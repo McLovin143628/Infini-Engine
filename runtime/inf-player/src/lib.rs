@@ -401,7 +401,7 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     //    author owns and a reviewer can read; the character wizard writes one,
     //    and a level with none gets the ported ALS defaults.
     if let WorldChoice::Level(path) = &args.world {
-        sim.camera_mut().tuning = inf_ecs::camera::CameraTuning::load_beside(path);
+        sim.camera_mut().tuning = input::load_camera_beside(path);
     }
     attach_cell_streaming(&mut sim, &partition);
     attach_terrain_streaming(&mut sim, &terrain_content);

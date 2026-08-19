@@ -645,24 +645,167 @@ fn modes_in(trace: &[Vec<u8>], pose: usize) -> BTreeSet<u8> {
     trace.iter().map(|r| r[mode_at(pose)]).collect()
 }
 
-/// The modes the course must force. `Driving` and `Flying` are absent on
-/// purpose — they are typed refusals until P29.7, and arm (g) asserts that.
-fn required_modes() -> Vec<(&'static str, MovementMode)> {
+/// …and how many steps each one occupies — the ledger's table, as data the gate
+/// can assert on rather than a printout (P29.6 audit, A3).
+fn mode_counts(trace: &[Vec<u8>], pose: usize) -> std::collections::BTreeMap<u8, usize> {
+    let mut out = std::collections::BTreeMap::new();
+    for r in trace {
+        *out.entry(r[mode_at(pose)]).or_insert(0) += 1;
+    }
+    out
+}
+
+/// What the course owes a mode: force it, or account for why not.
+///
+/// The list below is a `match` on purpose (P29.6 audit, A3). `required_modes`
+/// used to be a hand-written `vec!` of twelve, and `assert_not_vacuous` tests
+/// that nothing on that list is **missing** — so *deleting a row deleted the
+/// obligation*, silently, and the whole gate stayed green. Measured: removing
+/// `("Prone", M::Prone)` left all ten arms passing.
+///
+/// A `match` with no wildcard is the pin. Every variant of `MovementMode` is
+/// classified here, the compiler refuses the day one is added, and
+/// `the_catalogue_is_accounted_for_variant_by_variant` re-derives the twelve
+/// from it rather than restating them.
+enum ModeDuty {
+    /// The course must force it, under this name.
+    Forced(&'static str),
+    /// P29.7 owns the mechanics; arm (g) asserts the typed refusal instead.
+    RefusedUntilP297,
+    /// A wire slot with no meaning yet.
+    Reserved,
+}
+
+fn duty_of(mode: MovementMode) -> ModeDuty {
+    use ModeDuty::*;
     use MovementMode as M;
-    vec![
-        ("Grounded", M::Grounded),
-        ("Crouch", M::Crouch),
-        ("Prone", M::Prone),
-        ("Slide", M::Slide),
-        ("Roll", M::Roll),
-        ("Dive", M::Dive),
-        ("FallFree", M::FallFree),
-        ("FallControlled", M::FallControlled),
-        ("Mantle", M::Mantle),
-        ("Ragdoll", M::Ragdoll),
-        ("SwimSurface", M::SwimSurface),
-        ("SwimUnder", M::SwimUnder),
+    match mode {
+        M::Grounded => Forced("Grounded"),
+        M::Crouch => Forced("Crouch"),
+        M::Prone => Forced("Prone"),
+        M::Slide => Forced("Slide"),
+        M::Roll => Forced("Roll"),
+        M::Dive => Forced("Dive"),
+        M::FallFree => Forced("FallFree"),
+        M::FallControlled => Forced("FallControlled"),
+        M::SwimSurface => Forced("SwimSurface"),
+        M::SwimUnder => Forced("SwimUnder"),
+        M::Mantle => Forced("Mantle"),
+        M::Ragdoll => Forced("Ragdoll"),
+        M::Driving | M::Flying => RefusedUntilP297,
+        M::Reserved14 | M::Reserved15 | M::Reserved16 | M::Reserved17 => Reserved,
+    }
+}
+
+/// Every `MovementMode` the wire declares, in declaration order — the domain
+/// [`duty_of`] is total over, and the one thing this file cannot derive from the
+/// type system (Rust has no variant enumeration). It is checked against the
+/// discriminants rather than trusted: see
+/// `the_catalogue_is_accounted_for_variant_by_variant`.
+const ALL_MODES: [MovementMode; 18] = {
+    use MovementMode as M;
+    [
+        M::Grounded,
+        M::Crouch,
+        M::Prone,
+        M::Slide,
+        M::Roll,
+        M::Dive,
+        M::FallFree,
+        M::FallControlled,
+        M::SwimSurface,
+        M::SwimUnder,
+        M::Mantle,
+        M::Ragdoll,
+        M::Driving,
+        M::Flying,
+        M::Reserved14,
+        M::Reserved15,
+        M::Reserved16,
+        M::Reserved17,
     ]
+};
+
+/// The modes the course must force — **derived** from [`duty_of`], not restated.
+/// `Driving` and `Flying` are absent because that function says so, and arm (g)
+/// asserts the refusal they are absent for.
+fn required_modes() -> Vec<(&'static str, MovementMode)> {
+    ALL_MODES
+        .iter()
+        .filter_map(|m| match duty_of(*m) {
+            ModeDuty::Forced(name) => Some((name, *m)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The modes P29.7 owns — derived from the same `match`, so arm (g) and the
+/// anti-vacuity list cannot drift apart.
+fn refused_modes() -> Vec<MovementMode> {
+    ALL_MODES
+        .iter()
+        .copied()
+        .filter(|m| matches!(duty_of(*m), ModeDuty::RefusedUntilP297))
+        .collect()
+}
+
+/// **The catalogue is accounted for variant by variant** (P29.6 audit, A3).
+///
+/// Three claims, and together they are what stops the anti-vacuity list from
+/// being shortened by an edit nothing notices:
+///
+/// 1. [`ALL_MODES`] really is every variant — checked against the
+///    discriminants, which are wire-frozen (§13), so a variant added anywhere
+///    but the end changes a number here;
+/// 2. every one of them is classified, and the classification is a `match` with
+///    no wildcard, so adding a variant is a **compile error** rather than a
+///    silently unclassified mode;
+/// 3. the counts are the ledger's: **twelve** forced, two refused, four
+///    reserved.
+#[test]
+fn the_catalogue_is_accounted_for_variant_by_variant() {
+    for (i, m) in ALL_MODES.iter().enumerate() {
+        assert_eq!(
+            *m as u8, i as u8,
+            "`ALL_MODES` is not the wire order at index {i}: {m:?} has \
+             discriminant {}",
+            *m as u8
+        );
+    }
+    let forced = required_modes();
+    let refused = refused_modes();
+    let reserved = ALL_MODES
+        .iter()
+        .filter(|m| matches!(duty_of(**m), ModeDuty::Reserved))
+        .count();
+    assert_eq!(
+        forced.len(),
+        12,
+        "the course's obligation is twelve modes and this list has {} — a row \
+         was deleted, and `assert_not_vacuous` only checks that nothing on the \
+         list is MISSING, so it would not have said so",
+        forced.len()
+    );
+    assert_eq!(refused.len(), 2, "P29.7 owns exactly Driving and Flying");
+    assert_eq!(reserved, 4, "the wire has four reserved slots");
+    assert_eq!(forced.len() + refused.len() + reserved, ALL_MODES.len());
+    // Every reserved slot answers `reserved_slot`, and no forced one does —
+    // the classification agrees with the engine's own answer rather than with
+    // this file's opinion.
+    for m in ALL_MODES {
+        assert_eq!(
+            m.reserved_slot().is_some(),
+            matches!(duty_of(m), ModeDuty::Reserved),
+            "{m:?} disagrees with `MovementMode::reserved_slot`"
+        );
+    }
+    // The names are distinct and each is its variant's own spelling, so a
+    // failure message names the mode a reader can find in the enum.
+    let names: BTreeSet<&str> = forced.iter().map(|(n, _)| *n).collect();
+    assert_eq!(names.len(), forced.len(), "two modes share a name");
+    for (name, m) in &forced {
+        assert_eq!(*name, format!("{m:?}"), "the name is not the variant's");
+    }
 }
 
 #[test]
@@ -722,9 +865,81 @@ fn pose_width(trace: &[Vec<u8>]) -> usize {
          empty worlds"
     );
     let pose = n - (FLOATS * 8 + FLAGS);
-    assert_eq!(record_len(pose), n, "the record's shape moved");
     assert!(pose > 0, "the pose half is empty");
     pose
+}
+
+/// **`FLOATS` and `FLAGS` are what `record` actually writes** — pinned against
+/// the writer on a world with **no** pose, where the whole record IS the
+/// movement half (P29.6 audit, A10-again).
+///
+/// The arm this replaces was `assert_eq!(record_len(pose), n)` inside
+/// `pose_width`, one line under `let pose = n - (FLOATS * 8 + FLAGS)`. Substitute
+/// and it reads `n == n`: algebraically unfalsifiable, and advertised in its own
+/// comment as the pin that stops a derived offset drifting. It stopped nothing.
+/// A fifteenth `f64` added to `record` would have shifted `mode_at` eight bytes
+/// early onto the `gait` byte, and the twelve-mode check would have started
+/// certifying the wrong field — quietly, since a gait byte takes small values
+/// too.
+///
+/// An empty `EcsWorld` publishes no pose, so `pose_state_bytes` is empty and the
+/// record is exactly the movement half. That is a real measurement of the
+/// writer, and it fails the moment the writer and these two constants disagree.
+#[test]
+fn the_record_layout_is_pinned_against_its_writer() {
+    let empty = EcsWorld::new();
+    let bare = record(&empty);
+    assert!(
+        bare.is_empty(),
+        "an empty world published {} bytes of pose, so the calibration below is \
+         not measuring the movement half alone",
+        bare.len()
+    );
+
+    // A world with the hero but no skeleton: the early return is gone, so the
+    // record is exactly `FLOATS` floats and `FLAGS` bytes and nothing else.
+    let mut w = EcsWorld::new();
+    let e = w.spawn_with_guid(hero(), "Hero", None);
+    w.world_mut().entity_mut(e).insert((
+        Transform::IDENTITY,
+        CharacterMovement::default(),
+        Collider3D {
+            shape_kind: inf_ecs::components::ColliderShape3DKind::Capsule,
+            ..Default::default()
+        },
+    ));
+    let movement_only = record(&w);
+    assert_eq!(
+        movement_only.len(),
+        FLOATS * 8 + FLAGS,
+        "`record` writes {} bytes of movement state and this file believes it \
+         writes {} — `mode_at` is therefore reading the wrong byte, and the \
+         twelve-mode check is certifying the wrong field",
+        movement_only.len(),
+        FLOATS * 8 + FLAGS
+    );
+    assert_eq!(record_len(0), movement_only.len());
+    // …and `mode_at` really lands on the mode. `Prone` rather than the default,
+    // so a record of zeros cannot satisfy it.
+    let mut w2 = EcsWorld::new();
+    let e2 = w2.spawn_with_guid(hero(), "Hero", None);
+    w2.world_mut().entity_mut(e2).insert((
+        Transform::IDENTITY,
+        CharacterMovement {
+            mode: MovementMode::Prone,
+            ..Default::default()
+        },
+        Collider3D {
+            shape_kind: inf_ecs::components::ColliderShape3DKind::Capsule,
+            ..Default::default()
+        },
+    ));
+    let posed = record(&w2);
+    assert_eq!(
+        posed[mode_at(0)],
+        MovementMode::Prone as u8,
+        "`mode_at` does not point at the mode byte"
+    );
 }
 
 /// **Every catalogue mode, by name.**
@@ -752,6 +967,24 @@ fn assert_not_vacuous(trace: &[Vec<u8>]) {
         "the course did not force {missing:?} — the (pose, mode) trace would \
          certify a SUBSET of the catalogue, which is exactly what §13's \
          movement-catalogue amendment forbids"
+    );
+    // **Present for more than one frame** (P29.6 audit, A3). Set membership is
+    // satisfied by a single step, and a mode the character flickers through on
+    // one frame of a transition is not a mode the trace certifies — it is a
+    // glitch that happens to have the right discriminant. The shortest station
+    // the shipped course actually visits is the slide, at thirteen steps, so a
+    // floor of five is well under every real one and well over an accident.
+    const MODE_FLOOR: usize = 5;
+    let counts = mode_counts(trace, pose);
+    let brief: Vec<(&str, usize)> = required_modes()
+        .into_iter()
+        .map(|(n, m)| (n, counts.get(&(m as u8)).copied().unwrap_or(0)))
+        .filter(|(_, c)| *c < MODE_FLOOR)
+        .collect();
+    assert!(
+        brief.is_empty(),
+        "these modes appear for fewer than {MODE_FLOOR} steps: {brief:?} — a \
+         one-frame flicker is not a station the course forces"
     );
     // …and the pose really moved, or the mode half is riding a still character.
     assert!(
@@ -781,6 +1014,14 @@ fn pie_equals_shipping_on_the_pose_and_mode_trace() {
     let ship = run_trace(pack_sim(&pack), STEPS);
     let pie = run_trace(pie_sim(None), STEPS);
     assert_not_vacuous(&ship);
+    // Both lengths, before the zip: `zip` truncates to the shorter side, so a
+    // PIE run that returned early would compare zero pairs and pass (P29.6
+    // audit). `assert_not_vacuous` pins the shipped side only.
+    assert_eq!(
+        ship.len(),
+        pie.len(),
+        "the two hosts produced different numbers of steps"
+    );
     let pose = pose_width(&ship);
     for (i, (s, p)) in ship.iter().zip(pie.iter()).enumerate() {
         assert_eq!(
@@ -926,6 +1167,11 @@ fn the_course_replays_bit_identically_across_two_independent_cooks() {
     let trace_a = run_trace(pack_sim(&pack_a), STEPS);
     let trace_b = run_trace(pack_sim(&pack_b), STEPS);
     assert_not_vacuous(&trace_a);
+    assert_eq!(
+        trace_a.len(),
+        trace_b.len(),
+        "the two cooks produced different numbers of steps"
+    );
     for (i, (x, y)) in trace_a.iter().zip(trace_b.iter()).enumerate() {
         assert_eq!(x, y, "step {i}: two independent cooks diverged");
     }
@@ -1244,11 +1490,37 @@ fn one_line_of_text_is_one_line_of_diff_and_one_change_in_the_trace() {
     assert_eq!(diff[0].1, before_line);
     assert_eq!(diff[0].2, after_line);
 
-    // 3. It revalidates.
-    let tuned = inf_anim::from_toml(&edited).expect("the edited text reads back");
-    tuned
-        .validate()
+    // 3. It goes back in **through the door** (P29.6 audit, A5).
+    //
+    //    `sm_text::save_from_text` is the Ring-1 door pillar S1 promises: parse,
+    //    validate through the same call `sm_save` makes, re-encode the payload,
+    //    and rewrite the text from what was stored. The first cut of this arm
+    //    parsed and validated by hand and never touched it, while the ledger
+    //    said "the gate's demonstration goes through the door" — so the one
+    //    thing that makes the text an *authoring* surface rather than a
+    //    read-only projection was the one thing not exercised.
+    //
+    //    On a COPY, because the committed sample is not this test's to rewrite.
+    let dir_tmp = tempfile::tempdir().expect("tempdir");
+    let copy = dir_tmp.path().join("Hero Locomotion.inf_sm");
+    std::fs::copy(dir.join("Hero Locomotion.inf_sm"), &copy).expect("copy the payload");
+    std::fs::write(inf_editor_core::sm_text::text_path(&copy), &edited).expect("copy the text");
+    let tuned = inf_editor_core::sm_text::save_from_text(&copy, &edited, committed.skeleton)
         .expect("the edited machine passes the same door `sm_save` uses");
+    // The payload beside it IS the edited machine, read back through the shipped
+    // reader — which is the half a text face nobody can save does not have.
+    let stored: inf_anim::StateMachineAsset =
+        inf_asset::decode(&std::fs::read(&copy).unwrap()).expect("the saved payload decodes");
+    assert_eq!(stored.machine, tuned, "the door stored a different machine");
+    assert_eq!(stored.skeleton, committed.skeleton, "the binding survived");
+    assert_eq!(
+        inf_anim::from_toml(
+            &std::fs::read_to_string(inf_editor_core::sm_text::text_path(&copy)).unwrap()
+        )
+        .unwrap(),
+        tuned,
+        "the two faces drifted across the save"
+    );
     assert_ne!(tuned, committed.machine, "the edit changed nothing");
     // …and it changed exactly the field the line names.
     let changed: Vec<usize> = committed
@@ -1301,15 +1573,35 @@ fn one_line_of_text_is_one_line_of_diff_and_one_change_in_the_trace() {
 
     let base = run_trace(pie_sim(None), DIFF_STEPS);
     let edit = run_trace(pie_sim(Some(&tuned)), DIFF_STEPS);
+    assert_eq!(base.len(), edit.len(), "the two runs are different lengths");
+    assert_eq!(base.len() as u32, DIFF_STEPS);
     let first = base
         .iter()
         .zip(edit.iter())
         .position(|(a, b)| a != b)
         .expect("the one-line edit changed nothing in the simulation at all");
-    assert_eq!(base[..first], edit[..first], "the prefix is not identical");
+    // **A real prefix** (P29.6 audit, A5). The first cut asserted
+    // `base[..first] == edit[..first]`, which is what `position` means — a
+    // tautology, and it would have been satisfied by `first == 0`, i.e. by an
+    // edit that changed the very first frame. The claim is "identical UP TO the
+    // step the affected transition fires", so the load-bearing number is that
+    // `first` is where the edge actually fires, not merely somewhere.
     assert!(
-        base[first..] != edit[first..],
-        "the suffix is identical — the edit did not survive the transition"
+        first > 0,
+        "the trace diverged on step 0 — the edit reached the character before \
+         the `idle -> walk` edge could possibly have fired, so \"identical up to \
+         the transition\" is a claim about an empty prefix"
+    );
+    let walked = base
+        .iter()
+        .position(|r| {
+            r[mode_at(pose_width(&base))] == MovementMode::Grounded as u8 && r != &base[0]
+        })
+        .unwrap_or(0);
+    assert!(
+        first >= walked,
+        "the divergence at step {first} came BEFORE the character started \
+         moving at step {walked}, so it is not the `idle -> walk` edge"
     );
     // …and what changed is the POSE, not the movement: a blend duration is an
     // animation decision and must not move the character.
@@ -1357,14 +1649,28 @@ fn camera_run(steps: u32) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
 ///
 /// Two claims that have to hold together. The camera trace is **deterministic** —
 /// two runs of the same course produce the same bytes, so a camera bug is
-/// reproducible from a trace like everything else. And the **sim** trace is
-/// byte-identical whether a camera was stepped or not, which is Ruling 4 kept
-/// literally: `ViewMode` never crosses the sim wire, and there is no camera →
-/// sim path at all.
+/// reproducible from a trace like everything else. And **nothing the camera is
+/// told reaches the simulation**, which is Ruling 4 kept literally: `ViewMode`
+/// never crosses the sim wire, and there is no camera → sim path at all.
+///
+/// # "Told", not "stepped" (P29.6 audit, A5)
+///
+/// The first cut said *byte-identical whether a camera was stepped or not*, and
+/// no host can run that experiment: `RuntimeSim::step_once` steps the camera
+/// unconditionally, as its last statement, so both sides of every comparison in
+/// this file already have one. What is actually falsifiable at this level — and
+/// what this arm does — is **perturbation**: drive the same course three times,
+/// telling the camera something different each time (view mode, shoulder, a
+/// whole different tuning table), and require the sim trace not to move. The
+/// stepped-versus-not comparison exists, and it is `inf_physics`'s
+/// `stepping_a_camera_changes_nothing_about_the_simulation`, where the two
+/// programs really can differ by one line.
 #[test]
 fn the_camera_trace_is_deterministic_and_is_not_the_sim_trace() {
     let (sim_a, cam_a) = camera_run(CAMERA_STEPS);
     let (sim_b, cam_b) = camera_run(CAMERA_STEPS);
+    assert_eq!(cam_a.len() as u32, CAMERA_STEPS);
+    assert_eq!(cam_a.len(), cam_b.len());
     assert_eq!(cam_a, cam_b, "the camera trace is not deterministic");
 
     // …and it is a camera that MOVED, or "deterministic" is a statement about a
@@ -1380,16 +1686,61 @@ fn the_camera_trace_is_deterministic_and_is_not_the_sim_trace() {
         distinct.len()
     );
 
-    // **The ruling.** The same course with no camera at all traces identically.
+    // **The ruling.** The same course, told nothing about a view mode, traces
+    // identically — and so does the same course under a wholly different camera
+    // table, which is the perturbation a leak that ignored `view_mode` would
+    // still have to survive.
     let bare = run_trace(pie_sim(None), CAMERA_STEPS);
+    assert_eq!(
+        bare.len(),
+        sim_a.len(),
+        "the two runs are different lengths"
+    );
     for (i, (a, b)) in sim_a.iter().zip(bare.iter()).enumerate() {
         assert_eq!(
             a, b,
-            "step {i}: stepping a camera changed the simulation — a camera value \
-             is reaching the sim, and the ViewMode ruling says none may"
+            "step {i}: telling the camera about a view mode changed the \
+             simulation — a camera value is reaching the sim, and the ViewMode \
+             ruling says none may"
         );
     }
     assert_eq!(sim_a, sim_b);
+
+    // A different camera in every respect the tuning door can express: a longer
+    // arm, the other shoulder, a first-person seat all the way through, and lag
+    // speeds nothing else in the tree uses.
+    let (sim_c, cam_c) = {
+        let mut sim = pie_sim(None);
+        let mut driver = Driver::default();
+        sim.camera_mut().right_shoulder = false;
+        sim.camera_mut().view_mode = inf_ecs::camera::ViewMode::FirstPerson;
+        let t = &mut sim.camera_mut().tuning;
+        assert!(t.set("run.arm_length_m", 6.25));
+        assert!(t.set("run.lag_x", 2.5));
+        assert!(t.set("collision_radius_m", 0.4));
+        assert!(t.set("pivot_height_ratio", 0.55));
+        let (mut s, mut c) = (Vec::new(), Vec::new());
+        for _ in 0..CAMERA_STEPS {
+            let (z, mode, grounded) = state_of(sim.world());
+            let (held, ax) = driver.step(z, mode, grounded);
+            sim.step_once(RuntimeInput::with_down(held).with_axes(ax));
+            s.push(record(sim.world()));
+            c.push(sim.camera().trace_bytes());
+        }
+        (s, c)
+    };
+    assert_ne!(
+        cam_c, cam_a,
+        "the retuned camera traced identically, so the perturbation below is \
+         about nothing"
+    );
+    for (i, (a, b)) in sim_c.iter().zip(bare.iter()).enumerate() {
+        assert_eq!(
+            a, b,
+            "step {i}: retuning the camera changed the simulation — a camera \
+             value is reaching the sim through a path `view_mode` does not take"
+        );
+    }
 }
 
 /// The camera **collides**: a course that runs a character up against three
@@ -1506,24 +1857,47 @@ fn the_committed_clips_are_derived_and_the_machine_is_proposed() {
 
 // ── (g) the refusals P29.7 owns ─────────────────────────────────────────────
 
-/// `Driving` and `Flying` are **typed refusals**, by name, until P29.7 — and the
-/// course proves it with a live character rather than with a unit fixture.
+/// `Driving` and `Flying` are **typed refusals**, by name, until P29.7.
+///
+/// # What this arm is, and what it is not (P29.6 audit, A3)
+///
+/// A **unit** check on `request_mode`, the one door a mode change goes through,
+/// asked from every legal starting mode. The first cut's doc claimed "the course
+/// proves it with a live character rather than with a unit fixture" while the
+/// body was one hard-coded call — the claim and the code disagreed, and the code
+/// was the honest half: a course cannot demonstrate that a mode is *unreachable*
+/// by visiting it.
+///
+/// What ties it to the course is `refused_modes()`: the same `match` that says
+/// these two are exempt from the twelve-mode obligation says they refuse here,
+/// so the exemption and the refusal cannot drift apart.
 #[test]
 fn driving_and_flying_are_refusals_with_the_wave_that_owns_them_named() {
-    use inf_ecs::components::MovementMode as M;
-    for mode in [M::Driving, M::Flying] {
-        let verdict = inf_ecs::movement::request_mode(M::Grounded, mode, true, true);
-        assert_eq!(
-            verdict.mode,
-            M::Grounded,
-            "{mode:?} was entered; P29.7 owns its mechanics and this wave ships \
-             a refusal"
-        );
-        assert!(
-            matches!(verdict.refusal, MovementRefusal::ModeNotYetImplemented),
-            "{mode:?} refused with {:?}, which does not name the wave that owns it",
-            verdict.refusal
-        );
+    let refused = refused_modes();
+    assert_eq!(
+        refused.len(),
+        2,
+        "the exemption list moved: {refused:?} — the twelve-mode obligation and \
+         this arm read the same `match`, so it must be Driving and Flying"
+    );
+    for mode in refused {
+        // From EVERY mode a character can actually be in, not just from
+        // `Grounded`: a refusal that only holds on one row of the transition
+        // table is a refusal with a way in.
+        for (_, from) in required_modes() {
+            let verdict = inf_ecs::movement::request_mode(from, mode, true, true);
+            assert_ne!(
+                verdict.mode, mode,
+                "{mode:?} was entered from {from:?}; P29.7 owns its mechanics \
+                 and this wave ships a refusal"
+            );
+            assert!(
+                matches!(verdict.refusal, MovementRefusal::ModeNotYetImplemented),
+                "{mode:?} from {from:?} refused with {:?}, which does not name \
+                 the wave that owns it",
+                verdict.refusal
+            );
+        }
     }
 }
 

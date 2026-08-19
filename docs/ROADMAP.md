@@ -18018,7 +18018,18 @@ shows a one-line authoring change as a one-line diff.
 > — so there is no camera → sim path to trace at all. Asserted twice: once at the
 > unit level (`stepping_a_camera_changes_nothing_about_the_simulation`) and once
 > over the whole course, where the camera trace is deterministic across two runs
-> and the **sim** trace is byte-identical with the camera stepped and not stepped.
+> and the **sim** trace does not move.
+>
+> > **CORRECTED by the P29.6 audit.** The second half of that sentence read "the
+> > sim trace is byte-identical with the camera stepped and not stepped", and no
+> > host can run that experiment: `step_once` steps the camera unconditionally as
+> > its last statement. The unit arm was also comparing a *different program* —
+> > its control dropped the solver and the write-back along with the camera — and
+> > a camera → sim leak through the `&mut PhysicsBridge3D` survived it. The unit
+> > control is `Sim::step` minus its last line now, over the world **and** the
+> > bridge, and the course arm asserts **perturbation**: a different view mode, a
+> > different shoulder and a different tuning table, with the sim trace required
+> > not to move. See A5 in the audit ledger.
 >
 > **The mouse reaches all three hosts.** `default_map` moved to Ring 0
 > (`inf_input::default_map`) and gained the four bindings the catalogue names and
@@ -18161,11 +18172,25 @@ shows a one-line authoring change as a one-line diff.
 > **One committed level moved, and it is these two fixes arriving in content.**
 > `samples/physics-playground` **persists** the ragdoll builder's output — P12.2
 > mapped `build_ragdoll`'s parts and `JointDesc3D`s onto real `Collider3D` and
-> `Joint3D` components — so its `.inf_lvl` carried twelve limbs at one kilogram
-> per cubic metre and eleven joints anchored the wrong way round. 164 bytes of it
-> changed, re-blessed through its own generator; nothing else under `samples/`
-> moved, and the P12-era arms are green on the new bytes. A committed level
-> moving is a thing this ledger has to say out loud, and this is it said.
+> `Joint3D` components — so its `.inf_lvl` carried **eight** limbs at one
+> kilogram per cubic metre and **seven** joints anchored the wrong way round.
+> (Twelve and eleven, as first written; the ragdoll's own skeleton has eight
+> bones, and the P29.6 audit counted them by decoding both versions of the file.)
+> 164 bytes of it changed, re-blessed through its own generator; nothing else
+> under `samples/` moved, and the P12-era arms are green on the new bytes. A
+> committed level moving is a thing this ledger has to say out loud, and this is
+> it said.
+>
+> > **VERIFIED by the P29.6 audit**, by decoding the pre-wave bytes against the
+> > committed ones field by field: **only** the eight colliders' `density` and the
+> > seven joints' anchor pair differ, every anchor change is exactly a swap of
+> > `local_anchor` and `other_anchor`, and no transform, body, settings block or
+> > any other component moved a bit. The self-collision half of the ragdoll fixes
+> > does **not** reach this file — `Joint3D` carries no `contacts` and `Collider3D`
+> > no `layers`, so the persisted ragdoll gets the anchors and the density and not
+> > the mask; the same builder therefore produces two physically different
+> > ragdolls depending on whether it is spawned or saved. Carried in the audit
+> > ledger below; closing it is a schema move.
 >
 > **(5) A level's `gravity_3d` is authored, serialized, round-tripped and read by
 > NOTHING.** The 3D solver's gravity comes from `gravity_2d.y`
@@ -18299,7 +18324,9 @@ shows a one-line authoring change as a one-line diff.
 > named rather than left to be rediscovered.
 > **The `.inf_sm` text has no UI.** `sm_text::save_from_text` is a Ring-1 door with
 > arms; no panel and no Ring-2 command calls it yet, so an author edits the file
-> and the editor does not know. The gate's demonstration goes through the door.
+> and the editor does not know. The gate's demonstration goes through the door —
+> **as of the P29.6 audit**: as shipped it parsed with `inf_anim::from_toml` and
+> validated by hand, and never touched the door at all.
 > **The camera's table is read but not tuned live.** The wizard writes
 > `camera.toml` and the windowed player reads it beside a `--level` boot, exactly
 > as it reads `input.toml`; a `--pack` boot does not, because the cook does not
@@ -18338,6 +18365,323 @@ shows a one-line authoring change as a one-line diff.
 > asserted). The island. PIE Possess polish (P30). A `character.*` node kit — the
 > parity arm is driven through `anim.*`, which is what the brief asked, and a
 > second kit with no caller is the thing this wave spent a section closing.
+
+> **P29.6 AUDIT** (2026-08-18) — adversarial pass over `6ab7c82..eba4b01`, eleven
+> commits, 79 files. **Nineteen findings, six HIGH, all closed in the tree.**
+> Battery **280 binaries / 5 177 passed / 0 failed / 11 ignored** against the
+> wave's 280 / 5 165 / 0 / 11 — twelve arms, no new binary. `clippy -D warnings`
+> over the whole workspace and `cargo fmt --check` clean; the frontend is
+> **611 tests across 65 files** against 610 / 65 (+1 arm, no new file), with
+> `tsc --noEmit` and eslint clean. Goldens stay **54**, byte-unchanged.
+> **No schema moves** and **no committed content moved** — the P29.6 sample's
+> bytes are byte-identical to the wave's, which the new pin below is what proves.
+>
+> ---
+>
+> **A1 — HIGH. Three ragdoll defects, and not one arm that could see them.**
+> The wave fixed backwards joint anchors, jointed-pair contacts and the 1 kg/m³
+> density, and mutation-verified none of them. Measured here: swapping the
+> anchors back leaves `crates/inf-physics/tests/ragdoll.rs` **green**, leaves
+> `playground_determinism` green and leaves the P12 gate (`physics_demo`) green —
+> the whole of the pre-wave ragdoll coverage. What did fail was
+> `phase29_gate`'s anti-vacuity, reporting `["SwimSurface", "SwimUnder"]`:
+> the ragdoll flings the character off the course, so the *catalogue* notices and
+> nothing near the builder does. That is a defect surviving seventeen sub-phases
+> and being caught, at the far end, by a coverage list.
+> Three arms now, all in the builder's own file, all mutation-killed:
+> `the_joint_anchors_name_one_world_point` (both anchors resolve through their
+> own body's pose to the child bone's head — exact, no physics stepped, dies on
+> the swap and on re-enabling contacts);
+> `every_limb_carries_the_ragdoll_layer_and_ignores_its_own_kind` (the layer's
+> ONLY falsifier — the dynamic arm does not fail without it, because this
+> fixture's seven-bone rig is too sparse for a non-adjacent overlap — and it
+> asserts the stated *bound*, that two different ragdolls pass through each
+> other, so closing that bound fails the ledger line rather than outliving it);
+> and `a_ragdoll_landing_at_speed_loses_energy_rather_than_gaining_it`, which
+> drops the rig at 11 m/s and requires it to slow down, dying on the swap and on
+> the density.
+>
+> **A2 — HIGH. The libm source gate named the half of the camera with no
+> trigonometry.** `portable_character.rs` lists `d3/camera.rs` with the reason
+> *"`phase29_gate` asserts a DETERMINISTIC camera trace"*. That file contains not
+> one trig call: every `psin64`/`pcos64` the camera evaluates is in
+> `inf_ecs::camera` (`basis`) or `inf_ecs::movement`
+> (`rotate_into_frame`/`rotate_from_frame`, which `axis_independent_lag`
+> delegates its whole rotation to), and **no gate in the tree read either file**.
+> The code is clean today and nothing kept it so — and the determinism arm
+> compares two runs on one machine with one libm, so it cannot see a portability
+> defect either. This repository's own law, met again: a gate must aim at the
+> thing it names. Both files are on `inf-anim`'s `portable_pose` list now (which
+> already strips `#[cfg(test)]` regions and already reaches across crates, so the
+> stripper is not written twice); a `.sin()` added to `basis` reds it by name.
+>
+> **A3 — HIGH. The anti-vacuity list could be shortened in silence.**
+> `required_modes()` was a hand-written `vec!` of twelve and `assert_not_vacuous`
+> checks that nothing on the list is *missing* — so deleting a row deleted the
+> obligation. Measured: removing `("Prone", M::Prone)` left all ten arms passing.
+> It is a `match` on `MovementMode` now, with no wildcard, plus an `ALL_MODES`
+> table checked against the wire discriminants, and
+> `the_catalogue_is_accounted_for_variant_by_variant` re-derives the twelve
+> forced / two refused / four reserved from it. Mutations: reclassifying `Prone`
+> as reserved **reds**; deleting it from `ALL_MODES` is a **compile error**.
+> Presence was also one frame wide — a mode the character flickers through on a
+> transition satisfied set membership — so every required mode must now occupy at
+> least five steps, comfortably under the shortest real station (the slide, at
+> thirteen) and comfortably over an accident.
+> The mandate's own mutation holds as advertised: deleting the prone press from
+> the course driver reds by name.
+>
+> **A4 — HIGH. The camera collides with the corpse it is filming.** The sweep
+> excludes `bridge.collider_of(subject)` — the character's one mirrored collider
+> — and a ragdoll **disables** exactly that collider while spawning a dozen live
+> limb colliders in its place. So through the whole of a ragdoll the camera's
+> entire exclusion set is a dead handle, the first limb in the path is a blocking
+> hit at nearly zero distance, and the death cam snaps to `min_arm_fraction` and
+> looks out of the character's chest. `SpawnedRagdoll::colliders` exists for
+> precisely this — the ground probe two hundred lines away uses it, with a
+> comment saying why — and the camera now does too.
+>
+> **A5 — HIGH. The camera-purity claim was asserted against a different
+> program.** `stepping_a_camera_changes_nothing_about_the_simulation` built its
+> control by hand and dropped `bridge.step(dt)` and `bridge.write_back_into` along
+> with the camera, so it compared *sim + solver + write-back + camera* against
+> *sim alone* and read the result as proof the camera is inert. Measured: a
+> camera → sim leak through the `&mut PhysicsBridge3D` the door holds — nudging
+> the subject's body by `yaw × 1e-12` — **survived it**. The control is now
+> `Sim::step` minus its last line, and the record samples the physics bridge's
+> own body positions as well as the world's components, because the bridge is the
+> only shared state the door can reach. The same leak reds it.
+> Two overstatements went with it. The wave's ledger and three doc comments said
+> the sim trace is *"byte-identical with the camera stepped and not stepped"*;
+> `step_once` steps the camera unconditionally as its last statement, so no host
+> can run that experiment. What the whole-course arm can do — and now does — is
+> **perturbation**: the same course under a different view mode, a different
+> shoulder and a wholly different tuning table, with the sim trace required not to
+> move. And `d3/camera.rs`'s header said the door is *"deliberately not in the
+> fixed step"*; it is the last statement of both hosts' fixed steps. Corrected,
+> with the `query_dirty` discipline the `&mut` actually rests on written down.
+>
+> **A6 — HIGH (the mandate's wire-or-advise). `gravity_3d` was noted and left
+> silent.** The wave recorded the dead wire field in prose and did nothing that a
+> project could trip over. It is a cook advisory now
+> (`inf_packager::cook::ignored_gravity_3d`), fired on the precise hazard — a
+> level with 3D content whose **authored** `gravity_3d` disagrees with the
+> `(0, gravity_2d.y, 0)` the solver will build — with the wording, the trigger and
+> the quiet cases pinned by `gravity_advisory`.
+> Writing it found a bigger thing. `LevelSettings::default()` pairs a `gravity_2d`
+> of **zero** with a `gravity_3d` of −9.81, so **every level that never touched
+> either field has no 3D gravity at all** while its Details panel reads −9.81 —
+> including two committed samples (`phase23-workshop` and the P19 grammar-bake
+> fixture), whose destructible content is standing in a world with no gravity.
+> The advisory deliberately stays silent on the untouched default: that defect is
+> the engine's, not the author's, and telling an author their default is wrong is
+> how a report stops being read. **Routed to P29.7 as a decision** — change the
+> default, or make the 3D bridge read `gravity_3d`, both of which are behaviour
+> changes for every level in the tree and neither of which an audit may make. The
+> false claim in `samples.rs` that *"the runtime wires the 3D bridge to
+> `gravity_3d`"* is corrected where it stood.
+>
+> ---
+>
+> **A7 — a partial `camera.toml` silently discarded the ported ALS table.**
+> `GaitCameraSettings`' doc promised a file may name only the numbers an author
+> is tuning. `#[serde(default)]` cannot deliver that below the top level — it
+> fills a missing field from the FIELD TYPE's default, and the ALS table is a
+> property of the whole `CameraTuning` — so `[first_person] fov_deg = 95` yielded
+> a first-person seat carrying the third-person **run** block's 3.4 m arm and its
+> shoulder offset. `CameraTuning::from_toml` folds the document onto the
+> serialized default, table by table, which is the promise made literal at every
+> depth; `a_partial_camera_table_keeps_every_number_it_did_not_name` is the arm.
+>
+> **A8 — a lag speed of zero froze the camera for ever.** `interp_to` opened with
+> `speed.max(0.0)`; ALS's `FInterpTo` opens with `if (InterpSpeed <= 0) return
+> Target;`. `CameraTuning::set` accepts `0.0`, so an author turning the lag off
+> through the tuning door got a pivot that never moved again — the opposite of
+> what the number says. And `LocomotionCamera::yaw_deg` was never re-wrapped:
+> `angle_delta_deg` answers a delta, so a character turning one way carried the
+> camera's yaw to `yaw + 360N`, into `CameraPose`, into `trace_bytes` and into
+> `basis`, whose portable range reduction is measurably worse at large arguments
+> (the P23 finding). Both fixed, both with arms; the short-way arm is the control
+> and is unchanged. `wrap_deg` had been a private copy in `inf-physics` of a rule
+> `inf-ecs` owns — one spelling now, which is what let the camera reach it.
+>
+> **A9 — the world model grew a filesystem.** `CameraTuning::load_beside` put the
+> only `std::fs` call in `inf-ecs` into the ECS crate, to read a host's file, for
+> a single caller in `inf-player` — while its doc cited `load_map_beside` as the
+> shape it mirrors, and that one has always lived in Ring 2. Parsing is Ring 0's
+> (`from_toml`); reading a path is a host's, and is now
+> `inf_player::input::load_camera_beside`, beside the neighbour it claims.
+>
+> **A10 — the record-layout pin pinned nothing.** `assert_eq!(record_len(pose), n)`
+> sat one line under `let pose = n - (FLOATS * 8 + FLAGS)`; substitute and it
+> reads `n == n`. It is advertised in its own comment as the P29.4 A10 lesson
+> about derived offsets drifting, and a fifteenth `f64` added to `record` would
+> have shifted `mode_at` eight bytes early onto the *gait* byte, leaving the
+> twelve-mode check certifying the wrong field with values small enough to look
+> plausible. `the_record_layout_is_pinned_against_its_writer` calibrates the two
+> constants against `record()` on a world with no pose, where the record **is**
+> the movement half, and checks `mode_at` lands on a `Prone` it planted. `FLOATS
+> = 15` reds it.
+>
+> **A11 — the documented precedence was the inverse of the code, in two places.**
+> `publish_character_params`' doc and its call-site comment both said *"a
+> Blueprint still wins: the kit's writes land after this in the fixed step"*.
+> They land **before** it: both hosts dispatch `EventKind::Tick` and then run
+> `step_character_movement`, so the engine's publish is last and a Blueprint that
+> sets one of the nine published names is overwritten before the pose step reads
+> it. The STATUS block's own sentence had it right — *a character with a movement
+> component owns its speed* — and `live_tuning` asserts the consequence for the
+> tuning door, so the tree was correct and two comments were not. The **order**
+> is pinned in both hosts now
+> (`both_fixed_steps_publish_character_params_after_the_blueprint_tick`), which is
+> where the precedence comes from.
+>
+> **A12 — a failed `sim_stop` left the mouse captured for the life of the
+> process.** `set_sim_running(false)` was the last statement, below two `?`s on
+> poisonable locks, and the session is taken out of the state above them. A
+> poisoned lock therefore returned `Err` with the session gone and `SIM_RUNNING`
+> still true in every viewport thread: every subsequent plain LMB would hide the
+> cursor and grab the mouse for a session that does not exist, with `push_look`
+> discarding the deltas in silence. Hoisted above the fallible work, which is
+> where `sim_start` already puts its `true`.
+>
+> **A13 — in a 2D viewport the play capture panned the editor's camera.**
+> `set_sim_running` goes to `Target::All` by design, so a 2D viewport arms
+> `Capture::SimLook` like any other — and the 2D branch's catch-all `_` panned
+> the editor camera with the deltas and forwarded nothing. The player would watch
+> the world slide under them and the character never look.
+>
+> **A14 — the binding arm could not catch the defect it names.**
+> `every_movement_action_the_intent_reads_is_bound` restated the thirteen action
+> names by hand, so it catches a binding that is deleted and cannot catch a
+> *fourteenth* action added to `MovementIntent::from_actions` and left unbound —
+> which is exactly how `move_y`, `move_up`, `roll` and `dive` came to do nothing.
+> The list is extracted from `from_actions`' own body now (the pattern
+> `commands/sim.rs`'s tunable arm already set), with a floor so a broken
+> extraction cannot pass, and every extracted constant resolved through the
+> vocabulary so a rename fails to compile. Mutation: a `VAULT` action read by the
+> intent and bound nowhere **reds**, by name.
+>
+> **A15 — the wizard's torn-build law was broken on its three newest writes.**
+> `write_text`, `camera.toml` and `input.toml` returned through a bare `?`, so a
+> read-only file or a directory in the way returned `Err` with all seven
+> registered assets still on disk — the exact state
+> `a_write_that_fails_halfway_takes_back_what_it_wrote` exists to forbid, on
+> paths that test cannot reach (it blocks a walk clip). All four writes roll back
+> now.
+>
+> **A16 — the same silent-zero defect the wave fixed, one statement over.** The
+> controller's footstep notify is genuinely a function of the rig now, and the
+> statement beside it hard-coded `anim.query_state(entity, "run")`. `propose`
+> emits only the tiers a clip set occupies — the collapse the wizard's own note
+> warns about, where a creature walking at 0.65 m/s tiers as an *idle* — so on
+> such a character there is no state called `run`, the query answers `false` for
+> ever and `run_time` counts nothing, silently, exactly as the notify did.
+> `character::motion_state_of` derives it from the machine the controller will
+> drive; the committed `.inf_act` bytes are unchanged, because for this creature's
+> ladder the answer is `run`.
+>
+> **A17 — one rule, two `format!`s, five hundred lines apart.** `footstep_<leg>`
+> was spelled once by `derived_markers` (what goes on the clip) and once by
+> `DerivedNames::of` (what every consumer asks for), agreeing by inspection. That
+> is the producer-and-consumer shape the wave spent a section closing at the
+> *wizard's* boundary, still open one layer down inside `inf-anim`.
+> `derive::footstep_marker` and `derive::plant_marker` are the one spelling.
+>
+> **A18 — the sample nothing locked.** `write_phase29_locomotion()` was added to
+> the bless branch and no arm was added to `committed_sample_matches_generators`,
+> which makes `samples/phase29-locomotion` the only sample in the tree that
+> regenerates on demand and is never checked. Everything the ledger claims about
+> that folder is a claim about *those bytes*, and the gate loads them off disk and
+> simulates whatever it finds — so a change to the scene generator, to
+> `edit_create_character`'s capsule arithmetic or to the derivation's encoding
+> would have moved the content and the trace together, in silence. Every file is
+> pinned now: the level, the rig, the mesh, the three derived clips, the machine,
+> the controller and the four text faces. It passes on the committed bytes
+> unchanged, which is the wave's regeneration confirmed rather than assumed;
+> changing `PHASE29_HEIGHT_M` by 5 cm reds it.
+> With it, `the_showcase_character_matches_the_wizard_door`: the sample
+> hand-copies `SceneDoc::edit_create_character`'s capsule arithmetic and component
+> set (it needs `create_with_guid`), and a byte pin cannot see two copies drift —
+> it compares the bytes to the same copy that wrote them. The two are compared to
+> each other now, at the same height, field by field.
+>
+> ---
+>
+> **The one-line-diff arm, and the door it did not go through.** Its two central
+> assertions were tautologies: `first` is *defined* as the first index where the
+> traces differ, so `base[..first] == edit[..first]` and `base[first..] !=
+> edit[first..]` are unfalsifiable, and `first` was never bounded away from zero —
+> "identical up to the step the transition fires" would have been satisfied by an
+> empty prefix. Replaced with the two claims that are real: the divergence is
+> after step 0 and at or after the step the character starts moving. And the
+> ledger's *"the gate's demonstration goes through the door"* was not true — the
+> arm parsed with `inf_anim::from_toml` and validated by hand, never touching
+> `sm_text::save_from_text`, which is the door that makes the text an *authoring*
+> surface rather than a projection. It goes through it now, on a copy, and reads
+> the payload back through the shipped reader.
+>
+> **Verdicts on the wave's headline claims.** HELD: the foot-seam decision and its
+> one door (`model_to_world` reverted in the pose step reds three foot arms; the
+> `projector_mirror` pin holds both hosts); the twelve-mode course (deleting the
+> prone press reds by name); the `deliberate` swim fix with P20's load-bearing
+> case pinned untouched (forcing `deliberate` false reds, naming `SwimUnder`);
+> the sinking-character fix, in the one movement door and mutation-killed;
+> `OverlayRegistry`'s interning determinism — interning over a bevy archetype walk
+> instead of the sorted `movement_targets` **reds** the arm, which is the exact
+> obligation two audits recorded; PIE == shipping byte-exact over the whole
+> course; goldens 54 byte-unchanged; no schema move; and the editor-versus-shipping
+> divergence bound, which is stated as what it is and routed.
+> CORRECTED: the camera purity claim (A5), the record pin (A10), the mode list
+> (A3), the precedence (A11), the save-through-the-door claim, and the sample's
+> unlocked bytes (A18).
+>
+> **The `set_blend_mode` fourth deferral: the stated reason is TRUE.**
+> `inf_ecs::pose::set_blend_mode` writes a world-level resource, `ScenePayload`
+> carries what a PIE boot needs, and a resource the editor can set that the
+> payload does not carry is a preview that differs from the build — which is the
+> defect class this repository has paid for four times. Exposing it does oblige
+> the wire. The routing is right and the reason is not convenient.
+>
+> **Carried, and named rather than fixed.**
+> `LevelSettings::default()` gives a 3D level no gravity (A6) — a default or a
+> solver change, and neither belongs in an audit.
+> `samples/physics-playground` persists its ragdoll as `Joint3D` + `Collider3D`
+> components, and neither carries `contacts` nor `layers` — so the *committed*
+> ragdoll gets the anchor and density fixes and **not** the two collision ones.
+> The P12 arms are green on it and the ledger's "two fixes arriving in content" is
+> accurate as written; what is new is that the same builder now produces two
+> physically different ragdolls depending on whether it is spawned or saved, and
+> closing that is a schema move.
+> `phase29_gate`'s two "independent cooks" are two temp directories in **one
+> process**, so a `OnceLock` pool or an in-memory cache is shared between them —
+> the subprocess-pool law, unmet here; and the gate spawns no real `--pie` binary,
+> unlike every phase gate since P21. Both are coverage gaps rather than defects.
+> `fov_deg` is documented **vertical** and valued like UE's **horizontal** (70,
+> 78, 55, 90); at 16:9 that reads as 106° and 121° horizontal. Nothing consumes
+> the field yet and nothing pins it, so changing the numbers would be an
+> unmeasured prescription — named for whoever wires a projection to it.
+> `min_arm_fraction`'s 0.05 puts the penetration fallback 17 cm from the pivot,
+> which is inside the head the comment says it avoids, and the pull-in is an
+> uninterpolated cut.
+> `axis_independent_lag` unrotates absolute world positions rather than the delta
+> — algebraically origin-independent, not so in floating point at partition scale.
+> The editor's play capture takes OS focus, so mouse-look and WASD are mutually
+> exclusive; the half that was a *bug* — a key held at the grab never receiving
+> its `keyup` and being re-sent for ever — is closed by clearing the held set on
+> `blur`, with its own vitest arm. The rest is the airspace rule and is
+> human-verified, which the win32 doc now says instead of describing a pointer
+> lock the code does not implement.
+>
+> **Mutation ledger.** Four of the wave's implied kills re-run (swapped anchors,
+> `settle_on_spawn` removed, `deliberate` forced false, the prone press deleted)
+> and fifteen new ones. Three survived and became findings — a deleted
+> `required_modes` row, a camera → sim leak through the bridge, and a removed
+> ragdoll layer mask — and all three are killed by the arms above. The rest:
+> `.sin()` in `basis`, `FLOATS = 15`, `PHASE29_HEIGHT_M` moved 5 cm, a fourteenth
+> unbound action, jointed contacts re-enabled, density back to 1.0, `Prone`
+> reclassified, `Prone` dropped from `ALL_MODES` (a compile error), archetype-order
+> overlay interning, and `model_to_world` reverted in the pose step.
 
 - **P29.1 `.inf_sm` model v2** — 1. typed parameters (`Bool`/`Int`/`Float`/`Trigger`, a trigger
   consumed by the transition that read it); 2. condition **trees** (`And`/`Or`/`Not` over typed

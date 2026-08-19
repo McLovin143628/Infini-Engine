@@ -70,6 +70,37 @@ pub fn load_map_beside(level_path: &Path) -> InputMap {
     }
 }
 
+/// Load the locomotion camera's tunables from `camera.toml` beside `level_path`
+/// if present, else the ported ALS table. A malformed file falls back to the
+/// defaults (logged) — the same shape, and the same rationale, as
+/// [`load_map_beside`] directly above.
+///
+/// **Here rather than in `inf-ecs`** (P29.6 audit, A9). The first cut put this
+/// on `CameraTuning` itself, which gave `inf-ecs` — the world model — the only
+/// `std::fs` call in the crate, to read a host's file, for a single caller that
+/// lives in this file's own crate. The table's *parsing* is Ring 0 (it is a
+/// property of the type); reading a path is a host's job, and the neighbour it
+/// claims to mirror was always here.
+pub fn load_camera_beside(level_path: &Path) -> inf_ecs::camera::CameraTuning {
+    let path = level_path.with_file_name("camera.toml");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match inf_ecs::camera::CameraTuning::from_toml(&text) {
+            Ok(t) => {
+                tracing::info!("inf-player: loaded camera table from {}", path.display());
+                t
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "inf-player: bad camera table {}: {e}; using defaults",
+                    path.display()
+                );
+                inf_ecs::camera::CameraTuning::default()
+            }
+        },
+        Err(_) => inf_ecs::camera::CameraTuning::default(),
+    }
+}
+
 /// The actions currently held **and this frame's resolved axes**, as
 /// [`RuntimeInput`] — what the blueprint host queries via `input.is_down` /
 /// `input.just_pressed`, and what P29.3's movement component reads its intent
@@ -194,6 +225,75 @@ mod tests {
     fn every_movement_action_the_intent_reads_is_bound() {
         use inf_ecs::movement::actions as a;
         let m = default_map();
+        // **The list is EXTRACTED, not restated** (P29.6 audit, A14). The first
+        // cut wrote the thirteen names out by hand, which catches a binding that
+        // is deleted and cannot catch the thing its own doc comment names: a
+        // *fourteenth* action added to `MovementIntent::from_actions` and left
+        // unbound. That is precisely how `move_y`, `move_up`, `roll` and `dive`
+        // came to do nothing — they were read and never bound — so the arm has
+        // to read the reader.
+        //
+        // The scope is `from_actions`' body: it is the one function that turns
+        // named input into an intent, and `commands/sim.rs`'s own tunable arm
+        // sets the precedent for extracting a list from the source it guards.
+        const MODEL: &str = include_str!("../../../crates/inf-ecs/src/movement.rs");
+        let src = MODEL.replace("\r\n", "\n");
+        let start = src
+            .find("    pub fn from_actions(")
+            .expect("the intent still has a `from_actions`");
+        let body = &src[start..];
+        let end = body.find("\n    }\n").expect("its closing brace");
+        let body = &body[..end];
+        let read: std::collections::BTreeSet<&str> = body
+            .split("actions::")
+            .skip(1)
+            .filter_map(|rest| rest.split(')').next())
+            .filter(|n| n.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
+            .collect();
+        assert!(
+            read.len() >= 13,
+            "only {} action constants were extracted from `from_actions` — the \
+             extraction broke, and an arm that greps nothing passes everything: \
+             {read:?}",
+            read.len()
+        );
+        // Each extracted CONSTANT name resolves to its value through the
+        // vocabulary, so a rename fails to compile rather than silently
+        // shrinking the set.
+        let value_of = |c: &str| -> &'static str {
+            match c {
+                "MOVE_X" => a::MOVE_X,
+                "MOVE_Y" => a::MOVE_Y,
+                "LOOK_X" => a::LOOK_X,
+                "LOOK_Y" => a::LOOK_Y,
+                "MOVE_UP" => a::MOVE_UP,
+                "SPRINT" => a::SPRINT,
+                "WALK" => a::WALK,
+                "AIM" => a::AIM,
+                "JUMP" => a::JUMP,
+                "CROUCH" => a::CROUCH,
+                "PRONE" => a::PRONE,
+                "ROLL" => a::ROLL,
+                "DIVE" => a::DIVE,
+                other => panic!(
+                    "`MovementIntent::from_actions` reads `actions::{other}`, which \
+                     this arm has never heard of — add it to `default_map` and to \
+                     the line below, or the control does nothing and nothing else \
+                     in the tree would say so"
+                ),
+            }
+        };
+        for c in &read {
+            let name = value_of(c);
+            assert!(
+                m.axis_names().any(|n| n == name) || m.action_names().any(|n| n == name),
+                "`{name}` is read by the movement intent and bound to nothing — \
+                 the control does nothing and nothing else in the tree would say so"
+            );
+        }
+        // The five analog ones are AXES and the eight discrete ones are ACTIONS:
+        // a `jump` bound as an axis would satisfy the sweep above and never
+        // reach `pressed`.
         for axis in [a::MOVE_X, a::MOVE_Y, a::LOOK_X, a::LOOK_Y, a::MOVE_UP] {
             assert!(
                 m.axis_names().any(|n| n == axis),

@@ -2165,6 +2165,49 @@ fn both_fixed_steps_run_the_hair_slot() {
     }
 }
 
+/// **The movement step publishes its parameters AFTER the Blueprint Tick**, in
+/// both hosts — which is the precedence, and the opposite of what P29.6's own
+/// documentation claimed in two places (P29.6 audit, A11).
+///
+/// `publish_character_params` writes nine names into the very overlay
+/// `anim.set_param` writes into, and the last writer in a step wins. Both hosts
+/// dispatch `EventKind::Tick` and *then* run `step_character_movement`, so on a
+/// character with a `CharacterMovement` the **engine** owns `speed`, `gait`,
+/// `grounded`, `mode`, `direction`, `fall_speed`, `land_alpha`, `overlay` and
+/// `flail`, and a Blueprint that sets one of them is overwritten before anything
+/// reads it. That is a defensible design — one authority for one fact — and it
+/// is a real constraint on what a game can do, so it must be asserted rather
+/// than described in a comment that said the reverse.
+///
+/// `live_tuning` pins the same precedence from the tuning door's side, in one
+/// host. This pins the ORDER, in both, which is where the precedence comes from.
+#[test]
+fn both_fixed_steps_publish_character_params_after_the_blueprint_tick() {
+    const RUNTIME_SIM: &str = "runtime/inf-player/src/runtime_sim.rs";
+    const SIMULATE: &str = "editor/crates/inf-editor-core/src/simulate.rs";
+    for (label, path) in [
+        ("shipped player", RUNTIME_SIM),
+        ("editor Simulate", SIMULATE),
+    ] {
+        let whole = read(path).replace("\r\n", "\n");
+        let start = whole.find("fn fixed_step(").expect("a fixed step");
+        let src = &whole[start..];
+        let at_tick = src
+            .find("&EventKind::Tick")
+            .unwrap_or_else(|| panic!("the {label} fixed step runs no Blueprint Tick"));
+        let at_move = src
+            .find("step_character_movement(")
+            .unwrap_or_else(|| panic!("the {label} fixed step runs no movement step"));
+        assert!(
+            at_tick < at_move,
+            "the {label} runs the movement step BEFORE the Blueprint Tick, so a \
+             Blueprint's `anim.set_param` would now win over the character's own \
+             published state — the precedence inverted, and every doc comment \
+             about it is now wrong in the other direction"
+        );
+    }
+}
+
 /// The hair trace is appended **after** the cloth trace, and both after the pose.
 #[test]
 fn the_hair_trace_is_appended_after_the_cloth_trace() {

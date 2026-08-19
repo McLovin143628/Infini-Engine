@@ -698,6 +698,10 @@ impl SimSession {
     /// costs the *preview* its fidelity on a Low-tier machine. Wiring it belongs
     /// with a tier read in `inf_viewport::host`, which is a `cfg`-gated file no
     /// Linux CI leg compiles. Ledgered in ROADMAP §12's P24.4 block.
+    pub fn set_hair_detail(&mut self, detail: inf_anim::HairDetail) {
+        self.hair_detail = detail;
+    }
+
     /// The locomotion camera's pose this step, or `None` on a level with no
     /// player-controlled character.
     pub fn camera_pose(&self) -> Option<inf_ecs::camera::CameraPose> {
@@ -712,10 +716,6 @@ impl SimSession {
     /// …and mutably: view mode, shoulder, and the tuning P29.5's door edits.
     pub fn camera_mut(&mut self) -> &mut inf_ecs::camera::LocomotionCamera {
         &mut self.camera
-    }
-
-    pub fn set_hair_detail(&mut self, detail: inf_anim::HairDetail) {
-        self.hair_detail = detail;
     }
 
     /// The hair detail this session draws at (a read for tests and gates).

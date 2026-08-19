@@ -1354,21 +1354,25 @@ export const packaging = {
 /**
  * In-editor Simulate / Play (P8.4). Drives the `SimSession` over the live
  * `SceneDoc`: `start` snapshots the world + fires BeginPlay, `tick` advances one
- * frame with the currently-held actions (the backend owns fixed-step
- * accumulation), `stop` restores the pre-play world exactly. Running state also
- * broadcasts on the `sim://state` event (see lib/events.ts).
+ * frame with the currently-held **physical keys** (the backend owns both the
+ * binding table and the fixed-step accumulation), `stop` restores the pre-play
+ * world exactly. Running state also broadcasts on the `sim://state` event (see
+ * lib/events.ts).
  */
 export const sim = {
   /** Enter Simulate over the current scene. Rejects (e.g. no scene) with a message. */
   start: (): Promise<void> => invoke("sim_start"),
   /**
-   * Advance one frame with the held actions (`["left","jump"]`). Resolves to
-   * whether a session was running (false = no-op). Arg name is camelCase.
+   * Advance one frame with the currently-held **physical keys**
+   * (`KeyboardEvent.code` values, e.g. `["KeyW","Shift"]`) — the backend
+   * resolves them through `inf_input::default_map`, which is the same table the
+   * shipped player reads. Resolves to whether a session was running (false =
+   * no-op). Arg name is camelCase.
    */
-  /** Advance a frame with the currently-held PHYSICAL keys (`KeyboardEvent.code`). */
   tick: (keys: string[]): Promise<boolean> => invoke<boolean>("sim_tick", { keys }),
   /**
-   * Advance **exactly one fixed step** with the held actions (B-P4 tier A′):
+   * Advance **exactly one fixed step** with the held physical keys (B-P4 tier
+   * A′):
    * bypasses the wall-clock accumulator, so Step is a guaranteed single step.
    * Resolves to whether a session was running.
    */

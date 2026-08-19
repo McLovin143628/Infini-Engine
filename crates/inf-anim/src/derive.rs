@@ -88,6 +88,25 @@ pub const FOOTSTEP_PREFIX: &str = "footstep";
 /// The prefix a derived **sync** marker carries.
 pub const PLANT_PREFIX: &str = "plant_";
 
+/// **The one spelling of a derived footstep event's name** (P29.6 audit, A17).
+///
+/// The rule is `footstep_<leg>` and it used to be written twice: once by
+/// `derived_markers`, which is what actually goes on the clip, and once by
+/// [`DerivedNames::of`], which is what every consumer asks for the name. Two
+/// `format!`s five hundred lines apart, agreeing by inspection, for a wire
+/// string — and a producer and a consumer that each spell one string in their
+/// own place is exactly how the P29.6 course found the wizard counting nothing.
+/// That defect was closed at the *wizard's* boundary; this is the same defect
+/// one layer down, in the crate that owns both halves.
+pub fn footstep_marker(leg: &str) -> String {
+    format!("{FOOTSTEP_PREFIX}_{leg}")
+}
+
+/// …and the sync marker beside it, for the same reason.
+pub fn plant_marker(leg: &str) -> String {
+    format!("{PLANT_PREFIX}{leg}")
+}
+
 /// How the vertical half of the root's motion is split between the track and the
 /// pose.
 ///
@@ -457,8 +476,8 @@ impl DerivedNames {
             out.curves.insert(format!("{FOOT_SPEED_PREFIX}{suffix}"));
             out.curves.insert(format!("{FOOT_LOCK_PREFIX}{suffix}"));
             let leg = leg_name_of(skeleton, foot);
-            out.sync_markers.insert(format!("{PLANT_PREFIX}{leg}"));
-            out.event_markers.insert(format!("{FOOTSTEP_PREFIX}_{leg}"));
+            out.sync_markers.insert(plant_marker(&leg));
+            out.event_markers.insert(footstep_marker(&leg));
         }
         out
     }
@@ -1021,13 +1040,10 @@ fn derived_markers(plants: &[FootPlant]) -> Vec<AnimMarker> {
     for p in plants {
         out.push(AnimMarker::sync(
             p.start_s,
-            format!("{PLANT_PREFIX}{}", p.name),
+            plant_marker(&p.name),
             crate::locomotion::FOOT_SYNC_GROUP,
         ));
-        out.push(AnimMarker::event(
-            p.start_s,
-            format!("{FOOTSTEP_PREFIX}_{}", p.name),
-        ));
+        out.push(AnimMarker::event(p.start_s, footstep_marker(&p.name)));
     }
     out.sort_by(|a, b| {
         a.time_s

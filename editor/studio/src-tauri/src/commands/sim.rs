@@ -262,7 +262,7 @@ pub async fn sim_start(
 /// **Codes, not action names** (P29.6). The frontend used to map three keys onto
 /// three action names in TypeScript, which meant the engine's binding table
 /// existed twice in two languages and the second copy knew about three of its
-/// fourteen entries. It sends the physical key now and
+/// seventeen entries. It sends the physical key now and
 /// [`inf_input::default_map`] does the mapping — the same table the shipped
 /// player uses, so `C` crouches in Simulate because it crouches in a build, and
 /// an `input.toml` beside the level would change both.
@@ -592,6 +592,18 @@ pub async fn sim_stop(
     scene: State<'_, SceneState>,
     sim: State<'_, SimState>,
 ) -> Result<(), String> {
+    // **The mouse goes back FIRST** (P29.6 audit, A12). This used to be the last
+    // statement in the function, below two `?`s on poisonable locks — and the
+    // session is taken out of the state before either of them. So a poisoned
+    // lock returned `Err` with the session already gone and `SIM_RUNNING` still
+    // true in every viewport thread, for the life of the process: every
+    // subsequent plain LMB in the viewport would hide the cursor and grab the
+    // mouse for a session that does not exist, and `push_look` would discard the
+    // deltas in silence. `sim_start` already places its `set_sim_running(true)`
+    // after all its fallible work, for the mirror reason.
+    if let Some(vp) = app.try_state::<super::ViewportState>() {
+        vp.set_sim_running(false);
+    }
     let session = {
         let mut inner = sim.inner.lock().map_err(|_| "sim lock poisoned")?;
         inner.last = None;
@@ -614,9 +626,6 @@ pub async fn sim_stop(
         if let Ok(mut states) = handle.lock() {
             states.clear();
         }
-    }
-    if let Some(vp) = app.try_state::<super::ViewportState>() {
-        vp.set_sim_running(false);
     }
     let _ = app.emit("sim://state", false);
     Ok(())

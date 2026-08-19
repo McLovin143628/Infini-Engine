@@ -604,10 +604,25 @@ pub mod params {
 /// how fast it was going — and the number it needed was already on the movement
 /// runtime, one crate away.
 ///
-/// It writes into the same overlay `anim.set_param` writes into, which means a
-/// Blueprint still **wins**: the kit's writes land after this in the fixed step
-/// (the movement step runs before the Blueprint tick in neither host — see the
-/// call site) and a game that wants to drive `speed` itself simply does.
+/// # The precedence, and it is the other way round (P29.6 audit, A11)
+///
+/// This writes into the same overlay `anim.set_param` writes into, and the last
+/// writer in a fixed step wins. Both hosts dispatch `EventKind::Tick` and *then*
+/// run `step_character_movement`, so **this** lands last: on a character with a
+/// [`CharacterMovement`](crate::components::CharacterMovement) the engine owns
+/// the nine names in [`params`], and a Blueprint that sets one of them is
+/// overwritten before the pose step reads it.
+///
+/// That is the right design — one authority for one fact, and the number the
+/// engine has is the true one — and it is a real constraint: a game that wants
+/// to drive `speed` itself takes the movement component off, which is exactly
+/// what `phase24_wizard`'s fixture does and says. The order it rests on is
+/// pinned in both hosts by `projector_mirror`'s
+/// `both_fixed_steps_publish_character_params_after_the_blueprint_tick`, and the
+/// consequence is pinned by `live_tuning`.
+///
+/// The first two write-ups of this paragraph — here and at the call site —
+/// claimed a Blueprint still wins. It does not, and nothing asserted either way.
 ///
 /// Returns whether anything was published. `false` for an entity with no
 /// machine, which is most characters, and the check is the first thing that

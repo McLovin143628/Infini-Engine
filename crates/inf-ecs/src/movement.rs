@@ -219,6 +219,24 @@ pub fn angle_delta_deg(a: f64, b: f64) -> f64 {
     d
 }
 
+/// Fold an angle into `[0, 360)` degrees, with a non-finite input answering `0`.
+///
+/// **One spelling** (P29.6 audit): the movement step's yaw integration and the
+/// locomotion camera's rotation lag both produce an angle that has to be folded,
+/// and a rule written twice in two crates is how two authorities for one
+/// convention appear. `inf_physics::d3::movement` reaches for this one.
+pub fn wrap_deg(a: f64) -> f64 {
+    if !a.is_finite() {
+        return 0.0;
+    }
+    let r = a % 360.0;
+    if r < 0.0 {
+        r + 360.0
+    } else {
+        r
+    }
+}
+
 /// **ALS's `CalculateQuadrant`** with its hysteresis: which quadrant of the aim
 /// frame `angle_deg` (the velocity direction relative to the aim yaw) falls in,
 /// given what it was last step.

@@ -113,7 +113,6 @@ impl InputState {
         !self.keys_down.is_empty() || !self.buttons_down.is_empty() || !self.axes_raw.is_empty()
     }
 
-    /// The map in use.
     /// The physical keys currently held, sorted — the raw device state, not the
     /// resolved actions.
     ///
@@ -126,6 +125,7 @@ impl InputState {
         self.keys_down.iter().map(String::as_str)
     }
 
+    /// The map in use.
     pub fn map(&self) -> &InputMap {
         &self.map
     }

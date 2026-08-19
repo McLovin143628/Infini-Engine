@@ -105,7 +105,16 @@ impl Sim {
         }
     }
 
-    fn step(&mut self, intent: &MovementIntent) -> Option<CameraPose> {
+    /// Everything a fixed step does **except** the camera.
+    ///
+    /// Split out for one reason (P29.6 audit, A5): the purity arm's control has
+    /// to be this program minus its last line, and the first cut wrote the
+    /// control out by hand and dropped the solver and the write-back with it.
+    /// It therefore compared `sim + solver + write-back + camera` against `sim`
+    /// alone and read the result as proof the camera was inert -- true only
+    /// because the two omissions happened to be no-ops for the bytes it
+    /// sampled, which is a coincidence a test must not rest on.
+    fn step_sim(&mut self, intent: &MovementIntent) {
         self.bridge.sync_from_world(&self.world);
         inf_ecs::movement::apply_intent(&mut self.world, intent);
         step_character_movement(&mut self.world, &mut self.bridge, DT);
@@ -115,6 +124,10 @@ impl Sim {
         self.bridge.step(DT);
         self.bridge.write_back_into(&mut self.world);
         self.world.propagate();
+    }
+
+    fn step(&mut self, intent: &MovementIntent) -> Option<CameraPose> {
+        self.step_sim(intent);
         step_locomotion_camera(&self.world, &mut self.bridge, &mut self.cam, HERO, DT)
     }
 }
@@ -174,10 +187,22 @@ fn a_wall_behind_the_character_pulls_the_camera_in() {
     assert_eq!(clear.cam.collision_pull_m, 0.0, "the control must not pull");
 }
 
-/// **The camera reads the sim and never writes it.** Two identical worlds,
-/// one stepped with a camera and one without, are byte-identical — the
-/// ViewMode ruling's proof at the unit level (`phase29_gate` repeats it over
-/// the whole course).
+/// **The camera reads the sim and never writes it.**
+///
+/// Two identical worlds run the identical program, one with the final
+/// `step_locomotion_camera` line and one without, and the simulation is
+/// byte-identical -- the ViewMode ruling's proof at the unit level
+/// (`phase29_gate` repeats it over the whole course).
+///
+/// # What "the simulation" means here (P29.6 audit, A5)
+///
+/// The world **and the physics bridge**. The door holds a `&mut
+/// PhysicsBridge3D` -- it must, because a sphere sweep needs the query pipeline
+/// -- so the bridge is the one place a leak would actually land, and the first
+/// cut of this arm sampled nine floats off one entity and nothing else. A
+/// mutation that nudged the subject's body by a picometre through that `&mut`
+/// survived it. The bridge's own body positions are in the record now, so it
+/// does not.
 #[test]
 fn stepping_a_camera_changes_nothing_about_the_simulation() {
     let script = |i: u32| MovementIntent {
@@ -190,10 +215,8 @@ fn stepping_a_camera_changes_nothing_about_the_simulation() {
     let mut without = Sim::new(Some(-1.5));
     for i in 0..120 {
         with.step(&script(i));
-        without.bridge.sync_from_world(&without.world);
-        inf_ecs::movement::apply_intent(&mut without.world, &script(i));
-        step_character_movement(&mut without.world, &mut without.bridge, DT);
-        without.world.propagate();
+        // The control is `step` MINUS its last line. Nothing else differs.
+        without.step_sim(&script(i));
     }
     let bytes = |s: &Sim| {
         let e = s.world.entity_of(HERO).unwrap();
@@ -205,10 +228,14 @@ fn stepping_a_camera_changes_nothing_about_the_simulation() {
             t.translation.x,
             t.translation.y,
             t.translation.z,
+            t.rotation.x,
             t.rotation.y,
+            t.rotation.z,
             cm.runtime.velocity.x,
+            cm.runtime.velocity.y,
             cm.runtime.velocity.z,
             cm.runtime.aim_yaw_deg,
+            cm.runtime.aim_pitch_deg,
             cm.runtime.body_yaw_deg,
             cm.runtime.mapped_speed,
         ] {
@@ -216,14 +243,27 @@ fn stepping_a_camera_changes_nothing_about_the_simulation() {
         }
         out.push(cm.mode as u8);
         out.push(cm.runtime.actual_gait as u8);
+        // **The bridge**, which is what the door can actually reach: every
+        // body's translation, in the bridge's own deterministic id order.
+        for b in s.bridge.world().body_ids() {
+            let p = s.bridge.world().body_translation(b).unwrap_or(DVec3::ZERO);
+            for v in [p.x, p.y, p.z] {
+                out.extend_from_slice(&v.to_bits().to_le_bytes());
+            }
+        }
         out
     };
+    let with_bytes = bytes(&with);
+    assert!(
+        with_bytes.len() > 15 * 8,
+        "the record covers no bodies, so the bridge half is about nothing"
+    );
     assert_eq!(
-        bytes(&with),
+        with_bytes,
         bytes(&without),
         "stepping a camera moved the simulation"
     );
-    // …and the camera really ran, or the equality above is about nothing.
+    // ...and the camera really ran, or the equality above is about nothing.
     assert_ne!(with.cam.pose.position, Vec3d::ZERO);
     assert!(with.cam.yaw_deg.abs() > 1.0, "the camera never turned");
 }

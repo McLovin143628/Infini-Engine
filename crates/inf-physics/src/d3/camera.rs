@@ -29,14 +29,33 @@
 //! ([`inf_ecs::movement::feet_offset_m`]), so the camera and the foot bridge
 //! cannot disagree about where the character's own origin is.
 //!
-//! # This is not a system, and it is deliberately not in the fixed step
+//! # This is not a system, and it is outside everything the trace folds
 //!
-//! `step_locomotion_camera` is called by a host **after** its fixed step, once
-//! per stepped frame, with the same `dt`. It is not inside
-//! `step_character_movement` because the camera is not sim state: folding it in
+//! `step_locomotion_camera` is called by each host as the **last statement of
+//! its fixed step** — after the movement step, after the solver, after the
+//! write-back, after the pose and after audio — once per stepped frame, with the
+//! same `dt`. It is not inside `step_character_movement` and it is not a
+//! `SimSchedule` system, because the camera is not sim state: folding it in
 //! would put a camera's smoothing inside the function whose output is compared
-//! byte for byte between PIE and shipping, and the ViewMode ruling says it must
-//! not be there. `phase29_gate` asserts the separation rather than describing it.
+//! byte for byte between PIE and shipping.
+//!
+//! **Stated precisely, because the first cut of this paragraph said "not in the
+//! fixed step" and the code says otherwise** (P29.6 audit). What the ViewMode
+//! ruling requires is that no camera value reach `state_bytes`, and what keeps
+//! that true is position (last) plus direction (this door takes `&EcsWorld`, not
+//! `&mut`, and writes nothing into any component).
+//!
+//! # The one `&mut` this door does hold, and why it is safe
+//!
+//! `bridge: &mut PhysicsBridge3D`, because `cast_shape_where` has to
+//! `ensure_query_pipeline()` and that rebuilds a BVH. That rebuild is a pure
+//! function of the colliders and the integration parameters, and every collider
+//! or body mutator sets `query_dirty`, so building it early yields the identical
+//! structure and the next step's own queries cannot tell. It is the only shared
+//! state the camera can touch, which is why
+//! `stepping_a_camera_changes_nothing_about_the_simulation` samples the bridge's
+//! bodies as well as the world's components — a mutation through this `&mut`
+//! survived the arm before it did.
 
 use glam::{DQuat, DVec3};
 use uuid::Uuid;
@@ -106,6 +125,22 @@ pub fn step_locomotion_camera(
     let mut exclude: std::collections::BTreeSet<ColliderId3D> = std::collections::BTreeSet::new();
     if let Some(c) = bridge.collider_of(subject) {
         exclude.insert(c);
+    }
+    // **…and the subject's ragdoll limbs** (P29.6 audit, A4). The capsule above
+    // is the character's *one* mirrored collider, and a ragdoll DISABLES it —
+    // `ragdoll_bridge` turns it off the step the ragdoll starts — while spawning
+    // a dozen live limb colliders in its place. Without this the death cam sweeps
+    // into the body it is filming: the first limb in the path is a blocking hit
+    // at nearly zero distance, so the camera snaps to `min_arm_fraction` and
+    // looks out of the character's own chest, for the whole of the ragdoll.
+    //
+    // The rule and the list are the ground probe's, two hundred lines away in
+    // `ragdoll_bridge`: `SpawnedRagdoll::colliders` exists precisely so a query
+    // can be blind to the ragdoll's own limbs, and a camera is such a query.
+    if let Some(r) = bridge.ragdoll_of(subject) {
+        for c in &r.colliders {
+            exclude.insert(*c);
+        }
     }
     let origin = cam.sweep_origin().to_dvec3();
     let desired = cam.desired.to_dvec3();

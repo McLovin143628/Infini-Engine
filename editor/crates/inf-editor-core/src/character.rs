@@ -861,7 +861,8 @@ pub fn build_character(
         .event_markers
         .into_iter()
         .collect();
-    let actor = match write_controller(project, &dir, name, machine, &footsteps) {
+    let motion_state = motion_state_of(&machine_model);
+    let actor = match write_controller(project, &dir, name, machine, &footsteps, &motion_state) {
         Ok(id) => {
             written.push(id);
             id
@@ -873,28 +874,45 @@ pub fn build_character(
     };
 
     // ── the text the author owns from minute one (S1) ──────────────────────
+    //
+    // **These three writes roll back too** (P29.6 audit, A15). Every earlier
+    // failure path in this function calls `roll_back(project, &written)` before
+    // returning, because `a_write_that_fails_halfway_takes_back_what_it_wrote`
+    // says so: an orphaned payload is re-registered by the watcher under a GUID
+    // nothing references. The first cut of this block used a bare `?` on four
+    // fallible writes, so a read-only `camera.toml` — or a directory in the way
+    // — returned `Err` with all seven registered assets still on disk. The
+    // existing rollback test blocks a walk clip, which never reaches this far.
     let mut text: Vec<std::path::PathBuf> = Vec::new();
+    macro_rules! or_roll_back {
+        ($e:expr) => {
+            match $e {
+                Ok(v) => v,
+                Err(e) => {
+                    roll_back(project, &written);
+                    return Err(CharacterError::Write(e.to_string()));
+                }
+            }
+        };
+    }
     // The machine, as text: the reviewable face of the `.inf_sm` beside it, and
     // the thing pillar S1's whole argument is about.
     let sm_payload = dir.join(format!("{name} Locomotion.inf_sm"));
-    crate::sm_text::write_text(&sm_payload, &machine_model)
-        .map_err(|e| CharacterError::Write(e.to_string()))?;
+    or_roll_back!(crate::sm_text::write_text(&sm_payload, &machine_model));
     text.push(crate::sm_text::text_path(&sm_payload));
     // The camera table and the input bindings — neither has a home in the scene
     // schema (a camera is not sim state; a binding is a project's), so both are
     // text beside the character, in the formats the shipped player already reads.
     let cam_path = dir.join("camera.toml");
-    let cam_text = inf_ecs::camera::CameraTuning::default()
-        .to_toml()
-        .map_err(CharacterError::Write)?;
-    inf_asset::write_atomically(&cam_path, cam_text.as_bytes())
-        .map_err(|e| CharacterError::Write(e.to_string()))?;
+    let cam_text = or_roll_back!(inf_ecs::camera::CameraTuning::default().to_toml());
+    or_roll_back!(inf_asset::write_atomically(&cam_path, cam_text.as_bytes()));
     text.push(cam_path);
     let input_path = dir.join("input.toml");
-    let input_text = toml::to_string_pretty(&inf_input::default_map())
-        .map_err(|e| CharacterError::Write(e.to_string()))?;
-    inf_asset::write_atomically(&input_path, input_text.as_bytes())
-        .map_err(|e| CharacterError::Write(e.to_string()))?;
+    let input_text = or_roll_back!(toml::to_string_pretty(&inf_input::default_map()));
+    or_roll_back!(inf_asset::write_atomically(
+        &input_path,
+        input_text.as_bytes()
+    ));
     text.push(input_path);
 
     Ok(CharacterBuild {
@@ -1060,8 +1078,9 @@ fn write_controller(
     name: &str,
     machine: AssetId,
     footsteps: &[String],
+    motion_state: &str,
 ) -> Result<AssetId, CharacterError> {
-    let class = controller_class(name, footsteps);
+    let class = controller_class(name, footsteps, motion_state);
     let bytes = crate::samples::encode_actor(&class).map_err(CharacterError::Write)?;
     let path = dir.join(format!("{name} Controller.inf_act"));
     inf_asset::write_atomically(&path, &bytes).map_err(|e| CharacterError::Write(e.to_string()))?;
@@ -1128,11 +1147,44 @@ fn write_controller(
 /// this character was built with, and the program is a function of the rig.
 /// [`controller_class`], for a caller outside this module (the committed P29.6
 /// sample builds the wizard's own controller with fixed ids).
-pub fn controller_class_for(name: &str, footsteps: &[String]) -> inf_blueprint::BlueprintClass {
-    controller_class(name, footsteps)
+pub fn controller_class_for(
+    name: &str,
+    footsteps: &[String],
+    motion_state: &str,
+) -> inf_blueprint::BlueprintClass {
+    controller_class(name, footsteps, motion_state)
 }
 
-fn controller_class(name: &str, footsteps: &[String]) -> inf_blueprint::BlueprintClass {
+/// **The state the controller times, derived from the machine it will drive**
+/// (P29.6 audit, A16).
+///
+/// The controller counts how long the character has spent in its fastest
+/// authored locomotion state, and the first cut spelled that `"run"` as a
+/// literal. `inf_anim::propose` names its states from
+/// [`inf_anim::propose::TIER_NAMES`] and emits **only the tiers a clip set
+/// actually occupies** — which is the collapse this module's own docs warn
+/// about, and the wizard's own honest note says a default biped walking at
+/// 0.65 m/s tiers as an idle. On such a creature there is no state called `run`,
+/// `anim.query_state` answers `false` for ever, and `run_time` stays at zero:
+/// the identical silent-zero defect as the footstep notify, one statement over.
+///
+/// The answer is the highest tier the machine really has, falling back to its
+/// last state for a hand-authored machine that uses none of the tier names.
+pub fn motion_state_of(machine: &inf_anim::StateMachine) -> String {
+    inf_anim::propose::TIER_NAMES
+        .iter()
+        .rev()
+        .find(|t| machine.states.iter().any(|s| s.name == **t))
+        .map(|t| (*t).to_string())
+        .or_else(|| machine.states.last().map(|s| s.name.clone()))
+        .unwrap_or_default()
+}
+
+fn controller_class(
+    name: &str,
+    footsteps: &[String],
+    motion_state: &str,
+) -> inf_blueprint::BlueprintClass {
     use inf_blueprint::{
         BinOp, Binding, BlueprintClass, BlueprintFn, EventBinding, EventKind, Expr, Lit, LocalId,
         Param, Stmt, Ty, Variable,
@@ -1179,7 +1231,10 @@ fn controller_class(name: &str, footsteps: &[String]) -> inf_blueprint::Blueprin
         // for, and the cheapest possible proof that the query is answered
         // against the machine's real current state.
         bump(
-            call(&["anim", "query_state"], vec![entity(), str_lit("run")]),
+            call(
+                &["anim", "query_state"],
+                vec![entity(), str_lit(motion_state)],
+            ),
             "run_time",
             dt(),
         ),
@@ -2276,6 +2331,55 @@ mod tests {
         for path in &out.text {
             assert!(path.exists(), "{} was not written", path.display());
         }
+    }
+
+    /// **The state the controller times is a function of the machine** (P29.6
+    /// audit, A16) — the same silent-zero defect the footstep notify had, one
+    /// statement over, and it was still open after the notify was fixed.
+    ///
+    /// `propose` emits only the tiers a clip set occupies, and this module's own
+    /// note says a default biped walking at 0.65 m/s tiers as an **idle**. On
+    /// such a creature there is no state called `run`, so a hard-coded
+    /// `anim.query_state(entity, "run")` answers `false` for ever and `run_time`
+    /// counts nothing — with no error, on every character the wizard makes.
+    #[test]
+    fn the_controller_times_a_state_its_machine_actually_has() {
+        use inf_anim::{SmState, StateMachine};
+        let m = |names: &[&str]| StateMachine {
+            states: names
+                .iter()
+                .map(|n| SmState::clip(*n, [1; 16]))
+                .collect::<Vec<_>>(),
+            ..Default::default()
+        };
+        // The three-tier ladder the wizard's own generator produces.
+        assert_eq!(motion_state_of(&m(&["idle", "walk", "run"])), "run");
+        // …and the four-tier one, where the fastest is the sprint.
+        assert_eq!(
+            motion_state_of(&m(&["idle", "walk", "run", "sprint"])),
+            "sprint"
+        );
+        // **The collapse.** Two tiers only — the case the wizard warns about —
+        // and the answer is a state that exists rather than one that does not.
+        assert_eq!(motion_state_of(&m(&["idle", "walk"])), "walk");
+        assert_eq!(motion_state_of(&m(&["idle"])), "idle");
+        // A hand-authored machine that uses none of the tier names still gets a
+        // real state: the last one, not an empty string and not `run`.
+        assert_eq!(motion_state_of(&m(&["Stand", "Amble"])), "Amble");
+        // The degenerate machine answers a value rather than panicking.
+        assert_eq!(motion_state_of(&m(&[])), "");
+        // …and the program really reads it: the emitted class names the state.
+        let class = controller_class_for("Hero", &[], "amble");
+        let json = crate::samples::encode_actor(&class).expect("the class encodes");
+        let text = String::from_utf8(json).unwrap();
+        assert!(
+            text.contains("amble"),
+            "the controller does not name the state it was told to time"
+        );
+        assert!(
+            !text.contains("\"run\""),
+            "the controller still carries a hard-coded `run`"
+        );
     }
 
     /// **The wizard emits a real controller, and everything it takes to play**

@@ -189,6 +189,30 @@ describe("tick loop", () => {
     expect(vi.mocked(sim.tick)).toHaveBeenCalledWith(["KeyC", "Shift"]);
   });
 
+  it("drops every held key when the window loses focus", async () => {
+    await useSimStore.getState().play();
+    window.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyW" }));
+    window.dispatchEvent(new KeyboardEvent("keydown", { code: "ShiftLeft" }));
+    runFrame();
+    await flush();
+    expect(vi.mocked(sim.tick)).toHaveBeenCalledWith(["KeyW", "Shift"]);
+
+    // The native viewport takes focus the instant the player presses LMB to
+    // mouse-look, so these listeners stop seeing events and the `keyup` for a
+    // held key never arrives. Without this the character sprints for ever
+    // (P29.6 audit).
+    window.dispatchEvent(new Event("blur"));
+    runFrame();
+    await flush();
+    expect(vi.mocked(sim.tick)).toHaveBeenLastCalledWith([]);
+
+    // …and the tracker still works afterwards: it is a clear, not a teardown.
+    window.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyD" }));
+    runFrame();
+    await flush();
+    expect(vi.mocked(sim.tick)).toHaveBeenLastCalledWith(["KeyD"]);
+  });
+
   it("step() advances exactly one fixed step and pauses", async () => {
     await useSimStore.getState().play();
     await useSimStore.getState().step();

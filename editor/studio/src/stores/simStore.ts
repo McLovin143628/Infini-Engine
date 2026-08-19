@@ -10,7 +10,7 @@
  *    the set of held **physical keys** (`KeyboardEvent.code`) and sends it
  *    verbatim. It does NOT map keys to action names: that table is the engine's
  *    (`inf_input::default_map`, Ring 0, shared with the shipped player), and the
- *    version of it that used to live here knew three of its fourteen entries —
+ *    version of it that used to live here knew three of the seventeen it has now —
  *    the two-copies-across-a-language-boundary defect the campaign's Wave I
  *    found at this same seam. `Space` still `preventDefault`s so the page never
  *    scrolls while playing.
@@ -42,7 +42,7 @@ import { useShellStore } from "./shellStore";
  * `keycode_to_code` in the player), which the backend resolves; forwarding the
  * raw `ShiftLeft` alongside would be a second name for one key.
  */
-export function simKeyCode(e: KeyboardEvent): string | null {
+export function simKeyCode(e: KeyboardEvent): string {
   switch (e.code) {
     case "ShiftLeft":
     case "ShiftRight":
@@ -84,14 +84,32 @@ function onKeyDown(e: KeyboardEvent): void {
 }
 
 function onKeyUp(e: KeyboardEvent): void {
-  const code = simKeyCode(e);
-  if (code) held.delete(code);
+  held.delete(simKeyCode(e));
+}
+
+/**
+ * **Drop every held key when this window stops receiving them** (P29.6 audit).
+ *
+ * These listeners are `window`-scoped, so they only see keys while the *webview*
+ * has focus — and the native viewport takes focus the instant the player presses
+ * LMB to mouse-look (`begin_capture` calls `SetFocus` on the child window). A key
+ * held at that moment never receives its `keyup`, stays in this set, and is
+ * re-sent to `sim_tick` every frame for the rest of the session: the character
+ * sprints for ever and nothing on either side reports it.
+ *
+ * A `blur` is exactly "no further key events are coming", which is the condition
+ * under which the only honest held set is the empty one. The same event covers
+ * alt-tab, a detached panel taking focus and a dialog opening.
+ */
+function onBlur(): void {
+  held.clear();
 }
 
 function installInput(): void {
   if (inputInstalled) return;
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("keyup", onKeyUp);
+  window.addEventListener("blur", onBlur);
   inputInstalled = true;
 }
 
@@ -99,6 +117,7 @@ function removeInput(): void {
   if (!inputInstalled) return;
   window.removeEventListener("keydown", onKeyDown);
   window.removeEventListener("keyup", onKeyUp);
+  window.removeEventListener("blur", onBlur);
   inputInstalled = false;
   held.clear();
 }

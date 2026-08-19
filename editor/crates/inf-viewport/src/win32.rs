@@ -376,10 +376,25 @@ enum Capture {
     Pan,
     Dolly,
     /// **Mouse-look for a running Simulate** (P29.6). Grabbed by a plain LMB
-    /// while a session is live, released by `Escape` or by the session ending.
-    /// It steers the GAME camera, not the editor one, so the frame loop's
-    /// camera arms deliberately do nothing for it — the deltas leave over
-    /// `ViewportEvent::SimLook` instead.
+    /// while a session is live. It steers the GAME camera, not the editor one,
+    /// so the frame loop's camera arms deliberately do nothing for it — the
+    /// deltas leave over `ViewportEvent::SimLook` instead.
+    ///
+    /// **A hold, not a lock** (corrected by the P29.6 audit). It is released on
+    /// `WM_LBUTTONUP` like every other drag gesture in this file; `Escape` and
+    /// the session ending are *additional* releases, for the cases where the
+    /// button-up never arrives (a stolen capture, a session stopped from the
+    /// webview). The first write-up named only the last two, which describes a
+    /// Unity-style pointer lock this is not.
+    ///
+    /// **Known bound, and it is a real one.** `begin_capture` calls `SetFocus`
+    /// on the native child window, so the webview stops receiving keyboard
+    /// events for the duration — the frontend's `keydown`/`keyup` listeners are
+    /// `window`-scoped. Mouse-look and WASD are therefore mutually exclusive as
+    /// shipped. The half that would have been a *bug* rather than a limitation —
+    /// a key held at the moment of the grab never receiving its `keyup`, and so
+    /// being re-sent to `sim_tick` for ever — is closed on the frontend side by
+    /// clearing the held set on `blur`. Ledgered in ROADMAP §13.
     SimLook,
 }
 
@@ -1555,6 +1570,20 @@ fn thread_main(
                     if input.wheel != 0 {
                         let (cx, cy) = input.cursor;
                         camera_2d.zoom_at(input.wheel, cx as f64, cy as f64, vwf, vhf);
+                    }
+                }
+                // **The play capture belongs to the GAME here too** (P29.6
+                // audit, A13). `set_sim_running` is sent to `Target::All`, so a
+                // 2D viewport arms `Capture::SimLook` like any other — and this
+                // arm was the catch-all `_`, which panned the *editor's* 2D
+                // camera with the deltas and forwarded nothing. The player would
+                // see the world slide under them and the character never look.
+                Capture::SimLook => {
+                    if input.dx != 0.0 || input.dy != 0.0 {
+                        sink(ViewportEvent::SimLook {
+                            dx: input.dx,
+                            dy: input.dy,
+                        });
                     }
                 }
                 _ => camera_2d.pan(input.dx as f64, input.dy as f64, vwf, vhf),

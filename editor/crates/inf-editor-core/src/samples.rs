@@ -5140,9 +5140,13 @@ pub fn phase20_coastal_scene() -> SceneDoc {
 
     let mut doc = SceneDoc::new();
     doc.set_title("Phase 20 Coastal");
-    // 3D gravity is what makes a crate fall into the sea at all; the runtime
-    // wires the 3D bridge to `gravity_3d`, so an unset one would leave every
-    // buoyant body hovering and every assertion comparing two copies of nothing.
+    // 3D gravity is what makes a crate fall into the sea at all — and it comes
+    // from **`gravity_2d.y`**, not from `gravity_3d` (`RuntimeSim::new` and its
+    // `SimSession` mirror). The claim this comment used to make was the other
+    // way round and was wrong; the P29.6 course found the field, and
+    // `inf_packager::cook`'s `ignored_gravity_3d` advisory now says so out loud
+    // when the two disagree. Both are set here, consistently, which is what
+    // keeps this level quiet in the report.
     doc.set_settings(LevelSettings {
         gravity_2d: Vec2d::new(0.0, -9.81),
         gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
@@ -8254,7 +8258,10 @@ pub fn phase29_controller() -> BlueprintClass {
         .event_markers
         .into_iter()
         .collect();
-    crate::character::controller_class_for("Hero", &footsteps)
+    // The state the controller times is a function of the machine, not a guess
+    // (P29.6 audit, A16) — for this creature's own ladder that is `run`.
+    let motion = crate::character::motion_state_of(&phase29_machine());
+    crate::character::controller_class_for("Hero", &footsteps, &motion)
 }
 
 /// The blocky mannequin body, one box per bone.
@@ -9353,6 +9360,183 @@ mod tests {
                 "committed phase23-workshop Prop.inf_mesh drifted from the generator"
             );
         }
+
+        // ── Phase 29 locomotion lock (P29.6 audit, A8) ─────────────────────
+        //
+        // The wave added `write_phase29_locomotion()` to the bless branch above
+        // and no arm down here, which made the showcase the ONLY sample in the
+        // tree that regenerates on demand and is never checked. Everything the
+        // P29.6 ledger claims about that folder — the clips are derived, the
+        // machine is the proposal, the controller is a function of the rig, the
+        // character is a real character — is a claim about *these bytes*, and
+        // `phase29_gate` loads them off disk and simulates whatever it finds. So
+        // a change to `phase29_locomotion_scene`, to `edit_create_character`'s
+        // capsule arithmetic or to the derivation's encoding would have moved
+        // the committed content and the trace with it, together, silently.
+        //
+        // Every file, not a representative one: the level, the rig, the mesh,
+        // the three derived clips, the machine, the controller and the three
+        // text faces.
+        let p29dir = phase29_locomotion_dir();
+        let p29lvl = p29dir.join("Phase29Locomotion.inf_lvl");
+        if p29lvl.exists() {
+            assert_eq!(
+                std::fs::read(&p29lvl).unwrap(),
+                crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(
+                    &phase29_locomotion_scene()
+                ))
+                .unwrap(),
+                "committed phase29-locomotion .inf_lvl drifted from the generator"
+            );
+            assert_eq!(
+                std::fs::read(p29dir.join("Hero.inf_skel")).unwrap(),
+                inf_asset::encode(&phase29_skeleton()).unwrap(),
+                "committed phase29-locomotion Hero.inf_skel drifted from the generator"
+            );
+            assert_eq!(
+                std::fs::read(p29dir.join("Hero Body.inf_mesh")).unwrap(),
+                inf_asset::encode(&phase29_body()).unwrap(),
+                "committed phase29-locomotion Hero Body.inf_mesh drifted from the generator"
+            );
+            let skel_bytes = *PHASE29_SKELETON_GUID.as_bytes();
+            let (set, _) = phase29_clips();
+            for (file, clip) in [
+                ("Hero Idle.inf_anim", &set.idle),
+                ("Hero Walk.inf_anim", &set.walk),
+                ("Hero Run.inf_anim", &set.run),
+            ] {
+                assert_eq!(
+                    std::fs::read(p29dir.join(file)).unwrap(),
+                    inf_asset::encode(&inf_anim::AnimClipAsset::new(
+                        clip.clone(),
+                        Some(skel_bytes)
+                    ))
+                    .unwrap(),
+                    "committed phase29-locomotion {file} drifted from the generator — \
+                     the clip is DERIVED, so this also catches a change in the \
+                     derivation the gate would otherwise absorb"
+                );
+            }
+            let machine = phase29_machine();
+            assert_eq!(
+                std::fs::read(p29dir.join("Hero Locomotion.inf_sm")).unwrap(),
+                inf_asset::encode(&inf_anim::StateMachineAsset::new(
+                    machine.clone(),
+                    Some(skel_bytes)
+                ))
+                .unwrap(),
+                "committed phase29-locomotion .inf_sm drifted from the proposal"
+            );
+            assert_eq!(
+                std::fs::read(p29dir.join("Hero Controller.inf_act")).unwrap(),
+                encode_actor(&phase29_controller()).unwrap(),
+                "committed phase29-locomotion .inf_act drifted from the generator"
+            );
+            // The three text faces, which are the ones an author edits and the
+            // gate's one-line-diff arm reads. Read as STRINGS so a line-ending
+            // rewrite fails here by content rather than by an opaque byte count.
+            assert_eq!(
+                std::fs::read_to_string(p29dir.join("Hero Locomotion.inf_sm.txt")).unwrap(),
+                inf_anim::to_toml(&machine),
+                "committed phase29-locomotion .inf_sm.txt drifted from the machine"
+            );
+            assert_eq!(
+                std::fs::read_to_string(p29dir.join("camera.toml")).unwrap(),
+                inf_ecs::camera::CameraTuning::default().to_toml().unwrap(),
+                "committed phase29-locomotion camera.toml drifted from the ALS table"
+            );
+            assert_eq!(
+                std::fs::read_to_string(p29dir.join("input.toml")).unwrap(),
+                toml::to_string_pretty(&inf_input::default_map()).unwrap(),
+                "committed phase29-locomotion input.toml drifted from `default_map`"
+            );
+            assert_eq!(
+                std::fs::read_to_string(p29dir.join("README.md")).unwrap(),
+                PHASE29_README,
+                "committed phase29-locomotion README drifted from the generator"
+            );
+        }
+    }
+
+    /// **The showcase's character is the WIZARD's character** (P29.6 audit, A8).
+    ///
+    /// `phase29_locomotion_scene` hand-copies `SceneDoc::edit_create_character`'s
+    /// capsule arithmetic and component set, because it needs
+    /// `create_with_guid` and the wizard's door does not take one. They are
+    /// equivalent today and nothing kept them so — while the sample's own README
+    /// says its assets "are what `build_character` produces from the default
+    /// biped". A byte pin cannot see that: it compares the committed bytes to
+    /// the same copy that wrote them.
+    ///
+    /// So the two are compared to each other, field by field, at the same
+    /// height.
+    #[test]
+    fn the_showcase_character_matches_the_wizard_door() {
+        use inf_ecs::components::{
+            CharacterController3D, CharacterMovement, Collider3D, ColliderShape3DKind, RigidBody3D,
+            Transform,
+        };
+        let feet = phase29_start();
+        let mut doc = SceneDoc::new();
+        let guid = doc.edit_create_character(
+            "Hero",
+            Uuid::from_u128(1),
+            Uuid::from_u128(2),
+            Uuid::from_u128(3),
+            feet,
+            None,
+            PHASE29_HEIGHT_M,
+        );
+        let door = doc.world().entity_of(guid).expect("the wizard spawned it");
+        let sample_doc = phase29_locomotion_scene();
+        let sample = sample_doc
+            .world()
+            .entity_of(PHASE29_HERO_GUID)
+            .expect("the sample has a hero");
+
+        let dw = doc.world().world();
+        let sw = sample_doc.world().world();
+        assert_eq!(
+            dw.get::<Collider3D>(door)
+                .map(|c| (c.shape_kind, c.half_extents, c.radius)),
+            sw.get::<Collider3D>(sample)
+                .map(|c| (c.shape_kind, c.half_extents, c.radius)),
+            "the showcase's capsule is not the one the wizard would build"
+        );
+        assert_eq!(
+            dw.get::<Transform>(door).map(|t| t.translation),
+            sw.get::<Transform>(sample).map(|t| t.translation),
+            "the showcase places its character at a different height than the \
+             wizard does for the same feet"
+        );
+        let cm = |c: Option<&CharacterMovement>| {
+            c.map(|c| {
+                (
+                    c.player_controlled,
+                    c.stand_half_height_m,
+                    c.crouch_half_height_m,
+                    c.prone_half_height_m,
+                )
+            })
+        };
+        assert_eq!(
+            cm(dw.get::<CharacterMovement>(door)),
+            cm(sw.get::<CharacterMovement>(sample)),
+            "the showcase's movement component is not the wizard's"
+        );
+        assert_eq!(
+            dw.get::<RigidBody3D>(door).map(|b| b.kind),
+            sw.get::<RigidBody3D>(sample).map(|b| b.kind)
+        );
+        assert!(
+            dw.get::<CharacterController3D>(door).is_some()
+                && sw.get::<CharacterController3D>(sample).is_some(),
+            "one of the two has no character controller"
+        );
+        // …and the fixture is not vacuous: a capsule with real dimensions.
+        let c = sw.get::<Collider3D>(sample).expect("a capsule");
+        assert_eq!(c.shape_kind, ColliderShape3DKind::Capsule);
+        assert!(c.radius > 0.1 && c.half_extents.y > 0.3, "{c:?}");
     }
 
     // ── Phase 22 playground shape (P22.4) ──────────────────────────────────

@@ -46,7 +46,7 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 23] = [
+const SIM_PATH: [(&str, &str, &str); 25] = [
     // ── P29.6's text form, for the same reason the two below it are here ──
     //
     // It is not on the *runtime* path at all — it is an authoring door — and it
@@ -184,6 +184,29 @@ const SIM_PATH: [(&str, &str, &str); 23] = [
         "inf_editor_core::simulate",
         include_str!("../../../editor/crates/inf-editor-core/src/simulate.rs"),
         "the EDITOR fixed step, and the other half of every `PIE == shipping` claim in the repository — the two are compared byte for byte, so a libm call in either one is a libm call in the comparison",
+    ),
+    // ── P29.6 audit, A2: where the locomotion camera's trigonometry ACTUALLY is ──
+    //
+    // The wave put `inf_physics::d3::camera` on the *other* portable gate
+    // (`inf-physics/tests/portable_character.rs`) with a note saying the camera
+    // trace is compared byte for byte. True — and that file contains not one
+    // trig call. Every sine the camera evaluates is in these two: `basis` builds
+    // the yaw/pitch frame, and `axis_independent_lag` delegates its whole
+    // rotation to `movement::rotate_into_frame`/`rotate_from_frame`. Neither
+    // file was covered by any gate in the tree, so a `.sin()` added to either
+    // would have failed nothing — and `phase29_gate`'s determinism arm compares
+    // two runs on ONE machine with one libm, so it cannot see a portability
+    // defect either. This repository's own law, met again: a gate must aim at
+    // the thing it names.
+    (
+        "inf_ecs::camera",
+        include_str!("../../inf-ecs/src/camera.rs"),
+        "`basis` and `axis_independent_lag` are where the camera's sines are, and `LocomotionCamera::trace_bytes` is compared byte for byte across runs by `phase29_gate`",
+    ),
+    (
+        "inf_ecs::movement",
+        include_str!("../../inf-ecs/src/movement.rs"),
+        "the movement MODEL: `rotate_into_frame`, the quadrant hysteresis and the gait ladder — every one of them folded into `state_bytes` by the fixed step above, and the camera's lag rotates through the first of them",
     ),
 ];
 

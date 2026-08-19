@@ -49,6 +49,11 @@ use inf_ecs::components::{
 };
 use inf_ecs::math::{Vec2d, Vec3d};
 use inf_ecs::movement as model;
+// **One spelling for the [0, 360) fold** (P29.6 audit). This file carried a
+// private `wrap_deg` copy of the model's rule, and the locomotion camera needed
+// the same fold in the same wave -- two crates spelling one convention is how a
+// camera and a character end up disagreeing about where north is.
+use inf_ecs::movement::wrap_deg;
 use inf_ecs::world::EcsWorld;
 
 use super::ecs::PhysicsBridge3D;
@@ -1306,8 +1311,12 @@ fn step_one(
     //    script at all**. Before it, `speed` was a parameter every generated and
     //    proposed machine gated on and nothing in the engine ever set.
     //
-    //    A Blueprint still wins: its `anim.set_param` runs in the Tick pass,
-    //    which is after this in both hosts' fixed steps.
+    //    **The precedence is THIS one** (P29.6 audit, A11). The Tick pass runs
+    //    BEFORE the movement step in both hosts, so this write lands last and a
+    //    Blueprint's `anim.set_param` on one of the nine published names is
+    //    overwritten before the pose step reads it. One authority for one fact;
+    //    a game that wants to drive `speed` itself takes the movement component
+    //    off. Pinned by `projector_mirror` and by `live_tuning`.
     //
     //    Costs one map lookup on a character with no machine, which is every
     //    character in every committed level before this wave.
@@ -1572,8 +1581,12 @@ fn step_mantle(
     //    script at all**. Before it, `speed` was a parameter every generated and
     //    proposed machine gated on and nothing in the engine ever set.
     //
-    //    A Blueprint still wins: its `anim.set_param` runs in the Tick pass,
-    //    which is after this in both hosts' fixed steps.
+    //    **The precedence is THIS one** (P29.6 audit, A11). The Tick pass runs
+    //    BEFORE the movement step in both hosts, so this write lands last and a
+    //    Blueprint's `anim.set_param` on one of the nine published names is
+    //    overwritten before the pose step reads it. One authority for one fact;
+    //    a game that wants to drive `speed` itself takes the movement component
+    //    off. Pinned by `projector_mirror` and by `live_tuning`.
     //
     //    Costs one map lookup on a character with no machine, which is every
     //    character in every committed level before this wave.
@@ -1773,18 +1786,5 @@ fn mover_for_with_capsule(
             half_height: half_height.max(1e-3),
             radius: radius.max(1e-3),
         }),
-    }
-}
-
-/// Fold an angle into `[0, 360)` degrees, with a non-finite input answering `0`.
-fn wrap_deg(a: f64) -> f64 {
-    if !a.is_finite() {
-        return 0.0;
-    }
-    let r = a % 360.0;
-    if r < 0.0 {
-        r + 360.0
-    } else {
-        r
     }
 }

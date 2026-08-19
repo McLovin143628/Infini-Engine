@@ -54,6 +54,9 @@ tracing = { workspace = true }
 # — a camera is not sim state and this wave has no schema budget, so its table is
 # text an author owns rather than a scene field. Already a workspace dependency
 # (`inf-asset` and the shipped player both carry it); it adds nothing to the tree.
+# PARSING only: reading the path is the host's job and lives in
+# `inf_player::input::load_camera_beside`, so this crate keeps its zero `std::fs`
+# calls (P29.6 audit, A9).
 toml = { workspace = true }
 
 [dev-dependencies]
