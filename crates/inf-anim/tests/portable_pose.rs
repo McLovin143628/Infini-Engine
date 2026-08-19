@@ -216,56 +216,22 @@ const SIM_PATH: [(&str, &str, &str); 25] = [
 /// is `.abs()`, `.floor()` or `.clamp()`, for the same reason. `.cbrt()` IS here
 /// — the P22.4 widening: on `wasm32` the standard library routes it through the
 /// `libm` crate, so a browser client and a native one differ by an ulp.
-const BANNED_CALLS: [&str; 36] = [
-    ".sin()",
-    ".cos()",
-    ".tan()",
-    ".asin()",
-    ".acos()",
-    ".atan()",
-    ".atan2(",
-    ".sin_cos()",
-    ".cbrt()",
-    ".powf(",
-    ".exp()",
-    ".ln()",
-    // **The UFCS spelling** (P24.2 re-audit minor 3). `.sin()` is a substring
-    // ban, so `f64::sin(x)` -- the same call, written the other way -- walked
-    // straight past it. A ban that enumerates one spelling is the P24.1 F1
-    // finding in miniature.
-    //
-    // The first cut of this half enumerated twelve entries against twelve method
-    // forms and covered only SIX of the functions -- `atan`, `sin_cos`, `cbrt`,
-    // `powf`, `exp` and `ln` had a method ban and no UFCS twin, so `f64::cbrt(x)`
-    // on the rubble path (the P22.4 widening, met again) walked past exactly as
-    // `f64::sin` had. Every method form above now has BOTH width spellings below,
-    // which is the only version of this list that is a rule rather than a sample:
-    // twelve functions x two widths, checked by a test.
-    "f32::sin(",
-    "f64::sin(",
-    "f32::cos(",
-    "f64::cos(",
-    "f32::tan(",
-    "f64::tan(",
-    "f32::acos(",
-    "f64::acos(",
-    "f32::asin(",
-    "f64::asin(",
-    "f32::atan(",
-    "f64::atan(",
-    "f32::atan2(",
-    "f64::atan2(",
-    "f32::sin_cos(",
-    "f64::sin_cos(",
-    "f32::cbrt(",
-    "f64::cbrt(",
-    "f32::powf(",
-    "f64::powf(",
-    "f32::exp(",
-    "f64::exp(",
-    "f32::ln(",
-    "f64::ln(",
-];
+/// The canonical libm ban, **derived rather than hand-copied** (Wave-G audit).
+///
+/// This was a 36-entry literal restating `inf_math::libm_ban::METHODS` +
+/// `UFCS`, kept honest only by `this_gate_bans_everything_the_canonical_list_does`
+/// noticing when the two drifted apart. When the audit added the logarithm and
+/// hyperbolic family to the canonical list, this copy went red — which is the
+/// meta-arm working, and also the seventh demonstration that a copy is a copy.
+/// Reading the list instead of restating it makes the drift impossible rather
+/// than merely detectable, which is what R2.B's "one list, not six" asked for.
+fn banned_calls() -> Vec<&'static str> {
+    inf_math::libm_ban::METHODS
+        .iter()
+        .chain(inf_math::libm_ban::UFCS.iter())
+        .copied()
+        .collect()
+}
 
 /// glam constructors that reach `sin_cos` **inside another crate**, where no grep
 /// of this one would ever see them.
@@ -412,7 +378,7 @@ fn the_ledgered_exclusions_are_named_rather_than_forgotten() {
 fn the_animation_blend_uses_no_platform_dependent_trigonometry() {
     for (name, src, why) in SIM_PATH {
         let code = production_code(src);
-        for banned in BANNED_CALLS.iter().chain(BANNED_GLAM.iter()) {
+        for banned in banned_calls().iter().chain(BANNED_GLAM.iter()) {
             let hits: Vec<usize> = code
                 .lines()
                 .enumerate()
@@ -490,30 +456,32 @@ fn the_trig_ban_is_looking_at_real_code() {
 /// without its twins now fails here instead of failing silently in five years.
 #[test]
 fn the_ban_covers_both_spellings_of_every_function() {
-    let methods: Vec<&str> = BANNED_CALLS
+    let calls = banned_calls();
+    let methods: Vec<&str> = calls
         .iter()
         .copied()
         .filter(|b| b.starts_with('.'))
         .collect();
     assert_eq!(
         methods.len(),
-        12,
-        "the method half of the ban changed size: {methods:?}"
+        inf_math::libm_ban::METHODS.len(),
+        "the method half of the ban is no longer the canonical set: {methods:?}"
     );
     for m in &methods {
         let name = m.trim_start_matches('.').trim_end_matches(['(', ')']);
         for width in ["f32", "f64"] {
             let ufcs = format!("{width}::{name}(");
             assert!(
-                BANNED_CALLS.contains(&ufcs.as_str()),
+                calls.contains(&ufcs.as_str()),
                 "`{m}` is banned as a method and `{ufcs}` is not banned at all — \
                  the same call written the other way walks straight past this \
                  gate, which is exactly the P24.2 minor-3 finding"
             );
         }
     }
-    // …and there is nothing else in the list: 12 methods x (1 method + 2 UFCS).
-    assert_eq!(BANNED_CALLS.len(), methods.len() * 3);
+    // …and there is nothing else in the list: each method contributes itself
+    // plus its two UFCS twins.
+    assert_eq!(calls.len(), methods.len() * 3);
 }
 
 /// **`#[cfg(test)]` on a one-line item cuts that item, not the rest of the file.**
@@ -575,10 +543,9 @@ pub fn also_on_it(x: f64) -> f64 {
 /// gate tied to it.
 #[test]
 fn this_gate_bans_everything_the_canonical_list_does() {
-    let mine: Vec<&str> = BANNED_CALLS
-        .iter()
-        .chain(BANNED_GLAM.iter())
-        .copied()
+    let mine: Vec<&str> = banned_calls()
+        .into_iter()
+        .chain(BANNED_GLAM.iter().copied())
         .collect();
     inf_math::libm_ban::covers_both_spellings("inf-anim/tests/portable_pose.rs", &mine);
     let missing: Vec<&str> = inf_math::libm_ban::ALL

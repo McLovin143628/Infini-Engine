@@ -57,59 +57,23 @@ const COMMITTED_PLACEMENT: [(&str, &str, &str); 2] = [
 
 /// Every `std` transcendental that is not bit-portable across targets, both
 /// spellings of each, plus the glam constructors that reach `sin_cos` **inside
-/// another crate** where no grep of this one would see them.
+/// another crate** where no grep of this one would see them —
+/// **derived rather than hand-copied** (Wave-G audit).
 ///
-/// `.sqrt()` is deliberately absent: IEEE-754 specifies it exactly, which is why
-/// `yaw_onto` and `tilt_onto` are built out of it. So are `.abs()`, `.floor()`
-/// and `.clamp()`.
-const BANNED: [&str; 42] = [
-    // Twelve method forms…
-    ".sin()",
-    ".cos()",
-    ".tan()",
-    ".asin()",
-    ".acos()",
-    ".atan()",
-    ".atan2(",
-    ".sin_cos()",
-    ".cbrt()",
-    ".powf(",
-    ".exp()",
-    ".ln()",
-    // …each with BOTH width spellings of its UFCS twin, which is the only
-    // version of this list that is a rule rather than a sample.
-    "f32::sin(",
-    "f64::sin(",
-    "f32::cos(",
-    "f64::cos(",
-    "f32::tan(",
-    "f64::tan(",
-    "f32::asin(",
-    "f64::asin(",
-    "f32::acos(",
-    "f64::acos(",
-    "f32::atan(",
-    "f64::atan(",
-    "f32::atan2(",
-    "f64::atan2(",
-    "f32::sin_cos(",
-    "f64::sin_cos(",
-    "f32::cbrt(",
-    "f64::cbrt(",
-    "f32::powf(",
-    "f64::powf(",
-    "f32::exp(",
-    "f64::exp(",
-    "f32::ln(",
-    "f64::ln(",
-    // …plus the glam constructors, which reach `sin_cos` inside another crate.
-    "from_rotation_arc",
-    "from_axis_angle",
-    "from_euler",
-    "from_rotation_x(",
-    "from_rotation_y(",
-    "from_rotation_z(",
-];
+/// This was a 42-entry literal restating `inf_math::libm_ban::ALL`, kept honest
+/// only by `this_gate_bans_everything_the_canonical_list_does` noticing when the
+/// two drifted apart. When the audit added the logarithm and hyperbolic family
+/// to the canonical list, this copy went red — the meta-arm working, and also the
+/// seventh demonstration that a copy is a copy. Reading the list makes drift
+/// impossible rather than merely detectable, which is what R2.B's "one list, not
+/// six" asked for.
+///
+/// `.sqrt()` is deliberately absent from the canonical list too: IEEE-754
+/// specifies it exactly, which is why `yaw_onto` and `tilt_onto` are built out of
+/// it. So are `.abs()`, `.floor()` and `.clamp()`.
+fn banned() -> Vec<&'static str> {
+    inf_math::libm_ban::ALL.to_vec()
+}
 
 /// A file's production half with comment lines blanked.
 ///
@@ -155,7 +119,7 @@ fn production_code(relative: &str) -> String {
 }
 
 fn offenders(code: &str) -> Vec<&'static str> {
-    BANNED
+    banned()
         .iter()
         .copied()
         .filter(|b| code.contains(b))
@@ -226,30 +190,29 @@ fn the_placement_ban_is_looking_at_real_code() {
 /// here instead of failing silently in five years.
 #[test]
 fn the_ban_covers_both_spellings_of_the_functions_it_names() {
-    let methods: Vec<&str> = BANNED
-        .iter()
-        .copied()
-        .filter(|b| b.starts_with('.'))
-        .collect();
+    let all = banned();
+    let methods: Vec<&str> = all.iter().copied().filter(|b| b.starts_with('.')).collect();
     assert_eq!(
         methods.len(),
-        12,
-        "the method half of the list changed size; the counts below and the \
-         UFCS half both depend on it"
+        inf_math::libm_ban::METHODS.len(),
+        "the method half of the list is no longer the canonical set"
     );
     for m in &methods {
         let bare = m.trim_start_matches('.').trim_end_matches(['(', ')']);
         for width in ["f32", "f64"] {
             let ufcs = format!("{width}::{bare}(");
             assert!(
-                BANNED.contains(&ufcs.as_str()),
+                all.contains(&ufcs.as_str()),
                 "`{m}` is banned as a method but `{ufcs}` is not — a ban that \
                  enumerates one spelling is a sample, not a rule"
             );
         }
     }
-    // Twelve methods × two widths, plus the six glam constructors.
-    assert_eq!(BANNED.len(), 12 + 24 + 6);
+    // Each method plus its two UFCS twins, plus the glam constructors.
+    assert_eq!(
+        all.len(),
+        methods.len() * 3 + inf_math::libm_ban::GLAM.len()
+    );
 }
 
 /// **Round-2 finding R2.B**: this gate's list is a superset of the canonical
@@ -264,7 +227,7 @@ fn the_ban_covers_both_spellings_of_the_functions_it_names() {
 /// gate tied to it.
 #[test]
 fn this_gate_bans_everything_the_canonical_list_does() {
-    let mine: Vec<&str> = BANNED.to_vec();
+    let mine: Vec<&str> = banned();
     inf_math::libm_ban::covers_both_spellings("inf-pcg/tests/portable_placement.rs", &mine);
     let missing: Vec<&str> = inf_math::libm_ban::ALL
         .iter()

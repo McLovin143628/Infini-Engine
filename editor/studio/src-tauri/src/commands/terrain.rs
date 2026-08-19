@@ -272,14 +272,28 @@ pub async fn terrain_import_plan(
 
 /// Queue a chunked heightmap import. Returns the job id; progress arrives on
 /// `assets://import` (phase `"progress"` carries `done`/`total` tiles).
+///
+/// **The open level's geo-anchor rides along** (Wave G). It is read here, on the
+/// command thread, and captured into the job: the build runs for minutes with no
+/// lock held, so looking the anchor up later would make where a terrain lands
+/// depend on whether the author touched World Settings in the meantime. Without
+/// this the wizard's "place using the source's georeferencing" switch is inert —
+/// the importer has nothing to subtract and every asset lands at the world
+/// origin, which is exactly the state the Wave-G audit found it in.
 #[tauri::command]
 pub async fn terrain_import(
     path: String,
     settings: TerrainImportSettingsDto,
     name: Option<String>,
     state: State<'_, AssetState>,
+    scene: State<'_, super::scene::SceneState>,
 ) -> Result<u64, String> {
-    state.submit_terrain_import(PathBuf::from(&path), settings.to_settings(), name)
+    let anchor = {
+        let doc = scene.doc.lock().map_err(|e| e.to_string())?;
+        let a = doc.geo().clone();
+        a.enabled.then_some(a)
+    };
+    state.submit_terrain_import(PathBuf::from(&path), settings.to_settings(), anchor, name)
 }
 
 /// Ask an in-flight terrain import to stop. The job still reports terminally

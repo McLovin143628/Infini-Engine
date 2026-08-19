@@ -67,8 +67,12 @@ pub fn classify_breaks(values: &[f64], method: ClassifyMethod, classes: usize) -
         return vec![0.0, 0.0];
     }
     nums.sort_by(f64::total_cmp);
+    // Indexed rather than `.last().expect(..)`: the emptiness was already ruled
+    // out four lines up, and the only `expect` in this crate's production code
+    // sitting on a fact a reader has to go and re-check is a worse trade than
+    // one more index.
     let min = nums[0];
-    let max = *nums.last().expect("non-empty");
+    let max = nums[nums.len() - 1];
 
     // Never ask for more classes than the data can distinguish: `k` classes need
     // `k` distinct values, and asking for more produces duplicate fenceposts that
@@ -261,10 +265,21 @@ mod tests {
         // one lands at the bottom of the upper cluster (90) rather than strictly
         // inside the void. What matters is that it is past the top of the lower
         // cluster (13) — i.e. that the gap, not a cluster, was cut.
+        //
+        // **The band has to exclude the answer the mutation gives.** The first
+        // version wrote `b[1] > 13.0 && b[1] <= 90.0`, and equal-interval on
+        // this data breaks at (10 + 92) / 2 = 51 — comfortably inside that band.
+        // So the named un-fix mutation (route `NaturalBreaks` to
+        // `equal_interval`) passed every assertion in this test, including the
+        // two classification loops, because 51 also separates the clusters. The
+        // band that means something is the one that admits only the Jenks
+        // answer: the bottom of the upper cluster, not anywhere in the void.
         assert!(
-            b[1] > 13.0 && b[1] <= 90.0,
-            "the interior break {} must cut the empty gap between the clusters, \
-             not the inside of one of them",
+            (b[1] - 90.0).abs() < 1e-9,
+            "the interior break is {}; Jenks on two tight clusters puts it at the \
+             BOTTOM OF THE UPPER ONE (90). A break anywhere else in the void — 51, \
+             say — is what equal-interval gives, which is the method this one is \
+             being chosen over",
             b[1]
         );
         // Every low value classes low, every high value classes high.

@@ -743,4 +743,34 @@ mod tests {
             Some("datum.analytic")
         );
     }
+
+    /// **`+datum=NAD27` really cannot be built**, which is the whole reason
+    /// [`crate::epsg::EPSG_TABLE`] spells EPSG:4267 out by ellipsoid instead.
+    ///
+    /// That reason was recorded as MEASURED and no measurement survived into the
+    /// tree (Wave-G audit): every NAD27 test drove the *table's* spelling, so the
+    /// claim about the spelling it avoids rested on a comment. A comment saying
+    /// "measured" with nothing behind it is the shape this house has a law about.
+    /// Re-derived here, in four lines.
+    #[test]
+    fn the_datum_name_this_table_avoids_genuinely_cannot_be_built() {
+        let refused = Proj::from_proj_string("+proj=longlat +datum=NAD27 +no_defs");
+        assert!(
+            refused.is_err(),
+            "`+datum=NAD27` built after all — the projection library gained NTv2 \
+             grids, or gained a grid-free fallback. Either way EPSG:4267 can now \
+             be spelled the obvious way and `EPSG_TABLE`'s note is stale."
+        );
+        // …and the spelling the table actually uses does build, and imports.
+        let by_ellipsoid = epsg::proj4_for("EPSG:4267").unwrap();
+        assert!(by_ellipsoid.contains("clrk66"), "{by_ellipsoid}");
+        assert!(
+            Proj::from_proj_string(&by_ellipsoid).is_ok(),
+            "the workaround spelling must build, or NAD27 is unimportable"
+        );
+        assert!(Transform::new("EPSG:4267", &vancouver())
+            .unwrap()
+            .to_world(-123.12, 49.28, 0.0)
+            .is_ok());
+    }
 }

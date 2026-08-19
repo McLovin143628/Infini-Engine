@@ -75,14 +75,27 @@ pub mod tilemath;
 pub mod triangulate;
 pub mod vector;
 
-pub use classify::{class_of, classify_breaks, ClassifyMethod};
-pub use crs::{Transform, MAX_LATITUDE_DEG};
-pub use epsg::{proj4_for, utm_zone_for, EPSG_TABLE};
+// The crate root re-exports the doors a caller outside this crate would reach
+// for. `classify_to_ids` and the terrarium tile readers were reachable only as
+// `inf_gis::classify::…` / `inf_gis::terrarium::…` — which made "callable"
+// narrowly true and practically false for the two paths the disposition memo
+// names most often.
+pub use classify::{class_of, classify_breaks, classify_to_ids, ClassifyMethod};
+pub use crs::{anchor_at, Transform, MAX_LATITUDE_DEG};
+pub use epsg::{proj4_for, suggested_utm_epsg, utm_zone_for, EPSG_TABLE};
 pub use feature::{Attr, GeoFeature, GeoGeometry, GeoLayer, LayerKind};
-pub use roads::{Intersection, RoadGraph, RoadKind, RoadSegment, LANE_WIDTH_M};
-pub use terrarium::{decode_elevation, encode_elevation};
-pub use tilemath::{tile_mercator_bounds, MERC_HALF_WORLD, MERC_WORLD, TILE_PX};
+pub use roads::{
+    build_all_ribbons, build_ribbon, Intersection, RoadGraph, RoadKind, RoadRibbon, RoadSegment,
+    LANE_WIDTH_M,
+};
+pub use terrarium::{
+    decode_elevation, decode_tile_png, decode_tile_rgb, encode_elevation, TerrariumTile,
+};
+pub use tilemath::{
+    plan_zoom, tile_mercator_bounds, tile_of_lonlat, MERC_HALF_WORLD, MERC_WORLD, TILE_PX,
+};
 pub use triangulate::{triangulate_polygon, Triangulation};
+pub use vector::{read_geojson, read_shapefile, read_vector};
 
 /// Everything that can go wrong importing geospatial data.
 ///

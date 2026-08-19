@@ -66,35 +66,57 @@ pub fn tiles_at_zoom(z: u8) -> u64 {
 /// Latitude is clamped to [`crate::crs::MAX_LATITUDE_DEG`]: the Mercator
 /// northing diverges at the poles, and returning an infinity here would just
 /// move the failure somewhere less informative.
-pub fn lonlat_to_mercator(lon_deg: f64, lat_deg: f64) -> (f64, f64) {
+///
+/// A non-finite input is **refused**, not clamped: `NaN.clamp(a, b)` is `NaN`,
+/// and a NaN mercator coordinate becomes a NaN tile fraction, and
+/// `NaN.floor().max(0.0)` is `0.0` — because `f64::max` returns the *other*
+/// operand when one is NaN. So the un-guarded version turned a NaN coordinate
+/// into tile `(0, 0)`: a perfectly valid-looking tile in the Atlantic, with no
+/// error anywhere. That is the crate's own headline hazard, met in the module
+/// that was written to avoid the *other* one.
+pub fn lonlat_to_mercator(lon_deg: f64, lat_deg: f64) -> Option<(f64, f64)> {
+    if !(lon_deg.is_finite() && lat_deg.is_finite()) {
+        return None;
+    }
     let lon = lon_deg.clamp(-180.0, 180.0);
     let lat = lat_deg.clamp(-crate::crs::MAX_LATITUDE_DEG, crate::crs::MAX_LATITUDE_DEG);
     let x = lon * MERC_HALF_WORLD / 180.0;
     let y = ((90.0 + lat) * std::f64::consts::PI / 360.0).tan().ln() * MERC_HALF_WORLD
         / std::f64::consts::PI;
-    (x, y)
+    (x.is_finite() && y.is_finite()).then_some((x, y))
 }
 
 /// Web-Mercator metres → geodetic (longitude, latitude) in degrees.
-pub fn mercator_to_lonlat(x: f64, y: f64) -> (f64, f64) {
+///
+/// `None` for a non-finite input, for the reason in [`lonlat_to_mercator`].
+pub fn mercator_to_lonlat(x: f64, y: f64) -> Option<(f64, f64)> {
+    if !(x.is_finite() && y.is_finite()) {
+        return None;
+    }
     let lon = x * 180.0 / MERC_HALF_WORLD;
     let lat = (2.0 * (y * std::f64::consts::PI / MERC_HALF_WORLD).exp().atan()
         - std::f64::consts::FRAC_PI_2)
         .to_degrees();
-    (lon, lat)
+    (lon.is_finite() && lat.is_finite()).then_some((lon, lat))
 }
 
 /// The `(x, y)` tile at zoom `z` containing a geodetic position.
-pub fn tile_of_lonlat(z: u8, lon_deg: f64, lat_deg: f64) -> (u32, u32) {
+///
+/// `None` rather than a plausible tile for a non-finite position — see
+/// [`lonlat_to_mercator`].
+pub fn tile_of_lonlat(z: u8, lon_deg: f64, lat_deg: f64) -> Option<(u32, u32)> {
     let n = tiles_at_zoom(z) as f64;
-    let (mx, my) = lonlat_to_mercator(lon_deg, lat_deg);
+    let (mx, my) = lonlat_to_mercator(lon_deg, lat_deg)?;
     let fx = (mx + MERC_HALF_WORLD) / MERC_WORLD * n;
     let fy = (MERC_HALF_WORLD - my) / MERC_WORLD * n;
+    if !(fx.is_finite() && fy.is_finite()) {
+        return None;
+    }
     let cap = (n as u32).saturating_sub(1);
-    (
+    Some((
         (fx.floor().max(0.0) as u32).min(cap),
         (fy.floor().max(0.0) as u32).min(cap),
-    )
+    ))
 }
 
 /// The finest zoom whose tile pixels are at least as fine as a source of
@@ -117,10 +139,18 @@ pub fn native_maxzoom(px_3857: f64) -> u8 {
 /// a z13 tile pixel is ~19.1 m at the equator but ~12.5 m at Vancouver's 49° N.
 /// Reporting the inflated figure would tell an author their DEM is coarser than
 /// it is.
-pub fn ground_resolution_m(z: u8, lat_deg: f64) -> f64 {
+///
+/// A non-finite latitude yields `None` rather than a NaN metres-per-pixel that
+/// then compares `false` against every threshold in [`plan_zoom`] and quietly
+/// selects the finest zoom in the table.
+pub fn ground_resolution_m(z: u8, lat_deg: f64) -> Option<f64> {
+    if !lat_deg.is_finite() {
+        return None;
+    }
     let n = tiles_at_zoom(z) as f64 * TILE_PX as f64;
     let lat = lat_deg.clamp(-crate::crs::MAX_LATITUDE_DEG, crate::crs::MAX_LATITUDE_DEG);
-    MERC_WORLD / n * lat.to_radians().cos()
+    let m = MERC_WORLD / n * lat.to_radians().cos();
+    m.is_finite().then_some(m)
 }
 
 /// The zoom whose ground resolution at `lat_deg` is closest to (and no coarser
@@ -130,7 +160,7 @@ pub fn plan_zoom(target_m: f64, lat_deg: f64) -> u8 {
         return MAX_NATIVE_ZOOM;
     }
     for z in 0..=MAX_NATIVE_ZOOM {
-        if ground_resolution_m(z, lat_deg) <= target_m {
+        if ground_resolution_m(z, lat_deg).is_some_and(|m| m <= target_m) {
             return z;
         }
     }
@@ -192,32 +222,52 @@ mod tests {
             (151.21, -33.87),
             (-157.8, 21.3),
         ] {
-            let (x, y) = lonlat_to_mercator(lon, lat);
-            let (lon2, lat2) = mercator_to_lonlat(x, y);
+            let (x, y) = lonlat_to_mercator(lon, lat).expect("a finite position projects");
+            let (lon2, lat2) = mercator_to_lonlat(x, y).expect("and inverts");
             assert!((lon - lon2).abs() < 1e-9, "{lon} -> {lon2}");
             assert!((lat - lat2).abs() < 1e-9, "{lat} -> {lat2}");
         }
         // The equator/prime meridian is the world centre. (`tan(pi/4).ln()` is
         // not exactly 0 in floating point, so this is "at the centre", not "bit
         // zero" — a sub-nanometre offset on a 40 000 km world.)
-        let (cx, cy) = lonlat_to_mercator(0.0, 0.0);
+        let (cx, cy) = lonlat_to_mercator(0.0, 0.0).unwrap();
         assert_eq!(cx, 0.0);
         assert!(cy.abs() < 1e-6, "the equator is at y={cy}");
         // Vancouver is in the northern hemisphere and west of Greenwich.
-        let (x, y) = lonlat_to_mercator(-123.12, 49.28);
+        let (x, y) = lonlat_to_mercator(-123.12, 49.28).unwrap();
         assert!(x < 0.0 && y > 0.0);
         // The poles clamp rather than going infinite.
-        assert!(lonlat_to_mercator(0.0, 90.0).1.is_finite());
-        assert!(lonlat_to_mercator(0.0, -90.0).1.is_finite());
+        assert!(lonlat_to_mercator(0.0, 90.0).unwrap().1.is_finite());
+        assert!(lonlat_to_mercator(0.0, -90.0).unwrap().1.is_finite());
+
+        // **A non-finite position is REFUSED, not turned into tile (0, 0).**
+        // `NaN.clamp(a, b)` is NaN, and `NaN.floor().max(0.0)` is 0.0 because
+        // `f64::max` returns the other operand against a NaN — so the unguarded
+        // version answered "tile (0, 0)", a real-looking tile in the Atlantic,
+        // for a coordinate that does not exist.
+        //
+        // Un-fix mutation: drop the finiteness guards and every assertion below
+        // returns a `Some` instead of `None`.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(lonlat_to_mercator(bad, 49.0), None, "lon {bad}");
+            assert_eq!(lonlat_to_mercator(-123.0, bad), None, "lat {bad}");
+            assert_eq!(mercator_to_lonlat(bad, 0.0), None);
+            assert_eq!(
+                tile_of_lonlat(12, bad, 49.0),
+                None,
+                "a NaN longitude must not become a plausible tile"
+            );
+            assert_eq!(ground_resolution_m(12, bad), None);
+        }
     }
 
     #[test]
     fn tile_selection_agrees_with_the_bounds_it_reports() {
         for (lon, lat) in [(-123.12, 49.28), (0.0, 0.0), (151.21, -33.87)] {
             for z in [0u8, 3, 8, 13] {
-                let (tx, ty) = tile_of_lonlat(z, lon, lat);
+                let (tx, ty) = tile_of_lonlat(z, lon, lat).expect("a finite position has a tile");
                 let b = tile_mercator_bounds(z, tx, ty);
-                let (mx, my) = lonlat_to_mercator(lon, lat);
+                let (mx, my) = lonlat_to_mercator(lon, lat).unwrap();
                 assert!(
                     mx >= b[0] && mx <= b[2] && my >= b[1] && my <= b[3],
                     "z{z} ({lon},{lat}) picked tile ({tx},{ty}) whose bounds {b:?} \
@@ -231,8 +281,8 @@ mod tests {
     /// Mercator one — the distinction an author plans an import against.
     #[test]
     fn ground_resolution_accounts_for_mercator_inflation() {
-        let eq = ground_resolution_m(13, 0.0);
-        let van = ground_resolution_m(13, 49.28);
+        let eq = ground_resolution_m(13, 0.0).unwrap();
+        let van = ground_resolution_m(13, 49.28).unwrap();
         assert!(
             (eq - 19.1).abs() < 0.2,
             "z13 at the equator is ~19.1 m/px, got {eq}"
@@ -249,12 +299,12 @@ mod tests {
         for target in [1.0, 5.0, 30.0, 100.0] {
             let z = plan_zoom(target, 49.28);
             assert!(
-                ground_resolution_m(z, 49.28) <= target,
+                ground_resolution_m(z, 49.28).unwrap() <= target,
                 "plan_zoom({target}) returned z{z}, which is {} m/px — coarser than asked",
-                ground_resolution_m(z, 49.28)
+                ground_resolution_m(z, 49.28).unwrap()
             );
             assert!(
-                z == 0 || ground_resolution_m(z - 1, 49.28) > target,
+                z == 0 || ground_resolution_m(z - 1, 49.28).unwrap() > target,
                 "plan_zoom({target}) returned z{z} but z{} would also have met it",
                 z - 1
             );

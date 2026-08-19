@@ -366,7 +366,9 @@ pub enum NodataPolicy {
     /// and the behaviour every import had before Wave G.
     #[default]
     Refuse,
-    /// Substitute a stated elevation, in the source's own vertical units.
+    /// Substitute a stated elevation, in **metres** — the domain a row is in by
+    /// the time the policy sees it, and the domain the sidecar label
+    /// (`clamp:<metres>`) already promised.
     ///
     /// `Clamp(0.0)` — sea level — is the common answer for a coastal DEM whose
     /// no-data is ocean, which is why [`NodataPolicy::sea_level`] names it.
@@ -478,6 +480,35 @@ impl NodataHandling {
     /// `true` when this handling can actually change a sample.
     pub fn is_active(&self) -> bool {
         !matches!(self.policy, NodataPolicy::Refuse)
+    }
+
+    /// This handling with its **sentinel** moved into the sample domain a
+    /// decoder emits.
+    ///
+    /// # Why this exists (Wave-G audit finding A1)
+    ///
+    /// A GeoTIFF's `GDAL_NODATA` is stated in the file's **own vertical unit**,
+    /// and [`decode_rows_tiff`] converts feet to metres *before* a row reaches
+    /// the policy. Comparing an unscaled sentinel against a scaled sample
+    /// matches nothing at all, silently: a foot DEM declaring `-9999` hands the
+    /// policy `-3047.6952`, [`is_nodata`](Self::is_nodata) says no, the void
+    /// survives as a *finite* pit that the finiteness door cannot see, and
+    /// [`NodataReport::substituted`] reports zero. Measured on a real
+    /// `EPSG:9002` fixture: 0 of 3 voids substituted, and a terrain shipped with
+    /// three −3 km craters in it.
+    ///
+    /// The policy's own `Clamp` value is **not** scaled — it is an elevation the
+    /// author stated in metres, which is what the sidecar label says and what
+    /// the row is already in.
+    #[inline]
+    pub fn scaled_by(self, scale: f64) -> Self {
+        if scale == 1.0 || !scale.is_finite() {
+            return self;
+        }
+        Self {
+            policy: self.policy,
+            sentinel: self.sentinel.map(|s| s * scale),
+        }
     }
 }
 
@@ -936,6 +967,52 @@ fn tiff_err(what: &str, e: &tiff::TiffError) -> TerrainError {
     TerrainError::Image(format!("tiff {what}: {msg}"))
 }
 
+/// The most a TIFF chunk row may cost before the import is refused.
+///
+/// See the refusal inside [`decode_rows_tiff`] for why a ceiling is needed at
+/// all: for a single-strip TIFF "one chunk row" *is* the whole image, and the
+/// P16.4a streaming bound is a property of the file's layout rather than of this
+/// decoder. 256 MiB is deliberately generous — it takes a 4 k x 4 k single-strip
+/// source without complaint and refuses the 16 k one that would want 2 GB.
+pub const MAX_TIFF_BAND_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Bytes held per sample of a live TIFF chunk row: the `f64` band, its coverage
+/// mask, and the decoder's own chunk buffer.
+const BYTES_PER_BANDED_SAMPLE: u64 = 8 + 1 + 8;
+
+/// The peak bytes one TIFF chunk row costs for a given layout.
+///
+/// A pure function of three header numbers, so the refusal it feeds can be
+/// tested at the 16 k x 16 k scale the bound is *stated* against without
+/// allocating a 16 k fixture — the decoder path itself is covered by the
+/// ordinary striped file that must keep importing.
+fn tiff_band_bytes(chunk_h: u32, width: u32, height: u32) -> u64 {
+    u64::from(chunk_h.min(height))
+        .saturating_mul(u64::from(width))
+        .saturating_mul(BYTES_PER_BANDED_SAMPLE)
+}
+
+/// Whether a TIFF's chunk layout can be streamed inside [`MAX_TIFF_BAND_BYTES`],
+/// and the refusal naming the remedy when it cannot. See the call site in
+/// [`decode_rows_tiff`] for the measurement behind it.
+fn check_tiff_band(chunk_h: u32, width: u32, height: u32) -> Result<(), TerrainError> {
+    let band_bytes = tiff_band_bytes(chunk_h, width, height);
+    if band_bytes <= MAX_TIFF_BAND_BYTES {
+        return Ok(());
+    }
+    Err(TerrainError::Unsupported(format!(
+        "this TIFF is laid out as strips {chunk_h} rows tall, so decoding it one \
+         chunk row at a time would still hold {} MiB of a {width}x{height} image \
+         at once — past the {} MiB this importer streams within. A file with no \
+         RowsPerStrip tag, or one naming its whole height, is a single strip and \
+         cannot be streamed at all. Re-save it tiled or in smaller strips — \
+         `gdal_translate -co TILED=YES -co BLOCKXSIZE=256 -co BLOCKYSIZE=256 \
+         in.tif out.tif` — and nothing about the elevations changes.",
+        band_bytes / (1024 * 1024),
+        MAX_TIFF_BAND_BYTES / (1024 * 1024)
+    )))
+}
+
 /// Stream a TIFF **one chunk at a time** — the strip or tile row the format
 /// itself is built out of.
 ///
@@ -953,9 +1030,12 @@ fn tiff_err(what: &str, e: &tiff::TiffError) -> TerrainError {
 ///
 /// The vertical unit conversion ([`crate::geotiff::VerticalUnits`]) is applied
 /// here and **only** here. A source in feet hands this function feet and hands
-/// its caller metres.
+/// its caller metres — and publishes the factor on `sample_scale` before the
+/// first row, so [`decode_rows_with`]'s no-data policy can compare the file's
+/// own sentinel against samples in the same domain (Wave-G audit A1).
 fn decode_rows_tiff<R: BufRead + Seek>(
     src: R,
+    sample_scale: &std::cell::Cell<f64>,
     on_row: RowSink<'_>,
 ) -> Result<HeightmapProbe, TerrainError> {
     use tiff::decoder::DecodingResult;
@@ -966,6 +1046,7 @@ fn decode_rows_tiff<R: BufRead + Seek>(
     }
     let w = width as usize;
     let vscale = geo.vertical_scale();
+    sample_scale.set(vscale);
     // Applying a scale of exactly 1.0 would still cost a multiply per sample on
     // the overwhelmingly common metric path, and — more importantly — would turn
     // an exact integer elevation into `x * 1.0`, which is the same value but
@@ -979,6 +1060,23 @@ fn decode_rows_tiff<R: BufRead + Seek>(
             "this TIFF declares a zero-sized chunk layout".into(),
         ));
     }
+    // **The memory bound is a property of the FILE's chunk grid, not of this
+    // decoder** (Wave-G audit A2). A TIFF that omits `RowsPerStrip` — or names
+    // one at or past its own height, which is what `image-tiff`'s own encoder
+    // writes by default for anything under 7 813 rows — is a *single strip*, and
+    // then "one chunk row" is the whole image. Measured: a 64x64 fixture written
+    // with no `RowsPerStrip` reports `chunk_dimensions() == (64, 7813)`.
+    //
+    // At f64 that band is 8 bytes a sample, so the 16 k x 16 k source the
+    // P16.4a bound is stated against would want **2.1 GB** here before
+    // `read_chunk` allocated its own copy — the opposite of the guarantee. The
+    // bound cannot be *restored* for such a file (there is no seam inside one
+    // strip to stream through), so it is **refused by name with the remedy**,
+    // which is the same answer this importer already gives a rotated raster and
+    // a non-square pixel. The check runs before any `read_chunk`, so the refusal
+    // costs nothing.
+    check_tiff_band(chunk_h, width, height)?;
+
     let chunks_across = width.div_ceil(chunk_w);
     let chunks_down = height.div_ceil(chunk_h);
     let chunk_count = (chunks_across as u64) * (chunks_down as u64);
@@ -1164,12 +1262,26 @@ pub fn decode_rows_with<R: BufRead + Seek>(
     // substitutes according to an author-chosen, sidecar-recorded policy; the
     // finiteness check then runs on the result, so a non-finite sample that the
     // policy did NOT explain is still a bug and still refuses.
+    //
+    // **The sentinel and the samples must be in ONE domain** (Wave-G audit A1).
+    // A format decoder that rescales its samples — only the TIFF arm does, for
+    // a DEM in feet — publishes the factor it applied here *before* it emits its
+    // first row, and the sentinel is moved into the same domain by
+    // `NodataHandling::scaled_by`. Without that the policy compares a metre
+    // against a foot and silently matches nothing; see that method's docs for
+    // the measurement.
+    let sample_scale = std::cell::Cell::new(1.0f64);
     let mut scratch: Vec<f64> = Vec::new();
     let mut finite_rows = |y: u32, row: &[f64]| -> Result<(), TerrainError> {
         let row: &[f64] = if nodata.is_active() {
             scratch.clear();
             scratch.extend_from_slice(row);
-            apply_nodata(nodata, report, y, &mut scratch)?;
+            apply_nodata(
+                &nodata.scaled_by(sample_scale.get()),
+                report,
+                y,
+                &mut scratch,
+            )?;
             &scratch
         } else {
             row
@@ -1189,7 +1301,7 @@ pub fn decode_rows_with<R: BufRead + Seek>(
     let probe = match format {
         HeightmapFormat::Png => decode_rows_png(src, &mut finite_rows)?,
         HeightmapFormat::Exr => decode_rows_exr(src, &mut finite_rows)?,
-        HeightmapFormat::Tiff => decode_rows_tiff(src, &mut finite_rows)?,
+        HeightmapFormat::Tiff => decode_rows_tiff(src, &sample_scale, &mut finite_rows)?,
     };
     if probe.width == 0 || probe.height == 0 {
         return Err(TerrainError::Empty);
@@ -2273,6 +2385,172 @@ mod tests {
         );
     }
 
+    /// **The sentinel and the samples must be in ONE domain** (Wave-G audit A1).
+    ///
+    /// A great many published DEMs are in feet and declare `GDAL_NODATA = -9999`.
+    /// The tag states that number in the file's OWN vertical unit, and
+    /// `decode_rows_tiff` converts the samples to metres before the policy sees
+    /// them — so an unscaled sentinel is compared against `-9999 x 0.3048 =
+    /// -3047.6952` and matches nothing. Measured before the fix: **0 of 3** voids
+    /// substituted, every one surviving as a *finite* -3 km pit that the
+    /// finiteness door cannot see, with `NodataReport` reporting zero. Silent in
+    /// every direction.
+    ///
+    /// Un-fix mutation: drop the `scaled_by` call in `decode_rows_with` and the
+    /// substitution count below goes to 0 while the rows keep their craters.
+    #[test]
+    fn a_foot_dem_matches_its_own_declared_sentinel() {
+        let (w, h) = (4u32, 2u32);
+        // 3076 = horizontal linear unit, 9002 = international foot; with no 4099
+        // vertical key the module's own inference makes the elevations feet too,
+        // which is the shape a foot-based state-plane DEM actually ships in.
+        let keys = vec![(1024u16, 1u16), (3072, 32610), (3076, 9002)];
+        let samples: Vec<f32> = vec![
+            100.0, 200.0, -9999.0, 400.0, //
+            500.0, 600.0, -9999.0, -9999.0,
+        ];
+        let bytes = geotiff_f32(
+            w,
+            h,
+            &samples,
+            &GeoTags {
+                pixel_scale: Some([10.0, 10.0, 0.0]),
+                tiepoint: Some([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                keys,
+                nodata: Some("-9999".into()),
+                ..Default::default()
+            },
+        );
+
+        let probe = probe_heightmap_bytes(&bytes).unwrap();
+        let g = probe.geo.as_ref().unwrap();
+        assert_eq!(g.vertical_units, VerticalUnits::Foot);
+        assert_eq!(
+            g.nodata,
+            Some(-9999.0),
+            "the sentinel is read in the FILE's units, unscaled"
+        );
+
+        let mut rows: Vec<Vec<f64>> = Vec::new();
+        let mut report = NodataReport::default();
+        decode_rows_with(
+            Cursor::new(&bytes),
+            &NodataHandling {
+                policy: NodataPolicy::sea_level(),
+                sentinel: g.nodata,
+            },
+            &mut report,
+            &mut |y, row| {
+                if rows.len() <= y as usize {
+                    rows.resize(y as usize + 1, Vec::new());
+                }
+                rows[y as usize] = row.to_vec();
+                Ok(())
+            },
+        )
+        .expect("a foot DEM with a declared sentinel imports");
+
+        assert_eq!(
+            report.substituted, 3,
+            "all three voids must be found; a sentinel left in feet finds NONE \
+             and the terrain ships with three -3 km craters in it (rows {rows:?})"
+        );
+        assert_eq!(rows[0][2], 0.0, "the void became the clamp elevation");
+        assert_eq!(rows[1][2], 0.0);
+        assert_eq!(rows[1][3], 0.0);
+        // …and the valid samples are still converted exactly once.
+        assert!(
+            (rows[0][0] - 30.48).abs() < 1e-9,
+            "100 ft is 30.48 m, got {}",
+            rows[0][0]
+        );
+        // The CLAMP value is metres, not feet — it is an elevation the author
+        // stated, and the sidecar label says `clamp:<metres>`.
+        let mut report = NodataReport::default();
+        let mut first = Vec::new();
+        decode_rows_with(
+            Cursor::new(&bytes),
+            &NodataHandling {
+                policy: NodataPolicy::Clamp(12.0),
+                sentinel: g.nodata,
+            },
+            &mut report,
+            &mut |y, row| {
+                if y == 0 {
+                    first = row.to_vec();
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            first[2], 12.0,
+            "a clamp of 12 means 12 METRES, not 12 feet ({first:?})"
+        );
+    }
+
+    /// **The streaming memory bound is a property of the FILE** (Wave-G audit
+    /// A2), so a layout that cannot be streamed is refused by name.
+    ///
+    /// A TIFF that omits `RowsPerStrip`, or names one at or past its own height,
+    /// is a single strip — and then "one chunk row" is the whole image. Measured:
+    /// `image-tiff`'s own encoder writes `RowsPerStrip = 7813` by default, so a
+    /// 64x64 fixture written with no explicit value reports
+    /// `chunk_dimensions() == (64, 7813)`. At the 16 k x 16 k size the P16.4a
+    /// bound is stated against that band would want 2.1 GB, which is the opposite
+    /// of the guarantee `tiff` was chosen for.
+    ///
+    /// Un-fix mutation: delete the budget check and this import allocates the
+    /// whole image instead of refusing.
+    #[test]
+    fn a_tiff_that_cannot_be_streamed_is_refused_with_its_remedy() {
+        // **The size the bound is stated against.** A 16 k x 16 k DEM laid out
+        // as ONE strip — which is what a file with no `RowsPerStrip` tag is —
+        // would want 4.2 GiB of chunk row. Checked as arithmetic rather than as
+        // a fixture, because building the fixture is the very allocation the
+        // refusal exists to prevent.
+        let e = check_tiff_band(16_384, 16_384, 16_384)
+            .expect_err("a 16k single-strip source must refuse")
+            .to_string();
+        assert!(e.contains("single strip"), "{e}");
+        assert!(
+            e.contains("gdal_translate") && e.contains("TILED=YES"),
+            "the refusal must name the remedy: {e}"
+        );
+        assert!(
+            e.contains("4352 MiB"),
+            "the refusal must quantify what it declined to hold: {e}"
+        );
+
+        // A `RowsPerStrip` past the image height clamps to the height rather
+        // than multiplying by a fantasy — the shape image-tiff's own encoder
+        // writes (7813 rows for a 64-row image).
+        assert_eq!(tiff_band_bytes(7813, 64, 64), tiff_band_bytes(64, 64, 64));
+        // …and that small single-strip file is fine, which is why the ceiling
+        // is generous rather than "one tile row or nothing".
+        assert!(check_tiff_band(7813, 64, 64).is_ok());
+        // A 4 k single-strip source still imports: 285 MiB is over the ceiling…
+        assert!(check_tiff_band(4096, 4096, 4096).is_err());
+        // …while the same source TILED is nowhere near it.
+        assert!(check_tiff_band(256, 4096, 4096).is_ok());
+
+        // And the real decoder is wired to it: an ordinary striped file imports
+        // unchanged, so the check is not refusing everything.
+        let ok = geotiff_f32(
+            8,
+            4,
+            &[1.0f32; 32],
+            &GeoTags {
+                pixel_scale: Some([1.0, 1.0, 0.0]),
+                tiepoint: Some([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                keys: utm10n(),
+                rows_per_strip: Some(2),
+                ..Default::default()
+            },
+        );
+        assert!(decode_rows(Cursor::new(&ok), &mut |_, _| Ok(())).is_ok());
+    }
+
     /// NaN is no-data whether or not a sentinel is declared — and the refusal
     /// now tells the author about the policy instead of just naming the pixel.
     #[test]
@@ -2575,6 +2853,31 @@ mod tests {
         };
         assert!(h.is_nodata(-9999.0));
         assert!(!h.is_nodata(-9998.0));
+
+        // **A sentinel that is also a legitimate elevation.** `-9999` is nowhere
+        // on Earth; `0` is sea level, and a coastal publisher who declares it as
+        // no-data means it. So the door honours the declaration exactly — every
+        // sample at 0 is no-data and nothing else is, because the relative
+        // tolerance degenerates to an exact compare against zero (the distance
+        // from 0 to any other value is 100% of the scale). The author is not left
+        // guessing: `import_advisories` reports the substituted COUNT and the
+        // percentage of the source it covers, so a DEM where the policy replaced
+        // 40% of its samples says so out loud.
+        let sea = NodataHandling {
+            policy: NodataPolicy::Clamp(-1.0),
+            sentinel: Some(0.0),
+        };
+        assert!(
+            sea.is_nodata(0.0),
+            "a declared 0 sentinel means what it says"
+        );
+        assert!(sea.is_nodata(-0.0), "including the negative zero");
+        assert!(
+            !sea.is_nodata(1e-12),
+            "and NOTHING else — not even nearly zero"
+        );
+        assert!(!sea.is_nodata(-0.5));
+        assert!(!sea.is_nodata(1.0));
     }
 
     /// **C4-18 — `PartialRows` counted writes, not coverage.**

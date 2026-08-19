@@ -44,8 +44,19 @@ fn fold_field_name(s: &str) -> String {
 ///
 /// Deliberately small: GIS attribute tables carry text, numbers, booleans and
 /// nulls, and everything a generator needs to read (a road class, a lane count,
-/// a street name, a zoning code) is one of those. `Ord` so a feature set can be
-/// sorted into a deterministic order for cooking.
+/// a street name, a zoning code) is one of those.
+///
+/// # No `Ord`, and it is not an omission
+///
+/// An earlier version of this comment promised `Ord` "so a feature set can be
+/// sorted into a deterministic order for cooking". It cannot have one:
+/// [`Attr::Number`] holds an `f64`, which has no total order, and the sort a
+/// reader would reach for — `sort_by(|a, b| a.partial_cmp(b).unwrap())` — panics
+/// on the first NaN. Determinism here comes from the container instead: a
+/// feature's attributes are a [`BTreeMap`](std::collections::BTreeMap) keyed on
+/// the field NAME, which is a `String` and does have a total order, and a
+/// layer's features keep their file order. Sort by an attribute with
+/// [`f64::total_cmp`] through [`Attr::as_number`] if you need to.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Attr {
     Text(String),
@@ -407,11 +418,23 @@ mod tests {
         // (0,0) -> (1,0) -> (1,1) -> (0,1) in XZ.
         let ccw = ring(&[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]);
         let a = GeoGeometry::signed_area_xz(&ccw);
-        assert!((a.abs() - 1.0).abs() < 1e-12, "unit square area, got {a}");
+        // **The SIGN is the whole point, so the sign is what is asserted.** The
+        // first version took `a.abs()` here and then only checked that reversing
+        // negates — both arms sign-agnostic, in a test named for the sign. An
+        // implementation that returned -1.0 for this ring (and would therefore
+        // classify every Shapefile exterior as a hole) was green.
+        assert!(
+            (a - 1.0).abs() < 1e-12,
+            "this ring must have area +1, not {a}: the sign is what tells a \
+             Shapefile boundary from a hole, and flipping it turns every parcel \
+             inside out"
+        );
         // Reversing the ring flips the sign and nothing else.
         let mut cw = ccw.clone();
         cw.reverse();
-        assert!((GeoGeometry::signed_area_xz(&cw) + a).abs() < 1e-12);
+        let r = GeoGeometry::signed_area_xz(&cw);
+        assert!(r < 0.0, "the reversed ring must be negative, got {r}");
+        assert!((r + a).abs() < 1e-12);
         // Degenerate rings have no area rather than a wrong one.
         assert_eq!(
             GeoGeometry::signed_area_xz(&ring(&[(0.0, 0.0), (1.0, 1.0)])),

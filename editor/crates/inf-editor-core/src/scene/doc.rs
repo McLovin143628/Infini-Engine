@@ -315,11 +315,21 @@ impl SceneDoc {
 
     /// Empty the document (before a load). Keeps title/version bookkeeping to
     /// the caller.
+    ///
+    /// **The geo-anchor is cleared here for the same reason `settings` is**
+    /// (Wave-G audit A4). Leaving it behind made the loader's own regression arm
+    /// blind: the arm seeded a document with the anchor it then asserted, and
+    /// `reset` preserved it, so deleting `apply_to_doc`'s `set_geo` line — the
+    /// exact line the wave confessed to having forgotten once — left all 666 of
+    /// this crate's tests green. Measured. A load path that forgets an
+    /// attachment does not crash, it agrees with itself (the P21 law), and a
+    /// gate cannot watch a line whose absence it cannot feel.
     pub(crate) fn reset(&mut self) {
         self.world.clear();
         self.order.clear();
         self.selection.clear();
         self.settings = LevelSettings::default();
+        self.geo = inf_math::geo::GeoAnchor::default();
         self.preview = None;
     }
 

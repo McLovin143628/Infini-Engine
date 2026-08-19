@@ -66,6 +66,16 @@ pub const LANE_WIDTH_M: f64 = 3.5;
 /// memo rather than papered over.
 pub const SNAP_TOLERANCE_M: f64 = 2.0;
 
+/// The most a mitred corner may widen its cross-section, as a multiple of the
+/// half-width.
+///
+/// A mitre offset is `half / cos(θ/2)`, which goes to infinity as a corner
+/// approaches a hairpin. 4 is the usual limit (it is SVG's default) and admits
+/// every corner down to about 29 degrees; sharper than that the corner is
+/// **clipped rather than spiked**, which is wrong by a little at a bend no
+/// survey puts a road through, instead of wrong by a lot.
+pub const MITER_LIMIT: f64 = 4.0;
+
 /// The road classes the document names, plus the two a real layer always has.
 ///
 /// # Freeze note
@@ -302,26 +312,23 @@ impl RoadGraph {
 
         for (seg_id, (i, points)) in pending.into_iter().enumerate() {
             let f = &layer.features[i];
-            let kind_text = f.attr_text(&[
-                "road_type",
-                "roadtype",
-                "highway",
-                "fclass",
-                "type",
-                "class",
-                "rttyp",
-                "mtfcc",
-                "surface",
-                "category",
-            ]);
+            let kind_text = f.attr_text(&ROAD_CLASS_FIELDS);
             let kind = match kind_text {
                 Some(t) => {
                     let k = RoadKind::classify(t);
-                    if k == RoadKind::Residential && RoadKind::classify(t) == RoadKind::default() {
+                    // `RoadKind::default()` IS `Residential`, so the second half
+                    // of the old condition (`classify(t) == default()`) was a
+                    // restatement of the first plus a redundant re-classify. What
+                    // it MEANT is "classify fell through to the default" — which
+                    // is what `k == default()` says on its own.
+                    if k == RoadKind::default() {
                         // The text was present but matched nothing specific.
+                        // Lower-cased once per feature rather than once per
+                        // needle: this runs over 10^5-feature county layers.
+                        let lower = t.to_ascii_lowercase();
                         let recognised = ["resid", "street", "local", "minor", "road"]
                             .iter()
-                            .any(|n| t.to_ascii_lowercase().contains(n));
+                            .any(|n| lower.contains(n));
                         if !recognised {
                             graph.unclassified += 1;
                         }
@@ -538,6 +545,15 @@ pub fn build_ribbon(
             "road width {width_m} is not a positive finite length"
         )));
     }
+    // The spine and the width were guarded and `lift_m` was not — and a NaN lift
+    // makes every vertex's `y` a NaN that `f32::min`/`max` then ignore, so the
+    // ribbon's bounds come back looking perfectly healthy. Same door, same
+    // reason, one line earlier than the place it would have hurt.
+    if !lift_m.is_finite() {
+        return Err(crate::GisError::NotFinite(format!(
+            "the road's lift above the ground ({lift_m} m) is not a finite length"
+        )));
+    }
 
     let half = width_m * 0.5;
     let mut vertices = Vec::with_capacity(pts.len() * 2);
@@ -552,24 +568,24 @@ pub fn build_ribbon(
         // The cross-section direction is the average of the incoming and outgoing
         // headings, so an interior corner miters rather than producing two
         // overlapping quads with a gap between them.
+        let back_dir = if i > 0 {
+            (pts[i].xz() - pts[i - 1].xz()).normalize_or_zero()
+        } else {
+            glam::DVec2::ZERO
+        };
+        let fwd_dir = if i + 1 < pts.len() {
+            (pts[i + 1].xz() - pts[i].xz()).normalize_or_zero()
+        } else {
+            glam::DVec2::ZERO
+        };
         let dir = {
-            let back = if i > 0 {
-                (pts[i].xz() - pts[i - 1].xz()).normalize_or_zero()
-            } else {
-                glam::DVec2::ZERO
-            };
-            let fwd = if i + 1 < pts.len() {
-                (pts[i + 1].xz() - pts[i].xz()).normalize_or_zero()
-            } else {
-                glam::DVec2::ZERO
-            };
-            let d = back + fwd;
+            let d = back_dir + fwd_dir;
             if d.length_squared() > 1e-12 {
                 d.normalize()
-            } else if fwd.length_squared() > 1e-12 {
-                fwd
-            } else if back.length_squared() > 1e-12 {
-                back
+            } else if fwd_dir.length_squared() > 1e-12 {
+                fwd_dir
+            } else if back_dir.length_squared() > 1e-12 {
+                back_dir
             } else {
                 glam::DVec2::X
             }
@@ -577,10 +593,50 @@ pub fn build_ribbon(
         // Perpendicular on the XZ plane. Rotating (x, z) by 90 degrees gives
         // (-z, x); with +X east and +Z south that points to the road's left.
         let perp = glam::DVec2::new(-dir.y, dir.x);
+        // **A mitre has to be SCALED, not just aimed.** Offsetting by `half`
+        // along the bisector is the mistake that looks right: the bisector is a
+        // unit vector, so the two cross-section vertices are always exactly
+        // `width_m` apart — and their distance from each *leg*'s centreline is
+        // `half · cos(θ/2)`, so the road PINCHES at every corner. Measured on a
+        // right-angle bend of a 10 m road: 7.07 m through the corner, a visible
+        // notch at every bend in every ribbon the importer produced. The
+        // correction is `1 / (bisector · leg)`, which is 1 on a straight run and
+        // √2 at a right angle.
+        let miter = {
+            let leg = if fwd_dir.length_squared() > 1e-12 {
+                fwd_dir
+            } else {
+                back_dir
+            };
+            let c = dir.dot(leg).abs();
+            // A hairpin has `c → 0` and would spike to infinity. Clipped rather
+            // than spiked, at the usual limit — a corner sharper than ~29° gets
+            // a blunt end instead of a spear, which is wrong by a little in a
+            // place no survey puts a road, rather than wrong by a lot.
+            if c > 1.0 / MITER_LIMIT {
+                1.0 / c
+            } else {
+                MITER_LIMIT
+            }
+        };
         for (side, sign) in [(0usize, -1.0f64), (1, 1.0)] {
-            let xz = pts[i].xz() + perp * (half * sign);
-            let y = height_at(xz.x, xz.y).unwrap_or(pts[i].y) + lift_m;
-            vertices.push(DVec3::new(xz.x, y, xz.y));
+            let xz = pts[i].xz() + perp * (half * miter * sign);
+            // The terrain callback is somebody else's function reading somebody
+            // else's heightfield; a query over a voxel hole or an unloaded tile
+            // is exactly where a `Some(NaN)` comes from, and it would become a
+            // NaN vertex with healthy-looking bounds.
+            let ground = match height_at(xz.x, xz.y) {
+                Some(h) if h.is_finite() => h,
+                Some(h) => {
+                    return Err(crate::GisError::NotFinite(format!(
+                        "the ground query under the road at ({}, {}) returned the \
+                         non-finite height {h}",
+                        xz.x, xz.y
+                    )))
+                }
+                None => pts[i].y,
+            };
+            vertices.push(DVec3::new(xz.x, ground + lift_m, xz.y));
             uvs.push([side as f32, (arc / width_m) as f32]);
         }
         if i + 1 < pts.len() {
@@ -597,34 +653,69 @@ pub fn build_ribbon(
     })
 }
 
-/// Build every segment's ribbon, keyed by segment id.
+/// Build every segment's ribbon, keyed by segment id, plus **what could not be
+/// built and why**.
+///
+/// The first cut wrote `if let Ok(r) = …` and dropped the errors on the floor —
+/// so a segment whose spine collapsed to one distinct point, or whose width came
+/// out non-finite, simply vanished from the output with no count and no name.
+/// This crate says three separate times that a skipped feature is a reported
+/// feature ([`RoadGraph::skipped`], `GeoLayer::skipped`, the vector reader's own
+/// doctrine); a silent hole in a road network is exactly the case that doctrine
+/// is for, because the symptom is a street that stops in the middle of a block.
 pub fn build_all_ribbons(
     graph: &RoadGraph,
     lift_m: f64,
     height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
-) -> BTreeMap<u64, RoadRibbon> {
+) -> (BTreeMap<u64, RoadRibbon>, Vec<String>) {
     let mut out = BTreeMap::new();
+    let mut skipped = Vec::new();
     for s in graph.segments.values() {
-        if let Ok(r) = build_ribbon(&s.spine, s.width_m(), lift_m, height_at) {
-            out.insert(s.id, r);
+        match build_ribbon(&s.spine, s.width_m(), lift_m, height_at) {
+            Ok(r) => {
+                out.insert(s.id, r);
+            }
+            Err(e) => skipped.push(format!(
+                "segment {} ({}) has no buildable surface: {e}",
+                s.id,
+                if s.name.is_empty() {
+                    "unnamed"
+                } else {
+                    &s.name
+                }
+            )),
         }
     }
-    out
+    (out, skipped)
 }
 
+/// The attribute spellings a road class may be stored under, most specific
+/// first.
+///
+/// **One list, read from two places.** `RoadGraph::from_layer` probed ten
+/// spellings and [`kind_of`] — the wizard's preview of the same decision —
+/// probed six, so on any TIGER-style layer whose class lives in `RTTYP` or
+/// `MTFCC` the preview said "residential" and the import built a highway. Two
+/// readers of one fact have to read it through one door.
+pub const ROAD_CLASS_FIELDS: [&str; 10] = [
+    "road_type",
+    "roadtype",
+    "highway",
+    "fclass",
+    "type",
+    "class",
+    "rttyp",
+    "mtfcc",
+    "surface",
+    "category",
+];
+
 /// Classify a feature's road kind without building a whole graph — the wizard's
-/// preview.
+/// preview. Reads [`ROAD_CLASS_FIELDS`], the same list the import uses.
 pub fn kind_of(f: &GeoFeature) -> RoadKind {
-    f.attr_text(&[
-        "road_type",
-        "roadtype",
-        "highway",
-        "fclass",
-        "type",
-        "class",
-    ])
-    .map(RoadKind::classify)
-    .unwrap_or_default()
+    f.attr_text(&ROAD_CLASS_FIELDS)
+        .map(RoadKind::classify)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -686,6 +777,86 @@ mod tests {
         let mut sorted = keys.clone();
         sorted.sort_unstable();
         assert_eq!(keys, sorted);
+
+        // **What is NOT order-independent, stated rather than left implied.**
+        // Segment ids are assigned in encounter order (`pending.into_iter()
+        // .enumerate()`), so reversing the file renumbers them — the geometry is
+        // the same, the labels are not. The node ids ARE geometric (they come
+        // out of the snap lattice, which is a BTreeMap keyed on position), which
+        // is why the assertions above are on nodes.
+        //
+        // This matters the moment anything keys a cooked artefact by segment id:
+        // `build_all_ribbons` returns a `BTreeMap<u64, RoadRibbon>` and two cooks
+        // of the same file in different record orders would pair the same meshes
+        // with different keys. Recorded here, and asserted so the day the ids
+        // become geometric this test tells somebody the note is stale.
+        let geom_a: Vec<Vec<DVec3>> = ga.segments.values().map(|s| s.spine.clone()).collect();
+        let geom_b: Vec<Vec<DVec3>> = gb.segments.values().map(|s| s.spine.clone()).collect();
+        assert_ne!(
+            geom_a, geom_b,
+            "segment IDS are encounter-order today, so reversing the file must \
+             pair different geometry with the same id. If this now passes, the \
+             ids became geometric — good news, and this comment plus the module \
+             header need updating."
+        );
+        let mut sa = geom_a.clone();
+        let mut sb = geom_b.clone();
+        let key = |v: &Vec<DVec3>| (v[0].x.to_bits(), v[0].z.to_bits());
+        sa.sort_by_key(key);
+        sb.sort_by_key(key);
+        assert_eq!(
+            sa, sb,
+            "the SET of segment geometry must be identical whatever order the \
+             file was in — only the numbering moves"
+        );
+    }
+
+    /// **Two doors onto one decision have to read the same fields**, and a
+    /// ribbon that cannot be built is reported rather than dropped.
+    ///
+    /// `kind_of` is the wizard's preview of the class `from_layer` will assign.
+    /// It probed six attribute spellings where the import probed ten, so on a
+    /// TIGER-style layer whose class lives in `RTTYP` or `MTFCC` the preview said
+    /// one thing and the import built another.
+    #[test]
+    fn the_preview_classifier_agrees_with_the_import_and_ribbons_report_failures() {
+        for field in ROAD_CLASS_FIELDS {
+            let mut f = GeoFeature::new(line(&[(0.0, 0.0), (100.0, 0.0)]));
+            f.attributes
+                .insert(field.to_uppercase(), Attr::Text("motorway".into()));
+            assert_eq!(
+                kind_of(&f),
+                RoadKind::Highway,
+                "the preview must read `{field}`"
+            );
+            let g = RoadGraph::from_layer(&layer(vec![f]));
+            assert_eq!(
+                g.segments.values().next().unwrap().kind,
+                RoadKind::Highway,
+                "the import must read `{field}` too — a preview that disagrees \
+                 with the import is worse than no preview"
+            );
+        }
+
+        // A segment whose spine collapses has no surface, and that is REPORTED.
+        let g = RoadGraph::from_layer(&layer(vec![
+            GeoFeature::new(line(&[(0.0, 0.0), (100.0, 0.0)])),
+            GeoFeature::new(line(&[(0.0, 500.0), (300.0, 500.0)])),
+        ]));
+        let mut flat = |_: f64, _: f64| Some(0.0);
+        let (ribbons, skipped) = build_all_ribbons(&g, 0.05, &mut flat);
+        assert_eq!(ribbons.len(), 2, "both roads build");
+        assert!(skipped.is_empty(), "{skipped:?}");
+
+        // …and a non-finite lift takes every one of them out, by name.
+        let mut sick = |_: f64, _: f64| Some(f64::NAN);
+        let (ribbons, skipped) = build_all_ribbons(&g, 0.0, &mut sick);
+        assert!(ribbons.is_empty());
+        assert_eq!(skipped.len(), 2, "every failure is counted");
+        assert!(
+            skipped[0].contains("segment") && skipped[0].contains("non-finite"),
+            "a dropped ribbon must name itself and its cause: {skipped:?}"
+        );
     }
 
     /// Endpoints that nearly coincide become one junction — the property that
@@ -869,14 +1040,52 @@ mod tests {
             r.vertices.iter().all(|v| v.is_finite()),
             "a corner produced a NaN vertex"
         );
-        // At the mitred corner the cross-section is WIDER than the road (that is
-        // what mitring means) but bounded — a runaway miter is the classic defect.
+        // **The corner test has to measure the corner, exactly.**
+        //
+        // The first version of this arm asserted `(10.0..20.0).contains(&w)` on
+        // a 10 m road, and `Range::contains` is `start <= x` — so the *pinched*
+        // answer (exactly 10.0, which is what an unscaled bisector offset gives
+        // at every corner angle) satisfied it, and so would a runaway. The
+        // assertion was structurally incapable of failing in either direction
+        // while its own message named the right answer, 14.1. The right answer
+        // is the one that gets asserted.
         let corner_w = (r.vertices[3].xz() - r.vertices[2].xz()).length();
         assert!(
-            (10.0..20.0).contains(&corner_w),
-            "the mitred corner is {corner_w} m across — a 90 degree corner should \
-             widen to ~14.1 m, not collapse and not run away"
+            (corner_w - 10.0 * std::f64::consts::SQRT_2).abs() < 1e-9,
+            "the mitred corner is {corner_w} m across; a right-angle corner on a \
+             10 m road must be exactly 10*sqrt(2) = 14.142. An unscaled bisector \
+             offset gives exactly 10.0 here — and then the road's width MEASURED \
+             AGAINST EACH LEG is 7.07 m, a visible notch at every bend."
         );
+
+        // …and the property that actually matters: the ribbon is `width_m` wide
+        // measured perpendicular to each LEG, through the corner as well as
+        // along the straights. That is what a mitre is for, and it is the claim
+        // the cross-section width alone cannot make.
+        let leg = glam::DVec2::new(1.0, 0.0); // the incoming leg's heading
+        let leg_perp = glam::DVec2::new(-leg.y, leg.x);
+        let across = (r.vertices[3].xz() - r.vertices[2].xz())
+            .dot(leg_perp)
+            .abs();
+        assert!(
+            (across - 10.0).abs() < 1e-9,
+            "measured across the incoming leg the corner is {across} m wide, not 10"
+        );
+
+        // A hairpin is CLIPPED, not spiked — the miter limit is a real bound.
+        let hairpin = vec![
+            DVec3::new(0.0, 0.0, 0.0),
+            DVec3::new(50.0, 0.0, 0.0),
+            DVec3::new(0.0, 0.0, 0.5),
+        ];
+        let h = build_ribbon(&hairpin, 10.0, 0.0, &mut flat).unwrap();
+        let spike = (h.vertices[3].xz() - h.vertices[2].xz()).length();
+        assert!(
+            spike <= 10.0 * MITER_LIMIT + 1e-9,
+            "a hairpin ran the miter away to {spike} m; the limit is {}",
+            10.0 * MITER_LIMIT
+        );
+        assert!(h.vertices.iter().all(|v| v.is_finite()));
 
         // Repeated points collapse, and a spine that is all one point is refused.
         let dup = vec![DVec3::ZERO, DVec3::ZERO, DVec3::ZERO];
@@ -893,6 +1102,21 @@ mod tests {
         // A nonsense width is refused rather than producing an inverted ribbon.
         assert!(build_ribbon(&spine, 0.0, 0.0, &mut flat).is_err());
         assert!(build_ribbon(&spine, f64::NAN, 0.0, &mut flat).is_err());
+        // …and so is a nonsense LIFT, which the width check used to leave open:
+        // every vertex would carry a NaN `y` whose bounds look perfectly healthy
+        // because `f32::min`/`max` ignore NaN.
+        assert!(matches!(
+            build_ribbon(&spine, 5.0, f64::NAN, &mut flat),
+            Err(crate::GisError::NotFinite(_))
+        ));
+        // A ground query is somebody else's heightfield — a hole or an unloaded
+        // tile is exactly where a `Some(NaN)` comes from, and it must not become
+        // a vertex either.
+        let mut sick = |_: f64, _: f64| Some(f64::NAN);
+        assert!(matches!(
+            build_ribbon(&spine, 5.0, 0.0, &mut sick),
+            Err(crate::GisError::NotFinite(_))
+        ));
     }
 
     /// The nearest-segment query the building-orientation step needs.

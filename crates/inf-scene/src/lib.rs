@@ -355,13 +355,15 @@ use uuid::Uuid;
 ///   nothing can put them on the same ground.
 ///
 ///   It is appended to the **file record**, after `settings`, and *not* inside
-///   [`RuntimeSettings`]. That placement was measured, not assumed. Every frozen
-///   file record from `SceneFileV10` to `SceneFileV23` carries the **live**
-///   settings type, so growing `RuntimeSettings` would have meant freezing a
-///   `RuntimeSettingsV23` and repointing thirty-one declarations across the two
-///   mirrors — the expensive `v10` shape of bump. Appending to the file record
-///   costs one frozen record, because the file record is the outermost struct
-///   and its tail is a genuine tail.
+///   [`RuntimeSettings`]. That placement was measured, not assumed. Every file
+///   record from `SceneFileV10` to `SceneFileV24` carries the **live** settings
+///   type — fourteen frozen plus the live one in this crate, and fourteen frozen
+///   plus `SceneFile` in the editor mirror, **thirty declarations** — so growing
+///   `RuntimeSettings` would have meant freezing a `RuntimeSettingsV23` and
+///   repointing every one of them: the expensive `v10` shape of bump. (The
+///   Wave-G audit counted them; the first write-up said thirty-one.) Appending
+///   to the file record costs one frozen record, because the file record is the
+///   outermost struct and its tail is a genuine tail.
 ///
 ///   And the design argument agrees with the cheap answer rather than merely
 ///   tolerating it: `RuntimeSettings` holds what the *simulation and renderer*
@@ -879,9 +881,17 @@ struct SceneFileV24 {
     entities: Vec<RuntimeEntity>,
     #[serde(default)]
     settings: RuntimeSettings,
-    /// Where on Earth world `(0, 0, 0)` is (schema v24). Additive:
-    /// `#[serde(default)]` → a disabled anchor, which is exactly what every
-    /// pre-v24 level meant.
+    /// Where on Earth world `(0, 0, 0)` is (schema v24).
+    ///
+    /// **`#[serde(default)]` is not what migrates a pre-v24 file** — that is the
+    /// standing P21.4 law, and the first version of this comment restated the
+    /// misconception it was written to retire. bincode is positional and carries
+    /// no field-presence information, so a short payload does not "default" this
+    /// field, it fails to decode. What makes v24 additive is the *version
+    /// dispatch*: a v23 file is decoded through the frozen [`SceneFileV23`] and
+    /// converted with `geo: Default::default()`. The attribute here earns its
+    /// place only for the self-describing formats this struct also travels
+    /// through, and as a statement of intent.
     #[serde(default)]
     geo: inf_math::geo::GeoAnchor,
 }

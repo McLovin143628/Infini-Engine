@@ -22334,8 +22334,12 @@ engineering summary.
 document's own emphasis devices instead. Re-pasting it with bold intact would let the priority
 be re-derived.
 
-**Tally:** 14 SHIPPED · 11 ALREADY-HAD · 4 PARTIAL · 6 DEFERRED · 3 CANNOT. The document's
-Part 3 (streaming architecture) is essentially a description of Phases 9 and 16.
+**Tally (corrected after audit):** 11 SHIPPED · 11 ALREADY-HAD · 5 PARTIAL · 8 DEFERRED ·
+3 CANNOT. The document's Part 3 (streaming architecture) is essentially a description of
+Phases 9 and 16. The first write-up said 14 SHIPPED; an adversarial pass moved three rows —
+land cover → biome ids (a classifier with nothing on either end of it), GIS attributes →
+building floor counts (no connecting code at all), and the road ribbon (vertex arrays, not a
+mesh asset; a terrain callback with no caller). See the memo's §7.
 
 ### What shipped
 
@@ -22351,15 +22355,23 @@ Part 3 (streaming architecture) is essentially a description of Phases 9 and 16.
   fill-row, recorded in the sidecar so a re-import reproduces the same terrain).
 * **The `.inf_terrain` header's `origin`** finally written — a field the format has carried
   since v2 with every importer writing zero into it. **No header bump**: the bytes were always
-  there.
+  there. (Audit: at the end of the wave the plumbing was complete and the first link was
+  missing — `build_anchored`'s only caller passed `None`, so every asset the editor could
+  produce still carried a zero origin, and turning the wizard's placement switch on suppressed
+  the advisory that said so. The anchor now rides the import job from the open level, and a
+  queue-level arm asserts a non-zero origin in the written payload.)
 * **Scene schema v24**, once, carrying the geo-anchor **and** `TerrainLayer::material`.
   `.inf_mat` v2→v3 and `.inf_matd` v1→v2 in their own containers for the detail slot.
   `SCENE_PAYLOAD_VERSION` 9→10 by the envelope's own doctrine.
 * **The layered-terrain fragment probe** — Wave T's third carried item. `dpdx` is
   fragment-stage-only, so no compute probe could ever have executed that branch.
 * **Vector in**: Shapefile + GeoJSON → one normalized feature type in world metres; road
-  graphs (`BTreeMap`, per the determinism law), terrain-conforming road ribbons, and
-  constrained-Delaunay polygon triangulation — the engine's **first polygon primitive**.
+  graphs (`BTreeMap`, per the determinism law), road ribbons with mitred corners and
+  arc-length UVs, and constrained-Delaunay polygon triangulation — the engine's **first
+  polygon primitive**. All of it is **library code with one consumer**: `inf-gis` has a single
+  dependent crate, which uses one of its nine modules; the road graph, ribbon builder,
+  triangulator, classifier, terrarium codec and tile math have no caller outside their own
+  tests. Correct and gated, waiting for a door.
 * **`SpanSource::Polyline` + `grammar.polyline`** — the cheap 80% of "this engine has no
   polygon", at no schema cost.
 
@@ -22378,6 +22390,26 @@ Part 3 (streaming architecture) is essentially a description of Phases 9 and 16.
 * **Axis order is decided once, at one door.** Authority order is lat/lon; every real file is
   lon/lat. File order is taken and a transposed record is refused by name.
 * **Field-name matching needs separator folding, not just case folding.**
+
+### The audit's own ledger
+
+Nine defects reached the tree and were fixed in the audit commit, each with an arm that fails
+without the fix: a **feet DEM never matched its own no-data sentinel** (the tag is in the
+file's units, the row was already in metres — 0 of 3 voids substituted, and the terrain shipped
+finite three-kilometre craters); a **single-strip TIFF materialised the whole image** (4.2 GiB
+for the 16 k source the memory bound is stated against — now refused with its remedy); the
+**anchor never reached the importer**; the **loader's own anchor gate was blind** (`reset` did
+not clear the field and the arm seeded what it asserted, so deleting the confessed fix left all
+666 tests in the crate green); a **self-intersecting ring panicked the triangulator** from
+inside `spade`; **every road corner pinched to 70.7% width** and the arm that named 14.1 in its
+message accepted the pinched 10.0; a **refused polygon hole was silently dropped** by a
+`filter` that ate the `Err` before `collect::<Result<_,_>>` saw it; **non-finite inputs became
+plausible answers** (a NaN longitude became tile (0,0)); and **`.log2()` was missing from the
+canonical libm ban list** — a hole the first new crate walked through, on a path that selects
+which source tiles get cooked. The log/exp family, the hyperbolics and `hypot` are named now,
+and `inf-gis` has the source gate its seven sibling crates already had, with its two projection
+modules exempt **by name** and the condition that retires the exemption asserted rather than
+promised.
 
 ### Named remainders
 

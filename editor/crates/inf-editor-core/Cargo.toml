@@ -82,3 +82,8 @@ csv = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Wave-G audit: the terrain import queue's georeferencing arm needs a real
+# GeoTIFF, and a PNG carries no georeference to test against. A dev-dependency,
+# so nothing this crate ships links a TIFF encoder — the decoder it reads lives
+# in `inf-terrain` where the row-at-a-time seam is.
+tiff = { workspace = true }

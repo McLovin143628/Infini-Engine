@@ -78,6 +78,13 @@ pub fn decode_elevation(rgb: [u8; 3]) -> f64 {
 /// docs on why that is a hazard rather than a convenience).
 pub const MISSING_TILE_ELEVATION_M: f64 = 0.0;
 
+/// How many tile-widths across a PNG may be and still be accepted as a tile.
+///
+/// A terrarium tile is [`crate::tilemath::TILE_PX`] square by definition; 8×
+/// leaves room for the 512 and 1024 variants some providers serve while keeping
+/// the pre-read allocation bounded. See the refusal in [`decode_tile_png`].
+const MAX_TILE_MULTIPLE: usize = 8;
+
 /// What one decoded tile turned out to contain.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TerrariumTile {
@@ -198,11 +205,34 @@ pub fn decode_tile_png(bytes: &[u8]) -> Result<TerrariumTile, GisError> {
             info.bit_depth
         )));
     }
-    let mut buf = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
+    // **The dimensions are refused before anything is allocated.** A PNG header
+    // is a few hundred bytes and can declare 65535x65535 RGB; `output_buffer_size`
+    // would then ask for ~12 GB and the `vec!` would abort the process instead of
+    // returning a refusal. A terrarium tile is `TILE_PX` square by definition, so
+    // a generous multiple of it is a real bound and not an arbitrary one.
+    let max = (crate::tilemath::TILE_PX * MAX_TILE_MULTIPLE) as u32;
+    if width == 0 || height == 0 || width > max || height > max {
+        return Err(GisError::Format(format!(
+            "this PNG declares {width}x{height}; a terrarium tile is \
+             {tile}x{tile} by definition and this door accepts up to {max}x{max}. \
+             A larger image is not a tile, and allocating for its declared size \
+             before reading a byte is how a malformed header takes the editor \
+             down rather than being refused.",
+            tile = crate::tilemath::TILE_PX
+        )));
+    }
+    let want = reader.output_buffer_size().ok_or_else(|| {
+        GisError::Format(format!(
+            "this PNG's declared size ({width}x{height}) overflows its own buffer \
+             arithmetic"
+        ))
+    })?;
+    let mut buf = vec![0u8; want];
     let frame = reader
         .next_frame(&mut buf)
         .map_err(|e| GisError::Format(format!("terrarium tile PNG data: {e}")))?;
-    decode_tile_rgb(&buf[..frame.buffer_size()], width, height, channels)
+    let got = frame.buffer_size().min(buf.len());
+    decode_tile_rgb(&buf[..got], width, height, channels)
 }
 
 #[cfg(test)]

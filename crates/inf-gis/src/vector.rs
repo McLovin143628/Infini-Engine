@@ -254,10 +254,23 @@ fn geojson_polygon(rings: &[WireRing], ring: RingReader<'_>) -> Result<GeoGeomet
     }
     // RFC 7946 says rings after the first are holes — by position, not by
     // winding. (Shapefile is the opposite; see `read_shapefile`.)
+    //
+    // **The `?` here has to be reachable.** The first cut filtered with
+    // `r.as_ref().is_ok_and(..)`, and `is_ok_and` is `false` for an `Err` — so
+    // `filter` removed every refusal from the iterator BEFORE `collect` into a
+    // `Result` could see it, and the `?` was dead code. A hole carrying a
+    // non-finite coordinate, a transposed lat/lon, or a point outside its
+    // projection's valid area — every refusal `Transform::to_world` exists to
+    // raise — was silently dropped, the polygon came back with one fewer hole,
+    // and nothing reached `layer.skipped`. That is the exact opposite of this
+    // module's own doctrine that a skipped feature is a reported feature.
+    // Refuse first, THEN drop the merely-degenerate.
     let holes = it
         .map(|r| ring(r).map(strip_closing))
-        .filter(|r| r.as_ref().is_ok_and(|v| v.len() >= MIN_RING_POSITIONS))
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|v| v.len() >= MIN_RING_POSITIONS)
+        .collect::<Vec<_>>();
     Ok(GeoGeometry::Polygon { exterior, holes })
 }
 
@@ -331,17 +344,34 @@ pub fn read_shapefile(
     Ok(layer)
 }
 
+/// A numeric attribute, or [`Attr::Null`] when it is not a number.
+fn finite_attr(n: f64) -> Attr {
+    if n.is_finite() {
+        Attr::Number(n)
+    } else {
+        Attr::Null
+    }
+}
+
 fn dbase_attr(v: &dbase::FieldValue) -> Attr {
     use dbase::FieldValue as F;
     match v {
         F::Character(Some(s)) => Attr::Text(s.trim().to_string()),
         F::Character(None) => Attr::Null,
-        F::Numeric(Some(n)) => Attr::Number(*n),
+        // **Attribute values cross a door too.** A DBF `Numeric` field is parsed
+        // out of its ASCII payload with `str::parse::<f64>()`, which happily
+        // accepts "NaN", "inf" and "infinity"; a `Double` is a raw little-endian
+        // f64 read verbatim, so a NaN bit pattern arrives intact. A stored NaN
+        // makes `GeoFeature`'s `PartialEq` non-reflexive and is visible to any
+        // consumer that matches `Attr::Number(n)` directly rather than going
+        // through `as_number`. It is `Null` — "this record does not state one" —
+        // which is exactly what a non-finite measurement means.
+        F::Numeric(Some(n)) => finite_attr(*n),
         F::Numeric(None) => Attr::Null,
-        F::Float(Some(n)) => Attr::Number(*n as f64),
+        F::Float(Some(n)) => finite_attr(f64::from(*n)),
         F::Float(None) => Attr::Null,
-        F::Integer(n) => Attr::Number(*n as f64),
-        F::Double(n) => Attr::Number(*n),
+        F::Integer(n) => Attr::Number(f64::from(*n)),
+        F::Double(n) => finite_attr(*n),
         F::Logical(Some(b)) => Attr::Bool(*b),
         F::Logical(None) => Attr::Null,
         F::Date(Some(d)) => Attr::Text(format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day())),
@@ -745,5 +775,151 @@ mod tests {
         }
         // A projected source carries no axis advisory — the hazard is geographic.
         assert!(!l.advisories.iter().any(|a| a.code == "axis.file_order"));
+    }
+
+    /// **The Shapefile half, through a real `.shp`/`.shx`/`.dbf` triple.**
+    ///
+    /// Every other arm here drives GeoJSON bytes, so `read_shapefile`,
+    /// `dbase_attr`, `shape_geometry` and `polygon_rings` had no coverage at
+    /// all — and `polygon_rings` is the function the reader's longest doc
+    /// section exists to justify. Shapefile has **no explicit hole marker**: a
+    /// ring is an interior ring because of its winding, and reading the GeoJSON
+    /// rule ("the first ring is the boundary, the rest are holes") onto it turns
+    /// a multi-part polygon — an island group, a parcel in two pieces — into one
+    /// shape with the other parts punched out of it. That is exactly what this
+    /// fixture is: two outer rings, one of which has a hole.
+    #[test]
+    fn a_shapefile_multipart_polygon_keeps_its_parts_and_its_holes() {
+        use shapefile::{Point, Polygon, PolygonRing};
+
+        let anchor = anchor_at("EPSG:32610", 491_000.0, 5_459_000.0, 0.0, "").unwrap();
+        let t = Transform::new("EPSG:32610", &anchor).unwrap();
+
+        // Rings are given in the format's own winding: an OUTER ring is
+        // clockwise, an INNER ring counter-clockwise. `PolygonRing::{Outer,Inner}`
+        // is how the crate reports that classification back.
+        let sq = |x: f64, z: f64, s: f64| {
+            vec![
+                Point::new(491_000.0 + x, 5_459_000.0 + z),
+                Point::new(491_000.0 + x, 5_459_000.0 + z + s),
+                Point::new(491_000.0 + x + s, 5_459_000.0 + z + s),
+                Point::new(491_000.0 + x + s, 5_459_000.0 + z),
+                Point::new(491_000.0 + x, 5_459_000.0 + z),
+            ]
+        };
+        let mut hole = sq(20.0, 20.0, 20.0);
+        hole.reverse();
+        let poly = Polygon::with_rings(vec![
+            PolygonRing::Outer(sq(0.0, 0.0, 100.0)),
+            PolygonRing::Inner(hole),
+            // A SECOND part — the case the GeoJSON rule would swallow.
+            PolygonRing::Outer(sq(300.0, 0.0, 50.0)),
+        ]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Parcels.shp");
+        {
+            use std::convert::TryInto;
+            let builder = dbase::TableWriterBuilder::new()
+                .add_character_field("NAME".try_into().unwrap(), 32)
+                .add_numeric_field("ACRES".try_into().unwrap(), 12, 3);
+            let w = shapefile::Writer::from_path(&path, builder).unwrap();
+            let mut rec = dbase::Record::default();
+            rec.insert(
+                "NAME".into(),
+                dbase::FieldValue::Character(Some("Lot 7".into())),
+            );
+            rec.insert("ACRES".into(), dbase::FieldValue::Numeric(Some(2.5)));
+            w.write_shapes_and_records(std::iter::once((&poly, &rec)))
+                .unwrap();
+        }
+
+        let l = read_shapefile(&path, LayerKind::Parcels, "EPSG:32610", &t)
+            .expect("a shapefile triple reads");
+        assert!(l.skipped.is_empty(), "{:?}", l.skipped);
+        assert_eq!(
+            l.features.len(),
+            2,
+            "a two-part polygon must come back as TWO polygons; one means the \
+             second part was read as a hole of the first"
+        );
+
+        // The parts, sorted by area so the assertion does not depend on ring
+        // order in the file.
+        let mut areas: Vec<f64> = l.features.iter().map(|f| f.geometry.area_m2()).collect();
+        areas.sort_by(f64::total_cmp);
+        assert!(
+            (areas[0] - 2_500.0).abs() < 1e-6,
+            "the small part is 50x50 = 2500 m2, got {}",
+            areas[0]
+        );
+        assert!(
+            (areas[1] - (10_000.0 - 400.0)).abs() < 1e-6,
+            "the big part is 100x100 minus its 20x20 hole = 9600 m2, got {} \
+             (10000 means the hole was dropped)",
+            areas[1]
+        );
+        // The hole really is a hole, structurally, not just by area.
+        let holed = l
+            .features
+            .iter()
+            .find(
+                |f| matches!(&f.geometry, GeoGeometry::Polygon { holes, .. } if !holes.is_empty()),
+            )
+            .expect("one part carries an interior ring");
+        match &holed.geometry {
+            GeoGeometry::Polygon { exterior, holes } => {
+                assert_eq!(holes.len(), 1);
+                assert_eq!(exterior.len(), 4, "the closing vertex is stripped");
+                assert_eq!(holes[0].len(), 4);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // The DBF attributes came across, on BOTH parts (they share a record).
+        for f in &l.features {
+            assert_eq!(f.attr_text(&["name"]), Some("Lot 7"), "separator/case fold");
+            assert_eq!(f.attr_number(&["acres"]), Some(2.5));
+        }
+
+        // A projected source in the anchor's own CRS lands exactly.
+        assert!(
+            l.features
+                .iter()
+                .flat_map(|f| f.geometry.positions())
+                .all(|p| p.is_finite()),
+            "every imported vertex is finite"
+        );
+
+        // …and the dispatcher routes `.shp` here rather than at the GeoJSON door.
+        let via = read_vector(&path, LayerKind::Parcels, "EPSG:32610", &t).unwrap();
+        assert_eq!(via.features.len(), l.features.len());
+    }
+
+    /// A non-finite DBF number is `Null`, not a stored NaN.
+    ///
+    /// A `Numeric` field is parsed out of ASCII with `str::parse::<f64>()`,
+    /// which accepts "NaN" and "inf"; a stored NaN makes `GeoFeature`'s
+    /// `PartialEq` non-reflexive and is visible to anything matching
+    /// `Attr::Number(n)` without going through `as_number`.
+    #[test]
+    fn a_non_finite_attribute_is_null_rather_than_a_stored_nan() {
+        assert_eq!(
+            dbase_attr(&dbase::FieldValue::Numeric(Some(2.5))),
+            Attr::Number(2.5)
+        );
+        assert_eq!(
+            dbase_attr(&dbase::FieldValue::Numeric(Some(f64::NAN))),
+            Attr::Null
+        );
+        assert_eq!(
+            dbase_attr(&dbase::FieldValue::Double(f64::INFINITY)),
+            Attr::Null
+        );
+        assert_eq!(
+            dbase_attr(&dbase::FieldValue::Float(Some(f32::NAN))),
+            Attr::Null
+        );
+        assert_eq!(dbase_attr(&dbase::FieldValue::Numeric(None)), Attr::Null);
     }
 }

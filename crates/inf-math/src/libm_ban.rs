@@ -40,11 +40,29 @@
 //! `tilt_onto` in `inf-pcg`, the rejection samplers in `inf-render::debris`).
 //! Banning them would ban the fix.
 
-/// The twelve method spellings, e.g. `".sin()"`.
+/// The banned method spellings, e.g. `".sin()"`.
 ///
-/// `atan2`, `sin_cos` and `powf` take arguments, so they end at the open paren;
-/// the rest are closed, because `.sin()` must not also match `.sinh()`.
-pub const METHODS: [&str; 12] = [
+/// `atan2`, `sin_cos`, `powf`, `log` and `hypot` take arguments, so they end at
+/// the open paren; the rest are closed, because `.sin()` must not also match
+/// `.sinh()`.
+///
+/// # The Wave-G audit's addition: the list itself had a hole
+///
+/// The first twelve entries were `sin`/`cos`/`tan`, their inverses, `atan2`,
+/// `sin_cos`, `cbrt`, `powf`, `exp` and `ln`. **`log2` was not among them**, and
+/// `f64::log2` routes through exactly the same platform libm that `ln` does. The
+/// hole surfaced the way this module's own header predicts one will: the first
+/// new crate to reach for a function nobody had thought of used it, on a path
+/// that selects which source tiles get cooked, and no gate could have seen it.
+/// The whole logarithm/exponential family, the hyperbolics and `hypot` are named
+/// here now rather than waiting for the next one.
+///
+/// Measured before landing: no gated module in the tree uses any of the added
+/// spellings, so closing the hole turned nothing red. The users that exist
+/// (`inf-render`'s VSM/virtual-texture level selection, `inf-gis`'s Mercator)
+/// are in crates that carry no libm gate — which is a separate, named finding,
+/// not something this list can fix.
+pub const METHODS: [&str; 25] = [
     ".sin()",
     ".cos()",
     ".tan()",
@@ -57,6 +75,20 @@ pub const METHODS: [&str; 12] = [
     ".powf(",
     ".exp()",
     ".ln()",
+    // ── Wave-G audit: the rest of the family ────────────────────────────────
+    ".log2()",
+    ".log10()",
+    ".log(",
+    ".exp2()",
+    ".exp_m1()",
+    ".ln_1p()",
+    ".sinh()",
+    ".cosh()",
+    ".tanh()",
+    ".asinh()",
+    ".acosh()",
+    ".atanh()",
+    ".hypot(",
 ];
 
 /// Both width spellings of every [`METHODS`] entry's UFCS twin, e.g.
@@ -65,7 +97,7 @@ pub const METHODS: [&str; 12] = [
 /// This half is the P24.2 re-audit's minor 3: `.sin()` is a *substring* ban and
 /// `f64::sin(x)` — the same call written the other way — walks straight past it.
 /// A list with only the method forms is a sample, not a rule.
-pub const UFCS: [&str; 24] = [
+pub const UFCS: [&str; 50] = [
     "f32::sin(",
     "f64::sin(",
     "f32::cos(",
@@ -90,6 +122,32 @@ pub const UFCS: [&str; 24] = [
     "f64::exp(",
     "f32::ln(",
     "f64::ln(",
+    "f32::log2(",
+    "f64::log2(",
+    "f32::log10(",
+    "f64::log10(",
+    "f32::log(",
+    "f64::log(",
+    "f32::exp2(",
+    "f64::exp2(",
+    "f32::exp_m1(",
+    "f64::exp_m1(",
+    "f32::ln_1p(",
+    "f64::ln_1p(",
+    "f32::sinh(",
+    "f64::sinh(",
+    "f32::cosh(",
+    "f64::cosh(",
+    "f32::tanh(",
+    "f64::tanh(",
+    "f32::asinh(",
+    "f64::asinh(",
+    "f32::acosh(",
+    "f64::acosh(",
+    "f32::atanh(",
+    "f64::atanh(",
+    "f32::hypot(",
+    "f64::hypot(",
 ];
 
 /// The glam constructors that reach `sin_cos` **inside another crate**, where no
@@ -106,9 +164,9 @@ pub const GLAM: [&str; 6] = [
     "from_rotation_z(",
 ];
 
-/// Every banned spelling: [`METHODS`] + [`UFCS`] + [`GLAM`], 42 in all.
-pub const ALL: [&str; 42] = {
-    let mut out = [""; 42];
+/// Every banned spelling: [`METHODS`] + [`UFCS`] + [`GLAM`], 81 in all.
+pub const ALL: [&str; 81] = {
+    let mut out = [""; 81];
     let mut i = 0;
     while i < METHODS.len() {
         out[i] = METHODS[i];
@@ -179,7 +237,15 @@ mod tests {
     fn the_canonical_list_passes_its_own_completeness_check() {
         covers_both_spellings("inf_math::libm_ban::ALL", &ALL);
         assert_eq!(ALL.len(), METHODS.len() + UFCS.len() + GLAM.len());
-        assert_eq!(ALL.len(), 42);
+        // 25 methods + 50 UFCS twins + 6 glam constructors. Was 42 before the
+        // Wave-G audit added the logarithm/exponential family, the hyperbolics
+        // and `hypot` — see [`METHODS`] for why the list had a hole.
+        assert_eq!(ALL.len(), 81);
+        // The addition is not decorative: `.log2()` is the spelling that was
+        // missing, and it must be present with both of its twins.
+        for added in [".log2()", "f32::log2(", "f64::log2(", ".tanh()", ".hypot("] {
+            assert!(ALL.contains(&added), "{added} must be banned");
+        }
         // No duplicates, or a count is not a count.
         let unique: std::collections::BTreeSet<&str> = ALL.iter().copied().collect();
         assert_eq!(unique.len(), ALL.len(), "the list repeats a spelling");

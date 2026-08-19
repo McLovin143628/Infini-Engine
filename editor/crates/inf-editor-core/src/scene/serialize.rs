@@ -14970,8 +14970,20 @@ mod tests {
     /// that round-trips a field the document never actually carries.
     #[test]
     fn v24_anchor_and_layer_materials_round_trip_through_the_codec_and_the_world() {
+        // **Deliberately NOT seeded with the fixture anchor** (Wave-G audit A4).
+        // The first cut of this arm called `doc.set_geo(v24_fixture_geo())` here,
+        // and `SceneDoc::reset` did not clear the field — so the assertion below
+        // was satisfied by the seed rather than by the load, and deleting
+        // `apply_to_doc`'s `set_geo` left the whole crate green. Seeding a
+        // DIFFERENT anchor is what makes the assertion mean "the loader wrote
+        // this" rather than "somebody wrote this at some point".
         let mut doc = SceneDoc::new();
-        doc.set_geo(v24_fixture_geo());
+        doc.set_geo(inf_math::geo::GeoAnchor {
+            enabled: true,
+            crs: "EPSG:32601".into(),
+            origin_easting_m: 1.0,
+            ..Default::default()
+        });
         let file = SceneFile {
             schema_version: SCHEMA_VERSION,
             title: "V24".into(),

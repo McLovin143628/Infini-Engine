@@ -79,12 +79,23 @@
 //!
 //! **The ruling this encodes** (Wave G): when a level has an anchor, the anchor
 //! is *authoritative* for where on Earth the world is, and the sky's
-//! `TimeOfDay::latitude_deg`/`longitude_deg` are **derived** from it. A mismatch
-//! is a **cook advisory**, not a silent correction — the P16 law that a silent
-//! hazard gets named rather than quietly fixed. This house has been bitten by a
-//! second source of truth at least twice before (the `inf-scene` mirror law, the
-//! `GpuLight` triplication law), and a wrong sun that nothing complains about is
-//! precisely that shape.
+//! `TimeOfDay::latitude_deg`/`longitude_deg` should be **derived** from it. A
+//! mismatch is a **cook advisory**, not a silent correction — the P16 law that a
+//! silent hazard gets named rather than quietly fixed. This house has been
+//! bitten by a second source of truth at least twice before (the `inf-scene`
+//! mirror law, the `GpuLight` triplication law), and a wrong sun that nothing
+//! complains about is precisely that shape.
+//!
+//! **What is built and what is not** (Wave-G audit A5, stated so the ruling is
+//! not mistaken for the implementation): [`GeoAnchor::solar_place`] and
+//! [`GeoAnchor::disagrees_with_place`] are the *predicates* that ruling needs,
+//! and they are tested — but **no cook calls them yet**, and
+//! [`GeoAnchor::grid_convergence_deg`] is derived at the import door, persisted,
+//! and read by nothing. The anchor therefore records where on Earth the world is
+//! and does not yet move the sun or correct a shadow for grid convergence. The
+//! landing site is the cook's advisory pass beside the other `.inf_lvl`
+//! advisories; until it exists, an author with an anchor and a hand-set
+//! `TimeOfDay` has two places and no complaint.
 //!
 //! # Units
 //!
@@ -500,12 +511,7 @@ mod tests {
         let mut fiji = anchor();
         fiji.origin_longitude_deg = 179.9;
         assert!(
-            !fiji.disagrees_with_place(
-                -17.0 + 17.0 + fiji.origin_latitude_deg - fiji.origin_latitude_deg + 49.28 - 49.28
-                    + 49.28,
-                -179.9,
-                0.5
-            ),
+            !fiji.disagrees_with_place(fiji.origin_latitude_deg, -179.9, 0.5),
             "179.9E and 179.9W are 0.2 degrees apart, not 359.8"
         );
 

@@ -200,6 +200,18 @@ impl GeoTiffMeta {
         if !anchor.enabled || !self.is_georeferenced() {
             return None;
         }
+        // **A geographic source can never be placed by subtraction** (Wave-G
+        // audit A11). Its tiepoint is in DEGREES, and the anchor's origin is in
+        // metres; subtracting one from the other is not a small error, it is a
+        // five-million-metre one. `crs_matches` catches the usual spelling of
+        // this — a file naming EPSG:4326 against a UTM anchor — but a raster
+        // that sets the model-type key to *geographic* and omits the CRS code is
+        // taken at the author's word by that check, and would land here. The
+        // model-type key is the one fact that cannot be omitted from such a
+        // file, so it is what this reads.
+        if self.crs_is_geographic {
+            return None;
+        }
         if !self.crs_matches(&anchor.crs) {
             return None;
         }
@@ -348,19 +360,20 @@ pub fn read_meta<R: std::io::Read + std::io::Seek>(
     // Geo keys: CRS identity and units.
     if let Ok(Some(v)) = decoder.find_tag(Tag::Unknown(TAG_GEO_KEY_DIRECTORY)) {
         if let Ok(raw) = v.into_u16_vec() {
-            let doubles = decoder
-                .find_tag(Tag::Unknown(TAG_GEO_DOUBLE_PARAMS))
-                .ok()
-                .flatten()
-                .and_then(|v| v.into_f64_vec().ok())
-                .unwrap_or_default();
+            // `GeoDoubleParams` (34736) is deliberately NOT read: every key this
+            // importer consumes — the model type, the CRS code, both unit codes
+            // — is a SHORT stored inline (`location == 0`). The double-valued
+            // keys are projection parameters for a CRS defined in the file
+            // rather than by code, which is a case this importer refuses at the
+            // anchor door anyway. Reading them into a binding nothing looks at
+            // would suggest they were honoured.
+            let _ = TAG_GEO_DOUBLE_PARAMS;
             let ascii = decoder
                 .find_tag(Tag::Unknown(TAG_GEO_ASCII_PARAMS))
                 .ok()
                 .flatten()
                 .and_then(|v| v.into_string().ok())
                 .unwrap_or_default();
-            let _ = &doubles;
 
             for key in parse_geo_keys(&raw) {
                 match key.id {
@@ -636,6 +649,40 @@ mod tests {
             None,
             "a DEM in a different UTM zone must NOT be placed by subtraction — \
              that would land it hundreds of km away"
+        );
+
+        // **A GEOGRAPHIC source can never be placed by subtraction** (Wave-G
+        // audit A11), and the CRS-code check alone does not catch it: a raster
+        // that sets the model-type key to geographic and omits the CRS code is
+        // taken at the author's word by `crs_matches` — and its tiepoint is in
+        // DEGREES, so subtracting a UTM origin from it is a five-million-metre
+        // error rather than a small one.
+        //
+        // Un-fix mutation: drop the `crs_is_geographic` guard and this returns
+        // `Some(DVec3(-490_876.9, 0.0, 5_459_049.3))` as a success.
+        let degrees = GeoTiffMeta {
+            epsg: None,
+            crs_is_geographic: true,
+            meters_per_sample: Some(0.000_277_8),
+            origin: Some((-123.12, 49.28, 0.0)),
+            ..Default::default()
+        };
+        assert_eq!(
+            degrees.world_origin(&anchor),
+            None,
+            "a geographic raster's degrees must never be subtracted from the \
+             anchor's metres"
+        );
+        // …and one that DOES name a geographic code is refused by the CRS check
+        // as well, so the two doors agree.
+        assert_eq!(
+            GeoTiffMeta {
+                epsg: Some(4326),
+                crs_is_geographic: true,
+                ..degrees.clone()
+            }
+            .world_origin(&anchor),
+            None
         );
 
         // A file that names no CRS is taken at the author's word, because plenty

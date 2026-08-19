@@ -357,12 +357,25 @@ pub struct TerrainBuild {
     report: inf_terrain::ImportReport,
     source: PathBuf,
     settings: TerrainImportSettings,
+    /// The world position the payload's header actually carries (Wave G).
+    ///
+    /// Recorded from what the build **used**, not from what the settings asked
+    /// for, so the advisories can tell "placed" from "asked to be placed and
+    /// was not" — three separate halves have to be present for placement to
+    /// happen and an author who is told nothing sees only a terrain in the wrong
+    /// place.
+    world_origin: glam::DVec3,
 }
 
 impl TerrainBuild {
     /// The source that was decoded.
     pub fn source(&self) -> &Path {
         &self.source
+    }
+    /// Where the built payload's header places tile (0,0) — `DVec3::ZERO` unless
+    /// georeferenced placement was both requested and possible.
+    pub fn world_origin(&self) -> glam::DVec3 {
+        self.world_origin
     }
     /// Tiles across all levels.
     pub fn tiles(&self) -> usize {
@@ -401,11 +414,12 @@ pub fn build_anchored(
     let probe = inf_terrain::probe_heightmap(source)
         .map_err(|e| AssetError::Import(format!("{}: {e}", source.display())))?;
     let import = settings.to_import(probe.width, probe.height);
+    let world_origin = settings
+        .world_origin(Some(&probe), anchor)
+        .unwrap_or(glam::DVec3::ZERO);
     let opts = ChunkedImportOptions {
         pyramid: settings.pyramid(),
-        world_origin: settings
-            .world_origin(Some(&probe), anchor)
-            .unwrap_or(glam::DVec3::ZERO),
+        world_origin,
         nodata: settings.nodata(Some(&probe))?,
     };
     let (asset, report) =
@@ -416,6 +430,7 @@ pub fn build_anchored(
         report,
         source: source.to_path_buf(),
         settings: settings.clone(),
+        world_origin,
     })
 }
 
@@ -463,7 +478,11 @@ pub fn commit(
     // source". `outside_root_advisories` is the same door the mesh and texture
     // importers raise it through, so the wording cannot drift.
     let mut advisories = super::import::outside_root_advisories(project, &built.source);
-    advisories.extend(import_advisories(&built.report, &built.settings));
+    advisories.extend(import_advisories(
+        &built.report,
+        &built.settings,
+        built.world_origin,
+    ));
     let rel_source = super::sidecar_source(project, &built.source);
     let id = project.register_written_asset(
         path,
@@ -506,6 +525,7 @@ pub fn commit(
 pub fn import_advisories(
     report: &inf_terrain::ImportReport,
     settings: &TerrainImportSettings,
+    world_origin: glam::DVec3,
 ) -> Vec<String> {
     let mut out = Vec::new();
 
@@ -576,6 +596,36 @@ pub fn import_advisories(
         );
     }
 
+    // **Asking is not being placed** (Wave-G audit A3). Placement needs three
+    // halves — the flag, a georeferenced source, and an *enabled anchor whose
+    // CRS the source agrees with*. The arms above cover the first two; the third
+    // is the one an author cannot see, because a level with no anchor looks
+    // exactly like a level with one until a road lands 40 km away. Before this,
+    // turning the flag ON silently suppressed the "imported at the world origin"
+    // note above while still importing at the world origin — strictly worse than
+    // leaving it off.
+    if settings.use_georeference
+        && world_origin == glam::DVec3::ZERO
+        && report
+            .probe
+            .geo
+            .as_ref()
+            .is_some_and(|g| g.is_georeferenced())
+    {
+        out.push(
+            "georeferenced placement was requested and this source knows where it \
+             is, but the terrain was still placed at the world origin. Either this \
+             level has no geo-anchor (set one in World Settings — until then there \
+             is nothing to place against), or the source's coordinate system is \
+             not the anchor's, or the source is in a geographic CRS whose degrees \
+             cannot be subtracted from the anchor's metres. A terrain in a \
+             different CRS from the level is refused rather than reprojected, \
+             because reprojecting a raster resamples it and changes the elevations \
+             rather than placing them."
+                .to_string(),
+        );
+    }
+
     out
 }
 
@@ -602,9 +652,18 @@ pub fn import_terrain(
 ///
 /// Fails when the asset has no recorded source or no settings block — a terrain
 /// authored in-editor has nothing to reimport *from*.
+///
+/// **`anchor` is the level's geo-anchor, and it is not optional in spirit**
+/// (Wave-G audit A3, second door). A reimport that went through the un-anchored
+/// [`build`] would silently move a georeferenced terrain back to the world
+/// origin — the sidecar records `use_georeference`, but the anchor is a property
+/// of the *level*, not of the asset, so it has to arrive from outside. Two doors
+/// onto one import must agree about where the terrain goes; this is the same
+/// "one door for three paths" law the fracture pipeline paid for.
 pub fn reimport(
     project: &mut AssetProject,
     asset: AssetId,
+    anchor: Option<&inf_math::geo::GeoAnchor>,
     progress: &mut dyn FnMut(ImportProgress),
     cancel: &CancelToken,
 ) -> Result<TerrainImportOutcome> {
@@ -631,7 +690,7 @@ pub fn reimport(
             AssetError::Import("terrain asset has no recorded import settings".into())
         })?;
     let source = project.root().join(source);
-    let built = build(&source, &settings, progress, cancel)?;
+    let built = build_anchored(&source, &settings, anchor, progress, cancel)?;
     commit(project, built, None, Some(asset), cancel)
 }
 
@@ -783,7 +842,14 @@ mod tests {
 
         // …and a reimport (which is told nothing) reproduces them byte-for-byte,
         // in place, under the same GUID.
-        let again = reimport(&mut proj, first.asset, &mut |_| {}, &CancelToken::new()).unwrap();
+        let again = reimport(
+            &mut proj,
+            first.asset,
+            None,
+            &mut |_| {},
+            &CancelToken::new(),
+        )
+        .unwrap();
         assert_eq!(again.asset, first.asset);
         assert_eq!(again.path, first.path);
         assert_eq!(std::fs::read(&again.path).unwrap(), first_bytes);
@@ -821,8 +887,14 @@ mod tests {
             built.advisories
         );
 
-        let err = reimport(&mut proj, built.asset, &mut |_| {}, &CancelToken::new())
-            .expect_err("reimport must refuse rather than guess");
+        let err = reimport(
+            &mut proj,
+            built.asset,
+            None,
+            &mut |_| {},
+            &CancelToken::new(),
+        )
+        .expect_err("reimport must refuse rather than guess");
         assert!(
             err.to_string().contains("no import source"),
             "the refusal must say why: {err}"

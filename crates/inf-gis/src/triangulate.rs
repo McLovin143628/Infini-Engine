@@ -120,8 +120,34 @@ fn clean_ring(ring: &[DVec3]) -> Vec<DVec3> {
     out
 }
 
-/// Crossing-number point-in-ring test on the XZ plane.
-fn point_in_ring(px: f64, pz: f64, ring: &[DVec3]) -> bool {
+/// The XZ bounding box of a ring, as `[min_x, min_z, max_x, max_z]`.
+///
+/// Computed once per ring so the per-face containment test can reject in O(1)
+/// for the rings that cannot possibly contain a given centroid — see
+/// [`point_in_ring`] for why that matters.
+fn ring_bounds_xz(ring: &[DVec3]) -> [f64; 4] {
+    ring.iter().fold(
+        [f64::MAX, f64::MAX, f64::MIN, f64::MIN],
+        |[nx, nz, xx, xz], p| [nx.min(p.x), nz.min(p.z), xx.max(p.x), xz.max(p.z)],
+    )
+}
+
+/// Crossing-number point-in-ring test on the XZ plane, with the ring's
+/// precomputed bounds as an O(1) reject.
+///
+/// **The reject is not an optimisation, it is the difference between linear and
+/// quadratic.** The caller runs this for every inner face against every ring,
+/// and a CDT on `V` vertices has about `2V` inner faces — so without a cheap
+/// reject a single polygon costs `2V x V` edge tests. The subjects this module
+/// names are lake shorelines and land-cover regions, which routinely carry
+/// 10^4-10^5 vertices: 10^8 to 10^10 operations for one polygon. With the box
+/// test, only the rings whose extent actually covers the face are walked, which
+/// for the usual shape (a big exterior and small scattered holes) is the
+/// exterior plus nearly nothing.
+fn point_in_ring(px: f64, pz: f64, ring: &[DVec3], bounds: &[f64; 4]) -> bool {
+    if px < bounds[0] || px > bounds[2] || pz < bounds[1] || pz > bounds[3] {
+        return false;
+    }
     let mut inside = false;
     let n = ring.len();
     if n < 3 {
@@ -206,8 +232,41 @@ pub fn triangulate_polygon(geometry: &GeoGeometry) -> Result<Triangulation, GisE
         for i in 0..handles.len() {
             let (a, b) = (handles[i], handles[(i + 1) % handles.len()]);
             if a != b {
-                // `add_constraint` returns false when the edge already exists,
-                // which is fine — a shared boundary between two rings is legal.
+                // **`add_constraint` PANICS on a crossing constraint** — spade's
+                // own docs say so, and its `cdt.rs` reaches an `expect` naming
+                // "The new constraint edge intersects an existing constraint
+                // edge" when the caller passes no splitting vertex constructor,
+                // which is what `add_constraint` does. A self-intersecting ring
+                // is not exotic: a bowtie from a digitising error, a hole that
+                // crosses its own exterior, a ring that revisits a vertex — OGC
+                // validity failures are the normal state of a published parcel
+                // or land-cover layer, and `clean_ring` only removes
+                // CONSECUTIVE duplicates, so a figure-eight arrives intact.
+                //
+                // One malformed record in a hundred thousand would have taken
+                // the whole cook down with a panic from inside a dependency.
+                // Refusals are values here (the house law), so the crossing is
+                // asked about first and reported by name. `try_add_constraint`
+                // returns the edges it created — an empty result means the edge
+                // already existed, which is legal (two rings may share a
+                // boundary) and is why this checks `can_add_constraint` rather
+                // than the return value.
+                if !cdt.can_add_constraint(a, b) {
+                    let va = cdt.vertex(a);
+                    let vb = cdt.vertex(b);
+                    let (pa, pb) = (va.data(), vb.data());
+                    return Err(GisError::Geometry(format!(
+                        "this polygon's boundary crosses itself: the edge from \
+                         ({}, {}) to ({}, {}) intersects another edge of the same \
+                         polygon. A self-intersecting ring has no unambiguous \
+                         inside, so it is refused rather than triangulated into \
+                         whichever answer the solver happened to reach. Published \
+                         layers carry these routinely — repair the geometry in \
+                         your GIS tool (a zero-width buffer or a 'fix geometries' \
+                         pass) and re-import.",
+                        pa.pos.x, pa.pos.y, pb.pos.x, pb.pos.y
+                    )));
+                }
                 cdt.add_constraint(a, b);
             }
         }
@@ -222,6 +281,9 @@ pub fn triangulate_polygon(geometry: &GeoGeometry) -> Result<Triangulation, GisE
         vertices[v.index()] = DVec3::new(d.pos.x, d.y, d.pos.y);
     }
 
+    // One box per ring, computed once — see `point_in_ring`.
+    let ring_boxes: Vec<[f64; 4]> = rings.iter().map(|r| ring_bounds_xz(r)).collect();
+
     let mut indices = Vec::new();
     for face in cdt.inner_faces() {
         let vs = face.vertices();
@@ -230,7 +292,11 @@ pub fn triangulate_polygon(geometry: &GeoGeometry) -> Result<Triangulation, GisE
         let (cx, cz) = ((a.x + b.x + c.x) / 3.0, (a.z + b.z + c.z) / 3.0);
         // Crossing-number over EVERY ring: the exterior puts a face in, a hole
         // takes it out, a ring inside a hole puts it back.
-        let crossings = rings.iter().filter(|r| point_in_ring(cx, cz, r)).count();
+        let crossings = rings
+            .iter()
+            .zip(ring_boxes.iter())
+            .filter(|(r, b)| point_in_ring(cx, cz, r, b))
+            .count();
         if crossings % 2 == 0 {
             continue;
         }
@@ -456,6 +522,73 @@ mod tests {
             triangulate_polygon(&poly(bad, vec![])),
             Err(GisError::NotFinite(_))
         ));
+    }
+
+    /// **A self-intersecting ring is refused, not a panic.**
+    ///
+    /// `spade`'s `add_constraint` documents — and reaches — an `expect` naming
+    /// "The new constraint edge intersects an existing constraint edge" when a
+    /// constraint crosses another. Bowties, rings that revisit a vertex, and
+    /// holes that cross their own exterior are *routine* in published
+    /// government layers; OGC validity failures are the normal state of a
+    /// parcel or land-cover file, and `clean_ring` only removes CONSECUTIVE
+    /// duplicates, so a figure-eight arrives at the triangulator intact.
+    ///
+    /// Before this, one malformed record in a hundred-thousand-feature layer
+    /// panicked the whole import from inside a dependency. Refusals are values
+    /// here.
+    ///
+    /// Un-fix mutation: drop the `can_add_constraint` guard and this test
+    /// aborts the process instead of failing.
+    #[test]
+    fn a_self_intersecting_ring_is_refused_rather_than_panicking() {
+        // A bowtie: (0,0) -> (10,10) -> (10,0) -> (0,10) crosses itself.
+        let bowtie = ring(&[(0.0, 0.0), (10.0, 10.0), (10.0, 0.0), (0.0, 10.0)]);
+        let e = triangulate_polygon(&poly(bowtie, vec![]))
+            .expect_err("a self-intersecting boundary must be refused")
+            .to_string();
+        assert!(e.contains("crosses itself"), "{e}");
+        assert!(
+            e.contains("repair"),
+            "the refusal must name the remedy: {e}"
+        );
+
+        // A hole that crosses its own exterior is the same failure wearing a
+        // different hat, and it must not panic either.
+        let outer = ring(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+        let crossing_hole = ring(&[(5.0, 5.0), (15.0, 5.0), (15.0, 8.0), (5.0, 8.0)]);
+        assert!(triangulate_polygon(&poly(outer, vec![crossing_hole])).is_err());
+    }
+
+    /// **The nested-ring rule the module leads with, actually exercised.**
+    ///
+    /// The doc says "a hole subtracts and a hole inside a hole adds back", and
+    /// every other arm used at most one hole — so the `crossings % 2` behaviour
+    /// the whole design paragraph is about had never run. Two holes and one
+    /// island inside a hole is the smallest input that distinguishes
+    /// "even-odd over every ring" from "exterior minus the first hole".
+    #[test]
+    fn holes_nest_and_an_island_inside_a_hole_comes_back() {
+        // 20x20 outer, a 10x10 hole in the middle, and a 4x4 island inside it.
+        let outer = ring(&[(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)]);
+        let hole = ring(&[(5.0, 5.0), (15.0, 5.0), (15.0, 15.0), (5.0, 15.0)]);
+        let island = ring(&[(8.0, 8.0), (12.0, 8.0), (12.0, 12.0), (8.0, 12.0)]);
+        let t = triangulate_polygon(&poly(outer, vec![hole, island])).expect("nested rings");
+        // 400 - 100 + 16 = 316. A reader that only subtracted the first hole
+        // would give 300; one that subtracted both would give 284.
+        let area = t.area_m2();
+        assert!(
+            (area - 316.0).abs() < 1e-6,
+            "nested rings give {area} m^2; 316 is outer - hole + island, 300 is \
+             'only the first hole counted', 284 is 'both rings subtracted'"
+        );
+        // …and a second, disjoint hole is subtracted too — two holes at once was
+        // also never exercised.
+        let outer = ring(&[(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)]);
+        let a = ring(&[(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0)]);
+        let b = ring(&[(12.0, 12.0), (16.0, 12.0), (16.0, 16.0), (12.0, 16.0)]);
+        let t = triangulate_polygon(&poly(outer, vec![a, b])).expect("two holes");
+        assert!((t.area_m2() - (400.0 - 32.0)).abs() < 1e-6);
     }
 
     /// A wire ring (closing vertex repeated, as both source formats require)

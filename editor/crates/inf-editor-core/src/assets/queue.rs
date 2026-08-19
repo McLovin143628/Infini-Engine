@@ -96,6 +96,13 @@ enum Job {
         id: u64,
         source: PathBuf,
         settings: Box<TerrainImportSettings>,
+        /// The level's geo-anchor at the moment the job was queued (Wave G).
+        ///
+        /// **Captured, not looked up.** The build runs for minutes with no
+        /// project lock held; reading the anchor out of a live document when the
+        /// job reaches the front of the queue would make where the terrain lands
+        /// depend on whether the author edited World Settings in the meantime.
+        anchor: Option<Box<inf_math::geo::GeoAnchor>>,
         name: Option<String>,
         cancel: CancelToken,
     },
@@ -204,10 +211,16 @@ impl ImportQueue {
 
     /// Queue a chunked heightmap → `.inf_terrain` import (P16.4). Returns the job
     /// id; progress ticks and the terminal event arrive on the same channel.
+    ///
+    /// `anchor` is the level's [`inf_math::geo::GeoAnchor`] (Wave G). It is what
+    /// turns `TerrainImportSettings::use_georeference` from a recorded
+    /// preference into a placed terrain — without it the importer has nothing to
+    /// subtract and the asset lands at the world origin however the flag is set.
     pub fn submit_terrain(
         &mut self,
         source: PathBuf,
         settings: TerrainImportSettings,
+        anchor: Option<inf_math::geo::GeoAnchor>,
         name: Option<String>,
     ) -> u64 {
         let id = self.take_id();
@@ -218,6 +231,7 @@ impl ImportQueue {
             id,
             source,
             settings: Box::new(settings),
+            anchor: anchor.map(Box::new),
             name,
             cancel,
         });
@@ -329,6 +343,7 @@ fn worker_loop(rx: Receiver<Job>, etx: Sender<ImportProgress>, project: Arc<Mute
             }
             Job::Terrain {
                 settings,
+                anchor,
                 name,
                 cancel,
                 ..
@@ -353,7 +368,13 @@ fn worker_loop(rx: Receiver<Job>, etx: Sender<ImportProgress>, project: Arc<Mute
                             },
                         });
                     };
-                    terrain_import::build(&source, &settings, &mut on_progress, &cancel)
+                    terrain_import::build_anchored(
+                        &source,
+                        &settings,
+                        anchor.as_deref(),
+                        &mut on_progress,
+                        &cancel,
+                    )
                 }
                 // PHASE 2 — commit, holding the lock for the few filesystem +
                 // database operations it actually needs. The cancellation flag is
@@ -672,6 +693,7 @@ mod tests {
                 meters_per_sample: 8.0,
                 ..Default::default()
             },
+            None,
             Some("World".into()),
         );
 
@@ -718,6 +740,160 @@ mod tests {
         assert!(lock(&project).db().contains(asset));
     }
 
+    /// A georeferenced GeoTIFF whose top-left sample sits at a stated easting
+    /// and northing in UTM zone 10N.
+    fn write_geotiff(dir: &std::path::Path, n: u32, east: f64, north: f64) -> PathBuf {
+        use tiff::encoder::{colortype, TiffEncoder};
+        use tiff::tags::Tag;
+
+        let samples: Vec<f32> = (0..n * n).map(|i| (i % 97) as f32).collect();
+        let path = dir.join("Dem.tif");
+        let file = std::fs::File::create(&path).unwrap();
+        {
+            let mut enc = TiffEncoder::new(std::io::BufWriter::new(file)).unwrap();
+            let mut img = enc.new_image::<colortype::Gray32Float>(n, n).unwrap();
+            img.rows_per_strip(8).unwrap();
+            {
+                let d = img.encoder();
+                d.write_tag(Tag::Unknown(33550), &[10.0f64, 10.0, 0.0][..])
+                    .unwrap();
+                d.write_tag(
+                    Tag::Unknown(33922),
+                    &[0.0f64, 0.0, 0.0, east, north, 0.0][..],
+                )
+                .unwrap();
+                // model type = projected, CRS = EPSG:32610, units = metres.
+                d.write_tag(
+                    Tag::Unknown(34735),
+                    &[
+                        1u16, 1, 0, 3, 1024, 0, 1, 1, 3072, 0, 1, 32610, 3076, 0, 1, 9001,
+                    ][..],
+                )
+                .unwrap();
+            }
+            img.write_data(&samples).unwrap();
+        }
+        path
+    }
+
+    /// **The anchor has to REACH the payload** (Wave-G audit A3).
+    ///
+    /// `TerrainImportSettings::use_georeference` was recorded in the sidecar and
+    /// read by `world_origin`, and `build_anchored` threaded an anchor into
+    /// `ChunkedImportOptions::world_origin`, and `chunked.rs` wrote it into the
+    /// header — every link was correct and the chain had no first link. The only
+    /// caller of `build_anchored` was `build`, which passes `None`, so *every*
+    /// asset this editor could produce carried `origin == DVec3::ZERO`. Turning
+    /// the flag on made it worse than leaving it off: it suppressed the "imported
+    /// at the world origin" advisory while still importing at the world origin.
+    ///
+    /// This asserts the **world** — the bytes of the built payload — rather than
+    /// the report or the settings, because the settings were right the whole
+    /// time.
+    ///
+    /// Un-fix mutation: pass `None` for the anchor at the `build_anchored` call
+    /// in `worker_loop` and the origin below comes back as zero.
+    #[test]
+    fn a_queued_georeferenced_import_places_the_payload_against_the_level_anchor() {
+        let src = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // The DEM's top-left sample is 2 km east and 3 km NORTH of the anchor.
+        let tif = write_geotiff(src.path(), 65, 493_000.0, 5_462_000.0);
+        let anchor = inf_math::geo::GeoAnchor {
+            enabled: true,
+            crs: "EPSG:32610".into(),
+            origin_easting_m: 491_000.0,
+            origin_northing_m: 5_459_000.0,
+            origin_height_m: 0.0,
+            origin_latitude_deg: 49.28,
+            origin_longitude_deg: -123.12,
+            grid_convergence_deg: 0.0,
+            vertical_datum: "EGM2008".into(),
+        };
+        let settings = TerrainImportSettings {
+            tile_resolution: 17,
+            meters_per_sample: 10.0,
+            float_meters: true,
+            center: false,
+            use_georeference: true,
+            ..Default::default()
+        };
+
+        let project = Arc::new(Mutex::new(AssetProject::open(dir.path()).unwrap()));
+        let mut queue = ImportQueue::spawn(project.clone());
+        let id = queue.submit_terrain(tif, settings, Some(anchor), Some("Placed".into()));
+
+        let asset = loop {
+            match queue.recv().expect("worker alive") {
+                ImportProgress::Finished { id: j, primary, .. } => {
+                    assert_eq!(j, id);
+                    break primary.expect("an asset");
+                }
+                ImportProgress::Failed { error, .. } => panic!("import failed: {error}"),
+                _ => {}
+            }
+        };
+
+        let path = lock(&project)
+            .db()
+            .get(asset)
+            .expect("registered")
+            .path
+            .clone();
+        let bytes = std::fs::read(&path).expect("the payload was written");
+        let reader = inf_terrain::TerrainAssetReader::new(&bytes[..]).expect("a valid payload");
+        let origin = reader.header().origin;
+        assert!(
+            (origin.x - 2_000.0).abs() < 1e-6,
+            "2 km east of the anchor is +2000 X; the header says {origin:?}. A \
+             zero origin means the anchor never reached the importer and the \
+             terrain will not line up with any vector layer from the same survey"
+        );
+        assert!(
+            (origin.z + 3_000.0).abs() < 1e-6,
+            "3 km north is -3000 Z (north is -Z, the solar frame); got {origin:?}"
+        );
+        assert_eq!(origin.y, 0.0, "the height datum belongs to the samples");
+
+        // …and the same import WITHOUT an anchor lands at the world origin and
+        // says so, rather than landing there silently.
+        let dir2 = tempfile::tempdir().unwrap();
+        let tif2 = write_geotiff(src.path(), 65, 493_000.0, 5_462_000.0);
+        let project2 = Arc::new(Mutex::new(AssetProject::open(dir2.path()).unwrap()));
+        let mut queue2 = ImportQueue::spawn(project2.clone());
+        let id2 = queue2.submit_terrain(
+            tif2,
+            TerrainImportSettings {
+                tile_resolution: 17,
+                meters_per_sample: 10.0,
+                float_meters: true,
+                center: false,
+                use_georeference: true,
+                ..Default::default()
+            },
+            None,
+            Some("Unplaced".into()),
+        );
+        let advisories = loop {
+            match queue2.recv().expect("worker alive") {
+                ImportProgress::Finished {
+                    id: j, advisories, ..
+                } => {
+                    assert_eq!(j, id2);
+                    break advisories;
+                }
+                ImportProgress::Failed { error, .. } => panic!("{error}"),
+                _ => {}
+            }
+        };
+        assert!(
+            advisories
+                .iter()
+                .any(|a| a.contains("still placed at the world origin")),
+            "asking for placement and not getting it must be REPORTED: {advisories:?}"
+        );
+    }
+
     /// **The lock-freedom gate (P16.4a audit).** A terrain import must make
     /// progress — and stay cancellable — while something else holds the project
     /// mutex, because the editor's asset commands and this very progress tick all
@@ -742,6 +918,7 @@ mod tests {
                 meters_per_sample: 4.0,
                 ..Default::default()
             },
+            None,
             Some("Locked".into()),
         );
 
@@ -794,6 +971,7 @@ mod tests {
                 tile_resolution: 17,
                 ..Default::default()
             },
+            None,
             Some("Ticked".into()),
         );
 
@@ -1015,7 +1193,7 @@ mod tests {
         let png = write_png(src.path(), 129, 129);
         let project = Arc::new(Mutex::new(AssetProject::open(dir.path()).unwrap()));
         let mut queue = ImportQueue::spawn(project.clone());
-        let id = queue.submit_terrain(png, TerrainImportSettings::default(), None);
+        let id = queue.submit_terrain(png, TerrainImportSettings::default(), None, None);
         assert!(queue.cancel(id), "the job is cancellable");
         assert!(!queue.cancel(id + 1), "an unknown job is not");
 

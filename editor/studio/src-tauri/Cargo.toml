@@ -28,6 +28,11 @@ tracing-tracy = { workspace = true, optional = true }
 inf-core = { workspace = true }
 inf-editor-core = { workspace = true }
 glam = { workspace = true }
+# Wave G: `inf_math::geo::GeoAnchor` — the open level's place on Earth, which
+# `terrain_import` reads off the scene document and hands to the import queue.
+# Ring 2 -> Ring 0 leaf; inf-math is already in this tree under every other
+# engine crate here.
+inf-math = { workspace = true }
 inf-asset = { workspace = true }
 inf-audio = { workspace = true }
 # P29.6: Simulate resolves the frontend's raw physical keys and the native

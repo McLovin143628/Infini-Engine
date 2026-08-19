@@ -20,11 +20,21 @@ priority will be re-derived from it.**
 
 | verdict | count | meaning |
 |---|---|---|
-| **SHIPPED** | 14 | built this wave |
+| **SHIPPED** | 11 | built this wave |
 | **ALREADY-HAD** | 11 | the engine already did this, sometimes by a different mechanism |
-| **PARTIAL** | 4 | the substance exists; a named piece does not |
-| **DEFERRED** | 6 | agreed, not built, with a reason and a landing site |
+| **PARTIAL** | 5 | the substance exists; a named piece does not |
+| **DEFERRED** | 8 | agreed, not built, with a reason and a landing site |
 | **CANNOT** | 3 | will not be done as written, with the reason in full |
+
+> **Corrected after audit.** The first version of this table said 14 SHIPPED. An
+> adversarial pass over the tree found three rows whose code exists and whose
+> *claim* does not: land cover → biome ids (G10) has a classifier with nothing on
+> either end of it, GIS attributes → building floor counts (G11) has no
+> connecting code at all, and the road ribbon (G29) produces vertex arrays that
+> are not a mesh asset and conforms to a terrain callback that no caller supplies.
+> Each is now marked for what it is. The rest of this memo is corrected in place;
+> §7 records what the audit changed and why, because a memo that quietly improves
+> its own scorecard is worth less than one that says where it was wrong.
 
 The document's Part 3 (streaming architecture) is, almost line for line, a description of a
 system this engine shipped in Phases 9 and 16. Its genuinely new content is Part 1's pivot to
@@ -51,6 +61,12 @@ What that meant in practice, beyond "add a decoder":
   not made in prose — the existing byte-identity determinism gate now has a GeoTIFF twin over
   six source sizes chosen against the *strip* grid, because a chunk-scattering decoder is a
   genuinely different shape of bug from a row walk.
+  *(Audit correction: the bound is a property of the **file's** chunk grid, not of the reader.
+  A TIFF that omits `RowsPerStrip` — or names one at or past its own height, which is what the
+  encoder used in our own tests writes by default — is a single strip, and then "one chunk row"
+  is the whole image: 4.2 GiB for the 16 k source this claim is stated against. That layout is
+  now refused by name with the `gdal_translate -co TILED=YES` remedy, which makes it the fifth
+  thing the importer declines to guess at rather than a silent 4 GiB allocation.)*
 * **Four things are refused rather than guessed**, each naming its remedy: a rotated or
   sheared raster (honouring one means resampling, which changes the elevations rather than
   placing them); non-square pixels (which would stretch the world along one axis); an
@@ -58,10 +74,24 @@ What that meant in practice, beyond "add a decoder":
 * **Feet become metres exactly once.** Many published DEMs are in feet and the file says so.
   Reading one as metres builds a landscape 3.28× too flat — and nothing about the result looks
   broken, it just looks like somebody scaled it wrong.
+  *(Audit correction: true on its own and false in combination. `GDAL_NODATA` states its
+  sentinel in the file's **own** vertical unit, and the conversion happened before the no-data
+  policy saw the row — so a feet DEM declaring `-9999` handed the policy `-3047.6952`, matched
+  nothing, and shipped its voids as finite three-kilometre craters that the finiteness door
+  cannot see and the report counted as zero. Measured: 0 of 3 substituted. The sentinel is now
+  moved into the sample domain at the same seam the samples are.)*
 * **The `.inf_terrain` header's `origin` finally carries a value.** It has been in the format
   since 2026 and every importer wrote zero into it. A georeferenced DEM is the reason it
   existed: the terrain now lands where the survey says it does, so roads and rivers from the
   same source line up with it. This costs **no format bump** — the bytes were always there.
+  *(Audit correction: at the end of the wave this was true of the code and not of the running
+  editor. `build_anchored` threaded an anchor all the way to the header and its only caller
+  passed `None`, so every asset the editor could actually produce still carried a zero origin —
+  and turning the wizard's placement switch **on** suppressed the "imported at the world
+  origin" advisory while still importing there, which is worse than leaving it off. The anchor
+  is now read off the open level and captured into the import job, a queue-level arm asserts a
+  non-zero origin in the written payload, and asking for placement and not getting it is
+  reported with which of the three halves was missing.)*
 
 ### The no-data policy door (new, and not in the document)
 
@@ -127,8 +157,14 @@ without it a world near a zone edge carries that error into its shadows.
 ### Vector data in (Batch G-B)
 
 Shapefile and GeoJSON now import into one normalized feature type, already reprojected into
-world metres. Everything downstream — roads, hydrology, biomes, the grammar — consumes that
-one type, so a new source format is a new reader rather than a new case in every consumer.
+world metres, so a new source format is a new reader rather than a new case in every consumer.
+
+*Audit correction: the first version of this paragraph said "everything downstream — roads,
+hydrology, biomes, the grammar — consumes that one type". One of those four is wired. A stream
+layer becomes the same `WaterBody` + `Spline` pair the hydrology tool creates by hand, and
+that path is real. The road graph consumes a layer inside its own tests and nothing calls it;
+the grammar does not reference this crate at all; the biome path does not exist (G10). The
+`GeoFeature` type is the right shape for all four — it is one consumer today.*
 
 Three hazards this makes loud rather than silent:
 
@@ -160,14 +196,28 @@ to coincide to within digitising precision, so the graph snaps endpoints onto a 
 tolerance is a real modelling decision — too small leaves a city of disconnected stubs, too
 large welds an overpass to the road beneath it — and it is documented where it is defined.
 
-Roads extrude into terrain-conforming quad ribbons with arc-length UVs, which closes a
-follow-up the engine's own spline module had already written down as unbuilt.
+Roads extrude into quad ribbons with arc-length UVs, mitred corners and an upward winding.
+*Audit correction: the first version said "terrain-conforming" and "closes a follow-up the
+engine's own spline module had written down as unbuilt". The ground comes from a caller-supplied
+closure that no caller supplies, and the result is vertex/UV/index arrays rather than a
+`MeshAsset` — so the ribbon is built and is not yet attached to a terrain or to the asset
+system. `inf-math`'s spline module still lists that follow-up as open, correctly. The audit
+also found the corner mitre was **aimed but not scaled**: offsetting by the half-width along
+the bisector pinches a 10 m road to 7.07 m through every right-angle bend, and the arm that
+should have caught it asserted `(10.0..20.0).contains(&w)` — which the pinched answer, 10.0
+exactly, satisfies. Both are fixed and the arm now asserts 10·√2.*
 
-Polygons — parcels, building footprints, lake surfaces, land-cover regions — now triangulate.
-**The engine previously had no polygon primitive at all**; every one of those collapsed to an
-axis-aligned bounding box, which is what blocked the document's most attractive promise
-("align a house mesh inside a property boundary"). Constrained Delaunay handles holes and
-concave boundaries.
+Polygons — parcels, building footprints, lake surfaces, land-cover regions — now **triangulate**
+as a library operation. **The engine previously had no polygon primitive at all**; every one of
+those collapsed to an axis-aligned bounding box, which is what blocked the document's most
+attractive promise ("align a house mesh inside a property boundary"). Constrained Delaunay
+handles holes, nested holes and concave boundaries. *Audit correction: "now triangulate" is
+true of the operation and not of the scene — the layer spawner still turns an area into a
+closed spline, because putting a polygon SURFACE in a level needs the polygon-interior work
+this wave deliberately deferred. The audit also found that `spade`'s `add_constraint` **panics**
+on a self-intersecting ring, which published parcel and land-cover layers carry routinely; that
+is now a refusal naming the remedy, and a face-culling pass that was quadratic in vertex count
+now rejects against per-ring bounds first.*
 
 > **A real bug in the document's sample code, worth naming.** Its `generate_terrain_mesh`
 > pushes into a parallel `heights` vector only on a *successful* insert, then indexes that
@@ -298,8 +348,8 @@ Numbered in document order.
 | G7 | Adaptive density — flat ground collapses, ridges densify | **PARTIAL, by different means.** The pyramid + clipmap deliver the benefit; a TIN is refused (CANNOT 2). |
 | G8 | Use `spade` to turn the point cloud into a mesh | **PARTIAL / redirected.** Adopted for GIS polygons, not for terrain. |
 | G9 | Source 1 m bare-earth DTM GeoTIFF; also raw LAS LiDAR | **SHIPPED (GeoTIFF)** / **DEFERRED (LAS)** — the LiDAR crates are clean and pure Rust, but a point→raster gridding step does not exist. |
-| G10 | Ingest roads, parcels, utilities, zoning / land cover → biome painting | **SHIPPED.** Land cover → biome ids via Jenks classification is the cleanest fit in the document: biomes were already one byte per terrain sample with a per-biome generation graph behind each, and there was **no image→biome path at all** before this. |
-| G11 | County datasets — building footprints, sewer, zoning height limits | **SHIPPED (the machinery)**; height limits map onto the existing building floor count. |
+| G10 | Ingest roads, parcels, utilities, zoning / land cover → biome painting | **SHIPPED (vector)** / **DEFERRED (land cover → biomes)**. Roads, parcels and utilities import as features. The land-cover half does **not** ship: Jenks classification is built and tested (`classify_breaks`, `classify_to_ids`), and there is still **no path from a raster to a `BiomeSet`** — nothing decodes a land-cover image, nothing writes biome ids, and the classifier has no caller outside its own tests. The claim that this was "the cleanest fit in the document" stands; the claim that it was built does not. |
+| G11 | County datasets — building footprints, sewer, zoning height limits | **PARTIAL.** Footprints and utility lines import as features like any other layer. Height limits do **not** map onto `BuildingParams::floors` — there is no code between a GIS attribute and that field in either direction. "Maps onto" described a shape, not a wire. |
 | G12 | Use the **`gdal` crate** | **CANNOT 1.** Replaced by the pure-Rust `tiff` crate. |
 
 ### Part 3 — binary format and streaming
@@ -334,7 +384,7 @@ This whole section describes a system shipped in Phases 9 and 16.
 | G26 | `spade` Delaunay: insert points, keep a parallel height table, emit buffers | **PARTIAL / redirected** — and the sample code has a real indexing bug, described above. |
 | G27 | Model the road network as a directed graph | **SHIPPED.** No road type of any kind existed in the repository before this wave. |
 | G28 | `RoadNetworkGraph` / `RoadSegment` / `RoadType` struct shapes | **SHIPPED, with two required changes** (`BTreeMap`, and spines carry a height). |
-| G29 | Procedural extrusion: width from lane count, perpendicular cross-sections, snap to terrain, stitch a quad ribbon with tiling UVs | **SHIPPED.** Closes a follow-up the engine's own spline module had already recorded as unbuilt. |
+| G29 | Procedural extrusion: width from lane count, perpendicular cross-sections, snap to terrain, stitch a quad ribbon with tiling UVs | **PARTIAL.** The generator ships and is correct — mitred corners, arc-length UVs, upward winding, refusals for every degenerate input — but it returns **vertex, UV and index arrays, not a `MeshAsset`**, and it takes the ground as a caller-supplied closure that nothing in the tree supplies. So it is a ribbon builder that is not yet wired to a terrain or to the asset system. `inf-math`'s spline module still lists "baking a spline to a renderable mesh (tube / ribbon)" as unbuilt, and it is right to. |
 | G30 | Spawn a building in a parcel, query the road graph, rotate the house to face the street | **PARTIAL.** The nearest-segment query ships; oriented lots are deferred — see the remainders. |
 | G31 | (Offered) A shader for blending textures where roads meet terrain | **PARTIAL.** The four-layer splat path and the deformation field are what such a blend would ride; no prescription to implement — the document only offers it. |
 | G32 | (Offered) Structure the asset compiler to process DEM + vector simultaneously | **ALREADY-HAD.** |
@@ -400,9 +450,11 @@ real attribute table will hand you.
 
 Stated plainly, because these are the things that will surprise somebody:
 
-* **A Shapefile's coordinate system is not read automatically.** It lives in a sidecar file
-  holding a format we have no parser for, so the wizard asks. The file's text is shown so the
-  choice is informed rather than blind.
+* **A Shapefile's coordinate system is not read automatically.** It lives in a sidecar `.prj`
+  holding WKT, a format we have no parser for, so the CRS is a parameter the caller states.
+  *(Audit correction: the first version of this bullet said "the wizard shows the author the
+  `.prj` text so the choice is informed". Nothing reads the `.prj` — and, as the bullet three
+  below says, there is no GIS wizard at all. Showing it is the design; none of it is built.)*
 * **Datum shifts are analytic.** Without NTv2 grids, shifting between old national datums
   carries metre-class error — a uniform offset of the whole import, not a distortion of it,
   and invisible in a game. It is **reported as an advisory** rather than hidden, following
@@ -428,8 +480,51 @@ Stated plainly, because these are the things that will surprise somebody:
   layers, layers become road graphs, ribbons and triangulated polygons — all callable and all
   tested — but the GIS Import dialog that would walk an author through picking a file, naming
   its CRS and choosing a layer kind is not built. That is the next batch's shape, not a
-  defect in this one.
+  defect in this one. **This is the wave's largest honest limit and it deserves the plainest
+  wording:** `inf-gis` has exactly one dependent crate in the workspace, and that crate uses
+  exactly one of its nine modules. The road graph, the ribbon builder, the triangulator, the
+  Jenks classifier, the terrarium codec and the tile math have **no caller outside their own
+  tests**. They are correct, gated library code waiting for a door, and every claim in this
+  memo that reads as "the engine now does X" should be read as "the engine now *can* do X, from
+  Rust, when something calls it".
 * **The road graph is derived at bake, never persisted.** Deliberate, following the
   procedural-generation precedent: the vector layer is the source of truth and a derived thing
   that is also stored is a thing that can disagree with its own source. It also means the road
   system costs no schema ladder.
+
+---
+
+## 7. What the audit changed
+
+This memo was audited adversarially after the wave closed. Nine defects reached the tree and
+were fixed in the audit commit; four claims in this document were wrong and are corrected
+above, in place, with the correction visible rather than the sentence quietly rewritten.
+
+**Defects found and fixed.** Each was measured, not reasoned about, and each now has an arm
+that fails without the fix:
+
+| what | why it mattered |
+|---|---|
+| A feet DEM never matched its own no-data sentinel | `GDAL_NODATA` is stated in the file's units and the row was already in metres; 0 of 3 voids substituted, and the terrain shipped with finite three-kilometre craters that the finiteness door cannot see |
+| A single-strip TIFF materialised the whole image | "one chunk row" is the whole image for a file with no `RowsPerStrip`; 4.2 GiB for the 16 k source the memory bound is stated against. Now refused with its remedy |
+| The level's anchor never reached the importer | `use_georeference` was a no-op that also **suppressed** the advisory saying so — strictly worse than leaving it off |
+| The loader's own anchor gate was blind | `SceneDoc::reset` did not clear the field, and the arm seeded the value it then asserted; deleting the confessed fix left all 666 tests in the crate green |
+| A self-intersecting ring panicked the triangulator | `spade::add_constraint` panics on a crossing constraint, and published parcel layers carry them routinely — one bad record took the whole import down from inside a dependency |
+| Every road corner pinched to 70.7% width | the mitre was aimed along the bisector and not scaled by `1/cos(θ/2)`; the arm that named 14.1 in its failure message accepted the pinched 10.0 |
+| A refused polygon hole was silently dropped | `filter(is_ok_and(..))` removed the `Err` before `collect::<Result<_,_>>` could see it, so the `?` was dead code and a NaN hole became a polygon with one fewer hole |
+| Non-finite inputs became plausible answers | a NaN longitude became tile (0, 0); a NaN lift and a NaN ground query became mesh vertices; a non-finite DBF number became a stored NaN |
+| `.log2()` was not on the libm ban list | the canonical portability list had a hole the first new crate walked through, on a path that selects which source tiles get cooked. The whole logarithm/exponential family, the hyperbolics and `hypot` are named now, and `inf-gis` has the source gate its seven sibling crates already had — with its two projection modules exempt **by name**, with the reason and the condition that retires the exemption |
+
+**Claims corrected**, each marked in place above: the SHIPPED count (14 → 11), the
+`.inf_terrain` origin, the memory bound, the feet conversion, the `.prj` text, the list of
+downstream consumers, "roads extrude into terrain-conforming ribbons", and "polygons now
+triangulate".
+
+**One claim in §5 was recorded as MEASURED with no surviving measurement**, and now has one.
+"`+datum=NAD27` cannot be built at all" justified spelling EPSG:4267 by ellipsoid instead —
+but every NAD27 test drove the *table's* spelling, so the claim about the spelling it avoids
+rested on a comment. It is re-derived in four lines
+(`the_datum_name_this_table_avoids_genuinely_cannot_be_built`), and it holds: the projection
+library refuses `+datum=NAD27` outright, the `+ellps=clrk66 +towgs84=…` form builds, and a
+NAD27 source imports with its advisory. The day the library gains NTv2 grids that test fails
+and tells somebody the table's note is stale, which is what a measurement is for.

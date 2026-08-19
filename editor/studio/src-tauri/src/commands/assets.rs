@@ -348,15 +348,21 @@ impl AssetState {
     /// Queue a chunked heightmap → `.inf_terrain` import on the shared import
     /// worker (P16.4a). Returns the job id; progress arrives on `assets://import`
     /// like every other import.
+    ///
+    /// `anchor` is the open level's geo-anchor (Wave G). It is passed in rather
+    /// than read here because the asset state has no idea which level is open —
+    /// and without it `use_georeference` is a recorded preference with nothing
+    /// behind it.
     pub fn submit_terrain_import(
         &self,
         source: PathBuf,
         settings: inf_editor_core::assets::TerrainImportSettings,
+        anchor: Option<inf_math::geo::GeoAnchor>,
         name: Option<String>,
     ) -> Result<u64, String> {
         let mut guard = self.inner.lock().map_err(|e| e.to_string())?;
         let inner = guard.as_mut().ok_or("assets not initialized")?;
-        Ok(inner.queue.submit_terrain(source, settings, name))
+        Ok(inner.queue.submit_terrain(source, settings, anchor, name))
     }
 
     /// Ask an in-flight cancellable import to stop. `false` for an unknown or
