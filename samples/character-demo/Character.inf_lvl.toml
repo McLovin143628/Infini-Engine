@@ -2,7 +2,7 @@ schema_version = 24
 guid = "00000000-0000-0000-0000-000084040000"
 title = "Character Demo"
 entity_count = 4
-content_hash = "05c6b2866492ddf9"
+content_hash = "5a82e638df5090dd"
 dependencies = [
     "00000000-0000-0000-0000-0000840400a0",
     "00000000-0000-0000-0000-0000840400a4",

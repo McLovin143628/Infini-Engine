@@ -860,8 +860,18 @@ pub const TERRAIN_DEMO_SPAN: f64 = 64.0;
 
 /// The demo's analytic terrain height at world `(x, z)` — a gentle sine hill. The
 /// runtime gate probes `TerrainData::height_at` at a grid point against this.
+///
+/// **Portable trig, because this generator is byte-locked** (the P14 law).
+/// `committed_sample_matches_generators` re-runs this function and asserts the
+/// result is byte-equal to the committed `TerrainDemo.inf_lvl`. With `std`'s
+/// `sin`/`cos` that is an assertion about *the machine running the test*: the
+/// platform libm is entitled to disagree in the last ulp, so the byte-lock was
+/// green where it was blessed and a latent red on any target whose libm rounds
+/// differently. `psin64`/`pcos64` use only IEEE add/mul/floor, which makes the
+/// lock mean what it says. (~1e-7 accuracy here against the gate's 1e-3 probe
+/// tolerance — four orders of margin.)
 pub fn terrain_demo_height(x: f64, z: f64) -> f64 {
-    6.0 * (x * 0.08).sin() * (z * 0.08).cos()
+    6.0 * inf_math::psin64(x * 0.08) * inf_math::pcos64(z * 0.08)
 }
 
 /// Build the demo's [`inf_pcg::PcgDocument`]: one layer, one rule scattering on a
@@ -1160,8 +1170,14 @@ pub const CHAR_START_Y: f64 = CHAR_STAND;
 /// X (flat in Z along the character's z=0 path). `height(0,0) == 0`, so the
 /// character starts grounded at `CHAR_START_Y`. The runtime gate probes
 /// `TerrainData::height_at` + the character's Y against this.
+///
+/// **Portable trig** for the same reason as [`terrain_demo_height`]: the
+/// committed `Character.inf_lvl` is byte-locked against this function, and the
+/// character-demo gate compares a PIE trace to a shipping one on ground heights
+/// derived from it. Both claims are about two machines agreeing, which is
+/// exactly what `std`'s libm does not promise.
 pub fn character_demo_height(x: f64, z: f64) -> f64 {
-    3.0 * (x * 0.08).sin() * (z * 0.08).cos()
+    3.0 * inf_math::psin64(x * 0.08) * inf_math::pcos64(z * 0.08)
 }
 
 /// A procedural 6-joint humanoid-ish skeleton (honest placeholder): hips (root) →

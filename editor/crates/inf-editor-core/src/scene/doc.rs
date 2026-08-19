@@ -3496,7 +3496,15 @@ fn attach_kind(world: &mut EcsWorld, entity: Entity, kind: SpawnKind) {
             terrain
                 .data
                 .write_region(glam::DVec2::ZERO, glam::DVec2::splat(span), |x, z| {
-                    2.0 * (x * 0.1).sin() * (z * 0.1).cos()
+                    // **Portable trig, because this writes COMMITTED content**
+                    // (the P14 law). These samples land in the author's
+                    // `Terrain` component, are serialized into their `.inf_lvl`
+                    // and are cooked into a pack — so the heights a level holds
+                    // must not depend on which machine spawned the terrain.
+                    // `std`'s `sin`/`cos` route through the platform libm and
+                    // are entitled to disagree in the last ulp; `psin64`/
+                    // `pcos64` are IEEE add/mul/floor only.
+                    2.0 * inf_math::psin64(x * 0.1) * inf_math::pcos64(z * 0.1)
                 });
             w.entity_mut(entity).insert(terrain);
         }
