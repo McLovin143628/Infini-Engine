@@ -398,7 +398,7 @@ fn thread_main(
     };
     tracing::info!("inf-viewport: CAMetalLayer + engine renderer up");
 
-    let camera = EditorCamera::default();
+    let mut camera = EditorCamera::default();
     // A default 2D camera; macOS input isn't wired yet, so 2D mode renders a
     // static top-down view (pan/zoom arrive with the macOS hardware pass).
     let camera_2d = Camera2D::default();
