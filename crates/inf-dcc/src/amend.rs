@@ -441,16 +441,24 @@ pub fn amend_shape_ok(old: &Op, new: &Op) -> Result<(), AmendError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Topology {
     verts: Vec<VertId>,
-    /// `(half, origin, twin, next, face)` for every live half-edge.
-    halfs: Vec<(
-        HalfId,
-        Option<VertId>,
-        Option<HalfId>,
-        Option<HalfId>,
-        Option<FaceId>,
-    )>,
+    /// Every live half-edge's identity and its four links.
+    halfs: Vec<HalfLinks>,
     /// `(face, its first half-edge)` for every live face.
     faces: Vec<(FaceId, Option<HalfId>)>,
+}
+
+/// One half-edge's identity and the four links that make it structure.
+///
+/// A named struct rather than a five-tuple: the tuple was the same five
+/// `Option`s in a row, and a reader (or a `swap` in a refactor) could not tell
+/// `twin` from `next` by type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HalfLinks {
+    pub half: HalfId,
+    pub origin: Option<VertId>,
+    pub twin: Option<HalfId>,
+    pub next: Option<HalfId>,
+    pub face: Option<FaceId>,
 }
 
 /// The mesh's structure, with its geometry removed. See [`Topology`].
@@ -459,14 +467,12 @@ pub fn topology(mesh: &Mesh) -> Topology {
         verts: mesh.vert_ids().collect(),
         halfs: mesh
             .half_ids()
-            .map(|h| {
-                (
-                    h,
-                    mesh.origin(h),
-                    mesh.twin(h),
-                    mesh.next(h),
-                    mesh.face_of(h).flatten(),
-                )
+            .map(|h| HalfLinks {
+                half: h,
+                origin: mesh.origin(h),
+                twin: mesh.twin(h),
+                next: mesh.next(h),
+                face: mesh.face_of(h).flatten(),
             })
             .collect(),
         faces: mesh.face_ids().map(|f| (f, mesh.face_half(f))).collect(),

@@ -509,31 +509,25 @@ fn repair_non_manifold(
     // ── stage 3: split what is left ────────────────────────────────────────
     let mut directed: BTreeMap<(usize, usize), usize> = BTreeMap::new();
     let mut splits = 0usize;
-    for fi in 0..faces.len() {
-        let n = faces[fi].verts.len();
-        let mut conflict = false;
-        for i in 0..n {
-            let key = (faces[fi].verts[i], faces[fi].verts[(i + 1) % n]);
-            if directed.contains_key(&key) {
-                conflict = true;
-                break;
-            }
-        }
+    for (fi, face) in faces.iter_mut().enumerate() {
+        let n = face.verts.len();
+        let conflict =
+            (0..n).any(|i| directed.contains_key(&(face.verts[i], face.verts[(i + 1) % n])));
         if conflict {
             // Private copies of EVERY vertex of the offending face. Copying only
             // the conflicting edge's endpoints leaves the face's other corners
             // shared, which re-introduces a bowtie at them — measured, and this
             // is the version that lands manifold in one pass.
             for k in 0..n {
-                let src = faces[fi].verts[k];
+                let src = face.verts[k];
                 positions.push(positions[src]);
                 skins.push(skins[src]);
-                faces[fi].verts[k] = positions.len() - 1;
+                face.verts[k] = positions.len() - 1;
             }
             splits += 1;
         }
         for i in 0..n {
-            let key = (faces[fi].verts[i], faces[fi].verts[(i + 1) % n]);
+            let key = (face.verts[i], face.verts[(i + 1) % n]);
             if directed.insert(key, fi).is_some() {
                 // Unreachable: a face whose vertices are all private cannot
                 // share a directed edge with anything. Kept because "unreachable"

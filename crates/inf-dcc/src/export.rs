@@ -299,9 +299,10 @@ pub fn to_mesh_asset_sourced(
     let mut submeshes = Vec::with_capacity(by_slot.len());
     let mut all_sources: Vec<Vec<HalfId>> = Vec::with_capacity(by_slot.len());
     for (slot, faces) in by_slot {
-        let (vertices, indices, skin, fallbacks, _sources, authored) =
-            build_submesh(mesh, &faces, opts, &mut report, &mut emitted, &mut written);
-        report.fan_fallbacks += fallbacks;
+        let built = build_submesh(mesh, &faces, opts, &mut report, &mut emitted, &mut written);
+        let (vertices, indices, skin, authored) =
+            (built.vertices, built.indices, built.skin, built.corners);
+        report.fan_fallbacks += built.fallbacks;
         if indices.is_empty() {
             continue;
         }
@@ -469,6 +470,24 @@ fn finite_or<const N: usize>(v: [f32; N], fill: f32) -> [f32; N] {
     v.map(|c| if c.is_finite() { c } else { fill })
 }
 
+/// One submesh, as `build_submesh` produces it.
+///
+/// A named struct rather than a six-tuple: the tuple had two `Vec`s of ids in a
+/// row and two counts, and nothing but position told a reader which was which.
+struct BuiltSubmesh {
+    vertices: Vec<MeshVertex>,
+    indices: Vec<u32>,
+    skin: Vec<inf_mesh::VertexSkin>,
+    /// Faces that had no valid ear and fell back to a fan.
+    fallbacks: usize,
+    /// The kernel CORNER each written vertex was interned from (Wave D).
+    ///
+    /// Its *vertex* is `mesh.origin(corner)` and is not carried separately: the
+    /// skin stream is built inside this function and nothing outside it has
+    /// wanted the vertex since.
+    corners: Vec<HalfId>,
+}
+
 fn build_submesh(
     mesh: &Mesh,
     faces: &[FaceId],
@@ -476,14 +495,7 @@ fn build_submesh(
     report: &mut ExportReport,
     emitted: &mut BTreeSet<(VertId, VertId)>,
     written: &mut BTreeSet<([u32; 3], VertId)>,
-) -> (
-    Vec<MeshVertex>,
-    Vec<u32>,
-    Vec<inf_mesh::VertexSkin>,
-    usize,
-    Vec<VertId>,
-    Vec<HalfId>,
-) {
+) -> BuiltSubmesh {
     let mut key_to_index: BTreeMap<CornerKey, u32> = BTreeMap::new();
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
@@ -662,7 +674,13 @@ fn build_submesh(
         Vec::new()
     };
     debug_assert_eq!(authored.len(), sources.len());
-    (vertices, indices, skin, fallbacks, sources, authored)
+    BuiltSubmesh {
+        vertices,
+        indices,
+        skin,
+        fallbacks,
+        corners: authored,
+    }
 }
 
 /// **The normal this writer emits for one corner, under a policy** — the

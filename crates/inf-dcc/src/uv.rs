@@ -918,7 +918,11 @@ pub fn unwrap(mesh: &Mesh) -> Result<Unwrapped, OpError> {
                 };
                 let (a, b, c) = (uv(&t[0]), uv(&t[1]), uv(&t[2]));
                 let area2 = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
-                !(area2.abs() > 0.0)
+                // `== 0.0` and not `!(> 0.0)`: an f32 NaN is neither, and a
+                // triangle whose UVs are non-finite is a different fault with a
+                // different counter (`ExportReport::non_finite_written`). This
+                // one counts triangles that are FLAT, which is exactly `== 0`.
+                area2.abs() == 0.0
             })
             .count();
     }

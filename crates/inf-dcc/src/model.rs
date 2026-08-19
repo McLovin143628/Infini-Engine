@@ -897,7 +897,7 @@ pub(crate) fn bevel_edges(
             value: amount,
         });
     }
-    if segments < 1 || segments > MAX_BEVEL_SEGMENTS {
+    if !(1..=MAX_BEVEL_SEGMENTS).contains(&segments) {
         return Err(OpError::CountOutOfRange {
             what: "a bevel segment count",
             value: segments,

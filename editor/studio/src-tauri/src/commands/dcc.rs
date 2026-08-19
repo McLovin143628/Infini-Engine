@@ -570,8 +570,7 @@ pub async fn dcc_new(
             }
             .to_string()
         });
-    let (id, report) =
-        assets.with_project(|proj| dcc::create_mesh_asset(proj, &name, &mesh).map_err(|e| e))?;
+    let (id, report) = assets.with_project(|proj| dcc::create_mesh_asset(proj, &name, &mesh))?;
     // The writer's advisories are surfaced, not dropped, even though a generated
     // primitive cannot normally trip one — "cannot normally" is the class of
     // claim this codebase keeps paying for.

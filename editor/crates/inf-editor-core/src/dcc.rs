@@ -1621,15 +1621,15 @@ pub fn merge_clusters(
         i
     }
     let tol2 = tolerance * tolerance;
-    for i in 0..n {
-        let Some(pi) = mesh.position(ids[i]) else {
-            continue;
-        };
-        for j in (i + 1)..n {
-            let Some(pj) = mesh.position(ids[j]) else {
-                continue;
-            };
-            if (pi - pj).length_squared() <= tol2 {
+    // Positions resolved ONCE, up front: the pairwise loop below reads each of
+    // them `n` times, and a vertex whose position is missing must be skipped in
+    // both halves consistently rather than re-asked about.
+    let places: Vec<Option<DVec3>> = ids.iter().map(|&v| mesh.position(v)).collect();
+    for (i, pi) in places.iter().enumerate() {
+        let Some(pi) = pi else { continue };
+        for (j, pj) in places.iter().enumerate().skip(i + 1) {
+            let Some(pj) = pj else { continue };
+            if (*pi - *pj).length_squared() <= tol2 {
                 let (a, b) = (find(&mut parent, i), find(&mut parent, j));
                 if a != b {
                     // Union toward the LOWER root, so the forest is a pure
@@ -1641,9 +1641,9 @@ pub fn merge_clusters(
     }
     let mut groups: std::collections::BTreeMap<usize, Vec<VertId>> =
         std::collections::BTreeMap::new();
-    for i in 0..n {
+    for (i, &v) in ids.iter().enumerate() {
         let r = find(&mut parent, i);
-        groups.entry(r).or_default().push(ids[i]);
+        groups.entry(r).or_default().push(v);
     }
     Ok(groups.into_values().filter(|g| g.len() > 1).collect())
 }
