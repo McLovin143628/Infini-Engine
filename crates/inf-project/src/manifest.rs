@@ -31,7 +31,17 @@ pub struct ProjectManifest {
     /// Content root relative to the project (default `"Content"`).
     #[serde(default = "default_content_dir")]
     pub content_dir: String,
-    /// Levels root relative to the project (default `"Levels"`).
+    /// Levels root relative to the **content root** (default `"Levels"`), so the
+    /// resolved directory is `<root>/<content_dir>/<levels_dir>` — see
+    /// [`crate::Project::levels_root`] for the ruling and its one migration.
+    ///
+    /// **This field's bytes did not change when the ruling landed, only what they
+    /// resolve to.** A pre-ruling `inf.toml` says `levels_dir = "Levels"` and a
+    /// post-ruling one says the same thing; the manifest schema therefore does
+    /// **not** move, and a project written by an older engine opens without a
+    /// migration. What moves is the directory the engine points at, and the
+    /// content an author already has under `<root>/Levels/` is what the cook's
+    /// `stranded levels` advisory is for.
     #[serde(default = "default_levels_dir")]
     pub levels_dir: String,
 }

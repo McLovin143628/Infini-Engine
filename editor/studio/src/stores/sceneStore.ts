@@ -300,7 +300,10 @@ export const useSceneStore = create<SceneState>((set, get) => ({
     }
     if (!defaultPath) {
       const proj = useProjectStore.getState().current;
-      if (proj) defaultPath = `${proj.root}/${proj.levels_dir}`;
+      // IB-7: `levels_dir` is relative to the CONTENT root, not the project
+      // root. Seeding the dialog at `<root>/Levels` pointed authors at a
+      // directory the cook never opens.
+      if (proj) defaultPath = `${proj.root}/${proj.content_dir}/${proj.levels_dir}`;
     }
     const path = await save({
       title: "Save Current Level As",

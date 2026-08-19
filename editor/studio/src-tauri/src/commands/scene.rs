@@ -856,11 +856,42 @@ fn data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir)
 }
 
-/// Resolve a save path: the given one, or a default quicksave in the data dir.
+/// **Where a Save with no path writes** — inside the open project.
+///
+/// # The escape this closes (island phase, IB-7)
+///
+/// It used to be `<app_data>/quicksave.inf_lvl`, unconditionally. That put a
+/// level the author had just made **outside their project entirely**: not in the
+/// content root, so the asset database never saw it, the cook never packed it and
+/// the Content Drawer never showed it. Combined with templates that scaffolded
+/// their boot scene into a directory the cook does not open, there was no guided
+/// route at all from "new project" to "shippable build" — which is what the
+/// AAA-readiness certification measured and called a dead end.
+///
+/// So the fallback is now `<project>/Content/Levels/quicksave.inf_lvl`: the same
+/// directory `inf new` scaffolds a boot scene into, and therefore a save that is
+/// *already* part of the build.
+///
+/// **The app-data path survives only for a session with no project open** —
+/// the editor can be launched onto the start screen and a scratch document
+/// edited before anything is opened, and refusing to save that would be worse
+/// than saving it somewhere plain. The crash-recovery file is unaffected and
+/// stays in app-data by design: it is session state, not content.
+fn quicksave_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    if let Some(project) = app.try_state::<crate::commands::ProjectState>() {
+        if let Some(levels) = project.current_levels_root() {
+            std::fs::create_dir_all(&levels).map_err(|e| e.to_string())?;
+            return Ok(levels.join("quicksave.inf_lvl"));
+        }
+    }
+    Ok(data_dir(app)?.join("quicksave.inf_lvl"))
+}
+
+/// Resolve a save path: the given one, or the [`quicksave_path`] default.
 fn resolve_path(app: &AppHandle, path: Option<String>) -> Result<std::path::PathBuf, String> {
     match path {
         Some(p) if !p.is_empty() => Ok(std::path::PathBuf::from(p)),
-        _ => Ok(data_dir(app)?.join("quicksave.inf_lvl")),
+        _ => quicksave_path(app),
     }
 }
 
@@ -970,7 +1001,7 @@ pub async fn scene_save(
         Some(p) if !p.is_empty() => Some(std::path::PathBuf::from(p)),
         _ => None,
     };
-    let quicksave = data_dir(&app)?.join("quicksave.inf_lvl");
+    let quicksave = quicksave_path(&app)?;
     let (target, new_current) = {
         let current = state.current_level_path.lock().map_err(|e| e.to_string())?;
         resolve_save_target(explicit.as_deref(), current.as_deref(), &quicksave)

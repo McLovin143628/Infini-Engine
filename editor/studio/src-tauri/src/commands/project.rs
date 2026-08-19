@@ -39,6 +39,19 @@ impl ProjectState {
             .ok()
             .and_then(|guard| guard.as_ref().map(|p| p.content_root()))
     }
+
+    /// The open project's levels root (`<project>/Content/Levels`), if any.
+    ///
+    /// One reader: `scene_save`'s no-path fallback, which used to write a level
+    /// into app-data — outside the project, invisible to the asset database and
+    /// to the cook. See `commands::scene::quicksave_path` and the IB-7 ruling on
+    /// [`inf_project::Project::levels_root`].
+    pub fn current_levels_root(&self) -> Option<PathBuf> {
+        self.current
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|p| p.levels_root()))
+    }
 }
 
 fn info(p: &Project) -> ProjectInfoDto {

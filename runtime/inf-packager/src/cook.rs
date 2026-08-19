@@ -1415,6 +1415,13 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
         // unbootable build and reported green.
         blocking.push("no levels in cook — the build has no boot scene".into());
     }
+    // IB-7's migration. A project scaffolded before levels became content has its
+    // levels at `<root>/Levels/`, which the cook does not open — so the message
+    // above would be the whole story, and the whole story would be wrong. Named
+    // whenever the stranded directory holds levels, blocking or not: a project
+    // that has *some* levels under `Content/` and an older one stranded outside
+    // is the case where a silent skip ships the wrong boot scene.
+    warnings.extend(stranded_levels(&project));
     // Every blocking advisory is also a warning, so a caller that reads only
     // `warnings` still sees everything (and the existing arms keep working).
     warnings.extend(blocking.iter().cloned());
@@ -1597,6 +1604,70 @@ pub fn sub_threshold_advisory(guid: AssetId, name: &str, triangles: usize, min: 
          PLACEHOLDER CUBE (the editor derives from one triangle, so it looks correct while you \
          author it). Lower [vgeom] min_triangles for this build, or merge the mesh into a \
          denser one."
+    )
+}
+
+/// **Levels stranded outside the content root** — the island phase's IB-7
+/// migration advisory.
+///
+/// Until the ruling, `inf new` scaffolded a project's boot scene into
+/// `<root>/Levels/`. The cook opens `<root>/Content/` and nothing else, so all
+/// four templates produced a project that refused to cook with *"no levels in
+/// cook — the build has no boot scene"* — a message that named the symptom and
+/// not one word of the cause. Levels now live under `Content/Levels/`, and the
+/// projects that already exist do not move themselves.
+///
+/// Reported as a warning rather than a blocking advisory **on purpose**: a
+/// stranded level does not make a pack unshippable, it makes it *incomplete*,
+/// and the blocking answer is already carried by the empty-levels case when it
+/// applies. What this adds is the sentence that turns a mystery into a `mv`.
+///
+/// Pure over the project (no asset database), so the trigger and the wording are
+/// unit-testable without a cook — the `sub_threshold_advisory` precedent.
+fn stranded_levels(project: &Project) -> Vec<String> {
+    let legacy = project.legacy_levels_root();
+    // A project whose `levels_dir` resolves to the same place twice (an author
+    // who set `levels_dir = "."`, say) is not stranded — it is already correct,
+    // and saying otherwise would be a permanent false alarm.
+    if legacy == project.levels_root() {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(&legacy) else {
+        return Vec::new();
+    };
+    // BTreeSet: the advisory's file list is part of its text, and a directory
+    // walk is not ordered. A cook's output is compared byte-for-byte by
+    // `cook_determinism`, so an unsorted list here is a flaky gate later.
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "inf_lvl") {
+            if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
+                names.insert(n.to_string());
+            }
+        }
+    }
+    if names.is_empty() {
+        return Vec::new();
+    }
+    vec![stranded_levels_advisory(&legacy, &project.levels_root(), &names)]
+}
+
+/// The wording of [`stranded_levels`], pure so it can be pinned.
+pub fn stranded_levels_advisory(
+    legacy: &Path,
+    levels_root: &Path,
+    names: &BTreeSet<String>,
+) -> String {
+    let list: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    format!(
+        "{} level(s) sit in {}, which is OUTSIDE the content root and is therefore not cooked \
+         and not visible to the asset database: {}. Levels are content — move them (with their \
+         .inf_lvl.toml sidecars) into {} and cook again.",
+        names.len(),
+        legacy.display(),
+        list.join(", "),
+        levels_root.display()
     )
 }
 

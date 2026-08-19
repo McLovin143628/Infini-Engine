@@ -210,6 +210,62 @@ pub fn tile_range(lod: u32, min: (i32, i32), max: (i32, i32)) -> BTreeSet<TileKe
     out
 }
 
+/// **Make a world-space rectangle answerable** — page every level-0 tile that
+/// covers `[min, max]` in world XZ into `data`, from `store`.
+///
+/// # Why this exists (island phase, IB-1)
+///
+/// Residency is a *view-dependent* policy everywhere else in this engine: the
+/// viewport and the player each compute wants from a camera or a streaming
+/// source, and Ring 0 only executes them. There is one caller that is neither,
+/// and it is the one a 50 km² world depends on most — **procedural generation**.
+/// A scatter volume does not look at the terrain from anywhere; it asks for
+/// heights over a *known rectangle*, once, and bakes the answer. Before this door
+/// it had no way to ask a cold store anything, so a scatter over an asset-backed
+/// terrain evaluated against `Some(0.0)`: measured at **929 of 929 instances at
+/// exactly sea level**, with a different instance count from the same graph
+/// because the slope and height masks were reading a plane.
+///
+/// # It is a want set, not a policy
+///
+/// The rectangle is the caller's; the arithmetic is here so that the two hosts
+/// cannot each round it differently. Level 0 only, deliberately: PCG places
+/// content on the ground an author authored, and a coarse pyramid level is a
+/// *rendering* approximation of that ground. Reading LOD 2 would put a tree
+/// somewhere no player will ever stand.
+///
+/// **Additive** ([`TerrainData::request_tiles`]): nothing is evicted, an already
+/// resident tile is never re-read over live edits, and a tile the store does not
+/// have is reported rather than invented. So calling this over a terrain that is
+/// already fully resident — an *authored*, inline-tile terrain — is a no-op, and
+/// the authored and streamed paths converge on one answer instead of two.
+///
+/// The caller is responsible for `data` already having the store's grid geometry
+/// (`tile_resolution`, `meters_per_sample`): a `TerrainData` configured
+/// differently from the asset it is paging from would place every tile it loaded
+/// at the wrong world coordinate. `TerrainData::insert_resident` does not check
+/// this and cannot — the store has no opinion about the grid it is being read
+/// into.
+pub fn page_region<S: TileStore + ?Sized>(
+    data: &mut TerrainData,
+    store: &S,
+    min: glam::DVec2,
+    max: glam::DVec2,
+) -> ResidencyReport {
+    let (min, max) = (min.min(max), min.max(max));
+    // Non-finite input is a refusal, not a panic and not a full page-in: the
+    // rectangle comes from a `PcgVolume`'s authored extent, `f64::NAN.floor() as
+    // i32` is 0 in Rust, and a silent (0,0)..(0,0) would look like a working
+    // scatter over one tile. NaN at doors (the standing law).
+    if !min.is_finite() || !max.is_finite() {
+        return ResidencyReport::default();
+    }
+    let c0 = data.tile_coord_of(min.x, min.y);
+    let c1 = data.tile_coord_of(max.x, max.y);
+    let wants = tile_range(0, c0, c1);
+    data.request_tiles(&wants, store)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -739,8 +739,10 @@ export default function WorldSettingsPanel() {
             </PropertyRow>
             <PropertyRow label="Levels">
               <ReadOnly>
+                {/* IB-7: levels_dir is relative to the content root, so show the
+                    path an author can actually navigate to. */}
                 <span className="font-mono text-[11px] text-(--ink-text-dim)">
-                  {project.levels_dir}
+                  {project.content_dir}/{project.levels_dir}
                 </span>
               </ReadOnly>
             </PropertyRow>

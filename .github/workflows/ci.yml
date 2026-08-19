@@ -153,16 +153,24 @@ jobs:
           [ "$RUNNER_OS" = "Windows" ] && EXE=".exe"
           # Build the CLI + player once (debug; reuses this job's target dir/cache).
           cargo build -p inf-cli -p inf-player
-          # Scaffold a throwaway project from the committed platformer sample.
-          proj="ci-platformer"
-          rm -rf "$proj"
-          mkdir -p "$proj/Content"
-          printf 'schema_version = 1\nname = "CI Platformer"\nengine_version = "0.1.0"\ntemplate = "2d-platformer"\n' > "$proj/inf.toml"
-          cp samples/platformer-2d/Platformer.inf_lvl samples/platformer-2d/Coyote.inf_act "$proj/Content/"
-          # Cook a shippable pack, then run it headless — the make→cook→play gate.
-          "./target/debug/inf$EXE" cook --project "$proj" --out "$proj/Build"
-          "./target/debug/inf-player$EXE" --pack "$proj/Build" --headless --run-frames 300 --assert-exit
-          rm -rf "$proj"
+          # THE REAL FIRST-RUN PATH (island phase, IB-7). This used to hand-write
+          # an inf.toml and copy a committed sample into Content/ — which is why
+          # CI stayed green through the whole period in which all four `inf new`
+          # templates produced a project `inf cook` refused. `inf new` is the
+          # first command anyone runs; it is now the first command this runs.
+          rm -rf ci-first-run
+          mkdir -p ci-first-run
+          # "<project name>:<template slug>" — the names avoid '.' because the
+          # scaffold sanitizes it out of the directory name (hybrid-2.5d would
+          # land in hybrid-2-5d and the cook path below would miss it).
+          for pair in Blank:blank-3d Platformer:2d-platformer FirstPerson:first-person Hybrid:hybrid-2.5d; do
+            name="${pair%%:*}"
+            slug="${pair##*:}"
+            "./target/debug/inf$EXE" new "$name" --template "$slug" --dir ci-first-run
+            "./target/debug/inf$EXE" cook --project "ci-first-run/$name" --out "ci-first-run/$name/Build"
+            "./target/debug/inf-player$EXE" --pack "ci-first-run/$name/Build" --headless --run-frames 300 --assert-exit
+          done
+          rm -rf ci-first-run
 
   wasm-check:
     name: Web player (wasm32) + Android (best-effort)
