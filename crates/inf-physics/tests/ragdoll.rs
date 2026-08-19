@@ -367,3 +367,143 @@ fn ragdoll_spawns_and_settles_without_exploding() {
         assert!(p.length() < 100.0, "a ragdoll body flew away: {p:?}");
     }
 }
+
+// ── The persisted-versus-spawned ragdoll (island phase, IB-10) ──────────────
+
+/// Spawn `parts` into a fresh world, optionally stripping the two P29.6
+/// collision fixes the way a **persisted** ragdoll strips them.
+///
+/// * `contacts` — leave `JointDesc3D::contacts` alone (`false`, the spawned
+///   path) or force it back to `true` (what a `Joint3D` with no such field
+///   produces).
+/// * `layers` — keep `ragdoll_layers()` or reset to the engine default (what a
+///   sample generator that never writes `collision_memberships` produces).
+fn spawn_variant(
+    parts: &[inf_physics::ragdoll::RagdollPart],
+    contacts: bool,
+    layers: bool,
+) -> (PhysicsWorld3D, Vec<inf_physics::d3::BodyId3D>) {
+    let mut world = PhysicsWorld3D::new(DVec3::new(0.0, -9.81, 0.0));
+    let floor = world.add_body(
+        BodyKind3D::Static,
+        DVec3::new(0.0, -0.5, 0.0),
+        glam::DQuat::IDENTITY,
+    );
+    world.add_collider(
+        floor,
+        inf_physics::d3::ColliderDesc3D::new(ColliderShape3D::Box {
+            half_extents: DVec3::new(20.0, 0.5, 20.0),
+        }),
+    );
+    let mut bodies = Vec::with_capacity(parts.len());
+    for p in parts {
+        let b = world.add_body(p.body.kind, p.position, p.rotation);
+        let mut c = p.collider.clone();
+        if !layers {
+            c = c.layers(inf_physics::CollisionLayers::default());
+        }
+        world.add_collider(b, c);
+        bodies.push(b);
+    }
+    for (i, p) in parts.iter().enumerate() {
+        if let Some(j) = &p.joint {
+            let mut desc = j.desc;
+            if contacts {
+                desc.contacts = true;
+            }
+            world
+                .add_joint(bodies[j.parent], bodies[i], desc)
+                .expect("ragdoll joint should build");
+        }
+    }
+    (world, bodies)
+}
+
+/// The greatest distance any limb of one variant ends from the same limb of the
+/// other, after `steps` fixed steps — the "are these two physically the same
+/// ragdoll" measure.
+fn divergence(
+    parts: &[inf_physics::ragdoll::RagdollPart],
+    a: (bool, bool),
+    b: (bool, bool),
+    steps: usize,
+) -> f64 {
+    let (mut wa, ba) = spawn_variant(parts, a.0, a.1);
+    let (mut wb, bb) = spawn_variant(parts, b.0, b.1);
+    for _ in 0..steps {
+        wa.step(1.0 / 60.0);
+        wb.step(1.0 / 60.0);
+    }
+    ba.iter()
+        .zip(bb.iter())
+        .map(|(x, y)| {
+            let (px, py) = (
+                wa.body_translation(*x).unwrap(),
+                wb.body_translation(*y).unwrap(),
+            );
+            (px - py).length()
+        })
+        .fold(0.0f64, f64::max)
+}
+
+/// **Which of the two P29.6 collision fixes does a persisted ragdoll actually
+/// need?** — the measurement the island's schema window turns on.
+///
+/// P29's disposition table row 12 defers *"`Joint3D` has no `contacts` and
+/// `Collider3D` no `layers`"* to the island's schema window, on the grounds that
+/// "the same builder produces two physically different ragdolls depending on
+/// whether it is spawned or saved". Two things about that sentence are worth
+/// checking before spending a schema rung on it, and this arm checks both:
+///
+/// 1. **`Collider3D` DOES carry layers.** It has had `collision_memberships` and
+///    `collision_filter` since P12.1 — the wire is not the gap, the sample
+///    generator is. That half needs no schema move at all.
+/// 2. **Do the layers alone close it?** `ragdoll_layers()` makes every limb a
+///    member of one bit and a filter of everything except that bit, so limbs do
+///    not collide with limbs *at all* — including the jointed pairs
+///    `without_contacts()` was added for. If that subsumes the joint flag, the
+///    persisted ragdoll is already the same ragdoll once the generator writes the
+///    masks, and `Joint3D::contacts` is a generality feature with no measured
+///    defect behind it.
+///
+/// The numbers are printed, not described. This is the P25 law ("unmeasured
+/// prescriptions can be backwards") applied to a schema decision.
+#[test]
+fn the_persisted_ragdolls_two_missing_fixes_are_not_equally_load_bearing() {
+    let parts = build_ragdoll(&demo_skeleton(), RagdollConfig::default());
+    const STEPS: usize = 240; // four seconds
+
+    // The reference: both fixes on — what `build_ragdoll` produces.
+    // (a) Drop ONLY the joint flag, keeping the layer mask.
+    let without_contacts_flag = divergence(&parts, (false, true), (true, true), STEPS);
+    // (b) Drop ONLY the layer mask, keeping the joint flag.
+    let without_layers = divergence(&parts, (false, true), (false, false), STEPS);
+    // (c) Drop both — the ragdoll `samples::physics_playground_scene` persists
+    //     today, before this wave.
+    let persisted_today = divergence(&parts, (false, true), (true, false), STEPS);
+
+    eprintln!(
+        "IB-10 ragdoll divergence after {STEPS} steps (max limb displacement vs \
+         the spawned rig):\n  joint `contacts` dropped, layers kept : {without_contacts_flag:.6} m\
+         \n  layers dropped, joint `contacts` kept : {without_layers:.6} m\
+         \n  BOTH dropped (what is persisted today): {persisted_today:.6} m"
+    );
+
+    // The claim the ledger makes: the persisted ragdoll is a DIFFERENT ragdoll.
+    // Asserted, so the ledger's sentence is a measurement rather than a belief.
+    assert!(
+        persisted_today > 1e-6,
+        "the persisted ragdoll is bit-identical to the spawned one, so P29's \
+         disposition row 12 describes a defect that does not exist"
+    );
+
+    // …and the finding: the LAYER mask is what carries it. If this ever fails,
+    // the joint flag matters independently and `Joint3D` owes a `contacts`
+    // field — rewrite this arm and take the expensive schema rung.
+    assert!(
+        without_contacts_flag <= without_layers,
+        "dropping the joint `contacts` flag ({without_contacts_flag:.6} m) hurt \
+         MORE than dropping the layer mask ({without_layers:.6} m), so the two \
+         fixes are not ordered the way this wave assumed"
+    );
+}

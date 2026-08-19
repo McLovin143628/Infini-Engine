@@ -2536,6 +2536,24 @@ pub fn physics_playground_scene() -> SceneDoc {
             }
         );
         // The capsule spanning the bone (build_ragdoll always emits a Capsule).
+        //
+        // **The collision layers ride along** (island phase, IB-10). They did
+        // not, and `..Default::default()` quietly reset them to "member of every
+        // layer, collides with every layer" — so the *persisted* ragdoll got
+        // P29.6's anchor and density fixes and neither of its collision ones. A
+        // ragdoll's limb capsules overlap by construction (adjacent bones share
+        // an endpoint), so limbs that push each other apart are a permanent
+        // depenetration force inside the body: measured on the P29.6 course, a
+        // settled pelvis climbed 14 cm per fixed step and rose ten metres.
+        //
+        // MEASURED HERE, and it decided this wave's schema window:
+        // `inf-physics`'s `the_persisted_ragdolls_two_missing_fixes_are_not_equally_load_bearing`
+        // reports **1.339 m** of divergence from dropping the layer mask and
+        // **0.000000 m** from dropping `JointDesc3D::contacts` while the mask is
+        // kept. The mask subsumes the flag — limbs that cannot collide at all do
+        // not need contacts disabled between the jointed pairs — so `Joint3D`
+        // does NOT owe a `contacts` field, and the whole of this gap closes in
+        // the generator with no schema move.
         if let inf_physics::ColliderShape3D::Capsule {
             half_height,
             radius,
@@ -2550,6 +2568,8 @@ pub fn physics_playground_scene() -> SceneDoc {
                     radius,
                     density: part.collider.density,
                     friction: part.collider.friction,
+                    collision_memberships: part.collider.layers.memberships,
+                    collision_filter: part.collider.layers.filter,
                     ..Default::default()
                 }
             );
