@@ -24,14 +24,20 @@ import { Copy, Eye, EyeOff, PencilLine, SquarePen, Trash2, Crosshair } from "luc
 import type { EntityEditorsDto } from "../bindings/EntityEditorsDto";
 import type { ContextMenuEntry } from "../components/ContextMenu";
 import { executeCommand, getCommand } from "./commands";
-import { commonRoutes, noEditorReason } from "./objectEditors";
+import { commonRoutes, noEditorReason, type ObjectEditorRoute } from "./objectEditors";
 
 /** Callbacks the host panel supplies for the things it owns. */
 export interface ObjectMenuActions {
   /** Open the object's editors as a tab group (the double-click action). */
   open: (guid: string) => void;
-  /** Open one specific editor route for the selection. */
-  openRoute: (routeId: string, guids: string[]) => void;
+  /**
+   * Open one specific editor route for the selection.
+   *
+   * Typed as the route union rather than `string`, so a caller cannot pass an
+   * id the resolver has never heard of — the alternative was an `as` cast at
+   * every call site, which is a type assertion pretending to be a type.
+   */
+  openRoute: (routeId: ObjectEditorRoute["id"], guids: string[]) => void;
   /** Start inline rename on `guid`. */
   rename: (guid: string) => void;
   /** Toggle visibility of `guid`. */

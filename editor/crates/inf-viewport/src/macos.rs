@@ -86,6 +86,10 @@ enum Cmd {
     SetGizmo(GizmoMode),
     SetGizmoSpace(GizmoSpace),
     SetSnap3D(SnapSettings),
+    /// Replace the pointer/camera feel from the editor preferences (Wave E).
+    SetInteraction(InteractionSettings),
+    /// Frame the current selection (the `F` key's action, from a DOM caller).
+    FocusSelection,
     SetViewMode(ViewMode),
     /// Point terrain streaming at a project's content root (P16.4a).
     SetContentRoot(Option<std::path::PathBuf>),
@@ -214,6 +218,20 @@ impl ViewportHandle {
     /// Replace the 3D transform-gizmo snap increments (Wave 2).
     pub fn set_snap_3d(&self, snap: SnapSettings) {
         let _ = self.tx.send(Cmd::SetSnap3D(snap));
+    }
+
+    /// Replace the pointer/camera feel from the editor preferences (Wave E).
+    /// **Accepted and stored, but macOS has no mouse input wired at all** — the
+    /// thresholds discriminate a gesture this platform never delivers. Kept in
+    /// lockstep with win32 because Ring 2 calls it unconditionally and the
+    /// `viewport_pump_mirror` gate says so.
+    pub fn set_interaction(&self, settings: InteractionSettings) {
+        let _ = self.tx.send(Cmd::SetInteraction(settings));
+    }
+
+    /// Frame the current selection — the `F` key's action, from a DOM caller.
+    pub fn focus_selection(&self) {
+        let _ = self.tx.send(Cmd::FocusSelection);
     }
 
     /// Set the shading view mode (Lit / Unlit / Wireframe) (R-P2). macOS input
@@ -420,6 +438,18 @@ fn thread_main(
                 Ok(Cmd::SetGizmo(m)) => host.set_gizmo_mode(m),
                 Ok(Cmd::SetGizmoSpace(s)) => host.set_gizmo_space(s),
                 Ok(Cmd::SetSnap3D(s)) => host.set_snap_3d(s),
+                Ok(Cmd::SetInteraction(s)) => {
+                    // The camera half applies; the pointer half has no input to
+                    // discriminate on this platform (macos.rs wires no mouse
+                    // messages at all — the standing gap named in `host.rs`).
+                    camera.fly_speed = s
+                        .fly_speed_mps
+                        .clamp(crate::camera::FLY_SPEED_MIN, crate::camera::FLY_SPEED_MAX);
+                }
+                Ok(Cmd::FocusSelection) => {
+                    // No focus animation on this platform yet (no input pump to
+                    // advance it); accepted so the two pumps stay mirrored.
+                }
                 Ok(Cmd::SetViewMode(m)) => host.set_view_mode(m),
                 Ok(Cmd::SetContentRoot(root)) => host.set_content_root(root),
                 Ok(Cmd::RefreshAssetIndex) => host.refresh_asset_index(),

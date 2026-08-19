@@ -97,8 +97,7 @@ export default function ViewportContextMenu() {
           dtos,
           {
             open: (g) => void openObject(g),
-            openRoute: (routeId, guids) =>
-              void openObjectEditor(routeId as "mesh" | "rig" | "blueprint" | "material", guids),
+            openRoute: (routeId, guids) => void openObjectEditor(routeId, guids),
             rename: (g) => requestRename(g),
             toggleVisible: (g) => useSceneStore.getState().toggleVisible(g),
           },

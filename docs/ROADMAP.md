@@ -22417,3 +22417,186 @@ The geo-anchor has commands and typed bindings but no World Settings panel row; 
 import doors are library code without a wizard; LAS/LiDAR, polygon interiors and oriented
 building lots, a global silhouette LOD, and 2-D nodata fill are deferred with reasons. All six
 are in the memo with their landing sites.
+
+## Editor-UX Wave E (2026-08-19) — settings, DCC routing, native-viewport interaction
+
+Answers items 4–6 of the owner's campaign mandate: *make the embedded DCC obvious and
+reachable*, *right-click and multi-select in the game viewport*, and *the preferences menu
+is not reachable today*. Three batches, ordered so the only one touching `inf-viewport`
+ran last and alone. Commits `e748e19` (A), `6f34955` + `455fdab` (B), `1be8e58` (C).
+
+### The finding that shaped the wave
+
+**None of the three items was a missing feature. All three were missing wiring**, and in
+two of the three the code that would have used it had been finished for phases:
+
+* Edit ▸ Editor Preferences… and the toolbar gear had dispatched a **handler-less
+  command since Phase 1** — the full UE menu tree is enumerated from `menuCommandDefs()`
+  and both entries fell straight through to the unhandled hook. There was no app-level
+  settings type in ANY ring; the editor's preferences were five ad-hoc `localStorage`
+  keys with no schema, no version and no corruption law, next to a `ProjectSettings`
+  that has had all three since P8.2c.
+* The Model Editor had **two doors, both inside the Content Drawer**, and neither
+  started from an object in the level. The blocker was one missing accessor:
+  `MeshRef::asset`, `SkeletalMesh::{mesh, skeleton}` are `#[reflect(ignore)]` and
+  `ActorClass` is unreflected, so the frontend had no way to learn what a selected
+  entity carries. Only `Material.asset` had ever been given an escape hatch.
+* Ctrl+click multi-select in the native viewport **has worked since Wave 2** and nothing
+  anywhere said so. What was missing was the right-click — and the window class could
+  not deliver a double-click at all.
+
+### Batch A — the preferences menu becomes a preferences file
+
+`inf_editor_core::editor_settings` is the Ring-1 owner, modelled on `project_settings`
+deliberately rather than invented: **absent is the default, corrupt is an ERROR and the
+bytes are left untouched** (C4-38), atomic write (C4-24), and the caller passes the
+directory so Ring 1 never names `app_config_dir` (the `LayoutStore` precedent). It is
+also the WIRE type — `ipc.rs` re-exports it instead of mirroring a Dto — so the file
+format and the TS bindings cannot drift apart.
+
+**LAW re-earned: NaN is not "out of range", it is "not a number".** Every comparison
+against it is false, so `clamp` lets it through untouched. `normalize` tests finiteness
+FIRST: non-finite falls back to the DEFAULT (an infinity is not "very large"), finite
+out-of-range clamps. A NaN autosave interval arms a timer with `NaN` ms; a NaN snap step
+divides the gizmo into nothing. Both halves are asserted, plus idempotence.
+
+A file written by a **newer** editor is refused by name rather than downgraded: a lossy
+write back over a richer file eats exactly the thing that must not be eaten.
+
+What applies LIVE, each with its own arm: the theme flips the document; keybinding
+overrides replace the live map (and removing an override restores the shipped default —
+only overrides are stored, so tomorrow's default chord still reaches an existing user);
+snap and foliage reach the native viewport; and **the autosave loop re-arms**. That last
+one was extracted out of `App`'s effect body into `stores/autosave.ts` precisely so "it
+applies" could be measured: at 1 s, three saves happen in three seconds where the old
+5 s period produced none.
+
+**The localStorage migration runs exactly once, recorded by its own marker key** rather
+than inferred from the settings' values — a saved file holding the defaults is
+indistinguishable from no file at all. `infinity:theme` stays as the pre-paint cache
+`main.tsx` reads before React mounts; the other three keys are removed once folded in.
+`bp:debug:name:*` is deliberately NOT migrated: it is per-document breakpoint state keyed
+by a blueprint's name, not a preference.
+
+**A refused load writes nothing** — the arm that matters, since the alternative is that
+the first launch after a typo replaces the user's preferences with defaults.
+
+Also live: Edit ▸ Project Settings… over the per-project `.infinity` family, which
+finally gives the P12.1 collision-layer IPC a UI (it had none at all); Window ▸ Audio
+Mixer, a panel registered since P12.4 and reachable from nowhere; and honest `STUB_HINTS`
+for the two settings entries that genuinely do not exist.
+
+### Batch B — the object in the level becomes a door to its editors
+
+Ring 1 gets the four accessors the P26.3b material row's justification always implied,
+plus `scene::editors`, which answers the whole question once. **`no_editor_reason` is a
+field, not an absence** (the P21 refusal law applied to UX): every alternative produces a
+worse editor — a dead menu item, an empty Model Editor, or a hidden item that teaches the
+user nothing about why a built-in cube has no mesh. The invariant *a route or a reason,
+never neither* is asserted over every kind the document can spawn, and the primitive arm
+asserts the REASON TEXT — "zero routes" is satisfied perfectly by a resolver that returns
+nothing for anything (the vacuous-check law).
+
+**THE DROP GAP IS CLOSED.** From P4 to this wave *nothing in the editor ever wrote
+`MeshRef::asset`* — only samples, migration fixtures and tests did. Dragging a mesh in
+spawned a placeholder cube named after the asset, and the ledger recorded it as a
+rendering limitation ("the viewport thread has no asset DB"). **P18.3 removed that reason
+five phases ago** and nobody noticed the write was still missing. It was one assignment.
+The payload now carries the asset KIND (`asset:<kind>:<id>:<name>`), parsed in Ring 1 so
+the Linux leg exercises it, and only a `mesh` binds — binding a texture's GUID to a
+`MeshRef` would render a missing mesh instead of an honest cube. The arm walks the whole
+path in ONE test, because each half passes alone while the feature stays broken.
+
+`graph_open_actor` gives `inf_blueprint::raise_fn` **its first Ring-2 caller**. Every
+piece of "open the blueprint OF this actor" existed and none were joined. Doc id
+`bp:<asset>` — idempotent by asset, mirroring `dcc_open` — which also retires, for actor
+graphs, the process-scoped `bp:{counter}` identity `blueprintStore` documents at length.
+`raise` only inverts lowering's IMAGE, so every handler is reported with
+`raisable`/`reason` and a class where nothing raises is a named `Err`, never a blank
+canvas.
+
+**Double-click OPENS; F2 renames.** The Content Drawer has meant *open* on double-click
+since P4, and `Actor ▸ Rename` has advertised F2 with **no handler** since Phase 1 — so
+wiring it is a net gain, not a trade. An object with nothing to open does not silently
+fall back to renaming; it says why.
+
+ONE resolver (`lib/objectEditors.ts`) and ONE menu builder (`lib/objectMenu.ts`), on the
+`assetDrop.ts` doctrine. `openBesidePanel` finally lets a caller ASK for a tab group — the
+docking substrate could always express one. A singleton panel re-opened with new params
+now adopts them; without that the blueprint canvas kept showing the first actor for ever.
+
+### Batch C — the 3D view answers a right-click and a double-click
+
+**A double-click in the 3D view did not exist at the OS level.** Windows only synthesizes
+`WM_*BUTTONDBLCLK` for classes carrying `CS_DBLCLKS`, and the class was registered with
+the default style — so a handler would have been dead code and the absence was invisible
+in the source. A gate reads the registration BLOCK, not a spelling anywhere in the file
+(the P23 law), and is mutation-verified.
+
+**The flycam's feel is the pin.** RMB capture still begins on button-DOWN. The obvious
+implementation of a context menu — wait and see whether the gesture becomes a drag before
+grabbing the mouse — puts a 250 ms dead zone at the start of every fly; the
+discrimination happens on button-UP instead, where both facts are already known. A third
+source-gate arm asserts the capture is still immediate. `is_context_click` lives in
+`camera.rs`, not `win32.rs`, for the reason the spoil rule moved there: the win32 module
+is `#[cfg(windows)]` and a predicate written in it is invisible to two of three CI legs.
+Ties go to the incumbent — a gesture exactly AT a threshold is a drag.
+
+**LAW: a per-gesture accumulator cannot borrow a per-frame one.** `right_travel` is its
+own field precisely because `mouse_dx`/`mouse_dy` are drained every frame — a slow drag
+reads zero on each of them, so every drag would have classified as a click.
+
+**Shift appends, Ctrl toggles** — `SceneDoc::select_append` rather than a second meaning
+for `additive`, which is documented and relied on as a toggle. Overloading it would make
+a shift-click across a group deselect the half already in it. A miss on empty space no
+longer clears while either modifier is held.
+
+The two gestures cross as `viewport://context-menu` and `viewport://activate`, stamped
+with the viewport id by pulled-out `stamp_*` functions so the claim is unit-testable
+without a GPU (the P23.2a precedent). An unstamped payload is dropped by the frontend's
+primary filter, so the stamp is the difference between a menu that opens and one that
+does not.
+
+`ContextMenuSurface` is the controlled half of the Phase-1 menu, split out because two
+callers cannot use a trigger wrapper: a menu positioned from an IPC event over a hole
+that has no DOM, and a menu whose items are the result of an `await`. **It owns the
+airspace guard, so the 3D view blanks for the menu's lifetime** — the standing behaviour
+for every overlay in this shell since Phase 1, and the flash-free alternatives remain the
+named Phase-2 polish item. Pinned: the guard is held for exactly the open lifetime and
+released on unmount-while-open (a leak there blanks the viewport for the session).
+
+Also closed: **the Content Drawer's hand-rolled asset menu never acquired the guard**. It
+is `position: fixed` at the cursor, so with the drawer open it opens upward across the
+hole and the native child draws over it — the menu was invisible under the 3D view and
+clicks landed in the viewport. Guard added.
+
+### What is human-verified-on-Windows rather than arm-covered
+
+CI has no window and no GPU, and `win32.rs` is `#[cfg(windows)]`, so three claims are
+labelled the way P29.6's play capture is: **the right-click menu actually appearing at
+the cursor, the double-click actually opening the Model Editor, and the flycam still
+feeling the same.** Everything reachable without a window is arm-covered — the predicate,
+the class style, the capture ordering, the id stamping, the coordinate transform, the
+overlay-guard lifetime and the whole routing resolver.
+
+### Named remainders
+
+* **The Content Drawer menu is guarded but not migrated** onto `ContextMenuSurface` — it
+  has an inline expanding submenu ("Add to Collection ▸") the surface does not model.
+* **One blueprint document at a time.** `blueprintStore` holds a single doc by its own v1
+  scope; opening a second actor's blueprint supersedes the first. `graph_open_actor`'s
+  asset-keyed ids are already ready for the multi-document store.
+* **No graph is written back into a `.inf_act`.** True of every blueprint document in
+  this editor, not just raised ones — `graph_generate`'s output has never been written to
+  disk either. The canvas says so in a banner rather than letting an author believe
+  otherwise.
+* **The "code of actor X" tab is not built.** There is no on-disk Rust for a blueprint
+  class to open; inventing a path for `graph_generate` output is a transpiler-workflow
+  decision, not a UX one. `requestOpenFile` *was* fixed to open the Code Editor panel —
+  before this wave a request to a hidden editor added an invisible tab.
+* **No marquee / rubber-band select**, and no `dcc_new` (a primitive still cannot be
+  converted to an editable mesh, and the grammar bake still has no Ring-2 door).
+* **macOS has no viewport mouse input at all**, so every gesture in batch C is
+  Windows-only until the hardware pass.
+* Keybinding rebinding ships, but conflict *resolution* is a toast rather than a dialog,
+  and the sculpt `[`/`]` listener is still outside the registry.

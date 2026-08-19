@@ -212,6 +212,10 @@ impl ViewportHandle {
     pub fn set_gizmo_mode(&self, _mode: inf_editor_core::ipc::GizmoModeDto) {}
     pub fn set_gizmo_space(&self, _space: camera::GizmoSpace) {}
     pub fn set_snap_3d(&self, _snap: camera::SnapSettings) {}
+    /// Wave E: no native viewport, so no pointer to give a feel to.
+    pub fn set_interaction(&self, _settings: camera::InteractionSettings) {}
+    /// Wave E: nothing to frame.
+    pub fn focus_selection(&self) {}
     pub fn set_view_mode(&self, _mode: inf_editor_core::ipc::ViewModeDto) {}
     pub fn set_content_root(&self, _root: Option<std::path::PathBuf>) {}
     pub fn refresh_asset_index(&self) {}
