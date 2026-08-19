@@ -143,10 +143,16 @@ pub fn tessellate(mesh: &Mesh) -> EditGeometry {
 /// # What is re-derived, and what is not
 ///
 /// * **Positions** come straight from the mesh — exact, not approximated.
-/// * **Normals** are re-accumulated over the (unchanged) index buffer,
-///   area-weighted, and renormalized. They have to be: a displaced surface with
-///   the old normals shades like the shape it used to be, which is worse than a
-///   slow frame.
+/// * **Normals** are re-derived by calling [`inf_dcc::corner_normal`] on the
+///   corner each written vertex was interned from — the **writer's own rule**,
+///   on the writer's own corners. They have to be re-derived at all because a
+///   displaced surface with the old normals shades like the shape it used to
+///   be, which is worse than a slow frame; and they have to be re-derived *that
+///   way* because a vertex-average over the index buffer is a different number
+///   on any hard-shaded mesh, where a derived normal stops at a sharp edge.
+///   (This paragraph described the vertex-average for a while after the code
+///   stopped doing it — which is the comment most likely to talk someone into
+///   putting it back.)
 /// * **UVs** are unchanged, because a position move does not move a UV.
 /// * **Tangents are KEPT**, and that is the one approximation. A tangent is only
 ///   read by normal mapping and the Model Editor's preview surface
@@ -3102,8 +3108,8 @@ impl PreviewCache {
             // can be holding is id-preserving (a stroke, a gizmo transform, a
             // weight table), so the scratch mesh has the committed mesh's
             // topology and the whole re-export was re-exporting the same
-            // connectivity. `displace` writes positions and re-accumulates
-            // normals over the unchanged index buffer instead.
+            // connectivity. `displace` writes positions and re-derives normals
+            // through the writer's own `corner_normal` instead.
             //
             // `self.get(session)` first, so the committed geometry exists and
             // this is a hit on the cache the panel already keeps. It also sets
@@ -5478,10 +5484,42 @@ mod tests {
                  the path this change replaced"
             );
 
+            // **And the PICK, at the same sizes** (audit).
+            //
+            // The wave re-carried "BVH-backed picking" unspent, on the grounds
+            // that "the per-interaction cost is dominated by tessellation, not
+            // by picking" — and the numbers it cited were all tessellation's.
+            // A prescription refused by measurement has to be refused by a
+            // measurement *of the thing prescribed* (the P25 law about
+            // inference dressed as measurement), so here it is: `pick` is a
+            // linear scan over every element, and this is what that costs at
+            // the same three sizes the drag frame is measured at.
+            let proj = projector(s.mesh(), 256);
+            let picks = 16;
+            let t = std::time::Instant::now();
+            let mut hits = 0usize;
+            for i in 0..picks {
+                // Spread across the viewport, so the measurement is not one
+                // lucky early-out repeated sixteen times.
+                let px = 8.0 + (i % 4) as f32 * 60.0;
+                let py = 8.0 + (i / 4) as f32 * 60.0;
+                for mode in [SelectMode::Vert, SelectMode::Edge, SelectMode::Face] {
+                    if pick(s.mesh(), &proj, mode, px, py).is_some() {
+                        hits += 1;
+                    }
+                }
+            }
+            let pick_ms = t.elapsed().as_secs_f64() * 1000.0 / (picks * 3) as f64;
+            assert!(
+                hits > 0,
+                "no pick hit anything at {verts} verts, so the timing is an \
+                 early-out and not a scan"
+            );
+
             println!(
                 "live-drag frame cost: {verts} verts, {} tris | tessellate \
                  {committed_ms:.2} ms | cold (warm+drag) {warm_and_drag_ms:.2} ms | \
-                 DISPLACED drag frame {drag_ms:.2} ms",
+                 DISPLACED drag frame {drag_ms:.2} ms | pick {pick_ms:.3} ms",
                 plain.indices.len() / 3
             );
             assert!(

@@ -232,3 +232,61 @@ fn export_bindings() {
     MixerBusDto::export_all(&cfg).expect("export MixerBusDto");
     MixerConfigDto::export_all(&cfg).expect("export MixerConfigDto");
 }
+
+/// **`#[ts(export)]` writes bindings where the drift job cannot see them.**
+///
+/// Wave D shipped six DTOs carrying the attribute, and `ts-rs` wrote a *second*
+/// bindings directory beside the crate — `editor/crates/inf-editor-core/bindings/`
+/// — six duplicate `.ts` files that were committed, that no consumer imports,
+/// and that go stale silently. CI's drift job is scoped to
+/// `editor/studio/src/bindings`, so it could not see them; the fix deleted them
+/// and removed the attributes, and nothing stopped the next author doing it
+/// again.
+///
+/// This is that something. The export door is `export_bindings` above and its
+/// `Config::with_out_dir`; the attribute is a second door with no address.
+#[test]
+fn no_dto_exports_itself_behind_the_harness() {
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    walk(&src, &mut files);
+    assert!(files.len() > 5, "the sweep found no sources under {src:?}");
+    let mut offenders = Vec::new();
+    for f in &files {
+        // The P22 CRLF law: normalize before searching a `.rs`.
+        let text = std::fs::read_to_string(f)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
+        // The attribute, not the words: `ts(export` catches `#[ts(export)]` and
+        // the same thing inside a longer `#[ts(export, rename = ...)]` list,
+        // without matching an ordinary argument called `export`.
+        if text.contains("ts(export") {
+            offenders.push(f.display().to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these types export themselves rather than through `export_bindings`, \
+         so their `.ts` lands beside the crate where CI's drift job does not \
+         look: {offenders:?}"
+    );
+    // Not vacuous: the directory that attribute created must also be gone.
+    let stray = Path::new(env!("CARGO_MANIFEST_DIR")).join("bindings");
+    assert!(
+        !stray.exists(),
+        "{stray:?} is back — a second bindings directory the drift job cannot see"
+    );
+}

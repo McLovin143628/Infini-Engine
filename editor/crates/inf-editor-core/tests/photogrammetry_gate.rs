@@ -490,11 +490,22 @@ fn the_retopologized_mesh_is_inside_its_budget_and_states_what_it_dropped() {
 }
 
 #[test]
-fn the_manifold_filter_is_why_the_kernel_accepts_the_mesh_at_all() {
+fn the_manifold_filter_is_what_saves_the_author_a_torn_surface() {
     // The claim the whole retopo step rests on, measured on the real fused
-    // surface rather than on a hand-built fin: the dense mesh as it comes out of
-    // fusion is REFUSED by the half-edge kernel, and it is the filter that makes
-    // it acceptable.
+    // surface rather than on a hand-built fin.
+    //
+    // **Restated, not weakened** (audit fix). Through P24 the sentence here was
+    // "the dense mesh is REFUSED by the half-edge kernel and the filter is what
+    // makes it acceptable", and Wave D made the reader repair rather than refuse
+    // — after which the body's `is_ok()` was very nearly a tautology while the
+    // test's name and comment still described a refusal that no longer happens.
+    // A hollowed arm is worse than a deleted one: it reads as coverage.
+    //
+    // So the claim is now what the filter actually buys, which is a NUMBER
+    // rather than a yes/no: unfiltered, the kernel opens the mesh by DETACHING
+    // the offending sheets into private vertices, and filtered it opens with
+    // none of that. Both sides are asserted, so a filter that stopped working
+    // and a reader that stopped repairing each fail a different line.
     let dense = dense_on_truth();
     let (filtered, dropped) = manifold_filter(&dense.mesh.indices);
     assert!(
@@ -505,11 +516,53 @@ fn the_manifold_filter_is_why_the_kernel_accepts_the_mesh_at_all() {
         filtered.len() < dense.mesh.indices.len(),
         "the filter kept everything"
     );
-    // And retopo, which runs it, produces a mesh the kernel does open.
-    let out = retopo(&dense.mesh, &finish_config()).expect("retopo runs");
+    // The control: the UNFILTERED surface still opens (Wave D), and it costs
+    // detached geometry to do it. Wrapped into the smallest `MeshAsset` that
+    // carries the two things the reader looks at — positions and indices —
+    // because the claim is about the INDEX SET the filter edits.
+    let as_asset = |indices: &[u32]| {
+        inf_mesh::MeshAsset::new(
+            vec![inf_mesh::SubMesh {
+                name: "dense".into(),
+                vertices: dense
+                    .mesh
+                    .positions
+                    .iter()
+                    .map(|p| inf_mesh::MeshVertex {
+                        position: [p.x as f32, p.y as f32, p.z as f32],
+                        ..Default::default()
+                    })
+                    .collect(),
+                indices: indices.to_vec(),
+                material_slot: None,
+                skin: Vec::new(),
+            }],
+            vec![],
+        )
+    };
+    let raw = inf_dcc::from_mesh_asset(&as_asset(&dense.mesh.indices))
+        .expect("the reader repairs rather than refusing since Wave D");
     assert!(
-        inf_dcc::from_mesh_asset(&out.asset).is_ok(),
-        "the retopologized mesh still will not enter the modelling kernel"
+        raw.report.non_manifold_splits > 0,
+        "the unfiltered fusion cost the reader no detachment, so the filter is \
+         saving the author nothing and this test measures nothing: {:?}",
+        raw.report
+    );
+    // …and the same surface with the filter's answer costs none.
+    let kept = inf_dcc::from_mesh_asset(&as_asset(&filtered)).expect("the filtered set opens");
+    assert_eq!(
+        kept.report.non_manifold_splits, 0,
+        "the filter left the reader something to detach: {:?}",
+        kept.report
+    );
+    // And retopo, which runs the filter, produces a mesh the kernel opens
+    // CLEAN — which is the difference the filter exists to make.
+    let out = retopo(&dense.mesh, &finish_config()).expect("retopo runs");
+    let clean = inf_dcc::from_mesh_asset(&out.asset)
+        .expect("the retopologized mesh still will not enter the modelling kernel");
+    assert_eq!(
+        clean.report.non_manifold_splits, 0,
+        "the retopologized mesh still costs the reader a detachment"
     );
 }
 
