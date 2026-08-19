@@ -19,6 +19,42 @@ const MATERIAL_TYPE_PATH: &str = "inf_ecs::components::Material";
 /// field so a future picker's write path is the obvious one.
 const MATERIAL_ASSET_FIELD: &str = "asset";
 
+/// The reflect type paths of the two mesh components whose asset links are
+/// `#[reflect(ignore)]` and therefore invisible to the walker (Wave E).
+const MESH_TYPE_PATH: &str = "inf_ecs::components::MeshRef";
+const SKELETAL_MESH_TYPE_PATH: &str = "inf_ecs::components::SkeletalMesh";
+/// `ActorClass` is not reflected at all, so its section is synthesized whole.
+/// The path is spelled like a component path so the frontend's section keying
+/// (and any future collapse-state persistence) treats it like every other one.
+const ACTOR_CLASS_TYPE_PATH: &str = "inf_ecs::components::ActorClass";
+/// The synthetic row key for `MeshRef::asset`.
+const MESH_ASSET_FIELD: &str = "asset";
+
+/// One read-only asset-reference row.
+///
+/// `same` is computed the way the walked fields compute it — across the WHOLE
+/// selection, so a multi-select of two props on different meshes shows "—"
+/// rather than the first one's, which is the bug a hand-rolled second copy of
+/// this logic would eventually have.
+fn asset_row(
+    name: &str,
+    label: &str,
+    asset_kind: &str,
+    value: Option<uuid::Uuid>,
+    sel: &[uuid::Uuid],
+    read: impl Fn(uuid::Uuid) -> Option<uuid::Uuid>,
+) -> PropFieldDto {
+    PropFieldDto {
+        name: name.into(),
+        label: label.into(),
+        value: PropValueDto::AssetRef {
+            value: value.map(|g| g.to_string()),
+            asset_kind: asset_kind.into(),
+        },
+        same: sel.iter().skip(1).all(|g| read(*g) == value),
+    }
+}
+
 /// Build the Details view for the current selection.
 pub fn build(doc: &SceneDoc) -> DetailsDto {
     let sel = doc.selection();
@@ -98,6 +134,68 @@ pub fn build(doc: &SceneDoc) -> DetailsDto {
                 asset_kind: "material".into(),
             },
             same,
+        });
+    }
+
+    // ── Wave E: the mesh / rig / class bindings, on the same terms ───────────
+    //
+    // The P26.3b row above was the ONLY escape hatch from `#[reflect(ignore)]`
+    // in the whole Details projection, so a user could see which material an
+    // actor wore and had no way to see which *mesh* it was — the fact the
+    // "Edit in Model Editor" routing is built on. Same mechanism, same
+    // read-only scope, one helper so the four rows cannot drift apart.
+    if let Some(mesh) = components
+        .iter_mut()
+        .find(|c| c.type_path == MESH_TYPE_PATH)
+    {
+        mesh.fields.push(asset_row(
+            MESH_ASSET_FIELD,
+            "Mesh Asset",
+            "mesh",
+            doc.mesh_asset_of(primary),
+            &sel,
+            |g| doc.mesh_asset_of(g),
+        ));
+    }
+    if let Some(skel) = components
+        .iter_mut()
+        .find(|c| c.type_path == SKELETAL_MESH_TYPE_PATH)
+    {
+        skel.fields.push(asset_row(
+            "mesh",
+            "Skeletal Mesh Asset",
+            "mesh",
+            doc.skeletal_mesh_of(primary).and_then(|(m, _)| m),
+            &sel,
+            |g| doc.skeletal_mesh_of(g).and_then(|(m, _)| m),
+        ));
+        skel.fields.push(asset_row(
+            "skeleton",
+            "Skeleton Asset",
+            "skeleton",
+            doc.skeletal_mesh_of(primary).and_then(|(_, s)| s),
+            &sel,
+            |g| doc.skeletal_mesh_of(g).and_then(|(_, s)| s),
+        ));
+    }
+
+    // `ActorClass` is not reflected AT ALL, so unlike the three above there is no
+    // component section to append to — the whole section is synthesized, and only
+    // when a class is bound. Nothing else in Details shows a level's blueprint
+    // bindings today.
+    let actor_class = doc.actor_class_of(primary);
+    if actor_class.is_some() || sel.iter().any(|g| doc.actor_class_of(*g).is_some()) {
+        components.push(ComponentDto {
+            type_path: ACTOR_CLASS_TYPE_PATH.into(),
+            display: "Blueprint Class".into(),
+            fields: vec![asset_row(
+                "class",
+                "Blueprint",
+                "blueprint",
+                actor_class,
+                &sel,
+                |g| doc.actor_class_of(g),
+            )],
         });
     }
 

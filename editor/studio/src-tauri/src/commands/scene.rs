@@ -172,10 +172,18 @@ pub async fn scene_create(
 }
 
 /// Spawn a dropped Content-Drawer asset into the scene (drag-to-viewport
-/// handoff, P4.4). A real, selectable, saveable entity named after the asset is
-/// created; it renders as a placeholder primitive today — resolving the mesh
-/// asset to its imported geometry in the interactive viewport is the documented
-/// Phase 4→7 follow-up (the thumbnailer already renders the real geometry).
+/// handoff, P4.4). A real, selectable, saveable entity named after the asset.
+///
+/// **A dropped MESH is now bound to the entity** (Wave E). Since P4 this wrote a
+/// placeholder cube and nothing else: `MeshRef::asset` was never written by any
+/// editor path, so a dragged-in prop drew a cube for ever and — the reason this
+/// wave found it — had no mesh for "Edit in Model Editor" to open. The
+/// interactive viewport has resolved that field to real geometry since P18.3
+/// (`inf_editor_core::render_assets`), so the placeholder was a missing
+/// assignment, not a rendering limitation.
+///
+/// Non-mesh kinds keep the placeholder: a texture or a data table has no
+/// geometry to bind, and the entity is still a real, named, selectable object.
 #[tauri::command]
 pub async fn scene_spawn_asset(
     app: AppHandle,
@@ -187,14 +195,45 @@ pub async fn scene_spawn_asset(
         .parse::<inf_asset::AssetId>()
         .map_err(|e| e.to_string())?;
     let name = assets.asset_name(id).unwrap_or_else(|| "Asset".to_string());
+    let is_mesh = assets.asset_kind(id) == Some(inf_asset::AssetKind::Mesh);
     let guid = {
         let mut doc = lock(&state.doc)?;
-        let guid = doc.edit_create(SpawnKind::Cube, &name, None);
+        let guid = if is_mesh {
+            doc.edit_create_mesh_asset(&name, id.uuid(), None)
+        } else {
+            doc.edit_create(SpawnKind::Cube, &name, None)
+        };
         doc.select(&[guid], false);
         guid
     };
     emit_world_delta(&app, &state);
     Ok(guid.to_string())
+}
+
+/// **Which editors can open these entities** (Wave E). Defaults to the current
+/// selection when `guids` is `None`.
+///
+/// The single door for every routing surface — the Details buttons, the Outliner
+/// context menu, the viewport context menu, the `object.edit.*` commands. Each
+/// row carries either at least one asset link or a named `no_editor_reason`
+/// (asserted in `inf_editor_core::scene::editors`), so the UI never shows a
+/// dead item and never opens an empty editor.
+#[tauri::command]
+pub async fn scene_entity_editors(
+    state: State<'_, SceneState>,
+    guids: Option<Vec<String>>,
+) -> Result<Vec<inf_editor_core::ipc::EntityEditorsDto>, String> {
+    let doc = lock(&state.doc)?;
+    let targets: Vec<Uuid> = match guids {
+        Some(list) => list
+            .iter()
+            .filter_map(|s| Uuid::parse_str(s).ok())
+            .collect(),
+        None => doc.selection().to_vec(),
+    };
+    Ok(inf_editor_core::scene::editors::entity_editors_many(
+        &doc, &targets,
+    ))
 }
 
 /// Apply a material asset's PBR parameters to entities (Content-Drawer

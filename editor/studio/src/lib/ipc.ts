@@ -11,6 +11,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  ActorGraphDto,
   BpDoc,
   BpEdit,
   DebugRunResult,
@@ -70,6 +71,7 @@ import type { PackageErrorDto } from "../bindings/PackageErrorDto";
 import type { PackageResultDto } from "../bindings/PackageResultDto";
 import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
 import type { EditorSettings } from "../bindings/EditorSettings";
+import type { EntityEditorsDto } from "../bindings/EntityEditorsDto";
 import type { ProjectSettingsDto } from "../bindings/ProjectSettingsDto";
 import type { ProjectTemplateDto } from "../bindings/ProjectTemplateDto";
 import type { PropValueDto } from "../bindings/PropValueDto";
@@ -125,6 +127,7 @@ export type {
   DeleteResult,
   DetailsDto,
   EditorSettings,
+  EntityEditorsDto,
   FileEntryDto,
   GitStatusDto,
   LayoutSummary,
@@ -505,6 +508,17 @@ export const editorSettings = {
 export const scene = {
   snapshot: (): Promise<SceneSnapshot> => invoke<SceneSnapshot>("scene_snapshot"),
   details: (): Promise<DetailsDto> => invoke<DetailsDto>("scene_details"),
+  /**
+   * **Which editors can open these entities** (Wave E). Defaults to the current
+   * selection when `guids` is null.
+   *
+   * The only way the frontend can learn an entity's mesh / rig / material /
+   * blueprint: those links are `#[reflect(ignore)]`, so they never appear in the
+   * reflection-driven Details grid. Each row carries either an asset link or a
+   * named `no_editor_reason` — see `lib/objectEditors.ts`, the one resolver.
+   */
+  entityEditors: (guids: string[] | null = null): Promise<EntityEditorsDto[]> =>
+    invoke<EntityEditorsDto[]>("scene_entity_editors", { guids }),
   create: (kind: SpawnKind, parent: string | null): Promise<string> =>
     invoke<string>("scene_create", { kind, parent }),
   delete: (guids: string[]): Promise<void> => invoke("scene_delete", { guids }),
@@ -857,6 +871,18 @@ export const graph = {
   registry: (): Promise<NodeDef[]> => invoke<NodeDef[]>("graph_registry"),
   list: (): Promise<BpDoc[]> => invoke<BpDoc[]>("graph_list"),
   create: (name: string): Promise<BpDoc> => invoke<BpDoc>("graph_create", { name }),
+  /**
+   * **Open the blueprint OF an actor** (Wave E): decode the `.inf_act`, raise a
+   * handler's IR back into a graph, and register it under the asset-keyed
+   * document id `bp:<assetId>` (idempotent by asset, like `dcc_open`).
+   *
+   * Rejects with a named reason when the chosen handler — or the whole class —
+   * is outside lowering's image and therefore has no unambiguous node form. The
+   * reply lists EVERY handler with `raisable`/`reason` so the canvas can offer a
+   * switcher rather than pretend an actor has one graph.
+   */
+  openActor: (assetId: string, handler: string | null = null): Promise<ActorGraphDto> =>
+    invoke<ActorGraphDto>("graph_open_actor", { assetId, handler }),
   get: (id: string): Promise<BpDoc> => invoke<BpDoc>("graph_get", { id }),
   /** Free a document + its undo journal from the backend (leak fix). */
   close: (id: string): Promise<void> => invoke("graph_close", { id }),

@@ -9,6 +9,8 @@ pub mod delta;
 pub mod demo;
 pub mod details;
 pub mod doc;
+// Wave E: "which editors can open this object", and — when none can — why not.
+pub mod editors;
 pub mod serialize;
 pub mod tilemap;
 pub mod undo;

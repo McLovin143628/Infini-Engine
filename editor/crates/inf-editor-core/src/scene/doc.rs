@@ -670,6 +670,55 @@ impl SceneDoc {
         self.touch();
     }
 
+    // ── the asset links the reflection walker cannot see (Wave E) ────────
+    //
+    // `MeshRef::asset`, `SkeletalMesh::{mesh, skeleton}` and `ActorClass` are
+    // all `#[reflect(ignore)]` (or unreflected), which is correct — they are
+    // identity links assigned by drag-drop, not editable numbers. The cost was
+    // that the frontend had **no way at all** to learn which mesh, rig or
+    // blueprint a selected entity carries, so "open this object in the Model
+    // Editor" had nothing to open. These four accessors are the fix, and they
+    // are exact copies of `material_asset_of`'s shape and justification.
+
+    /// The `.inf_mesh` an entity's [`MeshRef`] is bound to, if any.
+    ///
+    /// Public for the same reason `material_asset_of` is: the field is
+    /// `#[reflect(ignore)]`, so the reflection walker cannot reach it.
+    pub fn mesh_asset_of(&self, guid: Uuid) -> Option<Uuid> {
+        let e = self.world.entity_of(guid)?;
+        self.world.world().get::<MeshRef>(e).and_then(|m| m.asset)
+    }
+
+    /// The built-in primitive an entity's [`MeshRef`] draws, if it has one.
+    ///
+    /// `Some` even when [`Self::mesh_asset_of`] is `Some` — the component
+    /// carries both, and the primitive is what the placeholder path draws.
+    pub fn primitive_of(&self, guid: Uuid) -> Option<Primitive> {
+        let e = self.world.entity_of(guid)?;
+        self.world.world().get::<MeshRef>(e).map(|m| m.primitive)
+    }
+
+    /// An entity's [`SkeletalMesh`] pair — `(mesh, skeleton)` — if it has one.
+    ///
+    /// Returns `Some((None, None))` for an entity that carries the component
+    /// with nothing bound: "it is a skeletal mesh with no rig" and "it is not a
+    /// skeletal mesh at all" are different answers and the caller needs both.
+    pub fn skeletal_mesh_of(&self, guid: Uuid) -> Option<(Option<Uuid>, Option<Uuid>)> {
+        let e = self.world.entity_of(guid)?;
+        self.world
+            .world()
+            .get::<SkeletalMesh>(e)
+            .map(|s| (s.mesh, s.skeleton))
+    }
+
+    /// The `.inf_act` blueprint class an entity is bound to, if any.
+    ///
+    /// The public face of the crate-private `raw_get_actor`, which stayed
+    /// `pub(crate)` because until Wave E nothing outside the undo layer read it.
+    pub fn actor_class_of(&self, guid: Uuid) -> Option<Uuid> {
+        self.raw_get_actor(guid)
+    }
+
     /// Insert (`Some`) or remove (`None`) an entity's [`ActorClass`] binding.
     pub(crate) fn raw_set_actor(&mut self, guid: Uuid, actor: Option<Uuid>) {
         if let Some(e) = self.world.entity_of(guid) {
@@ -1605,6 +1654,57 @@ impl SceneDoc {
                 },
             );
         }
+        guid
+    }
+
+    /// Create an entity **bound to a mesh asset** — a dropped `.inf_mesh` (Wave E).
+    ///
+    /// # The gap this closes
+    ///
+    /// Since P4 every editor path that placed a dragged-in mesh called
+    /// `edit_create(SpawnKind::Cube, …)` and stopped: the entity was a
+    /// **placeholder cube named after the asset**, and *nothing in the editor
+    /// ever wrote `MeshRef::asset`* — only samples, migration fixtures and
+    /// tests did. The viewport has resolved that field to real geometry since
+    /// P18.3 ([`crate::render_assets`]), so the placeholder was not a rendering
+    /// limitation any more; it was a missing assignment. It also meant the Wave-E
+    /// routing ("edit the mesh of this object") had nothing to open on any prop
+    /// the user had actually placed.
+    ///
+    /// The `primitive` stays `Cube`: it is the fallback the renderer draws when
+    /// the asset cannot be resolved, exactly as `MeshRef`'s own docs describe.
+    ///
+    /// One `Create` undo step — the component is attached **before** the record
+    /// is snapshotted, so redo restores a prop that is still wearing its mesh
+    /// (the `edit_create_streamed_terrain` pattern, for its reason).
+    pub fn edit_create_mesh_asset(
+        &mut self,
+        name: &str,
+        asset: Uuid,
+        parent: Option<Uuid>,
+    ) -> Uuid {
+        let guid = self.create(SpawnKind::Cube, name, parent);
+        if let Some(entity) = self.world.entity_of(guid) {
+            let mut mesh = self
+                .world
+                .world()
+                .get::<MeshRef>(entity)
+                .copied()
+                .unwrap_or_default();
+            mesh.asset = Some(asset);
+            self.world.world_mut().entity_mut(entity).insert(mesh);
+        }
+        let at = self.order.iter().position(|g| *g == guid).unwrap_or(0);
+        if let Some(record) = crate::scene::serialize::record_of(self, guid) {
+            self.history.record(
+                "Place Mesh",
+                EditCommand::Create {
+                    at,
+                    record: Box::new(record),
+                },
+            );
+        }
+        self.touch();
         guid
     }
 
@@ -3230,6 +3330,13 @@ fn kind_of(world: &EcsWorld, e: Entity) -> String {
     }
     if w.get::<Camera>(e).is_some() {
         return "Camera".to_string();
+    }
+    // Before Wave E this arm did not exist, so `kind_of` reported every rigged
+    // character as "Static Mesh" (or "Actor") and the Outliner's type column
+    // could not tell a prop from a character. Checked BEFORE `MeshRef` because a
+    // character generated by the P24.5 wizard carries both.
+    if w.get::<SkeletalMesh>(e).is_some() {
+        return "Skeletal Mesh".to_string();
     }
     if w.get::<MeshRef>(e).is_some() {
         return "Static Mesh".to_string();

@@ -1,10 +1,26 @@
 /**
  * Outliner (P1.4.1 shell, P3.2 live): the world tree, bound to the backend ECS
- * document. Supports create (Add menu), rename (double-click), reparent (drag),
- * delete (Del / context), multi-select (Ctrl-click), and visibility toggles —
- * all routed through scene commands; the tree re-syncs from `world://delta`.
+ * document. Create (Add menu), reparent (drag), delete (Del), multi-select
+ * (Ctrl-click) and visibility toggles — all routed through scene commands; the
+ * tree re-syncs from `world://delta`.
+ *
+ * # Double-click OPENS; F2 renames (Wave E)
+ *
+ * Double-click used to start an inline rename. It now opens the object's
+ * editors — the Model Editor on its mesh, with its blueprint docked as a tab —
+ * and rename moved to F2 and the context menu. The reasons, in order:
+ *
+ * 1. the Content Drawer has meant *open* on double-click since P4, so this makes
+ *    the shell consistent rather than inconsistent;
+ * 2. `Actor ▸ Rename` has ADVERTISED F2 in the menu bar since Phase 1 with no
+ *    handler behind it — wiring it is a net gain, not a trade;
+ * 3. rename keeps two discoverable paths (F2 and the context menu), while
+ *    "open the object I am looking at" had none at all;
+ * 4. an object with nothing to open does NOT silently fall back to renaming —
+ *    it says why in the status bar, because a gesture that quietly does
+ *    something else teaches the wrong model.
  */
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -13,12 +29,21 @@ import {
   Plus,
   Search,
 } from "lucide-react";
+import type { EntityEditorsDto } from "../bindings/EntityEditorsDto";
 import type { SpawnKind } from "../bindings/SpawnKind";
+import { ContextMenuSurface, type ContextMenuEntry, type MenuAnchor } from "../components/ContextMenu";
 import { cn } from "../lib/utils";
 import { fuzzyMatch } from "../lib/fuzzy";
+import { buildObjectMenuItems } from "../lib/objectMenu";
 import { SPAWNABLE_SECTIONS } from "../lib/spawnables";
 import { useDockLayout } from "./dock/dockLayoutStore";
 import { outlinerRows, useSceneStore } from "../stores/sceneStore";
+import {
+  fetchEntityEditors,
+  onRenameRequest,
+  openObject,
+  openObjectEditor,
+} from "../stores/objectEditorCommands";
 
 export default function OutlinerPanel() {
   const nodes = useSceneStore((s) => s.nodes);
@@ -38,6 +63,53 @@ export default function OutlinerPanel() {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
   const dragGuid = useRef<string | null>(null);
+  /** The open context menu: where it is and what it offers. */
+  const [menu, setMenu] = useState<{ at: MenuAnchor; items: ContextMenuEntry[] } | null>(null);
+
+  // F2 (and Actor ▸ Rename, and the context menu's Rename) ask for an inline
+  // rename through a window event, so the command registry does not have to
+  // know that the rename UI lives in this panel — the `infinity:open-file`
+  // pattern. If the panel is closed nobody answers, which is correct.
+  useEffect(() => onRenameRequest((guid) => setRenaming(guid)), []);
+
+  /**
+   * Open the context menu for `guid`, having asked the backend what that object
+   * can open. Async, and deliberately so: building the menu from a cache would
+   * offer a stale answer for a row that was just right-clicked, and offering
+   * "Edit Mesh" on an object with no mesh is the dead item this wave exists to
+   * remove.
+   */
+  const openMenu = async (guid: string, at: MenuAnchor) => {
+    // The UE rule: right-clicking OUTSIDE the current selection selects the row;
+    // right-clicking INSIDE it keeps the selection, so a multi-object menu is
+    // reachable at all.
+    const sel = useSceneStore.getState().selection;
+    const targets = sel.includes(guid) ? sel : [guid];
+    if (!sel.includes(guid)) select([guid], false);
+    let dtos: EntityEditorsDto[] = [];
+    try {
+      dtos = await fetchEntityEditors(targets);
+    } catch {
+      // The backend refused (no scene, a torn selection) — the menu still opens
+      // with its non-editor actions rather than nothing happening at all.
+    }
+    const node = useSceneStore.getState().nodes[guid];
+    setMenu({
+      at,
+      items: buildObjectMenuItems(
+        targets,
+        dtos,
+        {
+          open: (g) => void openObject(g),
+          openRoute: (routeId, guids) =>
+            void openObjectEditor(routeId as "mesh" | "rig" | "blueprint" | "material", guids),
+          rename: (g) => setRenaming(g),
+          toggleVisible: (g) => toggleVisible(g),
+        },
+        node?.visible ?? null,
+      ),
+    });
+  };
 
   const rows = useMemo(() => {
     const all = outlinerRows(nodes, roots, search ? [] : collapsed);
@@ -164,7 +236,15 @@ export default function OutlinerPanel() {
               )}
               style={{ paddingLeft: 8 + depth * 14 }}
               onClick={(e) => select([node.guid], e.ctrlKey || e.metaKey)}
-              onDoubleClick={() => setRenaming(node.guid)}
+              onDoubleClick={() => {
+                select([node.guid], false);
+                void openObject(node.guid);
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                void openMenu(node.guid, { x: e.clientX, y: e.clientY });
+              }}
             >
               <button
                 aria-label={isCollapsed ? "Expand" : "Collapse"}
@@ -225,7 +305,14 @@ export default function OutlinerPanel() {
       <div className="border-t border-(--ink-border) px-2 py-0.5 text-[11px] text-(--ink-text-faint)">
         {rows.length} {rows.length === 1 ? "actor" : "actors"}
         {search && " (filtered)"}
+        {selection.length > 1 && ` · ${selection.length} selected`}
       </div>
+
+      <ContextMenuSurface
+        at={menu?.at ?? null}
+        items={menu?.items ?? []}
+        onClose={() => setMenu(null)}
+      />
     </div>
   );
 }

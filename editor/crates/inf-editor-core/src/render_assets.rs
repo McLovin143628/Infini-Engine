@@ -977,6 +977,56 @@ mod tests {
         assert_eq!(store.loaded_vgeom(), 1);
     }
 
+    /// **The drop gap, end to end** (Wave E).
+    ///
+    /// From P4 to this wave, dragging a mesh asset into the viewport spawned a
+    /// placeholder cube named after the asset and **nothing in the editor ever
+    /// wrote `MeshRef::asset`** — only samples, migration fixtures and tests
+    /// did. The gap was recorded as a rendering limitation ("the viewport thread
+    /// has no asset DB"), and P18.3 — the test directly above — removed that
+    /// reason without anyone noticing the write was still missing.
+    ///
+    /// This arm walks the whole path in one place, because each half passes on
+    /// its own while the feature stays broken: the payload parses, the spawn
+    /// binds, the component holds the guid, and the store resolves that guid to
+    /// real streamable geometry. Delete the `mesh_asset()` branch in
+    /// `spawn_drop` and the second assertion fails; delete the binding in
+    /// `edit_create_mesh_asset` and the third does.
+    #[test]
+    fn a_dropped_mesh_is_bound_to_the_entity_and_resolves_to_real_geometry() {
+        use crate::scene::SceneDoc;
+        use crate::viewport_drop::parse_drop_payload;
+
+        let (_dir, root, mesh_id) = project_with_derived_mesh(12);
+
+        // 1. What the Content Drawer sends when a mesh is dropped on the hole.
+        let payload = format!("asset:mesh:{mesh_id}:Barrel");
+        let parsed = parse_drop_payload(&payload);
+        let bound = parsed.mesh_asset().expect("a mesh payload binds");
+        assert_eq!(bound, mesh_id);
+
+        // 2. What the viewport host does with it — the entity carries the asset.
+        let mut doc = SceneDoc::new();
+        let guid = doc.edit_create_mesh_asset("Barrel", bound, None);
+        assert_eq!(
+            doc.mesh_asset_of(guid),
+            Some(mesh_id),
+            "the spawned prop must carry the mesh it was dropped from"
+        );
+
+        // 3. What the renderer then finds: real geometry, not a placeholder.
+        let mut store = EditorRenderAssets::new();
+        store.set_content_root(Some(root));
+        let loaded = store
+            .resolve_vgeom(doc.mesh_asset_of(guid).unwrap())
+            .expect("the bound asset resolves to real geometry");
+        assert!(loaded.source.meshlet_count() > 0);
+
+        // 4. And undo removes the prop rather than leaving a bound orphan.
+        assert!(doc.undo());
+        assert_eq!(doc.mesh_asset_of(guid), None);
+    }
+
     /// Resolution is a pure function of content: two stores over the same root
     /// agree on the id and on everything the renderer reads from the source.
     #[test]

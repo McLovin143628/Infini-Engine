@@ -109,6 +109,30 @@ export interface BpDoc {
   modifiedMs: number;
 }
 
+/**
+ * One handler of an actor class (`graph_open_actor`, Wave E).
+ *
+ * `raisable` is false when the handler's IR is outside lowering's image —
+ * `raise` only inverts what `lower` produces — and `reason` then says so.
+ * A non-raisable handler is offered and DISABLED, never hidden: hiding it would
+ * make the actor look like it has fewer handlers than it has.
+ */
+export interface ActorHandlerDto {
+  key: string;
+  label: string;
+  raisable: boolean;
+  reason?: string | null;
+}
+
+/** `graph_open_actor`'s reply: the opened graph plus the class's handler list. */
+export interface ActorGraphDto {
+  doc: BpDoc;
+  assetId: string;
+  className: string;
+  handler: string;
+  handlers: ActorHandlerDto[];
+}
+
 /** A structural edit (tagged `{kind, …}`, kebab-case) sent to `graph_apply`.
  *
  *  **Every variant of `inf_graph::GraphEdit`, and the Rust side is the source of

@@ -844,18 +844,21 @@ function AssetCell({
           .catch((err) => console.error("bind actor failed", err));
       } else {
         // Place-by-drag (C): route through the wave-2 viewport drop so the
-        // placeholder spawns at the cursor's world point (not the origin, as the
-        // old direct `scene_spawn_asset` did). Coordinates are physical pixels
-        // relative to the hole's top-left (the native-window contract). The
-        // `asset:<id>:<name>` payload carries the name so the backend can name
-        // the placeholder; today `EngineHost::spawn_drop` places a cube at the
-        // pick point (naming it from the payload is a flagged host-side follow-up).
+        // asset spawns at the cursor's world point (not the origin, as the old
+        // direct `scene_spawn_asset` did). Coordinates are physical pixels
+        // relative to the hole's top-left (the native-window contract).
+        //
+        // The payload is `asset:<kind>:<id>:<name>` (Wave E). The KIND is what
+        // lets the viewport thread — which has no asset database — bind a
+        // dropped mesh to `MeshRef.asset` instead of spawning yet another
+        // anonymous placeholder cube. Format + parser:
+        // `inf_editor_core::viewport_drop`.
         const dpr = window.devicePixelRatio || 1;
         viewport
           .drop({
             x: (e.clientX - r.left) * dpr,
             y: (e.clientY - r.top) * dpr,
-            payload: `asset:${asset.id}:${asset.name}`,
+            payload: `asset:${asset.kind}:${asset.id}:${asset.name}`,
           })
           .catch((err) => console.error("asset drop failed", err));
       }

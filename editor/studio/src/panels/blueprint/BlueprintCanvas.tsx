@@ -54,6 +54,8 @@ function outputType(doc: BpDoc, byId: Record<string, { outputs: { name: string; 
 
 function CanvasInner() {
   const doc = useBlueprintStore((s) => s.doc);
+  const actor = useBlueprintStore((s) => s.actor);
+  const openActor = useBlueprintStore((s) => s.openActor);
   const registryById = useBlueprintStore((s) => s.registryById);
   const registry = useBlueprintStore((s) => s.registry);
   const apply = useBlueprintStore((s) => s.apply);
@@ -214,6 +216,32 @@ function CanvasInner() {
         {problemCount > 0 && <span className="bp-toolbar__issues">{problemCount} issue(s)</span>}
       </div>
 
+      {actor && (
+        <div className="bp-toolbar bp-toolbar--actor">
+          <span className="bp-toolbar__hint">{actor.className}</span>
+          <select
+            className="bp-btn"
+            value={actor.handler}
+            onChange={(e) => void openActor(actor.assetId, e.target.value)}
+            title="Which handler of this actor class to show"
+          >
+            {actor.handlers.map((h) => (
+              <option key={h.key} value={h.key} disabled={!h.raisable}>
+                {h.label}
+                {h.raisable ? "" : " (no graph form)"}
+              </option>
+            ))}
+          </select>
+          {/* Honest scope: nothing writes a graph back into a `.inf_act`. Every
+              blueprint document in this editor is session-scoped today — the
+              raised one is no different, and saying so beats letting an author
+              believe their edits landed in the asset. */}
+          <span className="bp-toolbar__hint">
+            viewing — edits are not written back to the asset
+          </span>
+        </div>
+      )}
+
       <div className="bp-toolbar bp-toolbar--debug">
         <button
           className="bp-btn bp-btn--debug"
@@ -318,18 +346,30 @@ function compatible(a: PortType, b: PortType): boolean {
   return a.kind === b.kind;
 }
 
-export function BlueprintCanvas() {
+/** The `params` prefix that says "raise this actor class", not "create a graph". */
+const ACTOR_PARAM_PREFIX = "actor:";
+
+export function BlueprintCanvas({ params }: { params?: string | null } = {}) {
   const init = useBlueprintStore((s) => s.init);
+  const openActor = useBlueprintStore((s) => s.openActor);
   const close = useBlueprintStore((s) => s.close);
   const ready = useBlueprintStore((s) => s.ready);
   // Init on mount; free the backend document on unmount (panel close) so open
   // graphs don't accumulate for the session.
+  //
+  // `params` of the form `actor:<assetId>` (Wave E) opens the blueprint OF that
+  // actor class instead of the session's scratch document — the panel is still
+  // a singleton, so re-opening with different params supersedes.
   useEffect(() => {
-    void init();
+    const assetId = params?.startsWith(ACTOR_PARAM_PREFIX)
+      ? params.slice(ACTOR_PARAM_PREFIX.length)
+      : null;
+    if (assetId) void openActor(assetId);
+    else void init();
     return () => {
       void close();
     };
-  }, [init, close]);
+  }, [params, init, openActor, close]);
   if (!ready) return <div className="bp-canvas bp-canvas--loading">Loading blueprint…</div>;
   return (
     <ReactFlowProvider>

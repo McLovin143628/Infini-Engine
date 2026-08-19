@@ -41,6 +41,7 @@ import {
   registerViewportCommands,
 } from "./stores/viewportStore";
 import { initSimSync, registerSimCommands } from "./stores/simStore";
+import { registerObjectEditorCommands } from "./stores/objectEditorCommands";
 import { initPieSync, registerPieCommands } from "./stores/pieStore";
 import { initEditorSync } from "./stores/editorStore";
 import { initLsp } from "./lib/editor/lspBridge";
@@ -54,6 +55,7 @@ registerSceneCommands();
 registerAssetCommands();
 registerProjectCommands();
 registerViewportCommands();
+registerObjectEditorCommands();
 registerSimCommands();
 registerPieCommands();
 

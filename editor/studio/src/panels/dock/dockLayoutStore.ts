@@ -62,6 +62,17 @@ interface DockLayoutStore {
 
   /** Create-or-focus a panel instance; returns the instance id. */
   openPanel: (type: string, params?: string | null) => string;
+  /**
+   * Open a panel **as a tab beside `anchorId`** (Wave E); returns the id.
+   *
+   * The docking substrate has always been able to do this — a tab group is a
+   * `DockTarget` of kind `"dock"` — but nothing could ASK for it, so "open this
+   * object's mesh, blueprint and code as tabs of one group" had no API. Falls
+   * back to a plain `openPanel` when the anchor is floating, detached, hidden or
+   * absent: a tab group with a window is not a thing, and refusing to open the
+   * panel at all would be the worse answer.
+   */
+  openBesidePanel: (anchorId: string, type: string, params?: string | null) => string;
   /** Remove a dynamic instance entirely; singletons are hidden instead. */
   closePanel: (id: string) => void;
 
@@ -577,6 +588,18 @@ export const useDockLayout = create<DockLayoutStore>((set, get) => {
       const { layout, container } = get();
       const existing = layout.panels[id];
       if (existing) {
+        // A SINGLETON re-opened with new params must adopt them (Wave E): the
+        // instance id of a singleton is its type, so `openPanel("blueprint",
+        // "actor:<a>")` and then `…"actor:<b>"` resolve to the same panel and
+        // the second call used to be a no-op — the canvas kept showing actor A.
+        // Only a non-null params updates: `openPanel(type)` from a Window-menu
+        // toggle means "show it", not "forget what you were showing".
+        if (params !== null && params !== existing.params) {
+          commitTx({
+            ...layout,
+            panels: { ...layout.panels, [id]: { ...existing, params } },
+          });
+        }
         if (existing.location.kind === "hidden") get().showPanel(id);
         else if (existing.location.kind === "window") {
           // Re-opening a detached panel = bring its OS window forward.
@@ -616,6 +639,25 @@ export const useDockLayout = create<DockLayoutStore>((set, get) => {
         next = dockOntoSide(next, id, loc);
       }
       commitTx(next);
+      return id;
+    },
+
+    openBesidePanel: (anchorId, type, params = null) => {
+      const id = get().openPanel(type, params);
+      if (id === anchorId) return id;
+      const { layout } = get();
+      const anchor = layout.panels[anchorId];
+      if (!anchor || anchor.location.kind !== "docked") return id;
+      const { side, groupId } = anchor.location;
+      const group = layout.docks[side].groups.find((g) => g.id === groupId);
+      if (!group) return id;
+      // Already a tab of that group (a re-open) — just make it active.
+      if (group.tabs.includes(id)) {
+        get().activateTab(id);
+        return id;
+      }
+      get().applyDrop(id, { kind: "dock", side, groupId, index: group.tabs.length });
+      get().activateTab(id);
       return id;
     },
 

@@ -126,10 +126,23 @@ registerSaveHandler(() => void useEditorStore.getState().saveActive());
 
 let unlisten: (() => void) | null = null;
 
-/** Subscribe to `infinity:open-file`. Idempotent; returns a disposer. */
+/**
+ * Subscribe to `infinity:open-file`. Idempotent; returns a disposer.
+ *
+ * **The panel is opened too** (Wave E). `requestOpenFile` added a tab and
+ * stopped there, so a request made while the Code Editor was hidden — which is
+ * the default layout, and every request from the Wave-E object routing — put the
+ * file somewhere invisible and looked like nothing happened. `openPanel` is
+ * create-or-focus, so an already-visible editor is merely activated.
+ */
 export function initEditorSync(): () => void {
   if (unlisten) return () => {};
-  unlisten = onOpenFile((path) => void useEditorStore.getState().openFile(path));
+  unlisten = onOpenFile((path) => {
+    void import("../panels/dock/dockLayoutStore").then(({ useDockLayout }) =>
+      useDockLayout.getState().openPanel("editor"),
+    );
+    void useEditorStore.getState().openFile(path);
+  });
   const dispose = unlisten;
   return () => {
     dispose();

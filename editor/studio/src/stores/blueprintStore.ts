@@ -9,6 +9,7 @@ import { registerUndoScope } from "../lib/undoScopes";
 
 import { graph as graphIpc } from "../lib/ipc";
 import type {
+  ActorHandlerDto,
   BpDoc,
   BpEdit,
   BpIssue,
@@ -102,6 +103,18 @@ interface BlueprintState {
   runResult: GraphRunResult | null;
   generated: string | null;
   ready: boolean;
+  /**
+   * Set when the document was raised from an actor class (`graph_open_actor`,
+   * Wave E) rather than created empty. Carries the whole handler list so the
+   * canvas can offer a switcher — an actor has as many graphs as it has
+   * handlers, and showing one without saying so would misrepresent the class.
+   */
+  actor: {
+    assetId: string;
+    className: string;
+    handler: string;
+    handlers: ActorHandlerDto[];
+  } | null;
 
   // ── B-P4 debugger slice ──
   /** Breakpoint node ids for the active graph (persisted per graph). */
@@ -112,6 +125,17 @@ interface BlueprintState {
   debugWireValues: Record<number, Record<string, string>>;
 
   init: () => Promise<void>;
+  /**
+   * **Open the blueprint OF an actor class** (Wave E): raise a handler's IR back
+   * into a graph and adopt it as the active document.
+   *
+   * Replaces the active document — the store holds ONE (its v1 scope), so
+   * opening a second actor's blueprint supersedes the first. Named as a
+   * remainder rather than hidden: an asset-keyed multi-document store is the
+   * next step, and `graph_open_actor`'s ids (`bp:<asset>`) are already ready
+   * for it.
+   */
+  openActor: (assetId: string, handler?: string | null) => Promise<void>;
   close: () => Promise<void>;
   apply: (edits: BpEdit[], label: string) => Promise<void>;
   previewMove: (id: number, x: number, y: number) => void;
@@ -141,6 +165,7 @@ export const useBlueprintStore = create<BlueprintState>((set, get) => ({
   runResult: null,
   generated: null,
   ready: false,
+  actor: null,
   debugBreakpoints: new Set(),
   debugHits: new Set(),
   debugWireValues: {},
@@ -173,6 +198,7 @@ export const useBlueprintStore = create<BlueprintState>((set, get) => ({
           registryById,
           doc,
           ready: true,
+          actor: null,
           // Restore this graph's persisted breakpoints.
           debugBreakpoints: loadBreakpoints(doc.name),
         });
@@ -185,6 +211,47 @@ export const useBlueprintStore = create<BlueprintState>((set, get) => ({
       }
     })();
     return opening;
+  },
+
+  openActor: async (assetId, handler = null) => {
+    // A re-open supersedes a close that has not landed (the tombstone rule).
+    tombstoned = false;
+    try {
+      // The palette is needed to render nodes; `init` may never have run for
+      // this panel (a double-click in the Outliner is a cold start).
+      if (get().registry.length === 0) {
+        const registry = await graphIpc.registry();
+        const registryById: Record<string, NodeDef> = {};
+        for (const d of registry) registryById[d.typeId] = d;
+        set({ registry, registryById });
+      }
+      const res = await graphIpc.openActor(assetId, handler);
+      set({
+        doc: res.doc,
+        ready: true,
+        actor: {
+          assetId: res.assetId,
+          className: res.className,
+          handler: res.handler,
+          handlers: res.handlers,
+        },
+        issues: [],
+        canUndo: false,
+        canRedo: false,
+        runResult: null,
+        generated: null,
+        debugHits: new Set(),
+        debugWireValues: {},
+        debugBreakpoints: loadBreakpoints(res.doc.name),
+      });
+    } catch (e) {
+      // A refusal is a value: `raise` only inverts lowering's image, so a
+      // handler with no node form must SAY so rather than leave a blank canvas.
+      const msg = e instanceof Error ? e.message : String(e);
+      const { useShellStore } = await import("./shellStore");
+      useShellStore.getState().pushStatus(msg, 8000);
+      set({ ready: true });
+    }
   },
 
   // Discard the editing surface: free the backend document (+ journal) and reset
@@ -200,6 +267,7 @@ export const useBlueprintStore = create<BlueprintState>((set, get) => ({
     set({
       doc: null,
       ready: false,
+      actor: null,
       issues: [],
       canUndo: false,
       canRedo: false,

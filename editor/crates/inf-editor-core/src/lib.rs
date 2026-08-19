@@ -62,6 +62,10 @@ pub mod thumbnail;
 // P29.5 pillar S4: the queue a live tuning edit lands on, drained at the top of
 // the next fixed step. Ring 1 ONLY -- the shipped player has no such door.
 pub mod tuning;
+// Wave E: the drag-to-viewport payload contract, parsed here rather than in
+// `inf_viewport::host` so the Linux CI leg exercises it (the `render_assets`
+// reason).
+pub mod viewport_drop;
 /// Carving a voxel volume + the save write-back (P21.2), `terrain_edit`'s twin.
 pub mod voxel_edit;
 pub mod voxel_store;

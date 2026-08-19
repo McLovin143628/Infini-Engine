@@ -183,6 +183,8 @@ fn export_bindings() {
     // its two nested tables (`Snap3DDto`, `FoliageSettingsDto`), which are
     // rooted above in their own right.
     inf_editor_core::ipc::EditorSettings::export_all(&cfg).expect("export EditorSettings");
+    // Wave E batch B: the answer to "which editors can open this object".
+    inf_editor_core::ipc::EntityEditorsDto::export_all(&cfg).expect("export EntityEditorsDto");
     ErosionParamsDto::export_all(&cfg).expect("export ErosionParamsDto");
     ErosionReportDto::export_all(&cfg).expect("export ErosionReportDto");
     DataMapExportDto::export_all(&cfg).expect("export DataMapExportDto");

@@ -60,6 +60,16 @@ impl AssetState {
         proj.db().get(id).map(|e| e.name.clone())
     }
 
+    /// The [`AssetKind`] of an asset. Public for the same reason
+    /// [`Self::asset_name`] is: the scene command has to know whether a dropped
+    /// asset is a **mesh** before it can bind it to the entity it spawns.
+    pub fn asset_kind(&self, id: AssetId) -> Option<AssetKind> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        proj.db().get(id).map(|e| e.kind())
+    }
+
     /// Write a baked texture as a new `.inf_tex` asset under `Content/baked`
     /// (P7.3 material bake). Returns the new asset id; the file watcher then
     /// re-syncs the Content Drawer.
@@ -119,6 +129,29 @@ impl AssetState {
     /// (`bound_actors` in Simulate, and the PIE payload builder) read `None` as
     /// **"no blueprint bound"**. The actor then runs with no gameplay logic at
     /// all, and nothing anywhere says why.
+    /// [`Self::load_blueprint_class`] with the REASON kept (Wave E).
+    ///
+    /// The `Option` twin exists for Simulate and the PIE payload builder, where
+    /// "no blueprint bound" and "the file will not parse" both mean *run without
+    /// gameplay logic*. A user who asked to OPEN this blueprint needs the other
+    /// answer: which asset, and what is wrong with it.
+    pub fn load_blueprint_class_result(
+        &self,
+        id: AssetId,
+    ) -> Result<inf_blueprint::BlueprintClass, String> {
+        let guard = self.inner.lock().map_err(|_| "asset state poisoned")?;
+        let inner = guard.as_ref().ok_or("assets not initialized")?;
+        let proj = inner.project.lock().map_err(|_| "asset project poisoned")?;
+        let entry = proj.db().get(id).ok_or_else(|| format!("no asset {id}"))?;
+        if entry.kind() != inf_asset::AssetKind::Blueprint {
+            return Err(format!("{} is not a blueprint asset", entry.name));
+        }
+        let path = entry.path.clone();
+        let name = entry.name.clone();
+        let bytes = std::fs::read(&path).map_err(|e| format!("read {name}: {e}"))?;
+        serde_json::from_slice(&bytes).map_err(|e| format!("{name} will not parse: {e}"))
+    }
+
     pub fn load_blueprint_class(&self, id: AssetId) -> Option<inf_blueprint::BlueprintClass> {
         let guard = self.inner.lock().ok()?;
         let inner = guard.as_ref()?;

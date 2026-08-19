@@ -3974,11 +3974,17 @@ impl EngineHost {
     /// select the new entity. Returns `true` when something was spawned (the
     /// caller emits `WorldChanged`).
     ///
-    /// Payload convention: `"spawn:<snake_case SpawnKind>"` (Place Actors drag)
-    /// spawns that primitive/light/etc.; any other payload is treated as a
-    /// Content-Drawer asset drop and spawns a placeholder cube (the viewport
-    /// thread has no asset DB, mirroring `scene_spawn_asset`'s placeholder — an
-    /// optional `"asset:"` prefix is accepted).
+    /// Payload convention lives in [`inf_editor_core::viewport_drop`] (parsed
+    /// there so the Linux CI leg exercises it — this module is Windows/macOS
+    /// only). In short: `spawn:<kind>` places a primitive; `asset:<kind>:<id>:
+    /// <name>` places a Content-Drawer asset.
+    ///
+    /// **A dropped mesh is bound to the entity** (Wave E). This used to spawn a
+    /// placeholder cube for every asset kind and never write `MeshRef::asset`,
+    /// on the belief that the viewport thread's lack of an asset DB made it
+    /// impossible — but the binding is a GUID, not a lookup, and the payload can
+    /// carry the kind. The interactive viewport has resolved that field to real
+    /// geometry since P18.3, so from here the prop draws as itself.
     pub fn spawn_drop(
         &self,
         doc: &mut SceneDoc,
@@ -3987,29 +3993,30 @@ impl EngineHost {
         py: u32,
         payload: &str,
     ) -> bool {
-        let mut name = "";
-        let kind = if let Some(rest) = payload.strip_prefix("spawn:") {
-            match spawn_kind_from_str(rest) {
-                Some(k) => k,
+        use inf_editor_core::viewport_drop::{parse_drop_payload, DropPayload};
+
+        let parsed = parse_drop_payload(payload);
+        let (kind, name) = match parsed {
+            DropPayload::Spawn { kind } => match spawn_kind_from_str(kind) {
+                Some(k) => (k, ""),
                 None => {
-                    tracing::warn!("inf-viewport: unknown drop spawn kind '{rest}'");
+                    tracing::warn!("inf-viewport: unknown drop spawn kind '{kind}'");
                     return false;
                 }
-            }
-        } else {
-            // Asset drop (or a bare/legacy payload) → placeholder cube. An
-            // `asset:<id>:<name>` payload carries the display name so the
-            // placeholder is named like `scene_spawn_asset`'s would be.
-            if let Some(rest) = payload.strip_prefix("asset:") {
-                if let Some((_id, n)) = rest.split_once(':') {
-                    name = n;
-                }
-            }
-            SpawnKind::Cube
+            },
+            // A non-mesh asset keeps the honest placeholder: there is no
+            // geometry to bind, and the entity is still real, named and
+            // selectable.
+            DropPayload::Asset { name, .. } => (SpawnKind::Cube, name),
         };
+        let mesh_asset = parsed.mesh_asset();
+
         let point = self.pick_world_point(doc, view, px, py);
         doc.begin_transaction("Spawn");
-        let guid = doc.edit_create(kind, name, None);
+        let guid = match mesh_asset {
+            Some(asset) => doc.edit_create_mesh_asset(name, asset, None),
+            None => doc.edit_create(kind, name, None),
+        };
         doc.edit_set_transform(guid, EcsTransform::from_translation(point));
         doc.select(&[guid], false);
         doc.commit_transaction();

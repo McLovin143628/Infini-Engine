@@ -213,6 +213,16 @@ export const MENU_BAR: TopMenu[] = [
       // GENERATES six assets and then places an actor wearing them.
       act("actor.newCharacter", "New Character from Template…"),
       sep,
+      // Wave E: the doors from an object in the level to the editors that can
+      // open it. `object.*` rather than `actor.*` because they act on whatever
+      // is selected (the resolver decides), and because the same ids drive the
+      // Outliner and viewport context menus.
+      act("object.open", "Open in Editor"),
+      act("object.edit.mesh", "Edit Mesh"),
+      act("object.edit.rig", "Edit Skeleton"),
+      act("object.edit.blueprint", "Open Blueprint"),
+      act("object.edit.material", "Edit Material"),
+      sep,
       act("actor.duplicate", "Duplicate", "Ctrl+W"),
       act("actor.delete", "Delete", "Del"),
       act("actor.rename", "Rename", "F2"),

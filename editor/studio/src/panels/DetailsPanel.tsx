@@ -8,8 +8,8 @@
  * pickers (EntityRefField), and add/remove component. Complex rows (list / struct
  * / entity-ref) are read-only under a multi-selection (rendered "— mixed").
  */
-import { useState } from "react";
-import { MoreVertical, Search, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { MoreVertical, PencilLine, Search, SquarePen, Trash2 } from "lucide-react";
 import {
   CheckboxField,
   ColorField,
@@ -25,10 +25,13 @@ import {
 import { AddComponentMenu } from "../components/AddComponentMenu";
 import { EntityRefField } from "../components/EntityRefField";
 import { AssetRefField } from "../components/AssetRefField";
+import type { EntityEditorsDto } from "../bindings/EntityEditorsDto";
 import type { PropValueDto } from "../bindings/PropValueDto";
 import { scene as sceneIpc } from "../lib/ipc";
 import { fuzzyMatch } from "../lib/fuzzy";
+import { commonRoutes, noEditorReason } from "../lib/objectEditors";
 import { useSceneStore } from "../stores/sceneStore";
+import { openObject, openObjectEditor } from "../stores/objectEditorCommands";
 
 function rgbaToHex(c: number[]): string {
   const to = (v: number) =>
@@ -51,10 +54,40 @@ function isComplex(kind: PropValueDto["kind"]): boolean {
 
 export default function DetailsPanel() {
   const details = useSceneStore((s) => s.details);
+  const selection = useSceneStore((s) => s.selection);
   const setProperty = useSceneStore((s) => s.setProperty);
   const resetProperty = useSceneStore((s) => s.resetProperty);
   const removeComponent = useSceneStore((s) => s.removeComponent);
   const [filter, setFilter] = useState("");
+  /**
+   * Which editors the selection can open (Wave E). Fetched rather than derived:
+   * the mesh / rig / class links are `#[reflect(ignore)]`, so they are not in
+   * `details` and cannot be — `scene_entity_editors` is the only door.
+   */
+  const [editors, setEditors] = useState<EntityEditorsDto[]>([]);
+  useEffect(() => {
+    if (selection.length === 0) return;
+    let live = true;
+    sceneIpc
+      .entityEditors(selection)
+      .then((rows) => {
+        if (live) setEditors(rows);
+      })
+      .catch(() => {
+        if (live) setEditors([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [selection]);
+  /**
+   * Filtered at render rather than cleared in the effect: a fetch for the
+   * PREVIOUS selection may still be in flight, and a row for an object that is
+   * no longer selected would offer an edit button for something else. (Also why
+   * the effect body sets no state — `react-hooks/set-state-in-effect` is an
+   * error in this repo, and the derived form is the better answer anyway.)
+   */
+  const shownEditors = editors.filter((e) => selection.includes(e.entity));
 
   if (!details || details.selection.length === 0) {
     return (
@@ -76,6 +109,7 @@ export default function DetailsPanel() {
           <span className="truncate text-xs font-semibold">{details.name}</span>
           <span className="truncate text-[11px] text-(--ink-text-faint)">{details.kind}</span>
         </div>
+        <ObjectEditorButtons editors={shownEditors} />
         <div className="flex h-6 items-center gap-1 rounded border border-(--ink-border) bg-(--ink-bg-2) px-1.5 focus-within:border-(--ink-accent)">
           <Search size={12} className="shrink-0 text-(--ink-text-faint)" />
           <input
@@ -253,4 +287,53 @@ export function renderControl(
     default:
       return null;
   }
+}
+
+/**
+ * **The Details panel's Edit buttons** (Wave E) — the highest-value door to the
+ * embedded DCC, because Details is where a user already is when they are looking
+ * at an object.
+ *
+ * A route is offered only when it exists. When none does, the refusal is shown
+ * as text rather than as a disabled button with no explanation: the whole point
+ * is that the user learns a built-in cube has no mesh asset, and what to do
+ * about it.
+ */
+function ObjectEditorButtons({ editors }: { editors: EntityEditorsDto[] }) {
+  if (editors.length === 0) return null;
+  const routes = commonRoutes(editors);
+  const guids = editors.map((e) => e.entity);
+
+  if (routes.length === 0) {
+    const reason = noEditorReason(editors);
+    if (!reason) return null;
+    return (
+      <div className="mb-1.5 rounded border border-(--ink-border) px-2 py-1 text-[11px] text-(--ink-text-faint)">
+        {reason}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-1.5 flex flex-wrap gap-1">
+      {editors.length === 1 && (
+        <button
+          className="flex h-6 items-center gap-1 rounded border border-(--ink-accent) px-1.5 text-[11px] text-(--ink-accent) hover:bg-(--ink-accent-muted)"
+          title="Open this object's editors as one tab group"
+          onClick={() => void openObject(guids[0])}
+        >
+          <SquarePen size={12} /> Open
+        </button>
+      )}
+      {routes.map((route) => (
+        <button
+          key={route.id}
+          className="flex h-6 items-center gap-1 rounded border border-(--ink-border) px-1.5 text-[11px] hover:border-(--ink-accent)"
+          onClick={() => void openObjectEditor(route.id, guids)}
+        >
+          <PencilLine size={12} /> {route.label}
+        </button>
+      ))}
+    </div>
+  );
 }

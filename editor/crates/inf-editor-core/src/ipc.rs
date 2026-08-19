@@ -1516,6 +1516,41 @@ pub struct DataMapExportDto {
     pub unit: String,
 }
 
+/// **Which editors can open this entity** (`scene_entity_editors`, Wave E).
+///
+/// One row per selected object. Every asset field is `Some` exactly when the
+/// entity carries that link — and because those links are `#[reflect(ignore)]`
+/// or unreflected, this DTO is the ONLY way the frontend can learn them.
+///
+/// [`Self::no_editor_reason`] is `Some` exactly when every asset field is
+/// `None`: a refusal is a value, so the UI shows a named reason (and the
+/// remedy) instead of a dead menu item or an empty editor. Built by
+/// [`crate::scene::editors`], which asserts that invariant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct EntityEditorsDto {
+    /// The entity GUID this row answers for.
+    pub entity: String,
+    /// Display name (the Outliner label) — menus title themselves with it.
+    pub name: String,
+    /// The UE-style type label ("Static Mesh", "Skeletal Mesh", "Terrain", …).
+    pub kind: String,
+    /// `MeshRef::asset` — a `.inf_mesh` the Model Editor can open.
+    pub mesh: Option<String>,
+    /// `SkeletalMesh::mesh` — also a `.inf_mesh`, and also openable.
+    pub skeletal_mesh: Option<String>,
+    /// `SkeletalMesh::skeleton` — a `.inf_skel` the Skeleton Editor can open.
+    pub skeleton: Option<String>,
+    /// `Material::asset` — a `.inf_mat` the material graph can open.
+    pub material: Option<String>,
+    /// `ActorClass` — the `.inf_act` whose handlers the Blueprint panel raises.
+    pub actor_class: Option<String>,
+    /// The built-in primitive drawn as a placeholder, if any ("Cube", …).
+    /// Present alongside `mesh`: the component carries both.
+    pub primitive: Option<String>,
+    /// Why nothing can be opened, when nothing can. Never empty when set.
+    pub no_editor_reason: Option<String>,
+}
+
 /// Per-project editor settings persisted under `<root>/.infinity/settings.toml`
 /// (`project_settings_get` / `project_settings_set`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]

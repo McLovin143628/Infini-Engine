@@ -136,6 +136,177 @@ pub async fn graph_create(
     Ok(doc)
 }
 
+/// One handler of an actor class, as offered to the frontend.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActorHandlerDto {
+    /// The `EventKind::key()` (or function name) — stable, and what `handler`
+    /// takes on the way back in.
+    pub key: String,
+    /// Human label for the switcher ("Begin Play", "Tick", "jump", …).
+    pub label: String,
+    /// Whether this handler can be shown as a graph at all.
+    pub raisable: bool,
+    /// Why not, when it cannot. Never empty when `raisable` is false.
+    pub reason: Option<String>,
+}
+
+/// `graph_open_actor`'s reply: the opened document plus the class's whole
+/// handler list, so the canvas can offer a switcher instead of pretending the
+/// actor has one graph.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActorGraphDto {
+    pub doc: GraphDoc,
+    /// The `.inf_act` GUID this document was raised from.
+    pub asset_id: String,
+    /// The class's display name.
+    pub class_name: String,
+    /// Which handler `doc` is showing.
+    pub handler: String,
+    pub handlers: Vec<ActorHandlerDto>,
+}
+
+/// **Open the blueprint OF an actor** (Wave E, batch B).
+///
+/// # What was missing
+///
+/// Every piece of this existed and none of them were joined. An entity carries
+/// `ActorClass(Uuid)`; the asset decodes to a `BlueprintClass`; the class's
+/// handlers are `BlueprintFn` IR; `inf_blueprint::raise_fn` turns IR back into a
+/// `Graph` and is proven to invert lowering (`lower(raise(f)) == f` on
+/// lowering's image) — and **nothing in Ring 2 had ever called it**. There was
+/// no door from "this object in my level" to "the blueprint that runs it".
+///
+/// # Identity
+///
+/// The document id is `bp:<asset>` — **idempotent by asset**, mirroring
+/// `dcc_open`'s `dcc:{id}`. That also retires, for actor graphs, the
+/// process-scoped `bp:{counter}` identity `blueprintStore` documents at length:
+/// the same actor gets the same document id in every session.
+///
+/// # Refusals are values
+///
+/// `raise` only inverts lowering's IMAGE. A handler written (or hand-edited)
+/// into a shape with no unambiguous node form cannot be drawn, and the honest
+/// answer is to say which handler and why — never an empty canvas. Every
+/// handler is reported with `raisable` + `reason`, and a class where *nothing*
+/// raises is an `Err` naming the first cause rather than an empty document.
+#[tauri::command]
+pub async fn graph_open_actor(
+    app: AppHandle,
+    asset_id: String,
+    handler: Option<String>,
+    state: State<'_, GraphState>,
+    assets: State<'_, super::assets::AssetState>,
+) -> Result<ActorGraphDto, String> {
+    let id: inf_asset::AssetId = asset_id.parse().map_err(|e| format!("bad asset id: {e}"))?;
+    let class = assets.load_blueprint_class_result(id)?;
+
+    // Events first, then member functions — the order the class declares them,
+    // so the switcher is stable across sessions.
+    let mut candidates: Vec<(String, String, &inf_blueprint::BlueprintFn)> = Vec::new();
+    for ev in &class.events {
+        candidates.push((ev.event.key().to_string(), event_label(&ev.event), &ev.body));
+    }
+    for f in &class.functions {
+        candidates.push((f.id.clone(), f.name.clone(), f));
+    }
+    if candidates.is_empty() {
+        return Err(format!(
+            "“{}” has no event handlers or functions to show as a graph.",
+            class.name
+        ));
+    }
+
+    let handlers: Vec<ActorHandlerDto> = candidates
+        .iter()
+        .map(|(key, label, body)| match inf_blueprint::raise_fn(body) {
+            Ok(_) => ActorHandlerDto {
+                key: key.clone(),
+                label: label.clone(),
+                raisable: true,
+                reason: None,
+            },
+            Err(e) => ActorHandlerDto {
+                key: key.clone(),
+                label: label.clone(),
+                raisable: false,
+                reason: Some(format!(
+                    "{e} — this handler has no unambiguous node form; open the generated code \
+                     instead."
+                )),
+            },
+        })
+        .collect();
+
+    // The requested handler, else the first that can actually be drawn.
+    let chosen = match &handler {
+        Some(k) => candidates
+            .iter()
+            .find(|(key, _, _)| key == k)
+            .ok_or_else(|| format!("“{}” has no handler `{k}`.", class.name))?,
+        None => candidates
+            .iter()
+            .find(|(key, _, _)| handlers.iter().any(|h| &h.key == key && h.raisable))
+            .ok_or_else(|| {
+                let first = handlers
+                    .iter()
+                    .find_map(|h| h.reason.clone())
+                    .unwrap_or_else(|| "no raisable handler".to_string());
+                format!(
+                    "No handler of “{}” can be drawn as a graph: {first}",
+                    class.name
+                )
+            })?,
+    };
+    let graph = inf_blueprint::raise_fn(chosen.2).map_err(|e| {
+        format!(
+            "“{}” ▸ {} cannot be drawn as a graph ({e}); open the generated code instead.",
+            class.name, chosen.1
+        )
+    })?;
+
+    let doc_id = format!("bp:{id}");
+    let doc = state.with(|s| {
+        let doc = GraphDoc {
+            id: doc_id.clone(),
+            name: format!("{} ▸ {}", class.name, chosen.1),
+            graph,
+            viewport: None,
+            modified_ms: 0,
+        };
+        s.docs.insert(doc_id.clone(), doc.clone());
+        // A fresh journal: the document's content just changed wholesale, and an
+        // undo stack from the previous handler would restore that handler's
+        // nodes into this one.
+        s.journals.insert(doc_id.clone(), GraphJournal::new(64));
+        Ok(doc)
+    })?;
+    let _ = app.emit("graph://sync", doc.id.clone());
+
+    Ok(ActorGraphDto {
+        doc,
+        asset_id: id.to_string(),
+        class_name: class.name.clone(),
+        handler: chosen.0.clone(),
+        handlers,
+    })
+}
+
+/// The switcher label for an event kind (its `key` is the identity).
+fn event_label(kind: &inf_blueprint::semantics::EventKind) -> String {
+    use inf_blueprint::semantics::EventKind as E;
+    match kind {
+        E::BeginPlay => "Begin Play".to_string(),
+        E::Tick => "Tick".to_string(),
+        E::Input(action) => format!("Input: {action}"),
+        E::Collision => "Collision".to_string(),
+        E::Custom(name) => format!("Custom: {name}"),
+        other => other.key().to_string(),
+    }
+}
+
 /// Fetch one document.
 #[tauri::command]
 pub async fn graph_get(id: String, state: State<'_, GraphState>) -> Result<GraphDoc, String> {

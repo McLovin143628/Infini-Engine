@@ -25,6 +25,7 @@ import { PersonStanding, X } from "lucide-react";
 
 import type { BodyPlanName } from "../lib/ipc";
 import { useViewportOverlay } from "../lib/viewportOverlay";
+import { useDockLayout } from "../panels/dock/dockLayoutStore";
 import { useShellStore } from "../stores/shellStore";
 import { projectRig, useCharacterWizardStore } from "../stores/characterWizardStore";
 
@@ -409,6 +410,33 @@ export default function CharacterWizardDialog() {
                 {result.actor
                   ? "The actor is in the level with its rig and machine assigned. Drive its `speed` variable and it will walk."
                   : "Drag the skeleton and the state machine onto an actor to use them."}
+              </div>
+              {/* Wave E: the wizard minted six assets and opened NOTHING — the
+                  editors it just filled were reachable only by finding the
+                  assets in the Content Drawer and double-clicking them. Both
+                  ids are already in `result`, so this is a zero-backend door. */}
+              <div className="mt-2 flex gap-2">
+                <button
+                  className="rounded border border-(--ink-accent) px-2 py-1 text-(--ink-accent) hover:bg-(--ink-accent-muted)"
+                  onClick={() => {
+                    const dock = useDockLayout.getState();
+                    const anchor = dock.openPanel("skeleton", result.skeleton);
+                    dock.openBesidePanel(anchor, "model", result.mesh);
+                    dock.activateTab(anchor);
+                    setOpen(false);
+                  }}
+                >
+                  Open Skeleton Editor
+                </button>
+                <button
+                  className="rounded border border-(--ink-border) px-2 py-1 hover:border-(--ink-accent)"
+                  onClick={() => {
+                    useDockLayout.getState().openPanel("model", result.mesh);
+                    setOpen(false);
+                  }}
+                >
+                  Open Model Editor
+                </button>
               </div>
             </div>
           )}
