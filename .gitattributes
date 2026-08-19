@@ -59,3 +59,11 @@
 # `str::lines()` happens to tolerate a trailing `\r`, so today the check survives
 # a CRLF checkout by luck rather than by rule. The rule is cheaper than the luck.
 *.wgsl text eol=lf
+
+# Markdown is READ BY TESTS too (P29.6). `committed_sample_matches_generators`
+# byte-pins every file of `samples/phase29-locomotion`, including its README —
+# the first .md whose bytes a gate compares against a generator's LF output. On
+# the Windows CI runner an autocrlf checkout handed that pin CRLF and the gate
+# red was a property of the platform, not the content (the block above's story,
+# fourth telling). Stored blobs are already LF; this fixes what checkout writes.
+*.md text eol=lf
