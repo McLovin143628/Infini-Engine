@@ -69,11 +69,36 @@ use crate::pyramid::{downsample_tiles, PyramidOptions};
 use crate::tile::{TerrainTile, TileKey};
 
 /// Knobs for [`import_heightmap`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// (`Eq` is deliberately absent: [`world_origin`](Self::world_origin) is a
+/// `DVec3` and floats have no total equality. `PartialEq` is what the tests
+/// compare with.)
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ChunkedImportOptions {
     /// LOD pyramid generation, exactly as [`crate::build_pyramid`] would apply it
     /// to the finished terrain.
     pub pyramid: PyramidOptions,
+    /// The world position of tile `(0, 0)`'s sample `(0, 0)` — the
+    /// `.inf_terrain` header's `origin` field (Wave G).
+    ///
+    /// # The field the format always had and nobody wrote
+    ///
+    /// `TerrainAssetHeader::origin` has been in the container since v2, and
+    /// every importer up to Wave G wrote `DVec3::ZERO` into it; `with_origin`
+    /// was called only by write-back, passing straight through whatever it had
+    /// read. It was dead weight waiting for a reason to exist.
+    ///
+    /// A georeferenced import is that reason. When a DEM knows where on Earth it
+    /// is and the level knows where its own origin is
+    /// ([`inf_math::geo::GeoAnchor`]), the difference between the two is exactly
+    /// this field — so a terrain imported from a GeoTIFF lands where the roads
+    /// and rivers imported from the same survey land, instead of at the world
+    /// origin regardless.
+    ///
+    /// **This is a behaviour change, not a wire change**: the bytes were always
+    /// there, and the header stays at v5. Default `ZERO` keeps every
+    /// ungeoreferenced import exactly as it was.
+    pub world_origin: DVec3,
 }
 
 /// A progress tick: how many tiles of the whole import are final.
@@ -467,7 +492,9 @@ impl<'a> Build<'a> {
             // P16.6: record the options this import's pyramid was built with in
             // the v2 header, so a later write-back re-plans to the same shape.
             builder: TerrainAssetBuilder::new(import.resolution(), import.meters_per_sample)
-                .with_pyramid(opts.pyramid),
+                .with_pyramid(opts.pyramid)
+                // Wave G: the header's `origin` finally carries a value.
+                .with_origin(opts.world_origin),
             tiles_total,
             tiles_done: 0,
             peak_live: 0,
@@ -745,6 +772,101 @@ mod tests {
                 report.grid.tile_count() + coarse_of(&reference)
             );
         }
+    }
+
+    /// A real f32 GeoTIFF of `w × h`, deliberately **striped** so the chunked
+    /// TIFF decoder walks many chunks rather than one.
+    fn geotiff_of(w: u32, h: u32) -> Vec<u8> {
+        use tiff::encoder::{colortype, TiffEncoder};
+        let samples: Vec<f32> = (0..w * h)
+            .map(|i| ((i as u64 * 7919) % 65536) as f32 / 65535.0)
+            .collect();
+        let mut buf = Vec::new();
+        {
+            let mut enc = TiffEncoder::new(std::io::Cursor::new(&mut buf)).unwrap();
+            let mut img = enc.new_image::<colortype::Gray32Float>(w, h).unwrap();
+            // Two rows per strip: many chunks, and a final short strip whenever
+            // the height is odd — the boundary case a whole-image decoder never
+            // meets.
+            img.rows_per_strip(2).unwrap();
+            img.write_data(&samples).unwrap();
+        }
+        buf
+    }
+
+    /// **THE DETERMINISM GATE, extended to GeoTIFF (Wave G).**
+    ///
+    /// The gate above proves the chunked and whole-image tilers agree byte for
+    /// byte on PNG. Adding a third container is exactly the kind of change that
+    /// could pass every one of its own new tests and still produce a *different*
+    /// terrain through the two tilers — the TIFF decoder scatters chunks into a
+    /// row band, which is a genuinely different shape of bug from the PNG
+    /// decoder's straight row walk.
+    ///
+    /// So the gate covers it. Sizes are chosen against the TIFF chunk grid
+    /// rather than the tile grid: a height that is an exact multiple of the
+    /// 2-row strip, one that leaves a short final strip, and widths that put a
+    /// tile boundary inside a strip and on it.
+    #[test]
+    fn chunked_matches_whole_image_byte_for_byte_on_geotiff() {
+        let import = HeightmapImport {
+            tile_resolution: 5,
+            meters_per_sample: 3.0,
+            min_height: -120.0,
+            max_height: 880.0,
+            ..Default::default()
+        };
+        let opts = ChunkedImportOptions::default();
+        for (w, h) in [(9, 9), (17, 16), (18, 17), (17, 18), (19, 23), (33, 33)] {
+            let tif = geotiff_of(w, h);
+            let (chunked, report) = chunked_asset(&tif, import, opts);
+            let reference = reference_asset(&tif, import, opts);
+            assert_eq!(
+                chunked, reference,
+                "{w}x{h}: the chunked GeoTIFF import diverged from the whole-image path"
+            );
+            assert_eq!(
+                report.tiles,
+                report.grid.tile_count() + coarse_of(&reference)
+            );
+            assert_eq!(report.probe.format, crate::import::HeightmapFormat::Tiff);
+        }
+    }
+
+    /// The P16.4a memory bound holds for the new format too.
+    ///
+    /// This is the claim `tiff` was chosen for over any whole-image reader, and
+    /// it is asserted the same way the PNG path asserts it — against the
+    /// importer's own live-tile ledger, not against a process memory figure.
+    #[test]
+    fn a_geotiff_import_never_holds_more_than_its_documented_bound() {
+        let import = HeightmapImport {
+            tile_resolution: 9,
+            meters_per_sample: 1.0,
+            min_height: 0.0,
+            max_height: 100.0,
+            ..Default::default()
+        };
+        // 129x129 at resolution 9 is a 16x16 tile lattice — enough rows that a
+        // whole-image decoder would be visibly different from a streaming one.
+        let tif = geotiff_of(129, 129);
+        let (_, report) = chunked_asset(&tif, import, ChunkedImportOptions::default());
+        assert_eq!((report.grid.ntx, report.grid.ntz), (16, 16));
+        assert!(
+            report.peak_live_tiles <= report.live_tile_bound,
+            "a GeoTIFF import held {} live tiles, past its {} bound",
+            report.peak_live_tiles,
+            report.live_tile_bound
+        );
+        // …and the bound is a real constraint, not a number larger than the job:
+        // it must be far below the whole lattice.
+        assert!(
+            report.live_tile_bound < report.grid.tile_count(),
+            "the bound ({}) is not smaller than the whole lattice ({}) — it is \
+             not bounding anything",
+            report.live_tile_bound,
+            report.grid.tile_count()
+        );
     }
 
     /// Tiles in the reference beyond level 0 (read back off the payload header).

@@ -153,9 +153,15 @@ impl HeightmapImport {
             }
             HeightMode::FloatMeters => {
                 if let Some(p) = probe {
-                    if !p.float_samples {
+                    // `absolute_samples`, not `float_samples` — see the field's
+                    // own docs. A 16-bit integer GeoTIFF DEM carries absolute
+                    // metres and must be allowed into this mode; a 16-bit PNG
+                    // carries counts and must not.
+                    if !p.absolute_samples {
                         return Err(TerrainError::Settings(format!(
-                            "float-metres mode needs a float source; {} carries integer samples",
+                            "float-metres mode needs a source whose samples are \
+                             absolute elevations; {} carries scaled integer samples, \
+                             which mean nothing without a stated height range",
                             p.format.label()
                         )));
                     }
@@ -305,6 +311,9 @@ pub enum HeightmapFormat {
     Png,
     /// OpenEXR.
     Exr,
+    /// TIFF, including **GeoTIFF** — the format real elevation data ships in
+    /// (Wave G). See [`crate::geotiff`] for the georeferencing half.
+    Tiff,
 }
 
 impl HeightmapFormat {
@@ -313,6 +322,260 @@ impl HeightmapFormat {
         match self {
             HeightmapFormat::Png => "PNG",
             HeightmapFormat::Exr => "EXR",
+            HeightmapFormat::Tiff => "TIFF",
+        }
+    }
+}
+
+// ── the nodata policy door (Wave G) ─────────────────────────────────────────
+
+/// What to do with a sample the source says it has no data for.
+///
+/// # Why this door has to exist
+///
+/// Real-world DEMs are **full** of no-data: ocean beyond the survey, the ragged
+/// edge of a flight line, LiDAR voids under water and dense canopy, cloud
+/// shadow. It arrives three ways — as `NaN` in a float raster, as a declared
+/// sentinel (`-9999`, `-32768`, `-3.4e38`) in the GeoTIFF `GDAL_NODATA` tag, or
+/// as an undeclared sentinel the publisher simply knows about.
+///
+/// Before Wave G this engine refused every one of them. The refusal was right,
+/// and its reasoning still is:
+///
+/// > *"a no-data pixel means the author's source does not cover that ground, and
+/// > this engine has no representation for a hole in a heightfield"*
+///
+/// But "refuse" as the **only** behaviour means the very first real GeoTIFF
+/// anyone imports stops dead at the first ocean pixel, and the author's only
+/// recourse is to go and edit the DEM. So the refusal becomes the *default* of a
+/// policy the author can change, and — this is the part that matters — the
+/// choice is **recorded in the sidecar**, so re-importing the same file
+/// reproduces the same terrain rather than depending on what somebody clicked.
+///
+/// # The two rules that fall out
+///
+/// 1. **The policy runs BEFORE the finiteness door, not instead of it.** A
+///    non-finite sample that survives the policy is still a bug and must still
+///    refuse. Substituting first and checking second is what keeps the guarantee
+///    that nothing non-finite is ever written into an `.inf_terrain`.
+/// 2. **The policy is sidecar data, not wire data.** The `.inf_terrain` sidecar
+///    is self-describing TOML, so recording it costs **no schema bump**.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum NodataPolicy {
+    /// Refuse the import, naming the first offending sample. **The default**,
+    /// and the behaviour every import had before Wave G.
+    #[default]
+    Refuse,
+    /// Substitute a stated elevation, in the source's own vertical units.
+    ///
+    /// `Clamp(0.0)` — sea level — is the common answer for a coastal DEM whose
+    /// no-data is ocean, which is why [`NodataPolicy::sea_level`] names it.
+    Clamp(f64),
+    /// Fill a void from the valid samples on either side of it **within its own
+    /// row**, linearly, for runs up to `max_span` samples wide. Wider runs
+    /// refuse.
+    ///
+    /// # Why "within its own row", stated plainly
+    ///
+    /// This decoder is row-at-a-time by design — that is the whole reason a
+    /// 16 k × 16 k source imports in ~100 MB instead of 1 GB (the P16.4a memory
+    /// bound). A true nearest-valid-neighbour fill needs the rows above and
+    /// below, which means buffering the image and giving that bound up.
+    ///
+    /// A row-wise fill is what a streaming decoder can honestly do. It closes
+    /// the case it is meant for — the scattered small voids that pepper LiDAR —
+    /// and `max_span` is what stops it from smearing a coastline across an ocean
+    /// it cannot see the far side of. A 2-D fill is a named remainder, not a
+    /// pretence.
+    FillRow { max_span: u32 },
+}
+
+impl NodataPolicy {
+    /// [`NodataPolicy::Clamp`] at sea level — the usual answer for a coastal DEM.
+    pub const fn sea_level() -> Self {
+        NodataPolicy::Clamp(0.0)
+    }
+
+    /// A stable label for the sidecar and the wizard.
+    pub fn label(self) -> String {
+        match self {
+            NodataPolicy::Refuse => "refuse".into(),
+            NodataPolicy::Clamp(v) => format!("clamp:{v}"),
+            NodataPolicy::FillRow { max_span } => format!("fill-row:{max_span}"),
+        }
+    }
+
+    /// Parse a label back. Returns `None` for an unrecognised spelling, so a
+    /// sidecar written by a newer build is refused rather than silently
+    /// downgraded to `Refuse` — which would change the terrain.
+    pub fn from_label(s: &str) -> Option<Self> {
+        let t = s.trim();
+        if t.eq_ignore_ascii_case("refuse") {
+            return Some(NodataPolicy::Refuse);
+        }
+        if let Some(v) = t.strip_prefix("clamp:") {
+            return v
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .map(NodataPolicy::Clamp);
+        }
+        if let Some(v) = t.strip_prefix("fill-row:") {
+            return v
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .map(|max_span| NodataPolicy::FillRow { max_span });
+        }
+        None
+    }
+}
+
+/// The nodata policy plus the sentinel it acts on.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct NodataHandling {
+    pub policy: NodataPolicy,
+    /// The value that means "no data" in the source's own domain.
+    ///
+    /// Read from `GDAL_NODATA` when the file declares one; an author may also
+    /// state it for a file that does not. `NaN` is *always* treated as no-data
+    /// whether or not a sentinel is set, because that is what a float raster
+    /// conventionally means by it.
+    pub sentinel: Option<f64>,
+}
+
+impl NodataHandling {
+    /// Nothing to do — the pre-Wave-G behaviour, and what a source with no
+    /// no-data gets.
+    pub const NONE: Self = Self {
+        policy: NodataPolicy::Refuse,
+        sentinel: None,
+    };
+
+    /// Whether a sample is no-data.
+    ///
+    /// Non-finite is always no-data. A declared sentinel matches on a
+    /// **relative** tolerance rather than exact equality: a sentinel like
+    /// `-3.4028234663852886e+38` reaches us as text through `GDAL_NODATA` and as
+    /// an `f32` through the pixels, and the two round-trips need not land on the
+    /// same double. An exact compare would silently miss every one of them.
+    #[inline]
+    pub fn is_nodata(&self, v: f64) -> bool {
+        if !v.is_finite() {
+            return true;
+        }
+        match self.sentinel {
+            Some(s) if s == v => true,
+            Some(s) => {
+                let scale = s.abs().max(v.abs());
+                scale > 0.0 && (s - v).abs() / scale < 1e-9
+            }
+            None => false,
+        }
+    }
+
+    /// `true` when this handling can actually change a sample.
+    pub fn is_active(&self) -> bool {
+        !matches!(self.policy, NodataPolicy::Refuse)
+    }
+}
+
+/// What the nodata policy did, for the import report and the cook advisory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NodataReport {
+    /// Samples replaced by the policy.
+    pub substituted: u64,
+    /// Runs of consecutive no-data filled by [`NodataPolicy::FillRow`].
+    pub filled_runs: u64,
+    /// The widest run seen, in samples. Reported because an author who set
+    /// `max_span` to 64 and imported a DEM whose widest void is 63 got away with
+    /// it by one sample, and should be told.
+    pub widest_run: u32,
+}
+
+impl NodataReport {
+    /// `true` when the policy touched anything — the trigger for the cook
+    /// advisory (the P16 law: a silent hazard gets named).
+    pub fn engaged(&self) -> bool {
+        self.substituted > 0
+    }
+}
+
+/// Apply the nodata policy to one decoded row, in place.
+///
+/// Runs before the finiteness door — see [`NodataPolicy`] for why that ordering
+/// is load-bearing.
+fn apply_nodata(
+    handling: &NodataHandling,
+    report: &mut NodataReport,
+    y: u32,
+    row: &mut [f64],
+) -> Result<(), TerrainError> {
+    if row.is_empty() {
+        return Ok(());
+    }
+    match handling.policy {
+        NodataPolicy::Refuse => Ok(()),
+        NodataPolicy::Clamp(v) => {
+            for s in row.iter_mut() {
+                if handling.is_nodata(*s) {
+                    *s = v;
+                    report.substituted += 1;
+                }
+            }
+            Ok(())
+        }
+        NodataPolicy::FillRow { max_span } => {
+            let n = row.len();
+            let mut i = 0usize;
+            while i < n {
+                if !handling.is_nodata(row[i]) {
+                    i += 1;
+                    continue;
+                }
+                let start = i;
+                while i < n && handling.is_nodata(row[i]) {
+                    i += 1;
+                }
+                let end = i; // exclusive
+                let span = (end - start) as u32;
+                report.widest_run = report.widest_run.max(span);
+                if span > max_span {
+                    return Err(TerrainError::Image(format!(
+                        "row {y} has a run of {span} no-data samples starting at \
+                         column {start}, wider than the {max_span}-sample limit this \
+                         import's fill policy allows. Filling it would invent {span} \
+                         samples of terrain from two endpoints that are {span} \
+                         samples apart — raise the limit if that is really what you \
+                         want, or choose a clamp elevation instead so the gap is \
+                         flat and honest rather than a smear."
+                    )));
+                }
+                // Endpoints. A run touching the row's edge has only one, and
+                // extends it flat rather than inventing a slope.
+                let left = (start > 0).then(|| row[start - 1]);
+                let right = (end < n).then(|| row[end]);
+                let (a, b) = match (left, right) {
+                    (Some(a), Some(b)) => (a, b),
+                    (Some(a), None) => (a, a),
+                    (None, Some(b)) => (b, b),
+                    (None, None) => {
+                        return Err(TerrainError::Image(format!(
+                            "row {y} is entirely no-data ({n} samples), so there is \
+                             nothing in it to fill from. A DEM whose rows are wholly \
+                             absent needs a clamp elevation, not a fill."
+                        )))
+                    }
+                };
+                for (k, slot) in row[start..end].iter_mut().enumerate() {
+                    let t = (k + 1) as f64 / (span + 1) as f64;
+                    *slot = a + (b - a) * t;
+                }
+                report.substituted += u64::from(span);
+                report.filled_runs += 1;
+            }
+            Ok(())
         }
     }
 }
@@ -327,17 +590,52 @@ pub struct HeightmapProbe {
     pub height: u32,
     /// Bits per sample of the source (8/16 for PNG, 16/32 for EXR).
     pub bit_depth: u32,
-    /// `true` when samples are floats — i.e. when [`HeightMode::FloatMeters`] is
-    /// available.
+    /// `true` when samples are IEEE floats.
     pub float_samples: bool,
+    /// `true` when the samples are **absolute elevations**, so
+    /// [`HeightMode::FloatMeters`] is meaningful.
+    ///
+    /// # Why this is not the same question as `float_samples`
+    ///
+    /// It used to be: a PNG's samples are counts on a `0..65535` scale and mean
+    /// nothing without a stated height range, while an EXR float is an elevation,
+    /// so "is it a float" and "is it an elevation" coincided and one flag served
+    /// both.
+    ///
+    /// GeoTIFF breaks that. A 16-bit **integer** DEM — which is what SRTM and a
+    /// great many national products ship as — stores absolute metres in a
+    /// `u16`/`i16`. It is not a float and it *is* an elevation. Reading it in
+    /// normalized mode would map the ocean-to-summit range of the file onto
+    /// whatever height range the wizard happened to show, which is a landscape
+    /// with the right shape and the wrong scale — the failure that looks like an
+    /// authoring choice.
+    ///
+    /// So the two questions are separated. `float_samples` stays what it always
+    /// meant (and keeps driving the wizard's "float" readout); this is what
+    /// [`HeightmapImport::validate`] actually asks about.
+    pub absolute_samples: bool,
     /// The channel the decoder will read (EXR channel name, or `"gray"`).
     pub channel: String,
+    /// GeoTIFF georeferencing, when the source carried any (Wave G).
+    ///
+    /// Derived from the header, **never persisted** — the same rule the rest of
+    /// this struct follows.
+    pub geo: Option<crate::geotiff::GeoTiffMeta>,
 }
 
 /// The eight-byte PNG signature.
 const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 /// The four-byte OpenEXR magic (`0x76 0x2f 0x31 0x01`).
 const EXR_MAGIC: [u8; 4] = [0x76, 0x2f, 0x31, 0x01];
+/// Classic TIFF, little- and big-endian: `II*\0` and `MM\0*`.
+const TIFF_MAGIC_LE: [u8; 4] = [b'I', b'I', 42, 0];
+const TIFF_MAGIC_BE: [u8; 4] = [b'M', b'M', 0, 42];
+/// **BigTIFF** — version 43 instead of 42, for files past 4 GB. Real
+/// state-wide 1 m DEMs cross that line routinely, so the signature is
+/// recognised on purpose: a BigTIFF must be refused *as a BigTIFF*, naming the
+/// remedy, rather than as "not a PNG or EXR heightmap".
+const BIGTIFF_MAGIC_LE: [u8; 4] = [b'I', b'I', 43, 0];
+const BIGTIFF_MAGIC_BE: [u8; 4] = [b'M', b'M', 0, 43];
 
 /// Sniff the container from the leading bytes, rewinding the source **before and
 /// after** — a source may already have been probed once (the chunked importer
@@ -353,8 +651,22 @@ fn sniff<R: BufRead + Seek>(src: &mut R) -> Result<HeightmapFormat, TerrainError
     if n >= 4 && head[..4] == EXR_MAGIC {
         return Ok(HeightmapFormat::Exr);
     }
+    if n >= 4 && (head[..4] == TIFF_MAGIC_LE || head[..4] == TIFF_MAGIC_BE) {
+        return Ok(HeightmapFormat::Tiff);
+    }
+    if n >= 4 && (head[..4] == BIGTIFF_MAGIC_LE || head[..4] == BIGTIFF_MAGIC_BE) {
+        return Err(TerrainError::Unsupported(
+            "this is a BigTIFF (the >4 GB TIFF variant, version 43). This engine's \
+             TIFF reader handles classic TIFF only. A state-wide 1 m DEM is often \
+             published this way — cut the area you need out of it first, with \
+             `gdal_translate -projwin <west> <north> <east> <south> in.tif out.tif`, \
+             which also gets you a file this importer can stream without holding \
+             the whole thing."
+                .into(),
+        ));
+    }
     Err(TerrainError::Unsupported(
-        "not a PNG or EXR heightmap (unrecognized file signature)".into(),
+        "not a PNG, EXR or TIFF heightmap (unrecognized file signature)".into(),
     ))
 }
 
@@ -385,6 +697,7 @@ pub fn probe_reader<R: BufRead + Seek>(mut src: R) -> Result<HeightmapProbe, Ter
     let probe = match sniff(&mut src)? {
         HeightmapFormat::Png => probe_png(src)?,
         HeightmapFormat::Exr => probe_exr(src)?,
+        HeightmapFormat::Tiff => probe_tiff(src)?,
     };
     if probe.width == 0 || probe.height == 0 {
         return Err(TerrainError::Empty);
@@ -407,7 +720,10 @@ fn probe_png<R: BufRead + Seek>(src: R) -> Result<HeightmapProbe, TerrainError> 
         height: h,
         bit_depth: depth,
         float_samples: false,
+        // A PNG's samples are counts on a 0..65535 scale, not elevations.
+        absolute_samples: false,
         channel: "gray".into(),
+        geo: None,
     })
 }
 
@@ -499,7 +815,267 @@ fn probe_exr<R: BufRead + Seek>(src: R) -> Result<HeightmapProbe, TerrainError> 
         height: size.1 as u32,
         bit_depth,
         float_samples,
+        // An EXR float channel IS an elevation; a u32 channel is a count.
+        absolute_samples: float_samples,
         channel,
+        geo: None,
+    })
+}
+
+// ── TIFF / GeoTIFF (Wave G) ─────────────────────────────────────────────────
+
+/// What one TIFF sample type is, reduced to what this decoder needs to know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TiffSampleKind {
+    bits: u32,
+    float: bool,
+    /// `true` when the raw sample value is an absolute elevation rather than a
+    /// count needing a height range — see [`HeightmapProbe::absolute_samples`].
+    absolute: bool,
+}
+
+/// Read the header facts a TIFF probe needs, without decoding a pixel.
+fn tiff_header<R: BufRead + Seek>(
+    src: R,
+) -> Result<
+    (
+        tiff::decoder::Decoder<R>,
+        u32,
+        u32,
+        TiffSampleKind,
+        crate::geotiff::GeoTiffMeta,
+    ),
+    TerrainError,
+> {
+    use tiff::tags::{SampleFormat, Tag};
+
+    let mut decoder = tiff::decoder::Decoder::new(src)
+        // Real DEMs are large; the default limits are sized for web images and
+        // would refuse a 16 k source that this importer streams comfortably.
+        .map_err(|e| tiff_err("header", &e))?
+        .with_limits(tiff::decoder::Limits::unlimited());
+    let (width, height) = decoder
+        .dimensions()
+        .map_err(|e| tiff_err("dimensions", &e))?;
+    check_dimensions(width, height)?;
+
+    let spp = decoder.get_tag_u32(Tag::SamplesPerPixel).unwrap_or(1);
+    if spp != 1 {
+        return Err(TerrainError::Unsupported(format!(
+            "TIFF heightmaps must carry one sample per pixel (this one has {spp}) \
+             — a heightmap is a scalar field, and averaging colour channels into \
+             an elevation is a guess this importer will not make. If this is an \
+             RGB terrarium elevation tile, it is a different format with its own \
+             door; otherwise re-export the elevation band on its own with \
+             `gdal_translate -b 1 in.tif out.tif`."
+        )));
+    }
+    let bits = decoder.get_tag_u32(Tag::BitsPerSample).unwrap_or(8);
+    let format = decoder
+        .find_tag_unsigned::<u16>(Tag::SampleFormat)
+        .ok()
+        .flatten()
+        .map(SampleFormat::from_u16_exhaustive)
+        .unwrap_or(SampleFormat::Uint);
+
+    let geo = crate::geotiff::read_meta(&mut decoder)?;
+
+    let float = matches!(format, SampleFormat::IEEEFP);
+    // What makes a TIFF sample an ELEVATION rather than a count:
+    //   * it is a float — nobody stores normalized 0..1 heights as f32 in a TIFF;
+    //   * or it is SIGNED — a signed integer raster is an elevation, since the
+    //     negative half would be meaningless as a count;
+    //   * or the file is georeferenced — a GeoTIFF with a pixel scale and a tie
+    //     point is a DEM, whatever its sample type.
+    // An unsigned, ungeoreferenced TIFF is treated like a PNG: a count.
+    let absolute = float || matches!(format, SampleFormat::Int) || geo.is_georeferenced();
+    Ok((
+        decoder,
+        width,
+        height,
+        TiffSampleKind {
+            bits,
+            float,
+            absolute,
+        },
+        geo,
+    ))
+}
+
+fn probe_tiff<R: BufRead + Seek>(src: R) -> Result<HeightmapProbe, TerrainError> {
+    let (_decoder, width, height, kind, geo) = tiff_header(src)?;
+    Ok(HeightmapProbe {
+        format: HeightmapFormat::Tiff,
+        width,
+        height,
+        bit_depth: kind.bits,
+        float_samples: kind.float,
+        absolute_samples: kind.absolute,
+        channel: "gray".into(),
+        geo: Some(geo),
+    })
+}
+
+fn tiff_err(what: &str, e: &tiff::TiffError) -> TerrainError {
+    let msg = e.to_string();
+    // image-tiff has NO LERC and NO JPEG2000 decoder, and ArcGIS — which is what
+    // most US government portals are built on — produces LERC-compressed COGs
+    // routinely. "unsupported compression" would leave an author with nowhere to
+    // go; naming the remedy is the whole difference.
+    if msg.contains("ompression") || msg.contains("LERC") || msg.contains("Lerc") {
+        return TerrainError::Unsupported(format!(
+            "this TIFF uses a compression this engine cannot read ({msg}). The \
+             pure-Rust TIFF reader handles uncompressed, Deflate/zip, LZW and \
+             PackBits. It does NOT handle LERC or JPEG2000 — and ArcGIS, which \
+             most government elevation portals run on, produces LERC-compressed \
+             files by default. Re-save it once on your machine with \
+             `gdal_translate -co COMPRESS=DEFLATE in.tif out.tif` and it will \
+             import; nothing about the elevations changes."
+        ));
+    }
+    TerrainError::Image(format!("tiff {what}: {msg}"))
+}
+
+/// Stream a TIFF **one chunk at a time** — the strip or tile row the format
+/// itself is built out of.
+///
+/// # The memory bound survives the new format
+///
+/// This is the whole reason `tiff` was the crate chosen: `read_chunk` +
+/// `chunk_dimensions` is the same chunk-at-a-time seam that `png::Reader::next_row`
+/// and `exr`'s `decompress_sequential` gave us, so the P16.4a guarantee — a
+/// 16 k × 16 k source imports inside a live set of `< 6·ntx` tiles rather than
+/// materialising a 1 GB grid — holds for GeoTIFF exactly as it does for the
+/// other two. Peak cost here is one chunk row: for a striped file that is a
+/// handful of source rows, for a tiled file it is one tile row.
+///
+/// # Elevations arrive in metres
+///
+/// The vertical unit conversion ([`crate::geotiff::VerticalUnits`]) is applied
+/// here and **only** here. A source in feet hands this function feet and hands
+/// its caller metres.
+fn decode_rows_tiff<R: BufRead + Seek>(
+    src: R,
+    on_row: RowSink<'_>,
+) -> Result<HeightmapProbe, TerrainError> {
+    use tiff::decoder::DecodingResult;
+
+    let (mut decoder, width, height, kind, geo) = tiff_header(src)?;
+    if width == 0 || height == 0 {
+        return Err(TerrainError::Empty);
+    }
+    let w = width as usize;
+    let vscale = geo.vertical_scale();
+    // Applying a scale of exactly 1.0 would still cost a multiply per sample on
+    // the overwhelmingly common metric path, and — more importantly — would turn
+    // an exact integer elevation into `x * 1.0`, which is the same value but
+    // makes the "no conversion happened" case indistinguishable from the
+    // "conversion happened to be identity" case in a debugger.
+    let scaled = vscale != 1.0;
+
+    let (chunk_w, chunk_h) = decoder.chunk_dimensions();
+    if chunk_w == 0 || chunk_h == 0 {
+        return Err(TerrainError::Image(
+            "this TIFF declares a zero-sized chunk layout".into(),
+        ));
+    }
+    let chunks_across = width.div_ceil(chunk_w);
+    let chunks_down = height.div_ceil(chunk_h);
+    let chunk_count = (chunks_across as u64) * (chunks_down as u64);
+
+    // One row of source samples, reused. This plus one chunk row is the peak.
+    let mut row = vec![0.0f64; w];
+    // Which columns of the current row band have been written, so a short or
+    // missing chunk cannot leave stale values in it (the C4-18 lesson, met in a
+    // second decoder).
+    let mut band: Vec<f64> = Vec::new();
+    let mut band_covered: Vec<bool> = Vec::new();
+
+    for cy in 0..chunks_down {
+        let band_y0 = cy * chunk_h;
+        let band_rows = chunk_h.min(height - band_y0) as usize;
+        band.clear();
+        band.resize(band_rows * w, 0.0);
+        band_covered.clear();
+        band_covered.resize(band_rows * w, false);
+
+        for cx in 0..chunks_across {
+            let index = cy * chunks_across + cx;
+            if u64::from(index) >= chunk_count {
+                break;
+            }
+            let (data_w, data_h) = decoder.chunk_data_dimensions(index);
+            let result = decoder
+                .read_chunk(index)
+                .map_err(|e| tiff_err(&format!("chunk {index}"), &e))?;
+            let dw = data_w as usize;
+            let dh = data_h as usize;
+            let x0 = (cx * chunk_w) as usize;
+
+            // One closure per sample type, so the match is paid once per chunk
+            // rather than once per sample.
+            macro_rules! scatter {
+                ($vals:expr, $conv:expr) => {{
+                    let vals = $vals;
+                    for j in 0..dh {
+                        let gy = j;
+                        if gy >= band_rows {
+                            break;
+                        }
+                        for i in 0..dw {
+                            let gx = x0 + i;
+                            if gx >= w {
+                                break;
+                            }
+                            let raw = match vals.get(j * dw + i) {
+                                Some(v) => $conv(*v),
+                                None => continue,
+                            };
+                            band[gy * w + gx] = if scaled { raw * vscale } else { raw };
+                            band_covered[gy * w + gx] = true;
+                        }
+                    }
+                }};
+            }
+
+            match result {
+                DecodingResult::U8(v) => scatter!(v, |x: u8| x as f64),
+                DecodingResult::U16(v) => scatter!(v, |x: u16| x as f64),
+                DecodingResult::U32(v) => scatter!(v, |x: u32| x as f64),
+                DecodingResult::U64(v) => scatter!(v, |x: u64| x as f64),
+                DecodingResult::I8(v) => scatter!(v, |x: i8| x as f64),
+                DecodingResult::I16(v) => scatter!(v, |x: i16| x as f64),
+                DecodingResult::I32(v) => scatter!(v, |x: i32| x as f64),
+                DecodingResult::I64(v) => scatter!(v, |x: i64| x as f64),
+                DecodingResult::F16(v) => scatter!(v, |x: half::f16| x.to_f64()),
+                DecodingResult::F32(v) => scatter!(v, |x: f32| x as f64),
+                DecodingResult::F64(v) => scatter!(v, |x: f64| x),
+            }
+        }
+
+        for j in 0..band_rows {
+            let y = band_y0 + j as u32;
+            if let Some(x) = band_covered[j * w..(j + 1) * w].iter().position(|c| !c) {
+                return Err(TerrainError::Image(format!(
+                    "the TIFF's chunks do not cover sample ({x}, {y}) — the file \
+                     declares a {width}x{height} image but its strip/tile table \
+                     leaves part of it unwritten"
+                )));
+            }
+            row.copy_from_slice(&band[j * w..(j + 1) * w]);
+            on_row(y, &row)?;
+        }
+    }
+
+    Ok(HeightmapProbe {
+        format: HeightmapFormat::Tiff,
+        width,
+        height,
+        bit_depth: kind.bits,
+        float_samples: kind.float,
+        absolute_samples: kind.absolute,
+        channel: "gray".into(),
+        geo: Some(geo),
     })
 }
 
@@ -541,7 +1117,23 @@ pub type RowSink<'a> = &'a mut dyn FnMut(u32, &[f64]) -> Result<(), TerrainError
 /// Returns the probe it read on the way in. Never allocates more than the codec's
 /// own band plus one row.
 pub fn decode_rows<R: BufRead + Seek>(
+    src: R,
+    on_row: RowSink<'_>,
+) -> Result<HeightmapProbe, TerrainError> {
+    let mut report = NodataReport::default();
+    decode_rows_with(src, &NodataHandling::NONE, &mut report, on_row)
+}
+
+/// [`decode_rows`], with an explicit **nodata policy** (Wave G).
+///
+/// The policy runs on each decoded row **before** the finiteness door — see
+/// [`NodataPolicy`] for why that ordering is the load-bearing part. `report`
+/// accumulates what the policy actually did, which is what the import turns into
+/// a cook advisory.
+pub fn decode_rows_with<R: BufRead + Seek>(
     mut src: R,
+    nodata: &NodataHandling,
+    report: &mut NodataReport,
     on_row: RowSink<'_>,
 ) -> Result<HeightmapProbe, TerrainError> {
     let format = sniff(&mut src)?;
@@ -565,12 +1157,31 @@ pub fn decode_rows<R: BufRead + Seek>(
     // source does not cover that ground, and this engine has no representation
     // for a hole in a heightfield (holes are the voxel layer's, P21.2). Naming
     // the pixel is the only answer that lets them fix it in the exporter.
+    //
+    // **Wave G — the policy runs first.** Real DEMs are full of no-data, and
+    // before Wave G the door above was the only behaviour, so the first real
+    // GeoTIFF anyone imported stopped at its first ocean pixel. `apply_nodata`
+    // substitutes according to an author-chosen, sidecar-recorded policy; the
+    // finiteness check then runs on the result, so a non-finite sample that the
+    // policy did NOT explain is still a bug and still refuses.
+    let mut scratch: Vec<f64> = Vec::new();
     let mut finite_rows = |y: u32, row: &[f64]| -> Result<(), TerrainError> {
+        let row: &[f64] = if nodata.is_active() {
+            scratch.clear();
+            scratch.extend_from_slice(row);
+            apply_nodata(nodata, report, y, &mut scratch)?;
+            &scratch
+        } else {
+            row
+        };
         if let Some(x) = row.iter().position(|v| !v.is_finite()) {
             return Err(TerrainError::Image(format!(
                 "sample at ({x}, {y}) is not a finite number (NaN or infinity) — \
                  in a float heightmap that usually means 'no data', and a terrain \
-                 has no way to be absent at one sample"
+                 has no way to be absent at one sample. If this source is a real \
+                 DEM with voids or ocean in it, choose a no-data policy for the \
+                 import (clamp to an elevation, or fill small gaps) rather than \
+                 editing the file."
             )));
         }
         on_row(y, row)
@@ -578,6 +1189,7 @@ pub fn decode_rows<R: BufRead + Seek>(
     let probe = match format {
         HeightmapFormat::Png => decode_rows_png(src, &mut finite_rows)?,
         HeightmapFormat::Exr => decode_rows_exr(src, &mut finite_rows)?,
+        HeightmapFormat::Tiff => decode_rows_tiff(src, &mut finite_rows)?,
     };
     if probe.width == 0 || probe.height == 0 {
         return Err(TerrainError::Empty);
@@ -643,7 +1255,9 @@ fn decode_rows_png<R: BufRead + Seek>(
         height,
         bit_depth: png_bit_depth(depth),
         float_samples: false,
+        absolute_samples: false,
         channel: "gray".into(),
+        geo: None,
     })
 }
 
@@ -773,7 +1387,9 @@ fn decode_rows_exr<R: BufRead + Seek>(
             _ => 32,
         },
         float_samples: !matches!(sample_type, SampleType::U32),
+        absolute_samples: !matches!(sample_type, SampleType::U32),
         channel: channel_name,
+        geo: None,
     })
 }
 
@@ -1151,7 +1767,9 @@ mod tests {
             height: 8,
             bit_depth: 16,
             float_samples: false,
+            absolute_samples: false,
             channel: "gray".into(),
+            geo: None,
         };
         assert!(HeightmapImport {
             mode: HeightMode::FloatMeters,
@@ -1287,6 +1905,676 @@ mod tests {
         let g = HeightmapGrid::new(2049, 1025, &import);
         assert_eq!(g.ntx, HeightmapGrid::new(2049, 1025, &import).ntx);
         assert!(g.ntx >= 1 && g.ntz >= 1);
+    }
+
+    // ── Wave G: GeoTIFF ─────────────────────────────────────────────────────
+
+    use crate::geotiff::VerticalUnits;
+    use tiff::encoder::colortype;
+    use tiff::encoder::TiffEncoder;
+    use tiff::tags::Tag;
+
+    /// How a test fixture is georeferenced.
+    #[derive(Default, Clone)]
+    struct GeoTags {
+        pixel_scale: Option<[f64; 3]>,
+        tiepoint: Option<[f64; 6]>,
+        transformation: Option<[f64; 16]>,
+        /// `(key id, value)` pairs written with `location == 0`.
+        keys: Vec<(u16, u16)>,
+        nodata: Option<String>,
+        rows_per_strip: Option<u32>,
+    }
+
+    /// Build a real f32 GeoTIFF in memory.
+    fn geotiff_f32(width: u32, height: u32, samples: &[f32], geo: &GeoTags) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut enc = TiffEncoder::new(Cursor::new(&mut buf)).expect("tiff encoder");
+            let mut img = enc
+                .new_image::<colortype::Gray32Float>(width, height)
+                .expect("new image");
+            if let Some(n) = geo.rows_per_strip {
+                img.rows_per_strip(n).expect("rows per strip");
+            }
+            write_geo_tags(img.encoder(), geo);
+            img.write_data(samples).expect("write data");
+        }
+        buf
+    }
+
+    /// Build a real i16 GeoTIFF — the shape SRTM and most national DEMs ship in.
+    fn geotiff_i16(width: u32, height: u32, samples: &[i16], geo: &GeoTags) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut enc = TiffEncoder::new(Cursor::new(&mut buf)).expect("tiff encoder");
+            let mut img = enc
+                .new_image::<colortype::GrayI16>(width, height)
+                .expect("new image");
+            if let Some(n) = geo.rows_per_strip {
+                img.rows_per_strip(n).expect("rows per strip");
+            }
+            write_geo_tags(img.encoder(), geo);
+            img.write_data(samples).expect("write data");
+        }
+        buf
+    }
+
+    fn write_geo_tags<W: std::io::Write + Seek, K: tiff::encoder::TiffKind>(
+        dir: &mut tiff::encoder::DirectoryEncoder<'_, W, K>,
+        geo: &GeoTags,
+    ) {
+        if let Some(s) = geo.pixel_scale {
+            dir.write_tag(Tag::Unknown(33550), &s[..]).expect("scale");
+        }
+        if let Some(t) = geo.tiepoint {
+            dir.write_tag(Tag::Unknown(33922), &t[..]).expect("tie");
+        }
+        if let Some(m) = geo.transformation {
+            dir.write_tag(Tag::Unknown(34264), &m[..]).expect("xform");
+        }
+        if !geo.keys.is_empty() {
+            let mut d: Vec<u16> = vec![1, 1, 0, geo.keys.len() as u16];
+            for (id, value) in &geo.keys {
+                d.extend_from_slice(&[*id, 0, 1, *value]);
+            }
+            dir.write_tag(Tag::Unknown(34735), &d[..]).expect("geokeys");
+        }
+        if let Some(n) = &geo.nodata {
+            dir.write_tag(Tag::Unknown(42113), n.as_str())
+                .expect("nodata");
+        }
+    }
+
+    fn utm10n() -> Vec<(u16, u16)> {
+        vec![(1024, 1), (3072, 32610), (3076, 9001)]
+    }
+
+    fn read_all(bytes: &[u8]) -> (HeightmapProbe, Vec<Vec<f64>>) {
+        let mut rows = Vec::new();
+        let probe = decode_rows(Cursor::new(bytes), &mut |y, row| {
+            if rows.len() <= y as usize {
+                rows.resize(y as usize + 1, Vec::new());
+            }
+            rows[y as usize] = row.to_vec();
+            Ok(())
+        })
+        .expect("decode");
+        (probe, rows)
+    }
+
+    /// The whole Batch G-A door: a georeferenced float DEM probes, reports its
+    /// geotransform, and decodes to its own elevations.
+    #[test]
+    fn a_georeferenced_float_geotiff_probes_and_decodes() {
+        let (w, h) = (8u32, 5u32);
+        let samples: Vec<f32> = (0..w * h).map(|i| i as f32 * 3.25 - 20.0).collect();
+        let geo = GeoTags {
+            pixel_scale: Some([10.0, 10.0, 0.0]),
+            tiepoint: Some([0.0, 0.0, 0.0, 491_000.0, 5_459_000.0, 0.0]),
+            keys: utm10n(),
+            ..Default::default()
+        };
+        let bytes = geotiff_f32(w, h, &samples, &geo);
+
+        // The magic is sniffed as TIFF.
+        let probe = probe_heightmap_bytes(&bytes).expect("probe");
+        assert_eq!(probe.format, HeightmapFormat::Tiff);
+        assert_eq!((probe.width, probe.height), (w, h));
+        assert_eq!(probe.bit_depth, 32);
+        assert!(probe.float_samples);
+        assert!(
+            probe.absolute_samples,
+            "a float DEM carries absolute elevations"
+        );
+
+        // …and the georeferencing came back.
+        let g = probe.geo.as_ref().expect("georeferenced");
+        assert!(g.is_georeferenced());
+        assert_eq!(g.meters_per_sample, Some(10.0));
+        assert_eq!(g.origin, Some((491_000.0, 5_459_000.0, 0.0)));
+        assert_eq!(g.epsg, Some(32610));
+        assert!(!g.crs_is_geographic);
+        assert_eq!(g.vertical_units, VerticalUnits::Metre);
+        assert_eq!(g.vertical_scale(), 1.0);
+
+        // Every sample decodes to its own value, in order.
+        let (probe2, rows) = read_all(&bytes);
+        assert_eq!(probe2.width, probe.width);
+        assert_eq!(rows.len(), h as usize);
+        for (y, row) in rows.iter().enumerate() {
+            assert_eq!(row.len(), w as usize, "row {y}");
+            for (x, v) in row.iter().enumerate() {
+                let want = samples[y * w as usize + x] as f64;
+                assert_eq!(*v, want, "sample ({x}, {y})");
+            }
+        }
+
+        // And it lands on a real terrain through the whole-image tiler.
+        let import = HeightmapImport {
+            tile_resolution: 5,
+            meters_per_sample: 10.0,
+            mode: HeightMode::FloatMeters,
+            ..Default::default()
+        };
+        let t = TerrainData::from_height_image(&bytes, import).expect("import");
+        assert!(t.tile_count() >= 1);
+        assert_eq!(t.get_tile((0, 0)).unwrap().sample(5, 0, 0), -20.0);
+    }
+
+    /// **A 16-bit INTEGER GeoTIFF is a DEM.** This is the case the old
+    /// `float_samples` gate would have refused, and refusing it would have shut
+    /// out SRTM and most national elevation products.
+    ///
+    /// Un-fix mutation: point `validate` back at `float_samples` and the
+    /// float-metres import below fails.
+    #[test]
+    fn an_integer_geotiff_dem_carries_absolute_elevations() {
+        let (w, h) = (6u32, 4u32);
+        // Real elevations, including below sea level.
+        let samples: Vec<i16> = (0..w * h).map(|i| i as i16 * 40 - 100).collect();
+        let geo = GeoTags {
+            pixel_scale: Some([30.0, 30.0, 0.0]),
+            tiepoint: Some([0.0, 0.0, 0.0, 500_000.0, 4_000_000.0, 0.0]),
+            keys: utm10n(),
+            ..Default::default()
+        };
+        let bytes = geotiff_i16(w, h, &samples, &geo);
+
+        let probe = probe_heightmap_bytes(&bytes).unwrap();
+        assert_eq!(probe.bit_depth, 16);
+        assert!(!probe.float_samples, "an i16 raster is not float");
+        assert!(
+            probe.absolute_samples,
+            "…but a SIGNED integer raster IS elevations — that is the distinction \
+             `absolute_samples` exists to draw"
+        );
+
+        // Float-metres mode is therefore available, and is validated as such.
+        let import = HeightmapImport {
+            tile_resolution: 4,
+            meters_per_sample: 30.0,
+            mode: HeightMode::FloatMeters,
+            ..Default::default()
+        };
+        assert!(import.validate(Some(&probe)).is_ok());
+
+        // The negative elevations survive as negative metres.
+        let (_, rows) = read_all(&bytes);
+        assert_eq!(rows[0][0], -100.0);
+        assert_eq!(rows[0][1], -60.0);
+
+        // A PNG, by contrast, is still refused in that mode — the old behaviour
+        // is intact for the format it was written for.
+        let png = encode_png16(&ramp(4, 4)).unwrap();
+        let png_probe = probe_heightmap_bytes(&png).unwrap();
+        assert!(!png_probe.absolute_samples);
+        assert!(import.validate(Some(&png_probe)).is_err());
+    }
+
+    /// **Feet become metres exactly once**, at the decoder, and a landscape in
+    /// feet does not import 3.28x too flat.
+    ///
+    /// Un-fix mutation: drop the `vscale` multiply in `decode_rows_tiff` and the
+    /// 1000 ft summit comes back as 1000 m.
+    #[test]
+    fn a_dem_in_feet_imports_in_metres() {
+        let (w, h) = (4u32, 2u32);
+        // A 1000-foot summit — 304.8 m.
+        let samples: Vec<f32> = vec![0.0, 1000.0, 500.0, -100.0, 0.0, 0.0, 0.0, 0.0];
+        let mut keys = utm10n();
+        keys.push((4099, 9002)); // vertical unit: international foot
+        let geo = GeoTags {
+            pixel_scale: Some([10.0, 10.0, 0.0]),
+            tiepoint: Some([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            keys,
+            ..Default::default()
+        };
+        let bytes = geotiff_f32(w, h, &samples, &geo);
+
+        let probe = probe_heightmap_bytes(&bytes).unwrap();
+        assert_eq!(
+            probe.geo.as_ref().unwrap().vertical_units,
+            VerticalUnits::Foot
+        );
+
+        let (_, rows) = read_all(&bytes);
+        assert!(
+            (rows[0][1] - 304.8).abs() < 1e-6,
+            "1000 ft must import as 304.8 m, got {}",
+            rows[0][1]
+        );
+        assert!((rows[0][2] - 152.4).abs() < 1e-6);
+        assert!((rows[0][3] + 30.48).abs() < 1e-6, "negatives scale too");
+        assert_eq!(rows[0][0], 0.0, "sea level is sea level in any unit");
+
+        // The US survey foot is a DIFFERENT unit and is not silently the same.
+        let mut keys = utm10n();
+        keys.push((4099, 9003));
+        let us = geotiff_f32(
+            w,
+            h,
+            &samples,
+            &GeoTags {
+                keys,
+                nodata: None,
+                transformation: None,
+                ..geo.clone()
+            },
+        );
+        let (_, us_rows) = read_all(&us);
+        assert!(
+            us_rows[0][1] > 304.8,
+            "the US survey foot is the longer one"
+        );
+        assert!(
+            (us_rows[0][1] - 304.800_609_6).abs() < 1e-5,
+            "got {}",
+            us_rows[0][1]
+        );
+
+        // A horizontal foot unit with NO vertical key implies foot elevations —
+        // the inference that keeps a foot-based state plane from importing flat.
+        let flat_keys = vec![(1024, 1), (3072, 32610), (3076, 9002)];
+        let inferred = geotiff_f32(
+            w,
+            h,
+            &samples,
+            &GeoTags {
+                keys: flat_keys,
+                ..geo.clone()
+            },
+        );
+        let p = probe_heightmap_bytes(&inferred).unwrap();
+        assert_eq!(
+            p.geo.as_ref().unwrap().vertical_units,
+            VerticalUnits::Foot,
+            "a foot-based CRS with no vertical key must imply foot elevations"
+        );
+    }
+
+    /// **The nodata policy door.** The default still refuses (naming the fix),
+    /// and each policy does what it says.
+    #[test]
+    fn the_nodata_policy_decides_what_happens_to_a_void() {
+        let (w, h) = (6u32, 2u32);
+        // A row with a two-sample void in the middle, declared as -9999.
+        let samples: Vec<f32> = vec![
+            10.0, 20.0, -9999.0, -9999.0, 50.0, 60.0, //
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0,
+        ];
+        let geo = GeoTags {
+            pixel_scale: Some([10.0, 10.0, 0.0]),
+            tiepoint: Some([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            keys: utm10n(),
+            nodata: Some("-9999".into()),
+            ..Default::default()
+        };
+        let bytes = geotiff_f32(w, h, &samples, &geo);
+
+        // The sentinel is read off the ASCII tag.
+        let probe = probe_heightmap_bytes(&bytes).unwrap();
+        assert_eq!(probe.geo.as_ref().unwrap().nodata, Some(-9999.0));
+
+        let handling = |policy| NodataHandling {
+            policy,
+            sentinel: Some(-9999.0),
+        };
+        let run = |h: NodataHandling| -> Result<(Vec<Vec<f64>>, NodataReport), TerrainError> {
+            let mut rows: Vec<Vec<f64>> = Vec::new();
+            let mut report = NodataReport::default();
+            decode_rows_with(Cursor::new(&bytes), &h, &mut report, &mut |y, row| {
+                if rows.len() <= y as usize {
+                    rows.resize(y as usize + 1, Vec::new());
+                }
+                rows[y as usize] = row.to_vec();
+                Ok(())
+            })?;
+            Ok((rows, report))
+        };
+
+        // Refuse: the default, and it survives — a -9999 is finite, so this one
+        // imports as a -9999 m pit rather than erroring. That is the honest
+        // behaviour for an UNDECLARED sentinel, and it is why the policy exists.
+        let (rows, report) = run(handling(NodataPolicy::Refuse)).unwrap();
+        assert_eq!(rows[0][2], -9999.0);
+        assert!(!report.engaged(), "Refuse substitutes nothing");
+
+        // Clamp: the void becomes the stated elevation.
+        let (rows, report) = run(handling(NodataPolicy::sea_level())).unwrap();
+        assert_eq!(rows[0][2], 0.0);
+        assert_eq!(rows[0][3], 0.0);
+        assert_eq!(rows[0][1], 20.0, "valid samples are untouched");
+        assert_eq!(report.substituted, 2);
+        assert!(
+            report.engaged(),
+            "and the cook advisory has something to say"
+        );
+
+        // Fill: the void is interpolated between its neighbours.
+        let (rows, report) = run(handling(NodataPolicy::FillRow { max_span: 4 })).unwrap();
+        assert!(
+            (rows[0][2] - 30.0).abs() < 1e-9 && (rows[0][3] - 40.0).abs() < 1e-9,
+            "a 2-wide void between 20 and 50 fills to 30 and 40, got {:?}",
+            &rows[0]
+        );
+        assert_eq!(report.substituted, 2);
+        assert_eq!(report.filled_runs, 1);
+        assert_eq!(report.widest_run, 2);
+
+        // …and a void wider than the limit REFUSES rather than smearing.
+        let e = run(handling(NodataPolicy::FillRow { max_span: 1 }))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("run of 2"), "{e}");
+        assert!(
+            e.contains("clamp"),
+            "the refusal must name the alternative: {e}"
+        );
+    }
+
+    /// NaN is no-data whether or not a sentinel is declared — and the refusal
+    /// now tells the author about the policy instead of just naming the pixel.
+    #[test]
+    fn a_nan_void_is_handled_by_the_policy_and_named_without_one() {
+        let (w, h) = (4u32, 1u32);
+        let samples: Vec<f32> = vec![10.0, f32::NAN, f32::NAN, 40.0];
+        let geo = GeoTags {
+            pixel_scale: Some([1.0, 1.0, 0.0]),
+            tiepoint: Some([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            keys: utm10n(),
+            ..Default::default()
+        };
+        let bytes = geotiff_f32(w, h, &samples, &geo);
+
+        // With no policy the finiteness door fires, and now points at the fix.
+        let e = decode_rows(Cursor::new(&bytes), &mut |_, _| Ok(()))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("not a finite number"), "{e}");
+        assert!(
+            e.contains("no-data policy"),
+            "the refusal must now name the policy as the remedy: {e}"
+        );
+
+        // With a clamp, the NaNs become sea level — no sentinel needed, because
+        // NaN is always no-data.
+        let mut rows: Vec<Vec<f64>> = Vec::new();
+        let mut report = NodataReport::default();
+        decode_rows_with(
+            Cursor::new(&bytes),
+            &NodataHandling {
+                policy: NodataPolicy::sea_level(),
+                sentinel: None,
+            },
+            &mut report,
+            &mut |_, row| {
+                rows.push(row.to_vec());
+                Ok(())
+            },
+        )
+        .expect("a clamp policy handles NaN with no sentinel declared");
+        assert_eq!(rows[0], vec![10.0, 0.0, 0.0, 40.0]);
+        assert_eq!(report.substituted, 2);
+    }
+
+    /// The two rasters that are refused rather than distorted, and the two
+    /// compression/format cases that get a remedy rather than a shrug.
+    #[test]
+    fn distorting_rasters_are_refused_with_a_named_remedy() {
+        let samples: Vec<f32> = vec![0.0; 16];
+
+        // Non-square pixels would stretch the world along one axis.
+        let aniso = geotiff_f32(
+            4,
+            4,
+            &samples,
+            &GeoTags {
+                pixel_scale: Some([10.0, 25.0, 0.0]),
+                tiepoint: Some([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                keys: utm10n(),
+                ..Default::default()
+            },
+        );
+        let e = probe_heightmap_bytes(&aniso).unwrap_err().to_string();
+        assert!(e.contains("not square"), "{e}");
+        assert!(e.contains("10") && e.contains("25"), "{e}");
+        assert!(e.contains("gdalwarp"), "{e}");
+
+        // A rotated transformation cannot be honoured without resampling.
+        let mut m = [0.0f64; 16];
+        m[0] = 10.0;
+        m[1] = 2.5; // shear
+        m[5] = -10.0;
+        let rotated = geotiff_f32(
+            4,
+            4,
+            &samples,
+            &GeoTags {
+                transformation: Some(m),
+                keys: utm10n(),
+                ..Default::default()
+            },
+        );
+        let e = probe_heightmap_bytes(&rotated).unwrap_err().to_string();
+        assert!(e.contains("rotated") || e.contains("sheared"), "{e}");
+        assert!(e.contains("north-up"), "{e}");
+
+        // An unknown vertical unit is refused rather than assumed metric.
+        let mut keys = utm10n();
+        keys.push((4099, 9036)); // kilometres
+        let km = geotiff_f32(
+            4,
+            4,
+            &samples,
+            &GeoTags {
+                pixel_scale: Some([10.0, 10.0, 0.0]),
+                tiepoint: Some([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                keys,
+                ..Default::default()
+            },
+        );
+        let e = probe_heightmap_bytes(&km).unwrap_err().to_string();
+        assert!(
+            e.contains("9036"),
+            "the refusal must name the unit code: {e}"
+        );
+        assert!(e.contains("vertical unit"), "{e}");
+
+        // A BigTIFF is refused AS a BigTIFF, with the cutting remedy — not as
+        // "unrecognized file signature".
+        let mut big = vec![b'I', b'I', 43, 0];
+        big.extend_from_slice(&[0u8; 32]);
+        let e = probe_heightmap_bytes(&big).unwrap_err().to_string();
+        assert!(e.contains("BigTIFF"), "{e}");
+        assert!(e.contains("gdal_translate"), "{e}");
+    }
+
+    /// **The memory bound survives the new format.** A striped TIFF is read one
+    /// chunk row at a time, and the decoder never holds the image.
+    ///
+    /// The assertion is on the DECODER's own chunk layout rather than on a
+    /// process memory figure: what matters is that the file really is being read
+    /// in many chunks and that each row arrives exactly once, in order.
+    #[test]
+    fn a_striped_geotiff_streams_one_chunk_row_at_a_time() {
+        let (w, h) = (64u32, 64u32);
+        let samples: Vec<f32> = (0..w * h).map(|i| (i % 997) as f32).collect();
+        let bytes = geotiff_f32(
+            w,
+            h,
+            &samples,
+            &GeoTags {
+                pixel_scale: Some([1.0, 1.0, 0.0]),
+                tiepoint: Some([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                keys: utm10n(),
+                // Four rows per strip: sixteen strips, so the chunked path is
+                // genuinely exercised rather than degenerating to one chunk.
+                rows_per_strip: Some(4),
+                ..Default::default()
+            },
+        );
+
+        let mut seen: Vec<u32> = Vec::new();
+        let mut peak_row_len = 0usize;
+        let probe = decode_rows(Cursor::new(&bytes), &mut |y, row| {
+            seen.push(y);
+            peak_row_len = peak_row_len.max(row.len());
+            // Every sample is its own value — no chunk boundary smeared.
+            for (x, v) in row.iter().enumerate() {
+                assert_eq!(
+                    *v,
+                    samples[(y as usize) * w as usize + x] as f64,
+                    "sample ({x}, {y}) crossed a chunk boundary wrong"
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(probe.width, w);
+        assert_eq!(seen.len(), h as usize, "every row arrives exactly once");
+        assert_eq!(
+            seen,
+            (0..h).collect::<Vec<_>>(),
+            "rows must arrive in order, once each"
+        );
+        assert_eq!(peak_row_len, w as usize, "a row is a row, never the image");
+        // (The whole-image-vs-chunked BYTE identity for GeoTIFF is asserted by
+        // the real determinism gate in `crate::chunked` — extended to cover this
+        // format rather than re-implemented here.)
+    }
+
+    /// A plain (ungeoreferenced) TIFF is still a heightmap — importing one is
+    /// legitimate and must not require a geotransform.
+    #[test]
+    fn a_plain_tiff_is_an_ordinary_heightmap() {
+        let (w, h) = (4u32, 3u32);
+        let samples: Vec<f32> = (0..w * h).map(|i| i as f32 / 100.0).collect();
+        let bytes = geotiff_f32(w, h, &samples, &GeoTags::default());
+        let probe = probe_heightmap_bytes(&bytes).unwrap();
+        assert_eq!(probe.format, HeightmapFormat::Tiff);
+        let g = probe.geo.as_ref().unwrap();
+        assert!(!g.is_georeferenced(), "no tags, no georeference");
+        assert_eq!(g.epsg, None);
+        assert_eq!(g.meters_per_sample, None);
+        // It still decodes. (Compared with a tolerance, not exactly: the source
+        // samples are f32, so `1.0/100.0` reaches us as the nearest f32 widened
+        // to f64 — 0.009 999 999 776…, which is the right answer and not 0.01.)
+        let (_, rows) = read_all(&bytes);
+        assert!((rows[0][1] - 0.01).abs() < 1e-7, "got {}", rows[0][1]);
+
+        // Multi-sample TIFFs are refused by name — a heightmap is scalar.
+        let mut buf = Vec::new();
+        {
+            let mut enc = TiffEncoder::new(Cursor::new(&mut buf)).unwrap();
+            enc.write_image::<colortype::RGB8>(2, 2, &[0u8; 12])
+                .unwrap();
+        }
+        let e = probe_heightmap_bytes(&buf).unwrap_err().to_string();
+        assert!(e.contains("one sample per pixel"), "{e}");
+        assert!(e.contains("gdal_translate"), "{e}");
+    }
+
+    /// The tiepoint's raster offset is honoured rather than assumed to be zero.
+    #[test]
+    fn a_tiepoint_at_the_raster_centre_places_the_corner_correctly() {
+        let (w, h) = (11u32, 11u32);
+        let samples: Vec<f32> = vec![0.0; (w * h) as usize];
+        // Tie raster pixel (5, 5) to model (1000, 2000) at 10 m pixels. The
+        // top-left sample is therefore 50 m west and 50 m north of that.
+        let bytes = geotiff_f32(
+            w,
+            h,
+            &samples,
+            &GeoTags {
+                pixel_scale: Some([10.0, 10.0, 0.0]),
+                tiepoint: Some([5.0, 5.0, 0.0, 1000.0, 2000.0, 0.0]),
+                keys: utm10n(),
+                ..Default::default()
+            },
+        );
+        let g = probe_heightmap_bytes(&bytes).unwrap().geo.unwrap();
+        assert_eq!(
+            g.origin,
+            Some((950.0, 2050.0, 0.0)),
+            "the tie's raster offset must be walked back to the top-left sample"
+        );
+    }
+
+    /// A geographic GeoTIFF reports its pixel size in DEGREES, so nobody reads
+    /// 0.000278 as a quarter of a millimetre.
+    #[test]
+    fn a_geographic_geotiff_says_its_pixels_are_degrees() {
+        let (w, h) = (4u32, 4u32);
+        let samples: Vec<f32> = vec![0.0; 16];
+        let bytes = geotiff_f32(
+            w,
+            h,
+            &samples,
+            &GeoTags {
+                pixel_scale: Some([0.000_277_8, 0.000_277_8, 0.0]),
+                tiepoint: Some([0.0, 0.0, 0.0, -123.5, 49.5, 0.0]),
+                // model type 2 == geographic; EPSG:4326.
+                keys: vec![(1024, 2), (2048, 4326)],
+                ..Default::default()
+            },
+        );
+        let g = probe_heightmap_bytes(&bytes).unwrap().geo.unwrap();
+        assert!(g.crs_is_geographic);
+        assert_eq!(g.epsg, Some(4326));
+        assert_eq!(g.degrees_per_sample(), Some(0.000_277_8));
+    }
+
+    /// The nodata policy label round-trips, and an unrecognised one is refused
+    /// rather than silently downgraded to `Refuse` — which would change the
+    /// terrain a re-import produces.
+    #[test]
+    fn nodata_policy_labels_round_trip_and_refuse_the_unknown() {
+        for p in [
+            NodataPolicy::Refuse,
+            NodataPolicy::Clamp(0.0),
+            NodataPolicy::Clamp(-12.5),
+            NodataPolicy::FillRow { max_span: 64 },
+        ] {
+            let label = p.label();
+            assert_eq!(
+                NodataPolicy::from_label(&label),
+                Some(p),
+                "{label:?} did not round-trip"
+            );
+        }
+        assert_eq!(NodataPolicy::sea_level(), NodataPolicy::Clamp(0.0));
+        assert_eq!(NodataPolicy::default(), NodataPolicy::Refuse);
+        assert_eq!(NodataPolicy::from_label("smear-outward"), None);
+        assert_eq!(NodataPolicy::from_label("clamp:nan"), None);
+        assert_eq!(NodataPolicy::from_label("clamp:"), None);
+    }
+
+    /// The sentinel match is RELATIVE, because a float sentinel reaches us twice
+    /// by two routes that need not round to the same double.
+    #[test]
+    fn the_nodata_sentinel_matches_across_a_float_round_trip() {
+        let h = NodataHandling {
+            policy: NodataPolicy::sea_level(),
+            sentinel: Some(-3.402_823_466_385_288_6e38),
+        };
+        // The f32 minimum widened to f64 — what the pixels actually carry.
+        assert!(h.is_nodata(f32::MIN as f64), "the f32 sentinel must match");
+        assert!(h.is_nodata(-3.402_823_466_385_288_6e38));
+        // A real elevation does not.
+        assert!(!h.is_nodata(-9999.0));
+        assert!(!h.is_nodata(0.0));
+        // Non-finite is always no-data, sentinel or not.
+        assert!(h.is_nodata(f64::NAN));
+        assert!(NodataHandling::NONE.is_nodata(f64::NAN));
+        assert!(!NodataHandling::NONE.is_nodata(-9999.0));
+        // An exact integer sentinel still matches exactly.
+        let h = NodataHandling {
+            policy: NodataPolicy::sea_level(),
+            sentinel: Some(-9999.0),
+        };
+        assert!(h.is_nodata(-9999.0));
+        assert!(!h.is_nodata(-9998.0));
     }
 
     /// **C4-18 — `PartialRows` counted writes, not coverage.**

@@ -40,8 +40,16 @@ image = { workspace = true }
 #          block at a time. Already in the tree via `image`'s `exr` feature, so
 #          this pins no new crate; BSD-3-Clause, on the deny allow-list.
 #   half — the `f16` sample type an EXR line may carry (in-tree via exr).
+#   tiff — GeoTIFF, the format real elevation data ships in (Wave G).
+#          `read_chunk` + `chunk_dimensions` is the SAME chunk-at-a-time seam
+#          the other two give us, so the P16.4a memory bound (a 16k source
+#          imports in ~100 MB, not 1 GB) survives the new format rather than
+#          being re-argued for it. This is the one place `tiff` is named — it
+#          belongs beside its sibling decoders, not behind inf-gis's facade,
+#          because a DEM is an elevation source and not a vector source. MIT.
 png = { workspace = true }
 exr = { workspace = true }
+tiff = { workspace = true }
 half = { workspace = true }
 thiserror = { workspace = true }
 # The `.inf_biomes` BiomeSet (P19.2) carries a PCG-graph asset reference per biome

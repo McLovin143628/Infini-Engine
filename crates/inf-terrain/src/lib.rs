@@ -57,6 +57,7 @@ mod data;
 pub mod deform;
 mod delta;
 pub mod erosion;
+pub mod geotiff;
 pub mod import;
 pub mod maps;
 pub use erosion::{erode, erode_terrain, erode_with, ErosionParams, ErosionStats};
@@ -101,9 +102,11 @@ pub use deform::{
     MAX_DEFORM_CELLS, MAX_DEFORM_DEPTH_M,
 };
 pub use delta::{HeightDelta, HoleDelta, HoleDeltaBuilder, HolePatch, TilePatch};
+pub use geotiff::{GeoTiffMeta, VerticalUnits};
 pub use import::{
     encode_png16, probe_heightmap, probe_heightmap_bytes, HeightImage, HeightMode, HeightmapFormat,
-    HeightmapGrid, HeightmapImport, HeightmapProbe, TerrainError,
+    HeightmapGrid, HeightmapImport, HeightmapProbe, NodataHandling, NodataPolicy, NodataReport,
+    TerrainError,
 };
 pub use maps::{DataMapDelta, DataMapPatch};
 pub use noise::fbm_signed;
