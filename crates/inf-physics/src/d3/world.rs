@@ -1122,8 +1122,36 @@ impl PhysicsWorld3D {
         max_toi: f64,
         exclude: &std::collections::BTreeSet<ColliderId3D>,
     ) -> Option<RayHit3D> {
+        self.cast_ray_where(origin, dir, max_toi, exclude, CastTargets::Fixed)
+    }
+
+    /// [`cast_ray_excluding`](Self::cast_ray_excluding) against a chosen **class**
+    /// of collider (P29.7) — the ray sibling of
+    /// [`cast_shape_where`](Self::cast_shape_where), and now the one
+    /// implementation both filtered ray doors share.
+    ///
+    /// # The caller this exists for
+    ///
+    /// A raycast vehicle's wheel. Its ray must see **everything** solid: a car
+    /// drives over a crate, up a fractured chunk and onto a moving platform, and
+    /// a suspension ray that skipped dynamic bodies would put the wheel through
+    /// them. That is the opposite of the structural probe
+    /// [`cast_ray_excluding`](Self::cast_ray_excluding) was built for — "is this
+    /// chunk resting on *static* geometry" — so the two are one function with a
+    /// class argument rather than two copies of a BVH walk.
+    ///
+    /// The exclusion set is still the caller's and is still structural here: a
+    /// wheel ray starts inside the vehicle it belongs to.
+    pub fn cast_ray_where(
+        &mut self,
+        origin: DVec3,
+        dir: DVec3,
+        max_toi: f64,
+        exclude: &std::collections::BTreeSet<ColliderId3D>,
+        targets: CastTargets,
+    ) -> Option<RayHit3D> {
         let dir = dir.normalize_or_zero();
-        if dir == DVec3::ZERO {
+        if dir == DVec3::ZERO || !max_toi.is_finite() || max_toi <= 0.0 {
             return None;
         }
         self.ensure_query_pipeline();
@@ -1142,7 +1170,11 @@ impl PhysicsWorld3D {
         // and a tower collapsed because its own rubble had landed beside it. It
         // also removes a tie-at-TOI hazard: two coincident hits, one dynamic, are
         // ordered by the BVH rather than by anything deterministic.
-        let filter = QueryFilter::exclude_dynamic().predicate(&predicate);
+        let base = match targets {
+            CastTargets::All => QueryFilter::default(),
+            CastTargets::Fixed => QueryFilter::exclude_dynamic(),
+        };
+        let filter = base.predicate(&predicate);
         let pipe = self.query_pipeline(filter);
         let (handle, hit) = pipe.cast_ray_and_get_normal(&ray, max_toi, true)?;
         Some(RayHit3D {

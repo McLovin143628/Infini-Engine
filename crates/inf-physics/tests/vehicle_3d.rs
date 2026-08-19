@@ -1,0 +1,649 @@
+//! **P29.7: the raycast vehicle, against a real world.**
+//!
+//! `inf_ecs::vehicle`'s own tests pin the arithmetic — the spring, the engine
+//! curve, the friction circle — as functions of numbers. These pin the *world*:
+//! a rig built out of scene components, discovered by the bridge, stepped by the
+//! one movement door, and asked afterwards where it actually is.
+//!
+//! Every claim here is about metres, radians or body counts. The one thing this
+//! file deliberately does not do is assert on `VehicleOutcome`, which is a
+//! report: a door that computed nothing and reported four grounded wheels would
+//! satisfy that and nothing else.
+
+use std::collections::BTreeMap;
+
+use glam::{DVec3, EulerRot};
+use uuid::Uuid;
+
+use inf_ecs::components::{BodyKind3D, Collider3D, ColliderShape3DKind, RigidBody3D, Transform};
+use inf_ecs::math::Vec3d;
+use inf_ecs::vehicle::{ChassisState, VehicleControls, VehicleRig, WheelForce, WheelState};
+use inf_ecs::EcsWorld;
+use inf_physics::d3::PhysicsBridge3D;
+
+const HZ: f64 = 60.0;
+const DT: f64 = 1.0 / HZ;
+
+const GROUND: Uuid = Uuid::from_u128(0x2907_1000);
+const CHASSIS: Uuid = Uuid::from_u128(0x2907_1001);
+const WHEEL_BASE: u128 = 0x2907_1010;
+const LOOSE_SENSOR: Uuid = Uuid::from_u128(0x2907_1099);
+
+/// The chassis is 4 × 1 × 2 m at 150 kg/m³ — a hollow shell, per
+/// `Collider3D::density`'s own note, which is 1 200 kg.
+const HALF: Vec3d = Vec3d::new(2.0, 0.5, 1.0);
+const DENSITY: f64 = 150.0;
+const MASS_KG: f64 = 8.0 * DENSITY;
+const WHEEL_RADIUS: f64 = 0.35;
+/// The wheel centre in the chassis frame, at full extension.
+const WHEEL_Y: f64 = -0.5;
+/// So a chassis at this height has its wheels exactly touching a floor at y = 0
+/// with the suspension fully extended — the placement an author would make.
+const SPAWN_Y: f64 = -WHEEL_Y + WHEEL_RADIUS;
+
+fn ground(world: &mut EcsWorld) {
+    let e = world.spawn_with_guid(GROUND, "Ground", None);
+    let mut t = Transform::IDENTITY;
+    t.translation = Vec3d::new(0.0, -0.5, 0.0);
+    world.world_mut().entity_mut(e).insert((
+        t,
+        RigidBody3D {
+            kind: BodyKind3D::Static,
+            ..Default::default()
+        },
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(80.0, 0.5, 80.0),
+            ..Default::default()
+        },
+    ));
+}
+
+/// The committed rig's shape, built by hand: a dynamic box with four sphere
+/// **sensors** hanging off it.
+fn car(world: &mut EcsWorld, y: f64) {
+    let e = world.spawn_with_guid(CHASSIS, "Car", None);
+    let mut t = Transform::IDENTITY;
+    t.translation = Vec3d::new(0.0, y, 0.0);
+    world.world_mut().entity_mut(e).insert((
+        t,
+        RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            // A car does not tumble on its own axis for want of damping; these
+            // are the numbers the sample carries too.
+            angular_damping: 0.5,
+            ..Default::default()
+        },
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: HALF,
+            density: DENSITY,
+            friction: 0.5,
+            ..Default::default()
+        },
+    ));
+    for (i, (x, z)) in [(-0.9, 1.4), (0.9, 1.4), (-0.9, -1.4), (0.9, -1.4)]
+        .into_iter()
+        .enumerate()
+    {
+        let w = world.spawn_with_guid(Uuid::from_u128(WHEEL_BASE + i as u128), "Wheel", Some(e));
+        let mut wt = Transform::IDENTITY;
+        wt.translation = Vec3d::new(x, WHEEL_Y, z);
+        world.world_mut().entity_mut(w).insert((
+            wt,
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Sphere,
+                radius: WHEEL_RADIUS,
+                sensor: true,
+                ..Default::default()
+            },
+        ));
+    }
+}
+
+struct Rig {
+    world: EcsWorld,
+    bridge: PhysicsBridge3D,
+}
+
+impl Rig {
+    fn new(y: f64) -> Self {
+        let mut world = EcsWorld::new();
+        ground(&mut world);
+        car(&mut world, y);
+        world.mark_dirty();
+        world.propagate();
+        let bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+        let mut rig = Self { world, bridge };
+        rig.bridge.sync_from_world(&rig.world);
+        rig
+    }
+
+    fn step(&mut self, n: u32) {
+        for _ in 0..n {
+            self.bridge.sync_from_world(&self.world);
+            inf_physics::d3::step_character_movement(&mut self.world, &mut self.bridge, DT);
+            self.bridge.step(DT);
+            self.bridge.write_back_into(&mut self.world);
+            self.world.propagate();
+        }
+    }
+
+    fn drive(&mut self, controls: VehicleControls, n: u32) {
+        for _ in 0..n {
+            if let Some(v) = self.bridge.vehicle_mut(CHASSIS) {
+                v.control(controls);
+            }
+            self.step(1);
+        }
+    }
+
+    fn chassis(&self) -> Transform {
+        let e = self.world.entity_of(CHASSIS).expect("the car exists");
+        *self
+            .world
+            .world()
+            .get::<Transform>(e)
+            .expect("…with a transform")
+    }
+
+    fn y(&self) -> f64 {
+        self.chassis().translation.y
+    }
+
+    fn z(&self) -> f64 {
+        self.chassis().translation.z
+    }
+
+    fn yaw_deg(&self) -> f64 {
+        self.chassis().rotation.y
+    }
+}
+
+/// **The headline.** A rig authored with its wheels on the floor settles onto
+/// its springs, stops, and stays there.
+///
+/// Three claims in one, and the third is the one a fixture would miss: it must
+/// not sink (a suspension that answers zero load lets the box rest on its own
+/// collider, half a metre lower), it must not bounce for ever (the damper), and
+/// it must not creep (the friction circle at zero slip).
+#[test]
+fn a_parked_rig_settles_on_its_springs_and_stays_there() {
+    let mut rig = Rig::new(SPAWN_Y);
+    rig.step(300);
+    let settled = rig.y();
+    // 1 200 kg on four 20 000 N/m springs is 0.147 m of compression.
+    let want = SPAWN_Y - MASS_KG * 9.81 / 4.0 / 20_000.0;
+    assert!(
+        (settled - want).abs() < 0.02,
+        "the rig settled at {settled} m; its springs say {want} m"
+    );
+    // …and the box's own underside is at `settled - HALF.y`; if the springs had
+    // failed it would be resting on the floor at HALF.y.
+    assert!(
+        settled - HALF.y > 0.1,
+        "the chassis is resting on its own collider, not on its wheels: {settled}"
+    );
+    let before = rig.y();
+    rig.step(120);
+    assert!(
+        (rig.y() - before).abs() < 1e-3,
+        "a parked car crept {} m in two seconds",
+        rig.y() - before
+    );
+    assert!(
+        rig.z().abs() < 0.01,
+        "…and wandered {} m sideways with no input",
+        rig.z()
+    );
+}
+
+/// A wheel is **consumed** by its vehicle, not mirrored into rapier — so it has
+/// no collider, and the world it drives on is unchanged by having wheels in it.
+#[test]
+fn a_wheel_never_reaches_the_physics_world() {
+    let mut rig = Rig::new(SPAWN_Y);
+    rig.step(1);
+    assert_eq!(rig.bridge.vehicle_count(), 1, "the car is recognised");
+    for i in 0..4u128 {
+        let w = Uuid::from_u128(WHEEL_BASE + i);
+        assert!(
+            rig.bridge.collider_of(w).is_none(),
+            "wheel {i} was mirrored into rapier"
+        );
+        assert!(rig.bridge.body_of(w).is_none(), "wheel {i} has a body");
+    }
+    // Two bodies: the ground and the chassis. A wheel that slipped through would
+    // make it six.
+    assert_eq!(rig.bridge.body_count(), 2, "{:?}", rig.bridge.body_count());
+}
+
+/// …and the falsifier: a sphere sensor whose parent is **not** a chassis is an
+/// ordinary sensor and is mirrored exactly as it always was.
+///
+/// Without this the consume rule would be "every sphere sensor disappears",
+/// which is a silent removal of a trigger volume from somebody's level.
+#[test]
+fn a_sphere_sensor_that_is_not_a_wheel_is_still_mirrored() {
+    let mut world = EcsWorld::new();
+    ground(&mut world);
+    // Parented to the GROUND, which is static — so it is not a wheel.
+    let parent = world.entity_of(GROUND).unwrap();
+    let e = world.spawn_with_guid(LOOSE_SENSOR, "Trigger", Some(parent));
+    let mut t = Transform::IDENTITY;
+    t.translation = Vec3d::new(3.0, 1.0, 0.0);
+    world.world_mut().entity_mut(e).insert((
+        t,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Sphere,
+            radius: 1.0,
+            sensor: true,
+            ..Default::default()
+        },
+    ));
+    world.mark_dirty();
+    world.propagate();
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync_from_world(&world);
+    assert_eq!(
+        bridge.vehicle_count(),
+        0,
+        "a static parent is not a vehicle"
+    );
+    assert!(
+        bridge.collider_of(LOOSE_SENSOR).is_some(),
+        "an ordinary sphere sensor must survive the wheel rule"
+    );
+}
+
+/// Throttle moves it, and the brake stops it — in metres, over the floor.
+#[test]
+fn throttle_drives_it_and_the_brake_stops_it() {
+    let mut rig = Rig::new(SPAWN_Y);
+    rig.step(60);
+    let start = rig.z();
+    rig.drive(
+        VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        },
+        180,
+    );
+    let travelled = rig.z() - start;
+    assert!(
+        travelled > 5.0,
+        "three seconds of full throttle moved it {travelled} m"
+    );
+    // A brake takes it to a stop and holds it there.
+    let before_brake = rig.z();
+    rig.drive(
+        VehicleControls {
+            brake: 1.0,
+            ..Default::default()
+        },
+        180,
+    );
+    let coasted = rig.z() - before_brake;
+    assert!(
+        coasted < travelled * 0.5,
+        "braking for as long as it accelerated covered {coasted} m against {travelled} m"
+    );
+    let stopped = rig.z();
+    rig.drive(
+        VehicleControls {
+            brake: 1.0,
+            ..Default::default()
+        },
+        60,
+    );
+    assert!(
+        (rig.z() - stopped).abs() < 0.05,
+        "a braked car rolled another {} m",
+        rig.z() - stopped
+    );
+}
+
+/// Steering turns it, and turns it the way the sign says.
+///
+/// `+steer` is right, and a right turn is a **positive** yaw here: euler-Y
+/// rotates `+Z` (forward) toward `+X` (right), which is the convention
+/// `Transform::quat` and the movement step's `rotate_from_frame` both use. The
+/// arm exists because a sign error is invisible to every other claim in the
+/// file, and it measures at **1.5 seconds** rather than at four — full lock at
+/// low speed turns about 43°/s, so a longer sample wraps past ±180° and the sign
+/// of the answer stops meaning what it looks like.
+#[test]
+fn steering_turns_it_and_the_sign_is_the_one_the_control_says() {
+    let turn = |steer: f64| {
+        let mut rig = Rig::new(SPAWN_Y);
+        rig.step(60);
+        rig.drive(
+            VehicleControls {
+                throttle: 1.0,
+                steer,
+                ..Default::default()
+            },
+            90,
+        );
+        rig.yaw_deg()
+    };
+    let right = turn(1.0);
+    assert!(
+        right > 5.0 && right < 170.0,
+        "a second and a half of full right lock turned it {right} degrees"
+    );
+    let left = turn(-1.0);
+    assert!(left < -5.0, "…and a left turn the other way, not {left}");
+    assert!(
+        (left + right).abs() < right.abs() * 0.35,
+        "the two turns should mirror: {right} against {left}"
+    );
+}
+
+/// The same world, stepped twice, is the same world — the determinism the whole
+/// replay discipline rests on, over a dynamic body under a force this wave
+/// added.
+#[test]
+fn two_identical_rigs_drive_byte_for_byte() {
+    let trace = |seed: u32| {
+        let mut rig = Rig::new(SPAWN_Y);
+        let mut out: Vec<u8> = Vec::new();
+        for i in 0..240u32 {
+            let controls = VehicleControls {
+                throttle: if (i + seed) % 90 < 60 { 1.0 } else { -0.5 },
+                steer: if i % 70 < 35 { 0.8 } else { -0.6 },
+                brake: 0.0,
+                handbrake: i % 121 == 0,
+            };
+            rig.drive(controls, 1);
+            let t = rig.chassis();
+            for v in [
+                t.translation.x,
+                t.translation.y,
+                t.translation.z,
+                t.rotation.x,
+                t.rotation.y,
+                t.rotation.z,
+            ] {
+                out.extend_from_slice(&v.to_bits().to_le_bytes());
+            }
+        }
+        out
+    };
+    let a = trace(0);
+    let b = trace(0);
+    assert_eq!(a, b, "two identical vehicle runs must agree bit for bit");
+    assert_ne!(
+        a,
+        trace(7),
+        "…and a different control script must produce a different world, or the \
+         comparison above is a comparison of two cars that never moved"
+    );
+}
+
+// ── the trait seam ──────────────────────────────────────────────────────────
+
+/// A second implementation of [`inf_ecs::vehicle::Vehicle`] — a hovercraft with
+/// no wheels that pushes straight up — which is what makes the trait a seam
+/// rather than a description of the one class this phase ships.
+///
+/// It counts what the door did to it, so the arm below can assert that the door
+/// routed input, cast nothing it did not ask for, and applied what it answered.
+struct Hover {
+    rig: VehicleRig,
+    wheels: Vec<WheelState>,
+    controls: VehicleControls,
+    solves: u32,
+    lift_n: f64,
+}
+
+impl inf_ecs::vehicle::Vehicle for Hover {
+    fn rig(&self) -> &VehicleRig {
+        &self.rig
+    }
+    fn set_rig(&mut self, rig: VehicleRig) {
+        self.rig = rig;
+    }
+    fn wheels(&self) -> &[WheelState] {
+        &self.wheels
+    }
+    fn wheels_mut(&mut self) -> &mut [WheelState] {
+        &mut self.wheels
+    }
+    fn control(&mut self, controls: VehicleControls) {
+        self.controls = controls;
+    }
+    fn tune(&mut self, name: &str, value: f64) -> bool {
+        if name == "lift_n" {
+            self.lift_n = value;
+            return true;
+        }
+        false
+    }
+    fn suspension_rest_m(&self) -> f64 {
+        0.0
+    }
+    fn solve(&mut self, chassis: ChassisState, _dt: f64, out: &mut Vec<WheelForce>) {
+        self.solves = self.solves.saturating_add(1);
+        out.push(WheelForce {
+            point: chassis.position,
+            force: DVec3::Y * self.lift_n * self.controls.throttle.max(0.0),
+        });
+    }
+}
+
+/// **The seam is real**: an island class installed over the derived one is the
+/// class the door drives.
+#[test]
+fn an_installed_class_is_the_one_the_door_drives() {
+    let mut rig = Rig::new(SPAWN_Y);
+    rig.step(1);
+    let derived = rig
+        .bridge
+        .vehicle_of(CHASSIS)
+        .expect("the car was derived")
+        .rig()
+        .clone();
+    assert_eq!(derived.wheels.len(), 4);
+    let hover = Hover {
+        rig: derived,
+        wheels: Vec::new(),
+        controls: VehicleControls::default(),
+        solves: 0,
+        // Twice its weight, so "it went up" is unambiguous.
+        lift_n: MASS_KG * 9.81 * 2.0,
+    };
+    rig.bridge.install_vehicle(CHASSIS, Box::new(hover));
+    assert!(
+        rig.bridge
+            .vehicle_mut(CHASSIS)
+            .expect("installed")
+            .tune("lift_n", MASS_KG * 9.81 * 2.0),
+        "the tuning door reaches the installed class by its own names"
+    );
+    let before = rig.y();
+    rig.drive(
+        VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        },
+        120,
+    );
+    assert!(
+        rig.y() - before > 1.0,
+        "the hovercraft rose {} m; the door is still driving the raycast class",
+        rig.y() - before
+    );
+    // …and the derived rig survived the swap, which is what `set_rig` is for:
+    // the bridge re-derives every sync and must not overwrite the installed
+    // class with a fresh `RaycastVehicle`.
+    assert_eq!(
+        rig.bridge.vehicle_of(CHASSIS).unwrap().rig().wheels.len(),
+        4,
+        "the re-derive replaced the installed class"
+    );
+}
+
+/// A rig in the air produces no force at all, so a car thrown off a cliff falls
+/// like a box — the off path, asserted rather than assumed.
+#[test]
+fn a_rig_in_the_air_falls_like_a_box() {
+    let mut rig = Rig::new(SPAWN_Y + 20.0);
+    let start = rig.y();
+    rig.drive(
+        VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        },
+        30,
+    );
+    let fell = start - rig.y();
+    // Free fall for half a second is about 1.2 m; a suspension that pushed
+    // against nothing would hold it up.
+    assert!(
+        fell > 1.0 && fell < 1.5,
+        "an airborne rig fell {fell} m in half a second"
+    );
+    assert!(
+        rig.z().abs() < 0.05,
+        "…and full throttle in the air moved it {} m forward",
+        rig.z()
+    );
+}
+
+/// The rig is derived from the scene through the same recogniser a sample
+/// generator reads — one spelling of "what is a wheel".
+#[test]
+fn the_public_deriver_agrees_with_the_bridge() {
+    let mut rig = Rig::new(SPAWN_Y);
+    rig.step(1);
+    let by_hand = inf_ecs::vehicle::rig_of(&rig.world, CHASSIS).expect("derived by hand");
+    let in_bridge = rig.bridge.vehicle_of(CHASSIS).unwrap().rig();
+    assert_eq!(&by_hand.wheels, &in_bridge.wheels);
+    assert_eq!(by_hand.seat_local, in_bridge.seat_local);
+    assert_eq!(
+        by_hand.seat_local,
+        Vec3d::new(0.0, HALF.y, 0.0),
+        "the seat is the top face of the chassis collider"
+    );
+    // A guid that is not a chassis answers with a refusal rather than a rig.
+    assert!(inf_ecs::vehicle::rig_of(&rig.world, GROUND).is_none());
+}
+
+/// The wheels are drawn where the suspension put them: compressed under load,
+/// extended in the air, and steered by the control.
+#[test]
+fn the_wheels_are_drawn_where_the_suspension_put_them() {
+    let mut rig = Rig::new(SPAWN_Y);
+    rig.step(180);
+    let local = |guid: Uuid, world: &EcsWorld| -> Transform {
+        let e = world.entity_of(guid).unwrap();
+        *world.world().get::<Transform>(e).unwrap()
+    };
+    let front_left = Uuid::from_u128(WHEEL_BASE);
+    let t = local(front_left, &rig.world);
+    assert!(
+        t.translation.y > WHEEL_Y + 0.05,
+        "a loaded wheel must ride up into its arch: {}",
+        t.translation.y
+    );
+    // Steering shows on the front wheels and not on the rear.
+    rig.drive(
+        VehicleControls {
+            steer: 1.0,
+            ..Default::default()
+        },
+        10,
+    );
+    let front = local(front_left, &rig.world).rotation.y;
+    let rear = local(Uuid::from_u128(WHEEL_BASE + 2), &rig.world)
+        .rotation
+        .y;
+    assert!(front.abs() > 5.0, "the front wheel steered {front} degrees");
+    assert_eq!(rear, 0.0, "the rear wheel steered {rear} degrees");
+    // And the rotation the door writes is the one a renderer would read.
+    let q = local(front_left, &rig.world).quat();
+    let (y, _, _) = q.to_euler(EulerRot::YXZ);
+    assert!((y.to_degrees() - front).abs() < 1e-9);
+}
+
+/// A parked rig's wheel state is stable across a re-derive — the authored mount
+/// is taken once, so a sync in the middle of a run does not walk the car into
+/// the floor.
+#[test]
+fn a_resync_does_not_move_a_parked_car() {
+    let mut rig = Rig::new(SPAWN_Y);
+    rig.step(180);
+    let settled = rig.y();
+    let mounts: BTreeMap<Uuid, Vec3d> = rig
+        .bridge
+        .vehicle_of(CHASSIS)
+        .unwrap()
+        .rig()
+        .wheels
+        .iter()
+        .map(|w| (w.guid, w.mount_local))
+        .collect();
+    // Twenty extra syncs, which is what an editor doing anything at all causes.
+    for _ in 0..20 {
+        rig.bridge.sync_from_world(&rig.world);
+    }
+    let after: BTreeMap<Uuid, Vec3d> = rig
+        .bridge
+        .vehicle_of(CHASSIS)
+        .unwrap()
+        .rig()
+        .wheels
+        .iter()
+        .map(|w| (w.guid, w.mount_local))
+        .collect();
+    assert_eq!(
+        mounts, after,
+        "the authored mount moved on a re-derive — the visual write fed back in"
+    );
+    rig.step(60);
+    assert!(
+        (rig.y() - settled).abs() < 1e-3,
+        "the car moved {} m after twenty resyncs",
+        rig.y() - settled
+    );
+}
+
+/// A tuner's probe, and the one that found the pitch pump
+/// (`ChassisState::contact_velocity`'s doc records the measurement).
+///
+/// `#[ignore]`d because it is a diagnostic rather than a claim — the same
+/// standing this phase's own `probe_the_course` has. Run it with
+/// `--ignored --nocapture` when a spring rate changes.
+#[test]
+#[ignore]
+fn probe_brake() {
+    let mut rig = Rig::new(SPAWN_Y);
+    rig.step(60);
+    rig.drive(
+        VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        },
+        180,
+    );
+    for i in 0..12 {
+        rig.drive(
+            VehicleControls {
+                brake: 1.0,
+                ..Default::default()
+            },
+            30,
+        );
+        let body = rig.bridge.body_of(CHASSIS).unwrap();
+        let lin = rig.bridge.world().body_linvel(body).unwrap();
+        let ang = rig.bridge.world().body_angvel(body).unwrap();
+        println!(
+            "t={:.1}s z={:.4} lin={:?} ang={:?}",
+            (i as f64 + 1.0) * 0.5,
+            rig.z(),
+            lin,
+            ang
+        );
+    }
+}

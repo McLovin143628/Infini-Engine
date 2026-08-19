@@ -244,6 +244,13 @@ pub fn step_character_movement(
             out.push(o);
         }
     }
+    // **The vehicle half of the one movement door** (P29.7). Last, so a driver's
+    // controls — written by the character step above, from the same intent — are
+    // this step's; and inside this function rather than beside it, because a
+    // sibling both hosts had to call separately would be a hand-maintained
+    // mirror, which is the shape of two of this phase's own defects. `O(vehicles)`
+    // and an early return on a level with none. See `super::vehicle`.
+    super::vehicle::step_vehicles(world, bridge, dt);
     out
 }
 

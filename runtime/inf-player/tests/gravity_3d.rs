@@ -55,12 +55,7 @@ const START_Y: f64 = 50.0;
 fn crate_doc(settings: LevelSettings) -> SceneDoc {
     let mut doc = SceneDoc::new();
     doc.set_settings(settings);
-    let e = doc.create_with_guid(
-        CRATE,
-        inf_editor_core::ipc::SpawnKind::Empty,
-        "Crate",
-        None,
-    );
+    let e = doc.create_with_guid(CRATE, inf_editor_core::ipc::SpawnKind::Empty, "Crate", None);
     let mut t = Transform::IDENTITY;
     t.translation = Vec3d::new(0.0, START_Y, 0.0);
     doc.world_mut().world_mut().entity_mut(e).insert((

@@ -37,6 +37,9 @@ pub mod schedule;
 pub mod sim;
 pub mod sky;
 pub mod transform;
+// P29.7: the raycast vehicle model — the `movement` of vehicles, with the
+// fixed-step door in `inf_physics::d3::vehicle`.
+pub mod vehicle;
 pub mod world;
 
 pub use attach::update_attachments;

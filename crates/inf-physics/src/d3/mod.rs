@@ -26,6 +26,8 @@ mod query;
 pub mod ragdoll_bridge;
 // P29.4 traversal detectors: the ledge probe and the land-prediction sweep.
 pub mod traversal;
+// P29.7 vehicles: the wheel rays, the forces and the wheel write-back.
+pub mod vehicle;
 pub mod water;
 mod world;
 
@@ -51,6 +53,7 @@ pub use ragdoll_bridge::{
 pub use traversal::{
     is_walkable, predict_landing, probe_ledge, LandPrediction, Ledge, LedgeSettings,
 };
+pub use vehicle::{step_vehicles, VehicleOutcome};
 pub use water::{
     BuoyancyDesc3D, SampleGeometry, WaterEvent3D, WaterEventKind3D, WaterIndex, WaterProbe,
 };

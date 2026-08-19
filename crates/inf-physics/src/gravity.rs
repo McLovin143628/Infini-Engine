@@ -128,7 +128,10 @@ mod tests {
 
     #[test]
     fn earth_is_the_legacy_pairing_of_earth() {
-        assert_eq!(WorldGravity::EARTH, WorldGravity::from_2d(DVec2::new(0.0, -9.81)));
+        assert_eq!(
+            WorldGravity::EARTH,
+            WorldGravity::from_2d(DVec2::new(0.0, -9.81))
+        );
         assert_eq!(WorldGravity::default(), WorldGravity::EARTH);
     }
 

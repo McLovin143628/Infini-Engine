@@ -295,6 +295,16 @@ pub struct PhysicsBridge3D {
     /// for every level nobody has ragdolled in, which is what keeps the whole
     /// mechanism free on the off path.
     ragdolls: BTreeMap<Uuid, super::ragdoll_bridge::SpawnedRagdoll>,
+    /// **Vehicles** (P29.7), keyed by chassis `Guid` — the rig derived from the
+    /// scene, its tunables and its wheel state.
+    ///
+    /// Here for the same three reasons [`ragdolls`](Self::ragdolls) is: a
+    /// property of a play session, never serialized, and gone when the session
+    /// is. `Box<dyn Vehicle>` because the trait is the seam the island phase
+    /// implements per vehicle class — a tank and a car share this map and this
+    /// step. Empty for every level with no vehicle in it, which is what keeps
+    /// the whole mechanism free on the off path.
+    vehicles: BTreeMap<Uuid, Box<dyn inf_ecs::vehicle::Vehicle>>,
     /// Swim latches, keyed by character `Guid` (P20.2). Separate from
     /// [`buoyant`](Self::buoyant) because a character controller is kinematic and
     /// never floats — it swims.
@@ -342,6 +352,7 @@ impl PhysicsBridge3D {
             water_env: (0.0, (0.0, 0.0)),
             buoyant: BuoyantMap::new(),
             ragdolls: BTreeMap::new(),
+            vehicles: BTreeMap::new(),
             swimming: BTreeMap::new(),
             water_events: Vec::new(),
             snaps_scratch: Vec::new(),
@@ -484,6 +495,50 @@ impl PhysicsBridge3D {
         self.ragdolls.len()
     }
 
+    /// The vehicle `guid` is the chassis of, if the scene describes one (P29.7).
+    pub fn vehicle_of(&self, guid: Uuid) -> Option<&dyn inf_ecs::vehicle::Vehicle> {
+        self.vehicles.get(&guid).map(|v| v.as_ref())
+    }
+
+    /// The same, mutably — the door input routing and live tuning go through.
+    pub fn vehicle_mut(&mut self, guid: Uuid) -> Option<&mut dyn inf_ecs::vehicle::Vehicle> {
+        self.vehicles.get_mut(&guid).map(|v| v.as_mut())
+    }
+
+    /// **Install a vehicle of a class this crate does not know**, replacing the
+    /// derived one — the trait's extension point.
+    ///
+    /// The derivation below builds an `inf_ecs::vehicle::RaycastVehicle`, which
+    /// is the one class this phase ships. The island phase's fleet installs its
+    /// own here, keeping the rig the scene derived; everything downstream — the
+    /// ray casting, the force application, the wheel write-back, the enter/exit
+    /// choreography — is written against the trait and does not change.
+    pub fn install_vehicle(&mut self, guid: Uuid, vehicle: Box<dyn inf_ecs::vehicle::Vehicle>) {
+        self.vehicles.insert(guid, vehicle);
+    }
+
+    /// Every chassis `Guid` with a vehicle, in `Guid` order — the door's walk,
+    /// and `O(vehicles)`.
+    pub fn vehicle_guids(&self) -> Vec<Uuid> {
+        self.vehicles.keys().copied().collect()
+    }
+
+    /// How many vehicles the scene describes — the counter a gate asserts on.
+    pub fn vehicle_count(&self) -> usize {
+        self.vehicles.len()
+    }
+
+    /// Whether the **water pass owns this body's persistent force** (P20.2).
+    ///
+    /// Read by the vehicle door, which must not clear a force it does not own:
+    /// `apply_water_forces` resets and re-applies every buoyant body at the top
+    /// of the fixed step, so a vehicle that is also buoyant gets its clear from
+    /// there and a vehicle that is not must do its own. See
+    /// `inf_physics::d3::vehicle`'s force-ownership note.
+    pub fn is_buoyant(&self, guid: Uuid) -> bool {
+        self.buoyant.contains_key(&guid)
+    }
+
     /// Every tracked `(guid, body, kind)`, in `Guid` order (P22.3).
     ///
     /// The seam a level-wide sweep — a radial impulse, a debug view — walks
@@ -587,6 +642,11 @@ impl PhysicsBridge3D {
         self.water_scratch.clear();
         self.water_sources.clear();
         let mut buoyancy: Vec<(Uuid, BuoyancyDesc3D)> = Vec::new();
+        // P29.7's two collections, gathered in this same walk. Both are empty on
+        // every level with no vehicle in it.
+        let mut chassis_seats: BTreeMap<Uuid, inf_ecs::math::Vec3d> = BTreeMap::new();
+        let mut wheel_candidates: Vec<(Uuid, inf_ecs::vehicle::WheelMount, EntitySync3D)> =
+            Vec::new();
         for entity in world.world().iter_entities() {
             let Some(guid) = entity.get::<inf_ecs::Guid>().map(|g| g.0) else {
                 continue;
@@ -639,15 +699,58 @@ impl PhysicsBridge3D {
                 .get::<Transform>()
                 .copied()
                 .unwrap_or(Transform::IDENTITY);
-            snaps.push(EntitySync3D {
+            // P29.7: a **chassis** is a dynamic body with a collider, and its
+            // seat is that collider's top face. Recorded here, in the walk that
+            // is already happening, for the reason the water gather above rides
+            // in it too — a second walk over 13 000 entities to learn that no
+            // vehicle moved is the cost this shape exists to avoid.
+            if let Some(seat) = inf_ecs::vehicle::chassis_of(col.as_ref(), rb.as_ref()) {
+                chassis_seats.insert(guid, seat);
+            }
+            let snap = EntitySync3D {
                 guid,
                 body: rb.map(body_desc),
                 collider: col.as_ref().map(collider_desc),
                 translation: transform.translation.to_dvec3(),
                 rotation: transform.quat(),
                 joint: joint.and_then(joint_sync),
-            });
+            };
+            // …and a **wheel** is described by the scene and *consumed* by its
+            // vehicle rather than mirrored into rapier — the same treatment a
+            // broken destructible's own collider gets twenty lines above, for the
+            // same reason: two representations of one thing is how a swap becomes
+            // an ordering accident. Whether the parent really is a chassis is not
+            // knowable inside an entity walk of unspecified order, so the
+            // candidate is held and the decision is made below.
+            if let Some(radius_m) = inf_ecs::vehicle::wheel_of(col.as_ref(), rb.as_ref()) {
+                if let Some(parent) = world.parent_of(entity.id()).and_then(|p| world.guid_of(p)) {
+                    wheel_candidates.push((
+                        parent,
+                        inf_ecs::vehicle::WheelMount {
+                            guid,
+                            mount_local: transform.translation,
+                            radius_m,
+                        },
+                        snap,
+                    ));
+                    continue;
+                }
+            }
+            snaps.push(snap);
         }
+        // The wheel decision, now that every chassis is known. A sphere sensor
+        // whose parent is not a chassis is an ordinary sensor and is mirrored
+        // exactly as it always was.
+        let mut wheels_by_chassis: BTreeMap<Uuid, Vec<inf_ecs::vehicle::WheelMount>> =
+            BTreeMap::new();
+        for (parent, mount, snap) in wheel_candidates {
+            if chassis_seats.contains_key(&parent) {
+                wheels_by_chassis.entry(parent).or_default().push(mount);
+            } else {
+                snaps.push(snap);
+            }
+        }
+        self.reconcile_vehicles(&chassis_seats, wheels_by_chassis);
         self.reconcile_water(buoyancy);
         // P19.5: a volume's derived solids. Unchanged volumes are **retained**
         // rather than re-described — see the doc on `structure_stamps`.
@@ -665,6 +768,69 @@ impl PhysicsBridge3D {
         self.sync_retaining(&snaps, &retained);
         snaps.clear();
         self.snaps_scratch = snaps;
+    }
+
+    /// Bring the vehicle set in line with what the walk found (P29.7).
+    ///
+    /// A chassis with wheels gets a vehicle; a chassis whose wheels have all
+    /// gone stops being one; a chassis that already had one keeps it — including
+    /// the class an island installed and the tunables an author has been
+    /// editing.
+    ///
+    /// # The authored mount is taken ONCE
+    ///
+    /// A wheel's `mount_local` is read off the wheel entity's `Transform`, and
+    /// the door **writes** that transform every step to show the suspension
+    /// travelling. Re-reading it on a later reconcile would therefore feed the
+    /// compressed position back in as the mount and walk the wheel into the
+    /// ground. So a wheel the vehicle already knows keeps the mount it was first
+    /// seen at — the same latch, and the same reason, as the authored facing the
+    /// movement step takes once (`MovementRuntime::seeded`): an authored value is
+    /// not the controller's to take twice.
+    fn reconcile_vehicles(
+        &mut self,
+        chassis_seats: &BTreeMap<Uuid, inf_ecs::math::Vec3d>,
+        wheels: BTreeMap<Uuid, Vec<inf_ecs::vehicle::WheelMount>>,
+    ) {
+        // The off path: no vehicle in the scene and none running is one compare.
+        if wheels.is_empty() && self.vehicles.is_empty() {
+            return;
+        }
+        self.vehicles.retain(|guid, _| wheels.contains_key(guid));
+        for (chassis, mut mounts) in wheels {
+            let Some(seat_local) = chassis_seats.get(&chassis).copied() else {
+                continue;
+            };
+            // Guid order, so the wheel indices are a function of the level's
+            // contents rather than of a bevy archetype walk.
+            mounts.sort_unstable_by_key(|m| m.guid);
+            match self.vehicles.get_mut(&chassis) {
+                Some(v) => {
+                    let known = v.rig();
+                    for m in &mut mounts {
+                        if let Some(old) = known.wheels.iter().find(|w| w.guid == m.guid) {
+                            m.mount_local = old.mount_local;
+                        }
+                    }
+                    v.set_rig(inf_ecs::vehicle::VehicleRig {
+                        chassis,
+                        seat_local,
+                        wheels: mounts,
+                    });
+                }
+                None => {
+                    let rig = inf_ecs::vehicle::VehicleRig {
+                        chassis,
+                        seat_local,
+                        wheels: mounts,
+                    };
+                    self.vehicles.insert(
+                        chassis,
+                        Box::new(inf_ecs::vehicle::RaycastVehicle::new(rig)),
+                    );
+                }
+            }
+        }
     }
 
     /// Bring the water index and the buoyant set in line with what the walk

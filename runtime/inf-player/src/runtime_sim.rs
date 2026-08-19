@@ -61,8 +61,7 @@ use inf_physics::d3::{
     DebrisBudget, DestroyedEvent, DestructOutcome, FractureAudit, FractureState, WaterEventKind3D,
 };
 use inf_physics::{
-    CharacterMover2D, ColliderShape2D, ContactPhase, PhysicsBridge2D, PhysicsBridge3D,
-    WorldGravity,
+    CharacterMover2D, ColliderShape2D, ContactPhase, PhysicsBridge2D, PhysicsBridge3D, WorldGravity,
 };
 use inf_runtime::FixedStep;
 use inf_voxel::VoxelData;
