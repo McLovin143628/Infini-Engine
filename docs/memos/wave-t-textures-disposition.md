@@ -6,13 +6,16 @@ priority**; anything that cannot be implemented must be reported with the reason
 why. This memo is that report.
 
 **Wave commits:** `65f6c57` (formats + HDR), `1e19d82` (the bold three),
-`e3c5509` (the sampler), `3f2815a` (the map-set importer).
+`e3c5509` (the sampler), `3f2815a` (the map-set importer), `ca9559b` (this memo),
+`2f4a1ec` (three review fixes), `17a2a5e` (the GPU proofs).
 
 **Counts:** 10 SHIPPED · 23 ALREADY-HAD · 4 MET-BY-A-DIFFERENT-MECHANISM ·
 6 DEFERRED · 12 CANNOT.
 Schema: `.inf_tex` v2→**v3**, `.inf_vmesh` v3→**v4**, both stamped only on
 payloads that need them. Scene schema: **unmoved**. Goldens: **54, unmoved**.
 New external dependencies: **zero**.
+Battery: **283 binaries / 5 251 passed / 0 failed / 13 ignored** (from 5 231 —
+the wave added 20 arms and moved none). Frontend untouched.
 
 ---
 
@@ -43,6 +46,8 @@ skinned pipeline already sits exactly on `max_vertex_attributes: 16`
 The fade is the detail texture's **own mip pyramid** rather than a distance ramp:
 the weight ramps out across the last two levels, which is correct under a zoom as
 well as a walk and needs no camera, no uniform and no tuning.
+
+**Proven on the GPU, not only validated.** `the_detail_map_reaches_the_surface_and_is_inert_without_one` runs the shipped `vt_surface` in a compute pass and asserts both halves: with the lane zero the surface is identical (which is what makes "the 54 goldens did not move" a measurement), and with it set the normal moves in the direction the detail map's XY says and the roughness is multiplied by its alpha. A detail slot with a ZERO SCALE is asserted inert too, because the slot and the scale are one decision.
 
 The saving the document is after is structural here rather than incidental,
 because virtual textures are deduplicated by GUID: the *second* object to
@@ -153,6 +158,21 @@ win and leaves only the host→VRAM leg the DMA engine performs anyway.
 | T44 | UV precision at 32K+ | a **tripwire**, not a feature: `an_f32_uv_still_addresses_every_texel_of_the_largest_legal_pyramid` |
 | T45a | BC5 for normal maps | `inf_material::bc::compress_bc5` |
 | T47 | Trilinear | `vt_sample`, opt-in behind `VirtualTextureSettings::trilinear` |
+
+### The trilinear arm, and the fixture that measured nothing
+
+`trilinear_blends_two_levels_and_is_off_by_default` runs the shipped sampler at a
+level of detail of exactly **1.5** — the worst case for a truncating sampler — and
+asserts it changes the result there and changes *nothing* at an integer level, where
+the document's own `blend < 0.01` early-out says it must not.
+
+It is worth recording what its first fixture did. A 32-texel stripe pattern measured
+**0 of 24** probes changing, which reads exactly like a dead feature and is not one: a
+power-of-two-aligned stripe is very nearly scale-invariant under a box downsample, so
+mip 1 *is* mip 0 at half the resolution and blending two levels of it cannot change
+anything. The arm now probes mip 1 against mip 2 directly and refuses to certify
+anything unless the two levels disagree at half its probes — the anti-vacuity the
+first draft would have shipped without.
 
 ### The numbers that justify BC5
 

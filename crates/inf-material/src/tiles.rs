@@ -4,16 +4,16 @@
 //! ```text
 //! ┌ header (128 B, little-endian) ────────────────────────────────────┐
 //! │  magic        [u8; 8]  b"INFVTEX\0"                               │
-//! │  schema_ver   u32      TEX_ASSET_SCHEMA_VERSION (2)               │
+//! │  schema_ver   u32      the LOWEST version this payload needs      │
 //! │  width · height  u32   the VIRTUAL extent (mip 0)                 │
-//! │  format       u32      0 Rgba8 · 1 Bc1 · 2 Bc3 (freeze-pinned)    │
+//! │  format       u32      0 Rgba8·1 Bc1·2 Bc3·3 Bc5·4 RGBA16F (v3)  │
 //! │  flags        u32      bit 0 = srgb                               │
 //! │  tile_size    u32      PAYLOAD texels per tile side (128)         │
 //! │  border       u32      border texels per side (4)                 │
 //! │  mip_count · tile_count  u32                                      │
 //! │  tile_bytes   u32      bytes of ONE stored tile (uniform)         │
 //! │  mip_dir_off · tile_dir_off · tile_base · total_len  (u64 each)   │
-//! │  reserved     [u8; 48] zeros (room for v3 without a re-length)    │
+//! │  reserved     [u8; 48] zeros (room for v4 without a re-length)    │
 //! ├ mip directory (mip_count × 32 B, FINEST FIRST) ───────────────────┤
 //! │  width u32 · height u32 · tiles_x u32 · tiles_y u32 ·             │
 //! │  first_tile u32 · tile_count u32 · pad[8]                         │

@@ -89,7 +89,13 @@ pub struct VtTextureSet {
 /// below is what stops that.
 #[inline]
 pub fn detail_scale_q8(scale: f32) -> u16 {
-    if !(scale > 0.0) {
+    // NaN is spelled out rather than caught by a negated comparison: every
+    // ordering comparison a NaN takes part in is false, so `scale <= 0.0` alone
+    // would let one through into `(scale * 256.0).round() as u16`, where a NaN
+    // saturates to 0 — silently switching the feature off for a value that is
+    // not a number rather than saying so. (The P29 blend-space finding, one
+    // crate over, is the same shape.)
+    if scale.is_nan() || scale <= 0.0 {
         return 0;
     }
     let q = (scale * 256.0).round();

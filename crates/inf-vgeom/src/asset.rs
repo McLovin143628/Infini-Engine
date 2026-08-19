@@ -4,7 +4,7 @@
 //! ```text
 //! ┌ header (128 B, little-endian) ────────────────────────────────────┐
 //! │  magic         [u8; 8]   b"INFVMSH\0"                             │
-//! │  schema_ver    u32       VMESH_ASSET_SCHEMA_VERSION (3)           │
+//! │  schema_ver    u32       the LOWEST version this payload needs    │
 //! │  page_count    u32       streaming pages (coarsest/root page 0)   │
 //! │  meshlet_count u32       meshlets across all pages                │
 //! │  vertex_count  u32       vertex records across all pages          │
@@ -14,7 +14,8 @@
 //! │  page_base     u64       absolute offset of the section area      │
 //! │  groups_off    u64 · groups_len u64   the DAG groups (bincode)    │
 //! │  total_len     u64       payload length (a self-check)            │
-//! │  reserved      [u8; 40]  zeros (room for v4 without a re-length)  │
+//! │  materials_off u64       v4: meshlet_count u32 slots, 0 = none    │
+//! │  reserved      [u8; 32]  zeros (room for v5 without a re-length)  │
 //! ├ page directory (page_count × 96 B, COARSEST FIRST) ───────────────┤
 //! │  page u32 · meshlet_count u32 · vertex_start u32 · vertex_count   │
 //! │  u32 · mlvert_count u32 · mltri_count u32 · floor_lod u32 ·       │
@@ -25,6 +26,7 @@
 //! │  page 0: indices · meshlets · mlverts · mltris · vertices · TILES │
 //! │  page 1: indices · meshlets · mlverts · mltris · vertices · TILES │
 //! │  …  each 16-byte aligned, zero-padded up to the next boundary …   │
+//! ├ materials section (v4: meshlet_count × u32, on-disk order) ───────┤
 //! ├ groups section (bincode `Vec<Group>`) ────────────────────────────┤
 //! └───────────────────────────────────────────────────────────────────┘
 //! ```

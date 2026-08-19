@@ -341,10 +341,10 @@ mod tests {
             img.blocks.iter().map(|b| img.words[b.base + 3]).collect()
         };
 
-        assert_eq!(flags(&[plain.clone()], false), vec![0]);
-        assert_eq!(flags(&[srgb.clone()], false), vec![1]);
-        assert_eq!(flags(&[normal.clone()], false), vec![2]);
-        assert_eq!(flags(&[plain.clone()], true), vec![4]);
+        assert_eq!(flags(std::slice::from_ref(&plain), false), vec![0]);
+        assert_eq!(flags(std::slice::from_ref(&srgb), false), vec![1]);
+        assert_eq!(flags(std::slice::from_ref(&normal), false), vec![2]);
+        assert_eq!(flags(std::slice::from_ref(&plain), true), vec![4]);
         // All three at once, which is the arrangement a mistake in the shifts
         // would show up in and a one-flag-at-a-time sweep would not.
         let mut all = srgb.clone();
