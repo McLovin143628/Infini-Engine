@@ -121,7 +121,8 @@ impl SessionSave {
     ///   *discriminant* did not move (16 is still 16), which is why the
     ///   frozen-discriminant match is silent about this and the version is not:
     ///   the two gates see different halves of the wire and both are needed.
-    ///   Wave D's five appended variants (31..=35) did **not** need this bump.
+    ///   Wave D's **seven** appended variants (31..=37) did **not** need this
+    ///   bump — see `frozen_discriminant`, which lists all seven.
     ///
     /// **No migration, and that is still the honest answer**: `MeshSession` has
     /// only ever lived in `DccState` for the life of a process, so **zero v1 or
@@ -1106,9 +1107,10 @@ mod tests {
             // `[5, 7]`, and `SessionSave::CURRENT_VERSION` does NOT move — `Mesh`
             // gained no field, only entries in a `Vec<String>` it already had.
             Op::AddMaterialSlots { .. } => 30,
-            // Wave D's FIVE, appended at the next free indices. Sixth batch,
-            // same rule: nothing above moved, `CollapseEdge{7}` is still
-            // `[5, 7]`. `SessionSave::CURRENT_VERSION` DID move in this batch,
+            // Wave D's SEVEN, appended at the next free indices (31..=37 —
+            // the last two land below, after the batch's own seam write).
+            // Sixth batch, same rule: nothing above moved, `CollapseEdge{7}` is
+            // still `[5, 7]`. `SessionSave::CURRENT_VERSION` DID move in this batch,
             // and **not for these** — `Op::BevelEdges` grew a `segments` field,
             // which is a change to variant 16's shape while leaving its
             // discriminant at 16. That is precisely the change this match cannot
@@ -1882,6 +1884,78 @@ mod tests {
         assert!(
             long.generation() > *seen[..seen.len() - 1].iter().max().unwrap(),
             "a restored session must start beyond every stamp already issued"
+        );
+    }
+
+    /// **A hostile v4 stream is a refusal, never a panic** (audit).
+    ///
+    /// The wave appended seven `Op` variants and bumped the version for an
+    /// eighth reason, and the ladder's two directions are both refused by name
+    /// — but the version is only the *first byte*. Everything after it is a
+    /// positional bincode stream, and the two ways a real file goes wrong are a
+    /// **truncation** (a write cut short) and a **flipped byte** (a bad sector,
+    /// a bad transfer). Neither may reach a panic, because `restore` is
+    /// documented as this crate's trust boundary and a trust boundary that
+    /// aborts is not one.
+    ///
+    /// Driven over the LAST appended variant (`MoveUvs`, 37), so the arm covers
+    /// the newest bytes on the wire rather than the oldest.
+    #[test]
+    fn a_hostile_v4_stream_refuses_as_a_value_and_never_panics() {
+        let mut s = MeshSession::new(cube(1.0));
+        let h = s
+            .mesh()
+            .half_ids()
+            .find(|&h| s.mesh().is_boundary(h) == Some(false))
+            .expect("an interior corner");
+        s.apply(Op::MoveUvs {
+            corners: vec![(h, [0.25, 0.75])],
+        })
+        .expect("a uv move");
+        let cfg = bincode::config::standard();
+        let bytes = bincode::serde::encode_to_vec(s.save(), cfg).expect("encodes");
+        assert_eq!(bytes[0], 4, "the fixture is a v4 stream");
+        assert!(bytes.contains(&37), "the fixture carries the last variant");
+
+        // (a) **Every truncation.** A prefix that happens to decode is still
+        //     handed to `restore`, which is the boundary the claim is about.
+        let mut decoded_prefixes = 0usize;
+        for cut in 0..bytes.len() {
+            if let Ok((save, _)) =
+                bincode::serde::decode_from_slice::<SessionSave, _>(&bytes[..cut], cfg)
+            {
+                decoded_prefixes += 1;
+                let _ = MeshSession::restore(save);
+            }
+        }
+        // Not vacuous in the other direction either: the WHOLE stream decodes.
+        assert!(
+            bincode::serde::decode_from_slice::<SessionSave, _>(&bytes, cfg).is_ok(),
+            "the fixture does not decode at all, so the truncations proved nothing"
+        );
+        let _ = decoded_prefixes;
+
+        // (b) **Every single-byte corruption**, both saturated and cleared —
+        //     which between them reach an out-of-range discriminant, a bogus
+        //     container length and a NaN float.
+        for i in 0..bytes.len() {
+            for fill in [0x00u8, 0xff] {
+                let mut bad = bytes.clone();
+                bad[i] = fill;
+                if let Ok((save, _)) =
+                    bincode::serde::decode_from_slice::<SessionSave, _>(&bad, cfg)
+                {
+                    let _ = MeshSession::restore(save);
+                }
+            }
+        }
+
+        // (c) …and a discriminant past the last variant is a refusal rather
+        //     than a match on something that does not exist.
+        let bogus = bincode::serde::encode_to_vec((4u32, 200u8), cfg).expect("encodes");
+        assert!(
+            bincode::serde::decode_from_slice::<SessionSave, _>(&bogus, cfg).is_err(),
+            "a stream naming variant 200 decoded"
         );
     }
 

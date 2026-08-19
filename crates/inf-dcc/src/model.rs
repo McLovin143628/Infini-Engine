@@ -990,14 +990,23 @@ pub(crate) fn bevel_edges(
 /// The endpoints are handed back **verbatim**, not re-normalized: `segments = 1`
 /// must reduce to exactly the two-vertex construction P23.4 shipped, bit for
 /// bit, or every mesh in the tree moves under a feature nobody asked to apply.
-fn bevel_profile(u1: DVec3, u2: DVec3, amount: f64, segments: u32) -> Option<Vec<DVec3>> {
+///
+/// **Audit fix.** That sentence was true of this function and false of the
+/// feature, because the caller was normalizing before it got here and this
+/// re-multiplied by `amount`: `d1.normalize() * amount` is `d1` only when
+/// `|d1|` is a power of two — which is exactly what an axis-aligned
+/// `cube(2.0)` with `amount = 0.25` gives, and exactly what the one test used.
+/// On any other geometry a single-segment bevel moved by an ULP under a feature
+/// nobody opted into. So the parameters are now the **already-scaled** offsets
+/// and only the interior samples are re-projected onto the circle.
+fn bevel_profile(d1: DVec3, d2: DVec3, amount: f64, segments: u32) -> Option<Vec<DVec3>> {
     let n = segments as usize;
     let mut out = Vec::with_capacity(n + 1);
-    out.push(u1 * amount);
+    out.push(d1);
     for k in 1..n {
         let t = k as f64 / n as f64;
-        let d = u1 * (1.0 - t) + u2 * t;
-        // `u1 == -u2` exactly — two coplanar faces folded flat against each
+        let d = d1 * (1.0 - t) + d2 * t;
+        // `d1 == -d2` exactly — two coplanar faces folded flat against each
         // other — leaves the midpoint with no direction. `None` rather than an
         // arbitrary choice: the caller turns it into a typed refusal.
         if !above(d.length(), 1e-12) {
@@ -1005,7 +1014,7 @@ fn bevel_profile(u1: DVec3, u2: DVec3, amount: f64, segments: u32) -> Option<Vec
         }
         out.push(d.normalize() * amount);
     }
-    out.push(u2 * amount);
+    out.push(d2);
     Some(out)
 }
 
@@ -1039,10 +1048,10 @@ fn bevel_one(mesh: &mut Mesh, h: HalfId, amount: f64, segments: u32) -> Result<O
     let in1 = n1.normalize().cross(eu) * amount;
     let in2 = n2.normalize().cross(-eu) * amount;
     // The profile ring, `segments + 1` offsets from `in1` round to `in2`. At
-    // `segments == 1` this is exactly `[in1, in2]` and everything below reduces
-    // to the P23.4 construction, vertex allocation order included.
-    let ring = bevel_profile(in1.normalize(), in2.normalize(), amount, segments)
-        .ok_or(OpError::DegenerateFace(f1))?;
+    // `segments == 1` this is exactly `[in1, in2]` — the offsets themselves,
+    // not a normalize-and-rescale round trip through them — and everything
+    // below reduces to the P23.4 construction, vertex allocation order included.
+    let ring = bevel_profile(in1, in2, amount, segments).ok_or(OpError::DegenerateFace(f1))?;
     let segs = segments as usize;
     for d in &ring {
         finite("a bevel vertex position", &(pa + *d).to_array())?;
@@ -3498,6 +3507,79 @@ mod tests {
         for &f in &out.faces {
             assert_eq!(m.face_verts(f).expect("live face").len(), 4);
         }
+    }
+
+    /// **The mechanism behind "`segments = 1` changes nothing"**, in bits
+    /// (audit fix).
+    ///
+    /// The counts next door pass whatever the offsets are; this is the claim
+    /// that actually keeps every beveled mesh in the tree where it was. The
+    /// endpoints must come back as the *same `f64`s* that went in — a
+    /// `normalize() * amount` round trip through them agrees only when the
+    /// magnitude is a power of two, which is exactly what an axis-aligned
+    /// `cube(2.0)` at `amount = 0.25` produces and exactly why a counts-only
+    /// test could not see it.
+    #[test]
+    fn the_profile_hands_its_endpoints_back_verbatim() {
+        // Magnitudes deliberately NOT powers of two.
+        let amount = 0.37;
+        let d1 = DVec3::new(0.11, -0.29, 0.43);
+        let d2 = DVec3::new(-0.31, 0.17, 0.23);
+        assert_ne!(
+            (d1.normalize() * amount).to_array(),
+            d1.to_array(),
+            "the fixture cannot distinguish the two spellings"
+        );
+        for segments in 1..=8u32 {
+            let ring = bevel_profile(d1, d2, amount, segments).expect("a profile");
+            assert_eq!(ring.len(), segments as usize + 1);
+            assert_eq!(ring[0].to_array(), d1.to_array(), "at {segments} segments");
+            assert_eq!(
+                ring[segments as usize].to_array(),
+                d2.to_array(),
+                "at {segments} segments"
+            );
+        }
+    }
+
+    /// …and the same claim one level up, as the **whole mesh**: a single-segment
+    /// bevel on a cube whose offsets are *not* axis-aligned, pinned as bytes.
+    ///
+    /// This does not prove equality with the P23.4 binary — nothing in the tree
+    /// can, that code is gone — but it is the arm that fails the day the
+    /// construction moves again, on the geometry where a re-normalization is
+    /// visible. Portable: the rotation is `psin64`/`pcos64` and the bevel is
+    /// multiply/add/`sqrt`.
+    #[test]
+    fn a_single_segment_bevel_on_a_rotated_cube_is_pinned_as_bytes() {
+        let mut m = cube(2.0);
+        let verts: Vec<VertId> = m.vert_ids().collect();
+        crate::ops::apply(
+            &mut m,
+            &Op::RotateVerts {
+                verts,
+                pivot: [0.0; 3],
+                axis: [0.3, 0.9, 0.2],
+                radians: 0.7,
+            },
+        )
+        .expect("rotates");
+        let h = m.half_ids().next().expect("an edge");
+        ok(
+            &mut m,
+            Op::BevelEdges {
+                edges: vec![h],
+                amount: 0.25,
+                segments: 1,
+            },
+        );
+        let digest = m.encoded().iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+            (h ^ u64::from(b)).wrapping_mul(0x1000_0000_01b3)
+        });
+        assert_eq!(
+            digest, 0xb4ad_2bd0_d285_114a,
+            "the single-segment construction moved"
+        );
     }
 
     #[test]
