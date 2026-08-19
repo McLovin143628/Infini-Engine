@@ -116,6 +116,12 @@ pub struct ImportReport {
     /// Vertices in the source asset, summed over submeshes.
     pub source_vertices: usize,
     /// Distinct positions after the exact weld.
+    ///
+    /// **Snapshotted before the repair**, so on a repaired import it is the
+    /// count the SOURCE welded to and not the count the delivered mesh has —
+    /// the detach stage mints private vertices after this is taken. Named
+    /// rather than silently corrected, because the number's job is to say what
+    /// the weld did to the author's data.
     pub welded_positions: usize,
     /// Extra vertices minted to break bowties into single fans.
     pub fan_splits: usize,
@@ -139,8 +145,15 @@ pub struct ImportReport {
     /// The *lossy* repair, counted separately for that reason: three faces
     /// cannot share one edge and be a surface, so the extras become separate
     /// shells at the same coordinates. Non-zero means the source described
-    /// something that is not a manifold surface — an interior partition, a
+    /// something **this kernel cannot represent** — an interior partition, a
     /// double-sided sheet — and this is how much of it was detached.
+    ///
+    /// "Not a manifold surface" would be the shorter sentence and it would be
+    /// wrong for one real case: a **non-orientable** surface (a Möbius band) is
+    /// perfectly edge-manifold, and it lands here because the winding walk
+    /// cannot orient it and the kernel has no way to hold it. Counted, torn at
+    /// its seam, and opened — which is the honest outcome, under a name that
+    /// does not blame the author's file for a limit of ours.
     pub non_manifold_splits: usize,
     /// Triangles dropped because they carry no surface.
     pub degenerate_triangles_skipped: usize,
@@ -417,6 +430,18 @@ struct NonManifoldRepair {
 ///    starts at the lowest face index of each connected component and visits
 ///    edges in `BTreeMap` order.
 ///
+///    **The seed does not get a vote** (audit fix): the walk agrees a component
+///    with whichever face happened to have the lowest index, so a mesh whose
+///    *first* triangle is the one an exporter reversed had every other face
+///    flipped to match the defect — arriving inside-out, reported as the repair
+///    that loses nothing. Flipping a consistently-wound component wholesale
+///    keeps it consistent and inverts its global sign, so the sign is free and
+///    the rule is **minority**: keep whichever orientation leaves the fewest
+///    faces differing from the source. Ties keep the seed, so it stays a pure
+///    function of the input. (What this still cannot decide is a source whose
+///    *majority* is inside-out — that needs the authored normals or a signed
+///    volume, and is named in the ledger rather than guessed at here.)
+///
 ///    **Authored corner normals are NOT flipped with the winding**, and that is
 ///    deliberate: an authored normal is what the source wanted *rendered*, the
 ///    flip is a topology fix, and `NormalPolicy::PreserveAuthored` writes them
@@ -474,6 +499,11 @@ fn repair_non_manifold(
             continue;
         }
         visited[seed] = true;
+        // The component's members, and how many of them the walk flipped. Both
+        // are needed for the minority rule below — the walk agrees the component
+        // with ITS SEED, and the seed is an arena index, not an opinion.
+        let mut component: Vec<usize> = vec![seed];
+        let mut flipped_here = 0usize;
         let mut queue = std::collections::VecDeque::from([seed]);
         while let Some(fi) = queue.pop_front() {
             // The face's directed edges, as they stand right now.
@@ -496,13 +526,36 @@ fn repair_non_manifold(
                         continue;
                     }
                     visited[nb] = true;
+                    component.push(nb);
                     if uses_directed(&faces[nb], a, b) {
                         flip_face(&mut faces[nb]);
-                        reoriented += 1;
+                        flipped_here += 1;
                     }
                     queue.push_back(nb);
                 }
             }
+        }
+        // **The minority rule.** The walk made the component agree with its
+        // seed, and the seed is whichever face happened to have the lowest
+        // index — so a mesh whose FIRST triangle is the one reversed exporter
+        // face had every other face flipped to match the defect, arrived
+        // inside-out, and was reported as the repair that "loses nothing".
+        //
+        // Flipping every face of a consistently-wound component keeps it
+        // consistent and inverts its global sign, so the choice is free: keep
+        // whichever sign leaves the FEWEST faces differing from the source.
+        // That is what "lossless" has to mean here — the surface is identical
+        // *and* the source's own majority winding is what survives.
+        //
+        // Strictly greater, so an exact tie keeps the seed and the rule stays a
+        // pure function of the input.
+        if flipped_here * 2 > component.len() {
+            for &fi in &component {
+                flip_face(&mut faces[fi]);
+            }
+            reoriented += component.len() - flipped_here;
+        } else {
+            reoriented += flipped_here;
         }
     }
 
@@ -899,6 +952,7 @@ pub fn torus(
 pub(crate) mod tests {
     use super::*;
     use crate::validate::validate;
+    use glam::DVec3;
     use inf_mesh::SubMesh;
 
     /// A flat-shaded, UV-mapped cube exactly as an exporter writes one: 24
@@ -1296,9 +1350,230 @@ pub(crate) mod tests {
         assert_eq!(out.mesh.face_count(), 3, "every triangle survives");
         assert_eq!(crate::validate::validate(&out.mesh), Ok(()));
         // …and the mesh really is manifold now: every directed edge once.
+        //
+        // **Audit fix.** This read `assert!(twin(h).is_some())`, which cannot
+        // fail: `twin` is TOTAL in this kernel (`lib.rs`'s first decision) and
+        // `half_ids` only yields live slots, so the loop was `assert!(true)` —
+        // the only claim anywhere that the LOSSY stage lands manifold, aimed at
+        // nothing. The claim in the comment is about directed edges, so that is
+        // what is counted.
+        let mut directed: std::collections::BTreeSet<(VertId, VertId)> =
+            std::collections::BTreeSet::new();
         for h in out.mesh.half_ids() {
-            assert!(out.mesh.twin(h).is_some());
+            let a = out.mesh.origin(h).expect("a live half has an origin");
+            let b = out.mesh.dest(h).expect("a live half has a destination");
+            assert!(
+                directed.insert((a, b)),
+                "directed edge {a} to {b} is used twice — the detach did not \
+                 produce a surface"
+            );
         }
+        // The detach mints private vertices, so the mesh is BIGGER than the
+        // source described. Pinned, because "how much geometry did the lossy
+        // stage invent" is the number an author is owed and no counter reports.
+        assert_eq!(
+            out.mesh.vert_count(),
+            11,
+            "5 source positions plus three private ones per detached triangle"
+        );
+        // …and two of those five are now ISOLATED — the detached faces stopped
+        // using them and nothing else did. Legal (`validate` says so in as many
+        // words) and **not counted anywhere**: the report says how many faces
+        // were detached and never how much of the source those faces took with
+        // them. Pinned here so the day a counter arrives, this is the number it
+        // has to agree with.
+        let orphans = out
+            .mesh
+            .vert_ids()
+            .filter(|&v| out.mesh.vert_outgoing(v).is_none_or(|o| o.is_empty()))
+            .count();
+        assert_eq!(orphans, 2, "the detach's uncounted residue");
+    }
+
+    /// **The seed does not get a vote** (audit fix).
+    ///
+    /// The BFS agrees a component with whichever face has the lowest index, so
+    /// a mesh whose FIRST triangle is the reversed one had every other face
+    /// flipped to match the defect: the surface arrived inside-out and the
+    /// report called it the repair that loses nothing. Measured here as the
+    /// world rather than the count — every face normal must end up on the side
+    /// seven of the eight source triangles were already on.
+    #[test]
+    fn the_repair_keeps_the_majority_winding_not_the_first_faces() {
+        // A 2x2 grid of quads in XZ, every triangle wound the same way.
+        let v = |x: f32, z: f32| MeshVertex {
+            position: [x, 0.0, z],
+            ..Default::default()
+        };
+        let vertices: Vec<MeshVertex> = (0..3)
+            .flat_map(|z| (0..3).map(move |x| v(x as f32, z as f32)))
+            .collect();
+        let at = |x: u32, z: u32| z * 3 + x;
+        let mut indices = Vec::new();
+        for z in 0..2 {
+            for x in 0..2 {
+                let (a, b, c, d) = (at(x, z), at(x + 1, z), at(x + 1, z + 1), at(x, z + 1));
+                indices.extend_from_slice(&[a, b, c, a, c, d]);
+            }
+        }
+        assert_eq!(indices.len(), 8 * 3, "eight triangles");
+        // The sign seven of the eight are on, read off the SOURCE rather than
+        // assumed — so the test cannot pass by agreeing with its own mistake.
+        let tri_y = |i: usize, idx: &[u32], vs: &[MeshVertex]| {
+            let p = |k: usize| {
+                let q = vs[idx[i * 3 + k] as usize].position;
+                DVec3::new(q[0] as f64, q[1] as f64, q[2] as f64)
+            };
+            (p(1) - p(0)).cross(p(2) - p(0)).y
+        };
+        let want = tri_y(1, &indices, &vertices);
+        assert!(want.abs() > 1e-9, "the fixture's triangles are degenerate");
+
+        // …and the FIRST one reversed, which is what an exporter that emits one
+        // face backwards looks like when that face happens to be face zero.
+        indices.swap(1, 2);
+        assert!(
+            tri_y(0, &indices, &vertices) * want < 0.0,
+            "the fixture does not actually reverse a face"
+        );
+        let asset = MeshAsset::new(
+            vec![SubMesh {
+                name: "grid".into(),
+                vertices,
+                indices,
+                material_slot: None,
+                skin: Vec::new(),
+            }],
+            vec![],
+        );
+        let out = from_mesh_asset(&asset).expect("a reversed first face is not a lockout");
+        assert_eq!(
+            out.report.faces_reoriented, 1,
+            "seven faces were flipped to agree with the broken one"
+        );
+        assert_eq!(out.report.non_manifold_splits, 0);
+        assert_eq!(out.mesh.face_count(), 8);
+        assert_eq!(crate::validate::validate(&out.mesh), Ok(()));
+        for f in out.mesh.face_ids() {
+            let vs = out.mesh.face_verts(f).expect("a live face");
+            let p = |k: usize| out.mesh.position(vs[k]).expect("a live vertex");
+            let y = (p(1) - p(0)).cross(p(2) - p(0)).y;
+            assert!(
+                y * want > 0.0,
+                "face {f} faces the other way — the repair kept the minority \
+                 winding and the whole sheet is inside out"
+            );
+        }
+    }
+
+    /// A mesh that is **nothing but duplicates** keeps exactly one surface, and
+    /// the reader does not hand back an empty mesh.
+    #[test]
+    fn a_mesh_of_nothing_but_duplicates_keeps_one_face() {
+        let v = |x: f32, z: f32| MeshVertex {
+            position: [x, 0.0, z],
+            ..Default::default()
+        };
+        let asset = MeshAsset::new(
+            vec![SubMesh {
+                name: "same".into(),
+                vertices: vec![v(0.0, 0.0), v(1.0, 0.0), v(1.0, 1.0)],
+                indices: (0..16).flat_map(|_| [0u32, 1, 2]).collect(),
+                material_slot: None,
+                skin: Vec::new(),
+            }],
+            vec![],
+        );
+        let out = from_mesh_asset(&asset).expect("sixteen copies of one triangle is still a mesh");
+        assert_eq!(out.report.duplicate_faces_dropped, 15);
+        assert_eq!(out.mesh.face_count(), 1);
+        assert_eq!(crate::validate::validate(&out.mesh), Ok(()));
+    }
+
+    /// **A non-orientable surface** — a Mobius band. The winding walk *cannot*
+    /// succeed on one (that is what non-orientable means), and the point of this
+    /// test is that it terminates anyway, hands the seam to the detach stage,
+    /// and counts it. Nothing in the repo exercised this before.
+    #[test]
+    fn a_non_orientable_band_opens_by_tearing_its_seam_and_says_so() {
+        const N: u32 = 6;
+        let v = |x: f32, y: f32| MeshVertex {
+            position: [x, y, 0.0],
+            ..Default::default()
+        };
+        // Two rows; the closing quad joins bottom-to-top and top-to-bottom,
+        // which is the half twist.
+        let mut vertices = Vec::new();
+        for i in 0..N {
+            vertices.push(v(i as f32, 0.0));
+        }
+        for i in 0..N {
+            vertices.push(v(i as f32, 1.0));
+        }
+        let (b, t) = (|i: u32| i, |i: u32| N + i);
+        let mut indices = Vec::new();
+        let mut quad = |p: u32, q: u32, r: u32, s: u32| {
+            indices.extend_from_slice(&[p, q, r, p, r, s]);
+        };
+        for i in 0..N - 1 {
+            quad(b(i), b(i + 1), t(i + 1), t(i));
+        }
+        quad(b(N - 1), t(0), b(0), t(N - 1));
+        let asset = MeshAsset::new(
+            vec![SubMesh {
+                name: "mobius".into(),
+                vertices,
+                indices,
+                material_slot: None,
+                skin: Vec::new(),
+            }],
+            vec![],
+        );
+        let out = from_mesh_asset(&asset).expect("a Mobius band is a surface this reader opens");
+        assert!(
+            out.report.non_manifold_splits > 0,
+            "a non-orientable band cannot be wound consistently, so the seam \
+             has to be torn — and if nothing was, this fixture is not one: {:?}",
+            out.report
+        );
+        assert_eq!(crate::validate::validate(&out.mesh), Ok(()));
+    }
+
+    /// The repair is a **pure function of its input** — the same claim the
+    /// primitives make, on the path that grows arenas and mints vertices.
+    #[test]
+    fn a_repaired_import_is_byte_identical_across_two_runs() {
+        let v = |p: [f32; 3]| MeshVertex {
+            position: p,
+            ..Default::default()
+        };
+        let asset = MeshAsset::new(
+            vec![SubMesh {
+                name: "hostile".into(),
+                vertices: vec![
+                    v([0.0, 0.0, 0.0]),
+                    v([1.0, 0.0, 0.0]),
+                    v([0.0, 1.0, 0.0]),
+                    v([0.0, 0.0, 1.0]),
+                    v([0.0, -1.0, 0.0]),
+                    v([1.0, 1.0, 0.0]),
+                ],
+                // a fan on 0-1, a reversed neighbour, and a duplicate.
+                indices: vec![0, 1, 2, 0, 1, 3, 0, 1, 4, 2, 1, 5, 0, 1, 2],
+                material_slot: None,
+                skin: Vec::new(),
+            }],
+            vec![],
+        );
+        let a = from_mesh_asset(&asset).expect("opens");
+        let b = from_mesh_asset(&asset).expect("opens");
+        assert_eq!(a.mesh.encoded(), b.mesh.encoded());
+        assert_eq!(a.report, b.report);
+        assert!(
+            a.report.duplicate_faces_dropped > 0 && a.report.non_manifold_splits > 0,
+            "the fixture must reach both stages: {:?}",
+            a.report
+        );
     }
 
     #[test]
