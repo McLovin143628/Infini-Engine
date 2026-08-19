@@ -503,8 +503,11 @@ export const useDccStore = create<DccState>((set, get) => {
       if (!doc) return;
       try {
         applyResult(assetId, await dccIpc.amend(doc.id, index, value));
-        // The rows describe the journal, and the journal just changed.
-        await get().historyRefresh(assetId);
+        // The rows describe the journal, and the journal just changed — but
+        // so does every other door, and only this one refreshed them. The
+        // panel now follows the generation stamp (audit fix), which is the
+        // one thing that moves when the mesh does, so a refresh here would
+        // be a second fetch of the same list.
       } catch (e) {
         patch(assetId, { refusal: String(e) });
       }

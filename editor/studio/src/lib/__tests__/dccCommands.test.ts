@@ -46,11 +46,22 @@ describe("the DCC command table", () => {
   it("every command carries the chord it is actually bound to", () => {
     // `shortcut` is display-only, so nothing enforces it — which is exactly why
     // it drifts, and a palette showing the wrong key is worse than none.
+    //
+    // **The `if (!bound) continue` is gone** (audit fix): it skipped exactly
+    // the case this arm names. `dcc.select.grow` advertised `Ctrl+NumpadAdd`,
+    // was bound to nothing, and the one test written to catch a phantom chord
+    // exempted every phantom chord by construction.
     for (const c of DCC_COMMANDS) {
       const bound = DEFAULT_KEYBINDINGS.find((b) => b.command === c.id);
-      if (!bound) continue;
-      expect(c.shortcut, `${c.id} advertises ${c.shortcut} and is bound to ${bound.chord}`).toBe(
-        bound.chord,
+      if (!c.shortcut) {
+        expect(bound, `${c.id} is bound to ${bound?.chord} and advertises nothing`).toBe(
+          undefined,
+        );
+        continue;
+      }
+      expect(bound, `${c.id} advertises ${c.shortcut} and is bound to nothing`).toBeDefined();
+      expect(c.shortcut, `${c.id} advertises ${c.shortcut} and is bound to ${bound?.chord}`).toBe(
+        bound?.chord,
       );
     }
   });

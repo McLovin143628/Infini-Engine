@@ -13,8 +13,12 @@
  * `applyKeybindingOverrides` composes the two. Registering here means every
  * chord below is **rebindable for free**, appears in the command palette, and is
  * one row in the conflict check rather than a private listener nobody can see.
- * It is also what retires the P23 remainder "sculpt `[`/`]` is still outside the
- * keybinding registry; conflict resolution is a toast".
+ * It does NOT retire the P23 remainder "sculpt `[`/`]` is still outside the
+ * keybinding registry" — an earlier draft of this comment said it did, and
+ * an audit checked. That listener is `initSculptKeybindings` in
+ * `stores/viewportStore.ts`, it belongs to the TERRAIN sculpt radius rather
+ * than to this panel, and it is still a raw `window` handler with its own
+ * hand-rolled editable-target check. The remainder stands, by name.
  *
  * # How a command finds the mesh
  *
@@ -122,7 +126,11 @@ export const DCC_COMMANDS: CommandDef[] = [
     id: "dcc.select.grow",
     title: "Grow selection",
     category: "Model",
-    shortcut: "Ctrl+NumpadAdd",
+    // No chord (audit fix). This advertised `Ctrl+NumpadAdd`, which is
+    // bound to nothing and which `chordOf` cannot produce either — it
+    // builds names from `e.key`, and the numpad plus arrives as "+". A
+    // palette row showing a key that does nothing is worse than a palette
+    // row showing none, and the arm that exists to catch this skipped it.
     run: selection({ action: "grow" }),
   },
   {

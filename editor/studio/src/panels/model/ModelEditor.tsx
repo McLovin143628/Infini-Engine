@@ -345,11 +345,72 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
     if (assetId && showUv && generation !== undefined) void uvRefresh(assetId);
   }, [assetId, showUv, generation, selectionRev, uvRefresh]);
 
+  // …and the HISTORY rows the same way (audit fix). They were fetched on
+  // opening the disclosure and after an amendment, and nowhere else — so with
+  // the list open, an extrude did not appear in it and an undo did not grey a
+  // row. The rows describe the journal, and the stamp is what says the
+  // journal moved; the UV pane next door already had exactly this shape.
+  useEffect(() => {
+    if (assetId && showHistory && generation !== undefined) void historyRefresh(assetId);
+  }, [assetId, showHistory, generation, historyRefresh]);
+
   // ── the preview surface ──────────────────────────────────────────────────
   const imgRef = useRef<HTMLImageElement | null>(null);
   const drag = useRef<DragState | null>(null);
 
-  /** Pointer position in the PREVIEW's own pixel space (what `dcc_pick` wants). */
+  /**
+ * One history row's draggable number.
+ *
+ * **Controlled, and the journal is the authority** (audit fix). This was an
+ * uncontrolled `<input defaultValue>` under a stable `key`, so React kept the
+ * DOM node: when the kernel REFUSED an amendment — which it does inertly, that
+ * being the whole contract — the field went on showing the rejected number
+ * while the journal held the old one, and the panel displayed a value the mesh
+ * did not have.
+ *
+ * The sync is a render-phase adjustment rather than an effect: React documents
+ * it for exactly this ("reset state when a prop changes"), it re-renders before
+ * anything is painted, and `set-state-in-effect` is banned repo-wide.
+ *
+ * `onBlur` and Enter, not `onChange`: an amendment replays the whole tail, and
+ * doing that per keystroke would replay it four times for "0.65".
+ */
+function AmendField({
+  value,
+  disabled,
+  onCommit,
+}: {
+  value: number;
+  disabled: boolean;
+  onCommit: (v: number) => void;
+}) {
+  const [text, setText] = useState(String(value));
+  const [seen, setSeen] = useState(value);
+  if (seen !== value) {
+    setSeen(value);
+    setText(String(value));
+  }
+  return (
+    <input
+      type="number"
+      step={0.01}
+      value={text}
+      disabled={disabled}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={() => {
+        const v = Number(text);
+        if (Number.isFinite(v) && v !== value) onCommit(v);
+        else setText(String(value));
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+      }}
+      className="w-16 rounded border border-(--ink-border) bg-(--ink-bg-1) px-1 py-0 text-right outline-none focus:border-(--ink-accent) disabled:opacity-40"
+    />
+  );
+}
+
+/** Pointer position in the PREVIEW's own pixel space (what `dcc_pick` wants). */
   const toPreviewPx = useCallback((e: React.PointerEvent): [number, number] => {
     const el = imgRef.current;
     if (!el) return [0, 0];
@@ -1346,11 +1407,7 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
         <ToolButton
           label={showHistory ? "History ▾" : "History ▸"}
           icon={<Layers size={12} />}
-          onClick={() => {
-            const next = !showHistory;
-            setShowHistory(next);
-            if (next && assetId) void historyRefresh(assetId);
-          }}
+          onClick={() => setShowHistory(!showHistory)}
           title="Every edit in this session. An edit with a single number can be changed where it is, and the rest of the model re-derives."
         />
         {showHistory && (
@@ -1374,24 +1431,12 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
                 </span>
                 <span className="min-w-0 flex-1 truncate">{h.kind}</span>
                 {h.value !== null && (
-                  <input
-                    type="number"
-                    step={0.01}
-                    defaultValue={h.value}
+                  <AmendField
+                    value={h.value}
                     disabled={!h.amendable}
-                    // `onBlur` and Enter, not `onChange`: an amendment replays the
-                    // whole tail, and doing that on every keystroke would replay
-                    // it four times for "0.65".
-                    onBlur={(e) => {
-                      const v = Number(e.target.value);
-                      if (assetId && Number.isFinite(v) && v !== h.value) {
-                        void amend(assetId, h.index, v);
-                      }
+                    onCommit={(v) => {
+                      if (assetId) void amend(assetId, h.index, v);
                     }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") e.currentTarget.blur();
-                    }}
-                    className="w-16 rounded border border-(--ink-border) bg-(--ink-bg-1) px-1 py-0 text-right outline-none focus:border-(--ink-accent) disabled:opacity-40"
                   />
                 )}
                 <span className="w-4 shrink-0 text-[10px] text-(--ink-text-dim)">{h.unit}</span>
