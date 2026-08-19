@@ -78,6 +78,8 @@ function docOf(assetId: string, over: Partial<DccDocDto> = {}): DccDocDto {
       duplicateFacesDropped: 0,
       facesReoriented: 0,
       nonManifoldSplits: 0,
+      // The band the panel's verdict reads. Nothing detached ⇒ "none".
+      detachSeverity: "none",
       // P24.2: the skin weld's advisory.
       skinConflicts: 0,
     },

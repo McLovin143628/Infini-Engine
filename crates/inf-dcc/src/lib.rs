@@ -100,8 +100,8 @@ pub use amend::{
 };
 pub use autofit::{fit_template, FitError, FitOptions, FitReport};
 pub use build::{
-    cube, cylinder, from_mesh_asset, plane, torus, ImportError, ImportReport, MeshImport,
-    WELD_TOLERANCE,
+    cube, cylinder, from_mesh_asset, plane, torus, DetachSeverity, ImportError, ImportReport,
+    MeshImport, WELD_TOLERANCE,
 };
 pub use bvh::{Bvh, ClosestHit, RayHit, Tri};
 pub use export::{

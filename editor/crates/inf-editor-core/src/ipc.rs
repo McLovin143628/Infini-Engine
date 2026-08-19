@@ -2777,6 +2777,28 @@ pub enum DccModeDto {
     Face,
 }
 
+/// How much of a surface the lossy non-manifold repair detached, banded.
+///
+/// A wire mirror of `inf_dcc::DetachSeverity`. The **bands** cross the wire, not
+/// the ratio, so the thresholds stay in the kernel where the repair is — a
+/// duplicated threshold in TypeScript is the GpuLight triplication law waiting to
+/// happen. `detach_severity_is_the_kernels_bands` in the DCC command module pins
+/// the two enums against each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum DccDetachSeverityDto {
+    /// Nothing was detached.
+    #[default]
+    None,
+    /// At most 1% of the delivered faces — a local defect, worth showing and not
+    /// worth stopping for.
+    Isolated,
+    /// Over 1% and at most 10%.
+    Substantial,
+    /// Over 10% — the delivered mesh is substantially coincident shells.
+    Pervasive,
+}
+
 /// What the kernel's reader had to do to open this asset — surfaced, not hidden.
 ///
 /// `boundaryEdges` is the one the panel puts a verdict on: a solid the author
@@ -2801,6 +2823,12 @@ pub struct DccImportDto {
     /// interior partition, a double-sided sheet — and this is how much of it
     /// came in as a separate shell.
     pub non_manifold_splits: u32,
+    /// **How bad that detach was, as a share of the surface** — the severity the
+    /// count above cannot express (the Wave-D audit's re-carry). Two faces out of
+    /// 200 000 and two out of six are the same number and different meshes; the
+    /// panel's verdict reads this, not `nonManifoldSplits === 0`. Banded in the
+    /// kernel (`inf_dcc::DetachSeverity`) so the thresholds live in one place.
+    pub detach_severity: DccDetachSeverityDto,
     pub degenerate_triangles_skipped: u32,
     pub sharp_edges: u32,
     pub boundary_edges: u32,

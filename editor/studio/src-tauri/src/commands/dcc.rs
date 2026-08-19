@@ -54,10 +54,11 @@ use inf_editor_core::dcc::{
     PendingDrag, PickHit, PreviewCache, Projector, VertTransform,
 };
 use inf_editor_core::ipc::{
-    DccApplyDto, DccDocDto, DccDragBeginDto, DccDragDto, DccExportDto, DccGarmentDto,
-    DccGizmoModeDto, DccGroomDto, DccGroomResultDto, DccGroomStatDto, DccHistoryEntryDto,
-    DccImportDto, DccModeDto, DccNewDto, DccPaintModeDto, DccPreviewDto, DccPrimitiveDto,
-    DccSaveDto, DccSculptModeDto, DccSelectDto, DccToolDto, DccUnwrapDto, SculptFalloffDto,
+    DccApplyDto, DccDetachSeverityDto, DccDocDto, DccDragBeginDto, DccDragDto, DccExportDto,
+    DccGarmentDto, DccGizmoModeDto, DccGroomDto, DccGroomResultDto, DccGroomStatDto,
+    DccHistoryEntryDto, DccImportDto, DccModeDto, DccNewDto, DccPaintModeDto, DccPreviewDto,
+    DccPrimitiveDto, DccSaveDto, DccSculptModeDto, DccSelectDto, DccToolDto, DccUnwrapDto,
+    SculptFalloffDto,
 };
 use inf_editor_core::thumbnail::{encode_png_fast, PreviewView, Thumbnailer};
 use tauri::{AppHandle, Emitter, State};
@@ -327,7 +328,23 @@ fn import_dto(r: &ImportReport) -> DccImportDto {
         duplicate_faces_dropped: r.duplicate_faces_dropped as u32,
         faces_reoriented: r.faces_reoriented as u32,
         non_manifold_splits: r.non_manifold_splits as u32,
+        detach_severity: detach_severity_dto(r.detach_severity),
         skin_conflicts: r.skin_conflicts as u32,
+    }
+}
+
+/// The kernel's band, on the wire.
+///
+/// An exhaustive `match` with **no wildcard**, deliberately: a new band added to
+/// `inf_dcc::DetachSeverity` must stop this build rather than silently arrive as
+/// something else. That is the same forcing function `op_preserves_ids` uses in
+/// the kernel, for the same reason.
+fn detach_severity_dto(s: inf_dcc::DetachSeverity) -> DccDetachSeverityDto {
+    match s {
+        inf_dcc::DetachSeverity::None => DccDetachSeverityDto::None,
+        inf_dcc::DetachSeverity::Isolated => DccDetachSeverityDto::Isolated,
+        inf_dcc::DetachSeverity::Substantial => DccDetachSeverityDto::Substantial,
+        inf_dcc::DetachSeverity::Pervasive => DccDetachSeverityDto::Pervasive,
     }
 }
 
@@ -2718,6 +2735,49 @@ fn refusal_text(e: &OpError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The wire enum is the kernel's bands, in the kernel's order.**
+    ///
+    /// The exhaustive `match` in `detach_severity_dto` already stops the build
+    /// when a band is *added*; what it cannot see is a mapping that is
+    /// exhaustive and **wrong** — `Isolated => Substantial` compiles perfectly
+    /// and would tell an author their mesh is worse than it is. So each band is
+    /// pinned to its own wire spelling, and the spellings are pinned to the
+    /// serde representation the panel actually compares against (`"isolated"`,
+    /// lowercase, because the panel's verdict is a string equality).
+    #[test]
+    fn detach_severity_is_the_kernels_bands() {
+        use inf_dcc::DetachSeverity as K;
+        for (kernel, dto, wire) in [
+            (K::None, DccDetachSeverityDto::None, "none"),
+            (K::Isolated, DccDetachSeverityDto::Isolated, "isolated"),
+            (
+                K::Substantial,
+                DccDetachSeverityDto::Substantial,
+                "substantial",
+            ),
+            (K::Pervasive, DccDetachSeverityDto::Pervasive, "pervasive"),
+        ] {
+            assert_eq!(detach_severity_dto(kernel), dto, "{kernel:?} maps wrong");
+            assert_eq!(
+                serde_json::to_string(&dto).unwrap(),
+                format!("\"{wire}\""),
+                "{dto:?} does not serialize as the spelling the panel compares"
+            );
+        }
+        // NOT VACUOUS: the mapping is injective, so a match arm that answered one
+        // band for two inputs would fail here rather than pass by symmetry.
+        let all = [K::None, K::Isolated, K::Substantial, K::Pervasive];
+        let mapped: std::collections::BTreeSet<String> = all
+            .iter()
+            .map(|k| serde_json::to_string(&detach_severity_dto(*k)).unwrap())
+            .collect();
+        assert_eq!(
+            mapped.len(),
+            all.len(),
+            "two bands collapsed onto one wire value"
+        );
+    }
 
     /// Seed a document directly (the real `dcc_open` needs a Tauri `State` and an
     /// asset project, neither of which a unit test can build).

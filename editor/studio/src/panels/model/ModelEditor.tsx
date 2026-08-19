@@ -1855,10 +1855,15 @@ function AmendField({
           value={imp.facesReoriented}
           good={imp.facesReoriented === 0}
         />
+        {/* The verdict reads the kernel's BAND, not `=== 0`. A count answers
+            "how many" and the author is asking "is my mesh all right", and those
+            differ at the same number: two faces out of 200 000 is a stray decal,
+            two out of six is a pile of shells. `isolated` is a GOOD outcome —
+            the reader opened a mesh that used to be refused outright. */}
         <Verdict
           label="Non-manifold detached"
           value={imp.nonManifoldSplits}
-          good={imp.nonManifoldSplits === 0}
+          good={imp.detachSeverity === "none" || imp.detachSeverity === "isolated"}
         />
         {imp.nonManifoldSplits > 0 && (
           <p className="text-[10px] leading-snug text-(--ink-text-dim)">
@@ -1866,6 +1871,29 @@ function AmendField({
             double-sided sheet. That is not a surface, so the extras came in as{" "}
             <b>separate shells</b> at the same coordinates. Nothing was thrown away and
             nothing was moved; they are simply no longer joined.
+            {imp.detachSeverity === "isolated" && (
+              <>
+                {" "}
+                This is <b>under 1%</b> of the surface — a local defect, not a
+                structural one.
+              </>
+            )}
+            {imp.detachSeverity === "substantial" && (
+              <>
+                {" "}
+                That is <b>between 1% and 10%</b> of the surface. A boolean, a
+                solidify or a bake will behave differently from what you drew.
+              </>
+            )}
+            {imp.detachSeverity === "pervasive" && (
+              <>
+                {" "}
+                That is <b>over 10%</b> of the surface. The source is structurally
+                something this kernel cannot hold, and what opened is largely
+                coincident shells rather than a repaired version of your mesh —
+                worth fixing where it was authored.
+              </>
+            )}
           </p>
         )}
         {imp.facesReoriented > 0 && (

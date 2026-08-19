@@ -110,6 +110,95 @@ pub enum ImportError {
     NoGeometry,
 }
 
+/// How much of a surface the lossy non-manifold repair had to detach, banded.
+///
+/// # Why a band and not the ratio
+///
+/// The author's decision is discrete — *accept, look at it, or go back to the
+/// DCC package* — so the report should carry the decision rather than a number
+/// the panel would have to re-band anyway. Putting the rule here also keeps it in
+/// **one** place: a threshold duplicated in TypeScript is the GpuLight
+/// triplication law waiting to happen, and this crate is where the repair lives.
+///
+/// # The thresholds, and that they are a share rather than a count
+///
+/// The denominator is the mesh's **own face count after the repair**, so the
+/// band says what fraction of *this* surface came in detached. That is the only
+/// denominator that makes the same reading mean the same thing on a six-triangle
+/// test fixture and on a 200 000-triangle scan.
+///
+/// * [`None`](Self::None) — nothing was detached. The surface is edge-manifold
+///   as authored (possibly after the *lossless* winding repair, which is
+///   counted separately).
+/// * [`Isolated`](Self::Isolated) — **at most 1%**. Measured against the tree's
+///   own fixtures, this is where a deliberate local defect lands: a
+///   double-sided decal, one interior partition wall, an exporter emitting a
+///   doubled face. Worth showing, not worth stopping for.
+/// * [`Substantial`](Self::Substantial) — **1% to 10%**. Enough of the surface
+///   is now unrelated shells that a later operation — a boolean, a solidify, a
+///   bake — will behave differently from what the author drew.
+/// * [`Pervasive`](Self::Pervasive) — **over 10%**. The source is structurally
+///   something this kernel cannot hold, and the delivered mesh is substantially
+///   a pile of coincident shells rather than a repaired version of the input.
+///
+/// The bands are *shares*, which is what makes them portable; they are not a
+/// refusal. Wave D's ruling stands — the reader **repairs rather than refuses**,
+/// because through P24 an asset with any non-manifold edge could not be opened at
+/// all and a large fraction of real game art is in that state. This type is how
+/// the author finds out how much it cost them, which is the half that was
+/// missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DetachSeverity {
+    /// Nothing was detached.
+    #[default]
+    None,
+    /// At most 1% of the delivered faces.
+    Isolated,
+    /// Over 1% and at most 10%.
+    Substantial,
+    /// Over 10%.
+    Pervasive,
+}
+
+impl DetachSeverity {
+    /// The band for `splits` detached faces out of `faces` delivered.
+    ///
+    /// A pure function of two integers, and deliberately so: it is asserted
+    /// directly in the unit tests rather than only through an import, because a
+    /// threshold reachable only via a fixture is a threshold nobody can check the
+    /// edges of.
+    ///
+    /// `faces == 0` cannot happen on a real import (`ImportError::NoGeometry`
+    /// precedes it) and answers [`None`](Self::None) rather than dividing.
+    pub fn classify(splits: usize, faces: usize) -> Self {
+        if splits == 0 || faces == 0 {
+            return Self::None;
+        }
+        // Integer comparison rather than a float ratio: `splits * 100 <= faces`
+        // is exactly "at most 1%" with no rounding to argue about, and it cannot
+        // depend on a platform's float behaviour — which matters, because this
+        // value is serialized.
+        if splits.saturating_mul(100) <= faces {
+            Self::Isolated
+        } else if splits.saturating_mul(10) <= faces {
+            Self::Substantial
+        } else {
+            Self::Pervasive
+        }
+    }
+
+    /// Whether this reading should stop an author rather than merely inform them.
+    ///
+    /// The panel's old verdict was `non_manifold_splits === 0`, i.e. *every*
+    /// detach was a failure. This is the same verdict re-aimed: `Isolated` is a
+    /// good outcome — the reader opened a mesh that used to be refused outright
+    /// and lost 1% of its joins doing it.
+    pub fn is_healthy(self) -> bool {
+        matches!(self, Self::None | Self::Isolated)
+    }
+}
+
 /// What the reader had to do to the source — advisories, not failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ImportReport {
@@ -155,6 +244,21 @@ pub struct ImportReport {
     /// its seam, and opened — which is the honest outcome, under a name that
     /// does not blame the author's file for a limit of ours.
     pub non_manifold_splits: usize,
+    /// **How bad the detach was, as a share of the surface** — the severity the
+    /// raw count above cannot express.
+    ///
+    /// The Wave-D audit re-carried this by name: *"the lossy detach has no
+    /// severity and no threshold; `non_manifold_splits` is a raw count with a
+    /// boolean `=== 0` panel verdict"*. A count answers "how many" and the
+    /// author's question is "is my mesh all right" — and those have different
+    /// answers at the same number. Two faces detached out of 200 000 is a stray
+    /// double-sided decal nobody needs to act on; two faces out of six is a mesh
+    /// that arrived as unrelated shells. Under a `=== 0` verdict both read the
+    /// same, which is "bad", so the verdict cried wolf on the first and
+    /// understated the second.
+    ///
+    /// See [`DetachSeverity`] for the thresholds and how they were chosen.
+    pub detach_severity: DetachSeverity,
     /// Triangles dropped because they carry no surface.
     pub degenerate_triangles_skipped: usize,
     /// Edges marked sharp because the corner normals disagree across them.
@@ -336,6 +440,10 @@ pub fn from_mesh_asset(asset: &MeshAsset) -> Result<MeshImport, ImportError> {
     report.duplicate_faces_dropped = repair.duplicates;
     report.faces_reoriented = repair.reoriented;
     report.non_manifold_splits = repair.splits;
+    // The share, taken against the faces the mesh actually has now — duplicates
+    // are already dropped at this point, so the denominator is the delivered
+    // surface rather than what the file claimed.
+    report.detach_severity = DetachSeverity::classify(repair.splits, faces.len());
 
     report.fan_splits = split_bowties(&mut faces, &mut positions, &mut skins);
 
@@ -1537,6 +1645,93 @@ pub(crate) mod tests {
             out.report
         );
         assert_eq!(crate::validate::validate(&out.mesh), Ok(()));
+    }
+
+    /// **The detach bands, at their exact edges** — the Wave-D audit's re-carry.
+    ///
+    /// Asserted on the pure function rather than only through an import, because
+    /// a threshold reachable only via a fixture is a threshold whose boundaries
+    /// nobody can check. Both sides of both edges, so an off-by-one in either
+    /// comparison fails here rather than in the field.
+    #[test]
+    fn the_detach_bands_are_shares_and_their_edges_are_exact() {
+        use DetachSeverity as S;
+        // Zero is zero, at any size, including the degenerate denominator that
+        // `ImportError::NoGeometry` already makes unreachable.
+        assert_eq!(S::classify(0, 0), S::None);
+        assert_eq!(S::classify(0, 1_000_000), S::None);
+        assert_eq!(S::classify(7, 0), S::None);
+
+        // 1% is the Isolated/Substantial edge, and "at most 1%" includes it.
+        assert_eq!(S::classify(1, 100), S::Isolated, "exactly 1% is isolated");
+        assert_eq!(S::classify(2, 200), S::Isolated);
+        assert_eq!(S::classify(2, 199), S::Substantial, "a hair over 1%");
+        assert_eq!(S::classify(1, 101), S::Isolated, "a hair under 1%");
+
+        // 10% is the Substantial/Pervasive edge, same convention.
+        assert_eq!(S::classify(10, 100), S::Substantial, "exactly 10%");
+        assert_eq!(S::classify(11, 100), S::Pervasive, "a hair over 10%");
+
+        // The extremes.
+        assert_eq!(S::classify(1, 1), S::Pervasive, "everything detached");
+        assert_eq!(S::classify(2, 200_000), S::Isolated, "a stray decal");
+        assert_eq!(S::classify(2, 6), S::Pervasive, "the same COUNT, torn");
+
+        // The band the panel's verdict turns on.
+        assert!(S::None.is_healthy() && S::Isolated.is_healthy());
+        assert!(!S::Substantial.is_healthy() && !S::Pervasive.is_healthy());
+
+        // …and no overflow on a hostile count: `saturating_mul` must not wrap a
+        // huge `splits` into a small product and answer `Isolated`.
+        assert_eq!(S::classify(usize::MAX, 10), S::Pervasive);
+    }
+
+    /// **The band reaches the report, and the tree's own hostile fixtures land
+    /// where the doc says they do.** Not vacuous: a `classify` that always
+    /// answered `None` would pass every arm above except this one.
+    #[test]
+    fn a_real_detach_carries_its_band() {
+        let v = |p: [f32; 3]| MeshVertex {
+            position: p,
+            ..Default::default()
+        };
+        // Three faces on one directed edge: the smallest true non-manifold
+        // fixture, and it is overwhelmingly detached because it is tiny.
+        let asset = MeshAsset::new(
+            vec![SubMesh {
+                name: "fin".into(),
+                vertices: vec![
+                    v([0.0, 0.0, 0.0]),
+                    v([1.0, 0.0, 0.0]),
+                    v([0.0, 1.0, 0.0]),
+                    v([0.0, 0.0, 1.0]),
+                    v([0.0, -1.0, 0.0]),
+                ],
+                indices: vec![0, 1, 2, 0, 1, 3, 0, 1, 4],
+                material_slot: None,
+                skin: Vec::new(),
+            }],
+            vec![],
+        );
+        let out = from_mesh_asset(&asset).expect("a fin opens");
+        assert!(out.report.non_manifold_splits > 0, "{:?}", out.report);
+        assert_eq!(
+            out.report.detach_severity,
+            DetachSeverity::classify(out.report.non_manifold_splits, 3),
+            "the report's band is the classifier's answer over the delivered faces"
+        );
+        assert!(
+            !out.report.detach_severity.is_healthy(),
+            "two of three faces detached is not a healthy read: {:?}",
+            out.report
+        );
+        // A clean mesh carries `None`, so the field is not stuck on. Round-tripped
+        // through the writer so it is a real asset the reader has to open.
+        let clean_asset = crate::export::to_mesh_asset(&cube(1.0), &Default::default()).0;
+        let clean = from_mesh_asset(&clean_asset).expect("a cube opens");
+        assert_eq!(clean.report.non_manifold_splits, 0);
+        assert_eq!(clean.report.detach_severity, DetachSeverity::None);
+        assert!(clean.report.detach_severity.is_healthy());
     }
 
     /// The repair is a **pure function of its input** — the same claim the
