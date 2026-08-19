@@ -1,0 +1,47 @@
+[package]
+name = "inf-gis"
+description = "GIS import: CRS transforms, vector features, tile math, classification (Wave G)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+glam = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+# The geo-anchor (`inf_math::geo::GeoAnchor`) this crate transforms into, and the
+# compass frame it must agree with (`inf_math::solar`). Ring-0 → Ring-0 leaf.
+inf-math = { workspace = true }
+
+# ── THE FACADE (architecture rule: one crate names each heavy dependency) ────
+# This crate is the ONLY one in the workspace that names proj4rs, shapefile,
+# geojson, geo-types or spade. That is the same discipline that keeps `bevy_ecs`
+# inside inf-ecs and `wasmtime` inside inf-wasm-host, and it is what GeoCanvas's
+# own `Gdal::session()` funnel demonstrated is worth having: an FFI (or here, a
+# format) lock nothing else can forge.
+#
+# `tiff` is the deliberate exception and is NOT named here — it belongs beside
+# `png`/`exr` in inf-terrain's row-at-a-time decoder seam, because a GeoTIFF DEM
+# is an elevation source, not a vector source, and routing it through this crate
+# would put a second decoder beside the one door `decode_rows` already is.
+proj4rs = { workspace = true }
+shapefile = { workspace = true }
+geojson = { workspace = true }
+geo-types = { workspace = true }
+spade = { workspace = true }
+# GeoJSON parses through serde_json, which this workspace pins WITH
+# `float_roundtrip` (the P19.3 law). A GIS coordinate is precisely where a 1-ULP
+# parse error becomes a metre on the ground.
+serde_json = { workspace = true }
+# Terrarium elevation tiles are PNGs, decoded row-at-a-time by the same `png`
+# crate inf-terrain uses — so the global-DEM path costs no new decoder.
+png = { workspace = true }
+# A source whose CRS we cannot honour, a datum shift with no grid, an axis order
+# we had to assume: all advisories, never silent.
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

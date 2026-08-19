@@ -20,6 +20,7 @@ members = [
     "crates/inf-terrain",
     "crates/inf-voxel",
     "crates/inf-water",
+    "crates/inf-gis",
     "crates/inf-photo",
     "crates/inf-photo-gpu",
     "crates/inf-pcg",
@@ -334,6 +335,67 @@ tokio = { version = "1", default-features = false }
 # quic tree. Only pulled behind inf-net's `quic` feature.
 bytes = "1"
 
+# ── GIS / real-world data import (Wave G) ────────────────────────────────────
+# The whole GIS surface is PURE RUST and host-only. `gdal`, `proj-sys`/`proj` and
+# `geos` were all REFUSED by name: they bind native C libraries (GDAL alone drags
+# PROJ + GEOS + libtiff + libcurl + OpenSSL + SQLite and ~40 more shared objects),
+# our CI builds on three operating systems with no vcpkg/brew step, and `geos` is
+# LGPL-2.1 — off the deny allow-list outright. This repo has already declined this
+# exact class of dependency twice in writing (`intel_tex_2`'s ISPC build for BC7,
+# `aws-lc-sys` for QUIC crypto); taking GDAL would reverse both rulings for a
+# capability pure Rust serves. The named, bounded gaps that decision costs us are
+# written down in docs/memos/wave-g-terrain-gis-disposition.md.
+#
+# Facade discipline (the rule that keeps `bevy_ecs` inside inf-ecs and `wasmtime`
+# inside inf-wasm-host): exactly ONE crate names these — `inf-gis` — except `tiff`,
+# which belongs beside `png`/`exr` in inf-terrain's row-at-a-time decoder seam.
+#
+#   tiff  — the GeoTIFF DEM reader. `read_chunk`/`chunk_dimensions` is the same
+#           chunk-at-a-time seam `png::Reader::next_row` and exr's
+#           `decompress_sequential` gave us, so the P16.4a "never hold more than
+#           one tile row" memory bound survives the new format. default-features
+#           off: `deflate` routes to flate2 (in-tree via png) and `lzw` to weezl;
+#           the defaults would add zstd (pointless here) and image-webp (new and
+#           pointless). NO LERC and NO JPEG2000 decoder exists in pure Rust — an
+#           ArcGIS-produced LERC COG is refused BY NAME with the gdal_translate
+#           remedy in the message, never with "unsupported compression". MIT.
+tiff = { version = "0.11", default-features = false, features = ["deflate", "lzw"] }
+# weezl — LZW, which is very common in DEM GeoTIFFs (transitive of tiff's `lzw`).
+weezl = "0.1"
+#   proj4rs — CRS → CRS transforms, a pure-Rust adaptation of proj4. TWO caveats
+#           stated up front because both are user-visible: (1) it is proj4-STRING
+#           driven, there is no `proj.db`, so "EPSG:32610" is resolved by our own
+#           curated table (inf_gis::epsg) and every unsupported code is refused by
+#           name rather than guessed; (2) it carries NO NTv2 datum grids, so datum
+#           shifts are analytic only and old national datums (NAD27 and friends)
+#           carry metre-class error — which we REPORT as a cook advisory rather
+#           than hide, following GeoCanvas's divergence-warning precedent.
+#           default-features off drops its two CLI binaries.
+proj4rs = { version = "0.1", default-features = false }
+#   shapefile — `.shp` geometry + `.dbf` attributes (via `dbase`). What the
+#           government geoportals the owner's document names actually serve. MIT.
+shapefile = "0.6"
+#   geojson — the other half of that pair. It parses through `serde_json`, which
+#           this workspace pins WITH the mandatory `float_roundtrip` feature (the
+#           P19.3 law — the default parser can land 1 ULP off, and a GIS coordinate
+#           is exactly where that shows up as a metre on the ground).
+geojson = "0.24"
+#   geo-types — the shared Point/LineString/Polygon vocabulary that lets geojson,
+#           shapefile and proj4rs interoperate without three conversions. DATA
+#           TYPES ONLY. The full `geo` algorithm crate is DECLINED: we need a
+#           handful of predicates, not a library that pulls rstar + spade +
+#           geographiclib-rs + robust behind our facade.
+geo-types = "0.7"
+#   spade  — 2D Delaunay, for triangulating GIS POLYGONS (parcels, footprints,
+#           lake surfaces) into meshes. Already resolved in Cargo.lock as an
+#           unpinned transitive of parry2d-f64/parry3d-f64, so it costs no new
+#           license review — but naming it is a workspace pin and a facade ruling,
+#           not a freebie. Deliberately NOT used for terrain: the engine's answer
+#           to "flat ground should cost less" is the LOD pyramid plus the clipmap
+#           rings, and a TIN would be a second terrain renderer beside the first
+#           (see the disposition memo's CANNOT §1).
+spade = "2.15"
+
 # intra-workspace crates
 inf-core = { path = "crates/inf-core" }
 inf-math = { path = "crates/inf-math" }
@@ -387,6 +449,11 @@ inf-terrain = { path = "crates/inf-terrain" }
 # volumetric terrain adds NO new external crate to the tree or to cargo-deny.
 inf-voxel = { path = "crates/inf-voxel" }
 inf-water = { path = "crates/inf-water" }
+# inf-gis = the Wave-G GIS facade: the ONE crate naming proj4rs/shapefile/
+# geojson/geo-types/spade. HOST-ONLY by rule — it runs at import and cook time
+# and nothing in the shipped player links it, the same discipline `inf-mesh`
+# applies to meshopt/gltf/image.
+inf-gis = { path = "crates/inf-gis" }
 # inf-photo = the photogrammetry SfM core (P25.1). Ring 0, and dependency-light
 # on purpose: glam + serde + thiserror + image + inf-core + inf-math, every one
 # already pinned above, so classical structure-from-motion adds NO new external

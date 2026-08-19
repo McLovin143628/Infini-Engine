@@ -10,3 +10,12 @@ publish = false
 
 [dependencies]
 glam = { workspace = true }
+# The Wave-G geo-anchor (`geo::GeoAnchor`) is a persisted scene settings block, so
+# it derives Serialize/Deserialize. serde is already the workspace's universal
+# pin — this adds NO new external crate to the tree or to cargo-deny, and it keeps
+# the anchor BELOW inf-terrain in the dependency order. That placement is forced:
+# inf-scene depends on inf-terrain, so the anchor cannot live in inf-scene if the
+# terrain importer is to subtract it (that would be a cycle). inf-math is the leaf
+# both already depend on, and it is where the compass frame the anchor must agree
+# with was pinned (`solar`).
+serde = { workspace = true }
