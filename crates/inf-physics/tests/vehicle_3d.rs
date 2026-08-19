@@ -423,6 +423,9 @@ impl inf_ecs::vehicle::Vehicle for Hover {
     fn suspension_rest_m(&self) -> f64 {
         0.0
     }
+    fn seat_warp(&self) -> (f64, inf_anim::WarpWindow) {
+        (0.2, inf_anim::WarpWindow::new(0.0, 0.2))
+    }
     fn solve(&mut self, chassis: ChassisState, _dt: f64, out: &mut Vec<WheelForce>) {
         self.solves = self.solves.saturating_add(1);
         out.push(WheelForce {
@@ -646,4 +649,327 @@ fn probe_brake() {
             ang
         );
     }
+}
+
+// ── the seat: enter, drive, exit (P29.7) ────────────────────────────────────
+
+const HERO: Uuid = Uuid::from_u128(0x2907_1002);
+const HERO_2: Uuid = Uuid::from_u128(0x2907_1003);
+const HERO_RADIUS: f64 = 0.3;
+
+/// A character beside the car, on the floor, facing it.
+fn hero(world: &mut EcsWorld, guid: Uuid, x: f64, z: f64) {
+    let cm = inf_ecs::components::CharacterMovement {
+        player_controlled: true,
+        ..Default::default()
+    };
+    let e = world.spawn_with_guid(guid, "Hero", None);
+    let mut t = Transform::IDENTITY;
+    t.translation = Vec3d::new(x, cm.stand_half_height_m + HERO_RADIUS, z);
+    world.world_mut().entity_mut(e).insert((
+        t,
+        RigidBody3D {
+            kind: BodyKind3D::Kinematic,
+            ..Default::default()
+        },
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Capsule,
+            half_extents: Vec3d::new(HERO_RADIUS, cm.stand_half_height_m, HERO_RADIUS),
+            radius: HERO_RADIUS,
+            ..Default::default()
+        },
+        inf_ecs::components::CharacterController3D::default(),
+        cm,
+    ));
+}
+
+/// A rig with a driver beside the car.
+struct Crew {
+    rig: Rig,
+}
+
+impl Crew {
+    fn new() -> Self {
+        let mut world = EcsWorld::new();
+        ground(&mut world);
+        car(&mut world, SPAWN_Y);
+        hero(&mut world, HERO, 2.5, 0.0);
+        world.mark_dirty();
+        world.propagate();
+        let bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+        let mut rig = Rig { world, bridge };
+        rig.bridge.sync_from_world(&rig.world);
+        Self { rig }
+    }
+
+    fn step(&mut self, intent: &inf_ecs::movement::MovementIntent, n: u32) {
+        for _ in 0..n {
+            inf_ecs::movement::apply_intent(&mut self.rig.world, intent);
+            self.rig.step(1);
+        }
+    }
+
+    fn driver(&self) -> inf_ecs::components::CharacterMovement {
+        let e = self.rig.world.entity_of(HERO).expect("the hero exists");
+        self.rig
+            .world
+            .world()
+            .get::<inf_ecs::components::CharacterMovement>(e)
+            .expect("…with a movement component")
+            .clone()
+    }
+
+    fn driver_pos(&self) -> DVec3 {
+        let e = self.rig.world.entity_of(HERO).unwrap();
+        self.rig
+            .world
+            .world()
+            .get::<Transform>(e)
+            .unwrap()
+            .translation
+            .to_dvec3()
+    }
+}
+
+fn interact() -> inf_ecs::movement::MovementIntent {
+    inf_ecs::movement::MovementIntent {
+        interact: true,
+        ..Default::default()
+    }
+}
+
+fn forward() -> inf_ecs::movement::MovementIntent {
+    inf_ecs::movement::MovementIntent {
+        move_input: inf_ecs::math::Vec2d::new(0.0, 1.0),
+        ..Default::default()
+    }
+}
+
+/// **The enter choreography is a WINDOW, not a slide.**
+///
+/// `WarpWindow` has been named as a zero-caller by three ledgers, and this is
+/// what having one means: before the window opens the character has not moved,
+/// while it is open the character warps to the seat, and after it closes the
+/// character is exactly on the seat. An implementation that lerped over the
+/// whole duration would fail the first clause, which is the one that makes it a
+/// choreography.
+#[test]
+fn the_enter_warp_is_a_window_and_lands_the_character_on_the_seat() {
+    let mut crew = Crew::new();
+    crew.step(&Default::default(), 60);
+    let standing = crew.driver_pos();
+    crew.step(&interact(), 1);
+    let cm = crew.driver();
+    assert_eq!(
+        cm.mode,
+        inf_ecs::components::MovementMode::Driving,
+        "the enter control takes"
+    );
+    assert!(cm.runtime.seat.entering, "…and the warp is running");
+    assert_eq!(cm.runtime.seat.vehicle, CHASSIS);
+    // The character's own collider is parked for the whole choreography.
+    let collider = crew
+        .rig
+        .bridge
+        .collider_of(HERO)
+        .expect("a mirrored capsule");
+    assert!(
+        crew.rig.bridge.world().collider_enabled(collider) == Some(false),
+        "a capsule sliding into a seat with its collider live pushes the car away"
+    );
+
+    // Before the window opens (0.10 s), nothing has moved.
+    crew.step(&Default::default(), 4);
+    let early = crew.driver_pos();
+    assert!(
+        (early - standing).length() < 0.02,
+        "the character moved {} m before the warp window opened",
+        (early - standing).length()
+    );
+
+    // After it closes (0.45 s), the character is on the seat.
+    crew.step(&Default::default(), 30);
+    assert!(!crew.driver().runtime.seat.entering, "the warp finishes");
+    let seat = crew.rig.chassis().translation.to_dvec3()
+        + DVec3::Y * (crew.driver().stand_half_height_m + HERO_RADIUS + HALF.y);
+    let seated = crew.driver_pos();
+    assert!(
+        (seated - seat).length() < 0.05,
+        "the character sat at {seated:?}, the seat is at {seat:?}"
+    );
+    assert!(
+        (seated - standing).length() > 1.0,
+        "…and it actually travelled to get there"
+    );
+    // The collider comes back on the way out, and only then.
+    assert!(crew.rig.bridge.world().collider_enabled(collider) == Some(false));
+}
+
+/// A vehicle out of reach is a refusal, as a value: the control does nothing and
+/// the character carries on standing.
+#[test]
+fn a_vehicle_out_of_reach_is_a_refusal_and_not_a_teleport() {
+    let mut world = EcsWorld::new();
+    ground(&mut world);
+    car(&mut world, SPAWN_Y);
+    hero(&mut world, HERO, 40.0, 0.0);
+    world.mark_dirty();
+    world.propagate();
+    let bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    let mut crew = Crew {
+        rig: Rig { world, bridge },
+    };
+    crew.rig.bridge.sync_from_world(&crew.rig.world);
+    crew.step(&Default::default(), 30);
+    let before = crew.driver_pos();
+    crew.step(&interact(), 30);
+    assert_eq!(
+        crew.driver().mode,
+        inf_ecs::components::MovementMode::Grounded
+    );
+    assert!(!crew.driver().runtime.seat.is_seated());
+    assert!((crew.driver_pos() - before).length() < 0.05);
+}
+
+/// **The car carries its driver**, and the driver's stick drives the car.
+#[test]
+fn the_driver_drives_and_the_car_carries_the_driver() {
+    let mut crew = Crew::new();
+    crew.step(&Default::default(), 60);
+    crew.step(&interact(), 1);
+    crew.step(&Default::default(), 40);
+    let car_before = crew.rig.z();
+    let driver_before = crew.driver_pos();
+    crew.step(&forward(), 180);
+    let car_moved = crew.rig.z() - car_before;
+    let driver_moved = crew.driver_pos().z - driver_before.z;
+    assert!(
+        car_moved > 5.0,
+        "three seconds of driving moved the car {car_moved} m"
+    );
+    assert!(
+        (driver_moved - car_moved).abs() < 0.05,
+        "the driver moved {driver_moved} m and the car {car_moved} m"
+    );
+    // The driver's own velocity is the car's, which is what makes the exit
+    // handoff a handoff rather than a guess.
+    //
+    // To within one step: the movement door runs BEFORE the solver, so what the
+    // runtime holds is the chassis velocity as it was at the top of this step —
+    // the same staleness every derived output on `MovementRuntime` carries, and
+    // the reason the *position* half is corrected in the write-back instead.
+    let body = crew.rig.bridge.body_of(CHASSIS).unwrap();
+    let linvel = crew.rig.bridge.world().body_linvel(body).unwrap();
+    let seen = crew.driver().runtime.velocity.to_dvec3();
+    assert!(
+        (seen - linvel).length() < 0.2,
+        "the driver's velocity {seen:?} is not the car's {linvel:?}"
+    );
+    assert!(
+        seen.length() > 5.0,
+        "…and the comparison is not two zeroes: {seen:?}"
+    );
+}
+
+/// **Leaving a moving vehicle inherits its velocity** — the ragdoll's precedent,
+/// and the reason `Driving` has an airborne destination in the mode table.
+#[test]
+fn leaving_a_moving_vehicle_inherits_its_velocity() {
+    let mut crew = Crew::new();
+    crew.step(&Default::default(), 60);
+    crew.step(&interact(), 1);
+    crew.step(&Default::default(), 40);
+    crew.step(&forward(), 180);
+    let body = crew.rig.bridge.body_of(CHASSIS).unwrap();
+    let linvel = crew.rig.bridge.world().body_linvel(body).unwrap();
+    assert!(linvel.z > 3.0, "the car must be moving: {linvel:?}");
+    crew.step(&interact(), 1);
+    let cm = crew.driver();
+    assert_eq!(
+        cm.mode,
+        inf_ecs::components::MovementMode::FallControlled,
+        "stepping out at {} m/s is not standing up",
+        linvel.length()
+    );
+    assert!(
+        (cm.runtime.velocity.to_dvec3() - linvel).length() < 0.5,
+        "the exit velocity {:?} is not the car's {linvel:?}",
+        cm.runtime.velocity
+    );
+    assert!(!cm.runtime.seat.is_seated());
+    // The collider comes back, or the character walks through the world for ever.
+    let collider = crew.rig.bridge.collider_of(HERO).unwrap();
+    assert_eq!(
+        crew.rig.bridge.world().collider_enabled(collider),
+        Some(true)
+    );
+    // …and it lands, rather than sliding for ever.
+    crew.step(&Default::default(), 600);
+    assert!(
+        crew.driver().runtime.grounded,
+        "the character never landed after the exit"
+    );
+}
+
+/// Leaving a **stopped** vehicle is a stand, not a fall.
+#[test]
+fn leaving_a_parked_vehicle_is_a_stand() {
+    let mut crew = Crew::new();
+    crew.step(&Default::default(), 60);
+    crew.step(&interact(), 1);
+    crew.step(&Default::default(), 60);
+    crew.step(&interact(), 1);
+    assert_eq!(
+        crew.driver().mode,
+        inf_ecs::components::MovementMode::Grounded
+    );
+    crew.step(&Default::default(), 120);
+    assert!(crew.driver().runtime.grounded);
+    // Beside the car, not inside it.
+    let gap = (crew.driver_pos() - crew.rig.chassis().translation.to_dvec3()).length();
+    assert!(
+        gap > HALF.x.min(HALF.z),
+        "the exit put the character {gap} m from the car's centre"
+    );
+}
+
+/// Two characters cannot climb into one seat.
+#[test]
+fn two_characters_cannot_share_one_seat() {
+    let mut world = EcsWorld::new();
+    ground(&mut world);
+    car(&mut world, SPAWN_Y);
+    hero(&mut world, HERO, 2.5, 0.0);
+    hero(&mut world, HERO_2, -2.5, 0.0);
+    world.mark_dirty();
+    world.propagate();
+    let bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    let mut crew = Crew {
+        rig: Rig { world, bridge },
+    };
+    crew.rig.bridge.sync_from_world(&crew.rig.world);
+    crew.step(&Default::default(), 60);
+    // `apply_intent` writes onto EVERY player-controlled character, so one press
+    // is two attempts — which is exactly the case the occupancy set exists for.
+    crew.step(&interact(), 1);
+    crew.step(&Default::default(), 60);
+    let seated: Vec<Uuid> = [HERO, HERO_2]
+        .into_iter()
+        .filter(|g| {
+            let e = crew.rig.world.entity_of(*g).unwrap();
+            crew.rig
+                .world
+                .world()
+                .get::<inf_ecs::components::CharacterMovement>(e)
+                .unwrap()
+                .runtime
+                .seat
+                .is_seated()
+        })
+        .collect();
+    assert_eq!(seated.len(), 1, "two characters took one seat: {seated:?}");
+    assert_eq!(
+        seated[0], HERO,
+        "…and the winner is the nearer one, not the archetype order"
+    );
 }

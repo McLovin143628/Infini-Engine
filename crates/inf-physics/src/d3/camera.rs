@@ -142,6 +142,23 @@ pub fn step_locomotion_camera(
             exclude.insert(*c);
         }
     }
+    // **…and the vehicle the subject is driving** (P29.7) — the same defect
+    // shape a third time. A seated character's own collider is parked, and the
+    // thing filling the space around it is a four-metre chassis; without this
+    // the drive camera sweeps into the car's own bodywork on the first frame and
+    // sits at `min_arm_fraction` for the whole segment. The seat is on the
+    // movement runtime, which is where the link between a character and the
+    // chassis it is riding lives.
+    if let Some(cm) = world
+        .entity_of(subject)
+        .and_then(|e| world.world().get::<CharacterMovement>(e))
+    {
+        if cm.runtime.seat.is_seated() {
+            if let Some(c) = bridge.collider_of(cm.runtime.seat.vehicle) {
+                exclude.insert(c);
+            }
+        }
+    }
     let origin = cam.sweep_origin().to_dvec3();
     let desired = cam.desired.to_dvec3();
     let delta = desired - origin;

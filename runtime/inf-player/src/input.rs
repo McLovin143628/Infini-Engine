@@ -144,6 +144,9 @@ pub fn keycode_to_code(code: KeyCode) -> Option<&'static str> {
         KeyCode::KeyX => "KeyX",
         KeyCode::AltLeft => "AltLeft",
         KeyCode::ControlLeft | KeyCode::ControlRight => "Control",
+        // ── P29.7: the flight toggle. `interact` and `handbrake` share keys
+        //    that were already here (E and Space).
+        KeyCode::KeyV => "KeyV",
         _ => return None,
     })
 }
@@ -251,7 +254,7 @@ mod tests {
             .filter(|n| n.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
             .collect();
         assert!(
-            read.len() >= 13,
+            read.len() >= 16,
             "only {} action constants were extracted from `from_actions` — the \
              extraction broke, and an arm that greps nothing passes everything: \
              {read:?}",
@@ -275,6 +278,9 @@ mod tests {
                 "PRONE" => a::PRONE,
                 "ROLL" => a::ROLL,
                 "DIVE" => a::DIVE,
+                "INTERACT" => a::INTERACT,
+                "FLY" => a::FLY,
+                "HANDBRAKE" => a::HANDBRAKE,
                 other => panic!(
                     "`MovementIntent::from_actions` reads `actions::{other}`, which \
                      this arm has never heard of — add it to `default_map` and to \
@@ -291,7 +297,7 @@ mod tests {
                  the control does nothing and nothing else in the tree would say so"
             );
         }
-        // The five analog ones are AXES and the eight discrete ones are ACTIONS:
+        // The five analog ones are AXES and the eleven discrete ones are ACTIONS:
         // a `jump` bound as an axis would satisfy the sweep above and never
         // reach `pressed`.
         for axis in [a::MOVE_X, a::MOVE_Y, a::LOOK_X, a::LOOK_Y, a::MOVE_UP] {
@@ -310,6 +316,9 @@ mod tests {
             a::PRONE,
             a::ROLL,
             a::DIVE,
+            a::INTERACT,
+            a::FLY,
+            a::HANDBRAKE,
         ] {
             assert!(
                 m.action_names().any(|n| n == action),
@@ -345,6 +354,7 @@ mod tests {
             KeyCode::KeyQ,
             KeyCode::KeyR,
             KeyCode::KeyS,
+            KeyCode::KeyV,
             KeyCode::KeyW,
             KeyCode::KeyX,
             KeyCode::ArrowLeft,

@@ -1058,6 +1058,17 @@ impl PhysicsWorld3D {
         }
     }
 
+    /// Whether `collider` is enabled — the reader for
+    /// [`set_collider_enabled`](Self::set_collider_enabled), and the only way an
+    /// arm can check that a parked capsule is really parked rather than that the
+    /// call returned `true` (P29.7: the seat parks one, the ragdoll parks one,
+    /// and neither had a way to assert the world).
+    ///
+    /// `None` for a handle that no longer exists.
+    pub fn collider_enabled(&self, collider: ColliderId3D) -> Option<bool> {
+        self.colliders.get(collider.0).map(|c| c.is_enabled())
+    }
+
     /// Does this collider still exist?
     pub fn contains_collider(&self, collider: ColliderId3D) -> bool {
         self.colliders.contains(collider.0)

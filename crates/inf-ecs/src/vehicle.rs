@@ -512,6 +512,15 @@ pub trait Vehicle: Send + Sync + 'static {
     /// The tunables, by name — the live-tuning door's target.
     fn tune(&mut self, name: &str, value: f64) -> bool;
 
+    /// **The enter/exit choreography**: how long it takes, seconds, and the
+    /// window of it the seat warp occupies.
+    ///
+    /// On the trait because the seat step reads it and an island class may want
+    /// a different one — a motorbike is thrown a leg over and a tank is climbed
+    /// into. See `inf_physics::d3::movement::step_driving` for what the window
+    /// does, and `VehicleTuning::enter_window` for why it is a window.
+    fn seat_warp(&self) -> (f64, inf_anim::WarpWindow);
+
     /// The suspension's length at full extension, metres.
     ///
     /// On the trait rather than derived from the wheels because the door needs
@@ -668,6 +677,10 @@ impl Vehicle for RaycastVehicle {
 
     fn tune(&mut self, name: &str, value: f64) -> bool {
         self.tuning.set(name, value)
+    }
+
+    fn seat_warp(&self) -> (f64, inf_anim::WarpWindow) {
+        (self.tuning.enter_time_s, self.tuning.enter_window)
     }
 
     fn suspension_rest_m(&self) -> f64 {

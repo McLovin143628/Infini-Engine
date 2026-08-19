@@ -222,3 +222,71 @@ fn step_one(
         forward_mps: state.linvel.dot(state.basis().0),
     })
 }
+
+// ── the seat: enter, drive, exit (P29.7) ────────────────────────────────────
+
+/// How close a character's feet must be to a seat to climb into it, metres.
+///
+/// Generous rather than exact: a door is not a pixel, and a refusal an author
+/// cannot see the edge of reads as a broken control. `try_enter` answers the
+/// nearest seat inside this radius and refuses everything else as a value.
+pub const ENTER_REACH_M: f64 = 3.0;
+
+/// How far to the side of the seat an exiting character is placed, in chassis
+/// half-widths plus this, metres.
+pub const EXIT_CLEARANCE_M: f64 = 0.6;
+
+/// Where a vehicle's seat is in the world, the chassis rotation it is in, and
+/// the chassis's own velocity — the three numbers the seat step needs.
+pub fn seat_pose(bridge: &PhysicsBridge3D, chassis: Uuid) -> Option<(DVec3, glam::DQuat, DVec3)> {
+    let body = bridge.body_of(chassis)?;
+    let v = bridge.vehicle_of(chassis)?;
+    let w = bridge.world();
+    let pos = w.body_translation(body)?;
+    let rot = w.body_rotation(body)?;
+    let seat = pos + rot * v.rig().seat_local.to_dvec3();
+    Some((seat, rot, w.body_linvel(body).unwrap_or(DVec3::ZERO)))
+}
+
+/// **Try to climb into the nearest vehicle** (P29.7).
+///
+/// Returns the chassis `Guid` if one was in reach. `O(vehicles)`, walked in
+/// `Guid` order with a strict `<` on the distance, so a tie between two seats
+/// at the same distance is broken by the lower guid rather than by a bevy
+/// archetype layout.
+///
+/// A refusal is a value: no vehicle, none in reach, or one already occupied all
+/// answer `None`, and the character does whatever it was going to do instead.
+pub fn try_enter(bridge: &PhysicsBridge3D, feet: DVec3, occupied: &BTreeSet<Uuid>) -> Option<Uuid> {
+    let mut best: Option<(f64, Uuid)> = None;
+    for chassis in bridge.vehicle_guids() {
+        if occupied.contains(&chassis) {
+            continue;
+        }
+        let Some((seat, _, _)) = seat_pose(bridge, chassis) else {
+            continue;
+        };
+        let d = (seat - feet).length();
+        if d > ENTER_REACH_M {
+            continue;
+        }
+        if best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, chassis));
+        }
+    }
+    best.map(|(_, g)| g)
+}
+
+/// Park (or restore) the character's own collider while it is in a seat.
+///
+/// The **same door the ragdoll uses**, for the same reason: a character riding
+/// on a chassis with its capsule still in the world is a capsule permanently
+/// intersecting a dynamic body, which is a depenetration force with nowhere to
+/// go. `set_collider_enabled` is a physics-world operation, so both hosts do it
+/// identically and PIE parity sees it — which is what the brief asks of this
+/// seam.
+pub fn park_collider(bridge: &mut PhysicsBridge3D, guid: Uuid, parked: bool) {
+    if let Some(c) = bridge.collider_of(guid) {
+        bridge.world_mut().set_collider_enabled(c, !parked);
+    }
+}

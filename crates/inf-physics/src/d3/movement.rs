@@ -529,6 +529,81 @@ fn step_one(
         return super::ragdoll_bridge::step_ragdoll(world, bridge, guid, cm, dt);
     }
 
+    // ── 0d. **A VEHICLE owns it too** (P29.7), and for the third time the same
+    //    reason: the chassis is the simulation now, this step's velocity model
+    //    has nothing to say about a car, and the character is a passenger on a
+    //    rigid body. `press_interact` from the ground climbs in; the seat step
+    //    below drives, warps and gets back out.
+    if cm.runtime.press_interact && cm.mode.is_grounded_family() {
+        cm.runtime.press_interact = false;
+        let feet = position - DVec3::Y * (cm.half_height_for(cm.mode) + radius);
+        let occupied = occupied_seats(world, guid);
+        if let Some(vehicle) = super::vehicle::try_enter(bridge, feet, &occupied) {
+            let mut refusal = MovementRefusal::None;
+            let probe = ClearanceProbe {
+                centre: position,
+                radius,
+                is_capsule,
+                exclude: &exclude,
+            };
+            cm.mode = request(
+                &mut cm,
+                bridge,
+                &probe,
+                MovementMode::Driving,
+                true,
+                &mut refusal,
+            );
+            if cm.mode == MovementMode::Driving {
+                cm.runtime.seat = inf_ecs::components::SeatState {
+                    vehicle,
+                    entering: true,
+                    time_s: 0.0,
+                    start: Vec3d::from_dvec3(position),
+                    start_yaw_deg: cm.runtime.body_yaw_deg,
+                };
+                cm.runtime.time_in_mode_s = 0.0;
+                // Parked at the START of the choreography, not at the end: a
+                // capsule sliding into a seat with its collider live pushes the
+                // car away from itself.
+                super::vehicle::park_collider(bridge, guid, true);
+            }
+        }
+    }
+    if cm.mode == MovementMode::Driving {
+        return step_driving(world, bridge, guid, cm, dt, radius, overlays);
+    }
+
+    // ── 0e. **FLIGHT** is its own integration (P29.7): six degrees of freedom,
+    //    no gravity, and a bank that comes out of the turn rate. Everything
+    //    below this line is about a character standing on, falling toward or
+    //    swimming in something, and none of it applies.
+    if cm.runtime.press_fly {
+        cm.runtime.press_fly = false;
+        let mut refusal = MovementRefusal::None;
+        let probe = ClearanceProbe {
+            centre: position,
+            radius,
+            is_capsule,
+            exclude: &exclude,
+        };
+        let to = if cm.mode == MovementMode::Flying {
+            MovementMode::FallControlled
+        } else {
+            MovementMode::Flying
+        };
+        cm.mode = request(&mut cm, bridge, &probe, to, true, &mut refusal);
+        if cm.mode != MovementMode::Flying {
+            cm.runtime.bank_deg = 0.0;
+        }
+    }
+    if cm.mode == MovementMode::Flying {
+        let fly_half = cm.half_height_for(MovementMode::Flying);
+        return step_flight(
+            world, bridge, guid, cm, dt, position, fly_half, radius, is_capsule, overlays,
+        );
+    }
+
     // ── 1. Aim. The look intent is a RATE (degrees per second), so integrating
     //    it here is frame-rate independent by construction — see
     //    `inf_input::InputState::axis_snapshot` for where that conversion is
@@ -1297,9 +1372,15 @@ fn step_one(
             t.translation.x = position.x;
             t.translation.y = position.y;
             t.translation.z = position.z;
-            // Yaw only: a character's pitch and roll belong to its pose, not to
-            // its body. (`Transform::rotation` is euler DEGREES, YXZ.)
+            // Yaw and the BANK. A character's *pitch* belongs to its pose and
+            // never to its body; its roll is the flight bank, which is zero in
+            // every other mode — and writing it unconditionally is what makes
+            // that true of the transform as well as of the runtime. Measured
+            // before this line existed: a character that landed out of a banked
+            // turn kept the bank for ever, because nothing else ever wrote the
+            // roll back. (`Transform::rotation` is euler DEGREES, YXZ.)
             t.rotation.y = body_yaw;
+            t.rotation.z = cm.runtime.bank_deg;
         }
         if is_capsule {
             if let Some(mut c) = w.get_mut::<Collider3D>(entity) {
@@ -1794,4 +1875,385 @@ fn mover_for_with_capsule(
             radius: radius.max(1e-3),
         }),
     }
+}
+
+// ── driving and flight (P29.7) ──────────────────────────────────────────────
+
+/// Which vehicles already have somebody in them, so two characters cannot climb
+/// into one seat.
+///
+/// `O(characters)`, and only on the step somebody presses the enter control.
+fn occupied_seats(world: &EcsWorld, except: uuid::Uuid) -> BTreeSet<uuid::Uuid> {
+    let mut out = BTreeSet::new();
+    for guid in model::movement_targets(world) {
+        if guid == except {
+            continue;
+        }
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        if let Some(cm) = world.world().get::<CharacterMovement>(e) {
+            if cm.runtime.seat.is_seated() {
+                out.insert(cm.runtime.seat.vehicle);
+            }
+        }
+    }
+    out
+}
+
+/// The compass yaw of a rotation, degrees — its forward axis, flattened.
+///
+/// `planar_yaw_deg` rather than `DQuat::to_euler`: the latter reaches
+/// `f64::atan2` and this number reaches `body_yaw_deg`, the transform, the
+/// replay trace and the camera. P14's law.
+fn yaw_of(rot: DQuat) -> f64 {
+    let f = rot * DVec3::Z;
+    model::planar_yaw_deg(Vec2d::new(f.x, f.z))
+}
+
+/// **The seat step**: warp in, drive, and get back out (P29.7).
+///
+/// # The choreography, and `WarpWindow`'s first consumer
+///
+/// Entering is a **motion warp onto the seat**: the character's transform is
+/// interpolated from where it stood to where the seat is, over a *window* of the
+/// enter clip rather than over the whole of it ([`inf_anim::WarpWindow`], named
+/// as a zero-caller by the P29.4, P29.5 and P29.6 ledgers). The window is what
+/// makes it a choreography instead of a slide: before it opens the character is
+/// still standing (the clip's approach), after it closes the character is seated
+/// and the rest of the clip plays out. `warp_ease` — the quintic the mantle uses
+/// — shapes the inside.
+///
+/// The **collider is parked** for the whole of it, through the same
+/// `set_collider_enabled` door the ragdoll uses, which is a physics-world
+/// operation both hosts make identically.
+///
+/// # The exit, and the velocity handoff
+///
+/// A character stepping out of a car doing 20 m/s is doing 20 m/s — the
+/// ragdoll's precedent exactly, and the reason `Driving` has an airborne
+/// destination in the mode table. Below walking pace the exit is a stand.
+fn step_driving(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    guid: uuid::Uuid,
+    mut cm: CharacterMovement,
+    dt: f64,
+    radius: f64,
+    overlays: &model::OverlayRegistry,
+) -> Option<MoveOutcome> {
+    let entity = world.entity_of(guid)?;
+    let mut refusal = MovementRefusal::None;
+    cm.runtime.time_in_mode_s += dt;
+    cm.runtime.time_since_land_s += dt;
+    cm.runtime.seat.time_s += dt;
+    // The aim keeps integrating: the camera reads it, and a driver still looks
+    // around. It is the same three lines as the standing step's, deliberately —
+    // the look control means one thing in this engine.
+    let prev_aim = cm.runtime.aim_yaw_deg;
+    cm.runtime.aim_yaw_deg = wrap_deg(cm.runtime.aim_yaw_deg + cm.runtime.intent_look_yaw_dps * dt);
+    cm.runtime.aim_pitch_deg =
+        (cm.runtime.aim_pitch_deg + cm.runtime.intent_look_pitch_dps * dt).clamp(-89.0, 89.0);
+    cm.runtime.aim_yaw_rate_dps =
+        (model::angle_delta_deg(cm.runtime.aim_yaw_deg, prev_aim) / dt).abs();
+
+    let vehicle = cm.runtime.seat.vehicle;
+    let Some((seat_world, rot, linvel)) = super::vehicle::seat_pose(bridge, vehicle) else {
+        // The vehicle is gone — despawned, or a level that changed underneath a
+        // running session. A refusal is a value: the character stands up where
+        // it is rather than the step failing.
+        return finish_driving(
+            world,
+            bridge,
+            guid,
+            cm,
+            overlays,
+            None,
+            MovementMode::Grounded,
+        );
+    };
+
+    // ── the controls, through the trait. This is the whole of "input routes to
+    //    the vehicle": a `VehicleControls` and nothing vehicle-shaped anywhere
+    //    in the movement model.
+    let forward_mps = linvel.dot(rot * DVec3::Z);
+    let controls = inf_ecs::vehicle::VehicleControls::from_intent(
+        cm.runtime.intent_move,
+        forward_mps,
+        cm.runtime.want_handbrake,
+    );
+    if let Some(v) = bridge.vehicle_mut(vehicle) {
+        v.control(controls);
+    }
+
+    let (enter_time_s, window) = bridge.vehicle_of(vehicle)?.seat_warp();
+    let target = seat_world + DVec3::Y * (cm.stand_half_height_m + radius);
+    let chassis_yaw = yaw_of(rot);
+    let position = if cm.runtime.seat.entering {
+        let alpha = f64::from(window.alpha(cm.runtime.seat.time_s as f32));
+        let eased = inf_anim::warp_ease(alpha);
+        let start = cm.runtime.seat.start.to_dvec3();
+        cm.runtime.body_yaw_deg = wrap_deg(
+            cm.runtime.seat.start_yaw_deg
+                + model::angle_delta_deg(chassis_yaw, cm.runtime.seat.start_yaw_deg) * eased,
+        );
+        if cm.runtime.seat.time_s >= enter_time_s {
+            cm.runtime.seat.entering = false;
+        }
+        start + (target - start) * eased
+    } else {
+        cm.runtime.body_yaw_deg = chassis_yaw;
+        target
+    };
+    cm.runtime.velocity = Vec3d::from_dvec3(linvel);
+    cm.runtime.target_yaw_deg = cm.runtime.body_yaw_deg;
+    // Seated is supported: a driver is not falling, whatever the car is doing.
+    cm.runtime.grounded = true;
+    cm.runtime.ground_normal = Vec3d::new(0.0, 1.0, 0.0);
+    cm.runtime.bank_deg = 0.0;
+
+    // ── the exit. Not during the warp: a control that could interrupt its own
+    //    choreography would leave the character half-way to a seat it is no
+    //    longer in.
+    let leaving = cm.runtime.press_interact && !cm.runtime.seat.entering;
+    clear_edges(&mut cm);
+    if leaving {
+        let half_width = world
+            .entity_of(vehicle)
+            .and_then(|e| world.world().get::<Collider3D>(e).copied())
+            .map(|c| match c.shape_kind {
+                ColliderShape3DKind::Sphere => c.radius,
+                _ => c.half_extents.x,
+            })
+            .unwrap_or(1.0);
+        let out_pos =
+            target + (rot * DVec3::X) * (half_width + super::vehicle::EXIT_CLEARANCE_M + radius);
+        // The handoff: a moving vehicle's exit inherits its velocity, and above
+        // walking pace that means the character is airborne rather than standing.
+        let moving = linvel.length() > 2.0;
+        let to = if moving {
+            MovementMode::FallControlled
+        } else {
+            MovementMode::Grounded
+        };
+        let verdict = model::request_mode(cm.mode, to, true, true);
+        if verdict.refusal == MovementRefusal::None {
+            return finish_driving(
+                world,
+                bridge,
+                guid,
+                cm,
+                overlays,
+                Some(out_pos),
+                verdict.mode,
+            );
+        }
+        // A refused exit keeps the character in the seat — the refusal is a
+        // value and the door is the mode table, so a destination the table does
+        // not allow leaves the driver driving rather than half out of a car in a
+        // mode nobody sanctioned.
+        refusal = verdict.refusal;
+        cm.runtime.refusals = cm.runtime.refusals.saturating_add(1);
+    }
+
+    write_driver_back(world, entity, guid, bridge, &cm, position, overlays);
+    Some(MoveOutcome {
+        guid,
+        mode: MovementMode::Driving,
+        refusal,
+        grounded: true,
+        landed: LandingKind::None,
+    })
+}
+
+/// Consume every edge a seated or flying character does not act on, so a press
+/// held over a mode change does not fire the moment it ends.
+fn clear_edges(cm: &mut CharacterMovement) {
+    cm.runtime.press_interact = false;
+    cm.runtime.press_fly = false;
+    cm.runtime.press_jump = false;
+    cm.runtime.press_crouch = false;
+    cm.runtime.press_prone = false;
+    cm.runtime.press_roll = false;
+    cm.runtime.press_dive = false;
+}
+
+/// Leave the seat: restore the collider, place the character, keep the velocity.
+///
+/// `at` is `None` when the vehicle itself vanished, in which case the character
+/// stays exactly where it was — the honest answer, and the one that cannot put
+/// it inside geometry it never travelled through.
+fn finish_driving(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    guid: uuid::Uuid,
+    mut cm: CharacterMovement,
+    overlays: &model::OverlayRegistry,
+    at: Option<DVec3>,
+    mode: MovementMode,
+) -> Option<MoveOutcome> {
+    let entity = world.entity_of(guid)?;
+    super::vehicle::park_collider(bridge, guid, false);
+    cm.runtime.seat = inf_ecs::components::SeatState::default();
+    cm.mode = mode;
+    cm.runtime.time_in_mode_s = 0.0;
+    let position = at.unwrap_or_else(|| {
+        world
+            .world()
+            .get::<Transform>(entity)
+            .map(|t| t.translation.to_dvec3())
+            .unwrap_or_default()
+    });
+    cm.runtime.grounded = mode.is_grounded_family();
+    write_driver_back(world, entity, guid, bridge, &cm, position, overlays);
+    Some(MoveOutcome {
+        guid,
+        mode,
+        refusal: MovementRefusal::None,
+        grounded: cm.runtime.grounded,
+        landed: LandingKind::None,
+    })
+}
+
+/// The write-back the seat and flight steps share — step 12 and 12b of the
+/// standing step, over a character that has no capsule resize to do.
+fn write_driver_back(
+    world: &mut EcsWorld,
+    entity: inf_ecs::Entity,
+    guid: uuid::Uuid,
+    bridge: &mut PhysicsBridge3D,
+    cm: &CharacterMovement,
+    position: DVec3,
+    overlays: &model::OverlayRegistry,
+) {
+    {
+        let w = world.world_mut();
+        if let Some(mut t) = w.get_mut::<Transform>(entity) {
+            t.translation.x = position.x;
+            t.translation.y = position.y;
+            t.translation.z = position.z;
+            t.rotation.y = cm.runtime.body_yaw_deg;
+            // The roll is the BANK, and it is zero in every mode but flight —
+            // which is why writing it here is safe: a character that lands with
+            // a bank on would keep it for ever otherwise.
+            t.rotation.z = cm.runtime.bank_deg;
+        }
+        if let Some(mut slot) = w.get_mut::<CharacterMovement>(entity) {
+            *slot = cm.clone();
+        }
+    }
+    let overlay = overlays.id_of(&cm.overlay);
+    inf_ecs::anim_bridge::publish_character_params(world, guid, cm, overlay);
+    if let Some(body) = bridge.body_of(guid) {
+        bridge.world_mut().set_body_translation(body, position);
+    }
+    world.mark_dirty();
+}
+
+/// **The flight step** (P29.7): six degrees of freedom, no gravity, banking.
+///
+/// The nearest precedent in this engine is the controlled-fall authority model,
+/// and the difference is the whole point: a fall integrates gravity and clamps
+/// the player's authority over it, while flight has **no gravity term at all**
+/// and the player's authority is total. `inf_ecs::movement::integrate_flight` is
+/// that, as a function of numbers.
+///
+/// It still moves through `PhysicsWorld3D::move_character`, so a flying
+/// character collides with the world rather than through it. The **capsule stays
+/// upright** in that sweep while the transform banks: the bank is a visual and
+/// an animation input, and tilting a kinematic character's swept shape would
+/// turn a bank into a squeeze through gaps it should not fit.
+#[allow(clippy::too_many_arguments)]
+fn step_flight(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    guid: uuid::Uuid,
+    mut cm: CharacterMovement,
+    dt: f64,
+    mut position: DVec3,
+    half_height: f64,
+    radius: f64,
+    is_capsule: bool,
+    overlays: &model::OverlayRegistry,
+) -> Option<MoveOutcome> {
+    let entity = world.entity_of(guid)?;
+    cm.runtime.time_in_mode_s += dt;
+    cm.runtime.time_since_land_s += dt;
+
+    // The aim, and the SIGNED rate the bank comes from. `aim_yaw_rate_dps` is an
+    // absolute value (three ALS systems read it as a magnitude), so the sign is
+    // recovered here rather than by changing what that field means.
+    let prev_aim = cm.runtime.aim_yaw_deg;
+    cm.runtime.aim_yaw_deg = wrap_deg(cm.runtime.aim_yaw_deg + cm.runtime.intent_look_yaw_dps * dt);
+    cm.runtime.aim_pitch_deg =
+        (cm.runtime.aim_pitch_deg + cm.runtime.intent_look_pitch_dps * dt).clamp(-89.0, 89.0);
+    let signed_rate = model::angle_delta_deg(cm.runtime.aim_yaw_deg, prev_aim) / dt;
+    cm.runtime.aim_yaw_rate_dps = signed_rate.abs();
+
+    // The wish velocity, in the aim frame and pitched by where the character is
+    // looking — which is what makes this six degrees of freedom rather than a
+    // hover with a lift button.
+    let pitch = cm.runtime.aim_pitch_deg.to_radians();
+    let (sp, cp) = (inf_math::psin64(pitch), inf_math::pcos64(pitch));
+    let flat = model::rotate_from_frame(Vec2d::new(0.0, 1.0), cm.runtime.aim_yaw_deg);
+    let forward = DVec3::new(flat.x * cp, sp, flat.y * cp);
+    let side = model::rotate_from_frame(Vec2d::new(1.0, 0.0), cm.runtime.aim_yaw_deg);
+    let right = DVec3::new(side.x, 0.0, side.y);
+    let wish = forward * cm.runtime.intent_move.y * model::FLY_SPEED_MPS
+        + right * cm.runtime.intent_move.x * model::FLY_SPEED_MPS
+        + DVec3::Y * cm.runtime.intent_vertical * model::FLY_ASCEND_MPS;
+    cm.runtime.velocity = model::integrate_flight(cm.runtime.velocity, Vec3d::from_dvec3(wish), dt);
+
+    // Move, with collision — but with **no ground snap and no autostep**. Both
+    // exist to keep a walking character attached to a floor, and both are wrong
+    // for flight: measured before this, a hovering character sank 4.8 cm per
+    // second because rapier's snap pulled it toward the ground it was flying
+    // over, which is exactly the "no gravity" claim failing by another route.
+    let mover = mover_for_with_capsule(world, guid, is_capsule.then_some((half_height, radius)))
+        .snap_to_ground(None)
+        .autostep(None);
+    let exclude = bridge.collider_of(guid);
+    let result = bridge.world_mut().move_character(
+        &mover,
+        position,
+        cm.runtime.velocity.to_dvec3() * dt,
+        exclude,
+    );
+    position += result.translation;
+    // A flying character is never "grounded": the mode is the authority on how
+    // it is being integrated, and a hover a centimetre over a roof is still
+    // flight.
+    cm.runtime.grounded = false;
+    cm.runtime.ground_normal = Vec3d::new(0.0, 1.0, 0.0);
+
+    // The body faces where it is looking, and banks into the turn.
+    cm.runtime.body_yaw_deg = cm.runtime.aim_yaw_deg;
+    cm.runtime.target_yaw_deg = cm.runtime.body_yaw_deg;
+    let target_bank = model::bank_target_deg(signed_rate);
+    let k = (model::BANK_INTERP_PER_S * dt).clamp(0.0, 1.0);
+    cm.runtime.bank_deg += (target_bank - cm.runtime.bank_deg) * k;
+
+    // The derived outputs the animation bridge reads, in flight's own terms.
+    let planar = (cm.runtime.velocity.x * cm.runtime.velocity.x
+        + cm.runtime.velocity.z * cm.runtime.velocity.z)
+        .sqrt();
+    cm.runtime.mapped_speed = model::mapped_speed(
+        planar,
+        cm.walk_speed_mps,
+        cm.run_speed_mps,
+        cm.sprint_speed_mps,
+    );
+    cm.runtime.gait_scalar = model::gait_scalar(cm.runtime.mapped_speed);
+    cm.runtime.actual_gait = Gait::Run;
+    cm.runtime.landing = LandingKind::None;
+    clear_edges(&mut cm);
+
+    write_driver_back(world, entity, guid, bridge, &cm, position, overlays);
+    Some(MoveOutcome {
+        guid,
+        mode: MovementMode::Flying,
+        refusal: MovementRefusal::None,
+        grounded: false,
+        landed: LandingKind::None,
+    })
 }

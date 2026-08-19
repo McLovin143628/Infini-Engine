@@ -1896,10 +1896,90 @@ impl PhysicsBridge3D {
                 changed = true;
             }
         }
+        changed |= self.follow_seats(world);
         if changed {
             world.mark_dirty();
         }
     }
+
+    /// **Passengers ride with their vehicles** (P29.7) — the seated half of the
+    /// write-back.
+    ///
+    /// # Why it is here and not in the movement step
+    ///
+    /// The movement door runs **before** the solver, which is right for
+    /// everything it decides and wrong for one thing it writes: a seated
+    /// character's transform is computed from the chassis pose as it was at the
+    /// start of the step, and then the solver moves the chassis. Measured over a
+    /// 22 m drive: the driver arrived **0.22 m** behind the seat and stayed
+    /// there — a character floating off the back of its own car, at exactly one
+    /// step of lag.
+    ///
+    /// So the seat follow belongs where every other post-solve truth is
+    /// projected into the ECS, which is this function. Putting it *inside*
+    /// `write_back_into` rather than beside it is the same choice
+    /// `step_vehicles` makes inside the movement door, for the same reason: both
+    /// hosts already call this one, and a sibling they each had to call would be
+    /// a hand-maintained mirror.
+    ///
+    /// Off path: one `is_empty` on a level with no vehicle in it.
+    fn follow_seats(&mut self, world: &mut EcsWorld) -> bool {
+        if self.vehicles.is_empty() {
+            return false;
+        }
+        let mut moved = false;
+        for guid in inf_ecs::movement::movement_targets(world) {
+            let Some(entity) = world.entity_of(guid) else {
+                continue;
+            };
+            let Some(cm) = world
+                .world()
+                .get::<inf_ecs::components::CharacterMovement>(entity)
+            else {
+                continue;
+            };
+            // Not during the enter warp: that placement is an interpolation from
+            // where the character stood, and re-deriving it after the solve would
+            // make the choreography jump.
+            if !cm.runtime.seat.is_seated() || cm.runtime.seat.entering {
+                continue;
+            }
+            let seat_local = match self.vehicle_of(cm.runtime.seat.vehicle) {
+                Some(v) => v.rig().seat_local.to_dvec3(),
+                None => continue,
+            };
+            let lift = cm.stand_half_height_m + seated_radius(world, entity);
+            let Some(chassis) = self.entities.get(&cm.runtime.seat.vehicle) else {
+                continue;
+            };
+            let (Some(pos), Some(rot)) = (
+                self.world.body_translation(chassis.body),
+                self.world.body_rotation(chassis.body),
+            ) else {
+                continue;
+            };
+            let at = pos + rot * seat_local + DVec3::Y * lift;
+            if let Some(mut t) = world.world_mut().get_mut::<Transform>(entity) {
+                t.translation = Vec3d::from_dvec3(at);
+                moved = true;
+            }
+            if let Some(body) = self.entities.get(&guid).map(|r| r.body) {
+                self.world.set_body_translation(body, at);
+            }
+        }
+        moved
+    }
+}
+
+/// A seated character's capsule radius, for the lift that puts its feet on the
+/// chassis rather than its middle.
+fn seated_radius(world: &EcsWorld, entity: inf_ecs::Entity) -> f64 {
+    world
+        .world()
+        .get::<Collider3D>(entity)
+        .filter(|c| c.shape_kind == ColliderShape3DKind::Capsule)
+        .map(|c| c.radius)
+        .unwrap_or(0.0)
 }
 
 fn apply_rb_props(world: &mut PhysicsWorld3D, body: BodyId3D, rb: &BodyDesc3D) {

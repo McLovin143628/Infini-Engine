@@ -221,6 +221,20 @@ pub fn default_map() -> InputMap {
         .bind_axis_key("move_up", "KeyQ", -1.0)
         .bind_key("roll", "KeyR")
         .bind_key("dive", "KeyF")
+        // ── P29.7: the three the vehicle and flight seams read ──
+        //
+        // `interact` is E, which is every game's enter-a-vehicle key; it shares
+        // that key with the `move_up` AXIS, which is a binding table doing
+        // exactly what a binding table is for (a key means one thing to an axis
+        // and another to an action, and only the modes that read each can tell).
+        // `handbrake` shares Space with `jump` for the same reason: a driver has
+        // no jump and a pedestrian has no handbrake.
+        .bind_key("interact", "KeyE")
+        .bind_button("interact", GamepadButton::North)
+        .bind_key("fly", "KeyV")
+        .bind_button("fly", GamepadButton::West)
+        .bind_key("handbrake", "Space")
+        .bind_button("handbrake", GamepadButton::South)
         .bind_mouse("aim", MouseButton::Right);
     m
 }

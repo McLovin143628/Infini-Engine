@@ -1473,14 +1473,15 @@ impl MovementMode {
     /// Whether this mode's mechanics belong to a later sub-phase, so that asking
     /// to enter it is a typed refusal rather than a stub.
     ///
-    /// **P29.4 took two of the four**: `Mantle` and `Ragdoll` have their
-    /// mechanics now (the ledge probe and the warp; the articulated handoff and
-    /// the pose-matched get-up), so they are ordinary modes with ordinary rows in
-    /// [`crate::movement::transition_is_legal`]. `Driving` and `Flying` are
-    /// P29.7's and still refuse by name.
+    /// **P29.4 took two of the four** — `Mantle` and `Ragdoll` (the ledge probe
+    /// and the warp; the articulated handoff and the pose-matched get-up) — and
+    /// **P29.7 took the last two**: `Driving` is a raycast vehicle
+    /// (`inf_ecs::vehicle`) reached through a seat warp, and `Flying` is 6-DOF
+    /// with banking. Every catalogue mode has its mechanics now, so what is left
+    /// here is exactly the reserved slots: a mode a NEWER build wrote into a file
+    /// this one is reading, which must refuse by name rather than be entered.
     pub fn is_deferred(self) -> bool {
-        matches!(self, MovementMode::Driving | MovementMode::Flying)
-            || self.reserved_slot().is_some()
+        self.reserved_slot().is_some()
     }
 
     /// Whether the character's feet are on something — the modes the ground
@@ -1895,6 +1896,52 @@ pub struct MovementRuntime {
     // ── ragdoll (P29.4) ──
     /// The ragdoll bridge's state for this character.
     pub ragdoll: RagdollRuntime,
+
+    // ── vehicles and flight (P29.7) ──
+    /// Edge: the enter/exit control. Enters the nearest vehicle from the ground
+    /// and leaves the one being driven.
+    pub press_interact: bool,
+    /// Edge: the flight toggle.
+    pub press_fly: bool,
+    /// Held: the handbrake, routed to the vehicle being driven.
+    pub want_handbrake: bool,
+    /// The seat this character is in (or climbing into).
+    pub seat: SeatState,
+    /// **Bank angle while flying**, degrees — roll into the turn, derived from
+    /// the yaw rate and bounded. Written onto the entity's `Transform` roll by
+    /// the flight step, and zero in every other mode.
+    pub bank_deg: f64,
+}
+
+/// A **seat**: which vehicle a character is in, and how far through the
+/// enter/exit choreography it is (P29.7).
+///
+/// Plain `Copy` scalars for the reason [`MantleState`] gives — this is inlined
+/// into a component — and on the **runtime** rather than on the wire, which is
+/// what lets `MovementMode::Driving` mean something without a schema move: the
+/// mode is serialized (it always was), the seat is derived, and a level saved
+/// mid-drive loads with a character standing where the car was rather than with
+/// a dangling reference to it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SeatState {
+    /// The chassis entity being driven, or `Uuid::nil()` for none.
+    pub vehicle: Uuid,
+    /// Whether the enter warp is still running.
+    pub entering: bool,
+    /// Seconds into the choreography.
+    pub time_s: f64,
+    /// Where the character's transform was when the warp began, world metres —
+    /// the warp's `start`, exactly as [`MantleState::start`] is the mantle's.
+    pub start: Vec3d,
+    /// Its facing then, degrees.
+    pub start_yaw_deg: f64,
+}
+
+impl SeatState {
+    /// Whether this character is in (or entering) a vehicle.
+    pub fn is_seated(&self) -> bool {
+        !self.vehicle.is_nil()
+    }
 }
 
 /// A **mantle in progress** (P29.4) — where it started, where it must end, and
@@ -6133,16 +6180,18 @@ mod tests {
         assert_eq!(RotationMode::Reserved4.reserved_slot(), Some(4));
         assert_eq!(RotationMode::Aiming.reserved_slot(), None);
 
-        // The modes whose mechanics belong to a later sub-phase are deferred
-        // together with the reserved slots, because entering either is the same
-        // typed refusal. **P29.4 took two of the four**: Mantle and Ragdoll have
-        // their mechanics now, so they moved to the list below -- and moving one
-        // is the only way this arm can change, which is what makes it a ledger of
-        // what is implemented rather than a restatement of the enum.
+        // Entering a mode this build has no mechanics for is a typed refusal.
+        // **P29.4 took two of the four and P29.7 took the last two**, so the
+        // deferred set is now exactly the reserved slots — a mode a NEWER build
+        // wrote into a file this one is reading, which is the case the freeze-pin
+        // exists for and the one that stays live for ever. Moving a row is the
+        // only way this arm can change, which is what makes it a ledger of what
+        // is implemented rather than a restatement of the enum.
         for m in [
-            MovementMode::Driving,
-            MovementMode::Flying,
+            MovementMode::Reserved14,
+            MovementMode::Reserved15,
             MovementMode::Reserved16,
+            MovementMode::Reserved17,
         ] {
             assert!(m.is_deferred(), "{m:?}");
         }

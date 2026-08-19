@@ -40,7 +40,7 @@ use crate::components::{
     CharacterMovement, Collider3D, ColliderShape3DKind, Gait, Guid, LandingKind, MovementDirection,
     MovementMode, MovementRefusal, RotationMode, Transform,
 };
-use crate::math::Vec2d;
+use crate::math::{Vec2d, Vec3d};
 use crate::world::EcsWorld;
 
 /// The action and axis names the movement intent reads.
@@ -77,6 +77,12 @@ pub mod actions {
     pub const ROLL: &str = "roll";
     /// Edge: dive.
     pub const DIVE: &str = "dive";
+    /// Edge: enter the nearest vehicle, or leave the one being driven (P29.7).
+    pub const INTERACT: &str = "interact";
+    /// Edge: toggle 6-DOF flight (P29.7).
+    pub const FLY: &str = "fly";
+    /// Held: the handbrake, while driving (P29.7).
+    pub const HANDBRAKE: &str = "handbrake";
 }
 
 /// ALS's `RollDoubleTapTimeout`: two crouch presses inside this window roll.
@@ -798,6 +804,21 @@ pub fn transition_is_legal(from: MovementMode, to: MovementMode) -> bool {
         (Grounded | Crouch | FallFree | FallControlled, Mantle) => true,
         (Mantle, Grounded | FallFree | FallControlled) => true,
         (Mantle, _) => false,
+        // **Driving** (P29.7). Entered from the ground beside a vehicle, and
+        // left back onto the ground or into the air — a moving vehicle's exit
+        // inherits its velocity, so a character stepping out at 20 m/s is
+        // falling, not standing. It is below the ragdoll and water rows on
+        // purpose: a car driven into a lake puts its driver in the water, and a
+        // driver hit hard enough ragdolls out of the seat.
+        (Grounded | Crouch, Driving) => true,
+        (Driving, Grounded | FallFree | FallControlled) => true,
+        (Driving, _) => false,
+        // **Flying** (P29.7). Toggled from the ground or from the air, and left
+        // into a controlled fall — a character that stops flying is falling,
+        // which is the only honest destination for a mode with no gravity.
+        (Grounded | FallFree | FallControlled, Flying) => true,
+        (Flying, Grounded | FallControlled) => true,
+        (Flying, _) => false,
         // Grounded family.
         (Grounded, Crouch | Prone | Slide | Roll | Dive | FallFree | FallControlled) => true,
         (Crouch, Grounded | Prone | Slide | Roll | FallFree | FallControlled) => true,
@@ -812,6 +833,84 @@ pub fn transition_is_legal(from: MovementMode, to: MovementMode) -> bool {
         // Everything else is off the table.
         _ => false,
     }
+}
+
+// ── flight (P29.7) ──────────────────────────────────────────────────────────
+//
+// The catalogue's row is "6-DOF integration, no gravity, banking". These are
+// its numbers, and they are **constants rather than component fields** for the
+// reason `MANTLE_LOW_TIME_S` above is: `CharacterMovement` is on the scene wire
+// and this wave has no schema budget. A flying creature whose speed differs from
+// a flying player's is a per-class tunable the island phase adds when it has a
+// class to hang it on.
+
+/// Level flight speed, m/s. Between a sprint (6.5) and a car, which is what a
+/// flight mode is for.
+pub const FLY_SPEED_MPS: f64 = 12.0;
+/// Vertical speed under full `move_up`, m/s.
+pub const FLY_ASCEND_MPS: f64 = 8.0;
+/// How hard flight accelerates toward its wish velocity, m/s².
+pub const FLY_ACCEL_MPS2: f64 = 18.0;
+/// Air friction: the fraction of the *remaining* velocity shed per second when
+/// there is no input, expressed as a first-order rate. Flight has no ground to
+/// brake against, so without this a released stick coasts for ever.
+pub const FLY_DRAG_PER_S: f64 = 1.6;
+/// Degrees of bank per degree-per-second of yaw rate.
+pub const BANK_PER_DPS: f64 = 0.22;
+/// The bank angle's ceiling, degrees — a bank that can pass 90° is a barrel
+/// roll, which is not what "bank into the turn" means.
+pub const BANK_MAX_DEG: f64 = 45.0;
+/// How fast the bank follows its target, per second (a first-order interp, the
+/// same shape the camera's lag uses).
+pub const BANK_INTERP_PER_S: f64 = 4.0;
+
+/// **The bank a turn asks for**, degrees, from the yaw rate.
+///
+/// Linear in the rate and clamped, so a hard turn banks hard and a straight line
+/// is level. The **sign** is the interesting half: a right turn is a positive
+/// yaw here (euler-Y rotates `+Z` toward `+X`), and a right bank is a *negative*
+/// roll — rotating about the forward `+Z` axis takes `+X` (the right side) to
+/// `+Y` (up), which lifts the right side and is a LEFT bank. So the target is
+/// the negated, scaled, clamped rate, and `banking_leans_into_the_turn` is the
+/// arm that says so in the only way that cannot be reasoned wrong: by checking
+/// which way the character's own right vector tilts.
+pub fn bank_target_deg(yaw_rate_dps: f64) -> f64 {
+    if !yaw_rate_dps.is_finite() {
+        return 0.0;
+    }
+    (-yaw_rate_dps * BANK_PER_DPS).clamp(-BANK_MAX_DEG, BANK_MAX_DEG)
+}
+
+/// **The 6-DOF flight integration**, in one pure step.
+///
+/// `wish` is the desired velocity (metres per second, world space, already
+/// resolved out of the aim frame by the caller); the result accelerates toward
+/// it at [`FLY_ACCEL_MPS2`] and, when the wish is zero, sheds speed at
+/// [`FLY_DRAG_PER_S`]. **No gravity term appears anywhere**, which is the whole
+/// difference between this and the fall integrator: flight is not falling
+/// slowly.
+///
+/// The exponential-decay form is `v · (1 − rate·dt)` rather than `v · exp(−rate·dt)`
+/// deliberately: the portable-math ban list has no `exp`, and a first-order
+/// decay is what every other damper in this engine uses (the camera's lag,
+/// ALS's `FInterpTo`). Clamped so a large `dt` cannot invert the velocity.
+pub fn integrate_flight(velocity: Vec3d, wish: Vec3d, dt: f64) -> Vec3d {
+    if !dt.is_finite() || dt <= 0.0 {
+        return velocity;
+    }
+    let v = velocity.to_dvec3();
+    let w = wish.to_dvec3();
+    if w.length_squared() <= 1e-12 {
+        let keep = (1.0 - FLY_DRAG_PER_S * dt).clamp(0.0, 1.0);
+        return Vec3d::from_dvec3(v * keep);
+    }
+    let delta = w - v;
+    let step = FLY_ACCEL_MPS2 * dt;
+    let len = delta.length();
+    if len <= step || len <= 1e-12 {
+        return Vec3d::from_dvec3(w);
+    }
+    Vec3d::from_dvec3(v + delta * (step / len))
 }
 
 /// The verdict of a mode request: what the mode is now, and why if it did not
@@ -903,6 +1002,12 @@ pub struct MovementIntent {
     pub roll: bool,
     /// Edge: dive.
     pub dive: bool,
+    /// Edge: enter/exit a vehicle (P29.7).
+    pub interact: bool,
+    /// Edge: toggle flight (P29.7).
+    pub fly: bool,
+    /// Held: handbrake (P29.7).
+    pub handbrake: bool,
 }
 
 impl MovementIntent {
@@ -946,6 +1051,9 @@ impl MovementIntent {
             prone: pressed(actions::PRONE),
             roll: pressed(actions::ROLL),
             dive: pressed(actions::DIVE),
+            interact: pressed(actions::INTERACT),
+            fly: pressed(actions::FLY),
+            handbrake: held(actions::HANDBRAKE),
         }
     }
 
@@ -983,6 +1091,7 @@ pub fn apply_intent(world: &mut EcsWorld, intent: &MovementIntent) {
         rt.want_sprint = intent.sprint;
         rt.want_walk = intent.walk;
         rt.want_aim = intent.aim;
+        rt.want_handbrake = intent.handbrake;
         // Edges are ORed rather than assigned: a host may apply an intent more
         // than once between fixed steps (a frame that runs two of them), and an
         // edge that arrived in the first must not be erased by the second.
@@ -992,6 +1101,8 @@ pub fn apply_intent(world: &mut EcsWorld, intent: &MovementIntent) {
         rt.press_prone |= intent.prone;
         rt.press_roll |= intent.roll;
         rt.press_dive |= intent.dive;
+        rt.press_interact |= intent.interact;
+        rt.press_fly |= intent.fly;
     }
 }
 
@@ -1657,20 +1768,21 @@ mod tests {
     #[test]
     fn a_deferred_mode_refuses_by_name_rather_than_pretending() {
         use MovementMode::*;
-        for deferred in [Driving, Flying, Reserved14, Reserved17] {
+        for deferred in [Reserved14, Reserved15, Reserved16, Reserved17] {
             let v = request_mode(Grounded, deferred, true, true);
             assert_eq!(
                 v.mode, Grounded,
-                "{deferred:?} has no mechanics in this wave and must not be entered"
+                "{deferred:?} has no mechanics in this build and must not be entered"
             );
             assert_eq!(v.refusal, MovementRefusal::ModeNotYetImplemented);
         }
-        // **And the two this wave took no longer refuse** -- the other half of
+        // **And the four the phase took no longer refuse** -- the other half of
         // the same claim, without which "Mantle is deferred" could be deleted
-        // from the list above and nothing would notice.
-        for taken in [Mantle, Ragdoll] {
+        // from the list above and nothing would notice. P29.4 took Mantle and
+        // Ragdoll; P29.7 took Driving and Flying, which is the catalogue closed.
+        for taken in [Mantle, Ragdoll, Driving, Flying] {
             let v = request_mode(Grounded, taken, true, true);
-            assert_eq!(v.mode, taken, "{taken:?} has its mechanics in P29.4");
+            assert_eq!(v.mode, taken, "{taken:?} has its mechanics");
             assert_eq!(v.refusal, MovementRefusal::None);
         }
         // A ragdoll may be entered from ANYTHING (it is a fact about the body,

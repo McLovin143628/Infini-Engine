@@ -436,11 +436,18 @@ fn a_fall_is_bounded_and_a_controlled_fall_steers_less_than_a_free_one() {
 
 // ── modes ───────────────────────────────────────────────────────────────────
 
-/// Entering a mode whose mechanics belong to a later sub-phase is a **typed
-/// refusal**, not a stub and not a panic. The world is unchanged and the
-/// character knows why.
+/// Entering a mode this build has no mechanics for is a **typed refusal**, not a
+/// stub and not a panic. The world is unchanged and the character knows why.
+///
+/// **P29.7 emptied the sub-phase half of this list.** `Driving` and `Flying`
+/// were the last two deferred modes and they have their mechanics now (a raycast
+/// vehicle reached through a seat warp; 6-DOF with banking), so what refuses is
+/// exactly what should: a **reserved slot**, which is a mode a newer build wrote
+/// into a file this one is reading. That is the case the freeze-pin exists for,
+/// it is the one that will still be live in ten years, and it was never covered
+/// while two ordinary modes were standing in for it.
 #[test]
-fn a_mode_owned_by_a_later_wave_refuses_and_changes_nothing() {
+fn a_mode_this_build_has_no_mechanics_for_refuses_and_changes_nothing() {
     let mut w = EcsWorld::new();
     let mut b = PhysicsBridge3D::new(GRAVITY);
     spawn_block(
@@ -452,7 +459,12 @@ fn a_mode_owned_by_a_later_wave_refuses_and_changes_nothing() {
     spawn_hero(&mut w, 0.0, 0.0, 0.0);
     step(&mut w, &mut b, &idle());
 
-    for deferred in [MovementMode::Driving, MovementMode::Flying] {
+    for deferred in [
+        MovementMode::Reserved14,
+        MovementMode::Reserved15,
+        MovementMode::Reserved16,
+        MovementMode::Reserved17,
+    ] {
         let before_half = hero_capsule_half(&w);
         let before_pos = hero_pos(&w);
         // Ask through the model door the step itself uses.
@@ -1821,4 +1833,306 @@ fn the_overlay_ids_are_a_function_of_the_world_and_not_of_the_spawn_order() {
         0.0,
         "the empty overlay must be id 0"
     );
+}
+
+// ── flight (P29.7) ──────────────────────────────────────────────────────────
+
+/// The intent that toggles flight.
+fn press_fly() -> MovementIntent {
+    MovementIntent {
+        fly: true,
+        ..Default::default()
+    }
+}
+
+/// **Flight has no gravity, and that is the whole difference from a fall.**
+///
+/// A character that toggles flight with no input holds its altitude for ever; a
+/// character in a controlled fall from the same place is metres lower. The
+/// control is the point — an arm that only checked "it does not fall" would pass
+/// over a mode that simply froze the character.
+#[test]
+fn flight_holds_its_altitude_where_a_fall_does_not() {
+    let mut w = EcsWorld::new();
+    let mut b = PhysicsBridge3D::new(GRAVITY);
+    spawn_block(
+        &mut w,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(60.0, 0.5, 60.0),
+    );
+    spawn_hero(&mut w, 8.0, 0.0, 0.0);
+    step(&mut w, &mut b, &idle());
+    step(&mut w, &mut b, &press_fly());
+    assert_eq!(hero(&w).mode, MovementMode::Flying, "the toggle takes");
+    // A second for the air friction to bleed off the fall velocity the character
+    // arrived with. That coast is the model working — a flyer that entered
+    // flight mid-drop and stopped dead would be a teleport — and measuring
+    // before it would be measuring the fall.
+    for _ in 0..60 {
+        step(&mut w, &mut b, &idle());
+    }
+    let start = hero_pos(&w).y;
+    for _ in 0..120 {
+        step(&mut w, &mut b, &idle());
+    }
+    let flown = hero_pos(&w).y;
+    // Centimetres, not zero: air friction is a first-order decay and is
+    // asymptotic, so the last of the fall velocity is still bleeding off three
+    // seconds later. The claim is the ratio against the control below — metres
+    // of fall against centimetres of drift — and not a zero this model never
+    // promises to reach.
+    let drift = (flown - start).abs();
+    assert!(
+        drift < 0.05,
+        "two seconds of level flight moved it {drift} m vertically"
+    );
+
+    // The control: the same three seconds without the toggle.
+    let mut w2 = EcsWorld::new();
+    let mut b2 = PhysicsBridge3D::new(GRAVITY);
+    spawn_block(
+        &mut w2,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(60.0, 0.5, 60.0),
+    );
+    spawn_hero(&mut w2, 8.0, 0.0, 0.0);
+    for _ in 0..181 {
+        step(&mut w2, &mut b2, &idle());
+    }
+    let fell = start - hero_pos(&w2).y;
+    assert!(
+        fell > 4.0,
+        "the control must actually fall, or the claim above is empty: {fell} m"
+    );
+    assert!(
+        fell > drift * 100.0,
+        "a fall of {fell} m against a flight drift of {drift} m is not a difference in kind"
+    );
+}
+
+/// Six degrees of freedom: the stick flies where the character is **looking**,
+/// pitch included, and `move_up` climbs.
+#[test]
+fn flight_is_six_degrees_of_freedom_and_follows_the_aim() {
+    let mut w = EcsWorld::new();
+    let mut b = PhysicsBridge3D::new(GRAVITY);
+    spawn_block(
+        &mut w,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(200.0, 0.5, 200.0),
+    );
+    spawn_hero(&mut w, 20.0, 0.0, 0.0);
+    step(&mut w, &mut b, &press_fly());
+
+    // Level, forward: +Z and nothing else.
+    let start = hero_pos(&w);
+    for _ in 0..60 {
+        step(
+            &mut w,
+            &mut b,
+            &MovementIntent {
+                move_input: Vec2d::new(0.0, 1.0),
+                ..Default::default()
+            },
+        );
+    }
+    let flat = hero_pos(&w);
+    assert!(
+        flat.z - start.z > 8.0,
+        "a second of level flight covered {} m",
+        flat.z - start.z
+    );
+    assert!(
+        (flat.y - start.y).abs() < 0.2,
+        "…and climbed {} m while looking level",
+        flat.y - start.y
+    );
+
+    // Nose up 45 degrees, same stick: it climbs.
+    let before = hero_pos(&w).y;
+    for _ in 0..60 {
+        let pitch_up = if hero(&w).runtime.aim_pitch_deg < 45.0 {
+            120.0
+        } else {
+            0.0
+        };
+        step(
+            &mut w,
+            &mut b,
+            &MovementIntent {
+                move_input: Vec2d::new(0.0, 1.0),
+                look_pitch_dps: pitch_up,
+                ..Default::default()
+            },
+        );
+    }
+    assert!(
+        hero_pos(&w).y - before > 3.0,
+        "a second of climbing gained {} m",
+        hero_pos(&w).y - before
+    );
+
+    // …and `move_up` is the vertical axis, independent of where it is looking.
+    // Two seconds rather than one: the climb above leaves 8 m/s of upward
+    // velocity on the character, and an acceleration model that reversed it
+    // instantly would not be an acceleration model.
+    let before = hero_pos(&w).y;
+    for _ in 0..120 {
+        step(
+            &mut w,
+            &mut b,
+            &MovementIntent {
+                vertical: -1.0,
+                ..Default::default()
+            },
+        );
+    }
+    assert!(
+        before - hero_pos(&w).y > 5.0,
+        "two seconds of descent lost {} m",
+        before - hero_pos(&w).y
+    );
+}
+
+/// **Banking leans into the turn**, and the arm checks which way the character's
+/// own right side tilts rather than the sign of a number it could reason wrong.
+#[test]
+fn banking_leans_into_the_turn() {
+    let mut w = EcsWorld::new();
+    let mut b = PhysicsBridge3D::new(GRAVITY);
+    spawn_block(
+        &mut w,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(200.0, 0.5, 200.0),
+    );
+    spawn_hero(&mut w, 20.0, 0.0, 0.0);
+    step(&mut w, &mut b, &press_fly());
+    for _ in 0..60 {
+        step(
+            &mut w,
+            &mut b,
+            &MovementIntent {
+                move_input: Vec2d::new(0.0, 1.0),
+                // A hard RIGHT turn: positive yaw rate rotates +Z toward +X.
+                look_yaw_dps: 120.0,
+                ..Default::default()
+            },
+        );
+    }
+    let bank = hero(&w).runtime.bank_deg;
+    assert!(
+        bank.abs() > 5.0,
+        "a hard turn must bank; it banked {bank} degrees"
+    );
+    assert!(
+        bank.abs() <= inf_ecs::movement::BANK_MAX_DEG + 1e-9,
+        "…and never past the ceiling: {bank}"
+    );
+    // The world's answer: the character's own right axis must go DOWN in a right
+    // turn. That is what "leaning into it" means, and it cannot be argued with.
+    let e = w.entity_of(HERO).unwrap();
+    let q = w.world().get::<Transform>(e).unwrap().quat();
+    let right = q * DVec3::X;
+    assert!(
+        right.y < -0.05,
+        "the right side must drop in a right turn; its up-component is {}",
+        right.y
+    );
+
+    // …and a left turn is the mirror.
+    for _ in 0..120 {
+        step(
+            &mut w,
+            &mut b,
+            &MovementIntent {
+                move_input: Vec2d::new(0.0, 1.0),
+                look_yaw_dps: -120.0,
+                ..Default::default()
+            },
+        );
+    }
+    let e = w.entity_of(HERO).unwrap();
+    let q = w.world().get::<Transform>(e).unwrap().quat();
+    assert!(
+        (q * DVec3::X).y > 0.05,
+        "the right side must rise in a left turn: {}",
+        (q * DVec3::X).y
+    );
+    // Levelling out takes the bank back to nothing.
+    for _ in 0..180 {
+        step(
+            &mut w,
+            &mut b,
+            &MovementIntent {
+                move_input: Vec2d::new(0.0, 1.0),
+                ..Default::default()
+            },
+        );
+    }
+    assert!(
+        hero(&w).runtime.bank_deg.abs() < 1.0,
+        "straight and level must be level: {}",
+        hero(&w).runtime.bank_deg
+    );
+}
+
+/// Flight still collides with the world, and leaving it is a controlled fall
+/// that lands — with the bank taken off, so a character does not walk around
+/// leaning.
+#[test]
+fn flight_collides_and_leaving_it_falls_and_lands_level() {
+    let mut w = EcsWorld::new();
+    let mut b = PhysicsBridge3D::new(GRAVITY);
+    spawn_block(
+        &mut w,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(60.0, 0.5, 60.0),
+    );
+    // A wall to fly into.
+    spawn_block(
+        &mut w,
+        Uuid::from_u128(0x2907_2001),
+        DVec3::new(0.0, 5.0, 12.0),
+        DVec3::new(20.0, 5.0, 0.5),
+    );
+    spawn_hero(&mut w, 6.0, 0.0, 0.0);
+    step(&mut w, &mut b, &press_fly());
+    for _ in 0..180 {
+        step(
+            &mut w,
+            &mut b,
+            &MovementIntent {
+                move_input: Vec2d::new(0.0, 1.0),
+                look_yaw_dps: 90.0,
+                ..Default::default()
+            },
+        );
+    }
+    assert!(
+        hero_pos(&w).z < 12.0,
+        "flight went through a wall: z = {}",
+        hero_pos(&w).z
+    );
+    assert!(
+        hero(&w).runtime.bank_deg.abs() > 1.0,
+        "the fixture must be banking when it stops flying"
+    );
+    step(&mut w, &mut b, &press_fly());
+    assert_eq!(
+        hero(&w).mode,
+        MovementMode::FallControlled,
+        "a character that stops flying is falling"
+    );
+    for _ in 0..300 {
+        step(&mut w, &mut b, &idle());
+    }
+    assert!(hero(&w).runtime.grounded, "…and it lands");
+    let e = w.entity_of(HERO).unwrap();
+    let roll = w.world().get::<Transform>(e).unwrap().rotation.z;
+    assert_eq!(roll, 0.0, "a landed character must not still be banked");
 }
