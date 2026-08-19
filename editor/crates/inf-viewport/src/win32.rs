@@ -480,12 +480,14 @@ thread_local! {
     /// `SIM_RUNNING`'s reason and by its rule: written by the frame loop when
     /// `Cmd::SetInteraction` arrives, read by the wnd_proc on the same thread,
     /// so the two can never race.
-    static INTERACTION: RefCell<InteractionSettings> = RefCell::new(InteractionSettings {
-        fly_speed_mps: 8.0,
-        look_sensitivity: 1.0,
-        rmb_click_travel_px: 4.0,
-        rmb_click_ms: 250,
-    });
+    static INTERACTION: RefCell<InteractionSettings> = const {
+        RefCell::new(InteractionSettings {
+            fly_speed_mps: 8.0,
+            look_sensitivity: 1.0,
+            rmb_click_travel_px: 4.0,
+            rmb_click_ms: 250,
+        })
+    };
 }
 
 fn modifier(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> bool {

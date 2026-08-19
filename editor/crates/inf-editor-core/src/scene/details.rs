@@ -153,7 +153,7 @@ pub fn build(doc: &SceneDoc) -> DetailsDto {
             "Mesh Asset",
             "mesh",
             doc.mesh_asset_of(primary),
-            &sel,
+            sel,
             |g| doc.mesh_asset_of(g),
         ));
     }
@@ -166,7 +166,7 @@ pub fn build(doc: &SceneDoc) -> DetailsDto {
             "Skeletal Mesh Asset",
             "mesh",
             doc.skeletal_mesh_of(primary).and_then(|(m, _)| m),
-            &sel,
+            sel,
             |g| doc.skeletal_mesh_of(g).and_then(|(m, _)| m),
         ));
         skel.fields.push(asset_row(
@@ -174,7 +174,7 @@ pub fn build(doc: &SceneDoc) -> DetailsDto {
             "Skeleton Asset",
             "skeleton",
             doc.skeletal_mesh_of(primary).and_then(|(_, s)| s),
-            &sel,
+            sel,
             |g| doc.skeletal_mesh_of(g).and_then(|(_, s)| s),
         ));
     }
@@ -193,7 +193,7 @@ pub fn build(doc: &SceneDoc) -> DetailsDto {
                 "Blueprint",
                 "blueprint",
                 actor_class,
-                &sel,
+                sel,
                 |g| doc.actor_class_of(g),
             )],
         });
