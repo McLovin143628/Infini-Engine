@@ -100,6 +100,23 @@ pub struct DerivedMaterial {
     pub emissive: [f32; 3],
     pub blend: DerivedBlend,
     pub alpha_cutoff: f32,
+    // ── schema v2 (Wave G) — the detail slot ─────────────────────────────────
+    //
+    // APPENDED, never inserted, for the positional-bincode reason and for the
+    // residency-order reason below.
+    /// High-frequency **detail** texture (`.inf_tex`) blended over the base
+    /// colour at close range (schema v2).
+    ///
+    /// # Why this record had to move too
+    ///
+    /// The shipped player cannot read a `.inf_mat` at all — it reads `.inf_matd`
+    /// — so a `detail_texture` that stopped at the authoring container would have
+    /// been invisible to the cook and to the game. Wave G's `.inf_mat` v3 and
+    /// this v2 are two halves of one field.
+    pub detail: Option<AssetId>,
+    /// World metres per detail tile (schema v2). Zero disables the blend — see
+    /// `MaterialAsset::detail_is_active`.
+    pub detail_scale_m: f32,
 }
 
 impl Default for DerivedMaterial {
@@ -115,16 +132,23 @@ impl Default for DerivedMaterial {
             emissive: [0.0; 3],
             blend: DerivedBlend::Opaque,
             alpha_cutoff: 0.5,
+            detail: None,
+            detail_scale_m: 0.0,
         }
     }
 }
 
 impl DerivedMaterial {
-    /// v1 (P26.3b).
-    pub const CURRENT_VERSION: u32 = 1;
+    /// The `.inf_matd` ladder.
+    ///
+    /// | version | what it added |
+    /// |---|---|
+    /// | v1 (P26.3b) | the original record |
+    /// | **v2 (Wave G)** | `detail` + `detail_scale_m` |
+    pub const CURRENT_VERSION: u32 = 2;
 
     /// Every `.inf_tex` GUID this record references, in the fixed slot order
-    /// albedo → normal → ORM.
+    /// albedo → normal → ORM → **detail**.
     ///
     /// **Order is part of the contract**, not a convenience: it is the order a
     /// host registers textures in, and `VtTextures::want_floor` is a pure
@@ -134,7 +158,11 @@ impl DerivedMaterial {
     /// cross-host comparison is by GUID) says the handles may differ; it does
     /// not license the pages to.
     pub fn texture_dependencies(&self) -> Vec<AssetId> {
-        [self.albedo, self.normal, self.orm]
+        // Detail is APPENDED. The order law above is why: `want_floor` is a pure
+        // function of the registration sequence, so putting the new slot ahead of
+        // an existing one would silently re-order what a shipped pack keeps
+        // resident — a change to streaming behaviour disguised as a schema edit.
+        [self.albedo, self.normal, self.orm, self.detail]
             .into_iter()
             .flatten()
             .collect()
@@ -143,7 +171,30 @@ impl DerivedMaterial {
     /// Whether this material names any texture at all. `false` is the
     /// scalars-only surface — the permanent no-texture path.
     pub fn has_textures(&self) -> bool {
-        self.albedo.is_some() || self.normal.is_some() || self.orm.is_some()
+        self.albedo.is_some()
+            || self.normal.is_some()
+            || self.orm.is_some()
+            || self.detail.is_some()
+    }
+
+    /// The detail scale as the renderer's 8.8 fixed-point word.
+    ///
+    /// **The one place metres become `detail_scale_q8`.** `VtTextureSet` packs
+    /// the scale into sixteen bits of a per-instance word, and a conversion that
+    /// existed at both host boundaries would be a conversion that could differ
+    /// between them — the mirror hazard this engine has a law about. Zero (no
+    /// texture, or a non-finite/non-positive scale) is the renderer's own
+    /// "disabled" encoding, so an inert material converts to inert rather than to
+    /// something arbitrary.
+    pub fn detail_scale_q8(&self) -> u16 {
+        if self.detail.is_none() || !self.detail_scale_m.is_finite() || self.detail_scale_m <= 0.0 {
+            return 0;
+        }
+        // 8.8: the integer part in the high byte, 1/256 m in the low. Saturating
+        // rather than wrapping — a 300 m detail tile is a nonsense value, and
+        // wrapping it to 44 m would be a nonsense value that looks plausible.
+        let q = (self.detail_scale_m * 256.0).round();
+        q.clamp(1.0, u16::MAX as f64 as f32) as u16
     }
 }
 

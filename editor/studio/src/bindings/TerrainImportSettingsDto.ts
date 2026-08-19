@@ -17,4 +17,18 @@ float_meters: boolean,
 /**
  * Straddle the world origin instead of growing into +X/+Z.
  */
-center: boolean, max_pyramid_levels: number, min_pyramid_tiles: number, };
+center: boolean, max_pyramid_levels: number, min_pyramid_tiles: number, 
+/**
+ * The no-data policy label: `"refuse"`, `"clamp:<metres>"` or
+ * `"fill-row:<samples>"` (Wave G).
+ */
+nodata_policy: string, 
+/**
+ * An author-declared no-data sentinel, for a source that declares none.
+ */
+nodata_sentinel: number | null, 
+/**
+ * Place the terrain using the level's geo-anchor and the source's own
+ * georeferencing, rather than at the world origin.
+ */
+use_georeference: boolean, };

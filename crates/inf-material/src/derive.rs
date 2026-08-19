@@ -68,6 +68,13 @@ pub fn derive_material(mat: &MaterialAsset) -> DerivedMaterial {
             MatBlend::Translucent => DerivedBlend::Translucent,
         },
         alpha_cutoff: mat.alpha_cutoff,
+        // Wave G: the detail slot crosses as a pair. An inert authoring state (a
+        // texture with a zero scale) is carried across AS inert rather than
+        // normalised away here, so the two records agree about what the material
+        // says — the runtime's own `detail_scale_q8` is the single place that
+        // turns "inert" into the renderer's zero.
+        detail: mat.detail_texture,
+        detail_scale_m: mat.detail_scale_m,
     }
 }
 
@@ -108,7 +115,10 @@ mod tests {
     #[test]
     fn every_field_crosses_into_its_own_slot() {
         let (albedo, normal, orm) = three_ids();
+        let detail = AssetId::new();
+        assert!(detail != albedo && detail != normal && detail != orm);
         let mat = MaterialAsset {
+            schema_version: MaterialAsset::CURRENT_VERSION,
             base_color: [0.1, 0.2, 0.3, 0.4],
             metallic: 0.6,
             roughness: 0.7,
@@ -118,7 +128,8 @@ mod tests {
             metallic_roughness_texture: Some(orm),
             blend: MatBlend::Masked,
             alpha_cutoff: 0.375,
-            ..Default::default()
+            detail_texture: Some(detail),
+            detail_scale_m: 0.75,
         };
         let d = derive_material(&mat);
         assert_eq!(d.albedo, Some(albedo));
@@ -131,6 +142,53 @@ mod tests {
         assert_eq!(d.blend, DerivedBlend::Masked);
         assert_eq!(d.alpha_cutoff, 0.375);
         assert_eq!(d.schema_version, DerivedMaterial::CURRENT_VERSION);
+        // Wave G: the detail pair crosses into its own two slots, and the
+        // dependency order APPENDS it.
+        assert_eq!(d.detail, Some(detail));
+        assert_eq!(d.detail_scale_m, 0.75);
+        assert_eq!(
+            d.texture_dependencies(),
+            vec![albedo, normal, orm, detail],
+            "the residency floor is a pure function of this order"
+        );
+        assert!(d.has_textures());
+    }
+
+    /// **The metres → 8.8 conversion, in the one place that owns it.**
+    ///
+    /// Both hosts read `detail_scale_q8()` off the record rather than converting
+    /// themselves, so this is the only implementation there is — and the
+    /// renderer's "zero disables the blend" encoding has to come out of it for
+    /// every inert authoring state, or a material an artist thinks is off will
+    /// render with a detail layer at an arbitrary scale.
+    #[test]
+    fn the_detail_scale_converts_once_and_encodes_inert_as_zero() {
+        let detail = AssetId::new();
+        let q = |scale: f32, tex: Option<AssetId>| {
+            derive_material(&MaterialAsset {
+                detail_texture: tex,
+                detail_scale_m: scale,
+                ..Default::default()
+            })
+            .detail_scale_q8()
+        };
+        // 8.8 fixed point: the integer part in the high byte.
+        assert_eq!(q(1.0, Some(detail)), 256);
+        assert_eq!(q(0.5, Some(detail)), 128);
+        assert_eq!(q(0.25, Some(detail)), 64);
+        assert_eq!(q(2.0, Some(detail)), 512);
+        // Every inert state encodes as the renderer's own "disabled" zero.
+        assert_eq!(q(0.5, None), 0, "no texture, no blend");
+        assert_eq!(q(0.0, Some(detail)), 0);
+        assert_eq!(q(-1.0, Some(detail)), 0);
+        assert_eq!(q(f32::NAN, Some(detail)), 0);
+        // A nonsense scale SATURATES rather than wrapping. Wrapping 300 m would
+        // give 44 m — a wrong value that looks plausible, which is worse than an
+        // obviously-clamped one.
+        assert_eq!(q(1e6, Some(detail)), u16::MAX);
+        // …and a tiny positive scale never rounds down INTO the disabled
+        // encoding, which would silently turn "very fine detail" into "off".
+        assert!(q(0.001, Some(detail)) >= 1);
     }
 
     /// All three blend modes map — and to three *distinct* values, so a `match`

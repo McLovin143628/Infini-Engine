@@ -236,7 +236,12 @@ pub async fn terrain_probe_heightmap(path: String) -> Result<HeightmapProbeDto, 
             height: probe.height,
             bit_depth: probe.bit_depth,
             float_samples: probe.float_samples,
+            absolute_samples: probe.absolute_samples,
             channel: probe.channel.clone(),
+            geo: probe
+                .geo
+                .as_ref()
+                .map(inf_editor_core::ipc::GeoReferenceDto::from_meta),
             suggested: TerrainImportSettingsDto::from_settings(&suggested),
         })
     })

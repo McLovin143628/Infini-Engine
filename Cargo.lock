@@ -3295,6 +3295,7 @@ dependencies = [
 name = "inf-material"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "half",
  "image",
  "inf-asset",

@@ -513,19 +513,65 @@ pub struct SaveResultDto {
 pub struct HeightmapProbeDto {
     /// Absolute source path (echoed so the wizard can keep one object).
     pub path: String,
-    /// "PNG" | "EXR".
+    /// "PNG" | "EXR" | "TIFF".
     pub format: String,
     pub width: u32,
     pub height: u32,
     /// Bits per sample of the source.
     pub bit_depth: u32,
-    /// `true` when the source carries floats — i.e. when float-metres mode is
-    /// offered.
+    /// `true` when the source carries IEEE floats.
     pub float_samples: bool,
+    /// `true` when the samples are absolute elevations — i.e. when float-metres
+    /// mode is offered. Not the same question as `float_samples`: a 16-bit
+    /// integer GeoTIFF DEM is an elevation raster and is not a float.
+    pub absolute_samples: bool,
     /// The channel the importer will read ("gray", "Y", …).
     pub channel: String,
+    /// GeoTIFF georeferencing, when the source carries any (Wave G).
+    pub geo: Option<GeoReferenceDto>,
     /// The settings the wizard opens with for this source.
     pub suggested: TerrainImportSettingsDto,
+}
+
+/// What a georeferenced source says about where it is — the wizard's
+/// "this DEM covers …" readout (Wave G).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct GeoReferenceDto {
+    /// The EPSG code the file names, if any.
+    pub epsg: Option<u32>,
+    /// A human CRS name from the file, if it carries one.
+    pub crs_name: Option<String>,
+    /// `true` when the CRS is geographic, so `pixel_size` is in DEGREES rather
+    /// than metres. The wizard must say which — a 0.000278 "metre" pixel is a
+    /// quarter of a millimetre and an author reading that will assume a bug.
+    pub crs_is_geographic: bool,
+    /// Ground size of one pixel, in the CRS's own units.
+    pub pixel_size: Option<f64>,
+    /// The model coordinate of the raster's top-left sample.
+    pub origin_x: Option<f64>,
+    pub origin_y: Option<f64>,
+    /// The no-data sentinel the file declares, if any.
+    pub nodata: Option<f64>,
+    /// The vertical unit label ("metres", "international feet", …).
+    pub vertical_units: String,
+    /// `true` when the file carried enough to place itself on Earth.
+    pub is_georeferenced: bool,
+}
+
+impl GeoReferenceDto {
+    pub fn from_meta(g: &inf_terrain::GeoTiffMeta) -> Self {
+        Self {
+            epsg: g.epsg,
+            crs_name: g.crs_name.clone(),
+            crs_is_geographic: g.crs_is_geographic,
+            pixel_size: g.meters_per_sample,
+            origin_x: g.origin.map(|o| o.0),
+            origin_y: g.origin.map(|o| o.1),
+            nodata: g.nodata,
+            vertical_units: g.vertical_units.label().to_string(),
+            is_georeferenced: g.is_georeferenced(),
+        }
+    }
 }
 
 /// The Terrain Import wizard's settings block. Mirrors
@@ -548,6 +594,14 @@ pub struct TerrainImportSettingsDto {
     pub max_pyramid_levels: u32,
     #[ts(type = "number")]
     pub min_pyramid_tiles: usize,
+    /// The no-data policy label: `"refuse"`, `"clamp:<metres>"` or
+    /// `"fill-row:<samples>"` (Wave G).
+    pub nodata_policy: String,
+    /// An author-declared no-data sentinel, for a source that declares none.
+    pub nodata_sentinel: Option<f64>,
+    /// Place the terrain using the level's geo-anchor and the source's own
+    /// georeferencing, rather than at the world origin.
+    pub use_georeference: bool,
 }
 
 /// The world a given source + settings pair will produce, recomputed on every
@@ -577,6 +631,9 @@ impl TerrainImportSettingsDto {
             center: self.center,
             max_pyramid_levels: self.max_pyramid_levels,
             min_pyramid_tiles: self.min_pyramid_tiles,
+            nodata_policy: self.nodata_policy.clone(),
+            nodata_sentinel: self.nodata_sentinel,
+            use_georeference: self.use_georeference,
         }
     }
 
@@ -591,6 +648,9 @@ impl TerrainImportSettingsDto {
             center: s.center,
             max_pyramid_levels: s.max_pyramid_levels,
             min_pyramid_tiles: s.min_pyramid_tiles,
+            nodata_policy: s.nodata_policy.clone(),
+            nodata_sentinel: s.nodata_sentinel,
+            use_georeference: s.use_georeference,
         }
     }
 }

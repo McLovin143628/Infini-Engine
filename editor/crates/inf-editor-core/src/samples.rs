@@ -3409,6 +3409,13 @@ pub fn phase16_terrain_asset() -> Result<inf_terrain::TerrainAsset, String> {
     let import = settings.to_import(probe.width, probe.height);
     let opts = inf_terrain::ChunkedImportOptions {
         pyramid: settings.pyramid(),
+        // The committed sample is byte-pinned, so it takes the pre-Wave-G
+        // defaults explicitly: no georeferenced placement, no no-data policy.
+        // Spelling them out rather than `..Default::default()` is what makes a
+        // future default change fail here instead of silently re-blessing the
+        // committed bytes.
+        world_origin: glam::DVec3::ZERO,
+        nodata: inf_terrain::NodataHandling::NONE,
     };
     let (asset, _report) = inf_terrain::import_heightmap_reader(
         std::io::Cursor::new(png),

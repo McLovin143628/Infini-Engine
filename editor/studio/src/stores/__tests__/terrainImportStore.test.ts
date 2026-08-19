@@ -41,6 +41,12 @@ const SETTINGS: TerrainImportSettingsDto = {
   center: true,
   max_pyramid_levels: 8,
   min_pyramid_tiles: 4,
+  // Wave G: the pre-Wave-G defaults, spelled out — refuse no-data, place at the
+  // world origin. A plain PNG heightmap has neither a sentinel nor a
+  // georeference, so this fixture exercises the unchanged path.
+  nodata_policy: "refuse",
+  nodata_sentinel: null,
+  use_georeference: false,
 };
 
 const PROBE: HeightmapProbeDto = {
@@ -50,7 +56,9 @@ const PROBE: HeightmapProbeDto = {
   height: 16385,
   bit_depth: 16,
   float_samples: false,
+  absolute_samples: false,
   channel: "gray",
+  geo: null,
   suggested: SETTINGS,
 };
 

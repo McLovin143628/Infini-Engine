@@ -580,9 +580,12 @@ impl EditorRenderAssets {
                     albedo: rec.albedo.map(|t| t.uuid().as_u128()),
                     normal: rec.normal.map(|t| t.uuid().as_u128()),
                     orm: rec.orm.map(|t| t.uuid().as_u128()),
-                    // Wave T's detail slot, defaulted exactly as the player
-                    // defaults it (`inf_player`) — see the note there.
-                    ..Default::default()
+                    // Wave G: bound exactly as the player binds it
+                    // (`inf_player::vt_materials`), through the record's own
+                    // `detail_scale_q8` so neither host owns a second
+                    // metres→8.8 conversion — see the note there.
+                    detail: rec.detail.map(|t| t.uuid().as_u128()),
+                    detail_scale_q8: rec.detail_scale_q8(),
                 },
             );
             for tex in rec.texture_dependencies() {

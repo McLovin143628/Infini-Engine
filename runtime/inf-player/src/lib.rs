@@ -1014,13 +1014,16 @@ impl MaterialContent {
                         albedo: rec.albedo.map(|t| t.uuid().as_u128()),
                         normal: rec.normal.map(|t| t.uuid().as_u128()),
                         orm: rec.orm.map(|t| t.uuid().as_u128()),
-                        // Wave T's detail slot is a renderer capability with no
-                        // `.inf_mat` field yet to carry it — see
-                        // `docs/memos/wave-t-textures-disposition.md`, item T25.
-                        // Both hosts spell the default the same way, here and in
-                        // `inf_editor_core::render_assets`, so neither can start
-                        // binding one without the other.
-                        ..Default::default()
+                        // Wave G: the detail slot now has an authoring field
+                        // behind it (`.inf_mat` v3 → `.inf_matd` v2), so both
+                        // hosts bind it — and they bind it through the SAME
+                        // `detail_scale_q8` on the record rather than each doing
+                        // its own metres→8.8 conversion. Two conversions are two
+                        // things that can disagree. The twin is
+                        // `inf_editor_core::render_assets`; a mirror test pins
+                        // them field for field.
+                        detail: rec.detail.map(|t| t.uuid().as_u128()),
+                        detail_scale_q8: rec.detail_scale_q8(),
                     },
                 )
             })

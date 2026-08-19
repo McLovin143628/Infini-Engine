@@ -31,7 +31,10 @@ import {
 } from "../stores/terrainImportStore";
 
 /** Heightmap containers the backend decoder accepts. */
-const HEIGHTMAP_EXTENSIONS = ["png", "exr"];
+// Wave G adds TIFF/GeoTIFF — the format real elevation data ships in. The
+// picker's filter is what an author actually meets first, so a format the
+// importer handles and the dialog hides is a format nobody finds.
+const HEIGHTMAP_EXTENSIONS = ["png", "exr", "tif", "tiff"];
 
 export default function TerrainImportDialog() {
   const open = useShellStore((s) => s.terrainImportOpen);
@@ -155,6 +158,110 @@ export default function TerrainImportDialog() {
                   label="Format"
                   value={`${probe.format} · ${probe.bit_depth}-bit ${probe.float_samples ? "float" : "integer"} · channel ${probe.channel}`}
                 />
+                {probe.geo && (
+                  <>
+                    <Row
+                      label="Coordinate system"
+                      value={
+                        probe.geo.crs_name ??
+                        (probe.geo.epsg ? `EPSG:${probe.geo.epsg}` : "not declared")
+                      }
+                    />
+                    {probe.geo.pixel_size != null && (
+                      <Row
+                        label="Source resolution"
+                        // A geographic CRS's pixel size is in DEGREES. Labelling
+                        // 0.000278 as metres would read as a quarter of a
+                        // millimetre and send the author looking for a bug.
+                        value={
+                          probe.geo.crs_is_geographic
+                            ? `${probe.geo.pixel_size}° per pixel (geographic — not metres)`
+                            : `${probe.geo.pixel_size} m per pixel`
+                        }
+                      />
+                    )}
+                    {probe.geo.vertical_units !== "metres" && (
+                      <Row
+                        label="Elevation units"
+                        value={`${probe.geo.vertical_units} (converted to metres on import)`}
+                      />
+                    )}
+                    {probe.geo.nodata != null && (
+                      <Row label="Declared no-data" value={`${probe.geo.nodata}`} />
+                    )}
+                  </>
+                )}
+              </Section>
+
+              {probe.geo?.is_georeferenced && (
+                <Section title="Placement">
+                  <CheckRow
+                    label="Place using this level's geo-anchor"
+                    checked={settings.use_georeference}
+                    onChange={(use_georeference) =>
+                      useTerrainImportStore.getState().patchSettings({ use_georeference })
+                    }
+                  />
+                  <Row
+                    label=""
+                    value="Off places the terrain at the world origin. On places it where the survey says it is, so roads and rivers from the same source line up with it."
+                  />
+                </Section>
+              )}
+
+              <Section title="No data">
+                <SelectRow
+                  label="Policy"
+                  value={nodataKind(settings.nodata_policy)}
+                  options={[
+                    ["refuse", "Refuse the import"],
+                    ["clamp", "Clamp to an elevation"],
+                    ["fill-row", "Fill small gaps"],
+                  ]}
+                  onChange={(kind) =>
+                    useTerrainImportStore
+                      .getState()
+                      .patchSettings({ nodata_policy: defaultPolicyFor(kind) })
+                  }
+                />
+                {nodataKind(settings.nodata_policy) === "clamp" && (
+                  <NumberRow
+                    label="Clamp elevation (m)"
+                    value={nodataArg(settings.nodata_policy)}
+                    step={1}
+                    onChange={(v) =>
+                      useTerrainImportStore
+                        .getState()
+                        .patchSettings({ nodata_policy: `clamp:${v}` })
+                    }
+                  />
+                )}
+                {nodataKind(settings.nodata_policy) === "fill-row" && (
+                  <NumberRow
+                    label="Widest gap to fill (samples)"
+                    value={nodataArg(settings.nodata_policy)}
+                    step={1}
+                    min={1}
+                    integer
+                    onChange={(v) =>
+                      useTerrainImportStore
+                        .getState()
+                        .patchSettings({ nodata_policy: `fill-row:${Math.max(1, Math.round(v))}` })
+                    }
+                  />
+                )}
+                {probe.geo?.nodata == null && (
+                  <NumberRow
+                    label="No-data value (this source declares none)"
+                    value={settings.nodata_sentinel ?? 0}
+                    step={1}
+                    onChange={(v) =>
+                      useTerrainImportStore
+                        .getState()
+                        .patchSettings({ nodata_sentinel: v })
+                    }
+                  />
+                )}
               </Section>
 
               <Section title="Sampling">
@@ -187,9 +294,9 @@ export default function TerrainImportDialog() {
               </Section>
 
               <Section title="Elevation">
-                {probe.float_samples && (
+                {probe.absolute_samples && (
                   <CheckRow
-                    label="Float metres (use the EXR's values as absolute heights)"
+                    label="Float metres (use the source's values as absolute heights)"
                     checked={settings.float_meters}
                     onChange={(float_meters) =>
                       useTerrainImportStore.getState().patchSettings({ float_meters })
@@ -431,4 +538,62 @@ function CheckRow(props: {
       <span className="truncate">{props.label}</span>
     </label>
   );
+}
+
+function SelectRow(props: {
+  label: string;
+  value: string;
+  options: [string, string][];
+  onChange: (v: string) => void;
+}) {
+  return (
+    <label className="flex items-center justify-between gap-2 py-0.5 text-(--ink-text-dim)">
+      <span className="truncate">{props.label}</span>
+      <select
+        className="bg-(--ink-bg-2) text-(--ink-text) rounded px-1 py-0.5"
+        value={props.value}
+        onChange={(e) => props.onChange(e.target.value)}
+      >
+        {props.options.map(([v, label]) => (
+          <option key={v} value={v}>
+            {label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+// ── the no-data policy label (Wave G) ──────────────────────────────────────
+//
+// The policy crosses the IPC as its stable label ("refuse", "clamp:0",
+// "fill-row:32") rather than as a tagged union, because that same string is
+// what lands in the asset's sidecar — where it has to stay readable and
+// diffable. These three helpers are the only place the frontend takes it apart.
+
+/** The policy kind, ignoring its argument. */
+export function nodataKind(policy: string): string {
+  const i = policy.indexOf(":");
+  return i < 0 ? policy : policy.slice(0, i);
+}
+
+/** The policy's numeric argument, or 0 when it has none. */
+export function nodataArg(policy: string): number {
+  const i = policy.indexOf(":");
+  if (i < 0) return 0;
+  const n = Number(policy.slice(i + 1));
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** A fresh policy label of the given kind, with a sensible argument. */
+export function defaultPolicyFor(kind: string): string {
+  switch (kind) {
+    // Sea level: the usual answer for a coastal DEM whose no-data is ocean.
+    case "clamp":
+      return "clamp:0";
+    case "fill-row":
+      return "fill-row:32";
+    default:
+      return "refuse";
+  }
 }

@@ -63,7 +63,8 @@ use inf_core::job::JobPool;
 
 use crate::asset::{encode_tile, TerrainAsset, TerrainAssetBuilder};
 use crate::import::{
-    decode_rows, probe_reader, HeightmapGrid, HeightmapImport, HeightmapProbe, TerrainError,
+    decode_rows_with, probe_reader, HeightmapGrid, HeightmapImport, HeightmapProbe, NodataHandling,
+    NodataReport, TerrainError,
 };
 use crate::pyramid::{downsample_tiles, PyramidOptions};
 use crate::tile::{TerrainTile, TileKey};
@@ -99,6 +100,11 @@ pub struct ChunkedImportOptions {
     /// there, and the header stays at v5. Default `ZERO` keeps every
     /// ungeoreferenced import exactly as it was.
     pub world_origin: DVec3,
+    /// What to do with samples the source says it has no data for (Wave G).
+    ///
+    /// Defaults to [`NodataHandling::NONE`] — refuse, no sentinel — which is
+    /// exactly the pre-Wave-G behaviour.
+    pub nodata: NodataHandling,
 }
 
 /// A progress tick: how many tiles of the whole import are final.
@@ -129,6 +135,12 @@ pub struct ImportReport {
     pub peak_live_tiles: usize,
     /// The bound `peak_live_tiles` is asserted against (see the module docs).
     pub live_tile_bound: usize,
+    /// What the no-data policy did (Wave G).
+    ///
+    /// The trigger for a cook advisory: an import that substituted elevations
+    /// produced a terrain the source does not literally contain, and the P16 law
+    /// says a silent hazard gets named.
+    pub nodata: NodataReport,
 }
 
 /// Import a heightmap **file** into a `.inf_terrain` payload, chunked.
@@ -195,13 +207,16 @@ pub fn import_heightmap_reader_in<R: std::io::BufRead + std::io::Seek>(
     let probe = probe_reader(&mut src)?;
     import.validate(Some(&probe))?;
     let mut build = Build::new(pool, import, opts, &probe, progress, cancel);
-    let decoded = decode_rows(src, &mut |y, row| build.push_source_row(y as i32, row))?;
+    let mut nodata = NodataReport::default();
+    let decoded = decode_rows_with(src, &opts.nodata, &mut nodata, &mut |y, row| {
+        build.push_source_row(y as i32, row)
+    })?;
     if (decoded.width, decoded.height) != (probe.width, probe.height) {
         return Err(TerrainError::Image(
             "the heightmap's header and its pixel data disagree about the size".into(),
         ));
     }
-    build.finish(probe)
+    build.finish(probe, nodata)
 }
 
 // ── the pyramid plan ────────────────────────────────────────────────────────
@@ -599,6 +614,7 @@ impl<'a> Build<'a> {
     fn finish(
         mut self,
         probe: HeightmapProbe,
+        nodata: NodataReport,
     ) -> Result<(TerrainAsset, ImportReport), TerrainError> {
         // Rows past the source's last one clamp onto it (the whole-image tiler's
         // `sample_at` clamp, expressed as extra rows).
@@ -637,6 +653,7 @@ impl<'a> Build<'a> {
             lod_levels,
             peak_live_tiles: self.peak_live,
             live_tile_bound,
+            nodata,
         };
         let asset = self
             .builder

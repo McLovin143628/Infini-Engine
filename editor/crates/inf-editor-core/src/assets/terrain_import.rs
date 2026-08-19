@@ -68,6 +68,35 @@ pub struct TerrainImportSettings {
     /// Stop generating levels once one holds at most this many tiles.
     #[serde(default = "default_min_tiles")]
     pub min_pyramid_tiles: usize,
+    // ── Wave G ───────────────────────────────────────────────────────────────
+    /// What to do with samples the source says it has no data for.
+    ///
+    /// Recorded here, in the sidecar, precisely so a **reimport reproduces the
+    /// same terrain**. A no-data policy chosen in a dialog and then forgotten
+    /// would make the committed world depend on what somebody clicked six months
+    /// ago — the same hazard the P20 law names as "a committed level must not
+    /// depend on which tools the session visited".
+    ///
+    /// Stored as its stable label (`"refuse"`, `"clamp:0"`, `"fill-row:32"`)
+    /// rather than as a tagged enum, so the sidecar stays readable and diffable.
+    #[serde(default = "default_nodata_policy")]
+    pub nodata_policy: String,
+    /// An author-declared no-data sentinel, for a source that declares none of
+    /// its own. A GeoTIFF's `GDAL_NODATA` tag wins over this when present.
+    #[serde(default)]
+    pub nodata_sentinel: Option<f64>,
+    /// Place the terrain using the level's geo-anchor and the source's own
+    /// georeferencing, rather than at the world origin.
+    ///
+    /// Off by default: a level with no anchor, or a source with no
+    /// georeferencing, has nothing to place against, and silently changing where
+    /// an existing import lands would move worlds that already exist.
+    #[serde(default)]
+    pub use_georeference: bool,
+}
+
+fn default_nodata_policy() -> String {
+    inf_terrain::NodataPolicy::default().label()
 }
 
 fn default_max_levels() -> u32 {
@@ -88,6 +117,9 @@ impl Default for TerrainImportSettings {
             center: true,
             max_pyramid_levels: default_max_levels(),
             min_pyramid_tiles: default_min_tiles(),
+            nodata_policy: default_nodata_policy(),
+            nodata_sentinel: None,
+            use_georeference: false,
         }
     }
 }
@@ -98,6 +130,51 @@ impl TerrainImportSettings {
     /// Centring is resolved **here**, against the probed dimensions, into an
     /// integral tile origin — so the value that reaches Ring 0 is exact and a
     /// reimport of the same file re-lands on the same tiles.
+    /// The Ring-0 no-data handling these settings name, for a given source.
+    ///
+    /// **The file's own declared sentinel wins** over the author's: a GeoTIFF
+    /// that says `GDAL_NODATA = -9999` is stating a fact about its own bytes,
+    /// while the author's field is a guess for files that state nothing. Letting
+    /// the guess override the fact is how a source with two different void
+    /// markers ends up half-handled.
+    ///
+    /// An unrecognised policy label is refused rather than defaulted — see
+    /// `NodataPolicy::from_label`.
+    pub fn nodata(&self, probe: Option<&HeightmapProbe>) -> Result<inf_terrain::NodataHandling> {
+        let policy =
+            inf_terrain::NodataPolicy::from_label(&self.nodata_policy).ok_or_else(|| {
+                AssetError::Import(format!(
+                    "this terrain's sidecar names the no-data policy {:?}, which this \
+                 build does not recognise. It was probably written by a newer \
+                 version of the editor. Re-importing with a policy this build \
+                 knows (refuse, clamp:<metres>, fill-row:<samples>) would change \
+                 the terrain, so it is refused rather than guessed.",
+                    self.nodata_policy
+                ))
+            })?;
+        let declared = probe.and_then(|p| p.geo.as_ref()).and_then(|g| g.nodata);
+        Ok(inf_terrain::NodataHandling {
+            policy,
+            sentinel: declared.or(self.nodata_sentinel),
+        })
+    }
+
+    /// The world position the `.inf_terrain` header's `origin` should carry.
+    ///
+    /// `None` — meaning "the world origin", the pre-Wave-G behaviour — unless
+    /// the author asked for georeferenced placement AND both halves are present:
+    /// a level anchor and a source that knows where it is.
+    pub fn world_origin(
+        &self,
+        probe: Option<&HeightmapProbe>,
+        anchor: Option<&inf_math::geo::GeoAnchor>,
+    ) -> Option<glam::DVec3> {
+        if !self.use_georeference {
+            return None;
+        }
+        probe?.geo.as_ref()?.world_origin(anchor?)
+    }
+
     pub fn to_import(&self, width: u32, height: u32) -> HeightmapImport {
         let base = HeightmapImport {
             tile_resolution: self.tile_resolution.max(2),
@@ -305,11 +382,31 @@ pub fn build(
     progress: &mut dyn FnMut(ImportProgress),
     cancel: &CancelToken,
 ) -> Result<TerrainBuild> {
+    build_anchored(source, settings, None, progress, cancel)
+}
+
+/// [`build`], told where on Earth the level's origin is (Wave G).
+///
+/// `anchor` is the level's [`inf_math::geo::GeoAnchor`]. It is threaded through
+/// as a parameter rather than read from anywhere, because this function is
+/// deliberately project-free (see [`TerrainBuild`]) and because the caller is the
+/// only thing that knows which level the import is for.
+pub fn build_anchored(
+    source: &Path,
+    settings: &TerrainImportSettings,
+    anchor: Option<&inf_math::geo::GeoAnchor>,
+    progress: &mut dyn FnMut(ImportProgress),
+    cancel: &CancelToken,
+) -> Result<TerrainBuild> {
     let probe = inf_terrain::probe_heightmap(source)
         .map_err(|e| AssetError::Import(format!("{}: {e}", source.display())))?;
     let import = settings.to_import(probe.width, probe.height);
     let opts = ChunkedImportOptions {
         pyramid: settings.pyramid(),
+        world_origin: settings
+            .world_origin(Some(&probe), anchor)
+            .unwrap_or(glam::DVec3::ZERO),
+        nodata: settings.nodata(Some(&probe))?,
     };
     let (asset, report) =
         inf_terrain::import_heightmap(source, import, opts, progress, &|| cancel.is_cancelled())
@@ -365,7 +462,8 @@ pub fn commit(
     // out at some later session, from `reimport` refusing with "no import
     // source". `outside_root_advisories` is the same door the mesh and texture
     // importers raise it through, so the wording cannot drift.
-    let advisories = super::import::outside_root_advisories(project, &built.source);
+    let mut advisories = super::import::outside_root_advisories(project, &built.source);
+    advisories.extend(import_advisories(&built.report, &built.settings));
     let rel_source = super::sidecar_source(project, &built.source);
     let id = project.register_written_asset(
         path,
@@ -397,6 +495,88 @@ pub fn commit(
         bytes: size,
         advisories,
     })
+}
+
+/// The advisories a finished import owes its author (Wave G).
+///
+/// **The P16 law**: a silent hazard gets named. Every one of these describes a
+/// terrain that is usable and is not literally what the source file contains, so
+/// an author who is never told will spend their time looking for the difference
+/// rather than deciding about it.
+pub fn import_advisories(
+    report: &inf_terrain::ImportReport,
+    settings: &TerrainImportSettings,
+) -> Vec<String> {
+    let mut out = Vec::new();
+
+    if report.nodata.engaged() {
+        let n = report.nodata.substituted;
+        let total = u64::from(report.probe.width) * u64::from(report.probe.height);
+        let pct = if total > 0 {
+            n as f64 * 100.0 / total as f64
+        } else {
+            0.0
+        };
+        out.push(format!(
+            "the no-data policy `{}` replaced {n} sample(s) ({pct:.2}% of the \
+             source) — this terrain contains elevations the DEM does not. Those \
+             areas are invented, not measured.",
+            settings.nodata_policy
+        ));
+        if report.nodata.filled_runs > 0 {
+            out.push(format!(
+                "{} void(s) were filled by interpolating across them; the widest \
+                 was {} samples. A fill spans a gap it cannot see the shape of, so \
+                 a wide one is a smooth ramp where the ground may not be smooth.",
+                report.nodata.filled_runs, report.nodata.widest_run
+            ));
+        }
+    }
+
+    if let Some(geo) = report.probe.geo.as_ref() {
+        // Placement was possible and was not taken — worth saying, because the
+        // symptom (a terrain at the world origin while the roads are 40 km away)
+        // looks like a bug in the vector importer.
+        if geo.is_georeferenced() && !settings.use_georeference {
+            out.push(
+                "this source is georeferenced but was imported at the world origin \
+                 (georeferenced placement is off). If you also import roads or \
+                 rivers from the same survey they will not line up with it — turn \
+                 georeferenced placement on and re-import to place them together."
+                    .to_string(),
+            );
+        }
+        if geo.vertical_units != inf_terrain::VerticalUnits::Metre {
+            out.push(format!(
+                "the source's elevations are in {} and were converted to metres on \
+                 the way in (x{:.6}).",
+                geo.vertical_units.label(),
+                geo.vertical_units.to_meters()
+            ));
+        }
+        // A geographic source's pixel size is in DEGREES, so `meters_per_sample`
+        // is whatever the author typed and bears no relation to the ground.
+        if let Some(deg) = geo.degrees_per_sample() {
+            let approx_m = deg * 111_320.0;
+            out.push(format!(
+                "this source is in a GEOGRAPHIC coordinate system: its pixels are \
+                 {deg} degrees across (about {approx_m:.1} m at the equator, less \
+                 further north), not metres. The sample spacing used for this \
+                 import was the {} m you chose, which is unrelated to the source's \
+                 own resolution — reproject the DEM to a metric CRS (a UTM zone) \
+                 if you need the two to agree.",
+                settings.meters_per_sample
+            ));
+        }
+    } else if settings.use_georeference {
+        out.push(
+            "georeferenced placement was requested but this source carries no \
+             georeferencing, so the terrain was placed at the world origin."
+                .to_string(),
+        );
+    }
+
+    out
 }
 
 /// Import `source` into `project` as a new `.inf_terrain` asset — [`build`] then
