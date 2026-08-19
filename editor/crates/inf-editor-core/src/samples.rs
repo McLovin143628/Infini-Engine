@@ -8061,6 +8061,9 @@ const PHASE29_SM_GUID: Uuid = Uuid::from_u128(0x8409_00a5);
 const PHASE29_ACTOR_GUID: Uuid = Uuid::from_u128(0x8409_00a6);
 /// The course's static blocks start here and run consecutively.
 const PHASE29_BLOCK_BASE: u128 = 0x8409_0100;
+/// The committed car's chassis (P29.7), and its four wheels after it.
+const PHASE29_CAR_GUID: Uuid = Uuid::from_u128(0x8409_0004);
+const PHASE29_WHEEL_BASE: u128 = 0x8409_0010;
 
 /// The character's own height, metres — the number every capsule dimension and
 /// the camera's pivot are derived from.
@@ -8148,16 +8151,122 @@ pub fn phase29_blocks() -> Vec<Phase29Block> {
         DVec3::new(0.0, -3.5, 110.0),
         DVec3::new(8.0, 0.5, 10.0),
     ));
-    // The far bank — so the course ENDS rather than running out of world. A
-    // character that swims off the end of the geometry falls for ever, and a
-    // trace whose last two thousand steps are a fall is a trace that certifies
-    // nothing about the two thousand before them.
+    // **The beach** (P29.7): a staircase out of the pool.
+    //
+    // Before it the course simply ended in the water — the P29.6 driver's last
+    // stage was a catch-all that swam forward for ever, so nothing noticed that
+    // the pool's far wall was a vertical three metres a swimmer can never climb.
+    //
+    // The shape is decided by one number: **a surface swimmer floats with its
+    // feet at about −1.07 m** (the capsule settles at −0.2 and is 0.87 from
+    // centre to sole), and it does **not** autostep, because rapier's autostep
+    // needs a grounded character. So the first thing it can stand on has to be
+    // below that, and the water has to end before anything above it does. Two
+    // wrong versions were measured first: a beach at −1.2/−0.8/−0.4 left the
+    // character pressed against a shelf face at z = 115.14, and one starting at
+    // −0.9 left it against the first wall at z = 113.21.
+    //
+    // So the pool stays flat, the water body ends at z = 120, and the bank the
+    // swimmer drops onto is at −1.35 — a 28 cm fall out of the water — with
+    // seven **19 cm** steps up to road level after it. Not 40 cm: the 45 cm
+    // `step_height_m` default is the mover's ceiling and a 40 cm rise stopped
+    // the character dead at z = 126.71, which is the third measurement this
+    // beach cost. The course's own stair station is 20 cm a tread and works, so
+    // the beach is that stair, seven times.
     out.push(b(
-        "far bank",
-        DVec3::new(0.0, -0.5, 125.0),
-        DVec3::new(8.0, 0.5, 5.0),
+        "bank low",
+        DVec3::new(0.0, -1.85, 122.0),
+        DVec3::new(8.0, 0.5, 2.0),
+    ));
+    for i in 0..7 {
+        let top = -1.35 + 1.35 * (i + 1) as f64 / 7.0;
+        out.push(b(
+            "bank step",
+            DVec3::new(0.0, top - 0.5, 124.5 + i as f64),
+            DVec3::new(8.0, 0.5, 0.5),
+        ));
+    }
+    // ── P29.7: the road, the hump and the apron ──
+    //
+    // Wide enough (24 m) that a steered car has somewhere to go, and long
+    // enough that the drive segment is a drive rather than a lurch: the rig
+    // accelerates at about 6.7 m/s², so the sixty metres before the hump is
+    // where it reaches the speed the jump needs.
+    out.push(b(
+        "road",
+        DVec3::new(0.0, -0.5, 201.0),
+        DVec3::new(16.0, 0.5, 70.0),
+    ));
+    // **Kerbs.** A 1 m wall down each side, because a car is not a character:
+    // the first drive segment steered off the edge of a 24 m road at 14 m/s and
+    // spent three thousand steps falling to y = −3 000, which is a replay whose
+    // last half certifies nothing. A wall is what a road has.
+    for x in [-16.5_f64, 16.5] {
+        out.push(b(
+            "kerb",
+            DVec3::new(x, 0.5, 201.0),
+            DVec3::new(0.5, 1.0, 70.0),
+        ));
+    }
+    // **The jump.** A hump rather than a ramp or a gap: a ramp is a rotated box
+    // whose lip never quite meets the road, and a gap is a failure mode (a car
+    // that misses it is at the bottom of a hole for the rest of the replay). A
+    // 20 cm hump the wheels roll over launches the whole rig on its own
+    // suspension at speed, which is what an airborne vehicle looks like anyway.
+    out.push(b(
+        "hump",
+        DVec3::new(0.0, 0.1, 200.0),
+        DVec3::new(16.0, 0.1, 1.5),
+    ));
+    // The apron the flight segment lands on. Generous in **both** axes: a flying
+    // character banks into its turns and therefore travels sideways, and a first
+    // draft 40 m wide put it off the edge and into a fall that ran to the end of
+    // the replay. It overlaps the road so a character that lands short is still
+    // on geometry.
+    out.push(b(
+        "apron",
+        DVec3::new(0.0, -0.5, 295.0),
+        DVec3::new(30.0, 0.5, 30.0),
     ));
     out
+}
+
+/// Where the committed car's **chassis** starts, world metres.
+///
+/// On the road, past the far bank, and far enough along it that the character
+/// walks to it rather than starting inside it. The `y` is the placement an
+/// author makes: wheels touching the road with the suspension fully extended,
+/// which is `wheel offset + wheel radius` above the surface.
+pub fn phase29_car_start() -> DVec3 {
+    DVec3::new(0.0, PHASE29_WHEEL_Y.abs() + PHASE29_WHEEL_RADIUS_M, 138.0)
+}
+
+/// The committed car's chassis half-extents, metres — 4 × 1 × 2 m.
+pub const PHASE29_CAR_HALF: inf_ecs::math::Vec3d = inf_ecs::math::Vec3d::new(2.0, 0.5, 1.0);
+/// Its density, kg/m³. A hollow shell, not its material: 150 over 8 m³ is
+/// 1 200 kg, which is a small road car. (`Collider3D::density`'s own note.)
+pub const PHASE29_CAR_DENSITY: f64 = 150.0;
+/// The wheel centres' height in the chassis frame, metres — at full extension.
+///
+/// −0.75 rather than −0.5 for **ground clearance**: the chassis is a metre tall,
+/// so its underside sits `0.75 + 0.35 − 0.5 − settle` above the road, which is
+/// 45 cm. At −0.5 the underside was at 20 cm, exactly the height of the hump,
+/// and the car drove up onto its own belly and stopped there for four thousand
+/// steps. A wheel that pokes out below the bodywork is also what a car looks
+/// like.
+pub const PHASE29_WHEEL_Y: f64 = -0.75;
+/// The wheel radius, metres.
+pub const PHASE29_WHEEL_RADIUS_M: f64 = 0.35;
+
+/// The four wheel mounts, in the chassis frame — front pair first (`+Z` is
+/// forward, and `WheelMount::steered` is a sign test on exactly this).
+pub fn phase29_wheel_mounts() -> [inf_ecs::math::Vec3d; 4] {
+    [
+        inf_ecs::math::Vec3d::new(-0.9, PHASE29_WHEEL_Y, 1.4),
+        inf_ecs::math::Vec3d::new(0.9, PHASE29_WHEEL_Y, 1.4),
+        inf_ecs::math::Vec3d::new(-0.9, PHASE29_WHEEL_Y, -1.4),
+        inf_ecs::math::Vec3d::new(0.9, PHASE29_WHEEL_Y, -1.4),
+    ]
 }
 
 /// The pool's surface elevation and half-extent (XZ) — the P20 water body the
@@ -8388,6 +8497,84 @@ pub fn phase29_locomotion_scene() -> SceneDoc {
     );
     insert!(doc, PHASE29_HERO_GUID, ActorClass(PHASE29_ACTOR_GUID));
 
+    // ── the car (P29.7) ──
+    //
+    // **Nothing here is a vehicle field**, because there is no such field: a
+    // chassis is a dynamic body with a collider and a wheel is a direct child
+    // carrying a sphere `Collider3D` with `sensor: true` and no body of its own.
+    // `inf_ecs::vehicle::wheel_of` is the one recogniser, and this generator and
+    // the physics bridge both read it — so the level and the simulation cannot
+    // disagree about what a wheel is.
+    //
+    // The density is authored (150 kg/m³ over 8 m³ = 1 200 kg): rapier's 1.0
+    // placeholder would make this car weigh eight kilograms, which is the
+    // fifth catch of that law in this repository.
+    doc.create_with_guid(PHASE29_CAR_GUID, SpawnKind::Empty, "Car", None);
+    insert!(
+        doc,
+        PHASE29_CAR_GUID,
+        Transform::from_translation(phase29_car_start())
+    );
+    insert!(
+        doc,
+        PHASE29_CAR_GUID,
+        inf_ecs::components::MeshRef {
+            primitive: inf_ecs::components::Primitive::Cube,
+            asset: None,
+        }
+    );
+    insert!(
+        doc,
+        PHASE29_CAR_GUID,
+        inf_ecs::components::Material::default()
+    );
+    insert!(
+        doc,
+        PHASE29_CAR_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            // A car does not spin on its own axis for want of damping; the
+            // suspension supplies the rest of the resistance.
+            angular_damping: 0.5,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PHASE29_CAR_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: PHASE29_CAR_HALF,
+            density: PHASE29_CAR_DENSITY,
+            friction: 0.5,
+            ..Default::default()
+        }
+    );
+    for (i, mount) in phase29_wheel_mounts().into_iter().enumerate() {
+        let guid = Uuid::from_u128(PHASE29_WHEEL_BASE + i as u128);
+        doc.create_with_guid(guid, SpawnKind::Empty, "Wheel", Some(PHASE29_CAR_GUID));
+        insert!(doc, guid, Transform::from_translation(mount.to_dvec3()));
+        insert!(
+            doc,
+            guid,
+            inf_ecs::components::MeshRef {
+                primitive: inf_ecs::components::Primitive::Sphere,
+                asset: None,
+            }
+        );
+        insert!(doc, guid, inf_ecs::components::Material::default());
+        insert!(
+            doc,
+            guid,
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Sphere,
+                radius: PHASE29_WHEEL_RADIUS_M,
+                sensor: true,
+                ..Default::default()
+            }
+        );
+    }
+
     // ── a sun, so the course is visible in PIE ──
     doc.create_with_guid(PHASE29_SUN_GUID, SpawnKind::Empty, "Sun", None);
     insert!(
@@ -8423,6 +8610,21 @@ pub fn phase29_actors() -> Vec<(Uuid, BlueprintClass)> {
 /// The character's GUID — the gate's subject, and the camera's.
 pub fn phase29_hero() -> Uuid {
     PHASE29_HERO_GUID
+}
+
+/// The committed car's chassis GUID (P29.7) — the drive segment's subject.
+pub fn phase29_car() -> Uuid {
+    PHASE29_CAR_GUID
+}
+
+/// Its four wheel GUIDs, in the order [`phase29_wheel_mounts`] lists them.
+pub fn phase29_wheels() -> [Uuid; 4] {
+    [
+        Uuid::from_u128(PHASE29_WHEEL_BASE),
+        Uuid::from_u128(PHASE29_WHEEL_BASE + 1),
+        Uuid::from_u128(PHASE29_WHEEL_BASE + 2),
+        Uuid::from_u128(PHASE29_WHEEL_BASE + 3),
+    ]
 }
 
 /// The asset GUIDs, so a gate can resolve the committed files without scanning.

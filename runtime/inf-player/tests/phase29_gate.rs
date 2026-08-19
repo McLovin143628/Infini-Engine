@@ -40,7 +40,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use glam::DVec2;
 use uuid::Uuid;
 
 use inf_ecs::components::{
@@ -56,7 +55,7 @@ use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
 const HZ: f64 = 60.0;
 /// How many fixed steps the course takes. Long enough for the character to reach
 /// the far side of the pool; the coverage arm asserts it did.
-const STEPS: u32 = 5400;
+const STEPS: u32 = 4900;
 /// The prefix the one-line-diff demonstration runs — long enough for the first
 /// transition to fire and for the difference to persist, short enough that the
 /// arm is about the diff rather than about the whole course.
@@ -401,13 +400,152 @@ impl Driver {
                 forward(&[])
             }
             // ── swim across, submerged for the middle stretch ──
-            _ => {
+            22 => {
+                if z >= 124.0 && grounded {
+                    self.next();
+                    return forward(&[]);
+                }
                 let mut a = axes(&[("move_y", 1.0)]);
-                if (104.0..114.0).contains(&z) {
+                // Surface again before the beach: a submerged character pressing
+                // into the first shelf's front face is a character that never
+                // gets out of the pool, which is how the P29.6 course ended.
+                if (104.0..109.0).contains(&z) {
                     a.insert("move_up".to_string(), -1.0);
                 }
                 (Vec::new(), a)
             }
+            // ── P29.7: walk up the road to the car ──
+            //
+            //    Within `ENTER_REACH_M` of the SEAT, which is on top of the
+            //    chassis: the reach is measured from the character's feet to the
+            //    seat, so the 1.2 m of height is part of the budget. Stopping at
+            //    134.5 left it 3.38 m away and pressing a control that answered
+            //    "nothing in reach" for four thousand steps.
+            23 => {
+                if z >= 136.0 {
+                    self.next();
+                }
+                forward(&[])
+            }
+            // ── climb in. `interact` is an EDGE, so it is pressed on one step
+            //    and released on the next; holding it would enter and leave. ──
+            24 => {
+                if mode == M::Driving {
+                    self.next();
+                    return (Vec::new(), BTreeMap::new());
+                }
+                self.held += 1;
+                if self.held % 2 == 1 {
+                    (vec!["interact"], BTreeMap::new())
+                } else {
+                    (Vec::new(), BTreeMap::new())
+                }
+            }
+            // ── drive the circuit: away from the start, over the hump, and back
+            //    on the far side of the road. The steer is what makes it a
+            //    circuit rather than a straight line, and it is applied as a
+            //    plain `move_x` — the same axis a character strafes with, which
+            //    is the point of routing input through one intent. ──
+            25 => {
+                if z >= 245.0 {
+                    self.next();
+                    return (Vec::new(), BTreeMap::new());
+                }
+                // An S: right, then left to straighten, both well before the
+                // hump at 200 — a steer still held at the end of the road puts
+                // the car into a kerb and holds it there, which is what a
+                // window ending at 230 measured.
+                let steer = if (158.0..167.0).contains(&z) {
+                    0.15
+                } else if (170.0..179.0).contains(&z) {
+                    -0.15
+                } else {
+                    0.0
+                };
+                // Six tenths of throttle, not full: the rig tops out at 25 m/s
+                // and a 110 m road at that speed is a segment where every
+                // steering input is a spin. A committed sample's vehicle uses
+                // the DEFAULT tuning in both hosts — a tune is an editor-only
+                // door by law — so the course adapts to the car rather than the
+                // other way round.
+                (Vec::new(), axes(&[("move_y", 0.6), ("move_x", steer)]))
+            }
+            // ── get out WHILE MOVING: the velocity handoff, and the airborne
+            //    destination the mode table gives `Driving`. ──
+            26 => {
+                if mode != M::Driving {
+                    self.next();
+                    return (Vec::new(), BTreeMap::new());
+                }
+                self.held += 1;
+                if self.held % 2 == 1 {
+                    (vec!["interact"], BTreeMap::new())
+                } else {
+                    (Vec::new(), BTreeMap::new())
+                }
+            }
+            // ── land, and stop ──
+            27 => {
+                if grounded && mode == M::Grounded {
+                    self.held += 1;
+                    if self.held > 30 {
+                        self.next();
+                    }
+                }
+                (Vec::new(), BTreeMap::new())
+            }
+            // ── take off ──
+            28 => {
+                if mode == M::Flying {
+                    self.next();
+                    return (Vec::new(), axes(&[("move_y", 1.0)]));
+                }
+                self.held += 1;
+                if self.held % 2 == 1 {
+                    (vec!["fly"], BTreeMap::new())
+                } else {
+                    (Vec::new(), BTreeMap::new())
+                }
+            }
+            // ── climb, then two banked turns, then level out over the apron ──
+            29 => {
+                self.held += 1;
+                if self.held > 240 {
+                    self.next();
+                    return (Vec::new(), axes(&[("move_y", 1.0)]));
+                }
+                // A rate, in degrees per second, exactly as a mouse delta
+                // arrives: one turn each way, with level flight between them so
+                // the bank is seen to come back. Sixty degrees a second for a
+                // second is a turn a 30 m apron can hold — at a hundred the
+                // character flew off the side of it.
+                let yaw = match self.held {
+                    60..=120 => 60.0,
+                    150..=210 => -60.0,
+                    _ => 0.0,
+                };
+                let climb = if self.held < 60 { 0.6 } else { 0.0 };
+                (
+                    Vec::new(),
+                    axes(&[("move_y", 1.0), ("look_x", yaw), ("move_up", climb)]),
+                )
+            }
+            // ── land: stop flying and let the controlled fall finish ──
+            30 => {
+                if mode != M::Flying {
+                    self.next();
+                    return (Vec::new(), BTreeMap::new());
+                }
+                self.held += 1;
+                if self.held % 2 == 1 {
+                    (vec!["fly"], BTreeMap::new())
+                } else {
+                    (Vec::new(), BTreeMap::new())
+                }
+            }
+            // ── the course is over: stand still, so the last stretch of the
+            //    trace is a settled character rather than a fall off the end. ──
+            _ => (Vec::new(), BTreeMap::new()),
         }
     }
 }
@@ -606,7 +744,14 @@ fn pie_sim(machine: Option<&inf_anim::StateMachine>) -> RuntimeSim {
 fn editor_session(machine: Option<inf_anim::StateMachine>) -> (SceneDoc, SimSession) {
     let assets = load_assets(machine);
     let mut doc = course_doc();
-    let mut session = SimSession::enter(&mut doc, samples::phase29_actors(), DVec2::ZERO, HZ);
+    // **The document's own gravity** (P29.7), through the same door the studio's
+    // Simulate uses. `DVec2::ZERO` was a literal here and in `commands/sim.rs`,
+    // and it means the editor simulated every level with no gravity at all —
+    // which no character noticed (a character carries its own) and the first
+    // dynamic body in a committed level would have.
+    let gravity = SimSession::gravity_of(&doc);
+    let mut session =
+        SimSession::enter_with_gravity(&mut doc, samples::phase29_actors(), gravity, HZ);
     session.set_skeletons(assets.skeletons);
     session.set_pose_clips(assets.clips);
     session.set_state_machines(assets.machines);
@@ -670,9 +815,13 @@ fn mode_counts(trace: &[Vec<u8>], pose: usize) -> std::collections::BTreeMap<u8,
 enum ModeDuty {
     /// The course must force it, under this name.
     Forced(&'static str),
-    /// P29.7 owns the mechanics; arm (g) asserts the typed refusal instead.
-    RefusedUntilP297,
-    /// A wire slot with no meaning yet.
+    /// A wire slot with no meaning yet — a mode a NEWER build wrote into a file
+    /// this one is reading. Arm (g) asserts the typed refusal.
+    ///
+    /// **P29.7 emptied the other category.** This enum used to carry a
+    /// `RefusedUntilP297` variant holding `Driving` and `Flying`; both have
+    /// their mechanics now, the course forces them, and what is left refusing is
+    /// exactly what should refuse for ever.
     Reserved,
 }
 
@@ -692,7 +841,8 @@ fn duty_of(mode: MovementMode) -> ModeDuty {
         M::SwimUnder => Forced("SwimUnder"),
         M::Mantle => Forced("Mantle"),
         M::Ragdoll => Forced("Ragdoll"),
-        M::Driving | M::Flying => RefusedUntilP297,
+        M::Driving => Forced("Driving"),
+        M::Flying => Forced("Flying"),
         M::Reserved14 | M::Reserved15 | M::Reserved16 | M::Reserved17 => Reserved,
     }
 }
@@ -727,8 +877,7 @@ const ALL_MODES: [MovementMode; 18] = {
 };
 
 /// The modes the course must force — **derived** from [`duty_of`], not restated.
-/// `Driving` and `Flying` are absent because that function says so, and arm (g)
-/// asserts the refusal they are absent for.
+/// All **fourteen** as of P29.7: the catalogue, whole.
 fn required_modes() -> Vec<(&'static str, MovementMode)> {
     ALL_MODES
         .iter()
@@ -739,13 +888,13 @@ fn required_modes() -> Vec<(&'static str, MovementMode)> {
         .collect()
 }
 
-/// The modes P29.7 owns — derived from the same `match`, so arm (g) and the
-/// anti-vacuity list cannot drift apart.
+/// The modes that still refuse — derived from the same `match`, so arm (g) and
+/// the anti-vacuity list cannot drift apart. The four reserved slots.
 fn refused_modes() -> Vec<MovementMode> {
     ALL_MODES
         .iter()
         .copied()
-        .filter(|m| matches!(duty_of(*m), ModeDuty::RefusedUntilP297))
+        .filter(|m| matches!(duty_of(*m), ModeDuty::Reserved))
         .collect()
 }
 
@@ -760,8 +909,8 @@ fn refused_modes() -> Vec<MovementMode> {
 /// 2. every one of them is classified, and the classification is a `match` with
 ///    no wildcard, so adding a variant is a **compile error** rather than a
 ///    silently unclassified mode;
-/// 3. the counts are the ledger's: **twelve** forced, two refused, four
-///    reserved.
+/// 3. the counts are the ledger's: **fourteen** forced and four reserved,
+///    which is the catalogue closed.
 #[test]
 fn the_catalogue_is_accounted_for_variant_by_variant() {
     for (i, m) in ALL_MODES.iter().enumerate() {
@@ -774,21 +923,20 @@ fn the_catalogue_is_accounted_for_variant_by_variant() {
     }
     let forced = required_modes();
     let refused = refused_modes();
-    let reserved = ALL_MODES
-        .iter()
-        .filter(|m| matches!(duty_of(**m), ModeDuty::Reserved))
-        .count();
     assert_eq!(
         forced.len(),
-        12,
-        "the course's obligation is twelve modes and this list has {} — a row \
+        14,
+        "the course's obligation is fourteen modes and this list has {} — a row \
          was deleted, and `assert_not_vacuous` only checks that nothing on the \
          list is MISSING, so it would not have said so",
         forced.len()
     );
-    assert_eq!(refused.len(), 2, "P29.7 owns exactly Driving and Flying");
-    assert_eq!(reserved, 4, "the wire has four reserved slots");
-    assert_eq!(forced.len() + refused.len() + reserved, ALL_MODES.len());
+    assert_eq!(
+        refused.len(),
+        4,
+        "what refuses is the four reserved slots and nothing else"
+    );
+    assert_eq!(forced.len() + refused.len(), ALL_MODES.len());
     // Every reserved slot answers `reserved_slot`, and no forced one does —
     // the classification agrees with the engine's own answer rather than with
     // this file's opinion.
@@ -1036,116 +1184,82 @@ fn pie_equals_shipping_on_the_pose_and_mode_trace() {
 }
 
 /// The **third** host: the editor's own Simulate, over the same committed
-/// document and the same assets.
+/// document and the same assets — **byte for byte, over the whole course**.
 ///
 /// A separate arm and not a third comparison inside the one above, because it is
 /// a different claim: `sim_from_payload` and `SimSession` are two different
 /// programs over one Ring-0 fixed step, and what this asserts is that the
 /// hand-maintained pair still slot the same calls in the same order.
 ///
-/// # THE BOUND THIS ARM FOUND, stated rather than hidden
+/// # THE BOUND THIS ARM USED TO CARRY, AND WHY IT IS GONE (P29.7)
 ///
-/// The two hosts are byte-identical for the whole course **up to the ragdoll** —
-/// two and a half thousand steps, covering every gait, the crouch, the prone
-/// crawl, the slide, the roll, the dive, both falls and all three mantles — and
-/// then diverge. The divergence begins on the step the ragdoll's articulated
-/// bodies are spawned, which is the first moment either world contains a
-/// **dynamic** body at all: it starts in the last bits of the character's
-/// position and, because a jointed body assembly is chaotic, it grows — nine
-/// millimetres four steps later, and by step 2 545 the two hosts have the
-/// ragdoll ending one step apart.
+/// P29.6 shipped this arm with a documented bound: byte-identical for two and a
+/// half thousand steps and then diverging, from the step the ragdoll's
+/// articulated bodies spawn — "the first moment either world contains a dynamic
+/// body at all". The diagnosis attached to it was rapier's determinism
+/// contract: two hosts with different body-handle generation histories get
+/// different solver iteration orders, so a dynamic solve is host-local. It was
+/// routed here as a design decision: one construction sequence for both hosts,
+/// or an editor preview that is an approximation.
 ///
-/// The cause is rapier's determinism contract rather than this engine's. It
-/// guarantees the same answer for the same **sequence of operations**, and the
-/// two hosts do not have the same one: a `SimSession` is entered over a document
-/// that has been built and edited, so its body handles carry a different
-/// generation history, and the island solver's iteration order follows the
-/// handles. Nothing in this repository had ever compared the two hosts across a
-/// dynamic solve — `movement_parity` and `pose_parity` both run worlds whose
-/// only dynamic body is a settled crate, and P29.4's own ragdoll fixtures run
-/// one host.
+/// **It was neither.** The editor's Simulate was passing a literal `DVec2::ZERO`
+/// as its world gravity — in `commands/sim.rs` and in this file's own
+/// `editor_session` — so the editor simulated **every level with no gravity**.
+/// No character ever noticed, because a character integrates its own
+/// `CharacterMovement::gravity_mps2` and never asks the world for one. The
+/// ragdoll's limbs are the first bodies in this course that do ask, so the two
+/// hosts parted company on exactly the step they spawned, and the symptom looked
+/// like a handle-history artefact because that is where it appeared.
 ///
-/// **PIE == shipping is unaffected and is not this arm.** That claim compares a
-/// cooked pack with the PIE payload — two `RuntimeSim`s built the same way — and
-/// it is byte-exact over the whole course, ragdoll included. What is bounded
-/// here is the *editor preview* against a build, and what the bound says is:
-/// identical until something dynamic exists, and the same **behaviour** after.
+/// `SimSession::gravity_of` is the one rule both hosts now read a document with
+/// (see `inf_physics::WorldGravity`), and with it the divergence is **not
+/// bounded, it is absent**: `first differing step: None` over the whole 4 900,
+/// through the ragdoll, a 110 m drive on a dynamic vehicle and a flight.
+/// `probe_host_divergence` is the measurement, kept.
 ///
-/// Carried to P29.7 with a name: either both hosts build their physics world
-/// through one construction sequence, or a dynamic solve is host-local and the
-/// editor's preview of one is an approximation. Choosing is a design decision,
-/// not a fix.
+/// So the arm is its own opposite now — and that is the point of writing a bound
+/// down rather than tolerating one: a bound with a wrong cause attached is a
+/// defect wearing a design decision's clothes.
 #[test]
 fn the_editors_simulate_matches_the_shipped_player() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let pack = cook_course(tmp.path());
     let ship = run_trace(pack_sim(&pack), STEPS);
     let editor = editor_trace(None, STEPS);
+    // Both sides, not one: a vacuous editor trace compared against a vacuous
+    // shipped one is two motionless characters agreeing perfectly.
     assert_not_vacuous(&editor);
+    assert_not_vacuous(&ship);
     let pose = pose_width(&ship);
-    let ragdoll = MovementMode::Ragdoll as u8;
-    let first_ragdoll = ship
-        .iter()
-        .position(|r| r[mode_at(pose)] == ragdoll)
-        .expect("the course ragdolls");
-
-    // ── exact, up to the first dynamic body ──
-    for (i, (s, e)) in ship
-        .iter()
-        .zip(editor.iter())
-        .enumerate()
-        .take(first_ragdoll)
-    {
+    assert_eq!(
+        ship.len(),
+        editor.len(),
+        "the two hosts produced different numbers of steps"
+    );
+    for (i, (s, e)) in ship.iter().zip(editor.iter()).enumerate() {
         assert_eq!(
             s,
             e,
-            "step {i}: the shipped player and the editor's Simulate disagree \
-             BEFORE any dynamic body exists — shipping mode {}, editor mode {}",
+            "step {i}: the shipped player and the editor's Simulate disagree — \
+             shipping mode {}, editor mode {}. The editor's preview is no longer \
+             allowed to differ from the build (P29.7); if this is a gravity or a \
+             seeding difference, the two hosts read it through one door and the \
+             door has moved.",
             s[mode_at(pose)],
             e[mode_at(pose)]
         );
     }
-    assert!(
-        first_ragdoll > 2000,
-        "the exact half covered only {first_ragdoll} steps, which is not the \
-         course"
-    );
-
-    // ── behavioural, after it ──
-    //
-    // The same catalogue, and the same finish. Not the same bytes: see the bound
-    // above.
-    assert_eq!(
-        modes_in(&ship, pose),
-        modes_in(&editor, pose),
-        "the two hosts certified different catalogues"
-    );
+    // …and the run really went all the way, rather than both hosts stopping in
+    // the same place early.
     let float_at = |r: &[u8], k: usize| {
         let o = pose + k * 8;
         f64::from_bits(u64::from_le_bytes(r[o..o + 8].try_into().unwrap()))
     };
-    let end_gap = (0..3)
-        .map(|k| {
-            let (a, b) = (
-                float_at(&ship[ship.len() - 1], k),
-                float_at(&editor[editor.len() - 1], k),
-            );
-            (a - b) * (a - b)
-        })
-        .sum::<f64>()
-        .sqrt();
-    assert!(
-        end_gap < 2.0,
-        "the two hosts finished the course {end_gap:.3} m apart — that is not a \
-         rounding difference amplified by a ragdoll, it is a different run"
-    );
-    // …and they both finished it, rather than both stopping early in the same
-    // place.
     let far = float_at(&ship[ship.len() - 1], 2);
     assert!(
-        far > 110.0,
-        "the shipped run ended at z = {far:.1}, short of the pool — the arm above \
-         is comparing two characters that never got there"
+        far > 300.0,
+        "the shipped run ended at z = {far:.1}, short of the apron — the \
+         comparison above is two characters that never got there"
     );
 }
 
@@ -1158,6 +1272,18 @@ fn the_editors_simulate_matches_the_shipped_player() {
 /// choice on the second pass (an id, an order, a derived byte) would produce a
 /// pack that plays differently, and every gate that compared one machine with
 /// itself would go on passing.
+///
+/// # The bound the P29.6 audit named, and where it is closed
+///
+/// The two cooks below are two temp directories **in one process**, so every
+/// `OnceLock` pool and in-memory cache is shared between them — the
+/// subprocess-pool law, unmet. Closing it needs a binary that can cook, and the
+/// shipped player deliberately is not one (`inf-packager` is a dev-dependency
+/// here, so a player never links the cook pipeline). So the subprocess pair
+/// lives beside the binary that can: `tools/inf-cli/tests/cook_determinism.rs`
+/// spawns `inf cook` **twice, in two processes**, over this same committed
+/// sample, and compares the pack and manifest BYTES — which is the stronger
+/// claim, and the one this arm's trace comparison rests on.
 #[test]
 fn the_course_replays_bit_identically_across_two_independent_cooks() {
     let a = tempfile::tempdir().expect("tempdir a");
@@ -1855,32 +1981,45 @@ fn the_committed_clips_are_derived_and_the_machine_is_proposed() {
     );
 }
 
-// ── (g) the refusals P29.7 owns ─────────────────────────────────────────────
+// ── (g) what still refuses ──────────────────────────────────────────────────
 
-/// `Driving` and `Flying` are **typed refusals**, by name, until P29.7.
+/// The **reserved slots** are typed refusals, by name.
 ///
 /// # What this arm is, and what it is not (P29.6 audit, A3)
 ///
 /// A **unit** check on `request_mode`, the one door a mode change goes through,
-/// asked from every legal starting mode. The first cut's doc claimed "the course
-/// proves it with a live character rather than with a unit fixture" while the
-/// body was one hard-coded call — the claim and the code disagreed, and the code
-/// was the honest half: a course cannot demonstrate that a mode is *unreachable*
-/// by visiting it.
+/// asked from every mode a character can actually be in. A course cannot
+/// demonstrate that a mode is *unreachable* by visiting it, which is why this is
+/// a unit arm and says so.
+///
+/// # What P29.7 changed
+///
+/// This arm used to name `Driving` and `Flying`. Both have their mechanics now
+/// and the course forces them, so the refusal it asserts is the one that never
+/// expires: a **reserved slot** is a mode a NEWER build wrote into a file this
+/// one is reading, and refusing it by name is the whole reason the enum was
+/// frozen with four spare rows in P29.3. The arm is stronger for it — a
+/// sub-phase refusal is a note to a future wave, and this is a compatibility
+/// contract.
 ///
 /// What ties it to the course is `refused_modes()`: the same `match` that says
-/// these two are exempt from the twelve-mode obligation says they refuse here,
-/// so the exemption and the refusal cannot drift apart.
+/// these four are exempt from the fourteen-mode obligation says they refuse
+/// here, so the exemption and the refusal cannot drift apart.
 #[test]
-fn driving_and_flying_are_refusals_with_the_wave_that_owns_them_named() {
+fn a_reserved_slot_is_a_refusal_with_no_way_in() {
     let refused = refused_modes();
     assert_eq!(
         refused.len(),
-        2,
-        "the exemption list moved: {refused:?} — the twelve-mode obligation and \
-         this arm read the same `match`, so it must be Driving and Flying"
+        4,
+        "the exemption list moved: {refused:?} — the fourteen-mode obligation \
+         and this arm read the same `match`, so it must be the reserved slots"
     );
     for mode in refused {
+        assert!(
+            mode.reserved_slot().is_some(),
+            "{mode:?} is exempt from the course but is not a reserved slot — a \
+             mode with mechanics that nothing forces is a hole in the catalogue"
+        );
         // From EVERY mode a character can actually be in, not just from
         // `Grounded`: a refusal that only holds on one row of the transition
         // table is a refusal with a way in.
@@ -1888,17 +2027,221 @@ fn driving_and_flying_are_refusals_with_the_wave_that_owns_them_named() {
             let verdict = inf_ecs::movement::request_mode(from, mode, true, true);
             assert_ne!(
                 verdict.mode, mode,
-                "{mode:?} was entered from {from:?}; P29.7 owns its mechanics \
-                 and this wave ships a refusal"
+                "{mode:?} was entered from {from:?}; a reserved slot has no \
+                 mechanics in any build that can read it"
             );
             assert!(
                 matches!(verdict.refusal, MovementRefusal::ModeNotYetImplemented),
-                "{mode:?} from {from:?} refused with {:?}, which does not name \
-                 the wave that owns it",
+                "{mode:?} from {from:?} refused with {:?}, which does not say \
+                 that this build has no mechanics for it",
                 verdict.refusal
             );
         }
     }
+}
+
+// ── (h) the REAL `--pie` subprocess ─────────────────────────────────────────
+
+/// How many frames the real subprocess is asked for.
+///
+/// The whole of **its own** run, not a prefix of the course: a `--pie` boot is
+/// step-driven and the protocol carries no input, so what this arm compares is
+/// an *undriven* six hundred steps against the in-process reference for exactly
+/// the same six hundred. That is not a weaker claim than it sounds — see the
+/// arm's docs for what an undriven course still simulates now that it has a
+/// vehicle in it.
+const PIE_FRAMES: u32 = 600;
+
+/// **The real player binary, in `--pie` mode, over the committed course**
+/// (P29.7, closing the P29.6 audit's second coverage gap).
+///
+/// Every phase gate since P21 spawns one and this one did not. The claim is the
+/// P21.4 law's: *a boot path that forgets an attachment does not crash, it
+/// agrees with itself.* `pie_equals_shipping_on_the_pose_and_mode_trace` compares
+/// two `RuntimeSim`s built in **this** process; if the shipped `--pie` binary's
+/// own boot dropped the skeletons, the clips, the machine or the terrain, both
+/// of those would still agree and the build would be broken.
+///
+/// # Why an undriven run is a real test here
+///
+/// The protocol has no input-carrying `Step`, so the subprocess runs with
+/// `RuntimeInput::default()` and the in-process reference (`scene_trace`) does
+/// the same. Before this wave that meant a character standing still. It does not
+/// now: the course carries a **dynamic vehicle**, and six hundred undriven steps
+/// are six hundred steps of a 1 200 kg rig settling onto four springs, which is
+/// the most divergence-sensitive thing in the level. The anti-vacuity assert
+/// below is what makes that a claim rather than a hope.
+#[test]
+fn the_real_pie_subprocess_matches_the_in_process_reference() {
+    let payload = course_payload(None);
+    let want = inf_player::scene_trace(&payload, u64::from(PIE_FRAMES))
+        .expect("the in-process reference boots");
+    assert_eq!(want.len(), PIE_FRAMES as usize);
+    // **The reference must actually move.** A world that hashed the same every
+    // step would make the comparison below a comparison of two constants — the
+    // P22 lesson, and the reason the vehicle matters here.
+    assert!(
+        want.windows(2).any(|w| w[0] != w[1]),
+        "the undriven course never changed state, so this arm compares two \
+         constants"
+    );
+
+    let mut session = inf_editor_core::pie::PieSession::spawn_scene(
+        &PathBuf::from(env!("CARGO_BIN_EXE_inf-player")),
+        &payload,
+    )
+    .expect("the player spawns in --pie mode");
+    session.step(PIE_FRAMES).expect("the session steps");
+    let mut got: Vec<u64> = Vec::with_capacity(PIE_FRAMES as usize);
+    for i in 0..PIE_FRAMES {
+        let ev = session
+            .wait_for(std::time::Duration::from_secs(30), |e| {
+                matches!(e, inf_runtime::pie::PlayerToEditor::Frame { .. })
+            })
+            .unwrap_or_else(|| panic!("no frame {i} from the --pie subprocess"));
+        if let inf_runtime::pie::PlayerToEditor::Frame { state_hash, .. } = ev {
+            got.push(state_hash);
+        }
+    }
+    session
+        .stop(std::time::Duration::from_secs(10))
+        .expect("graceful stop");
+    assert_eq!(
+        got, want,
+        "the real --pie subprocess and the in-process reference diverged — one \
+         of the two boot paths is missing an attachment"
+    );
+}
+
+// ── (i) the committed vehicle ───────────────────────────────────────────────
+
+/// **The committed car is a rig the engine recognises**, and the recogniser is
+/// the one the sample generator wrote it with (P29.7).
+///
+/// There is no `Vehicle` component and this wave added no scene field: a chassis
+/// is a dynamic body with a collider and a wheel is a direct child carrying a
+/// sphere `Collider3D` with `sensor: true` and no body of its own. If those two
+/// sentences ever stop being true of the committed bytes, the level still loads
+/// and the car is scenery — silently, which is what this arm exists for.
+#[test]
+fn the_committed_car_is_a_rig_the_engine_recognises() {
+    let doc = course_doc();
+    let rig = inf_ecs::vehicle::rig_of(doc.world(), samples::phase29_car())
+        .expect("the committed chassis derives a vehicle rig");
+    let mut want: Vec<Uuid> = samples::phase29_wheels().to_vec();
+    want.sort_unstable();
+    let got: Vec<Uuid> = rig.wheels.iter().map(|w| w.guid).collect();
+    assert_eq!(got, want, "the rig's wheels are not the sample's four");
+    for w in &rig.wheels {
+        assert!(
+            (w.radius_m - samples::PHASE29_WHEEL_RADIUS_M).abs() < 1e-12,
+            "wheel {} has radius {}",
+            w.guid,
+            w.radius_m
+        );
+    }
+    // Two steer, two do not — the sign test `WheelMount::steered` makes, over
+    // the mounts the level actually carries.
+    assert_eq!(
+        rig.wheels.iter().filter(|w| w.steered()).count(),
+        2,
+        "a car with four steering wheels is a different vehicle class"
+    );
+    // The seat is the chassis collider's top face, so a driver's FEET land on
+    // the bodywork rather than its middle.
+    assert!(
+        (rig.seat_local.y - samples::PHASE29_CAR_HALF.y).abs() < 1e-12,
+        "the seat is at {} and the chassis half-height is {}",
+        rig.seat_local.y,
+        samples::PHASE29_CAR_HALF.y
+    );
+    // …and the car is authored with a real mass. rapier's 1.0 placeholder would
+    // make this 4 x 1 x 2 m body weigh eight kilograms (the fifth catch of that
+    // law in this repository).
+    let e = doc.entity_of(samples::phase29_car()).expect("the car");
+    let col = doc
+        .world()
+        .world()
+        .get::<Collider3D>(e)
+        .expect("the chassis collider");
+    assert!(
+        col.density > 100.0,
+        "the chassis density is {} kg/m3 — that is rapier's placeholder",
+        col.density
+    );
+}
+
+/// **The drive segment really drove**, and the car carried its driver.
+///
+/// The (pose, mode) trace certifies that `Driving` was entered and held; it
+/// cannot say the car moved, because the record is the character's and a
+/// character glued to a stationary seat traces exactly like a character glued to
+/// a moving one. So this arm asks the **world** where the car ended up.
+#[test]
+fn the_course_drives_the_car_and_flies_the_character() {
+    let mut sim = pie_sim(None);
+    let start = car_z(sim.world());
+    let mut driver = Driver::default();
+    let mut driving = 0u32;
+    let mut flying = 0u32;
+    let mut peak_air = f64::MIN;
+    for _ in 0..STEPS {
+        let (z, mode, grounded) = state_of(sim.world());
+        let (held, ax) = driver.step(z, mode, grounded);
+        sim.step_once(RuntimeInput::with_down(held).with_axes(ax));
+        match state_of(sim.world()).1 {
+            MovementMode::Driving => driving += 1,
+            MovementMode::Flying => {
+                flying += 1;
+                peak_air = peak_air.max(hero_y(sim.world()));
+            }
+            _ => {}
+        }
+    }
+    let travelled = car_z(sim.world()) - start;
+    assert!(
+        travelled > 90.0,
+        "the car moved {travelled:.1} m — the drive segment is a character \
+         sitting on a parked vehicle"
+    );
+    assert!(
+        driving > 300,
+        "only {driving} steps of Driving, which is not a circuit"
+    );
+    assert!(
+        flying > 200,
+        "only {flying} steps of Flying, which is not a flight"
+    );
+    // The flight left the ground by more than a jump ever could: the course's
+    // own jump apex is under a metre, and a `FallFree` cannot hold altitude.
+    assert!(
+        peak_air > 3.0,
+        "the flight peaked at y = {peak_air:.2}, which is a jump"
+    );
+    // …and the driver ended the course on the apron, on its feet, having got out
+    // of the car and back down again.
+    let (z, mode, grounded) = state_of(sim.world());
+    assert!(z > 300.0, "the character finished at z = {z:.1}");
+    assert_eq!(mode, MovementMode::Grounded);
+    assert!(grounded);
+}
+
+/// The car's world `z`.
+fn car_z(world: &EcsWorld) -> f64 {
+    world
+        .entity_of(samples::phase29_car())
+        .and_then(|e| world.world().get::<Transform>(e))
+        .map(|t| t.translation.z)
+        .expect("the committed car is in the world")
+}
+
+/// The character's world `y`.
+fn hero_y(world: &EcsWorld) -> f64 {
+    world
+        .entity_of(hero())
+        .and_then(|e| world.world().get::<Transform>(e))
+        .map(|t| t.translation.y)
+        .unwrap_or(f64::MIN)
 }
 
 // ── the fixture's own integrity ─────────────────────────────────────────────
@@ -1916,5 +2259,32 @@ fn the_fixture_copies_every_committed_sample_file() {
         listed, on_disk,
         "the sample folder and this file's list have drifted — a file the cook \
          never sees is a file the shipping side is missing"
+    );
+}
+
+#[test]
+#[ignore = "the divergence probe: where do the editor and the shipped player part?"]
+fn probe_host_divergence() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pack = cook_course(tmp.path());
+    let ship = run_trace(pack_sim(&pack), STEPS);
+    let editor = editor_trace(None, STEPS);
+    let pose = pose_width(&ship);
+    let ragdoll = MovementMode::Ragdoll as u8;
+    let first_ragdoll = ship.iter().position(|r| r[mode_at(pose)] == ragdoll);
+    let first_diff = ship.iter().zip(editor.iter()).position(|(a, b)| a != b);
+    eprintln!("first ragdoll step: {first_ragdoll:?}");
+    eprintln!("first differing step: {first_diff:?}");
+    if let Some(i) = first_diff {
+        eprintln!(
+            "  shipping mode {} editor mode {}",
+            ship[i][mode_at(pose)],
+            editor[i][mode_at(pose)]
+        );
+    }
+    let drive = MovementMode::Driving as u8;
+    eprintln!(
+        "first driving step: {:?}",
+        ship.iter().position(|r| r[mode_at(pose)] == drive)
     );
 }

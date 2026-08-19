@@ -1388,13 +1388,17 @@ export const sim = {
    * **Queue a live tuning edit** (P29.5, pillar S4). It applies at the top of
    * the NEXT fixed step, never inside one. `kind` is `"field"` (a reflected
    * component field -- `typePath` defaults to `CharacterMovement`), `"param"` (a
-   * machine parameter) or `"trigger"` (a machine trigger; `value` is ignored).
-   * `keep` chooses whether the value survives Stop as an ordinary undoable edit.
-   * Resolves to whether a session was running -- `false` is a value, not an
-   * error, because a tuning panel is live over a session the author can stop.
+   * machine parameter), `"trigger"` (a machine trigger; `value` is ignored),
+   * `"vehicle"` (a raycast vehicle's spring/engine/grip tunables, by the chassis
+   * guid) or `"camera"` (the locomotion camera's table; it has no entity, so
+   * pass a nil guid). `keep` chooses whether the value survives Stop as an
+   * ordinary undoable edit, and is ignored by the three kinds with no document
+   * field to keep it on. Resolves to whether a session was running -- `false` is
+   * a value, not an error, because a tuning panel is live over a session the
+   * author can stop.
    */
   tune: (
-    kind: "field" | "param" | "trigger",
+    kind: "field" | "param" | "trigger" | "vehicle" | "camera",
     guid: string,
     name: string,
     value: number,

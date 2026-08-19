@@ -472,3 +472,179 @@ fn a_tune_with_a_bad_field_is_a_value_and_the_step_still_runs() {
     }
     assert!(pos(&doc).length() > 0.1, "{:?}", pos(&doc));
 }
+
+// ── the two tunables that are not on the document (P29.7) ───────────────────
+
+const CAR: Uuid = Uuid::from_u128(0x2907_2001);
+const WHEEL: u128 = 0x2907_2010;
+
+/// The floor from [`world`] plus a car: a dynamic box on four sphere sensors,
+/// which is what `inf_ecs::vehicle`'s recogniser calls a vehicle.
+fn world_with_a_car() -> SceneDoc {
+    let mut doc = world();
+    let e = doc.create_with_guid(CAR, SpawnKind::Empty, "Car", None);
+    let mut t = inf_ecs::components::Transform::IDENTITY;
+    // Wheels at -0.5 with a 0.35 radius, so the rig is authored resting on the
+    // floor with its suspension fully extended.
+    t.translation = Vec3d::new(6.0, 0.85, 0.0);
+    doc.world_mut().world_mut().entity_mut(e).insert((
+        t,
+        inf_ecs::components::RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            angular_damping: 0.5,
+            ..Default::default()
+        },
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(2.0, 0.5, 1.0),
+            density: 150.0,
+            ..Default::default()
+        },
+    ));
+    for (i, (x, z)) in [(-0.9, 1.4), (0.9, 1.4), (-0.9, -1.4), (0.9, -1.4)]
+        .into_iter()
+        .enumerate()
+    {
+        let w = doc.create_with_guid(
+            Uuid::from_u128(WHEEL + i as u128),
+            SpawnKind::Empty,
+            "Wheel",
+            Some(CAR),
+        );
+        let mut wt = inf_ecs::components::Transform::IDENTITY;
+        wt.translation = Vec3d::new(x, -0.5, z);
+        doc.world_mut().world_mut().entity_mut(w).insert((
+            wt,
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Sphere,
+                radius: 0.35,
+                sensor: true,
+                ..Default::default()
+            },
+        ));
+    }
+    doc.world_mut().mark_dirty();
+    doc.world_mut().propagate();
+    doc
+}
+
+fn car_y(doc: &SceneDoc) -> f64 {
+    let e = doc.entity_of(CAR).expect("car");
+    doc.world()
+        .world()
+        .get::<inf_ecs::components::Transform>(e)
+        .expect("transform")
+        .translation
+        .y
+}
+
+/// **A vehicle tunable reaches the running vehicle**, and the claim is the
+/// world: a spring rate an author dials up holds the chassis measurably higher.
+///
+/// A vehicle is not a component — the rig is derived and the tunables live on
+/// the running vehicle, which is a play-session thing exactly as a ragdoll's
+/// bodies are — so this cannot go through `Tune::Field` and the arm is what says
+/// the other door works.
+#[test]
+fn a_vehicle_tune_reaches_the_running_vehicle_and_changes_the_world() {
+    let run = |stiffness: Option<f64>| -> f64 {
+        let mut doc = world_with_a_car();
+        let mut sim = session(&mut doc);
+        if let Some(k) = stiffness {
+            sim.tune(
+                Tune::Vehicle {
+                    guid: CAR,
+                    name: "stiffness_n_per_m".to_string(),
+                    value: k,
+                },
+                TuneScope::Session,
+            );
+        }
+        for _ in 0..300 {
+            sim.step_once(&mut doc, SimInput::default());
+        }
+        let y = car_y(&doc);
+        sim.exit(&mut doc);
+        y
+    };
+    let stock = run(None);
+    let stiff = run(Some(200_000.0));
+    assert!(
+        stiff > stock + 0.05,
+        "a ten-times stiffer spring settled the chassis at {stiff} m against {stock} m"
+    );
+    // …and a name the door does not know is a refusal, not a panic.
+    let mut doc = world_with_a_car();
+    let mut sim = session(&mut doc);
+    sim.tune(
+        Tune::Vehicle {
+            guid: CAR,
+            name: "stiffness".to_string(),
+            value: 1.0,
+        },
+        TuneScope::Keep,
+    );
+    sim.step_once(&mut doc, SimInput::default());
+    assert_eq!(sim.pending_tunes(), 0, "the queue drains either way");
+    assert!(
+        sim.kept_tunes().is_empty(),
+        "a REFUSED tune is not recorded at all — the queue only keeps what applied"
+    );
+    sim.exit(&mut doc);
+}
+
+/// **A camera tunable reaches the camera's table** — the P29.6 remainder that
+/// said "live-tunable through P29.5's door" was true of the tuning *type* and
+/// not yet of the queue.
+#[test]
+fn a_camera_tune_reaches_the_camera_through_the_queue() {
+    let mut doc = world_with_a_car();
+    let mut sim = session(&mut doc);
+    for _ in 0..30 {
+        sim.step_once(&mut doc, forward());
+    }
+    let before = sim.camera().tuning.velocity_direction.run.arm_length_m;
+    sim.tune(
+        Tune::Camera {
+            name: "run.arm_length_m".to_string(),
+            value: before + 4.0,
+        },
+        TuneScope::Keep,
+    );
+    assert_eq!(
+        sim.camera().tuning.velocity_direction.run.arm_length_m,
+        before,
+        "a queued tune must not land before the next fixed step"
+    );
+    sim.step_once(&mut doc, forward());
+    assert!(
+        (sim.camera().tuning.velocity_direction.run.arm_length_m - (before + 4.0)).abs() < 1e-9,
+        "the camera table did not take the tune"
+    );
+    // A gait block edits both rotation modes at once, which is `CameraTuning`'s
+    // own rule and not this door's — asserted here so the door is known to be a
+    // pass-through rather than a second copy of that rule.
+    assert!((sim.camera().tuning.looking_direction.run.arm_length_m - (before + 4.0)).abs() < 1e-9);
+    // Nothing about a camera can be KEPT: there is no document field for it, and
+    // `TuneScope::Keep`'s own doc says a `Keep` on such a tune is applied and
+    // not kept — which `kept_edits` says by returning nothing rather than by
+    // failing. (The raw queue does record it; the filter is the contract.)
+    assert!(
+        inf_editor_core::tuning::kept_edits(sim.kept_tunes()).is_empty(),
+        "a camera tune reached the document commit"
+    );
+    // …and an unknown name is a refusal.
+    sim.tune(
+        Tune::Camera {
+            name: "run.arm_length".to_string(),
+            value: 1.0,
+        },
+        TuneScope::Session,
+    );
+    sim.step_once(&mut doc, forward());
+    assert!(
+        (sim.camera().tuning.velocity_direction.run.arm_length_m - (before + 4.0)).abs() < 1e-9,
+        "a near-miss name was guessed at instead of refused"
+    );
+    sim.exit(&mut doc);
+}

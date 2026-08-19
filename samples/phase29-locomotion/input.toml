@@ -18,6 +18,24 @@ Key = "KeyS"
 [[actions.down]]
 Key = "ArrowDown"
 
+[[actions.fly]]
+Key = "KeyV"
+
+[[actions.fly]]
+GamepadButton = "West"
+
+[[actions.handbrake]]
+Key = "Space"
+
+[[actions.handbrake]]
+GamepadButton = "South"
+
+[[actions.interact]]
+Key = "KeyE"
+
+[[actions.interact]]
+GamepadButton = "North"
+
 [[actions.jump]]
 Key = "Space"
 

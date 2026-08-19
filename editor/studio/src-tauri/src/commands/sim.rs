@@ -537,10 +537,14 @@ pub async fn sim_set_debug(
 /// `State` lookup, per the typed-IPC law. It applies at the top of the **next**
 /// fixed step, never inside one.
 ///
-/// `kind` is `"field"`, `"param"` or `"trigger"`. For `"field"`, `name` is the
-/// reflect access path and `type_path` names the component (defaulting to
-/// `CharacterMovement`, which is what a movement tuner edits). `keep` chooses
-/// whether the value survives Stop.
+/// `kind` is `"field"`, `"param"`, `"trigger"`, `"vehicle"` or `"camera"`. For
+/// `"field"`, `name` is the reflect access path and `type_path` names the
+/// component (defaulting to `CharacterMovement`, which is what a movement tuner
+/// edits). `keep` chooses whether the value survives Stop — and is ignored by
+/// the three kinds that have no document field to keep it on.
+///
+/// `"camera"` takes no entity, so its `guid` is not read; passing a nil one is
+/// the honest call.
 ///
 /// Returns `false` when no session is running, which is a **value**: a tuning
 /// panel is live over a session the author can stop at any moment, and a toast
@@ -555,7 +559,11 @@ pub async fn sim_tune(
     type_path: Option<String>,
     keep: bool,
 ) -> Result<bool, String> {
-    let guid: uuid::Uuid = guid.parse().map_err(|e| format!("bad guid: {e}"))?;
+    let guid: uuid::Uuid = if kind == "camera" {
+        uuid::Uuid::nil()
+    } else {
+        guid.parse().map_err(|e| format!("bad guid: {e}"))?
+    };
     if name.trim().is_empty() {
         return Err("a tune needs a field or parameter name".to_string());
     }
@@ -569,9 +577,11 @@ pub async fn sim_tune(
         },
         "param" => inf_editor_core::tuning::Tune::Param { guid, name, value },
         "trigger" => inf_editor_core::tuning::Tune::Trigger { guid, name },
+        "vehicle" => inf_editor_core::tuning::Tune::Vehicle { guid, name, value },
+        "camera" => inf_editor_core::tuning::Tune::Camera { name, value },
         other => {
             return Err(format!(
-                "unknown tune kind `{other}` (expected field, param or trigger)"
+                "unknown tune kind `{other}` (expected field, param, trigger, vehicle or camera)"
             ))
         }
     };

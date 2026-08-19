@@ -635,7 +635,23 @@ impl SimSession {
             return;
         }
         for (tune, scope) in std::mem::take(&mut self.pending_tunes) {
-            if !crate::tuning::apply_tune(doc, &tune) {
+            // ── P29.7 ── The two tunables that are not on the document: a
+            //    vehicle lives on the physics bridge (a play-session thing, like
+            //    a ragdoll's bodies) and the camera is a host-owned field here
+            //    (Ruling 4: never a component and never a resource). Both are
+            //    session-scoped by construction — there is no document field for
+            //    a `Keep` to land on — and both answer with a value rather than
+            //    failing, which is what `CameraTuning::set` already promised.
+            let applied = match &tune {
+                crate::tuning::Tune::Vehicle { guid, name, value } => self
+                    .bridge3d
+                    .vehicle_mut(*guid)
+                    .map(|v| v.tune(name, *value))
+                    .unwrap_or(false),
+                crate::tuning::Tune::Camera { name, value } => self.camera.tuning.set(name, *value),
+                _ => crate::tuning::apply_tune(doc, &tune),
+            };
+            if !applied {
                 continue;
             }
             if scope == crate::tuning::TuneScope::Keep {

@@ -87,15 +87,41 @@ pub enum Tune {
     /// kit gives: a trigger is an *event* and is edge-detected, so "set the
     /// variable to 1" fires once for two presses one step apart.
     Trigger { guid: Uuid, name: String },
+    /// A **vehicle** tunable, by name (P29.7) — spring rate, engine force,
+    /// grip, steer limit; see `inf_ecs::vehicle::VehicleTuning::names`.
+    ///
+    /// Not a [`Field`](Self::Field) because a vehicle is not a component: the
+    /// rig is derived from the scene and its tunables live on the running
+    /// vehicle, which is a play-session thing exactly as a ragdoll's bodies are.
+    /// So it is a session tune with no `Keep` half — there is no document field
+    /// for a kept value to land on, and [`kept_edits`] says so by returning
+    /// nothing rather than by failing.
+    Vehicle {
+        guid: Uuid,
+        name: String,
+        value: f64,
+    },
+    /// A **camera** tunable, by name (P29.7) — `CameraTuning::set`'s vocabulary
+    /// (`run.arm_length_m`, `collision_radius_m`, …).
+    ///
+    /// The camera is a **host-owned** field on the session and never a component
+    /// or a resource (Ruling 4), so this one cannot go through
+    /// [`apply_tune`]'s document either; `SimSession` applies it in the same
+    /// drain. It closes the P29.6 remainder that said "live-tunable through
+    /// P29.5's door" was true of the tuning *type* and not yet of the queue.
+    Camera { name: String, value: f64 },
 }
 
 impl Tune {
     /// The entity this tune is about.
     pub fn guid(&self) -> Uuid {
         match self {
-            Tune::Field { guid, .. } | Tune::Param { guid, .. } | Tune::Trigger { guid, .. } => {
-                *guid
-            }
+            Tune::Field { guid, .. }
+            | Tune::Param { guid, .. }
+            | Tune::Trigger { guid, .. }
+            | Tune::Vehicle { guid, .. } => *guid,
+            // The camera is one per session and belongs to no entity.
+            Tune::Camera { .. } => Uuid::nil(),
         }
     }
 
@@ -153,6 +179,11 @@ pub fn apply_tune(doc: &mut SceneDoc, tune: &Tune) -> bool {
             inf_ecs::set_anim_param(doc.world_mut(), *guid, name, *value)
         }
         Tune::Trigger { guid, name } => inf_ecs::set_anim_trigger(doc.world_mut(), *guid, name),
+        // Neither of these lives on the document: a vehicle is on the physics
+        // bridge and the camera is a field on the session. `SimSession` applies
+        // them in the same drain, and this door answers `false` so a caller that
+        // reached the wrong one is told rather than silently obeyed.
+        Tune::Vehicle { .. } | Tune::Camera { .. } => false,
     }
 }
 
