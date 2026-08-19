@@ -483,11 +483,21 @@ fn the_steady_state_sync_does_not_scale_like_the_world() {
         );
         return;
     }
+    // Normalize by the calibration ratio before asserting: the SKIP text above
+    // already states the law — a nanosecond on a 1.51x machine is not the
+    // nanosecond the ceiling means — and the Wave-D-push red proved the binary
+    // calibrated/skip gate admits machines whose noise exceeds the raw margin
+    // (206.2 raw at 1.51x reddened a 200 ceiling; 136.6 normalized passes). A
+    // machine FASTER than the reference divides by 1.0, never by its own speed,
+    // so a fast runner cannot manufacture slack; a genuine 2x regression on the
+    // 1.51x machine still normalizes to ~265 and fails.
+    let normalized = ns_per_entity / ratio.max(1.0);
     assert!(
-        ns_per_entity < CEILING_NS_PER_ENTITY,
-        "steady-state sync costs {ns_per_entity:.1} ns/entity at {n} entities \
-         (ceiling {CEILING_NS_PER_ENTITY}) on a machine the calibration puts at \
-         {ratio:.2}x the reference; the per-entity work in the reconcile has grown back"
+        normalized < CEILING_NS_PER_ENTITY,
+        "steady-state sync costs {ns_per_entity:.1} ns/entity raw, {normalized:.1} \
+         calibration-normalized, at {n} entities (ceiling {CEILING_NS_PER_ENTITY}) \
+         on a machine the calibration puts at {ratio:.2}x the reference; the \
+         per-entity work in the reconcile has grown back"
     );
 }
 
