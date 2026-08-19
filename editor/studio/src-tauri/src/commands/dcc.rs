@@ -2220,6 +2220,102 @@ fn chain_refusals(settled: Option<String>, why: String) -> String {
 /// One frame of the **2D UV view**: the charts, the wireframe, the seams and the
 /// shared selection, composited on the CPU and encoded like the 3D preview.
 ///
+/// **Pick in the UV pane** (Wave D) — the vertex whose nearest corner is under
+/// the pointer, in the pane's own pixel space.
+///
+/// The UV view has been a handler-less `<img>` since P23.5. It answers with a
+/// *vertex* because the selection is shared with the 3D view: a pick that
+/// answered in corners would give the two pictures two different ideas of what
+/// is selected. The rule and the pixel arithmetic are `dcc::pick_uv`, in Ring 1,
+/// inverse to the same `to_px` the layout is drawn with — so what lights up is
+/// what was clicked, by construction rather than by agreement.
+#[tauri::command]
+pub async fn dcc_uv_pick(
+    id: String,
+    x: f64,
+    y: f64,
+    size: u32,
+    additive: bool,
+    state: State<'_, DccState>,
+) -> Result<DccDocDto, String> {
+    state.with(|s| {
+        let (doc, session) = s.pair(&id)?;
+        // This door answers with a bare `DccDocDto`, which has nowhere to
+        // carry a refusal; `settle_reported` has already said it out loud.
+        let _ = settle_reported(doc, session, "dcc_uv_pick");
+        sync(doc, session);
+        let hit = dcc::pick_uv(session.mesh(), size.max(1), x as f32, y as f32);
+        if !additive {
+            doc.selection.clear();
+            doc.knife.clear();
+        }
+        if let Some(v) = hit {
+            // Written in VERTEX terms whatever the mode is, then converted — the
+            // selection's own door. A UV pick in face mode selecting nothing
+            // would be a pane that looks interactive and is not.
+            let was = doc.mode;
+            doc.mode = SelectMode::Vert;
+            doc.selection.set_vert(v, true);
+            if was != SelectMode::Vert {
+                doc.selection.convert(session.mesh(), SelectMode::Vert, was);
+                doc.mode = was;
+            }
+            doc.active = session.mesh().position(v).filter(|p| p.is_finite());
+        }
+        Ok(doc_dto(doc, session))
+    })
+}
+
+/// **Drag the selection in the UV pane** (Wave D) — one journal entry for the
+/// whole gesture.
+///
+/// The delta arrives in pane pixels; `dcc::uv_move_corners` converts it and
+/// resolves which corners move (every corner of every selected vertex, including
+/// the ones in other charts — a vertex cut by a seam has one per chart, and
+/// moving some of them is how a seam becomes a tear).
+#[tauri::command]
+pub async fn dcc_uv_move(
+    app: AppHandle,
+    id: String,
+    dx: f64,
+    dy: f64,
+    size: u32,
+    state: State<'_, DccState>,
+) -> Result<DccApplyDto, String> {
+    let out = state.with(|s| {
+        let (doc, session) = s.pair(&id)?;
+        let settled = settle_reported(doc, session, "dcc_uv_move");
+        sync(doc, session);
+        let corners = dcc::uv_move_corners(
+            session.mesh(),
+            &doc.selection,
+            doc.mode,
+            size.max(1),
+            dx,
+            dy,
+        );
+        if corners.is_empty() {
+            return Ok(DccApplyDto {
+                ok: settled.is_none(),
+                refusal: settled,
+                doc: doc_dto(doc, session),
+            });
+        }
+        let refusal = match session.apply(Op::MoveUvs { corners }) {
+            Ok(_) => settled,
+            Err(e) => Some(chain_refusals(settled, refusal_text(&e))),
+        };
+        sync(doc, session);
+        Ok(DccApplyDto {
+            ok: refusal.is_none(),
+            refusal,
+            doc: doc_dto(doc, session),
+        })
+    })?;
+    let _ = app.emit("dcc://sync", id);
+    Ok(out)
+}
+
 /// No GPU at all — a UV layout is flat lines on a flat square — which is why this
 /// one cannot report "no adapter" and always has an image.
 #[tauri::command]
@@ -2929,7 +3025,7 @@ mod tests {
     /// Hand-written on purpose: a table derived from the code would agree with the
     /// code by construction and prove nothing. This is the decision, written down
     /// once, and the gate holds the code to it.
-    const DRAG_POLICY: [(&str, DragPolicy); 27] = [
+    const DRAG_POLICY: [(&str, DragPolicy); 29] = [
         ("dcc_open", DragPolicy::NoJournal),
         // Wave D. `dcc_new` touches no existing document at all — it mints one —
         // so there is nothing of the author's in flight for it to settle or
@@ -2944,6 +3040,11 @@ mod tests {
         // the drag away nor be replayed underneath it.
         ("dcc_history", DragPolicy::NoJournal),
         ("dcc_amend", DragPolicy::Settles),
+        // UV-space editing. Both settle, like their 3D twins `dcc_pick` and
+        // `dcc_apply`: an edit in either view is an edit, and a sculpt stroke
+        // still in flight is part of what the author can see.
+        ("dcc_uv_pick", DragPolicy::Settles),
+        ("dcc_uv_move", DragPolicy::Settles),
         ("dcc_close", DragPolicy::Abandons),
         ("dcc_list", DragPolicy::NoJournal),
         ("dcc_apply", DragPolicy::Settles),
@@ -3406,6 +3507,7 @@ mod tests {
             // already put the sentence in the Output Log.
             ("pub async fn dcc_box_select(", "DccDocDto"),
             ("pub async fn dcc_set_view_opts(", "DccDocDto"),
+            ("pub async fn dcc_uv_pick(", "DccDocDto"),
         ];
         for (signature, dto) in dropping {
             let body = code_only(&body_of(SOURCE, signature));

@@ -1116,6 +1116,24 @@ export const dcc = {
    */
   uvPreview: (id: string, size: number): Promise<DccPreviewDto> =>
     invoke<DccPreviewDto>("dcc_uv_preview", { id, size }),
+  /**
+   * **Pick in the UV pane** (Wave D). Answers with the whole document, because a
+   * UV pick changes the SHARED selection — the 3D view lights up too, which is
+   * the point of one selection and two pictures.
+   */
+  uvPick: (
+    id: string,
+    x: number,
+    y: number,
+    size: number,
+    additive: boolean,
+  ): Promise<DccDocDto> => invoke<DccDocDto>("dcc_uv_pick", { id, x, y, size, additive }),
+  /**
+   * **Drag the selection in UV space.** `dx`/`dy` are pane pixels; a drag of
+   * `size` pixels is one whole UV unit. One journal entry per gesture.
+   */
+  uvMove: (id: string, dx: number, dy: number, size: number): Promise<DccApplyDto> =>
+    invoke<DccApplyDto>("dcc_uv_move", { id, dx, dy, size }),
 };
 
 /**

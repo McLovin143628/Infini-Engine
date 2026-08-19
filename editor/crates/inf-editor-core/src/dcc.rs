@@ -1708,6 +1708,108 @@ pub fn shade_edges(
     (sharp, soft)
 }
 
+// ── UV-space editing (Wave D) ──────────────────────────────────────────────
+//
+// The UV pane has been a handler-less `<img>` since P23.5 — "UV-space dragging"
+// is the carried remainder these three close. Everything here works in the pane's
+// own pixel space, which is the inverse of `draw_uv_layout`'s `to_px` and is
+// written once, here, so the picture and the pick cannot disagree (the P23.4
+// rule that put `pick` and `draw_overlay` behind one `Projector`, applied to the
+// second view).
+
+/// The pane pixel a UV lands on. The inverse of [`uv_from_px`].
+fn uv_to_px(uv: [f64; 2], size: f32) -> (f32, f32) {
+    // UV (0,0) is bottom-left; pixel y grows downward — `draw_uv_layout`'s rule.
+    (uv[0] as f32 * size, (1.0 - uv[1] as f32) * size)
+}
+
+/// The UV a pane pixel names.
+pub fn uv_from_px(px: f32, py: f32, size: f32) -> [f64; 2] {
+    [(px / size) as f64, (1.0 - py / size) as f64]
+}
+
+/// **Pick in the UV pane**: the vertex whose nearest corner is under the pointer.
+///
+/// Returns a *vertex*, not a corner, and that is the decision: the selection is
+/// shared with the 3D view, so picking in UV space has to answer in the same
+/// currency or the two pictures would disagree about what is selected. A vertex
+/// on a seam has a corner in each chart it touches; clicking either one selects
+/// the vertex, and a drag then moves **every** corner of it — which is what
+/// "move this vertex in UV space" has to mean when the vertex is cut.
+///
+/// `radius_px` is the same 7-pixel reach [`pick`] uses, for the same reason.
+pub fn pick_uv(mesh: &Mesh, size: u32, px: f32, py: f32) -> Option<VertId> {
+    let s = size.max(1) as f32;
+    let mut best: Option<(f32, VertId)> = None;
+    for h in mesh.half_ids() {
+        if mesh.is_boundary(h) != Some(false) {
+            continue;
+        }
+        let (Some(uv), Some(v)) = (mesh.corner_uv(h), mesh.origin(h)) else {
+            continue;
+        };
+        let (x, y) = uv_to_px(uv, s);
+        let d = ((x - px).powi(2) + (y - py).powi(2)).sqrt();
+        if d > PICK_RADIUS_PX {
+            continue;
+        }
+        // Ties break toward the lower vertex id, so a pick is a pure function of
+        // the mesh rather than of iteration order.
+        if best.is_none_or(|(bd, bv)| (d, v) < (bd, bv)) {
+            best = Some((d, v));
+        }
+    }
+    best.map(|(_, v)| v)
+}
+
+/// **Move the selection's corners in UV space**, as one
+/// [`inf_dcc::Op::MoveUvs`]'s worth of values.
+///
+/// The delta arrives in **pane pixels** and is converted here, because the pane's
+/// size is the panel's business and the op's units are the kernel's. A drag of
+/// `size` pixels is a drag of one whole UV unit, which is what makes the gesture
+/// feel like dragging the picture.
+///
+/// Every corner of every selected vertex moves — including the ones in other
+/// charts. A vertex cut by a seam has a corner per chart, and moving one of them
+/// and not the others is how a seam becomes a tear.
+pub fn uv_move_corners(
+    mesh: &Mesh,
+    selection: &SelectionSet,
+    mode: SelectMode,
+    size: u32,
+    dx_px: f64,
+    dy_px: f64,
+) -> Vec<(HalfId, [f64; 2])> {
+    let s = size.max(1) as f64;
+    let (du, dv) = (dx_px / s, -dy_px / s);
+    if !(du.is_finite() && dv.is_finite()) || (du == 0.0 && dv == 0.0) {
+        return Vec::new();
+    }
+    let verts = selection.resolved_verts(mesh, mode);
+    let mut out: Vec<(HalfId, [f64; 2])> = Vec::new();
+    for v in verts {
+        for &h in mesh.vert_outgoing(v).unwrap_or(&[]) {
+            if mesh.is_boundary(h) != Some(false) {
+                continue;
+            }
+            let Some(uv) = mesh.corner_uv(h) else {
+                continue;
+            };
+            let moved = [uv[0] + du, uv[1] + dv];
+            if !(moved[0].is_finite() && moved[1].is_finite()) {
+                continue;
+            }
+            out.push((h, moved));
+        }
+    }
+    // Sorted by half-edge — the op's wire convention, and what makes two runs of
+    // one drag produce one byte string.
+    out.sort_by_key(|&(h, _)| h);
+    out.dedup_by_key(|&mut (h, _)| h);
+    out
+}
+
 /// **Auto-seam**: every edge whose two faces disagree by more than `angle_deg`,
 /// plus every boundary edge.
 ///
@@ -4675,6 +4777,79 @@ mod tests {
             .expect("a clustering")
             .is_empty());
         assert!(merge_clusters(&m, &ids, f64::NAN).is_err());
+    }
+
+    /// **The UV pane's pick and its drag** — the pixel arithmetic is the inverse
+    /// of the picture's, and the drag moves EVERY corner of a cut vertex.
+    #[test]
+    fn a_uv_pick_finds_the_corner_under_the_pointer_and_a_drag_moves_all_of_them() {
+        // A cube, unwrapped, so its corners are spread over a real atlas.
+        let mut m = cube(2.0);
+        let seams: Vec<HalfId> = auto_seam_edges(&m, 40.0);
+        inf_dcc::ops::apply(
+            &mut m,
+            &Op::SetEdgesSeam {
+                halfs: seams,
+                seam: true,
+            },
+        )
+        .expect("marks");
+        let u = inf_dcc::unwrap(&m).expect("unwraps");
+        inf_dcc::ops::apply(&mut m, &u.op).expect("applies");
+
+        // Round-trip the pixel mapping: a UV converted to pixels and back is the
+        // UV. This is the arithmetic that makes the pick land where the picture
+        // says it is.
+        for uv in [[0.0, 0.0], [1.0, 1.0], [0.25, 0.75]] {
+            let (x, y) = uv_to_px(uv, 256.0);
+            let back = uv_from_px(x, y, 256.0);
+            assert!((back[0] - uv[0]).abs() < 1e-6 && (back[1] - uv[1]).abs() < 1e-6);
+        }
+
+        // Pick at a corner's own pixel and get its vertex back.
+        let h = m
+            .half_ids()
+            .find(|&h| m.is_boundary(h) == Some(false))
+            .expect("a corner");
+        let uv = m.corner_uv(h).expect("a uv");
+        let v = m.origin(h).expect("live");
+        let (x, y) = uv_to_px(uv, 256.0);
+        assert_eq!(pick_uv(&m, 256, x, y), Some(v));
+        // …and a pick in empty space finds nothing rather than the nearest thing.
+        assert_eq!(pick_uv(&m, 256, -500.0, -500.0), None);
+
+        // A drag moves EVERY corner of the selected vertex. On a fully-seamed
+        // cube each vertex is cut into three charts, so this is the case where
+        // moving only one corner would tear the seam.
+        let mut sel = SelectionSet::new(1);
+        sel.set_vert(v, true);
+        let moves = uv_move_corners(&m, &sel, SelectMode::Vert, 256, 25.6, 0.0);
+        let corners_at_v = m
+            .vert_outgoing(v)
+            .unwrap_or(&[])
+            .iter()
+            .filter(|&&h| m.is_boundary(h) == Some(false))
+            .count();
+        assert_eq!(
+            moves.len(),
+            corners_at_v,
+            "a drag must move every corner of the vertex, not one of them"
+        );
+        assert!(corners_at_v > 1, "the fixture must have a CUT vertex");
+        // 25.6 px of 256 is 0.1 of a UV unit, rightward.
+        for (h, uv) in &moves {
+            let was = m.corner_uv(*h).expect("a uv");
+            assert!((uv[0] - was[0] - 0.1).abs() < 1e-9, "{uv:?} vs {was:?}");
+            assert!((uv[1] - was[1]).abs() < 1e-12);
+        }
+        // Sorted by half-edge — the op's wire convention.
+        assert!(moves.windows(2).all(|w| w[0].0 < w[1].0));
+        // …and it applies.
+        inf_dcc::ops::apply(&mut m, &Op::MoveUvs { corners: moves }).expect("the drag applies");
+
+        // A zero drag is nothing, not an empty op.
+        assert!(uv_move_corners(&m, &sel, SelectMode::Vert, 256, 0.0, 0.0).is_empty());
+        assert!(uv_move_corners(&m, &sel, SelectMode::Vert, 256, f64::NAN, 0.0).is_empty());
     }
 
     /// Auto-seam cuts a cube into six charts and leaves a smooth cylinder's

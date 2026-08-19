@@ -161,6 +161,10 @@ interface DccState {
   unwrap: (assetId: string) => Promise<void>;
   /** Render one UV frame. Called when the view is open, after every edit. */
   uvRefresh: (assetId: string) => Promise<void>;
+  /** **Pick in the UV pane** (Wave D) — changes the shared selection. */
+  uvPick: (assetId: string, x: number, y: number, additive: boolean) => Promise<void>;
+  /** **Drag the selection in UV space** — one journal entry per gesture. */
+  uvMove: (assetId: string, dx: number, dy: number) => Promise<void>;
 }
 
 const EMPTY: DccEntry = {
@@ -462,6 +466,26 @@ export const useDccStore = create<DccState>((set, get) => {
       // The gate collapses the storm: a pointer-move during a frame queues one
       // and no more, which is the same rule an orbit already lives under.
       void pump(assetId);
+    },
+
+    uvPick: async (assetId, x, y, additive) => {
+      const doc = entry(assetId).doc;
+      if (!doc) return;
+      try {
+        adopt(assetId, await dccIpc.uvPick(doc.id, x, y, DCC_PREVIEW_SIZE, additive));
+      } catch (e) {
+        patch(assetId, { refusal: String(e) });
+      }
+    },
+
+    uvMove: async (assetId, dx, dy) => {
+      const doc = entry(assetId).doc;
+      if (!doc) return;
+      try {
+        applyResult(assetId, await dccIpc.uvMove(doc.id, dx, dy, DCC_PREVIEW_SIZE));
+      } catch (e) {
+        patch(assetId, { refusal: String(e) });
+      }
     },
 
     historyRefresh: async (assetId) => {

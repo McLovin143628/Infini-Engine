@@ -221,6 +221,8 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   const historyRefresh = useDccStore((s) => s.historyRefresh);
   const amend = useDccStore((s) => s.amend);
   const setHover = useDccStore((s) => s.setHover);
+  const uvPick = useDccStore((s) => s.uvPick);
+  const uvMove = useDccStore((s) => s.uvMove);
   const assetsById = useAssetStore((s) => s.assets);
   // What the drawer is dragging right now, so the zone lights up for a drop it
   // can actually accept rather than for any native drag that crosses it.
@@ -388,6 +390,61 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
       return { kind: "gizmo", mode: gizmoMode, snap, softRadius, falloff };
     }
     return null;
+  };
+
+  // ── the UV pane's pointer (Wave D) ───────────────────────────────────────
+  //
+  // A separate, much smaller state machine than the 3D one: there is no camera
+  // to orbit and no backend drag to own, so a gesture is "down, accumulate,
+  // commit on up" and the whole move is ONE journal entry. The accumulation is a
+  // ref rather than state — it changes per pointer-move, and re-rendering the
+  // panel to hold a number the backend has not seen yet would be re-rendering
+  // for nothing.
+  const uvRef = useRef<HTMLImageElement | null>(null);
+  const uvDrag = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+
+  /** Pointer position in the UV pane's own pixel space. */
+  const toUvPx = (e: React.PointerEvent): [number, number] => {
+    const el = uvRef.current;
+    if (!el) return [0, 0];
+    const r = el.getBoundingClientRect();
+    const s = DCC_PREVIEW_SIZE / Math.max(1, r.width);
+    const t = DCC_PREVIEW_SIZE / Math.max(1, r.height);
+    return [(e.clientX - r.left) * s, (e.clientY - r.top) * t];
+  };
+
+  const onUvPointerDown = (e: React.PointerEvent) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const [x, y] = toUvPx(e);
+    uvDrag.current = { x, y, moved: false };
+  };
+
+  const onUvPointerMove = (e: React.PointerEvent) => {
+    const d = uvDrag.current;
+    if (!d || !assetId) return;
+    const [x, y] = toUvPx(e);
+    const dx = x - d.x;
+    const dy = y - d.y;
+    // The same 3 px threshold the 3D view uses, so a shaky click still picks.
+    if (!d.moved && Math.abs(dx) + Math.abs(dy) < 3) return;
+    d.moved = true;
+    d.x = x;
+    d.y = y;
+    // Committed per move rather than accumulated to pointer-up: the pane has to
+    // show the UVs moving, and `Op::MoveUvs` is id-preserving, so N of them in a
+    // drag is N undo steps of the same kind — which is the shape the seam tool
+    // already has and the one an author can unwind.
+    void uvMove(assetId, dx, dy);
+  };
+
+  const onUvPointerUp = (e: React.PointerEvent) => {
+    const d = uvDrag.current;
+    uvDrag.current = null;
+    if (!d || !assetId) return;
+    if (!d.moved) {
+      const [x, y] = toUvPx(e);
+      void uvPick(assetId, x, y, e.shiftKey || e.ctrlKey);
+    }
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
@@ -707,12 +764,20 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
         {showUv && (
           <div className="flex h-48 shrink-0 items-center justify-center border-t border-(--ink-border) bg-(--ink-bg-0) p-2">
             {uvImage ? (
+              // **The UV pane answers a pointer** (Wave D). Click picks — into
+              // the SHARED selection, so the 3D view lights up too — and a drag
+              // moves the selection's corners as ONE journal entry.
               <img
+                ref={uvRef}
                 src={uvImage}
                 alt="uv layout"
                 draggable={false}
-                className="max-h-full max-w-full select-none rounded"
+                className="max-h-full max-w-full cursor-crosshair select-none rounded"
                 style={{ imageRendering: "pixelated" }}
+                onPointerDown={onUvPointerDown}
+                onPointerMove={onUvPointerMove}
+                onPointerUp={onUvPointerUp}
+                onPointerCancel={onUvPointerUp}
               />
             ) : (
               <span className="text-[11px] text-(--ink-text-dim)">

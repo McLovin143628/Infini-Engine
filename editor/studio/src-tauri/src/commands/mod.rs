@@ -122,6 +122,9 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         dcc::dcc_drag_cancel,
         dcc::dcc_unwrap,
         dcc::dcc_uv_preview,
+        // Wave D: the UV pane answers a pointer.
+        dcc::dcc_uv_pick,
+        dcc::dcc_uv_move,
         terrain::terrain_erode,
         terrain::terrain_export_data_map,
         terrain::terrain_probe_heightmap,

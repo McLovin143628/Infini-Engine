@@ -121,7 +121,10 @@ pub fn op_preserves_ids(op: &Op) -> bool {
         // …and the two batch attribute writes are `Op::SetEdgeSharp` and
         // `Op::SetEdgeSeam` N times over.
         | Op::SetEdgesSharp { .. }
-        | Op::SetEdgesSeam { .. } => true,
+        | Op::SetEdgesSeam { .. }
+        // …and a UV drag writes corner attributes, exactly as `SetCornerUv` and
+        // `Unwrap` do.
+        | Op::MoveUvs { .. } => true,
         // Everything else frees slots (which the LIFO free list then hands back
         // to something different) or rebuilds a patch outright.
         Op::RemoveVertex { .. }

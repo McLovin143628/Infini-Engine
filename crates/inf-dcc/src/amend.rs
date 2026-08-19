@@ -167,7 +167,8 @@ pub fn op_amendable(op: &Op) -> Amendability {
         | Op::AddMaterialSlots { .. }
         | Op::MoveVerts { .. }
         | Op::SetEdgesSharp { .. }
-        | Op::SetEdgesSeam { .. } => Amendability::Free,
+        | Op::SetEdgesSeam { .. }
+        | Op::MoveUvs { .. } => Amendability::Free,
 
         // ── Structural: an operand set is fixed, a magnitude is not ─────────
         //
@@ -245,6 +246,7 @@ pub fn op_kind(op: &Op) -> &'static str {
         Op::MoveVerts { .. } => "soft move",
         Op::SetEdgesSharp { .. } => "shading",
         Op::SetEdgesSeam { .. } => "auto-seam",
+        Op::MoveUvs { .. } => "uv move",
         Op::FlipFaces { .. } => "flip",
         Op::DissolveEdges { .. } => "dissolve",
         Op::BridgeLoops { .. } => "bridge",
@@ -358,7 +360,8 @@ pub fn op_structure(op: &Op) -> OpStructure {
         | Op::AddMaterialSlots { .. }
         | Op::MoveVerts { .. }
         | Op::SetEdgesSharp { .. }
-        | Op::SetEdgesSeam { .. } => {}
+        | Op::SetEdgesSeam { .. }
+        | Op::MoveUvs { .. } => {}
 
         Op::AddFace { verts, .. } => s.verts = verts.clone(),
         Op::SplitEdge { half, .. } => s.halfs = vec![*half],

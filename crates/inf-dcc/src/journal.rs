@@ -759,6 +759,7 @@ pub(crate) mod tests_support {
                 halfs: vec![],
                 seam: true,
             },
+            Op::MoveUvs { corners: vec![] },
         ]
     }
 }
@@ -1120,6 +1121,7 @@ mod tests {
             // …and the batch seam write, appended after them. Same rule; the
             // version does NOT move for an appended variant.
             Op::SetEdgesSeam { .. } => 36,
+            Op::MoveUvs { .. } => 37,
         }
     }
 
@@ -1212,14 +1214,15 @@ mod tests {
             | Op::FlipFaces { .. }
             | Op::DissolveEdges { .. }
             | Op::BridgeLoops { .. }
-            | Op::SetEdgesSeam { .. } => Vec::new(),
+            | Op::SetEdgesSeam { .. }
+            | Op::MoveUvs { .. } => Vec::new(),
         }
     }
 
     #[test]
     fn op_discriminants_are_frozen() {
         let every: Vec<Op> = tests_support::one_of_every_op();
-        assert_eq!(every.len(), 37, "one sample per variant");
+        assert_eq!(every.len(), 38, "one sample per variant");
         let cfg = bincode::config::standard();
         for op in &every {
             let bytes = bincode::serde::encode_to_vec(op, cfg).unwrap();

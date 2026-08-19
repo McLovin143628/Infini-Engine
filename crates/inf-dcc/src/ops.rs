@@ -662,6 +662,21 @@ pub enum Op {
     /// appending a variant is not a shape change, which is the distinction the
     /// frozen-discriminant match and the version between them keep legible.
     SetEdgesSeam { halfs: Vec<HalfId>, seam: bool },
+    /// **Set many corners' UVs at once** — a drag in the UV pane.
+    ///
+    /// [`Op::SetCornerUv`] is the single form and stays: a corner nudged by hand
+    /// is one op and one undo step. A *drag* moves every corner of a selection
+    /// together and must be one entry, exactly as [`Op::MoveVerts`] is for a
+    /// drag in 3D.
+    ///
+    /// Distinct from [`Op::Unwrap`], which carries the same shape of data for a
+    /// different event: an unwrap is a **solve's result** over the whole mesh,
+    /// and reusing it for a hand-drag would make the history say "unwrap" over
+    /// an edit nobody solved. `corners` is `(half-edge, uv)` sorted by
+    /// half-edge — deterministic on the wire and cheap to verify.
+    ///
+    /// Appended at 37, same rule, and the version does not move.
+    MoveUvs { corners: Vec<(HalfId, [f64; 2])> },
 }
 
 /// Apply one op. See the module docs for the three rules this upholds.
@@ -1042,6 +1057,25 @@ pub fn apply(mesh: &mut Mesh, op: &Op) -> Result<OpOutcome, OpError> {
             }
             for h in halfs {
                 mesh.set_seam_pair(*h, *seam);
+            }
+            Ok(OpOutcome::default())
+        }
+
+        Op::MoveUvs { corners } => {
+            if corners.is_empty() {
+                return Err(OpError::EmptyOperand {
+                    what: "a uv move list",
+                });
+            }
+            // Every id and every value checked before the first write, so the
+            // refusal is inert without a transaction — `Op::Unwrap`'s shape,
+            // which this is the hand-authored twin of.
+            for (h, uv) in corners {
+                corner_of(mesh, *h)?;
+                finite("a corner uv", uv)?;
+            }
+            for (h, uv) in corners {
+                mesh.half_mut(*h).uv = *uv;
             }
             Ok(OpOutcome::default())
         }
