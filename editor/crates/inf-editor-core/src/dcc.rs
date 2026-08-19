@@ -97,18 +97,109 @@ pub struct EditGeometry {
     pub indices: Vec<u32>,
     /// The bounding box the framing camera is fitted to.
     pub bounds: inf_mesh::Aabb,
+    /// **The kernel CORNER each written vertex was interned from** (Wave D),
+    /// parallel to `verts` — or empty when the export could not supply one.
+    ///
+    /// This is what makes [`displace`] possible: a drag moves positions and
+    /// leaves the topology alone, so the whole re-export was re-exporting the
+    /// same connectivity. A corner and not merely its vertex, because the normal
+    /// the writer emits is a property of the CORNER — authored, or the corner's
+    /// smooth fan, which stops at sharp edges.
+    pub sources: Vec<inf_dcc::HalfId>,
 }
 
 /// Tessellate the kernel mesh for drawing — through the real writer, so the
 /// preview and the save agree by construction (see the module docs).
 pub fn tessellate(mesh: &Mesh) -> EditGeometry {
-    let (asset, _) = inf_dcc::to_mesh_asset(mesh, &inf_dcc::ExportOptions::default());
+    let (asset, _, sources) =
+        inf_dcc::to_mesh_asset_sourced(mesh, &inf_dcc::ExportOptions::default());
     let (verts, indices) = flatten(&asset);
     EditGeometry {
         bounds: asset.bounds,
         verts,
         indices,
+        // Flattened the same way the vertices are, so index `i` of `verts` and
+        // index `i` of `sources` describe the same written vertex.
+        sources: sources
+            .map(|s| s.into_iter().flatten().collect())
+            .unwrap_or_default(),
     }
+}
+
+/// **Re-derive a tessellation for a mesh whose vertices merely MOVED**, without
+/// re-running the exporter.
+///
+/// The P23 ledger's named next lever, in the words it named it in: *"displacing
+/// the cached vertex buffer in place rather than re-running the exporter, which
+/// needs the writer to expose its corner→vertex map"*. The map is
+/// [`inf_dcc::to_mesh_asset_sourced`]'s third return value; this is what it is
+/// for.
+///
+/// `None` — meaning "fall back to a full `tessellate`" — when the geometry has
+/// no source map (an optimized export), when a source id is no longer live, or
+/// when a source position is not finite. **`None` is a value, not a failure**:
+/// every caller can always tessellate.
+///
+/// # What is re-derived, and what is not
+///
+/// * **Positions** come straight from the mesh — exact, not approximated.
+/// * **Normals** are re-accumulated over the (unchanged) index buffer,
+///   area-weighted, and renormalized. They have to be: a displaced surface with
+///   the old normals shades like the shape it used to be, which is worse than a
+///   slow frame.
+/// * **UVs** are unchanged, because a position move does not move a UV.
+/// * **Tangents are KEPT**, and that is the one approximation. A tangent is only
+///   read by normal mapping and the Model Editor's preview surface
+///   (`DCC_SURFACE_WGSL`) has no normal map, so a drag frame cannot show the
+///   difference — and the committed frame, which is a full `tessellate`, is
+///   exact. Stated rather than left for someone to find.
+/// * **A face's own authored normals** are likewise kept: they are authored data
+///   that a drag does not change, and the export policy writes them verbatim.
+///
+/// The result is only a *preview*. Nothing here reaches a file: a save goes
+/// through `save_mesh_session`, which exports from the mesh.
+pub fn displace(base: &EditGeometry, mesh: &Mesh) -> Option<EditGeometry> {
+    if base.sources.len() != base.verts.len() || base.sources.is_empty() {
+        return None;
+    }
+    let mut verts = base.verts.clone();
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for (v, &h) in verts.iter_mut().zip(&base.sources) {
+        if !mesh.has_half(h) || mesh.is_boundary(h) != Some(false) {
+            return None;
+        }
+        let p = mesh.origin(h).and_then(|x| mesh.position(x))?;
+        if !p.is_finite() {
+            return None;
+        }
+        v.position = [p.x as f32, p.y as f32, p.z as f32];
+        for k in 0..3 {
+            lo[k] = lo[k].min(v.position[k]);
+            hi[k] = hi[k].max(v.position[k]);
+        }
+    }
+    // **The writer's own normal rule, called on the writer's own corners.**
+    // Not a vertex-average: a derived normal is the corner's SMOOTH FAN, which
+    // stops at sharp edges, and an authored one is copied verbatim. Both live in
+    // `inf_dcc::corner_normal`, and calling it is the difference between a
+    // preview that matches the save and one that merely looks plausible.
+    for (v, &h) in verts.iter_mut().zip(&base.sources) {
+        let n = inf_dcc::corner_normal(mesh, h, inf_dcc::NormalPolicy::PreserveAuthored);
+        let len = n.length();
+        // A corner whose fan cancels out — a fold pinched flat by the drag —
+        // keeps the normal it had. Zeroing it would make the preview go black
+        // there, and the drag is the moment an author is looking hardest.
+        if len.is_finite() && len > 1e-20 {
+            let n = n / len;
+            v.normal = [n.x as f32, n.y as f32, n.z as f32];
+        }
+    }
+    Some(EditGeometry {
+        verts,
+        indices: base.indices.clone(),
+        bounds: inf_mesh::Aabb { min: lo, max: hi },
+        sources: base.sources.clone(),
+    })
 }
 
 /// Concatenate an asset's submeshes into one vertex/index pair, rebasing each
@@ -2637,7 +2728,10 @@ pub struct PreviewCache {
     scratch_key: Option<(u64, usize)>,
     scratch_geometry: Option<std::sync::Arc<EditGeometry>>,
     scratch_mesh: Option<std::sync::Arc<Mesh>>,
+    /// How many scratch frames fell back to a FULL tessellation (Wave D).
     scratch_tessellations: u64,
+    /// How many scratch frames were built at all, fast path or slow.
+    scratch_frames: u64,
     /// **The identity of the geometry the last get returned** — the key a
     /// vertex-buffer upload may be skipped on. See [`PreviewCache::upload_stamp`].
     upload_stamp: u64,
@@ -2730,17 +2824,68 @@ impl PreviewCache {
         )
     }
 
-    /// How many times the **scratch** tessellator has run — the uncommitted half
-    /// of the cache, counted separately so a gate can say "an orbit during a
-    /// drag costs nothing extra" rather than assuming it.
+    /// How many scratch frames fell back to a **full** tessellation.
+    ///
+    /// Wave D split this from [`PreviewCache::scratch_frames`], and the split is
+    /// the measurement: since the drag path displaces the committed geometry in
+    /// place, a working fast path leaves this at **zero** however many frames a
+    /// drag produces. A gate that read only "how many frames were built" could
+    /// not tell the two apart, which is exactly how a silently-disabled
+    /// optimization survives.
     pub fn scratch_tessellations(&self) -> u64 {
         self.scratch_tessellations
+    }
+
+    /// How many uncommitted frames were built at all — the number the
+    /// "an orbit during a drag costs nothing extra" claim is about.
+    pub fn scratch_frames(&self) -> u64 {
+        self.scratch_frames
     }
 
     /// The geometry and mesh a frame should draw, given a drag that has not been
     /// committed yet.
     ///
-    /// # The side channel, and why it is a full re-tessellation
+    /// # Wave D: the drag frame DISPLACES the committed one
+    ///
+    /// The P23 ledger's named next lever, in its own words — *"displacing the
+    /// cached vertex buffer in place rather than re-running the exporter, which
+    /// needs the writer to expose its corner→vertex map"* — and the carried
+    /// remainder it retires is the **~100 000-vertex live-sculpt ceiling**.
+    ///
+    /// Every op a drag can be holding is id-preserving (a stroke, a gizmo
+    /// transform, a weight table), so the scratch mesh has the committed mesh's
+    /// topology and the full re-export was re-exporting the same connectivity.
+    /// [`displace`] writes the positions and asks
+    /// [`inf_dcc::corner_normal`] — the *writer's own rule* — for the normals,
+    /// on the corners [`inf_dcc::to_mesh_asset_sourced`] hands back.
+    ///
+    /// **Measured on this machine, debug build**, by
+    /// `live_drag_frame_cost_is_measured` (the same test and the same profile as
+    /// the P23.5 figures below it, so the columns are comparable):
+    ///
+    /// | mesh | full `tessellate` | **displaced drag frame** |
+    /// | --- | --- | --- |
+    /// | 26 v / 48 tri | 0.21 ms | **0.01 ms** |
+    /// | 1 538 v / 3 072 tri | 8.53 ms | **0.29 ms** |
+    /// | 24 578 v / 49 152 tri | 141.98 ms | **4.35 ms** |
+    ///
+    /// **29–33× at both real sizes, and the scaling is linear in vertices rather
+    /// than in the exporter's `BTreeMap` interning.** At 24 578 vertices a drag
+    /// frame is 4.35 ms in a debug build — inside an interactive rate with the
+    /// P23.2a render (0.09 ms) and encode (0.34 ms) on top — where the same frame
+    /// used to cost 142 ms, i.e. 7 fps. Extrapolating the linear term, a hundred
+    /// thousand vertices is ~18 ms debug and several times less in release, so
+    /// the ceiling the P23.5 docs stated is **retired with a number rather than
+    /// with an argument**.
+    ///
+    /// What it is NOT: a claim that the *committed* frame got faster. It did
+    /// not — a pointer-up still exports, once, and the save always exports. What
+    /// changed is that the frames *between* pointer-down and pointer-up stopped
+    /// paying for it. `scratch_tessellations` counts the fallbacks and is
+    /// asserted at **zero**, so a fast path that silently stopped working is a
+    /// failing test rather than a slow editor.
+    ///
+    /// # The side channel, and why it used to be a full re-tessellation
     ///
     /// [`PreviewCache::get`]'s key is the journal generation, and an uncommitted
     /// drag *does not move it* — that is the whole point of not journalling until
@@ -2761,18 +2906,19 @@ impl PreviewCache {
     ///
     /// **The clone and the stroke are free; the tessellation is the whole cost**
     /// — the two columns agree to within noise at both sizes, which is the useful
-    /// finding and the one that says the scratch channel adds nothing of its own.
+    /// finding, and it is exactly why Wave D attacked the tessellation and not
+    /// the clone.
     ///
     /// Against the P23.2a budget — 0.09 ms to render at 256² and ~0.34 ms to
     /// encode — a drag frame on a small model is comfortable and a **1.5 k-vertex
     /// model is already the dominant cost at ~9 ms**, i.e. about 30 fps in a
     /// debug build and fine in release. Stated rather than hidden: **this path
     /// will not hold an interactive rate on a model of a hundred thousand
-    /// vertices.** The next lever is displacing the cached vertex buffer in place
-    /// rather than re-running the exporter, which needs the writer to expose its
-    /// corner→vertex map — a remainder, not a defect. What is *not* on the table
-    /// is displacing on the GPU: the CPU picker could not see it, and the panel
-    /// would go back to highlighting one thing and hitting another.
+    /// vertices.** That was true when it was written and is **retired** by the
+    /// section above — the lever it names is the one that was pulled. What is
+    /// still *not* on the table is displacing on the GPU: the CPU picker could
+    /// not see it, and the panel would go back to highlighting one thing and
+    /// hitting another.
     pub fn get_with_pending(
         &mut self,
         session: &inf_dcc::MeshSession,
@@ -2805,10 +2951,35 @@ impl PreviewCache {
             || self.scratch_mesh.is_none()
         {
             let mesh = pending.scratch(session, selection, mode);
+            // **The committed tessellation is the base, and the drag DISPLACES
+            // it** (Wave D) — the P23 ledger's named next lever. Every op a drag
+            // can be holding is id-preserving (a stroke, a gizmo transform, a
+            // weight table), so the scratch mesh has the committed mesh's
+            // topology and the whole re-export was re-exporting the same
+            // connectivity. `displace` writes positions and re-accumulates
+            // normals over the unchanged index buffer instead.
+            //
+            // `self.get(session)` first, so the committed geometry exists and
+            // this is a hit on the cache the panel already keeps. It also sets
+            // `upload_stamp`, which the line below then overwrites with the
+            // scratch key — the order matters and is why the call is here rather
+            // than at the top of the function.
+            let (committed, _) = self.get(session);
+            let geo = match displace(&committed, &mesh) {
+                Some(g) => g,
+                None => {
+                    // No source map, or the drag moved something off the map.
+                    // A full tessellation is always correct; this is the
+                    // fallback, and `scratch_tessellations` counts only it so a
+                    // gate can tell the fast path from the slow one.
+                    self.scratch_tessellations += 1;
+                    tessellate(&mesh)
+                }
+            };
             self.scratch_key = Some(key);
-            self.scratch_geometry = Some(std::sync::Arc::new(tessellate(&mesh)));
+            self.scratch_geometry = Some(std::sync::Arc::new(geo));
             self.scratch_mesh = Some(std::sync::Arc::new(mesh));
-            self.scratch_tessellations += 1;
+            self.scratch_frames += 1;
         }
         self.upload_stamp = fold_key(key.0, key.1 as u64);
         (
@@ -4727,27 +4898,33 @@ mod tests {
             let (g, _) = cache.get_with_pending(&s, &sel, SelectMode::Face, Some(&pending));
             assert!(std::sync::Arc::ptr_eq(&g, &geo0), "a new scratch frame");
         }
-        assert_eq!(cache.scratch_tessellations(), 1, "ten frames, one scratch");
+        assert_eq!(cache.scratch_frames(), 1, "ten frames, one scratch");
+        // Wave D: and that one frame was DISPLACED, not re-exported. Zero is the
+        // whole claim — a fast path that silently stopped working would read
+        // `1` here and every other assertion in this test would still pass.
+        assert_eq!(
+            cache.scratch_tessellations(),
+            0,
+            "the drag frame re-ran the exporter instead of displacing"
+        );
         assert_eq!(
             cache.tessellations(),
-            0,
-            "and the committed path is untouched"
+            1,
+            "the committed geometry is tessellated ONCE, as the base the drag              displaces — it used to be zero because the scratch re-exported"
         );
 
         stroke.path.push(DVec3::new(0.6, 0.5, 0.5));
         let moved = PendingDrag::Stroke(stroke);
         let (geo1, _) = cache.get_with_pending(&s, &sel, SelectMode::Face, Some(&moved));
         assert!(!std::sync::Arc::ptr_eq(&geo1, &geo0));
-        assert_eq!(cache.scratch_tessellations(), 2);
+        assert_eq!(cache.scratch_frames(), 2);
+        assert_eq!(cache.scratch_tessellations(), 0, "still displacing");
 
         // Pointer-up: back to the committed cache, and the scratch is released.
         let (committed, _) = cache.get_with_pending(&s, &sel, SelectMode::Face, None);
         assert_eq!(cache.tessellations(), 1);
-        assert_eq!(
-            cache.scratch_tessellations(),
-            2,
-            "no extra scratch on release"
-        );
+        assert_eq!(cache.scratch_frames(), 2, "no extra scratch on release");
+        assert_eq!(cache.scratch_tessellations(), 0);
         assert!(!std::sync::Arc::ptr_eq(&committed, &geo1));
     }
 
@@ -4848,7 +5025,7 @@ mod tests {
         let mut cache = PreviewCache::new();
         cache.get_with_pending(&s, &sel, SelectMode::Vert, Some(&pending));
         let first = cache.upload_stamp();
-        let tess = cache.scratch_tessellations();
+        let tess = cache.scratch_frames();
 
         // Same transform, same generation — a different SELECTION.
         let mut other = SelectionSet::new(s.generation());
@@ -4860,9 +5037,9 @@ mod tests {
             "the drag moved a different vertex and the preview served the old mesh"
         );
         assert_eq!(
-            cache.scratch_tessellations(),
+            cache.scratch_frames(),
             tess + 1,
-            "…and it really re-tessellated rather than only re-keying"
+            "…and it really rebuilt the frame rather than only re-keying"
         );
 
         // Same transform, same selection — a different MODE. The ids are the
@@ -4877,10 +5054,10 @@ mod tests {
 
         // And the warm path survives: an unchanged frame is still free.
         let third = cache.upload_stamp();
-        let tess = cache.scratch_tessellations();
+        let tess = cache.scratch_frames();
         cache.get_with_pending(&s, &other, SelectMode::Face, Some(&pending));
         assert_eq!(cache.upload_stamp(), third, "an orbit mid-drag is free");
-        assert_eq!(cache.scratch_tessellations(), tess);
+        assert_eq!(cache.scratch_frames(), tess);
     }
 
     /// **Round 3**: `0` is `PreviewSession`'s built-in sphere, so no stamp this
@@ -4967,7 +5144,7 @@ mod tests {
         // Two sizes, so the shape of the cost is visible and not just its value:
         // a scratch frame must be a small constant factor over the committed
         // tessellation at BOTH, or something in the path is superlinear.
-        for subdivisions in [1usize, 4] {
+        for subdivisions in [1usize, 4, 6] {
             let mut s = MeshSession::new(cube(1.0));
             for _ in 0..subdivisions {
                 let faces: Vec<_> = s.mesh().face_ids().collect();
@@ -4991,26 +5168,209 @@ mod tests {
 
             // A fresh cache per frame, so this measures the SCRATCH path and not
             // the hit path `the_live_preview_re_tessellates_only_when_the_drag_
-            // moves` already pins.
+            // moves` already pins. The committed base is warmed first, exactly
+            // as it is in the product — a drag always follows a committed frame.
             let frames = 5;
             let t = std::time::Instant::now();
             for _ in 0..frames {
                 let mut c = PreviewCache::new();
+                let _ = c.get(&s);
                 let _ = c.get_with_pending(&s, &sel, SelectMode::Face, Some(&pending));
             }
-            let scratch_ms = t.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+            let warm_and_drag_ms = t.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+            // …and the drag frame ALONE, which is the number an author feels:
+            // the committed frame is already in the cache by the time they press
+            // the button.
+            let mut c = PreviewCache::new();
+            let _ = c.get(&s);
+            let t = std::time::Instant::now();
+            for i in 0..frames {
+                // A different drag shape each time, or the cache would answer
+                // from its key and this would measure a hash.
+                let mut p = pending.clone();
+                if let PendingDrag::Stroke(st) = &mut p {
+                    st.path.push(DVec3::new(0.5 + i as f64 * 0.01, 0.5, 0.5));
+                }
+                let _ = c.get_with_pending(&s, &sel, SelectMode::Face, Some(&p));
+            }
+            let drag_ms = t.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+            assert_eq!(
+                c.scratch_tessellations(),
+                0,
+                "the measurement fell back to the exporter, so it is measuring \
+                 the path this change replaced"
+            );
 
             println!(
                 "live-drag frame cost: {verts} verts, {} tris | tessellate \
-                 {committed_ms:.2} ms | clone+apply+tessellate {scratch_ms:.2} ms",
+                 {committed_ms:.2} ms | cold (warm+drag) {warm_and_drag_ms:.2} ms | \
+                 DISPLACED drag frame {drag_ms:.2} ms",
                 plain.indices.len() / 3
             );
             assert!(
-                scratch_ms < 2_000.0,
-                "a scratch frame took {scratch_ms:.1} ms on {verts} vertices — that \
+                drag_ms < 2_000.0,
+                "a scratch frame took {drag_ms:.1} ms on {verts} vertices — that \
                  is not a constant factor over the {committed_ms:.1} ms tessellation"
             );
         }
+    }
+
+    /// **The displaced frame IS the exported frame**, to the precision the
+    /// approximation admits.
+    ///
+    /// The whole risk of the fast path is that it diverges from the slow one and
+    /// nothing says so — a drag that previews a shape the save will not produce.
+    /// So: apply a real transform, tessellate it the long way, displace the
+    /// committed geometry the short way, and compare **vertex for vertex**.
+    #[test]
+    fn a_displaced_frame_matches_the_exported_one() {
+        let mut s = MeshSession::new(cube(1.0));
+        for _ in 0..2 {
+            let faces: Vec<_> = s.mesh().face_ids().collect();
+            s.apply(inf_dcc::Op::SubdivideFaces { faces })
+                .expect("subdivides");
+        }
+        // **Round-tripped, so every face is a TRIANGLE** — and that is the
+        // finding this fixture encodes rather than works around. The exporter
+        // ear-clips an n-gon by its *geometry*, so moving a quad's corners can
+        // flip which diagonal it picks; a displaced frame keeps the base's
+        // triangulation and a re-export would choose again. On a triangle mesh
+        // — which is what imported art is — the triangulation is the identity
+        // and the two paths must agree exactly, which is a comparison worth
+        // making. The n-gon difference is a preview detail (it is a *stabler*
+        // picture, not a wrong one) and the committed frame re-exports anyway.
+        let s = MeshSession::new(
+            inf_dcc::from_mesh_asset(&inf_dcc::to_mesh_asset(s.mesh(), &Default::default()).0)
+                .expect("a kernel export re-opens")
+                .mesh,
+        );
+        let base = tessellate(s.mesh());
+        assert_eq!(
+            base.sources.len(),
+            base.verts.len(),
+            "the exporter must hand back a source per written vertex"
+        );
+
+        // Move half the vertices, so the comparison is over a mesh that really
+        // changed shape rather than one that did not.
+        let moved: Vec<inf_dcc::VertId> = s.mesh().vert_ids().step_by(2).collect();
+        let mut after = s.mesh().clone();
+        inf_dcc::ops::apply(
+            &mut after,
+            &inf_dcc::Op::TranslateVerts {
+                verts: moved,
+                delta: [0.0, 0.35, 0.1],
+            },
+        )
+        .expect("translates");
+
+        let slow = tessellate(&after);
+        let fast = displace(&base, &after).expect("the fast path is available");
+        assert_eq!(fast.verts.len(), slow.verts.len());
+        assert_eq!(fast.indices, slow.indices, "the topology must not move");
+        for (i, (f, sl)) in fast.verts.iter().zip(&slow.verts).enumerate() {
+            for k in 0..3 {
+                assert!(
+                    (f.position[k] - sl.position[k]).abs() < 1e-6,
+                    "vertex {i} position {k}: displaced {} vs exported {}",
+                    f.position[k],
+                    sl.position[k]
+                );
+                assert!(
+                    (f.normal[k] - sl.normal[k]).abs() < 1e-4,
+                    "vertex {i} normal {k}: displaced {:?} vs exported {:?}",
+                    f.normal,
+                    sl.normal
+                );
+            }
+            assert_eq!(f.uv, sl.uv, "a position move does not move a UV");
+        }
+        for k in 0..3 {
+            assert!((fast.bounds.min[k] - slow.bounds.min[k]).abs() < 1e-6);
+            assert!((fast.bounds.max[k] - slow.bounds.max[k]).abs() < 1e-6);
+        }
+        assert!(
+            base.sources.iter().all(|&h| s
+                .mesh()
+                .corner_normal(h)
+                .expect("a live corner")
+                .is_some()),
+            "an imported mesh's normals are authored — that phase tested the \
+             copied-verbatim branch, and the phase below tests the derived one"
+        );
+
+        // ── the DERIVED branch ─────────────────────────────────────────────
+        //
+        // Clear every authored normal, so the exporter falls back to its
+        // smooth-fan rule and `displace` must re-accumulate. Without this the
+        // test above would pass just as happily if `displace` never touched a
+        // normal at all — the mutation that motivated splitting it in two.
+        let mut derived = s.mesh().clone();
+        for h in derived.half_ids().collect::<Vec<_>>() {
+            if derived.is_boundary(h) == Some(false) {
+                inf_dcc::ops::apply(
+                    &mut derived,
+                    &inf_dcc::Op::SetCornerNormal {
+                        half: h,
+                        normal: None,
+                    },
+                )
+                .expect("clears");
+            }
+        }
+        let base = tessellate(&derived);
+        assert!(
+            base.sources
+                .iter()
+                .all(|&h| derived.corner_normal(h).expect("a live corner").is_none()),
+            "the fixture still has authored normals"
+        );
+        let mut after = derived.clone();
+        let moved: Vec<inf_dcc::VertId> = derived.vert_ids().step_by(2).collect();
+        inf_dcc::ops::apply(
+            &mut after,
+            &inf_dcc::Op::TranslateVerts {
+                verts: moved,
+                delta: [0.0, 0.35, 0.1],
+            },
+        )
+        .expect("translates");
+        let slow = tessellate(&after);
+        let fast = displace(&base, &after).expect("the fast path is available");
+        assert_eq!(fast.indices, slow.indices, "still a triangle mesh");
+        let mut changed = 0usize;
+        for (i, (f, sl)) in fast.verts.iter().zip(&slow.verts).enumerate() {
+            for k in 0..3 {
+                assert!(
+                    (f.normal[k] - sl.normal[k]).abs() < 1e-4,
+                    "vertex {i} normal {k}: displaced {:?} vs exported {:?}",
+                    f.normal,
+                    sl.normal
+                );
+            }
+            if f.normal != base.verts[i].normal {
+                changed += 1;
+            }
+        }
+        assert!(
+            changed > 0,
+            "no derived normal moved — `displace` is not recomputing them"
+        );
+    }
+
+    /// `displace` refuses — as a value — when it cannot be trusted, and every
+    /// caller can always fall back to a full tessellation.
+    #[test]
+    fn displace_refuses_rather_than_guessing() {
+        let s = MeshSession::new(cube(1.0));
+        let mut base = tessellate(s.mesh());
+        // No source map (an optimized export produces none).
+        base.sources.clear();
+        assert!(displace(&base, s.mesh()).is_none());
+        // …and a source that is no longer live.
+        let mut base = tessellate(s.mesh());
+        base.sources[0] = inf_dcc::HalfId(9999);
+        assert!(displace(&base, s.mesh()).is_none());
     }
 
     #[test]

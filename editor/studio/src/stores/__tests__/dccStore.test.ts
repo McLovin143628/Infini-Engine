@@ -74,6 +74,10 @@ function docOf(assetId: string, over: Partial<DccDocDto> = {}): DccDocDto {
       sharpEdges: 12,
       boundaryEdges: 0,
       nonFiniteValues: 0,
+      // Wave D: the non-manifold repair's three counters.
+      duplicateFacesDropped: 0,
+      facesReoriented: 0,
+      nonManifoldSplits: 0,
       // P24.2: the skin weld's advisory.
       skinConflicts: 0,
     },

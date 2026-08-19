@@ -2789,6 +2789,18 @@ pub struct DccImportDto {
     pub source_vertices: u32,
     pub welded_positions: u32,
     pub fan_splits: u32,
+    /// **Faces dropped as exact duplicates** of an earlier one (Wave D).
+    pub duplicate_faces_dropped: u32,
+    /// **Faces whose winding was flipped** to agree with their neighbours
+    /// (Wave D). The LOSSLESS half of the non-manifold repair: the surface is
+    /// identical, only its orientation is now consistent.
+    pub faces_reoriented: u32,
+    /// **Faces detached because they still shared a directed edge** (Wave D).
+    /// The LOSSY half, counted apart from the lossless one on purpose: non-zero
+    /// means the source described something that is not a manifold surface — an
+    /// interior partition, a double-sided sheet — and this is how much of it
+    /// came in as a separate shell.
+    pub non_manifold_splits: u32,
     pub degenerate_triangles_skipped: u32,
     pub sharp_edges: u32,
     pub boundary_edges: u32,

@@ -500,13 +500,43 @@ fn the_bevel_refuses_the_corner_it_cannot_save() {
         twin_report.coincident_vertices, 8,
         "the fixture must really carry the hazard it is demonstrating"
     );
+    // **Wave D restated this premise without weakening it.** The reader no
+    // longer *refuses* a non-manifold edge — it repairs it and counts what it
+    // did — so "unopenable" is the wrong word now. The harm the bevel's refusal
+    // prevents is the one that was always underneath it and is unchanged: the
+    // asset does **not come back as the mesh that was saved**. The exact weld
+    // fuses the coincident pairs, and the face built on them is no longer a
+    // second surface — the repair says so in a counter rather than in an error,
+    // and either way the author's geometry is not what they saved.
+    let twin_back = inf_dcc::from_mesh_asset(&twin_asset)
+        .expect("the reader repairs rather than refusing since Wave D");
     assert!(
-        matches!(
-            inf_dcc::from_mesh_asset(&twin_asset),
-            Err(inf_dcc::ImportError::NonManifoldEdge { .. })
-        ),
-        "coincident vertices must really make an asset unopenable, or the bevel's \
-         refusal is a superstition"
+        twin_back.report.duplicate_faces_dropped + twin_back.report.non_manifold_splits > 0,
+        "coincident vertices must really make an asset come back as something \
+         else, or the bevel's refusal is a superstition"
+    );
+    // …and the difference is visible in the MESH, not only in the report. Counted
+    // in TRIANGLES on both sides, because the asset holds triangles and the kernel
+    // holds n-gons — comparing `face_count` to a written face count is comparing
+    // two different units, which is how a "the mesh changed" arm passes on a mesh
+    // that did not.
+    let asset_tris: usize = twin_asset
+        .submeshes
+        .iter()
+        .map(|sm| sm.indices.len() / 3)
+        .sum();
+    let (back_asset, _) =
+        inf_dcc::to_mesh_asset(&twin_back.mesh, &inf_dcc::ExportOptions::default());
+    let back_tris: usize = back_asset
+        .submeshes
+        .iter()
+        .map(|sm| sm.indices.len() / 3)
+        .sum();
+    assert!(
+        back_tris < asset_tris,
+        "the saved asset carried {asset_tris} triangles and it comes back with \
+         {back_tris} — equal would mean the round trip is lossless and the \
+         bevel's refusal really is a superstition"
     );
 
     // (3) …AND THE OP IS STILL A TOOL. Two edges that do not meet bevel cleanly,

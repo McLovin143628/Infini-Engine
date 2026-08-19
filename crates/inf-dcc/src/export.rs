@@ -251,6 +251,29 @@ pub struct ExportReport {
 /// The produced asset is schema v2 — **the existing format, unchanged**. This
 /// batch adds a writer, not a version.
 pub fn to_mesh_asset(mesh: &Mesh, opts: &ExportOptions) -> (MeshAsset, ExportReport) {
+    let (asset, report, _) = to_mesh_asset_sourced(mesh, opts);
+    (asset, report)
+}
+
+/// **The writer, plus the kernel vertex each written vertex came from** (Wave D).
+///
+/// `sources[i][j]` is the **corner** (half-edge)
+/// `asset.submeshes[i].vertices[j]` was interned from — the "corner to vertex map" the P23 ledger named as the
+/// prerequisite for displacing a cached vertex buffer in place instead of
+/// re-running this whole function on every frame of a drag. It costs nothing to
+/// produce: `build_submesh` has kept it since P24.2 to build the skin stream out
+/// of, and this is the door that hands it back.
+///
+/// `None` when [`ExportOptions::optimize`] ran, and that is the honest answer
+/// rather than a best effort: `inf_mesh::optimize` reorders and re-welds the
+/// vertex buffer and hands back only `(vertices, indices)`, so any map through
+/// it would be a map of where the vertices used to be. A caller that wants the
+/// map wants an un-optimized export, which is the default and is what the
+/// preview path uses.
+pub fn to_mesh_asset_sourced(
+    mesh: &Mesh,
+    opts: &ExportOptions,
+) -> (MeshAsset, ExportReport, Option<Vec<Vec<HalfId>>>) {
     let mut report = ExportReport {
         optimized: opts.optimize,
         ..Default::default()
@@ -274,8 +297,9 @@ pub fn to_mesh_asset(mesh: &Mesh, opts: &ExportOptions) -> (MeshAsset, ExportRep
     // different material slot is just as unreadable.
     let mut emitted: BTreeSet<(VertId, VertId)> = BTreeSet::new();
     let mut submeshes = Vec::with_capacity(by_slot.len());
+    let mut all_sources: Vec<Vec<HalfId>> = Vec::with_capacity(by_slot.len());
     for (slot, faces) in by_slot {
-        let (vertices, indices, skin, fallbacks) =
+        let (vertices, indices, skin, fallbacks, sources, authored) =
             build_submesh(mesh, &faces, opts, &mut report, &mut emitted, &mut written);
         report.fan_fallbacks += fallbacks;
         if indices.is_empty() {
@@ -313,6 +337,7 @@ pub fn to_mesh_asset(mesh: &Mesh, opts: &ExportOptions) -> (MeshAsset, ExportRep
 
         report.vertices += vertices.len();
         report.triangles += indices.len() / 3;
+        all_sources.push(authored);
         submeshes.push(SubMesh {
             name,
             vertices,
@@ -327,11 +352,21 @@ pub fn to_mesh_asset(mesh: &Mesh, opts: &ExportOptions) -> (MeshAsset, ExportRep
     }
     report.submeshes = submeshes.len();
     report.coincident_vertices = count_coincident(&written);
+    // A submesh that ended up empty is dropped above, so the two lists would
+    // desync — rebuilt here from what actually shipped rather than trusted.
+    let sourced = (!opts.optimize
+        && all_sources.len() == submeshes.len()
+        && submeshes
+            .iter()
+            .zip(&all_sources)
+            .all(|(sm, src)| sm.vertices.len() == src.len()))
+    .then_some(all_sources);
 
     // `MeshAsset::new` recomputes the bounds from the written positions.
     (
         MeshAsset::new(submeshes, mesh.material_slots().to_vec()),
         report,
+        sourced,
     )
 }
 
@@ -441,7 +476,14 @@ fn build_submesh(
     report: &mut ExportReport,
     emitted: &mut BTreeSet<(VertId, VertId)>,
     written: &mut BTreeSet<([u32; 3], VertId)>,
-) -> (Vec<MeshVertex>, Vec<u32>, Vec<inf_mesh::VertexSkin>, usize) {
+) -> (
+    Vec<MeshVertex>,
+    Vec<u32>,
+    Vec<inf_mesh::VertexSkin>,
+    usize,
+    Vec<VertId>,
+    Vec<HalfId>,
+) {
     let mut key_to_index: BTreeMap<CornerKey, u32> = BTreeMap::new();
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
@@ -452,6 +494,15 @@ fn build_submesh(
     // change nothing except the intern order this function's round-trip
     // guarantee depends on.
     let mut sources: Vec<VertId> = Vec::new();
+    // Wave D: the CORNER each written vertex was interned from — i.e. the
+    // (the half-edge, not merely its vertex). A caller that displaces a cached
+    // vertex buffer needs the corner and not the vertex, because the normal the
+    // writer emits is a property of the CORNER — an authored one is copied
+    // verbatim and a derived one is the corner's smooth fan, which stops at
+    // sharp edges. With only the vertex, a displaced frame could not reproduce
+    // either, and the memo 7b law says the picture is the geometry the save
+    // produces.
+    let mut authored: Vec<HalfId> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     let mut fallbacks = 0usize;
 
@@ -528,6 +579,7 @@ fn build_submesh(
                 let next = positions.len() as u32;
                 let idx = *key_to_index.entry(key).or_insert(next);
                 if idx == next {
+                    authored.push(h);
                     let p = mesh.position(v).expect("live vertex id");
                     let p32 = [p.x as f32, p.y as f32, p.z as f32];
                     // M6 / **the round-3 contract ruling**: the write path
@@ -609,11 +661,20 @@ fn build_submesh(
     } else {
         Vec::new()
     };
-    (vertices, indices, skin, fallbacks)
+    debug_assert_eq!(authored.len(), sources.len());
+    (vertices, indices, skin, fallbacks, sources, authored)
 }
 
-/// The normal written for one corner, under a policy.
-fn corner_normal(mesh: &Mesh, h: HalfId, policy: NormalPolicy) -> DVec3 {
+/// **The normal this writer emits for one corner, under a policy** — the
+/// smooth-fan rule and the authored-normal passthrough, as one public function.
+///
+/// Public since Wave D so a caller that displaces a cached vertex buffer
+/// (`inf_editor_core::dcc::displace`) reproduces the writer EXACTLY instead of
+/// approximating it with a vertex-average. The difference is not academic: a
+/// derived normal stops at sharp edges, so on any hard-shaded mesh an average
+/// is a different number, and the memo 7b law says the preview is the geometry
+/// the save produces.
+pub fn corner_normal(mesh: &Mesh, h: HalfId, policy: NormalPolicy) -> DVec3 {
     if policy == NormalPolicy::PreserveAuthored {
         if let Some(n) = mesh.corner_normal(h).expect("live half-edge id") {
             return DVec3::from_array(n);

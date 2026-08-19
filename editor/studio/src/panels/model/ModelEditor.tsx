@@ -1618,6 +1618,40 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
         <Verdict label="Source vertices" value={imp.sourceVertices} good />
         <Verdict label="Welded positions" value={imp.weldedPositions} good />
         <Verdict label="Sharp edges" value={imp.sharpEdges} good />
+        {/* Wave D: the non-manifold repair. Through P24 an asset with any of
+            these was REFUSED outright and there was no repair door anywhere in
+            the product — so a large fraction of real game art could not be
+            opened. Now it opens, and the counts are the contract. */}
+        <Verdict
+          label="Duplicate faces dropped"
+          value={imp.duplicateFacesDropped}
+          good={imp.duplicateFacesDropped === 0}
+        />
+        <Verdict
+          label="Faces reoriented"
+          value={imp.facesReoriented}
+          good={imp.facesReoriented === 0}
+        />
+        <Verdict
+          label="Non-manifold detached"
+          value={imp.nonManifoldSplits}
+          good={imp.nonManifoldSplits === 0}
+        />
+        {imp.nonManifoldSplits > 0 && (
+          <p className="text-[10px] leading-snug text-(--ink-text-dim)">
+            Three or more faces met at one edge — an interior partition, or a
+            double-sided sheet. That is not a surface, so the extras came in as{" "}
+            <b>separate shells</b> at the same coordinates. Nothing was thrown away and
+            nothing was moved; they are simply no longer joined.
+          </p>
+        )}
+        {imp.facesReoriented > 0 && (
+          <p className="text-[10px] leading-snug text-(--ink-text-dim)">
+            Some faces were wound the other way round from their neighbours and were
+            flipped to agree. The surface is identical &mdash; the authored normals were
+            kept verbatim, so re-exporting looks exactly as it arrived.
+          </p>
+        )}
 
         {lastSave && (
           <>

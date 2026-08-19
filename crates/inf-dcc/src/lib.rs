@@ -104,7 +104,10 @@ pub use build::{
     WELD_TOLERANCE,
 };
 pub use bvh::{Bvh, ClosestHit, RayHit, Tri};
-pub use export::{to_mesh_asset, ExportOptions, ExportReport, NormalPolicy, TANGENT_FALLBACK};
+pub use export::{
+    corner_normal, to_mesh_asset, to_mesh_asset_sourced, ExportOptions, ExportReport, NormalPolicy,
+    TANGENT_FALLBACK,
+};
 pub use heat::{solve_heat_weights, BoneReport, HeatError, HeatReport};
 pub use journal::{MeshSession, SessionError, SessionSave, CHECKPOINT_INTERVAL, MAX_CHECKPOINTS};
 pub use model::{KnifePoint, MergeTarget, MirrorAxis, MAX_BEVEL_SEGMENTS, MAX_LOOP_CUTS};

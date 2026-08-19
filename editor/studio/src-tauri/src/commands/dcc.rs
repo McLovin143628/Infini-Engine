@@ -324,6 +324,9 @@ fn import_dto(r: &ImportReport) -> DccImportDto {
         sharp_edges: r.sharp_edges as u32,
         boundary_edges: r.boundary_edges as u32,
         non_finite_values: r.non_finite_values as u32,
+        duplicate_faces_dropped: r.duplicate_faces_dropped as u32,
+        faces_reoriented: r.faces_reoriented as u32,
+        non_manifold_splits: r.non_manifold_splits as u32,
         skin_conflicts: r.skin_conflicts as u32,
     }
 }

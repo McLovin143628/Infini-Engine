@@ -40,16 +40,23 @@
 //! that refused to open such a file would be wrong; one that welded it into a
 //! bowtie would be broken.
 //!
+//! ## Non-manifold edges are REPAIRED (Wave D), not refused
+//!
+//! Through P24 the same directed edge used by two faces — coincident triangles,
+//! a winding flipped by an exporter, three faces at an interior partition —
+//! refused the whole asset. That was the wrong call: those are *ordinary* in
+//! shipped game content, every other DCC opens all of it, and "Edit Mesh" on
+//! such an asset failed with a message and no repair door anywhere in the
+//! product. See `repair_non_manifold` for the three stages and what each one
+//! costs; the counts are in [`ImportReport`] and the count is the contract.
+//!
 //! ## What import *does* refuse
 //!
 //! * A **newer schema** than this build understands.
-//! * A **skinned** submesh. The kernel has no skinning model, so importing and
-//!   exporting one would silently drop every weight. Refusing is the honest
-//!   answer until P24 gives the kernel somewhere to put them.
-//! * A **non-manifold edge** — the same directed edge used by two faces (two
-//!   coincident triangles, or inconsistent winding). Unlike a bowtie this cannot
-//!   be repaired by splitting a vertex without inventing geometry the source did
-//!   not describe.
+//! * A **skin stream** whose length does not match its submesh.
+//! * An **index list** that is not a whole number of triangles, or that names a
+//!   vertex the submesh does not have.
+//! * An asset with **no triangles at all**.
 //!
 //! Degenerate triangles (a repeated index, or two corners that weld together)
 //! are **skipped and counted** in [`ImportReport`] rather than refused: they
@@ -112,6 +119,29 @@ pub struct ImportReport {
     pub welded_positions: usize,
     /// Extra vertices minted to break bowties into single fans.
     pub fan_splits: usize,
+    /// **Faces dropped as exact duplicates** of an earlier one (Wave D).
+    ///
+    /// Same vertex loop, same cyclic order — no additional surface, exactly like
+    /// a degenerate triangle. A *reversed* twin is not a duplicate: that is a
+    /// genuine second sheet, and it lands in
+    /// [`ImportReport::non_manifold_splits`] instead.
+    pub duplicate_faces_dropped: usize,
+    /// **Faces whose winding was flipped** to agree with their neighbours
+    /// (Wave D).
+    ///
+    /// The lossless repair: the surface is identical, only its orientation is
+    /// now consistent. The commonest cause of a non-manifold edge in exported
+    /// content, and the one this reader used to refuse whole assets over.
+    pub faces_reoriented: usize,
+    /// **Faces given private vertices** because they still shared a directed
+    /// edge after the reorientation (Wave D).
+    ///
+    /// The *lossy* repair, counted separately for that reason: three faces
+    /// cannot share one edge and be a surface, so the extras become separate
+    /// shells at the same coordinates. Non-zero means the source described
+    /// something that is not a manifold surface — an interior partition, a
+    /// double-sided sheet — and this is how much of it was detached.
+    pub non_manifold_splits: usize,
     /// Triangles dropped because they carry no surface.
     pub degenerate_triangles_skipped: usize,
     /// Edges marked sharp because the corner normals disagree across them.
@@ -287,23 +317,12 @@ pub fn from_mesh_asset(asset: &MeshAsset) -> Result<MeshImport, ImportError> {
         return Err(ImportError::NoGeometry);
     }
 
-    // Edge-manifoldness is a property of the *source* and cannot be repaired by
-    // splitting, so it is checked before anything is built.
-    let mut directed: BTreeMap<(usize, usize), usize> = BTreeMap::new();
-    for face in &faces {
-        let n = face.verts.len();
-        for i in 0..n {
-            let key = (face.verts[i], face.verts[(i + 1) % n]);
-            let count = directed.entry(key).or_insert(0);
-            *count += 1;
-            if *count > 1 {
-                return Err(ImportError::NonManifoldEdge {
-                    from: key.0,
-                    to: key.1,
-                });
-            }
-        }
-    }
+    // **Edge-manifoldness is REPAIRED, not refused** (Wave D). See
+    // `repair_non_manifold`.
+    let repair = repair_non_manifold(&mut faces, &mut positions, &mut skins)?;
+    report.duplicate_faces_dropped = repair.duplicates;
+    report.faces_reoriented = repair.reoriented;
+    report.non_manifold_splits = repair.splits;
 
     report.fan_splits = split_bowties(&mut faces, &mut positions, &mut skins);
 
@@ -353,6 +372,224 @@ struct RawFace {
     verts: Vec<usize>,
     corners: Vec<CornerData>,
     slot: Option<u32>,
+}
+
+/// What [`repair_non_manifold`] had to do.
+struct NonManifoldRepair {
+    duplicates: usize,
+    reoriented: usize,
+    splits: usize,
+}
+
+/// **Make the face soup edge-manifold** — three stages, each counted.
+///
+/// # Why this exists at all
+///
+/// Through P24 the reader **refused** a non-manifold edge outright, on the
+/// grounds that (unlike a bowtie) it "cannot be repaired by splitting a vertex
+/// without inventing geometry the source did not describe". That is true of the
+/// third stage below and it was the wrong conclusion, because non-manifold edges
+/// are *ordinary* in shipped game content: interior partitions, coincident
+/// double-sided faces, a winding flipped by a CAD or sketch exporter, T-junction
+/// fans. Every other DCC opens all of it. "Edit Mesh" on such an asset failed
+/// with a message and there was no repair door anywhere in the product, so the
+/// honest description of the old behaviour is *this tool cannot open a large
+/// fraction of real art*.
+///
+/// The rule that replaces it is the **bowtie precedent** (`split_bowties`, and
+/// the module docs above): repair what the source plainly described, and
+/// **count it**, because the count is the contract. Never silently.
+///
+/// # The three stages, in the order that loses the least
+///
+/// 1. **Duplicate faces are dropped.** A face whose vertex set and cyclic order
+///    match an earlier one carries no additional surface — the same reasoning
+///    that skips a degenerate triangle rather than refusing it. Checked on the
+///    *canonical rotation* of the loop, so `[a,b,c]` and `[b,c,a]` are one face
+///    and `[a,c,b]` (the reversed twin of a double-sided pair) is not: that one
+///    is a genuine second surface and stage 2 decides what to do with it.
+///
+/// 2. **Winding is made consistent**, by a breadth-first walk over the faces'
+///    shared undirected edges: a neighbour that disagrees is flipped, and its
+///    own neighbours follow. This is the repair for the commonest cause by far,
+///    and it is the only one of the three that loses **nothing** — the surface
+///    is identical, only its orientation is now agreed. Deterministic: the walk
+///    starts at the lowest face index of each connected component and visits
+///    edges in `BTreeMap` order.
+///
+///    **Authored corner normals are NOT flipped with the winding**, and that is
+///    deliberate: an authored normal is what the source wanted *rendered*, the
+///    flip is a topology fix, and `NormalPolicy::PreserveAuthored` writes them
+///    back out unchanged — so a repaired asset re-exports looking exactly as it
+///    arrived. (`mark_sharp_from_normals` will read the disagreement as a crease,
+///    which is what a hard-shaded surface looked like anyway.)
+///
+/// 3. **Whatever still shares a directed edge gets its own vertices.** Three
+///    faces on one edge cannot all keep it — that is not a surface — so every
+///    face after the first two mints private copies of the edge's two endpoints.
+///    This *does* invent geometry: the extra sheet becomes a separate shell at
+///    the same coordinates. It is the honest form of "open it anyway", and it is
+///    counted separately from the other two so an author can tell the lossless
+///    repair from the lossy one.
+///
+/// The refusal survives as a **convergence guard**: if a repair pass leaves a
+/// directed edge still doubled, the reader says so rather than building a mesh
+/// `add_face_raw` would then panic on.
+fn repair_non_manifold(
+    faces: &mut Vec<RawFace>,
+    positions: &mut Vec<[f64; 3]>,
+    skins: &mut Vec<Option<VertWeights>>,
+) -> Result<NonManifoldRepair, ImportError> {
+    // ── stage 1: drop duplicate faces ──────────────────────────────────────
+    let mut seen: std::collections::BTreeSet<Vec<usize>> = std::collections::BTreeSet::new();
+    let mut duplicates = 0usize;
+    let mut kept: Vec<RawFace> = Vec::with_capacity(faces.len());
+    for face in faces.drain(..) {
+        if seen.insert(canonical_loop(&face.verts)) {
+            kept.push(face);
+        } else {
+            duplicates += 1;
+        }
+    }
+    *faces = kept;
+
+    // ── stage 2: agree on a winding ────────────────────────────────────────
+    //
+    // The undirected-edge → faces index. Built once and reused by stage 3,
+    // because flipping never changes which faces touch which edge.
+    let mut by_edge: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+    for (fi, face) in faces.iter().enumerate() {
+        let n = face.verts.len();
+        for i in 0..n {
+            by_edge
+                .entry(undirected(face.verts[i], face.verts[(i + 1) % n]))
+                .or_default()
+                .push(fi);
+        }
+    }
+    let mut visited = vec![false; faces.len()];
+    let mut reoriented = 0usize;
+    for seed in 0..faces.len() {
+        if visited[seed] {
+            continue;
+        }
+        visited[seed] = true;
+        let mut queue = std::collections::VecDeque::from([seed]);
+        while let Some(fi) = queue.pop_front() {
+            // The face's directed edges, as they stand right now.
+            let dirs: Vec<(usize, usize)> = {
+                let f = &faces[fi];
+                let n = f.verts.len();
+                (0..n).map(|i| (f.verts[i], f.verts[(i + 1) % n])).collect()
+            };
+            for &(a, b) in &dirs {
+                let Some(neighbours) = by_edge.get(&undirected(a, b)) else {
+                    continue;
+                };
+                // Exactly two faces on an edge is a surface; more is stage 3's
+                // problem and reorienting them is not defined.
+                if neighbours.len() != 2 {
+                    continue;
+                }
+                for &nb in neighbours {
+                    if nb == fi || visited[nb] {
+                        continue;
+                    }
+                    visited[nb] = true;
+                    if uses_directed(&faces[nb], a, b) {
+                        flip_face(&mut faces[nb]);
+                        reoriented += 1;
+                    }
+                    queue.push_back(nb);
+                }
+            }
+        }
+    }
+
+    // ── stage 3: split what is left ────────────────────────────────────────
+    let mut directed: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    let mut splits = 0usize;
+    for fi in 0..faces.len() {
+        let n = faces[fi].verts.len();
+        let mut conflict = false;
+        for i in 0..n {
+            let key = (faces[fi].verts[i], faces[fi].verts[(i + 1) % n]);
+            if directed.contains_key(&key) {
+                conflict = true;
+                break;
+            }
+        }
+        if conflict {
+            // Private copies of EVERY vertex of the offending face. Copying only
+            // the conflicting edge's endpoints leaves the face's other corners
+            // shared, which re-introduces a bowtie at them — measured, and this
+            // is the version that lands manifold in one pass.
+            for k in 0..n {
+                let src = faces[fi].verts[k];
+                positions.push(positions[src]);
+                skins.push(skins[src]);
+                faces[fi].verts[k] = positions.len() - 1;
+            }
+            splits += 1;
+        }
+        for i in 0..n {
+            let key = (faces[fi].verts[i], faces[fi].verts[(i + 1) % n]);
+            if directed.insert(key, fi).is_some() {
+                // Unreachable: a face whose vertices are all private cannot
+                // share a directed edge with anything. Kept because "unreachable"
+                // is a claim about code that will change, and the alternative is
+                // a panic inside `add_face_raw` whose own contract says a refusal
+                // is a value.
+                return Err(ImportError::NonManifoldEdge {
+                    from: key.0,
+                    to: key.1,
+                });
+            }
+        }
+    }
+
+    Ok(NonManifoldRepair {
+        duplicates,
+        reoriented,
+        splits,
+    })
+}
+
+fn undirected(a: usize, b: usize) -> (usize, usize) {
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+/// A face's vertex loop rotated to start at its lowest index — the key that makes
+/// `[a,b,c]` and `[b,c,a]` one face and `[a,c,b]` two.
+fn canonical_loop(verts: &[usize]) -> Vec<usize> {
+    let Some(start) = verts
+        .iter()
+        .enumerate()
+        .min_by_key(|&(_, v)| *v)
+        .map(|(i, _)| i)
+    else {
+        return Vec::new();
+    };
+    verts[start..]
+        .iter()
+        .chain(&verts[..start])
+        .copied()
+        .collect()
+}
+
+fn uses_directed(face: &RawFace, a: usize, b: usize) -> bool {
+    let n = face.verts.len();
+    (0..n).any(|i| face.verts[i] == a && face.verts[(i + 1) % n] == b)
+}
+
+/// Reverse a face's winding, keeping every corner on the vertex it belongs to.
+fn flip_face(face: &mut RawFace) {
+    face.verts.reverse();
+    face.corners.reverse();
 }
 
 /// Partition each welded vertex's corners into fans and give every fan after the
@@ -949,8 +1186,10 @@ pub(crate) mod tests {
         ));
     }
 
+    /// Wave D: a duplicated triangle **opens**, with the duplicate dropped and
+    /// counted. It used to refuse the whole asset.
     #[test]
-    fn a_duplicated_triangle_is_a_non_manifold_edge_refusal() {
+    fn a_duplicated_triangle_is_dropped_and_counted() {
         let v = |x: f32, y: f32| MeshVertex {
             position: [x, y, 0.0],
             ..Default::default()
@@ -965,10 +1204,107 @@ pub(crate) mod tests {
             }],
             vec![],
         );
-        assert!(matches!(
-            from_mesh_asset(&asset),
-            Err(ImportError::NonManifoldEdge { .. })
-        ));
+        let out =
+            from_mesh_asset(&asset).expect("a duplicate is not a reason to lock an author out");
+        assert_eq!(out.report.duplicate_faces_dropped, 1);
+        assert_eq!(
+            out.report.non_manifold_splits, 0,
+            "nothing had to be detached"
+        );
+        assert_eq!(out.mesh.face_count(), 1, "one surface, once");
+        assert_eq!(crate::validate::validate(&out.mesh), Ok(()));
+    }
+
+    /// A neighbour wound the wrong way — the commonest cause, and the one the
+    /// repair loses nothing to. Two triangles sharing an edge, the second
+    /// reversed: they open as one two-face surface, one flip recorded, no
+    /// detachment.
+    #[test]
+    fn an_inconsistently_wound_neighbour_is_flipped_not_refused() {
+        let v = |x: f32, z: f32| MeshVertex {
+            position: [x, 0.0, z],
+            ..Default::default()
+        };
+        let asset = MeshAsset::new(
+            vec![SubMesh {
+                name: "flipped".into(),
+                vertices: vec![v(0.0, 0.0), v(1.0, 0.0), v(1.0, 1.0), v(0.0, 1.0)],
+                // 0-1-2 and 0-2-3: the shared edge runs 0→2 in the first and
+                // 2→0 in the second, which is what agreement looks like.
+                indices: vec![0, 1, 2, 0, 2, 3],
+                material_slot: None,
+                skin: Vec::new(),
+            }],
+            vec![],
+        );
+        // The control: this pair IS consistent (0→2 vs 2→0), so nothing is done.
+        let ok = from_mesh_asset(&asset).expect("a well-wound pair opens");
+        assert_eq!(ok.report.faces_reoriented, 0);
+        assert_eq!(ok.report.non_manifold_splits, 0);
+
+        // …and the broken one, with the second triangle's winding reversed.
+        let broken = MeshAsset::new(
+            vec![SubMesh {
+                name: "flipped".into(),
+                vertices: vec![v(0.0, 0.0), v(1.0, 0.0), v(1.0, 1.0), v(0.0, 1.0)],
+                indices: vec![0, 1, 2, 3, 2, 0],
+                material_slot: None,
+                skin: Vec::new(),
+            }],
+            vec![],
+        );
+        let out = from_mesh_asset(&broken).expect("a flipped neighbour is not a lockout");
+        assert_eq!(
+            out.report.faces_reoriented, 1,
+            "one flip, and it is recorded"
+        );
+        assert_eq!(
+            out.report.non_manifold_splits, 0,
+            "the lossless repair was enough — nothing was detached"
+        );
+        assert_eq!(out.mesh.face_count(), 2);
+        assert_eq!(out.mesh.vert_count(), 4, "and nothing was duplicated");
+        assert_eq!(crate::validate::validate(&out.mesh), Ok(()));
+    }
+
+    /// THREE faces on one edge is not a surface, and no reorientation makes it
+    /// one. The extras are detached — the lossy repair — and counted apart from
+    /// the lossless ones so an author can tell which happened.
+    #[test]
+    fn a_third_face_on_one_edge_is_detached_and_counted_separately() {
+        let v = |p: [f32; 3]| MeshVertex {
+            position: p,
+            ..Default::default()
+        };
+        let asset = MeshAsset::new(
+            vec![SubMesh {
+                name: "fin".into(),
+                vertices: vec![
+                    v([0.0, 0.0, 0.0]),
+                    v([1.0, 0.0, 0.0]),
+                    v([0.0, 1.0, 0.0]),
+                    v([0.0, 0.0, 1.0]),
+                    v([0.0, -1.0, 0.0]),
+                ],
+                // Three triangles all using the edge 0–1.
+                indices: vec![0, 1, 2, 0, 1, 3, 0, 1, 4],
+                material_slot: None,
+                skin: Vec::new(),
+            }],
+            vec![],
+        );
+        let out = from_mesh_asset(&asset).expect("an interior partition still opens");
+        assert!(
+            out.report.non_manifold_splits >= 1,
+            "the third sheet has to detach: {:?}",
+            out.report
+        );
+        assert_eq!(out.mesh.face_count(), 3, "every triangle survives");
+        assert_eq!(crate::validate::validate(&out.mesh), Ok(()));
+        // …and the mesh really is manifold now: every directed edge once.
+        for h in out.mesh.half_ids() {
+            assert!(out.mesh.twin(h).is_some());
+        }
     }
 
     #[test]

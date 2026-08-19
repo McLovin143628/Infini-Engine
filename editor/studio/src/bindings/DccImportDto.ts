@@ -8,7 +8,25 @@
  * weld (tolerance zero, and it stays zero) is why. Telling them beats picking an
  * epsilon on their behalf.
  */
-export type DccImportDto = { sourceVertices: number, weldedPositions: number, fanSplits: number, degenerateTrianglesSkipped: number, sharpEdges: number, boundaryEdges: number, nonFiniteValues: number, 
+export type DccImportDto = { sourceVertices: number, weldedPositions: number, fanSplits: number, 
+/**
+ * **Faces dropped as exact duplicates** of an earlier one (Wave D).
+ */
+duplicateFacesDropped: number, 
+/**
+ * **Faces whose winding was flipped** to agree with their neighbours
+ * (Wave D). The LOSSLESS half of the non-manifold repair: the surface is
+ * identical, only its orientation is now consistent.
+ */
+facesReoriented: number, 
+/**
+ * **Faces detached because they still shared a directed edge** (Wave D).
+ * The LOSSY half, counted apart from the lossless one on purpose: non-zero
+ * means the source described something that is not a manifold surface — an
+ * interior partition, a double-sided sheet — and this is how much of it
+ * came in as a separate shell.
+ */
+nonManifoldSplits: number, degenerateTrianglesSkipped: number, sharpEdges: number, boundaryEdges: number, nonFiniteValues: number, 
 /**
  * **Welded positions where two source vertices disagreed about their
  * skinning influences** (P24.2). Normally zero — a well-formed exporter

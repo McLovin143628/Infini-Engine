@@ -1867,9 +1867,19 @@ mod tests {
             }],
             vec!["t".into()],
         );
+        // **Wave D: the kernel no longer REFUSES a fin — it detaches it and
+        // says so.** The filter still earns its place, and the claim is now
+        // about what it saves the author rather than about a lockout: an
+        // unfiltered scan opens as a mesh with loose sheets in it, and a
+        // filtered one opens clean. The assertion is rewritten rather than
+        // deleted, because a filter that stopped removing the fin would
+        // otherwise look identical from here.
+        let unfiltered = inf_dcc::from_mesh_asset(&broken)
+            .expect("the reader repairs rather than refusing since Wave D");
         assert!(
-            inf_dcc::from_mesh_asset(&broken).is_err(),
-            "the fin did not make the kernel refuse — this test proves nothing"
+            unfiltered.report.non_manifold_splits > 0,
+            "the fin did not make the kernel detach anything — this test proves \
+             nothing"
         );
         let (filtered, dropped) = manifold_filter(&indices);
         assert_eq!(dropped, 1);
@@ -1883,9 +1893,11 @@ mod tests {
             }],
             vec!["t".into()],
         );
-        assert!(
-            inf_dcc::from_mesh_asset(&fixed).is_ok(),
-            "the filtered mesh still will not open"
+        let clean =
+            inf_dcc::from_mesh_asset(&fixed).expect("the filtered mesh still will not open");
+        assert_eq!(
+            clean.report.non_manifold_splits, 0,
+            "…and it opens CLEAN, which is the whole point of filtering"
         );
     }
 

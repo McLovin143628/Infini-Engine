@@ -53,8 +53,10 @@
 //!   their corners coincident, which is counted and surfaced
 //!   ([`BakeReport::coincident_vertices`]) rather than repaired — the P16
 //!   advisory doctrine, and the same ruling `ExportReport` already made. See
-//!   [`BakeReport::reopenable`] for the consequence, which is real and is
-//!   measured rather than assumed.
+//!   [`BakeReport::reopenable`], which **flipped to true in Wave D** because the
+//!   reader learned to repair a non-manifold edge: the consequence is still
+//!   real, it is now "the shared sheets arrive detached and counted" rather than
+//!   "the asset cannot be opened".
 //! * **No interior detail beyond what the grammar placed.** Furniture is placed
 //!   by the assembler and is therefore baked; nothing is added, removed or
 //!   simplified.
@@ -159,13 +161,22 @@ pub struct BakeReport {
     /// by actually running the reader over it rather than inferred from the
     /// counter above.
     ///
-    /// A building whose parts abut exactly is *not* re-openable, and that is the
-    /// honest v1 limit: the reader's weld is exact, so the four faces meeting at
-    /// a shared slab edge become four faces on one edge, which is non-manifold
-    /// and refused. The asset is still perfectly good for what it is for —
-    /// rendering, virtualization and **fracture**, none of which need half-edge
-    /// topology. Measured, so the day a boolean union lands this flips and the
-    /// ledger gets rewritten.
+    /// **This flipped in Wave D, and the ledger is rewritten** — measured, which
+    /// is exactly why it was measured. The P23 limit read: *"a building whose
+    /// parts abut exactly is not re-openable; the reader's weld is exact, so the
+    /// four faces meeting at a shared slab edge become four faces on one edge,
+    /// which is non-manifold and refused."* Every word of that is still true
+    /// about the GEOMETRY; what changed is that the reader now **repairs** a
+    /// non-manifold edge instead of refusing the asset over it
+    /// (`inf_dcc::build`'s three-stage repair, counted in `ImportReport`).
+    ///
+    /// So a baked building opens. The honest shape of what opens: the extra
+    /// sheets at a shared slab edge come in **detached** — separate shells at
+    /// the same coordinates, counted in `ImportReport::non_manifold_splits` —
+    /// because three faces on one edge is not a surface however the reader is
+    /// written. That is a mesh an author can edit, which is the thing they could
+    /// not do at all before. The day a boolean union lands, the sheets stop
+    /// existing and this becomes clean rather than merely open.
     pub reopenable: bool,
 }
 
@@ -930,10 +941,25 @@ mod tests {
             "a real building's parts abut; zero coincident vertices means the \
              counter is not measuring what it claims"
         );
+        // **Wave D: this flipped, and the gate is what noticed.** It asserted
+        // `!reopenable` from P23 until the reader learned to repair a
+        // non-manifold edge; the assertion is inverted rather than deleted,
+        // because "a baked building opens in the Model Editor" is now a claim
+        // somebody could break.
         assert!(
-            !baked.report.reopenable,
-            "a baked building became re-openable in the Model Editor — the v1 \
-             ledger says it is not, and that is now wrong"
+            baked.report.reopenable,
+            "a baked building no longer opens in the Model Editor — the reader's \
+             non-manifold repair is what makes it open, so this is that repair \
+             regressing"
         );
+        // …and it opens with the abutting sheets DETACHED, which is the honest
+        // shape of the repair rather than a claim that the geometry got better.
+        let import = inf_dcc::from_mesh_asset(&baked.asset).expect("it opens");
+        assert!(
+            import.report.non_manifold_splits > 0,
+            "abutting parts share slab edges; zero detachments means the repair \
+             is not measuring what it claims"
+        );
+        assert_eq!(inf_dcc::validate(&import.mesh), Ok(()), "and it is a mesh");
     }
 }
