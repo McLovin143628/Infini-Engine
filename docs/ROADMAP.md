@@ -991,7 +991,7 @@ tutorial, and ships a small game in a weekend.
 | Meshlets | meshopt (meshopt-rs) | industry-baseline clusterization/simplification |
 | Physics | rapier3d-f64 / rapier2d | pure Rust (console-portable), f64 builds; Jolt re-evaluated P12 |
 | Audio | kira | game-oriented (clocks, tweens, spatial); rodio is playback-only |
-| Import | gltf, image, intel_tex_2 (BC7); FBX via ufbx later | glTF-first modern pipeline |
+| Import | gltf, image, half; **owned BC1/BC3/BC5** (Wave T); FBX via ufbx later | glTF-first modern pipeline; `intel_tex_2`'s ISPC build was refused at P4 as a cross-OS CI liability and the block encoders are owned integer code — BC7/BC6H are named deferrals in `docs/memos/wave-t-textures-disposition.md` |
 | Serialization | serde + bincode 2 + toml + xxhash-rust | the dual-format asset design |
 | TS bindings | ts-rs | proven pattern; CI drift-checked |
 | Transpiler | syn 2 + quote + prettyplease | the only serious option; deterministic formatting |
