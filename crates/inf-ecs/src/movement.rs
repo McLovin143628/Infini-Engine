@@ -807,9 +807,15 @@ pub fn transition_is_legal(from: MovementMode, to: MovementMode) -> bool {
         // **Driving** (P29.7). Entered from the ground beside a vehicle, and
         // left back onto the ground or into the air — a moving vehicle's exit
         // inherits its velocity, so a character stepping out at 20 m/s is
-        // falling, not standing. It is below the ragdoll and water rows on
-        // purpose: a car driven into a lake puts its driver in the water, and a
-        // driver hit hard enough ragdolls out of the seat.
+        // falling, not standing.
+        //
+        // It is below the ragdoll and water rows on purpose, so that the table
+        // **permits** a driver to be pulled out of a seat by something that is a
+        // fact about its body rather than a choice. Nothing pulls it yet: the
+        // seat step owns the whole step and returns before the swim latch and
+        // before any landing classifier, so a car driven into a lake keeps its
+        // driver dry and seated (P29.7 audit, A6). The rows are the contract
+        // the day a trigger exists; they are not a description of one.
         (Grounded | Crouch, Driving) => true,
         (Driving, Grounded | FallFree | FallControlled) => true,
         (Driving, _) => false,

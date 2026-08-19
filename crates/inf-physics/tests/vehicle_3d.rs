@@ -28,6 +28,8 @@ const GROUND: Uuid = Uuid::from_u128(0x2907_1000);
 const CHASSIS: Uuid = Uuid::from_u128(0x2907_1001);
 const WHEEL_BASE: u128 = 0x2907_1010;
 const LOOSE_SENSOR: Uuid = Uuid::from_u128(0x2907_1099);
+/// The lake the buoyancy-ownership arm floats the car on.
+const LAKE: Uuid = Uuid::from_u128(0x2907_1098);
 
 /// The chassis is 4 × 1 × 2 m at 150 kg/m³ — a hollow shell, per
 /// `Collider3D::density`'s own note, which is 1 200 kg.
@@ -198,6 +200,90 @@ fn a_parked_rig_settles_on_its_springs_and_stays_there() {
     );
 }
 
+/// **A floating vehicle keeps the water pass's force** — the door's OTHER
+/// force-ownership rule, given the falsifier it did not have (P29.7 audit, A3).
+///
+/// `step_vehicles` clears a chassis's persistent force before applying its own,
+/// because a rapier force persists until `reset_forces` (P20.2's law). It must
+/// **not** clear one it does not own: `apply_water_forces` resets and re-applies
+/// every buoyant body at fixed-step stage 8 and this door runs at stage 12, so
+/// an unconditional clear would delete this step's buoyancy before the solver
+/// ever saw it. `PhysicsBridge3D::is_buoyant` is the one line that says so.
+///
+/// Measured: with that guard removed (`if true`) the car sinks past −100 m in
+/// ten seconds; with it, it floats. Before this arm the whole rule was a
+/// comment — nothing in the workspace reddened when the guard was deleted.
+///
+/// There is deliberately **no ground**: the only thing holding this car up is
+/// the force the vehicle door must not touch.
+#[test]
+fn a_buoyant_vehicle_keeps_the_force_the_water_pass_owns() {
+    use inf_ecs::components::{Buoyancy, WaterBody};
+
+    let mut world = EcsWorld::new();
+    let lake = world.spawn_with_guid(LAKE, "Lake", None);
+    world.world_mut().entity_mut(lake).insert((
+        WaterBody {
+            // Amplitude 0 makes the height query exact, so the tolerance below
+            // is the solver's settling and not the Gerstner inversion's.
+            wave_amplitude_m: 0.0,
+            ..WaterBody::lake(0.0, inf_ecs::math::Vec2d::splat(100.0))
+        },
+        Transform::IDENTITY,
+    ));
+    car(&mut world, 0.0);
+    let chassis = world.entity_of(CHASSIS).expect("the car exists");
+    world.world_mut().entity_mut(chassis).insert(Buoyancy {
+        // The chassis's own 150 kg/m³, so the hull floats with its deck clear
+        // rather than awash — and so this arm's claim is Archimedes' rather
+        // than a tuning coincidence.
+        density_kg_m3: DENSITY,
+        ..Default::default()
+    });
+    world.mark_dirty();
+    world.propagate();
+
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync_from_world(&world);
+    assert!(
+        bridge.is_buoyant(CHASSIS),
+        "the fixture must opt the chassis in, or the guard is never reached"
+    );
+    // The runtime's own order: sync → water → movement (which is where the
+    // vehicle door lives) → solve → write-back.
+    let float_y = |world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, n: u32| -> f64 {
+        for _ in 0..n {
+            bridge.sync_from_world(world);
+            bridge.apply_water_forces(DT);
+            inf_physics::d3::step_character_movement(world, bridge, DT);
+            bridge.step(DT);
+            bridge.write_back_into(world);
+            world.propagate();
+        }
+        world
+            .world()
+            .get::<Transform>(world.entity_of(CHASSIS).expect("the car survives"))
+            .expect("…with a transform")
+            .translation
+            .y
+    };
+    let half = float_y(&mut world, &mut bridge, 300);
+    let full = float_y(&mut world, &mut bridge, 300);
+    assert!(
+        full > -0.5,
+        "the car sank to y = {full} in ten seconds — the vehicle door cleared \
+         the force the water pass owns"
+    );
+    // …and it is *floating* rather than merely not-yet-fallen: it stopped. A
+    // body whose buoyancy is being deleted every step is still accelerating
+    // downward at five seconds and at ten.
+    assert!(
+        (full - half).abs() < 0.05,
+        "the car was at {half} m after five seconds and {full} m after ten — it \
+         is still sinking, not floating"
+    );
+}
+
 /// A wheel is **consumed** by its vehicle, not mirrored into rapier — so it has
 /// no collider, and the world it drives on is unchanged by having wheels in it.
 #[test]
@@ -300,6 +386,43 @@ fn throttle_drives_it_and_the_brake_stops_it() {
         (rig.z() - stopped).abs() < 0.05,
         "a braked car rolled another {} m",
         rig.z() - stopped
+    );
+    // **And a resistive force may not REVERSE the motion** (P29.7 audit, A4).
+    //
+    // The ledger's first measured defect — rolling resistance applied outside
+    // the stop clamp — is asserted here and NOT by the position window above,
+    // which is twenty times too wide to see it once the pitch pump is fixed.
+    // The two defects were measured together (5.8 cm/s), and separating them
+    // was this audit's job: with `contact_velocity` correct, restoring the
+    // unclamped rolling term leaves the *position* pinned to four decimal
+    // places and puts a permanent **−2.45 mm/s** on the body — a car that is
+    // driving backwards against its own brakes and getting nowhere, which is
+    // the same defect one integration short of being visible.
+    //
+    // So the claim is the body's own velocity, read out of the solver, and it
+    // is a claim about the world rather than about a report: a braked car is
+    // stopped, not slowly reversing. Correct: 6.4e−10 m/s. Defective: 2.45e−3.
+    rig.drive(
+        VehicleControls {
+            brake: 1.0,
+            ..Default::default()
+        },
+        240,
+    );
+    let body = rig
+        .bridge
+        .body_of(CHASSIS)
+        .expect("the chassis is mirrored");
+    let residual = rig
+        .bridge
+        .world()
+        .body_linvel(body)
+        .expect("…with a velocity")
+        .z;
+    assert!(
+        residual.abs() < 1e-6,
+        "a braked car is still moving at {residual} m/s after four seconds on \
+         the brake — a resistive force that overshoots reverses the motion"
     );
 }
 
@@ -866,6 +989,72 @@ fn a_vehicle_out_of_reach_is_a_refusal_and_not_a_teleport() {
     );
     assert!(!crew.driver().runtime.seat.is_seated());
     assert!((crew.driver_pos() - before).length() < 0.05);
+}
+
+/// **An enter press the step could not honour is CONSUMED, not banked**
+/// (P29.7 audit, A1).
+///
+/// The movement door's own law, written above its edge-consumption block: *the
+/// edges are consumed whether or not they were honoured; an unconsumed edge
+/// fires again next step off the same press.* `press_interact` is only read on a
+/// grounded step, and it was the one edge nothing cleared on the other paths —
+/// so a press made in mid-air survived the whole fall and climbed into whatever
+/// car happened to be in reach when the character landed, which is the input
+/// buffer nobody asked for.
+///
+/// The fixture drops the character in beside the car so the press lands on an
+/// airborne step, and then lets it land **inside** `ENTER_REACH_M` — which is
+/// what makes this an assertion about the edge rather than about the reach.
+#[test]
+fn an_enter_press_made_in_the_air_does_not_fire_on_landing() {
+    let mut world = EcsWorld::new();
+    ground(&mut world);
+    car(&mut world, SPAWN_Y);
+    hero(&mut world, HERO, 2.5, 0.0);
+    {
+        let e = world.entity_of(HERO).expect("the hero exists");
+        let mut t = world
+            .world_mut()
+            .get_mut::<Transform>(e)
+            .expect("…with a transform");
+        t.translation.y += 6.0;
+    }
+    world.mark_dirty();
+    world.propagate();
+    let bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    let mut crew = Crew {
+        rig: Rig { world, bridge },
+    };
+    crew.rig.bridge.sync_from_world(&crew.rig.world);
+    crew.step(&Default::default(), 5);
+    assert!(
+        !crew.driver().runtime.grounded,
+        "the fixture must press the control in the AIR, or it proves nothing"
+    );
+    crew.step(&interact(), 1);
+    assert!(
+        !crew.driver().runtime.seat.is_seated(),
+        "an airborne character climbed into a car"
+    );
+    crew.step(&Default::default(), 180);
+    assert!(
+        crew.driver().runtime.grounded,
+        "the character must land for this arm to mean anything"
+    );
+    // …and it landed in reach, so the refusal below is the EDGE and not the
+    // distance.
+    let seat = crew.rig.chassis().translation.to_dvec3() + DVec3::Y * HALF.y;
+    let feet = crew.driver_pos() - DVec3::Y * (crew.driver().stand_half_height_m + HERO_RADIUS);
+    assert!(
+        (seat - feet).length() < inf_physics::d3::vehicle::ENTER_REACH_M,
+        "the character landed {} m from the seat, outside the reach",
+        (seat - feet).length()
+    );
+    assert!(
+        !crew.driver().runtime.seat.is_seated(),
+        "a press the airborne step could not honour was banked and fired on \
+         landing"
+    );
 }
 
 /// **The car carries its driver**, and the driver's stick drives the car.

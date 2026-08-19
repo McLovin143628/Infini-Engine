@@ -518,6 +518,12 @@ fn step_one(
     //
     //    Nothing below this point runs while `Mantle` is the mode.
     if cm.mode == MovementMode::Mantle {
+        // The two P29.7 edges are consumed here too (P29.7 audit, A1): neither
+        // is read by a mantle, and an edge that survives a path that could not
+        // honour it fires the moment that path ends. `press_jump` is NOT
+        // consumed here, because the mantle and the ragdoll both read it.
+        cm.runtime.press_interact = false;
+        cm.runtime.press_fly = false;
         return step_mantle(world, bridge, guid, cm, dt, overlays);
     }
 
@@ -526,6 +532,8 @@ fn step_one(
     //    step's velocity model has nothing to say about them. The bridge follows
     //    the pelvis with the capsule and hands the character back when it settles.
     if cm.mode == MovementMode::Ragdoll {
+        cm.runtime.press_interact = false;
+        cm.runtime.press_fly = false;
         return super::ragdoll_bridge::step_ragdoll(world, bridge, guid, cm, dt);
     }
 
@@ -534,8 +542,22 @@ fn step_one(
     //    has nothing to say about a car, and the character is a passenger on a
     //    rigid body. `press_interact` from the ground climbs in; the seat step
     //    below drives, warps and gets back out.
-    if cm.runtime.press_interact && cm.mode.is_grounded_family() {
-        cm.runtime.press_interact = false;
+    //
+    //    **The edge is taken whether or not it is honoured** (P29.7 audit, A1),
+    //    which is this function's own law forty lines down. It is only *read*
+    //    on a grounded step, and while it was only *cleared* on one, a press
+    //    made in mid-air was banked for the whole fall and climbed into
+    //    whatever car was in reach when the character landed.
+    //
+    //    The one exception is `Driving`, and it is not a latch: the seat step
+    //    below reads this same edge as the EXIT control, so taking it here would
+    //    lock the driver in.
+    let want_enter = if cm.mode == MovementMode::Driving {
+        false
+    } else {
+        std::mem::take(&mut cm.runtime.press_interact)
+    };
+    if want_enter && cm.mode.is_grounded_family() {
         let feet = position - DVec3::Y * (cm.half_height_for(cm.mode) + radius);
         let occupied = occupied_seats(world, guid);
         if let Some(vehicle) = super::vehicle::try_enter(bridge, feet, &occupied) {

@@ -1526,8 +1526,10 @@ fn rig_bones(
 /// window, and that bound is stated rather than implied: a clip whose traversal
 /// occupies only its middle third publishes an arc whose first and last thirds
 /// are flat, and a warp over it spends those thirds correcting additively. A
-/// per-clip warp window ([`inf_anim::WarpWindow`], which has no producer yet) is
-/// where that stops being true.
+/// per-clip warp window ([`inf_anim::WarpWindow`]) is where that stops being
+/// true. P29.7 gave that type its first consumer — the seat warp, in
+/// `inf_physics::d3::movement::step_driving` — but no *clip* carries one, so
+/// this bound stands.
 fn traversal_arc_of(clip: &inf_anim::AnimClip) -> Option<crate::anim_bridge::TraversalArc> {
     let track = clip.root_motion.as_ref()?;
     if track.times.len() < 2 || !clip.duration.is_finite() || clip.duration <= 0.0 {

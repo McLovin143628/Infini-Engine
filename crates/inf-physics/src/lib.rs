@@ -61,7 +61,12 @@
 pub mod d2;
 pub mod d3;
 mod filtering;
-mod gravity;
+// P29.7: the two solvers' gravity as one value. **Public**, unlike its private
+// siblings above and below, because `WorldGravity`'s own docs point at the
+// module docs for the finding and the decision they record — and a public item
+// linking into a private module is a pointer a reader of the public API cannot
+// follow (P29.7 audit, A8).
+pub mod gravity;
 mod stepper;
 
 pub use filtering::{CollisionLayers, CombineRule};

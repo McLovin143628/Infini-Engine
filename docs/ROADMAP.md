@@ -19101,7 +19101,7 @@ shows a one-line authoring change as a one-line diff.
 > | 10 | `distance_match` and `play_rate_for` have zero callers | P29.4 | **ROUTED to the island.** Their consumer is a locomotion state whose clip play-rate is driven by distance travelled — a behaviour change to the pose step with its own arms. Neither a seated driver nor a flyer plays a clip at all, so this wave had nothing to hang it on. Their *input* (the distance track) is committed content since P29.6, so the island starts with the hard half done. |
 > | 11 | `inf_ecs::pose::set_blend_mode` (the per-transition blend mode) | P29.2, deferred four times | **DEFERRED to the island's schema window**, with P29.6's sentence unchanged and now confirmed by a fifth wave: it writes a **world-level** resource, so exposing it obliges `ScenePayload` to carry it, and a resource the editor can set that the payload does not carry is a preview that differs from the build. One schema move buys the `SmTransition` field and the payload slot together; doing either alone is the worse half. §13's risk register spends the scene bump in P29.3, and this wave has no schema budget. |
 > | 12 | the playground's persisted ragdoll carries anchors + density but not contacts/layers | P29.6 audit | **DEFERRED to the island's schema window**, by name: `Joint3D` has no `contacts` and `Collider3D` no `layers`, so the same builder produces two physically different ragdolls depending on whether it is spawned or saved. It rides the same bump as #11. |
-> | 13 | `fov_deg` is documented vertical and valued like UE's horizontal | P29.6 audit | **RE-ROUTED, with the measurement.** Nothing this wave consumes it: the drive and fly cameras read the same table and the only reader in the tree is the windowed player's `fov_y`. The number, for whoever wires the next projection: a **vertical** 70° at 16:9 is **106° horizontal**, and ALS's 70/78/55/90 are horizontal — so the shipped window is currently rendering about half again the intended field. Changing the four constants moves `camera.toml`, the camera trace and the feel of every view mode, which is a rendering decision with its own before/after and not a footnote on a vehicle wave. |
+> | 13 | `fov_deg` is documented vertical and valued like UE's horizontal | P29.6 audit | **RE-ROUTED, with the measurement — corrected by the P29.7 audit (A2).** Nothing this wave *projects* with it: the drive and fly cameras read the same table and the only reader in the tree is the windowed player's `fov_y`. (P29.7 did give it a live-tuning knob — `run.fov_deg` in the panel's Camera group — which reaches the real field and changes the camera pose; it changes nothing an editor Simulate draws, because the editor viewport uses its own camera.) The number, for whoever wires the next projection: `2·atan(tan(35°)·16/9)`, so a **vertical** 70° at 16:9 is **102.5° horizontal** — the ledger first said 106°, which is not that arithmetic at any aspect this engine uses. ALS's 70/78/55/90 are horizontal, so the shipped window is rendering **1.46×** the intended field (102.5 against 70), which is the half-again claim and it survives the correction. The four constants convert to 43.0 / 49.0 / 32.6 / 58.7 vertical. Changing them moves `camera.toml`, the camera trace and the feel of every view mode, which is a rendering decision with its own before/after and not a footnote on a vehicle wave. |
 > | 14 | the editor's play capture takes OS focus (mouse-look and WASD exclusive) | P29.6 | **CARRIED.** The drive segment did not need it — the gate drives headlessly through the same intent both hosts read — and the half that was a *bug* (a key held at the grab never receiving its keyup) was closed by the P29.6 audit. What remains is the airspace rule, human-verified. |
 > | 15 | the `.inf_sm` text has no UI | P29.6 | **CARRIED to P30.** `sm_text::save_from_text` is a Ring-1 door with arms and the gate's demonstration goes through it; no panel calls it. An authoring surface is editor-UX work, which is the phase §13 set aside. |
 > | 16 | `camera.toml` is not carried by a cooked pack | P29.6 | **ROUTED to P30.** The windowed player reads it beside a `--level` boot and not beside a `--pack` one, because the cook does not carry it. Making it would be a pipeline change with its own arms, and the camera is not sim state, so nothing about PIE == shipping turns on it. The live-tuning half is closed (#8). |
@@ -19127,8 +19127,8 @@ shows a one-line authoring change as a one-line diff.
 > | **S1** | **text-diffable machines** — a transition tweak is a reviewable line, not an opaque binary blob | **MET** | `inf_anim::text` projects a v2 machine into deterministic TOML and reads it back losslessly over every shape the model has; a condition is one line of a tiny expression language rather than a nest of arrays-of-tables. `sm_text::save_from_text` makes the text an *authoring* surface, and `phase29_gate`'s one-line-diff arm edits `duration = 0.15` to `0.42`, proves the file's shape does not move, drives it through the same validator `sm_save` uses, and shows the trace diverging only after the affected edge first fires — with a control that never leaves `idle` and traces byte-identically under both machines. `7d4b9b0` (P29.6), door corrected in `21cad8a`. |
 > | **S2** | **derive at import** — the curves Epic bakes with hand-run AnimModifiers are derived by code, every time | **MET** | `inf_anim::derive` at the glTF import door: a residual-removed root-motion track, a distance track, foot-plant sync markers and footstep notifies found from the feet's own height, and six curve channels. The seven AnimModifiers were counted **on disk** in the stock sample and answered one row each (four derived, three superseded, one honest CANNOT on a name locked inside a binary `.uasset`). `phase29_gate`'s arm (f) reads the committed clips off disk and requires what only the derivation puts there. P29.5. |
 > | **S3** | **propose the graph** — the engine proposes a state graph and its thresholds instead of an empty canvas | **MET** | `inf_anim::propose` clusters a clip set by what the derivation measured and writes a normal text-diffable machine with its reasoning beside it. Its first committed consumer is the character wizard, and arm (f) asserts the committed `.inf_sm` **is** `propose`'s output for this creature's own gait ladder. P29.5, consumer in `b97bbeb` (P29.6). |
-> | **S4** | **live tuning during Simulate**, which UE cannot do for an AnimBlueprint | **MET** | One queued door drained at the top of the fixed step, with `TuneScope::Keep` replaying onto the document as an ordinary undoable edit — and `tests/player_has_no_tuning_door.rs` proving the shipped player does not have it. P29.7 added `Tune::Vehicle` and `Tune::Camera`, so the two things a live session most wants to feel are reachable. P29.5; `c3df7b6`. |
-> | **S5** | **bit-exact replay** — the pose is sim state, so an animation bug is reproducible from a trace | **MET** | The pose is folded into `state_bytes` (P24.1); `phase29_gate` compares a cooked pack against the PIE payload byte for byte over the whole course, replays bit-identically across two cooks, and — as of P29.7 — a real `--pie` subprocess and two real cook processes back the two claims a single process was making about itself. `9755795`. |
+> | **S4** | **live tuning during Simulate**, which UE cannot do for an AnimBlueprint | **MET** | One queued door drained at the top of the fixed step, with `TuneScope::Keep` replaying onto the document as an ordinary undoable edit — and `tests/player_has_no_tuning_door.rs` proving the shipped player does not have it. P29.7 added `Tune::Vehicle` and `Tune::Camera`, so the two things a live session most wants to feel are reachable. P29.5; `1b9f1a9`. |
+> | **S5** | **bit-exact replay** — the pose is sim state, so an animation bug is reproducible from a trace | **MET** | The pose is folded into `state_bytes` (P24.1); `phase29_gate` compares a cooked pack against the PIE payload byte for byte over the whole course, replays bit-identically across two cooks, and — as of P29.7 — a real `--pie` subprocess and two real cook processes back the two claims a single process was making about itself. `64c3dc7`. |
 > | **S6** | **one IR** — the same `anim.*` semantics interpreted in the editor and compiled in the ship build | **MET** | The kit is dispatched by both hosts under the registry-versus-hosts source gate, which can see an id spelled wrong in *both* (a host-versus-host text compare cannot). Arm (c) drives the sample's own committed `.inf_act` through a real course segment and compares interpreted against compiled on the states entered and the footsteps fired, with a `generate_fn` string pin. P29.4. |
 > | **S7** | **design out Epic's five confessed workarounds** | **MET, four designed out and one superseded** — the chooser limitation routed around in the graph (our conditions are typed trees on one machine, so there is nothing to route around); the orientation-warping curve applied by a hack (**superseded**: we rescale the baked `RootMotionTrack.yaw_rad` against a runtime target, so no alpha is authored at all); the thread-unsafe curve read replaced by a dummy animation (there is no dummy: `publish_character_params` writes the character's own state into the same overlay the kit writes into, once per step, from the one movement door); the fixed **0.75 s** magic number (ours is `turn_in_place_delay_s`, an angle-dependent 0–0.75 s band with the angle in it); and the blend-space/transition incompatibility avoided rather than fixed (Delaunay barycentric blend spaces are transitions like any other, and the sync groups keep their feet across one). |
 > | **S8** | **the smoothness stack** — inertialization as the default blend, motion warping, distance matching and orientation warping, pose matching, sync markers | **MET WITH ONE NAMED GAP** | Inertialization is a first-class blend mode and the **default** for state transitions (a quintic decay of the pose deviation — cheaper *and* smoother than a cross-fade, and a polynomial, so it stays inside the portable-math ban list without a new helper). Motion warping has two consumers now: the mantle's root-motion warp and P29.7's seat window. Orientation warping and pose matching are live. **The gap is distance matching**: its input is on every derived clip and its runtime caller is row 10 of the table above, routed to the island by name. |
@@ -19141,6 +19141,180 @@ shows a one-line authoring change as a one-line diff.
 > No `character.*` node kit. And no second schema move: the scene bumped exactly
 > once, in P29.3, which is what the risk register asked for on the day the phase
 > was planned.
+
+> **AUDIT: P29.7 — AND THE PHASE-CLOSING PASS** (2026-08-18) — **eight findings,
+> all fixed; local gates green; NOT PUSHED.** Range `9c14d8f..97b3f7d` (eight
+> commits, rebased onto the CRLF hotfix). No schema moved, no golden moved, no
+> sample byte moved, and the fourteen-mode step counts are **identical** after
+> the fixes — the table above was re-measured through `probe_the_course` and
+> matches row for row, and `probe_host_divergence` still answers `first
+> differing step: None`.
+>
+> **A1 · an enter press was banked, against the door's own law** (medium; fixed).
+> `step_character_movement` writes the rule down forty lines below the defect:
+> *the edges are consumed whether or not they were honoured; an unconsumed edge
+> fires again next step off the same press.* `press_interact` was the one edge
+> that broke it. It is read only on a grounded step and it was **cleared** only
+> on one, so a press made in the air, in a swim, in a dive or during a mantle
+> survived until the character landed — and then climbed into whatever car was in
+> reach, however many seconds later. `press_fly` had the same shape through a
+> mantle and a ragdoll. Both are taken now, with one deliberate exception written
+> into the code: `Driving`, where the seat step reads the same edge as the
+> **exit** control, and taking it early locks the driver in (measured — the first
+> fix did exactly that and reddened two arms).
+> `an_enter_press_made_in_the_air_does_not_fire_on_landing` is the falsifier, and
+> it was written **before** the fix and watched to fail.
+>
+> **A2 · the disposition table's one MEASURED number was wrong** (medium; fixed).
+> Row 13 routed `fov_deg` forward "with the measurement": *a vertical 70° at 16:9
+> is 106° horizontal*. It is **102.5°** — `2·atan(tan(35°)·16/9)` — and 106 is
+> not that arithmetic at any aspect this engine uses. The conclusion survives (a
+> 70° vertical against ALS's 70° horizontal is 1.46× the intended field, which is
+> the "half again"), and the row now carries the four converted constants
+> (43.0 / 49.0 / 32.6 / 58.7 vertical) so the next wave has the whole answer. The
+> row also now names the thing it had missed: this wave *did* give `fov_deg` a
+> live-tuning knob, which reaches the real field and draws nothing in the
+> editor's own viewport.
+>
+> **A3 · the vehicle door's force-ownership rule had no falsifier** (medium;
+> fixed). `step_vehicles` resets a chassis's persistent force before applying its
+> own, **except** when the water pass already owns that body — a real rule with a
+> real reason (water resets at stage 8, this door runs at stage 12, so clearing
+> again would delete this step's buoyancy before the solver ever saw it).
+> Deleting the guard entirely reddened **nothing in the workspace**.
+> `a_buoyant_vehicle_keeps_the_force_the_water_pass_owns` floats the committed
+> rig's shape on a lake with **no ground under it**, so the only thing holding it
+> up is the force the door must not touch; with the guard removed the car is at
+> **y = −466 m** after ten seconds. The arm also asserts it *stopped* rather than
+> merely not-yet-fallen, because a body whose buoyancy is deleted every step is
+> still accelerating at five seconds and at ten.
+>
+> **A4 · the first of the two measured defects had no falsifier either** (medium;
+> fixed). The ledger records two defects "found by driving it rather than by
+> reading it", and they were measured **together** (5.8 cm/s backwards on full
+> brakes). Separating them was this audit's job. Defect (2), the pitch pump, is
+> caught by `throttle_drives_it_and_the_brake_stops_it`. Defect (1) — rolling
+> resistance outside the stop clamp — is **not**: with the pitch fixed, restoring
+> it leaves the position pinned to four decimal places and puts a permanent
+> **−2.45 mm/s** on the body, against a 5 cm window. A car driving backwards
+> against its own brakes and getting nowhere is the same defect one integration
+> short of being visible, so the arm now reads the chassis's velocity out of the
+> solver after four seconds on the brake: **6.4e−10 m/s** correct, **2.45e−3**
+> defective, and the assert sits at 1e−6.
+>
+> **A5 · two stale doc sentences** (low; fixed). `inf_ecs::pose` still said
+> `WarpWindow` "has no producer yet" — this wave gave it one, and the bound that
+> paragraph is about (no *clip* carries a window) is the part that still stands.
+> `apply_water_forces` still said "nothing else applies a persistent force to
+> them"; the vehicle door now does, on a buoyant chassis, and the ownership is
+> one-directional rather than exclusive.
+>
+> **A6 · the mode table's Driving comment described a runtime that does not
+> exist** (low; fixed). *"A car driven into a lake puts its driver in the water,
+> and a driver hit hard enough ragdolls out of the seat."* The table **permits**
+> both — that is what the row order buys — but the seat step owns the whole step
+> and returns before the swim latch and before any landing classifier, so nothing
+> pulls a driver out of a seat. The rows are the contract the day a trigger
+> exists; the comment says so now.
+>
+> **A7 · two of the eight surpass-pillar citations pointed at commits that are
+> not on this branch** (medium; fixed). S4 cited `c3df7b6` and S5 cited
+> `9755795`; both are the implementer's **pre-rebase** objects, reachable only
+> through this machine's reflog. On a fresh clone the two pillars a reader is
+> most likely to check would cite nothing. They are `1b9f1a9` and `64c3dc7`. The
+> three P29.5/P29.6 shas in the same table are genuine ancestors and were
+> checked.
+>
+> **A8 · the gravity decision was written where no reader of the API can reach
+> it** (low; fixed). `WorldGravity`'s own doc says *see the module docs* for the
+> finding and the decision — and `mod gravity` was **private**, so the pointer
+> resolved to nothing and the whole P29.7 gravity narrative was invisible from
+> `inf_physics`'s public surface. `rustdoc` says so out loud; nothing in the
+> battery reads `rustdoc`. The module is `pub` now (its private siblings
+> `filtering` and `stepper` stay private because neither has an essay a public
+> item points at), and the one link it then exposed that can never resolve —
+> `LevelSettings`, which lives in Ring 1 and which Ring 0 may not name — is a
+> code span with that sentence attached. `cargo doc -p inf-physics --no-deps` is
+> clean for this file.
+>
+> **Mutations run.** Six of the implementer's, re-run: the editor's `gravity_of`
+> back to `ZERO` (reds three arms of `gravity_3d` — *including both editor
+> halves* — plus the gate's host-comparison arm, so the coverage is four arms
+> deep and not one); the shipped player's 3D bridge back to `gravity_2d.y` (three
+> arms); the camera's vehicle exclusion deleted (reds `camera_3d`'s purpose-built
+> fixture and **not** the gate — exactly as the ledger says, which is why the
+> ledger saying it matters); the seat warp widened to the whole clip (the
+> pre-open clause dies at 0.171 m against a 0.02 m window); a planted eaten
+> continuation (named by file and line); and a row deleted from `duty_of` (a
+> compile error — the P29.6 A3 pattern held for both new rows).
+>
+> **Fourteen new ones**, and two of them found the holes above. `step_vehicles`
+> never called: 9 + 4 arms. `reset_forces` removed: 11 arms. The buoyancy guard
+> removed: **nothing** → A3. `contact_velocity` reverted to `point_velocity`: one
+> arm. The rolling-resistance clamp removed: **nothing** → A4. `follow_seats`
+> disabled: one arm, at **0.22 m over 22 m**, which is the ledger's own number.
+> `park_collider` a no-op: three arms, one of them asserting the collider's state
+> in the world rather than the call's return. `steered()` always true: the model
+> arm and the committed-rig arm. The bank sign flipped: one arm. Gravity added to
+> flight's coast branch: one arm. The exit threshold raised past any speed: one
+> arm (and **not** the gate — the course's `FallControlled` count survives on the
+> stair landing alone, which is worth knowing). `ALL_MODES` reordered: the
+> discriminant pin. The authored wheel mount re-read every reconcile: six arms.
+> The **process id** folded into the cook manifest: `cook_determinism` reds —
+> which proves both that the arm compares bytes and that the two cooks really are
+> two processes. A one-step drift in `main.rs`'s `--pie` boot: **only**
+> `the_real_pie_subprocess_matches_the_in_process_reference` reds, which is what
+> a subprocess arm is for.
+>
+> **Claims checked and HELD.** `is_deferred` is exactly the four reserved slots.
+> The vehicle rides the movement door's last statement, `O(vehicles)` over a
+> `BTreeMap`, with the early return on the off path — and a **driverless** car is
+> stepped, because both hosts call `step_character_movement` unconditionally and
+> the door walks the vehicle map rather than the character walk;
+> `a_parked_rig_settles_on_its_springs_and_stays_there` has no character in it at
+> all. Force, not impulse, at the contact point, with the clear before the apply.
+> Portable math throughout: `psin64`/`pcos64` for the steer and the flight pitch,
+> `patan2_64` under `planar_yaw_deg`, `sqrt` for the lengths, and no `exp` in the
+> bank or the air friction. Densities authored (150 kg/m³, 1 200 kg) in the
+> sample, in `vehicle_3d` and in `camera_3d`'s fixture. `FIX_INTERNAL_EDGES` does
+> not apply: every drive surface on the course is a **box** collider, and a
+> raycast wheel reads a ray hit rather than a contact normal — the day this rig
+> drives on a heightfield is the island's, and the flag is already enforced where
+> heightfields are built. The two-process cook compares **pack and manifest
+> bytes**. The `--pie` arm spawns `CARGO_BIN_EXE_inf-player`. The fourteen-mode
+> list is a wildcard-free `match` over `ALL_MODES`, checked against the wire
+> discriminants. Thirteen of the disposition table's twenty-six rows were checked
+> against their evidence — every CLOSED row, both DEFERRED rows (both name the
+> island's schema window and both name the missing field), the ROUTED
+> zero-caller row (`distance_match` and `play_rate_for` really do have no runtime
+> caller, which is S8's named gap and it is honest), and the two REFUSED rows.
+>
+> **Carried, with the reason.** The **powered** branch of `integrate_flight` has
+> no independent no-gravity falsifier — the arm that proves flight is not falling
+> uses the coast branch, which is the branch a released stick takes and the one
+> the claim is about; a gravity term added to the powered branch alone is within
+> the 6-DOF arm's tolerance. A wheel ray uses `CastTargets::All`, which does not
+> exclude **sensors**, so a car crossing a trigger volume would ride on it; that
+> is the pre-existing behaviour of every filtered cast in the tree (the camera
+> sweep included) and changing it is a query-layer decision with its own arms,
+> not a vehicle-wave footnote. `chassis_seats` is gathered for every dynamic body
+> in the walk, so a destruction level pays one `BTreeMap` insert per chunk per
+> sync for a map that is usually empty of vehicles; the walk was already
+> `O(entities)` and `reconcile_vehicles` still returns on one compare.
+>
+> **Battery after the audit: 283 binaries / 5 231 passed / 0 failed / 13
+> ignored**, against the wave's 283 / 5 229 / 0 / 13 — two arms added (A1's and
+> A3's) and one strengthened (A4's), in the binaries that already existed.
+> `cargo fmt --all --check` and `clippy --workspace --all-targets -D warnings`
+> clean; `cargo doc -p inf-physics --no-deps` clean for the file A8 was about.
+> Frontend **611 tests across 65 files**, `tsc --noEmit` and eslint clean, all
+> unchanged — none of these findings was on that side. Goldens stay **54**.
+> Under `samples/`, nothing moved in this pass at all.
+>
+> **PHASE 29 IS CERTIFIED.** Seven sub-phases, seven audits, the catalogue closed
+> at fourteen modes with both hosts byte-identical over the whole of it, two of
+> the gate's claims made by real subprocesses, and one scene bump in the whole
+> phase — the number the risk register asked for on the day it was planned.
 
 - **P29.1 `.inf_sm` model v2** — 1. typed parameters (`Bool`/`Int`/`Float`/`Trigger`, a trigger
   consumed by the transition that read it); 2. condition **trees** (`And`/`Or`/`Not` over typed

@@ -11,14 +11,16 @@
 //! nothing that simulates.
 //!
 //! The P29.6 audit found it and, writing the cook advisory for it, found the
-//! bigger half: [`LevelSettings::default()`] pairs a `gravity_2d` of **zero**
-//! with a `gravity_3d` of −9.81, so **every level that never touched either
-//! field had no 3D gravity at all** while its Details panel read −9.81. Two
-//! committed samples were in that state. Nothing had noticed because a
-//! *character* carries its own `CharacterMovement::gravity_mps2` and never asks
-//! the world for one — only a **dynamic body** reads this number, and until this
-//! wave the samples with dynamic bodies were exactly the samples whose authors
-//! had typed `gravity_2d.y` by hand to make them fall.
+//! bigger half: `LevelSettings::default()` — a code span rather than a link,
+//! because it lives in `inf_editor_core` and Ring 0 may not name it — pairs a
+//! `gravity_2d` of **zero** with a `gravity_3d` of −9.81, so **every level that
+//! never touched either field had no 3D gravity at all** while its Details
+//! panel read −9.81. Two committed samples were in that state. Nothing had
+//! noticed because a *character* carries its own
+//! `CharacterMovement::gravity_mps2` and never asks the world for one — only a
+//! **dynamic body** reads this number, and until this wave the samples with
+//! dynamic bodies were exactly the samples whose authors had typed
+//! `gravity_2d.y` by hand to make them fall.
 //!
 //! # The decision
 //!

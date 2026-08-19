@@ -1684,10 +1684,14 @@ impl PhysicsBridge3D {
         // a front-loaded impulse leaves a neutrally buoyant body drifting upward
         // about a millimetre per step while its velocity stays exactly zero).
         //
-        // The reset is scoped to bodies the water pass owns. Nothing else applies
-        // a persistent force to them — there is no `apply_force` Blueprint node,
-        // and both hosts use impulses — so the ownership is total rather than
-        // shared.
+        // The reset is scoped to bodies the water pass owns, and the ownership
+        // is one-directional rather than exclusive. There is no `apply_force`
+        // Blueprint node and both hosts use impulses, so nothing *contests* the
+        // clear; the one other pass that applies a persistent force is P29.7's
+        // vehicle door, which runs at stage 12 — after this one — and reads
+        // `is_buoyant` precisely so it does not clear what this pass just
+        // applied. The reset below is therefore the clear for both, and
+        // `a_buoyant_vehicle_keeps_the_force_the_water_pass_owns` is the arm.
         for body in reset_only {
             self.world.reset_forces(body);
         }
