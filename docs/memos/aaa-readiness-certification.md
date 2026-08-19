@@ -1,6 +1,8 @@
 # AAA-readiness certification — can a studio build the island on this engine today?
 
-**Audit date** 2026-08-19 · **Tree** `c023b73` → this memo's own commit · **Scope** the whole engine,
+**Audit date** 2026-08-19 · **Measured against** `c023b73`; the audit's three commits were
+later rebased onto `2181417` (a CI-red fix on two test arms) without conflict — no file
+overlap · **Scope** the whole engine,
 against one question: *can a AAA team — and specifically the 50 km² Vancouver island
 starter map — develop on this engine today, and what would stop them?*
 
@@ -125,8 +127,12 @@ cargo test -p inf-physics --test bridge_sync_scaling -- --nocapture
   **4.663 ms/step** with 12 850 colliders (60 Hz frame = 16.7 ms; tripwire 33 ms).
 * Per collider: **0.363 µs/step**. 60 fps ceiling ≈ **46 000 colliders**.
 * The town is **seven** buildings → ~1 836 colliders each → ceiling ≈ **25 buildings**.
-* Physics bridge reconcile: 61.7 / 82.0 / **89.7 ns per entity** at 1k / 5k / 13k entities
-  against an asserted ceiling of 200 ns. At 1.8 M colliders that alone is ~166 ms/sync.
+* Physics bridge reconcile: **58.9–61.7 / 78.5–82.0 / 89.7–96.0 ns per entity** at 1k / 5k /
+  13k entities against an asserted ceiling of 200 ns — two runs, before and after the
+  rebase onto `2181417`, whose fix makes this arm calibration-normalize. Quoted as a range
+  because the spread between runs (±7% at 13k) is larger than the difference the fix made,
+  and a single figure would imply a precision this bench does not have. At 1.8 M colliders
+  the reconcile alone is ~160–175 ms/sync.
 
 Compounding it: **one `building.plan` node is one building.** There is no block- or
 lot-subdivision node; `building/partition.rs` splits *rooms inside a floor plate*, not a
@@ -444,7 +450,7 @@ shipped.
 
 ## The numbers
 
-| | before (`c023b73`) | after (`9c4e7d5`) |
+| | before (`c023b73`) | after (this audit's three commits) |
 |---|---|---|
 | Rust battery | 291 blocks / 5 507 passed / 0 failed / 13 ignored | **293 / 5 516 / 0 / 13** |
 | Frontend | 690 tests / 77 files | **690 / 77** (unchanged) |
