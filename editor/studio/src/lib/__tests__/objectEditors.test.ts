@@ -48,11 +48,26 @@ describe("resolveObjectEditors", () => {
     expect(route).toMatchObject({ id: "blueprint", panelType: "blueprint", params: "actor:a-1" });
   });
 
-  it("orders mesh → rig → blueprint → material", () => {
+  it("orders mesh → rig → blueprint → code → material", () => {
     const routes = resolveObjectEditors(
       row({ mesh: "m", skeleton: "s", actor_class: "a", material: "mat" }),
     );
-    expect(routes.map((r) => r.id)).toEqual(["mesh", "rig", "blueprint", "material"]);
+    // Wave D put `code` after `blueprint` and before `material`: the generated
+    // Rust IS the blueprint, seen the other way round, and a material is a
+    // property of the surface rather than of the object's identity.
+    expect(routes.map((r) => r.id)).toEqual(["mesh", "rig", "blueprint", "code", "material"]);
+  });
+
+  it("gives an actor class a code route, and nothing else one", () => {
+    // The route exists exactly when there is a class to generate from — a mesh
+    // has no Rust and must not offer to open some.
+    const withClass = resolveObjectEditors(row({ actor_class: "a-1" }));
+    expect(withClass.find((r) => r.id === "code")).toMatchObject({
+      panelType: "code",
+      assetId: "a-1",
+    });
+    const meshOnly = resolveObjectEditors(row({ mesh: "m-1" }));
+    expect(meshOnly.find((r) => r.id === "code")).toBeUndefined();
   });
 
   /**

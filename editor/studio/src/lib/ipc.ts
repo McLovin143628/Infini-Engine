@@ -50,6 +50,7 @@ import type { DccGroomDto } from "../bindings/DccGroomDto";
 import type { DccGroomResultDto } from "../bindings/DccGroomResultDto";
 import type { DccSelectDto } from "../bindings/DccSelectDto";
 import type { DccNewDto } from "../bindings/DccNewDto";
+import type { GeneratedSourceDto } from "../bindings/GeneratedSourceDto";
 import type { DccOrientDto } from "../bindings/DccOrientDto";
 import type { DccPivotDto } from "../bindings/DccPivotDto";
 import type { DccToolDto } from "../bindings/DccToolDto";
@@ -918,6 +919,16 @@ export const graph = {
   debugRun: (id: string, breakpoints: number[], capture: boolean): Promise<DebugRunResult> =>
     invoke<DebugRunResult>("graph_debug_run", { id, breakpoints, capture }),
   generate: (id: string): Promise<string> => invoke<string>("graph_generate", { id }),
+  /**
+   * **The CODE TAB** (Wave D): write this class's generated Rust to
+   * `<project>/src/blueprints/<Class>_<guid8>.rs` and answer with the path.
+   *
+   * Written on demand and on **staleness** — the file's banner carries the
+   * graph's content hash, so a tab opened twice is one read and a canvas nudge
+   * costs no filesystem write. `wrote: false` means it was already current.
+   */
+  writeSource: (id: string): Promise<GeneratedSourceDto> =>
+    invoke<GeneratedSourceDto>("graph_write_source", { id }),
 };
 
 /**

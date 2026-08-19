@@ -3415,6 +3415,21 @@ pub struct DccGroomStatDto {
     pub value: u32,
 }
 
+/// Where a blueprint class's generated Rust landed, and whether it had to be
+/// written (Wave D — the CODE TAB).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct GeneratedSourceDto {
+    /// The absolute path, ready for `requestOpenFile`.
+    pub path: String,
+    /// `false` when the file on disk already described this graph — the tab was
+    /// already current and nothing was touched.
+    pub wrote: bool,
+    /// `true` when the file did not exist before.
+    pub created: bool,
+}
+
 /// Which primitive a new mesh starts as.
 ///
 /// The four the kernel has had since P23.3 and Ring 2 has never had a door for.

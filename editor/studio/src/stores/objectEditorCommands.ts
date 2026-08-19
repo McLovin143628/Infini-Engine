@@ -18,7 +18,8 @@
  */
 import type { EntityEditorsDto } from "../bindings/EntityEditorsDto";
 import { registerCommands, setCommandHandler, getCommand } from "../lib/commands";
-import { scene as sceneIpc } from "../lib/ipc";
+import { graph as graphIpc, scene as sceneIpc } from "../lib/ipc";
+import { requestOpenFile } from "../lib/openFile";
 import {
   noEditorReason,
   primaryRoute,
@@ -131,6 +132,32 @@ export async function openObject(guid: string): Promise<void> {
   // The primary stays the active tab: it is what the user asked for.
   dock.activateTab(anchor);
   useShellStore.getState().pushStatus(`Opened ${dto.name} — ${primary.label}.`);
+}
+
+/**
+ * Generate (or find current) a blueprint class's Rust and open it in the Editor
+ * panel.
+ *
+ * The path is the backend's answer, never built here: the convention lives in
+ * `inf_editor_core::blueprint_source` and a frontend copy of it would be a
+ * second convention that drifts the first time the backend's changes.
+ */
+export async function openGeneratedCode(assetId: string): Promise<void> {
+  try {
+    const out = await graphIpc.writeSource(`bp:${assetId}`);
+    requestOpenFile(out.path);
+    useShellStore
+      .getState()
+      .pushStatus(
+        out.created
+          ? `Generated ${out.path}`
+          : out.wrote
+            ? `Regenerated ${out.path}`
+            : `Opened ${out.path} (already current)`,
+      );
+  } catch (e) {
+    refuse(String(e));
+  }
 }
 
 /** Fetch the editor rows for a selection (context menus, Details buttons). */

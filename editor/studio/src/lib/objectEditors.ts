@@ -31,12 +31,12 @@
 import type { EntityEditorsDto } from "../bindings/EntityEditorsDto";
 
 /** Panel types this resolver can route to. */
-export type ObjectEditorPanel = "model" | "skeleton" | "blueprint" | "material";
+export type ObjectEditorPanel = "model" | "skeleton" | "blueprint" | "material" | "code";
 
 /** One openable editor for an object. */
 export interface ObjectEditorRoute {
   /** Stable id — also the `object.edit.*` command suffix. */
-  id: "mesh" | "rig" | "blueprint" | "material";
+  id: "mesh" | "rig" | "blueprint" | "material" | "code";
   /** Menu / button label. */
   label: string;
   /** The panel registry type to open. */
@@ -85,6 +85,25 @@ export function resolveObjectEditors(dto: EntityEditorsDto): ObjectEditorRoute[]
       id: "blueprint",
       label: "Open Blueprint",
       panelType: "blueprint",
+      params: `actor:${dto.actor_class}`,
+      assetId: dto.actor_class,
+    });
+  }
+  if (dto.actor_class) {
+    // **The CODE tab** (Wave D). Wave E shipped four routes and no code one, and
+    // said why: a blueprint class had no on-disk Rust to open. It does now —
+    // `graph_write_source` renders the class into
+    // `<project>/src/blueprints/<Class>_<guid8>.rs`, where cargo compiles it —
+    // so the route exists and `openObject` can dock it beside the canvas.
+    //
+    // `panelType: "code"` is a MARKER, not a registered panel: the opener calls
+    // the backend and hands the resulting PATH to `requestOpenFile`, which is
+    // the shell's existing Editor panel. A second code editor would be a second
+    // answer to a question Phase 5 already answered.
+    routes.push({
+      id: "code",
+      label: "Open Generated Rust",
+      panelType: "code",
       params: `actor:${dto.actor_class}`,
       assetId: dto.actor_class,
     });

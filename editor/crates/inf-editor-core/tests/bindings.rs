@@ -20,8 +20,8 @@ use inf_editor_core::ipc::{
     DccImportDto, DccModeDto, DccNewDto, DccPaintModeDto, DccPreviewDto, DccSaveDto,
     DccSculptModeDto, DccSelectDto, DccToolDto, DccUnwrapDto, DeleteResult, DetailsDto,
     ErosionParamsDto, ErosionReportDto, FileEntryDto, FoliageSettingsDto, GaitParamsDto,
-    GitFileDto, GitStatusDto, GizmoModeDto, GizmoSpaceDto, ImportEventDto, LakePreviewDto,
-    LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto, PackageKindCountDto,
+    GeneratedSourceDto, GitFileDto, GitStatusDto, GizmoModeDto, GizmoSpaceDto, ImportEventDto,
+    LakePreviewDto, LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto, PackageKindCountDto,
     PackageResultDto, PartitionSettingsDto, PhotoEntryDto, ProjectInfoDto, ProjectSettingsDto,
     ProjectTemplateDto, PropFieldDto, PropValueDto, RecentProjectDto, RiverBedConflictDto,
     RiverClimbDto, RiverReportDto, SaveResultDto, SceneDelta, SceneNode, SceneSnapshot,
@@ -69,6 +69,8 @@ fn export_bindings() {
     // were hard-wired constants until this wave. All three are rooted because
     // the panel holds each of them in local state before any call carries one.
     DccNewDto::export_all(&cfg).expect("export DccNewDto");
+    // Wave D: the CODE TAB's reply.
+    GeneratedSourceDto::export_all(&cfg).expect("export GeneratedSourceDto");
     inf_editor_core::dcc::DccPivotDto::export_all(&cfg).expect("export DccPivotDto");
     inf_editor_core::dcc::DccOrientDto::export_all(&cfg).expect("export DccOrientDto");
     // P23.5's drag surface: the sculpt brush and the component gizmo.

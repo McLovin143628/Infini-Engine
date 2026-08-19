@@ -16,6 +16,7 @@ use std::sync::Mutex;
 
 use inf_blueprint::interp::{eval_fn, eval_fn_traced, Host, RunError, Trace, Value};
 use inf_blueprint::{blueprint_registry, lower_graph, lower_graph_debug, InterpDebug, LowerMap};
+use inf_editor_core::ipc::GeneratedSourceDto;
 use inf_graph::{
     apply_edits, compile::validate, GraphDoc, GraphEdit, GraphIssue, GraphJournal, NodeDef,
     NodeRegistry,
@@ -728,13 +729,85 @@ pub async fn graph_debug_run(
 /// The Rust `inf-transpile` generates for this graph ("Open generated Rust").
 #[tauri::command]
 pub async fn graph_generate(id: String, state: State<'_, GraphState>) -> Result<String, String> {
-    state.with(|s| {
-        let doc = s.docs.get(&id).ok_or_else(|| format!("no graph `{id}`"))?;
-        let fns = lower_graph(&doc.graph, &s.registry).map_err(|e| e.to_string())?;
-        let file = BlueprintFile {
-            entries: fns.into_iter().map(FileEntry::Blueprint).collect(),
-        };
-        generate_file(&file).map_err(|e| e.to_string())
+    state.with(|s| Ok(generated_source(s, &id)?.1))
+}
+
+/// Lower a document and render it, plus the graph's **content hash**.
+///
+/// One function for `graph_generate` and `graph_write_source`, so the string in
+/// the drawer and the bytes on disk cannot be two different renderings of one
+/// graph — which is exactly what two call sites of `generate_file` would become.
+fn generated_source(s: &GraphStore, id: &str) -> Result<(u64, String), String> {
+    let doc = s.docs.get(id).ok_or_else(|| format!("no graph `{id}`"))?;
+    let fns = lower_graph(&doc.graph, &s.registry).map_err(|e| e.to_string())?;
+    let file = BlueprintFile {
+        entries: fns.into_iter().map(FileEntry::Blueprint).collect(),
+    };
+    let rust = generate_file(&file).map_err(|e| e.to_string())?;
+    // The GRAPH's hash, not the rendered text's: the stamp answers "does this
+    // file describe this graph", and hashing the output would answer "does this
+    // file describe this output", which is true of a file the generator itself
+    // changed under.
+    let bytes = serde_json::to_vec(&doc.graph).map_err(|e| e.to_string())?;
+    Ok((inf_graph::content_hash(&bytes), rust))
+}
+
+/// **Write a blueprint class's generated Rust to disk, and say where.**
+///
+/// The CODE TAB's backend. Wave E shipped four object-editor tabs and no code
+/// one, and said why: *"`graph_generate`'s output has never been written to a
+/// file — inventing a path for it is a transpiler-workflow decision, not a UX
+/// one."* The decision is `inf_editor_core::blueprint_source`, which owns the
+/// convention, the banner, the staleness stamp and the write; this is the
+/// wiring.
+///
+/// Idempotent and cheap on the hit path: a graph whose hash already matches the
+/// file's banner is not rewritten, so opening the tab twice is one read.
+#[tauri::command]
+pub async fn graph_write_source(
+    id: String,
+    state: State<'_, GraphState>,
+    project: State<'_, super::project::ProjectState>,
+) -> Result<GeneratedSourceDto, String> {
+    use inf_editor_core::blueprint_source as src;
+
+    let root = project
+        .current_root()
+        .ok_or_else(|| "open a project before generating blueprint code".to_string())?;
+    // The class name and the asset id come from the DOCUMENT id (`bp:<asset>`),
+    // which `graph_open_actor` is documented as keying idempotently — so the
+    // file and the tab agree about identity by construction rather than by two
+    // lookups that could disagree.
+    let (kind, asset_id) = id.split_once(':').unwrap_or(("", id.as_str()));
+    if kind != "bp" {
+        return Err(format!(
+            "`{id}` is not an actor blueprint document, so it has no class to \
+             generate code for"
+        ));
+    }
+    let (hash, rust, name) = state.with(|s| {
+        let (hash, rust) = generated_source(s, &id)?;
+        let name = s
+            .docs
+            .get(&id)
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| asset_id.to_string());
+        Ok((hash, rust, name))
+    })?;
+    // The document name is "<Class> — <handler>"; the FILE is per class, so the
+    // handler half is dropped rather than sanitized into the path.
+    let class = name
+        .split(['—', '-'])
+        .next()
+        .unwrap_or(&name)
+        .trim()
+        .to_string();
+    let (path, what) =
+        src::write_if_stale(&root, &class, asset_id, hash, &rust).map_err(|e| e.to_string())?;
+    Ok(GeneratedSourceDto {
+        path: path.to_string_lossy().into_owned(),
+        wrote: !matches!(what, src::SourceWrite::Current),
+        created: matches!(what, src::SourceWrite::Created),
     })
 }
 

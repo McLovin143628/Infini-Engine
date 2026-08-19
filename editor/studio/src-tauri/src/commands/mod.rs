@@ -78,6 +78,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         graph::graph_run,
         graph::graph_debug_run,
         graph::graph_generate,
+        // Wave D: the CODE TAB — the same output, written where cargo compiles it.
+        graph::graph_write_source,
         material::material_registry,
         material::material_list,
         material::material_create,

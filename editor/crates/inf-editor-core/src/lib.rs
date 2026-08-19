@@ -6,6 +6,8 @@ pub mod assets;
 // The grammar → mesh bake (P23.6). Docs live in `bake.rs`, for the same
 // intra-doc-link reason `dcc` states below.
 pub mod bake;
+/// Where a blueprint class's generated Rust lives on disk (Wave D).
+pub mod blueprint_source;
 // P24.5 "New Character from Template": the wizard's Ring-1 half. Docs live in
 // `character.rs`, for the intra-doc-link reason `dcc` states below.
 pub mod character;

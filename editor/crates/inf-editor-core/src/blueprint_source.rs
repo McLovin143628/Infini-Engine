@@ -1,0 +1,443 @@
+//! **Where a blueprint's generated Rust lives** (Wave D) — the convention, the
+//! write door, and the staleness stamp.
+//!
+//! # The problem this closes
+//!
+//! Wave E shipped per-object DCC, Skeleton, Blueprint and Material tabs and no
+//! CODE tab, and said why, verbatim: *"a blueprint class has no on-disk Rust to
+//! open. `.inf_act` stores the lowered IR, and `graph_generate`'s output has
+//! never been written to a file — inventing a path for it is a
+//! transpiler-workflow decision, not a UX one."*
+//!
+//! That was exactly right, and this is the transpiler-workflow decision. Until
+//! now `graph_generate` lowered the graph, called `inf_transpile::generate_file`
+//! and returned a **`String`** the frontend put in a zustand store and rendered
+//! as a read-only `<pre>`. It vanished on reset. `inf-transpile` contains no
+//! `std::fs` at all, the cook ships the IR as data, and PIE and the shipped
+//! player both *interpret* it — so no path in the product wrote it down.
+//!
+//! # The convention, and why each part of it earns its place
+//!
+//! ```text
+//! <project_root>/src/blueprints/<ClassName>_<guid8>.rs
+//! ```
+//!
+//! * **`<project_root>/src/`** is the scaffolded user cargo crate, and the
+//!   template's own doc comment already reserves it for exactly this
+//!   (`inf_project::template`: *"Hand-written systems live here; Infinity
+//!   Blueprints (Phase 6) generate additional Rust into this crate and stay in
+//!   sync."*). It is also the **only** candidate `cargo build` compiles and
+//!   `lib.rs` can reach. The two alternatives are worse for stated reasons:
+//!   `Content/.inf/` is the gitignored *derived cache* area and generated
+//!   gameplay source is not a cache; the `.infinity/` family is *settings* —
+//!   six members, all TOML, all absent-is-default.
+//! * **`blueprints/`** keeps generated files in one place, so a `// @generated`
+//!   sweep, a `.gitattributes` `linguist-generated` mark and a future clean step
+//!   each have one target.
+//! * **file per CLASS, not per handler**, because `BlueprintFile` /
+//!   `generate_file` already emits many fns into one file and
+//!   `inf_packager::mods`'s `GeneratedModCrate` already concatenates all
+//!   handlers of a class into one `lib.rs`. The precedent exists on both sides.
+//! * **`<ClassName>_<guid8>`** because the class *name* is not stable and the
+//!   asset **GUID** is. `graph_open_actor` already keys its document
+//!   `bp:<asset>` and is documented as *"idempotent by asset"*; the code path
+//!   keys the same way. The ident goes through `inf_asset::data::sanitize_ident`
+//!   — the P4 codegen sanitizer — rather than a second one.
+//! * **`Content/` is untouched.** Generated Rust is source, not content.
+//!
+//! # Committed, not ignored
+//!
+//! It is what `cargo build` compiles and what ships. Contrast `Content/.inf/`,
+//! which the template gitignores precisely because it is derived. The header
+//! banner says so in the file, where an author will actually read it.
+//!
+//! # When it is written: on demand and on STALENESS
+//!
+//! Not on every canvas nudge — that makes each drag a filesystem write and a git
+//! diff. The header carries the graph's content hash (`inf-graph` is
+//! content-addressed with xxh3 folding upstream hashes), and
+//! [`write_if_stale`] compares before writing. So the tab is always current
+//! without the canvas paying for it, which matters because `graph_open_actor`'s
+//! own refusal messages **already tell the author to "open the generated code
+//! instead"** for a handler outside `raise`'s image — a promise the product
+//! could not keep until now. That refusal is the strongest single argument for
+//! the tab: a non-raisable handler has no other view.
+//!
+//! # Generated is authoritative, for v1
+//!
+//! The banner says edits may be overwritten. Two-way sync is not speculative
+//! here — P6's `raise` already inverts lowering on its image and
+//! `graph_roundtrip` is a permanent test — but it is its own decision and
+//! belongs behind the one-way version, named as the follow-up.
+//!
+//! **One remainder this does not close, and should say so**: no graph is written
+//! back into a `.inf_act`. That is true of every blueprint document in this
+//! editor and not only of raised ones; persisting `graph_generate`'s output does
+//! not fix it. It is the *adjacent* transpiler-workflow decision and should be
+//! scheduled with it, not confused with it.
+
+use std::path::{Path, PathBuf};
+
+/// The directory generated blueprint Rust lives in, relative to the project
+/// root.
+pub const BLUEPRINT_SRC_DIR: &str = "src/blueprints";
+
+/// The marker every generated file's first line carries.
+///
+/// Searched for by [`is_generated`] before any overwrite, so a file an author
+/// hand-wrote at a generated path is **never** clobbered — the one failure this
+/// convention could cause that an author cannot undo.
+pub const GENERATED_MARKER: &str = "// @generated by Infinity Engine";
+
+/// Why a source write was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SourceError {
+    /// The class has no usable name once sanitized *and* no guid to fall back
+    /// on.
+    #[error("a blueprint class needs a name or an asset id to be written to a file")]
+    Unnameable,
+    /// A file exists at the target path and is **not** ours.
+    ///
+    /// Refused rather than overwritten, and this is the whole reason
+    /// [`GENERATED_MARKER`] exists: a generated path collides with a
+    /// hand-written module the moment an author names a file the same thing, and
+    /// silently replacing their code is the one mistake this feature could make
+    /// that no undo reaches.
+    #[error("{path} exists and was not generated by Infinity Engine; it will not be overwritten")]
+    NotOurs { path: String },
+    #[error("could not write {path}: {message}")]
+    Io { path: String, message: String },
+}
+
+/// The file name for a class: `<Ident>_<guid8>.rs`.
+///
+/// The guid's first eight hex digits, which is what `graph_open_actor`'s
+/// document key already shows an author, and enough to make two classes called
+/// `Door` two files.
+///
+/// # This is also the path guard, and it is structural
+///
+/// `commands::paths::confine_for_write` is the editor's filesystem door and it
+/// needs an `AppHandle`, which Ring 1 does not have and a test cannot build.
+/// It is not needed here, and the reason is stronger than a check would be: the
+/// name is built from `sanitize_ident`'s output (alphanumerics and `_`) and hex
+/// digits, so it **cannot contain a separator, a `..`, a drive letter or a
+/// colon**. There is no string an author can type into a class name that
+/// escapes `<root>/src/blueprints/`, because the escape characters do not
+/// survive the sanitizer. Asserted below.
+pub fn source_file_name(class_name: &str, asset_id: &str) -> Result<String, SourceError> {
+    let ident = inf_asset::data::sanitize_ident(class_name, "");
+    let guid8: String = asset_id
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(8)
+        .collect();
+    if ident.is_empty() && guid8.is_empty() {
+        return Err(SourceError::Unnameable);
+    }
+    // A class with no nameable ident still gets a file — the guid is the
+    // identity and the name is a convenience, which is the same ordering the
+    // path's own doc gives.
+    if ident.is_empty() {
+        return Ok(format!("Blueprint_{guid8}.rs"));
+    }
+    if guid8.is_empty() {
+        return Ok(format!("{ident}.rs"));
+    }
+    Ok(format!("{ident}_{guid8}.rs"))
+}
+
+/// The absolute path a class's generated Rust belongs at.
+pub fn source_path(
+    project_root: &Path,
+    class_name: &str,
+    asset_id: &str,
+) -> Result<PathBuf, SourceError> {
+    Ok(project_root
+        .join(BLUEPRINT_SRC_DIR)
+        .join(source_file_name(class_name, asset_id)?))
+}
+
+/// The header banner, carrying the identity and the **staleness stamp**.
+///
+/// The hash is the graph's content hash. It is on line 2 rather than line 1
+/// because line 1 is the marker every tool greps for, and a marker that moves
+/// with a hash is a marker nothing can match.
+pub fn banner(asset_id: &str, graph_hash: u64) -> String {
+    format!(
+        "{GENERATED_MARKER} — edits may be overwritten.\n\
+         // source: blueprint {asset_id} · graph {graph_hash:016x}\n\
+         //\n\
+         // This file is COMMITTED, not ignored: it is what `cargo build` compiles\n\
+         // and what ships. Regenerated when the graph's hash above stops matching\n\
+         // the graph — opening the Code tab is what checks.\n\
+         \n"
+    )
+}
+
+/// The graph hash recorded in a file's banner, if it has one.
+pub fn stamped_hash(source: &str) -> Option<u64> {
+    let line = source.lines().nth(1)?;
+    let hex = line.rsplit_once("graph ")?.1.trim();
+    u64::from_str_radix(hex.get(..16)?, 16).ok()
+}
+
+/// Whether a file was generated by this door.
+pub fn is_generated(source: &str) -> bool {
+    source.starts_with(GENERATED_MARKER)
+}
+
+/// What [`write_if_stale`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceWrite {
+    /// The file did not exist and was created.
+    Created,
+    /// The stamp disagreed with the graph and the file was rewritten.
+    Rewritten,
+    /// The stamp matched: the file on disk already describes this graph.
+    Current,
+}
+
+/// **The write door.** Ring 1, never a `#[tauri::command]` — the memo §7c LAW:
+/// a command cannot be driven from a test, so a rule written there is a rule no
+/// gate can see.
+///
+/// Writes `banner(asset_id, graph_hash) + body` to
+/// `<project_root>/src/blueprints/<ClassName>_<guid8>.rs`, through
+/// [`inf_asset::write_atomically`] — the same door `file_write` uses, because a
+/// crash between a truncate and a write leaves a **half-written source file**
+/// that `cargo build` then reports as a syntax error in generated code nobody
+/// edited.
+///
+/// Refuses rather than overwriting a file that is not ours (see
+/// [`SourceError::NotOurs`]), and returns [`SourceWrite::Current`] without
+/// touching the disk when the stamp already matches.
+pub fn write_if_stale(
+    project_root: &Path,
+    class_name: &str,
+    asset_id: &str,
+    graph_hash: u64,
+    body: &str,
+) -> Result<(PathBuf, SourceWrite), SourceError> {
+    let path = source_path(project_root, class_name, asset_id)?;
+    let io = |e: std::io::Error| SourceError::Io {
+        path: path.display().to_string(),
+        message: e.to_string(),
+    };
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        if !is_generated(&existing) {
+            return Err(SourceError::NotOurs {
+                path: path.display().to_string(),
+            });
+        }
+        if stamped_hash(&existing) == Some(graph_hash) {
+            return Ok((path, SourceWrite::Current));
+        }
+    }
+    let existed = path.exists();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(io)?;
+    }
+    let text = format!("{}{body}", banner(asset_id, graph_hash));
+    inf_asset::write_atomically(&path, text.as_bytes()).map_err(|e| SourceError::Io {
+        path: path.display().to_string(),
+        message: e.to_string(),
+    })?;
+    write_module_index(project_root)?;
+    Ok((
+        path,
+        if existed {
+            SourceWrite::Rewritten
+        } else {
+            SourceWrite::Created
+        },
+    ))
+}
+
+/// Rewrite `src/blueprints/mod.rs` from what is on disk.
+///
+/// **Derived from the directory, not accumulated**, so a deleted blueprint's
+/// `pub mod` line goes with it — an index that only ever grows is an index that
+/// stops the crate compiling the first time somebody removes a file.
+///
+/// `lib.rs` is deliberately NOT edited here. Adding `pub mod blueprints;` to a
+/// project that already has one is a one-time repair, and editing an author's
+/// hand-written `lib.rs` behind their back is the kind of help nobody asks for
+/// twice. New projects get the line at scaffold time; existing ones get told.
+fn write_module_index(project_root: &Path) -> Result<(), SourceError> {
+    let dir = project_root.join(BLUEPRINT_SRC_DIR);
+    let err = |e: std::io::Error| SourceError::Io {
+        path: dir.display().to_string(),
+        message: e.to_string(),
+    };
+    let mut mods: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(err)?.flatten() {
+        let p = entry.path();
+        if p.extension().is_some_and(|x| x == "rs") {
+            let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if stem == "mod" {
+                continue;
+            }
+            mods.push(stem.to_string());
+        }
+    }
+    // Sorted, so two runs on the same directory write the same bytes and the
+    // file is not a permanent git diff.
+    mods.sort();
+    let mut text = String::from(
+        "// @generated by Infinity Engine — edits may be overwritten.\n\
+         //\n\
+         // One `pub mod` per generated blueprint class. Rebuilt from the directory\n\
+         // on every write, so a deleted class's line goes with it.\n\
+         \n",
+    );
+    for m in &mods {
+        text.push_str(&format!("pub mod {m};\n"));
+    }
+    inf_asset::write_atomically(&dir.join("mod.rs"), text.as_bytes()).map_err(|e| SourceError::Io {
+        path: dir.join("mod.rs").display().to_string(),
+        message: e.to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_file_name_is_the_class_and_the_guids_first_eight_digits() {
+        assert_eq!(
+            source_file_name("Door", "3f2a9c1e-0000-4000-8000-000000000000").unwrap(),
+            "Door_3f2a9c1e.rs"
+        );
+        // A name that is not an ident goes through the P4 sanitizer rather than
+        // a second one — which upper-camels it, exactly as it does for a data
+        // asset's generated type. Pinned because "which sanitizer" is the whole
+        // decision, and a second one would drift.
+        assert_eq!(
+            source_file_name("my door!", "3f2a9c1e-1111-4000-8000-000000000000").unwrap(),
+            "MyDoor_3f2a9c1e.rs"
+        );
+        // The GUID is the identity; the name is a convenience.
+        assert_eq!(
+            source_file_name("", "3f2a9c1e-2222-4000-8000-000000000000").unwrap(),
+            "Blueprint_3f2a9c1e.rs"
+        );
+        assert_eq!(source_file_name("", ""), Err(SourceError::Unnameable));
+        // Two classes called Door are two files.
+        assert_ne!(
+            source_file_name("Door", "aaaaaaaa-0000-4000-8000-000000000000").unwrap(),
+            source_file_name("Door", "bbbbbbbb-0000-4000-8000-000000000000").unwrap()
+        );
+    }
+
+    /// **The path guard, which is structural rather than a check.** No class
+    /// name reaches a separator, so no class name escapes the directory.
+    #[test]
+    fn a_hostile_class_name_cannot_leave_the_blueprints_directory() {
+        let root = Path::new("/proj");
+        for hostile in [
+            "../../../etc/passwd",
+            "..\\..\\windows\\system32",
+            "C:/absolute",
+            "a/b/c",
+            "..",
+            ".",
+            "con",
+            "  ",
+        ] {
+            let p = source_path(root, hostile, "aaaaaaaa-0").expect("a name");
+            assert!(
+                p.starts_with(root.join(BLUEPRINT_SRC_DIR)),
+                "{hostile:?} escaped to {p:?}"
+            );
+            assert_eq!(
+                p.components().count(),
+                root.join(BLUEPRINT_SRC_DIR).components().count() + 1,
+                "{hostile:?} grew a directory: {p:?}"
+            );
+            let name = p.file_name().and_then(|n| n.to_str()).expect("a name");
+            assert!(
+                !name.contains('/') && !name.contains('\\') && !name.contains(':'),
+                "{hostile:?} kept a separator: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_banner_round_trips_its_stamp_and_keeps_the_marker_on_line_one() {
+        let b = banner("abc", 0x0123_4567_89ab_cdef);
+        assert!(is_generated(&b), "the marker must be the first thing");
+        assert_eq!(stamped_hash(&b), Some(0x0123_4567_89ab_cdef));
+        assert!(
+            b.contains("COMMITTED"),
+            "the ignore question is answered in the file"
+        );
+        // A hand-written file has neither.
+        assert!(!is_generated("fn main() {}"));
+        assert_eq!(stamped_hash("fn main() {}\n// nothing"), None);
+    }
+
+    /// The write door's three outcomes, and the refusal that protects an
+    /// author's own file.
+    #[test]
+    fn a_write_creates_then_skips_then_rewrites_and_never_clobbers_a_hand_written_file() {
+        let tmp = tempfile::tempdir().expect("a temp dir");
+        let root = tmp.path();
+
+        let (path, what) = write_if_stale(root, "Door", "aaaaaaaa-0", 1, "fn a() {}\n").unwrap();
+        assert_eq!(what, SourceWrite::Created);
+        assert!(path.ends_with("src/blueprints/Door_aaaaaaaa.rs"));
+
+        // The same hash: not touched at all.
+        let before = std::fs::metadata(&path).unwrap().len();
+        let (_, what) =
+            write_if_stale(root, "Door", "aaaaaaaa-0", 1, "fn DIFFERENT() {}\n").unwrap();
+        assert_eq!(
+            what,
+            SourceWrite::Current,
+            "a matching stamp must not write"
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), before);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("fn a()"));
+
+        // A different hash: rewritten.
+        let (_, what) = write_if_stale(root, "Door", "aaaaaaaa-0", 2, "fn b() {}\n").unwrap();
+        assert_eq!(what, SourceWrite::Rewritten);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("fn b()") && !text.contains("fn a()"));
+
+        // The index lists it, and is rebuilt from the directory.
+        let index = std::fs::read_to_string(root.join("src/blueprints/mod.rs")).unwrap();
+        assert!(index.contains("pub mod Door_aaaaaaaa;"), "{index}");
+        write_if_stale(root, "Lever", "bbbbbbbb-0", 1, "fn c() {}\n").unwrap();
+        let index = std::fs::read_to_string(root.join("src/blueprints/mod.rs")).unwrap();
+        assert!(
+            index.contains("pub mod Door_aaaaaaaa;") && index.contains("pub mod Lever_bbbbbbbb;")
+        );
+        // …and deleting a file removes its line on the next write.
+        std::fs::remove_file(&path).unwrap();
+        write_if_stale(root, "Lever", "bbbbbbbb-0", 2, "fn c2() {}\n").unwrap();
+        let index = std::fs::read_to_string(root.join("src/blueprints/mod.rs")).unwrap();
+        assert!(
+            !index.contains("Door_aaaaaaaa"),
+            "an index that only grows breaks the build the first time somebody \
+             deletes a blueprint: {index}"
+        );
+
+        // **The refusal.** A hand-written file at a generated path is never
+        // clobbered — the one mistake this feature could make that no undo
+        // reaches.
+        let mine = root.join("src/blueprints/Mine_cccccccc.rs");
+        std::fs::write(&mine, "pub fn hand_written() {}\n").unwrap();
+        let err = write_if_stale(root, "Mine", "cccccccc-0", 1, "fn x() {}\n").unwrap_err();
+        assert!(matches!(err, SourceError::NotOurs { .. }), "{err:?}");
+        assert_eq!(
+            std::fs::read_to_string(&mine).unwrap(),
+            "pub fn hand_written() {}\n",
+            "it must be byte-identical afterwards"
+        );
+    }
+}
