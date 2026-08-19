@@ -489,9 +489,13 @@ fn vt_apply_detail(
 
     let b = vt_table[VT_HEADER_WORDS + ((word & VT_SLOT_MASK) - 1u)];
     let mip_count = vt_table[b];
-    let lod = vt_mip(b, dx, dy);
+    // **`vt_lod`, not `vt_mip`** — the CONTINUOUS level. `vt_mip` truncates, and
+    // a weight computed from a truncated level is 0 or 1 and nothing between: a
+    // hard cut at one distance, which is the artifact this ramp exists to avoid
+    // rather than a cheaper version of it.
+    let lodf = vt_lod(b, dx, dy);
     // Ramp out over the last two levels of the detail texture's own pyramid.
-    let w = clamp(f32(mip_count - 1u) - f32(lod), 0.0, 1.0);
+    let w = clamp((f32(mip_count - 1u) - lodf) * 0.5, 0.0, 1.0);
     if (!(w > 0.0)) {
         return;
     }

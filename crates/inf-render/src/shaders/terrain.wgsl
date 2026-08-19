@@ -306,7 +306,22 @@ fn terrain_layers(world: vec3<f32>, w: vec4<f32>, tex_scale: f32) -> TerrainLaye
         return out;
     }
     let inv = 1.0 / max(tex_scale, 0.001);
-    let uv = world.xz * inv;
+    // **ABSOLUTE world XZ, not render-local.** `world_local` is rebased every
+    // time the floating origin snaps (10 m steps), so a uv derived from it would
+    // slide the material across the ground as the player walks — a shift of
+    // `10 / tex_scale` tiles, which for a 4 m tiling is two and a half tiles of
+    // visible jump. `grid_axis_viewport.xy` is the render-local position of the
+    // world X/Z axes, i.e. `-origin.xz`, so subtracting it undoes the rebase.
+    // The derivatives are unaffected either way (a constant offset), so this
+    // costs one subtraction and buys a material that stays where it was put.
+    //
+    // The bound, stated: this is an f32 world coordinate, so its resolution is
+    // about 4 mm at 50 km from the origin. That is under a texel of a 2K
+    // material tiled at 4 m out to roughly that range, and past it the tiling
+    // begins to quantise. The procedural grain above it has always been
+    // render-local and therefore *does* slide; it is a ±15 % tint and nobody has
+    // seen it. A material is not.
+    let uv = (world.xz - view.grid_axis_viewport.xy) * inv;
     let ddx = dpdx(uv);
     let ddy = dpdy(uv);
     let weights = array<f32, 4>(w.x, w.y, w.z, w.w);

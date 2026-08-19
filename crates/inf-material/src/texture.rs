@@ -1246,6 +1246,46 @@ mod tests {
             "a non-image must not sniff as float"
         );
 
+        // **The document's own premise is "4K/8K Megascans PNG/EXR from Fab", so
+        // the EXR leg is not optional.** Same pixels, the other float container:
+        // it must sniff as float, take the same branch, and come back with the
+        // same values — a sniff that only knew Radiance would silently flatten
+        // every OpenEXR map in a Megascans set, which is the exact failure.
+        let mut exr: Vec<u8> = Vec::new();
+        image::DynamicImage::ImageRgb32F(src.clone())
+            .write_to(
+                &mut std::io::Cursor::new(&mut exr),
+                image::ImageFormat::OpenExr,
+            )
+            .expect("the EXR fixture encodes");
+        assert!(source_is_float(&exr), "an EXR must sniff as float");
+        let from_exr = import_texture_bytes(&exr, TextureImportSettings::data_hdr()).unwrap();
+        assert_eq!(from_exr.format, TextureFormat::Rgba16F);
+        assert_eq!(from_exr.mips[0].data.len(), (w * h * 8) as usize);
+        for (i, px) in src.pixels().enumerate() {
+            for c in 0..3 {
+                let o = (i * 4 + c) * 2;
+                let got = half::f16::from_le_bytes([
+                    from_exr.mips[0].data[o],
+                    from_exr.mips[0].data[o + 1],
+                ])
+                .to_f32();
+                assert!(
+                    (got - px.0[c]).abs() <= px.0[c] * 0.001 + 1e-3,
+                    "EXR texel {i} channel {c}: kept {got}, source {}",
+                    px.0[c]
+                );
+            }
+        }
+        // …and the same EXR through the DEFAULT settings is still flattened,
+        // which is what makes `hdr` an opt-in rather than a behaviour change.
+        assert_eq!(
+            import_texture_bytes(&exr, TextureImportSettings::data())
+                .unwrap()
+                .format,
+            TextureFormat::Rgba8
+        );
+
         // The control: the pre-Wave-T path, which is still the default.
         let flat = import_texture_bytes(&encoded, TextureImportSettings::data()).unwrap();
         assert_eq!(flat.format, TextureFormat::Rgba8);

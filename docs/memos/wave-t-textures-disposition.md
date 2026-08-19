@@ -8,7 +8,8 @@ why. This memo is that report.
 **Wave commits:** `65f6c57` (formats + HDR), `1e19d82` (the bold three),
 `e3c5509` (the sampler), `3f2815a` (the map-set importer).
 
-**Counts:** 12 SHIPPED · 22 ALREADY-HAD · 6 DEFERRED · 11 CANNOT.
+**Counts:** 10 SHIPPED · 23 ALREADY-HAD · 4 MET-BY-A-DIFFERENT-MECHANISM ·
+6 DEFERRED · 12 CANNOT.
 Schema: `.inf_tex` v2→**v3**, `.inf_vmesh` v3→**v4**, both stamped only on
 payloads that need them. Scene schema: **unmoved**. Goldens: **54, unmoved**.
 New external dependencies: **zero**.
@@ -126,7 +127,7 @@ put every texture's table in one buffer to begin with. Until then a multi-materi
 Nanite mesh shades as its instance's material, exactly as before — and now it
 *knows* which meshlet wanted which.
 
-### The §2 thesis — **PART, and it is a success criterion rather than a task**
+### The §2 thesis (T10) — **PART, and a success criterion rather than a task**
 
 > *"GPU-driven rendering, zero-CPU I/O, and data-oriented parallel execution."*
 
@@ -149,11 +150,11 @@ win and leaves only the host→VRAM leg the DMA engine performs anyway.
 | T25 | **BOLD A** — detail maps | `vt_apply_detail` |
 | T26 | **BOLD B** — layered terrain materials | `terrain_layers()` |
 | T27 | **BOLD C** — per-meshlet material slots | `.inf_vmesh` v4 |
-| T44 | UV precision at 32K+ | a **tripwire**, not a feature — see §3 |
+| T44 | UV precision at 32K+ | a **tripwire**, not a feature: `an_f32_uv_still_addresses_every_texel_of_the_largest_legal_pyramid` |
 | T45a | BC5 for normal maps | `inf_material::bc::compress_bc5` |
 | T47 | Trilinear | `vt_sample`, opt-in behind `VirtualTextureSettings::trilinear` |
 
-### The two numbers that justify BC5
+### The numbers that justify BC5
 
 Normal maps have shipped **uncompressed** in this engine since Phase 4, because
 `TextureImportSettings::data`'s own comment said why: *"BC introduces artifacts
@@ -233,7 +234,7 @@ Doing it right means either an integer half-float endpoint fit or an explicit,
 documented exemption with a portability argument. Both are a batch, not an
 afternoon, and the wave's priority was the bold set.
 
-**2.2 — BC7 (`T45b`).** Wanted for base colour and ORM, where BC1's 3-colour
+**2.2 — BC7 (T45b, and the BC7 half of T12).** Wanted for base colour and ORM, where BC1's 3-colour
 endpoint palette bands visibly on Megascans albedo. Bounded rather than guessed
 at: BC7 is 8 bpp against BC1's 4, i.e. **twice the page bytes**, for a quality
 step that is roughly BC1's error halved on smooth gradients and much better than
@@ -251,7 +252,7 @@ artist can use*, and they should be first in the consolidated schema wave.
 
 **2.5 — The per-meshlet material shading consumer.** See §0 C.
 
-**2.6 — Anisotropic filtering (`T46`).** The document says: *"this shader already
+**2.6 — Anisotropic filtering (T46).** The document says: *"this shader already
 supports anisotropic filtering perfectly because `textureSampleArray` is used
 with a normal UV, and the border padding handles sampling neighbouring tiles."*
 **That claim is false at this engine's border width, and the measurement is
@@ -321,13 +322,56 @@ the tree and one was wrong:
 
 ---
 
+## 3b. Met by a different mechanism, or whose premise this engine does not have
+
+Four items are neither "done" nor "not done" — the prescription describes a
+solution to a problem this engine solved differently or does not have. Listed
+separately so the ledger has no silent gaps.
+
+**T33b — *"govern streaming requests with strict frame budgets."*** There is no
+per-frame time budget and no per-frame admission or upload throttle in the VT
+loop; the only budget is a byte residency ceiling. That is deliberate and it is
+**coupled to a measured ruling**: `apply_wants` seats a miss the frame it is
+offered, with no latency between admitted and sampleable, and
+`docs/memos/p28-5-lead-time-ruling.md` names *"a per-frame admission throttle, or
+a loader with real latency"* as the two changes that would reverse the h=0
+prefetch decision. Adding one is therefore not a local change — it re-opens a
+measurement, and the named tripwire tests are built to go red when it lands. Do
+it deliberately or not at all. **Not done this wave, on purpose.**
+
+**T36 — persistent ring staging buffers.** The engine uses `queue.write_texture`
+per tile with the **tight** row pitch and lets wgpu's own staging belt be the
+ring. The document's `copy_buffer_to_texture` route is *actively wrong here* and
+that was measured rather than argued: a 34-block BC1 row is 272 bytes, which is
+not a multiple of `COPY_BYTES_PER_ROW_ALIGNMENT` (256), so the call rejects the
+write — and padding `bytes_per_row` without padding the data makes wgpu reject it
+too. Adopting T36 would require repacking every tile on the CPU, i.e. undoing the
+zero-copy property the whole container design exists for.
+
+**T43 — the feedback shader writing `rg32uint` packed page ids.** The engine
+writes an order-independent `atomicOr` coverage bitmask instead, one bit per
+virtual tile at the same index the indirection table uses. The reason is the same
+one that refuses T49 (§4.10): OR is commutative and idempotent, so the mask is a
+pure function of (camera, request list, table) and not of how many threads ran or
+in what order. The document's packed-ID scheme is fine in itself; it is the
+compaction that follows it that cannot ship here.
+
+**T51 — the three-state page lifecycle (Free → Pending In-Flight → Resident)
+with a GPU pending-request bitset.** The problem it solves — a "feedback storm"
+requesting one tile hundreds of times while it loads — **needs a window between
+request and residency, and this loop has none**: `VtTextures::sync` applies and
+stages in one synchronous call from mmap slices. It becomes required the day an
+async upload path lands, which is the same day T33b's ruling re-opens.
+
+---
+
 ## 4. CANNOT — with the specific technical reason
 
 These are the items that cannot be implemented as prescribed. Where the engine
 already achieves the underlying goal by another route, that is said.
 
-**4.1 — DirectStorage and GPU-initiated I/O** *(doc: "Fully GPU-Driven I/O", and
-the whole `windows-rs` / `dstorage` code sample).* Not reachable through the
+**4.1 — DirectStorage and GPU-initiated I/O (T4, T31)** *(doc: "Fully GPU-Driven
+I/O", and the whole `windows-rs` / `dstorage` code sample).* Not reachable through the
 graphics API this engine is built on. DirectStorage's API takes an
 `ID3D12Device` and writes into an `ID3D12Resource`, and **neither exists here,
 because the D3D12 backend is compiled out of this engine entirely** — the
@@ -340,13 +384,13 @@ memory-mapped pack, uploaded with no intermediate copy of our own. That collects
 the read syscall, the buffer copy and the decompression; only the final host→VRAM
 leg remains, and the DMA engine performs that anyway.
 
-**4.2 — GPU hardware decompression (GDeflate / BCPack).** Not exposed by wgpu.
+**4.2 — GPU hardware decompression, GDeflate / BCPack (T5).** Not exposed by wgpu.
 **The underlying goal is nevertheless fully met, by format design rather than by
 hardware:** `.inf_tex` tiles are cooked as raw BC blocks and are explicitly
 excluded from the pack's zstd compression, so there is *no decompression step at
 all* on the hot path. There is nothing for a hardware decompressor to do.
 
-**4.3 — Ray-query shadows replacing shadow maps.** Built, measured and refused,
+**4.3 — Ray-query shadows replacing shadow maps (T7).** Built, measured and refused,
 before this document arrived — the full verdict is
 `docs/memos/p28-5-ray-query.md`. Quality was in the ray query's *favour* (exact
 against an independent CPU ray caster: 0 of 36 864 pixels differ). It was refused
@@ -361,7 +405,7 @@ also Vulkan-only and native-only by wgpu's own documentation, so macOS, the WASM
 player and every software adapter are excluded by construction. The experiment is
 kept, armed, default-off.
 
-**4.4 — Neural / ML predictive prefetching.** Two separate refusals. *(a)* A
+**4.4 — Neural / ML predictive prefetching (T8).** Two separate refusals. *(a)* A
 learned predictor is untestable under this project's gates: training
 nondeterminism, and no falsifiable bound. It was replaced by a deterministic
 analytic dead-reckoner over committed input history, which has the same intent and
@@ -375,7 +419,7 @@ spent on where the camera *will* be is a slot not spent on where it *is*. Named
 tripwire tests re-open the ruling automatically the day an async upload path gives
 the loader real latency.
 
-**4.5 — Neural Texture Compression instead of BC7/ASTC.** Deferred by memo, not
+**4.5 — Neural Texture Compression instead of BC7/ASTC (T9).** Deferred by memo, not
 by silence. Weight-per-material NTC needs a training pipeline this project does
 not have and has no falsifiable bound under the house gates. The document's own
 *fallback* idea — reconstruct detail while the real tile streams — was built as a
@@ -384,7 +428,7 @@ deterministic, integer-only upscale of the finest resident ancestor
 texel MAE of **9.92**, beating both bilinear (12.13) and an edge-directed filter
 (12.05). That number is the floor any future learned predictor has to clear.
 
-**4.6 — Per-tile LZ4 / Zstd disk compression.** Declined deliberately, and it is
+**4.6 — Per-tile LZ4 / Zstd disk compression (T17).** Declined deliberately, and it is
 the stronger position. The `.inf_tex` container has a **uniform tile stride** —
 the parser requires every tile to be exactly `tile_bytes` long at exactly
 `tile_base + stride × n` — so variable-rate compression is excluded by
@@ -395,14 +439,14 @@ excluded from the pack's zstd for the recorded reason that a compressed frame is
 out of existence rather than optimise."* Adopting this would reintroduce, on the
 hot path, the exact cost the document's own §2 asks us to eliminate.
 
-**4.7 — KTX2 / Basis Universal.** Refused on two grounds. *Build:* the Rust
+**4.7 — KTX2 / Basis Universal (T18).** Refused on two grounds. *Build:* the Rust
 `basis-universal` crate is an FFI binding over a vendored C++ encoder — the same
 class of cross-OS CI liability that caused `intel_tex_2` to be deferred at Phase
 4. *Purpose:* Basis's value is a **supercompressed universal** format transcoded
 to a native BC format at load time, i.e. a CPU decode step on the streaming path
 — see 4.6. The tiles already store the final GPU format with no transcode.
 
-**4.8 — `io_uring` / IOCP / `O_DIRECT` ring-buffered streamer.** Three
+**4.8 — `io_uring` / IOCP / `O_DIRECT` ring-buffered streamer (T32).** Three
 independent blockers. *(a)* The prescribed worker loop is built on `tokio`, which
 is **Ring 2 by house rule**; the engine crates that would host this streamer are
 Ring 0 and may not name it. *(b)* `io_uring` and `O_DIRECT` are Linux-only and the
@@ -411,7 +455,7 @@ Phase 25 law names. *(c)* On the merits it is a regression here: it would replac
 a zero-copy mmap slice with a copy through pinned host memory, which is *more*
 work per tile, not less, absent the direct-to-VRAM leg 4.1 says is unavailable.
 
-**4.9 — A dedicated Vulkan transfer queue and timeline semaphores.** `wgpu`
+**4.9 — A dedicated Vulkan transfer queue and timeline semaphores (T38, T39).** `wgpu`
 exposes exactly one `Queue`, no queue-family selection, and no timeline-semaphore
 surface. Implementing this means taking `ash` as a direct dependency and reaching
 through `wgpu_hal` escape hatches, which makes the upload path **Vulkan-only** —
@@ -423,7 +467,7 @@ queue such that it executes before the commands of any command buffer submitted
 afterwards, so applying a whole transaction at the frame sync point is atomic with
 respect to any frame.
 
-**4.10 — The GPU compute reduction into a compacted append buffer.** The *goal* —
+**4.10 — The GPU compute reduction into a compacted append buffer (T49).** The *goal* —
 never read a screen-resolution feedback texture back to the CPU — is already met,
 and by a smaller payload than the document proposes. The *mechanism* is refused
 because it is nondeterministic in two distinct places.
@@ -439,7 +483,7 @@ is a pure function of (camera, request list, table) regardless of thread count,
 order or duplicate writes — and the CPU reads frame *F−2*'s mask **or nothing**,
 never "whatever arrived."
 
-**4.11 — 4096-byte tile alignment.** Alignment is 16 bytes, matching
+**4.11 — 4096-byte tile alignment (T29).** Alignment is 16 bytes, matching
 `inf_asset::BLOB_ALIGN` and `.inf_vmesh`. 4096-byte alignment only buys something
 if the reader uses `O_DIRECT` / `FILE_FLAG_NO_BUFFERING`, and **this reader is
 mmap** — the kernel maps pages regardless. Padding every 9 248-byte BC1 tile to
@@ -447,7 +491,7 @@ mmap** — the kernel maps pages regardless. Padding every 9 248-byte BC1 tile t
 the I/O path cannot collect. Revisit only together with 4.1 and 4.8, which are
 themselves refused.
 
-**4.12 — TIFF sources.** Megascans ships some 16-bit maps as `.tif`. The
+**4.12 — TIFF sources (a T20 sub-case).** Megascans ships some 16-bit maps as `.tif`. The
 workspace's `image` pin does not enable the `tiff` feature, so the map-set planner
 does not claim to handle them. This is the one CANNOT on the list that is a
 *decision away from being possible* rather than structurally blocked: enabling one
