@@ -15,11 +15,12 @@ pub mod derive;
 pub mod error;
 pub mod graph;
 pub mod instance;
+pub mod mapset;
 pub mod material;
 pub mod texture;
 pub mod tiles;
 
-pub use bc::{decode_bc1, decode_bc3};
+pub use bc::{decode_bc1, decode_bc3, decode_bc5};
 pub use derive::{derive_material, derive_material_bytes};
 pub use error::MaterialError;
 pub use graph::{
@@ -28,14 +29,17 @@ pub use graph::{
     TextureCompile,
 };
 pub use instance::{MatOverrides, MaterialInstance};
+pub use mapset::{classify_map, pack_orm, plan_map_set, MapKind, MapSetPlan, PlannedTexture};
 pub use material::{MatBlend, MaterialAsset};
 pub use texture::{
-    decode_image_rgba8, import_texture_bytes, texture_from_rgba8, texture_import_advisories,
+    decode_image_rgba16f, decode_image_rgba8, hdr_import_advisory, import_texture_bytes,
+    source_is_float, texture_from_rgba16f, texture_from_rgba8, texture_import_advisories,
     tiled_size_factor_pct, TextureAsset, TextureCompression, TextureFormat, TextureImportSettings,
     TextureMip,
 };
 pub use tiles::{
-    build_tiled_texture, decode_texture_payload, lift_texture_asset, stored_tile_bytes, TileCoord,
-    TiledTextureError, TiledTextureExt, TiledTextureImage, TiledTextureReader, TiledTextureView,
-    STORED_TILE_SIZE, TEX_ASSET_MAGIC, TEX_ASSET_SCHEMA_VERSION, TILE_BORDER, TILE_SIZE,
+    build_tiled_texture, build_tiled_texture_from_bytes, build_tiled_texture_rgba16f,
+    decode_texture_payload, lift_texture_asset, stored_tile_bytes, TileCoord, TiledTextureError,
+    TiledTextureExt, TiledTextureImage, TiledTextureReader, TiledTextureView, STORED_TILE_SIZE,
+    TEX_ASSET_MAGIC, TEX_ASSET_SCHEMA_VERSION, TILE_BORDER, TILE_SIZE,
 };
