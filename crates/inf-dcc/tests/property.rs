@@ -36,7 +36,7 @@ struct Choice {
 }
 
 fn choice() -> impl Strategy<Value = Choice> {
-    (0u8..30, any::<u16>(), any::<u16>(), any::<u8>()).prop_map(|(kind, a, b, p)| Choice {
+    (0u8..32, any::<u16>(), any::<u16>(), any::<u8>()).prop_map(|(kind, a, b, p)| Choice {
         kind,
         a,
         b,
@@ -306,6 +306,28 @@ fn make_op(mesh: &Mesh, c: Choice) -> Op {
                 }
             }
         }
+        // Audit fix: variants 36 and 37 were shipped in this wave and the
+        // generator stopped at 29, so `every_modelling_op_applies_at_least_once`
+        // proved nothing about either — two of the seven new ops sat outside the
+        // determinism, inertness and replay properties entirely.
+        29 => Op::SetEdgesSeam {
+            halfs: vec![pick(&halfs, c.a, dead_h), pick(&halfs, c.b, dead_h)],
+            seam: c.p.is_multiple_of(2),
+        },
+        30 => Op::MoveUvs {
+            // A boundary half-edge has no corner (`BoundaryCorner`), so the
+            // applied path needs `corners`; `dead_h` still reaches the refusal.
+            corners: vec![
+                (
+                    pick(&corners, c.a, dead_h),
+                    [scale(c.a) * 0.5, scale(c.b) * 0.5],
+                ),
+                (
+                    pick(&corners, c.b, dead_h),
+                    [scale(c.b) * 0.5, scale(c.a) * 0.5],
+                ),
+            ],
+        },
         28 => Op::DissolveEdges {
             // `corners` is the interior half-edges; a boundary one is the
             // `DissolveBoundaryEdge` refusal and `dead_h` is `NoSuchHalf`.
@@ -420,7 +442,7 @@ fn the_generator_reaches_both_applied_and_refused_ops() {
         };
         let script: Vec<Choice> = (0..200)
             .map(|_| Choice {
-                kind: (next() % 30) as u8,
+                kind: (next() % 32) as u8,
                 a: next() as u16,
                 b: next() as u16,
                 p: next() as u8,
@@ -456,7 +478,7 @@ fn every_modelling_op_applies_at_least_once_somewhere_in_the_battery() {
         ("cylinder", cylinder(0.5, 2.0, 6)),
         ("torus", torus(1.0, 0.3, 6, 4)),
     ];
-    let mut applied = [0usize; 30];
+    let mut applied = [0usize; 32];
     for (_, base) in bases {
         let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
         let mut next = || {
@@ -469,7 +491,7 @@ fn every_modelling_op_applies_at_least_once_somewhere_in_the_battery() {
         let mut session = MeshSession::new(base);
         for _ in 0..600 {
             let c = Choice {
-                kind: (next() % 30) as u8,
+                kind: (next() % 32) as u8,
                 a: next() as u16,
                 b: next() as u16,
                 p: next() as u8,
@@ -492,7 +514,7 @@ fn every_modelling_op_applies_at_least_once_somewhere_in_the_battery() {
         }
         assert_eq!(validate(session.mesh()), Ok(()));
     }
-    for kind in 13..30 {
+    for kind in 13..32 {
         assert!(
             applied[kind] > 0,
             "op kind {kind} never applied — the generator cannot reach it, so \
