@@ -58,12 +58,16 @@ import {
   type AssetDropDetail,
 } from "../../lib/assetDrop";
 import { DCC_PREVIEW_SIZE, MAX_BEVEL_SEGMENTS } from "../../lib/ipc";
+import { useDockLayout } from "../dock/dockLayoutStore";
 import { useAssetStore } from "../../stores/assetStore";
 import { useDccEntry, useDccStore } from "../../stores/dccStore";
 import type { DccDragDto } from "../../bindings/DccDragDto";
 import type { DccGizmoModeDto } from "../../bindings/DccGizmoModeDto";
 import type { DccModeDto } from "../../bindings/DccModeDto";
+import type { DccOrientDto } from "../../bindings/DccOrientDto";
 import type { DccPaintModeDto } from "../../bindings/DccPaintModeDto";
+import type { DccPivotDto } from "../../bindings/DccPivotDto";
+import type { DccPrimitiveDto } from "../../bindings/DccPrimitiveDto";
 import type { DccSculptModeDto } from "../../bindings/DccSculptModeDto";
 import type { SculptFalloffDto } from "../../bindings/SculptFalloffDto";
 import { cn } from "../../lib/utils";
@@ -78,7 +82,7 @@ import { cn } from "../../lib/utils";
  * starts off the silhouette is a camera move, so neither tool costs the author
  * their navigation.
  */
-type PointerTool = "select" | "sculpt" | "weights" | "gizmo";
+type PointerTool = "select" | "box" | "sculpt" | "weights" | "gizmo";
 
 /**
  * The smallest brush radius the backend accepts, metres — mirrored from
@@ -103,10 +107,18 @@ interface DragState {
    * whether the pointer grabbed anything, and moves during that window are
    * dropped rather than guessed at.
    */
-  kind: "pending" | "drag" | "orbit";
+  kind: "pending" | "drag" | "orbit" | "box";
   /** The pointer came up before `dragBegin` resolved. */
   released: boolean;
   shift: boolean;
+}
+
+/** The rubber band, in preview-space pixels, while a marquee is being dragged. */
+interface Marquee {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
 }
 
 /** A small labelled number input. */
@@ -203,6 +215,9 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   const dragCancel = useDccStore((s) => s.dragCancel);
   const unwrap = useDccStore((s) => s.unwrap);
   const uvRefresh = useDccStore((s) => s.uvRefresh);
+  const boxSelect = useDccStore((s) => s.boxSelect);
+  const setViewOpts = useDccStore((s) => s.setViewOpts);
+  const newMesh = useDccStore((s) => s.newMesh);
   const assetsById = useAssetStore((s) => s.assets);
   // What the drawer is dragging right now, so the zone lights up for a drop it
   // can actually accept rather than for any native drag that crosses it.
@@ -222,6 +237,22 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   const [slide, setSlide] = useState(0.25);
   const [smoothAngle, setSmoothAngle] = useState(30);
   const [mergeTolerance, setMergeTolerance] = useState(0.001);
+  /** The rubber band, while a marquee is being dragged. */
+  const [marquee, setMarquee] = useState<Marquee | null>(null);
+  /** The numeric transform box — the caller `dcc::transform_ops` never had. */
+  const [nudge, setNudge] = useState<[number, number, number]>([0, 0, 0]);
+  const [spinAxis, setSpinAxis] = useState<"x" | "y" | "z">("y");
+  const [spinDeg, setSpinDeg] = useState(15);
+  const [scaleBy, setScaleBy] = useState<[number, number, number]>([1, 1, 1]);
+  /** The New Mesh dialog. */
+  const [newOpen, setNewOpen] = useState(false);
+  const [newPrimitive, setNewPrimitive] = useState<DccPrimitiveDto>("cube");
+  const [newSize, setNewSize] = useState(1);
+  const [newSegments, setNewSegments] = useState(16);
+  const [newRings, setNewRings] = useState(8);
+  const [newName, setNewName] = useState("");
+  /** The material-slot name being typed. */
+  const [slotName, setSlotName] = useState("");
 
   // ── P23.5 tool state ─────────────────────────────────────────────────────
   const [tool, setTool] = useState<PointerTool>("select");
@@ -368,6 +399,15 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
       shift: e.shiftKey || e.ctrlKey,
     };
     drag.current = d;
+    // The marquee never asks the backend whether it grabbed something — it IS
+    // the gesture, and it is resolved on pointer-up against a rectangle. Set
+    // here rather than in `dragRequest`, which answers "what backend drag does
+    // this start" and the answer for a marquee is "none".
+    if (tool === "box") {
+      d.kind = "box";
+      setMarquee({ x0: px, y0: py, x1: px, y1: py });
+      return;
+    }
     const request = assetId ? dragRequest() : null;
     if (!assetId || !request) return;
 
@@ -409,6 +449,9 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
     if (d.kind === "drag") {
       const [px, py] = toPreviewPx(e);
       void dragMove(assetId, px, py);
+    } else if (d.kind === "box") {
+      const [px, py] = toPreviewPx(e);
+      setMarquee((m) => (m ? { ...m, x1: px, y1: py } : m));
     } else if (d.kind === "orbit") {
       void orbit(assetId, -dx * 0.4, dy * 0.4, 0);
     }
@@ -425,6 +468,18 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
       return;
     }
     drag.current = null;
+    if (d.kind === "box") {
+      const [px, py] = toPreviewPx(e);
+      setMarquee(null);
+      // A marquee that never moved is a click, and a click in box mode should
+      // still pick — otherwise switching to the marquee tool costs the author
+      // ordinary selection.
+      if (assetId) {
+        if (d.moved) void boxSelect(assetId, d.downX, d.downY, px, py, d.shift);
+        else void pick(assetId, d.downX, d.downY, d.shift);
+      }
+      return;
+    }
     if (!assetId) return;
     if (d.kind === "drag") {
       void dragEnd(assetId);
@@ -586,24 +641,40 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           )}
         >
           {image ? (
-            <img
-              ref={imgRef}
-              src={image}
-              alt="mesh preview"
-              draggable={false}
-              className={cn(
-                "max-h-full max-w-full select-none rounded outline-none",
-                tool === "sculpt" ? "cursor-cell" : "cursor-crosshair",
+            // `relative` so the marquee can be positioned against the IMAGE's own
+            // box rather than the panel's — the rectangle is in preview pixels,
+            // and the image is letterboxed inside its container.
+            <div className="relative">
+              <img
+                ref={imgRef}
+                src={image}
+                alt="mesh preview"
+                draggable={false}
+                className={cn(
+                  "max-h-full max-w-full select-none rounded outline-none",
+                  tool === "sculpt" ? "cursor-cell" : "cursor-crosshair",
+                )}
+                style={{ imageRendering: "pixelated" }}
+                tabIndex={0}
+                onPointerDown={onPointerDown}
+                onPointerMove={onPointerMove}
+                onPointerUp={onPointerUp}
+                onPointerCancel={onPointerUp}
+                onWheel={onWheel}
+                onKeyDown={onKeyDown}
+              />
+              {marquee && (
+                <div
+                  className="pointer-events-none absolute border border-dashed border-(--ink-accent) bg-(--ink-accent)/10"
+                  style={{
+                    left: `${(Math.min(marquee.x0, marquee.x1) / DCC_PREVIEW_SIZE) * 100}%`,
+                    top: `${(Math.min(marquee.y0, marquee.y1) / DCC_PREVIEW_SIZE) * 100}%`,
+                    width: `${(Math.abs(marquee.x1 - marquee.x0) / DCC_PREVIEW_SIZE) * 100}%`,
+                    height: `${(Math.abs(marquee.y1 - marquee.y0) / DCC_PREVIEW_SIZE) * 100}%`,
+                  }}
+                />
               )}
-              style={{ imageRendering: "pixelated" }}
-              tabIndex={0}
-              onPointerDown={onPointerDown}
-              onPointerMove={onPointerMove}
-              onPointerUp={onPointerUp}
-              onPointerCancel={onPointerUp}
-              onWheel={onWheel}
-              onKeyDown={onKeyDown}
-            />
+            </div>
           ) : (
             <div className="text-(--ink-text-dim)">{previewError ?? "Rendering…"}</div>
           )}
@@ -636,12 +707,93 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
               {doc.dragPoints > 0 ? `stroke: ${doc.dragPoints} points` : "dragging"} · Esc cancels
             </span>
           )}
+          {/* The live delta / angle / factor — the P23 carried remainder, for
+              all three gizmo modes rather than only the rotate one it named. */}
+          {doc.readout && (
+            <span className="font-mono text-(--ink-accent)">{doc.readout}</span>
+          )}
           {refusal && <span className="ml-auto truncate text-(--ink-warn,#ffb454)">{refusal}</span>}
         </div>
       </div>
 
       {/* ── tools ─────────────────────────────────────────────────────── */}
       <div className="flex w-64 shrink-0 flex-col gap-2 overflow-y-auto p-2">
+        {/* ── starting a model at all (Wave D) ────────────────────────────
+            The kernel has had four primitives since P23.3 and Ring 2 had no
+            door for any of them, so the Model Editor could open an imported
+            mesh and nothing else. */}
+        <ToolButton
+          label={newOpen ? "New mesh ▾" : "New mesh ▸"}
+          icon={<Box size={12} />}
+          onClick={() => setNewOpen((v) => !v)}
+          title="Mint a .inf_mesh from a primitive and open it. It lands in Content/Meshes."
+        />
+        {newOpen && (
+          <div className="flex flex-col gap-1 rounded border border-(--ink-border) bg-(--ink-bg-2) p-2">
+            <select
+              value={newPrimitive}
+              onChange={(e) => setNewPrimitive(e.target.value as DccPrimitiveDto)}
+              className="rounded border border-(--ink-border) bg-(--ink-bg-1) px-1 py-0.5 text-[11px]"
+            >
+              <option value="cube">Cube</option>
+              <option value="plane">Plane</option>
+              <option value="cylinder">Cylinder</option>
+              <option value="torus">Torus</option>
+            </select>
+            <label className="flex items-center justify-between gap-2 text-[11px]">
+              <span className="text-(--ink-text-dim)">Name</span>
+              <input
+                value={newName}
+                placeholder={newPrimitive}
+                onChange={(e) => setNewName(e.target.value)}
+                className="w-28 rounded border border-(--ink-border) bg-(--ink-bg-1) px-1.5 py-0.5 outline-none focus:border-(--ink-accent)"
+              />
+            </label>
+            <Num label="Size (m)" value={newSize} onChange={setNewSize} />
+            {(newPrimitive === "cylinder" || newPrimitive === "torus") && (
+              <Num
+                label="Segments"
+                value={newSegments}
+                step={1}
+                onChange={(v) => setNewSegments(Math.round(v))}
+              />
+            )}
+            {newPrimitive === "torus" && (
+              <Num
+                label="Rings"
+                value={newRings}
+                step={1}
+                onChange={(v) => setNewRings(Math.round(v))}
+              />
+            )}
+            <ToolButton
+              label="Create"
+              icon={<Sparkles size={12} />}
+              onClick={() => {
+                void newMesh({
+                  primitive: newPrimitive,
+                  name: newName.trim() || null,
+                  sizeM: newSize,
+                  segments: newSegments,
+                  rings: newRings,
+                }).then((id) => {
+                  if (!id) return;
+                  setNewOpen(false);
+                  // Open a Model Editor ON the mesh just made, so "Create" ends
+                  // with the author editing it rather than hunting the drawer.
+                  // `openPanel` is keyed by `type:params`, so pressing Create
+                  // twice for the same asset re-focuses one panel.
+                  useDockLayout.getState().openPanel("model", id);
+                });
+              }}
+            />
+            <p className="text-[10px] leading-snug text-(--ink-text-dim)">
+              Size is the bounding box: a cube&rsquo;s edge, a cylinder&rsquo;s diameter and
+              height, a torus&rsquo;s outer diameter.
+            </p>
+          </div>
+        )}
+
         <div className="flex gap-1">
           {modeButton("vert", <CircleDot size={12} />, "Vert")}
           {modeButton("edge", <ChevronsLeftRight size={12} />, "Edge")}
@@ -652,7 +804,7 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           POINTER
         </div>
         <div className="flex gap-1">
-          {(["select", "sculpt", "weights", "gizmo"] as PointerTool[]).map((t) => (
+          {(["select", "box", "sculpt", "weights", "gizmo"] as PointerTool[]).map((t) => (
             <button
               key={t}
               className={cn(
@@ -814,9 +966,10 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
               onChange={(v) => setSoftRadius(Math.max(0, v))}
             />
             <p className="text-[10px] leading-snug text-(--ink-text-dim)">
-              The handles sit on the selection&rsquo;s centroid. Snap 0 is off; a soft radius
-              above 0 blends the move into the geodesic neighbourhood. The Translate box
-              below journals the identical op.
+              The handles sit on the pivot chosen under TRANSFORM. Snap 0 is off; a soft
+              radius above 0 blends the move into the geodesic neighbourhood and journals
+              the whole drag as ONE entry. The Translate / Rotate / Scale boxes under
+              TRANSFORM journal the identical ops &mdash; one function, not two paths.
             </p>
           </>
         )}
@@ -858,6 +1011,146 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
             title="Edge ring through the last edge you clicked"
           />
         </div>
+
+        {/* ── the numeric transform box (Wave D) ────────────────────────────
+            The panel's own help text has claimed since P23.4 that "the Translate
+            box below journals the identical op", beside no box at all. These
+            three go through `dcc::transform_ops`, which is the same function the
+            dragged gizmo commits through — so the claim is now true of the
+            product and not only of the Rust. */}
+        <div className="text-[10px] font-semibold tracking-wide text-(--ink-text-dim)">
+          TRANSFORM
+        </div>
+        <div className="flex items-center gap-1">
+          <select
+            value={doc.pivot}
+            onChange={(e) =>
+              assetId && void setViewOpts(assetId, { pivot: e.target.value as DccPivotDto })
+            }
+            className="flex-1 rounded border border-(--ink-border) bg-(--ink-bg-2) px-1 py-0.5 text-[11px]"
+            title="Where the gizmo sits. Individual origins is not built — it means one op per element, which this tool does not produce."
+          >
+            <option value="median">Pivot: median</option>
+            <option value="boundingBox">Pivot: bbox</option>
+            <option value="worldOrigin">Pivot: origin</option>
+            <option value="activeElement">Pivot: active</option>
+          </select>
+          <select
+            value={doc.orient}
+            onChange={(e) =>
+              assetId && void setViewOpts(assetId, { orient: e.target.value as DccOrientDto })
+            }
+            className="flex-1 rounded border border-(--ink-border) bg-(--ink-bg-2) px-1 py-0.5 text-[11px]"
+            title="Which way the gizmo's axes point"
+          >
+            <option value="global">Axes: global</option>
+            <option value="normal">Axes: normal</option>
+            <option value="view">Axes: view</option>
+          </select>
+        </div>
+        <div className="grid grid-cols-3 gap-1">
+          <Num label="X" value={nudge[0]} onChange={(v) => setNudge([v, nudge[1], nudge[2]])} />
+          <Num label="Y" value={nudge[1]} onChange={(v) => setNudge([nudge[0], v, nudge[2]])} />
+          <Num label="Z" value={nudge[2]} onChange={(v) => setNudge([nudge[0], nudge[1], v])} />
+        </div>
+        <ToolButton
+          label="Translate (m)"
+          icon={<Move size={12} />}
+          disabled={nothing}
+          onClick={() => assetId && void apply(assetId, { tool: "translate", delta: nudge })}
+          title="Move the selection by an exact delta. The identical op the gizmo journals — one function, not two paths kept in step."
+        />
+        <div className="flex items-center gap-1">
+          <select
+            value={spinAxis}
+            onChange={(e) => setSpinAxis(e.target.value as "x" | "y" | "z")}
+            className="rounded border border-(--ink-border) bg-(--ink-bg-2) px-1 py-0.5 text-[11px]"
+          >
+            <option value="x">X</option>
+            <option value="y">Y</option>
+            <option value="z">Z</option>
+          </select>
+          <div className="flex-1">
+            <Num label="Degrees" value={spinDeg} step={1} onChange={setSpinDeg} />
+          </div>
+        </div>
+        <ToolButton
+          label="Rotate (°)"
+          icon={<Circle size={12} />}
+          disabled={nothing}
+          onClick={() =>
+            assetId &&
+            void apply(assetId, {
+              tool: "rotate",
+              axis: spinAxis === "x" ? [1, 0, 0] : spinAxis === "y" ? [0, 1, 0] : [0, 0, 1],
+              degrees: spinDeg,
+            })
+          }
+          title="Rotate about the pivot chosen above. Degrees here, radians in the op."
+        />
+        <div className="grid grid-cols-3 gap-1">
+          <Num
+            label="X"
+            value={scaleBy[0]}
+            onChange={(v) => setScaleBy([v, scaleBy[1], scaleBy[2]])}
+          />
+          <Num
+            label="Y"
+            value={scaleBy[1]}
+            onChange={(v) => setScaleBy([scaleBy[0], v, scaleBy[2]])}
+          />
+          <Num
+            label="Z"
+            value={scaleBy[2]}
+            onChange={(v) => setScaleBy([scaleBy[0], scaleBy[1], v])}
+          />
+        </div>
+        <ToolButton
+          label="Scale (x)"
+          icon={<Expand size={12} />}
+          disabled={nothing}
+          onClick={() => assetId && void apply(assetId, { tool: "scale", factor: scaleBy })}
+          title="Scale about the pivot. 1 is unchanged; negative mirrors, which is what dragging a handle past the pivot does."
+        />
+        <Num label="Extrude edges (m)" value={distance} onChange={setDistance} />
+        <ToolButton
+          label="Extrude edges"
+          icon={<Move size={12} />}
+          disabled={nothing || mode !== "edge"}
+          onClick={() =>
+            assetId &&
+            void apply(assetId, {
+              tool: "extrudeEdges",
+              delta: nudge.every((v) => v === 0) ? [0, distance, 0] : nudge,
+            })
+          }
+          title="Grow faces out of the selected BOUNDARY edges by the XYZ delta above (or straight up, if it is all zeroes). An edge has no canonical direction, so you supply one."
+        />
+        <label className="flex items-center gap-2 text-[11px] text-(--ink-text-dim)">
+          <input
+            type="checkbox"
+            checked={softRadius > 0}
+            onChange={(e) => setSoftRadius(e.target.checked ? 0.5 : 0)}
+          />
+          Proportional (soft) — one undo step
+        </label>
+        {softRadius > 0 && (
+          <ToolButton
+            label="Soft translate"
+            icon={<Move size={12} />}
+            disabled={nothing}
+            onClick={() =>
+              assetId &&
+              void apply(assetId, {
+                tool: "softTranslate",
+                delta: nudge,
+                radius: softRadius,
+                falloff,
+              })
+            }
+            title="The whole neighbourhood moves, weighted by geodesic distance in metres — and the whole drag is ONE journal entry."
+          />
+        )}
 
         <div className="text-[10px] font-semibold tracking-wide text-(--ink-text-dim)">MODEL</div>
         <Num label="Distance (m)" value={distance} onChange={setDistance} />
@@ -1021,6 +1314,60 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           onClick={() => assetId && void apply(assetId, { tool: "mergeByDistance", tolerance: mergeTolerance })}
           title="Fuse selected vertices closer than the tolerance. One undo step per cluster — the reader itself never welds by epsilon."
         />
+
+        {/* ── material slots (Wave D) ───────────────────────────────────────
+            `Op::AddMaterialSlots` and `Op::SetFaceSlot` have existed since P24.3
+            with no UI caller at all — the only consumer was the drop-merge — so
+            a multi-material prop could not be authored here. */}
+        <div className="text-[10px] font-semibold tracking-wide text-(--ink-text-dim)">
+          MATERIAL SLOTS
+        </div>
+        <div className="flex flex-col gap-0.5">
+          <button
+            className="flex items-center justify-between rounded px-1.5 py-0.5 text-left text-[11px] hover:bg-(--ink-bg-3) disabled:opacity-40"
+            disabled={nothing || mode !== "face"}
+            onClick={() => assetId && void apply(assetId, { tool: "assignSlot", slot: null })}
+            title="Put the selected faces back on the default material"
+          >
+            <span className="text-(--ink-text-dim)">(default)</span>
+            <span className="font-mono text-[10px]">assign</span>
+          </button>
+          {doc.materialSlots.map((name, i) => (
+            <button
+              key={`${i}-${name}`}
+              className="flex items-center justify-between rounded px-1.5 py-0.5 text-left text-[11px] hover:bg-(--ink-bg-3) disabled:opacity-40"
+              disabled={nothing || mode !== "face"}
+              onClick={() => assetId && void apply(assetId, { tool: "assignSlot", slot: i })}
+              title={`Assign the selected faces to slot ${i}`}
+            >
+              <span className="truncate">
+                <span className="text-(--ink-text-dim)">{i}. </span>
+                {name}
+              </span>
+              <span className="font-mono text-[10px]">assign</span>
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1">
+          <input
+            value={slotName}
+            placeholder="new slot name"
+            onChange={(e) => setSlotName(e.target.value)}
+            className="min-w-0 flex-1 rounded border border-(--ink-border) bg-(--ink-bg-2) px-1.5 py-0.5 text-[11px] outline-none focus:border-(--ink-accent)"
+          />
+          <button
+            className="rounded border border-(--ink-border) bg-(--ink-bg-2) px-2 py-0.5 text-[11px] hover:bg-(--ink-bg-3) disabled:opacity-40"
+            disabled={!slotName.trim()}
+            onClick={() => {
+              if (!assetId) return;
+              void apply(assetId, { tool: "addSlots", names: [slotName.trim()] });
+              setSlotName("");
+            }}
+            title="Append a slot. Append-only: a face records its slot as an INDEX, so inserting one would silently repaint every face after it."
+          >
+            Add
+          </button>
+        </div>
 
         <div className="text-[10px] font-semibold tracking-wide text-(--ink-text-dim)">UV</div>
         <div className="grid grid-cols-2 gap-1">
@@ -1263,6 +1610,14 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
             the other. Nothing was averaged.
           </p>
         )}
+        {/* Wave D: the three import totals the `NOT_SHOWN` freeze recorded as
+            "an author reads these off the mesh stats instead". They do not —
+            `sourceVertices` is what the FILE had, and the stats are what the
+            KERNEL has, which is exactly the pair that says how much welding
+            happened. */}
+        <Verdict label="Source vertices" value={imp.sourceVertices} good />
+        <Verdict label="Welded positions" value={imp.weldedPositions} good />
+        <Verdict label="Sharp edges" value={imp.sharpEdges} good />
 
         {lastSave && (
           <>
@@ -1292,6 +1647,41 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
             )}
             <Verdict label="Vertices" value={lastSave.export.vertices} good />
             <Verdict label="vmesh" value={lastSave.vmesh} good={lastSave.vmesh !== "skipped"} />
+            {/* Wave D: the seven export counters the `NOT_SHOWN` freeze recorded
+                as having "never had rows". Five of them also produce a sentence
+                in `advisories` below; the row is what makes the ZERO visible,
+                which is the half a sentence cannot say. */}
+            <Verdict label="Submeshes" value={lastSave.export.submeshes} good />
+            <Verdict
+              label="Coincident vertices"
+              value={lastSave.export.coincidentVertices}
+              good={lastSave.export.coincidentVertices === 0}
+            />
+            <Verdict
+              label="Reused diagonals"
+              value={lastSave.export.reusedDiagonals}
+              good={lastSave.export.reusedDiagonals === 0}
+            />
+            <Verdict
+              label="Fan fallbacks"
+              value={lastSave.export.fanFallbacks}
+              good={lastSave.export.fanFallbacks === 0}
+            />
+            <Verdict
+              label="Fallback tangents"
+              value={lastSave.export.fallbackTangents}
+              good={lastSave.export.fallbackTangents === 0}
+            />
+            <Verdict
+              label="Non-finite written"
+              value={lastSave.export.nonFiniteWritten}
+              good={lastSave.export.nonFiniteWritten === 0}
+            />
+            <Verdict
+              label="Non-unit normals"
+              value={lastSave.export.nonUnitNormalsWritten}
+              good={lastSave.export.nonUnitNormalsWritten === 0}
+            />
             {lastSave.advisories.map((a) => (
               <p
                 key={a}

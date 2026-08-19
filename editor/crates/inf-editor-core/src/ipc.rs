@@ -2894,6 +2894,28 @@ pub struct DccDocDto {
     /// joints its indices address and not what any of them is called. Names
     /// arrive with P24.3's skeleton binding UI.
     pub skin_joints: Option<u32>,
+
+    // ── Wave D ──────────────────────────────────────────────────────────────
+    /// The mesh's material slot table, in slot order.
+    ///
+    /// `Op::AddMaterialSlots` and `Op::SetFaceSlot` have existed since P24.3 with
+    /// **no UI caller at all** — the only consumer was `merge_into` — so a
+    /// multi-material prop could not be authored in this editor. This is the
+    /// field that makes the table visible; `DccToolDto::AssignSlot` is what
+    /// writes to it.
+    pub material_slots: Vec<String>,
+    /// Where the transform gizmo sits. Hard-wired to the centroid until Wave D.
+    pub pivot: crate::dcc::DccPivotDto,
+    /// Which way its axes point. `Quat::IDENTITY` at two sites until Wave D.
+    pub orient: crate::dcc::DccOrientDto,
+    /// Whether a marquee catches what it cannot see.
+    pub xray: bool,
+    /// **The live readout of the drag in flight** — "0.42 m along X",
+    /// "37.5°", "×1.25" — or `None` when nothing is being dragged.
+    ///
+    /// The P23 carried remainder was "no rotate-gizmo angle readout"; all three
+    /// modes had the same nothing, so all three have this.
+    pub readout: Option<String>,
 }
 
 // ── the Skeleton Editor (P24.3) ─────────────────────────────────────────────
@@ -3381,6 +3403,53 @@ pub struct DccGroomStatDto {
     pub value: u32,
 }
 
+/// Which primitive a new mesh starts as.
+///
+/// The four the kernel has had since P23.3 and Ring 2 has never had a door for.
+/// **Wave E's own remainder was blunter than that**: *"there is no way to start
+/// a new model at all"* — the Model Editor could open an imported mesh and
+/// nothing else, which made an engine with a modelling kernel a tool for editing
+/// other people's geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum DccPrimitiveDto {
+    Cube,
+    Plane,
+    Cylinder,
+    Torus,
+}
+
+/// What a new mesh is made of, and what it is called.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DccNewDto {
+    pub primitive: DccPrimitiveDto,
+    /// The asset name. Blank means the primitive's own name.
+    pub name: Option<String>,
+    /// The bounding size in **metres** — a cube's edge, a cylinder's diameter
+    /// and height, a torus's outer diameter — so one number means the same box
+    /// whichever button was pressed.
+    pub size_m: f64,
+    /// Segments around the major axis (cylinder, torus). Ignored by cube/plane.
+    pub segments: u32,
+    /// Segments around the minor axis (torus only).
+    pub rings: u32,
+}
+
+impl Default for DccNewDto {
+    fn default() -> Self {
+        Self {
+            primitive: DccPrimitiveDto::Cube,
+            name: None,
+            size_m: 1.0,
+            segments: 16,
+            rings: 8,
+        }
+    }
+}
+
 /// A modelling tool press. Parameters arrive from the toolbar popovers; the
 /// *operands* are the document's current selection, resolved backend-side.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -3468,6 +3537,39 @@ pub enum DccToolDto {
     /// metres. The clusters are computed here and the **result** is journalled.
     MergeByDistance {
         tolerance: f64,
+    },
+
+    // ── the numeric transform box (Wave D) ─────────────────────────────────
+    //
+    // `Translate` has existed since P23.4 with **no UI caller**, and the panel's
+    // own help text claimed otherwise — *"The Translate box below journals the
+    // identical op"*, beside no box at all. These two complete the set, so
+    // `dcc::transform_ops`'s one-door property is finally true in the product
+    // rather than only in Rust.
+    /// Rotate the selection about the document's pivot, in **degrees** (the
+    /// units doctrine: degrees at the UI boundary, radians in the op).
+    Rotate {
+        /// A world-space axis. Normalized backend-side; a zero axis is refused
+        /// by the kernel as a value.
+        axis: [f64; 3],
+        degrees: f64,
+    },
+    /// Scale the selection about the document's pivot, per axis. `1` is
+    /// unchanged; negative mirrors, which is what dragging a handle past the
+    /// pivot visibly does.
+    Scale {
+        factor: [f64; 3],
+    },
+    /// Assign the selected faces to a material slot, or to `None` (the default
+    /// material).
+    AssignSlot {
+        slot: Option<u32>,
+    },
+    /// Append material slots to the table, by name. Append-only, because a face
+    /// records its slot as an *index* and inserting one silently repaints every
+    /// face after it.
+    AddSlots {
+        names: Vec<String>,
     },
 }
 

@@ -42,6 +42,7 @@ import {
   registerViewportCommands,
 } from "./stores/viewportStore";
 import { initSimSync, registerSimCommands } from "./stores/simStore";
+import { registerDccCommands } from "./lib/dccCommands";
 import { openObject, registerObjectEditorCommands } from "./stores/objectEditorCommands";
 import { initPieSync, registerPieCommands } from "./stores/pieStore";
 import { initEditorSync } from "./stores/editorStore";
@@ -57,6 +58,9 @@ registerAssetCommands();
 registerProjectCommands();
 registerViewportCommands();
 registerObjectEditorCommands();
+// Wave D: the Model Editor's keyboard, through the same registry as every other
+// chord — so a modeller's 1/2/3 and G/R/S are rebindable for free.
+registerDccCommands();
 registerSimCommands();
 registerPieCommands();
 

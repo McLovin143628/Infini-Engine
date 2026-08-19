@@ -76,6 +76,40 @@ export const DEFAULT_KEYBINDINGS: readonly Keybinding[] = [
   { chord: "Ctrl+V", command: "edit.paste" },
   // Wave E: the object-editor routing (Actor ▸ Edit …) and rename.
   { chord: "F2", command: "actor.rename" },
+
+  // ── Wave D: the Model Editor's keyboard ──────────────────────────────────
+  //
+  // Here rather than in `dccCommands.ts` beside the command definitions,
+  // because THIS is the one table — `applyKeybindingOverrides` composes it with
+  // the user's overrides and `PreferencesDialog` checks it for conflicts, and a
+  // second table nobody composes is a second table with its own conflicts.
+  // (`dccCommands.ts` would also have to import this module for the type, so
+  // the value going the other way would be a cycle.)
+  //
+  // **Bare letters, and that is a decision.** The listener already skips
+  // editable targets, so `G` in a text field types a G. A bare letter reaching
+  // the shell while a different panel has focus does nothing at all: every
+  // `dcc.*` command resolves the FOCUSED panel first and returns when it is not
+  // a Model Editor. That is also why `S` can be scale here and nothing
+  // elsewhere — it never fires elsewhere.
+  //
+  // `Ctrl+S` is deliberately NOT reused for the mesh: it saves the level, every
+  // author knows that, and quietly changing what it means inside one panel is
+  // how work gets lost. `Ctrl+Shift+M` is the mesh's own save.
+  { chord: "1", command: "dcc.mode.vert" },
+  { chord: "2", command: "dcc.mode.edge" },
+  { chord: "3", command: "dcc.mode.face" },
+  { chord: "G", command: "dcc.gizmo.translate" },
+  { chord: "R", command: "dcc.gizmo.rotate" },
+  { chord: "S", command: "dcc.gizmo.scale" },
+  { chord: "A", command: "dcc.select.all" },
+  { chord: "Alt+A", command: "dcc.select.none" },
+  { chord: "Ctrl+I", command: "dcc.select.invert" },
+  { chord: "L", command: "dcc.select.linked" },
+  { chord: "Alt+L", command: "dcc.select.loop" },
+  { chord: "Alt+R", command: "dcc.select.ring" },
+  { chord: "Ctrl+Shift+M", command: "dcc.save" },
+  { chord: "F", command: "dcc.frame" },
 ] as const;
 
 /** Install the defaults over whatever is bound now. */

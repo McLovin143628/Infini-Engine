@@ -49,6 +49,9 @@ import type { DccGarmentDto } from "../bindings/DccGarmentDto";
 import type { DccGroomDto } from "../bindings/DccGroomDto";
 import type { DccGroomResultDto } from "../bindings/DccGroomResultDto";
 import type { DccSelectDto } from "../bindings/DccSelectDto";
+import type { DccNewDto } from "../bindings/DccNewDto";
+import type { DccOrientDto } from "../bindings/DccOrientDto";
+import type { DccPivotDto } from "../bindings/DccPivotDto";
 import type { DccToolDto } from "../bindings/DccToolDto";
 import type { DccUnwrapDto } from "../bindings/DccUnwrapDto";
 import type { SkelApplyDto } from "../bindings/SkelApplyDto";
@@ -944,6 +947,14 @@ export const dcc = {
   /** Open (or re-attach to) a mesh asset. Idempotent. */
   open: (assetId: string): Promise<DccDocDto> => invoke<DccDocDto>("dcc_open", { assetId }),
   /**
+   * **Start a new model** (Wave D): mint a `.inf_mesh` from a kernel primitive,
+   * open a session on it, and reveal it in the drawer.
+   *
+   * Not idempotent, and cannot be: every call is a new asset. The panel's dialog
+   * is what stops a stray press from filling `Content/Meshes` with cubes.
+   */
+  new: (spec: DccNewDto): Promise<DccDocDto> => invoke<DccDocDto>("dcc_new", { spec }),
+  /**
    * Free a document, **by asset id**. Symmetric with `open`, and deliberately so:
    * a panel that unmounts before its `open` resolves has no document id yet, and
    * a close it cannot send is a leaked backend session. Idempotent.
@@ -958,6 +969,38 @@ export const dcc = {
   /** Pointer → component. `size` must match the last `preview` size. */
   pick: (id: string, x: number, y: number, size: number, additive: boolean): Promise<DccDocDto> =>
     invoke<DccDocDto>("dcc_pick", { id, x, y, size, additive }),
+  /**
+   * **Marquee select** (Wave D). Same `size` rule as `pick`, for the same
+   * reason: the projection is built from it backend-side.
+   *
+   * A rectangle under two pixels either way is a click that wobbled and is a
+   * no-op — clearing a whole selection because a hand moved is worse than
+   * missing a tiny marquee.
+   */
+  boxSelect: (
+    id: string,
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    size: number,
+    additive: boolean,
+  ): Promise<DccDocDto> =>
+    invoke<DccDocDto>("dcc_box_select", { id, x0, y0, x1, y1, size, additive }),
+  /**
+   * Set the gizmo's pivot, its axis orientation, and the x-ray toggle. Every
+   * argument is optional; `null` means "leave it".
+   */
+  setViewOpts: (
+    id: string,
+    opts: { pivot?: DccPivotDto; orient?: DccOrientDto; xray?: boolean },
+  ): Promise<DccDocDto> =>
+    invoke<DccDocDto>("dcc_set_view_opts", {
+      id,
+      pivot: opts.pivot ?? null,
+      orient: opts.orient ?? null,
+      xray: opts.xray ?? null,
+    }),
   /** Orbit (degrees) and dolly (a proportion, so it scales with the model). */
   orbit: (id: string, yawDeg: number, pitchDeg: number, dolly: number): Promise<void> =>
     invoke("dcc_orbit", { id, yawDeg, pitchDeg, dolly }),

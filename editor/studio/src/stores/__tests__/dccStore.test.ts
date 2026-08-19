@@ -79,6 +79,13 @@ function docOf(assetId: string, over: Partial<DccDocDto> = {}): DccDocDto {
     },
     // P24.2: a fixture mesh is rigid unless a case says otherwise.
     skinJoints: null,
+    // Wave D: the slot table, the two gizmo settings that were hard-wired
+    // constants until this wave, and the live drag readout.
+    materialSlots: [],
+    pivot: "median",
+    orient: "global",
+    xray: false,
+    readout: null,
     ...over,
   };
 }

@@ -50,14 +50,14 @@ use inf_dcc::{
 };
 use inf_editor_core::assets::vmesh;
 use inf_editor_core::dcc::{
-    self, GizmoDrag, GizmoInFlight, GizmoMode, OverlayStyle, PendingDrag, PickHit, PreviewCache,
-    Projector, VertTransform,
+    self, DccOrientDto, DccPivotDto, GizmoDrag, GizmoInFlight, GizmoMode, OverlayStyle,
+    PendingDrag, PickHit, PreviewCache, Projector, VertTransform,
 };
 use inf_editor_core::ipc::{
     DccApplyDto, DccDocDto, DccDragBeginDto, DccDragDto, DccExportDto, DccGarmentDto,
     DccGizmoModeDto, DccGroomDto, DccGroomResultDto, DccGroomStatDto, DccImportDto, DccModeDto,
-    DccPaintModeDto, DccPreviewDto, DccSaveDto, DccSculptModeDto, DccSelectDto, DccToolDto,
-    DccUnwrapDto, SculptFalloffDto,
+    DccNewDto, DccPaintModeDto, DccPreviewDto, DccPrimitiveDto, DccSaveDto, DccSculptModeDto,
+    DccSelectDto, DccToolDto, DccUnwrapDto, SculptFalloffDto,
 };
 use inf_editor_core::thumbnail::{encode_png_fast, PreviewView, Thumbnailer};
 use tauri::{AppHandle, Emitter, State};
@@ -109,6 +109,47 @@ struct DccDoc {
     /// and the handles are drawn backend-side, and a panel-held copy would be a
     /// second opinion about which tool is active.
     gizmo: Option<GizmoMode>,
+    /// **Where the gizmo sits** (Wave D). Hard-wired to the centroid through
+    /// P24; now a document setting, because it is a statement about this
+    /// document's selection and the panel already holds none of those.
+    pivot: DccPivotDto,
+    /// **Which way its axes point** (Wave D). `Quat::IDENTITY` at two sites
+    /// until now, which is exactly why it is *one* field read by both.
+    orient: DccOrientDto,
+    /// The position of the last component picked — what
+    /// [`DccPivotDto::ActiveElement`] means, and the one pivot that cannot be
+    /// derived from the selection because a `BTreeSet` has no last element.
+    active: Option<glam::DVec3>,
+    /// Whether a marquee catches what it cannot see. Off by default: a box
+    /// select that grabs the far side of a closed model is the commonest way to
+    /// delete geometry by accident.
+    xray: bool,
+    /// **The live readout of the drag in flight** — the delta in metres, the
+    /// angle in degrees, or the per-axis factor.
+    ///
+    /// Computed on `dcc_drag_move` and read by `doc_dto`, because the transform
+    /// lives in `PendingDrag` and the panel holds no copy of it. This closes the
+    /// P23 carried remainder "no rotate-gizmo angle readout" — for all three
+    /// modes, since all three had the same nothing.
+    readout: Option<String>,
+}
+
+impl DccDoc {
+    /// **Where this document's gizmo sits**, honouring the pivot setting.
+    ///
+    /// One function, called by the gizmo drag, the numeric rotate and the
+    /// numeric scale — because "the pivot" answered three times is three answers
+    /// the first time somebody changes one of them. `None` when nothing is
+    /// selected, which is what makes a drag with no selection refuse instead of
+    /// silently transforming about the origin.
+    fn pivot_point(&self, mesh: &inf_dcc::Mesh) -> Option<glam::DVec3> {
+        dcc::gizmo_pivot_of(mesh, &self.selection, self.mode, self.pivot, self.active)
+    }
+
+    /// …and which way its axes point.
+    fn gizmo_quat(&self, mesh: &inf_dcc::Mesh) -> glam::Quat {
+        dcc::gizmo_orientation(mesh, &self.selection, self.mode, self.orient, self.view)
+    }
 }
 
 struct DccStore {
@@ -334,6 +375,49 @@ fn doc_dto(doc: &DccDoc, session: &MeshSession) -> DccDocDto {
         seams: inf_dcc::seam_count(mesh) as u32,
         charts: inf_dcc::charts(mesh).len() as u32,
         skin_joints: mesh.skin_binding().map(|b| b.joints),
+        // ── Wave D ─────────────────────────────────────────────────────────
+        material_slots: mesh.material_slots().to_vec(),
+        pivot: doc.pivot,
+        orient: doc.orient,
+        xray: doc.xray,
+        readout: doc.readout.clone(),
+    }
+}
+
+/// A fresh document for `asset`, at the framing its own bounds imply.
+///
+/// One constructor for `dcc_open` and `dcc_new`, because two literals of a
+/// fifteen-field struct is one struct that acquires a field on one path only —
+/// which is how `pivot` would have shipped as "whatever `Default` says" in the
+/// editor and "Median" in the creator.
+fn new_doc(
+    doc_id: String,
+    asset: AssetId,
+    name: String,
+    mesh: &inf_dcc::Mesh,
+    session: &MeshSession,
+    import: ImportReport,
+) -> DccDoc {
+    DccDoc {
+        id: doc_id,
+        asset,
+        name,
+        mode: SelectMode::Face,
+        selection: SelectionSet::new(session.generation()),
+        view: dcc::frame(dcc::tessellate(mesh).bounds),
+        import,
+        saved_generation: Some(session.generation()),
+        knife: Vec::new(),
+        last_edge: None,
+        preview: PreviewCache::new(),
+        pending: None,
+        drag_snap: 0.0,
+        gizmo: None,
+        pivot: DccPivotDto::default(),
+        orient: DccOrientDto::default(),
+        active: None,
+        xray: false,
+        readout: None,
     }
 }
 
@@ -353,6 +437,11 @@ fn doc_dto(doc: &DccDoc, session: &MeshSession) -> DccDocDto {
               file will not contain — say so (C4-34)"]
 fn settle(doc: &mut DccDoc, session: &mut MeshSession) -> Option<String> {
     let pending = doc.pending.take();
+    // The readout describes a drag in flight, so it goes when the drag does.
+    // Here rather than at the eleven doors, for the same reason `pending` is
+    // taken here: a state that survives its own gesture is the shape where a
+    // status strip reads "+0.42 m on X" over a model nobody is touching.
+    doc.readout = None;
     dcc::settle_drag(session, &mut doc.selection, doc.mode, pending)
 }
 
@@ -419,29 +508,20 @@ pub async fn dcc_open(
     })?;
 
     let import = from_mesh_asset(&payload).map_err(|e| e.to_string())?;
-    let view = dcc::frame(dcc::tessellate(&import.mesh).bounds);
     let session = MeshSession::new(import.mesh);
     let dto = state.with(|s| {
         // No counter: unlike the three graph stores this template came from,
         // a document id here is `dcc:{asset}` — the asset IS the identity, which
         // is what makes `dcc_open` idempotent. The inherited `counter` was
         // incremented on every open and read by nothing.
-        let doc = DccDoc {
-            id: doc_id.clone(),
-            asset: id,
+        let doc = new_doc(
+            doc_id.clone(),
+            id,
             name,
-            mode: SelectMode::Face,
-            selection: SelectionSet::new(session.generation()),
-            view,
-            import: import.report,
-            saved_generation: Some(session.generation()),
-            knife: Vec::new(),
-            last_edge: None,
-            preview: PreviewCache::new(),
-            pending: None,
-            drag_snap: 0.0,
-            gizmo: None,
-        };
+            session.mesh(),
+            &session,
+            import.report,
+        );
         let dto = doc_dto(&doc, &session);
         s.docs.insert(doc_id.clone(), doc);
         s.journals.insert(doc_id.clone(), session);
@@ -449,6 +529,88 @@ pub async fn dcc_open(
     })?;
     let _ = app.emit("dcc://sync", dto.id.clone());
     Ok(dto)
+}
+
+/// **Start a new model.** Mint a `.inf_mesh` from one of the kernel's
+/// primitives, open a session on it, and reveal it in the drawer.
+///
+/// The gap Wave E named and could not close from where it was standing: *"there
+/// is no way to start a new model at all"*. The kernel has had
+/// `cube`/`plane`/`cylinder`/`torus` since P23.3 and Ring 2 has had no door,
+/// which made a modelling engine a tool for editing other people's geometry.
+///
+/// Everything with a rule in it is in Ring 1 — `dcc::primitive_mesh` (the
+/// parameter checks, NaN included) and `dcc::create_mesh_asset` (the atomic
+/// write, the sidecar, and the **synchronous** `ensure_vmesh` the save path also
+/// takes) — because a `#[tauri::command]` cannot be driven from a test. This
+/// function is the wiring: build, write, open, announce.
+#[tauri::command]
+pub async fn dcc_new(
+    app: AppHandle,
+    spec: DccNewDto,
+    state: State<'_, DccState>,
+    assets: State<'_, super::assets::AssetState>,
+) -> Result<DccDocDto, String> {
+    let mesh = dcc::primitive_mesh(spec.primitive, spec.size_m, spec.segments, spec.rings)?;
+    let name = spec
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            match spec.primitive {
+                DccPrimitiveDto::Cube => "Cube",
+                DccPrimitiveDto::Plane => "Plane",
+                DccPrimitiveDto::Cylinder => "Cylinder",
+                DccPrimitiveDto::Torus => "Torus",
+            }
+            .to_string()
+        });
+    let (id, report) =
+        assets.with_project(|proj| dcc::create_mesh_asset(proj, &name, &mesh).map_err(|e| e))?;
+    // The writer's advisories are surfaced, not dropped, even though a generated
+    // primitive cannot normally trip one — "cannot normally" is the class of
+    // claim this codebase keeps paying for.
+    for line in advisories(&report) {
+        tracing::warn!("dcc_new({name}): {line}");
+    }
+
+    let doc_id = format!("dcc:{id}");
+    let session = MeshSession::new(mesh);
+    let dto = state.with(|s| {
+        let doc = new_doc(
+            doc_id.clone(),
+            id,
+            name,
+            session.mesh(),
+            &session,
+            ImportReport::default(),
+        );
+        let dto = doc_dto(&doc, &session);
+        s.docs.insert(doc_id.clone(), doc);
+        s.journals.insert(doc_id.clone(), session);
+        Ok(dto)
+    })?;
+    // Both fan-outs, for the same reason `dcc_save` sends both: the drawer has to
+    // show the new asset and the viewport has to be able to place it.
+    viewport_refresh_all(&app);
+    let _ = app.emit("assets://changed", ());
+    let _ = app.emit("dcc://sync", dto.id.clone());
+    Ok(dto)
+}
+
+/// Tell every view the asset index moved.
+///
+/// A free function so `dcc_new` does not have to take a `ViewportState` it uses
+/// for one line — and so the `Target::All` decision (this is a fact about the
+/// *project*, not about one viewport — P23.2a's rule at every resolution point)
+/// is written once.
+fn viewport_refresh_all(app: &AppHandle) {
+    use tauri::Manager;
+    if let Some(vp) = app.try_state::<super::ViewportState>() {
+        vp.refresh_asset_index(super::Target::All);
+    }
 }
 
 /// Free a document and its journal, **by asset id** — the same key `dcc_open`
@@ -803,6 +965,61 @@ fn build_ops(doc: &DccDoc, session: &MeshSession, tool: &DccToolDto) -> Result<V
                 target: MergeTarget::Center,
             })
             .collect(),
+
+        // **The other two thirds of the one door.** `Translate` above has gone
+        // through `dcc::transform_ops` since P23.5 and had no caller; these two
+        // complete the numeric box, and every one of the three produces exactly
+        // the op the dragged gizmo produces because there is one function.
+        DccToolDto::Rotate { axis, degrees } => {
+            let Some(pivot) = doc.pivot_point(mesh) else {
+                return Ok(Vec::new());
+            };
+            dcc::transform_ops(
+                mesh,
+                &doc.selection,
+                doc.mode,
+                pivot,
+                VertTransform::Rotate {
+                    axis: glam::DVec3::from_array(*axis),
+                    // Degrees at the UI boundary, radians in the op (the units
+                    // doctrine). `to_radians` is exact scaling, not trigonometry.
+                    radians: degrees.to_radians(),
+                },
+                None,
+            )
+        }
+        DccToolDto::Scale { factor } => {
+            let Some(pivot) = doc.pivot_point(mesh) else {
+                return Ok(Vec::new());
+            };
+            dcc::transform_ops(
+                mesh,
+                &doc.selection,
+                doc.mode,
+                pivot,
+                VertTransform::Scale(glam::DVec3::from_array(*factor)),
+                None,
+            )
+        }
+
+        // ── material slots (Wave D) ────────────────────────────────────────
+        DccToolDto::AssignSlot { slot } => faces
+            .into_iter()
+            .map(|face| Op::SetFaceSlot { face, slot: *slot })
+            .collect(),
+        DccToolDto::AddSlots { names } => {
+            let names: Vec<String> = names
+                .iter()
+                .map(|n| n.trim())
+                .filter(|n| !n.is_empty())
+                .map(str::to_string)
+                .collect();
+            if names.is_empty() {
+                Vec::new()
+            } else {
+                vec![Op::AddMaterialSlots { names }]
+            }
+        }
     })
 }
 
@@ -879,7 +1096,8 @@ pub async fn dcc_pick(
         sync(doc, session);
         let mesh = session.mesh();
         let proj = Projector::new(doc.view, size.max(1));
-        match dcc::pick(mesh, &proj, doc.mode, x as f32, y as f32) {
+        let hit = dcc::pick(mesh, &proj, doc.mode, x as f32, y as f32);
+        match hit {
             Some(PickHit::Vert(v)) => {
                 if !additive {
                     doc.selection.clear();
@@ -916,8 +1134,45 @@ pub async fn dcc_pick(
             }
             None => {}
         }
+        // **The active element** (Wave D): the position of what was just picked,
+        // which is what `DccPivotDto::ActiveElement` means and the one pivot that
+        // cannot be derived — a `BTreeSet` has no last member. Taken from the
+        // *hit* rather than from the selection so it really is the thing clicked
+        // and not the centroid of everything that happens to be selected.
+        doc.active = match hit {
+            Some(PickHit::Vert(v)) => mesh_position(session.mesh(), v),
+            Some(PickHit::Edge(h)) => {
+                let m = session.mesh();
+                match (
+                    m.origin(h).and_then(|v| m.position(v)),
+                    m.dest(h).and_then(|v| m.position(v)),
+                ) {
+                    (Some(a), Some(b)) => Some((a + b) * 0.5),
+                    _ => None,
+                }
+            }
+            Some(PickHit::Face(f)) => face_centroid(session.mesh(), f),
+            None => None,
+        };
         Ok(doc_dto(doc, session))
     })
+}
+
+fn mesh_position(mesh: &inf_dcc::Mesh, v: inf_dcc::VertId) -> Option<glam::DVec3> {
+    mesh.position(v).filter(|p| p.is_finite())
+}
+
+fn face_centroid(mesh: &inf_dcc::Mesh, f: inf_dcc::FaceId) -> Option<glam::DVec3> {
+    let vs = mesh.face_verts(f)?;
+    let mut acc = glam::DVec3::ZERO;
+    let mut n = 0usize;
+    for v in vs {
+        if let Some(p) = mesh_position(mesh, v) {
+            acc += p;
+            n += 1;
+        }
+    }
+    (n > 0).then(|| acc / n as f64)
 }
 
 // ── pointer drags: the sculpt brush and the component gizmo (P23.5) ────────
@@ -939,6 +1194,100 @@ pub async fn dcc_set_gizmo(
         // carry a refusal; `settle_reported` has already said it out loud.
         let _ = settle_reported(doc, session, "dcc_set_gizmo");
         doc.gizmo = mode.map(gizmo_mode_of);
+        Ok(doc_dto(doc, session))
+    })
+}
+
+/// **Set the gizmo's pivot, its orientation, and the x-ray toggle** (Wave D).
+///
+/// One door for the three, because they are one decision an author makes at
+/// once and three doors would be three `dcc://sync` round trips for it. Every
+/// argument is optional and `None` means "leave it", so the panel sends only what
+/// changed.
+#[tauri::command]
+pub async fn dcc_set_view_opts(
+    id: String,
+    pivot: Option<DccPivotDto>,
+    orient: Option<DccOrientDto>,
+    xray: Option<bool>,
+    state: State<'_, DccState>,
+) -> Result<DccDocDto, String> {
+    state.with(|s| {
+        let (doc, session) = s.pair(&id)?;
+        // This door answers with a bare `DccDocDto`, which has nowhere to
+        // carry a refusal; `settle_reported` has already said it out loud.
+        let _ = settle_reported(doc, session, "dcc_set_view_opts");
+        if let Some(p) = pivot {
+            doc.pivot = p;
+        }
+        if let Some(o) = orient {
+            doc.orient = o;
+        }
+        if let Some(x) = xray {
+            doc.xray = x;
+        }
+        Ok(doc_dto(doc, session))
+    })
+}
+
+/// **Marquee select.** Everything the rectangle catches, in the current mode.
+///
+/// The rules and the visibility test are `dcc::pick_box`, in Ring 1 — including
+/// the honest caveat that "visible" is back-face culling and not depth testing,
+/// so the far side of a *fold* is still caught with x-ray off.
+///
+/// `additive` extends the selection rather than replacing it, matching
+/// `dcc_pick`'s shift-click. A degenerate rectangle (a click that wobbled) is a
+/// no-op rather than a "select nothing": clearing an author's whole selection
+/// because their hand moved two pixels is the failure this guard exists for.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn dcc_box_select(
+    id: String,
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    size: u32,
+    additive: bool,
+    state: State<'_, DccState>,
+) -> Result<DccDocDto, String> {
+    state.with(|s| {
+        let (doc, session) = s.pair(&id)?;
+        // This door answers with a bare `DccDocDto`, which has nowhere to
+        // carry a refusal; `settle_reported` has already said it out loud.
+        let _ = settle_reported(doc, session, "dcc_box_select");
+        sync(doc, session);
+        let rect = dcc::BoxRect {
+            x0: x0 as f32,
+            y0: y0 as f32,
+            x1: x1 as f32,
+            y1: y1 as f32,
+        };
+        if rect.is_degenerate() {
+            return Ok(doc_dto(doc, session));
+        }
+        let mesh = session.mesh();
+        let proj = Projector::new(doc.view, size.max(1));
+        let (verts, edges, faces) = dcc::pick_box(mesh, &proj, doc.mode, rect, doc.xray);
+        if !additive {
+            doc.selection.clear();
+            doc.knife.clear();
+        }
+        for v in verts {
+            doc.selection.set_vert(v, true);
+        }
+        for h in edges {
+            doc.selection.set_edge(mesh, h, true);
+            doc.last_edge = Some(h);
+        }
+        for f in faces {
+            doc.selection.set_face(f, true);
+        }
+        // The marquee moves the "active element" to the selection it just made,
+        // so a pivot set to `ActiveElement` does not keep pointing at whatever
+        // was clicked three gestures ago.
+        doc.active = dcc::gizmo_pivot(session.mesh(), &doc.selection, doc.mode);
         Ok(doc_dto(doc, session))
     })
 }
@@ -1053,7 +1402,7 @@ pub async fn dcc_drag_begin(
             } => {
                 let gmode = gizmo_mode_of(mode);
                 doc.gizmo = Some(gmode);
-                let Some(pivot) = dcc::gizmo_pivot(session.mesh(), &doc.selection, doc.mode) else {
+                let Some(pivot) = doc.pivot_point(session.mesh()) else {
                     return Ok(DccDragBeginDto {
                         grabbed: false,
                         handle: None,
@@ -1063,8 +1412,14 @@ pub async fn dcc_drag_begin(
                         doc: doc_dto(doc, session),
                     });
                 };
+                // **The orientation is read ONCE and handed to both** the
+                // hit-test and the drag. Those are the two sites that used to say
+                // `Quat::IDENTITY` independently, which is exactly the shape
+                // where one gets updated and the other does not — and the symptom
+                // would be a gizmo that picks one axis and drags along another.
+                let quat = doc.gizmo_quat(session.mesh());
                 match (
-                    dcc::pick_gizmo(&proj, doc.view, pivot, gmode, px, py),
+                    dcc::pick_gizmo(&proj, doc.view, pivot, quat, gmode, px, py),
                     proj.ray(px, py),
                 ) {
                     (Some(axis), Some((ro, rd))) => {
@@ -1072,14 +1427,7 @@ pub async fn dcc_drag_begin(
                             glam::Vec3::new(pivot.x as f32, pivot.y as f32, pivot.z as f32);
                         doc.drag_snap = snap as f32;
                         doc.pending = Some(PendingDrag::Gizmo(Box::new(GizmoInFlight {
-                            drag: GizmoDrag::begin(
-                                gmode,
-                                axis,
-                                glam::Quat::IDENTITY,
-                                origin,
-                                ro,
-                                rd,
-                            ),
+                            drag: GizmoDrag::begin(gmode, axis, quat, origin, ro, rd),
                             pivot,
                             // Zero until the first move: a click that never
                             // dragged must journal nothing.
@@ -1153,6 +1501,12 @@ pub async fn dcc_drag_move(
             Some(PendingDrag::Gizmo(g)) => {
                 if let Some((ro, rd)) = proj.ray(px, py) {
                     g.xform = VertTransform::from_gizmo(g.drag.update(ro, rd, snap));
+                    // **The readout** (Wave D). Written here rather than derived
+                    // in `doc_dto`, because `doc.pending` is borrowed mutably in
+                    // this arm and the alternative is a second match over the
+                    // same enum in the projection — which is where two answers
+                    // about one drag come from.
+                    doc.readout = Some(dcc::drag_readout(&g.xform));
                 }
             }
             None => {}
@@ -2102,25 +2456,19 @@ mod tests {
         let session = MeshSession::new(mesh);
         state
             .with(|s| {
-                s.docs.insert(
+                // Through `new_doc`, the one constructor `dcc_open` and `dcc_new`
+                // both use — so a field added to `DccDoc` cannot arrive with one
+                // default in the product and another in the tests.
+                let mut doc = new_doc(
                     id.to_string(),
-                    DccDoc {
-                        id: id.to_string(),
-                        asset: AssetId::new(),
-                        name: "T".into(),
-                        mode: SelectMode::Face,
-                        selection: SelectionSet::new(session.generation()),
-                        view: PreviewView::default(),
-                        import: ImportReport::default(),
-                        saved_generation: Some(session.generation()),
-                        knife: Vec::new(),
-                        last_edge: None,
-                        preview: PreviewCache::new(),
-                        pending: None,
-                        drag_snap: 0.0,
-                        gizmo: None,
-                    },
+                    AssetId::new(),
+                    "T".into(),
+                    session.mesh(),
+                    &session,
+                    ImportReport::default(),
                 );
+                doc.view = PreviewView::default();
+                s.docs.insert(id.to_string(), doc);
                 s.journals.insert(id.to_string(), session);
                 Ok(())
             })
@@ -2205,7 +2553,7 @@ mod tests {
     }
 
     #[test]
-    fn a_soft_translate_scales_by_weight_and_stays_one_op_per_weight() {
+    fn a_soft_translate_scales_by_weight_and_is_one_op() {
         let state = DccState::default();
         seed(&state, "dcc:1", inf_dcc::cube(2.0));
         state
@@ -2223,17 +2571,18 @@ mod tests {
                         falloff: SculptFalloffDto::Linear,
                     },
                 )?;
-                assert!(ops.len() > 1, "the neighbourhood moves too: {ops:?}");
-                let full = ops
-                    .iter()
-                    .filter(|o| matches!(o, Op::TranslateVerts { delta, .. } if delta[1] == 1.0))
-                    .count();
-                assert_eq!(full, 1, "exactly one group moves at full weight");
-                for op in &ops {
-                    let Op::TranslateVerts { delta, .. } = op else {
-                        panic!("{op:?}")
-                    };
-                    assert!(delta[1] > 0.0 && delta[1] <= 1.0, "{delta:?}");
+                // Wave D: the whole proportional drag is ONE op carrying a
+                // weight table, not one op per distinct weight. Same numbers,
+                // one undo press.
+                assert_eq!(ops.len(), 1, "a soft drag is one op now: {ops:?}");
+                let Op::MoveVerts { moves } = &ops[0] else {
+                    panic!("{:?}", ops[0])
+                };
+                assert!(moves.len() > 1, "the neighbourhood moves too: {moves:?}");
+                let full = moves.iter().filter(|(_, d)| d[1] == 1.0).count();
+                assert_eq!(full, 1, "exactly one vertex moves at full weight");
+                for (_, d) in moves {
+                    assert!(d[1] > 0.0 && d[1] <= 1.0, "{d:?}");
                 }
                 Ok(())
             })
@@ -2406,8 +2755,15 @@ mod tests {
     /// Hand-written on purpose: a table derived from the code would agree with the
     /// code by construction and prove nothing. This is the decision, written down
     /// once, and the gate holds the code to it.
-    const DRAG_POLICY: [(&str, DragPolicy); 22] = [
+    const DRAG_POLICY: [(&str, DragPolicy); 25] = [
         ("dcc_open", DragPolicy::NoJournal),
+        // Wave D. `dcc_new` touches no existing document at all — it mints one —
+        // so there is nothing of the author's in flight for it to settle or
+        // abandon. The other two are ordinary selection/setting doors and settle,
+        // like `dcc_pick` and `dcc_set_gizmo` beside them.
+        ("dcc_new", DragPolicy::NoJournal),
+        ("dcc_box_select", DragPolicy::Settles),
+        ("dcc_set_view_opts", DragPolicy::Settles),
         ("dcc_close", DragPolicy::Abandons),
         ("dcc_list", DragPolicy::NoJournal),
         ("dcc_apply", DragPolicy::Settles),
@@ -2865,6 +3221,11 @@ mod tests {
             ("pub async fn dcc_set_gizmo(", "DccDocDto"),
             ("pub async fn dcc_undo(", "DccDocDto"),
             ("pub async fn dcc_redo(", "DccDocDto"),
+            // Wave D's two selection/setting doors, same shape and same reason:
+            // a `DccDocDto` has no `refusal` field, and `settle_reported` has
+            // already put the sentence in the Output Log.
+            ("pub async fn dcc_box_select(", "DccDocDto"),
+            ("pub async fn dcc_set_view_opts(", "DccDocDto"),
         ];
         for (signature, dto) in dropping {
             let body = code_only(&body_of(SOURCE, signature));

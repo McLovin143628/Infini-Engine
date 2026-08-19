@@ -288,20 +288,18 @@ fn camel(snake: &str) -> String {
 /// counter must now either get a panel row or be added to this list by hand,
 /// which is the decision the seam was making by default and wrongly. Retiring
 /// entries is a UI task, ledgered in ROADMAP section 12's P24 block.
-const NOT_SHOWN: [&str; 10] = [
-    // Import: totals an author reads off the mesh stats instead.
-    "sourceVertices",
-    "weldedPositions",
-    "sharpEdges",
-    // Export: the shape of what was written, already visible as mesh stats, plus
-    // three writer advisories that have never had rows.
-    "submeshes",
-    "fanFallbacks",
-    "fallbackTangents",
-    "coincidentVertices",
-    "reusedDiagonals",
-    "nonFiniteWritten",
-    "nonUnitNormalsWritten",
+const NOT_SHOWN: [&str; 0] = [
+    // **EMPTY, since Wave D.** Every one of the ten pre-existing gaps this pin
+    // measured now has a row in the Model Editor: the three import totals under
+    // HOW IT OPENED (`sourceVertices` is what the FILE had and the mesh stats
+    // are what the KERNEL has — the pair is the welding, which is why "read it
+    // off the stats" was never quite true), and the seven export counters under
+    // LAST SAVE. Five of the seven also produce a sentence in `advisories`; the
+    // row is what makes the ZERO visible, which a sentence cannot say.
+    //
+    // The list stays here rather than being deleted, because its value was never
+    // the ten entries — it is that a NEW report counter must get a row or be
+    // added here by hand. An empty exemption list is the strongest form of that.
 ];
 
 #[test]

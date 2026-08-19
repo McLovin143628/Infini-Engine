@@ -20,4 +20,9 @@ segments: number, } | { "tool": "loopCut", cuts: number, } | { "tool": "knife" }
  * whose contract is camelCase. Named explicitly rather than spelled
  * around.
  */
-angleDeg: number | null, } | { "tool": "slide", t: number, } | { "tool": "mergeByDistance", tolerance: number, };
+angleDeg: number | null, } | { "tool": "slide", t: number, } | { "tool": "mergeByDistance", tolerance: number, } | { "tool": "rotate", 
+/**
+ * A world-space axis. Normalized backend-side; a zero axis is refused
+ * by the kernel as a value.
+ */
+axis: [number, number, number], degrees: number, } | { "tool": "scale", factor: [number, number, number], } | { "tool": "assignSlot", slot: number | null, } | { "tool": "addSlots", names: Array<string>, };

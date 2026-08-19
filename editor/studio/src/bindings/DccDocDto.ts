@@ -2,6 +2,8 @@
 import type { DccGizmoModeDto } from "./DccGizmoModeDto";
 import type { DccImportDto } from "./DccImportDto";
 import type { DccModeDto } from "./DccModeDto";
+import type { DccOrientDto } from "./DccOrientDto";
+import type { DccPivotDto } from "./DccPivotDto";
 
 /**
  * One open Model Editor document.
@@ -76,4 +78,34 @@ charts: number,
  * joints its indices address and not what any of them is called. Names
  * arrive with P24.3's skeleton binding UI.
  */
-skinJoints: number | null, };
+skinJoints: number | null, 
+/**
+ * The mesh's material slot table, in slot order.
+ *
+ * `Op::AddMaterialSlots` and `Op::SetFaceSlot` have existed since P24.3 with
+ * **no UI caller at all** — the only consumer was `merge_into` — so a
+ * multi-material prop could not be authored in this editor. This is the
+ * field that makes the table visible; `DccToolDto::AssignSlot` is what
+ * writes to it.
+ */
+materialSlots: Array<string>, 
+/**
+ * Where the transform gizmo sits. Hard-wired to the centroid until Wave D.
+ */
+pivot: DccPivotDto, 
+/**
+ * Which way its axes point. `Quat::IDENTITY` at two sites until Wave D.
+ */
+orient: DccOrientDto, 
+/**
+ * Whether a marquee catches what it cannot see.
+ */
+xray: boolean, 
+/**
+ * **The live readout of the drag in flight** — "0.42 m along X",
+ * "37.5°", "×1.25" — or `None` when nothing is being dragged.
+ *
+ * The P23 carried remainder was "no rotate-gizmo angle readout"; all three
+ * modes had the same nothing, so all three have this.
+ */
+readout: string | null, };

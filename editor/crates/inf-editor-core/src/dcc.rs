@@ -1016,6 +1016,57 @@ impl VertTransform {
     }
 }
 
+/// **What the drag says it is doing**, in the units the author typed.
+///
+/// The P23 ledger carried "no rotate-gizmo angle readout"; all three gizmo modes
+/// had the same nothing, so all three get this. In Ring 1 rather than in the
+/// command because it is a *rule about presentation* — how many digits, which
+/// units, what "no movement yet" reads as — and a rule written in a
+/// `#[tauri::command]` is a rule no gate can see (memo §7c).
+///
+/// Units at the boundary (architecture rule 6 and the units doctrine): metres
+/// for a translate, **degrees** for a rotate (radians live in the op), a bare
+/// multiplier for a scale.
+pub fn drag_readout(x: &VertTransform) -> String {
+    match x {
+        VertTransform::Translate(d) => {
+            // The dominant axis by name, plus the magnitude — which is what an
+            // author reads off a constrained drag. An unconstrained one shows all
+            // three, because naming one of them would be a lie about the other
+            // two.
+            let (ax, mag) = dominant_axis(*d);
+            if mag > 0.0 && d.length() - mag < 1e-9 {
+                format!("{mag:+.4} m on {ax}")
+            } else {
+                format!("{:+.4}, {:+.4}, {:+.4} m", d.x, d.y, d.z)
+            }
+        }
+        VertTransform::Rotate { axis, radians } => {
+            let (ax, _) = dominant_axis(*axis);
+            format!("{:+.2}° about {ax}", radians.to_degrees())
+        }
+        VertTransform::Scale(f) => {
+            if (f.x - f.y).abs() < 1e-12 && (f.y - f.z).abs() < 1e-12 {
+                format!("x{:.4}", f.x)
+            } else {
+                format!("x{:.4}, {:.4}, {:.4}", f.x, f.y, f.z)
+            }
+        }
+    }
+}
+
+/// The axis a vector points most along, and its signed component there.
+fn dominant_axis(v: DVec3) -> (&'static str, f64) {
+    let a = v.abs();
+    if a.x >= a.y && a.x >= a.z {
+        ("X", v.x)
+    } else if a.y >= a.z {
+        ("Y", v.y)
+    } else {
+        ("Z", v.z)
+    }
+}
+
 /// Turn a transform into journal ops, honouring soft-select weights.
 ///
 /// `soft` is `Some((radius, falloff))` for a proportional transform and `None`
@@ -1163,6 +1214,112 @@ pub fn quantize_weight(w: f64) -> f64 {
         return 0.0;
     }
     (w.clamp(0.0, 1.0) * SOFT_WEIGHT_STEPS).round() / SOFT_WEIGHT_STEPS
+}
+
+// ── starting a model at all (Wave D) ───────────────────────────────────────
+
+/// The folder a newly-minted mesh lands in, under the project's content root.
+///
+/// `Meshes`, beside `Materials` — `asset_create`'s convention, and the one place
+/// an author will look for something they made rather than imported.
+pub const NEW_MESH_FOLDER: &str = "Meshes";
+
+pub use crate::ipc::DccPrimitiveDto;
+
+/// The **size** limits a primitive is built inside.
+///
+/// Refusals rather than clamps, per the units doctrine: the limit belongs to the
+/// author's intent, not to the generator, and silently building a different
+/// shape is how a mesh nobody asked for ends up in a level.
+pub const MIN_PRIMITIVE_M: f64 = 1e-4;
+/// A kilometre. Past this a "primitive" is a terrain, and this engine has one.
+pub const MAX_PRIMITIVE_M: f64 = 1_000.0;
+/// The most segments a generated primitive may have around its major axis.
+///
+/// 256 × 256 on a torus is 65 536 quads, which is a real model and past the
+/// point where the Model Editor's CPU picker is interactive (see the
+/// live-sculpt ceiling). Refused rather than accepted-and-slow.
+pub const MAX_PRIMITIVE_SEGMENTS: u32 = 256;
+
+/// Build one of the kernel's primitives, with every parameter checked.
+///
+/// **NaN at the numeric door** (the Wave E precedent): a non-finite size is
+/// refused here rather than stored, because a mesh whose bounds exclude its own
+/// geometry prints as `NaN` in a Details panel and makes every later comparison
+/// false — including the ones a later refusal would rely on.
+pub fn primitive_mesh(
+    kind: DccPrimitiveDto,
+    size_m: f64,
+    segments: u32,
+    rings: u32,
+) -> Result<Mesh, String> {
+    let size = check_size("a primitive size", size_m)?;
+    let seg = check_segments("segments", segments)?;
+    let ring = check_segments("rings", rings)?;
+    Ok(match kind {
+        DccPrimitiveDto::Cube => inf_dcc::cube(size),
+        DccPrimitiveDto::Plane => inf_dcc::plane(size),
+        // A cylinder's `size` is its DIAMETER, so a "1 m cube" and a "1 m
+        // cylinder" occupy the same box. Radius would make the two buttons mean
+        // different things under one number.
+        DccPrimitiveDto::Cylinder => inf_dcc::cylinder(size * 0.5, size, seg),
+        // …and a torus's is its outer diameter, for the same reason: the minor
+        // radius is a quarter of it, which is the proportion every DCC's default
+        // torus has.
+        DccPrimitiveDto::Torus => inf_dcc::torus(size * 0.375, size * 0.125, seg, ring),
+    })
+}
+
+fn check_size(what: &str, v: f64) -> Result<f64, String> {
+    if !v.is_finite() {
+        return Err(format!("{what} must be a number, got {v}"));
+    }
+    if !(MIN_PRIMITIVE_M..=MAX_PRIMITIVE_M).contains(&v) {
+        return Err(format!(
+            "{what} must be between {MIN_PRIMITIVE_M} m and {MAX_PRIMITIVE_M} m, got {v}"
+        ));
+    }
+    Ok(v)
+}
+
+fn check_segments(what: &str, v: u32) -> Result<usize, String> {
+    if !(3..=MAX_PRIMITIVE_SEGMENTS).contains(&v) {
+        return Err(format!(
+            "{what} must be between 3 and {MAX_PRIMITIVE_SEGMENTS}, got {v}"
+        ));
+    }
+    Ok(v as usize)
+}
+
+/// Mint a `.inf_mesh` from a kernel mesh and derive everything that hangs off it.
+///
+/// The **creation** twin of [`save_mesh_session`], and it goes through the same
+/// two doors in the same order for the same reason: `write_asset` (atomic, with
+/// its sidecar) and then `ensure_vmesh` **synchronously**, because the next thing
+/// the author does is look at the viewport and a queued derivation is a window in
+/// which the level draws nothing.
+///
+/// Returns the new asset id and the writer's advisory report — which the caller
+/// must **surface**, not drop: a primitive is generated geometry and cannot
+/// normally trip one, but "cannot normally" is exactly the class of claim this
+/// codebase keeps paying for.
+pub fn create_mesh_asset(
+    project: &mut crate::assets::AssetProject,
+    name: &str,
+    mesh: &Mesh,
+) -> Result<(inf_asset::AssetId, inf_dcc::ExportReport), String> {
+    let (payload, report) = inf_dcc::to_mesh_asset(mesh, &inf_dcc::ExportOptions::default());
+    let dir = project
+        .content_dir(NEW_MESH_FOLDER)
+        .map_err(|e| e.to_string())?;
+    let id = project
+        .write_asset(&dir, name, &payload, None, vec![], None)
+        .map_err(|e| format!("write {name}: {e}"))?;
+    // Same synchronous derivation the save path takes. A primitive is under
+    // `min_triangles` so this Skips, and Skipping is correct — but calling it is
+    // what makes the two paths one contract instead of two habits.
+    crate::assets::vmesh::ensure_vmesh(project, id).map_err(|e| format!("derive {name}: {e}"))?;
+    Ok((id, report))
 }
 
 // ── the Wave-D derived tools ───────────────────────────────────────────────
@@ -1523,6 +1680,284 @@ pub fn selection_revision(selection: &SelectionSet) -> u64 {
 /// Not the bounding-box centre: a centroid is what the transform ops are
 /// pivot-relative to, and a box centre would put the visible handle somewhere the
 /// rotation is not actually about on any asymmetric selection.
+/// **Where the gizmo sits** — the first of the two constants P23.5 hard-wired.
+///
+/// Blender offers five; four of them are a statement about the selection and one
+/// (*individual origins*) is a statement about the **op**, because it means "run
+/// this transform once per element about its own centre". `transform_ops`
+/// produces one op for one transform, so individual origins is a different shape
+/// and is a named remainder rather than a fifth variant nobody can honour.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, ts_rs::TS,
+)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum DccPivotDto {
+    /// The mean of the selected vertices. What P23.5 hard-wired, and still the
+    /// default because it is what a modeller means nine times in ten.
+    #[default]
+    Median,
+    /// The centre of the selection's axis-aligned bounding box. Differs from the
+    /// median whenever the vertices are unevenly distributed — which is the case
+    /// an author reaches for this in.
+    BoundingBox,
+    /// The mesh's own origin. Rotating a whole object about it is the one thing
+    /// a median pivot cannot express.
+    WorldOrigin,
+    /// The last component clicked. Blender's "active element", and the only
+    /// pivot that depends on the *order* the selection was built in — which is
+    /// why the document tracks it rather than deriving it.
+    ActiveElement,
+}
+
+/// **Which way the gizmo's axes point** — the second hard-wired constant
+/// (`Quat::IDENTITY`, at two sites).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, ts_rs::TS,
+)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum DccOrientDto {
+    /// World axes. What was hard-wired.
+    #[default]
+    Global,
+    /// +Z along the selection's area-weighted normal — so "extrude along the
+    /// blue handle" is "extrude along the surface" without the author computing
+    /// anything. Blender's own convention for the normal orientation.
+    Normal,
+    /// The camera's basis: +Z toward the eye, +X right, +Y up. Dragging the red
+    /// handle moves the selection across the screen.
+    View,
+}
+
+/// The gizmo's rotation, for a pivot kind and the camera it is drawn against.
+///
+/// Handed to `inf_render::gizmo::pick_axis` and to `GizmoDrag::begin`, which are
+/// the exact two sites that used to read `Quat::IDENTITY` — so a caller cannot
+/// pick up one and forget the other, because the value comes from here.
+pub fn gizmo_orientation(
+    mesh: &Mesh,
+    selection: &SelectionSet,
+    mode: SelectMode,
+    kind: DccOrientDto,
+    view: PreviewView,
+) -> glam::Quat {
+    match kind {
+        DccOrientDto::Global => glam::Quat::IDENTITY,
+        DccOrientDto::Normal => {
+            let n = selection_normal(mesh, selection, mode);
+            match n {
+                // `from_rotation_arc` is undefined for opposite vectors, so the
+                // 180° case is spelled out rather than left to produce a NaN
+                // quaternion the gizmo would then hit-test against.
+                Some(n) if n.dot(Vec3::Z) < -0.999_999 => {
+                    glam::Quat::from_axis_angle(Vec3::X, std::f32::consts::PI)
+                }
+                Some(n) => glam::Quat::from_rotation_arc(Vec3::Z, n),
+                None => glam::Quat::IDENTITY,
+            }
+        }
+        DccOrientDto::View => {
+            let (eye, _) = view.view_proj();
+            let fwd = (eye - view.target).normalize_or_zero();
+            if fwd == Vec3::ZERO {
+                return glam::Quat::IDENTITY;
+            }
+            let right = view.up.cross(fwd).normalize_or_zero();
+            if right == Vec3::ZERO {
+                return glam::Quat::IDENTITY;
+            }
+            glam::Quat::from_mat3(&glam::Mat3::from_cols(right, fwd.cross(right), fwd))
+        }
+    }
+}
+
+/// The unit average of the selected faces' normals, or `None` when there is no
+/// usable direction.
+///
+/// Area-weighted through the same Newell sum the exporter and the kernel use, so
+/// "the normal" means one thing in this codebase. In vertex or edge mode the
+/// faces *touching* the selection are what is averaged — an author in vertex mode
+/// pointing at a surface still means the surface.
+fn selection_normal(mesh: &Mesh, selection: &SelectionSet, mode: SelectMode) -> Option<Vec3> {
+    let mut acc = DVec3::ZERO;
+    let faces: std::collections::BTreeSet<inf_dcc::FaceId> = if mode == SelectMode::Face {
+        selection.faces().iter().copied().collect()
+    } else {
+        let verts = selection.resolved_verts(mesh, mode);
+        let mut out = std::collections::BTreeSet::new();
+        for v in verts {
+            for &h in mesh.vert_outgoing(v).unwrap_or(&[]) {
+                if let Some(Some(f)) = mesh.face_of(h) {
+                    out.insert(f);
+                }
+            }
+        }
+        out
+    };
+    for f in faces {
+        acc += face_normal_of(mesh, f);
+    }
+    let n = acc.normalize_or_zero();
+    (n != DVec3::ZERO).then(|| Vec3::new(n.x as f32, n.y as f32, n.z as f32))
+}
+
+/// Where the gizmo sits, for a pivot kind.
+///
+/// `active` is the position of the last component the author clicked, which the
+/// document tracks because it cannot be derived: a `BTreeSet` has no "last".
+pub fn gizmo_pivot_of(
+    mesh: &Mesh,
+    selection: &SelectionSet,
+    mode: SelectMode,
+    kind: DccPivotDto,
+    active: Option<DVec3>,
+) -> Option<DVec3> {
+    match kind {
+        DccPivotDto::Median => gizmo_pivot(mesh, selection, mode),
+        DccPivotDto::WorldOrigin => {
+            // Still `None` on an empty selection: a gizmo with nothing to move is
+            // not a gizmo, and drawing one at the origin would invite a drag that
+            // journals nothing.
+            gizmo_pivot(mesh, selection, mode).map(|_| DVec3::ZERO)
+        }
+        DccPivotDto::BoundingBox => {
+            let verts = selection.resolved_verts(mesh, mode);
+            let (mut lo, mut hi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
+            let mut any = false;
+            for v in verts {
+                if let Some(p) = mesh.position(v) {
+                    if p.is_finite() {
+                        lo = lo.min(p);
+                        hi = hi.max(p);
+                        any = true;
+                    }
+                }
+            }
+            any.then(|| (lo + hi) * 0.5)
+        }
+        // Falls back to the median when nothing has been clicked yet — the
+        // alternative is a gizmo that vanishes the first time an author picks
+        // this mode before picking a component.
+        DccPivotDto::ActiveElement => active
+            .filter(|p| p.is_finite())
+            .or_else(|| gizmo_pivot(mesh, selection, mode)),
+    }
+}
+
+/// A screen-space rectangle in the preview's own pixel space, origin top-left.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoxRect {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+impl BoxRect {
+    /// Normalized so `x0 <= x1` and `y0 <= y1` — a drag may go any direction.
+    pub fn normalized(self) -> Self {
+        Self {
+            x0: self.x0.min(self.x1),
+            y0: self.y0.min(self.y1),
+            x1: self.x0.max(self.x1),
+            y1: self.y0.max(self.y1),
+        }
+    }
+
+    fn contains(&self, p: &Projected) -> bool {
+        p.x >= self.x0 && p.x <= self.x1 && p.y >= self.y0 && p.y <= self.y1
+    }
+
+    /// A drag of a few pixels is a click that wobbled, not a marquee.
+    pub fn is_degenerate(&self) -> bool {
+        let n = self.normalized();
+        (n.x1 - n.x0) < 2.0 && (n.y1 - n.y0) < 2.0
+    }
+}
+
+/// **What a marquee catches** — box select, in the current component mode.
+///
+/// The rules are Blender's, and each one is a decision:
+///
+/// * a **vertex** is caught when its projection is inside the rectangle;
+/// * an **edge** when *both* endpoints are — a rectangle clipping the middle of
+///   a long edge has not selected it, it has crossed it;
+/// * a **face** when *every* corner is.
+///
+/// `through` is the x-ray toggle. With it off, a component is caught only if it
+/// is facing the eye — the same visibility test [`pick`] uses, because a marquee
+/// that grabs the far side of a closed model is the single most common way to
+/// delete geometry by accident. **It is back-face culling and not depth
+/// testing** (the carried remainder the overlay names): the far side of a *fold*
+/// still gets caught. Said here rather than discovered.
+pub fn pick_box(
+    mesh: &Mesh,
+    proj: &Projector,
+    mode: SelectMode,
+    rect: BoxRect,
+    through: bool,
+) -> (Vec<VertId>, Vec<HalfId>, Vec<inf_dcc::FaceId>) {
+    let rect = rect.normalized();
+    let inside = |v: VertId| -> bool {
+        mesh.position(v)
+            .and_then(|p| proj.point(p))
+            .is_some_and(|q| rect.contains(&q))
+    };
+    let mut verts = Vec::new();
+    let mut edges = Vec::new();
+    let mut faces = Vec::new();
+    match mode {
+        SelectMode::Vert => {
+            for v in mesh.vert_ids() {
+                if inside(v) && (through || vert_is_visible(mesh, proj, v)) {
+                    verts.push(v);
+                }
+            }
+        }
+        SelectMode::Edge => {
+            for h in mesh.half_ids() {
+                // Once per undirected edge.
+                if inf_dcc::canonical_edge(mesh, h) != Some(h) {
+                    continue;
+                }
+                let (Some(a), Some(b)) = (mesh.origin(h), mesh.dest(h)) else {
+                    continue;
+                };
+                if inside(a) && inside(b) && (through || edge_is_visible(mesh, proj, h)) {
+                    edges.push(h);
+                }
+            }
+        }
+        SelectMode::Face => {
+            for f in mesh.face_ids() {
+                let vs = mesh.face_verts(f).unwrap_or_default();
+                if !vs.is_empty()
+                    && vs.iter().all(|&v| inside(v))
+                    && (through || face_faces_eye(mesh, proj, f))
+                {
+                    faces.push(f);
+                }
+            }
+        }
+    }
+    (verts, edges, faces)
+}
+
+/// A vertex is visible when **any** face around it faces the eye — a vertex on
+/// a silhouette belongs to the near side too, and requiring all of them would
+/// drop exactly the vertices an author is aiming at.
+fn vert_is_visible(mesh: &Mesh, proj: &Projector, v: VertId) -> bool {
+    let out = mesh.vert_outgoing(v).unwrap_or(&[]);
+    if out.is_empty() {
+        return true; // an isolated vertex has no facing to be wrong about
+    }
+    out.iter().any(|&h| match mesh.face_of(h) {
+        Some(Some(f)) => face_faces_eye(mesh, proj, f),
+        _ => true, // a boundary corner is always a candidate
+    })
+}
+
 pub fn gizmo_pivot(mesh: &Mesh, selection: &SelectionSet, mode: SelectMode) -> Option<DVec3> {
     let verts = selection.resolved_verts(mesh, mode);
     if verts.is_empty() {
@@ -1558,6 +1993,12 @@ pub fn pick_gizmo(
     proj: &Projector,
     view: PreviewView,
     pivot: DVec3,
+    // The gizmo's rotation — `gizmo_orientation`'s answer, passed in rather than
+    // assumed. It used to be `Quat::IDENTITY` here **and** at `GizmoDrag::begin`
+    // one ring up, which is the shape where one site gets an orientation and the
+    // other does not, and the symptom is a gizmo that picks one axis and drags
+    // along another.
+    quat: glam::Quat,
     mode: GizmoMode,
     px: f32,
     py: f32,
@@ -1566,7 +2007,7 @@ pub fn pick_gizmo(
     inf_render::gizmo::pick_axis(
         mode,
         p,
-        glam::Quat::IDENTITY,
+        quat,
         gizmo_size(proj, view, pivot),
         proj.view_proj(),
         glam::Vec2::new(px, py),
@@ -3394,7 +3835,7 @@ mod tests {
                 let tip = pivot + DVec3::new(d.x as f64, d.y as f64, d.z as f64) * g;
                 let s = proj.point(tip).expect("the tip is in frame");
                 assert_eq!(
-                    pick_gizmo(&proj, view, pivot, mode, s.x, s.y),
+                    pick_gizmo(&proj, view, pivot, glam::Quat::IDENTITY, mode, s.x, s.y),
                     Some(axis),
                     "{mode:?}/{axis:?}: the painted tip is not hittable"
                 );
@@ -3406,10 +3847,19 @@ mod tests {
         let ring = proj
             .point(pivot + DVec3::Y * g)
             .expect("a point on the X ring");
-        assert!(pick_gizmo(&proj, view, pivot, GizmoMode::Rotate, ring.x, ring.y).is_some());
+        assert!(pick_gizmo(
+            &proj,
+            view,
+            pivot,
+            glam::Quat::IDENTITY,
+            GizmoMode::Rotate,
+            ring.x,
+            ring.y
+        )
+        .is_some());
         for mode in [GizmoMode::Translate, GizmoMode::Rotate, GizmoMode::Scale] {
             assert_eq!(
-                pick_gizmo(&proj, view, pivot, mode, 2.0, 2.0),
+                pick_gizmo(&proj, view, pivot, glam::Quat::IDENTITY, mode, 2.0, 2.0),
                 None,
                 "{mode:?} claims a hit in the corner of the frame"
             );
@@ -3460,6 +3910,7 @@ mod tests {
                     &proj,
                     view,
                     pivot,
+                    glam::Quat::IDENTITY,
                     GizmoMode::Translate,
                     (i % 256) as f32,
                     (i / 256) as f32,
@@ -3649,6 +4100,221 @@ mod tests {
         // every distinct weight is carried, because there is no longer a reason
         // to round them together.
         assert!(moved > 100, "only {moved} vertices move");
+    }
+
+    // ── Wave D: starting a model, the pivot, the marquee ───────────────────
+
+    /// Every primitive builds, is valid, and is the size it was asked for.
+    #[test]
+    fn every_primitive_builds_at_the_size_it_was_asked_for() {
+        for kind in [
+            DccPrimitiveDto::Cube,
+            DccPrimitiveDto::Plane,
+            DccPrimitiveDto::Cylinder,
+            DccPrimitiveDto::Torus,
+        ] {
+            let m = primitive_mesh(kind, 2.0, 16, 8).expect("a primitive");
+            assert_eq!(inf_dcc::validate(&m), Ok(()), "{kind:?}");
+            assert!(m.face_count() > 0, "{kind:?} has no faces");
+            // `size` is the BOUNDING BOX, so one number means the same box for
+            // all four — which is the whole reason the dialog has one field.
+            let (mut lo, mut hi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
+            for v in m.vert_ids() {
+                let p = m.position(v).expect("live");
+                lo = lo.min(p);
+                hi = hi.max(p);
+            }
+            let extent = (hi - lo).max_element();
+            assert!(
+                (extent - 2.0).abs() < 0.02,
+                "{kind:?} is {extent} across, not 2 m"
+            );
+        }
+    }
+
+    /// **NaN at the numeric door**, and every other refusal is a value with a
+    /// sentence in it — not a clamp, and not a panic.
+    #[test]
+    fn a_primitive_refuses_a_size_that_is_not_a_size() {
+        for bad in [f64::NAN, f64::INFINITY, 0.0, -1.0, MAX_PRIMITIVE_M * 2.0] {
+            let err =
+                primitive_mesh(DccPrimitiveDto::Cube, bad, 16, 8).expect_err("{bad} is not a size");
+            assert!(err.contains("size"), "{err}");
+        }
+        for bad in [0u32, 2, MAX_PRIMITIVE_SEGMENTS + 1] {
+            assert!(primitive_mesh(DccPrimitiveDto::Cylinder, 1.0, bad, 8).is_err());
+        }
+    }
+
+    /// The pivot really is four different answers, and the world-origin one is
+    /// still `None` with nothing selected — a gizmo at the origin invites a drag
+    /// that journals nothing.
+    #[test]
+    fn the_four_pivots_answer_differently() {
+        let m = cube(2.0);
+        let mut sel = SelectionSet::new(1);
+        // Two vertices on one face, so the median and the bbox centre agree but
+        // neither is the origin…
+        let ids: Vec<VertId> = m.vert_ids().take(2).collect();
+        for &v in &ids {
+            sel.set_vert(v, true);
+        }
+        let median = gizmo_pivot_of(&m, &sel, SelectMode::Vert, DccPivotDto::Median, None)
+            .expect("a median");
+        let bbox = gizmo_pivot_of(&m, &sel, SelectMode::Vert, DccPivotDto::BoundingBox, None)
+            .expect("a bbox");
+        let origin = gizmo_pivot_of(&m, &sel, SelectMode::Vert, DccPivotDto::WorldOrigin, None)
+            .expect("an origin");
+        assert!(
+            (median - bbox).length() < 1e-12,
+            "two vertices: same answer"
+        );
+        assert_eq!(origin, DVec3::ZERO);
+        assert!(median != DVec3::ZERO, "the fixture does not separate them");
+
+        // …and a THREE-vertex selection separates the median from the bbox.
+        sel.set_vert(m.vert_ids().nth(2).expect("a third"), true);
+        let median = gizmo_pivot_of(&m, &sel, SelectMode::Vert, DccPivotDto::Median, None)
+            .expect("a median");
+        let bbox = gizmo_pivot_of(&m, &sel, SelectMode::Vert, DccPivotDto::BoundingBox, None)
+            .expect("a bbox");
+        assert!(
+            (median - bbox).length() > 1e-9,
+            "an uneven selection must separate them: {median} vs {bbox}"
+        );
+
+        // The active element is what was clicked, and falls back when nothing
+        // has been.
+        let active = DVec3::new(9.0, 9.0, 9.0);
+        assert_eq!(
+            gizmo_pivot_of(
+                &m,
+                &sel,
+                SelectMode::Vert,
+                DccPivotDto::ActiveElement,
+                Some(active)
+            ),
+            Some(active)
+        );
+        assert_eq!(
+            gizmo_pivot_of(&m, &sel, SelectMode::Vert, DccPivotDto::ActiveElement, None),
+            Some(median)
+        );
+        // Nothing selected: no gizmo, whatever the pivot says.
+        let empty = SelectionSet::new(1);
+        for kind in [
+            DccPivotDto::Median,
+            DccPivotDto::BoundingBox,
+            DccPivotDto::WorldOrigin,
+        ] {
+            assert_eq!(
+                gizmo_pivot_of(&m, &empty, SelectMode::Vert, kind, None),
+                None,
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// The normal orientation really points the blue axis at the surface.
+    #[test]
+    fn the_normal_orientation_aims_z_along_the_selection() {
+        let m = cube(2.0);
+        let view = PreviewView::default();
+        let mut sel = SelectionSet::new(1);
+        let top = m
+            .face_ids()
+            .max_by_key(|&f| (face_normal_of(&m, f).normalize_or_zero().y * 1e6) as i64)
+            .expect("the +Y face");
+        sel.set_face(top, true);
+        let q = gizmo_orientation(&m, &sel, SelectMode::Face, DccOrientDto::Normal, view);
+        let z = q * Vec3::Z;
+        assert!(
+            z.y > 0.99,
+            "+Z should point along the face normal, got {z:?}"
+        );
+        // Global really is the identity, which is what the two sites used to
+        // hard-code.
+        assert_eq!(
+            gizmo_orientation(&m, &sel, SelectMode::Face, DccOrientDto::Global, view),
+            glam::Quat::IDENTITY
+        );
+        // View is a real basis: unit, right-handed, and not the identity.
+        let v = gizmo_orientation(&m, &sel, SelectMode::Face, DccOrientDto::View, view);
+        assert!((v.length() - 1.0).abs() < 1e-5);
+        assert!(v.angle_between(glam::Quat::IDENTITY) > 0.1);
+    }
+
+    /// A marquee over the whole preview catches everything facing the eye — and
+    /// **not** the far side, unless x-ray is on. That difference is the reason
+    /// the flag exists.
+    #[test]
+    fn a_marquee_catches_the_near_side_and_x_ray_catches_both() {
+        let m = cube(2.0);
+        let view = frame(tessellate(&m).bounds);
+        let proj = Projector::new(view, 256);
+        let all = BoxRect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 256.0,
+            y1: 256.0,
+        };
+        let (_, _, near) = pick_box(&m, &proj, SelectMode::Face, all, false);
+        let (_, _, both) = pick_box(&m, &proj, SelectMode::Face, all, true);
+        assert_eq!(both.len(), 6, "x-ray catches every face of a cube");
+        assert!(
+            near.len() < both.len() && !near.is_empty(),
+            "without x-ray the far side must be spared: {} of {}",
+            near.len(),
+            both.len()
+        );
+        // A rectangle over one corner catches less than everything.
+        let corner = BoxRect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 40.0,
+            y1: 40.0,
+        };
+        let (_, _, few) = pick_box(&m, &proj, SelectMode::Face, corner, true);
+        assert!(few.len() < 6, "a corner marquee caught the whole cube");
+        // An edge needs BOTH endpoints inside — a rectangle that crosses one has
+        // not selected it.
+        let (_, edges_all, _) = pick_box(&m, &proj, SelectMode::Edge, all, true);
+        assert_eq!(edges_all.len(), m.edge_count());
+        // …and a degenerate rectangle is a click that wobbled.
+        assert!(BoxRect {
+            x0: 10.0,
+            y0: 10.0,
+            x1: 11.0,
+            y1: 11.0
+        }
+        .is_degenerate());
+        assert!(!all.is_degenerate());
+    }
+
+    /// The readout says what the drag is doing, in the units the author typed.
+    #[test]
+    fn the_drag_readout_names_the_axis_and_the_units() {
+        let t = drag_readout(&VertTransform::Translate(DVec3::new(0.0, 0.42, 0.0)));
+        assert!(
+            t.contains("0.4200") && t.contains(" m") && t.contains('Y'),
+            "{t}"
+        );
+        // An unconstrained drag names all three rather than lying about one.
+        let t = drag_readout(&VertTransform::Translate(DVec3::new(1.0, 1.0, 0.0)));
+        assert!(t.matches(',').count() == 2, "{t}");
+        // Degrees at the boundary, not radians.
+        let r = drag_readout(&VertTransform::Rotate {
+            axis: DVec3::Y,
+            radians: std::f64::consts::FRAC_PI_2,
+        });
+        assert!(
+            r.contains("90.00") && r.contains('°') && r.contains('Y'),
+            "{r}"
+        );
+        let s = drag_readout(&VertTransform::Scale(DVec3::splat(1.25)));
+        assert_eq!(s, "x1.2500");
+        let s = drag_readout(&VertTransform::Scale(DVec3::new(2.0, 1.0, 1.0)));
+        assert!(s.contains("2.0000") && s.contains("1.0000"), "{s}");
     }
 
     // ── Wave D: the derived tools ──────────────────────────────────────────

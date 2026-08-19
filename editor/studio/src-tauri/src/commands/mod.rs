@@ -89,6 +89,9 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         material::material_compile,
         material::material_bake,
         dcc::dcc_open,
+        // Wave D: the door that makes this a modelling tool rather than an
+        // editor for other people's geometry.
+        dcc::dcc_new,
         dcc::dcc_close,
         dcc::dcc_list,
         dcc::dcc_apply,
@@ -105,6 +108,9 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         dcc::dcc_make_garment,
         dcc::dcc_grow_hair,
         dcc::dcc_set_gizmo,
+        // Wave D: the pivot, the orientation and the marquee.
+        dcc::dcc_set_view_opts,
+        dcc::dcc_box_select,
         dcc::dcc_drag_begin,
         dcc::dcc_drag_move,
         dcc::dcc_drag_end,

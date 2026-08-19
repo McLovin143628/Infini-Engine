@@ -45,6 +45,9 @@ import type { DccGizmoModeDto } from "../bindings/DccGizmoModeDto";
 import type { DccGroomDto } from "../bindings/DccGroomDto";
 import type { DccGroomResultDto } from "../bindings/DccGroomResultDto";
 import type { DccModeDto } from "../bindings/DccModeDto";
+import type { DccNewDto } from "../bindings/DccNewDto";
+import type { DccOrientDto } from "../bindings/DccOrientDto";
+import type { DccPivotDto } from "../bindings/DccPivotDto";
 import type { DccSaveDto } from "../bindings/DccSaveDto";
 import type { DccSelectDto } from "../bindings/DccSelectDto";
 import type { DccToolDto } from "../bindings/DccToolDto";
@@ -87,11 +90,33 @@ interface DccState {
   docs: Record<string, DccEntry>;
 
   open: (assetId: string) => Promise<void>;
+  /**
+   * **Start a new model** (Wave D). Mints the asset, opens a session on it and
+   * returns the new asset's GUID so the caller can route the panel to it.
+   */
+  newMesh: (spec: DccNewDto) => Promise<string | null>;
   close: (assetId: string) => Promise<void>;
   apply: (assetId: string, tool: DccToolDto) => Promise<void>;
   select: (assetId: string, action: DccSelectDto) => Promise<void>;
   setMode: (assetId: string, mode: DccModeDto) => Promise<void>;
   pick: (assetId: string, x: number, y: number, additive: boolean) => Promise<void>;
+  /**
+   * **Marquee select** (Wave D). Pixel coordinates in the preview's own space,
+   * the same space `pick` takes.
+   */
+  boxSelect: (
+    assetId: string,
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    additive: boolean,
+  ) => Promise<void>;
+  /** Set the gizmo pivot / orientation / x-ray. Only what changed is sent. */
+  setViewOpts: (
+    assetId: string,
+    opts: { pivot?: DccPivotDto; orient?: DccOrientDto; xray?: boolean },
+  ) => Promise<void>;
   orbit: (assetId: string, yawDeg: number, pitchDeg: number, dolly: number) => Promise<void>;
   frame: (assetId: string) => Promise<void>;
   undo: (assetId: string) => Promise<void>;
@@ -261,6 +286,26 @@ export const useDccStore = create<DccState>((set, get) => {
       }
     },
 
+    newMesh: async (spec) => {
+      // The backend mints the asset AND opens the session, so this creates the
+      // store entry from the document it gets back rather than calling `open`
+      // afterwards — a second `dcc_open` would be idempotent but would also
+      // mean two round trips for one press, and a window in which the panel has
+      // an asset id and no document.
+      try {
+        const doc = await dccIpc.new(spec);
+        set((s) => ({
+          docs: { ...s.docs, [doc.assetId]: { ...EMPTY, doc } },
+        }));
+        tombstones.delete(doc.assetId);
+        await pump(doc.assetId);
+        return doc.assetId;
+      } catch (e) {
+        console.error("dcc.new failed", e);
+        return null;
+      }
+    },
+
     close: async (assetId) => {
       tombstones.add(assetId);
       flight.delete(assetId);
@@ -312,6 +357,26 @@ export const useDccStore = create<DccState>((set, get) => {
       if (!doc) return;
       try {
         adopt(assetId, await dccIpc.pick(doc.id, x, y, DCC_PREVIEW_SIZE, additive));
+      } catch (e) {
+        patch(assetId, { refusal: String(e) });
+      }
+    },
+
+    boxSelect: async (assetId, x0, y0, x1, y1, additive) => {
+      const doc = entry(assetId).doc;
+      if (!doc) return;
+      try {
+        adopt(assetId, await dccIpc.boxSelect(doc.id, x0, y0, x1, y1, DCC_PREVIEW_SIZE, additive));
+      } catch (e) {
+        patch(assetId, { refusal: String(e) });
+      }
+    },
+
+    setViewOpts: async (assetId, opts) => {
+      const doc = entry(assetId).doc;
+      if (!doc) return;
+      try {
+        adopt(assetId, await dccIpc.setViewOpts(doc.id, opts));
       } catch (e) {
         patch(assetId, { refusal: String(e) });
       }
