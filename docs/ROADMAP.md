@@ -22756,9 +22756,14 @@ guard; both are asserted, in bytes, in both directions. The **seven appended var
 exhaustive arm in `op_preserves_ids`, `frozen_discriminant`, `frozen_nested` and the new
 `op_amendable`. Bevel takes a **segment count** whose profile follows a circular arc
 sampled by a *normalized lerp* (`acos`/`sin` are banned from a replayed journal by the P14
-law; `sqrt` is not), and `segments = 1` is **bit-identical** to the P23.4 chamfer — same
-vertices, same ids, same interleaved allocation order — so the feature is opt-in rather
-than applied to every mesh in the tree.
+law; `sqrt` is not), and `segments = 1` reduces to the P23.4 chamfer — same ids, same interleaved
+allocation order — so the feature is opt-in rather than applied to every mesh in the
+tree. **The "same vertices" half was corrected by the audit**: `bevel_profile` was
+handed *normalized* endpoints and re-multiplied them by `amount`, which is the same
+`f64` only when the offset magnitude is a power of two — exactly what the one test's
+axis-aligned `cube(2.0)` at `amount = 0.25` gives, and exactly why a counts-only test
+could not see it. The endpoints are now passed pre-scaled and returned verbatim, and
+the reduction is armed in bits and pinned as a whole mesh on a *rotated* cube.
 
 **You can start a model.** `dcc_new` mints a `.inf_mesh` from cube/plane/cylinder/torus —
 the four primitives the kernel has had since P23.3 with no Ring-2 door — through
@@ -22817,7 +22822,10 @@ it. Measured — the first version caught 86 of 692; the diagonal version catche
 
 `MAX_DEGENERATE_UV_FRACTION` comes down **0.20 → 0.08** — the exit criterion its own
 paragraph wrote for the day this was diagnosed — and the 5 survivors are the sliver floor
-it predicted, now **gated** (`unexplained <= 60`). `MAX_OVERLAP_FRACTION` goes 0.02 → 0.04
+it predicted, now **gated** (`unexplained <= 60`, a 12× ceiling over the measurement
+because the fixture goes through `meshopt` and the P25 one-platform-bounds law applies;
+it catches a return toward 418 and would not catch a new mechanism worth thirty
+triangles — said plainly here rather than left to be discovered). `MAX_OVERLAP_FRACTION` goes 0.02 → 0.04
 and the ledger carries why: a projected chart has area, so it occupies texels a segment
 did not (661 → 1 518 of 65 536). An overlapped texel is textured from one of two triangles;
 a degenerate triangle has *no texels*. 857 of "slightly wrong" for 664 of "textured at
@@ -22935,10 +22943,14 @@ report fields · the bake's re-openability.
 * **Edit during embedded PIE.** Two blockers, neither of them DCC work (the embedded player
   draws placeholder cubes for asset meshes; `embed_foreign` hides the editor viewport).
 * **BVH-backed picking.** Deliberately NOT built, and the reason is a measurement rather
-  than a plan: the ledger's own numbers say the per-*interaction* cost is dominated by
-  tessellation, not by picking, and Wave D took that from 142 ms to 4.35 ms at 24.5k
-  vertices. A pick is one click's worth of projection. The prescription is re-carried
-  unspent rather than applied to the cheaper of the two paths.
+  than a plan — **of the pick, since the audit** (the earlier draft of this bullet cited
+  tessellation’s numbers for a claim about picking, which is inference wearing a
+  measurement’s clothes). Measured beside the drag frame at the same three sizes, debug:
+  a `pick` over every vertex, edge and face costs **0.002 / 0.095 / 1.57 ms** at 26 /
+  1 538 / 24 578 vertices, against a 4.43 ms displaced drag frame and a 138 ms full
+  tessellation. One click at a third of one drag frame is not the interaction budget's
+  problem, so the prescription is re-carried unspent — and now it is refused by a number
+  about the thing prescribed.
 * **Voxel booleans / remesh**, **subdivision preview**, **shrinkwrap** — the D5 items past
   the amend feature. Not built, not started.
 * **Slot-level `transact`.** Not measured, therefore not built (memo §7e: a measurement may
@@ -22974,7 +22986,7 @@ report fields · the bake's re-openability.
 ### Counts
 
 Full battery **290 blocks / 5 483 passed / 0 failed / 13 ignored** (baseline 290 / 5 428 /
-0 / 13, so **+55 arms** with no block-count drift — the six ts-rs auto-export tests removed
+0 / 13, so **+55 arms** with no block-count drift — the six stray `#[ts(export)]` attributes removed (attributes and files, not tests — corrected in audit)
 along the way offset the new binaries). Per crate: `inf-dcc` 300 lib + 12 property + 10
 determinism-law + 2 fracture; `inf-editor-core` 712 lib + bindings + report_drift +
 capture_wizard_gate 13 + photogrammetry_gate 24; `inf-studio` 110; `phase23_gate` 13/13.
@@ -22982,3 +22994,128 @@ Frontend **687 tests / 76 files** (baseline 681 / 75). `cargo fmt --all --check`
 `cargo clippy --workspace --all-targets` under `-D warnings`, `npm run typecheck`, eslint
 `--max-warnings 0` and `npm run build` all green. Goldens **54**, byte-untouched. Schema:
 `SessionSave` v3 → v4, **once**; `MeshAsset` v2 and scene v20 unmoved.
+
+## Wave D audit (2026-08-19) — the adversarial pass
+
+Sole tree-writer, range `82a3a46..6de028f`, twelve commits read one at a time against the
+gap map, the P23 design memo and the wave's own ledger. **Twenty-two findings, eighteen
+corrected in-range, four re-carried by name.** Twelve mutations designed beyond the
+implementer's three; eleven killed, one analysed as equivalent and kept.
+
+### The signature claim held
+
+`MeshSession::amend` was attacked with ten independent arms and did not move. It refuses
+inertly or produces a pure function of its ops in every one of them, including the five
+the brief named: a downstream reference invalidation, a mid-replay refusal, an amendment
+under a cursor behind its tail, a double amendment on one index, and the first op of the
+journal. The arms are now permanent (`crates/inf-dcc/tests/amend_attacks.rs`), because
+each kills a mutation nothing else killed.
+
+Two structural things worth recording, since both could have been holes and are not:
+
+* **`Topology` is complete even though it carries no vertex data.** `Vert::out` is
+  documented as *"kept sorted ascending, redundant with the links and validated against
+  them"*, and `prev` is `next`'s inverse under `validate` — so a comparison over
+  `(vert ids, every half's origin/twin/next/face, every face's first half)` determines the
+  whole structure. Nothing an amendment can change hides behind the fields it omits.
+* **The pre-loop topology check is redundant with the loop's first comparison** for every
+  fixture that can be constructed: removing it (`M6`) killed no test, mine included,
+  because the loop catches the same divergence one op later and names the same index. It
+  is load-bearing only for a *diverge-then-reconverge* at the very first tail op, which
+  needs the tail op to compensate for the amendment on two different meshes. Kept as
+  defence in depth, named here rather than left as a surviving mutant nobody mentioned.
+
+### The findings
+
+| # | sev | defect | disposition |
+|---|---|---|---|
+| **A1** | HIGH | **The CODE tab was unreachable, and it broke double-click.** `openGeneratedCode` had zero callers anywhere in the app; `resolveObjectEditors` emitted `panelType: "code"`, and `openObject` docked it like a panel — but no panel of that type is registered, so every actor with a blueprint class opened an empty untitled tab. `openObject`'s own doc comment still said a code tab *is not among them*. | FIXED — `openRoute` is the one door, `code` is a declared marker dispatched to `openGeneratedCode`, the command family gained `object.edit.code` so the palette and menus reach it, and the stale comment is gone. New arms in `stores/__tests__/objectEditorCommands.test.ts`. |
+| **A2** | HIGH | **One file per HANDLER, not per class.** `actor_doc_name` joins with `▸`; `graph_write_source` split the title on `['—', '-']`. Nothing ever split, so `Turret ▸ Tick` sanitized to `TurretTick_<guid8>.rs` and switching handler wrote a second file — and `Fire-Door` was truncated at the hyphen. The wave's headline convention is not what the code did. Untested. | FIXED — `ACTOR_DOC_SEPARATOR` is a constant, `class_of_doc_name` is its inverse, and the two are asserted against each other rather than against a literal. The existing one-spelling source pin moved with them. |
+| **A3** | HIGH | **A digit-leading class name broke the author's crate.** `sanitize_ident(class_name, "")` — the only call site in the tree passing an empty fallback — disables the sanitizer's own leading-digit repair, so `3D Door` produced `pub mod 3DDoor_a1b2c3d4;` in generated code the author never wrote. `½` (category `No`) survived too, and nothing bounded the length. | FIXED — `module_stem` narrows the P4 sanitizer's output to ASCII, prefixes a digit-first stem, and caps at `MAX_STEM_CHARS`. `source_file_name` no longer emits a bare stem, so a DOS device name is unreachable. Asserted over the whole hostile corpus plus digits, `No`-numerics, unicode, RTL overrides and 300 characters. |
+| **A4** | HIGH | **The winding repair let the lowest-indexed face dictate a component's orientation.** A mesh whose *first* triangle is the reversed one had every other face flipped to match the defect: the surface arrived inside-out and the report called it the repair that "loses nothing". The information to decide is present (authored normals are deliberately not flipped) and unused. | FIXED — the **minority rule**: flipping a consistently-wound component wholesale keeps it consistent and inverts its sign, so keep whichever sign leaves the fewest faces differing from the source; ties keep the seed, so it stays a pure function of the input. Asserted as the WORLD (every face normal on the side seven of eight source triangles were on), not as the count. |
+| **A5** | MED | **An unreadable or non-UTF-8 file at a generated path was clobbered.** `if let Ok(existing)` discarded the error and fell through to `write_atomically`, whose rename needs directory rights and not read rights — so a hand-written file with Latin-1 in a comment was replaced and the caller was told `Rewritten`. | FIXED — everything except `NotFound` refuses, with the reason in the message. |
+| **A6** | MED | **`mod.rs` was rewritten with no `is_generated` check.** The class files were guarded against exactly this and the index was not, so the first Code-tab generate destroyed the hand-written index an existing project needs to make `pub mod blueprints;` compile. | FIXED — the index gets the same guard; it is also byte-idempotent, so it is not a permanent git diff. |
+| **A7** | MED | **The index was built from a raw directory listing.** A file dropped in as `my-helper.rs` emitted `pub mod my-helper;`. Also, the `Current` early-return was the one path that never rebuilt the index, so a deleted `mod.rs` could not be restored by re-opening the tab. | FIXED — `is_module_ident` filters the listing; `Current` rebuilds the index. |
+| **A8** | MED | **`segments = 1` was not bit-identical to the P23.4 chamfer.** `bevel_profile` received *normalized* endpoints and re-multiplied by `amount`: three roundings where P23.4 had one, equal only when the offset magnitude is a power of two — which is exactly what the one test's axis-aligned `cube(2.0)` at `amount = 0.25` gives. The test asserted counts while its own doc claimed id order. | FIXED — the endpoints are passed pre-scaled and returned verbatim, so the reduction is exact. Armed in bits (`the_profile_hands_its_endpoints_back_verbatim`, on magnitudes that are not powers of two) and pinned as a whole mesh on a **rotated** cube. Ledger sentence corrected. |
+| **A9** | MED | **A tautological assertion.** The detach test's only manifoldness claim was `assert!(twin(h).is_some())` — `twin` is TOTAL in this kernel and `half_ids` yields live slots, so it was `assert!(true)`. The gate did not aim at the thing it named. | FIXED — every directed edge is counted once, the vertex count is pinned, and the two **isolated vertices the detach leaves behind and no counter reports** are pinned with it. |
+| **A10** | MED | **The collapse fallback's firing was not armed anywhere in `inf-dcc`.** Stubbing `planar_uv` to `None` killed **none** of the crate's twenty-three UV tests; the only armed proof of firing was one aggregate in another crate's gate, on a photogrammetry fixture. `no_chart_survives_unwrap_mapped_onto_a_line` would pass with the fix removed. | FIXED — a seamless cylinder is one non-developable chart whose two-pin energy collapses it; the new arm asserts the solve converged, the pins and the 3D area are healthy, the fallback fired, the chart came back with extent in both directions and every triangle got `f32` area — with a developable control so a `planar_uv` that projected everything would also fail. Mutation-verified. |
+| **A11** | MED | **A hollowed gate.** `the_manifold_filter_is_why_the_kernel_accepts_the_mesh_at_all` still named and commented a refusal that Wave D had made impossible; its body's `is_ok()` was near-tautological once the reader repairs. Unlike the two gates the wave *deliberately* inverted (both of which keep the old defective input as a live control — verified), this one was quietly weakened. | FIXED — restated as what the filter actually buys: unfiltered, the reader opens the fusion by **detaching** sheets; filtered, it opens with none. Both sides asserted, so a broken filter and a reader that stopped repairing fail different lines. |
+| **A12** | MED | **Two of the seven new ops were outside the property battery.** `make_op` dispatched on `% 30`, so `SetEdgesSeam` (36) and `MoveUvs` (37) were unreachable and the `for kind in 13..30` coverage arm proved nothing about either. | FIXED — the generator runs to 32 with both resolved against the live mesh, and the coverage arm with it. |
+| **A13** | MED | **A phantom shortcut, and the arm written to catch it exempted it.** `dcc.select.grow` advertised `Ctrl+NumpadAdd`, which is bound to nothing and which `chordOf` cannot produce. The test's `if (!bound) continue` skipped exactly that case. | FIXED — the chord is gone from the palette row and the arm is exhaustive in both directions. |
+| **A14** | MED | **The history rows went stale, and a refused amendment left the rejected number on screen.** `historyRefresh` fired on opening the disclosure and after an amendment and nowhere else, so an extrude did not appear and an undo did not grey a row; and the amend field was an uncontrolled `defaultValue` under a stable key, so after an *inert* refusal the panel displayed a value the mesh did not have. | FIXED — the rows follow the generation stamp, exactly as the UV pane next door already did, and `AmendField` is controlled with the journal as the authority. |
+| **A15** | MED | **A false retirement claim in a load-bearing docstring.** `dccCommands.ts` claimed to retire the P23 remainder *"sculpt `[`/`]` is still outside the keybinding registry"*. `initSculptKeybindings` is untouched at HEAD, is a raw `window` handler, and belongs to the terrain sculpt radius rather than to this panel. | FIXED — the sentence now says what is true and re-carries the remainder by name. |
+| **A16** | LOW | **The ladder's own doc undercounted its appended variants.** `SessionSave::CURRENT_VERSION` and `frozen_discriminant` both said Wave D appended **five** (31..=35); it appended seven (31..=37), and the ledger's *"the file says so twice"* was true of the wrong number. | FIXED in both places. |
+| **A17** | LOW | **`displace`'s doc described the implementation the wave replaced** — *"re-accumulated over the (unchanged) index buffer, area-weighted"* — in two places, which is the comment most likely to talk the next reader into putting the vertex-average back. | FIXED — it names `inf_dcc::corner_normal` and says why a vertex-average is a different number on a hard-shaded mesh. |
+| **A18** | LOW | **The diagonal-squared denominator was labelled "area"** in its own doc line and its call-site binding, which is the exact drift vector back into the defect the wave had just fixed. | FIXED — `uv_area_and_diag2`, `uv_diag2`, and a doc that says which and why. |
+| **A19** | LOW | **Nothing stopped the stray bindings directory coming back.** The fix in-range deleted six duplicate `.ts` files and six `#[ts(export)]` attributes, but CI's drift job is scoped to `editor/studio/src/bindings`, `.gitignore` is silent, and no gate banned the attribute. | FIXED — a source sweep over the crate refuses `ts(export` and asserts the stray directory is absent. |
+| **A20** | LOW | **`is_generated` is a prefix check and nothing said so.** Swapping `starts_with` for `contains` killed no test, although the prefix is precisely what keeps a hand-written file that merely *mentions* the marker the author's. | FIXED — both directions asserted; mutation-verified. |
+| **A21** | LOW | **A `///` on a `pub mod` line.** `blueprint_source` was the only module declaration in `inf-editor-core`’s `lib.rs` carrying an *outer* doc comment, three lines above the comment that explains why none of them do: a `///` there resolves in the parent module’s scope, so every intra-doc link into the module dangles (seven of the nine doc warnings a previous audit counted). Its one line has no link today, which is exactly how this survives review. | FIXED — `//`, like its eleven neighbours. |
+| **A22** | MED | **A prescription refused by the wrong measurement.** "BVH-backed picking" was re-carried unspent on the grounds that "the per-interaction cost is dominated by tessellation, not by picking" — and every number cited was tessellation’s. Picking had never been timed, and after this wave took the drag frame to 4.35 ms an untimed linear scan over every element was a live hypothesis, not a closed one (the P25 law: inference dressed as measurement). | FIXED — measured beside the drag frame at the same three sizes: **0.002 / 0.095 / 1.57 ms**. The refusal stands, now for the right reason, and the number is printed by the same test that prints the drag frame. |
+
+### Re-carried, by name
+
+* **`preventDefault()` runs before the "did anything actually run" check** (`lib/keybindings.ts`). Wave D added nine bare-letter chords, so `1 2 3 G R S A L F` are now swallowed app-wide for any non-editable target — and `closest("input, textarea, [contenteditable]")` does not match `<select>`, of which `ModelEditor.tsx` alone has six. The registry's own docstring argues bare letters are safe because the *command* does nothing; that is true of the command and false of the event. Not fixed here: reordering the guard changes dispatch for every chord in the shell, which is a Wave-E-scope change and not an audit's to make unannounced.
+* **A `libm`/trig source gate does not cover `editor/.../dcc.rs`.** Its three `.sin()`/`.cos()` sites are display-only today and its two `pcos64` sites (`shade_edges`, `auto_seam_edges`) correctly feed journalled *results*; the file now contains both kinds and no gate distinguishes them.
+* **The lossy detach has no severity and no threshold.** `non_manifold_splits` is a raw count with a boolean `=== 0` panel verdict, its private-vertex minting is uncapped, and the isolated vertices it strands are legal, uncounted, and now at least pinned by a test.
+* **A non-orientable surface is torn and mis-attributed.** A Möbius band terminates, opens, and is counted — now with a fixture that says so — but `non_manifold_splits`'s doc tells the author their source *"is not a manifold surface"*, which is untrue of one. The kernel cannot represent non-orientability; the message should eventually say that instead.
+* **`welded_positions` is snapshotted before the repair** and therefore understates a repaired import.
+* **`ImportError::NonManifoldEdge`'s convergence guard is now unreachable** from `from_mesh_asset`, which makes the property battery's arm for it dead code. Kept: "unreachable" is a claim about code that will change.
+
+### The v4 ladder, dispositioned
+
+Asked and answered, because the brief was right that the ledger has to say which: **every
+`save()` stamps v4**, there is no min-version stamping, and the question of "does a v3 file
+saved back stay v3" does not arise — `restore` refuses any version but the current one, by
+name and with a remedy, in both directions. That is legal precisely because `SessionSave`
+**still reaches no disk**: the only writers are `DccState` in memory and the tests, verified
+again at HEAD, so the count of v1/v2/v3 files in the world is zero and a migration would be
+a decoder for a file that has never existed. The seven appended variants are positional-safe
+by the frozen-discriminant match, and the shape change the version *is* for (`BevelEdges`
+growing `segments`) is pinned as bytes in both directions.
+
+What the ladder did not have is a **hostile-bytes** arm, and now does: over a v4 stream
+carrying the last appended variant, every truncation and every single-byte corruption must
+reach a refusal — through `restore`, the documented trust boundary — and never a panic.
+
+### The chr(92) law, twelfth catch, on the audit's own edit
+
+Three of this audit's new assertion strings came back with their `\`-continuations eaten and
+a run of fourteen spaces where the line break had been — written through a Python heredoc,
+which is the exact vector the P22 law names. **The wave's own gate caught it**
+(`advisory_source_gate::no_string_literal_in_the_workspace_carries_an_eaten_continuation`),
+in the full battery, before a commit. Recorded because a law is only worth its catches, and
+because the auditor is not exempt from it.
+
+### Counts, after the audit
+
+Full battery **291 blocks / 5 507 passed / 0 failed / 13 ignored** against the wave's
+290 / 5 483 / 0 / 13 — **+24 arms** and one new binary (`amend_attacks`). Frontend **690
+tests / 77 files** against 687 / 76. `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets` under `-D warnings`, `npm run typecheck`, eslint `--max-warnings 0` and
+`npm run build` all green. Goldens **54, byte-untouched** — nothing in this audit renders.
+Schema **unmoved**: `SessionSave` stays at the v4 this wave set, and no second bump was
+needed or made.
+
+### Laws this audit paid for
+
+* **A counts-only test cannot see an ULP, and a power-of-two fixture cannot see a
+  normalization.** The bevel's compatibility claim was asserted on the one mesh where the
+  defect is invisible — `cube(2.0)` at `amount = 0.25` makes `normalize() * amount` exact.
+  A claim about *bits* has to be asserted on geometry where the bits differ.
+* **A route without an opener is worse than a missing feature.** Wave E's invariant is *a
+  route or a reason, never neither*; Wave D added a fifth route whose `panelType` was a
+  marker and left the openers docking it, so the invariant was satisfied and the product
+  was not. The opener is now the thing that enumerates markers, in one place.
+* **The one call site that passes an empty fallback is the one that needed it most.**
+  `sanitize_ident`'s leading-digit repair is `format!("{fallback}{out}")` — an empty
+  fallback makes the guard a no-op silently, and this is the only site in the tree that
+  writes its output into a `pub mod` line.
+* **A repair with a free choice must not let an arena index make it.** The winding walk
+  agreed a component with whichever face sorted first. Every claim of the form "this
+  repair loses nothing" needs to say *relative to what*, and the honest answer is the
+  source's own majority.
+* **Stub the fix, not the test.** Twenty-three UV tests passed with `planar_uv` returning
+  `None`. The question a gate for a fix must answer is not "is the output good" but "did
+  the fix run" — and the cheapest way to ask it is to stub the fix and watch.
+* **A guard is not armed by the reasoning that chose it.** `starts_with` over `contains`
+  is the right call and the doc explains it well; `contains` still passed every test.
