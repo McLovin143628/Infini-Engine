@@ -42,14 +42,48 @@ import type { SmParamDto } from "../../lib/smTypes";
  * reachable through Details; these are the ones an author reaches for *while
  * watching*, and a panel that mirrored the whole component would be a worse
  * Details. */
-const MOVEMENT_TUNABLES: { field: string; label: string; step: number }[] = [
-  { field: "walk_speed_mps", label: "Walk (m/s)", step: 0.05 },
-  { field: "run_speed_mps", label: "Run (m/s)", step: 0.05 },
-  { field: "sprint_speed_mps", label: "Sprint (m/s)", step: 0.1 },
-  { field: "jump_speed_mps", label: "Jump (m/s)", step: 0.1 },
-  { field: "step_height_m", label: "Step height (m)", step: 0.01 },
-  { field: "slope_limit_deg", label: "Slope limit (deg)", step: 1 },
-  { field: "air_control", label: "Air control", step: 0.05 },
+const MOVEMENT_TUNABLES: { mfield: string; label: string; step: number }[] = [
+  { mfield: "walk_speed_mps", label: "Walk (m/s)", step: 0.05 },
+  { mfield: "run_speed_mps", label: "Run (m/s)", step: 0.05 },
+  { mfield: "sprint_speed_mps", label: "Sprint (m/s)", step: 0.1 },
+  { mfield: "jump_speed_mps", label: "Jump (m/s)", step: 0.1 },
+  { mfield: "step_height_m", label: "Step height (m)", step: 0.01 },
+  { mfield: "slope_limit_deg", label: "Slope limit (deg)", step: 1 },
+  { mfield: "air_control", label: "Air control", step: 0.05 },
+];
+
+/** The **vehicle** tunables offered by name (P29.7).
+ *
+ * A vehicle is not a component — its rig is derived from the scene and its
+ * tunables live on the running vehicle, like a ragdoll's bodies — so these cross
+ * as `kind: "vehicle"` and are matched against
+ * `inf_ecs::vehicle::VehicleTuning::names()` rather than against a reflected
+ * field. Select the CAR to tune it: the guid is the chassis'.
+ *
+ * Session-scoped whatever the checkbox says, because there is no document field
+ * for a kept value to land on. */
+const VEHICLE_TUNABLES: { vfield: string; label: string; step: number }[] = [
+  { vfield: "stiffness_n_per_m", label: "Spring (N/m)", step: 1000 },
+  { vfield: "damping_ns_per_m", label: "Damper (Ns/m)", step: 100 },
+  { vfield: "max_engine_force_n", label: "Engine (N)", step: 500 },
+  { vfield: "brake_force_n", label: "Brake (N)", step: 500 },
+  { vfield: "max_steer_deg", label: "Steer lock (deg)", step: 1 },
+  { vfield: "lateral_grip", label: "Grip (mu)", step: 0.05 },
+];
+
+/** The **camera** tunables offered by name (P29.7).
+ *
+ * The locomotion camera is a host-owned field on the session — never a component
+ * and never a resource (Ruling 4) — so these cross as `kind: "camera"` and carry
+ * no entity at all. The names are `CameraTuning::set`'s vocabulary; a gait block
+ * edits both rotation modes at once, which is that type's rule and not this
+ * panel's. */
+const CAMERA_TUNABLES: { cfield: string; label: string; step: number }[] = [
+  { cfield: "run.arm_length_m", label: "Arm (m)", step: 0.1 },
+  { cfield: "run.lag_x", label: "Lag X", step: 0.5 },
+  { cfield: "run.fov_deg", label: "FOV (deg)", step: 1 },
+  { cfield: "collision_radius_m", label: "Sweep radius (m)", step: 0.05 },
+  { cfield: "pivot_height_ratio", label: "Pivot height", step: 0.05 },
 ];
 
 export function LiveTuning({ params }: { params: SmParamDto[] }) {
@@ -60,10 +94,16 @@ export function LiveTuning({ params }: { params: SmParamDto[] }) {
   const guid = selection[0] ?? null;
 
   const push = useCallback(
-    async (kind: "field" | "param" | "trigger", name: string, value: number) => {
-      if (!guid) return;
+    async (
+      kind: "field" | "param" | "trigger" | "vehicle" | "camera",
+      name: string,
+      value: number,
+    ) => {
+      // The camera belongs to the session rather than to an entity, so it is the
+      // one kind that does not need a selection.
+      if (!guid && kind !== "camera") return;
       try {
-        const applied = await simIpc.tune(kind, guid, name, value, keep);
+        const applied = await simIpc.tune(kind, guid ?? "", name, value, keep);
         setStatus(applied ? `${name} = ${value} (next step)` : "no Simulate session is running");
       } catch (e) {
         setStatus(String(e));
@@ -129,14 +169,43 @@ export function LiveTuning({ params }: { params: SmParamDto[] }) {
 
       <div className="sm-insp__subtitle">Movement</div>
       {MOVEMENT_TUNABLES.map((t) => (
-        <label className="sm-insp__row" key={t.field}>
+        <label className="sm-insp__row" key={t.mfield}>
           <span>{t.label}</span>
           <input
             type="number"
             step={t.step}
             placeholder="set"
             onChange={(e) =>
-              e.target.value !== "" && void push("field", t.field, Number(e.target.value))
+              e.target.value !== "" && void push("field", t.mfield, Number(e.target.value))
+            }
+          />
+        </label>
+      ))}
+      <div className="sm-insp__subtitle">Vehicle (select the car)</div>
+      {VEHICLE_TUNABLES.map((t) => (
+        <label className="sm-insp__row" key={t.vfield}>
+          <span>{t.label}</span>
+          <input
+            type="number"
+            step={t.step}
+            placeholder="set"
+            onChange={(e) =>
+              e.target.value !== "" && void push("vehicle", t.vfield, Number(e.target.value))
+            }
+          />
+        </label>
+      ))}
+
+      <div className="sm-insp__subtitle">Camera</div>
+      {CAMERA_TUNABLES.map((t) => (
+        <label className="sm-insp__row" key={t.cfield}>
+          <span>{t.label}</span>
+          <input
+            type="number"
+            step={t.step}
+            placeholder="set"
+            onChange={(e) =>
+              e.target.value !== "" && void push("camera", t.cfield, Number(e.target.value))
             }
           />
         </label>

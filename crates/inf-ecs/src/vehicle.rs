@@ -1105,4 +1105,54 @@ mod tests {
         assert_eq!(c.steer, 1.0);
         assert!(c.handbrake);
     }
+
+    /// **The handbrake is the rear wheels and only those** — which is what makes
+    /// a handbrake turn a turn rather than a stop.
+    ///
+    /// Asserted at the model, where a wheel's identity is visible: `solve`
+    /// pushes three forces per grounded wheel in rig order (suspension, lateral,
+    /// longitudinal), so wheel `i`'s longitudinal is `out[3i + 2]`, and the
+    /// fixture's first two wheels are the front pair (`+Z`, therefore steered).
+    /// Applied to all four, this arm would find the front pair braking too.
+    #[test]
+    fn the_handbrake_is_the_rear_wheels_and_only_those() {
+        let mut v = RaycastVehicle::new(rig(4));
+        let t = *v.tuning();
+        for (i, w) in v.wheels_mut().iter_mut().enumerate() {
+            w.contact = Some(WheelContact {
+                point: DVec3::new(i as f64 * 0.1, -1.0, 0.0),
+                normal: DVec3::Y,
+                distance_m: t.rest_length_m - 0.1 + 0.35,
+            });
+        }
+        v.control(VehicleControls {
+            handbrake: true,
+            ..Default::default()
+        });
+        let mut chassis = resting(1_200.0);
+        // Rolling forward, so there is something for a brake to resist.
+        chassis.linvel = DVec3::new(0.0, 0.0, 8.0);
+        let mut out = Vec::new();
+        v.solve(chassis, 1.0 / 60.0, &mut out);
+
+        let long = |i: usize| out[i * 3 + 2].force.z;
+        let (front, rear) = ((long(0) + long(1)) * 0.5, (long(2) + long(3)) * 0.5);
+        assert!(
+            rear < -100.0,
+            "a locked rear wheel must resist the motion; it pushed {rear} N"
+        );
+        assert!(
+            front > rear * 0.2,
+            "the front wheels braked {front} N against the rear's {rear} N — the \
+             handbrake reached a steered wheel"
+        );
+        // …and the front pair is only rolling resistance, which is a small
+        // fraction of the load rather than a brake.
+        let load = v.wheels()[0].load_n;
+        assert!(
+            front.abs() < load * t.rolling_resistance * 1.5,
+            "the front wheels carried {front} N, which is more than rolling \
+             resistance on a {load} N load"
+        );
+    }
 }

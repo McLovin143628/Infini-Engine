@@ -711,8 +711,15 @@ mod tests {
 
         // The list, extracted from the source rather than restated here — a
         // restatement is a third copy.
+        //
+        // The key is `mfield` and not `field` (P29.7): the panel grew a vehicle
+        // list and a camera list, each checked against a *different* truth, and
+        // a `field: "` split matches `vfield: "` too — which is how the first
+        // draft of the vehicle group made this gate report that
+        // `stiffness_n_per_m` is not a field of `CharacterMovement`. Three
+        // prefixes, three extractors, no substring can belong to two of them.
         let named: Vec<&str> = PANEL
-            .split("field: \"")
+            .split("mfield: \"")
             .skip(1)
             .filter_map(|rest| rest.split('"').next())
             .collect();
@@ -746,5 +753,72 @@ mod tests {
         // Anti-vacuity: the field set is a real one, so `contains` is answering.
         assert!(fields.contains("walk_speed_mps"), "{fields:?}");
         assert!(!fields.contains("sprint_speed_mph"));
+    }
+
+    /// **The panel's VEHICLE tunables are names the door knows** (P29.7).
+    ///
+    /// The same claim as the movement one above and the same shape, against a
+    /// different truth: a vehicle is not a component, so a `kind: "vehicle"` tune
+    /// is matched by name against `VehicleTuning::set` rather than resolved
+    /// through `bevy_reflect`. A misspelling is the same silent no-op — the tune
+    /// is queued, the setter answers `false`, the panel says "next step" and
+    /// nothing moves.
+    #[test]
+    fn every_vehicle_tunable_the_panel_offers_is_a_name_the_door_knows() {
+        const PANEL: &str = include_str!("../../../src/panels/sm/LiveTuning.tsx");
+        let named: Vec<&str> = PANEL
+            .split("vfield: \"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert!(
+            named.len() >= 5,
+            "found {} vehicle tunables in LiveTuning.tsx — this gate is reading \
+             the wrong file or the wrong shape",
+            named.len()
+        );
+        for n in &named {
+            let mut t = inf_ecs::vehicle::VehicleTuning::default();
+            assert!(
+                t.set(n, 1.0),
+                "LiveTuning.tsx offers vehicle tunable `{n}`, which the door \
+                 refuses: {:?}",
+                inf_ecs::vehicle::VehicleTuning::names()
+            );
+        }
+        // Anti-vacuity: the door really does refuse something.
+        let mut t = inf_ecs::vehicle::VehicleTuning::default();
+        assert!(!t.set("stiffness", 1.0));
+    }
+
+    /// **The panel's CAMERA tunables are names the door knows** (P29.7).
+    ///
+    /// Third time, third truth: the locomotion camera is a host-owned field on
+    /// the session, so a `kind: "camera"` tune is matched against
+    /// `CameraTuning::set`'s by-name vocabulary.
+    #[test]
+    fn every_camera_tunable_the_panel_offers_is_a_name_the_door_knows() {
+        const PANEL: &str = include_str!("../../../src/panels/sm/LiveTuning.tsx");
+        let named: Vec<&str> = PANEL
+            .split("cfield: \"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert!(
+            named.len() >= 4,
+            "found {} camera tunables in LiveTuning.tsx — this gate is reading \
+             the wrong file or the wrong shape",
+            named.len()
+        );
+        for n in &named {
+            let mut t = inf_ecs::camera::CameraTuning::default();
+            assert!(
+                t.set(n, 1.0),
+                "LiveTuning.tsx offers camera tunable `{n}`, which \
+                 `CameraTuning::set` refuses"
+            );
+        }
+        let mut t = inf_ecs::camera::CameraTuning::default();
+        assert!(!t.set("run.arm_length", 1.0));
     }
 }

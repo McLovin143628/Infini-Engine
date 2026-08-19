@@ -381,6 +381,43 @@ fn two_identical_rigs_drive_byte_for_byte() {
     );
 }
 
+/// **The handbrake slows the car**, and the world says so in metres.
+///
+/// The other half of the claim — that it is the REAR wheels, which is what makes
+/// a handbrake turn a turn rather than a stop — is asserted at the model, where
+/// a wheel's identity is visible (`inf_ecs::vehicle`'s
+/// `the_handbrake_is_the_rear_wheels_and_only_those`).
+#[test]
+fn the_handbrake_slows_the_car() {
+    let roll = |handbrake: bool| -> f64 {
+        let mut rig = Rig::new(SPAWN_Y);
+        rig.step(60);
+        rig.drive(
+            VehicleControls {
+                throttle: 1.0,
+                ..Default::default()
+            },
+            150,
+        );
+        let start = rig.z();
+        rig.drive(
+            VehicleControls {
+                handbrake,
+                ..Default::default()
+            },
+            120,
+        );
+        rig.z() - start
+    };
+    let free = roll(false);
+    let held = roll(true);
+    assert!(free > 3.0, "the fixture must be rolling: {free} m");
+    assert!(
+        held < free * 0.7,
+        "two seconds on the handbrake covered {held} m against {free} m coasting"
+    );
+}
+
 // ── the trait seam ──────────────────────────────────────────────────────────
 
 /// A second implementation of [`inf_ecs::vehicle::Vehicle`] — a hovercraft with

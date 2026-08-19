@@ -18683,6 +18683,428 @@ shows a one-line authoring change as a one-line diff.
 > reclassified, `Prone` dropped from `ALL_MODES` (a compile error), archetype-order
 > overlay interning, and `model_to_world` reverted in the pose step.
 
+> **STATUS: P29.7 COMPLETE — AND WITH IT PHASE 29** (2026-08-18) — **local gates
+> green; NOT PUSHED.**
+> Battery **BATTERY_LINE**. `clippy -D warnings` over the whole workspace and
+> `cargo fmt --check` clean. The frontend is **FRONTEND_LINE**, with `tsc --noEmit`
+> and eslint clean. Goldens stay **54** — the showcase asserts STATE, not pixels.
+> **No schema moves**: `.inf_anim` v2, `.inf_sm` v2, scene v23 and `ScenePayload`
+> v9 all stand. Everything this wave added that has to persist is expressed in
+> components the wire already carried; everything that must not persist is on
+> `MovementRuntime`, which is `#[serde(skip)]`.
+>
+> **One committed level moved**, and it is the showcase: `samples/phase29-
+> locomotion` gains a car and the geometry a drive and a flight need, re-blessed
+> through its own generator. Its `input.toml` gains three bindings. Nothing else
+> under `samples/` moved a byte.
+>
+> **What landed, one line each.** A raycast vehicle controller built natively on
+> the physics bridge. The `Vehicle` trait the island implements per class, with a
+> second implementation in the tests so it is a seam rather than a description.
+> `MovementMode::Driving` and `MovementMode::Flying`, which were the catalogue's
+> last two refusals. A seat warp that is `WarpWindow`'s first consumer. A level's
+> `gravity_3d`, wired to the solver whose name it carries. And two real
+> subprocesses on the gate, closing the P29.6 audit's coverage gaps.
+>
+> ---
+>
+> **THE HEADLINE: THE EDITOR-VERSUS-SHIPPING DIVERGENCE IS GONE, AND THE P29.6
+> DIAGNOSIS WAS WRONG.**
+>
+> That ledger recorded a bound and routed it here as a design decision: the two
+> hosts are byte-identical for two and a half thousand steps and then diverge from
+> the step the ragdoll's articulated bodies spawn — "the first moment either world
+> contains a **dynamic** body at all" — with the cause given as rapier's
+> determinism contract, which guarantees an answer per *sequence of operations*
+> and cannot when two hosts have different body-handle histories. The choice
+> offered was: one construction sequence for both hosts, or a dynamic solve is
+> host-local and the editor previews an approximation.
+>
+> **It was neither.** `commands/sim.rs` passed a literal `DVec2::ZERO` as the
+> world gravity — and so did this gate's own third host — so **the editor's
+> Simulate simulated every level in the repository with no gravity at all**, since
+> P11.3. Nothing noticed for eighteen sub-phases because a *character* integrates
+> its own `CharacterMovement::gravity_mps2` and never asks the world for one. The
+> ragdoll's limbs are the first bodies in that course that ask. The two hosts
+> parted company on exactly the step they spawned, and the symptom wore the shape
+> of a handle-history artefact because that is where it appeared.
+>
+> With `SimSession::gravity_of` — one rule both hosts read a document with — the
+> divergence is not bounded, it is **absent**: `first differing step: None` over
+> the whole 4 900, through the ragdoll, a 110 m drive on a dynamic vehicle and a
+> flight. `the_editors_simulate_matches_the_shipped_player` is its own opposite
+> now, and `probe_host_divergence` is the measurement, kept and ignored.
+>
+> The lesson is not "the audit was wrong". The audit did the right thing: it
+> *wrote the bound down with its cause attached*, and a cause written down is a
+> claim the next wave can falsify. A bound tolerated in silence is a defect
+> wearing a design decision's clothes.
+>
+> ---
+>
+> **GRAVITY, DECIDED** (the P29.6 audit's A6, routed here as a decision an audit
+> may not make).
+>
+> `LevelSettings` has carried `gravity_2d` and `gravity_3d` since the scene schema
+> had a version number and only the first was ever read; and `LevelSettings::
+> default()` pairs a `gravity_2d` of **zero** with a `gravity_3d` of −9.81, so
+> every level that never touched either field had no 3D gravity while its Details
+> panel read −9.81.
+>
+> **The decision: each field feeds the solver its name says, and neither default
+> moves.** `inf_physics::WorldGravity` carries the pair and the reasoning. The
+> alternative — change `gravity_2d`'s default to −9.81 so the existing wiring
+> became correct — is the worse half: a 2D project's default would stop being "the
+> game decides", every 2D level would gain a pull it never asked for, and
+> `gravity_3d` would still be read by nothing. The pairing is not incoherent once
+> each field feeds its own dimension; it was incoherent while one field did both
+> jobs.
+>
+> **What moved in the tree: no committed content.** The four samples that set both
+> fields set them to the same −9.81 and the fifth leaves `gravity_3d` at a default
+> that equals its `gravity_2d.y`, so every 3D sample's gravity is the number it
+> always was. The levels whose *behaviour* changed are exactly the two the audit
+> named — `phase23-workshop` and the P19 grammar-bake fixture — which had none and
+> now have Earth's. `phase23_gate` is green on the new bytes, unchanged.
+>
+> **The cook advisory inverts rather than retires.** `ignored_gravity_3d` said
+> "`gravity_3d` is authored, serialized and read by nothing"; that sentence is now
+> false. `moved_3d_gravity` fires on the one silent hazard the fix creates: a
+> level with 3D content whose `gravity_2d.y` used to be its 3D gravity and whose
+> `gravity_3d` disagrees. Every committed sample is quiet, and the untouched
+> default is quiet on purpose — an author who never typed a number is not making a
+> claim the cook should argue with.
+>
+> `tests/gravity_3d.rs` asserts the **world** (metres fallen) in both hosts, and
+> states its claim as a **ratio** rather than a closed form. The first draft
+> hand-derived `g · dt² · n(n+1)/2` and was wrong by 1.2 % against a rapier that
+> had read the right number; a tolerance wide enough to hide that would have been
+> wide enough to hide a wrong gravity. A free fall is exactly linear in `g`, so
+> `fall(g₁)·g₂ == fall(g₂)·g₁` is a claim about the solver's input that needs no
+> model of its interior.
+>
+> ---
+>
+> **THE RAYCAST VEHICLE.** `inf_ecs::vehicle` is the model — a suspension spring
+> and damper, an engine-force curve, a speed-sensitive steer limit and a friction
+> circle, as pure functions of numbers — and `inf_physics::d3::vehicle` is the
+> door that casts the rays, applies the forces and writes the wheels back. The
+> same split as the camera and the movement step, for the same reason: the
+> arithmetic is testable without a world and every rapier type stays on one side
+> of one wall.
+>
+> **Owned code, not rapier's `DynamicRayCastVehicleController`** — the pattern,
+> not the dependency. Its vocabulary is rapier handles, its tunables are not
+> SI-documented, and a gameplay feature the island phase cannot extend is not a
+> seam. What is ported is the *shape*, which is older than either engine.
+>
+> **THE RIG IS DERIVED, AND THAT IS HOW THIS WAVE HAS A COMMITTED VEHICLE WITHOUT
+> A SCHEMA MOVE.** There is no `Vehicle` component. A **chassis** is an entity
+> with a `RigidBody3D { kind: Dynamic }` and a `Collider3D`; a **wheel** is a
+> direct child carrying a sphere `Collider3D` with `sensor: true` and no body of
+> its own, whose local `Transform` is the mount and whose collider radius is the
+> wheel radius. `inf_ecs::vehicle::wheel_of` is the one recogniser, read by the
+> physics bridge and by the sample generator, so the level and the simulation
+> cannot disagree about what a wheel is.
+>
+> A wheel is **consumed** by its vehicle rather than mirrored into rapier — the
+> same treatment a broken destructible's own collider gets, twenty lines away in
+> the same walk — and `a_sphere_sensor_that_is_not_a_wheel_is_still_mirrored` is
+> the falsifier that stops the rule becoming "every sphere sensor disappears from
+> somebody's level".
+>
+> **One door, inside the movement door.** `step_vehicles` is the last statement of
+> `step_character_movement` rather than a sibling both hosts call: a sibling would
+> be a hand-maintained mirror, and this phase's own ledger records two defects of
+> exactly that shape (the intent feed, and the publish order). `O(vehicles)`, with
+> the discovery riding in the entity walk `sync_from_world_sim` already makes, and
+> one `is_empty` on the off path.
+>
+> **`cast_ray_where`** is the ray sibling of `cast_shape_where`: a wheel must see
+> dynamic bodies (a car drives over a crate) which is the opposite of what the
+> structural probe wanted, so the two filtered ray doors are one function with a
+> class argument rather than two copies of a BVH walk.
+>
+> ---
+>
+> **TWO DEFECTS FOUND BY DRIVING IT RATHER THAN BY READING IT.**
+>
+> **(1) A resistive force that overshoots reverses the motion.** Rolling
+> resistance sat outside the stop-clamp, so a car with its brakes full on crept
+> **5.8 cm backwards per second**, for ever. Everything that resists is one budget
+> now, clamped to the force that brings that wheel to rest.
+>
+> **(2) Feeding the whole body rotation into the tyre model is an energy pump.**
+> A nose-down pitch makes the front contact move backwards and the rear forwards;
+> a friction model that cancels each wheel's own slip then applies opposite forces
+> at front and rear, which is a couple, which is more pitch. Measured: a steady
+> **0.21 rad/s** of pitch that angular damping could not remove, on a car that was
+> supposed to be parked. `ChassisState::contact_velocity` filters the pitch and
+> roll rates out of the **tyre's** input and leaves them in the **suspension's**,
+> which is what a damper is for. `probe_brake` is the ignored diagnostic that
+> found it, and it is kept.
+>
+> ---
+>
+> **DRIVING, AND THE SEAT.** `press_interact` from the ground finds the nearest
+> seat in reach — `O(vehicles)`, guid-ordered, and a refusal as a value — parks
+> the character's collider through the same `set_collider_enabled` door the
+> ragdoll uses, and runs the choreography. Input routes to the vehicle as a
+> `VehicleControls` through the trait, so nothing vehicle-shaped appears anywhere
+> in the movement model. Pressing it again gets out beside the car with the
+> chassis velocity in hand, and above walking pace that is `FallControlled` rather
+> than a stand — the ragdoll's velocity-handoff precedent, and the reason
+> `Driving` has an airborne row in the mode table.
+>
+> **`WarpWindow` closes, and closes as a window.** Three ledgers named it a
+> zero-caller because binding one needs a clip with an authored window and the
+> mantle warps a whole clip. The seat warp is that window: before it opens the
+> character has not moved, inside it the transform warps onto the seat through
+> `warp_ease` (the quintic the mantle uses), after it closes the character is
+> seated and the rest of the clip plays out. The arm asserts the **first** clause,
+> which is the one a whole-duration lerp would fail.
+>
+> **A passenger trailed its own car by one step** — 0.22 m over a 22 m drive —
+> because the movement door runs before the solver and a seat pose read at the top
+> of a step is a step stale. `follow_seats` rides inside `write_back_into`, which
+> is where every other post-solve truth is projected into the ECS, guarded by one
+> `is_empty`.
+>
+> **FLYING.** Six degrees of freedom in the aim frame with pitch, `move_up` as the
+> vertical axis, air friction, and a bank derived from the signed yaw rate and
+> bounded. **No gravity term appears anywhere**, which is the whole difference
+> from a controlled fall, and the arm proves it against a control that falls four
+> metres in the same three seconds. The bank arm checks which way the character's
+> own right axis tilts rather than the sign of a number that can be reasoned
+> wrong.
+>
+> Two more measured defects came out of flying it: **rapier's ground snap sinks a
+> hovering character** 4.8 cm/s toward the floor it is flying over (snap and
+> autostep both exist to keep a *walking* character attached to a floor, and the
+> flight mover turns both off); and **nothing had ever written the transform's
+> roll back**, so a character that landed out of a banked turn kept the bank for
+> ever. The movement step owns the roll now, and it is zero in every mode but
+> flight.
+>
+> The camera excludes the chassis its subject is driving — the P29.6 audit's A4 a
+> third time: the character's own collider, then the ragdoll's limbs, and now a
+> four-metre car around a parked capsule.
+>
+> ---
+>
+> **THE COURSE, AND ALL FOURTEEN MODES.** `duty_of` classifies `Driving` and
+> `Flying` as **forced**; `required_modes()` is fourteen; and what still refuses is
+> exactly the four **reserved slots** — a mode a NEWER build wrote into a file this
+> one is reading, which is the refusal the freeze-pin exists for and the one that
+> never expires. Arm (g) is stronger for the swap: a sub-phase refusal is a note to
+> a future wave, a reserved slot is a compatibility contract.
+>
+> | mode | steps | what forces it |
+> |---|---|---|
+> | `Grounded` | 1 764 | open floor, three gaits, the road |
+> | `Crouch` | 922 | a roof at 1.4 m |
+> | `Prone` | 221 | the crawl out of it |
+> | `Slide` | 13 | sprint + crouch, after eight metres of runway |
+> | `Roll` | 45 | the roll edge |
+> | `Dive` | 29 | the dive edge |
+> | `FallFree` | 146 | a jump |
+> | `FallControlled` | 146 | the stair landing, and stepping out of a moving car |
+> | `Mantle` | 146 | ledges at 1 m and 3 m — both height classes |
+> | `Ragdoll` | 46 | a jump off the 5 m ledge |
+> | `SwimSurface` | 321 | a 3 m pool |
+> | `SwimUnder` | 276 | a deliberate dive in it |
+> | `Driving` | 582 | 110 m of road, an S-bend and a hump |
+> | `Flying` | 243 | a climb, two banked turns and a landing |
+>
+> **FOUR COURSE DEFECTS, EACH MEASURED RATHER THAN REASONED**, and each recorded
+> where it was fixed rather than here:
+>
+> * **A swimmer cannot climb a vertical pool wall, and does not autostep** —
+>   rapier's autostep needs a grounded character. The P29.6 course ended in the
+>   water and its last driver stage was a catch-all that swam forward for ever, so
+>   nothing had noticed the pool had no exit. Three beach geometries were measured
+>   before one worked: at z = 119.71 with no beach, at 115.14 with shelves the
+>   character floated over, at 113.21 with a shelf whose face it pressed into. The
+>   answer is one number — a surface swimmer's feet sit at −1.07 m — so the water
+>   must end before anything above that does.
+> * **A car whose belly is 20 cm up cannot cross a 20 cm hump.** It drove up onto
+>   its own floor pan and sat there for four thousand steps. The wheels hang
+>   lower now, which is also what a car looks like.
+> * **A car at 14 m/s steers off a 24 m road** and falls to y = −3 000 for the rest
+>   of the replay. A road has kerbs.
+> * **A banking flyer travels sideways** and left a 40 m apron. Aprons are for
+>   landing on.
+>
+> ---
+>
+> **TWO REAL SUBPROCESSES**, closing both of the P29.6 audit's coverage gaps.
+>
+> `the_real_pie_subprocess_matches_the_in_process_reference` spawns the **actual
+> `inf-player --pie` binary** and compares six hundred per-frame state hashes
+> against `scene_trace`, which is the pattern every gate since P21 has and this one
+> did not. The protocol carries no input, so the run is undriven — and that is a
+> real test *now*, because the level has a 1 200 kg vehicle settling onto four
+> springs in it, which the anti-vacuity assert requires to be moving.
+>
+> `tools/inf-cli/tests/cook_determinism.rs` cooks the committed sample **twice, in
+> two processes**, and compares the pack and manifest **bytes**. It is not in
+> `phase29_gate` and the reason is a rule rather than convenience: closing the
+> subprocess-pool gap needs a binary that can cook, and the shipped player
+> deliberately is not one (`inf-packager` is a dev-dependency of `inf-player`, with
+> a comment saying so). The arm lives beside the binary that can. Comparing bytes
+> is also the stronger claim: if two independently-cooked packs are identical then
+> any two replays off them are identical for free.
+>
+> ---
+>
+> **THE GARMENT LIFT** (the P29.6 remainder, closed). The foot-publish seam reached
+> the pose, the ragdoll rig, the sockets and both skinned draws; it did not reach
+> the two cloth/hair projectors, which were handed the entity's translation — a
+> capsule **centre** — while a garment's vertices are in feet-at-origin model
+> space. A coat was drawn nearly a metre above the character wearing it.
+> `pose::model_offset_world` is the offset form of the same door, and it exists in
+> that form for a reason: the shipped player's projector passes the sim's
+> **interpolated** position, so re-deriving the translation from the affine would
+> silently drop interpolation on every garment in the game. Both hosts add the
+> offset identically (the mirror gate holds), and the arm asserts that it composes
+> to exactly what `model_to_world` produces.
+>
+> **THE TUNING DOOR'S LAST TWO VARIANTS.** `Tune::Vehicle` and `Tune::Camera`.
+> Neither lives on the document — a vehicle's tunables are on the running vehicle
+> (a play-session thing, like a ragdoll's bodies) and the camera is a host-owned
+> field (Ruling 4: never a component and never a resource) — so `SimSession`
+> applies both in the same drain, session-scoped by construction. That closes
+> P29.6's remainder that "live-tunable through P29.5's door" was true of the tuning
+> *type* and not of the queue. The vehicle arm asserts the world: a ten-times
+> stiffer spring settles the chassis measurably higher.
+>
+> **`foot::interp_to_vec` DELETED, not routed a fourth time.** Zero callers from
+> the day it was written. P29.6 supplied the reason the hope was wrong rather than
+> late (the camera is f64 world space and that helper is f32 pose space); this wave
+> looked in the vehicle and flight work and found no consumer either — the bank
+> interpolates one scalar, a suspension is a spring, a warp is a warp. A fourth
+> routing of a two-line function is a fourth deferral; it is one line to write
+> again the day something wants it.
+>
+> ---
+>
+> **THE chr(92) LAW'S TENTH CATCH, on this wave, on its own hand.** Two
+> `assert_eq!` messages in the rewritten divergence arm went through a Python
+> heredoc and lost their `\`-continuations, leaving fourteen and ten spaces in the
+> middle of a sentence. Found by eye during review and repaired through the editor,
+> which is what the law says to do in the first place — and then
+> `no_string_literal_in_the_workspace_carries_an_eaten_continuation` was
+> **mutation-verified** against a planted one, which it named by file and line. The
+> honest reading is that the guard would have found both in the full battery, and
+> that the law was broken by the same shortcut it was written about.
+>
+> **Honest remainders of this wave.**
+> **The vehicle has no per-vehicle authored tuning.** A committed rig uses the
+> Ring-0 defaults in both hosts, because a tune is an editor-only door by law and a
+> scene field is a schema move. The course therefore adapts to the car (six tenths
+> of throttle) rather than the car to the course. A vehicle *class* with its own
+> numbers is the island's, and it is what the `Vehicle` trait is shaped for.
+> **A wheel is a visual and a radius, not a rolling body.** There is no wheel
+> collider in rapier, so a wheel cannot catch on a kerb edge or be knocked off; the
+> suspension ray is the whole contact model. That is what a raycast vehicle is, and
+> it is written here so the next reader does not look for the missing half.
+> **`ENTER_REACH_M` is measured to the seat, which is on the roof**, so 1.2 m of
+> the 3 m budget is height. It is generous rather than exact and the course had to
+> be told twice.
+> **No `Possess`, no camera hand-off UI, no vehicle HUD.** PIE-in-viewport polish
+> is P30's by §13's own scope note.
+> **The drive segment's steer is open-loop.** The course drives a scripted S-bend
+> and the kerbs are what keep it honest; a closed-loop driver that steered toward
+> a target would be a small autopilot, and a gate should not contain one.
+
+> **PHASE 29 COMPLETE** (2026-08-18) — animation state machines v2 and the full
+> movement catalogue, over seven sub-phases, with the ALS port ruling and the
+> catalogue amendment both discharged.
+>
+> **Done when**, from §13's own sentence: *`samples/phase29-locomotion` — a
+> wizard-produced character driven by a v2 machine over a real movement component
+> — runs in PIE with PIE == shipping on the (pose, movement-mode) trace, replays
+> bit-exactly across two independent cooks, agrees between its Blueprint driver
+> and its transpiled Rust, holds foot-slide under a bound measured in metres, and
+> shows a one-line authoring change as a one-line diff.* Every clause is an arm of
+> `phase29_gate`, and as of this sub-phase the trace it certifies covers **all
+> fourteen** catalogue modes, the two hosts are byte-identical over the whole of
+> it, and two of its claims are made by real subprocesses.
+>
+> **The sub-phases, and their honest state.**
+>
+> | | what it owed | state |
+> |---|---|---|
+> | **P29.1** | `.inf_sm` model v2: typed parameters, condition trees, priority + interruption, blend curves and per-joint profiles, an advancing outgoing pose, a period resolver, any-state edges, sub-machines, enter/exit events | **COMPLETE**, audited |
+> | **P29.2** | blending depth: additive, layers, per-bone masks, Delaunay 2D blend spaces, sync markers/groups, inertialization as the default blend, `.inf_anim` v2 | **COMPLETE**, audited |
+> | **P29.3** | the movement component: the full tunable set, the frozen `MovementMode` wire enum, `autostep` wired so stairs work, scene v23 + `ScenePayload` v9 (the phase's one scene bump), shape casts, mouse input | **COMPLETE**, audited |
+> | **P29.4** | the bridge: the `anim.*` kit under the registry gate, root motion, foot IK + foot lock, a foot-slide gate in metres, motion warping, the traversal detectors, the landing-classifier consumers, the ragdoll bridge | **COMPLETE**, audited |
+> | **P29.5** | authoring: the condition rule builder, live tuning during Simulate, import-time derivation and proposed graphs, the `preview_character` warm path | **COMPLETE**, audited |
+> | **P29.6** | the gate: a wizard-emitted controller, `samples/phase29-locomotion`, `phase29_gate`, the locomotion camera, the foot-publish convention | **COMPLETE**, audited |
+> | **P29.7** | vehicles and flight: the raycast controller, the enter/exit choreography, `Driving` through a trait, `Flying` as 6-DOF with banking, the gate's drive-and-fly segment | **COMPLETE** (this block) |
+>
+> ---
+>
+> **THE CARRIED-ITEM DISPOSITION TABLE.** Every item named as carried, deferred or
+> routed by any P29 ledger or audit, with what became of it. "Island" means the
+> Vancouver-island phase named in the mandate; "P30" is the PIE-in-viewport phase
+> §13's risk register set aside.
+>
+> | # | item | first named | disposition |
+> |---|---|---|---|
+> | 1 | the editor-versus-shipping dynamic-body divergence bound | P29.6 | **CLOSED.** Not order-normalized and not formalized: the cause was the editor's zero gravity, and the two hosts are now byte-identical over the whole course. The arm asserts it. |
+> | 2 | `LevelSettings::default()` gives a 3D level no gravity | P29.6 audit A6 | **CLOSED.** `gravity_3d` feeds the 3D solver; defaults unchanged; the advisory inverted; no committed content moved. |
+> | 3 | `phase29_gate`'s two "independent cooks" run in one process | P29.6 audit | **CLOSED**, in `tools/inf-cli/tests/cook_determinism.rs` — two real processes, compared on pack bytes. Placed there because a player must not link the cook pipeline. |
+> | 4 | the gate spawns no real `--pie` | P29.6 audit | **CLOSED.** `the_real_pie_subprocess_matches_the_in_process_reference`. |
+> | 5 | `warp::WarpWindow` has zero callers | P29.4 | **CLOSED.** The seat warp, and as a window rather than a whole clip. |
+> | 6 | `foot::interp_to_vec` has zero callers | P29.4 | **CLOSED by deletion.** No consumer exists and the one hoped-for is type-wrong. |
+> | 7 | cloth and hair are lifted by the raw entity transform | P29.6 | **CLOSED.** `pose::model_offset_world`, in both projectors, mirror-pinned. |
+> | 8 | `Tune::Camera` does not exist, so the camera is not live-tunable through the queue | P29.6 | **CLOSED.** |
+> | 9 | a vehicle's tunables need a live door | P29.7 (scope) | **CLOSED.** `Tune::Vehicle`. |
+> | 10 | `distance_match` and `play_rate_for` have zero callers | P29.4 | **ROUTED to the island.** Their consumer is a locomotion state whose clip play-rate is driven by distance travelled — a behaviour change to the pose step with its own arms. Neither a seated driver nor a flyer plays a clip at all, so this wave had nothing to hang it on. Their *input* (the distance track) is committed content since P29.6, so the island starts with the hard half done. |
+> | 11 | `inf_ecs::pose::set_blend_mode` (the per-transition blend mode) | P29.2, deferred four times | **DEFERRED to the island's schema window**, with P29.6's sentence unchanged and now confirmed by a fifth wave: it writes a **world-level** resource, so exposing it obliges `ScenePayload` to carry it, and a resource the editor can set that the payload does not carry is a preview that differs from the build. One schema move buys the `SmTransition` field and the payload slot together; doing either alone is the worse half. §13's risk register spends the scene bump in P29.3, and this wave has no schema budget. |
+> | 12 | the playground's persisted ragdoll carries anchors + density but not contacts/layers | P29.6 audit | **DEFERRED to the island's schema window**, by name: `Joint3D` has no `contacts` and `Collider3D` no `layers`, so the same builder produces two physically different ragdolls depending on whether it is spawned or saved. It rides the same bump as #11. |
+> | 13 | `fov_deg` is documented vertical and valued like UE's horizontal | P29.6 audit | **RE-ROUTED, with the measurement.** Nothing this wave consumes it: the drive and fly cameras read the same table and the only reader in the tree is the windowed player's `fov_y`. The number, for whoever wires the next projection: a **vertical** 70° at 16:9 is **106° horizontal**, and ALS's 70/78/55/90 are horizontal — so the shipped window is currently rendering about half again the intended field. Changing the four constants moves `camera.toml`, the camera trace and the feel of every view mode, which is a rendering decision with its own before/after and not a footnote on a vehicle wave. |
+> | 14 | the editor's play capture takes OS focus (mouse-look and WASD exclusive) | P29.6 | **CARRIED.** The drive segment did not need it — the gate drives headlessly through the same intent both hosts read — and the half that was a *bug* (a key held at the grab never receiving its keyup) was closed by the P29.6 audit. What remains is the airspace rule, human-verified. |
+> | 15 | the `.inf_sm` text has no UI | P29.6 | **CARRIED to P30.** `sm_text::save_from_text` is a Ring-1 door with arms and the gate's demonstration goes through it; no panel calls it. An authoring surface is editor-UX work, which is the phase §13 set aside. |
+> | 16 | `camera.toml` is not carried by a cooked pack | P29.6 | **ROUTED to P30.** The windowed player reads it beside a `--level` boot and not beside a `--pack` one, because the cook does not carry it. Making it would be a pipeline change with its own arms, and the camera is not sim state, so nothing about PIE == shipping turns on it. The live-tuning half is closed (#8). |
+> | 17 | an author cannot live-tune a parameter the engine publishes | P29.6 | **CARRIED**, unchanged and watched: `Tune::Param` drains at the top of the fixed step and the movement step publishes later in the same one, so a tune of `speed` on a character with a movement component is overwritten before anything reads it. `live_tuning`'s own arm asserts both halves. Closing it needs an author-override layer over the parameter overlay, which is a feature. |
+> | 18 | the ragdoll's self-collision is off wholesale (two ragdolls pass through each other) | P29.6 | **CARRIED.** Per-ragdoll groups need a group id rather than a wider mask, and `every_limb_carries_the_ragdoll_layer_and_ignores_its_own_kind` asserts the stated bound, so closing it *fails* that arm rather than outliving it. |
+> | 19 | the course does not visit `Slide` (13 steps) or `Ragdoll` (46) twice | P29.6 | **CARRIED**, and now with fourteen modes rather than twelve. Both stations are real and both are brief; a longer slide wants a slope the catalogue does not require. |
+> | 20 | the f32 play-head reduction in `motion_leader` | P29.5 audit A7/A9 | **CARRIED**, with the bound measured: markers stop separating when one f32 ulp exceeds the fixed step, at t > 131 072 s — about 36 hours in one unbroken animation state. The honest fixes are a second reduction rule (the thing P29.5 retired) or an f64 `resolve_time` every caller pays for. |
+> | 21 | the inline save refusal is asserted at the store, not at the DOM | P29.5 audit | **CARRIED.** This tree has no component-render harness for an `@xyflow` canvas. |
+> | 22 | `min_arm_fraction`'s 0.05 puts the penetration fallback inside the head | P29.6 audit | **CARRIED to P30**, with the camera's other polish. The pull-in is also an uninterpolated cut. |
+> | 23 | `axis_independent_lag` unrotates absolute world positions rather than the delta | P29.6 audit | **CARRIED.** Algebraically origin-independent; not so in floating point at partition scale. It wants a floating-origin-aware camera, which is a streaming-scale question and belongs with the island's 50 km². |
+> | 24 | no `character.*` Blueprint node kit | P29.3 | **REFUSED, with the reason unchanged.** The parity arm is driven through `anim.*`, which is what §13 asked for; a second kit with no caller is what P29.6 spent a section closing. |
+> | 25 | ALS's seven enum-mirror structs | ALS ruling 1 | **REFUSED.** 398 hand-maintained lines that store an enum plus one bool per variant to save an AnimBP a compare node. A `match` is free in Rust and a denormalisation can desync. |
+> | 26 | vehicle content: bodies, classes and traffic | catalogue amendment | **DEFERRED to the island**, by the amendment's own sentence: this phase ships one real drivable rig and the island's fleet reuses the seam. The seam is the `Vehicle` trait, and it has a second implementation in the tests so it is known to be one. |
+>
+> ---
+>
+> **THE SURPASS-PILLAR SCORECARD (S1–S8).** §13 named seven; the catalogue
+> amendment added the smoothness stack as **S8**. Each row's evidence is the arm
+> or the artefact, with the commit that landed it.
+>
+> | | pillar | verdict | evidence |
+> |---|---|---|---|
+> | **S1** | **text-diffable machines** — a transition tweak is a reviewable line, not an opaque binary blob | **MET** | `inf_anim::text` projects a v2 machine into deterministic TOML and reads it back losslessly over every shape the model has; a condition is one line of a tiny expression language rather than a nest of arrays-of-tables. `sm_text::save_from_text` makes the text an *authoring* surface, and `phase29_gate`'s one-line-diff arm edits `duration = 0.15` to `0.42`, proves the file's shape does not move, drives it through the same validator `sm_save` uses, and shows the trace diverging only after the affected edge first fires — with a control that never leaves `idle` and traces byte-identically under both machines. `7d4b9b0` (P29.6), door corrected in `21cad8a`. |
+> | **S2** | **derive at import** — the curves Epic bakes with hand-run AnimModifiers are derived by code, every time | **MET** | `inf_anim::derive` at the glTF import door: a residual-removed root-motion track, a distance track, foot-plant sync markers and footstep notifies found from the feet's own height, and six curve channels. The seven AnimModifiers were counted **on disk** in the stock sample and answered one row each (four derived, three superseded, one honest CANNOT on a name locked inside a binary `.uasset`). `phase29_gate`'s arm (f) reads the committed clips off disk and requires what only the derivation puts there. P29.5. |
+> | **S3** | **propose the graph** — the engine proposes a state graph and its thresholds instead of an empty canvas | **MET** | `inf_anim::propose` clusters a clip set by what the derivation measured and writes a normal text-diffable machine with its reasoning beside it. Its first committed consumer is the character wizard, and arm (f) asserts the committed `.inf_sm` **is** `propose`'s output for this creature's own gait ladder. P29.5, consumer in `b97bbeb` (P29.6). |
+> | **S4** | **live tuning during Simulate**, which UE cannot do for an AnimBlueprint | **MET** | One queued door drained at the top of the fixed step, with `TuneScope::Keep` replaying onto the document as an ordinary undoable edit — and `tests/player_has_no_tuning_door.rs` proving the shipped player does not have it. P29.7 added `Tune::Vehicle` and `Tune::Camera`, so the two things a live session most wants to feel are reachable. P29.5; `c3df7b6`. |
+> | **S5** | **bit-exact replay** — the pose is sim state, so an animation bug is reproducible from a trace | **MET** | The pose is folded into `state_bytes` (P24.1); `phase29_gate` compares a cooked pack against the PIE payload byte for byte over the whole course, replays bit-identically across two cooks, and — as of P29.7 — a real `--pie` subprocess and two real cook processes back the two claims a single process was making about itself. `9755795`. |
+> | **S6** | **one IR** — the same `anim.*` semantics interpreted in the editor and compiled in the ship build | **MET** | The kit is dispatched by both hosts under the registry-versus-hosts source gate, which can see an id spelled wrong in *both* (a host-versus-host text compare cannot). Arm (c) drives the sample's own committed `.inf_act` through a real course segment and compares interpreted against compiled on the states entered and the footsteps fired, with a `generate_fn` string pin. P29.4. |
+> | **S7** | **design out Epic's five confessed workarounds** | **MET, four designed out and one superseded** — the chooser limitation routed around in the graph (our conditions are typed trees on one machine, so there is nothing to route around); the orientation-warping curve applied by a hack (**superseded**: we rescale the baked `RootMotionTrack.yaw_rad` against a runtime target, so no alpha is authored at all); the thread-unsafe curve read replaced by a dummy animation (there is no dummy: `publish_character_params` writes the character's own state into the same overlay the kit writes into, once per step, from the one movement door); the fixed **0.75 s** magic number (ours is `turn_in_place_delay_s`, an angle-dependent 0–0.75 s band with the angle in it); and the blend-space/transition incompatibility avoided rather than fixed (Delaunay barycentric blend spaces are transitions like any other, and the sync groups keep their feet across one). |
+> | **S8** | **the smoothness stack** — inertialization as the default blend, motion warping, distance matching and orientation warping, pose matching, sync markers | **MET WITH ONE NAMED GAP** | Inertialization is a first-class blend mode and the **default** for state transitions (a quintic decay of the pose deviation — cheaper *and* smoother than a cross-fade, and a polynomial, so it stays inside the portable-math ban list without a new helper). Motion warping has two consumers now: the mantle's root-motion warp and P29.7's seat window. Orientation warping and pose matching are live. **The gap is distance matching**: its input is on every derived clip and its runtime caller is row 10 of the table above, routed to the island by name. |
+>
+> ---
+>
+> **What Phase 29 did not do, stated once.** No PIE-in-viewport UX (Possess, or
+> editing during embedded PIE) — §13 set that aside as the mandate's second item
+> and it is P30's. No vehicle content beyond one drivable rig. No 50 km² island.
+> No `character.*` node kit. And no second schema move: the scene bumped exactly
+> once, in P29.3, which is what the risk register asked for on the day the phase
+> was planned.
+
 - **P29.1 `.inf_sm` model v2** — 1. typed parameters (`Bool`/`Int`/`Float`/`Trigger`, a trigger
   consumed by the transition that read it); 2. condition **trees** (`And`/`Or`/`Not` over typed
   compares) replacing the flat AND list; 3. transition **priority** + an interruption model (which
@@ -18719,6 +19141,17 @@ shows a one-line authoring change as a one-line diff.
   and the seam the P29.4 audit pinned for this wave (**the foot-publish
   convention**). **All five landed** — see the STATUS block above for what each
   one is, for the six defects the course found, and for the bounds each carries.
+- **P29.7 Vehicles & flight** — 1. a raycast vehicle controller (suspension by ray, drive
+  and steer at the controller, rapier's dynamic-raycast pattern done natively); 2. enter/exit
+  choreography through motion warping onto the seat; 3. `MovementMode::Driving` routing input
+  to the vehicle through the `Vehicle` trait, with one real drivable test rig shipped; 4.
+  `Flying` as 6-DOF movement with banking; 5. `phase29_gate` extended with a drive-and-fly
+  segment on the same replay discipline. **All five landed**, and with them three things the
+  clause did not ask for: a level's `gravity_3d` wired to the solver whose name it carries, the
+  editor-versus-shipping divergence **closed** rather than formalized (it was that gravity), and
+  the gate's two remaining in-process claims made by real subprocesses. See the STATUS block
+  above for the phase-closing ledger, the carried-item disposition table and the S1–S8
+  scorecard.
 
 ### Amendment (2026-08-15) — the full movement catalogue
 
