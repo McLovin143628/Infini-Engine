@@ -333,7 +333,7 @@ fn the_cost_of_the_city_as_cubes_and_as_baked_meshes() {
     );
     assert_eq!(
         vgeom_scene.vgeom_instances.len(),
-        (side * side) as usize,
+        side * side,
         "the vgeom side must draw one instance per building and no more"
     );
     let _ = BUILDINGS;

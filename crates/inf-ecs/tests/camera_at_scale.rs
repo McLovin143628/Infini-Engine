@@ -48,9 +48,9 @@ fn run(lag: fn(Vec3d, Vec3d, f64, Vec3d, f64) -> Vec3d, anchor: Vec3d, steps: us
         // vertical so the y axis is exercised too.
         let t = s as f64 * DT * 6.0;
         let target = Vec3d::new(
-            anchor.x + t * 0.7071067811865476,
+            anchor.x + t * std::f64::consts::FRAC_1_SQRT_2,
             anchor.y + (t * 0.1),
-            anchor.z + t * 0.7071067811865476,
+            anchor.z + t * std::f64::consts::FRAC_1_SQRT_2,
         );
         pivot = lag(pivot, target, YAW, speeds(), DT);
     }
@@ -169,9 +169,9 @@ fn a_rebase_mid_lag_moves_the_camera_by_exactly_the_origin_and_no_more() {
             // so the render pose jumps by that and by nothing else.
             let world_step = glam::DVec3::new(world.x - pw.x, world.y - pw.y, world.z - pw.z);
             let render_step = glam::DVec3::new(
-                f64::from(render.x) - f64::from(pr.x),
-                f64::from(render.y) - f64::from(pr.y),
-                f64::from(render.z) - f64::from(pr.z),
+                f64::from(render.x) - pr.x,
+                f64::from(render.y) - pr.y,
+                f64::from(render.z) - pr.z,
             );
             // `to_render` is f32, so the comparison carries a float-precision
             // tolerance rather than being exact — at a 1024 m origin distance an

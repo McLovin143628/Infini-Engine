@@ -85,6 +85,20 @@ impl FrameTimings {
 /// costs 512 bytes of query-set storage.
 pub const MAX_FRAME_MARKS: u32 = 64;
 
+/// The frame writes 29 graph nodes + 4 out-of-graph segments + the origin mark.
+///
+/// A **compile-time** assertion rather than a test, because both sides are
+/// constants and clippy is right that a runtime `assert!` over two `const`s is
+/// an assertion with a constant value. What it guards is real: a timer that
+/// silently drops the tail would report a frame whose segments no longer sum to
+/// its total, and a diagnostic that lies is worse than none. The *runtime* twin
+/// — that the report names every node the renderer actually built — is
+/// `gpu_timing::the_report_names_every_pass_and_the_segments_tile_the_frame`,
+/// which reads `EngineRenderer::pass_names` and cannot be folded away.
+/// 29 graph nodes, 4 out-of-graph segments, and the frame's origin mark.
+const FRAME_MARKS_NEEDED: u32 = 34;
+const _: () = assert!(MAX_FRAME_MARKS >= FRAME_MARKS_NEEDED);
+
 /// A per-frame GPU stopwatch over one `wgpu::QuerySet`.
 ///
 /// Single-buffered on purpose: the harness that reads it polls the device every
@@ -121,7 +135,7 @@ impl FrameTimer {
         let bytes = u64::from(MAX_FRAME_MARKS) * wgpu::QUERY_SIZE as u64;
         // The resolve destination's offset must be 256-aligned; its SIZE need
         // only hold the queries, but rounding up keeps both buffers one shape.
-        let bytes = bytes.next_multiple_of(u64::from(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT));
+        let bytes = bytes.next_multiple_of(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT);
         Some(Self {
             set: gpu.device.create_query_set(&wgpu::QuerySetDescriptor {
                 label: Some("inf-frame-timestamps"),
@@ -295,24 +309,5 @@ mod tests {
         );
         let sum: f64 = t.passes.iter().map(|p| p.ms).sum();
         assert_eq!(sum, t.total_ms, "the segments must tile the frame");
-    }
-
-    /// The mark budget covers the graph the renderer actually builds, with the
-    /// out-of-graph segments and the frame origin counted.
-    ///
-    /// This is the arm that fails the day someone adds a thirty-fifth pass: a
-    /// timer that silently drops the tail would report a frame whose segments no
-    /// longer sum to its total, and a diagnostic that lies is worse than none.
-    #[test]
-    fn the_mark_budget_covers_the_whole_frame() {
-        // 29 graph nodes + vt-stream + vsm-raster + vt-feedback + vsm-mark + the
-        // origin mark.
-        const NEEDED: u32 = 29 + 4 + 1;
-        assert!(
-            MAX_FRAME_MARKS >= NEEDED,
-            "the frame writes {NEEDED} timestamps and the query set holds \
-             {MAX_FRAME_MARKS} — raise MAX_FRAME_MARKS or the tail of every \
-             per-pass report is silently missing"
-        );
     }
 }

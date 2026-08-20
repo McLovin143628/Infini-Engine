@@ -729,10 +729,14 @@ it look like. What is missing to ship it is named below.
 
 | | after the I3 audit | after I4 |
 |---|---|---|
-| battery blocks / passed / failed / ignored | 298 / 5 670 / 0 / 13 | see the ROADMAP block |
-| goldens | 54, byte-frozen | **54, byte-frozen** — `timing_changes_no_pixel` is the arm that says so |
-| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved** |
-| new ratchet constants | — | `SHIPPING_FRAME_CEILING_MS` 58.0, `SHIPPING_FRAME_P99_CEILING_MS` 64.0 (targets 16.6 / 33.2, never asserted) |
+| battery blocks / passed / failed / ignored | 298 / 5 670 / 0 / 13 | **305 / 5 690 / 0 / 14** — 7 new test binaries, **exactly 20** new arms, and the one new `#[ignore]` is the 257²-page island confirmation |
+| frontend tests / files | 702 / 78 | **702 / 78**, `tsc` clean — no UI was touched |
+| goldens | 54, byte-frozen | **54, byte-identical under `INF_GOLDEN_STRICT=1`** — and `timing_changes_no_pixel` is the arm that says an attached GPU stopwatch cannot move one |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| rustdoc individual warnings (cold, all roots touched) | 412 | **412** — 446 `^warning` lines − 34 per-crate summaries, unmoved |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved.** Every struct this wave grew (`VtPoolConfig`, `VtStats`, `VtTransaction`, `AdmitLog`, `VirtualTextureSettings`, `RenderSettings`) carries no serde derive; checked rather than assumed |
+| new ratchet constants | — | `SHIPPING_FRAME_CEILING_MS` 58.0, `SHIPPING_FRAME_P99_CEILING_MS` 64.0 (targets 16.6 / 33.2, never asserted); `StreamBudget::default().max_resident_tiles` **1024 → 860**, derived |
+| committed samples | 20 levels | **20** — the instrument's scene is composed at test time and writes nothing into `samples/` |
 
 ---
 

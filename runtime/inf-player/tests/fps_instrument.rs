@@ -163,7 +163,7 @@ fn open(pack: &Path) -> Fixture {
     let built = inf_player::build_world_from_pack(&source).expect("the pack world builds");
     // R-P4: the level's own render block, captured before the world is consumed
     // — exactly where `inf_player::run_windowed` captures it.
-    let record = built.render.clone();
+    let record = built.render;
     let materials = std::sync::Arc::new(source.material_content());
     let reader = std::sync::Arc::new(
         PackReader::open(&pack.join(inf_player::level::PACK_FILE)).expect("the pack maps"),
@@ -307,7 +307,7 @@ impl Measured {
 /// two halves are public and named as such precisely so a gate can drive them
 /// without a window.
 fn measure(gpu: &GpuContext, fx: &mut Fixture, w: u32, h: u32) -> Measured {
-    let (settings, _tier) = shipped_settings(gpu, fx.record.clone());
+    let (settings, _tier) = shipped_settings(gpu, fx.record);
     let target = HeadlessTarget::new(gpu, w, h);
     let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
     renderer.set_settings(settings);
@@ -503,7 +503,7 @@ fn the_frame_at_shipping_resolution() {
     let tmp = tempfile::tempdir().expect("tmp");
     let pack = cook_instrument(tmp.path());
     let mut fx = open(&pack);
-    let (settings, tier) = shipped_settings(&gpu, fx.record.clone());
+    let (settings, tier) = shipped_settings(&gpu, fx.record);
 
     println!(
         "\n=== THE FPS INSTRUMENT === {} ({:?}), tier {tier:?}\n\

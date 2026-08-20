@@ -505,13 +505,13 @@ impl VtResidency {
     /// the second thing when the first happened is the wrong-diagnosis hazard
     /// this tree has already paid for once (`AssetPayload::migrates_from`).
     pub fn upload_advisory(&self) -> Option<crate::VtAdvisory> {
-        (self.throttled_run >= crate::VT_SUSTAINED_THROTTLE_FRAMES).then(|| {
+        (self.throttled_run >= crate::VT_SUSTAINED_THROTTLE_FRAMES).then_some(
             crate::VtAdvisory::UploadBudgetSustained {
                 budget_bytes: self.cfg.upload_budget_bytes,
                 frames: self.throttled_run,
                 pages: self.stats.throttled,
-            }
-        })
+            },
+        )
     }
 
     pub fn stats(&self) -> &VtStats {
