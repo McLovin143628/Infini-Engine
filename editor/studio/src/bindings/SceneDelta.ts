@@ -3,8 +3,10 @@ import type { SceneNode } from "./SceneNode";
 
 /**
  * An incremental world change (`world://delta` event). Structural edits ship
- * as added/removed/updated node sets; `roots`, `selection`, and the doc meta
- * are small so they ride along every delta for a trivially-correct reducer.
+ * as added/removed/updated node sets; `selection` and the doc meta are small
+ * so they ride along every delta for a trivially-correct reducer. **`roots`
+ * stopped riding along** at IB-13 — it is the one whole-tree field that is not
+ * small at city scale — and is `None` for "unchanged"; see its own doc.
  */
 export type SceneDelta = { version: number, added: Array<SceneNode>, removed: Array<string>, updated: Array<SceneNode>, 
 /**

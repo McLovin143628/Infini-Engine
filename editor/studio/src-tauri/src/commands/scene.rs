@@ -1290,7 +1290,11 @@ pub async fn scene_open(
     *state.current_level_path.lock().map_err(|e| e.to_string())? = Some(path);
     // A fresh document restarts the version counter (lower than the doc we just
     // replaced), so drop the stale baseline — otherwise the version-monotonic
-    // guard in `emit_world_delta` would suppress this scene's full delta.
+    // guard in `emit_world_delta` would suppress this scene's emit entirely.
+    // (The TREE reaches the frontend through the `SceneSnapshot` this command
+    // returns, which is what `applySnapshot` consumes; the emit that follows
+    // carries the doc tail — title, dirty, selection, undo labels — and, since
+    // `snapshot()` has just re-seeded the projection, no nodes.)
     *state.last_version.lock().map_err(|e| e.to_string())? = None;
     emit_world_delta(&app, &state);
     Ok(snap)
@@ -1401,7 +1405,8 @@ pub async fn scene_new(
     *state.current_level_path.lock().map_err(|e| e.to_string())? = None;
     // Reset the delta baseline: the fresh document's version counter restarts
     // below the replaced one, which the version-monotonic guard would otherwise
-    // treat as a stale (backward) emit and drop.
+    // treat as a stale (backward) emit and drop. The tree itself reaches the
+    // frontend through the returned `SceneSnapshot` — see `scene_open`.
     *state.last_version.lock().map_err(|e| e.to_string())? = None;
     emit_world_delta(&app, &state);
     Ok(snap)
