@@ -19,7 +19,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | Wave | Scope | Status |
 |---|---|---|
 | **I1** | foundations — IB-7 layout, IB-1 PCG/streaming, IB-10 schema window, IB-15 multi-terrain | **DONE + AUDITED** (+ `.inf_sm` v3 addendum) |
-| **I2** | the GIS door — IB-3, IB-4, IB-5, IB-6, IB-14, IB-11's near half | **DONE + AUDITED** — battery 296 / 5 619 / 0 / 13, frontend 702 / 78, goldens 54, clippy 0, rustdoc 443 |
+| **I2** | the GIS door — IB-3, IB-4, IB-5, IB-6, IB-14, IB-11's near half | **DONE + AUDITED** — battery 296 / 5 618 / 0 / 13, frontend 702 / 78, goldens 54, clippy 0, rustdoc 443 |
 | I3 | city scale — IB-2 (grammar collider LOD/budget, lot subdivision) | not started |
 | I4 | the fps instrument + budgets — IB-9, IB-16, the shipping-resolution harness | not started |
 | I5 | source data — IB-11 (DEM ingest reality, CRS, LiDAR) | not started |
@@ -92,10 +92,11 @@ Wave numbering is this file's; the certification's ordering is what it follows.
   imports that differ by a metre in the eighth digit.
 * **A road has to be subdivided ACROSS its width, not only along its length** (IB-4).
   Resampling the spine at the terrain's pitch closes the longitudinal gap and does nothing
-  for the transverse one — **49 mm** between a 14 m arterial's crown and the ground against
-  0.4 mm along it. The first builder had one quad across, and the longitudinal fix hid the
-  transverse defect perfectly, because both are "the road does not follow the ground" and
-  only one was measured.
+  for the transverse one. The first builder had one quad across, and the longitudinal fix hid
+  the transverse defect perfectly, because both are "the road does not follow the ground" and
+  only one was measured. Both alternatives are priced and **printed** now (I2 audit), on a
+  14 m arterial at a 1 m step: **0.000750 m** with both axes subdivided, **5.0490 m** on the
+  centreline's own vertices, **0.0495 m** with one quad across.
 * **Plan in the lot's frame, place in the world's** (IB-6). An oriented `Rect2` would have
   meant an OBB through the slicer, the adjacency test, the wall builder, the roof, the
   stairs and the furniture grid — and `partition::adjacencies`' world-axis `same_line`

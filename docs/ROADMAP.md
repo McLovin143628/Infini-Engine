@@ -23902,7 +23902,7 @@ unchanged, and verified biting.
 | | after I2 | after the audit |
 |---|---|---|
 | battery blocks | 296 | **296** |
-| tests passed / failed / ignored | 5 612 / 0 / 13 | **5 619 / 0 / 13** |
+| tests passed / failed / ignored | 5 612 / 0 / 13 | **5 618 / 0 / 13** |
 | frontend tests / files | 702 / 78 | **702 / 78** |
 | goldens | 54 | **54**, byte-unchanged |
 | `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
