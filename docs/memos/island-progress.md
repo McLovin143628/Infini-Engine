@@ -429,9 +429,17 @@ a drag frame and **0.0006 ms** for a select frame.
 
 ### The commits
 
+`866fb55..d6218ec`, **eleven**, plus the two that close the ledger. The six that carry the
+work:
+
 `cdeb888` lot subdivision + structure groups + the composition door · `29ac631` the sim-side
 collider band · `fa4963b` the structure draw LOD + the inner band · `d170651` the scoped
 scene projection · `d83b762` the 64-bit visbuffer id · `666d63d` the city fixture + gate.
+
+Then `14a5fac` this ledger · `849f105` six committed binary asset kinds that had no `-text`
+rule · `dd2bbbb` fmt · `4d279b9` rustdoc back to zero added warnings · `d6218ec` clippy zero.
+`291de87` and its successor correct this range and these counts — the field the I2 audit
+found wrong in the block above, which a ledger cannot outsource to a test.
 
 ### Counts
 
@@ -440,12 +448,10 @@ scene projection · `d83b762` the 64-bit visbuffer id · `666d63d` the city fixt
 | battery blocks / passed / failed / ignored | 296 / 5 618 / 0 / 13 | **298 / 5 663 / 0 / 13** |
 | frontend tests / files | 702 / 78 | **702 / 78**, `tsc` and `eslint` clean |
 | goldens | 54, byte-frozen | **54, byte-identical under `INF_GOLDEN_STRICT=1`** |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
 | rustdoc warnings (ceiling 450) | 443 | **445**, and the warning **list** is byte-identical to `866fb55`'s — this wave added zero. (`866fb55` measures 445 today too; the ledger's 443 does not reproduce, which is the I2 law arriving a third time.) |
+| `cargo deny` | — | bans / licenses / sources **ok**; advisories **FAILED on a yanked `arrayref 0.3.9`** via `winit → sctk-adwaita → tiny-skia`. **Pre-existing** — it fails identically at `866fb55`, and this wave added no dependency. |
 | schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved** |
-
-The battery was measured at `14a5fac` (5 662) plus the one arm that landed after it —
-`the_shipped_projection_emits_complementary_parts_and_shell_batches`, green and printed in
-the gate's own output. Every other later commit is documentation or `.gitattributes`.
 
 ---
 

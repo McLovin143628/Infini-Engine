@@ -23915,10 +23915,12 @@ No schema moved, no golden moved, no sample moved, and no P29-or-prior arm chang
 
 ## Phase 30 (the island) — wave I3: city scale (2026-08-20)
 
-`866fb55..d6218ec` — **eleven** commits, sole tree-writer, tagged `(I3)`. Three certified
-ceilings killed, and **every number below lives in a test that prints it**. (The count and
-the range are stated exactly because the I2 audit found both wrong in the block above this
-one: *a number that only lives in a ledger drifts*.)
+`866fb55..d6218ec` — **eleven** commits, plus the one that writes this line, sole
+tree-writer, tagged `(I3)`. Three certified ceilings killed, and **every number below lives
+in a test that prints it**. (The count and the range are stated exactly, and say which end
+they exclude, because the I2 audit found both wrong in the block above this one: *a number
+that only lives in a ledger drifts*, and a ledger's own commit range is the one number it
+cannot outsource to a test.)
 
 The certification's IB-2 is one arithmetic and it is about scale: *"12 850 static colliders
 cost 4.663 ms/step (0.363 µs each); the town is **seven** buildings; 60 fps ceiling ≈ 25
@@ -24177,9 +24179,20 @@ working.
 
 | | after the I2 audit | after I3 |
 |---|---|---|
+| battery blocks / passed / failed / ignored | 296 / 5 618 / 0 / 13 | **298 / 5 663 / 0 / 13** |
+| frontend tests / files | 702 / 78 | **702 / 78**, `tsc` and `eslint` clean |
 | goldens | 54, byte-frozen | **54, byte-identical under `INF_GOLDEN_STRICT=1`** |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| rustdoc warnings (ceiling 450) | 443 | **445**, warning **list** byte-identical to `866fb55`'s |
 | schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged** |
 | committed levels | 19 | **20** (the city) |
+
+**Two ledger numbers that do not reproduce, reported rather than restated.** The I2 audit's
+rustdoc figure of **443** measures **445** at `866fb55` today, with no doc between them
+changed — which is why this wave's claim is a *diff of the warning list against its own start
+point* rather than a count. And `cargo deny`'s **advisories leg fails on a yanked
+`arrayref 0.3.9`** (`winit → sctk-adwaita → tiny-skia`); it fails identically at `866fb55`,
+this wave added no dependency, and bans / licenses / sources are all ok.
 
 **No schema moved and no golden moved.** Every new field is `serde(skip)` derived state,
 asserted absent from the encoded form.
