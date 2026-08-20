@@ -1776,6 +1776,16 @@ struct BootManifest {
     packs: Vec<String>,
     #[serde(default)]
     root_level: Option<Uuid>,
+    /// The project's session-default animation blend mode, by name.
+    ///
+    /// **The cooked path's half of the wire the PIE path already had.** The
+    /// editor→player `ScenePayload` carries `blend_mode` and
+    /// `build_world_from_payload` applies it; a cooked boot has no payload at
+    /// all, so until this key existed a project that set the mode previewed one
+    /// blend and shipped another. Defaulted, so an old manifest and a new player
+    /// agree on `Inertialize`.
+    #[serde(default)]
+    anim_blend: String,
 }
 
 /// A [`LevelSource`] backed by a cooked `content.inf_pack` (+ optional
@@ -1793,6 +1803,24 @@ pub struct PackLevelSource {
     reader: Arc<PackReader>,
     root_level: AssetId,
     label: String,
+    /// The manifest's `anim_blend`, as an `SmBlendMode` wire discriminant.
+    blend_mode: u8,
+}
+
+/// The `SmBlendMode` wire discriminant a blend-mode name spells.
+///
+/// **The shipped player cannot call `inf_project::anim_blend_wire`** — that
+/// crate is a dev-dependency here, deliberately, so the player links no project
+/// model. The mapping is therefore repeated, and pinned from both sides by
+/// `the_cooked_path_reads_the_projects_session_blend_mode`, which drives the
+/// real `inf.toml` → cook → `manifest.toml` → boot chain rather than either
+/// function on its own.
+fn anim_blend_wire(name: &str) -> u8 {
+    if name.trim().eq_ignore_ascii_case("crossfade") {
+        1
+    } else {
+        0
+    }
 }
 
 impl PackLevelSource {
@@ -1880,11 +1908,23 @@ impl PackLevelSource {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "pack".to_string());
 
+        let blend_mode = manifest
+            .as_ref()
+            .map(|m| anim_blend_wire(&m.anim_blend))
+            .unwrap_or(0);
+
         Ok(Self {
             reader: Arc::new(reader),
             root_level,
             label,
+            blend_mode,
         })
+    }
+
+    /// The project's session-default blend mode, as the `SmBlendMode` wire
+    /// discriminant. `0` (`Inertialize`) when the manifest said nothing.
+    pub fn blend_mode(&self) -> u8 {
+        self.blend_mode
     }
 
     /// Build a pack source from an already-loaded [`PackReader`] — the path the
@@ -1903,6 +1943,10 @@ impl PackLevelSource {
             reader: Arc::new(reader),
             root_level,
             label: label.into(),
+            // The web player fetches pack bytes with no sibling manifest, so it
+            // takes the engine default — the same deterministic fallback the
+            // root-level choice takes two lines up.
+            blend_mode: 0,
         })
     }
 

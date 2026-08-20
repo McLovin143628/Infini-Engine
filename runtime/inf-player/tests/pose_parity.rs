@@ -1427,3 +1427,86 @@ fn the_payloads_session_blend_mode_reaches_the_built_world() {
         "both wire values built the same session default, so this arm is vacuous"
     );
 }
+
+/// **The cooked path's session blend mode, end to end** — `inf.toml` → cook →
+/// `manifest.toml` → boot → the built world.
+///
+/// The I1 audit's carried bound A5, closed. Its words: `blend_mode`
+/// "round-trips, is applied, and is armed; **nothing can set it**, and the
+/// shipping path never sees it". Both halves are now wired, and this arm drives
+/// the real chain rather than either end of it:
+///
+/// * `ProjectManifest::anim_blend` is what the author writes (Project Settings
+///   ▸ Animation ▸ Blend mode);
+/// * `inf_packager::cook` copies it verbatim into the cooked `manifest.toml`,
+///   which is the only thing the shipped player can read — `inf-project` is a
+///   dev-dependency of `inf-player`, deliberately, so `inf.toml` is not
+///   available at boot;
+/// * `PackLevelSource::open` reads it and `build_world_from_pack` applies it.
+///
+/// The anti-vacuity control is the same one the payload arm carries: the two
+/// names must build different worlds, or this is asserting a default.
+#[test]
+fn the_cooked_path_reads_the_projects_session_blend_mode() {
+    use inf_anim::SmBlendMode::{CrossFade, Inertialize};
+
+    let level = inf_editor_core::scene::serialize::encode(
+        &inf_editor_core::scene::serialize::to_scene_file(&SceneDoc::new()),
+    )
+    .expect("an empty level encodes");
+
+    let cook_and_boot = |blend: &str| -> inf_anim::SmBlendMode {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        let content = root.join("Content");
+        std::fs::create_dir_all(&content).unwrap();
+
+        // A real `inf.toml`, written through the manifest's own writer so the
+        // key's spelling is the one the type produces and not one this test
+        // invented.
+        let mut manifest = inf_project::ProjectManifest::new("BlendTest", "blank-3d");
+        manifest.anim_blend = blend.to_string();
+        manifest.save(&root).expect("inf.toml writes");
+
+        let lvl = content.join("Main.inf_lvl");
+        std::fs::write(&lvl, &level).unwrap();
+        let sidecar = inf_asset::AssetSidecar::new(
+            inf_asset::AssetId::new(),
+            inf_asset::AssetKind::Level,
+            inf_asset::ContentHash::of(&level),
+        );
+        sidecar.save(&lvl).expect("the sidecar writes");
+
+        let out = root.join("Build");
+        inf_packager::cook(&root, &out, &inf_packager::CookOptions::default())
+            .expect("the project cooks");
+
+        // The cooked manifest carries the name — the assertion the player's own
+        // read depends on.
+        let text = std::fs::read_to_string(out.join("manifest.toml")).unwrap();
+        assert!(
+            text.contains(&format!("anim_blend = \"{blend}\"")),
+            "the cook must copy the project's blend mode into manifest.toml; it \
+             wrote:\n{text}"
+        );
+
+        let source = inf_player::level::PackLevelSource::open(&out).expect("the pack opens");
+        let built = inf_player::build_world_from_pack(&source).expect("the pack builds a world");
+        inf_ecs::pose::blend_mode(&built.world)
+    };
+
+    assert_eq!(
+        cook_and_boot("crossfade"),
+        CrossFade,
+        "a project that asks for cross-fade must SHIP cross-fade — this is the \
+         half that did not exist: the cooked path carries no ScenePayload, so it \
+         applied nothing at all and shipped Inertialize whatever the author chose"
+    );
+    assert_eq!(cook_and_boot("inertialize"), Inertialize);
+    // ANTI-VACUITY.
+    assert_ne!(
+        cook_and_boot("crossfade"),
+        cook_and_boot("inertialize"),
+        "both names built the same session default, so this arm is vacuous"
+    );
+}

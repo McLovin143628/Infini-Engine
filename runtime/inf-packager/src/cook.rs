@@ -1434,6 +1434,10 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
         root_level: root_level.map(|a| a.uuid()),
         levels: levels.iter().map(|a| a.uuid()).collect(),
         asset_count: writer.len() as u32,
+        // Copied VERBATIM from `inf.toml`, not re-derived: the shipped player
+        // cannot read `inf.toml`, and one spelling of the name is what keeps
+        // PIE and the cooked boot on the same blend.
+        anim_blend: project.manifest.anim_blend.clone(),
         kinds: kinds.iter().map(|(k, v)| (k.clone(), *v as u32)).collect(),
     };
     let manifest_path = out_dir.join(MANIFEST_FILE);

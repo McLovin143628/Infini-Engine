@@ -348,7 +348,17 @@ pub fn build_world_from_pack(source: &PackLevelSource) -> Result<BuiltWorld, Str
                 }
             })
         });
-    level::load(source, &builder)
+    let mut built = level::load(source, &builder)?;
+    // **The cooked path's session blend mode** — the twin of the line
+    // `build_world_from_payload` runs for the PIE path. Without it a cooked boot
+    // applied nothing at all, so a project that set the mode previewed one blend
+    // and shipped another (the I1 audit's carried bound, A5).
+    let mode = match source.blend_mode() {
+        1 => inf_anim::SmBlendMode::CrossFade,
+        _ => inf_anim::SmBlendMode::Inertialize,
+    };
+    inf_ecs::pose::set_blend_mode(&mut built.world, mode);
+    Ok(built)
 }
 
 /// Headless CI path: no window/GPU. Run `--run-frames N` fixed steps of the world

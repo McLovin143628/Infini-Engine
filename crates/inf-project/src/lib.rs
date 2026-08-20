@@ -12,7 +12,10 @@ pub mod recent;
 pub mod template;
 
 pub use error::{ProjectError, Result};
-pub use manifest::{ProjectManifest, PROJECT_FILE, SCHEMA_VERSION};
+pub use manifest::{
+    anim_blend_name, anim_blend_wire, ProjectManifest, ANIM_BLEND_CROSSFADE,
+    ANIM_BLEND_INERTIALIZE, PROJECT_FILE, SCHEMA_VERSION,
+};
 pub use project::Project;
 pub use recent::{RecentProject, RecentProjects};
 pub use template::{scaffold, ProjectTemplate, Scaffolded};

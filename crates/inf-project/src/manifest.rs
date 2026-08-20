@@ -44,6 +44,31 @@ pub struct ProjectManifest {
     /// `stranded levels` advisory is for.
     #[serde(default = "default_levels_dir")]
     pub levels_dir: String,
+    /// **The session-default animation blend mode** — `"inertialize"` (the
+    /// engine's own default) or `"crossfade"`.
+    ///
+    /// # Why a project setting, and why here
+    ///
+    /// `ScenePayload::blend_mode` has round-tripped and been applied since the
+    /// island's schema window, and until now **nothing could set it**: no panel,
+    /// no command, and the blueprint kit declines it by name. So the preview
+    /// default was `Inertialize` in practice and the *cooked* path — which
+    /// carries no `ScenePayload` at all — applied none, which meant a project
+    /// that ever gained a way to change it would preview one blend and ship
+    /// another.
+    ///
+    /// A per-transition mode is authored in `.inf_sm` and ships with the asset;
+    /// this is what an *inheriting* transition inherits, which is a property of
+    /// the whole game rather than of one machine or one level. `inf.toml` is
+    /// where the cook can read it (`inf-packager` depends on this crate; it does
+    /// not depend on the editor), and it is the file an author can put in
+    /// version control.
+    ///
+    /// **This costs no schema move**, for the reason [`Self::levels_dir`]'s note
+    /// spells out: TOML is name-keyed and the field defaults, so an older
+    /// `inf.toml` opens unchanged and an older engine ignores the key.
+    #[serde(default = "default_anim_blend")]
+    pub anim_blend: String,
 }
 
 fn default_content_dir() -> String {
@@ -51,6 +76,36 @@ fn default_content_dir() -> String {
 }
 fn default_levels_dir() -> String {
     "Levels".to_string()
+}
+fn default_anim_blend() -> String {
+    ANIM_BLEND_INERTIALIZE.to_string()
+}
+
+/// The engine's own default blend mode — `SmBlendMode::Inertialize`, wire 0.
+pub const ANIM_BLEND_INERTIALIZE: &str = "inertialize";
+/// `SmBlendMode::CrossFade`, wire 1.
+pub const ANIM_BLEND_CROSSFADE: &str = "crossfade";
+
+/// The `SmBlendMode` **wire discriminant** a blend-mode name spells.
+///
+/// One function, because this name crosses three boundaries — `inf.toml`, the
+/// cook's `manifest.toml`, and the shipped player's boot — and three spellings
+/// of the mapping is how a project previews one blend and ships another. An
+/// unknown name is the engine's default rather than an error: a manifest written
+/// by a newer engine must not stop an older one booting.
+pub fn anim_blend_wire(name: &str) -> u8 {
+    match name.trim().to_ascii_lowercase().as_str() {
+        ANIM_BLEND_CROSSFADE => 1,
+        _ => 0,
+    }
+}
+
+/// The inverse of [`anim_blend_wire`].
+pub fn anim_blend_name(wire: u8) -> &'static str {
+    match wire {
+        1 => ANIM_BLEND_CROSSFADE,
+        _ => ANIM_BLEND_INERTIALIZE,
+    }
 }
 
 impl ProjectManifest {
@@ -63,6 +118,7 @@ impl ProjectManifest {
             template: template.into(),
             content_dir: default_content_dir(),
             levels_dir: default_levels_dir(),
+            anim_blend: default_anim_blend(),
         }
     }
 

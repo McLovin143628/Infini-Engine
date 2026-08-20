@@ -29,6 +29,7 @@ export default function ProjectSettingsDialog() {
   const setPixelsPerUnit = useViewportStore((s) => s.setPixelsPerUnit);
 
   const [ppu, setPpu] = useState(100);
+  const [animBlend, setAnimBlend] = useState("inertialize");
   const [layers, setLayers] = useState<CollisionLayerDto[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,6 +45,7 @@ export default function ProjectSettingsDialog() {
       .then((s) => {
         setError(null);
         setPpu(s.pixels_per_unit);
+        setAnimBlend(s.anim_blend ?? "inertialize");
       })
       .catch((e) => setError(String(e)));
     collisionIpc
@@ -69,6 +71,11 @@ export default function ProjectSettingsDialog() {
       // to the native viewport, so the setting APPLIES rather than merely
       // persisting.
       setPixelsPerUnit(ppu);
+      // The blend mode goes through the project-settings door directly: it is
+      // written to `inf.toml` (which the cook copies into the shipped
+      // `manifest.toml`) AND applied to the live world, so the previewed blend
+      // and the shipped one are the same one.
+      await projectIpc.set({ pixels_per_unit: ppu, anim_blend: animBlend });
       const saved = await collisionIpc.set(layers);
       setLayers(saved);
       pushStatus(`Project settings saved (${saved.length} collision layers).`);
@@ -121,6 +128,26 @@ export default function ProjectSettingsDialog() {
               }}
               className="w-28 rounded border border-(--ink-border) bg-(--ink-bg-2) px-2 py-1 text-right outline-none focus:border-(--ink-accent)"
             />
+          </label>
+
+          <div className="mb-2 text-xs text-(--ink-text-dim)">Animation</div>
+          <label className="mb-3 flex items-center gap-3 text-xs">
+            <span className="w-40 shrink-0">
+              Blend mode{" "}
+              <span className="text-(--ink-text-faint)">(session default)</span>
+            </span>
+            <select
+              value={animBlend}
+              onChange={(e) => setAnimBlend(e.target.value)}
+              className="rounded border border-(--ink-border) bg-(--ink-bg-2) px-2 py-1 outline-none focus:border-(--ink-accent)"
+            >
+              <option value="inertialize">Inertialize</option>
+              <option value="crossfade">Cross-fade</option>
+            </select>
+            <span className="text-(--ink-text-faint)">
+              what a transition with no mode of its own inherits — in the editor, in
+              PIE and in the shipped build
+            </span>
           </label>
 
           <div className="mb-2 text-xs text-(--ink-text-dim)">

@@ -34,8 +34,27 @@ pub struct CookManifest {
     pub levels: Vec<Uuid>,
     /// Total asset count in the pack.
     pub asset_count: u32,
+    /// **The project's session-default animation blend mode**, copied from
+    /// `inf.toml` (`inf_project::ProjectManifest::anim_blend`).
+    ///
+    /// The shipped player links no editor crate and `inf-project` is only a
+    /// **dev**-dependency of it, so `inf.toml` is unreadable at boot. Carrying
+    /// the name here is what closes the gap the I1 audit measured: the PIE path
+    /// applies `ScenePayload::blend_mode` and the cooked path applied nothing at
+    /// all, so a project that set the mode would preview one blend and ship
+    /// another.
+    ///
+    /// A defaulted string in a name-keyed TOML, so `MANIFEST_SCHEMA_VERSION`
+    /// does not move: an older player ignores the key, and an older manifest
+    /// reads as the engine's own default.
+    #[serde(default = "default_anim_blend")]
+    pub anim_blend: String,
     /// Per-kind asset counts, keyed by the kind slug (sorted by `BTreeMap`).
     pub kinds: BTreeMap<String, u32>,
+}
+
+fn default_anim_blend() -> String {
+    inf_project::ANIM_BLEND_INERTIALIZE.to_string()
 }
 
 impl CookManifest {
@@ -67,10 +86,23 @@ mod tests {
             root_level: Some(Uuid::from_u128(0x84_0100)),
             levels: vec![Uuid::from_u128(0x84_0100)],
             asset_count: 3,
+            anim_blend: "crossfade".into(),
             kinds,
         };
         let t1 = m.to_toml().unwrap();
         assert_eq!(t1, m.to_toml().unwrap(), "re-emit is byte-identical");
         assert_eq!(CookManifest::from_toml(&t1).unwrap(), m);
+
+        // **A manifest written before the key existed still reads.** The player
+        // is the reader that matters and it defaults the field too, so an old
+        // build boots on the engine's own blend rather than refusing.
+        let older = t1
+            .lines()
+            .filter(|l| !l.starts_with("anim_blend"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let back = CookManifest::from_toml(&older).expect("an older manifest reads");
+        assert_eq!(back.anim_blend, "inertialize");
+        assert_eq!(back.asset_count, 3, "and the rest of it is unchanged");
     }
 }

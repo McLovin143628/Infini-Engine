@@ -530,7 +530,12 @@ export const useViewportStore = create<ViewportUiState>((set, get) => ({
     const pixelsPerUnit = v > 0 ? v : 100;
     set({ pixelsPerUnit });
     pushSnap(get());
-    void projectSettings.set({ pixels_per_unit: pixelsPerUnit }).catch(() => {});
+    // `anim_blend: null` is a PARTIAL update — this setter is only changing the
+    // pixel grid, and sending a blend name here would reset the project's own
+    // (see `ProjectSettingsDto::anim_blend`).
+    void projectSettings
+      .set({ pixels_per_unit: pixelsPerUnit, anim_blend: null })
+      .catch(() => {});
   },
 
   setToolMode: (toolMode) => {

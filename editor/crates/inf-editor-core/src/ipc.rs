@@ -1780,12 +1780,35 @@ pub struct EntityEditorsDto {
     pub no_editor_reason: Option<String>,
 }
 
-/// Per-project editor settings persisted under `<root>/.infinity/settings.toml`
-/// (`project_settings_get` / `project_settings_set`).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+/// Per-project settings (`project_settings_get` / `project_settings_set`).
+///
+/// **Two files behind one DTO**, and the split is load-bearing:
+/// `pixels_per_unit` is editor state under `<content root>/.infinity/`, while
+/// `anim_blend` is in `inf.toml` because the **cook** has to read it and
+/// `inf-packager` cannot see the editor's files.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct ProjectSettingsDto {
     /// Pixels-per-unit for 2D pixel snapping (default 100).
     pub pixels_per_unit: f32,
+    /// **The session-default animation blend mode** — `"inertialize"` or
+    /// `"crossfade"`.
+    ///
+    /// Stored in `inf.toml` rather than beside `pixels_per_unit` in
+    /// `.infinity/settings.toml`, because the **cook** has to read it: this is
+    /// the writer `ScenePayload::blend_mode` never had, and the whole point of
+    /// it is that the previewed blend and the shipped one are the same. See
+    /// `inf_project::ProjectManifest::anim_blend`.
+    ///
+    /// # `None` on the way IN means "leave it alone"
+    ///
+    /// This DTO is also sent by a caller that is only changing
+    /// `pixels_per_unit` — the viewport store's pixel-snap setter. A plain
+    /// `String` would make that caller send `""`, which resolves to the engine
+    /// default, which would silently reset a project's `crossfade` every time
+    /// somebody nudged the pixel grid. A partial update says which fields it is
+    /// updating.
+    #[serde(default)]
+    pub anim_blend: Option<String>,
 }
 
 // ── Tilemap painting (P8.2b) ─────────────────────────────────────────────
