@@ -232,6 +232,31 @@ fn shell_bits(g: &[StructureGroup]) -> Vec<[u64; 12]> {
         .collect()
 }
 
+/// Plant a `Camera` at `at` — the thing the band is forbidden to read (I3
+/// audit).
+///
+/// `SimBand::from_world` takes an `&EcsWorld` and walks it for
+/// `StreamingSource`; nothing in the type stops a later edit from reaching for a
+/// `Camera` in the same walk, and a camera is exactly what differs between the
+/// editor and a shipped build. So the drive-through gives the two hosts cameras
+/// **a city apart** and requires the traces to stay identical: a band that read
+/// one would diverge at step 0, and without this the fixture has no camera at
+/// all, which is a hazard closed by the absence of a fixture rather than by an
+/// arm.
+fn plant_camera(built: &mut BuiltWorld, guid: Uuid, at: DVec3) {
+    let e = built.world.spawn_with_guid(guid, "Camera", None);
+    built
+        .world
+        .world_mut()
+        .entity_mut(e)
+        .insert(Transform {
+            translation: Vec3d::new(at.x, at.y, at.z),
+            ..Transform::IDENTITY
+        })
+        .insert(inf_ecs::components::Camera::default());
+    built.world.mark_dirty();
+}
+
 /// Put the driver at `step`'s point. Scripted, so the trace is a function of the
 /// level alone — the phase-16 gate's discipline, applied to a drive-through.
 fn drive_to(built: &mut BuiltWorld, step: u64) {
@@ -735,6 +760,10 @@ fn pie_equals_shipping_on_a_drive_through_the_city() {
     let pack = cook_city(tmp.path());
     let mut ship = pack_built(&pack);
     let mut pie = pie_built();
+    // A camera in each host, a city apart, and neither may reach the band.
+    let cam = Uuid::from_u128(0x8430_0CA1);
+    plant_camera(&mut ship, cam, DVec3::new(600.0, 40.0, 400.0));
+    plant_camera(&mut pie, cam, DVec3::new(-600.0, 2.0, -400.0));
 
     // The two hosts must be describing the same city before anything is
     // compared: the shells are what the band tiers, so a payload that lost the
