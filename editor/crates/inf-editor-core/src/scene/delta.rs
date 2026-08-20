@@ -326,4 +326,66 @@ mod tests {
             "an unscoped touch must still project everything"
         );
     }
+
+    /// **A scoped node lists its children in the same order the full projection
+    /// does** (I3 audit).
+    ///
+    /// The two projections read the hierarchy from two different places: the
+    /// full walk builds `children_of` from the document's creation `order`, and
+    /// the scoped walk asked the *world* for a parent's children — which is
+    /// bevy's `Children` component, i.e. the order the links were last
+    /// **inserted**. The two agree until something re-parents, and then a
+    /// rename of the parent ships a re-ordered child list that the next full
+    /// projection puts back: the Outliner's tree reorders under the cursor and
+    /// nothing reports it.
+    ///
+    /// Order is not decoration here — `sceneStore`'s flatten walks
+    /// `node.children` in the order the node states, so it *is* the tree the
+    /// user sees.
+    #[test]
+    fn a_scoped_node_lists_its_children_in_creation_order() {
+        let mut doc = SceneDoc::new();
+        let p = doc.create(SpawnKind::Empty, "P", None);
+        let a = doc.create(SpawnKind::Cube, "A", Some(p));
+        let b = doc.create(SpawnKind::Cube, "B", Some(p));
+        let want = vec![a.to_string(), b.to_string()];
+        let children = |s: &crate::ipc::SceneSnapshot| {
+            s.nodes
+                .iter()
+                .find(|n| n.guid == p.to_string())
+                .expect("the parent is in the snapshot")
+                .children
+                .clone()
+        };
+        assert_eq!(children(&doc.snapshot()), want);
+
+        // `A` leaves and comes back — two structural edits, each of which takes
+        // the full path and is correct. What they leave behind is a world whose
+        // child list is `[B, A]` while the document's creation order is still
+        // `[A, B]`.
+        assert!(doc.reparent(a, None));
+        let _ = doc.project_delta();
+        assert!(doc.reparent(a, Some(p)));
+        let _ = doc.project_delta();
+        assert_eq!(
+            children(&doc.snapshot()),
+            want,
+            "the full projection is creation order, and stays it"
+        );
+
+        // THE SCOPED FRAME: a rename of the parent, which names one guid.
+        doc.rename(p, "P renamed");
+        let d = doc.project_delta();
+        let got = d
+            .added
+            .iter()
+            .chain(&d.updated)
+            .find(|n| n.guid == p.to_string())
+            .expect("the renamed parent is in the delta");
+        assert_eq!(
+            got.children, want,
+            "the scoped delta re-ordered the parent's children; the full \
+             projection says {want:?}"
+        );
+    }
 }

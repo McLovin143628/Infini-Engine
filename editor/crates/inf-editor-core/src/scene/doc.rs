@@ -109,6 +109,25 @@ pub struct SceneDoc {
     /// the same invariant [`touch_at`](Self::touch_at) states, read from the
     /// other end.
     roots_cache: Vec<String>,
+    /// Each published guid's position in [`order`](Self::order) — **creation
+    /// rank** (I3 audit).
+    ///
+    /// A `SceneNode` states its children *in creation order*, and the full
+    /// projection gets that for free by walking `order`. A scoped projection
+    /// cannot walk `order`, so it asks the world instead — and `Children` is
+    /// bevy's own list, in the order the links were last *inserted*. The two
+    /// agree until something re-parents, and then a rename of the parent shipped
+    /// a re-ordered child list that the next full projection put back: the
+    /// Outliner's tree reordered under the cursor and nothing reported it
+    /// (`a_scoped_node_lists_its_children_in_creation_order`).
+    ///
+    /// Refreshed by [`hierarchy_index`](Self::hierarchy_index), i.e. exactly
+    /// where [`roots_cache`](Self::roots_cache) is, and it is stale in exactly
+    /// the same circumstances — `order` only moves on a create, a delete or a
+    /// load, and all three take the full path. ~2 MB at 100 000 entities, which
+    /// buys the scoped branch an `O(children)` sort instead of an `O(entities)`
+    /// walk.
+    order_rank: HashMap<Uuid, u32>,
 }
 
 /// Source of [`SceneDoc::doc_id`]. Never wraps in any plausible session (one
@@ -138,6 +157,7 @@ impl SceneDoc {
             scope: None,
             projected: BTreeSet::new(),
             roots_cache: Vec::new(),
+            order_rank: HashMap::new(),
         }
     }
 
@@ -3538,21 +3558,15 @@ impl SceneDoc {
             }
             // Only what was named. `children_of` is built for the named guids
             // alone — `EcsWorld::children_of` is a per-entity read, so the index
-            // costs O(children of the named), not O(world).
+            // costs O(children of the named), not O(world) — and it is **ranked**
+            // (I3 audit), because the world's `Children` is insertion order and a
+            // `SceneNode` states creation order.
             Some(named) => {
                 let mut children_of: HashMap<Uuid, Vec<String>> = HashMap::new();
                 for &guid in &named {
-                    if let Some(e) = self.world.entity_of(guid) {
-                        let kids: Vec<String> = self
-                            .world
-                            .children_of(e)
-                            .into_iter()
-                            .filter_map(|c| self.world.guid_of(c))
-                            .map(|g| g.to_string())
-                            .collect();
-                        if !kids.is_empty() {
-                            children_of.insert(guid, kids);
-                        }
+                    let kids = self.ranked_children(guid);
+                    if !kids.is_empty() {
+                        children_of.insert(guid, kids);
                     }
                 }
                 let mut added = Vec::new();
@@ -3600,19 +3614,54 @@ impl SceneDoc {
     /// [`project_delta`](Self::project_delta) so the two cannot build the
     /// hierarchy differently — a snapshot and the delta that follows it
     /// disagreeing about who owns a child is a tree the Outliner cannot draw.
-    fn hierarchy_index(&self) -> (HashMap<Uuid, Vec<String>>, Vec<String>) {
+    ///
+    /// It also **refreshes [`order_rank`](Self::order_rank)**, because the same
+    /// walk is what defines creation rank and the scoped projection has no other
+    /// way to state a child list in the order this one does (I3 audit).
+    fn hierarchy_index(&mut self) -> (HashMap<Uuid, Vec<String>>, Vec<String>) {
         let mut children_of: HashMap<Uuid, Vec<String>> = HashMap::new();
         let mut roots: Vec<String> = Vec::new();
-        for &g in &self.order {
+        let mut rank: HashMap<Uuid, u32> = HashMap::with_capacity(self.order.len());
+        for (i, &g) in self.order.iter().enumerate() {
             let Some(e) = self.world.entity_of(g) else {
                 continue;
             };
+            rank.insert(g, i as u32);
             match self.world.parent_of(e).and_then(|p| self.world.guid_of(p)) {
                 Some(parent) => children_of.entry(parent).or_default().push(g.to_string()),
                 None => roots.push(g.to_string()),
             }
         }
+        self.order_rank = rank;
         (children_of, roots)
+    }
+
+    /// `guid`'s children as a [`SceneNode`] states them: **creation order**, the
+    /// order [`hierarchy_index`](Self::hierarchy_index) produces (I3 audit).
+    ///
+    /// The world's own `Children` is insertion order, so this sorts by
+    /// [`order_rank`](Self::order_rank) — `O(children log children)`, which is
+    /// `O(1)` for the leaf a gizmo drag names. A guid the rank does not know is
+    /// one no projection has published; it sorts last, by its text, so the
+    /// answer is still a function of the content.
+    fn ranked_children(&self, guid: Uuid) -> Vec<String> {
+        let Some(e) = self.world.entity_of(guid) else {
+            return Vec::new();
+        };
+        let mut kids: Vec<(u32, String)> = self
+            .world
+            .children_of(e)
+            .into_iter()
+            .filter_map(|c| self.world.guid_of(c))
+            .map(|g| {
+                (
+                    self.order_rank.get(&g).copied().unwrap_or(u32::MAX),
+                    g.to_string(),
+                )
+            })
+            .collect();
+        kids.sort_unstable();
+        kids.into_iter().map(|(_, s)| s).collect()
     }
 
     /// `children_of` is [`snapshot`](Self::snapshot)'s single-pass parent index.
