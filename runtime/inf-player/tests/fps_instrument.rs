@@ -28,6 +28,21 @@
 //! camera that moves down the middle street so nothing is cached from last frame
 //! because nothing moved.
 //!
+//! # What this frame does NOT draw (the I4 audit)
+//!
+//! The shipped settings for a level that authors no render block leave
+//! **shadows, GI, VSM, TAA, SSAO, bloom and the visbuffer all off** —
+//! `RenderSettingsRecord::default()` for five of them, `VsmSettings::default()`
+//! for VSM, the tier for the visbuffer. So the headline below is honest about
+//! what a shipped player draws today and is **not** a lit AAA frame, and the
+//! audit's addition is that the harness says so in its own output and then
+//! measures the difference: `THE STACK'S PRICE` runs the same content at 1080p
+//! with the authorable half turned on through the same `shipped_settings` door,
+//! and prints it. Measured on an RTX 4070 Ti: **p95 92.853 ms lit against
+//! 43.679 ms as shipped, GPU frame 36.116 against 17.323** — the stack roughly
+//! doubles the frame, and quoting the shipped number as "what the engine costs"
+//! without that line would be quoting a frame with no shadows in it.
+//!
 //! # How it is measured
 //!
 //! * **A whole discarded pass** runs first — pipelines compile, the terrain's
@@ -39,6 +54,14 @@
 //!   p50 is the one reported. A shared machine's slow round is a statement about
 //!   the machine; the fastest round is the closest this can get to a statement
 //!   about the engine. (`inf-anim`'s `inertialization` harness is the precedent.)
+//!   It also means the headline is the *best* of `ROUNDS`, so the printed
+//!   distance from 60 fps is a lower bound on the distance; every round's
+//!   percentiles are printed beside it.
+//! * **The per-stage tables are MEANS and the headline is a PERCENTILE**, which
+//!   the output now says on the line above the table (the I4 audit). The CPU
+//!   stages are asserted to tile the round's own **mean** frame, so a cost that
+//!   sits in no stage — as the timestamp readback did — is a red arm rather than
+//!   an unexplained few milliseconds between two tables.
 //!
 //! # Where it asserts
 //!
@@ -99,14 +122,23 @@ const ROUNDS: usize = 3;
 /// A frame that is CPU-bound and cannot say WHERE is the same defect the
 /// certification found on the GPU side, one processor over — so the instrument
 /// splits the wall clock at the four seams a host actually has.
+/// The last stage is **the instrument's own overhead**, and it is here for the
+/// reason the GPU segments tile the GPU frame: a breakdown whose parts do not add
+/// up to the whole it sits beside is a breakdown of a frame nobody measured. The
+/// timestamp readback (`gpu_timings`, a `map_async` + a poll) happens inside the
+/// wall clock that produces p50/p95/p99, and a shipped frame does not pay it. It
+/// is measured, printed, and subtracted by the reader rather than left as an
+/// unnamed residue between a 37.8 ms stage table and a 39.9 ms p50 — which is
+/// what the first version of this file left. (Added by the I4 audit.)
 const CPU_STAGE_NAMES: [&str; CPU_STAGES] = [
     "sim fixed step",
     "stream sync",
     "projection",
     "render (record)",
     "poll (GPU wait)",
+    "timing readback",
 ];
-const CPU_STAGES: usize = 5;
+const CPU_STAGES: usize = 6;
 
 // ── the fixture ─────────────────────────────────────────────────────────────
 
@@ -245,6 +277,12 @@ struct Round {
     p95: f64,
     p99: f64,
     worst: f64,
+    /// The **mean** of the same frames. Carried beside the percentiles because
+    /// every per-stage number this file prints is a mean and every headline
+    /// number is a percentile, and reading one against the other is only honest
+    /// if both are on the page. It is also what makes the stage table's tiling
+    /// assertion possible.
+    mean: f64,
 }
 
 /// Nearest-rank percentile over a sorted sample — the definition that always
@@ -260,11 +298,16 @@ fn percentile(sorted: &[f64], q: f64) -> f64 {
 
 fn round_of(mut frames: Vec<f64>) -> Round {
     frames.sort_by(f64::total_cmp);
+    let mean = match frames.is_empty() {
+        true => 0.0,
+        false => frames.iter().sum::<f64>() / frames.len() as f64,
+    };
     Round {
         p50: percentile(&frames, 0.50),
         p95: percentile(&frames, 0.95),
         p99: percentile(&frames, 0.99),
         worst: *frames.last().unwrap_or(&0.0),
+        mean,
     }
 }
 
@@ -306,8 +349,13 @@ impl Measured {
 /// `project_scene_full`, which is `PlayerRenderHost::project`'s whole body — the
 /// two halves are public and named as such precisely so a gate can drive them
 /// without a window.
-fn measure(gpu: &GpuContext, fx: &mut Fixture, w: u32, h: u32) -> Measured {
-    let (settings, _tier) = shipped_settings(gpu, fx.record);
+fn measure(
+    gpu: &GpuContext,
+    fx: &mut Fixture,
+    w: u32,
+    h: u32,
+    settings: inf_render::RenderSettings,
+) -> Measured {
     let target = HeadlessTarget::new(gpu, w, h);
     let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
     renderer.set_settings(settings);
@@ -357,7 +405,14 @@ fn measure(gpu: &GpuContext, fx: &mut Fixture, w: u32, h: u32) -> Measured {
         let t = std::time::Instant::now();
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         cpu[4] = t.elapsed().as_secs_f64() * 1000.0;
-        (renderer.gpu_timings(gpu), cpu)
+        // **The instrument's own cost, inside the instrument's own clock.** The
+        // readback below is a `map_async` plus a second poll, and it is inside
+        // the `t0` span the percentiles are taken over — so it has to be a named
+        // stage or the stage table stops tiling the frame it sits under.
+        let t = std::time::Instant::now();
+        let timings = renderer.gpu_timings(gpu);
+        cpu[5] = t.elapsed().as_secs_f64() * 1000.0;
+        (timings, cpu)
     };
 
     // The discarded pass: pipelines compile, the terrain's render cut converges
@@ -524,12 +579,38 @@ fn the_frame_at_shipping_resolution() {
         settings.bloom.enabled,
         settings.vt.budget_bytes / (1024 * 1024),
     );
+    // **WHAT THIS FRAME DOES NOT DRAW, said out loud** (the I4 audit).
+    //
+    // Every one of those flags is `false`, and none of it is the instrument's
+    // choice: `RenderSettingsRecord::default()` ships shadows / GI / TAA / SSAO
+    // / bloom off, `VsmSettings::default().enabled` is `false` engine-wide
+    // ("until P27.4 gives the pages a receiver"), and `VgeomSettings::visbuffer`
+    // is off on every tier. So the headline below is an honest measurement of
+    // **what a shipped player draws for a level that authors no render block**,
+    // and it is emphatically not a measurement of a frame with a lighting stack
+    // in it. Quoting the number without this line would make "≥ 60 fps" mean a
+    // frame with no shadows in it. `the_price_of_the_lighting_stack` below runs
+    // the same content with the authorable half turned on and prints what it
+    // costs — reported, never asserted, because the ceilings are set from the
+    // shipped configuration.
+    println!(
+        "NOTE — the measured frame draws NO shadows, NO GI, NO VSM, NO TAA, NO \
+         SSAO, NO bloom and NO visbuffer. That is the shipped default for a level \
+         with no authored render block, not a choice this harness made; the price \
+         of turning the authorable half on is printed at the end of this run."
+    );
 
     let mut worst_p95 = 0.0f64;
     let mut worst_p99 = 0.0f64;
+    // The 1080p row's own p95 and GPU frame, kept so the lighting stack's price
+    // is a difference between two runs of the SAME resolution.
+    let mut shipped_1080 = (0.0f64, 0.0f64);
     for (w, h, label) in RESOLUTIONS {
-        let m = measure(&gpu, &mut fx, w, h);
+        let m = measure(&gpu, &mut fx, w, h, settings);
         let r = m.round();
+        if (w, h) == (RESOLUTIONS[0].0, RESOLUTIONS[0].1) {
+            shipped_1080 = (r.p95, m.gpu_frame_ms);
+        }
         println!(
             "\n{label} ({w}x{h}): p50 {:.3} ms ({:.1} fps) | p95 {:.3} ms | \
              p99 {:.3} ms | worst {:.3} ms   [round {} of {ROUNDS}]",
@@ -560,13 +641,33 @@ fn the_frame_at_shipping_resolution() {
             );
         }
         let cpu_sum: f64 = m.cpu_ms.iter().sum();
-        println!("{label} CPU frame {cpu_sum:.3} ms, stage by stage:");
+        println!(
+            "{label} CPU frame {cpu_sum:.3} ms (a MEAN — every stage below is a \
+             mean, and the p50/p95/p99 above are percentiles of the same {FRAMES} \
+             frames; the round's own mean frame is {:.3} ms), stage by stage:",
+            r.mean
+        );
         for (n, ms) in CPU_STAGE_NAMES.iter().zip(m.cpu_ms) {
             println!(
                 "{label}   {n:<16} {ms:7.3} ms  ({:5.1} % of the CPU frame)",
                 ms / cpu_sum.max(1.0e-9) * 100.0
             );
         }
+        // **THE STAGES TILE THE FRAME** — the CPU twin of the GPU segments'
+        // tiling assertion below, and the arm that would have caught the residue
+        // the I4 audit found: the timestamp readback sat inside the wall clock the
+        // percentiles are taken over and inside no stage, so the table summed to
+        // 37.839 ms beside a 39.792 ms headline with nothing naming the gap.
+        // 0.5 ms is one `Instant::now()` pair per stage plus the loop's own
+        // bookkeeping, which is what the difference is allowed to be.
+        assert!(
+            (cpu_sum - r.mean).abs() < 0.5,
+            "{label}: the CPU stages sum to {cpu_sum:.3} ms beside a {:.3} ms mean \
+             frame — {:.3} ms of the measured frame is in no stage, so the \
+             breakdown describes a frame this harness did not time",
+            r.mean,
+            (r.mean - cpu_sum).abs()
+        );
         if m.passes.is_empty() {
             println!("{label} per-pass: unavailable (no timestamp queries on this device)");
         } else {
@@ -599,10 +700,12 @@ fn the_frame_at_shipping_resolution() {
         // overlaps them, so the frame it would show is bounded below by the
         // dearer of the two halves. Reported as an estimate and never asserted —
         // it is arithmetic over two measurements, not a third measurement.
-        let submitted = cpu_sum - m.cpu_ms[4];
+        // The wait AND the instrument's own readback come off: neither is work a
+        // presenter's frame does.
+        let submitted = cpu_sum - m.cpu_ms[4] - m.cpu_ms[5];
         let pipelined = submitted.max(m.gpu_frame_ms);
         println!(
-            "{label} PIPELINED ESTIMATE {pipelined:.3} ms ({:.1} fps) = max(CPU without the wait {submitted:.3}, GPU frame {:.3}) — an estimate, not a measurement; the asserted number is the serialized p95 above",
+            "{label} PIPELINED ESTIMATE {pipelined:.3} ms ({:.1} fps) = max(CPU without the wait or the stopwatch {submitted:.3}, GPU frame {:.3}) — an estimate, not a measurement; the asserted number is the serialized p95 above",
             1000.0 / pipelined.max(1.0e-9),
             m.gpu_frame_ms
         );
@@ -614,6 +717,93 @@ fn the_frame_at_shipping_resolution() {
         );
         worst_p95 = worst_p95.max(r.p95);
         worst_p99 = worst_p99.max(r.p99);
+    }
+
+    // ── THE PRICE OF THE LIGHTING STACK (the I4 audit) ──────────────────────
+    //
+    // Everything above is the shipped default, and the shipped default has no
+    // shadows in it. A constitution that says what "≥ 60 fps" means over a frame
+    // with the expensive half of the renderer switched off would be quoted for
+    // years as though it covered a lit frame, so the same content is run once
+    // more at 1080p with the stack on and the difference is printed.
+    //
+    // Through the **authoring door** (`RenderSettingsRecord` → `shipped_settings`),
+    // not by poking `RenderSettings`: that is what an author enabling shadows in
+    // Project Settings produces, so the number is a number about a level somebody
+    // could ship. VSM is the one exception — it has no authorable field, because
+    // `VsmSettings::default().enabled` is a *code* default the tier applies over —
+    // so it is set beside the record and named as such.
+    //
+    // **Reported, never asserted, and never folded into `worst_p95`.** The
+    // ratchets are set from the shipped configuration; a second configuration
+    // asserted against them would be a ceiling for a frame nobody has ratcheted.
+    {
+        let lit_record = inf_scene::RenderSettingsRecord {
+            bloom_enabled: true,
+            ssao_enabled: true,
+            taa: true,
+            shadows_enabled: true,
+            gi_enabled: true,
+            ..fx.record
+        };
+        let (mut lit, lit_tier) = shipped_settings(&gpu, lit_record);
+        lit.vsm.enabled = true;
+        let (w, h, label) = RESOLUTIONS[0];
+        let m = measure(&gpu, &mut fx, w, h, lit);
+        let r = m.round();
+        let (base_p95, base_gpu) = shipped_1080;
+        println!(
+            "\n{label} WITH THE LIGHTING STACK ON (tier {lit_tier:?}; shadows {} / \
+             gi {} / vsm {} / taa {} / ssao {} / bloom {}): p50 {:.3} ms ({:.1} fps) \
+             | p95 {:.3} ms | p99 {:.3} ms | GPU frame {:.3} ms",
+            lit.shadows.enabled,
+            lit.gi.enabled,
+            lit.vsm.enabled,
+            lit.taa,
+            lit.ssao.enabled,
+            lit.bloom.enabled,
+            r.p50,
+            1000.0 / r.p50.max(1.0e-9),
+            r.p95,
+            r.p99,
+            m.gpu_frame_ms,
+        );
+        if !m.passes.is_empty() {
+            let mut by_cost = m.passes.clone();
+            by_cost.sort_by(|a, b| b.1.total_cmp(&a.1));
+            println!(
+                "{label} lit, dearest passes: {}",
+                by_cost
+                    .iter()
+                    .take(6)
+                    .map(|(n, ms)| format!("{n} {ms:.3} ms"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        println!(
+            "{label} THE STACK'S PRICE, same resolution and same content: p95 \
+             {:.3} ms lit against {base_p95:.3} ms as shipped ({:+.3} ms), GPU \
+             frame {:.3} ms against {base_gpu:.3} ms ({:+.3} ms). Reported, never \
+             asserted — every ceiling in this file is set from the shipped \
+             configuration, and this is what the shipped configuration is NOT \
+             paying for.",
+            r.p95,
+            r.p95 - base_p95,
+            m.gpu_frame_ms,
+            m.gpu_frame_ms - base_gpu,
+        );
+        // Anti-vacuity: the two configurations really are different renderers.
+        // A tier that clamped the stack back off would make the line above a
+        // comparison of one configuration with itself.
+        assert!(
+            lit.shadows.enabled && lit.gi.enabled,
+            "the lit configuration came back with shadows {} / gi {} — the tier \
+             clamped the stack off, so the price printed above is the price of \
+             nothing",
+            lit.shadows.enabled,
+            lit.gi.enabled
+        );
     }
 
     if !real {

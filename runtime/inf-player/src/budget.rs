@@ -470,13 +470,27 @@ pub const SHIPPING_FRAME_P99_BUDGET_MS: f64 = 33.2;
 /// # The measurement it comes from
 ///
 /// Island wave I4, RTX 4070 Ti, `cargo test --release`, MIN of three rounds of
-/// 120 frames after 24 warm-up, over the composed instrument scene (1 000
-/// grammar buildings / 370 468 solids, a streamed terrain, a skinned character):
-/// see the wave's ROADMAP block for the p50/p95/p99 pair at 1080p and 1440p and
-/// the per-pass breakdown. This constant is set with headroom over the measured
-/// p95 the way every §8 tripwire is — *"deliberately generous… a regression that
-/// matters moves these by an order of magnitude and trips them; a 20 % drift does
-/// not, and is not what CI is for."*
+/// 120 frames after a **discarded pass of 120** (the first write-up said "24
+/// warm-up"; the harness's `FRAMES` is one constant and the discarded pass is a
+/// whole one of them — corrected by the I4 audit), over the composed instrument
+/// scene (1 000 grammar buildings / 370 468 solids, a streamed terrain, a skinned
+/// character): see the wave's ROADMAP block for the p50/p95/p99 pair at 1080p and
+/// 1440p and the per-pass breakdown. This constant is set with headroom over the
+/// measured p95 the way every §8 tripwire is — *"deliberately generous… a
+/// regression that matters moves these by an order of magnitude and trips them; a
+/// 20 % drift does not, and is not what CI is for."*
+///
+/// # What the measured frame does NOT contain
+///
+/// **Shadows, GI, VSM, TAA, SSAO, bloom and the visbuffer are all off** in it —
+/// the shipped defaults for a level that authors no render block. That is a fact
+/// about the engine's defaults rather than about the harness, and it is stated
+/// here because a ceiling is quoted long after the run that minted it: the same
+/// content at 1080p with the authorable half of that stack turned on measures
+/// **p95 92.853 ms against 43.679** (GPU frame 36.116 against 17.323). This
+/// constant does not cover that frame and was never measured over it. The day a
+/// shipped level turns the stack on, this ceiling is measuring a different
+/// renderer and has to be re-minted, not raised.
 ///
 /// # Where it is asserted
 ///
