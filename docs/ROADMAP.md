@@ -23915,8 +23915,10 @@ No schema moved, no golden moved, no sample moved, and no P29-or-prior arm chang
 
 ## Phase 30 (the island) — wave I3: city scale (2026-08-20)
 
-`866fb55..` — six commits, sole tree-writer, tagged `(I3)`. Three certified ceilings killed,
-and **every number below lives in a test that prints it**.
+`866fb55..4d279b9` — **twelve** commits, sole tree-writer, tagged `(I3)`. Three certified
+ceilings killed, and **every number below lives in a test that prints it**. (The count and
+the range are stated exactly because the I2 audit found both wrong in the block above this
+one: *a number that only lives in a ledger drifts*.)
 
 The certification's IB-2 is one arithmetic and it is about scale: *"12 850 static colliders
 cost 4.663 ms/step (0.363 µs each); the town is **seven** buildings; 60 fps ceiling ≈ 25
@@ -24125,7 +24127,7 @@ own item.
 
 ### The gate
 
-`runtime/inf-player/tests/city_scale.rs`, seven arms, **all through the cooked pack** rather
+`runtime/inf-player/tests/city_scale.rs`, **eight arms, all through the cooked pack** rather
 than by calling the rules — the P21.4 law that a rule proven by calling it leaves the
 *wiring* unarmed, and every claim here lives on a wire between a graph, a derived cache, a
 bridge and two hosts.
@@ -24136,10 +24138,22 @@ IB-2a: 370 468 solids -> 6 067 banded colliders (1.64 %) at near 64 m / far 1024
        2.202 ms/step at the certification's rate against 134.480 ms, budget 4.000 ms
        (measured 1.991 ms here)
 IB-2b: 14 whole, 788 shells, 198 out
+       and through the real `project_scene`:
+       100 parts batches (370 468 instances) bounded ABOVE at 192 m
+       100 shell batches (  1 000 instances) bounded BELOW at 192 m
+         0 ungrouped instances            -- a 370x far-field reduction
 IB-2c: 4 500 lot pairs, worst overlap 0.000e0 m2, two loads bit-identical
 drive: 480 steps, PIE == shipping at EVERY ONE, 9 distinct active sets,
        6 054..=7 538 colliders
 ```
+
+The draw-side arm is the one the source-mirror gate could not give:
+`both_projectors_band_a_structure_lod_the_same_way` compares the two hosts' *text*, and
+nothing in it asserts a `RenderScene` ever receives a shell batch. Every batch must band
+from either 0 or the LOD distance and from nothing else, and every parts batch must have
+its complement — an overlap draws a solid box inside a building, a gap deletes it from the
+skyline, and a city with no buildings would satisfy "every batch is banded", which is why
+the counts are exact rather than positive.
 
 The drive-through starts **inside** the city: a run that begins in open ground spends its
 first half approaching, and an approach only exercises the band growing. Two anti-vacuity

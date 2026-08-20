@@ -1158,6 +1158,12 @@ mod tests {
     /// routing is structural, and both statements are checked. It fails the day
     /// somebody spends the reserved bits without revisiting the routing, and the
     /// day `voxel.wgsl` stops naming its real blocker.
+    // `VIS_RESERVED_BITS > 0` const-folds, and that is the point: the subject of
+    // this arm is a *constant*, and the arm's job is to fail — visibly, with its
+    // message — the day somebody spends those bits. A `const _: () = assert!(…)`
+    // would turn that into a compile error, which stops the build instead of
+    // sending the reader to the routing.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn the_voxel_routing_survives_the_id_widening() {
         assert!(

@@ -140,11 +140,11 @@ mod tests {
         let _ = scoped.snapshot();
         let g = |i: u128| Uuid::from_u128(0x13_0000 + i);
 
-        let mut step = |scoped: &mut SceneDoc,
-                        full: &mut SceneDoc,
-                        prev: &mut crate::ipc::SceneSnapshot,
-                        label: &str,
-                        f: &dyn Fn(&mut SceneDoc)| {
+        let step = |scoped: &mut SceneDoc,
+                    full: &mut SceneDoc,
+                    prev: &mut crate::ipc::SceneSnapshot,
+                    label: &str,
+                    f: &dyn Fn(&mut SceneDoc)| {
             let prev_roots = prev.roots.clone();
             f(scoped);
             f(full);

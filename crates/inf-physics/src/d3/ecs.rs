@@ -2354,12 +2354,13 @@ pub fn terrain_tile_collider(
 /// A volume's solids are not all described. Each [`inf_ecs::StructureGroup`] —
 /// one building — is tiered by [`SimBand::tier`] against its own **shell**:
 ///
-/// * [`Tier::Near`]: every part, exactly as before. The building is enterable,
-///   its doorways are real gaps, and the P19 enterability invariant is
-///   untouched.
-/// * [`Tier::Far`]: **one** collider, the shell box. A body cannot walk through
-///   a distant building, and the swap costs one description instead of ~800.
-/// * [`Tier::Out`]: nothing.
+/// * [`Tier::Near`][] — every part, exactly as before. The building is
+///   enterable, its doorways are real gaps, and the P19 enterability invariant
+///   is untouched.
+/// * [`Tier::Far`][] — **one** collider, the shell box. A body cannot walk
+///   through a distant building, and the swap costs one description instead of
+///   ~800.
+/// * [`Tier::Out`][] — nothing.
 ///
 /// Solids covered by no group — a fence, a `grammar.expand` run, a scatter —
 /// are tiered box by box and admitted only at `Near`, because a lone box has no

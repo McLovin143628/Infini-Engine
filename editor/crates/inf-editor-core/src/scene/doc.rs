@@ -3499,7 +3499,7 @@ impl SceneDoc {
     /// replaces, which was the nodes *and* their strings.
     pub fn project_delta(&mut self) -> SceneDelta {
         self.world.propagate();
-        let scope = std::mem::replace(&mut self.scope, Some(BTreeSet::new()));
+        let scope = self.scope.replace(BTreeSet::new());
         let tail_selection: Vec<String> = self.selection.iter().map(|g| g.to_string()).collect();
         // Only a full projection can have moved the roots — a scoped change is a
         // rename, a visibility or a property write by contract, none of which

@@ -411,8 +411,11 @@ shipped one is 370 468 solids, hence the two slightly different counts at 64 m.)
 `[0, draw)`, the parts take `[0, lod)`, the shells take `[lod, draw)` — where `lod` is
 `STRUCTURE_LOD_M = 192`, deliberately **three times** the 64 m collider band so every
 building a body can collide with is drawn as its parts. On the shipped city: **14 whole,
-788 shells, 198 out.** A probe dropped on a far building's shell rests at 7.599 m on a
-7.200 m box, because a shell that is not a barrier is a hole rather than a LOD.
+788 shells, 198 out** in physics, and through the real `project_scene`, **100 parts batches
+(370 468 instances) bounded above at 192 m against 100 shell batches (1 000 instances)
+bounded below at it** — a **370×** far-field reduction, with zero ungrouped instances. A
+probe dropped on a far building's shell rests at 7.599 m on a 7.200 m box, because a shell
+that is not a barrier is a hole rather than a LOD.
 
 **IB-2c · lot subdivision.** 100 × 60 block → 8 lots totalling **6000.0 m² of 6000.0**; a
 rotated 120 × 70 block at maximum jitter → 12 lots, worst pairwise overlap **1.4e-12 m²**; a
@@ -434,9 +437,15 @@ scene projection · `d83b762` the 64-bit visbuffer id · `666d63d` the city fixt
 
 | | after I2's audit | after I3 |
 |---|---|---|
-| battery blocks / passed | 296 / 5 618 | see the ROADMAP block |
+| battery blocks / passed / failed / ignored | 296 / 5 618 / 0 / 13 | **298 / 5 663 / 0 / 13** |
+| frontend tests / files | 702 / 78 | **702 / 78**, `tsc` and `eslint` clean |
 | goldens | 54, byte-frozen | **54, byte-identical under `INF_GOLDEN_STRICT=1`** |
+| rustdoc warnings (ceiling 450) | 443 | **445**, and the warning **list** is byte-identical to `866fb55`'s — this wave added zero. (`866fb55` measures 445 today too; the ledger's 443 does not reproduce, which is the I2 law arriving a third time.) |
 | schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved** |
+
+The battery was measured at `14a5fac` (5 662) plus the one arm that landed after it —
+`the_shipped_projection_emits_complementary_parts_and_shell_batches`, green and printed in
+the gate's own output. Every other later commit is documentation or `.gitattributes`.
 
 ---
 

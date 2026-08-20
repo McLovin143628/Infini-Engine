@@ -1062,6 +1062,14 @@ mod tests {
     /// cannot all enter the visbuffer path in one frame"*. This arm is that
     /// sentence, made false, at the shape the island's own city fixture has and
     /// at the brief's target.
+    // The ceiling IS a constant, and comparing it to the number the
+    // certification names is the whole content of this arm — `clippy` is right
+    // that the comparison const-folds and wrong that it is therefore pointless.
+    // The alternative it suggests (a `const _: () = assert!(…)`) would make a
+    // future re-cut a compile error instead of a failing test, which is worse:
+    // the failure this arm exists to force is *revisit the ledger*, not *stop
+    // building*.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn the_instance_ceiling_admits_a_city() {
         // The thousand-building city fixture, and the brief's 16k target.

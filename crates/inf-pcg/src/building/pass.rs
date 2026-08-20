@@ -797,7 +797,7 @@ mod tests {
         let many = oriented_lots_of(&sub, &NoSplines, &cx);
         assert_eq!(many.len(), 8, "{} lots", many.len());
 
-        let plans = plans_of(&[sub.clone()], &NoSplines, &flat(0.0), &cx);
+        let plans = plans_of(std::slice::from_ref(&sub), &NoSplines, &flat(0.0), &cx);
         assert_eq!(plans.len(), 8, "one plan per lot");
         for p in &plans {
             assert!(p.fully_reachable(), "every subdivided lot is enterable");
