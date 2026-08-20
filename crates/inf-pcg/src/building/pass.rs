@@ -437,7 +437,7 @@ mod tests {
             aabb.area()
         );
 
-        let out = evaluate_buildings(&[p.clone()], &NoSplines, &flat(0.0), &cx);
+        let out = evaluate_buildings(std::slice::from_ref(&p), &NoSplines, &flat(0.0), &cx);
         assert!(out.colliders.len() > 20, "{} boxes", out.colliders.len());
 
         // (a) Every box is inside the LOT, not merely inside its bounding box.

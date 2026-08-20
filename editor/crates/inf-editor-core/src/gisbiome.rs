@@ -256,7 +256,7 @@ pub fn paint_biomes_from_layer(
         .filter(|a| !matches!(a, inf_gis::Attr::Null))
         .collect();
     let numeric_count = stated.iter().filter(|a| a.as_number().is_some()).count();
-    out.numeric = stated.len() > 0 && numeric_count * 2 > stated.len();
+    out.numeric = !stated.is_empty() && numeric_count * 2 > stated.len();
 
     // ── class id per feature ────────────────────────────────────────────────
     let ids: Vec<Option<u8>> = if out.numeric {

@@ -171,11 +171,19 @@ fn ten_thousand_roads_and_fifty_thousand_footprints_import_whole() {
         capped.truncated,
         whole.count()
     );
-
-    // The island ceiling has headroom past both, which is what makes it a
-    // setting and not a second cap in disguise.
-    assert!(ISLAND_MAX_ENTITIES > 50_000 * 2);
 }
+
+/// The island ceiling has headroom past both layers, which is what makes it a
+/// setting and not a second cap in disguise.
+///
+/// A **compile-time** assertion, not a runtime one: this is a relation between
+/// two constants, and a runtime `assert!` over constants is a test that cannot
+/// tell you anything a build could not.
+const _: () = assert!(
+    ISLAND_MAX_ENTITIES > 100_000,
+    "the island cap must clear the certification's 50 000-footprint layer with \
+     room to spare, or raising it is just moving the amputation"
+);
 
 /// The whole-layer plan is a **function of the file**: importing it twice gives
 /// the same plan, digest for digest, at island scale as at three features.

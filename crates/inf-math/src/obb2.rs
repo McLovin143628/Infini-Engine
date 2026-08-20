@@ -360,7 +360,7 @@ mod tests {
     /// the rectangle that actually encloses it, and every input point is inside.
     #[test]
     fn a_concave_footprint_is_enclosed_by_its_own_rectangle() {
-        let l = vec![
+        let l = [
             DVec2::new(0.0, 0.0),
             DVec2::new(20.0, 0.0),
             DVec2::new(20.0, 6.0),

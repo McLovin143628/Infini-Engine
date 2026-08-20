@@ -176,7 +176,7 @@ pub fn footprint_attrs(f: &GeoFeature, d: &FootprintDefaults) -> FootprintAttrs 
         Some(n) => (n, FloorSource::Attribute),
         None => match height_m {
             Some(h) => (
-                ((h / storey).round() as u32).max(1).min(MAX_ATTR_FLOORS),
+                ((h / storey).round() as u32).clamp(1, MAX_ATTR_FLOORS),
                 FloorSource::DerivedFromHeight,
             ),
             None => (d.floors.clamp(1, MAX_ATTR_FLOORS), FloorSource::Default),
