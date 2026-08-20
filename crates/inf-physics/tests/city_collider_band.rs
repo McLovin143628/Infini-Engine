@@ -555,6 +555,19 @@ fn the_radius_sweep_states_what_the_default_buys() {
          a {BUDGET_MS} ms step buys",
         at_default.1
     );
+    // …and it is the WIDEST such row, which is the claim the constant's own doc
+    // makes (I3 audit). Without this the arm passes for 16 m as happily as for
+    // 64 m, and "the radius is a measurement" would be a statement about the
+    // table rather than about the number that ships: a narrower default is a
+    // character walking into a building that is still a shell.
+    for (r, n) in &rows {
+        assert!(
+            *r <= default || *n > ceiling,
+            "the sweep offers {r} m at {n} colliders — inside the {ceiling} \
+             budget and wider than the shipped {default} m default, so the \
+             default is not the widest radius the budget buys"
+        );
+    }
     // …and the sweep really does climb, or it is not measuring a radius.
     let widest = rows.last().expect("rows").1;
     assert!(

@@ -51,6 +51,17 @@
 //! about, so the effective near radius varies by that much. It is a *radius*
 //! budget, not a correctness one, and the near radius is chosen with it in hand.
 //!
+//! The second cost is the lattice's own **edge**, and it is a bound rather than
+//! a saving: "once a second at walking pace" is true of a source *travelling*
+//! and false of one parked on a lattice line, whose sub-millimetre jitter
+//! crosses it every step. Hysteresis would fix it and is refused — a band that
+//! depended on the history of positions rather than on the positions would stop
+//! being a pure function of sim state, which is the whole reason PIE equals
+//! shipping here. So the thrash is measured instead, and what is asserted is
+//! that it alternates between exactly **two** bands (the two cells the source is
+//! between): never wrong, never wandering, re-described until the source moves
+//! off the line. See `a_source_parked_on_a_lattice_line_rebands_every_step`.
+//!
 //! # It fails OPEN
 //!
 //! A world with no streaming source at all — every committed level before the
@@ -418,5 +429,70 @@ mod tests {
              measuring the corner case it claims to"
         );
         println!("IB-2a lattice slop: worst {worst:.3} m against the {bound:.3} m bound");
+    }
+
+    /// **The lattice has an edge, and a source parked on it re-bands every
+    /// step** (I3 audit) — measured and bounded rather than claimed away.
+    ///
+    /// The quantization buys "membership changes on a lattice crossing instead
+    /// of every step", which is true of a source *travelling*: at walking pace a
+    /// crossing is a once-a-second event. It is not true of a source sitting on
+    /// a lattice line with sub-millimetre jitter — a standing character whose
+    /// solver pose oscillates — which crosses on *every* step and re-describes
+    /// the whole active set each time. That is the P19.5 regression's own
+    /// mechanism, met from the other side.
+    ///
+    /// **It is not fixed with hysteresis, deliberately.** Hysteresis means the
+    /// band depends on the *history* of positions rather than on the positions,
+    /// and the band being a pure function of sim state is the entire reason
+    /// PIE == shipping holds on a drive-through. A stateful band would agree
+    /// with itself in each host and diverge between them the first time one of
+    /// them started mid-trace.
+    ///
+    /// So the cost is stated: the thrash alternates between exactly **two**
+    /// bands — the two cells the source is between — so the active set is never
+    /// wrong and never wanders; it is re-described at the fixed-step rate for as
+    /// long as the source parks there. The bound this arm holds is that
+    /// two-ness.
+    #[test]
+    fn a_source_parked_on_a_lattice_line_rebands_every_step() {
+        // A metre-scale jitter around a lattice line, which is what a solver
+        // gives a body that is standing still.
+        let line = BAND_LATTICE_M * 3.0;
+        let mut stamps = Vec::new();
+        for step in 0..60 {
+            let x = line + if step % 2 == 0 { -0.001 } else { 0.001 };
+            stamps.push(SimBand::from_anchors([DVec3::new(x, 0.0, 0.0)], 64.0, 1024.0).stamp());
+        }
+        let distinct: std::collections::BTreeSet<u64> = stamps.iter().copied().collect();
+        let changes = stamps.windows(2).filter(|w| w[0] != w[1]).count();
+        println!(
+            "IB-2a lattice edge: a source jittering +/-1 mm across a line re-stamps \
+             {changes} times in {} steps, over {} distinct bands",
+            stamps.len(),
+            distinct.len()
+        );
+        assert_eq!(
+            distinct.len(),
+            2,
+            "a parked source produced {} bands — the thrash is a wander, not the \
+             two cells it is between",
+            distinct.len()
+        );
+        assert_eq!(changes, stamps.len() - 1, "the arm is not measuring the edge");
+
+        // THE CONTROL, and it is what says the quantization does its job at all:
+        // the same jitter a metre away from the line re-stamps NEVER.
+        let inside: Vec<u64> = (0..60)
+            .map(|step| {
+                let x = line + 1.0 + if step % 2 == 0 { -0.001 } else { 0.001 };
+                SimBand::from_anchors([DVec3::new(x, 0.0, 0.0)], 64.0, 1024.0).stamp()
+            })
+            .collect();
+        assert!(
+            inside.windows(2).all(|w| w[0] == w[1]),
+            "the same jitter away from the line re-stamped — the lattice is \
+             buying nothing"
+        );
     }
 }
