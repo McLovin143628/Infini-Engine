@@ -38,6 +38,10 @@ pub mod erosion_gpu;
 // creates, so the river validator and the cook advisory apply to imported water
 // on the day it lands.
 pub mod gis;
+// IB-4: the other half of a road import — the ribbon arrays become a real
+// `MeshAsset`, draped on the level's own terrains through the IB-15 ground rule
+// and spawned through the same door a dropped asset uses.
+pub mod gisroad;
 pub mod hydro;
 pub mod ipc;
 pub mod layouts;

@@ -485,7 +485,7 @@ impl RoadGraph {
 }
 
 /// A quad-ribbon mesh generated along a road spine.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RoadRibbon {
     /// World-space vertices, left/right alternating along the spine.
     pub vertices: Vec<DVec3>,
@@ -517,6 +517,34 @@ pub fn build_ribbon(
     lift_m: f64,
     height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
 ) -> Result<RoadRibbon, crate::GisError> {
+    build_ribbon_across(spine, width_m, lift_m, 1, height_at)
+}
+
+/// [`build_ribbon`], with the cross-section split into `strips` quads.
+///
+/// # Why a road has to be subdivided ACROSS as well as along
+///
+/// Resampling the spine makes a road follow the ground *along* its length and
+/// does nothing at all for its width, and that is where the daylight actually
+/// is: a 14 m arterial crossing a hill with 0.004 m⁻¹ of curvature leaves
+/// **49 mm** between its crown and the ground, measured, against 0.4 mm along
+/// its length at a 1 m step. The first version of this builder had one quad
+/// across, and the along-the-spine resampling that closes the longitudinal gap
+/// hid the transverse one perfectly, because both errors are "the road does not
+/// follow the ground" and only one of them was being measured.
+///
+/// The alternative — a road that is planar across its width, which is what a
+/// graded carriageway really is — needs the terrain cut and filled to meet it,
+/// and that is the road-to-terrain blend the disposition memo lists as unbuilt.
+/// Conforming is the honest thing an importer can do on its own.
+pub fn build_ribbon_across(
+    spine: &[DVec3],
+    width_m: f64,
+    lift_m: f64,
+    strips: usize,
+    height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
+) -> Result<RoadRibbon, crate::GisError> {
+    let strips = strips.max(1);
     // Drop consecutive duplicates: a zero-length segment has no direction, and a
     // perpendicular of a zero vector is where a NaN enters a mesh.
     let mut pts: Vec<DVec3> = Vec::with_capacity(spine.len());
@@ -619,7 +647,10 @@ pub fn build_ribbon(
                 MITER_LIMIT
             }
         };
-        for (side, sign) in [(0usize, -1.0f64), (1, 1.0)] {
+        for k in 0..=strips {
+            // `u` runs 0 (left kerb) to 1 (right kerb) across the carriageway.
+            let u = k as f64 / strips as f64;
+            let sign = u * 2.0 - 1.0;
             let xz = pts[i].xz() + perp * (half * miter * sign);
             // The terrain callback is somebody else's function reading somebody
             // else's heightfield; a query over a voxel hole or an unloaded tile
@@ -637,12 +668,17 @@ pub fn build_ribbon(
                 None => pts[i].y,
             };
             vertices.push(DVec3::new(xz.x, ground + lift_m, xz.y));
-            uvs.push([side as f32, (arc / width_m) as f32]);
+            uvs.push([u as f32, (arc / width_m) as f32]);
         }
         if i + 1 < pts.len() {
-            let b = (i * 2) as u32;
-            // Wound so the surface faces up (+Y), matching the triangulator.
-            indices.extend_from_slice(&[b, b + 1, b + 3, b, b + 3, b + 2]);
+            let row = (strips + 1) as u32;
+            let base = (i * (strips + 1)) as u32;
+            for k in 0..strips as u32 {
+                let a = base + k;
+                // Wound so the surface faces up (+Y), matching the triangulator.
+                // Identical to the two-vertex form for `strips == 1`.
+                indices.extend_from_slice(&[a, a + 1, a + row + 1, a, a + row + 1, a + row]);
+            }
         }
     }
 
@@ -718,6 +754,526 @@ pub fn kind_of(f: &GeoFeature) -> RoadKind {
         .unwrap_or_default()
 }
 
+// ── the road SURFACE: a whole network, draped, joined and merged ────────────
+
+/// How far a road may run between ground queries before it stops following the
+/// ground, in metres.
+///
+/// **This is the watertightness knob, and it is the terrain's number, not the
+/// road's.** A published centreline has a vertex where the street bends, which
+/// is nowhere near often enough to follow a heightfield: a 300 m straight has
+/// two vertices, the ground under it has three hundred samples, and a ribbon
+/// built on the centreline's own vertices spans every hill between them as a
+/// chord — metres of daylight under the middle of the block. Resampling at the
+/// terrain's own sample pitch makes the road's error the terrain's own
+/// interpolation error and nothing more.
+pub const DEFAULT_GROUND_STEP_M: f64 = 1.0;
+
+/// How far a road surface floats above the ground it follows, in metres.
+///
+/// Two centimetres: enough that the two coplanar surfaces cannot z-fight at any
+/// distance the depth buffer resolves, small enough that no wheel and no foot
+/// notices a step. It is the only gap between a road and its terrain, and the
+/// watertightness arm measures exactly it.
+pub const DEFAULT_ROAD_LIFT_M: f64 = 0.02;
+
+/// Resample a spine so no two consecutive positions are more than `step_m`
+/// apart on the XZ plane.
+///
+/// Every original vertex is kept — a survey's vertices *are* the road (the same
+/// reason the imported spline interpolates linearly) — and the inserted ones
+/// divide each leg into equal parts, so the result is a pure function of the
+/// input and the step.
+pub fn densify_spine(spine: &[DVec3], step_m: f64) -> Vec<DVec3> {
+    if spine.len() < 2 || !(step_m.is_finite() && step_m > 0.0) {
+        return spine.to_vec();
+    }
+    let mut out: Vec<DVec3> = Vec::with_capacity(spine.len());
+    out.push(spine[0]);
+    for w in spine.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let len = (b.xz() - a.xz()).length();
+        // `ceil` on the ratio, so the sub-step is at most `step_m` and never a
+        // hair over it: 2.0001 m at a 1 m step becomes three legs of 0.667 m,
+        // not two of 1.00005.
+        let n = if len.is_finite() && len > step_m {
+            (len / step_m).ceil() as usize
+        } else {
+            1
+        };
+        for i in 1..=n {
+            let t = i as f64 / n as f64;
+            out.push(a + (b - a) * t);
+        }
+    }
+    out
+}
+
+/// A monotone stand-in for `atan2(d.y, d.x)`, in `[0, 4)`.
+///
+/// **Trig-free by law.** The P14 portability law bans `atan2` (and its whole
+/// family) on anything that reaches committed content, and a junction fan's
+/// vertex order decides its triangles, which reach a `.inf_mesh`. This is the
+/// standard L1 pseudo-angle: it is not an angle, but it is *ordered like* one,
+/// which is all a radial sort needs, and it is exact rational arithmetic.
+fn pseudo_angle(d: glam::DVec2) -> f64 {
+    let denom = d.x.abs() + d.y.abs();
+    if !(denom.is_finite() && denom > 0.0) {
+        return 0.0;
+    }
+    let p = d.x / denom;
+    if d.y < 0.0 {
+        3.0 + p
+    } else {
+        1.0 - p
+    }
+}
+
+/// A drivable road surface: merged triangles per road class, plus the junction
+/// fans that close the holes between them.
+///
+/// One [`RoadRibbon`] per [`RoadKind`] rather than one per segment, because a
+/// mesh asset per segment is ten thousand files for a county and the classes are
+/// exactly the material split a road surface wants.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RoadSurface {
+    /// The merged geometry, keyed by class. `BTreeMap`, so the submesh order in
+    /// the asset is a function of the data.
+    pub parts: BTreeMap<RoadKind, RoadRibbon>,
+    /// How many junctions got a fan.
+    pub junctions_filled: usize,
+    /// Junctions that could not be filled, and why.
+    pub junctions_skipped: usize,
+    /// Segments with no buildable surface, named.
+    pub skipped: Vec<String>,
+}
+
+impl RoadSurface {
+    pub fn triangle_count(&self) -> usize {
+        self.parts.values().map(RoadRibbon::triangle_count).sum()
+    }
+    pub fn vertex_count(&self) -> usize {
+        self.parts.values().map(|r| r.vertices.len()).sum()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.parts.values().all(|r| r.indices.is_empty())
+    }
+}
+
+/// Options for [`build_surface`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfaceOptions {
+    /// See [`DEFAULT_ROAD_LIFT_M`].
+    pub lift_m: f64,
+    /// See [`DEFAULT_GROUND_STEP_M`].
+    pub ground_step_m: f64,
+    /// Fill junctions of degree 3 and above with a fan. A degree-2 node is a
+    /// bend and the ribbon's own mitre already closes it.
+    pub fill_junctions: bool,
+}
+
+impl Default for SurfaceOptions {
+    fn default() -> Self {
+        Self {
+            lift_m: DEFAULT_ROAD_LIFT_M,
+            ground_step_m: DEFAULT_GROUND_STEP_M,
+            fill_junctions: true,
+        }
+    }
+}
+
+/// How many quads a carriageway of `width_m` needs across it at `step_m`.
+///
+/// The same rule as the spine's resampling, applied to the other axis, and
+/// capped at [`MAX_CROSS_STRIPS`] so a 60 m motorway interchange at a 10 cm step
+/// cannot ask for six hundred columns of vertices.
+pub fn cross_strips(width_m: f64, step_m: f64) -> usize {
+    if !(width_m.is_finite() && width_m > 0.0 && step_m.is_finite() && step_m > 0.0) {
+        return 1;
+    }
+    ((width_m / step_m).ceil() as usize).clamp(1, MAX_CROSS_STRIPS)
+}
+
+/// The ceiling on cross-section subdivision. A road wider than
+/// `MAX_CROSS_STRIPS × step` conforms to the ground at a coarser pitch across
+/// than along — reported by `MeshBuildReport`'s triangle count rather than
+/// hidden, and 32 is past every real carriageway at every sane step.
+pub const MAX_CROSS_STRIPS: usize = 32;
+
+/// Append `src` into `dst`, rebasing the indices.
+fn append_ribbon(dst: &mut RoadRibbon, src: &RoadRibbon) {
+    let base = dst.vertices.len() as u32;
+    dst.vertices.extend_from_slice(&src.vertices);
+    dst.uvs.extend_from_slice(&src.uvs);
+    dst.indices.extend(src.indices.iter().map(|i| i + base));
+}
+
+/// **Build a whole road network's surface**: drape every segment on the ground,
+/// merge by class, and fan the junctions.
+///
+/// `height_at` is the engine's own ground query — `inf_voxel::ground_height_at`
+/// at the call site, which since IB-15 is the *topmost terrain that answers*, so
+/// a road crossing from one terrain onto another follows both. `None` means
+/// nothing answers there, and the spine's own elevation is used, which is the
+/// published centreline's best guess.
+///
+/// # What "watertight with the terrain" means here, exactly
+///
+/// Every ribbon vertex is placed at `ground(x, z) + lift_m`, at both edges of
+/// the road, at a spacing of `ground_step_m`. So the road touches the terrain to
+/// within `lift_m` at every one of its own vertices by construction, and between
+/// them it differs from the terrain by the terrain's own chord error over one
+/// sample — which is why the step is the terrain's pitch and not the road's.
+/// `roads_follow_the_ground_they_are_draped_on` measures both.
+pub fn build_surface(
+    graph: &RoadGraph,
+    opts: &SurfaceOptions,
+    height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
+) -> RoadSurface {
+    let mut out = RoadSurface::default();
+    // node id -> the cross-section corners of each incident segment end, as
+    // (left, right) world positions. A `BTreeMap` of `Vec`s, filled in segment
+    // id order, so a fan's vertex set is a function of the graph.
+    let mut ends: BTreeMap<u64, Vec<(DVec3, DVec3)>> = BTreeMap::new();
+
+    for s in graph.segments.values() {
+        let dense = densify_spine(&s.spine, opts.ground_step_m);
+        // The cross-section is subdivided at the same pitch as the spine — see
+        // `build_ribbon_across` for the 49 mm this closes.
+        let strips = cross_strips(s.width_m(), opts.ground_step_m);
+        match build_ribbon_across(&dense, s.width_m(), opts.lift_m, strips, height_at) {
+            Ok(r) => {
+                let row = strips + 1;
+                if r.vertices.len() >= 2 * row {
+                    let n = r.vertices.len();
+                    ends.entry(s.start_node)
+                        .or_default()
+                        .push((r.vertices[0], r.vertices[row - 1]));
+                    ends.entry(s.end_node)
+                        .or_default()
+                        .push((r.vertices[n - row], r.vertices[n - 1]));
+                }
+                append_ribbon(out.parts.entry(s.kind).or_default(), &r);
+            }
+            Err(e) => out.skipped.push(format!(
+                "segment {} ({}) has no buildable surface: {e}",
+                s.id,
+                if s.name.is_empty() {
+                    "unnamed"
+                } else {
+                    &s.name
+                }
+            )),
+        }
+    }
+
+    if opts.fill_junctions {
+        for (node, corners) in &ends {
+            let Some(inter) = graph.intersections.get(node) else {
+                continue;
+            };
+            // A degree-2 node is a bend, and `build_ribbon`'s mitre already
+            // closes it exactly. A degree-1 node is a dead end with nothing on
+            // the far side to close against.
+            if inter.degree() < 3 || corners.len() < 3 {
+                continue;
+            }
+            // The fan's class is the highest-order road at the junction — a
+            // motorway crossing a residential street paves the intersection in
+            // motorway, which is what the ground actually looks like. `RoadKind`
+            // ordering is declaration order, most important first.
+            let kind = inter
+                .segments
+                .iter()
+                .filter_map(|id| graph.segments.get(id).map(|s| s.kind))
+                .min()
+                .unwrap_or_default();
+            match fan_at(corners, opts.lift_m, height_at) {
+                Some(fan) => {
+                    append_ribbon(out.parts.entry(kind).or_default(), &fan);
+                    out.junctions_filled += 1;
+                }
+                None => out.junctions_skipped += 1,
+            }
+        }
+    }
+    out
+}
+
+// ── the surface becomes a mesh asset ────────────────────────────────────────
+
+/// What building a mesh out of a road surface cost.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MeshBuildReport {
+    pub vertices: usize,
+    pub triangles: usize,
+    /// The furthest any vertex sits from the mesh's local origin, in metres.
+    pub max_offset_m: f64,
+    /// The f32 spacing at that distance — the mesh's own positional resolution.
+    ///
+    /// A `MeshVertex` is `[f32; 3]` (it is uploaded to a GPU buffer verbatim),
+    /// and this engine's world is f64 for exactly the reason that matters here:
+    /// a UTM easting is ~5×10⁵ and an f32 resolves it to 30 mm. Centring the
+    /// mesh on its own content makes the offset the *extent*, not the
+    /// coordinate — 25 km at island scale, where the spacing is ~3 mm — and
+    /// reporting it means nobody has to guess.
+    pub quantisation_m: f64,
+}
+
+/// The f32 spacing at a given magnitude — one ulp of the mantissa.
+fn f32_quantisation(magnitude_m: f64) -> f64 {
+    let m = magnitude_m.abs().max(1.0) as f32;
+    (f32::from_bits(m.to_bits() + 1) - m) as f64
+}
+
+/// **The road surface as a real `MeshAsset`** — the thing Wave G's ribbon
+/// builder stopped one step short of.
+///
+/// One submesh per road class, named by the class, with the class list as the
+/// mesh's material slots — so assigning a material to slot *k* means "this is
+/// what an arterial looks like" on both sides of the asset.
+///
+/// Positions are **local to `origin`**, because a `MeshVertex` is f32 and a
+/// world-space UTM coordinate spends its whole mantissa on the false easting.
+/// The caller places the entity at `origin`; see [`MeshBuildReport`].
+pub fn surface_to_mesh(
+    surface: &RoadSurface,
+    origin: DVec3,
+) -> Result<(inf_mesh::MeshAsset, MeshBuildReport), crate::GisError> {
+    if !origin.is_finite() {
+        return Err(crate::GisError::NotFinite(format!(
+            "the road mesh's local origin {origin:?} is not finite"
+        )));
+    }
+    if surface.is_empty() {
+        return Err(crate::GisError::Geometry(
+            "the road network produced no surface at all — every segment was \
+             skipped, or the layer had none. The per-segment reasons are in the \
+             import report."
+                .to_string(),
+        ));
+    }
+    let mut report = MeshBuildReport::default();
+    let mut submeshes = Vec::new();
+    let mut slots = Vec::new();
+    for (kind, ribbon) in &surface.parts {
+        if ribbon.indices.is_empty() {
+            continue;
+        }
+        let slot = slots.len() as u32;
+        slots.push(kind.label().to_string());
+        let sub = ribbon_to_submesh(kind.label(), ribbon, origin, slot, &mut report)?;
+        submeshes.push(sub);
+    }
+    if submeshes.is_empty() {
+        return Err(crate::GisError::Geometry(
+            "every road class in this network produced an empty surface".to_string(),
+        ));
+    }
+    report.quantisation_m = f32_quantisation(report.max_offset_m);
+    Ok((inf_mesh::MeshAsset::new(submeshes, slots), report))
+}
+
+/// One ribbon → one submesh, with per-vertex normals and UV-derived tangents.
+fn ribbon_to_submesh(
+    name: &str,
+    ribbon: &RoadRibbon,
+    origin: DVec3,
+    slot: u32,
+    report: &mut MeshBuildReport,
+) -> Result<inf_mesh::SubMesh, crate::GisError> {
+    let n = ribbon.vertices.len();
+    if ribbon.uvs.len() != n {
+        return Err(crate::GisError::Geometry(format!(
+            "the {name} ribbon has {n} vertices and {} UVs — they are index \
+             aligned by construction, so this is a builder defect",
+            ribbon.uvs.len()
+        )));
+    }
+    let mut pos: Vec<[f32; 3]> = Vec::with_capacity(n);
+    for v in &ribbon.vertices {
+        if !v.is_finite() {
+            return Err(crate::GisError::NotFinite(format!(
+                "the {name} surface carries the non-finite vertex {v:?}"
+            )));
+        }
+        let l = *v - origin;
+        report.max_offset_m = report
+            .max_offset_m
+            .max(l.x.abs().max(l.y.abs()).max(l.z.abs()));
+        pos.push([l.x as f32, l.y as f32, l.z as f32]);
+    }
+    // Accumulate face normals and UV tangents per vertex. Both are the textbook
+    // constructions; the only thing worth saying is that a degenerate triangle
+    // (a sliver at a hairpin, a fan spoke of zero area) contributes nothing
+    // rather than a NaN, which is the same door every other producer in this
+    // crate has.
+    let mut nrm = vec![glam::Vec3::ZERO; n];
+    let mut tan = vec![glam::Vec3::ZERO; n];
+    for t in ribbon.indices.chunks_exact(3) {
+        let (i0, i1, i2) = (t[0] as usize, t[1] as usize, t[2] as usize);
+        if i0 >= n || i1 >= n || i2 >= n {
+            return Err(crate::GisError::Geometry(format!(
+                "the {name} surface indexes vertex {} of {n}",
+                t.iter().copied().max().unwrap_or(0)
+            )));
+        }
+        let p = [
+            glam::Vec3::from(pos[i0]),
+            glam::Vec3::from(pos[i1]),
+            glam::Vec3::from(pos[i2]),
+        ];
+        let face = (p[1] - p[0]).cross(p[2] - p[0]);
+        if face.length_squared() > 0.0 && face.is_finite() {
+            for i in [i0, i1, i2] {
+                nrm[i] += face;
+            }
+        }
+        let uv = [
+            glam::Vec2::from(ribbon.uvs[i0]),
+            glam::Vec2::from(ribbon.uvs[i1]),
+            glam::Vec2::from(ribbon.uvs[i2]),
+        ];
+        let (duv1, duv2) = (uv[1] - uv[0], uv[2] - uv[0]);
+        let det = duv1.x * duv2.y - duv2.x * duv1.y;
+        if det.abs() > 1e-12 {
+            let r = 1.0 / det;
+            let t3 = ((p[1] - p[0]) * duv2.y - (p[2] - p[0]) * duv1.y) * r;
+            if t3.is_finite() {
+                for i in [i0, i1, i2] {
+                    tan[i] += t3;
+                }
+            }
+        }
+        report.triangles += 1;
+    }
+
+    let vertices: Vec<inf_mesh::MeshVertex> = (0..n)
+        .map(|i| {
+            let normal = nrm[i].normalize_or(glam::Vec3::Y);
+            // Gram-Schmidt against the normal, so the tangent frame is
+            // orthonormal even where two ribbons meet at a fold.
+            let t = tan[i] - normal * normal.dot(tan[i]);
+            let tangent = if t.length_squared() > 1e-20 {
+                let t = t.normalize();
+                [t.x, t.y, t.z, 1.0]
+            } else {
+                inf_mesh::TANGENT_PLACEHOLDER
+            };
+            inf_mesh::MeshVertex {
+                position: pos[i],
+                normal: [normal.x, normal.y, normal.z],
+                uv: ribbon.uvs[i],
+                tangent,
+            }
+        })
+        .collect();
+    report.vertices += vertices.len();
+
+    Ok(inf_mesh::SubMesh {
+        name: name.to_string(),
+        vertices,
+        indices: ribbon.indices.clone(),
+        material_slot: Some(slot),
+        skin: Vec::new(),
+    })
+}
+
+/// A triangle fan over the cross-section corners meeting at one junction.
+///
+/// # Why a fan and not a mitre
+///
+/// A mitre joins **two** legs and `build_ribbon` already does it. Three or more
+/// legs have no bisector to mitre onto: the honest shapes are a fan (paves the
+/// convex area the legs enclose) or a proper intersection mesh with kerb radii
+/// per leg pair, which is a road-modelling project rather than an import. The
+/// fan is the one that is right about the thing that matters here — there is no
+/// hole in the ground at the junction — and wrong only about the corner radii,
+/// which is a texture-scale defect on a surface a car drives over.
+///
+/// The corners are sorted radially about their own centroid by
+/// [`pseudo_angle`], which is trig-free by law, and each triangle is emitted
+/// with the winding that faces **up**, tested per triangle rather than reasoned
+/// about.
+fn fan_at(
+    corners: &[(DVec3, DVec3)],
+    lift_m: f64,
+    height_at: &mut dyn FnMut(f64, f64) -> Option<f64>,
+) -> Option<RoadRibbon> {
+    let mut pts: Vec<DVec3> = Vec::with_capacity(corners.len() * 2);
+    for (l, r) in corners {
+        pts.push(*l);
+        pts.push(*r);
+    }
+    if pts.len() < 3 || pts.iter().any(|p| !p.is_finite()) {
+        return None;
+    }
+    let mut centre = pts.iter().copied().sum::<DVec3>() / pts.len() as f64;
+    if !centre.is_finite() {
+        return None;
+    }
+    // **The hub sits on the GROUND, not on the average of its rim.** Averaging
+    // was the first version and it is wrong in exactly the case a junction meets:
+    // a corner whose XZ falls outside the terrain keeps the published
+    // centreline's own elevation, and one such corner in six dragged a hub 7.78 m
+    // below the ground under it — measured, on a road running along a terrain's
+    // edge. Asking the same query every other vertex asks makes the hub a vertex
+    // like the rest, and lets the import's own arm assert *every* vertex sits at
+    // `ground + lift`.
+    if let Some(g) = height_at(centre.x, centre.z) {
+        if g.is_finite() {
+            centre.y = g + lift_m;
+        }
+    }
+    // Sort radially. `total_cmp` because a pseudo-angle is an f64 and
+    // `partial_cmp().unwrap()` is the panic this crate has already paid for.
+    let mut order: Vec<usize> = (0..pts.len()).collect();
+    order.sort_by(|a, b| {
+        let ka = pseudo_angle(pts[*a].xz() - centre.xz());
+        let kb = pseudo_angle(pts[*b].xz() - centre.xz());
+        ka.total_cmp(&kb).then(a.cmp(b))
+    });
+
+    let mut ribbon = RoadRibbon {
+        vertices: vec![centre],
+        uvs: vec![[0.5, 0.5]],
+        indices: Vec::new(),
+    };
+    for (n, i) in order.iter().enumerate() {
+        ribbon.vertices.push(pts[*i]);
+        // The junction's UVs are a unit-square projection about the centre, so
+        // a road texture continues across it at roughly its own scale rather
+        // than stretching.
+        let d = pts[*i].xz() - centre.xz();
+        ribbon
+            .uvs
+            .push([(0.5 + d.x * 0.1) as f32, (0.5 + d.y * 0.1) as f32]);
+        let _ = n;
+    }
+    let n = order.len() as u32;
+    for i in 0..n {
+        let a = 0u32;
+        let b = 1 + i;
+        let c = 1 + (i + 1) % n;
+        let (pb, pc) = (ribbon.vertices[b as usize], ribbon.vertices[c as usize]);
+        // The vertical component of (pb - centre) x (pc - centre): positive is
+        // up. Tested rather than assumed — the shoelace sign on the XZ plane is
+        // the NEGATION of the usual 2-D orientation term, which this crate has
+        // already had backwards once.
+        let (u, v) = (pb - centre, pc - centre);
+        let up = u.z * v.x - u.x * v.z;
+        if up.abs() <= 0.0 {
+            continue; // a degenerate sliver contributes nothing
+        }
+        if up > 0.0 {
+            ribbon.indices.extend_from_slice(&[a, b, c]);
+        } else {
+            ribbon.indices.extend_from_slice(&[a, c, b]);
+        }
+    }
+    (!ribbon.indices.is_empty()).then_some(ribbon)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,6 +1290,310 @@ mod tests {
         let mut l = GeoLayer::new("Roads", LayerKind::Roads, "EPSG:32610");
         l.features = features;
         l
+    }
+
+    /// A synthetic hill with real curvature, so a chord across it is visibly
+    /// wrong and a resampled ribbon is not. Portable (no trig): a quadratic
+    /// bump, whose second derivative is a constant.
+    fn hill(x: f64, z: f64) -> Option<f64> {
+        Some(20.0 - 0.002 * (x - 100.0) * (x - 100.0) - 0.001 * z * z)
+    }
+
+    /// A three-legged junction at (100, 0).
+    ///
+    /// **The through-street is TWO features, not one**, and that is how published
+    /// layers are digitised: `RoadGraph` derives its nodes from segment
+    /// *endpoints*, so a street that merely passes through a vertex at the
+    /// crossing creates no junction there. A fixture that wrote Broadway as one
+    /// 200 m feature produced a degree-2 node and the fan gate had nothing to
+    /// measure.
+    fn t_junction() -> RoadGraph {
+        let arterial = |pts: &[(f64, f64)], name: &str| {
+            let mut f = GeoFeature::new(line(pts));
+            f.attributes.insert("name".into(), Attr::Text(name.into()));
+            f.attributes
+                .insert("road_type".into(), Attr::Text("arterial".into()));
+            f
+        };
+        let mut b = GeoFeature::new(line(&[(100.0, 0.0), (100.0, 120.0)]));
+        b.attributes.insert("name".into(), Attr::Text("Elm".into()));
+        RoadGraph::from_layer(&layer(vec![
+            arterial(&[(0.0, 0.0), (60.0, 0.0), (100.0, 0.0)], "Broadway West"),
+            arterial(&[(100.0, 0.0), (200.0, 0.0)], "Broadway East"),
+            b,
+        ]))
+    }
+
+    /// **The road follows the ground, and the step that makes it do so is the
+    /// TERRAIN's number.**
+    ///
+    /// Every ribbon vertex sits at `ground + lift` by construction, so the arm
+    /// that means something is the one about the space *between* vertices: a
+    /// ribbon built on the centreline's own vertices spans a hill as a chord.
+    /// The alternative is priced in the test, in metres, because a gate against
+    /// a cheaper alternative has to price the alternative (the I1 audit law).
+    #[test]
+    fn roads_follow_the_ground_they_are_draped_on() {
+        let graph = t_junction();
+        let mut h = |x: f64, z: f64| hill(x, z);
+        let opts = SurfaceOptions::default();
+        let s = build_surface(&graph, &opts, &mut h);
+        assert!(!s.is_empty() && s.skipped.is_empty(), "{s:?}");
+
+        // (a) EVERY vertex — junction hubs included — is exactly `lift` above
+        // the ground under it.
+        let mut worst_vertex = 0.0f64;
+        for r in s.parts.values() {
+            for v in &r.vertices {
+                let g = hill(v.x, v.z).unwrap();
+                worst_vertex = worst_vertex.max((v.y - g - opts.lift_m).abs());
+            }
+        }
+        assert!(
+            worst_vertex < 1e-9,
+            "every road vertex must sit exactly {} m above the ground; worst was \
+             {worst_vertex} m",
+            opts.lift_m
+        );
+        let ribbons = build_surface(
+            &graph,
+            &SurfaceOptions {
+                fill_junctions: false,
+                ..opts
+            },
+            &mut h,
+        );
+
+        // (b) Between vertices — the claim that matters. Walk each ribbon edge's
+        // midpoint and compare the interpolated road against the real ground.
+        let midspan_error = |surf: &RoadSurface| -> f64 {
+            let mut worst = 0.0f64;
+            for r in surf.parts.values() {
+                for t in r.indices.chunks_exact(3) {
+                    for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+                        let a = r.vertices[t[i] as usize];
+                        let b = r.vertices[t[j] as usize];
+                        let m = (a + b) * 0.5;
+                        let g = hill(m.x, m.z).unwrap();
+                        worst = worst.max((m.y - g - 0.02).abs());
+                    }
+                }
+            }
+            worst
+        };
+        let dense = midspan_error(&ribbons);
+        let coarse = midspan_error(&build_surface(
+            &graph,
+            &SurfaceOptions {
+                fill_junctions: false,
+                ground_step_m: 10_000.0, // i.e. the centreline's own vertices
+                ..opts
+            },
+            &mut h,
+        ));
+        assert!(
+            dense < 0.002,
+            "at a 1 m step the road should hug the ground to millimetres; it was \
+             {dense:.6} m"
+        );
+        assert!(
+            coarse > 1.0,
+            "THE ALTERNATIVE MUST BE PRICED: on the centreline's own vertices the \
+             ribbon spans the hill as a chord, and that has to be metres for this \
+             gate to mean anything — it measured {coarse:.4} m"
+        );
+        assert!(
+            coarse / dense > 100.0,
+            "dense {dense:.6} m vs coarse {coarse:.4} m"
+        );
+    }
+
+    /// Densifying keeps every surveyed vertex and bounds the sub-step.
+    #[test]
+    fn densify_keeps_the_survey_and_bounds_the_step() {
+        let spine = vec![
+            DVec3::new(0.0, 0.0, 0.0),
+            DVec3::new(2.5, 0.0, 0.0),
+            DVec3::new(2.5, 0.0, 30.0),
+        ];
+        let d = densify_spine(&spine, 1.0);
+        for p in &spine {
+            assert!(
+                d.iter().any(|q| (*q - *p).length() < 1e-12),
+                "the survey's own vertex {p:?} must survive"
+            );
+        }
+        let worst = d
+            .windows(2)
+            .map(|w| (w[1].xz() - w[0].xz()).length())
+            .fold(0.0f64, f64::max);
+        assert!(worst <= 1.0 + 1e-12, "worst sub-step {worst}");
+        // Degenerate steps are refused by returning the input rather than
+        // looping forever.
+        assert_eq!(densify_spine(&spine, 0.0), spine);
+        assert_eq!(densify_spine(&spine, f64::NAN), spine);
+        assert_eq!(densify_spine(&spine[..1], 1.0), spine[..1].to_vec());
+    }
+
+    /// Is `p` (XZ) inside any triangle of the surface?
+    fn covered_at(s: &RoadSurface, p: glam::DVec2) -> bool {
+        for r in s.parts.values() {
+            for t in r.indices.chunks_exact(3) {
+                let a = r.vertices[t[0] as usize].xz();
+                let b = r.vertices[t[1] as usize].xz();
+                let c = r.vertices[t[2] as usize].xz();
+                let s1 = (b - a).perp_dot(p - a);
+                let s2 = (c - b).perp_dot(p - b);
+                let s3 = (a - c).perp_dot(p - c);
+                if (s1 >= 0.0 && s2 >= 0.0 && s3 >= 0.0) || (s1 <= 0.0 && s2 <= 0.0 && s3 <= 0.0) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// **A junction's core is PAVED, not holed** — and the arm measures *ground*
+    /// on a grid rather than asking the report whether it ran.
+    ///
+    /// # The fixture is an acute fork, and that is a finding
+    ///
+    /// The obvious fixture — a symmetric T or a `+` crossing — turns out to need
+    /// **no** fan at all: when two opposed legs of one street both end at the
+    /// node, their ribbons tile the whole crossing between them and every probe
+    /// is already covered, so a gate built on one measures nothing and passes
+    /// whatever the fan does. Holes appear where the legs do *not* span the
+    /// node's neighbourhood between them: an acute fork (a slip road leaving a
+    /// through street) with a third leg elsewhere leaves an open wedge on the
+    /// far side of the fork, inside the junction's own corner hull. That is the
+    /// case this measures.
+    ///
+    /// What the fan does **not** fix is stated where it is built: the wedges
+    /// *outside* the corner hull, between adjacent kerbs, need kerb-radius
+    /// fillets per leg pair, which is a road-modelling project rather than an
+    /// import.
+    #[test]
+    fn a_junction_of_three_roads_is_paved_rather_than_holed() {
+        // Node at (100, 0): a through street heading east, a slip road forking
+        // off it at ~11 degrees, and a cross street heading north.
+        let leg = |to: (f64, f64), name: &str| {
+            let mut f = GeoFeature::new(line(&[(100.0, 0.0), to]));
+            f.attributes.insert("name".into(), Attr::Text(name.into()));
+            f
+        };
+        let graph = RoadGraph::from_layer(&layer(vec![
+            leg((300.0, 0.0), "Kingsway"),
+            leg((298.0, 40.0), "Kingsway Slip"),
+            leg((100.0, 200.0), "Main"),
+        ]));
+        let node = graph
+            .intersections
+            .values()
+            .find(|i| i.degree() >= 3)
+            .expect("three legs share one endpoint");
+        assert_eq!(node.degree(), 3);
+
+        let mut h = |x: f64, z: f64| hill(x, z);
+        let filled = build_surface(&graph, &SurfaceOptions::default(), &mut h);
+        let holed = build_surface(
+            &graph,
+            &SurfaceOptions {
+                fill_junctions: false,
+                ..Default::default()
+            },
+            &mut h,
+        );
+        assert_eq!(filled.junctions_filled, 1, "{filled:?}");
+        assert_eq!(filled.junctions_skipped, 0);
+
+        // Sweep a 16 m box around the node at 10 cm and count open ground.
+        let mut open_before = 0usize;
+        let mut open_after = 0usize;
+        let mut newly_paved = 0usize;
+        for ix in -80..=80 {
+            for iz in -80..=80 {
+                let p = node.position.xz() + glam::DVec2::new(ix as f64 * 0.1, iz as f64 * 0.1);
+                let b = covered_at(&holed, p);
+                let a = covered_at(&filled, p);
+                if !b {
+                    open_before += 1;
+                }
+                if !a {
+                    open_after += 1;
+                }
+                if !b && a {
+                    newly_paved += 1;
+                }
+                assert!(b <= a, "the fan must never REMOVE ground, at {p:?}");
+            }
+        }
+        assert!(
+            newly_paved > 0,
+            "THE FAN MUST PAVE GROUND THAT WAS OPEN. It paved {newly_paved} of the \
+             {open_before} open samples in the box — if that is zero, the legs \
+             already tiled the junction and this gate measures nothing."
+        );
+        assert!(open_after < open_before);
+        println!(
+            "IB-4 junction: {newly_paved} of {open_before} open samples paved by the \
+             fan ({open_after} remain, outside the corner hull)"
+        );
+        // The fan takes the class of the most important road meeting there; all
+        // three legs here are residential.
+        assert!(
+            filled.parts.contains_key(&RoadKind::Residential),
+            "{:?}",
+            filled.parts.keys().collect::<Vec<_>>()
+        );
+        assert!(filled.triangle_count() > holed.triangle_count());
+    }
+
+    /// **The ribbon becomes a real `MeshAsset`** — the step Wave G stopped one
+    /// short of — with per-class submeshes, upward normals and a stated
+    /// positional resolution.
+    #[test]
+    fn a_road_network_becomes_a_mesh_asset_with_a_submesh_per_class() {
+        let graph = t_junction();
+        let mut h = |x: f64, z: f64| hill(x, z);
+        let s = build_surface(&graph, &SurfaceOptions::default(), &mut h);
+        // Centre the mesh on its own content — the reason is f32.
+        let origin = DVec3::new(100.0, 20.0, 0.0);
+        let (mesh, report) = surface_to_mesh(&s, origin).unwrap();
+
+        assert_eq!(mesh.schema_version, inf_mesh::MeshAsset::CURRENT_VERSION);
+        assert_eq!(
+            mesh.material_slots,
+            vec!["arterial".to_string(), "residential".into()],
+            "one slot per class present, in class order"
+        );
+        assert_eq!(mesh.submeshes.len(), 2);
+        assert_eq!(mesh.triangle_count(), s.triangle_count());
+        assert!(mesh.validate().is_ok(), "the asset's own door accepts it");
+        for (i, sub) in mesh.submeshes.iter().enumerate() {
+            assert_eq!(sub.material_slot, Some(i as u32));
+            for v in &sub.vertices {
+                assert!(v.position.iter().all(|c| c.is_finite()));
+                assert!(
+                    v.normal[1] > 0.5,
+                    "a road surface faces UP; {:?} does not",
+                    v.normal
+                );
+                let t = glam::Vec3::from_slice(&v.tangent[..3]);
+                assert!((t.length() - 1.0).abs() < 1e-3, "unit tangent, got {t:?}");
+            }
+        }
+        // The report says what an f32 vertex cost at this extent.
+        assert!(report.max_offset_m > 100.0 && report.max_offset_m < 200.0);
+        assert!(
+            report.quantisation_m > 0.0 && report.quantisation_m < 1e-4,
+            "{report:?}"
+        );
+        assert_eq!(report.triangles, s.triangle_count());
+
+        // An empty surface is a refusal naming where the reasons are.
+        let e = surface_to_mesh(&RoadSurface::default(), origin).unwrap_err();
+        assert!(e.to_string().contains("import report"), "{e}");
+        assert!(surface_to_mesh(&s, DVec3::new(f64::NAN, 0.0, 0.0)).is_err());
     }
 
     /// **The determinism gate** — the reason `HashMap` became `BTreeMap`.

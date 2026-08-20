@@ -3235,6 +3235,7 @@ dependencies = [
  "geojson",
  "glam 0.33.2",
  "inf-math",
+ "inf-mesh",
  "png 0.18.1",
  "proj4rs",
  "serde",

@@ -156,6 +156,71 @@ pub fn apply_plan(doc: &mut SceneDoc, plan: &SpawnPlan) -> SpawnReport {
     report
 }
 
+/// **The import's ground door.** Run `f` with a ground query over the level's
+/// terrains, then hand the document back.
+///
+/// # One rule, not a fourth spelling of it
+///
+/// The rule is [`inf_voxel::ground_height_at`] — the Ring-0 function IB-15 made
+/// *position-aware*, which takes the **topmost terrain that answers** rather
+/// than the lowest `Guid`. The two hosts each gather their terrains for it on a
+/// fixed step; this is the third gather, for the import path, and it exists
+/// rather than reusing one of theirs because both of theirs answer `0.0` where
+/// nothing does. An import needs `None` there: a road over ground the level has
+/// not authored must keep the published centreline's own elevation, not fall to
+/// sea level.
+///
+/// The closure shape is what makes it borrow-safe: registering the archetype
+/// query needs `&mut` on the world, sampling needs `&`, and spawning what the
+/// samples produced needs `&mut` again. Two phases inside one call, rather than
+/// a cloned `TerrainData` per terrain, which at island scale is tens of
+/// megabytes of resident tiles.
+///
+/// Voxel volumes are **not** consulted: at import time a road drapes on the
+/// heightfield, and a road over a carved cave mouth is a named remainder rather
+/// than a silent answer.
+pub fn with_ground<R>(
+    doc: &mut SceneDoc,
+    f: impl FnOnce(&mut dyn FnMut(f64, f64) -> Option<f64>) -> R,
+) -> R {
+    use inf_ecs::components::{GlobalTransform, Terrain, Transform};
+    use inf_ecs::{Entity, Guid};
+
+    let mut query = doc.world_mut().world_mut().query::<(
+        Entity,
+        &Guid,
+        &Terrain,
+        Option<&GlobalTransform>,
+        Option<&Transform>,
+    )>();
+    let mut found: Vec<(Uuid, Entity, DVec3)> = Vec::new();
+    {
+        let w = doc.world().world();
+        for (entity, guid, t, global, local) in query.iter(w) {
+            if t.data.is_empty() {
+                continue;
+            }
+            let origin = global
+                .map(|g| g.translation())
+                .or_else(|| local.map(|t| t.translation.to_dvec3()))
+                .unwrap_or(DVec3::ZERO);
+            found.push((guid.0, entity, origin));
+        }
+    }
+    // `Guid` order, so the rule's tie-break is a function of the level rather
+    // than of a bevy archetype walk — the same ordering both hosts apply.
+    found.sort_unstable_by_key(|(g, _, _)| *g);
+    let w = doc.world().world();
+    let terrains: Vec<(&inf_ecs::TerrainData, DVec3)> = found
+        .iter()
+        .filter_map(|(_, e, o)| w.get::<Terrain>(*e).map(|t| (&t.data, *o)))
+        .collect();
+    let empty: std::collections::BTreeMap<Uuid, inf_voxel::VoxelData> =
+        std::collections::BTreeMap::new();
+    let mut probe = |x: f64, z: f64| inf_voxel::ground_height_at(&terrains, &empty, x, z);
+    f(&mut probe)
+}
+
 /// Spawn a bare `Spline` entity at the run's first point.
 ///
 /// The points are stored in the entity's own frame — the same convention
@@ -403,7 +468,12 @@ mod tests {
         let report = apply_plan(&mut doc, &plan);
         assert_eq!(report.count(), plan.count());
         assert_eq!(
-            (report.too_short, report.unusable, report.truncated, report.cap),
+            (
+                report.too_short,
+                report.unusable,
+                report.truncated,
+                report.cap
+            ),
             (plan.too_short, plan.unusable, plan.truncated, plan.cap),
             "the report restates the plan, it does not recompute it"
         );

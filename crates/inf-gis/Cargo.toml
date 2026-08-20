@@ -15,6 +15,13 @@ thiserror = { workspace = true }
 # The geo-anchor (`inf_math::geo::GeoAnchor`) this crate transforms into, and the
 # compass frame it must agree with (`inf_math::solar`). Ring-0 → Ring-0 leaf.
 inf-math = { workspace = true }
+# IB-4: a road ribbon is a MESH, and the disposition memo's complaint about it
+# was literally that `build_ribbon` "returns vertex, UV and index arrays, not a
+# `MeshAsset`". Writing one here rather than in the editor is what lets the
+# `inf gis` CLI, the wizard and a cook-time pipeline produce the same asset —
+# a host crate depending on a runtime crate, which is the safe direction, and
+# `inf-mesh` has no edge back here.
+inf-mesh = { workspace = true }
 
 # ── THE FACADE (architecture rule: one crate names each heavy dependency) ────
 # This crate is the ONLY one in the workspace that names proj4rs, shapefile,

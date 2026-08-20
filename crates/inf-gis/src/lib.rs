@@ -91,8 +91,9 @@ pub use import::{
     ISLAND_MAX_ENTITIES,
 };
 pub use roads::{
-    build_all_ribbons, build_ribbon, Intersection, RoadGraph, RoadKind, RoadRibbon, RoadSegment,
-    LANE_WIDTH_M,
+    build_all_ribbons, build_ribbon, build_surface, densify_spine, surface_to_mesh, Intersection,
+    MeshBuildReport, RoadGraph, RoadKind, RoadRibbon, RoadSegment, RoadSurface, SurfaceOptions,
+    DEFAULT_GROUND_STEP_M, DEFAULT_ROAD_LIFT_M, LANE_WIDTH_M,
 };
 pub use terrarium::{
     decode_elevation, decode_tile_png, decode_tile_rgb, encode_elevation, TerrariumTile,

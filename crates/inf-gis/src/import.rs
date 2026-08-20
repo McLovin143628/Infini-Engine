@@ -183,7 +183,9 @@ fn vertical_unit_from_wkt(wkt: &str) -> Option<f64> {
     let upper = wkt.to_ascii_uppercase();
     let at = upper.find("VERT_CS[").or_else(|| upper.find("VERTCRS["))?;
     let rest_upper = &upper[at..];
-    let rel = rest_upper.find("UNIT[").or_else(|| rest_upper.find("LENGTHUNIT["))?;
+    let rel = rest_upper
+        .find("UNIT[")
+        .or_else(|| rest_upper.find("LENGTHUNIT["))?;
     let body_start = at + rel;
     let close = upper[body_start..].find(']')?;
     let body = &wkt[body_start..body_start + close];
@@ -194,7 +196,10 @@ fn vertical_unit_from_wkt(wkt: &str) -> Option<f64> {
         .chars()
         .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == 'e' || *c == 'E' || *c == '-')
         .collect();
-    number.parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0)
+    number
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v > 0.0)
 }
 
 /// Parse a `.prj`'s WKT into whatever of it this engine can honour.
@@ -760,7 +765,9 @@ pub fn runs_of(f: &GeoFeature) -> Vec<Vec<DVec3>> {
 
 /// Plan-view length of a run, in metres.
 pub fn run_length(pts: &[DVec3]) -> f64 {
-    pts.windows(2).map(|w| (w[1].xz() - w[0].xz()).length()).sum()
+    pts.windows(2)
+        .map(|w| (w[1].xz() - w[0].xz()).length())
+        .sum()
 }
 
 /// A stream's channel, read off its attribute row with the spellings real
@@ -998,7 +1005,9 @@ mod tests {
         let read = parse_prj_wkt(wkt);
         assert_eq!(read.crs.as_deref(), Some("EPSG:26910"), "{read:?}");
         assert!(
-            read.advisories.iter().any(|a| a.code == "crs.prj_name_matched"),
+            read.advisories
+                .iter()
+                .any(|a| a.code == "crs.prj_name_matched"),
             "a pattern match must say it was one: {:?}",
             read.advisories
         );
@@ -1019,14 +1028,20 @@ mod tests {
         let wkt = r#"PROJCS["Some_Local_Grid_1927",PROJECTION["Krovak"],UNIT["Meter",1.0]]"#;
         let read = parse_prj_wkt(wkt);
         assert_eq!(read.crs, None);
-        assert!(read.advisories.iter().any(|a| a.code == "crs.prj_unreadable"));
+        assert!(read
+            .advisories
+            .iter()
+            .any(|a| a.code == "crs.prj_unreadable"));
 
         let dir = tempfile::tempdir().unwrap();
         let shp = dir.path().join("roads.shp");
         std::fs::write(&shp, b"not a shapefile").unwrap();
         std::fs::write(dir.path().join("roads.prj"), wkt).unwrap();
         let e = resolve_crs(&shp, None).unwrap_err().to_string();
-        assert!(e.contains("Krovak"), "the .prj's own text must be shown: {e}");
+        assert!(
+            e.contains("Krovak"),
+            "the .prj's own text must be shown: {e}"
+        );
         assert!(e.contains("epsg.io"), "the remedy must be named: {e}");
 
         // Stating one wins, and the disagreement is reported rather than hidden.
@@ -1055,7 +1070,10 @@ mod tests {
 
         let other = resolve_crs(&shp, Some("EPSG:32610")).unwrap();
         assert!(
-            other.advisories.iter().any(|a| a.code == "crs.overrides_prj"),
+            other
+                .advisories
+                .iter()
+                .any(|a| a.code == "crs.overrides_prj"),
             "a silent override is how a layer lands in the wrong datum: {:?}",
             other.advisories
         );
@@ -1081,7 +1099,10 @@ mod tests {
         let feet = Transform::with_vertical_unit("EPSG:26910", &anchor, 0.3048).unwrap();
         let a = metres.to_world(491_100.0, 5_459_100.0, 100.0).unwrap();
         let b = feet.to_world(491_100.0, 5_459_100.0, 100.0).unwrap();
-        assert!((a.x - b.x).abs() < 1e-9 && (a.z - b.z).abs() < 1e-9, "{a:?} {b:?}");
+        assert!(
+            (a.x - b.x).abs() < 1e-9 && (a.z - b.z).abs() < 1e-9,
+            "{a:?} {b:?}"
+        );
         assert!(
             (b.y - 30.48).abs() < 1e-9 && (a.y - 100.0).abs() < 1e-9,
             "100 feet is 30.48 m, not {}: {a:?} {b:?}",
@@ -1118,7 +1139,10 @@ mod tests {
         assert_eq!(probe.features, 2);
         assert_eq!(probe.polylines, 2);
         assert_eq!(probe.dominant_kind(), "polyline");
-        assert_eq!(probe.field_names(), vec!["lanes".to_string(), "name".into()]);
+        assert_eq!(
+            probe.field_names(),
+            vec!["lanes".to_string(), "name".into()]
+        );
         let lanes = probe.fields.iter().find(|f| f.name == "lanes").unwrap();
         assert_eq!(
             (lanes.present, lanes.numeric),
@@ -1126,13 +1150,27 @@ mod tests {
             "a JSON null is present-but-unset and must not count as a value"
         );
         assert_eq!(
-            probe.fields.iter().find(|f| f.name == "name").unwrap().sample.as_deref(),
+            probe
+                .fields
+                .iter()
+                .find(|f| f.name == "name")
+                .unwrap()
+                .sample
+                .as_deref(),
             Some("Main St")
         );
         // Vancouver is UTM zone 10 north.
-        assert_eq!(probe.suggested_anchor_epsg, Some(32610), "{:?}", probe.centre_lat_lon);
+        assert_eq!(
+            probe.suggested_anchor_epsg,
+            Some(32610),
+            "{:?}",
+            probe.centre_lat_lon
+        );
         let (lat, lon) = probe.centre_lat_lon.unwrap();
-        assert!((lat - 49.28).abs() < 1e-6 && (lon + 123.115).abs() < 1e-3, "{lat} {lon}");
+        assert!(
+            (lat - 49.28).abs() < 1e-6 && (lon + 123.115).abs() < 1e-3,
+            "{lat} {lon}"
+        );
         // Source bounds are the file's own degrees, not world metres.
         let (lo, hi) = probe.bounds_source.unwrap();
         assert!(lo.x < -123.1 && hi.x < -123.1, "{lo:?} {hi:?}");
@@ -1179,7 +1217,9 @@ mod tests {
         let mut req = ImportRequest::new(&p, LayerKind::Roads);
         req.source_crs = Some("EPSG:4326".into());
 
-        let e = import_layer(&req, &GeoAnchor::default()).unwrap_err().to_string();
+        let e = import_layer(&req, &GeoAnchor::default())
+            .unwrap_err()
+            .to_string();
         assert!(
             e.to_ascii_lowercase().contains("anchor"),
             "the refusal must name the anchor: {e}"
