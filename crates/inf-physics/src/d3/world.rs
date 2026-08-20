@@ -622,6 +622,35 @@ impl PhysicsWorld3D {
         );
         collector.append_into(&mut self.pending_contacts);
         self.query_moved_bodies.extend(self.islands.active_bodies());
+        // **AND THE LIST IS BOUNDED BY THE WORLD, NOT BY TIME.**
+        //
+        // `ensure_query_pipeline` drains this on the next *query*, and a level
+        // may not make one: a physics playground with a thousand falling props
+        // and no character, no camera subject and no gameplay cast never calls
+        // it. Left as a plain accumulator, that world appends two entries per
+        // awake body per step, at 60 Hz, for the length of the session — the
+        // "a pin with no release is a leak with a deadline" shape, one phase on.
+        //
+        // Deduplicating here bounds it at the number of *distinct* bodies that
+        // have moved since the last query, which is at most the world's body
+        // count. The cost is a sort over the awake set — one or two entries on
+        // the city this wave measured — and the key is `into_raw_parts` rather
+        // than the handle itself so this does not rest on rapier's `Ord`.
+        self.query_moved_bodies
+            .sort_unstable_by_key(|h| h.into_raw_parts());
+        self.query_moved_bodies.dedup();
+        // The collider list has the same shape and a different cure. It grows on
+        // attach and on enable/disable rather than per step, so deduplicating it
+        // would cost a sort per attach; what bounds it is the observation that
+        // makes it moot: **once more colliders are pending than the world has, a
+        // fresh build is cheaper than re-inserting them one at a time.** So past
+        // that point the pending list is dropped and the next query rebuilds —
+        // which is both the bound and the right performance answer, and needs no
+        // constant, because the world's own collider count is the threshold.
+        if self.query_moved.len() > self.colliders.len() {
+            self.query_rebuild = true;
+            self.query_moved.clear();
+        }
     }
 
     /// **How much narrow phase this world is paying for** (island wave I4b) —
@@ -1496,6 +1525,17 @@ impl PhysicsWorld3D {
     }
 
     // ── internal ──────────────────────────────────────────────────────────────
+
+    /// **How much the query BVH has pending** — `(bodies, colliders)` marked
+    /// stale and not yet folded in (island wave I4b).
+    ///
+    /// A diagnostic with one job: the marks are drained by the next *query*, and
+    /// a level may never make one, so `step` bounds both lists. This is what
+    /// `a_world_that_never_queries_does_not_accumulate_pending_marks` reads to
+    /// say the bound is real rather than intended.
+    pub fn pending_query_marks(&self) -> (usize, usize) {
+        (self.query_moved_bodies.len(), self.query_moved.len())
+    }
 
     /// **Throw the query BVH away and build it fresh on the next query**
     /// (island wave I4b).

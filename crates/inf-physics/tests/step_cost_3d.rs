@@ -263,6 +263,57 @@ fn a_removed_collider_leaves_the_query_tree() {
     );
 }
 
+/// **A WORLD THAT NEVER QUERIES DOES NOT GROW A LIST FOREVER.**
+///
+/// The incremental query tree's pending marks are drained by the next *query*,
+/// and a level may never make one: a physics playground with falling props, no
+/// character, no camera subject and no gameplay cast steps at 60 Hz and asks
+/// nothing. Left as a plain accumulator that is "a pin with no release is a leak
+/// with a deadline" one phase on, so `step` deduplicates the body list and drops
+/// the collider list once it is longer than the world's own collider count —
+/// past which a fresh build is cheaper than re-inserting anyway.
+///
+/// This arm steps such a world 600 times and reads the lists' own bound, then
+/// **checks the world still answers correctly afterwards**, because a bound that
+/// works by forgetting is only a bound if what it forgot was recoverable.
+#[test]
+fn a_world_that_never_queries_does_not_accumulate_pending_marks() {
+    let (mut w, ball) = field(4);
+    for _ in 0..600 {
+        w.step(DT);
+    }
+    let (bodies, colliders) = w.pending_query_marks();
+    println!(
+        "600 steps with no query: {bodies} pending bodies, {colliders} pending \
+         colliders, over a world of {} colliders",
+        4 * 4 + 1
+    );
+    assert!(
+        bodies <= 4 * 4 + 1,
+        "{bodies} pending body marks after 600 steps of a {} body world — the \
+         list is accumulating per step rather than per distinct body",
+        4 * 4 + 1
+    );
+    assert!(
+        colliders <= 4 * 4 + 1,
+        "{colliders} pending collider marks after 600 steps — the ceiling that \
+         converts a long pending list into a rebuild is not firing"
+    );
+    // …and the world is still right. The first query after all that drains
+    // whatever is pending, and it has to answer what a rebuilt tree would.
+    let p = w.body_translation(ball).expect("the ball exists");
+    let ray = w.cast_ray(p + DVec3::Y * 6.0, -DVec3::Y, 40.0);
+    w.force_query_rebuild();
+    let ray2 = w.cast_ray(p + DVec3::Y * 6.0, -DVec3::Y, 40.0);
+    assert_eq!(
+        ray.map(|h| (h.collider, h.toi.to_bits())),
+        ray2.map(|h| (h.collider, h.toi.to_bits())),
+        "after 600 unqueried steps the incremental tree disagrees with a rebuilt \
+         one — the bound dropped a mark it needed"
+    );
+    assert!(ray.is_some(), "the ray must hit the floor it is aimed at");
+}
+
 /// **A collider attached between two steps is queryable immediately.**
 ///
 /// The reason the query tree is a second structure at all rather than the
