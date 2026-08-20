@@ -1036,7 +1036,7 @@ impl PhysicsWorld3D {
     /// narrow for this engine: game triggers routinely involve
     /// kinematic-vs-static overlaps, and a level author expects a static sensor
     /// volume placed over static scenery to report it. So this engine has always
-    /// used [`ActiveCollisionTypes::all()`] — and that is one pairing too many.
+    /// used `ActiveCollisionTypes::all()` — and that is one pairing too many.
     ///
     /// # The one pairing that is removed, and what it was costing
     ///
@@ -1500,9 +1500,9 @@ impl PhysicsWorld3D {
     /// **Throw the query BVH away and build it fresh on the next query**
     /// (island wave I4b).
     ///
-    /// The incremental maintenance in [`ensure_query_pipeline`](Self::ensure_query_pipeline)
-    /// tracks what this world knows moved. This is the door for the two cases it
-    /// cannot know about, and there are exactly two:
+    /// The incremental maintenance in `ensure_query_pipeline` tracks what this
+    /// world knows moved. This is the door for the two cases it cannot know
+    /// about, and there are exactly two:
     ///
     /// * a caller that has changed collider geometry through some future escape
     ///   hatch this type does not own, and

@@ -52,54 +52,87 @@ pub const STEP_PHASES: usize = 22;
 /// step (after write-back, after root motion, after attachments) and a reader
 /// asking "what does transform propagation cost this world" wants one number;
 /// the same goes for the two dispatch drains folded into their event phases.
+/// What each one covers, in order, is documented on the matching constant in
+/// [`phase`] — deliberately there and not as a trailing comment here, because
+/// `rustfmt` aligns trailing comments into runs of spaces on lines that contain
+/// a string literal, and `inf_packager`'s workspace-wide
+/// `no_string_literal_in_the_workspace_carries_an_eaten_continuation` reads such
+/// a run as an eaten `\`-continuation. A table that trips the tree's own
+/// mangled-whitespace gate is a table that has to be maintained around it.
 pub const STEP_PHASE_NAMES: [&str; STEP_PHASES] = [
-    "cell stream",      // 0  P16.5 partition cells
-    "terrain stream",   // 1  P16.3b2 sim-side terrain paging
-    "sky",              // 2  P17.1 time of day + P17.4 weather blend
-    "physics2d sync",   // 3  the 2D bridge's ECS → rapier2d walk
-    "physics3d sync",   // 4  the 3D bridge's walk — the collider band lives here
-    "water forces",     // 5  P20.2 buoyancy + hydrodynamic drag
-    "input events",     // 6  Wave 3 input edges + their dispatches
-    "blueprint tick",   // 7  the Tick pass over every actor + its dispatches
-    "character move",   // 8  P29.3 the one Ring-0 movement step
-    "solver",           // 9  rapier2d + rapier3d
-    "collision drain",  // 10 Wave 3 contacts/overlaps + their dispatches
-    "write-back",       // 11 rapier → ECS
-    "propagate",        // 12 transform + visibility DFS (THREE calls, gathered)
-    "deformation",      // 13 P22.1 the ground remembers
-    "animation",        // 14 play-heads + state machines + root motion
-    "attachments",      // 15 P11.3 sockets
-    "cloth + hair",     // 16 P24.4
-    "mods",             // 17 P14.5 WASM mods (propagates internally)
-    "destruction",      // 18 P22.3 fracture write-back + solve + budget
-    "audio",            // 19 P12.3 the command queue
-    "camera",           // 20 P29.6 the locomotion camera
-    "position capture", // 21 the interpolation history roll
+    "cell stream",
+    "terrain stream",
+    "sky",
+    "physics2d sync",
+    "physics3d sync",
+    "water forces",
+    "input events",
+    "blueprint tick",
+    "character move",
+    "solver",
+    "collision drain",
+    "write-back",
+    "propagate",
+    "deformation",
+    "animation",
+    "attachments",
+    "cloth + hair",
+    "mods",
+    "destruction",
+    "audio",
+    "camera",
+    "position capture",
 ];
 
-/// Phase indices, named so a mark cannot drift from its meaning.
+/// Phase indices, named so a mark cannot drift from its meaning — and the place
+/// each phase's *contents* are written down, since [`STEP_PHASE_NAMES`] carries
+/// only the labels.
 pub(crate) mod phase {
+    /// P16.5 partition cells.
     pub const CELL_STREAM: usize = 0;
+    /// P16.3b2 sim-side terrain paging.
     pub const TERRAIN_STREAM: usize = 1;
+    /// P17.1 time of day + P17.4 the weather blend.
     pub const SKY: usize = 2;
+    /// The 2D bridge's ECS → rapier2d walk.
     pub const PHYSICS2D_SYNC: usize = 3;
+    /// The 3D bridge's walk — the I3 collider band's gather lives here, and so
+    /// does the P22.3 fracture follow that precedes it.
     pub const PHYSICS3D_SYNC: usize = 4;
+    /// P20.2 buoyancy + hydrodynamic drag.
     pub const WATER: usize = 5;
+    /// Wave 3 input edges and the dispatches they queue.
     pub const INPUT_EVENTS: usize = 6;
+    /// The Tick pass over every actor, and the dispatches it queues.
     pub const BLUEPRINT_TICK: usize = 7;
+    /// P29.3 — the one Ring-0 movement step, plus the intent that feeds it.
     pub const CHARACTER_MOVE: usize = 8;
+    /// rapier2d + rapier3d.
     pub const SOLVER: usize = 9;
+    /// Wave 3 contacts and overlaps, and the dispatches they queue.
     pub const COLLISION_DRAIN: usize = 10;
+    /// rapier → ECS.
     pub const WRITE_BACK: usize = 11;
+    /// The transform + visibility DFS. **Three call sites, gathered.**
     pub const PROPAGATE: usize = 12;
+    /// P22.1 — the ground remembers what stood on it.
     pub const DEFORMATION: usize = 13;
+    /// Play-heads, state machines and root motion.
     pub const ANIMATION: usize = 14;
+    /// P11.3 sockets.
     pub const ATTACHMENTS: usize = 15;
+    /// P24.4 garments and hair.
     pub const CLOTH_HAIR: usize = 16;
+    /// P14.5 WASM mods — which propagate internally, so their propagate is here
+    /// rather than in [`PROPAGATE`].
     pub const MODS: usize = 17;
+    /// P22.3 fracture write-back, the structural solve and the debris budget.
     pub const DESTRUCTION: usize = 18;
+    /// P12.3 — the audio command queue.
     pub const AUDIO: usize = 19;
+    /// P29.6 — the locomotion camera.
     pub const CAMERA: usize = 20;
+    /// The interpolation history roll and the rising-edge clear.
     pub const POSITION_CAPTURE: usize = 21;
 }
 

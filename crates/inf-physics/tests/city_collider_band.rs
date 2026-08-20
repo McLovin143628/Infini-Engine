@@ -820,13 +820,19 @@ fn the_solver_pays_for_static_pairs_the_city_can_never_move() {
     }
     assert!(
         tracked > colliders,
-        "the narrow phase tracks {tracked} pairs over {colliders} colliders -          fewer pairs than colliders means the city's boxes are not touching each          other and this arm is measuring a different world than the one its          header describes"
+        "the narrow phase tracks {tracked} pairs over {colliders} colliders — \
+         fewer pairs than colliders means the city's boxes are not touching each \
+         other and this arm is measuring a different world than the one its \
+         header describes"
     );
     // **AND NONE OF THEM IS A MANIFOLD.** This is the arm the rule dies at: put
     // `FIXED_FIXED` back on solids and a city of static boxes on static ground
     // starts computing twenty thousand contact manifolds a step again.
     assert_eq!(
         touching, 0,
-        "{touching} of the city's {tracked} static pairs computed a contact          manifold - `ActiveCollisionTypes` is back to `all()` for solids, and          this city's fixed step has just gone back to paying nine milliseconds          for contacts no solver can act on"
+        "{touching} of the city's {tracked} static pairs computed a contact \
+         manifold — `ActiveCollisionTypes` is back to `all()` for solids, and \
+         this city's fixed step has just gone back to paying nine milliseconds \
+         for contacts no solver can act on"
     );
 }

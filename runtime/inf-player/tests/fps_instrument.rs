@@ -967,7 +967,8 @@ fn the_frame_at_shipping_resolution() {
             );
             for (n, ms, cpu) in by_cost.iter().take(12) {
                 println!(
-                    "{label}   {n:<16} {ms:7.3} ms  ({:5.1} % of the GPU frame)                        record {cpu:6.3} ms",
+                    "{label}   {n:<16} {ms:7.3} ms  ({:5.1} % of the GPU frame)   \
+                     record {cpu:6.3} ms",
                     ms / m.gpu_frame_ms.max(1.0e-9) * 100.0
                 );
             }
@@ -1101,7 +1102,11 @@ fn the_frame_at_shipping_resolution() {
             // on the other processor.
             if let Some(v) = m.vsm.as_ref() {
                 println!(
-                    "{label} lit VSM raster: {} frames opened the page pass,                      {} page rectangles, {} indirect draws, {} casters                      ({} from scatter, {} terrain), {} deferred pages, {}                      dropped casters — i.e. {:.1} pages and {:.0} draws per                      rastering frame",
+                    "{label} lit VSM raster: {} frames opened the page pass, \
+                     {} page rectangles, {} indirect draws, {} casters \
+                     ({} from scatter, {} terrain), {} deferred pages, {} \
+                     dropped casters — i.e. {:.1} pages and {:.0} draws per \
+                     rastering frame",
                     v.frames,
                     v.pages,
                     v.draws,
@@ -1114,7 +1119,9 @@ fn the_frame_at_shipping_resolution() {
                     v.draws as f64 / v.frames.max(1) as f64,
                 );
                 println!(
-                    "{label} lit VSM group mask: {} indirect draws skipped                      ({:.0} per rastering frame) against {} issued;                      {} invalidation touches ({:.0} per frame)",
+                    "{label} lit VSM group mask: {} indirect draws skipped \
+                     ({:.0} per rastering frame) against {} issued; \
+                     {} invalidation touches ({:.0} per frame)",
                     v.skipped_draws,
                     v.skipped_draws as f64 / v.frames.max(1) as f64,
                     v.draws,
@@ -1134,7 +1141,8 @@ fn the_frame_at_shipping_resolution() {
                 let mut by_cost = m.passes.clone();
                 by_cost.sort_by(|a, b| (b.1 + b.2).total_cmp(&(a.1 + a.2)));
                 println!(
-                    "{label} lit GPU frame {:.3} ms; every pass, with what it cost                      to RECORD it:",
+                    "{label} lit GPU frame {:.3} ms; every pass, with what it cost \
+                     to RECORD it:",
                     m.gpu_frame_ms
                 );
                 for (n, ms, cpu) in by_cost
@@ -1142,7 +1150,8 @@ fn the_frame_at_shipping_resolution() {
                     .filter(|(_, ms, cpu)| *ms >= 0.0005 || *cpu >= 0.0005)
                 {
                     println!(
-                        "{label}   lit {n:<16} {ms:7.3} ms  ({:5.1} % of the lit GPU                          frame)   record {cpu:6.3} ms",
+                        "{label}   lit {n:<16} {ms:7.3} ms  ({:5.1} % of the lit \
+                         GPU frame)   record {cpu:6.3} ms",
                         ms / m.gpu_frame_ms.max(1.0e-9) * 100.0
                     );
                 }
