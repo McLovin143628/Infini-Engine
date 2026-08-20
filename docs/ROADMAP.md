@@ -24622,15 +24622,15 @@ evaluate PCG volumes**; the player does, on load, so there is nothing cook-side 
 
 ### Counts
 
-| | after the I3 audit | after I4 |
-|---|---|---|
-| battery blocks / passed / failed / ignored | 298 / 5 670 / 0 / 13 | **305 / 5 689 / 0 / 14** — 7 new test binaries, 19 new arms, and the one new `#[ignore]` is the 257²-page island confirmation |
-| frontend tests / files | 702 / 78 | **702 / 78**, `tsc` clean — no UI was touched |
-| goldens | 54, byte-frozen | **54, byte-identical under `INF_GOLDEN_STRICT=1`** |
-| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
-| rustdoc individual warnings (cold, all roots touched) | 412 | **412** — 446 `^warning` lines − 34 per-crate summaries, unmoved |
-| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged.** Every struct this wave grew carries no serde derive; checked rather than assumed |
-| `StreamBudget::default().max_resident_tiles` | 1024 (chosen) | **860 (derived)** |
+| | after the I3 audit | after I4 | **after the I4 audit** |
+|---|---|---|---|
+| battery blocks / passed / failed / ignored | 298 / 5 670 / 0 / 13 | 305 / 5 689 / 0 / 14 — 7 new test binaries, 19 new arms, and the one new `#[ignore]` is the 257²-page island confirmation | **305 / 5 690 / 0 / 14** — the audit adds **exactly one** arm (`the_registration_door_carries_the_upload_budget`) and no test binary; the rest of its work sharpened arms that already existed and deleted four that could not fail |
+| frontend tests / files | 702 / 78 | 702 / 78, `tsc` clean | **702 / 78**, `tsc` and `eslint` clean — no UI was touched by either |
+| goldens | 54, byte-frozen | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical under `INF_GOLDEN_STRICT=1`** (100 golden arms, re-run on the audit's head) |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | 0 | **0** |
+| rustdoc individual warnings (cold, all roots touched) | 412 | 412 | **412** — 446 `^warning` lines − 34 per-crate summaries, unmoved |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | unchanged | **unchanged — no schema moved**, and no golden and no committed sample |
+| `StreamBudget::default().max_resident_tiles` | 1024 (chosen) | **860 (derived)** | 860 |
 
 ### Laws this wave paid for
 

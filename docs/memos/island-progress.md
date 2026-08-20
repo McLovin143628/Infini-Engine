@@ -827,16 +827,16 @@ and must not be quoted.** It is still a fidelity decision with a cost — a much
 
 ### Counts
 
-| | after the I3 audit | after I4 |
-|---|---|---|
-| battery blocks / passed / failed / ignored | 298 / 5 670 / 0 / 13 | **305 / 5 689 / 0 / 14** — 7 new test binaries, **19** new arms (20, less the one clippy turned into a compile-time `const` assertion), and the one new `#[ignore]` is the 257²-page island confirmation |
-| frontend tests / files | 702 / 78 | **702 / 78**, `tsc` clean — no UI was touched |
-| goldens | 54, byte-frozen | **54, byte-identical under `INF_GOLDEN_STRICT=1`** — and `timing_changes_no_pixel` is the arm that says an attached GPU stopwatch cannot move one |
-| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
-| rustdoc individual warnings (cold, all roots touched) | 412 | **412** — 446 `^warning` lines − 34 per-crate summaries, unmoved |
-| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved.** Every struct this wave grew (`VtPoolConfig`, `VtStats`, `VtTransaction`, `AdmitLog`, `VirtualTextureSettings`, `RenderSettings`) carries no serde derive; checked rather than assumed |
-| new ratchet constants | — | `SHIPPING_FRAME_CEILING_MS` 58.0, `SHIPPING_FRAME_P99_CEILING_MS` 64.0 (targets 16.6 / 33.2, never asserted); `StreamBudget::default().max_resident_tiles` **1024 → 860**, derived |
-| committed samples | 20 levels | **20** — the instrument's scene is composed at test time and writes nothing into `samples/` |
+| | after the I3 audit | after I4 | **after the I4 audit** |
+|---|---|---|---|
+| battery blocks / passed / failed / ignored | 298 / 5 670 / 0 / 13 | 305 / 5 689 / 0 / 14 — 7 new test binaries, **19** new arms (20, less the one clippy turned into a compile-time `const` assertion), and the one new `#[ignore]` is the 257²-page island confirmation | **305 / 5 690 / 0 / 14** — the audit adds **exactly one** arm and no test binary; the rest of its work sharpened arms that already existed and **deleted four that could not fail** |
+| frontend tests / files | 702 / 78 | 702 / 78, `tsc` clean | **702 / 78**, `tsc` and `eslint` clean — no UI was touched by either |
+| goldens | 54, byte-frozen | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical under `INF_GOLDEN_STRICT=1`** (100 golden arms, re-run on the audit's head) — and `timing_changes_no_pixel` is the arm that says an attached GPU stopwatch cannot move one, mutation-verified |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | 0 | **0** |
+| rustdoc individual warnings (cold, all roots touched) | 412 | 412 | **412** — 446 `^warning` lines − 34 per-crate summaries, unmoved |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | unchanged — every struct the wave grew (`VtPoolConfig`, `VtStats`, `VtTransaction`, `AdmitLog`, `VirtualTextureSettings`, `RenderSettings`) carries no serde derive; checked rather than assumed | **unchanged — no schema moved, no golden moved, no committed sample moved** |
+| new ratchet constants | — | `SHIPPING_FRAME_CEILING_MS` 58.0, `SHIPPING_FRAME_P99_CEILING_MS` 64.0 (targets 16.6 / 33.2, never asserted); `StreamBudget::default().max_resident_tiles` **1024 → 860**, derived | unchanged — the audit minted none and raised none |
+| committed samples | 20 levels | **20** — the instrument's scene is composed at test time and writes nothing into `samples/` | 20 |
 
 ## The I4 audit (adversarial, `1d33295..d67e180` audited; the audit's own commits follow it)
 
@@ -901,6 +901,26 @@ audit block tables them; the two recorded as *coverage bounds* rather than defec
 `VirtualTextureSettings::default().upload_budget_bytes`, which `whip_pan` cannot see because
 it builds its pool config directly.
 
+
+**Certification.** Wave I4 is **certified** at this tree. Its four items are closed as
+follows: the **fps instrument exists and is honest about its own configuration** (the audit's
+addition: it now names what it does not draw and prices it); **IB-12 is closed** and its two
+blind arms are repaired; **IB-16 is closed** and its one production door is now armed;
+**IB-9 is closed as a derivation and carried as a ceiling**, with the gap asserted so it
+cannot be forgotten. Clause 6's refusal stands and is now armed on the object it is about,
+conditionally on the billboard sizing. Clause 5's path is proven and its price is corrected
+from +1.416 ms to **+0.32 ms** against a comparable configuration.
+
+Battery **305 / 5 690 / 0 / 14** (the audit adds exactly one arm and deletes four that could
+not fail), frontend **702 / 78** with `tsc` and `eslint` clean, goldens **54 byte-identical
+under `INF_GOLDEN_STRICT=1`**, `clippy --workspace --all-targets -D warnings` **0**, rustdoc
+**412** individual warnings from a cold re-documentation, `cargo fmt --all --check` clean,
+**no schema moved, no golden moved, no committed sample moved**. Twenty-three mutations were
+run and each dies at exactly the arm that names it.
+
+**No blocker for IP.** The one item that could have been — the cook's missing PCG evaluation
+— is verified, qualified and routed as IP's first clause rather than left as a sentence.
+
 ---
 
 ## Open questions / carried bounds
@@ -931,8 +951,13 @@ it builds its pool config directly.
   walker on a heightfield. Deleting the scatter pass entirely would still leave a ~21 ms
   frame. **This is where the next 60 fps work is**, and it is a sim question rather than a
   render one. What the step is made of has never been broken down: the I3 collider band is
-  2.2 ms of it at the certification's rate, and the other ~11 ms is unattributed —
-  movement, animation, the physics step over 6 067 banded colliders, the change-stamp scans.
+  **~2.0–2.2 ms** of it (1.991 / 2.13 / 2.06 ms measured on the same city, 2.202 computed at
+  the certification's rate), and the other **~11.5 ms is unattributed** — movement,
+  animation, the physics step over the 6 067 banded colliders, the change-stamp scans.
+  *The one cross-check that reconciles: the band IS engaged in the instrument's scene. An
+  unbanded city steps in **134.480 ms**, so a 13–15 ms step could not be an unbanded one —
+  the city fixture's Driver carries its `StreamingSource` into the composed level and the
+  band fails closed on it.*
   **→ IP: a §8 budget for the fixed step over a CITY, and a breakdown that names its parts,
   before anything is optimised.**
 * **…and the lighting stack is the other half, unmeasured until the audit.** The frame above
