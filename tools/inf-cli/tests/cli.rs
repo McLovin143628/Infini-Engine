@@ -173,3 +173,222 @@ fn cook_fails_nonzero_on_a_broken_blueprint() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("cook failed"), "stderr: {stderr}");
 }
+
+// ── the GIS door (IB-3) ─────────────────────────────────────────────────────
+
+/// The fixture both front ends import: two roads and a two-metre stub, in WGS 84
+/// degrees near Vancouver.
+const ROADS_GEOJSON: &str = r#"{"type":"FeatureCollection","features":[
+  {"type":"Feature","properties":{"name":"Main St","lanes":4,"road_type":"arterial"},
+   "geometry":{"type":"LineString","coordinates":[[-123.12,49.28],[-123.11,49.28],[-123.11,49.29]]}},
+  {"type":"Feature","properties":{"name":"Elm","lanes":2},
+   "geometry":{"type":"LineString","coordinates":[[-123.11,49.28],[-123.105,49.275]]}},
+  {"type":"Feature","properties":{"name":"Stub"},
+   "geometry":{"type":"LineString","coordinates":[[-123.12,49.28],[-123.119975,49.28]]}}
+]}"#;
+
+fn write_roads(dir: &Path) -> PathBuf {
+    let p = dir.join("roads.geojson");
+    std::fs::write(&p, ROADS_GEOJSON).unwrap();
+    p
+}
+
+/// The anchor both front ends transform into — Vancouver, UTM zone 10N.
+const ANCHOR: &str = "EPSG:32610,491000,5459000,0";
+
+fn field(stdout: &str, key: &str) -> String {
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix(&format!("{key}: ")))
+        .unwrap_or_else(|| panic!("no {key:?} line in:\n{stdout}"))
+        .trim()
+        .to_string()
+}
+
+/// **THE ONE-DOOR PROOF.**
+///
+/// The editor's wizard and `inf gis` are two front ends onto one importer, and
+/// this is the arm that makes that falsifiable rather than asserted: the real
+/// `inf` binary imports a fixture in its own process, and the same request is
+/// built in *this* process through `inf_gis::import_layer` — the call the Ring-2
+/// command makes. Every count must agree, and so must the plan's digest, which
+/// folds every entity's name, kind and coordinate BIT PATTERN.
+///
+/// Un-fix mutations that this catches: applying the cap in the CLI instead of at
+/// the door; naming an entity differently; reading a different attribute for the
+/// stream channel; reordering the plan.
+#[test]
+fn the_cli_and_the_library_import_the_same_fixture_identically() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_roads(dir.path());
+
+    let out = Command::new(inf())
+        .args(["gis", "plan"])
+        .arg(&path)
+        .args(["--kind", "roads", "--crs", "EPSG:4326", "--anchor", ANCHOR])
+        .output()
+        .expect("inf gis plan runs");
+    assert!(
+        out.status.success(),
+        "plan exit {:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+
+    // The same request, in-process, through the door the wizard uses.
+    let anchor = inf_gis::anchor_at("EPSG:32610", 491_000.0, 5_459_000.0, 0.0, "unknown").unwrap();
+    let mut req = inf_gis::ImportRequest::new(&path, inf_gis::LayerKind::Roads);
+    req.source_crs = Some("EPSG:4326".into());
+    let lib = inf_gis::import_layer(&req, &anchor).unwrap();
+
+    assert_eq!(field(&stdout, "entities"), lib.plan.count().to_string());
+    assert_eq!(field(&stdout, "too-short"), lib.plan.too_short.to_string());
+    assert_eq!(field(&stdout, "unusable"), lib.plan.unusable.to_string());
+    assert_eq!(field(&stdout, "truncated"), lib.plan.truncated.to_string());
+    assert_eq!(field(&stdout, "cap"), lib.plan.cap.to_string());
+    assert_eq!(
+        field(&stdout, "digest"),
+        format!("{:016x}", lib.plan.digest()),
+        "the CLI's plan and the library's must be the SAME plan, coordinate bit \
+         for coordinate bit — this is what 'one import door' means\n{stdout}"
+    );
+    // …and the fixture is not vacuous: two roads survive, the 2 m stub does not.
+    assert_eq!(lib.plan.count(), 2, "{:?}", lib.plan);
+    assert_eq!(lib.plan.too_short, 1);
+}
+
+/// The cap is visible, raisable, and a truncated import **fails the pipeline**
+/// (IB-14) rather than quietly shipping a city with a hard edge.
+#[test]
+fn the_entity_cap_is_reported_raisable_and_blocking() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_roads(dir.path());
+
+    let capped = Command::new(inf())
+        .args(["gis", "plan"])
+        .arg(&path)
+        .args([
+            "--kind",
+            "roads",
+            "--crs",
+            "EPSG:4326",
+            "--anchor",
+            ANCHOR,
+            "--max",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !capped.status.success(),
+        "a truncated import must exit NONZERO — a pipeline that ships 1 of 2 roads \
+         without stopping is the defect IB-14 names"
+    );
+    let stdout = String::from_utf8_lossy(&capped.stdout);
+    assert_eq!(field(&stdout, "truncated"), "1");
+    let stderr = String::from_utf8_lossy(&capped.stderr);
+    assert!(
+        stderr.contains("--max 2"),
+        "the remedy must name the number to raise it to: {stderr}"
+    );
+
+    // Raised, it takes the whole layer and exits zero.
+    let whole = Command::new(inf())
+        .args(["gis", "plan"])
+        .arg(&path)
+        .args([
+            "--kind",
+            "roads",
+            "--crs",
+            "EPSG:4326",
+            "--anchor",
+            ANCHOR,
+            "--max",
+            "2",
+        ])
+        .output()
+        .unwrap();
+    assert!(whole.status.success());
+    assert_eq!(
+        field(&String::from_utf8_lossy(&whole.stdout), "truncated"),
+        "0"
+    );
+}
+
+/// `inf gis info` reads a file before the level has an anchor — which is the
+/// point of the probe — and suggests the CRS to anchor in.
+#[test]
+fn gis_info_reads_a_file_and_suggests_an_anchor() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_roads(dir.path());
+    let out = Command::new(inf())
+        .args(["gis", "info"])
+        .arg(&path)
+        .args(["--crs", "EPSG:4326"])
+        .output()
+        .expect("inf gis info runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("3 features"), "{s}");
+    assert!(s.contains("3 polylines"), "{s}");
+    assert!(
+        s.contains("suggested anchor CRS: EPSG:32610"),
+        "Vancouver is UTM zone 10 north: {s}"
+    );
+    assert!(s.contains("road_type"), "the fields are listed: {s}");
+    assert!(s.contains("lanes"), "{s}");
+
+    // No CRS and no .prj is a refusal with the remedy, not a guess.
+    let bare = Command::new(inf())
+        .args(["gis", "info"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(!bare.status.success());
+    let e = String::from_utf8_lossy(&bare.stderr);
+    assert!(
+        e.contains("no .prj sidecar") && e.contains("EPSG:4326"),
+        "{e}"
+    );
+}
+
+/// A GIS import needs an anchor, and without one the CLI says so rather than
+/// importing a city at the world origin.
+#[test]
+fn a_plan_with_no_anchor_is_refused_with_its_remedy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_roads(dir.path());
+    let out = Command::new(inf())
+        .args(["gis", "plan"])
+        .arg(&path)
+        .args(["--crs", "EPSG:4326"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(e.contains("--anchor") && e.contains("--level"), "{e}");
+
+    // Web Mercator stays refused AS AN ANCHOR, with its number.
+    let merc = Command::new(inf())
+        .args(["gis", "plan"])
+        .arg(&path)
+        .args([
+            "--crs",
+            "EPSG:4326",
+            "--anchor",
+            "EPSG:3857,-13704000,6318000,0",
+        ])
+        .output()
+        .unwrap();
+    assert!(!merc.status.success());
+    let e = String::from_utf8_lossy(&merc.stderr);
+    assert!(
+        e.contains("geographic") || e.contains("1.5") || e.contains("Web Mercator"),
+        "{e}"
+    );
+}

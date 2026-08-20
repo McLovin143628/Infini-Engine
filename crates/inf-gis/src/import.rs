@@ -693,6 +693,62 @@ impl SpawnPlan {
         self.entities.len()
     }
 
+    /// **A stable digest of everything this plan will create.**
+    ///
+    /// The one-door proof needs a comparison two *processes* can make: the
+    /// editor's Ring-2 command and `inf gis` both build a plan, and "the same
+    /// plan" has to mean something a test can check across a process boundary
+    /// rather than something a comment claims.
+    ///
+    /// FNV-1a over the name bytes, the kind discriminant and each coordinate's
+    /// **bit pattern** — `to_bits`, not a formatted decimal, because a plan is
+    /// exact and a rounded comparison would pass for two imports that differ by
+    /// a metre in the eighth digit. Deterministic across machines: this is
+    /// integer arithmetic over IEEE bit patterns, with no float operation in it.
+    pub fn digest(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let byte = |h: &mut u64, b: u8| {
+            *h ^= u64::from(b);
+            *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        let word = |h: &mut u64, v: u64| {
+            for b in v.to_le_bytes() {
+                byte(h, b);
+            }
+        };
+        for e in &self.entities {
+            for b in e.name.as_bytes() {
+                byte(&mut h, *b);
+            }
+            word(&mut h, e.feature as u64);
+            match e.kind {
+                PlannedKind::Spline { closed } => {
+                    word(&mut h, if closed { 1 } else { 0 });
+                }
+                PlannedKind::River {
+                    width_m,
+                    depth_m,
+                    flow_m_s,
+                } => {
+                    word(&mut h, 2);
+                    for v in [width_m, depth_m, flow_m_s] {
+                        word(&mut h, v.to_bits());
+                    }
+                }
+            }
+            word(&mut h, e.points.len() as u64);
+            for p in &e.points {
+                for v in [p.x, p.y, p.z] {
+                    word(&mut h, v.to_bits());
+                }
+            }
+        }
+        for v in [self.too_short, self.unusable, self.truncated, self.cap] {
+            word(&mut h, v as u64);
+        }
+        h
+    }
+
     /// A one-line summary an author can act on.
     ///
     /// The truncation clause names **the cap and the remedy**, not just the

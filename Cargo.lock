@@ -3127,8 +3127,11 @@ version = "0.1.0"
 dependencies = [
  "inf-asset",
  "inf-blueprint",
+ "inf-gis",
+ "inf-math",
  "inf-packager",
  "inf-project",
+ "inf-scene",
  "serde_json",
  "tempfile",
 ]

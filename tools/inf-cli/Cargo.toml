@@ -17,6 +17,15 @@ inf-asset = { workspace = true }
 inf-blueprint = { workspace = true }
 inf-packager = { workspace = true }
 inf-project = { workspace = true }
+# IB-3: `inf gis` is the headless half of the import door. It links the Ring-0
+# import module and NOTHING else — every decision the wizard makes is in there,
+# so the two front ends cannot drift. `inf-scene` is the decode-only level
+# reader the shipped player uses, here to read a level's geo-anchor without the
+# CLI linking an editor crate (and its wgpu), which is the same reason
+# `inf-project` exists.
+inf-gis = { workspace = true }
+inf-math = { workspace = true }
+inf-scene = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
