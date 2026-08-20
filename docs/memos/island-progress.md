@@ -657,6 +657,23 @@ terrain 2.605, resolve 2.400, sky 1.870, vgeom 1.849.
 time) while a presenter overlaps the halves, so a **pipelined estimate** is printed beside
 it and never asserted: **20.975 ms (47.7 fps)** at 1080p, **23.430 ms (42.7 fps)** at 1440p.
 
+**THE NUMBERS ARE A RANGE, NOT A FIGURE** — the I3 law about a wall clock, applied to the
+instrument that produces them. Three independent release runs of the same tree, same
+machine, same adapter:
+
+| | 1080p p50 | p95 | p99 | GPU frame | 1440p p50 | p95 | GPU frame |
+|---|---|---|---|---|---|---|---|
+| run 1 | 39.792 | 45.057 | 46.709 | 15.875 | 47.424 | 51.136 | 22.716 |
+| run 2 | 40.955 | 45.165 | 48.877 | 19.776 | 48.218 | 51.587 | — |
+| run 3 | 40.517 | 46.096 | 47.259 | 17.615 | 43.281 | 49.268 | 21.436 |
+
+The **CPU-side p50 is stable to about 3 %**; the **GPU frame moves by 20 %** run to run
+(15.875 → 19.776 ms at 1080p on byte-identical code), which is boost clocks and nothing the
+engine did — and is exactly why `SHIPPING_FRAME_CEILING_MS` is 58.0 and not 47. The
+*shape* is what reproduces: the frame is CPU-bound in every run, the sim fixed step is
+13.1–14.3 ms in every run, and the scatter pass is **67.8 / 68.0 %** of the 1080p GPU frame
+in the two runs that printed it. Quote the shape; treat any single millisecond as ±20 %.
+
 **IB-9 · both terrain budgets derived from one measurement.** The certification found
 `TERRAIN_RESIDENT_BYTES_CEILING` (16 MiB) and `max_resident_tiles` (1 024 = 264 MiB at 257²)
 **16.4× apart** with nothing making them agree. They were two guesses at one quantity —
@@ -729,7 +746,7 @@ it look like. What is missing to ship it is named below.
 
 | | after the I3 audit | after I4 |
 |---|---|---|
-| battery blocks / passed / failed / ignored | 298 / 5 670 / 0 / 13 | **305 / 5 690 / 0 / 14** — 7 new test binaries, **exactly 20** new arms, and the one new `#[ignore]` is the 257²-page island confirmation |
+| battery blocks / passed / failed / ignored | 298 / 5 670 / 0 / 13 | **305 / 5 689 / 0 / 14** — 7 new test binaries, **19** new arms (20, less the one clippy turned into a compile-time `const` assertion), and the one new `#[ignore]` is the 257²-page island confirmation |
 | frontend tests / files | 702 / 78 | **702 / 78**, `tsc` clean — no UI was touched |
 | goldens | 54, byte-frozen | **54, byte-identical under `INF_GOLDEN_STRICT=1`** — and `timing_changes_no_pixel` is the arm that says an attached GPU stopwatch cannot move one |
 | `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |

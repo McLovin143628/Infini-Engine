@@ -22958,6 +22958,18 @@ report fields · the bake's re-openability.
 * **A `dcc://sync` frontend listener**, `viewport_detach`, the lost-preview-device rebuild.
   Unchanged.
 
+### Counts
+
+| | after the I3 audit | after I4 |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 298 / 5 670 / 0 / 13 | **305 / 5 689 / 0 / 14** — 7 new test binaries, 19 new arms, and the one new `#[ignore]` is the 257²-page island confirmation |
+| frontend tests / files | 702 / 78 | **702 / 78**, `tsc` clean — no UI was touched |
+| goldens | 54, byte-frozen | **54, byte-identical under `INF_GOLDEN_STRICT=1`** |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| rustdoc individual warnings (cold, all roots touched) | 412 | **412** — 446 `^warning` lines − 34 per-crate summaries, unmoved |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged.** Every struct this wave grew carries no serde derive; checked rather than assumed |
+| `StreamBudget::default().max_resident_tiles` | 1024 (chosen) | **860 (derived)** |
+
 ### Laws this wave paid for
 
 * **A metric can be right in shape and wrong in denominator.** The collapse detector's
@@ -23396,6 +23408,18 @@ measured per-level byte block, like its v3 sibling.
 * **A hostile-input fixture can abort before the decoder does.** Splice bytes; do not build
   the value you are trying to refuse.
 
+### Counts
+
+| | after the I3 audit | after I4 |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 298 / 5 670 / 0 / 13 | **305 / 5 689 / 0 / 14** — 7 new test binaries, 19 new arms, and the one new `#[ignore]` is the 257²-page island confirmation |
+| frontend tests / files | 702 / 78 | **702 / 78**, `tsc` clean — no UI was touched |
+| goldens | 54, byte-frozen | **54, byte-identical under `INF_GOLDEN_STRICT=1`** |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| rustdoc individual warnings (cold, all roots touched) | 412 | **412** — 446 `^warning` lines − 34 per-crate summaries, unmoved |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged.** Every struct this wave grew carries no serde derive; checked rather than assumed |
+| `StreamBudget::default().max_resident_tiles` | 1024 (chosen) | **860 (derived)** |
+
 ### Laws this wave paid for
 
 * **A gate that pins a defect outlives the reason it was written.**
@@ -23775,6 +23799,18 @@ One hazard closed on the way: `ProjectSettingsDto::anim_blend` is an `Option<Str
 because the viewport's pixel-snap setter sends the same DTO. A plain `String` would have
 made that caller send `""` — the engine default — and silently reset a project's cross-fade
 every time somebody nudged the pixel grid.
+
+### Counts
+
+| | after the I3 audit | after I4 |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 298 / 5 670 / 0 / 13 | **305 / 5 689 / 0 / 14** — 7 new test binaries, 19 new arms, and the one new `#[ignore]` is the 257²-page island confirmation |
+| frontend tests / files | 702 / 78 | **702 / 78**, `tsc` clean — no UI was touched |
+| goldens | 54, byte-frozen | **54, byte-identical under `INF_GOLDEN_STRICT=1`** |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| rustdoc individual warnings (cold, all roots touched) | 412 | **412** — 446 `^warning` lines − 34 per-crate summaries, unmoved |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged.** Every struct this wave grew carries no serde derive; checked rather than assumed |
+| `StreamBudget::default().max_resident_tiles` | 1024 (chosen) | **860 (derived)** |
 
 ### Laws this wave paid for
 
@@ -24400,6 +24436,23 @@ rounds by p50, every round replaying the same camera sequence:**
 at 1080p costs barely more than one sim step, and deleting the scatter pass entirely would
 still leave a ~21 ms frame.
 
+**THE NUMBERS ARE A RANGE, NOT A FIGURE** — the I3 law about a wall clock, applied to the
+instrument that produces them. Three independent release runs of the same tree, same
+machine, same adapter:
+
+| | 1080p p50 | p95 | p99 | GPU frame | 1440p p50 | p95 | GPU frame |
+|---|---|---|---|---|---|---|---|
+| run 1 | 39.792 | 45.057 | 46.709 | 15.875 | 47.424 | 51.136 | 22.716 |
+| run 2 | 40.955 | 45.165 | 48.877 | 19.776 | 48.218 | 51.587 | — |
+| run 3 | 40.517 | 46.096 | 47.259 | 17.615 | 43.281 | 49.268 | 21.436 |
+
+The **CPU-side p50 is stable to about 3 %**; the **GPU frame moves by 20 %** run to run
+(15.875 → 19.776 ms at 1080p on byte-identical code), which is boost clocks and nothing the
+engine did — and is exactly why `SHIPPING_FRAME_CEILING_MS` is 58.0 and not 47. The
+*shape* is what reproduces: the frame is CPU-bound in every run, the sim fixed step is
+13.1–14.3 ms in every run, and the scatter pass is **67.8 / 68.0 %** of the 1080p GPU frame
+in the two runs that printed it. Quote the shape; treat any single millisecond as ±20 %.
+
 **Two kinds of constant, because one could not be both.** `SHIPPING_FRAME_BUDGET_MS = 16.6`
 is what "≥ 60 fps" MEANS and is **never asserted** — a constant asserted where it fails is a
 red build somebody raises. `SHIPPING_FRAME_CEILING_MS = 58.0` (and `_P99_ = 64.0`) is the
@@ -24564,6 +24617,18 @@ evaluate PCG volumes**; the player does, on load, so there is nothing cook-side 
 | `the_parts_to_shell_swap_measured_at_1080p` | the refusal, armed; and the impostor ratio, carried |
 | `a_baked_grammar_building_becomes_one_vgeom_asset` | the bake to vgeom path, and a frame with zero placeholder batches |
 | `the_cost_of_the_city_as_cubes_and_as_baked_meshes` | +1.416 ms, printed, never asserted |
+
+### Counts
+
+| | after the I3 audit | after I4 |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 298 / 5 670 / 0 / 13 | **305 / 5 689 / 0 / 14** — 7 new test binaries, 19 new arms, and the one new `#[ignore]` is the 257²-page island confirmation |
+| frontend tests / files | 702 / 78 | **702 / 78**, `tsc` clean — no UI was touched |
+| goldens | 54, byte-frozen | **54, byte-identical under `INF_GOLDEN_STRICT=1`** |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| rustdoc individual warnings (cold, all roots touched) | 412 | **412** — 446 `^warning` lines − 34 per-crate summaries, unmoved |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged.** Every struct this wave grew carries no serde derive; checked rather than assumed |
+| `StreamBudget::default().max_resident_tiles` | 1024 (chosen) | **860 (derived)** |
 
 ### Laws this wave paid for
 
