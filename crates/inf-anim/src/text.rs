@@ -254,6 +254,14 @@ fn write_machine(out: &mut String, m: &StateMachine, prefix: &str) {
             let _ = writeln!(out, "priority = {}", t.priority);
         }
         let _ = writeln!(out, "curve = {}", quote(curve_name(t.curve)));
+        // `.inf_sm` v3 — ONE diffable token per transition, written
+        // **unconditionally** like `curve` and unlike `priority`/`exit_time`.
+        // A conditional line changes the file's LINE COUNT when an author toggles
+        // it, and `phase29_gate`'s one-line-of-text-is-one-line-of-diff arm
+        // asserts `text.lines().count() == edited.lines().count()` — so a token
+        // that appears and disappears would turn a mode change into a shape
+        // change. `"inherit"` is a real value here, not an absence.
+        let _ = writeln!(out, "blend = {}", quote(blend_name(t.blend)));
         let _ = writeln!(
             out,
             "interrupt = {}",
@@ -385,6 +393,21 @@ fn curve_name(c: BlendCurve) -> &'static str {
         BlendCurve::EaseOut => "ease_out",
         BlendCurve::EaseInOut => "ease_in_out",
         BlendCurve::Step => "step",
+    }
+}
+
+/// The TEXT face's name for a per-transition blend mode (`.inf_sm` v3).
+///
+/// `None` is spelled `"inherit"` rather than omitted — see the writer for why the
+/// line is unconditional. snake_case, like every other token on this face and
+/// unlike the IPC face's camelCase; the two are independent name tables on
+/// purpose, because a text file is read by a human with a diff and a DTO is read
+/// by TypeScript.
+fn blend_name(b: Option<crate::SmBlendMode>) -> &'static str {
+    match b {
+        None => "inherit",
+        Some(crate::SmBlendMode::Inertialize) => "inertialize",
+        Some(crate::SmBlendMode::CrossFade) => "cross_fade",
     }
 }
 
@@ -759,6 +782,23 @@ fn read_machine(t: &toml::Table, path: &str) -> Result<StateMachine, TextError> 
                 })
             }
         };
+        // `.inf_sm` v3 — the per-transition blend mode, as ONE diffable token.
+        // ABSENT means "inherit the session default", which is what every machine
+        // authored before v3 means, so a round trip of a v2-shaped text face
+        // writes no `blend =` line at all.
+        let blend = match tr.get("blend").and_then(|v| v.as_str()) {
+            None => None,
+            Some("inherit") => None,
+            Some("inertialize") => Some(crate::SmBlendMode::Inertialize),
+            Some("cross_fade") => Some(crate::SmBlendMode::CrossFade),
+            Some(other) => {
+                return Err(TextError::BadEnum {
+                    path: format!("{path}.blend"),
+                    value: other.to_string(),
+                    allowed: "inherit, inertialize, cross_fade".into(),
+                })
+            }
+        };
         transitions.push(SmTransition {
             from,
             to: resolve_state(to_v, &format!("{path}.to"))?,
@@ -772,6 +812,7 @@ fn read_machine(t: &toml::Table, path: &str) -> Result<StateMachine, TextError> 
             interrupt,
             curve,
             profile,
+            blend,
         });
     }
 

@@ -23310,6 +23310,92 @@ That also settles a real inconsistency: the editor viewport's scatter placement 
 greatest-`y`, so gameplay height and authored scatter now agree where before they could pick
 different terrains.
 
+
+### I1 addendum — `.inf_sm` v2→v3, the per-transition blend mode (coordinator-authorized)
+
+I1 STOPPED on IB-10 item (a) and reported that its home is `SmTransition` — the `.inf_sm`
+container — not the scene wire. The coordinator authorized the second container, once, plus
+folding the payload slot into the still-unpushed `ScenePayload` v11. This is that work.
+
+**The field.** `SmTransition::blend: Option<SmBlendMode>` at the tail. `Option` rather than
+a bare mode so that *inherit* is a **state**: a bare mode would make every edge state its own
+answer, which retires the world-level setting by making it unreachable (cross-fade a whole
+project = an edit on every transition) and makes a machine authored before anyone thought
+about blending indistinguishable from one that chose the default deliberately.
+
+**Precedence, in exactly one function** (`PoseBlender::mode_for`): the fired transition's own
+`blend` when `Some`; else the session default (`inf_ecs::pose::set_blend_mode`); else
+`Inertialize`. The P29.3 slope-limit precedent — two authorities that each believe they
+decide is the defect, so the ordering is code in one place and armed by a test, not prose in
+two. A sub-machine transition resolves against the sub-machine's own list.
+
+**The ladder.** `.inf_sm` **v2 → v3**, and this container's first *migrating* rung: v1 stays
+refused (P29.1 changed shapes inside the machine, so no honest upgrade exists), v2 migrates
+by pure default-fill. That needed a new Ring-0 seam, because bincode is positional and
+`migrate` runs on an already-decoded value: **`AssetPayload::decode_wire(bytes, found)`**, a
+trait method with a default that changes nothing for every other payload.
+
+**`ScenePayload` v11** gained `blend_mode: u8` — the *session* default, which the `.inf_sm`
+bytes cannot carry because it is what an *inheriting* edge inherits. Read from the
+document's own world (where `set_blend_mode` writes it), applied by the player after
+`build_world_from_payload`. Folded into the unpushed v11 rather than made a v12: extending
+an unpushed bump is not a second bump, and a v10.5 is a version no build ever spoke.
+
+**The parity obligation, discharged with the exposure** (P29.2 recorded this boundary for
+exactly this day):
+
+```
+v3 blend parity: 12 steps, hosts identical;
+                 CrossFade differs from inherit at 12 of 12 steps in BOTH hosts
+```
+
+Anti-vacuity is the half that matters: a field neither host reads would satisfy "the hosts
+agree" perfectly — the IB-1 shape this wave had just finished paying for. The precedence arm
+asserts the ordering both ways plus that the two modes genuinely differ.
+
+**Authoring.** The SM panel gets a Blend-mode select; the `.inf_sm.txt` S1 face gets ONE
+token per transition, written **unconditionally** like `curve` (a conditional line changes
+the file's line count, and `phase29_gate` asserts a one-line edit is a one-line diff).
+
+**Re-bless, arithmetic-verified.** `Locomotion.inf_sm` 345 → 350 (**+5**, 5 transitions);
+`Hero Locomotion.inf_sm` 297 → 301 (**+4**, 4 transitions); `Hero Locomotion.inf_sm.txt`
+66 → 70 lines and 1 413 → 1 485 bytes (**+4 lines × 18 B = +72**).
+
+#### Three defects the rung's own arms found
+
+1. **The frozen v2 record reached the LIVE sub-machine.** `v2::StateMachine` held
+   `Vec<SmState>` of the *live* type, whose `Motion::SubMachine` nests a live
+   `StateMachine` — so nested transitions were already paying the v3 byte on both sides of
+   the comparison. Caught by `v3_costs_one_discriminant_per_transition`: three transitions,
+   two bytes. Hence `v2::SmState` and `v2::Motion` recursing into `v2::StateMachine`.
+2. **`v2::Motion` had no depth guard.** `decode_wire` dispatches a v2 payload straight into
+   the frozen record, so the live `de_sub_machine` guard never runs on that path and a
+   crafted chain would have reached the bottom of the stack before `validate` saw the tree.
+   The guard is now **shared** (`sub_machine_depth_guard`), not restated. The first draft
+   carried a doc comment explaining why no guard was needed; the comment was wrong.
+3. **A guarded refusal was diagnosed as `SchemaTooOld`.** `decode` turned any failure at an
+   older version into "re-create the machine", which is a confident wrong diagnosis for a
+   payload whose problem is hostility rather than age — the exact hazard
+   `peek_schema_version`'s own note had written down one rung before there was a way to
+   break it. **`AssetPayload::migrates_from`** separates the two.
+
+A fourth was found in the *fixture*: building 4 096 nested machines overflows the stack in
+`Serialize`, before the decoder is reached. The hostile payload is **spliced** from a
+measured per-level byte block, like its v3 sibling.
+
+#### Laws this addendum paid for
+
+* **A version ladder decodes old bytes through a DIFFERENT declaration, so every
+  hostile-input guard on the live shape has to be re-entered on the frozen one.** A guard is
+  attached to a type, and a frozen record is a different type.
+* **A frozen record must freeze everything reachable that can change** — not only the field
+  that moved. `SmTransition` grew; `SmState` and `Motion` had to be frozen because they
+  *contain* it.
+* **A payload with a migrating rung must not be told it is old.** The diagnosis a refusal
+  carries is part of the refusal.
+* **A hostile-input fixture can abort before the decoder does.** Splice bytes; do not build
+  the value you are trying to refuse.
+
 ### Laws this wave paid for
 
 * **A gate that pins a defect outlives the reason it was written.**

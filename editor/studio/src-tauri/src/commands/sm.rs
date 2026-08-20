@@ -161,6 +161,19 @@ pub struct SmTransitionDto {
     pub curve: String,
     /// Index into [`SmMachineDto::profiles`].
     pub profile: Option<usize>,
+    /// `"inherit"` / `"inertialize"` / `"crossFade"` (`.inf_sm` v3).
+    ///
+    /// `"inherit"` is the default and means "blend the way this session blends"
+    /// — see `inf_anim::SmTransition::blend` for the precedence rule.
+    #[serde(default = "inherit_blend")]
+    pub blend_mode: String,
+}
+
+/// A DTO from a client that predates v3 reads as "inherit", which is what every
+/// pre-v3 machine meant. Without this the field would deserialize as an error and
+/// an older panel could not save at all.
+fn inherit_blend() -> String {
+    "inherit".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -409,6 +422,30 @@ fn str_to_blend(s: &str) -> InterruptBlend {
     }
 }
 
+/// The IPC name for a per-transition blend mode (`.inf_sm` v3).
+///
+/// camelCase, like every other enum on this face and unlike the TEXT face's
+/// snake_case. `"inherit"` is the absent case — a real value on the wire, so the
+/// panel can offer it as a choice rather than as a cleared field.
+fn blend_mode_to_str(b: Option<inf_anim::SmBlendMode>) -> &'static str {
+    match b {
+        None => "inherit",
+        Some(inf_anim::SmBlendMode::Inertialize) => "inertialize",
+        Some(inf_anim::SmBlendMode::CrossFade) => "crossFade",
+    }
+}
+
+/// …and back, degrading to "inherit" on anything unknown — this face's failure
+/// model (the TEXT face errors instead; each surface refuses the way its reader
+/// can act on).
+fn str_to_blend_mode(s: &str) -> Option<inf_anim::SmBlendMode> {
+    match s {
+        "inertialize" => Some(inf_anim::SmBlendMode::Inertialize),
+        "crossFade" => Some(inf_anim::SmBlendMode::CrossFade),
+        _ => None,
+    }
+}
+
 fn kind_to_str(k: SmParamKind) -> &'static str {
     match k {
         SmParamKind::Bool => "bool",
@@ -527,6 +564,7 @@ fn transition_to_dto(t: &SmTransition) -> SmTransitionDto {
         interrupt_blend: blend_to_str(t.interrupt.blend).to_string(),
         curve: curve_to_str(t.curve).to_string(),
         profile: t.profile,
+        blend_mode: blend_mode_to_str(t.blend).to_string(),
     }
 }
 
@@ -559,6 +597,7 @@ fn dto_to_transition(t: &SmTransitionDto) -> SmTransition {
         },
         curve: str_to_curve(&t.curve),
         profile: t.profile,
+        blend: str_to_blend_mode(&t.blend_mode),
     }
 }
 
@@ -1099,6 +1138,8 @@ mod tests {
             "valueKind",
             "paramX",
             "paramY",
+            // `.inf_sm` v3.
+            "blendMode",
         ] {
             assert!(json.contains(key), "the wire is missing `{key}`: {json}");
         }
@@ -1111,6 +1152,10 @@ mod tests {
             "param_y",
             "exclude_self",
             "exit_time",
+            // `.inf_sm` v3. There are no ts-rs bindings for this face (it is
+            // Ring 2), so this pair of loops is the ONLY thing standing between a
+            // dropped rename and a TypeScript mirror reading `undefined`.
+            "blend_mode",
         ] {
             assert!(
                 !json.contains(wrong),
@@ -1247,9 +1292,22 @@ mod tests {
         ] {
             assert_eq!(str_to_kind(kind_to_str(k)), k);
         }
+        // `.inf_sm` v3 — including the ABSENT case, which is a real value on
+        // this face and not a cleared field.
+        for m in [
+            None,
+            Some(inf_anim::SmBlendMode::Inertialize),
+            Some(inf_anim::SmBlendMode::CrossFade),
+        ] {
+            assert_eq!(str_to_blend_mode(blend_mode_to_str(m)), m);
+        }
         assert_eq!(str_to_curve("nonsense"), BlendCurve::Linear);
         assert_eq!(str_to_source("nonsense"), InterruptSource::Destination);
         assert_eq!(str_to_kind("nonsense"), SmParamKind::Float);
+        // …and an unknown mode degrades to "inherit" rather than to a mode the
+        // author did not choose: this face is read by a panel that may be older
+        // than the backend, and inheriting is the conservative answer.
+        assert_eq!(str_to_blend_mode("nonsense"), None);
         // The typed operand keeps its kind across the numeric wire.
         assert_eq!(dto_to_value(1.0, "bool"), SmValue::Bool(true));
         assert_eq!(dto_to_value(0.4, "bool"), SmValue::Bool(false));

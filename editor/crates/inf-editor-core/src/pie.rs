@@ -953,6 +953,22 @@ where
         ));
     }
 
+    // **The session's default blend mode** (`ScenePayload` v11) — read from the
+    // DOCUMENT'S OWN WORLD, which is where `inf_ecs::pose::set_blend_mode` writes
+    // it and what this function just encoded.
+    //
+    // No new parameter and no new state: the resource already lives on an
+    // `EcsWorld`, the doc has one, and Simulate snapshots from the same place. It
+    // is a *session* setting and is deliberately not persisted in `.inf_lvl` — a
+    // project that wants a mode permanently says so on the transitions, which
+    // `.inf_sm` v3 carries. What this closes is the P29.2 boundary: the editor
+    // can change it, so the payload has to carry it, or the preview and the build
+    // blend differently.
+    let blend_mode = match inf_ecs::pose::blend_mode(doc.world()) {
+        inf_anim::SmBlendMode::Inertialize => 0u8,
+        inf_anim::SmBlendMode::CrossFade => 1u8,
+    };
+
     Ok(
         ScenePayload::new(doc.title(), level_bytes, classes, tick_hz, windowed)
             .with_pcgs(pcgs)
@@ -963,7 +979,8 @@ where
             .with_fractures(fractures)
             .with_meshes(meshes)
             .with_garments(cloths, hairs)
-            .with_materials(materials, textures),
+            .with_materials(materials, textures)
+            .with_blend_mode(blend_mode),
     )
 }
 

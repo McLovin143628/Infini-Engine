@@ -91,6 +91,77 @@ pub trait AssetPayload: Serialize + DeserializeOwned {
         }
         Ok(self)
     }
+
+    /// **The version ladder's door** — turn `bytes` into a value, given the
+    /// version [`peek_schema_version`] read off the head (`None` when the head is
+    /// not plausibly a version at all).
+    ///
+    /// The default decodes at the **current** shape, which is the whole story for
+    /// every payload whose older versions are *refused* rather than migrated: a
+    /// short read fails here and [`decode`] turns it into
+    /// [`AssetError::SchemaTooOld`] with the type's own remedy.
+    ///
+    /// A payload that **migrates** overrides this, because bincode is positional
+    /// and there is nowhere else the branch can live: [`migrate`](Self::migrate)
+    /// runs on an already-decoded value, and a value decoded at the wrong shape
+    /// was never built. `StateMachineAsset` is the first override — its v2→v3
+    /// rung appends a field *inside* a `Vec` in the middle of the stream, so a v2
+    /// payload is not a prefix of a v3 one and only a frozen v2 record can read
+    /// it.
+    ///
+    /// Overriding this does **not** excuse a payload from `migrate`: the two do
+    /// different jobs (shape, then structure), and `decode` runs both.
+    fn decode_wire(bytes: &[u8], _found: Option<u32>) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        bincode::serde::decode_from_slice::<Self, _>(bytes, bincode_config())
+            .map(|(v, _)| v)
+            .map_err(|e| AssetError::Decode(e.to_string()))
+    }
+
+    /// Whether [`decode_wire`](Self::decode_wire) has a rung for version `v` —
+    /// i.e. whether this payload can *read* it, not merely recognise it.
+    ///
+    /// # It is the difference between two diagnoses, and one of them is a lie
+    ///
+    /// [`decode`] turns a failed decode of an older payload into
+    /// [`AssetError::SchemaTooOld`], which tells the user to re-create the asset.
+    /// That is exactly right for a version with no rung. It is exactly **wrong**
+    /// for one the ladder handles: if a v2 `.inf_sm` fails because it is
+    /// truncated, or hostile, or nests a sub-machine a thousand deep, the honest
+    /// answer is the decoder's own message — and "re-create the machine" sends
+    /// someone to rebuild content whose problem is not its age.
+    ///
+    /// The `.inf_sm` ladder found this the day it grew its first migrating rung:
+    /// a guarded-depth refusal came back as `SchemaTooOld`. This file's own note
+    /// on `peek_schema_version` had already written the principle down — *"a wrong
+    /// diagnosis is worse than none"* — one rung before there was a way to break
+    /// it.
+    fn migrates_from(_v: u32) -> bool {
+        false
+    }
+}
+
+/// Decode an arbitrary serde shape with the asset config — **the door a version
+/// ladder's FROZEN record goes through**.
+///
+/// A payload crate that migrates has to read its own history, and its history is
+/// a struct that is not an [`AssetPayload`] (it is a *shape*, not a kind). Without
+/// this, every such crate would name `bincode` directly and the config would be
+/// restated once per ladder — which is how two encoders end up disagreeing about
+/// varint widths. `inf-anim`'s v2 `.inf_sm` record is the first caller.
+pub fn decode_shape<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    bincode::serde::decode_from_slice::<T, _>(bytes, bincode_config())
+        .map(|(v, _)| v)
+        .map_err(|e| AssetError::Decode(e.to_string()))
+}
+
+/// Encode an arbitrary serde shape with the asset config — the
+/// [`decode_shape`] twin, for a ladder's **downgrade-bless** direction.
+pub fn encode_shape<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+    bincode::serde::encode_to_vec(value, bincode_config())
+        .map_err(|e| AssetError::Encode(e.to_string()))
 }
 
 /// Encode a payload to deterministic bincode bytes.
@@ -163,11 +234,19 @@ pub fn peek_schema_version(bytes: &[u8], current: Option<u32>) -> Option<u32> {
 /// Generic on purpose: this covers every bincode asset kind at once, because the
 /// hazard is the format's, not any one schema's.
 pub fn decode<T: AssetPayload>(bytes: &[u8]) -> Result<T> {
-    match bincode::serde::decode_from_slice::<T, _>(bytes, bincode_config()) {
-        Ok((value, _)) => value.migrate(),
+    // The peek happens FIRST and is handed to the shape door, so a payload with a
+    // real version ladder can branch on it. For every payload that takes the
+    // default it changes nothing: the peek is a single leading varint and the
+    // decode that follows is the one this function always ran.
+    let peeked = peek_schema_version(bytes, Some(T::SCHEMA_VERSION));
+    match T::decode_wire(bytes, peeked) {
+        Ok(value) => value.migrate(),
         Err(e) => {
-            if let Some(found) = peek_schema_version(bytes, Some(T::SCHEMA_VERSION)) {
-                if found < T::SCHEMA_VERSION {
+            if let Some(found) = peeked {
+                // Older AND unreadable. A version the ladder has a rung for
+                // failed for some other reason, and saying "too old" about it
+                // would be a confident wrong diagnosis — see `migrates_from`.
+                if found < T::SCHEMA_VERSION && !T::migrates_from(found) {
                     return Err(AssetError::SchemaTooOld {
                         kind: T::KIND.slug(),
                         found,

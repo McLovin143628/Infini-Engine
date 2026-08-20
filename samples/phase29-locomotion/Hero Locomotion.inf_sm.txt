@@ -39,6 +39,7 @@ to = "walk"
 duration = 0.15
 condition = "speed > 0.3347802758216858"
 curve = "ease_in_out"
+blend = "inherit"
 interrupt = "destination/carry"
 
 [[transitions]]
@@ -47,6 +48,7 @@ to = "idle"
 duration = 0.15
 condition = "speed <= 0.3347802758216858"
 curve = "ease_in_out"
+blend = "inherit"
 interrupt = "destination/carry"
 
 [[transitions]]
@@ -55,6 +57,7 @@ to = "run"
 duration = 0.15
 condition = "speed > 1.179997444152832"
 curve = "ease_in_out"
+blend = "inherit"
 interrupt = "destination/carry"
 
 [[transitions]]
@@ -63,4 +66,5 @@ to = "walk"
 duration = 0.15
 condition = "speed <= 1.179997444152832"
 curve = "ease_in_out"
+blend = "inherit"
 interrupt = "destination/carry"

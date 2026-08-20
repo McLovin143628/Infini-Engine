@@ -534,13 +534,34 @@ pub struct PoseBlendRes(pub BTreeMap<Uuid, PoseBlender>);
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoseBlendModeRes(pub SmBlendMode);
 
-/// Choose how state transitions blend, for every posed entity in this world.
+/// Choose **this world's default** for how state transitions blend.
 ///
-/// The **selector** `.inf_sm` cannot carry: a per-transition choice would be a
-/// field on `SmTransition`, and that format bumped in P29.1 and does not bump
-/// again in this phase. So the choice is world-level and lives in a resource,
-/// which is enough for a project that wants the P29.1 cross-fade back and is the
-/// seam P29.4's `anim.*` kit exposes.
+/// # It is the FALLBACK now, not the authority (`.inf_sm` v3)
+///
+/// P29.2 shipped this as the only selector, and said why: *"a per-transition
+/// choice would be a field on `SmTransition`, and that format bumped in P29.1 and
+/// does not bump again in this phase."* The island phase bumped it. So the
+/// precedence is now two-deep, and it is written down in **exactly one place** —
+/// [`inf_anim::PoseBlender::mode_for`]:
+///
+/// ```text
+/// the fired transition's own `blend`  (Some)  — the author's per-edge choice
+///   else this resource                        — what this function sets
+///   else SmBlendMode::Inertialize
+/// ```
+///
+/// Two authorities that each believe they decide is the P29.3 slope-limit defect;
+/// this one is deliberately the *weaker* of the two and says so, and no code
+/// outside `mode_for` compares them.
+///
+/// **It did not retire**, because retiring it would make "cross-fade this whole
+/// project" a per-edge edit on every transition in every machine — and would make
+/// a machine authored before anyone thought about blending indistinguishable from
+/// one that chose the default deliberately.
+///
+/// **PIE carries it** (`ScenePayload` v11): a setting the editor can change that
+/// the payload does not carry is a preview that differs from the build, which is
+/// the sentence P29.2 wrote this boundary down with.
 ///
 /// Existing blenders switch **immediately** rather than after their current decay
 /// expires — a setting that takes effect at an unpredictable later moment is

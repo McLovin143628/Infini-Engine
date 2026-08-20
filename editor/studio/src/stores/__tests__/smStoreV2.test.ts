@@ -132,6 +132,24 @@ describe("v2 transitions", () => {
     expect(any.to).toBe(1);
   });
 
+  // `.inf_sm` v3. A NEW edge must arrive as "inherit" — the factory spells it,
+  // so a transition the panel creates is a complete DTO rather than one the
+  // backend's `#[serde(default)]` has to repair — and the generic patch door
+  // must carry the field like any other.
+  it("authors a per-transition blend mode, defaulting to inherit", () => {
+    const s = useSmStore.getState();
+    s.addTransition(0, 1);
+    expect(useSmStore.getState().doc!.machine.transitions[0].blendMode).toBe("inherit");
+
+    s.setTransition(0, { blendMode: "crossFade" });
+    expect(useSmStore.getState().doc!.machine.transitions[0].blendMode).toBe("crossFade");
+
+    // ANTI-VACUITY: a second edge is untouched, so a store that wrote one value
+    // into every transition would fail here.
+    s.addTransition(1, 0);
+    expect(useSmStore.getState().doc!.machine.transitions[1].blendMode).toBe("inherit");
+  });
+
   // **The rule that is easy to get silently wrong.** `dto_to_transition` prefers
   // the flat list when it is non-null, so a builder that set the tree and left a
   // stale list behind would save the LIST and discard the tree the author just

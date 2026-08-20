@@ -41,6 +41,12 @@ export const SM_BLEND_CURVES: SmBlendCurve[] = [
   "step",
 ];
 
+/** How a transition BLENDS (`.inf_sm` v3). `"inherit"` defers to the session
+ * default, which is what every machine authored before v3 means. */
+export type SmBlendMode = "inherit" | "inertialize" | "crossFade";
+
+export const SM_BLEND_MODES: SmBlendMode[] = ["inherit", "inertialize", "crossFade"];
+
 /** Which in-progress cross-fade a transition may cut into. */
 export type SmInterruptSource = "none" | "destination" | "sourceOrDestination";
 
@@ -124,6 +130,9 @@ export interface SmTransitionDto {
   interruptBlend: SmInterruptBlend;
   curve: SmBlendCurve;
   profile: number | null;
+  /** How THIS transition blends (`.inf_sm` v3); `"inherit"` defers to the
+   *  session default. */
+  blendMode: SmBlendMode;
 }
 
 export interface SmParamDto {
@@ -335,5 +344,9 @@ export function newTransition(from: number, to: number): SmTransitionDto {
     interruptBlend: "carry",
     curve: "linear",
     profile: null,
+    // v3: inherit, which is what every edge meant before the field existed —
+    // and what the backend's `#[serde(default)]` would fill in anyway. Spelled
+    // here so a new edge is a complete DTO rather than one the wire repairs.
+    blendMode: "inherit",
   };
 }

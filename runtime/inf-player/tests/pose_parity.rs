@@ -1147,3 +1147,223 @@ fn the_step_records_what_each_ik_goal_did() {
         "a cleared goal left its verdict behind"
     );
 }
+
+// ── the per-transition blend mode (`.inf_sm` v3, the island phase) ──────────
+//
+// P29.2 shipped `SmBlendMode` as a world-level resource and wrote down the
+// boundary it was leaving: *"exposing it obliges `ScenePayload` to carry it, and
+// a resource the editor can set that the payload does not carry is a preview that
+// differs from the build."* The island phase's addendum exposed it — per
+// transition, on the wire — so the arm ships WITH the exposure. That is what the
+// boundary was recorded for.
+
+/// A machine whose one transition has a REAL duration, so the two modes have
+/// something to differ about.
+///
+/// The zero-duration transitions of `machine()` above cannot tell inertialization
+/// from a cross-fade: a snap is a snap under both, which is exactly the
+/// degenerate-fade trap the `SPAWN` constant's note describes. 0.25 s at 60 Hz is
+/// fifteen steps, so a twelve-step trace samples the fade while it is running.
+fn blend_machine(mode: Option<inf_anim::SmBlendMode>) -> StateMachine {
+    StateMachine {
+        states: vec![
+            SmState::clip("spawn", *SPAWN.as_bytes()),
+            SmState::clip("run", *RUN.as_bytes()),
+        ],
+        transitions: vec![SmTransition::new(0, 1, 0.25).with_blend(mode)],
+        entry: 0,
+        ..Default::default()
+    }
+}
+
+/// How many steps the blend traces sample. Longer than [`STEPS`] on purpose: a
+/// trace that ended before the blend did would be comparing two snaps.
+const BLEND_STEPS: u32 = 12;
+
+fn player_blend_trace(mode: Option<inf_anim::SmBlendMode>) -> Vec<Vec<u8>> {
+    let mut world = EcsWorld::new();
+    let e = world.spawn_with_guid(HERO, "Hero", None);
+    world.world_mut().entity_mut(e).insert(character());
+    world.mark_dirty();
+    let mut sim = RuntimeSim::new(world, Vec::new(), DVec2::ZERO, HZ);
+    sim.set_state_machines(BTreeMap::from([(SM, blend_machine(mode))]));
+    sim.set_skeletons(skeletons());
+    sim.set_pose_clips(pose_clips());
+    (0..BLEND_STEPS)
+        .map(|_| {
+            sim.step_once(RuntimeInput::default());
+            inf_ecs::pose::pose_state_bytes(sim.world())
+        })
+        .collect()
+}
+
+fn editor_blend_trace(mode: Option<inf_anim::SmBlendMode>) -> Vec<Vec<u8>> {
+    let mut doc = SceneDoc::new();
+    let e = doc.create_with_guid(HERO, inf_editor_core::ipc::SpawnKind::Empty, "Hero", None);
+    doc.world_mut()
+        .world_mut()
+        .entity_mut(e)
+        .insert(character());
+    doc.world_mut().mark_dirty();
+    let mut session = SimSession::enter(&mut doc, Vec::new(), DVec2::ZERO, HZ);
+    session.set_state_machines(BTreeMap::from([(SM, blend_machine(mode))]));
+    session.set_skeletons(skeletons());
+    session.set_pose_clips(pose_clips());
+    let out = (0..BLEND_STEPS)
+        .map(|_| {
+            session.step_once(&mut doc, SimInput::default());
+            inf_ecs::pose::pose_state_bytes(doc.world())
+        })
+        .collect();
+    session.exit(&mut doc);
+    out
+}
+
+/// **A transition that names `CrossFade` traces byte-identically in both hosts —
+/// and differently from one that inherits.**
+///
+/// Two claims, and the second is the one that makes the first mean something:
+///
+/// 1. **PARITY.** The editor's Simulate and the shipped player produce the same
+///    bits, step for step, over a machine whose transition carries a per-edge
+///    blend mode. This is the P29.2 obligation, discharged the day the field
+///    reached the wire.
+/// 2. **ANTI-VACUITY.** The same machine with the mode left at *inherit* traces
+///    **differently** — in BOTH hosts, separately asserted. Without this the
+///    first claim would be satisfied perfectly by a field neither host reads: two
+///    identical default runs agree beautifully, which is exactly the shape of the
+///    IB-1 defect this wave has just finished paying for ("two hosts agreeing is
+///    not two hosts being right").
+///
+/// A third claim rides along for free: the *inherit* traces also match each
+/// other, so claim 2's difference is the mode's doing and not a host's.
+#[test]
+fn a_per_transition_blend_mode_is_carried_by_both_hosts_and_changes_the_pose() {
+    let cross = Some(inf_anim::SmBlendMode::CrossFade);
+
+    let player_cross = player_blend_trace(cross);
+    let editor_cross = editor_blend_trace(cross);
+    let player_inherit = player_blend_trace(None);
+    let editor_inherit = editor_blend_trace(None);
+
+    // Every trace posed something, at every step — two empty traces are equal.
+    for (label, t) in [
+        ("player/crossFade", &player_cross),
+        ("editor/crossFade", &editor_cross),
+        ("player/inherit", &player_inherit),
+        ("editor/inherit", &editor_inherit),
+    ] {
+        assert_eq!(t.len() as u32, BLEND_STEPS, "{label}: short trace");
+        assert!(
+            t.iter().all(|b| !b.is_empty()),
+            "{label}: a step published no pose at all"
+        );
+    }
+
+    // 1. PARITY, step for step so a divergence names its step.
+    for (i, (p, e)) in player_cross.iter().zip(editor_cross.iter()).enumerate() {
+        assert_eq!(
+            p, e,
+            "step {i}: the two hosts blended a CrossFade transition differently — \
+             PIE is not shipping"
+        );
+    }
+    for (i, (p, e)) in player_inherit.iter().zip(editor_inherit.iter()).enumerate() {
+        assert_eq!(
+            p, e,
+            "step {i}: the two hosts disagree on an INHERITING edge"
+        );
+    }
+
+    // 2. ANTI-VACUITY, in each host separately: the setting reaches the pose
+    //    math, and it reaches it on BOTH sides rather than on one.
+    let differs =
+        |a: &[Vec<u8>], b: &[Vec<u8>]| a.iter().zip(b.iter()).filter(|(x, y)| x != y).count();
+    let p_diff = differs(&player_cross, &player_inherit);
+    let e_diff = differs(&editor_cross, &editor_inherit);
+    assert!(
+        p_diff > 0,
+        "the PLAYER poses a CrossFade edge exactly like an inheriting one — the \
+         per-transition mode never reached the pose math"
+    );
+    assert!(
+        e_diff > 0,
+        "the EDITOR poses a CrossFade edge exactly like an inheriting one — the \
+         per-transition mode never reached the pose math"
+    );
+    // …and they disagree at the SAME number of steps, which is what "the two
+    // hosts read one field" means as opposed to "both happened to differ from
+    // something".
+    assert_eq!(
+        p_diff, e_diff,
+        "the mode changed {p_diff} step(s) in the player and {e_diff} in the \
+         editor — one host is reading it and the other is reading something else"
+    );
+    eprintln!(
+        "v3 blend parity: {BLEND_STEPS} steps, hosts identical; CrossFade differs \
+         from inherit at {p_diff} of {BLEND_STEPS} steps in both hosts"
+    );
+}
+
+/// **The precedence rule, armed.** Per-transition wins over the session default;
+/// an inheriting edge follows it.
+///
+/// The P29.3 slope-limit precedent: two authorities that each believe they decide
+/// is a defect, so the ordering is asserted rather than described. Run in the
+/// player alone — the rule lives in one Ring-0 function that both hosts call, and
+/// the arm above is what proves they call it.
+#[test]
+fn the_per_transition_mode_overrides_the_session_default_and_inherit_follows_it() {
+    let trace = |edge: Option<inf_anim::SmBlendMode>, session: inf_anim::SmBlendMode| {
+        let mut world = EcsWorld::new();
+        let e = world.spawn_with_guid(HERO, "Hero", None);
+        world.world_mut().entity_mut(e).insert(character());
+        world.mark_dirty();
+        let mut sim = RuntimeSim::new(world, Vec::new(), DVec2::ZERO, HZ);
+        sim.set_state_machines(BTreeMap::from([(SM, blend_machine(edge))]));
+        sim.set_skeletons(skeletons());
+        sim.set_pose_clips(pose_clips());
+        inf_ecs::pose::set_blend_mode(sim.world_mut(), session);
+        (0..BLEND_STEPS)
+            .map(|_| {
+                sim.step_once(RuntimeInput::default());
+                inf_ecs::pose::pose_state_bytes(sim.world())
+            })
+            .collect::<Vec<_>>()
+    };
+    use inf_anim::SmBlendMode::{CrossFade, Inertialize};
+
+    // An edge that NAMES a mode ignores the session default entirely: the two
+    // sessions below disagree about everything and the traces are identical.
+    assert_eq!(
+        trace(Some(CrossFade), Inertialize),
+        trace(Some(CrossFade), CrossFade),
+        "the session default overrode a per-transition mode — the precedence is \
+         inverted"
+    );
+    assert_eq!(
+        trace(Some(Inertialize), CrossFade),
+        trace(Some(Inertialize), Inertialize),
+        "…and the same in the other direction"
+    );
+    // An edge that INHERITS follows the session default, which is the half that
+    // makes `None` a state rather than a synonym for `Inertialize`.
+    assert_eq!(
+        trace(None, CrossFade),
+        trace(Some(CrossFade), CrossFade),
+        "an inheriting edge did not follow the session default"
+    );
+    assert_eq!(
+        trace(None, Inertialize),
+        trace(Some(Inertialize), Inertialize),
+        "an inheriting edge did not follow the session default"
+    );
+    // ANTI-VACUITY: the two modes really produce different worlds, so every
+    // equality above is a statement about precedence and not about a field
+    // nothing reads.
+    assert_ne!(
+        trace(None, CrossFade),
+        trace(None, Inertialize),
+        "the session default changes nothing, so this whole arm is vacuous"
+    );
+}

@@ -258,9 +258,17 @@ pub struct StateMachineAsset {
 }
 
 impl StateMachineAsset {
-    /// v2 (P29.1) — typed parameters, condition trees, priority/interruption,
-    /// blend curves and profiles, any-state sources, sub-machines, notifies.
-    pub const CURRENT_VERSION: u32 = 2;
+    /// v3 (the island phase) — the **per-transition blend mode**.
+    ///
+    /// * v1 → refused. See the type's docs: v2 changed shapes *inside* the
+    ///   machine, so no honest in-place upgrade exists and the remedy is a door.
+    /// * v2 → **migrated**, because this rung is the opposite kind: one
+    ///   `Option<SmBlendMode>` appended to the tail of `SmTransition`, whose
+    ///   default (`None`, "inherit the session default") is exactly what every v2
+    ///   machine already meant. A v2 file therefore loses nothing and behaves
+    ///   identically, which is what makes a migration honest here and dishonest
+    ///   there.
+    pub const CURRENT_VERSION: u32 = 3;
 
     /// Wrap a machine (optionally bound to a skeleton GUID) as a current-schema
     /// asset.
@@ -299,7 +307,7 @@ impl AssetPayload for StateMachineAsset {
     /// quiet one: every ordering comparison a NaN takes part in is false, so the
     /// machine simply never transitions and looks like content that was authored
     /// wrong.
-    fn migrate(self) -> inf_asset::Result<Self> {
+    fn migrate(mut self) -> inf_asset::Result<Self> {
         let found = self.schema_version;
         if found > Self::SCHEMA_VERSION {
             return Err(inf_asset::AssetError::SchemaTooNew {
@@ -308,10 +316,278 @@ impl AssetPayload for StateMachineAsset {
                 current: Self::SCHEMA_VERSION,
             });
         }
+        // A v2 payload arrives here already lifted by `decode_wire` (the shape
+        // door); the stamp is what says so. Restamping here rather than there
+        // keeps `decode_wire` about BYTES and this about the value.
+        self.schema_version = Self::SCHEMA_VERSION;
         self.machine
             .validate()
             .map_err(|e| inf_asset::AssetError::Decode(format!("invalid state machine: {e}")))?;
         Ok(self)
+    }
+
+    /// **The v2 → v3 rung.** v3 appended `blend` to the tail of `SmTransition`,
+    /// which sits inside a `Vec` in the middle of the stream — so a v2 payload is
+    /// **not a prefix** of a v3 one and the current shape cannot read it. The
+    /// frozen [`v2::StateMachineAsset`] can, and lifting it is a pure default-fill.
+    ///
+    /// v1 is deliberately absent: it falls through to the current shape, fails,
+    /// and `decode` turns that into `SchemaTooOld` with this type's own remedy —
+    /// the behaviour P29.1 chose and this rung does not change.
+    /// v2 has a rung; v1 does not. So a v1 payload keeps its `SchemaTooOld`
+    /// remedy, and a v2 one that fails for a structural reason reports **that**
+    /// reason rather than being told it is old.
+    fn migrates_from(v: u32) -> bool {
+        v == 2
+    }
+
+    fn decode_wire(bytes: &[u8], found: Option<u32>) -> inf_asset::Result<Self> {
+        if found == Some(2) {
+            let old: v2::StateMachineAsset = inf_asset::decode_shape(bytes)
+                .map_err(|e| inf_asset::AssetError::Decode(format!("v2 state machine: {e}")))?;
+            return Ok(old.into_current());
+        }
+        inf_asset::decode_shape(bytes)
+    }
+}
+
+/// **The frozen schema-v2 `.inf_sm` record** — the shape before the island phase
+/// appended `SmTransition::blend`.
+///
+/// Ladder-local and declared field-for-field rather than derived from the live
+/// types, which is the whole point: if `SmTransition` grows again without a bump,
+/// this shape stops matching the bytes the old encoder wrote and
+/// `the_frozen_v2_record_is_the_shape_v2_actually_wrote` goes red. A frozen record
+/// assembled *from* the live one asserts nothing.
+///
+/// # Four types are re-declared, and the fourth is the one that was nearly missed
+///
+/// `SmTransition` obviously. But a state's `Motion::SubMachine` nests a whole
+/// `StateMachine`, whose transitions are `SmTransition`s **too** — so a frozen
+/// record that reached `SmState` through the *live* declaration would write the
+/// v3 shape for every nested transition while claiming to be v2. It did, and
+/// `v3_costs_one_discriminant_per_transition` caught it: the fixture's three
+/// transitions cost **two** bytes, because the sub-machine's one was already
+/// paying on both sides of the comparison. Hence `v2::SmState`, `v2::Motion` and
+/// the recursion back into `v2::StateMachine`.
+///
+/// Everything else inside the machine is byte-unchanged by v3 and is reached
+/// through the live declarations — the same economy `inf_scene`'s
+/// `EntityRecordV20Gen` uses, and the same limit: the day one of them changes, it
+/// gets frozen here too.
+pub(crate) mod v2 {
+    use serde::{Deserialize, Serialize};
+
+    use crate::blend_space::{BlendSpace1D, BlendSpace2D, ClipRef};
+    use crate::state_machine::{BlendCurve, BlendProfile, SmCond, SmInterrupt, SmParam, SmSource};
+
+    /// A v2 state. Identical to the live one except that its `motion` reaches
+    /// [`Motion`] — the v2 sub-machine — rather than the live one.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct SmState {
+        pub name: String,
+        pub motion: Motion,
+        pub looping: bool,
+        pub speed: f64,
+        pub position: (f32, f32),
+        #[serde(default)]
+        pub on_enter: Vec<String>,
+        #[serde(default)]
+        pub on_exit: Vec<String>,
+    }
+
+    /// A v2 motion. The `SubMachine` arm is the whole reason this exists.
+    ///
+    /// # It carries the SAME depth guard the live `Motion` does
+    ///
+    /// The first draft of this record did not, on the reasoning that these bytes
+    /// "have already survived the live guard". They have not: `decode_wire`
+    /// dispatches a v2 payload **straight here**, so the live `de_sub_machine`
+    /// never runs on this path and a crafted `.inf_sm` with a deep sub-machine
+    /// chain would have reached the bottom of the stack before `validate` saw the
+    /// tree. A version ladder decodes old bytes through a *different*
+    /// declaration, which means every hostile-input guard on the live shape has to
+    /// be re-entered on the frozen one — the guard is shared
+    /// (`state_machine::sub_machine_depth_guard`), not restated.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub enum Motion {
+        Clip(ClipRef),
+        Blend1D(BlendSpace1D),
+        Blend2D(BlendSpace2D),
+        SubMachine(#[serde(deserialize_with = "de_sub_machine_v2")] Box<StateMachine>),
+    }
+
+    fn de_sub_machine_v2<'de, D>(d: D) -> Result<Box<StateMachine>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let _guard = crate::state_machine::sub_machine_depth_guard::<D::Error>()?;
+        Ok(Box::new(StateMachine::deserialize(d)?))
+    }
+
+    /// A v2 transition: everything the live one has except the v3 tail.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct SmTransition {
+        pub from: SmSource,
+        pub to: usize,
+        pub duration: f64,
+        pub condition: SmCond,
+        pub exit_time: Option<f64>,
+        #[serde(default)]
+        pub priority: i32,
+        #[serde(default)]
+        pub interrupt: SmInterrupt,
+        #[serde(default)]
+        pub curve: BlendCurve,
+        #[serde(default)]
+        pub profile: Option<usize>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct StateMachine {
+        pub states: Vec<SmState>,
+        pub transitions: Vec<SmTransition>,
+        pub entry: usize,
+        #[serde(default)]
+        pub params: Vec<SmParam>,
+        #[serde(default)]
+        pub profiles: Vec<BlendProfile>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct StateMachineAsset {
+        pub schema_version: u32,
+        pub machine: StateMachine,
+        pub skeleton: Option<[u8; 16]>,
+    }
+
+    impl SmTransition {
+        /// Lift one transition: the v3 tail arrives **absent**, which is what a v2
+        /// machine meant — "blend the way this session blends".
+        fn into_current(self) -> crate::state_machine::SmTransition {
+            crate::state_machine::SmTransition {
+                from: self.from,
+                to: self.to,
+                duration: self.duration,
+                condition: self.condition,
+                exit_time: self.exit_time,
+                priority: self.priority,
+                interrupt: self.interrupt,
+                curve: self.curve,
+                profile: self.profile,
+                blend: None,
+            }
+        }
+
+        /// Project a live transition back onto the v2 shape — the
+        /// **downgrade-bless** direction, which is what regenerates the committed
+        /// v2 fixture from ladder-local literals rather than from a stale file.
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub fn from_current(t: crate::state_machine::SmTransition) -> Self {
+            Self {
+                from: t.from,
+                to: t.to,
+                duration: t.duration,
+                condition: t.condition,
+                exit_time: t.exit_time,
+                priority: t.priority,
+                interrupt: t.interrupt,
+                curve: t.curve,
+                profile: t.profile,
+            }
+        }
+    }
+
+    impl SmState {
+        fn into_current(self) -> crate::state_machine::SmState {
+            crate::state_machine::SmState {
+                name: self.name,
+                motion: match self.motion {
+                    Motion::Clip(c) => crate::state_machine::Motion::Clip(c),
+                    Motion::Blend1D(b) => crate::state_machine::Motion::Blend1D(b),
+                    Motion::Blend2D(b) => crate::state_machine::Motion::Blend2D(b),
+                    Motion::SubMachine(m) => {
+                        crate::state_machine::Motion::SubMachine(Box::new(m.into_current()))
+                    }
+                },
+                looping: self.looping,
+                speed: self.speed,
+                position: self.position,
+                on_enter: self.on_enter,
+                on_exit: self.on_exit,
+            }
+        }
+
+        #[cfg_attr(not(test), allow(dead_code))]
+        fn from_current(s: crate::state_machine::SmState) -> Self {
+            Self {
+                name: s.name,
+                motion: match s.motion {
+                    crate::state_machine::Motion::Clip(c) => Motion::Clip(c),
+                    crate::state_machine::Motion::Blend1D(b) => Motion::Blend1D(b),
+                    crate::state_machine::Motion::Blend2D(b) => Motion::Blend2D(b),
+                    crate::state_machine::Motion::SubMachine(m) => {
+                        Motion::SubMachine(Box::new(StateMachine::from_current(*m)))
+                    }
+                },
+                looping: s.looping,
+                speed: s.speed,
+                position: s.position,
+                on_enter: s.on_enter,
+                on_exit: s.on_exit,
+            }
+        }
+    }
+
+    impl StateMachine {
+        fn into_current(self) -> crate::state_machine::StateMachine {
+            crate::state_machine::StateMachine {
+                states: self.states.into_iter().map(SmState::into_current).collect(),
+                transitions: self
+                    .transitions
+                    .into_iter()
+                    .map(SmTransition::into_current)
+                    .collect(),
+                entry: self.entry,
+                params: self.params,
+                profiles: self.profiles,
+            }
+        }
+
+        #[cfg_attr(not(test), allow(dead_code))]
+        fn from_current(m: crate::state_machine::StateMachine) -> Self {
+            Self {
+                states: m.states.into_iter().map(SmState::from_current).collect(),
+                transitions: m
+                    .transitions
+                    .into_iter()
+                    .map(SmTransition::from_current)
+                    .collect(),
+                entry: m.entry,
+                params: m.params,
+                profiles: m.profiles,
+            }
+        }
+    }
+
+    impl StateMachineAsset {
+        pub fn into_current(self) -> super::StateMachineAsset {
+            super::StateMachineAsset {
+                schema_version: self.schema_version,
+                machine: self.machine.into_current(),
+                skeleton: self.skeleton,
+            }
+        }
+
+        /// The downgrade: a current asset as the bytes v2 would have written.
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub fn from_current(a: &super::StateMachineAsset) -> Self {
+            Self {
+                schema_version: 2,
+                machine: StateMachine::from_current(a.machine.clone()),
+                skeleton: a.skeleton,
+            }
+        }
     }
 }
 
@@ -870,7 +1146,7 @@ mod tests {
     #[test]
     fn state_machine_asset_round_trips_deterministically() {
         let a = StateMachineAsset::new(v2_machine(), Some([9u8; 16]));
-        assert_eq!(a.schema_version, 2);
+        assert_eq!(a.schema_version, 3);
         let e1 = encode(&a).unwrap();
         let e2 = encode(&a).unwrap();
         assert_eq!(e1, e2, "re-encoding is byte-identical");
@@ -962,6 +1238,323 @@ mod tests {
         .unwrap()
     }
 
+    // ── the v2 → v3 rung (the island phase: per-transition blend) ───────────
+
+    /// The exact bytes a **v2** encoder wrote for [`v2_machine`], built from the
+    /// frozen record rather than from the live one — the downgrade-bless.
+    fn v2_sm_bytes() -> Vec<u8> {
+        let live = StateMachineAsset::new(v2_machine(), Some([9u8; 16]));
+        inf_asset::encode_shape(&v2::StateMachineAsset::from_current(&live)).unwrap()
+    }
+
+    /// **A v2 `.inf_sm` still loads, and every transition inherits.**
+    ///
+    /// The rung's whole claim: a machine authored before the island phase behaves
+    /// exactly as it did, because `None` means "blend the way this session
+    /// blends" and that is what a v2 machine always meant.
+    #[test]
+    fn a_v2_state_machine_migrates_and_every_transition_inherits() {
+        let bytes = v2_sm_bytes();
+        assert_eq!(
+            inf_asset::peek_schema_version(&bytes, Some(StateMachineAsset::CURRENT_VERSION)),
+            Some(2),
+            "the fixture is not a genuine v2 payload"
+        );
+        let a: StateMachineAsset = decode(&bytes).expect("a v2 machine must migrate");
+        assert_eq!(a.schema_version, StateMachineAsset::CURRENT_VERSION);
+        assert_eq!(a.skeleton, Some([9u8; 16]));
+
+        // Everything v2 could express survived…
+        let want = v2_machine();
+        assert_eq!(a.machine.states, want.states);
+        assert_eq!(a.machine.params, want.params);
+        assert_eq!(a.machine.profiles, want.profiles);
+        assert_eq!(a.machine.entry, want.entry);
+        assert_eq!(a.machine.transitions.len(), want.transitions.len());
+        for (got, w) in a.machine.transitions.iter().zip(want.transitions.iter()) {
+            assert!(got.blend.is_none(), "a v2 transition named a blend mode");
+            // …field for field, compared through a patched clone rather than a
+            // field list, so a slot added later cannot quietly stop being checked.
+            let mut patched = got.clone();
+            patched.blend = w.blend;
+            assert_eq!(&patched, w, "the v2 lift lost something other than `blend`");
+        }
+        // ANTI-VACUITY: the fixture really exercises the sub-machine arm.
+        assert!(a
+            .machine
+            .states
+            .iter()
+            .any(|s| matches!(s.motion, crate::state_machine::Motion::SubMachine(_))));
+    }
+
+    /// **The frozen v2 record is the shape v2 ACTUALLY wrote** — the ladder's
+    /// forcing function.
+    ///
+    /// If `SmTransition` grows again without a bump, the live encoder writes a
+    /// longer transition than this frozen shape describes and the byte-consumption
+    /// check below fails. A frozen record assembled *from* the live one could
+    /// never notice, which is why `v2::SmTransition` is declared field-for-field.
+    #[test]
+    fn the_frozen_v2_record_is_the_shape_v2_actually_wrote() {
+        let bytes = v2_sm_bytes();
+        // It decodes THROUGH the frozen shape, consuming every byte.
+        let (_, consumed) = bincode::serde::decode_from_slice::<v2::StateMachineAsset, _>(
+            &bytes,
+            inf_asset::bincode_config(),
+        )
+        .expect("the frozen v2 shape reads its own bytes");
+        assert_eq!(
+            consumed,
+            bytes.len(),
+            "the frozen v2 record leaves {} byte(s) unread — the shape and the \
+             encoder disagree",
+            bytes.len() - consumed
+        );
+        // …and the CURRENT shape cannot, because v3 appended inside a Vec in the
+        // middle of the stream. That is the whole reason this rung needs a
+        // frozen record rather than a `#[serde(default)]`.
+        assert!(
+            bincode::serde::decode_from_slice::<StateMachineAsset, _>(
+                &bytes,
+                inf_asset::bincode_config()
+            )
+            .is_err(),
+            "a v2 payload decoded at the v3 shape — then the ladder is measuring \
+             nothing and the migration is dead code"
+        );
+    }
+
+    /// v3 costs a v2 machine **one byte per transition** — the `None`
+    /// discriminant, the price every additive tail has paid since v8 of the scene.
+    #[test]
+    fn v3_costs_one_discriminant_per_transition() {
+        let live = StateMachineAsset::new(v2_machine(), Some([9u8; 16]));
+        let v3 = inf_asset::encode(&live).unwrap();
+        let v2b = v2_sm_bytes();
+        // The sub-machine's transitions pay it too — they are `SmTransition`s.
+        let total = live.machine.transitions.len()
+            + live
+                .machine
+                .states
+                .iter()
+                .filter_map(|s| match &s.motion {
+                    crate::state_machine::Motion::SubMachine(inner) => {
+                        Some(inner.transitions.len())
+                    }
+                    _ => None,
+                })
+                .sum::<usize>();
+        assert!(total > 1, "the fixture has {total} transitions");
+        assert_eq!(
+            v3.len(),
+            v2b.len() + total,
+            "v3 costs {} bytes over {total} transitions, not {total}",
+            v3.len() - v2b.len()
+        );
+    }
+
+    /// An **authored** mode really costs more, and round-trips — so the arm above
+    /// is about an absent one rather than about a field that never encodes.
+    #[test]
+    fn an_authored_blend_mode_round_trips_and_is_not_free() {
+        let mut m = v2_machine();
+        m.transitions[0].blend = Some(crate::SmBlendMode::CrossFade);
+        let a = StateMachineAsset::new(m, None);
+        let bytes = inf_asset::encode(&a).unwrap();
+        let back: StateMachineAsset = decode(&bytes).unwrap();
+        assert_eq!(
+            back.machine.transitions[0].blend,
+            Some(crate::SmBlendMode::CrossFade)
+        );
+        assert!(
+            back.machine.transitions[1..]
+                .iter()
+                .all(|t| t.blend.is_none()),
+            "a codec that wrote one value into every slot would pass the line above"
+        );
+        let bare = inf_asset::encode(&StateMachineAsset::new(v2_machine(), None)).unwrap();
+        assert!(
+            bytes.len() > bare.len(),
+            "an authored mode encoded to nothing"
+        );
+    }
+
+    /// **The wire discriminants are frozen** — `SmBlendMode` is content now.
+    ///
+    /// bincode writes an externally-tagged enum as its variant index, so
+    /// inserting a variant anywhere but the end re-reads every committed
+    /// machine's transitions as a different mode. Pinned against literals, not
+    /// against the enum, because a pin that asks the enum what it is asserts
+    /// nothing.
+    #[test]
+    fn the_blend_mode_wire_discriminants_are_frozen() {
+        for (mode, index) in [
+            (crate::SmBlendMode::Inertialize, 0u32),
+            (crate::SmBlendMode::CrossFade, 1u32),
+        ] {
+            let got = inf_asset::encode_shape(&mode).unwrap();
+            let want = inf_asset::encode_shape(&index).unwrap();
+            assert_eq!(
+                got, want,
+                "{mode:?} no longer encodes as variant index {index} — every \
+                 committed .inf_sm just changed meaning"
+            );
+        }
+        // …and `Option<SmBlendMode>`'s absent case is the single `0` byte the
+        // cost arms above count.
+        assert_eq!(
+            inf_asset::encode_shape(&Option::<crate::SmBlendMode>::None)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// **A pathologically nested V2 payload is refused too** — the ladder's own
+    /// hostile-input hole, found while writing its docs.
+    ///
+    /// `decode_wire` dispatches a v2 payload straight into the frozen record, so
+    /// the LIVE `de_sub_machine` guard never runs on that path. The first draft of
+    /// `v2::Motion` had no guard and a note explaining why it did not need one;
+    /// the note was wrong. A version ladder decodes old bytes through a
+    /// *different* declaration, so every hostile-input guard on the live shape has
+    /// to be re-entered on the frozen one.
+    ///
+    /// # The payload is SPLICED, not built
+    ///
+    /// The same technique as the v3 sibling below, and for a reason this arm
+    /// learned the hard way: constructing four thousand nested `StateMachine`s in
+    /// Rust overflows the stack in the **fixture** — in `Serialize`, before the
+    /// decoder is ever reached — so a test that built its own hostile value would
+    /// abort while proving nothing about the decoder. One level costs a fixed
+    /// prefix/suffix block; a chain of N is that block N times.
+    #[test]
+    fn a_pathologically_nested_v2_payload_is_refused_rather_than_aborting() {
+        use crate::state_machine::SmState;
+
+        let leaf = || StateMachine {
+            states: vec![SmState::clip("x", [1; 16])],
+            ..Default::default()
+        };
+        let nest = |inner: StateMachine| StateMachine {
+            states: vec![SmState::sub_machine("n", inner)],
+            ..Default::default()
+        };
+        // Encoded through the FROZEN v2 writer, so these are genuine v2 bytes.
+        let v2b = |m: StateMachine| {
+            let live = StateMachineAsset::new(m, None);
+            inf_asset::encode_shape(&v2::StateMachineAsset::from_current(&live)).unwrap()
+        };
+        let a = v2b(leaf());
+        let b = v2b(nest(leaf()));
+        let head = (0..a.len()).find(|&i| a[i] != b[i]).unwrap();
+        let tail = (0..a.len() - head)
+            .find(|&i| a[a.len() - 1 - i] != b[b.len() - 1 - i])
+            .unwrap();
+        let unit = b.len() - a.len();
+        let (mut pre, mut suf) = (Vec::new(), Vec::new());
+        for plen in 0..=unit {
+            let p = &b[head..head + plen];
+            let s = &b[b.len() - tail - (unit - plen)..b.len() - tail];
+            let mut cand = b[..head].to_vec();
+            cand.extend_from_slice(p);
+            cand.extend_from_slice(&a[head..a.len() - tail]);
+            cand.extend_from_slice(s);
+            cand.extend_from_slice(&b[b.len() - tail..]);
+            if cand == b {
+                pre = p.to_vec();
+                suf = s.to_vec();
+                break;
+            }
+        }
+        assert!(
+            !pre.is_empty(),
+            "the per-level v2 byte block was not recovered"
+        );
+        let sub_payload = |n: usize| -> Vec<u8> {
+            let mut out = b[..head].to_vec();
+            for _ in 0..n {
+                out.extend_from_slice(&pre);
+            }
+            out.extend_from_slice(&a[head..a.len() - tail]);
+            for _ in 0..n {
+                out.extend_from_slice(&suf);
+            }
+            out.extend_from_slice(&b[b.len() - tail..]);
+            out
+        };
+
+        // Control: one level is the feature, from a v2 file, and it migrates.
+        let one = sub_payload(1);
+        assert_eq!(
+            inf_asset::peek_schema_version(&one, Some(StateMachineAsset::CURRENT_VERSION)),
+            Some(2),
+            "the spliced fixture is not a genuine v2 payload"
+        );
+        decode::<StateMachineAsset>(&one).expect("one sub-machine is legal v2 content");
+
+        // …and a deep chain is a REFUSAL, not a stack overflow. 4 096 levels is
+        // the depth the v3 sibling uses, and is enough to abort an unguarded
+        // decoder.
+        for depth in [3usize, 8, 64, 4096] {
+            let bytes = sub_payload(depth);
+            let err = decode::<StateMachineAsset>(&bytes)
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("a v2 sub-machine chain {depth} deep decoded as a machine")
+                });
+            // NAMED, not incidental — and specifically NOT `SchemaTooOld`, which
+            // would send the author to re-create content whose problem is not its
+            // age. That mis-diagnosis is what `AssetPayload::migrates_from`
+            // exists to prevent, and this is the arm that would notice it coming
+            // back.
+            let msg = err.to_string();
+            assert!(
+                !matches!(err, inf_asset::AssetError::SchemaTooOld { .. }),
+                "a structurally hostile v2 payload was diagnosed as merely old: {msg}"
+            );
+            assert!(
+                msg.contains("nested state machine"),
+                "the refusal does not name the nesting: {msg}"
+            );
+        }
+    }
+
+    /// **Hostile decode, the P29.1 A1 precedent**: a truncated v2 payload and a
+    /// bad enum discriminant are refusals, not panics and not silent successes.
+    #[test]
+    fn a_damaged_state_machine_is_refused_rather_than_trusted() {
+        let good = v2_sm_bytes();
+        // 1. TRUNCATION at every length. None may panic; none may succeed.
+        for cut in 1..good.len() {
+            let r = std::panic::catch_unwind(|| decode::<StateMachineAsset>(&good[..cut]));
+            let r = r.unwrap_or_else(|_| panic!("truncating to {cut} bytes PANICKED the decoder"));
+            assert!(
+                r.is_err(),
+                "a v2 payload truncated to {cut} of {} bytes decoded as a machine",
+                good.len()
+            );
+        }
+        // 2. A BAD DISCRIMINANT for the v3 blend mode. The two modes differ at
+        //    exactly one byte, found by diffing rather than counted, so this arm
+        //    cannot drift with the layout.
+        let mut m = v2_machine();
+        m.transitions[0].blend = Some(crate::SmBlendMode::CrossFade);
+        let mut bytes = inf_asset::encode(&StateMachineAsset::new(m, None)).unwrap();
+        let mut alt = v2_machine();
+        alt.transitions[0].blend = Some(crate::SmBlendMode::Inertialize);
+        let other = inf_asset::encode(&StateMachineAsset::new(alt, None)).unwrap();
+        let at = bytes
+            .iter()
+            .zip(other.iter())
+            .position(|(a, b)| a != b)
+            .expect("the two modes differ somewhere");
+        bytes[at] = 200;
+        assert!(
+            decode::<StateMachineAsset>(&bytes).is_err(),
+            "variant index 200 decoded as a blend mode"
+        );
+    }
     /// **The v1 → v2 break is a NAMED refusal that says what to do.**
     ///
     /// v2 changed shapes *inside* the payload (a condition list became a tree, a

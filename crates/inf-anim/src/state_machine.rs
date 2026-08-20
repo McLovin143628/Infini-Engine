@@ -210,12 +210,26 @@ fn de_sub_machine<'de, D>(d: D) -> Result<Box<StateMachine>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let _guard = enter_depth::<D::Error>(
+    let _guard = sub_machine_depth_guard::<D::Error>()?;
+    Ok(Box::new(StateMachine::deserialize(d)?))
+}
+
+/// The nesting guard, **for a frozen record's sub-machine arm too**
+/// (`.inf_sm` v3).
+///
+/// A version ladder decodes old bytes through a *different* declaration, and a
+/// frozen record that reached its own nested machine without this would give a
+/// hostile payload a stack to run off — the live guard is on the live `Motion`
+/// and would never run. `asset::v2::Motion` is the first such record; this is the
+/// one guard both of them enter.
+///
+/// Returns an opaque guard that decrements on drop however the decode leaves.
+pub(crate) fn sub_machine_depth_guard<E: serde::de::Error>() -> Result<impl Drop, E> {
+    enter_depth::<E>(
         &SUB_DEPTH,
         MAX_SUB_DEPTH_AT_DECODE,
         "a nested state machine",
-    )?;
-    Ok(Box::new(StateMachine::deserialize(d)?))
+    )
 }
 
 /// A comparison operator for a transition condition.
@@ -841,6 +855,40 @@ pub struct SmTransition {
     /// Index into [`StateMachine::profiles`] — a per-joint mask on this fade (v2).
     #[serde(default)]
     pub profile: Option<usize>,
+    /// **How THIS transition blends** (`.inf_sm` v3) — `None` inherits the
+    /// session default.
+    ///
+    /// # Deferred five waves, and this is the shape it was deferred as
+    ///
+    /// P29.2 shipped [`SmBlendMode`] as a **world-level** resource
+    /// (`inf_ecs::pose::set_blend_mode`) and wrote down why: *"a per-transition
+    /// choice would be a field on `SmTransition`, and that format bumped in P29.1
+    /// and does not bump again in this phase."* P29's disposition table then
+    /// routed it to the island's schema window by name, adding that "one schema
+    /// move buys the `SmTransition` field and the payload slot together; doing
+    /// either alone is the worse half". This is that field; `ScenePayload` v11
+    /// carries the session default beside it.
+    ///
+    /// # Why `Option` rather than a bare mode
+    ///
+    /// So that "inherit" is a *state* rather than a coincidence. A bare
+    /// `SmBlendMode` would make every transition state its own answer, which
+    /// (a) retires the world-level setting by making it unreachable — an author
+    /// who wants the P29.1 cross-fade everywhere would have to say so on every
+    /// edge, and the `.inf_sm` diff would be as long as the machine — and
+    /// (b) means a machine authored before anyone thought about blending is
+    /// indistinguishable from one that chose the default deliberately.
+    ///
+    /// **Precedence, stated once** (see [`PoseBlender::mode_for`]): this field
+    /// when `Some`; otherwise the session default; otherwise
+    /// [`SmBlendMode::Inertialize`]. There is exactly one place that rule is
+    /// written, because two authorities that disagree is the P29.3 slope-limit
+    /// defect and this is the seam it would recur at.
+    ///
+    /// A v2 machine lifts to `None`, so **every existing machine behaves
+    /// identically** — the v2→v3 migration is pure default-fill.
+    #[serde(default)]
+    pub blend: Option<crate::SmBlendMode>,
 }
 
 impl SmTransition {
@@ -856,6 +904,9 @@ impl SmTransition {
             interrupt: SmInterrupt::default(),
             curve: BlendCurve::default(),
             profile: None,
+            // v3: inherit the session default. See the field's own docs for why
+            // "inherit" is a state and not a coincidence.
+            blend: None,
         }
     }
 
@@ -879,6 +930,14 @@ impl SmTransition {
     /// Builder: set the condition tree.
     pub fn when(mut self, condition: SmCond) -> Self {
         self.condition = condition;
+        self
+    }
+
+    /// Builder: set **this transition's** blend mode (`.inf_sm` v3). Passing
+    /// `None` restores "inherit the session default", which is what every v2
+    /// machine means.
+    pub fn with_blend(mut self, blend: impl Into<Option<crate::SmBlendMode>>) -> Self {
+        self.blend = blend.into();
         self
     }
 

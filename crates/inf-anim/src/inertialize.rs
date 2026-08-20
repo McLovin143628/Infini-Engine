@@ -62,6 +62,8 @@
 //! is one deep (P29.1 measured the second interruption at 40.5° of discontinuity);
 //! this has no depth limit at all, because it never stores states — only the pose.
 
+use serde::{Deserialize, Serialize};
+
 use crate::blend_space::ClipRef;
 use crate::layers::{additive_delta, apply_additive};
 use crate::pose::Pose;
@@ -252,8 +254,27 @@ fn deviation_magnitude(dev: &Pose) -> f32 {
     sum.sqrt()
 }
 
+/// The sub-machine the runtime is currently inside, if its active state is one.
+///
+/// One level deep by construction ([`Motion::SubMachine`]'s own bound), so this
+/// is a lookup and not a walk.
+fn sub_machine_of<'a>(sm: &'a StateMachine, runtime: &SmRuntime) -> Option<&'a StateMachine> {
+    match &sm.states.get(runtime.current)?.motion {
+        Motion::SubMachine(inner) => Some(inner),
+        _ => None,
+    }
+}
+
 /// How a fired transition is blended.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// # A WIRE ENUM as of `.inf_sm` v3 — append only, never reorder
+///
+/// `SmTransition::blend` puts this on disk, so its discriminants are content.
+/// bincode writes an externally-tagged enum as its **variant index**, which means
+/// inserting a variant anywhere but the end silently re-reads every committed
+/// machine's transitions as a different mode. The standing P19 rule, and
+/// `the_blend_mode_wire_discriminants_are_frozen` is what enforces it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SmBlendMode {
     /// Inertialization — **the P29.2 default** (§13's catalogue amendment).
     #[default]
@@ -376,6 +397,45 @@ impl PoseBlender {
         }
     }
 
+    /// **How the transition that just fired blends** — the ONE precedence rule
+    /// (`.inf_sm` v3).
+    ///
+    /// ```text
+    /// the fired transition's own `blend`   (Some)   — the author's per-edge choice
+    ///   else this blender's `mode`                  — the session default
+    ///                                                 (`inf_ecs::pose::set_blend_mode`,
+    ///                                                  carried by ScenePayload v11)
+    ///   else SmBlendMode::Inertialize               — `mode`'s own Default
+    /// ```
+    ///
+    /// Written down in exactly one function, and read by the step below and by
+    /// nothing else. Two authorities that each believe they decide is the P29.3
+    /// slope-limit defect — `mover_for` and the controller both "owned" the slope
+    /// limit and disagreed — and a per-edge override on top of a world-level
+    /// setting is precisely the shape that recurs at.
+    ///
+    /// A **sub-machine** transition resolves against the sub-machine's own
+    /// transition list, because that is where the author wrote it. A top-level
+    /// fire wins over a simultaneous sub-fire, matching the step below, which
+    /// collapses one fade for both.
+    pub fn mode_for(&self, sm: &StateMachine, runtime: &SmRuntime, step: &SmStep) -> SmBlendMode {
+        if let Some(i) = step.fired {
+            if let Some(b) = sm.transitions.get(i).and_then(|t| t.blend) {
+                return b;
+            }
+            return self.mode;
+        }
+        if let Some(i) = step.sub_fired {
+            if let Some(b) = sub_machine_of(sm, runtime)
+                .and_then(|inner| inner.transitions.get(i))
+                .and_then(|t| t.blend)
+            {
+                return b;
+            }
+        }
+        self.mode
+    }
+
     /// Advance the machine by `dt` and produce the pose to render.
     ///
     /// Equivalent to [`SmRuntime::advance`] + [`eval_pose`] in `CrossFade` mode.
@@ -395,8 +455,11 @@ impl PoseBlender {
     ) -> (Pose, SmStep) {
         let step = runtime.advance(sm, ctx, dt);
         let fired = step.fired.is_some() || step.sub_fired.is_some();
+        // `.inf_sm` v3: the transition that just fired may name its own mode. THE
+        // ONE precedence site — see `mode_for`.
+        let mode = self.mode_for(sm, runtime, &step);
         let mut duration = 0.0f32;
-        if self.mode == SmBlendMode::Inertialize && fired {
+        if mode == SmBlendMode::Inertialize && fired {
             // The fade the runtime just set up, taken as the decay's length before
             // it is collapsed. A zero-duration transition stays a snap, exactly as
             // it is under the cross-fade.

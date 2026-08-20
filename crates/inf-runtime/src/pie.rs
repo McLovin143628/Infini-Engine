@@ -159,19 +159,31 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 ///   The anchor needs no envelope field of its own because it rides inside
 ///   `level_bytes` — the scene file record carries it, and this envelope's whole
 ///   job is to say which scene contract those bytes obey.
-/// * **v11** — the island phase, and the same shape of bump as v9 and v10 for
-///   the same reason: **no new slot**, recording that `level_bytes` is now a
-///   scene **v25** payload (the vehicle class).
+/// * **v11** — the island phase, carrying **two** things, because it is one
+///   bump and the second one arrived while the first was still unpushed:
 ///
-///   The class needs no envelope field of its own because it rides inside
-///   `level_bytes` — it is a component on an entity, not a referenced asset, so
-///   there are no bytes to resolve and nothing for the collector to gather.
-///   What the bump buys is the refusal: without it, a v25 editor handing a stale
-///   v10 player a level would pass `check_version` — the envelope is unchanged,
-///   after all — and fail several layers deeper, in `inf_scene::decode`, with a
-///   message about a scene schema. The player's own refusal ("rebuild both from
-///   the same commit") is the one that names the actual fix, and it only fires
-///   if the envelope moves when the contract does.
+///   **(a) The scene contract.** `level_bytes` is now a scene **v25** payload
+///   (the vehicle class). The class needs no envelope field of its own because it
+///   rides inside `level_bytes` — it is a component on an entity, not a
+///   referenced asset — so there are no bytes to resolve and nothing for the
+///   collector to gather. What the bump buys is the refusal: without it, a v25
+///   editor handing a stale v10 player a level would pass `check_version` — the
+///   envelope is unchanged, after all — and fail several layers deeper, in
+///   `inf_scene::decode`, with a message about a scene schema. The player's own
+///   refusal ("rebuild both from the same commit") is the one that names the
+///   actual fix, and it only fires if the envelope moves when the contract does.
+///
+///   **(b) [`blend_mode`](ScenePayload::blend_mode)** — the session's default,
+///   and the P29.2 boundary this envelope was told to close the day the
+///   per-transition field landed. `.inf_sm` v3 puts the per-edge choice inside
+///   the bytes `machines` already carries; what those bytes cannot carry is what
+///   an edge that says *inherit* inherits. That is a world-level resource the
+///   editor can set, and a setting the editor can change that the payload does
+///   not carry is a preview that differs from the build.
+///
+///   Recorded as **one** rung rather than two because this envelope had not been
+///   pushed when the `.inf_sm` ruling arrived: extending an unpushed bump is not
+///   a second bump, and a v10.5 would be a version no build ever spoke.
 pub const SCENE_PAYLOAD_VERSION: u32 = 11;
 
 /// Upper bound on a single frame; anything larger means a desynced or
@@ -365,6 +377,22 @@ pub struct ScenePayload {
     /// one copy.
     #[serde(default)]
     pub textures: Vec<(Uuid, Vec<u8>)>,
+    /// **The session's default blend mode** (v11) — `0` inertialize, `1` cross
+    /// fade, mirroring `inf_anim::SmBlendMode`'s frozen wire discriminants.
+    ///
+    /// The P29.2 boundary, closed. A per-transition mode rides inside the
+    /// `.inf_sm` bytes `machines` already carries; what those bytes do NOT carry
+    /// is what a transition that says `inherit` inherits, which is a world-level
+    /// resource the editor can set (`inf_ecs::pose::set_blend_mode`). A setting
+    /// the editor can change that the payload does not carry is a preview that
+    /// differs from the build — P29.2 wrote that sentence down as the reason this
+    /// field could not be exposed without a payload move, and this is the move.
+    ///
+    /// A **`u8`, not the enum**: `inf-runtime` carries bytes and does not depend
+    /// on `inf-anim` (the same rule `fractures` follows for `inf-mesh`). The
+    /// discriminants are frozen and pinned on the `inf-anim` side.
+    #[serde(default)]
+    pub blend_mode: u8,
 }
 
 impl ScenePayload {
@@ -396,6 +424,9 @@ impl ScenePayload {
             hairs: Vec::new(),
             materials: Vec::new(),
             textures: Vec::new(),
+            // v11: inertialize, which is `SmBlendMode::default()` and what every
+            // session means until something calls `set_blend_mode`.
+            blend_mode: 0,
         }
     }
 
@@ -504,6 +535,18 @@ impl ScenePayload {
     ) -> Self {
         self.materials = materials;
         self.textures = textures;
+        self
+    }
+
+    /// Attach the **session's default blend mode** (v11) as its frozen wire
+    /// discriminant — see [`blend_mode`](Self::blend_mode).
+    ///
+    /// A `u8` because this crate carries bytes: naming `inf_anim::SmBlendMode`
+    /// here would make the PIE protocol depend on the animation crate, which is
+    /// the dependency `fractures` already declines for `inf-mesh`. The caller on
+    /// each side converts, and the discriminants are pinned where the enum lives.
+    pub fn with_blend_mode(mut self, blend_mode: u8) -> Self {
+        self.blend_mode = blend_mode;
         self
     }
 
@@ -814,6 +857,10 @@ mod tests {
             vec![(Uuid::from_u128(0x26_03_03), vec![0x33; 56])],
             vec![(Uuid::from_u128(0x26_03_04), vec![0x44; 72])],
         )
+        // v11 — NOT the default (`0`), for the same reason every `Vec` above is
+        // non-empty: a pin whose fixture carries the default value cannot tell
+        // "field 20 decoded" from "a zero was read from somewhere else".
+        .with_blend_mode(1)
     }
 
     /// **The round trip the v5 fields never had.** Every earlier envelope test
@@ -891,6 +938,10 @@ mod tests {
             hairs: Vec<(Uuid, Vec<u8>)>,
             materials: Vec<(Uuid, Vec<u8>)>,
             textures: Vec<(Uuid, Vec<u8>)>,
+            // v11: the session default. A `u8`, so it is the ONE tail field whose
+            // mis-ordering would not change the encoding's LENGTH — which is
+            // exactly why the value assertion below is not optional.
+            blend_mode: u8,
         }
 
         let want = payload_with_assets();
@@ -922,7 +973,7 @@ mod tests {
         let bytes = bincode::serde::encode_to_vec(&want, bincode::config::standard()).unwrap();
         let (wire, consumed): (WireOrder, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
-                .expect("the canonical 19-field order decodes the wire");
+                .expect("the canonical 20-field order decodes the wire");
         assert_eq!(
             consumed,
             bytes.len(),
@@ -961,6 +1012,13 @@ mod tests {
             wire.textures, want.textures,
             "`textures` is not wire field 19"
         );
+        assert_eq!(
+            wire.blend_mode, want.blend_mode,
+            "`blend_mode` is not wire field 20"
+        );
+        // ANTI-VACUITY for the one-byte field: the fixture must not carry the
+        // DEFAULT, or a pin that read a stray zero from anywhere would pass.
+        assert_ne!(want.blend_mode, 0, "the fixture blend mode is the default");
     }
 
     /// **The tail is positional, and it is at the tail.** A reader that knows only

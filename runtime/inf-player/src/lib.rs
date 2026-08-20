@@ -864,7 +864,21 @@ pub fn build_world_from_payload(payload: &ScenePayload) -> Result<BuiltWorld, St
                 }
             }
         }));
-    builder.build(&payload.level_bytes)
+    let mut built = builder.build(&payload.level_bytes)?;
+    // **The session's default blend mode** (`ScenePayload` v11). A transition
+    // whose `.inf_sm` v3 `blend` says *inherit* inherits THIS, so a PIE session
+    // that did not apply it would blend every inheriting edge differently from
+    // the editor that spawned it — the P29.2 boundary, from the reading side.
+    //
+    // The discriminants are `SmBlendMode`'s frozen wire indices; an unknown one
+    // reads as the default rather than refusing, because a preview that blends
+    // conservatively is better than a preview that does not start.
+    let mode = match payload.blend_mode {
+        1 => inf_anim::SmBlendMode::CrossFade,
+        _ => inf_anim::SmBlendMode::Inertialize,
+    };
+    inf_ecs::pose::set_blend_mode(&mut built.world, mode);
+    Ok(built)
 }
 
 /// The **derived material records + their texture containers** a streamed

@@ -51,6 +51,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSmStore } from "../../stores/smStore";
 import {
   SM_BLEND_CURVES,
+  SM_BLEND_MODES,
   SM_INTERRUPT_BLENDS,
   SM_INTERRUPT_SOURCES,
   SM_OPS,
@@ -659,6 +660,26 @@ function CanvasInner() {
                   {SM_BLEND_CURVES.map((c) => (
                     <option key={c} value={c}>
                       {c}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {/* `.inf_sm` v3 — how THIS edge blends. "inherit" is the default
+                  and defers to the session setting; the precedence rule lives in
+                  `inf_anim::PoseBlender::mode_for` and nowhere else. */}
+              <label className="sm-insp__row">
+                <span>Blend mode</span>
+                <select
+                  value={tr.blendMode}
+                  onChange={(e) =>
+                    setTransition(selectedTransition, {
+                      blendMode: e.target.value as (typeof SM_BLEND_MODES)[number],
+                    })
+                  }
+                >
+                  {SM_BLEND_MODES.map((b) => (
+                    <option key={b} value={b}>
+                      {b}
                     </option>
                   ))}
                 </select>
