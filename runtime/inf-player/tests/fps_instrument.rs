@@ -642,6 +642,35 @@ fn the_shipped_players_frame_path_does_not_wait_for_the_gpu() {
          PIPELINED ESTIMATE this file prints a description of a frame the player \
          no longer draws."
     );
+
+    // **AND THE LOOP THAT CALLS IT** (the I4b audit). The paragraph above said
+    // this arm extracted "the windowed loop's own frame block" as well; it did
+    // not, and a poll one caller up serializes the halves exactly as a poll one
+    // caller down does. `PlayerApp::frame` is the block: it runs the fixed steps,
+    // projects, and calls `host.render(&view)` — the whole of what a presented
+    // frame costs the CPU.
+    let window_rs = include_str!("../src/window.rs");
+    let start = window_rs
+        .find("fn frame(&mut self, event_loop: &ActiveEventLoop) {")
+        .expect("PlayerApp::frame is the windowed loop's own frame block");
+    let loop_body = &window_rs[start..];
+    let end = loop_body
+        .find("\n    }\n")
+        .expect("the function body ends at a de-indented brace");
+    let loop_body = &loop_body[..end];
+    println!(
+        "the windowed loop's frame block is {} lines",
+        loop_body.lines().count()
+    );
+    assert!(
+        loop_body.contains("live.host.render(&view)"),
+        "the extracted block is not the windowed frame path — this arm is \
+         reading the wrong function and would pass for anything"
+    );
+    assert!(
+        !loop_body.contains("poll("),
+        "the windowed loop now polls the device around its frame:\n{loop_body}"
+    );
 }
 
 /// **THE FIXED STEP'S OWN BREAKDOWN** (island wave I4b) — the table wave I4

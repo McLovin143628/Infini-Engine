@@ -119,6 +119,27 @@ impl PrimMesh {
     }
 }
 
+/// **The discriminant IS the dense index** — pinned, because two spellings of it
+/// are in use and one of them crosses into WGSL (the I4b audit).
+///
+/// `pack_fallback` buckets with [`PrimMesh::index`]; `ScatterData::build` folds
+/// `mesh as u32` into the content key; and island wave I4b's `ScatterNode` puts
+/// `mesh as u32` in `RasterParamsGpu::material.z`, where `impostor_radius` in
+/// `scatter_mesh.wgsl` branches on it to size an impostor card — `0u` cube, `1u`
+/// sphere, `2u` plane, anything else the cylinder/cone hypotenuse. `PrimMesh`
+/// carries no `#[repr]` and no explicit discriminants, so today the two agree by
+/// declaration order alone; adding an explicit discriminant, or inserting a kind
+/// anywhere but the end, would silently give every cube a sphere's billboard.
+/// A compile-time assertion is the cheapest place to notice.
+const _: () = {
+    let mut i = 0;
+    while i < PrimMesh::ALL.len() {
+        assert!(PrimMesh::ALL[i] as u32 as usize == i);
+        assert!(PrimMesh::ALL[i].index() == i);
+        i += 1;
+    }
+};
+
 /// Where one kind's geometry lives inside the packed [`PrimGpu`] buffers: an index
 /// sub-range plus the `base_vertex` its indices are relative to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
