@@ -1241,8 +1241,14 @@ before → after on I4's own instrument, RTX 4070 Ti, release, MIN of rounds, sa
 | 1440p unlit p50 / p95 | 43.3–48.2 / 49.3–51.6 | **18.2–18.9 / 20.2–25.4** |
 | 1080p **lit** p50 / p95 | — / 92.3–92.9 | **32.8–33.4 / 38.1–41.8** |
 | 1080p lit GPU frame | 35.8–36.1 | **16.1–16.5** |
-| 1080p lit **pipelined estimate** | 24.4 | **16.4–16.9 (59.3–60.9 fps)** |
+| 1080p lit **pipelined estimate** | 24.4 (mid-wave, see below) | **16.4–16.9 (59.3–60.9 fps)** |
 | **distance from 60 fps, 1080p unlit** | p50 +23.2, p95 +28.5 | **p50 −5.8, p95 −2.4** |
+
+*The lit pipelined "before" is the one number here that is **not** an I4 number: I4's lit block
+printed a p95 and a GPU frame and no pipelined estimate at all — closing that is what this
+wave's clause 2 began with — so 24.4 was measured **mid-wave**, after the fixed step's repair
+and before the record's. It is the right comparison for clauses 2 onward and must not be
+quoted as I4's.*
 
 **The shipped-default 1080p frame is inside the 60 fps budget at p50 and p95.** The **lit**
 frame is at the line on the *pipelined* measure (16.4–16.9 against 16.6) and not on the
