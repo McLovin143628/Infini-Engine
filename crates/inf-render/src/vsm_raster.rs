@@ -1203,7 +1203,7 @@ impl VsmRaster {
         // conservative in the cull's own direction: it may fold a caster into a
         // page the page's frustum would reject, never miss one it would keep.
         self.stats.invalidation_touches +=
-            scatter_caster_stamps(&mut pages, residency, geom, &casters, &hashes, &groups);
+            scatter_caster_stamps(&mut pages, residency, geom, &casters, &hashes);
 
         // ── 2. the dirty set: a page whose slot already holds this content is not
         // touched at all — no viewport, no clear, no draw, and it is not even in
@@ -2164,6 +2164,24 @@ struct PageDraw {
     /// can never hide a group the cull would have kept. That asymmetry is what
     /// makes skipping the draw safe.
     ///
+    /// # …and it RAISES THE STAKES on that conservativeness (the I4b audit)
+    ///
+    /// The mask inherits [`scatter_caster_stamps`]'s over-approximation whole —
+    /// the same NDC rectangle, the same two depth planes — so it is exactly as
+    /// conservative as the fold beside it and no more. But the *consequence* of a
+    /// miss is now larger. Before this field, a `(caster, page)` pair the scatter
+    /// failed to name only cost the page's **content stamp**: if the page was
+    /// dirty for any other reason it was re-rastered anyway and the GPU cull, which
+    /// tests every caster against every page, put the caster back. Now a clear bit
+    /// removes the pair's args block, so the cull returns before it can. A stamp
+    /// that under-approximates was a stale page; it is a **missing caster in a page
+    /// that was re-rastered**. One direction is still a licence and the other is
+    /// still a bug — the arithmetic did not move — and what moved is how loudly a
+    /// mistake in it would speak. Mutation-measured: forcing every bit clear fails
+    /// **18** of `vsm_raster.rs`'s 34 arms, and mis-attributing a caster's group
+    /// fails 6 — so a shadow hole here is caught by content arms and not only by
+    /// the goldens.
+    ///
     /// Why it exists: the raster loop is `pages × groups`, and a group is one per
     /// primitive kind, per vgeom asset, per skinned pair **and per resident
     /// terrain tile** — so a streamed world puts it in the hundreds while a
@@ -2248,7 +2266,6 @@ fn scatter_caster_stamps(
     geom: PageGeometry<'_>,
     casters: &[VsmCasterRaw],
     hashes: &[u64],
-    groups: &[GroupGeom],
 ) -> u64 {
     let mut grids: std::collections::BTreeMap<u32, LightGrids> = std::collections::BTreeMap::new();
     let mut perspective: Vec<usize> = Vec::new();
@@ -2299,18 +2316,20 @@ fn scatter_caster_stamps(
     }
 
     let mut touches = 0u64;
-    // **Which group this caster belongs to** (island wave I4b). Casters are
-    // pushed contiguously per group — that is the same layout `group_prefix`
-    // encodes and the cull indexes with — so a running cursor is exact and costs
-    // one compare per caster, against a `group_prefix` binary search per caster
-    // or a group id stored on every `VsmCasterRaw` (which is 96 bytes already).
-    let mut group = 0usize;
-    let mut group_end = groups.first().map(|g| g.casters as usize).unwrap_or(0);
-    for (ci, (c, &hash)) in casters.iter().zip(hashes).enumerate() {
-        while ci >= group_end && group + 1 < groups.len() {
-            group += 1;
-            group_end += groups[group].casters as usize;
-        }
+    for (c, &hash) in casters.iter().zip(hashes) {
+        // **Which group this caster belongs to** — `ids.x`, the field
+        // `pack_casters` writes and **the field the cull itself indexes the slot
+        // table with** (`slots[pi * counts.z + c.ids.x]` in `vsm_cull.wgsl`).
+        //
+        // Island wave I4b re-derived it here with a running cursor over
+        // `groups[..].casters`, which is a second spelling of an index the record
+        // already carries: exact today, and exact only while "casters are pushed
+        // contiguously per group" holds in four separate push loops. Two
+        // derivations of one index that must agree is the shape this repo has
+        // paid for at four seams — and if they ever disagreed the cull would look
+        // up one group's slot for a caster the mask registered under another,
+        // which is a shadow hole. One field, read twice.
+        let group = c.ids[0] as usize;
         let (word, bit) = (group / 64, 1u64 << (group % 64));
         let centre = glam::Vec3::new(c.sphere[0], c.sphere[1], c.sphere[2]);
         let radius = c.sphere[3];
