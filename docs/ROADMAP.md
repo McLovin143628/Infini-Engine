@@ -23915,12 +23915,18 @@ No schema moved, no golden moved, no sample moved, and no P29-or-prior arm chang
 
 ## Phase 30 (the island) — wave I3: city scale (2026-08-20)
 
-`866fb55..d6218ec` — **eleven** commits, plus the one that writes this line, sole
-tree-writer, tagged `(I3)`. Three certified ceilings killed, and **every number below lives
-in a test that prints it**. (The count and the range are stated exactly, and say which end
-they exclude, because the I2 audit found both wrong in the block above this one: *a number
-that only lives in a ledger drifts*, and a ledger's own commit range is the one number it
-cannot outsource to a test.)
+`0856405..c6ec96e` — **thirteen** commits (the range excludes its base and includes its
+head), sole tree-writer, tagged `(I3)`, plus the audit block at the end of this section.
+Three certified ceilings killed, and **every number below lives in a test that prints it**.
+
+*The range is the audit's, restated from the tree it certifies.* The wave stated
+`866fb55..d6218ec` and eleven, which was true when it was written and false by the time it
+was read: the thirteen commits were **rebased onto the I2 hotfix**, so every sha the wave
+named — including the six that carry the work — is gone. That is the fourth way this field
+has gone wrong in three waves (a miscount, a wrong end, two blocks disagreeing, and now a
+rebase), and the first three were the wave's to fix. This one is not: **a sha is only true of
+the tree it was written in**, so from here the range in a wave's ledger is re-stated by the
+audit that closes it.
 
 The certification's IB-2 is one arithmetic and it is about scale: *"12 850 static colliders
 cost 4.663 ms/step (0.363 µs each); the town is **seven** buildings; 60 fps ceiling ≈ 25
@@ -23929,7 +23935,7 @@ colliders. The island needs two cities and five towns.
 
 ### The fixture, first — because every other number is about it
 
-`samples/phase30-city` (262 KB, committed as a **generator**): 100 `PcgVolume` blocks sharing
+`samples/phase30-city` (**244 974 bytes** across seven files, committed as a **generator** — the wave said 262 KB, which is the seven files' ALLOCATED size at a 4 KiB cluster rather than their content): 100 `PcgVolume` blocks sharing
 one `CityBlock.inf_pcg` and differing only by their own `seed`, a Driver carrying
 `StreamingSource`, and a street grid through I2's own import door
 (`RoadGraph::from_layer` → `build_surface` → `surface_to_mesh`) — **220 segments, 81 four-way
@@ -23982,8 +23988,15 @@ colliders is the obvious reading, and at 256 m cells with a 256 m activation rad
 active set is at least 590 000 m² — ~840 buildings of interiors, two orders past the budget.
 **The cells decide what EXISTS; the band decides what is SOLID.** *Anchors are quantized to a
 16 m lattice*, so membership changes on a lattice crossing rather than every step — the P19.5
-11.62 ms regression's own mechanism, reused; worst measured slop **11.180 m against the
-11.314 m half-diagonal bound**.
+11.62 ms regression's own mechanism, reused; worst measured slop **11.314 m against the
+11.314 m half-diagonal bound** — the sweep has a sample on a cell corner, so the bound is
+*reached* rather than merely respected. (The wave's ledger said 11.180; the arm that prints
+it says 11.314. Corrected by the I3 audit.) The lattice's own **edge** is the second cost,
+and it is a bound rather than a saving: a source parked ON a lattice line with sub-millimetre
+jitter crosses it every step — measured at 59 re-stamps in 60 steps, over exactly **two**
+bands. Hysteresis would close it and is **refused**, because a band that depended on the
+history of positions rather than on the positions would stop being a pure function of sim
+state, which is the whole reason PIE equals shipping here.
 
 **It fails OPEN**: no streaming source means no banding, which is every pre-island level and
 every unit fixture. Dropping colliders drops a body through the world and keeps it falling;
@@ -24015,8 +24028,21 @@ on brightness, counted the sky, and reported 44 224 for both).
 `STRUCTURE_LOD_M = 192` is deliberately **three times** the 64 m collider band, so every
 building a body can collide with is drawn as its parts: *what I can touch* and *what I can
 see* stay the same building. On the shipped city: **14 whole, 788 shells, 198 out**. A probe
-dropped on a far building's shell rests at **7.599 m** on a 7.200 m box — a shell that is not
-a barrier is a hole, not a LOD.
+— a 0.4 m sphere — dropped on a far building's shell rests at **7.599 m** on a 7.200 m box,
+its own radius above the surface, because a shell that is not a barrier is a hole, not a LOD.
+
+**The bands overlap by a `reach` rather than meeting, and that is the I3 audit's
+correction.** They are complementary in the *group's* distance; the cull compares the eye
+against each *instance*, and a part sits up to its shell's own half-diagonal nearer the eye
+than the shell's centre does. With both cuts at 192 m a building whose shell centre is just
+inside the line keeps its near parts, loses its far ones, and grows no shell to stand in for
+them — a hole through its back, on **196** building-observations over twenty eye positions of
+the city's own drive line, worst **15 at once**. The parts band now ends at `lod + reach`
+(18.486 m on the city, the widest shell's half-diagonal in the batch), which makes a gap
+impossible; the price is that in a `reach`-wide annulus a building draws its parts inside its
+own shell, which contains them. Gap-freedom needs `P >= S + reach` and overlap-freedom needs
+`P <= S - reach`: a per-instance cut cannot have both, and the choice is made in favour of
+the one that never shows through a building.
 
 ### IB-2c — lot subdivision
 
@@ -24042,7 +24068,9 @@ would have let a `grammar.expand` be dragged onto a block and silently ignore th
 
 ### IB-8 — the visbuffer id is 64 bits
 
-**2 047 → 16 777 214** (8 196×; the brief asked for 16 384).
+`VIS_MAX_INSTANCES` **2 047 → 16 777 215** — indices `0..=16 777 214`, which is the number
+the wave's ledger printed instead and the audit corrected — 8 196×, where the brief asked for
+16 384.
 
 The 32-bit re-cut the certification proposes was **measured and refused**. The meshlet field
 addresses the pool's *capacity*, and P28.1's own measurement puts descriptors at a stable
@@ -24065,8 +24093,11 @@ So `VIS_FORMAT` is `Rg32Uint`. **WGSL has no 64-bit integer**, so the id is a `v
 no field may straddle the word boundary — which is why the split is 7 + 25 filling word 0
 exactly and 24 + 8 reserved in word 1 rather than a sized share of a flat 64: both unpacks
 stay single-word expressions. Meshlet slots go to 33 554 432 = **2 GiB of descriptors, 6.0×
-the whole default streaming budget** (a ~36.8 GiB pool). Cost: **8 bytes a pixel** — 3.7 MB
-at 720p — paid only while `VgeomSettings::visbuffer` is on, which is `false` on every tier.
+the whole default streaming budget** (a ~36.8 GiB pool). Cost: **8 bytes a pixel**, four more
+than before — **7.4 MB at 720p and 66 MB at 4K in total**, of which the widening added 3.7 MB
+and 33 MB — paid only while `VgeomSettings::visbuffer` is on, which is `false` on every tier.
+(The first write-up paired the 8 B/px label with the delta's megabytes; the I3 audit
+corrected all three documents that carried it.)
 
 Two of the three refusals are now unreachable by real content, **and that is the point**: the
 binding ceiling moves to `budget_bytes` and `MAX_CPU_SCATTER_INSTANCES`, which are tunable
@@ -24141,9 +24172,11 @@ IB-2a: 370 468 solids -> 6 067 banded colliders (1.64 %) at near 64 m / far 1024
        (measured 1.991 ms here)
 IB-2b: 14 whole, 788 shells, 198 out
        and through the real `project_scene`:
-       100 parts batches (370 468 instances) bounded ABOVE at 192 m
+       100 parts batches (370 468 instances) bounded ABOVE at 192 m + reach <= 18.486 m
        100 shell batches (  1 000 instances) bounded BELOW at 192 m
          0 ungrouped instances            -- a 370x far-field reduction
+       gap sweep: 0 part-drawn buildings with no shell at 20 eyes
+                  (196 under the equal-cut alternative, worst 15)
 IB-2c: 4 500 lot pairs, worst overlap 0.000e0 m2, two loads bit-identical
 drive: 480 steps, PIE == shipping at EVERY ONE, 9 distinct active sets,
        6 054..=7 538 colliders
@@ -24177,15 +24210,15 @@ working.
 
 ### Counts
 
-| | after the I2 audit | after I3 |
-|---|---|---|
-| battery blocks / passed / failed / ignored | 296 / 5 618 / 0 / 13 | **298 / 5 663 / 0 / 13** |
-| frontend tests / files | 702 / 78 | **702 / 78**, `tsc` and `eslint` clean |
-| goldens | 54, byte-frozen | **54, byte-identical under `INF_GOLDEN_STRICT=1`** |
-| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
-| rustdoc warnings (ceiling 450) | 443 | **445**, warning **list** byte-identical to `866fb55`'s |
-| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged** |
-| committed levels | 19 | **20** (the city) |
+| | after the I2 audit | after I3 | after the I3 audit |
+|---|---|---|---|
+| battery blocks / passed / failed / ignored | 296 / 5 618 / 0 / 13 | 298 / 5 663 / 0 / 13 | **298 / 5 670 / 0 / 13** (the audit adds exactly five arms, so the wave's head was 5 665 — one of the two missing is a commit that landed after its ledger) |
+| frontend tests / files | 702 / 78 | 702 / 78 | **702 / 78**, `tsc` and `eslint` clean |
+| goldens | 54, byte-frozen | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical**, re-run after the LOD band moved |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | 0 | **0** |
+| rustdoc warnings (ceiling 450) | 443 | 445 | **412 individual warnings over 34 crates** (446 `^warning` lines − 34 per-crate summaries, all 45 roots re-documented) — see above: the 443/445 pair is a *metric* artefact, not a regression |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | unchanged | **unchanged** |
+| committed levels | 19 | **20** (the city) | 20 |
 
 **Two ledger numbers that do not reproduce, reported rather than restated.** The I2 audit's
 rustdoc figure of **443** measures **445** at `866fb55` today, with no doc between them
@@ -24194,5 +24227,103 @@ point* rather than a count. And `cargo deny`'s **advisories leg fails on a yanke
 `arrayref 0.3.9`** (`winit → sctk-adwaita → tiny-skia`); it fails identically at `866fb55`,
 this wave added no dependency, and bans / licenses / sources are all ok.
 
+> *Both of those are corrected in the audit block below.* The rustdoc figure is a
+> **metric** problem rather than a wrong number: `grep -c '^warning'` counts one *summary*
+> line per **re-documented** crate on top of the warnings themselves, so the total moves with
+> the cache — 445 then 446 on two consecutive runs of one unchanged tree. Re-documented from
+> cold, with all 45 crate roots touched: **446 lines − 34 summaries = 412** individual
+> warnings over the 34 crates that emit any. 412 is the figure to compare from here, and
+> neither 443 nor 445 was ever wrong so much as *ill-defined*. And the
+> advisories leg is **ok** on re-run: the yank check reads the registry index, which moves on
+> its own, so nothing in the tree changed between the two answers.
+
 **No schema moved and no golden moved.** Every new field is `serde(skip)` derived state,
 asserted absent from the encoded form.
+
+### The I3 audit (adversarial, fresh agent, sole tree-writer)
+
+Range audited: `0856405..c6ec96e`, thirteen commits, read one at a time. The audit's own
+commits follow it and are listed at the end of this block.
+
+**Every headline measurement HELD on re-measurement**, from the tests that print them —
+370 468 solids → 6 067 banded colliders (1.64 %) → 2.202 ms at the certification's rate
+against 134.480 ms; the programmatic city's 427 351 → 7 513 (1.76 %) → 2.727 ms against
+155.128 ms; the radius sweep collider-for-collider; 14 whole / 788 shells / 198 out; 100 +
+100 batches at 370 468 + 1 000 instances and 0 ungrouped; 4 500 lot pairs at 0.000e0 m²;
+1.4e-12 m² on the rotated block; 480 steps, 9 distinct active sets, 6 054..=7 538; the probe
+at 7.599 m; 12 parity + 7 feedback arms and 54 goldens byte-identical under
+`INF_GOLDEN_STRICT=1` **on a real device**; the committed sample re-generating byte-for-byte;
+schemas and goldens unmoved. The wall-clock figures are this machine's and vary: the shipped
+city's fixed step measured **2.13 and 2.06 ms** on two runs where the wave recorded 1.991 —
+which is why the collider count is asserted and the clock is only printed.
+
+**Two defects, both inside the wave's own headline claims:**
+
+* **IB-2b's two bands are complementary in the GROUP's distance, and the cull is per
+  INSTANCE.** With both cuts at `STRUCTURE_LOD_M` a building straddling the line loses the
+  parts outside it and grows no shell to stand in for them. Measured on the shipped city at
+  twenty eye positions: **196** part-drawn-with-no-shell buildings, worst **15 at once**; and
+  **0** once the parts band carries the batch's reach. The wave's own sentence for why this
+  matters — "an overlap draws a solid box inside a building, a gap deletes it from the
+  skyline" — is exactly right, and the gap is the half that shipped.
+* **IB-13's scoped projection read the hierarchy from the world** — bevy's `Children`,
+  i.e. insertion order — while the full projection builds it from the document's creation
+  `order`. The commit's own claim that "the hierarchy is built in exactly ONE place" is true
+  of the full arm and false of the scoped one, in the same commit. A reparent-and-back
+  followed by a rename shipped a re-ordered child list, and `sceneStore`'s flatten walks the
+  order the node states, so it is the tree the user sees.
+
+**Five arms that could not fail**, each mutation-measured before and after: the radius sweep
+asserted the default is *inside* the budget where its own doc claims it is the *widest*
+inside it (a 32 m default passed); `vis_feedback.wgsl` masking the meshlet field with the old
+literal `14u` left **all 7 feedback and all 12 parity arms green**, because the three-readers
+pin compared `const` declarations and no fixture in the tree resides past the old field; the
+band anchoring on a `Camera` left **all 9 city arms green**, because the city fixture has no
+camera at all — the hazard IB-2a's whole legality argument is about could not be expressed;
+`project_delta`'s scoped removal branch was unreachable through the document's API, so
+deleting it left all 238 scene tests green; and the band's **loose** branch — the one that
+decides whether a fence beyond the radius is walk-through — had no ungrouped solid anywhere
+in either city fixture, so widening it to admit at any tier changed nothing.
+
+**Five ledger numbers did not reproduce** and are corrected above: the lattice slop (11.314,
+the bound exactly, not 11.180), `VIS_MAX_INSTANCES` (16 777 215, not the largest index), the
+visbuffer's cost in megabytes, the sample's size (244 974 bytes of content against a 262 KB
+*allocation*), and the commit range — which the wave had already corrected twice before a
+rebase invalidated it. Three source comments outlived their own change (the 48 B scatter
+record, the `R32Uint` resolve header, an 8 192× that is 8 196×), and one doc claim was missing
+its exception: `structure_admitted` is bounded by the active set *except* under fail-open,
+where the active set is the world (5.9 MB on an unbanded city).
+
+**Twenty-five mutations** were run, six of the implementer's and nineteen new, and after the
+repairs each dies at the arm that names it and at no other. (A twenty-sixth was discarded on
+inspection: swapping `VisPacking::words` and `from_words` *together* cancels, because the two
+are each other's inverse and every consumer composes them — **a mutation that is its own
+inverse measures nothing**, and the real one is to swap the order the raster writes the two
+words, which kills ten of the twelve parity arms.) Two survivors are recorded as
+**coverage bounds** rather than defects: `compose_volume`'s instance rebasing is armed only
+by its unit test, because every block of the city is buildings and the scatter prefix is
+therefore zero; and `phase19_gate`'s "13 000 colliders" is the *solid* count rather than the
+bridge's, so a band that emptied the town would leave all twelve of its arms green and its
+step faster. The town is unbanded by construction (no `StreamingSource`) and both city gates
+arm the fail-open property at the door, so nothing is wrong today — but a later wave that
+bands more aggressively must fix that arm before trusting it.
+
+### Gates the audit added or sharpened
+
+| gate | what it now says |
+|---|---|
+| `no_eye_position_leaves_a_building_partly_drawn_with_no_shell` | over the shipped city at twenty eye positions, every building is either shelled or wholly drawn — with the equal-cut alternative priced in the same run (196, worst 15), and the bands **read off the real `project_scene`** rather than restated, so a projection that stopped emitting shells fails it |
+| `a_scoped_node_lists_its_children_in_creation_order` | the scoped delta's child list equals the full projection's after a reparent-and-back — a world proof, not a source pin |
+| `a_scoped_projection_reports_a_named_guid_that_is_gone` | the scoped arm's removal branch, reached the only way it can be |
+| `a_source_parked_on_a_lattice_line_rebands_every_step` | the lattice's edge, measured (59 re-stamps in 60 steps over exactly two bands) with the away-from-the-line control |
+| `a_solid_covered_by_no_group_is_banded_box_by_box` | the loose branch: a post inside the band is solid, one outside it is not, with the tier check first so the two are provably on opposite sides |
+| `the_radius_sweep_states_what_the_default_buys` | *(sharpened)* no row wider than the shipped default may be inside the ceiling |
+| `the_shaders_bit_split_is_the_rusts` | *(sharpened)* the three shaders' **use sites** are counted, per constant, not only their declarations |
+| `pie_equals_shipping_on_a_drive_through_the_city` | *(sharpened)* a `Camera` in each host, a city apart, so "never a camera" has something to fail against |
+| `the_shipped_lots_are_disjoint_and_deterministic` | *(sharpened)* prints a digest of every shipped shell, so "identical across two processes" is a diff of two lines |
+
+The audit's commits, in order: the scoped projection's child order · the LOD bands' reach ·
+the sweep's own claim and the lattice's edge · three visbuffer numbers · the gap sweep reads
+the shipped bands · the scoped removal branch's arm · the three-readers use-site pin · the
+camera the band had to be tested against · fmt · the ungrouped band and a memory claim's
+exception · the lot digest · three sentences IB-13 made false · this ledger.

@@ -15,7 +15,8 @@ changes.
 
 > **SUPERSEDED BY IB-8 (island wave I3, 2026-08-20).** The id is now **sixty-four
 > bits** in two words — triangle 7 / meshlet 25 in word 0, instance 24 + 8
-> reserved in word 1 — and `VIS_MAX_INSTANCES` is **16 777 214**. §1.1 below is
+> reserved in word 1 — and `VIS_MAX_INSTANCES` is **16 777 215** (indices
+> `0..=16 777 214`). §1.1 below is
 > the ruling and the arithmetic that forced it; the rest of §1 is kept because
 > the *measurements* in it are what made the case, and because a superseded
 > section that is deleted takes its reasoning with it.
@@ -60,10 +61,10 @@ expressions, unchanged in shape from the 32-bit contract.
 
 | | before | after |
 |---|---|---|
-| instances | 2 047 | **16 777 214** (8 196×; the brief asked for 16 384) |
+| instances | 2 047 | **16 777 215** — indices `0..=16 777 214` (8 196×; the brief asked for 16 384) |
 | meshlet slots | 16 384 (1 MiB of descriptors, 7.4 % of budget) | 33 554 432 (**2 GiB** of descriptors — 6.0× the *whole* default streaming budget, i.e. a ~36.8 GiB pool) |
 | triangles a meshlet | 128 | 128, deliberately unchanged |
-| cost | 4 B/pixel | **8 B/pixel** — 3.7 MB at 1280 × 720, 33 MB at 4K, paid only while `VgeomSettings::visbuffer` is on, which is off on every tier (§5) |
+| cost | 4 B/pixel (3.7 MB at 1280 × 720) | **8 B/pixel** — **7.4 MB** at 1280 × 720 and **66 MB** at 4K, i.e. **+3.7 MB / +33 MB**, paid only while `VgeomSettings::visbuffer` is on, which is off on every tier (§5) |
 
 **Two of the three refusals are now unreachable by real content, and that is the
 point rather than a defect.** The binding ceiling moves to

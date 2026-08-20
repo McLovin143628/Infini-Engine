@@ -151,12 +151,18 @@ resident), a lot-subdivision node, and a collider budget. All three are features
 >   `STREAMED_STEP_BUDGET_MS`. The 64 m radius is the widest on a printed six-row sweep that
 >   stays inside the budget.
 > * **IB-2b** — `StructureGroup` + `ScatterBatch::near_distance`: a far building is one shell
->   box, drawn and collided. 14 whole / 788 shells / 198 out on the fixture.
+>   box, drawn and collided. 14 whole / 788 shells / 198 out on the fixture. The draw bands
+>   **overlap** by the batch's widest shell half-diagonal (≤ 18.486 m) rather than meeting at
+>   192 m: the bands are complementary per *group* and the cull is per *instance*, and the
+>   I3 audit measured 196 buildings drawn in pieces with no shell before that reach was
+>   carried.
 > * **IB-2c** — `building.lots`, so one `building.plan` node is as many buildings as its block
 >   has lots. 4 500 shipped lot pairs at **0.000e0 m²** of overlap.
 >
-> `runtime/inf-player/tests/city_scale.rs` — eight arms through the cooked pack, including
-> **PIE == shipping at every one of 480 drive-through steps**. `docs/ROADMAP.md`'s I3 block.
+> `runtime/inf-player/tests/city_scale.rs` — nine arms through the cooked pack, including
+> **PIE == shipping at every one of 480 drive-through steps**, with a `Camera` planted in each
+> host a city apart so that the "never a camera" clause has something to fail against.
+> `docs/ROADMAP.md`'s I3 block and its audit block.
 
 ### IB-3 · The GIS vector path has no caller — RELAYED, verified by grep
 
@@ -247,14 +253,23 @@ GI `instance_budget = 4096`.
 
 > **CLOSED by island wave I3 (2026-08-20).** The id is **sixty-four bits** —
 > triangle 7 / meshlet 25 in word 0, instance 24 + 8 reserved in word 1 — and
-> `VIS_MAX_INSTANCES` is **16 777 214**, 8 196× the number above. The re-cut this
+> `VIS_MAX_INSTANCES` is **16 777 215** (indices `0..=16 777 214`), 8 196× the
+> number above. The re-cut this
 > entry proposes was measured and refused: the meshlet field addresses pool
 > *capacity* and was already the binding ceiling at 7.4 % of the default streaming
 > budget, so buying instance bits from it would have made an already-firing
-> refusal fire at 0.9 %. Cost: 4 bytes a pixel, paid only while the mode is on,
-> which is off on every tier. All twelve P28.1 parity arms, the seven feedback
-> arms, the seven `phase28_gate` arms and the 54 goldens under
-> `INF_GOLDEN_STRICT=1` pass unchanged. `docs/memos/p28-1-visbuffer.md` §1.1.
+> refusal fire at 0.9 %. Cost: four more bytes a pixel — eight in total, 7.4 MB at
+> 720p — paid only while the mode is on, which is off on every tier. All twelve
+> P28.1 parity arms, the seven feedback arms, the seven `phase28_gate` arms and
+> the 54 goldens under `INF_GOLDEN_STRICT=1` pass unchanged.
+> `docs/memos/p28-1-visbuffer.md` §1.1.
+>
+> *The I3 audit adds one thing to that list:* the three shaders' bit-split pin
+> compared `const` **declarations**, so `vis_feedback.wgsl` masking the meshlet
+> field with the old literal `14u` passed all twelve parity and all seven feedback
+> arms. It is invisible for the same reason it was invisible to the arms — no
+> fixture in the tree resides past the old 16 384-slot field — and the use sites
+> are now pinned as counts.
 
 ### IB-9 · The terrain ratchet and the terrain budget are 16× apart — VERIFIED
 
