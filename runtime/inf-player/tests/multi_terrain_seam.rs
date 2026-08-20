@@ -333,7 +333,7 @@ fn adjacent_terrain_tiles_abut_when_the_author_lands_them_on_the_grid() {
 fn the_terrain_asset_origin_is_carried_and_never_placed() {
     let data = {
         let mut d = inf_terrain::TerrainData::new(RESOLUTION, METERS_PER_SAMPLE);
-        d.write_region(DVec2::ZERO, DVec2::splat(TILE_SPAN), |x, z| ground(x, z));
+        d.write_region(DVec2::ZERO, DVec2::splat(TILE_SPAN), ground);
         d
     };
     let opts = inf_terrain::PyramidOptions::default();
