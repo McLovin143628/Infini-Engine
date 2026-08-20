@@ -32,6 +32,40 @@ ignore = [
     # Drop these the moment the wayland crates bump their quick-xml req.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    # arrayref: STAY on the pinned 0.3.9 bytes. This is the one entry in this
+    # file that exists because moving FORWARD is the dangerous direction, so
+    # the reasoning is written out rather than summarized.
+    #
+    # On 2026-08-20 every version of `arrayref` in the range `tiny-skia`
+    # accepts (`^0.3.6` — so 0.3.6 … 0.3.9) was yanked, and a 0.3.10 was
+    # published the same day. Read out of cargo's own index cache, 0.3.10
+    # declares a **normal, runtime** dependency on `proc-macro1 ^1.0.107`: a
+    # crate that 404s on crates.io and is not in the index at all, whose name
+    # is one character off the ubiquitous `proc-macro2`. `cargo update -p
+    # arrayref` consequently does not even resolve. A leaf crate that does
+    # nothing but take references to fixed-size array slices does not acquire
+    # a proc-macro runtime dependency at a patch bump; yanking every good
+    # version and publishing a successor that pulls an unpublished crate is
+    # the shape of a compromised publisher, not of a maintenance release.
+    #
+    # So the fix is deliberately the null move. `Cargo.lock` pins 0.3.9 by
+    # checksum (76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb)
+    # and a yank neither alters nor withdraws an already-published artifact —
+    # the bytes we compile are the bytes that have been in this tree all
+    # along, and 0.3.9 carries no vulnerability advisory, only the yank.
+    #
+    # The exemption is scoped to that ONE crate at that ONE version, so
+    # `yanked = "deny"` above still reds CI for anything else, and a bump to
+    # 0.3.10 stops matching this spec and fails the build — which is the
+    # behaviour we want, not a side effect.
+    #
+    # Path in: tiny-skia / tiny-skia-path → sctk-adwaita → winit → inf-player,
+    # the Linux client-side-decoration stack (absent from Windows and macOS
+    # builds). RETIRE when either `arrayref` is restored to a non-yanked
+    # version that resolves — check the DEPENDENCY LIST, not just the version
+    # number — or `tiny-skia` moves off it. Re-check on the next dependency
+    # sweep rather than letting it age quietly.
+    { crate = "arrayref@0.3.9", reason = "every in-range version yanked 2026-08-20; the only unyanked successor depends on the nonexistent `proc-macro1`, so the checksum-pinned bytes are the safe place to stand" },
 ]
 
 [licenses]
