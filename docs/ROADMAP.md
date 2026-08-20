@@ -23915,7 +23915,7 @@ No schema moved, no golden moved, no sample moved, and no P29-or-prior arm chang
 
 ## Phase 30 (the island) — wave I3: city scale (2026-08-20)
 
-`866fb55..4d279b9` — **twelve** commits, sole tree-writer, tagged `(I3)`. Three certified
+`866fb55..d6218ec` — **eleven** commits, sole tree-writer, tagged `(I3)`. Three certified
 ceilings killed, and **every number below lives in a test that prints it**. (The count and
 the range are stated exactly because the I2 audit found both wrong in the block above this
 one: *a number that only lives in a ledger drifts*.)
