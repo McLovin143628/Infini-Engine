@@ -44,6 +44,10 @@ pub mod settings;
 /// against the LIVE floors, the coupling's size, and the readback ledger.
 pub mod stream;
 pub mod surface;
+/// **The per-pass GPU clock** (island wave I4) — one `QuerySet` written between
+/// encoder commands, so no pass has to know it is being measured and a frame
+/// with timing off records byte-identical commands.
+pub mod timing;
 /// The P28.1 visibility buffer's **packing contract** — the thirty-two bits that
 /// name a triangle, the typed refusal a scene past them takes, and the Rust twin
 /// of the resolve's barycentric solve.
@@ -125,6 +129,7 @@ pub use precip::{
 };
 pub use primitives::{PrimGpu, PrimMesh, PrimRange};
 pub use readback::{ReadbackRing, READBACK_LATENCY_FRAMES};
+pub use timing::{FrameTimer, FrameTimings, PassTime, MAX_FRAME_MARKS};
 pub use renderer::{
     EngineRenderer, ViewMode, AO_FORMAT, HDR_FORMAT, LDR_FORMAT, MASK_FORMAT, SCENE_FORMAT,
     SCENE_SAMPLES,

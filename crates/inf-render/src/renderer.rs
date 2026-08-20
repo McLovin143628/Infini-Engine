@@ -518,6 +518,10 @@ pub struct EngineRenderer {
     vis_report: passes::visbuffer::SharedVisReport,
     /// P18.5 instance-cull counters (see [`EngineRenderer::set_scatter_audit`]).
     scatter_audit: passes::scatter::ScatterAuditResources,
+    /// The island-wave-I4 per-pass GPU stopwatch, or `None` — which it is on
+    /// every frame nobody asked to measure. See
+    /// [`EngineRenderer::set_gpu_timing`] and [`crate::timing`].
+    frame_timer: Option<crate::timing::FrameTimer>,
     /// Shared atmosphere LUTs + uniform (P17.2). Unlike `shadow`/`gi` these are
     /// **recreated** when [`crate::atmosphere::AtmosphereQuality`] changes, which
     /// is why they carry a generation the env bind-group cache keys on.
@@ -807,6 +811,7 @@ impl EngineRenderer {
             vgeom_stream,
             vis_report,
             scatter_audit: passes::scatter::ScatterAuditResources::new(gpu),
+            frame_timer: None,
             atmosphere,
             next_atmosphere_generation: 2,
             wetness: WetnessResources::new(gpu),
@@ -1383,6 +1388,43 @@ impl EngineRenderer {
         self.vgeom_audit.read(gpu)
     }
 
+    /// Enable/disable the **per-pass GPU clock** (island wave I4). **Off by
+    /// default**, on the same terms as the two audits either side of it: with it
+    /// off the frame records byte-identical commands, which is what lets an
+    /// instrument share a renderer with 54 byte-frozen goldens.
+    ///
+    /// Returns whether timing is live afterwards — `false` when asked for on a
+    /// device without `TIMESTAMP_QUERY`(`_INSIDE_ENCODERS`), which is every
+    /// software rasterizer and most paravirtual runners. That is a **report, not
+    /// an error**: the caller falls back to the CPU frame clock, and a harness
+    /// that silently believed it had per-pass numbers would print zeros as
+    /// measurements.
+    pub fn set_gpu_timing(&mut self, gpu: &GpuContext, enabled: bool) -> bool {
+        self.frame_timer = match enabled {
+            true => crate::timing::FrameTimer::new(gpu),
+            false => None,
+        };
+        self.frame_timer.is_some()
+    }
+
+    /// The **last submitted** frame's per-pass GPU timings, blocking on a buffer
+    /// map — the sibling of [`vgeom_audit`](EngineRenderer::vgeom_audit) and read
+    /// the same way.
+    ///
+    /// `None` when timing was never enabled, when this device cannot time an
+    /// encoder segment, or when the frame has already been taken. A caller reads
+    /// it once per frame, after the poll that made the frame finish.
+    pub fn gpu_timings(&mut self, gpu: &GpuContext) -> Option<crate::timing::FrameTimings> {
+        self.frame_timer.as_mut()?.take(gpu)
+    }
+
+    /// Every graph node's name in run order (I4) — the list a per-pass report is
+    /// checked against, so a pass that is renamed or dropped is a red arm rather
+    /// than a line quietly missing from a diagnostic.
+    pub fn pass_names(&self) -> Vec<&'static str> {
+        self.graph.names()
+    }
+
     /// Enable/disable the P18.5 scatter instance-cull audit counters. **Off by
     /// default**, on the same terms as the vgeom audit: the cull compute skips the
     /// atomics and no readback copy is recorded, so the shipping frame is
@@ -1830,6 +1872,13 @@ impl EngineRenderer {
                 label: Some("frame"),
             });
 
+        // The island-wave-I4 GPU stopwatch opens here, at the frame's first
+        // command, so every segment below is measured against one origin. `None`
+        // on every shipped frame — see `crate::timing`.
+        if let Some(t) = self.frame_timer.as_mut() {
+            t.begin(&mut encoder);
+        }
+
         // **THE CLUSTER PAGE-IN** (P28.2), in three steps around one virtual-
         // texture transaction, because a page-in that feeds two consumers cannot
         // be seated at two different depths of the frame.
@@ -1890,6 +1939,9 @@ impl EngineRenderer {
         // is applied whole, staged on the queue, and executes before the
         // commands of this encoder. A textureless frame does none of it.
         self.vt_stream(gpu, scene, view, &mut encoder, &cluster_wants);
+        if let Some(t) = self.frame_timer.as_mut() {
+            t.mark(&mut encoder, "vt-stream");
+        }
 
         {
             let lib = self.vt_textures.as_ref();
@@ -1921,6 +1973,9 @@ impl EngineRenderer {
             None => 0,
         };
         self.vsm_raster_frames += u64::from(rastered > 0);
+        if let Some(t) = self.frame_timer.as_mut() {
+            t.mark(&mut encoder, "vsm-raster");
+        }
 
         let targets = self.targets.as_ref().unwrap();
         let post_hdr = if self.settings.taa {
@@ -1974,7 +2029,8 @@ impl EngineRenderer {
             },
         };
         let vis_frames_before = self.vis_audit().frames;
-        self.graph.run(gpu, &mut encoder, &frame);
+        self.graph
+            .run(gpu, &mut encoder, &frame, self.frame_timer.as_mut());
         // No `drop(frame)`: `FrameData` implements no `Drop`, so NLL ends its
         // borrow of `self` at the last use above — the line above — and clippy's
         // `drop_non_drop` is right that spelling it out buys nothing.
@@ -1995,6 +2051,9 @@ impl EngineRenderer {
         let produced = self.vt_feedback_dispatched > 0 || vis_marked;
         if let Some(f) = self.vt_feedback.as_mut() {
             f.finish(&mut encoder, self.frame_index, produced);
+        }
+        if let Some(t) = self.frame_timer.as_mut() {
+            t.mark(&mut encoder, "vt-feedback");
         }
 
         // **The shadow-page marking pass** (P27.1), recorded here and nowhere
@@ -2032,6 +2091,10 @@ impl EngineRenderer {
             None => 0,
         };
         self.vsm_engaged_frames += u64::from(marked > 0);
+        if let Some(t) = self.frame_timer.as_mut() {
+            t.mark(&mut encoder, "vsm-mark");
+            t.end(&mut encoder);
+        }
 
         gpu.queue.submit([encoder.finish()]);
 

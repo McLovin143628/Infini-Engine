@@ -51,10 +51,34 @@ impl RenderGraph {
             .find_map(|n| (n.as_ref() as &dyn std::any::Any).downcast_ref::<T>())
     }
 
-    pub fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
+    /// Run every node in registration order.
+    ///
+    /// `timer` is the island-wave-I4 GPU stopwatch, and this is the **one seam**
+    /// where per-pass timing enters the engine: a timestamp is written after each
+    /// node, beside the `tracing` span that has bracketed them since Phase 2, so
+    /// no pass ever learns that it is being measured. `None` — which is every
+    /// shipped frame — makes this identical to the loop it replaced, command for
+    /// command.
+    pub fn run(
+        &mut self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &FrameData,
+        mut timer: Option<&mut crate::timing::FrameTimer>,
+    ) {
         for node in &mut self.nodes {
             let _span = tracing::trace_span!("render_node", name = node.name()).entered();
             node.run(gpu, encoder, frame);
+            if let Some(t) = timer.as_deref_mut() {
+                t.mark(encoder, node.name());
+            }
         }
+    }
+
+    /// Every node's name, in run order — what a gate compares a per-pass report
+    /// against so a renamed or dropped pass is a red test rather than a line
+    /// missing from a diagnostic.
+    pub fn names(&self) -> Vec<&'static str> {
+        self.nodes.iter().map(|n| n.name()).collect()
     }
 }

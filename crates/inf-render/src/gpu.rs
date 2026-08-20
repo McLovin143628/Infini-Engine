@@ -188,8 +188,22 @@ impl GpuContext {
         // The experiment therefore builds its own device
         // ([`GpuContext::headless_ray_query`]) and the shipped one is exactly
         // the device it was before this batch.
-        let optional_features = adapter.features()
+        //  * `TIMESTAMP_QUERY | TIMESTAMP_QUERY_INSIDE_ENCODERS` (I4) — the
+        //    per-pass GPU clock the fps instrument reads. Requested as a **pair**,
+        //    because a timestamp written between two encoder commands is the only
+        //    kind this engine writes ([`crate::timing`]): the graph's one seam is
+        //    `RenderGraph::run`, and marking there costs no pass its own
+        //    descriptor. An adapter with only half the pair gets neither, so
+        //    `supports_timestamp_query` is a single question with a single answer.
+        //    Absent, `EngineRenderer::gpu_timings` returns `None` and the
+        //    instrument reports CPU frame time alone.
+        let timestamps = wgpu::Features::TIMESTAMP_QUERY
+            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        let mut optional_features = adapter.features()
             & (wgpu::Features::POLYGON_MODE_LINE | wgpu::Features::TEXTURE_COMPRESSION_BC);
+        if adapter.features().contains(timestamps) {
+            optional_features |= timestamps;
+        }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             required_features: optional_features,
             ..Default::default()
@@ -263,6 +277,26 @@ impl GpuContext {
         self.device
             .features()
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+    }
+
+    /// Whether this device can time a segment of a command encoder (I4), i.e.
+    /// **both** `TIMESTAMP_QUERY` and `TIMESTAMP_QUERY_INSIDE_ENCODERS` were
+    /// requested-and-granted at creation.
+    ///
+    /// Read at the **device** for
+    /// [`supports_texture_compression_bc`](GpuContext::supports_texture_compression_bc)'s
+    /// reason. It is one question rather than two because `from_adapter` grants
+    /// the pair or neither: a timestamp this engine writes always sits *between*
+    /// two encoder commands, so half the pair would be a capability nothing can
+    /// use.
+    ///
+    /// Nothing on the shipped path reads this — [`crate::timing`] is off unless a
+    /// harness turns it on, and a frame with it off records byte-identical
+    /// commands to a frame that never heard of it.
+    pub fn supports_timestamp_query(&self) -> bool {
+        let f = self.device.features();
+        f.contains(wgpu::Features::TIMESTAMP_QUERY)
+            && f.contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS)
     }
 
     /// Install a lenient uncaptured-error handler for interactive/editor
