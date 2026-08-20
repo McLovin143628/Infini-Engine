@@ -1368,7 +1368,11 @@ impl RenderNode for ScatterNode {
                     0,
                     bytemuck::bytes_of(&RasterParamsGpu {
                         anchor: anchor.extend(b.data.mesh.bounding_radius()).to_array(),
-                        material: [b.metallic, b.roughness, 0.0, 0.0],
+                        // `z` is the primitive KIND (island wave I4b): the
+                        // impostor's card radius is the instance's own bounding
+                        // sphere, and which sphere that is depends on the shape.
+                        // See `impostor_radius` in `scatter_mesh.wgsl`.
+                        material: [b.metallic, b.roughness, b.data.mesh as u32 as f32, 0.0],
                         emissive: [b.emissive[0], b.emissive[1], b.emissive[2], 0.0],
                         bands: [mesh_end, cull, fade, if impostors { 1.0 } else { 0.0 }],
                         geom: [

@@ -33,16 +33,37 @@
 //! With `impostors = false` the swap is between the parts' **geometry** and the
 //! shell's, and it is invisible — that is the reading the cross-fade is refused
 //! on. With `impostors = true`, which is the default, **both** sides are drawn as
-//! billboards and 93.9 % of a silhouette 19.2× the mesh's moves. The change there
-//! is still the band pair's; what the impostor contributes is its *size*, because
-//! a billboard is sized from the instance's bounding sphere and a 20 × 30 × 7.4 m
-//! box's sphere is far wider than the box.
+//! billboards and 91.6 % of a silhouette **9.2×** the mesh's moves. The change
+//! there is still the band pair's; what the impostor contributes is its *size*,
+//! because a billboard is sized from the instance's bounding sphere and a
+//! 20 × 30 × 7.4 m box's sphere is far wider than the box.
 //!
 //! So the refusal is **conditional**: no cross-fade, because as geometry there is
 //! nothing to fade — and the first repair at this distance is the billboard's
-//! sizing, not a fade. Both halves are armed below, and the shipped half is armed
-//! so that fixing the sizing turns this file red and clause 6 is re-decided
-//! rather than quietly inherited.
+//! sizing, not a fade.
+//!
+//! # The sizing HAS been repaired, and the refusal still stands (island wave I4b)
+//!
+//! I4 measured the ratio at **19.2×** (55 868 px against 2 903) and named the
+//! sizing as the repair that comes first. I4b took it: `impostor_radius` in
+//! `scatter_mesh.wgsl` now answers the instance's own bounding sphere per
+//! primitive kind instead of `unit_radius × max(sx, sy, sz)`, and the ratio
+//! halved to **9.2×** (26 792 px) — exactly the `0.866 × 30 = 25.98 m` against
+//! `0.5 × |(20, 30, 7.4)| = 18.38 m` the arithmetic predicts, squared.
+//!
+//! What is left is not a defect but what an impostor *is*: a screen-facing card
+//! sized to a bounding sphere is intrinsically about twice a box's silhouette,
+//! and 91.6 % of it still moves at the swap. So the conditional refusal is
+//! **re-taken and kept**, on the same geometry numbers, and the arms below are
+//! re-aimed at the repaired ratio rather than deleted — the next thing that could
+//! move them is an oriented card or a real impostor atlas, which is a project.
+//!
+//! And the honest half: the repair **did not move the frame**. Measured on the
+//! fps instrument's city at 1080p, MIN of rounds, the scatter pass is
+//! 2.98 ms unlit against 2.70–3.31 before and 7.44 ms lit against 7.49 — inside
+//! the run-to-run spread on both. Halving a billboard's area is a fidelity fix
+//! here, not a performance one, because this scene's scatter cost is its mesh
+//! band rather than impostor overdraw.
 //!
 //! # The fixture is hand-authored, and that is a bound
 //!
@@ -388,23 +409,34 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
     // reading are drawn as impostors, so the change between them is the **band
     // pair's** — parts against shell — seen through a billboard. What the
     // impostor owns is the change's SIZE, not its cause: it is what turns a
-    // 2 903-pixel difference into a 55 868-pixel one. The first write-up said the
+    // 2 903-pixel difference into a 26 792-pixel one. The first write-up said the
     // discontinuity "belongs to the impostor band rather than to the structure
     // band pair", which sends the next reader to the wrong repair.
+    //
+    // **The bound is `> 4x` and the measurement is 9.2x** (island wave I4b sized
+    // the card to the instance's own bounding sphere and halved it from 19.2x).
+    // It stays at 4x because what the arm is about is "a billboard is much bigger
+    // than the silhouette it stands in for", which is still true and is what an
+    // impostor is; a bound re-tightened to 9x would go red for an *improvement*.
     assert!(
         imp_covered > covered * 4,
         "the impostor silhouette ({imp_covered} px) is no longer far larger than the mesh's ({covered} px) — island wave I4 carried that ratio as the reason the discontinuity at {STRUCTURE_LOD_M} m is so much bigger than the geometry reading, and the ledger needs re-reading"
     );
     // **AND THE SHIPPED POP IS NOT SMALL, ARMED AS THE REFUSAL'S CONDITION.**
     // The refusal above is a statement about geometry; the configuration that
-    // ships draws both sides as impostors and moves 93.9 % of a silhouette 19.2x
-    // the mesh's. That is carried rather than fixed, and it is the reason the
-    // cross-fade refusal is CONDITIONAL on the billboard sizing being repaired
-    // first. The day it is, this arm goes red and clause 6 is re-decided on the
-    // geometry numbers alone.
+    // ships draws both sides as impostors and moves 91.6 % of a silhouette 9.2x
+    // the mesh's.
+    //
+    // **The condition FIRED and the refusal was re-taken** (island wave I4b).
+    // I4 wrote this arm so that repairing the billboard's sizing would turn the
+    // file red and force clause 6 to be re-decided. I4b repaired it — the ratio
+    // went 19.2x -> 9.2x — and the re-decision is: the refusal STANDS, because
+    // the geometry reading it rests on did not move at all (63 of 2 903 px), and
+    // what remains is a bounding-sphere card, which is what an impostor is rather
+    // than a defect it has. So the arm is kept, aimed at the repaired numbers.
     let imp_pct = imp_moved as f64 / imp_covered.max(1) as f64 * 100.0;
     assert!(
         imp_pct > 50.0,
-        "the SHIPPED parts->shell swap now moves only {imp_pct:.1} % of the building's impostor silhouette, against the 93.9 % island wave I4 measured. The impostor billboard has been re-sized or the band pair has gained a fade; either way the I4 refusal of a band-pair cross-fade was conditional on this number and has to be re-taken."
+        "the SHIPPED parts->shell swap now moves only {imp_pct:.1} % of the building's impostor silhouette, against the 91.6 % island wave I4b measured after re-sizing the card. The band pair has gained a fade, or the impostor has become something other than a bounding-sphere billboard; either way the refusal of a band-pair cross-fade was conditional on this number and has to be re-taken."
     );
 }

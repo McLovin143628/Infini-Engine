@@ -48,7 +48,8 @@ struct ScatterParams {
     // xyz = the batch anchor in render-local space, w = the impostor/cull radius
     // at unit scale (the primitive's bounding radius).
     anchor: vec4<f32>,
-    // x = metallic, y = roughness, zw unused.
+    // x = metallic, y = roughness, **z = the primitive kind** (island wave I4b,
+    // for `impostor_radius`), w unused.
     material: vec4<f32>,
     // rgb = emissive, w unused.
     emissive: vec4<f32>,
@@ -226,6 +227,45 @@ fn vs_mesh(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32)
     return out;
 }
 
+// **The impostor card's radius: the instance's OWN bounding sphere** (island
+// wave I4b).
+//
+// This used to be `unit_radius x max(sx, sy, sz)` — the primitive's uniform
+// bounding radius scaled by the largest axis, which is exact for a uniform
+// instance and wildly generous for anything else. Wave I4 measured what that
+// costs on a city: a building's scatter impostor covers **19.2x** its mesh's
+// screen area (55 868 px against 2 903 at 192 m), because a 20 x 30 x 7.4 m box
+// scaled from a unit cube got a card of radius `0.866 x 30 = 25.98 m` where its
+// bounding sphere is `0.5 x |(20, 30, 7.4)| = 18.38 m`. The card is a screen
+// facing quad with a disc discard, so the drawn area falls with `r^2`.
+//
+// Every branch answers the SMALLEST sphere that contains the scaled primitive,
+// which is what a billboard has to cover and no more:
+//
+// * a **cube**'s bounding sphere is half the box's own diagonal;
+// * a **sphere** scales into an ellipsoid, whose bounding sphere is its largest
+//   semi-axis — the old formula, which is why this is not a blanket `length`;
+// * a **plane** is a quad in XZ, so Y contributes nothing;
+// * a **cylinder** and a **cone** are a disc of radius 0.5 swept along Y, so the
+//   rim is the farthest point and the radius is the hypotenuse of (disc radius,
+//   half height).
+//
+// The kind rides in `material.z`, a slot the struct already carried unused.
+fn impostor_radius(kind: u32, s: vec3<f32>) -> f32 {
+    if (kind == 1u) {
+        return 0.5 * max(s.x, max(s.y, s.z));
+    }
+    if (kind == 0u) {
+        return 0.5 * length(s);
+    }
+    if (kind == 2u) {
+        return 0.5 * length(vec2<f32>(s.x, s.z));
+    }
+    let rim = 0.5 * max(s.x, s.z);
+    let half_h = 0.5 * s.y;
+    return sqrt(rim * rim + half_h * half_h);
+}
+
 @vertex
 fn vs_impostor(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32) -> VsOut {
     let inst = s_instances[s_visible[sp.geom.w + iidx]];
@@ -236,9 +276,10 @@ fn vs_impostor(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: 
     );
     let c = corners[vidx];
     let base = sp.anchor.xyz + inst.offset;
-    // The card's radius takes the instance's LARGEST axis, which is `inst.scale`
-    // itself for every uniform instance (max of three equal numbers).
-    let r = sp.anchor.w * max(inst.scale, max(inst.scale_yz.x, inst.scale_yz.y));
+    let r = impostor_radius(
+        u32(sp.material.z),
+        abs(vec3<f32>(inst.scale, inst.scale_yz.x, inst.scale_yz.y)),
+    );
     // P22.1: an impostor leans as a WHOLE CARD, evaluated once at its centre —
     // never per vertex. A card is a billboard: shearing its corners individually
     // would rotate the quad out of its screen-facing plane and it would stop

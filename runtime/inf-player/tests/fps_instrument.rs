@@ -38,10 +38,22 @@
 //! audit's addition is that the harness says so in its own output and then
 //! measures the difference: `THE STACK'S PRICE` runs the same content at 1080p
 //! with the authorable half turned on through the same `shipped_settings` door,
-//! and prints it. Measured on an RTX 4070 Ti over two runs: **p95 92.3-92.9 ms
-//! lit against 43.7-44.0 as shipped, GPU frame 35.8-36.1 against 17.3-19.4** — the stack roughly
-//! doubles the frame, and quoting the shipped number as "what the engine costs"
-//! without that line would be quoting a frame with no shadows in it.
+//! and prints it — with, since island wave I4b, the same CPU-stage and per-pass
+//! tables the shipped configuration gets, because a configuration whose price is
+//! one number cannot be optimised.
+//!
+//! Measured on an RTX 4070 Ti, MIN of rounds, **after wave I4b**: lit p95
+//! 38.1-41.8 ms against 15.8-19.5 as shipped, GPU frame 16.1-16.5 against
+//! 2.9-6.0, and the pipelined estimate **16.4-16.5 ms lit (60.7-60.9 fps)**.
+//! Wave I4 measured the same two configurations at **92.3-92.9 lit against
+//! 43.7-44.0, GPU frame 35.8-36.1 against 17.3-19.4**.
+//!
+//! **Two of those movements are not the engine's**, and the file says so where
+//! it prints them: the unlit GPU frame fell further than any change to the unlit
+//! path can explain, because I4's frame left the GPU idle two thirds of every
+//! frame and a card that is idle downclocks. A GPU millisecond is a measurement
+//! of the device *in the state the frame put it in*, so GPU columns are only
+//! comparable between runs whose CPU frames are comparable.
 //!
 //! # How it is measured
 //!
@@ -568,6 +580,68 @@ fn the_instrument_scene_carries_the_city_the_ground_and_the_character() {
     );
     assert_eq!(terrains, 1, "the streamed ground must be in the world");
     assert_eq!(characters, 1, "the wizard character must be in the world");
+}
+
+/// **THE SHIPPED PLAYER PIPELINES, AND THAT IS WHAT THE ESTIMATE ASSUMES**
+/// (island wave I4b).
+///
+/// Every run of this file prints a `PIPELINED ESTIMATE` — `max(CPU without the
+/// wait, GPU frame)` — beside the serialized number it measures, on the stated
+/// grounds that "a real presenter overlaps the halves". Wave I4 carried that as
+/// arithmetic over two measurements and named a windowed present-to-present
+/// harness as the honest closure. A harness needs a window and this battery has
+/// none; what it can do, and what I4 did not, is **check the claim about the
+/// player** rather than assert it in prose.
+///
+/// The player's frame path is four calls —
+/// `SurfaceChain::acquire` → `EngineRenderer::render` (record + submit) →
+/// `Queue::present` — and it contains **no blocking device poll**. The CPU
+/// therefore runs ahead into the next frame while the GPU drains this one, and
+/// `acquire` blocks only when the swap chain has no free image, which is the
+/// definition of "the GPU is the bottleneck". That is exactly the model the
+/// estimate is.
+///
+/// This arm is a **source scope**, not a substring ban: it extracts
+/// `PlayerRenderHost::render`'s body and the windowed loop's own frame block, and
+/// requires that neither waits. A ban over the whole file would have been
+/// satisfied by a poll moved one function away, which is the shape the P23 byte
+/// pin failed at.
+#[test]
+fn the_shipped_players_frame_path_does_not_wait_for_the_gpu() {
+    let render_rs = include_str!("../src/render.rs");
+    let start = render_rs
+        .find("pub fn render(&mut self, view: &RenderView) {")
+        .expect("PlayerRenderHost::render is the player's one frame call");
+    let body = &render_rs[start..];
+    let end = body
+        .find("\n    }\n")
+        .expect("the function body ends at a de-indented brace");
+    let body = &body[..end];
+    println!(
+        "the player's frame path is {} lines: {}",
+        body.lines().count(),
+        body.lines()
+            .filter(|l| {
+                let l = l.trim();
+                !l.is_empty() && !l.starts_with("//")
+            })
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    assert!(
+        body.contains("self.gpu.queue.present(frame)"),
+        "the extracted body is not the present path — this arm is reading the \
+         wrong function and would pass for anything"
+    );
+    assert!(
+        !body.contains("poll("),
+        "the shipped player's frame path now polls the device:\n{body}\nA poll \
+         serializes the CPU and GPU halves, which is what the harness does on \
+         purpose and what a presenter must not do — and it would make every \
+         PIPELINED ESTIMATE this file prints a description of a frame the player \
+         no longer draws."
+    );
 }
 
 /// **THE FIXED STEP'S OWN BREAKDOWN** (island wave I4b) — the table wave I4

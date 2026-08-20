@@ -233,14 +233,16 @@ pub const STREAMED_STEP_BUDGET_MS: f64 = 4.0;
 ///
 /// # The number, and the ratchet it has already taken
 ///
-/// Minted at **20.0** against the *unrepaired* 13.0–14.9 ms measurement, on
+/// Minted at **20.0** against the *unrepaired* 13.0-14.9 ms measurement, on
 /// [`PROJECTION_BUDGET_MS`]'s stated precedent: a budget minted after a fix
-/// cannot certify that the fix is what moved the number. It has since ratcheted
-/// to its current value against the repaired step. Read the git log of this
-/// line, not just its value.
+/// cannot certify that the fix is what moved the number. It ratcheted to **6.0**
+/// in the same wave, against a repaired step of **1.222 ms** - about five times
+/// the measurement, and a fifth of the older walker-scene budget it sits beside
+/// even though it covers three hundred times the content. Read the git log of
+/// this line, not just its value.
 ///
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.**
-pub const CITY_STEP_BUDGET_MS: f64 = 20.0;
+pub const CITY_STEP_BUDGET_MS: f64 = 6.0;
 
 /// Hard ceiling on **terrain** page bytes resident at any point of the gate
 /// flythrough (`TerrainStreamStats::bytes_resident`, summed over every streamed
@@ -551,13 +553,13 @@ pub const SHIPPING_FRAME_P99_BUDGET_MS: f64 = 33.2;
 /// walk down toward [`SHIPPING_FRAME_BUDGET_MS`] as the frame's named costs are
 /// paid off; the instrument prints the distance so the next step is always
 /// visible.
-pub const SHIPPING_FRAME_CEILING_MS: f64 = 58.0;
+pub const SHIPPING_FRAME_CEILING_MS: f64 = 40.0;
 
 /// The 99th-percentile twin of [`SHIPPING_FRAME_CEILING_MS`], asserted on exactly
 /// the same terms by the same test.
 ///
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.**
-pub const SHIPPING_FRAME_P99_CEILING_MS: f64 = 64.0;
+pub const SHIPPING_FRAME_P99_CEILING_MS: f64 = 48.0;
 
 /// The message every budget assertion fails with — the ratchet rule, at the point
 /// where somebody is most tempted to break it.
