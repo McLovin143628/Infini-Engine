@@ -23570,3 +23570,228 @@ it and at no other. The full table is in `docs/memos/island-progress.md`.
 * **A payload slot needs a writer, not only a reader.** `blend_mode` round-trips, is applied,
   and is armed; nothing can set it, and the shipping path never sees it. That is a bound, and
   it is now written down instead of implied by a builder method.
+
+---
+
+## Phase 30 (the island) — wave I2: the GIS door (2026-08-19)
+
+`d942140..` — six commits, sole tree-writer, tagged `(I2)`.
+
+The certification called IB-3 *"the single largest piece of connective work the island
+needs"*. `inf-gis` was 5 732 lines across nine modules with **one** dependent crate using
+**one** module, and zero non-test callers for `spawn_layer`, `read_vector`,
+`RoadGraph::from_layer`, `build_all_ribbons`, `triangulate_polygon` and `classify_to_ids`.
+Every one of those now has a caller on a production path, and the two items the I1 audit
+routed here are closed.
+
+### IB-3 — one import door, and a proof that crosses a process boundary
+
+`inf_gis::import` (Ring 0) owns every import decision: the `.prj` read, the CRS resolution,
+the probe, entity naming, the stub floor, the entity cap and the stream channel. It returns
+a **`SpawnPlan`** — a plain value listing exactly what will be created and exactly what will
+not. Three front ends consume it and none of them decides anything:
+
+| front end | what it does with the plan |
+|---|---|
+| the wizard (`GisImportDialog` → `commands/gis.rs` → `gis::run_import`) | applies it |
+| `inf gis plan` | prints it, and its digest |
+| `inf_editor_core::gis::apply_plan` | turns planned entities into GUIDs |
+
+`SpawnPlan::digest()` is FNV-1a over each entity's name, kind discriminant and every
+coordinate's **bit pattern** (`to_bits`, not a formatted decimal — a rounded comparison
+passes for two imports that differ by a metre in the eighth digit).
+`the_cli_and_the_library_import_the_same_fixture_identically` runs the **real `inf`
+binary**, reads its `digest:` line and compares it against `inf_gis::import_layer` called
+in this process. Applying the cap in the CLI, renaming an entity or reordering the plan all
+fail it.
+
+The CLI links `inf-gis`, `inf-math` and `inf-scene` — the decode-only level reader the
+shipped player uses — so it can read a level's geo-anchor **without linking an editor crate
+and its wgpu**, which is the reason `inf-project` exists.
+
+### IB-11's near half — the `.prj`, and one vertical conversion
+
+* **The LAST `AUTHORITY["EPSG",...]`, not the first.** A NAD83 / UTM zone 10N WKT names five
+  EPSG codes and four of them describe its ellipsoid, prime meridian, angular unit and
+  geographic base. Taking the first imports a UTM layer as EPSG:4269 — degrees — and every
+  easting in the file becomes a longitude of 491 234, refused at the axis-order door with a
+  confusing message.
+* **An ESRI `.prj` has no authority code at all** (`PROJCS["NAD_1983_UTM_Zone_10N",...]`), and
+  it is the commonest thing a North-American portal hands an author. The projection NAME is
+  pattern-matched as a fallback and the advisory **says it was a guess**.
+* **The vertical unit is converted exactly once**, in `Transform::to_projected`, **before**
+  the projection — because `GeoAnchor::world_from_projected` subtracts a metric
+  `origin_height_m`, so scaling afterwards would scale the anchor along with the sample.
+  100 ftUS in, 30.48 m out, asserted.
+* **`Transform::source_space`** lets the wizard look inside a file before the level has an
+  anchor — which is the point, since what the probe finds is how the author decides what to
+  anchor to. It is refused at the import door by name (`is_source_space`), because a probe
+  transform reaching an import would place a city at its raw eastings, visibly wrong only if
+  somebody looks at the numbers.
+* Web Mercator stays refused **as an anchor** with its 1.53x number and stays legal as a
+  source. LERC / BigTIFF / LAS are untouched named CANNOTs.
+
+### IB-4 — roads become geometry
+
+`build_surface` drapes a whole network on the ground (the IB-15 topmost-that-answers rule,
+through `gis::with_ground`), merges by road class and fans the junctions; `surface_to_mesh`
+writes a real `MeshAsset` with one submesh and one material slot per class;
+`gisroad::import_road_surface` writes it through `AssetProject::write_asset` and spawns it
+through `edit_create_mesh_asset` — the same doors a dropped asset uses — in one transaction.
+
+**Three measurements, two of them findings.**
+
+* **A road has to be subdivided ACROSS its width, not only along its length.** Resampling
+  the spine at the terrain's own pitch closes the longitudinal gap and does nothing for the
+  transverse one, and the transverse one is bigger: **49 mm** between a 14 m arterial's
+  crown and the ground, against **0.4 mm** along it at a 1 m step. The first builder had one
+  quad across, and the longitudinal fix hid the transverse defect perfectly — both are "the
+  road does not follow the ground" and only one was being measured. After
+  `build_ribbon_across`: every vertex at `ground + lift` **exactly** (3 758 vertices,
+  worst deviation **0.000000 m**), mid-span 0.0004 m dense against **3.2 m** on the
+  centreline's own vertices. The alternative is priced in the test, in metres.
+* **A junction hub must ask the ground, not average its rim.** One corner whose XZ falls off
+  the terrain keeps the published centreline's elevation, and one such corner in six dragged
+  a hub **7.78 m** below the ground under it.
+* **A symmetric T or `+` junction needs no fan at all** — two opposed legs tile the crossing
+  between them, so a gate built on one measures nothing and passes whatever the fan does.
+  The fixture is an acute fork (a slip road leaving a through street), where the fan paves
+  **581** of the box's open samples (5.8 m2) and never removes ground.
+
+**Colliders: ruled, with the arithmetic.** A road conforms to the terrain, which already
+carries a heightfield collider, so the drawn surface and the collided surface are two
+readings of one array separated by exactly the 2 cm lift. Duplicating it as per-segment
+trimeshes costs 0.363 us/step each (IB-2's own measurement) — **3.63 ms/step** for the
+certification's 10 000-road layer, 22% of a 60 fps frame — to add nothing a body can reach.
+The case that genuinely needs one is a road that **leaves** the ground, which needs a
+bridge/tunnel attribute published layers rarely carry.
+
+Road across two terrains: **west 28.460 m, east 48.460 m**.
+
+### IB-5 — the two attribute wires
+
+**G10, land cover to biome ids.** `inf_terrain::BiomeFill` is a polygon fill the circular
+brush could not make: even-odd crossing with the half-open rule, so a shared edge between
+two adjacent land-cover polygons belongs to exactly one of them and a tiling of the map
+leaves no unassigned seam. It accumulates fills at **any** id into ONE `BiomeDelta`, so a
+hundred polygons at eight classes is one undo step. `gisbiome` is `classify_to_ids`'s first
+caller outside its own tests: a **numeric** class attribute goes through Jenks (equal
+interval puts nine tenths of a lumpy geographic distribution in one biome); a **named** one
+matches the level's own biome set, folded, and a name that matches nothing is left
+**unpainted** and reported rather than assigned to biome 1. Class ids shift off the reserved
+`0` once, at the seam where the two numberings meet.
+Measured: **2 496 samples, biomes {1: 1456, 2: 1040}**; 5% and 7% canopy in one class and
+92% in another; unpainted ground still 0; one undo restores it.
+
+**G11, footprint attributes to `BuildingParams::floors`.** The stated count wins; a stated
+**height** is next (a LiDAR-derived footprint layer has `HEIGHT` on every record and
+`LEVELS` on none, so reading only the floor count would default a whole downtown while the
+data sat in the next column); a typed default is last — and which of the three answered
+rides on every feature, so a report says "4 831 of 5 002 took the default" instead of
+looking like it knew. `HEIGHT_FT` is read as feet, because an attribute column carries no
+unit and reading it as metres builds a downtown at a third of its height. Hostile inputs
+fall back or clamp at the door: `0`, negative, NaN, inf, and the `9999` sentinel a real
+height column carries (which is 3 333 storeys, and the grammar would try to plan it).
+Measured: floors **6 / 10 / 2** from attribute / height / default producing **21.9 m** and
+**5.6 m** of baked geometry.
+
+**A lighthouse is not a house.** `kind.contains("house")` classified `lighthouse_platform`
+as a detached dwelling, and `contains("mall")` does the same to anything *small*. The
+archetype table matches whole TOKENS with a prefix.
+
+### IB-6 — oriented lots
+
+`inf_math::obb2`: a monotone-chain 2-D convex hull and a rotating-calipers **oriented
+minimum-area rectangle**. Owned, because the workspace had neither — `inf-mesh`'s hull is
+3-D triangle faces for fracture and `inf-anim`'s is a Delaunay boundary for blend spaces.
+Trig-free by the P14 law, because a lot's orientation reaches committed content. Canonical:
+local `+X` is always the LONGER axis and the basis is sign-normalised, so a square's four
+equally-minimal answers collapse to one and a rebuild cannot pick a different one.
+
+**Plan in the lot's frame, place in the world's.** An oriented `Rect2` would have meant an
+OBB type through the slicer, the adjacency test, the wall builder, the roof, the stairs and
+the furniture grid — and `partition::adjacencies`' world-axis `same_line` test would have
+found **zero** doors between rotated rooms, i.e. a building with no way through it. Instead
+`BuildingPlan` carries a `LotFrame`, every rule stays axis-aligned in the lot's own
+coordinates, and `assemble::place_in_frame` turns the finished output into the world at one
+site. The identity frame is skipped by an **exact** comparison, so nothing a level already
+contains moves — and nothing does: every committed sample's `building.plan` node has no
+`lot` pin at all, so the span branch this changes has no committed caller.
+
+Measured: a 30 x 10 lot off the grid is **300 m2 oriented against 780 axis-aligned**; the
+grammar fixture's 24 x 12 lot is **288 vs 633.6**. The world proof asserts the population,
+not a struct field: every placed box is square to the **lot** and **none** is square to the
+world axes, every box is inside the lot rather than inside its bounding box, and the same
+lot un-rotated builds a box-for-box identical building.
+
+### IB-14 — the caps, reproduced and retired
+
+| layer | features | at the default cap | truncated | raised |
+|---|---|---|---|---|
+| roads | 10 000 | 4 096 | 5 904 | **10 000 whole** |
+| footprints | 50 000 | 4 096 | 45 904 | **50 000 whole** |
+
+The default still guards — a misdirected wizard should bound rather than hang — and
+`ISLAND_MAX_ENTITIES` is what an author who means it asks for. The certification's complaint
+was that the truncation had nowhere to be raised and nowhere to be seen; it is now surfaced
+in three places at once: a wizard field clamped to the island ceiling, a `capNote` that says
+what will be dropped **before** the button (`5904 of 10000 ... Raise it to 10000`), and
+`EditorSettings::gis_max_entities` remembering what the author raised it to. `inf gis plan`
+**exits non-zero** when it fires, so a pipeline stops rather than shipping a city with a
+hard edge.
+
+### The two items the I1 audit routed here
+
+**A — the deformation footprint pass was single-terrain. Closed.** `ground_terrain` picked
+the lowest `Guid` once per step, so on a two-terrain level a body on the second one left
+**zero** footprints against the control's one. It resolves per contact now, by the same
+topmost-that-answers rule with the same `Guid` tie-break. **The field needed no key**: the
+audit predicted "a per-contact resolve *and* a terrain-keyed field", and `DeformField` is a
+global world-XZ lattice — `stamp_contact` takes a world position and nothing else — so only
+the resolution was single-terrain. The bound's own arm said to delete it the day this
+landed; it is inverted instead, on the same fixture, and now also asserts that the mark is
+at the walker's world position and **not** where the first terrain would have put it, that
+the higher terrain wins where two overlap, and that the single-terrain control is unchanged.
+
+**B — `ScenePayload::blend_mode` had a reader and no writer. Both built.** The writer is
+Project Settings > Animation > Blend mode, which writes `inf.toml`
+(`ProjectManifest::anim_blend`) **and** applies `inf_ecs::pose::set_blend_mode` to the live
+world — both, because writing only the file leaves the editor previewing the old mode until
+the project is reopened. The cooked reader is `cook` copying the name verbatim into
+`manifest.toml`, `BootManifest` reading it, and `build_world_from_pack` applying it (the
+twin of the line `build_world_from_payload` already ran). `inf-project` is a
+**dev**-dependency of `inf-player` by design, so `inf.toml` is unreadable at boot and the
+name has to travel in the cooked manifest. No schema moves: both are defaulted keys in
+name-keyed TOML, the precedent `ProjectManifest::levels_dir` already documents; an older
+`manifest.toml` reads as `inertialize`, asserted.
+`the_cooked_path_reads_the_projects_session_blend_mode` drives the real chain end to end.
+
+One hazard closed on the way: `ProjectSettingsDto::anim_blend` is an `Option<String>`
+because the viewport's pixel-snap setter sends the same DTO. A plain `String` would have
+made that caller send `""` — the engine default — and silently reset a project's cross-fade
+every time somebody nudged the pixel grid.
+
+### Laws this wave paid for
+
+* **One import door means one PLAN, and a plan is a value.** "Two front ends agree" is only
+  provable if there is a value to compare; a digest over coordinate **bit patterns** is what
+  makes it a comparison rather than a claim.
+* **A fix that closes one axis can hide the same defect on the other.** The road's
+  longitudinal draping made the transverse gap invisible, because both are "the road does
+  not follow the ground" and only one had an arm.
+* **Plan in the local frame, place once.** A rotation applied at one emission point beats a
+  rotated type through a dozen axis-aligned rules — and the rule most likely to fail
+  silently under rotation (`same_line`) is the one that would have produced a building with
+  no doors.
+* **A gate's fixture has to be the case the feature is FOR.** A symmetric junction needs no
+  fan; a fixture built on one would have passed whatever the fan did.
+* **Match tokens, not substrings**, when a table reads human words. A lighthouse is not a
+  house.
+* **A partial update must say which fields it is updating.** A shared settings DTO with a
+  non-optional field lets an unrelated caller reset it.
+
+### Counts
+
+Battery, `fmt`, `clippy --workspace --all-targets` with `-D warnings`, the frontend suite
+and the golden count are in the wave's closing commit message; goldens stayed **54** and no
+schema moved (scene v25 / `ScenePayload` v11 / `.inf_sm` v3, all as I1 left them).

@@ -19,7 +19,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | Wave | Scope | Status |
 |---|---|---|
 | **I1** | foundations — IB-7 layout, IB-1 PCG/streaming, IB-10 schema window, IB-15 multi-terrain | **DONE + AUDITED** (+ `.inf_sm` v3 addendum) |
-| I2 | the GIS door — IB-3, IB-4, IB-5, IB-6, IB-14 | not started |
+| **I2** | the GIS door — IB-3, IB-4, IB-5, IB-6, IB-14, IB-11's near half | **DONE**, not yet audited |
 | I3 | city scale — IB-2 (grammar collider LOD/budget, lot subdivision) | not started |
 | I4 | the fps instrument + budgets — IB-9, IB-16, the shipping-resolution harness | not started |
 | I5 | source data — IB-11 (DEM ingest reality, CRS, LiDAR) | not started |
@@ -82,6 +82,38 @@ Wave numbering is this file's; the certification's ordering is what it follows.
   lowest-`Guid` ground pick and left ~8 doc sites in five crates still teaching it, plus one
   function (`inf_ecs::deform::ground_terrain`) whose doc asserted an invariant the change had
   just broken. Corrected, and the broken invariant is now a measured bound.
+* **One import door means one PLAN, and a plan is a value** (I2). `inf_gis::import`
+  owns every import decision — the `.prj` read, the CRS resolution, the naming, the stub
+  floor, the entity cap, the stream channel — and hands back a `SpawnPlan`. The editor
+  *applies* one; `inf gis` *prints* one. `SpawnPlan::digest()` folds every name, kind and
+  coordinate **bit pattern**, so "the wizard and the CLI import the same file identically"
+  is a comparison a test makes across a process boundary rather than a sentence a comment
+  claims. *Why a digest and not a formatted report:* a rounded comparison passes for two
+  imports that differ by a metre in the eighth digit.
+* **A road has to be subdivided ACROSS its width, not only along its length** (IB-4).
+  Resampling the spine at the terrain's pitch closes the longitudinal gap and does nothing
+  for the transverse one — **49 mm** between a 14 m arterial's crown and the ground against
+  0.4 mm along it. The first builder had one quad across, and the longitudinal fix hid the
+  transverse defect perfectly, because both are "the road does not follow the ground" and
+  only one was measured.
+* **Plan in the lot's frame, place in the world's** (IB-6). An oriented `Rect2` would have
+  meant an OBB through the slicer, the adjacency test, the wall builder, the roof, the
+  stairs and the furniture grid — and `partition::adjacencies`' world-axis `same_line`
+  test would have found **zero** doors between rotated rooms, i.e. a building with no way
+  through it. Instead the plan is built in lot coordinates, where every existing rule is
+  already correct, and one function (`assemble::place_in_frame`) turns the finished output
+  into the world. The identity frame is skipped by an exact comparison, so nothing a level
+  already contains moves.
+* **A lighthouse is not a house** (IB-5b). `kind.contains("house")` classified
+  `lighthouse_platform` as a detached dwelling and `contains("mall")` does the same to
+  anything *small*. A use code is a phrase of whole words; the table matches TOKENS with a
+  prefix.
+* **The cap belongs at the door, the report belongs before the import** (IB-14). The
+  certification's complaint was never that truncation was silent — it is reported — but
+  that there was nowhere to raise it and nowhere to see it. Now: one cap in Ring 0, a
+  wizard field backed by `EditorSettings::gis_max_entities`, a `capNote` that says what
+  will be dropped *before* the button, and `inf gis plan` **exiting non-zero** when it
+  fires so a pipeline stops instead of shipping a city with a hard edge.
 * **A payload with a migrating rung must not be diagnosed as "too old".**
   `AssetPayload::migrates_from` exists so a v2 `.inf_sm` that fails for a *structural*
   reason reports that reason. Telling an author to re-create a machine whose problem is
@@ -183,53 +215,124 @@ per contact and keying the field by terrain entity.
 
 ---
 
-## Next — wave I2 (the GIS door)
+## Done — wave I2 (the GIS door)
 
-The certification calls this *"the single largest piece of connective work the island
-needs"*. `inf-gis` is 5 732 lines across nine modules with **one dependent crate using one
+The certification called this *"the single largest piece of connective work the island
+needs"*: `inf-gis` was 5 732 lines across nine modules with **one dependent crate using one
 module** and zero non-test callers for `spawn_layer`, `read_vector`, `RoadGraph::from_layer`,
-`build_all_ribbons`, `triangulate_polygon`, `classify_to_ids`.
+`build_all_ribbons`, `triangulate_polygon`, `classify_to_ids`. Every one of those now has a
+caller on a production path.
 
-1. **IB-3 — the door itself.** A Ring-2 command family + a GIS import wizard. Nothing else
-   in I2 is reachable without it.
-2. **IB-4 — roads become geometry.** `build_ribbon` returns arrays, not a `MeshAsset`, and
-   takes a ground closure nothing supplies. No road surface, no collider, no terrain blend.
-3. **IB-5 — the two attribute wires.** Land cover → `BiomeSet` (G10: nothing decodes a
-   raster, nothing writes biome ids) and GIS attributes → `BuildingParams::floors` (G11:
-   *"no code between a GIS attribute and that field in either direction"*).
-4. **IB-6 — oriented lots.** `building/pass.rs::lot_of` takes an XZ bounding box, so a real
-   footprint becomes axis-aligned. Vancouver's West End and downtown are both rotated.
-   Wave G calls the floor-plate slicer's axis-alignment "a deep change… its own sub-phase".
-5. **IB-14 — surface the caps.** `SpawnOptions::max_entities` defaults to **4 096**;
-   measured 10 000 roads → 4 096 (5 904 truncated), 50 000 footprints → 4 096 (45 904). It
-   is reported and never silent — but with no wizard there is nowhere to raise it and
-   nowhere to show the report.
-6. **IB-11's near half — `.prj` + reprojection.** The CRS is a caller-stated parameter with
-   no UI to state it, and a terrain in a different CRS is *refused, not warped*. **Web
-   Mercator must stay refused**: its metres are inflated ~1.53× at Vancouver's latitude, so
-   accepting it would build the island half again too large with no symptom. Anchor in
-   **UTM zone 10N**.
+**IB-3 · the door.** `inf_gis::import` (Ring 0) owns the whole import: `.prj` resolution,
+the probe, naming, the stub floor, the cap, the stream channel, and a `SpawnPlan` as the
+result. Three front ends, one decision-maker — the wizard
+(`GisImportDialog` + `commands/gis.rs` + `inf_editor_core::gis::run_import`), the CLI
+(`inf gis info` / `inf gis plan`), and any future cook-time pipeline. **The proof is
+cross-process**: the real `inf` binary prints `SpawnPlan::digest()` and
+`the_cli_and_the_library_import_the_same_fixture_identically` compares it against
+`import_layer` in-process.
 
-Note for I2: PCG now sees streamed terrain, so GIS-driven scatter over the real DEM is
-finally a thing that can be measured rather than a thing that returns zeros.
+**IB-11's near half.** The `.prj` sidecar is read (last `AUTHORITY["EPSG",…]`, not the
+first — a NAD83/UTM WKT names five codes and four describe its ellipsoid, prime meridian,
+angular unit and geographic base); an ESRI `.prj` with no authority at all falls back to a
+pattern match on the projection NAME and **says it guessed**. The vertical unit is applied
+exactly once, in `Transform::to_projected`, **before** the projection — the anchor subtracts
+a metric datum height, so scaling afterwards would scale the anchor. Web Mercator stays
+refused as an anchor with its 1.53× number and stays legal as a source. LERC / BigTIFF /
+LAS are untouched named CANNOTs.
+
+**IB-4 · roads are geometry.** `build_surface` drapes a whole network, merges by class and
+fans the junctions; `surface_to_mesh` writes a real `MeshAsset` with a submesh and a
+material slot per road class; `gisroad::import_road_surface` supplies the ground from the
+level's terrains through the IB-15 rule and spawns through
+`edit_create_mesh_asset` — one transaction, one Ctrl+Z. Measured: **3 758 road vertices,
+worst deviation 0.000000 m** from `ground + lift`; mid-span 0.0004 m dense against **3.2 m**
+on the centreline's own vertices; a road across two terrains at **west 28.460 m, east
+48.460 m**.
+
+**IB-5 · both wires.** Land cover → biome ids through `classify_to_ids` (its first caller
+outside its own tests) and a new `inf_terrain::BiomeFill` polygon fill that accumulates any
+number of classes into **one** `BiomeDelta`, i.e. one undo step. Footprint attributes →
+`BuildingParams::floors`, from the stated count, else DERIVED from a stated height, else a
+typed default — with which of the three answered carried per feature and counted per layer.
+Measured: 2 496 samples over 2 biomes with 5%/7% canopy in one class and 92% in another;
+floors 6/10/2 producing 21.9 m and 5.6 m of baked geometry.
+
+**IB-6 · oriented lots.** `inf_math::obb2` (owned monotone-chain hull + rotating calipers,
+trig-free, canonical) and `inf_pcg::building::LotFrame`. Measured: a 30 × 10 lot off the
+grid is **300 m² oriented against 780 axis-aligned**; the grammar fixture's 24 × 12 lot is
+**288 vs 633.6**. The world proof asserts the population — every placed box square to the
+LOT, **none** square to the world axes, and the same lot un-rotated building a
+box-for-box identical building.
+
+**IB-14 · the caps.** The certification's numbers reproduced and then retired: 10 000 roads
+→ 4 096 (5 904 truncated) → **10 000 whole**; 50 000 footprints → 4 096 (45 904) →
+**50 000 whole**.
+
+**Both I1-routed items, closed.** The deformation footprint pass resolves per contact (and
+needed no terrain-keyed field — the field is a global world-XZ lattice), and
+`ScenePayload::blend_mode` has both halves: a Project Settings writer into `inf.toml` + the
+live world, and a cooked-path reader through `manifest.toml` →
+`build_world_from_pack`.
+
+## Next — wave I3 (city scale)
+
+IB-2: 12 850 static colliders cost 4.663 ms/step, so the 60 fps ceiling is ≈ 46 000
+colliders ≈ **25 archetype buildings**, and one `building.plan` node is one building. I2
+built the footprint→building wire and capped its bake at 512 for exactly this reason: the
+attribute pass scales and the geometry does not. I3 owns collider LOD/streaming for grammar
+buildings, a lot-subdivision node, and a collider budget.
 
 ---
 
 ## Open questions / carried bounds
 
-**Measured and bounded (I1 owns the numbers):**
-* **The deformation footprint pass is still single-terrain.** `ground_terrain` picks the
-  lowest `Guid` once per step and every contact is resolved against it, so on a two-terrain
-  level a body on the second one leaves **0 footprints** against a control's 1 — measured by
-  `inf_ecs::deform`'s `a_contact_over_a_second_terrain_leaves_no_footprint`. Found by the I1
-  audit as a consequence of IB-15: the two rules used to be the same rule.
-* **`ScenePayload::blend_mode` has a reader and no writer.** The PIE path applies it
-  (`build_world_from_payload`), and nothing sets `inf_ecs::pose::set_blend_mode` outside
-  tests — no panel, no Ring-2 command, and the blueprint kit declines it by name. So the
-  session default is `Inertialize` in practice, and the **cooked** path carries no payload
-  and applies none at all: a project that ever gains a way to change it would preview one
-  blend and ship another. The per-edge `.inf_sm` v3 field is the surface that *is* authored
-  and *does* ship; this slot is the inherit-target, waiting for its author-facing half.
+**Closed by I2 (were I1's carried bounds):**
+* ~~The deformation footprint pass is single-terrain~~ — per-contact resolve, same
+  topmost-that-answers rule, same `Guid` tie-break. The predicted "terrain-keyed field" was
+  **not needed**: `DeformField` is a global world-XZ lattice.
+* ~~`ScenePayload::blend_mode` has a reader and no writer~~ — Project Settings ▸ Animation
+  writes `inf.toml` and the live world; the cook copies the name into `manifest.toml` and
+  `build_world_from_pack` applies it.
+
+**Measured and bounded (I2 owns these numbers):**
+* **A junction fan paves the CORE, not the kerbs.** `fan_at` covers the convex hull of the
+  legs' end cross-sections — 581 open samples (5.8 m²) on the acute-fork fixture — and the
+  wedges *outside* that hull, between adjacent kerbs, stay open. Closing them needs
+  kerb-radius fillets per leg pair, which is a road-modelling project rather than an import.
+  Also measured, and worth knowing before building a gate on it: **a symmetric T or `+`
+  junction needs no fan at all**, because two opposed legs tile the crossing between them.
+* **A road has no collider of its own, by ruling.** It conforms to the terrain, whose
+  heightfield collider already answers there, so drawn and collided are two readings of one
+  array separated by exactly the 2 cm lift (3 758 vertices, 0.000000 m). Duplicating it as
+  per-segment trimeshes is 0.363 µs/step each (IB-2) = **3.63 ms/step** for 10 000 roads,
+  for nothing a body can reach. The case that genuinely needs one is a road that **leaves**
+  the ground — a bridge — which needs a bridge/tunnel attribute published layers rarely
+  carry.
+* **A cross-section subdivides at most `MAX_CROSS_STRIPS = 32` times.** A carriageway wider
+  than `32 × ground_step` conforms more coarsely across than along. Past every real road at
+  every sane step, and reported through the triangle count rather than hidden.
+* **A road mesh is f32 and therefore quantised.** Positions are local to the mesh's own
+  centre, so the number is an *extent* rather than a coordinate (~3 mm at island scale), and
+  `MeshBuildReport::quantisation_m` states it. Past 1 cm the import raises an advisory.
+* **Footprint geometry is capped at 512 buildings; the attribute pass is not.** Reading
+  50 000 rows is free and the coverage is what an author needs; 50 000 `.inf_mesh` files is
+  not. Reported with the number to raise.
+* **A GIS import drapes on the heightfield only.** `gis::with_ground` passes no voxel
+  volumes, so a road over a carved cave mouth takes the published centreline's elevation.
+* **`inf gis` cannot write a level.** The `.inf_lvl` writer is `SceneDoc`, in Ring 1, and
+  putting it in the CLI would link wgpu — the same reason `inf-project` exists. So the CLI
+  produces plans, reports and derived assets; placing entities is the editor's half. The
+  digest is what makes the two provably the same import anyway.
+* **`RoadGraph` derives junctions from segment ENDPOINTS.** A street digitised as one
+  feature passing *through* a crossing creates no node there. Correct for published layers,
+  which are split at intersections — and the reason the fan fixture splits its through-road.
+* **The GIS wizard has no attribute-mapping UI.** The field spellings each generator reads
+  are constants (`ROAD_CLASS_FIELDS`, `FLOOR_FIELDS`, `CLASS_FIELDS`, …), and a layer that
+  spells a column differently is defaulted-and-counted rather than remapped. The counts are
+  advisories; the remap is not built.
+* **The biome terrain is entered as an entity id.** The wizard has a text field, not a
+  picker — a level with several terrains needs the author to paste a GUID.
 * **The rustdoc ceiling has 8 of 450 left** — measured at **442** after this audit; the wave
   took it to 448 with six new links (two private ladder aliases, three unqualified
   `SmBlendMode`/`PoseBlender` paths, one private `stranded_levels`), all now item-scoped or
