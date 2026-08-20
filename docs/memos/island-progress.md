@@ -1351,6 +1351,20 @@ stand, with I4b's amendments applied in place.
    real geometry, and the only item on this list that is a *feature* rather than a budget.
    `inf-packager` + `inf-dcc` is a one-line Cargo change; what is missing is an evaluated
    population at cook time to bake from. Everything about the shape of the fix is above.
+
+   **I4b did NOT take it, deliberately, and the reason is a size rather than a preference.**
+   The Cargo edge and a cook-time evaluation really are near-one-line. What is not is the half
+   after it: the projector still emits **placeholder cubes** for every PCG structure, and
+   turning that into real geometry means a runtime vgeom asset per archetype — the standing
+   P19 `kind_index → real mesh` gap, which the I4 ledger already calls "a project" and which
+   `gisbuild` is the only existing path toward. A performance wave that spent its remaining
+   budget starting a geometry project would have shipped neither.
+
+   What the wave *did* change about it is the arithmetic: real geometry costs **+0.32 ms**
+   against a comparable configuration (the I4 audit's corrected figure), and the shipped
+   1080p frame now sits **1.5–2.4 ms under** the 60 fps budget at p95 where it was 28.5 ms
+   over. **The headroom to spend on it exists now**, which it did not when the number was
+   quoted.
 2. ~~**The sim fixed step has no §8 budget and costs 13.0–14.9 ms on the city.**~~ **CLOSED by
    I4b.** `CITY_STEP_BUDGET_MS` exists, the step is broken down by
    `inf_player::step_profile` into 22 phases that tile it, and it costs **1.222 ms**. The
