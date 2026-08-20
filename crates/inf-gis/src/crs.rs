@@ -77,6 +77,13 @@ pub struct Transform {
     source_is_latlong: bool,
     /// The source and the anchor are the same CRS, so no reprojection is needed.
     identity: bool,
+    /// This transform does not transform: it hands a source's own coordinates
+    /// back. See [`Transform::source_space`] — probe-only, refused at the import
+    /// door.
+    source_space: bool,
+    /// Metres per unit of the source's **vertical** axis. See
+    /// [`Transform::with_vertical_unit`].
+    vertical_unit_m: f64,
     source_spec: String,
     advisories: Vec<Advisory>,
 }
@@ -118,8 +125,55 @@ impl Transform {
     /// * **A non-metric anchor CRS** (a state plane in US survey feet, say).
     ///   Same reason, wearing a different hat.
     pub fn new(source_crs: &str, anchor: &GeoAnchor) -> Result<Self, GisError> {
+        Self::with_vertical_unit(source_crs, anchor, 1.0)
+    }
+
+    /// [`Transform::new`], plus the source's **vertical** unit in metres.
+    ///
+    /// # Why the vertical unit is converted here and nowhere else
+    ///
+    /// A source's horizontal unit is part of its projection and `proj4rs`
+    /// handles it. Its *vertical* unit is not: a Shapefile's `Z` values and a
+    /// GeoJSON position's third ordinate are raw numbers, and a `.prj` with a
+    /// `VERT_CS[…UNIT["foot",0.3048]]` is the only thing that says they are feet.
+    /// Reading a foot elevation as a metre builds a world 3.28× too flat — the
+    /// same defect the terrain importer's own feet-to-metres conversion exists to
+    /// stop, met one crate over.
+    ///
+    /// It is applied **before** the projection rather than after, because
+    /// [`GeoAnchor::world_from_projected`] subtracts `origin_height_m`, which is
+    /// in metres: scaling afterwards would scale the anchor's own datum height
+    /// along with the sample. One conversion, at one door, on the way in — the
+    /// P16 law about a unit conversion crossing a no-data policy, in its
+    /// vertical form.
+    pub fn with_vertical_unit(
+        source_crs: &str,
+        anchor: &GeoAnchor,
+        vertical_unit_m: f64,
+    ) -> Result<Self, GisError> {
         anchor.validate()?;
+        if !(vertical_unit_m.is_finite() && vertical_unit_m > 0.0) {
+            return Err(GisError::NotFinite(format!(
+                "the source's vertical unit is {vertical_unit_m} metres per unit, \
+                 which is not a positive finite length. A vertical unit of zero \
+                 flattens every elevation to the anchor's datum height and a \
+                 non-finite one makes every elevation a NaN that bounds checks \
+                 then ignore."
+            )));
+        }
         let mut advisories = Vec::new();
+        if (vertical_unit_m - 1.0).abs() > 1e-12 {
+            advisories.push(Advisory::new(
+                "vertical.unit",
+                format!(
+                    "the source states a vertical unit of {vertical_unit_m} m per \
+                     unit (feet are 0.3048), so every elevation is multiplied by it \
+                     exactly once on the way in. Reading it as metres instead would \
+                     build the world {:.2}x too flat.",
+                    1.0 / vertical_unit_m
+                ),
+            ));
+        }
 
         let target = build_proj(&anchor.crs, "anchor")?;
         if target.is_latlong() {
@@ -199,9 +253,67 @@ impl Transform {
             anchor: anchor.clone(),
             source_is_latlong,
             identity,
+            source_space: false,
+            vertical_unit_m,
             source_spec: source_crs.to_string(),
             advisories,
         })
+    }
+
+    /// A **probe-only** transform that hands a source's own coordinates straight
+    /// back, packed `(x, z, y)` into a `DVec3` — `x` first, elevation in `y`, the
+    /// source's second horizontal coordinate in `z`.
+    ///
+    /// # Why this exists
+    ///
+    /// A GIS import wizard has to show an author what is *in* a file — its
+    /// fields, its record count, where on Earth it sits — **before** the level
+    /// has a geo-anchor, because reading the file is how the author decides what
+    /// to anchor to. Every reader in [`crate::vector`] takes a [`Transform`], and
+    /// [`Transform::new`] requires an anchor, so without this there is no way to
+    /// look inside a file until after the decision the look is meant to inform.
+    ///
+    /// # It is NOT an import path, and the door says so
+    ///
+    /// The coordinates it produces are the file's own numbers, in the file's own
+    /// units, in the file's own frame — **not** world metres, and in particular
+    /// not the anchor-relative, +Z-south frame every other `DVec3` in this crate
+    /// is in. [`crate::import::import_layer`] refuses one by name
+    /// ([`Transform::is_source_space`]) rather than trusting a caller to
+    /// remember, because a probe transform reaching an import would place a whole
+    /// city at its raw eastings — visibly wrong only if somebody looks at the
+    /// numbers.
+    ///
+    /// The axis-order guard in [`Transform::to_projected`] still runs, so a
+    /// transposed lat/lon file is refused at the probe too, which is exactly
+    /// where an author wants to hear about it.
+    pub fn source_space(source_crs: &str) -> Result<Self, GisError> {
+        let source = build_proj(source_crs, "source")?;
+        let target = build_proj(source_crs, "source")?;
+        let source_is_latlong = source.is_latlong();
+        Ok(Self {
+            source,
+            target,
+            anchor: GeoAnchor::default(),
+            source_is_latlong,
+            identity: true,
+            source_space: true,
+            vertical_unit_m: 1.0,
+            source_spec: source_crs.to_string(),
+            advisories: Vec::new(),
+        })
+    }
+
+    /// Metres per unit of the source's vertical axis (1.0 unless a `.prj` said
+    /// otherwise).
+    pub fn vertical_unit_m(&self) -> f64 {
+        self.vertical_unit_m
+    }
+
+    /// Whether this is a probe transform ([`Transform::source_space`]) rather
+    /// than a real source → world-metres transform.
+    pub fn is_source_space(&self) -> bool {
+        self.source_space
     }
 
     /// The non-fatal hazards found while configuring this transform.
@@ -227,6 +339,11 @@ impl Transform {
     /// `x`/`y` are in **file order** (see the module docs): X first — longitude
     /// or easting — then Y. `z` is metres either way.
     pub fn to_projected(&self, x: f64, y: f64, z: f64) -> Result<(f64, f64, f64), GisError> {
+        // **The vertical unit, converted exactly once, here.** See
+        // `Transform::with_vertical_unit`: this is the only multiplication of a
+        // source elevation in the crate, and it happens before the projection so
+        // that the anchor's metric datum height is subtracted from metres.
+        let z = z * self.vertical_unit_m;
         if !(x.is_finite() && y.is_finite() && z.is_finite()) {
             return Err(GisError::NotFinite(format!(
                 "the source coordinate ({x}, {y}, {z}) is not finite — a NaN or \
@@ -301,6 +418,12 @@ impl Transform {
     /// result sits at the anchor's height datum.
     pub fn to_world(&self, x: f64, y: f64, z: f64) -> Result<DVec3, GisError> {
         let (e, n, h) = self.to_projected(x, y, z)?;
+        if self.source_space {
+            // The file's own numbers, packed the way the rest of this crate packs
+            // a position. No anchor is subtracted because there is no anchor —
+            // see `Transform::source_space`.
+            return Ok(DVec3::new(e, h, n));
+        }
         let w = self.anchor.world_from_projected(e, n, h);
         // Belt and braces: the anchor was validated at construction and the
         // projection output was just guarded, so this can only fire on an

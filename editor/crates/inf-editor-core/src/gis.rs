@@ -24,66 +24,44 @@
 //! A published stream layer digitises each watercourse **downstream** — that is
 //! the near-universal convention, and it is the only flow information a polyline
 //! carries. So the polyline's own order becomes the river's flow order, and
-//! [`SpawnOptions::reverse_flow`] exists for the layers that got it backwards.
-//! An import that guessed instead would produce rivers running uphill, which the
-//! P20.4 cook advisory would then report by the hundred — correct, and useless.
+//! [`inf_gis::import::ImportOptions::reverse_flow`] exists for the layers that
+//! got it backwards. An import that guessed instead would produce rivers running
+//! uphill, which the P20.4 cook advisory would then report by the hundred —
+//! correct, and useless.
+//!
+//! # Every import decision is one crate down
+//!
+//! Naming, the stub floor, the entity cap, the stream channel: all of it is
+//! [`inf_gis::import`], and this module is the **applier**. That is what makes
+//! "one import door" a thing a test can falsify rather than a thing a comment
+//! claims — the `inf gis` CLI builds a [`SpawnPlan`] from the same request and
+//! the two are compared as values.
 
-use glam::{DVec3, Vec3Swizzles};
-use inf_gis::feature::{GeoFeature, GeoGeometry, GeoLayer, LayerKind};
+use glam::DVec3;
+use inf_gis::feature::GeoLayer;
+use inf_gis::import::{PlannedKind, SpawnPlan};
 use uuid::Uuid;
 
 use crate::scene::SceneDoc;
 
-/// Default river width when a stream layer carries no width attribute, metres.
-///
-/// Small on purpose. A published hydrography layer is mostly headwater creeks,
-/// and a default sized for a main stem would flood every valley in the import;
-/// an author widening the handful of real rivers afterwards is a better first
-/// hour than an author narrowing four thousand creeks.
-pub const DEFAULT_STREAM_WIDTH_M: f64 = 3.0;
-/// Default river depth, metres.
-pub const DEFAULT_STREAM_DEPTH_M: f64 = 0.8;
-/// Default surface flow speed, m/s — a walking-pace creek.
-pub const DEFAULT_STREAM_FLOW_M_S: f64 = 0.6;
-
-/// The shortest feature worth spawning, metres.
-///
-/// Vector layers are full of stubs — a two-metre driveway apron, a culvert
-/// fragment, the residue of a clipped tile edge. Each would become an entity
-/// with a spline of no useful length, and ten thousand of them would make a
-/// level nobody can open. Named so an author can lower it deliberately.
-pub const MIN_FEATURE_LENGTH_M: f64 = 8.0;
+pub use inf_gis::import::{
+    DEFAULT_MAX_ENTITIES, DEFAULT_STREAM_DEPTH_M, DEFAULT_STREAM_FLOW_M_S, DEFAULT_STREAM_WIDTH_M,
+    ISLAND_MAX_ENTITIES, MIN_FEATURE_LENGTH_M,
+};
 
 /// What to do with a layer, and how much of it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SpawnOptions {
-    /// Skip features shorter than this (metres). See [`MIN_FEATURE_LENGTH_M`].
-    pub min_length_m: f64,
-    /// Stop after this many entities. **A guard, not a preference**: a county
-    /// road layer is ~10⁵ features and spawning all of them into a document that
-    /// keeps every entity's record in memory is how an editor stops responding.
-    /// The import reports what it left behind.
-    pub max_entities: usize,
-    /// Reverse each polyline before spawning — for a stream layer digitised
-    /// upstream. Has no effect on non-flowing kinds.
-    pub reverse_flow: bool,
-    /// Prefix for generated entity names when a feature carries no name
-    /// attribute.
-    pub name_prefix: String,
-}
-
-impl Default for SpawnOptions {
-    fn default() -> Self {
-        Self {
-            min_length_m: MIN_FEATURE_LENGTH_M,
-            max_entities: 4096,
-            reverse_flow: false,
-            name_prefix: String::new(),
-        }
-    }
-}
+///
+/// **This is [`inf_gis::import::ImportOptions`], not a copy of it.** The cap,
+/// the stub floor and the flow reversal are import decisions and they live at
+/// the import door in Ring 0, where the `inf gis` CLI reads the same values from
+/// the same constants. Two spellings of one cap is exactly how the editor and a
+/// headless pipeline come to disagree about what a layer contains.
+pub type SpawnOptions = inf_gis::import::ImportOptions;
 
 /// What a spawn produced.
+///
+/// Everything except [`spawned`](SpawnReport::spawned) is copied verbatim off
+/// the Ring-0 [`SpawnPlan`] — this half only turns planned entities into GUIDs.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SpawnReport {
     /// The entities created, in spawn order.
@@ -98,6 +76,8 @@ pub struct SpawnReport {
     /// of forty thousand roads produces a city with a hard edge and no
     /// explanation.
     pub truncated: usize,
+    /// The cap that produced `truncated`, so the remedy can name the number.
+    pub cap: usize,
     /// Non-fatal advisories, including the layer's own.
     pub advisories: Vec<String>,
 }
@@ -108,143 +88,70 @@ impl SpawnReport {
     }
 
     /// A one-line summary for the log and the wizard's done state.
+    ///
+    /// Delegates to [`SpawnPlan::summary`] so the wizard, the log and the CLI
+    /// print the same sentence.
     pub fn summary(&self, layer: &str) -> String {
-        let mut s = format!("{}: {} entities", layer, self.spawned.len());
-        if self.too_short > 0 {
-            s.push_str(&format!(", {} too short", self.too_short));
+        SpawnPlan {
+            entities: Vec::new(),
+            too_short: self.too_short,
+            unusable: self.unusable,
+            truncated: self.truncated,
+            cap: self.cap,
+            advisories: Vec::new(),
         }
-        if self.unusable > 0 {
-            s.push_str(&format!(", {} unusable", self.unusable));
-        }
-        if self.truncated > 0 {
-            s.push_str(&format!(", {} NOT IMPORTED (entity cap)", self.truncated));
-        }
-        s
+        .summary_with_count(layer, self.spawned.len())
     }
-}
-
-/// A feature's name, from whichever attribute the source used.
-fn feature_name(f: &GeoFeature, fallback: &str, index: usize) -> String {
-    f.attr_text(&[
-        "name",
-        "street_name",
-        "full_name",
-        "fullname",
-        "streetname",
-        "gnis_name",
-        "label",
-    ])
-    .map(|s| s.trim().to_string())
-    .filter(|s| !s.is_empty())
-    .unwrap_or_else(|| {
-        if fallback.is_empty() {
-            format!("Feature {index}")
-        } else {
-            format!("{fallback} {index}")
-        }
-    })
-}
-
-/// Every polyline a feature contributes, as world-space runs.
-fn runs_of(f: &GeoFeature) -> Vec<Vec<DVec3>> {
-    match &f.geometry {
-        GeoGeometry::Polyline { points, .. } => vec![points.clone()],
-        GeoGeometry::Polygon { exterior, holes } => std::iter::once(exterior.clone())
-            .chain(holes.iter().cloned())
-            .collect(),
-        GeoGeometry::Point(_) => Vec::new(),
-    }
-}
-
-fn run_length(pts: &[DVec3]) -> f64 {
-    pts.windows(2)
-        .map(|w| (w[1].xz() - w[0].xz()).length())
-        .sum()
 }
 
 /// Spawn a vector layer into the document.
 ///
-/// The layer's [`kind`](GeoLayer::kind) decides what each feature becomes:
-///
-/// | kind | becomes |
-/// |---|---|
-/// | [`Streams`](LayerKind::Streams) | a `WaterBody::river` + `Spline` — the same pair the hydrology tool creates, so the river validator, the uphill advisory and the buoyancy solver all apply |
-/// | everything else | a `Spline` entity, which the grammar's polyline span and the road builder both consume |
-///
-/// Areas (`Lakes`, `Biomes`, `Buildings`, `Parcels`) spawn their **boundaries**
-/// as closed splines. Turning a boundary into a lake surface or a building lot
-/// needs the polygon-interior work this wave deliberately deferred — see the
-/// disposition memo — and a closed spline is the honest half that exists today.
+/// A thin wrapper over [`inf_gis::import::plan_spawn`] + [`apply_plan`], kept
+/// because it is the shape a caller with a layer in hand wants. **It makes no
+/// import decision of its own** — see [`apply_plan`].
 pub fn spawn_layer(doc: &mut SceneDoc, layer: &GeoLayer, opts: &SpawnOptions) -> SpawnReport {
+    let plan = inf_gis::import::plan_spawn(layer, opts);
+    apply_plan(doc, &plan)
+}
+
+/// **The applier.** Turn a Ring-0 [`SpawnPlan`] into entities.
+///
+/// The layer's [`kind`](GeoLayer::kind) has already decided what each feature
+/// becomes; this function only knows how to build the two things a plan can ask
+/// for:
+///
+/// | planned kind | becomes |
+/// |---|---|
+/// | [`PlannedKind::River`] | a `WaterBody::river` + `Spline` — the same pair the hydrology tool creates, so the river validator, the uphill advisory and the buoyancy solver all apply |
+/// | [`PlannedKind::Spline`] | a `Spline` entity, which the grammar's polyline span and the road builder both consume |
+///
+/// Areas (`Lakes`, `Biomes`, `Buildings`, `Parcels`) arrive as their
+/// **boundaries**, as closed splines. `Roads` additionally gain a real surface
+/// through [`crate::gisroad`], and `Biomes` a real painted region through
+/// [`crate::gisbiome`]; the closed spline is the substrate all three share.
+///
+/// Nothing here invents a component or a persistence path, which is what keeps
+/// the import from being a schema event: every spawn below is an ordinary scene
+/// edit.
+pub fn apply_plan(doc: &mut SceneDoc, plan: &SpawnPlan) -> SpawnReport {
     let mut report = SpawnReport {
-        advisories: layer.advisories.iter().map(|a| a.to_string()).collect(),
+        too_short: plan.too_short,
+        unusable: plan.unusable,
+        truncated: plan.truncated,
+        cap: plan.cap,
+        advisories: plan.advisories.clone(),
         ..Default::default()
     };
-    if !layer.skipped.is_empty() {
-        report.advisories.push(format!(
-            "{} feature(s) of this layer could not be read and were skipped; the \
-             first was: {}",
-            layer.skipped.len(),
-            layer.skipped.first().cloned().unwrap_or_default()
-        ));
-    }
-
-    let prefix = if opts.name_prefix.is_empty() {
-        layer.name.clone()
-    } else {
-        opts.name_prefix.clone()
-    };
-
-    for (i, f) in layer.features.iter().enumerate() {
-        let runs = runs_of(f);
-        if runs.is_empty() {
-            report.unusable += 1;
-            continue;
-        }
-        for run in runs {
-            if run.len() < 2 {
-                report.unusable += 1;
-                continue;
-            }
-            if run_length(&run) < opts.min_length_m {
-                report.too_short += 1;
-                continue;
-            }
-            if report.spawned.len() >= opts.max_entities {
-                report.truncated += 1;
-                continue;
-            }
-            let mut pts = run;
-            // Flow order is the vertex order — see the module docs.
-            if opts.reverse_flow && layer.kind == LayerKind::Streams {
-                pts.reverse();
-            }
-            let name = feature_name(f, &prefix, i);
-            let guid = match layer.kind {
-                LayerKind::Streams => {
-                    let width = f
-                        .attr_number(&["width_m", "width", "chan_width", "bankfull_w"])
-                        .filter(|v| v.is_finite() && *v > 0.0)
-                        .unwrap_or(DEFAULT_STREAM_WIDTH_M);
-                    let depth = f
-                        .attr_number(&["depth_m", "depth", "mean_depth"])
-                        .filter(|v| v.is_finite() && *v > 0.0)
-                        .unwrap_or(DEFAULT_STREAM_DEPTH_M);
-                    let flow = f
-                        .attr_number(&["flow_m_s", "velocity", "flow"])
-                        .filter(|v| v.is_finite() && *v > 0.0)
-                        .unwrap_or(DEFAULT_STREAM_FLOW_M_S);
-                    doc.edit_create_river(&name, &pts, width, depth, flow)
-                }
-                _ => spawn_spline(
-                    doc,
-                    &name,
-                    &pts,
-                    matches!(&f.geometry, GeoGeometry::Polygon { .. }),
-                ),
-            };
-            report.spawned.push(guid);
-        }
+    for e in &plan.entities {
+        let guid = match e.kind {
+            PlannedKind::River {
+                width_m,
+                depth_m,
+                flow_m_s,
+            } => doc.edit_create_river(&e.name, &e.points, width_m, depth_m, flow_m_s),
+            PlannedKind::Spline { closed } => spawn_spline(doc, &e.name, &e.points, closed),
+        };
+        report.spawned.push(guid);
     }
     report
 }
@@ -289,7 +196,7 @@ fn spawn_spline(doc: &mut SceneDoc, name: &str, pts: &[DVec3], closed: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use inf_gis::feature::{Attr, GeoLayer};
+    use inf_gis::feature::{Attr, GeoFeature, GeoGeometry, GeoLayer, LayerKind};
 
     fn line(pts: &[(f64, f64)]) -> GeoGeometry {
         GeoGeometry::Polyline {
@@ -463,6 +370,63 @@ mod tests {
         let s = report.summary("Roads");
         assert!(s.contains("NOT IMPORTED"), "{s}");
         assert!(s.contains("too short"), "{s}");
+    }
+
+    /// **The applier applies; it does not decide.**
+    ///
+    /// Every count in the report is the plan's own count, and the entity list is
+    /// the plan's entity list in order — so a front end that builds a plan
+    /// headlessly (the `inf gis` CLI) and one that applies it (the wizard) are
+    /// looking at the same import rather than two imports that agree by
+    /// inspection. Un-fix mutations: dropping the cap into `apply_plan`, or
+    /// re-deriving `too_short` here, both fail this.
+    #[test]
+    fn the_applied_report_is_the_plan_it_was_given() {
+        let mut features = vec![
+            GeoFeature::new(line(&[(0.0, 0.0), (2.0, 0.0)])),
+            GeoFeature::new(GeoGeometry::Point(DVec3::ZERO)),
+        ];
+        for i in 0..5 {
+            features.push(GeoFeature::new(line(&[
+                (0.0, i as f64 * 10.0),
+                (50.0, i as f64 * 10.0),
+            ])));
+        }
+        let l = layer(LayerKind::Roads, features);
+        let opts = SpawnOptions {
+            max_entities: 3,
+            ..Default::default()
+        };
+        let plan = inf_gis::import::plan_spawn(&l, &opts);
+
+        let mut doc = SceneDoc::new();
+        let report = apply_plan(&mut doc, &plan);
+        assert_eq!(report.count(), plan.count());
+        assert_eq!(
+            (report.too_short, report.unusable, report.truncated, report.cap),
+            (plan.too_short, plan.unusable, plan.truncated, plan.cap),
+            "the report restates the plan, it does not recompute it"
+        );
+        assert_eq!(report.advisories, plan.advisories);
+        // The names came from the plan, in the plan's order.
+        let world = doc.world();
+        let names: Vec<String> = report
+            .spawned
+            .iter()
+            .map(|g| {
+                world
+                    .name_of(world.entity_of(*g).unwrap())
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        let planned: Vec<String> = plan.entities.iter().map(|e| e.name.clone()).collect();
+        assert_eq!(names, planned);
+        // And `spawn_layer` is that pair, not a third path.
+        let mut doc2 = SceneDoc::new();
+        let via_layer = spawn_layer(&mut doc2, &l, &opts);
+        assert_eq!(via_layer.count(), report.count());
+        assert_eq!(via_layer.truncated, report.truncated);
     }
 
     /// A layer's own advisories ride through to the import's report — an axis

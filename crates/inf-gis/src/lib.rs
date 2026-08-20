@@ -69,6 +69,7 @@ pub mod classify;
 pub mod crs;
 pub mod epsg;
 pub mod feature;
+pub mod import;
 pub mod roads;
 pub mod terrarium;
 pub mod tilemath;
@@ -84,6 +85,11 @@ pub use classify::{class_of, classify_breaks, classify_to_ids, ClassifyMethod};
 pub use crs::{anchor_at, Transform, MAX_LATITUDE_DEG};
 pub use epsg::{proj4_for, suggested_utm_epsg, utm_zone_for, EPSG_TABLE};
 pub use feature::{Attr, GeoFeature, GeoGeometry, GeoLayer, LayerKind};
+pub use import::{
+    import_layer, plan_spawn, probe, resolve_crs, CrsChoice, CrsOrigin, GisProbe, ImportOptions,
+    ImportRequest, LayerImport, PlannedEntity, PlannedKind, SpawnPlan, DEFAULT_MAX_ENTITIES,
+    ISLAND_MAX_ENTITIES,
+};
 pub use roads::{
     build_all_ribbons, build_ribbon, Intersection, RoadGraph, RoadKind, RoadRibbon, RoadSegment,
     LANE_WIDTH_M,
