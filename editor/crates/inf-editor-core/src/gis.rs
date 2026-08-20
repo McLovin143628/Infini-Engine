@@ -232,9 +232,13 @@ pub fn run_import(
     let anchor = doc.geo().clone();
     let imported = inf_gis::import_layer(&req, &anchor).map_err(|e| e.to_string())?;
 
+    // **One transaction around the WHOLE import**, opened after the last thing
+    // that can refuse. The extras open their own; `EditHistory::begin` nests on
+    // a depth counter, so only this outermost commit closes — and an author's
+    // Ctrl+Z takes back the splines, the road mesh and the buildings together
+    // rather than one third of a city at a time.
     doc.begin_transaction("Import GIS Layer");
     let report = apply_plan(doc, &imported.plan);
-    doc.commit_transaction();
 
     let mut out = crate::ipc::GisImportResultDto {
         layer_name: imported.layer.name.clone(),
@@ -321,6 +325,7 @@ pub fn run_import(
             Err(e) => out.advisories.push(format!("no buildings were built: {e}")),
         }
     }
+    doc.commit_transaction();
     Ok(out)
 }
 
@@ -788,6 +793,94 @@ mod tests {
         assert_eq!(plain.digest, with_surface.digest);
         assert!(plain.road_summary.is_none());
         assert!(plain.meshes.is_empty());
+    }
+
+    /// **A whole import is ONE undo step**, splines and road mesh together.
+    ///
+    /// `run_import` opens a transaction around everything and the extras open
+    /// their own inside it; `EditHistory::begin` nests on a depth counter, so
+    /// only the outermost commit closes. Without that an author who imported a
+    /// road layer with a surface would take back one third of a city per
+    /// Ctrl+Z. Un-fix mutation: commit the outer transaction before the extras
+    /// run, and this arm needs two undos.
+    #[test]
+    fn a_whole_gis_import_is_one_undo_step() {
+        use crate::ipc::GisImportSettingsDto;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("roads.geojson");
+        std::fs::write(
+            &src,
+            r#"{"type":"FeatureCollection","features":[
+              {"type":"Feature","properties":{"name":"Main"},
+               "geometry":{"type":"LineString","coordinates":[[491000,5459000],[491120,5459000]]}},
+              {"type":"Feature","properties":{"name":"Elm"},
+               "geometry":{"type":"LineString","coordinates":[[491120,5459000],[491120,5459100]]}}
+            ]}"#,
+        )
+        .unwrap();
+        let mut proj = crate::assets::AssetProject::open(tmp.path().join("Content")).unwrap();
+        let mut doc = SceneDoc::new();
+        doc.edit_geo(
+            inf_gis::anchor_at("EPSG:32610", 491_000.0, 5_459_000.0, 0.0, "EGM2008").unwrap(),
+        );
+        {
+            let guid = doc.edit_create(crate::ipc::SpawnKind::Empty, "Ground", None);
+            let e = doc.world().entity_of(guid).unwrap();
+            let res = 129u32;
+            let tile = inf_terrain::TerrainTile::from_heights(
+                res,
+                DVec3::ZERO,
+                vec![0.0; (res * res) as usize],
+            )
+            .unwrap();
+            let mut data = inf_terrain::TerrainData::new(res, 2.0);
+            data.insert_tile((0, 0), tile).ok();
+            let mut t = inf_ecs::components::Transform::IDENTITY;
+            t.translation = inf_ecs::math::Vec3d::new(-40.0, 0.0, -40.0);
+            doc.world_mut().world_mut().entity_mut(e).insert((
+                inf_ecs::components::Terrain {
+                    data,
+                    ..Default::default()
+                },
+                t,
+            ));
+            doc.world_mut().propagate();
+        }
+        let before = doc.order().len();
+
+        let settings = GisImportSettingsDto {
+            kind: "roads".into(),
+            source_crs: "EPSG:32610".into(),
+            vertical_unit_m: 0.0,
+            max_entities: 4096,
+            min_length_m: 8.0,
+            reverse_flow: false,
+            name_prefix: String::new(),
+            road_surface: true,
+            road_lift_m: 0.02,
+            road_ground_step_m: 1.0,
+            biome_terrain: String::new(),
+            biome_attribute: String::new(),
+            biome_classes: 8,
+            buildings: false,
+            max_buildings: 16,
+            furnish: false,
+        };
+        let out = run_import(&mut proj, &mut doc, &src, &settings).unwrap();
+        assert_eq!(out.spawned, 2);
+        assert_eq!(out.meshes.len(), 1, "the surface was built too");
+        // 2 splines + 1 road-mesh entity.
+        assert_eq!(doc.order().len(), before + 3);
+
+        assert!(doc.undo(), "the import is undoable");
+        assert_eq!(
+            doc.order().len(),
+            before,
+            "ONE undo must take the whole import back — splines and surface"
+        );
+        assert!(doc.redo());
+        assert_eq!(doc.order().len(), before + 3);
     }
 
     /// A level with no geo-anchor refuses the whole import at the door, rather
