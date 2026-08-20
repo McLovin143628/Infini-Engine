@@ -760,6 +760,7 @@ impl Ctx<'_> {
 mod tests {
     use super::*;
     use crate::building::palettes::{archetypes, ArchetypeId};
+    use crate::building::plan::plan_building;
     use crate::building::solid_bounds;
 
     fn lot(w: f64, h: f64) -> Rect2 {
