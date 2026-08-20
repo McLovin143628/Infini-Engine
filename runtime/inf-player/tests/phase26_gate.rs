@@ -2190,8 +2190,8 @@ fn the_streaming_loop_stays_inside_its_budgets() {
     println!(
         "phase26 budgets on {} ({:?}){}:\n  \
          cold frame (the floor, into an empty pool) {:.2} ms\n  \
-         steady mean over {} frames               {:.2} ms (all {} frames: {:.2} ms)\n  \
-         the same path with no VT at all          {control_steady:.2} ms \
+         steady mean over {} frames {:.2} ms (all {} frames: {:.2} ms)\n  \
+         the same path with no VT at all {control_steady:.2} ms \
          (streaming is {:+.2} ms of it)\n  \
          {} admits, {} deferred; {} on the cold frame, peak {} on a steady one \
          (per frame: {})\n  \

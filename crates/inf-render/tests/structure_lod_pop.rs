@@ -220,10 +220,10 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
         info.name, info.device_type
     );
     println!(
-        "  noise floor (the same scene twice): {noise} px differ, worst channel          {noise_worst}/255"
+        "  noise floor (the same scene twice): {noise} px differ, worst channel {noise_worst}/255"
     );
     println!(
-        "  NOTE: `ScatterSettings::default().mesh_distance_m` is {} m, so at the          {STRUCTURE_LOD_M} m structure swap the scatter path is ALREADY in its          impostor band. Both readings are given.",
+        "  NOTE: `ScatterSettings::default().mesh_distance_m` is {} m, so at the {STRUCTURE_LOD_M} m structure swap the scatter path is ALREADY in its impostor band. Both readings are given.",
         inf_render::RenderSettings::default().scatter.mesh_distance_m
     );
     let mut at_swap = None;
@@ -251,7 +251,7 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
             let (differing, worst) = moved(&p, &s);
             let (covered, bw, bh) = silhouette(&p, &s, &empty);
             println!(
-                "  {label} {d:>6.1} m: building {bw} x {bh} px ({covered} px,                  {:.4} % of frame); {differing} px move ({:.1} % of it), worst                  channel {worst}/255; perceptual mean {mean:.5} / max {max:.5}",
+                "  {label} {d:>6.1} m: building {bw} x {bh} px ({covered} px, {:.4} % of frame); {differing} px move ({:.1} % of it), worst channel {worst}/255; perceptual mean {mean:.5} / max {max:.5}",
                 covered as f64 / f64::from(W * H) * 100.0,
                 differing as f64 / covered.max(1) as f64 * 100.0,
             );
@@ -273,7 +273,7 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
     // ANTI-VACUITY (1): the building is really on screen at the swap distance.
     assert!(
         covered > 400,
-        "only {covered} pixels are the building at {STRUCTURE_LOD_M} m — the shot          is empty and the comparison is between two skies"
+        "only {covered} pixels are the building at {STRUCTURE_LOD_M} m — the shot is empty and the comparison is between two skies"
     );
     // ANTI-VACUITY (2): the two arms really drew different geometry, by more than
     // the renderer's own repeatability (which measured ZERO — the frame is
@@ -281,18 +281,18 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
     // would not be a LOD at all.
     assert!(
         differing > noise,
-        "the swap moved {differing} pixels against a {noise}-pixel noise floor —          the two arms are indistinguishable from one scene rendered twice"
+        "the swap moved {differing} pixels against a {noise}-pixel noise floor — the two arms are indistinguishable from one scene rendered twice"
     );
 
     println!(
         "
   THE VERDICT — the parts->shell swap, as GEOMETRY, at {STRUCTURE_LOD_M} m:
-             the building is {bw} x {bh} px (the I3 ledger's \"about thirty          pixels tall\", measured); {differing} of its {covered} px move ({:.1} %),          worst channel {worst}/255, frame-level perceptual mean {mean:.5} against          a {:.2} tolerance. The pop is INVISIBLE and the cross-fade is REFUSED.",
+             the building is {bw} x {bh} px (the I3 ledger's \"about thirty pixels tall\", measured); {differing} of its {covered} px move ({:.1} %), worst channel {worst}/255, frame-level perceptual mean {mean:.5} against a {:.2} tolerance. The pop is INVISIBLE and the cross-fade is REFUSED.",
         differing as f64 / covered.max(1) as f64 * 100.0,
         inf_render::golden::GOLDEN_MEAN_TOLERANCE,
     );
     println!(
-        "  …and the finding beside it: with the SHIPPED impostor band on          (`mesh_distance_m` {} m < {STRUCTURE_LOD_M} m), the same building's          silhouette is {imp_w} x {imp_h} px / {imp_covered} px — {:.1}x the          mesh's {covered} px — and {imp_moved} of it ({:.1} %) moves at the swap,          worst channel {imp_worst}/255, mean {imp_mean:.5} / max {imp_max:.5}.          The discontinuity a player sees at 192 m is the IMPOSTOR's, not the          band pair's.",
+        "  …and the finding beside it: with the SHIPPED impostor band on (`mesh_distance_m` {} m < {STRUCTURE_LOD_M} m), the same building's silhouette is {imp_w} x {imp_h} px / {imp_covered} px — {:.1}x the mesh's {covered} px — and {imp_moved} of it ({:.1} %) moves at the swap, worst channel {imp_worst}/255, mean {imp_mean:.5} / max {imp_max:.5}. The discontinuity a player sees at 192 m is the IMPOSTOR's, not the band pair's.",
         inf_render::RenderSettings::default().scatter.mesh_distance_m,
         imp_covered as f64 / covered.max(1) as f64,
         imp_moved as f64 / imp_covered.max(1) as f64 * 100.0,
@@ -309,7 +309,7 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
     assert!(
         mean <= inf_render::golden::GOLDEN_MEAN_TOLERANCE
             && max <= inf_render::golden::GOLDEN_MAX_TOLERANCE,
-        "the parts->shell swap now moves the frame by mean {mean:.5} / max          {max:.5}, past the golden harness's own re-render tolerance. Island          wave I4 REFUSED a cross-fade because this pop was far under it; that          refusal no longer has evidence, and the band pair needs the dither the          I3 ledger describes."
+        "the parts->shell swap now moves the frame by mean {mean:.5} / max {max:.5}, past the golden harness's own re-render tolerance. Island wave I4 REFUSED a cross-fade because this pop was far under it; that refusal no longer has evidence, and the band pair needs the dither the I3 ledger describes."
     );
 
     // **THE CARRIED BOUND, ARMED.** The impostor silhouette being many times the
@@ -319,6 +319,6 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
     // says so instead of the ledger quietly going stale.
     assert!(
         imp_covered > covered * 4,
-        "the impostor silhouette ({imp_covered} px) is no longer far larger than          the mesh's ({covered} px) — island wave I4 carried that ratio as the          reason the visible discontinuity at {STRUCTURE_LOD_M} m belongs to the          impostor band rather than to the structure band pair, and the ledger          needs re-reading"
+        "the impostor silhouette ({imp_covered} px) is no longer far larger than the mesh's ({covered} px) — island wave I4 carried that ratio as the reason the visible discontinuity at {STRUCTURE_LOD_M} m belongs to the impostor band rather than to the structure band pair, and the ledger needs re-reading"
     );
 }

@@ -1623,6 +1623,10 @@ mod tests {
             budget_bytes: inf_render::DEFAULT_VT_BUDGET_BYTES,
             max_texture_dim: 8192,
             trilinear: false,
+            // **Unthrottled** (IB-16): a per-frame upload budget would make a want
+            // that was ASKED FOR and a want that was SEATED two different things in
+            // every count here, which is not what this file is about.
+            upload_budget_bytes: 0,
         });
         let n = lib.register_materials(&content.materials, |g| content.source(g));
         assert_eq!(n, 2);

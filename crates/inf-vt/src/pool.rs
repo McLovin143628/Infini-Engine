@@ -266,7 +266,7 @@ pub enum VtAdvisory {
         budget_bytes: u64,
     },
     #[error(
-        "the {budget_bytes} B/frame upload budget has been over-subscribed for          {frames} consecutive frames ({pages} page(s) held back on the last one);          this is sustained demand rather than a burst — the working set wants more          bandwidth than the budget grants, so raise `upload_budget_bytes`, lower          the content's texel density, or accept a permanently coarser mip"
+        "the {budget_bytes} B/frame upload budget has been over-subscribed for {frames} consecutive frames ({pages} page(s) held back on the last one); this is sustained demand rather than a burst — the working set wants more bandwidth than the budget grants, so raise `upload_budget_bytes`, lower the content's texel density, or accept a permanently coarser mip"
     )]
     UploadBudgetSustained {
         budget_bytes: u64,

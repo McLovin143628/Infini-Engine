@@ -417,11 +417,18 @@ pub fn analytic_floor(lib: &VtTextures, view: &RenderView, coverage: &[VtCoverag
 /// # And the floor cannot be the answer, because it cannot be prefetched
 ///
 /// `VtResidency::apply_wants` admits a miss the frame it is offered, out of the
-/// same pool, with no per-frame admission throttle anywhere in the loop
-/// (`VT_ADMITS_PER_FRAME_CEILING` is a *gate ceiling*, not a governor). So the
-/// floor's fallback count is `max(0, demand − pool)`: under the pool nothing
-/// misses, over it the shortfall is the arithmetic difference, and in **neither
-/// regime does having asked earlier change the number**. Measured, not argued —
+/// same pool. So the floor's fallback count is `max(0, demand − supply)`: under
+/// the supply nothing misses, over it the shortfall is the arithmetic
+/// difference, and in **neither regime does having asked earlier change the
+/// number**.
+///
+/// *`supply` gained a second term in island wave I4 — the per-frame upload
+/// budget (IB-16) — and the sentence survives it, because **the floor lane is
+/// exempt from that budget by construction** (`inf_stream::admit_by_lane`): the
+/// floor is the mandatory residency class and a P28.2 cluster's tiles ride its
+/// lane. `VT_ADMITS_PER_FRAME_CEILING` remains a gate ceiling rather than a
+/// governor; the governor is `upload_budget_bytes` and it governs refinement.*
+/// Measured, not argued —
 /// `whip_pan::a_saturated_floor_cannot_be_prefetched_and_the_arm_says_so` runs
 /// the whole 360° path over an undersized pool and the two arms come out
 /// byte-identical on every floor counter.

@@ -714,7 +714,7 @@ mod tests {
         assert_eq!(txn.deferred, 2, "the tail is deferred, not dropped");
         assert_eq!(
             txn.throttled, 2,
-            "every deferral here is flow control — the pool has 16 slots and              four wants, so nothing was deferred for want of a slot"
+            "every deferral here is flow control — the pool has 16 slots and four wants, so nothing was deferred for want of a slot"
         );
 
         // …and the FLOOR is exempt: the same over-ask in lane 0 seats whole.
@@ -731,7 +731,7 @@ mod tests {
         assert_eq!(
             txn_floor.admits.len(),
             4,
-            "the floor lane must ignore the upload budget — it is the mandatory              residency class and a cluster's tiles ride it"
+            "the floor lane must ignore the upload budget — it is the mandatory residency class and a cluster's tiles ride it"
         );
         assert_eq!(txn_floor.throttled, 0);
 

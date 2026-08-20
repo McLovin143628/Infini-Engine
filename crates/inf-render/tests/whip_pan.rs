@@ -305,10 +305,13 @@ struct Arm {
     ///
     /// The only class a *lead time* can serve. Everything else in this file
     /// measures surfaces that are already on screen, and for those "ask for what
-    /// is needed now" is unbeatable in a loop with no admission throttle — which
-    /// is the ruling `a_saturated_floor_cannot_be_prefetched_and_the_arm_says_so`
-    /// already reached for the floor. If dead reckoning earns anything anywhere,
-    /// it is here.
+    /// is needed now" is unbeatable in a loop with **no latency between admitted
+    /// and sampleable** — which is the ruling
+    /// `a_saturated_floor_cannot_be_prefetched_and_the_arm_says_so` already
+    /// reached for the floor. (Island wave I4 landed a per-frame *throttle*, and
+    /// the ruling survived it; see
+    /// `the_lead_time_ruling_is_conditional_on_the_upload_budget`.) If dead
+    /// reckoning earns anything anywhere, it is here.
     arrival_blur: u64,
     arrival_justified: u64,
     arrival_frames: u64,
@@ -913,10 +916,9 @@ fn every_horizon_in_the_roadmaps_band_beats_the_predictor_being_off() {
 /// does. That is not a defect in the predictor; it is
 /// `a_saturated_floor_cannot_be_prefetched_and_the_arm_says_so` one class up.
 /// `apply_wants` seats a miss the frame it is offered, out of the same pool,
-/// with no admission throttle and no fetch latency — a page is sampleable the
-/// frame it is admitted — so *having asked earlier* buys nothing anywhere in
-/// this loop, and every want spent on where the camera will be is a slot not
-/// spent on where it is.
+/// with no fetch latency — a page is sampleable the frame it is admitted — so
+/// *having asked earlier* buys nothing anywhere in this loop, and every want
+/// spent on where the camera will be is a slot not spent on where it is.
 ///
 /// **P28.5 acted on it** (`docs/memos/p28-5-lead-time-ruling.md`): the shipped
 /// [`inf_render::DEFAULT_PREDICT_HORIZON_TICKS`] is now **0** — the lane at the
@@ -1291,7 +1293,7 @@ fn the_lead_time_ruling_is_conditional_on_the_upload_budget() {
     let free_zero = run_with_upload_budget(Some(HORIZON), PAGES, 0);
     let free_lead = run_with_upload_budget(Some(LEAD), PAGES, 0);
     println!(
-        "IB-16 x P28.5: UNTHROTTLED h=0 blur {}/{} vs h={LEAD} blur {}/{}; the          default budget's own price on this fixture is {} blur tiles",
+        "IB-16 x P28.5: UNTHROTTLED h=0 blur {}/{} vs h={LEAD} blur {}/{}; the default budget's own price on this fixture is {} blur tiles",
         free_zero.blur,
         free_zero.justified,
         free_lead.blur,
@@ -1300,7 +1302,7 @@ fn the_lead_time_ruling_is_conditional_on_the_upload_budget() {
     );
     assert!(
         at_default_zero.blur > free_zero.blur,
-        "the default upload budget did not change this fixture at all ({}          against {}), so nothing below is a measurement of a throttle",
+        "the default upload budget did not change this fixture at all ({} against {}), so nothing below is a measurement of a throttle",
         at_default_zero.blur,
         free_zero.blur
     );
@@ -1314,13 +1316,13 @@ fn the_lead_time_ruling_is_conditional_on_the_upload_budget() {
     //     a lane rather than delaying the head of one.
     assert!(
         at_default_zero.blur <= at_default_lead.blur,
-        "at the default budget a lead time won ({} against {}) — the P28.5          ruling is re-opened and `DEFAULT_PREDICT_HORIZON_TICKS` has to be          re-decided",
+        "at the default budget a lead time won ({} against {}) — the P28.5 ruling is re-opened and `DEFAULT_PREDICT_HORIZON_TICKS` has to be re-decided",
         at_default_lead.blur,
         at_default_zero.blur
     );
     assert!(
         free_zero.blur <= free_lead.blur,
-        "unthrottled, a lead time won ({} against {}) — P28.5's own measurement          no longer reproduces and the ruling is re-opened for a reason that has          nothing to do with IB-16",
+        "unthrottled, a lead time won ({} against {}) — P28.5's own measurement no longer reproduces and the ruling is re-opened for a reason that has nothing to do with IB-16",
         free_lead.blur,
         free_zero.blur
     );
@@ -1328,7 +1330,7 @@ fn the_lead_time_ruling_is_conditional_on_the_upload_budget() {
     // (3) The tight budget bites harder still — anti-vacuity for clause (4).
     assert!(
         tight_zero.blur > at_default_zero.blur,
-        "a 2-page-a-frame budget was no worse than the default ({} against          {}) — the throttle is not scaling with the budget",
+        "a 2-page-a-frame budget was no worse than the default ({} against {}) — the throttle is not scaling with the budget",
         tight_zero.blur,
         at_default_zero.blur
     );
@@ -1337,8 +1339,8 @@ fn the_lead_time_ruling_is_conditional_on_the_upload_budget() {
     //     asserted. A ruling made on a configuration nobody runs is not a ruling.
     let verdict = match tight_zero.blur.cmp(&tight_lead.blur) {
         std::cmp::Ordering::Less => "no lead still wins",
-        std::cmp::Ordering::Equal => "the two TIE — at two pages a frame the              throttle, not the latency, is what the fixture is measuring",
-        std::cmp::Ordering::Greater => "A LEAD WINS — re-open the ruling if this              budget ever becomes a shipped default",
+        std::cmp::Ordering::Equal => "the two TIE — at two pages a frame the throttle, not the latency, is what the fixture is measuring",
+        std::cmp::Ordering::Greater => "A LEAD WINS — re-open the ruling if this budget ever becomes a shipped default",
     };
     println!("IB-16 x P28.5: under the tight budget, {verdict}");
 }

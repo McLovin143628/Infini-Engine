@@ -242,7 +242,7 @@ fn the_render_cut_is_camera_local_and_both_budgets_derive_from_it() {
         // rather than `4n` exactly.
         assert!(
             w[1].0 >= w[0].0 * 4,
-            "each row must at least quadruple the catalog ({} -> {}), or the              growth below is not being measured against a growing world",
+            "each row must at least quadruple the catalog ({} -> {}), or the growth below is not being measured against a growing world",
             w[0].0,
             w[1].0
         );
@@ -251,23 +251,23 @@ fn the_render_cut_is_camera_local_and_both_budgets_derive_from_it() {
     for s in &steps {
         assert!(
             (*s as f64 - mean).abs() <= mean * 0.1,
-            "the per-level ring is not constant: {steps:?} pages while the              catalog quadrupled each step. The cut would then be a function of              the world's SIZE, and no budget could be derived from the ladder."
+            "the per-level ring is not constant: {steps:?} pages while the catalog quadrupled each step. The cut would then be a function of the world's SIZE, and no budget could be derived from the ladder."
         );
     }
     assert!(
         mean > 0.0,
-        "the cut did not grow at all with the ladder — the rows are measuring          one world"
+        "the cut did not grow at all with the ladder — the rows are measuring one world"
     );
     // …and the growth really is logarithmic rather than proportional: four times
     // the pages must not be anywhere near four times the cut.
     let (first, last) = (unclipped[0].1, unclipped[unclipped.len() - 1].1);
     assert!(
         (last as f64) < first as f64 * 2.5,
-        "the cut went from {first} to {last} pages while the catalog went up          16x — that is not logarithmic growth"
+        "the cut went from {first} to {last} pages while the catalog went up 16x — that is not logarithmic growth"
     );
     assert!(
         peaks[0].1.pages < unclipped[0].1,
-        "the 8x8 world did not clip its own cut ({} against {}), so the ring          above is being measured on worlds that may all be too small to fill it",
+        "the 8x8 world did not clip its own cut ({} against {}), so the ring above is being measured on worlds that may all be too small to fill it",
         peaks[0].1.pages,
         unclipped[0].1
     );
@@ -276,7 +276,7 @@ fn the_render_cut_is_camera_local_and_both_budgets_derive_from_it() {
     //     always-on arm measure a cheap grid and the bytes be a multiplication.
     assert_eq!(
         peaks[4].1.pages, peaks[2].1.pages,
-        "the peak cut changed with the page resolution ({} at 65^2 against {}          at 33^2) — pages would not be the grid-independent unit and          `resident_bytes_bound` could not be a multiplication",
+        "the peak cut changed with the page resolution ({} at 65^2 against {} at 33^2) — pages would not be the grid-independent unit and `resident_bytes_bound` could not be a multiplication",
         peaks[4].1.pages,
         peaks[2].1.pages
     );

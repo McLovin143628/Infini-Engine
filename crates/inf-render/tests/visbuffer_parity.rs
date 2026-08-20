@@ -788,6 +788,10 @@ fn parity_textured_virtual_texture() {
             budget_bytes: inf_vt::PageFormat::Rgba8.page_bytes(inf_vt::STORED_TILE_SIZE) * 256,
             max_texture_dim: 8192,
             trilinear: false,
+            // **Unthrottled** (IB-16): a per-frame upload budget would make a want
+            // that was ASKED FOR and a want that was SEATED two different things in
+            // every count here, which is not what this file is about.
+            upload_budget_bytes: 0,
         });
         lib.register_or_record(1, Arc::new(bytes.clone()))
             .unwrap_or_else(|| panic!("the fixture registers: {:?}", lib.refusals()));

@@ -207,7 +207,7 @@ fn sustained_over_subscription_raises_an_advisory_and_a_burst_does_not() {
         let txn = res.apply_wants(&wants);
         assert_eq!(
             txn.out_of_range, 0,
-            "frame {frame} asked for a tile outside the texture — an              out-of-range want is never offered a slot and so is never              throttled, which would make this arm reset its own run"
+            "frame {frame} asked for a tile outside the texture — an out-of-range want is never offered a slot and so is never throttled, which would make this arm reset its own run"
         );
         if raised_at.is_none() && res.upload_advisory().is_some() {
             raised_at = Some(frame);

@@ -75,7 +75,7 @@ fn the_lag_is_origin_independent_at_partition_scale() {
     let at_origin_abs = run(axis_independent_lag_absolute, Vec3d::ZERO, STEPS);
 
     println!("IB-12 lag, {STEPS} steps at {YAW}° yaw, error against the same run at the origin:");
-    println!("  anchor            delta form            absolute form (pre-IB-12)");
+    println!("  anchor delta form absolute form (pre-IB-12)");
     let mut worst_delta = 0.0f64;
     let mut worst_abs = 0.0f64;
     for (label, anchor) in [
@@ -88,7 +88,7 @@ fn the_lag_is_origin_independent_at_partition_scale() {
             run(axis_independent_lag_absolute, anchor, STEPS),
             at_origin_abs,
         );
-        println!("  {label:<18} {d:>12.3e} m       {a:>12.3e} m");
+        println!("  {label:<18} {d:>12.3e} m {a:>12.3e} m");
         worst_delta = worst_delta.max(d);
         worst_abs = worst_abs.max(a);
     }
@@ -349,7 +349,7 @@ fn a_partition_handoff_at_speed_is_absorbed_by_the_lag() {
     );
     assert!(
         worst_after_gap > 0.0,
-        "no step was ever recorded as following a handoff — the branch that          measures the recovery never ran, which is how the first version of this          arm reported 0.000000 m and passed"
+        "no step was ever recorded as following a handoff — the branch that measures the recovery never ran, which is how the first version of this arm reported 0.000000 m and passed"
     );
     // A handoff may cost at most one extra step of catch-up. Three times the
     // steady step is the honest ceiling for "the lag absorbed it": a CUT would be

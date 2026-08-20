@@ -309,7 +309,7 @@ fn the_cost_of_the_city_as_cubes_and_as_baked_meshes() {
         "clause 5 prize on {} ({:?}), {W}x{H}, {} buildings:\n  \
          as PLACEHOLDER CUBES: {cube_count} scatter instances -> GPU frame \
          {cube_ms:.3} ms (scatter pass {:.3} ms)\n  \
-         as BAKED VGEOM      : {} instances of one {}-meshlet asset -> GPU frame \
+         as BAKED VGEOM : {} instances of one {}-meshlet asset -> GPU frame \
          {vgeom_ms:.3} ms (vgeom pass {:.3} ms)\n  \
          delta {:+.3} ms ({:.2}x)",
         info.name,

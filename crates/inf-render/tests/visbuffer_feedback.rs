@@ -225,6 +225,10 @@ fn run(gpu: &GpuContext, visbuffer: bool, hidden: bool, frames: usize) -> Run {
         budget_bytes: inf_vt::PageFormat::Rgba8.page_bytes(inf_vt::STORED_TILE_SIZE) * 2048,
         max_texture_dim: 8192,
         trilinear: false,
+        // **Unthrottled** (IB-16): a per-frame upload budget would make a want
+        // that was ASKED FOR and a want that was SEATED two different things in
+        // every count here, which is not what this file is about.
+        upload_budget_bytes: 0,
     });
     lib.register_or_record(TEX, Arc::new(bytes.clone()))
         .unwrap_or_else(|| panic!("the fixture registers: {:?}", lib.refusals()));
@@ -473,6 +477,10 @@ fn the_meshlet_set_is_handed_over_and_not_marked_twice() {
         budget_bytes: inf_vt::PageFormat::Rgba8.page_bytes(inf_vt::STORED_TILE_SIZE) * 256,
         max_texture_dim: 8192,
         trilinear: false,
+        // **Unthrottled** (IB-16): a per-frame upload budget would make a want
+        // that was ASKED FOR and a want that was SEATED two different things in
+        // every count here, which is not what this file is about.
+        upload_budget_bytes: 0,
     });
     lib.register_or_record(TEX, Arc::new(container()))
         .expect("registers");
@@ -538,6 +546,10 @@ fn the_analytic_floor_still_covers_a_handed_over_meshlet_surface() {
         budget_bytes: inf_vt::PageFormat::Rgba8.page_bytes(inf_vt::STORED_TILE_SIZE) * 256,
         max_texture_dim: 8192,
         trilinear: false,
+        // **Unthrottled** (IB-16): a per-frame upload budget would make a want
+        // that was ASKED FOR and a want that was SEATED two different things in
+        // every count here, which is not what this file is about.
+        upload_budget_bytes: 0,
     });
     lib.register_or_record(TEX, Arc::new(container()))
         .expect("registers");
@@ -791,6 +803,10 @@ fn a_detail_map_does_not_stop_the_per_fragment_pass_marking() {
             budget_bytes: inf_vt::PageFormat::Rgba8.page_bytes(inf_vt::STORED_TILE_SIZE) * 2048,
             max_texture_dim: 8192,
             trilinear: false,
+            // **Unthrottled** (IB-16): a per-frame upload budget would make a want
+            // that was ASKED FOR and a want that was SEATED two different things in
+            // every count here, which is not what this file is about.
+            upload_budget_bytes: 0,
         });
         lib.register_or_record(TEX, Arc::new(bytes.clone()))
             .expect("the fixture registers");

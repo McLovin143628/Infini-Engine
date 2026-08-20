@@ -770,12 +770,21 @@ impl Default for PredictSettings {
 /// | arrival-window blur / 1 728 | **64** | 96 | 144 | 176 | 176 | 128 | 224 |
 ///
 /// The mechanism is structural, not a tuning accident: `apply_wants` seats a
-/// miss the frame it is offered, with no per-frame admission throttle and **no
-/// latency between admitted and sampleable**, so having asked earlier buys
-/// nothing anywhere in this loop and every want spent on where the camera will
-/// be is a slot not spent on where it is. It is
-/// `a_saturated_floor_cannot_be_prefetched_and_the_arm_says_so`, one want class
-/// up.
+/// miss the frame it is offered, with **no latency between admitted and
+/// sampleable**, so having asked earlier buys nothing anywhere in this loop and
+/// every want spent on where the camera will be is a slot not spent on where it
+/// is. It is `a_saturated_floor_cannot_be_prefetched_and_the_arm_says_so`, one
+/// want class up.
+///
+/// *Island wave I4 landed the per-frame upload throttle
+/// ([`VirtualTextureSettings::upload_budget_bytes`]) that
+/// `p28-5-lead-time-ruling.md` §3.5 named as one of the two things that would
+/// reverse this, and **it did not**: a throttle takes the TAIL of a lane, it does
+/// not delay the HEAD of one. Re-measured with it on — h=0 blur 19 542 against
+/// h=18's 19 766 — in `whip_pan::the_lead_time_ruling_is_conditional_on_the_upload_budget`,
+/// which also reports the budget at which a lead genuinely does win (two pages a
+/// frame, which nothing ships). The other half of §3.5, a loader with real
+/// latency, is still not built.*
 ///
 /// So P28.5 ships the lane at zero lead and records the deviation rather than
 /// shipping a knob its own gate measures backwards
