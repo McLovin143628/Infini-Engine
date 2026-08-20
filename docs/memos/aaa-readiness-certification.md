@@ -279,7 +279,8 @@ GI `instance_budget = 4096`.
 scene never approaches either, so the two have never had to agree. At island scale the
 ratchet fires first, and whoever is holding it will not know which number is the real one.
 
-> **CLOSED by island wave I4 (2026-08-20).** They were two guesses at one quantity: how many
+> **CLOSED-AS-A-DERIVATION by island wave I4 (2026-08-20); the ceiling's island half is
+> carried** (audit, same day). They were two guesses at one quantity: how many
 > pages a render cut holds. `inf_terrain::stream::cut_page_bound` is that quantity, and
 > `StreamBudget::for_ladder` and `resident_bytes_bound` are two readings of it.
 >
@@ -289,10 +290,20 @@ ratchet fires first, and whoever is holding it will not know which number is the
 > resolutions. That invariance is what makes a budget derivable; the finding's own premise —
 > that the working set grows with the map — is false in the direction that matters.
 >
-> **They meet now**: `phase16_gate` arm (e) computes what the budget would let its own scene
-> hold and asserts it inside the ratchet — **200 pages → 12.70 MiB** at 129² against a
-> **16 MiB** ceiling and a **5.90 MiB** measured peak. The same arithmetic before this wave
-> gave **65 MiB against 16 MiB**. `crates/inf-terrain/tests/island_working_set.rs`.
+> **They meet at THIS SCENE'S ladder**: `phase16_gate` arm (e) computes what the budget would
+> let its own scene hold and asserts it inside the ratchet — **200 pages → 12.70 MiB** at 129²
+> against a **16 MiB** ceiling and a **5.90 MiB** measured peak. The same arithmetic before
+> this wave gave **65 MiB against 16 MiB**. `crates/inf-terrain/tests/island_working_set.rs`.
+>
+> **What is NOT closed** (the I4 audit): the sentence above it — *"at island scale the ratchet
+> fires first"*. `TERRAIN_RESIDENT_BYTES_CEILING` is still a **flat constant sized for the
+> gate scene**, while `for_ladder` now grows with the terrain in hand. At this finding's own
+> island row — 32 × 32 level-0 pages, five levels, a 257² page — the derived budget is **464
+> pages = 116.91 MiB** and the measured peak cut **250 pages = 63.0 MiB**, against the same
+> **16 MiB**: **7.3×** and **3.9×**, where the finding recorded 16.4×. The wave narrowed the
+> disagreement and did not remove it. `phase16_gate` arm (e2) asserts that gap so the day the
+> ceiling becomes a function of the terrain — which is what closing it needs — the arm goes
+> red and this block is rewritten. **Routed to the island's performance wave.**
 
 ### IB-10 · The island needs a schema window on day one — RELAYED
 
@@ -581,11 +592,19 @@ Two honest bounds on that machinery, both material for the island:
   > **CLOSED by island wave I4 (2026-08-20)** — `runtime/inf-player/tests/fps_instrument.rs`,
   > 1920 × 1080 and 2560 × 1440 over the phase-30 city + a streamed terrain + the phase-29
   > wizard character, with per-pass GPU timings from `inf_render::timing` (the repo had **no**
-  > GPU timing at all before this wave). On an RTX 4070 Ti in release: **p50 39.792 ms
-  > (25.1 fps) at 1080p** and **47.424 ms (21.1 fps) at 1440p**, p95 45.057 / 51.136. The
-  > frame is **CPU-bound** — the sim fixed step alone is 13.659 ms against a 15.875 ms GPU
-  > frame. `SHIPPING_FRAME_BUDGET_MS = 16.6` is what "≥ 60 fps" now MEANS, it is a target and
+  > GPU timing at all before this wave). On an RTX 4070 Ti in release: **p50 37.8–39.9 ms
+  > (25–26 fps) at 1080p** and **44.4–47.5 ms (21–23 fps) at 1440p**, p95 43.7–46.1 / 49.3–51.6
+  > over five independent runs. The frame is **CPU-bound** in every run — the sim fixed step
+  > alone is 13.0–14.9 ms against a 14.4–17.3 ms GPU frame.
+  > `SHIPPING_FRAME_BUDGET_MS = 16.6` is what "≥ 60 fps" now MEANS, it is a target and
   > not an assertion, and the instrument prints the distance from it every run.
+  >
+  > **Read with its scope** (the I4 audit): that frame draws **no shadows, no GI, no VSM, no
+  > TAA, no SSAO, no bloom and no visbuffer** — the shipped defaults for a level that authors
+  > no render block. The same content at 1080p with the authorable half of that stack turned
+  > on measures **p95 92.853 ms (13 fps), GPU frame 36.116 ms**: the lighting stack roughly
+  > doubles the frame, and it is not in any number above or in
+  > `SHIPPING_FRAME_CEILING_MS`. The harness prints both.
 * **Every wall-clock assertion is disabled on software/paravirtual adapters** (they print
   and return), and `create_instance()` hard-codes `VULKAN | METAL` with no DX12/GL and no
   `WGPU_BACKEND` override honoured. On a Windows box without a Vulkan ICD every GPU test
@@ -641,10 +660,13 @@ Not a plan — an ordering the numbers imply.
    because both are ceilings a city walks into on its first frame.)*
 6. ~~**Build an fps instrument at shipping resolution** before claiming 60 fps, and settle
    the terrain ratchet-vs-budget disagreement (IB-9).~~ *(wave I4 — with **IB-12** and
-   **IB-16**, both pulled forward. The instrument exists and says 25.1 fps at 1080p; the
-   dearest single thing in the frame is the **sim fixed step at 13.659 ms**, which no §8
-   budget covers and which is where the next 60 fps work is.)*
-7. Verify IB-15 (pyramid seam, global silhouette) before committing to multi-terrain. ←
-   **next**, with IB-11's far half (I5).
+   **IB-16**, both pulled forward. The instrument exists and says ~25 fps at 1080p with the
+   lighting stack **off** and ~13 fps with it on; the dearest single thing in the frame is
+   the **sim fixed step at 13.0–14.9 ms**, which no §8 budget covers. IB-9's ceiling is still
+   a gate-scene constant at island scale.)*
+7. **A performance wave**, which the instrument now makes possible to hold to a number: the
+   sim fixed step (13–15 ms, no §8 budget), the lighting stack's +43 ms p95, and IB-9's
+   island-scale ceiling. ← **next**, with IB-15 (pyramid seam, global silhouette) and
+   IB-11's far half (I5).
 
 Only then author content.

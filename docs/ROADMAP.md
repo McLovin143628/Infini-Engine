@@ -24410,13 +24410,49 @@ machine, same adapter:
 | run 1 | 39.792 | 45.057 | 46.709 | 15.875 | 47.424 | 51.136 | 22.716 |
 | run 2 | 40.955 | 45.165 | 48.877 | 19.776 | 48.218 | 51.587 | — |
 | run 3 | 40.517 | 46.096 | 47.259 | 17.615 | 43.281 | 49.268 | 21.436 |
+| **audit run 4** | **39.917** | 45.173 | 47.449 | **16.949** | 46.439 | 49.909 | 22.413 |
+| **audit run 5** | **37.803** | 45.450 | 47.074 | **14.395** | 44.397 | 49.263 | 21.862 |
+| **audit run 6** | **39.561** | 43.679 | 44.657 | **17.323** | 46.285 | 49.917 | 22.121 |
 
-The **CPU-side p50 is stable to about 3 %**; the **GPU frame moves by 20 %** run to run
-(15.875 → 19.776 ms at 1080p on byte-identical code), which is boost clocks and nothing the
+*(The audit's three runs widened four of the wave's five ranges — its 1080p p50 band 39.8–41.0
+becomes **37.8–41.0**, the GPU frame's 15.9–19.8 becomes **14.4–19.8** (a 37 % spread, not
+20 %), the sim step's 13.1–14.3 becomes **13.0–14.9**, and the pipelined estimate's 21.0–21.8
+becomes **20.3–22.6**. Run 6 is the post-audit harness, whose sixth CPU stage and lit-stack
+pass do not touch the shipped measurement.)*
+
+The **CPU-side p50 is stable to about 5 %**; the **GPU frame moves by 37 %** run to run
+(14.395 → 19.776 ms at 1080p on byte-identical code), which is boost clocks and nothing the
 engine did — and is exactly why `SHIPPING_FRAME_CEILING_MS` is 58.0 and not 47. The
 *shape* is what reproduces: the frame is CPU-bound in every run, the sim fixed step is
-13.1–14.3 ms in every run, and the scatter pass is **67.8 / 68.0 %** of the 1080p GPU frame
-in the two runs that printed it. Quote the shape; treat any single millisecond as ±20 %.
+13.0–14.9 ms in every run, and the scatter pass is **67.6–68.1 %** of the 1080p GPU frame in
+every run that printed it. Quote the shape; treat any single millisecond as ±20 %.
+
+**AND THE FRAME DRAWS NO SHADOWS** (the audit). `RenderSettingsRecord::default()` ships
+shadows / GI / TAA / SSAO / bloom off, `VsmSettings::default().enabled` is false engine-wide,
+and the visbuffer is off on every tier — so every number above is an honest measurement of
+what a shipped player draws for a level that authors no render block, and is **not** a lit
+AAA frame. The same content at 1080p with the authorable half turned on, through the same
+`shipped_settings` door:
+
+```text
+                        as shipped     with the stack on
+  p50                   39.561 ms      75.172 ms  (13.3 fps)
+  p95                   43.679 ms      92.853 ms  (+42.9 ms)
+  GPU frame             17.323 ms      36.116 ms  (+18.8 ms)
+  dearest passes                       scatter 16.124 | gi 6.049 | terrain 4.716
+                                       vgeom 2.495 | vsm-raster 1.411 | sky 1.319
+```
+
+Reported, never asserted, never folded into the ceilings: `SHIPPING_FRAME_CEILING_MS` is
+minted over the shipped configuration and does not cover this one.
+
+**And the camera moves 30 m per round.** `CITY_DRIVE_STEP_M` is 0.25 m, so 120 frames is
+30 metres and the whole four-pass run covers **120 m of a 1 260 × 900 m city**. The numbers
+describe one neighbourhood at one vantage, not a tour of the district — which is also why
+removing the `step = 0` that makes every round replay one sequence moves the p50 by about
+1 % today (39.104 against 39.5–39.9) rather than by the 28.3 ms the wave's law records. The
+law stands and the discipline is right; **the 28.3 ms figure does not reproduce from this
+tree** and should not be quoted.
 
 **Two kinds of constant, because one could not be both.** `SHIPPING_FRAME_BUDGET_MS = 16.6`
 is what "≥ 60 fps" MEANS and is **never asserted** — a constant asserted where it fails is a
@@ -24579,9 +24615,10 @@ evaluate PCG volumes**; the player does, on load, so there is nothing cook-side 
 | `a_rebase_mid_lag_moves_the_camera_by_exactly_the_origin_and_no_more` | continuity across a rebase |
 | `a_partition_handoff_at_speed_is_absorbed_by_the_lag` | 1.02x a steady step across a one-step subject gap |
 | `the_shipped_camera_calls_the_delta_form_and_only_that` | one production call site, counted with the test module cut off |
-| `the_parts_to_shell_swap_measured_at_1080p` | the refusal, armed; and the impostor ratio, carried |
-| `a_baked_grammar_building_becomes_one_vgeom_asset` | the bake to vgeom path, and a frame with zero placeholder batches |
-| `the_cost_of_the_city_as_cubes_and_as_baked_meshes` | +1.416 ms, printed, never asserted |
+| `the_parts_to_shell_swap_measured_at_1080p` | the refusal, armed on the OBJECT; the shipped pop and the impostor ratio, both armed as the refusal's condition |
+| `a_baked_grammar_building_becomes_one_vgeom_asset` | the bake to vgeom path, and the packed asset's own header read back |
+| `the_cost_of_the_city_as_cubes_and_as_baked_meshes` | +0.32 ms against a COMPARABLE cube configuration, printed, never asserted |
+| `the_registration_door_carries_the_upload_budget` | *(added by the audit)* IB-16's one production call site |
 
 ### Counts
 
@@ -24600,13 +24637,109 @@ evaluate PCG volumes**; the player does, on load, so there is nothing cook-side 
 * **A budget is a TARGET or a TRIPWIRE and cannot be both.**
 * **The build is not the build**: a wall clock measured at `opt-level = 1` with debug
   assertions is a fact about a build nobody ships — the paravirtual-adapter law one layer down.
-* **A MIN over samples of different things is a selection, not a minimum** (28.3 ms -> 39.8 ms
-  once every round replayed the same camera sequence).
+* **A MIN over samples of different things is a selection, not a minimum** — the discipline is
+  right and every round replays one camera sequence. *(The 28.3 ms the wave attributed to its
+  absence does not reproduce: `CITY_DRIVE_STEP_M` is 0.25 m, so a round is 30 metres and
+  removing the reset costs about 1 %. The law stands; the number was retired by the audit.)*
 * **A check that cannot fire is not a check** — the handoff arm reported 0.000000 m and passed.
+  *(And the ceiling it was repaired with, 3× a steady step, still sat above the 1.77× cut it
+  named; a threshold has to be below the defect it exists to catch.)*
 * **Measure the sign, not just the size**: real geometry was assumed to be the cheap way to
-  draw a city and is 1.416 ms dearer.
+  draw a city and is dearer. *(The audit's correction: **+0.32 ms**, not 1.416 — the first
+  measurement compared a scatter path culled at 400 m against a meshlet path with no distance
+  cull, and its 30-frame mean answered with a different sign on three of four runs. Both sides
+  are audited and MIN-of-rounds'd now.)*
 * **A throttle takes the tail of a lane, not the head of one** — which is why a per-frame
   admission budget did not reverse a prefetch ruling built on zero latency.
 * **`LNK1318: Unexpected PDB error; LIMIT (12)` is the disk-full hazard in its documented
   disguise** — met again at 0.00 GB free; `target/debug/incremental` alone was 59 GB and
   deleting just it restored the build with no cold rebuild.
+
+## The I4 audit (adversarial, `1d33295..d67e180` audited; the audit's own commits follow `d67e180`)
+
+**Every headline measurement HELD on re-measurement, from the tests that print them**: the
+IB-12 lag at 6.551e-14 / 8.207e-11 / 7.082e-10 m against 2.618e-6 / 1.309e-4 / 1.309e-3 and
+its 1.848e6x; 2 rebases over 3 km at 3.7e-5 m; the handoff at 0.384902 m against 0.376831
+(1.02x); the render cut at 64 / 157 / 250 / 340 pages with a constant ring; 200 pages ->
+12.70 MiB against 16 MiB and 5.90 MiB; the burst draining in exactly 10 frames at 36 992 B
+with 180 flow-control deferrals; the advisory at frame 14 of 15; the P28.5 re-measurement at
+19 542 / 19 766 (default), 18 752 / 18 976 (unthrottled) and 76 074 / 75 928 (two pages a
+frame); the LOD pop at 63 of 2 903 px, worst channel 18/255, noise floor zero; the impostor
+at 55 868 px / 19.2x / 93.9 %; the bake at 424 parts -> 10 176 vertices / 5 088 triangles ->
+144 meshlets; goldens 54; schemas unmoved; the eaten-continuation gate green (the 57 repairs
+are complete). The instrument's own numbers reproduce **in shape** on three independent
+release runs and **not** inside four of the five ranges the wave tabulated — see the widened
+table above.
+
+### The findings
+
+| # | severity | finding | disposition |
+|---|---|---|---|
+| A1 | **high** | **The instrument measures a frame with the expensive half of the renderer off** — no shadows, GI, VSM, TAA, SSAO, bloom or visbuffer — and neither the harness, the ledger, the certification nor `docs/profiling.md` said so. Those are the shipped defaults, so the measurement is honest; quoting it as "what the engine costs" is not. | FIXED. The harness prints what the frame does not draw, and **measures the stack**: p95 92.853 ms lit against 43.679 as shipped, GPU frame 36.116 against 17.323. Reported, never asserted, never folded into the ceilings. |
+| A2 | med | The headline p50/p95/p99 is a **percentile** and the whole stage table beside it a **mean**, with an unnamed residue between them; the timestamp readback ran inside the timed span and inside no stage. | FIXED. A sixth stage ("timing readback", 0.015 ms), the round's mean printed beside the percentiles, and an assertion that the stages **tile** the mean frame (0.001 ms apart). |
+| A3 | med | Four of the wave's five run-to-run ranges are too narrow — three independent audit runs fall outside them. The GPU frame moves **37 %**, not 20 %. | CORRECTED in place; the table now carries six runs. |
+| A4 | **high** | **Clause 5's price compared two culling policies**: the cube side was distance-culled at 400 m (432 046 of 434 176 thrown away, **zero** drawn as meshes) against a meshlet path with no distance cull. Its anti-vacuity clause counted `Vec::len()` on the CPU, which a cull cannot see. And a 30-frame mean answered with a **different sign on three of four runs**. | FIXED. Both sides audited, the cube side measured at both band settings, MIN-of-5-rounds. Reproducible: 0.539 / 1.25 / 1.573 ms, i.e. **+0.32 ms** against a comparable configuration, not +1.416. |
+| A5 | **high** | **IB-16's one production door was unarmed.** Replacing `build_vt_level`'s `upload_budget_bytes: settings.vt.upload_budget_bytes` with `0` left the whole tree green with the throttle silently off in both hosts. Every IB-16 arm builds its `VtPoolConfig` by hand. | FIXED — `the_registration_door_carries_the_upload_budget` goes through the door and asserts the state (1 of 16 seated at a one-page budget; 16 of 16 unthrottled as the control). |
+| A6 | med | **IB-9's ceiling half is not closed.** The derivation is; the certification's other sentence — "at island scale the ratchet fires first" — is not: `TERRAIN_RESIDENT_BYTES_CEILING` is still a flat gate-scene constant. At the island row the derived budget is **116.91 MiB** and the measured cut **63.0 MiB** against **16 MiB** (7.3x and 3.9x, from 16.4x). | CORRECTED + ROUTED. `phase16_gate` arm (e2) asserts the gap so closing it turns the arm red. |
+| A7 | med | **Clause 6's refusal was armed by a clause that cannot fail.** `image_diff` averages over a 64 x 36 downscale, so a change confined to a 2 903-px object moves the frame mean by at most 0.0014 — **43x under the tolerance at its arithmetic maximum**. | FIXED. The refusal is armed on the object (2.2 % of its own pixels, worst channel 18/255, against 5 % and 32/255) with the frame-scale pair kept beside it. |
+| A8 | med | The LOD-pop **noise floor was taken with impostors ON** and compared against a delta taken with impostors OFF, and "the frame is bit-deterministic" was printed and never asserted. | FIXED. One floor per configuration, both `assert_eq!`d at zero. |
+| A9 | med | The **shipped** LOD configuration's pop (93.9 % of a silhouette 19.2x the mesh's) had no assertion, and the attribution — "the discontinuity belongs to the impostor band rather than to the structure band pair" — is causally wrong: both frames there are impostors, so the CHANGE is the band pair's and the impostor owns its SIZE. | FIXED. Armed as the refusal's **condition**; the wording sends the next reader to the billboard sizing. |
+| A10 | med | **The handoff ceiling sat above the cut it named**: 3x a steady step, where a full cut is 1.77x. The arm could not see the defect its own comment describes. | FIXED — 1.5x, with the cut computed and printed and a second clause pinning the ceiling below it. |
+| A11 | med | The **rebase arm forgave a 10 m jump on any step**: it rounded the unexplained render step to the nearest `ORIGIN_SNAP` unconditionally. | FIXED — forgiven only on the step `maybe_rebase` reports. |
+| A12 | med | **A scripted insertion matched three anchors it was not meant to**: the I4 `### Counts` table was pasted into the Phase 25, wave I1 and wave I2 blocks of this file. | FIXED — three deleted. The chr(92) law's cousin, and its thirteenth catch. |
+| A13 | low | **Clause 5's "ZERO placeholder batches" was a fixture tautology** — `scatter.is_empty()` over a `RenderScene` built with `..Default::default()` and only vgeom pushes; with `asset.id == BAKED_ID`, `vgeom_assets.len() == 1` and "every instance names BAKED_ID", four identities of the two lines that produced both sides. | FIXED — deleted, replaced by the packed asset's own header read back (18.511 m), and the projector's standing gap written down where the claim used to be. |
+| A14 | low | **Three ledger numbers no test prints**: "sixty `timestamp_writes: None`" (61); `whip_pan`'s "1 220 blur tiles" (790) and "19 972 / 20 196" (19 542 / 19 766); `SHIPPING_FRAME_CEILING_MS`'s "after 24 warm-up" (a discarded pass of 120). | CORRECTED. |
+| A15 | low | `VtStats::budget_clamped` still documented as "deferred FOR WANT OF A SLOT" after IB-16 made a throttled want deferred too; `inf_player::terrain_stream`'s pin doc still said `max_resident_tiles` is 1024; `island_working_set`'s tightness message called the 64x64 row "island-class". | CORRECTED. |
+| A16 | **retracted claim** | **"A MIN over different stretches reported 28.3 ms."** `CITY_DRIVE_STEP_M` is 0.25 m, so a round is 30 metres and the whole run is 120 m of a 1 260 m city; removing the `step = 0` reset costs about **1 %** (39.104 ms). The law is right and the fix is right; the number does not reproduce from this tree. | LAW KEPT, NUMBER RETIRED. |
+| A17 | carried | **The cook does not evaluate PCG volumes** — verified. `inf-packager` decodes a `.inf_pcg` for two advisories and a dep edge and never calls `evaluate` / `evaluate_grammars` / `evaluate_buildings` / `compose_volume`; the three production evaluation paths are the player's world builder, cell activation and the editor's `pcg_evaluate`. Shipped packs DO contain PCG buildings (evaluated at load) — the claim is about cook-time baking, and it is accurate with that qualification. | VERIFIED + ROUTED as the next wave's first clause. |
+| A18 | carried | `evaluate_biome_bindings` has **no cell-streaming call site** — a streamed cell evaluates its `PcgVolume` (I1's fix) and not its biome bindings. Pre-existing, not this wave's. | ROUTED. |
+
+**Mutation evidence.** Five of the implementer's mutations were re-run and eighteen new ones
+run; after the repairs each dies at exactly the arm that names it and at no other:
+
+| mutation | before | after |
+|---|---|---|
+| the floor lane is throttled (`lane >= LANE_FLOOR`) | — | `one_transaction_admits_a_cluster_page_and_its_tiles` + `the_unified_streamer_stays_inside_its_budgets` (phase28) and `the_admit_budget_defers_the_tail_and_names_it_throttled` (inf-stream). The wave's "throttling the floor retracted a cluster page" reproduces. |
+| a throttled deferral is not counted as throttled | — | the same inf-stream arm |
+| `AdmitBudget::from_bytes` treats bytes as seats | — | `a_byte_budget_becomes_seats_at_the_pages_own_size` |
+| `throttled_run` counts a total, not a run | — | `sustained_over_subscription_raises_an_advisory_and_a_burst_does_not` |
+| `cut_page_bound` gains an O(pages) term | — | the tightness clause of `the_render_cut_is_camera_local_…` |
+| `StreamBudget::for_ladder` returns a flat 1024 | *green in `island_working_set`* | `phase16_gate` (e), at the ledger's own 65.00 MiB |
+| the ring assertion demands an IDENTICAL peak (the wave's own first draft) | — | the same arm |
+| `axis_independent_lag` reverts to the absolute form | — | `the_lag_is_origin_independent_at_partition_scale` **and** `the_shipped_camera_calls_the_delta_form_and_only_that` |
+| the handoff branch is re-derived from the cell index (the wave's own defect) | — | `a_partition_handoff_at_speed_is_absorbed_by_the_lag` |
+| `whip_pan::run` goes back to unthrottled | — | `the_lead_time_ruling_is_conditional_on_the_upload_budget` |
+| a graph node is skipped when the timer is attached | — | `timing_changes_no_pixel` |
+| `FrameTimer::mark` drops one name | — | `the_report_names_every_pass_and_the_segments_tile_the_frame` |
+| `FrameTimer::end` resolves one query short | — | the same arm, at its tiling clause |
+| the projection stage is left untimed | — | the instrument's new stage-tiling assertion |
+| `build_vt_level` stops carrying the upload budget | **the whole tree green** | `the_registration_door_carries_the_upload_budget` |
+| the cube side's bands are not opened | — | `the_cost_of_the_city_…`'s comparability clause |
+| `shoot` ignores its `impostors` argument | — | the impostor-ratio clause |
+| the noise floor compares two different scenes | — | the new `assert_eq!(noise, 0)` |
+
+Two mutations are recorded as **coverage bounds** rather than defects: leaving the 0.015 ms
+timestamp readback untimed is below any tolerance a wall-clock sum can carry (which is why
+the stage-tiling arm is aimed at a stage-sized residue), and
+`VirtualTextureSettings::default().upload_budget_bytes = 0` is invisible to `whip_pan`,
+which builds its pool config directly — the door arm above is what covers that setting's
+production path.
+
+### Laws the audit paid for
+
+* **A frame-scale tolerance cannot arm an object-scale claim.** `GOLDEN_MEAN_TOLERANCE` over a
+  64 x 36 downscale is 43x out of reach for anything a 0.14 %-coverage object can do. When a
+  measurement is about a thing, assert it in the thing's own units.
+* **A threshold has to sit below the defect it names.** "3x a steady step" against a cut that
+  is 1.77x is a ceiling that cannot fire; compute the defect and put the threshold under it.
+* **A wall clock needs MIN-of-rounds or it has no sign.** One 30-frame mean of an identical
+  scene lands between 0.54 and 5.76 ms on this card, and a comparison built on one flipped
+  sign three times in four runs.
+* **Two configurations are not one comparison.** A path culled at 400 m against a path with no
+  distance cull answers a question about culling policy, and the audits are what say so.
+* **A setting reaches production through one line, and that line needs an arm.** The I1 law,
+  met again: every IB-16 test built its pool by hand and the door was free to stop carrying
+  the budget.
+* **A default that is off is part of the measurement.** "≥ 60 fps" measured over a frame with
+  no shadows, GI, VSM, TAA, SSAO or bloom is a true number about a configuration, and a
+  constitution has to name the configuration.

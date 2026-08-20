@@ -21,7 +21,8 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **I1** | foundations — IB-7 layout, IB-1 PCG/streaming, IB-10 schema window, IB-15 multi-terrain | **DONE + AUDITED** (+ `.inf_sm` v3 addendum) |
 | **I2** | the GIS door — IB-3, IB-4, IB-5, IB-6, IB-14, IB-11's near half | **DONE + AUDITED** — battery 296 / 5 618 / 0 / 13, frontend 702 / 78, goldens 54, clippy 0, rustdoc 443 |
 | **I3** | city scale — IB-2a/b/c, IB-8, IB-13, the city fixture | **DONE + AUDITED** — see below |
-| **I4** | the fps instrument + budgets — IB-9, IB-16, IB-12, the shipping-resolution harness | **DONE** — see below |
+| **I4** | the fps instrument + budgets — IB-9, IB-16, IB-12, the shipping-resolution harness | **DONE + AUDITED** — see below |
+| **IP** | **performance** — the cook's PCG evaluation, the sim fixed step, the lighting stack, IB-9's island ceiling | **NEXT** — the wave the instrument makes possible; routed by the I4 audit, see *What IP inherits* below |
 | I5 | source data — IB-11 (DEM ingest reality, CRS, LiDAR) | not started |
 | ~~I6~~ | ~~scale seams — IB-12~~ *(pulled into I4; IB-8 and IB-13 into I3)* | **absorbed** |
 | I7 | content — the 50 km² Vancouver map itself | not started |
@@ -231,10 +232,30 @@ twice.
   instrument does not assert it: `cargo test --release` is the run that does. Measured: the
   same frame is **39.8 ms** release and **46.4 ms** dev at 1080p.
 * **A MIN over samples of different things is a selection, not a minimum** (I4). The
-  instrument's first draft let its camera step run on across rounds, so each round flew a
-  different stretch of the city and MIN-of-rounds reported **28.3 ms** by picking the
-  cheapest stretch. Every round replays the identical sequence now, and the honest number is
-  **39.8 ms**.
+  instrument's first draft let its camera step run on across rounds; every round replays the
+  identical sequence now, which is the right discipline and is kept. *(The **28.3 ms** the
+  wave attributed to its absence does not reproduce — the I4 audit re-ran the mutation and
+  the p50 moved by about 1 %, to 39.104 ms, because `CITY_DRIVE_STEP_M` is 0.25 m and a
+  120-frame round is **thirty metres**. The law stands; the figure is retired.)*
+* **A wall clock with no MIN-of-rounds has no sign** (I4 audit). Clause 5's price took one
+  30-frame mean per configuration and answered **−2.03, −0.28, +2.00 and −0.86 ms** on four
+  runs of byte-identical code. The same three configurations under MIN-of-5-rounds reproduce
+  to three decimals. A single mean of an identical scene lands anywhere between **0.54 and
+  5.76 ms** on this card, and any comparison built on one is a coin toss with a decimal point.
+* **A frame-scale tolerance cannot arm an object-scale claim** (I4 audit). `image_diff`
+  averages over a 64 × 36 downscale, so a change confined to a 2 903-pixel building can move
+  the frame mean by at most **0.0014 — 43× under `GOLDEN_MEAN_TOLERANCE` at its arithmetic
+  maximum**. Clause 6's refusal was armed by a clause that could not fail for any LOD swap
+  whatever. Assert a measurement in the units of the thing it is about.
+* **A threshold has to sit below the defect it names** (I4 audit). The handoff arm allowed
+  3× a steady step and its own comment priced a cut at "0.667 m against a few centimetres" —
+  but the steady step is 0.377 m, so a full cut is **1.77×** and passed. Compute the defect,
+  then put the threshold under it.
+* **A default that is OFF is part of the measurement** (I4 audit). The instrument's frame
+  draws no shadows, GI, VSM, TAA, SSAO, bloom or visbuffer, because those are the shipped
+  defaults for a level that authors no render block. The number is true; it is a number about
+  a configuration, and a constitution has to name the configuration. Measured: the same
+  content lit is **p95 92.853 ms against 43.679**, GPU frame **36.116 against 17.323**.
 * **The render cut is O(LEVELS), not O(pages)** (IB-9). A quadtree cut's refine radius
   doubles exactly when its node size doubles, so a level contributes the same ring however
   large the world is, and the pyramid terminates at `min_tiles`. Measured across four world
@@ -628,8 +649,17 @@ measured* — asserted at **370 468 solids**, not assumed. The settings come fro
 `inf_player::render::shipped_settings`, extracted out of `PlayerRenderHost::new` so there is
 one answer to "what does the player render with".
 
-**RTX 4070 Ti, release, tier High, 3 rounds × 120 frames after a discarded pass, MIN of
-rounds, every round replaying the same camera sequence:**
+**AND THE FRAME DRAWS NO SHADOWS** (the I4 audit). `RenderSettingsRecord::default()` ships
+shadows / GI / TAA / SSAO / bloom off, `VsmSettings::default().enabled` is `false`
+engine-wide, and the visbuffer is off on every tier — so every number below is an honest
+measurement of **what a shipped player draws for a level that authors no render block**, and
+is not a lit AAA frame. The harness now says so in its own output and measures the
+difference through the same `shipped_settings` door: at 1080p, **p95 92.853 ms (13.3 fps)
+lit against 43.679 as shipped, GPU frame 36.116 against 17.323** — the stack roughly doubles
+the frame, and none of it is in `SHIPPING_FRAME_CEILING_MS`.
+
+**RTX 4070 Ti, release, tier High, 3 rounds × 120 frames after a discarded pass of 120, MIN
+of rounds, every round replaying the same camera sequence:**
 
 | | p50 | p95 | p99 | fps at p50 |
 |---|---|---|---|---|
@@ -666,13 +696,22 @@ machine, same adapter:
 | run 1 | 39.792 | 45.057 | 46.709 | 15.875 | 47.424 | 51.136 | 22.716 |
 | run 2 | 40.955 | 45.165 | 48.877 | 19.776 | 48.218 | 51.587 | — |
 | run 3 | 40.517 | 46.096 | 47.259 | 17.615 | 43.281 | 49.268 | 21.436 |
+| **audit 4** | **39.917** | 45.173 | 47.449 | **16.949** | 46.439 | 49.909 | 22.413 |
+| **audit 5** | **37.803** | 45.450 | 47.074 | **14.395** | 44.397 | 49.263 | 21.862 |
+| **audit 6** | **39.561** | 43.679 | 44.657 | **17.323** | 46.285 | 49.917 | 22.121 |
 
-The **CPU-side p50 is stable to about 3 %**; the **GPU frame moves by 20 %** run to run
-(15.875 → 19.776 ms at 1080p on byte-identical code), which is boost clocks and nothing the
-engine did — and is exactly why `SHIPPING_FRAME_CEILING_MS` is 58.0 and not 47. The
-*shape* is what reproduces: the frame is CPU-bound in every run, the sim fixed step is
-13.1–14.3 ms in every run, and the scatter pass is **67.8 / 68.0 %** of the 1080p GPU frame
-in the two runs that printed it. Quote the shape; treat any single millisecond as ±20 %.
+**Four of the wave's five ranges were too narrow** (the I4 audit's three runs): 1080p p50
+becomes **37.8–41.0**, the GPU frame **14.4–19.8** (a **37 %** spread, not 20 %), the sim
+step **13.0–14.9**, the pipelined estimate **20.3–22.6**. The **CPU-side p50 is stable to
+about 5 %**; the GPU frame's swing is boost clocks and nothing the engine did — and is
+exactly why `SHIPPING_FRAME_CEILING_MS` is 58.0 and not 47. The *shape* is what reproduces:
+the frame is CPU-bound in every run, the sim fixed step is 13.0–14.9 ms in every run, and
+the scatter pass is **67.6–68.1 %** of the 1080p GPU frame in every run that printed it.
+Quote the shape; treat any single millisecond as ±20 %.
+
+**And the camera moves 30 m per round.** `CITY_DRIVE_STEP_M` is 0.25 m, so the whole
+four-pass run covers **120 m of a 1 260 × 900 m city**. Every number above describes one
+neighbourhood at one vantage.
 
 **IB-9 · both terrain budgets derived from one measurement.** The certification found
 `TERRAIN_RESIDENT_BYTES_CEILING` (16 MiB) and `max_resident_tiles` (1 024 = 264 MiB at 257²)
@@ -691,10 +730,20 @@ Measured over a flythrough across each world's own diagonal:
 `StreamBudget::for_ladder(levels)` is the bound, with **no second multiplier** —
 `sync_render` evicts outside the cut it publishes and then loads, so steady residency *is*
 the cut, and the bound already exceeds its measurement by 1.75×. Both hosts size the budget
-to the terrain in hand. **They meet**: `phase16_gate` arm (e) computes 200 pages → **12.70
+to the terrain in hand. **They meet at this scene's ladder**: `phase16_gate` arm (e) computes 200 pages → **12.70
 MiB** at 129² against a **16 MiB** ceiling and a **5.90 MiB** measured peak. Before, the
 same arithmetic gave **65 MiB against 16 MiB**. `RENDER_LOD0_RADIUS_TILES`, declared twice
 with a `MIRROR of` comment, is Ring 0 now.
+
+**What IB-9 did NOT close** (the I4 audit): the certification's other sentence, *"at island
+scale the ratchet fires first"*. `TERRAIN_RESIDENT_BYTES_CEILING` is still a **flat constant
+sized for the gate scene** while `for_ladder` grows with the terrain in hand, so at the
+certification's own island row — 32 × 32 level-0 pages, five levels, a 257² page — the
+derived budget is **464 pages = 116.91 MiB** and the measured peak cut **250 pages =
+63.0 MiB**, against the same **16 MiB**: **7.3×** and **3.9×**, where the finding recorded
+16.4×. The wave narrowed the disagreement and did not remove it. `phase16_gate` arm (e2)
+asserts the gap, so the day the ceiling becomes a function of the terrain the arm goes red.
+Routed to **IP**.
 
 **IB-16 · the per-frame VT upload budget.** `inf_stream::AdmitBudget`, in the one admission
 walk both page systems run, in **bytes** (an RGBA8 transcode page is 8× BC1's, so a page
@@ -729,18 +778,52 @@ step, 1.02×**, not a cut.
   the golden harness's own re-render tolerance.
 * **and the finding beside it**: `mesh_distance_m` is **120 m**, so *at* the 192 m swap the
   scatter path is already in its **impostor** band — and a building's impostor silhouette is
-  **19.2×** its mesh's (55 868 px against 2 903), of which **93.9 %** moves. The
-  discontinuity a player sees at 192 m is the impostor's, not the band pair's, and a
-  cross-fade built for the band pair would have polished the wrong seam.
+  **19.2×** its mesh's (55 868 px against 2 903), of which **93.9 %** moves.
 
-**Clause 5 · real building geometry — the path proven, the price measured with the wrong
-sign.** bake → `MeshAsset` → `build_vgeom` → `VgeomAsset` → `VgeomInstance` runs end to end
-in memory with no schema and no cook: **424 parts, 10 176 vertices / 5 088 triangles, 144
-meshlets**, and such a frame carries the baked id on every instance with **zero**
-placeholder batches. But at 1080p: **434 176 placeholder cubes cost 3.378 ms of GPU frame
-and 1 024 baked vgeom instances cost 4.793 ms** — real geometry is **1.416 ms DEARER**. It
-is a fidelity decision with a cost, not the performance win the 67.8 % scatter share makes
-it look like. What is missing to ship it is named below.
+  *The attribution, corrected by the I4 audit.* Both frames in that reading are impostors,
+  so the **change is still the band pair's**; what the impostor owns is its **size**, because
+  a billboard is sized from the instance's bounding sphere. "The discontinuity belongs to the
+  impostor band rather than to the structure band pair" sends the next reader to the wrong
+  repair. The refusal is therefore **conditional**: no cross-fade, because as *geometry*
+  there is nothing to fade — and the first repair at this distance is the **billboard's
+  sizing**, not a fade. Both halves are armed now, the shipped half as the refusal's own
+  condition, so fixing the sizing turns the file red and clause 6 is re-decided.
+
+  *And the refusal's armament was itself a clause that could not fail.* It was held against
+  `GOLDEN_MEAN_TOLERANCE`, which averages over a 64 × 36 downscale — an arithmetic ceiling of
+  **0.0014** for anything a 2 903-pixel object can do, 43× under the 0.06 tolerance. It is
+  armed on the object now (≤ 5 % of the building's own pixels, worst channel ≤ 32/255), and
+  the "bit-deterministic" noise floor is `assert_eq!`d at zero per configuration rather than
+  printed.
+
+**Clause 5 · real building geometry — the path proven, the price re-measured.** bake →
+`MeshAsset` → `build_vgeom` → `VgeomAsset` → `VgeomInstance` runs end to end in memory with
+no schema and no cook: **424 parts, 10 176 vertices / 5 088 triangles, 144 meshlets**, and
+the packed `.inf_vmesh` header reads back an 18.511 m bounding radius.
+
+*(The "and such a frame carries the baked id on every instance with zero placeholder
+batches" half was a **fixture tautology** — the scene is hand-built with `vgeom_instances`
+and `..Default::default()`, so `scatter.is_empty()` asserted that `Vec::new()` is empty.
+Deleted by the I4 audit along with three more identities. The projector still emits
+placeholder cubes for every PCG structure; that is the gap, and it is IP's.)*
+
+**The price, corrected.** The wave measured 434 176 cubes at 3.378 ms against 1 024 baked
+instances at 4.793 and recorded **+1.416 ms DEARER**. Both halves of that were wrong: the
+cube side was **distance-culled at 400 m** (432 046 of 434 176 thrown away, **zero** drawn
+as meshes) against a meshlet path with no distance cull at all, so the delta was between two
+culling policies; and a 30-frame mean answered with a **different sign on three of four
+runs**. With both sides audited, the cube side measured at both band settings, and
+MIN-of-5-rounds, the three numbers reproduce to three decimals:
+
+| | GPU frame |
+|---|---|
+| 434 176 cubes at the shipped bands (nearly all distance-culled) | **0.539 ms** |
+| the same cubes with the bands opened past the district | **1.25 ms** |
+| 1 024 baked vgeom buildings (146 067 meshlet pairs drawn) | **1.573 ms** |
+
+Real geometry is **dearer by about +0.32 ms** against a comparable configuration (+1.03
+against the shipped bands). The direction the wave recorded survives; **1.416 ms does not
+and must not be quoted.** It is still a fidelity decision with a cost — a much smaller one.
 
 ### Counts
 
@@ -755,12 +838,76 @@ it look like. What is missing to ship it is named below.
 | new ratchet constants | — | `SHIPPING_FRAME_CEILING_MS` 58.0, `SHIPPING_FRAME_P99_CEILING_MS` 64.0 (targets 16.6 / 33.2, never asserted); `StreamBudget::default().max_resident_tiles` **1024 → 860**, derived |
 | committed samples | 20 levels | **20** — the instrument's scene is composed at test time and writes nothing into `samples/` |
 
+## The I4 audit (adversarial, `1d33295..d67e180` audited; the audit's own commits follow it)
+
+**Every headline measurement HELD on re-measurement**, from the tests that print them — the
+IB-12 lag pair and its 1.848e6×, 2 rebases at 3.7e-5 m, the handoff at 1.02×, the cut at
+64/157/250/340 with a constant ring, 200 pages → 12.70 MiB, the burst at exactly 10 frames /
+36 992 B / 180 flow-control deferrals, the advisory at frame 14 of 15, the P28.5 trio
+(19 542 / 19 766 · 18 752 / 18 976 · 76 074 / 75 928), the LOD pop at 63 of 2 903 px with a
+zero noise floor, the impostor at 19.2× / 93.9 %, the bake at 424 → 5 088 → 144, goldens 54,
+schemas unmoved, and the eaten-continuation gate green (the 57 repairs are complete). The
+instrument reproduces **in shape** on three independent release runs and outside **four of
+the five ranges** the wave tabulated.
+
+**Three findings are large enough to change what the ledger says:**
+
+| finding | what shipped | now |
+|---|---|---|
+| **The instrument measures a frame with the expensive half of the renderer OFF** — no shadows, GI, VSM, TAA, SSAO, bloom or visbuffer — and nothing said so | a "≥ 60 fps means this" constitution quoting 39.8 ms for an unlit frame | the harness prints what it does not draw and **measures the stack**: p95 92.853 lit against 43.679, GPU frame 36.116 against 17.323 |
+| **Clause 5's price compared two culling policies and its sign moved** | "+1.416 ms dearer", from a cube side that drew **zero** meshes (432 046 of 434 176 distance-culled) against a meshlet path with no distance cull, on a 30-frame mean that answered −2.03 / −0.28 / +2.00 / −0.86 across four runs | both sides audited, the cube side measured at both band settings, MIN-of-5-rounds: **0.539 / 1.25 / 1.573 ms → +0.32 ms** against a comparable configuration, reproducible to three decimals |
+| **IB-16's one production door was unarmed** | `build_vt_level`'s `upload_budget_bytes: 0` left the entire tree green with the throttle off in both hosts | `the_registration_door_carries_the_upload_budget` — 1 of 16 seated at a one-page budget, 16 of 16 unthrottled as the control |
+
+**Six arms that could not fail, mutation-measured and closed:**
+
+| arm | why it could not fail | now |
+|---|---|---|
+| clause 6's refusal (`mean <= GOLDEN_MEAN_TOLERANCE`) | `image_diff` averages over a 64 × 36 downscale, so a 2 903-px object moves the mean by at most **0.0014** — 43× under the tolerance at its arithmetic maximum | armed on the object: ≤ 5 % of its own pixels, worst channel ≤ 32/255 |
+| the LOD noise floor | measured with impostors **ON**, compared against a delta taken with them **OFF**; and "bit-deterministic" was printed, never asserted | one floor per configuration, both `assert_eq!`d at zero |
+| the shipped LOD configuration's 93.9 % pop | no assertion at all | armed as the refusal's **condition** |
+| the handoff ceiling | `3 ×` a steady step, where a full cut is **1.77 ×** — above the defect it named | `1.5 ×`, with the cut computed, printed, and a clause pinning the ceiling below it |
+| the rebase arm | rounded the unexplained step to the nearest `ORIGIN_SNAP` on **every** step, forgiving a 10 m teleport | forgiven only on the step `maybe_rebase` reports |
+| clause 5's "ZERO placeholder batches" | `scatter.is_empty()` over a scene built with `..Default::default()` and only vgeom pushes — one of four identities | deleted, with the packed asset's own header read back in their place |
+
+**Two claims retracted, one qualified:**
+
+* **"A MIN over different stretches reported 28.3 ms."** Does not reproduce:
+  `CITY_DRIVE_STEP_M` is 0.25 m, a round is 30 metres, and removing the `step = 0` reset costs
+  about **1 %**. The law and the fix are kept; the figure is retired.
+* **"+1.416 ms dearer."** See above — **+0.32 ms**.
+* **"The cook does not evaluate PCG volumes"** is accurate and needs one qualification: a
+  cooked pack *does* ship its PCG buildings, evaluated at load. What does not exist is an
+  evaluated population at **cook time** to bake from.
+
+**A scripted insertion matched three anchors it was not meant to.** The wave's `### Counts`
+table was pasted into the Phase 25, wave I1 and wave I2 blocks of `docs/ROADMAP.md`, each
+claiming "after the I3 audit / after I4" as though it were theirs. Three deleted. That is the
+chr(92) law's cousin and its **thirteenth catch**: a scripted edit anchored on a heading that
+occurs more than once, in a file where the gate that catches eaten continuations cannot see a
+table in the wrong section.
+
+**Three ledger numbers no test printed, corrected**: "sixty `timestamp_writes: None`" (61 on
+the wave's own base tree), `whip_pan`'s "1 220 blur tiles" and "19 972 / 20 196" (790 and
+19 542 / 19 766 — the arm beside them prints it), and `SHIPPING_FRAME_CEILING_MS`'s "after 24
+warm-up" (a discarded pass of 120). Plus three docs a change made false:
+`VtStats::budget_clamped` ("for want of a slot" — a throttled want is deferred too),
+`inf_player::terrain_stream`'s `max_resident_tiles` (1024 → derived), and
+`island_working_set`'s "island-class" label on the 64 × 64 row.
+
+**Twenty-three mutations were run** — five of the implementer's and eighteen new — and after
+the repairs each dies at exactly the arm that names it and at no other. `docs/ROADMAP.md`'s
+audit block tables them; the two recorded as *coverage bounds* rather than defects are the
+0.015 ms timestamp readback (below any tolerance a wall-clock sum can carry) and
+`VirtualTextureSettings::default().upload_budget_bytes`, which `whip_pan` cannot see because
+it builds its pool config directly.
+
 ---
 
 ## Open questions / carried bounds
 
-**Closed by I4:**
-* ~~**IB-9**~~ — `cut_page_bound` is the one quantity; `StreamBudget::for_ladder` and
+**Closed by I4** (with the I4 audit's amendments applied above):
+* ~~**IB-9**~~ *(the derivation; the island-scale ceiling is carried — see IP)* —
+  `cut_page_bound` is the one quantity; `StreamBudget::for_ladder` and
   `resident_bytes_bound` are two readings of it, and `phase16_gate` compares them
   (12.70 MiB derived against a 16 MiB ceiling, where the old arithmetic gave 65 MiB).
 * ~~**IB-12**~~ — the lag unrotates the delta; 1.848e6× at 500 km, a rebase mid-lag moves
@@ -776,13 +923,23 @@ it look like. What is missing to ship it is named below.
   impostor band's, carried below.
 
 **Measured and bounded (I4 owns these numbers):**
-* **THE FRAME IS CPU-BOUND, AND THE SINGLE DEAREST THING IS THE FIXED STEP.** 13.659 ms at
-  1080p and 15.631 ms at 1440p, against a 15.875 / 22.716 ms GPU frame — the *whole* GPU
-  frame at 1080p costs barely more than one sim step. Nothing in this tree had measured it
-  over a thousand-building city before, and no §8 budget covers it: `STREAMED_STEP_BUDGET_MS`
-  is 4.0 ms and is asserted over the phase-16 gate scene, which is a walker on a heightfield.
-  Deleting the scatter pass entirely would still leave a 21 ms frame. **This is where the
-  next 60 fps work is**, and it is a sim question rather than a render one.
+* **THE FRAME IS CPU-BOUND, AND THE SINGLE DEAREST THING IS THE FIXED STEP.** **13.0–14.9 ms**
+  at 1080p and 14.3–15.6 at 1440p over six runs, against a 14.4–19.8 / 21.4–22.7 ms GPU frame
+  — the *whole* GPU frame at 1080p costs barely more than one sim step. Nothing in this tree
+  had measured it over a thousand-building city before, and **no §8 budget covers it**:
+  `STREAMED_STEP_BUDGET_MS` is 4.0 ms and is asserted over the phase-16 gate scene, which is a
+  walker on a heightfield. Deleting the scatter pass entirely would still leave a ~21 ms
+  frame. **This is where the next 60 fps work is**, and it is a sim question rather than a
+  render one. What the step is made of has never been broken down: the I3 collider band is
+  2.2 ms of it at the certification's rate, and the other ~11 ms is unattributed —
+  movement, animation, the physics step over 6 067 banded colliders, the change-stamp scans.
+  **→ IP: a §8 budget for the fixed step over a CITY, and a breakdown that names its parts,
+  before anything is optimised.**
+* **…and the lighting stack is the other half, unmeasured until the audit.** The frame above
+  has no shadows, GI, VSM, TAA, SSAO or bloom in it. Turned on: **p95 92.853 ms, GPU frame
+  36.116 ms** (scatter 16.124 | gi 6.049 | terrain 4.716 | vgeom 2.495 | vsm-raster 1.411 |
+  sky 1.319). Any 60 fps target that includes shadows is starting **56 ms** from 16.6, not
+  27. **→ IP.**
 * **The instrument's frame is SERIALIZED and a presenter's is not.** It polls to completion
   every frame, because a frame time without a sync point is a submission time; a real
   presenter overlaps the halves. The pipelined estimate (20.975 / 23.430 ms) is arithmetic
@@ -802,11 +959,23 @@ it look like. What is missing to ship it is named below.
   box — so a non-uniformly-scaled instance gets a billboard far larger than its silhouette.
   Armed as a bound in `structure_lod_pop.rs`, not fixed.
 * **The cook does not evaluate PCG volumes, which is the one thing between the engine and a
-  city of real geometry.** The bake→vgeom path works in memory (424 parts → 144 meshlets),
+  city of real geometry.** *(Verified by the I4 audit: `inf-packager` decodes a `.inf_pcg`
+  for two advisories and a dependency edge and calls none of `evaluate`,
+  `evaluate_grammars`, `evaluate_buildings`, `compose_volume` — its own manifest says so.
+  The three production evaluation paths are `InfSceneWorldBuilder::build`, cell activation
+  and the editor's `pcg_evaluate` command. **Read it precisely**: a cooked pack DOES ship its
+  PCG buildings, evaluated at load; what does not exist is an evaluated population at COOK
+  time to bake from.)* The bake→vgeom path works in memory (424 parts → 144 meshlets),
   `bake.rs`'s dependencies are all Ring 0 so `inf_dcc::bake` is acyclic, and `inf-packager`
-  taking `inf-dcc` would keep the kernel out of the shipped player. What is missing is
-  something cook-side to bake *from*. And the measurement says it costs **+1.416 ms** rather
+  taking `inf-dcc` would keep the kernel out of the shipped player — a one-line Cargo change.
+  And the measurement says it costs **+0.32 ms** against a comparable configuration rather
   than saving time, so it is a fidelity decision to be taken knowingly.
+  **→ IP's first clause.**
+* **A streamed cell evaluates its `PcgVolume` and NOT its biome bindings** (I4 audit,
+  observation on I1's fix). `evaluate_biome_bindings` has one call site,
+  `InfSceneWorldBuilder::build`; `cell_stream::reconcile` mirrors `page_terrains_for_pcg` and
+  `evaluate_pcg_volumes_in` and has no biome twin. Pre-existing, not this wave's, and nothing
+  in the tree has a partitioned biome-bound terrain yet. **→ IP.**
 * **`AdmitBudget` is a seat count derived from bytes, so it is exact only for uniform-size
   pages.** True of every VT pool by construction (one format, one slot size) and *not* true
   of the meshlet pools, which is why `inf-vgeom` deliberately does not implement `SlotPool`.
@@ -971,7 +1140,43 @@ it look like. What is missing to ship it is named below.
 * **IB-11's far half** — LERC / BigTIFF / JPEG2000 / LAS, reprojection, the geoid. I5's.
 * **IB-15's open halves** — the 66.8707° adjacent-terrain normal seam, and the fact that
   abutment is conditional and unenforced.
-* ~~IB-9~~, ~~IB-12~~, ~~IB-16~~ and ~~the missing fps instrument~~ — **closed by I4**, above.
-  The instrument exists, and what it says is that the engine renders this content at
-  **25.1 fps at 1080p** and **21.1 fps at 1440p** on an RTX 4070 Ti. Nothing in this
-  repository may claim ≥ 60 fps; what it may now claim is a number.
+* ~~IB-12~~, ~~IB-16~~ and ~~the missing fps instrument~~ — **closed by I4**, above.
+  **IB-9 is closed as a derivation and open as a ceiling** (I4 audit): the two readings agree
+  at the gate scene's ladder, and at island class the derived budget is 116.91 MiB against a
+  flat 16 MiB ratchet. The instrument exists, and what it says is that the engine renders
+  this content at **25–26 fps at 1080p** and **21–23 fps at 1440p** on an RTX 4070 Ti with
+  **no shadows, no GI, no VSM, no TAA, no SSAO and no bloom** — and at **13.3 fps** with the
+  authorable half of that stack on. Nothing in this repository may claim ≥ 60 fps; what it
+  may now claim is a number, and the number has a configuration attached to it.
+
+---
+
+## What IP inherits (the performance wave), in the order the numbers imply
+
+Routed here by the I4 audit. Every item is a number this tree already prints.
+
+1. **The cook does not evaluate PCG volumes.** The one thing between the engine and a city of
+   real geometry, and the only item on this list that is a *feature* rather than a budget.
+   `inf-packager` + `inf-dcc` is a one-line Cargo change; what is missing is an evaluated
+   population at cook time to bake from. Everything about the shape of the fix is above.
+2. **The sim fixed step has no §8 budget and costs 13.0–14.9 ms on the city.** Mint the
+   budget over a CITY (`STREAMED_STEP_BUDGET_MS` is 4.0 ms over a walker on a heightfield),
+   and break the step down before optimising it — 2.2 ms is the I3 collider band at the
+   certification's own rate and the other ~11 ms has never been attributed.
+3. **The lighting stack costs +42.9 ms of p95 and is in no ceiling.** Shadows, GI, VSM, TAA,
+   SSAO and bloom are off by default, so every frame number this repository carries is for a
+   frame without them. Decide what a shipped island level authors, then re-mint the ceilings
+   over that configuration.
+4. **IB-9's ceiling is a gate-scene constant at island scale** — 116.91 MiB derived and
+   63.0 MiB measured against 16 MiB. `phase16_gate` arm (e2) holds the gap open.
+5. **The scatter impostor is sized from a bounding SPHERE**, so a 20 × 30 × 7.4 m box gets a
+   billboard 19.2× its silhouette and 93.9 % of it changes at the structure swap. This is the
+   repair clause 6's cross-fade refusal is conditional on, and `structure_lod_pop.rs` goes red
+   the day it lands.
+6. **`resident_bytes` counts heights only** — not `maps`, `biomes` or `holes` — so an eroded,
+   painted or carved terrain under-reports against both the ceiling and the bound, which are
+   now derived from the same under-count.
+7. **A streamed cell evaluates its `PcgVolume` and not its biome bindings.**
+8. **The instrument's camera covers 120 m of a 1 260 m city**, and its scene has **zero
+   virtual textures**. Both bound what the headline number is a number *about*; a textured,
+   longer-path fixture is what would make the VT column and the p99 mean something.

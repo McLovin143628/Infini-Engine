@@ -92,10 +92,18 @@ Notes:
   the phase-29 wizard character at 1920 × 1080 and 2560 × 1440, with **per-pass
   GPU timings** from `inf_render::timing` (one `QuerySet` written between encoder
   commands; off by default, and `timing_changes_no_pixel` proves attaching it
-  moves no pixel). First measured on an RTX 4070 Ti, release: **p50 39.792 ms
-  (25.1 fps) at 1080p**, **47.424 ms (21.1 fps) at 1440p**, and the frame is
-  **CPU-bound** — the sim fixed step alone is 13.659 ms against a 15.875 ms GPU
-  frame, of which the scatter pass is 67.8 %.
+  moves no pixel). Measured on an RTX 4070 Ti, release, over five independent
+  runs: **p50 37.8–39.9 ms (25–26 fps) at 1080p**, **44.4–47.5 ms at 1440p**, and
+  the frame is **CPU-bound in every run** — the sim fixed step alone is
+  13.0–14.9 ms against a 14.4–17.3 ms GPU frame, of which the scatter pass is
+  67.6–68.1 %. Quote the shape and treat any single millisecond as ±20 %.
+
+  **What that frame does not draw.** Shadows, GI, VSM, TAA, SSAO, bloom and the
+  visbuffer are all **off** in it — the shipped defaults for a level with no
+  authored render block, not a choice the harness made. The same content at
+  1080p with the authorable half turned on measures **p95 92.853 ms (13 fps),
+  GPU frame 36.116 ms**: the stack roughly doubles the frame. The harness prints
+  both, and `SHIPPING_FRAME_CEILING_MS` is minted from the shipped one only.
 
   It reports and does not assert in **three** named cases: a software or
   paravirtual adapter, any CI runner, and **the `dev` profile** — `opt-level = 1`

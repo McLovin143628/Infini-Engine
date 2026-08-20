@@ -458,7 +458,9 @@ impl TerrainStreaming {
     /// The editor pins every dirty tile and releases them all on save. A *player*
     /// never saves, and a runtime hole mask is never cleared — so pinning every
     /// dirty tile meant a pin set that only ever grew. Past
-    /// `StreamBudget::max_resident_tiles` (1024) that is not a memory cost, it is
+    /// `StreamBudget::max_resident_tiles` — a flat 1024 when this was written,
+    /// **derived from the terrain's own ladder since IB-9** (860 for the deepest
+    /// pyramid, 200 for a three-level one) — that is not a memory cost, it is
     /// a **stall**: `TerrainStreamer::pin_ceiling` clamps the camera's cut to
     /// `.max(1)` once the pins fill the budget, so the terrain silently stops
     /// streaming around the player and nothing says why.
