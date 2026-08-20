@@ -157,7 +157,11 @@ export const useSceneStore = create<SceneState>((set, get) => ({
       for (const n of d.updated) nodes[n.guid] = n;
       return {
         nodes,
-        roots: d.roots,
+        // IB-13: `roots` is omitted when it did not move. A root list can only
+        // change on a create, a delete or a reparent, and re-shipping 100 000
+        // strings on every drag frame measured 3.496 ms of an otherwise 0.03 ms
+        // delta. The reducer stays trivially correct.
+        roots: d.roots ?? state.roots,
         selection: d.selection,
         version: Number(d.version),
         dirty: d.dirty,

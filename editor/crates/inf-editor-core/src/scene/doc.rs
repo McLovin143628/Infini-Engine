@@ -10,7 +10,7 @@
 //! GUIDs, not bevy `Entity` ids, are the identity that crosses every boundary:
 //! entity ids are reused across despawn and never serialized.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use glam::{DVec2, DVec3};
 use inf_ecs::components::{
@@ -27,7 +27,7 @@ use inf_terrain::{
 };
 use uuid::Uuid;
 
-use crate::ipc::{SceneNode, SceneSnapshot, SpawnKind};
+use crate::ipc::{SceneDelta, SceneNode, SceneSnapshot, SpawnKind};
 use crate::scene::serialize::{EntityRecord, LevelSettings};
 use crate::scene::undo::{EditCommand, EditHistory};
 
@@ -84,6 +84,31 @@ pub struct SceneDoc {
     /// identical levels opened in sequence are still two different documents to
     /// anything holding a mid-gesture reference into one of them.
     doc_id: u64,
+    /// **What has changed since the last projection** (IB-13).
+    ///
+    /// `Some(set)` names the guids a mutation moved; `None` means "everything",
+    /// which is what [`SceneDoc::touch`] records and what
+    /// [`SceneDoc::project_delta`] pays a full walk for. It is a *conservative
+    /// union* — one `touch` in a batch widens the batch — so a call site that has
+    /// not been narrowed to [`SceneDoc::touch_at`] is slow and never wrong.
+    scope: Option<BTreeSet<Uuid>>,
+    /// The guid set the last projection published.
+    ///
+    /// Replaces the retained full `SceneSnapshot` Ring 2 used to diff against: a
+    /// removal is `projected − live`, and a scoped projection asks only whether
+    /// each named guid still exists. 100 000 uuids is 1.6 MB against a snapshot's
+    /// hundred thousand nodes and their strings.
+    projected: BTreeSet<Uuid>,
+    /// The root list the last projection published.
+    ///
+    /// `SceneDelta` carries `roots` whole on every emit, and deriving it costs a
+    /// walk of `order` — which is exactly the O(n) this item exists to remove
+    /// from the drag path. Only a full projection refreshes it, and only a
+    /// structural change (create / delete / reparent) can move it; both of those
+    /// go through [`touch`](Self::touch), which forces a full projection. That is
+    /// the same invariant [`touch_at`](Self::touch_at) states, read from the
+    /// other end.
+    roots_cache: Vec<String>,
 }
 
 /// Source of [`SceneDoc::doc_id`]. Never wraps in any plausible session (one
@@ -110,6 +135,9 @@ impl SceneDoc {
             history: EditHistory::default(),
             preview: None,
             doc_id: NEXT_DOC_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            scope: None,
+            projected: BTreeSet::new(),
+            roots_cache: Vec::new(),
         }
     }
 
@@ -220,9 +248,67 @@ impl SceneDoc {
     }
 
     /// Bump the version; mark unsaved. Every mutation funnels through here.
+    ///
+    /// **Widens the projection scope to everything** (IB-13): a caller that does
+    /// not say what it moved has said it might have moved anything, and the next
+    /// [`project_delta`](Self::project_delta) pays a full walk. That is the
+    /// conservative direction — slow, never wrong — and it is why narrowing a
+    /// call site to [`touch_at`](Self::touch_at) is a strict improvement rather
+    /// than a migration.
     pub(crate) fn touch(&mut self) {
         self.version += 1;
         self.dirty = true;
+        self.scope = None;
+    }
+
+    /// [`touch`](Self::touch), naming exactly the entities whose projection
+    /// changed.
+    ///
+    /// # The contract
+    ///
+    /// **Only for changes that cannot move an entity in the hierarchy.** A
+    /// `SceneNode`'s `children` and a projection's `roots` are derived from
+    /// *other* entities' parent links, so a create, a delete or a reparent
+    /// changes nodes this call has no way to name — those must use
+    /// [`touch`](Self::touch). Renames, visibility, transforms and property
+    /// edits are what this is for, and between them they are every frame of a
+    /// gizmo drag.
+    ///
+    /// Widening is monotone: once a batch has seen one `touch`, later
+    /// `touch_at`s cannot narrow it back.
+    pub(crate) fn touch_at(&mut self, guids: impl IntoIterator<Item = Uuid>) {
+        self.version += 1;
+        self.dirty = true;
+        if let Some(scope) = self.scope.as_mut() {
+            scope.extend(guids);
+        }
+    }
+
+    /// [`touch_at`](Self::touch_at) over `guid` **and every descendant**.
+    ///
+    /// The door for anything that changes `effective_visible`, which is a
+    /// property of an entity's whole ancestry: hiding a folder changes the
+    /// projection of everything under it, and naming only the folder would leave
+    /// the Outliner drawing its children at full brightness. `O(subtree)`, which
+    /// is `O(1)` for the leaf every gizmo drag touches.
+    pub(crate) fn touch_subtree(&mut self, guid: Uuid) {
+        let mut guids = vec![guid];
+        if let Some(e) = self.world.entity_of(guid) {
+            guids.extend(self.world.subtree(e).into_iter().filter_map(|se| {
+                let g = self.world.guid_of(se)?;
+                (g != guid).then_some(g)
+            }));
+        }
+        self.touch_at(guids);
+    }
+
+    /// [`touch_at`](Self::touch_at) without dirtying — the selection's door.
+    ///
+    /// Selection is not an unsaved edit (a saved file does not record who was
+    /// clicked), but it *is* a projection change: the delta's tail carries the
+    /// selection and the frontend refetches Details from it.
+    pub(crate) fn touch_selection(&mut self) {
+        self.version += 1;
     }
 
     /// Push a prepared [`EditCommand`] onto the history — the door for edits
@@ -241,8 +327,15 @@ impl SceneDoc {
     /// Bump the version **without** dirtying — the Simulate loop (P8.4) calls
     /// this after mutating the ECS world so the viewport re-syncs, but a live
     /// preview must not mark the document unsaved (exit restores it anyway).
+    ///
+    /// **Widens the projection scope to everything** (IB-13). The Simulate loop
+    /// writes straight into the ECS world without going through any `SceneDoc`
+    /// mutation, so there is nothing to name — treating this as a narrow change
+    /// would leave the Outliner showing the pre-Simulate world while the viewport
+    /// showed the live one.
     pub fn bump_version_for_runtime(&mut self) {
         self.version += 1;
+        self.scope = None;
     }
 
     /// Clear the dirty flag (after a successful save) without bumping version.
@@ -385,7 +478,14 @@ impl SceneDoc {
         };
         let ok = self.world.write_prop(e, type_path, field, value);
         if ok {
-            self.touch();
+            // IB-13: a reflected field write cannot re-parent an entity (the
+            // hierarchy is not an editable component), so the projection change
+            // is bounded by this entity's subtree — the subtree rather than the
+            // entity because `Visibility::visible` is one of the fields that
+            // arrives here, and it changes every descendant's
+            // `effective_visible`. This is the Details panel's write and every
+            // frame of a numeric drag in it.
+            self.touch_subtree(guid);
         }
         ok
     }
@@ -473,14 +573,18 @@ impl SceneDoc {
     pub fn rename(&mut self, guid: Uuid, name: &str) {
         if let Some(e) = self.world.entity_of(guid) {
             self.world.rename(e, name);
-            self.touch();
+            // IB-13: a rename moves one node and nothing else — not even its
+            // children, which carry guids and not names.
+            self.touch_at([guid]);
         }
     }
 
     pub fn set_visible(&mut self, guid: Uuid, visible: bool) {
         if let Some(e) = self.world.entity_of(guid) {
             self.world.set_visible(e, visible);
-            self.touch();
+            // IB-13: `effective_visible` is a property of the ancestry, so
+            // hiding a folder changes every node under it.
+            self.touch_subtree(guid);
         }
     }
 
@@ -544,7 +648,9 @@ impl SceneDoc {
         } else {
             self.selection = valid;
         }
-        self.version += 1; // resync UI, but selection is not an unsaved edit
+        // IB-13: a selection change moves no NODE — only the delta's tail —
+        // so it does not widen the projection scope.
+        self.touch_selection();
     }
 
     /// **Append without toggling** — Shift+click in the viewport (Wave E).
@@ -565,14 +671,14 @@ impl SceneDoc {
             changed = true;
         }
         if changed {
-            self.version += 1;
+            self.touch_selection();
         }
     }
 
     pub fn clear_selection(&mut self) {
         if !self.selection.is_empty() {
             self.selection.clear();
-            self.version += 1;
+            self.touch_selection();
         }
     }
 
@@ -612,7 +718,12 @@ impl SceneDoc {
         if let Some(e) = self.world.entity_of(guid) {
             self.world.world_mut().entity_mut(e).insert(t);
             self.world.mark_dirty();
-            self.touch();
+            // IB-13, and this is **the** gizmo-drag path: a `SceneNode` carries
+            // no transform at all (guid, name, kind, visible, effective_visible,
+            // parent, children), so moving an entity changes no node. The
+            // version bump is what the viewport re-syncs on; the delta carries
+            // the doc tail and no nodes.
+            self.touch_at([guid]);
         }
     }
 
@@ -3261,7 +3372,10 @@ impl SceneDoc {
                 cmd.revert(self);
             }
             self.history.push_redo(txn);
+            // IB-13: an undo replays whole `EditCommand` inverses, which can
+            // create, delete and reparent — so the projection resyncs.
             self.version += 1;
+            self.scope = None;
             true
         } else {
             false
@@ -3276,6 +3390,7 @@ impl SceneDoc {
             }
             self.history.push_undo(txn);
             self.version += 1;
+            self.scope = None;
             true
         } else {
             false
@@ -3305,23 +3420,24 @@ impl SceneDoc {
         //
         // The parent link is read once per entity here, and creation order is
         // preserved because `order` is walked in order.
-        let mut children_of: HashMap<Uuid, Vec<String>> = HashMap::new();
-        let mut roots: Vec<String> = Vec::new();
-        for &g in &self.order {
-            let Some(e) = self.world.entity_of(g) else {
-                continue;
-            };
-            match self.world.parent_of(e).and_then(|p| self.world.guid_of(p)) {
-                Some(parent) => children_of.entry(parent).or_default().push(g.to_string()),
-                None => roots.push(g.to_string()),
-            }
-        }
+        let (children_of, roots) = self.hierarchy_index();
 
         let nodes: Vec<SceneNode> = self
             .order
             .iter()
             .filter_map(|&guid| self.node_of(guid, &children_of))
             .collect();
+
+        // A snapshot IS a projection: the frontend that received it holds exactly
+        // these guids, so the next delta must diff against them. Recording it
+        // here is what lets `scene_snapshot`/`scene_open`/`scene_new` hand the
+        // client a full tree and the very next `world://delta` be scoped.
+        self.projected = nodes
+            .iter()
+            .filter_map(|n| n.guid.parse::<Uuid>().ok())
+            .collect();
+        self.roots_cache = roots.clone();
+        self.scope = Some(BTreeSet::new());
 
         SceneSnapshot {
             version: self.version,
@@ -3335,6 +3451,166 @@ impl SceneDoc {
             undo_label: self.history.undo_label().map(str::to_string),
             redo_label: self.history.redo_label().map(str::to_string),
         }
+    }
+
+    /// **What changed since the last projection** (IB-13) — the door
+    /// `world://delta` goes through.
+    ///
+    /// # The measurement this exists for
+    ///
+    /// Every `world://delta` used to cost a full [`snapshot`](Self::snapshot)
+    /// *plus* a full `diff` of it against a retained copy, and one is emitted on
+    /// every gizmo-drag mouse-move, every sculpt dab and every click-select.
+    /// Measured on this machine (release, `tests/delta_cost_bench.rs`), moving
+    /// **one** entity:
+    ///
+    /// | entities | snapshot | diff | round trip |
+    /// |---|---|---|---|
+    /// | 15 000 | 3.173 ms | 2.251 ms | 5.423 ms |
+    /// | 50 000 | 11.802 ms | 7.707 ms | 19.508 ms |
+    /// | 100 000 | 24.117 ms | 19.999 ms | **44.116 ms** |
+    ///
+    /// The certification's IB-13 named 34 ms at 100 000 and counted only the
+    /// snapshot half; the round trip is worse, and it is past the 33 ms frame
+    /// tripwire *before anything renders*.
+    ///
+    /// # The scope, and the contract that makes it safe
+    ///
+    /// A mutation declares what it moved. [`touch`](Self::touch) means "I do not
+    /// know" and costs a full projection; [`touch_at`](Self::touch_at) names the
+    /// guids and costs `O(named)`. A scope is a **conservative union**: one
+    /// `touch` anywhere in a batch widens the whole batch to everything, so
+    /// converting a call site is a strict improvement and forgetting to convert
+    /// one is only slow.
+    ///
+    /// **`touch_at` may only be used for changes that cannot move an entity in
+    /// the hierarchy**, because a `SceneNode`'s `children` and the snapshot's
+    /// `roots` are derived from *other* entities' parent links. Create, delete
+    /// and reparent must use `touch`. That is the whole invariant, it is stated
+    /// on `touch_at`, and `a_reparent_reaches_the_delta_through_every_node_it_
+    /// moves` is what measures it.
+    ///
+    /// The removal half needs no journal: the doc remembers the guid **set** it
+    /// last published (`projected`), so a full projection derives `removed` by
+    /// difference and a scoped one by asking whether each named guid still
+    /// exists. A set of 100 000 uuids is 1.6 MB against the retained snapshot it
+    /// replaces, which was the nodes *and* their strings.
+    pub fn project_delta(&mut self) -> SceneDelta {
+        self.world.propagate();
+        let scope = std::mem::replace(&mut self.scope, Some(BTreeSet::new()));
+        let tail_selection: Vec<String> = self.selection.iter().map(|g| g.to_string()).collect();
+        // Only a full projection can have moved the roots — a scoped change is a
+        // rename, a visibility or a property write by contract, none of which
+        // re-parents anything. Cloning the list anyway cost 3.496 ms of an
+        // otherwise 0.03 ms delta at 100 000 entities. Read AFTER the walk, which
+        // is what refreshes the cache.
+        let was_full = scope.is_none();
+
+        let (added, updated, removed) = match scope {
+            // Everything: the same walk `snapshot` performs, and the roots cache
+            // is refreshed from it rather than by a second pass.
+            None => {
+                let (children_of, roots) = self.hierarchy_index();
+                self.roots_cache = roots;
+                let mut added = Vec::new();
+                let mut updated = Vec::new();
+                let mut live: BTreeSet<Uuid> = BTreeSet::new();
+                for &guid in &self.order {
+                    let Some(node) = self.node_of(guid, &children_of) else {
+                        continue;
+                    };
+                    live.insert(guid);
+                    if self.projected.contains(&guid) {
+                        updated.push(node);
+                    } else {
+                        added.push(node);
+                    }
+                }
+                let removed: Vec<String> = self
+                    .projected
+                    .difference(&live)
+                    .map(|g| g.to_string())
+                    .collect();
+                self.projected = live;
+                (added, updated, removed)
+            }
+            // Only what was named. `children_of` is built for the named guids
+            // alone — `EcsWorld::children_of` is a per-entity read, so the index
+            // costs O(children of the named), not O(world).
+            Some(named) => {
+                let mut children_of: HashMap<Uuid, Vec<String>> = HashMap::new();
+                for &guid in &named {
+                    if let Some(e) = self.world.entity_of(guid) {
+                        let kids: Vec<String> = self
+                            .world
+                            .children_of(e)
+                            .into_iter()
+                            .filter_map(|c| self.world.guid_of(c))
+                            .map(|g| g.to_string())
+                            .collect();
+                        if !kids.is_empty() {
+                            children_of.insert(guid, kids);
+                        }
+                    }
+                }
+                let mut added = Vec::new();
+                let mut updated = Vec::new();
+                let mut removed = Vec::new();
+                for guid in named {
+                    match self.node_of(guid, &children_of) {
+                        Some(node) => {
+                            if self.projected.insert(guid) {
+                                added.push(node);
+                            } else {
+                                updated.push(node);
+                            }
+                        }
+                        None => {
+                            if self.projected.remove(&guid) {
+                                removed.push(guid.to_string());
+                            }
+                        }
+                    }
+                }
+                (added, updated, removed)
+            }
+        };
+
+        SceneDelta {
+            version: self.version,
+            added,
+            removed,
+            updated,
+            roots: was_full.then(|| self.roots_cache.clone()),
+            selection: tail_selection,
+            dirty: self.dirty,
+            title: self.title.clone(),
+            can_undo: self.history.can_undo(),
+            can_redo: self.history.can_redo(),
+            undo_label: self.history.undo_label().map(str::to_string),
+            redo_label: self.history.redo_label().map(str::to_string),
+        }
+    }
+
+    /// The parent→children index and the root list, in **one** walk of `order`.
+    ///
+    /// Shared by [`snapshot`](Self::snapshot) and the full arm of
+    /// [`project_delta`](Self::project_delta) so the two cannot build the
+    /// hierarchy differently — a snapshot and the delta that follows it
+    /// disagreeing about who owns a child is a tree the Outliner cannot draw.
+    fn hierarchy_index(&self) -> (HashMap<Uuid, Vec<String>>, Vec<String>) {
+        let mut children_of: HashMap<Uuid, Vec<String>> = HashMap::new();
+        let mut roots: Vec<String> = Vec::new();
+        for &g in &self.order {
+            let Some(e) = self.world.entity_of(g) else {
+                continue;
+            };
+            match self.world.parent_of(e).and_then(|p| self.world.guid_of(p)) {
+                Some(parent) => children_of.entry(parent).or_default().push(g.to_string()),
+                None => roots.push(g.to_string()),
+            }
+        }
+        (children_of, roots)
     }
 
     /// `children_of` is [`snapshot`](Self::snapshot)'s single-pass parent index.

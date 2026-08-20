@@ -6,4 +6,20 @@ import type { SceneNode } from "./SceneNode";
  * as added/removed/updated node sets; `roots`, `selection`, and the doc meta
  * are small so they ride along every delta for a trivially-correct reducer.
  */
-export type SceneDelta = { version: number, added: Array<SceneNode>, removed: Array<string>, updated: Array<SceneNode>, roots: Array<string>, selection: Array<string>, dirty: boolean, title: string, can_undo: boolean, can_redo: boolean, undo_label: string | null, redo_label: string | null, };
+export type SceneDelta = { version: number, added: Array<SceneNode>, removed: Array<string>, updated: Array<SceneNode>, 
+/**
+ * The whole root list, or `None` for "unchanged — keep the one you have"
+ * (IB-13).
+ *
+ * It used to ride along whole on every delta, for the trivially-correct
+ * reducer this DTO's header describes. Measured at city scale that
+ * convenience is the *dominant* cost of an otherwise empty delta: cloning
+ * 100 000 `String`s took **3.496 ms** on a frame that shipped one node, and
+ * a click-select emits one. A root list can only move on a create, a delete
+ * or a reparent — all of which take the full projection path anyway — so
+ * carrying it on a drag frame was paying a level-sized price for a value
+ * that had not changed.
+ *
+ * The reducer stays trivially correct: `roots ?? state.roots`.
+ */
+roots: Array<string> | null, selection: Array<string>, dirty: boolean, title: string, can_undo: boolean, can_redo: boolean, undo_label: string | null, redo_label: string | null, };

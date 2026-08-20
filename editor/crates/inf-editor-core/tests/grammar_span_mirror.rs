@@ -88,7 +88,15 @@ fn both_evaluation_paths_go_through_the_same_grammar_seams() {
         // lands on. A side that skipped the second one would draw the building
         // and leave it walk-through — the exact failure "enterable" names.
         "inf_pcg::evaluate_buildings(",
-        "vol.set_structures(",
+        // …and the derived cache its output lands on. Since IB-2b that is the
+        // whole population — instances, solids AND the structure grouping — in
+        // one write, because a group's index ranges are only meaningful against
+        // the exact lists they were derived from.
+        "vol.set_population(",
+        // The join, which is where the ORDER of the three passes is decided.
+        // Both sides go through the one Ring-0 door rather than concatenating
+        // for themselves.
+        "inf_pcg::compose_volume(",
         // The per-volume inputs. A side that folded the volume seed its own way
         // (the exact mistake `biome_seed` exists to prevent one type down) would
         // not construct this.

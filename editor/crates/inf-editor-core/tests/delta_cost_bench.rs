@@ -36,8 +36,8 @@ fn doc_with(n: usize) -> SceneDoc {
 #[test]
 #[ignore = "a measurement, not a gate — see the module docs"]
 fn what_one_world_delta_costs() {
-    println!("entities |  snapshot |      diff |     total |  nodes in delta");
-    for n in [1_000usize, 5_000, 15_000] {
+    println!("entities | snapshot |     diff | old total |    drag | select-only | nod | speedup");
+    for n in [1_000usize, 5_000, 15_000, 50_000, 100_000] {
         let mut doc = doc_with(n);
 
         // Warm: the first snapshot allocates its Vec capacity.
@@ -50,7 +50,6 @@ fn what_one_world_delta_costs() {
 
         let mut snap_ns = 0u128;
         let mut diff_ns = 0u128;
-        let mut updated = 0usize;
         const REPS: u32 = 20;
         for _ in 0..REPS {
             let t = Instant::now();
@@ -58,15 +57,51 @@ fn what_one_world_delta_costs() {
             snap_ns += t.elapsed().as_nanos();
 
             let t = Instant::now();
-            let d = diff(&prev, &next);
+            let _ = diff(&prev, &next);
             diff_ns += t.elapsed().as_nanos();
-            updated = d.added.len() + d.updated.len() + d.removed.len();
         }
         let snap_ms = snap_ns as f64 / REPS as f64 / 1e6;
         let diff_ms = diff_ns as f64 / REPS as f64 / 1e6;
+
+        // IB-13: the same frame through the scoped projection. Two frames are
+        // timed, because they cost different things and only one of them is this
+        // item's:
+        //
+        // * a **drag** frame — a transform write — pays `EcsWorld::propagate`,
+        //   which is a full DFS over the world with a bundle insert per entity.
+        //   That is transform work, not projection work, and it is O(world) by
+        //   construction until propagation itself becomes incremental.
+        // * a **select** frame does not dirty the world, so propagation is
+        //   skipped and what is left IS the projection.
+        let mut drag_ns = 0u128;
+        let mut sel_ns = 0u128;
+        let mut nodes = 0usize;
+        let _ = doc.snapshot(); // re-seed the projection baseline
+        for i in 0..REPS {
+            doc.edit_set_transform(
+                id,
+                inf_ecs::components::Transform {
+                    translation: inf_ecs::Vec3d::new(f64::from(i), 0.0, 0.0),
+                    ..inf_ecs::components::Transform::IDENTITY
+                },
+            );
+            let t = Instant::now();
+            let d = doc.project_delta();
+            drag_ns += t.elapsed().as_nanos();
+            nodes = d.added.len() + d.updated.len() + d.removed.len();
+
+            doc.select(&[id], false);
+            let t = Instant::now();
+            let _ = doc.project_delta();
+            sel_ns += t.elapsed().as_nanos();
+        }
+        let drag_ms = drag_ns as f64 / REPS as f64 / 1e6;
+        let sel_ms = sel_ns as f64 / REPS as f64 / 1e6;
+        let old = snap_ms + diff_ms;
         println!(
-            "{n:>8} | {snap_ms:>7.3}ms | {diff_ms:>7.3}ms | {:>7.3}ms | {updated:>4} of {n}",
-            snap_ms + diff_ms
+            "{n:>8} | {snap_ms:>6.3}ms | {diff_ms:>6.3}ms | {old:>7.3}ms | {drag_ms:>7.4}ms \
+             | {sel_ms:>8.4}ms | {nodes:>3} | {:>5.0}x",
+            old / drag_ms.max(1e-9)
         );
     }
 }
@@ -126,14 +161,43 @@ fn node_of_does_not_rescan_the_order_list() {
          back from somewhere else, this pin needs rewriting rather than deleting"
     );
 
-    // …and the hoist is really in `snapshot`, exactly once.
-    let snap = src
-        .find("pub fn snapshot(&mut self)")
-        .expect("SceneDoc::snapshot still exists");
-    let scope = &src[snap..(snap + 2500).min(src.len())];
+    // …and the hoist is really a hoist: the index is BUILT in exactly one place
+    // in the whole file, and both projections reach it through that one place.
+    //
+    // (This clause moved with IB-13, per this test's own instruction that a
+    // relocated index needs the pin rewritten rather than deleted. It was
+    // `children_of.entry` appearing once *within `snapshot`*; the builder is now
+    // `hierarchy_index`, shared by `snapshot` and `project_delta`, which is a
+    // stronger property than the one it replaces — the two projections cannot
+    // build the hierarchy differently, and a snapshot disagreeing with the delta
+    // that follows it about who owns a child is a tree the Outliner cannot draw.)
     assert_eq!(
-        scope.matches("children_of.entry").count(),
+        src.matches("children_of.entry").count(),
         1,
-        "the parent index must be built once, in `snapshot`"
+        "the parent index must be built in exactly one place"
     );
+    assert!(
+        src.contains("fn hierarchy_index("),
+        "the shared index builder is gone; if it moved, rewrite this pin"
+    );
+    assert_eq!(
+        src.matches("self.hierarchy_index()").count(),
+        2,
+        "`snapshot` and `project_delta`'s full arm are the two callers of the \
+         one index builder — {} call it",
+        src.matches("self.hierarchy_index()").count()
+    );
+    for who in [
+        "pub fn snapshot(&mut self)",
+        "pub fn project_delta(&mut self)",
+    ] {
+        let at = src
+            .find(who)
+            .unwrap_or_else(|| panic!("{who} still exists"));
+        let scope = &src[at..(at + 4000).min(src.len())];
+        assert!(
+            scope.contains("self.hierarchy_index()"),
+            "`{who}` no longer goes through the shared index"
+        );
+    }
 }

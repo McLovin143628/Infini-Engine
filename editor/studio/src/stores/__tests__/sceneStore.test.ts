@@ -80,5 +80,35 @@ describe("applyDelta reducer", () => {
     expect(s.roots).toEqual(["a", "b"]);
     expect(s.selection).toEqual(["b"]);
     expect(s.canUndo).toBe(true);
+
+    // IB-13: a delta with no root list keeps the one the store holds — the
+    // backend omits it on every frame that cannot have moved it (a drag, a
+    // select), because re-shipping 100 000 strings measured 3.496 ms.
+    store.applyDelta({
+      ...delta,
+      version: 3,
+      added: [],
+      updated: [node("a", [], { name: "moved" })],
+      roots: null,
+      selection: ["b"],
+    });
+    const t = useSceneStore.getState();
+    expect(t.roots).toEqual(["a", "b"]);
+    expect(t.nodes.a?.name).toBe("moved");
+    expect(t.version).toBe(3);
+
+    // …and a delta that DOES carry one replaces it wholesale, including a
+    // shrink — an `??` that had been written `||` would keep the old list on an
+    // empty one, which is a delete of the last root the Outliner never sees.
+    store.applyDelta({
+      ...delta,
+      version: 4,
+      added: [],
+      updated: [],
+      removed: ["a", "b"],
+      roots: [],
+      selection: [],
+    });
+    expect(useSceneStore.getState().roots).toEqual([]);
   });
 });

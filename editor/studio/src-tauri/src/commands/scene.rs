@@ -15,7 +15,7 @@ use inf_editor_core::ipc::{
     SpawnKind, TilemapCellDto, TilemapDto,
 };
 use inf_editor_core::scene::serialize::EntityRecord;
-use inf_editor_core::scene::{details, diff, serialize, tilemap, SceneDoc};
+use inf_editor_core::scene::{details, serialize, tilemap, SceneDoc};
 use inf_editor_core::terrain_edit;
 use inf_editor_core::voxel_edit;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -28,7 +28,12 @@ use uuid::Uuid;
 /// dialog).
 pub struct SceneState {
     pub doc: Arc<Mutex<SceneDoc>>,
-    last: Mutex<Option<SceneSnapshot>>,
+    /// The version of the last `world://delta` emitted (IB-13).
+    ///
+    /// Was the whole previous `SceneSnapshot`, retained so `diff` had something
+    /// to compare against. The document now owns its own projection state, so
+    /// all this needs to carry is the monotone version the race guard reads.
+    last_version: Mutex<Option<u64>>,
     /// Backend-held entity clipboard — a forest of records (parents-first). Does
     /// not cross a process boundary, so it needn't serialize.
     clipboard: Mutex<Vec<EntityRecord>>,
@@ -48,7 +53,7 @@ impl SceneState {
     pub fn new() -> Self {
         Self {
             doc: Arc::new(Mutex::new(SceneDoc::with_demo())),
-            last: Mutex::new(None),
+            last_version: Mutex::new(None),
             clipboard: Mutex::new(Vec::new()),
             current_level_path: Mutex::new(None),
         }
@@ -88,49 +93,42 @@ pub(super) fn lock(
 /// Recompute the snapshot and emit the delta against the last emitted one.
 /// Emits globally (`app.emit`) so it reaches the main webview whether the caller
 /// is a command or the viewport thread (a pick/gizmo edit, via the event sink).
+/// # IB-13: the projection is the document's, not this module's
+///
+/// This used to take a full `SceneDoc::snapshot()` and `diff` it against a
+/// retained copy of the previous one — **44.116 ms at 100 000 entities**, on
+/// every gizmo-drag mouse-move, past the 33 ms frame tripwire before anything
+/// renders. `SceneDoc::project_delta` replaces both halves: the document knows
+/// which entities a mutation named and which guid set it last published, so a
+/// drag frame costs `O(entities the drag touched)` and the retained snapshot is
+/// gone (with its memory).
+///
+/// The race guard survives verbatim, because it is about *ordering*, not about
+/// cost: two emitters — a command thread and the viewport thread firing
+/// `WorldChanged` — must not interleave and ship a backward delta. It now
+/// compares against a retained **version** rather than a retained snapshot.
+/// Equal versions still emit: a save clears `dirty` without bumping the version
+/// and that flag change must reach the frontend.
 pub fn emit_world_delta(app: &AppHandle, state: &SceneState) {
-    let next = match lock(&state.doc) {
-        Ok(mut doc) => doc.snapshot(),
+    // The document lock is taken INSIDE the emit lock, so the project-and-record
+    // pair is atomic against a second emitter. Ordering matters and is fixed
+    // everywhere: `last_version` then `doc`.
+    let mut last = state.last_version.lock().expect("last version lock");
+    let delta = match lock(&state.doc) {
+        Ok(mut doc) => {
+            if let Some(prev) = *last {
+                if doc.version() < prev {
+                    return;
+                }
+            }
+            doc.project_delta()
+        }
         Err(_) => return,
     };
-    // Hold `last` across the compare-store so two emitters (a command thread and
-    // the viewport thread firing `WorldChanged`) can't interleave and ship a
-    // backward delta. The snapshot's monotonically-increasing `version` is the
-    // guard: if what we snapshotted is STRICTLY older than the last emitted
-    // state, a newer emit already won the race — drop this one, leaving `last`
-    // un-regressed. (Equal versions still emit: a save clears `dirty` without
-    // bumping the version, and that flag change must reach the frontend.
-    // `scene_open` / `scene_new` reset `last` to `None`, so a fresh,
-    // lower-versioned document still emits its full delta.)
-    let mut last = state.last.lock().expect("last snapshot lock");
-    if let Some(prev) = last.as_ref() {
-        if next.version < prev.version {
-            return;
-        }
-    }
-    let delta = match last.as_ref() {
-        Some(prev) => diff(prev, &next),
-        None => diff(&empty_snapshot(), &next),
-    };
-    *last = Some(next);
+    *last = Some(delta.version);
     drop(last);
     if let Err(e) = app.emit("world://delta", delta) {
         tracing::warn!("world://delta emit failed: {e}");
-    }
-}
-
-fn empty_snapshot() -> SceneSnapshot {
-    SceneSnapshot {
-        version: 0,
-        roots: Vec::new(),
-        nodes: Vec::new(),
-        selection: Vec::new(),
-        dirty: false,
-        title: String::new(),
-        can_undo: false,
-        can_redo: false,
-        undo_label: None,
-        redo_label: None,
     }
 }
 
@@ -140,7 +138,9 @@ fn empty_snapshot() -> SceneSnapshot {
 #[tauri::command]
 pub async fn scene_snapshot(state: State<'_, SceneState>) -> Result<SceneSnapshot, String> {
     let snap = lock(&state.doc)?.snapshot();
-    *state.last.lock().map_err(|e| e.to_string())? = Some(snap.clone());
+    // IB-13: a full snapshot re-seeds the document's own projection baseline,
+    // so the very next `world://delta` is scoped against exactly these nodes.
+    *state.last_version.lock().map_err(|e| e.to_string())? = Some(snap.version);
     Ok(snap)
 }
 
@@ -1291,7 +1291,7 @@ pub async fn scene_open(
     // A fresh document restarts the version counter (lower than the doc we just
     // replaced), so drop the stale baseline — otherwise the version-monotonic
     // guard in `emit_world_delta` would suppress this scene's full delta.
-    *state.last.lock().map_err(|e| e.to_string())? = None;
+    *state.last_version.lock().map_err(|e| e.to_string())? = None;
     emit_world_delta(&app, &state);
     Ok(snap)
 }
@@ -1402,7 +1402,7 @@ pub async fn scene_new(
     // Reset the delta baseline: the fresh document's version counter restarts
     // below the replaced one, which the version-monotonic guard would otherwise
     // treat as a stale (backward) emit and drop.
-    *state.last.lock().map_err(|e| e.to_string())? = None;
+    *state.last_version.lock().map_err(|e| e.to_string())? = None;
     emit_world_delta(&app, &state);
     Ok(snap)
 }

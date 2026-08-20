@@ -150,7 +150,20 @@ pub struct SceneDelta {
     pub added: Vec<SceneNode>,
     pub removed: Vec<String>,
     pub updated: Vec<SceneNode>,
-    pub roots: Vec<String>,
+    /// The whole root list, or `None` for "unchanged — keep the one you have"
+    /// (IB-13).
+    ///
+    /// It used to ride along whole on every delta, for the trivially-correct
+    /// reducer this DTO's header describes. Measured at city scale that
+    /// convenience is the *dominant* cost of an otherwise empty delta: cloning
+    /// 100 000 `String`s took **3.496 ms** on a frame that shipped one node, and
+    /// a click-select emits one. A root list can only move on a create, a delete
+    /// or a reparent — all of which take the full projection path anyway — so
+    /// carrying it on a drag frame was paying a level-sized price for a value
+    /// that had not changed.
+    ///
+    /// The reducer stays trivially correct: `roots ?? state.roots`.
+    pub roots: Option<Vec<String>>,
     pub selection: Vec<String>,
     pub dirty: bool,
     pub title: String,
