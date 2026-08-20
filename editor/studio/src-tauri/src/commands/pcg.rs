@@ -181,6 +181,61 @@ fn page_terrains_for_pcg(
     paged
 }
 
+/// A [`VolumeOutput`](inf_pcg::VolumeOutput) in the ECS's own dependency-light
+/// mirror types.
+///
+/// MIRROR: `inf_player::level::population_of`, character for character between
+/// the `MIRROR-BEGIN`/`MIRROR-END` markers — see that function for why the body
+/// cannot be hoisted into a shared crate (rings, and the P19.5 dependency-light
+/// mirror ruling) and what specifically goes wrong when it drifts: `start` and
+/// `inst_start` are both `u32`, so swapping them compiles and silently draws one
+/// distant building with another's walls.
+fn population_of(
+    out: inf_pcg::VolumeOutput,
+) -> (
+    Vec<ScatteredInstance>,
+    Vec<inf_ecs::components::ScatteredSolid>,
+    Vec<inf_ecs::StructureGroup>,
+) {
+    // MIRROR-BEGIN population_of
+    let instances = out
+        .instances
+        .into_iter()
+        .map(|i| ScatteredInstance {
+            position: i.pos,
+            rotation: i.rotation,
+            scale: i.scale,
+            kind: i.kind_index,
+        })
+        .collect();
+    let solids: Vec<inf_ecs::components::ScatteredSolid> = out
+        .colliders
+        .iter()
+        .map(|s| inf_ecs::components::ScatteredSolid {
+            center: s.center,
+            half_extents: s.half_extents,
+            rotation: s.rotation,
+        })
+        .collect();
+    let groups = out
+        .groups
+        .iter()
+        .map(|g| inf_ecs::StructureGroup {
+            shell: inf_ecs::components::ScatteredSolid {
+                center: g.shell.center,
+                half_extents: g.shell.half_extents,
+                rotation: g.shell.rotation,
+            },
+            start: g.start,
+            len: g.len,
+            inst_start: g.inst_start,
+            inst_len: g.inst_len,
+        })
+        .collect();
+    (instances, solids, groups)
+    // MIRROR-END population_of
+}
+
 /// The editor's [`MaskSource`]: resolves a `mask.image` node's texture GUID to
 /// the live project's `.inf_tex` pixels.
 ///
@@ -837,7 +892,7 @@ pub async fn pcg_evaluate(
             None => Box::new(FnHeight::new(|_, _| Some(0.0))),
         };
 
-        let mut instances = inf_pcg::evaluate(&document, provider.as_ref(), region);
+        let instances = inf_pcg::evaluate(&document, provider.as_ref(), region);
         // P19.4/P19.5: the graph's grammar and building passes run on the same
         // volume, against the same height provider, and append after the scatter
         // — grammars first, then buildings, a fixed order, so the cache is a
@@ -859,32 +914,17 @@ pub async fn pcg_evaluate(
             provider.as_ref(),
             &cx,
         ));
-        instances.extend(generated.instances);
-        let baked: Vec<ScatteredInstance> = instances
-            .iter()
-            .map(|i| ScatteredInstance {
-                position: i.pos,
-                rotation: i.rotation,
-                scale: i.scale,
-                kind: i.kind_index,
-            })
-            .collect();
-        let solid: Vec<inf_ecs::components::ScatteredSolid> = generated
-            .colliders
-            .iter()
-            .map(|s| inf_ecs::components::ScatteredSolid {
-                center: s.center,
-                half_extents: s.half_extents,
-                rotation: s.rotation,
-            })
-            .collect();
+        // The join is `inf_pcg::compose_volume`, the same door the shipped
+        // player's `evaluate_pcg_volumes_in` goes through — I3 made the ORDER
+        // load-bearing (a `StructureGroup` carries index ranges into these very
+        // lists), so it is stated once in Ring 0 rather than twice here.
+        let (baked, solid, groups) = population_of(inf_pcg::compose_volume(instances, generated));
         let placed = baked.len() as u32;
 
         {
             let w = doc.world_mut().world_mut();
             if let Some(mut vol) = w.get_mut::<PcgVolume>(e) {
-                vol.evaluated = baked;
-                vol.set_structures(solid);
+                vol.set_population(baked, solid, groups);
             }
         }
         doc.bump_version_for_runtime();

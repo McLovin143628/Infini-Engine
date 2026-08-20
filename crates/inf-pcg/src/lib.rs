@@ -57,13 +57,15 @@ pub mod noise;
 pub mod rules;
 pub mod sampler;
 pub mod scatter;
+pub mod volume;
 
 pub use asset::{PcgAssetPayload, PcgError};
 pub use binding::{bind_document, biome_seed, BiomeBinding, BiomeGraph, DEFAULT_BIOME_FEATHER};
 pub use building::{
-    archetype, archetypes, evaluate_buildings, evaluate_buildings_in, plans_of, ArchetypeId,
-    BuildingArchetype, BuildingOutput, BuildingParams, BuildingPass, BuildingPlan, Opening,
-    OpeningKind, Rect2, Room, RoomType, Stair, Wall,
+    archetype, archetypes, evaluate_buildings, evaluate_buildings_in, plans_of, subdivide_block,
+    ArchetypeId, BlockLot, BlockSubdivision, BuildingArchetype, BuildingOutput, BuildingParams,
+    BuildingPass, BuildingPlan, LotRules, Opening, OpeningKind, Rect2, Room, RoomType, Stair,
+    StructureGroup, StructureTier, Wall, DEFAULT_STRUCTURE_LOD_M,
 };
 pub use fields::{NoFields, OffsetTerrain, TerrainFields};
 pub use grammar::{
@@ -85,3 +87,4 @@ pub use scatter::{
     scatter_region, scatter_region_in, PcgCollider, PcgInstance, Region, RotationMode,
     ScatterParams,
 };
+pub use volume::{compose_volume, VolumeOutput};

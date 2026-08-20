@@ -1333,7 +1333,12 @@ pub fn evaluate_pcg_volumes_in(
         // One closure per branch so the scatter and the grammar see the SAME
         // height provider — a grammar snapping to a different ground than the
         // scatter beside it would be invisible until somebody walked the level.
-        let (mut raw, solids) = match &terrain {
+        // The three passes are joined by `inf_pcg::compose_volume` — the ONE
+        // door (I3), shared with the editor's `pcg_evaluate`. Hand-rolling the
+        // concatenation here is what made the two hosts two authorities on the
+        // order, and a `StructureGroup`'s index ranges make that order
+        // load-bearing rather than merely conventional.
+        let (scatter, grammar) = match &terrain {
             Some((data, o)) => {
                 let data = data.clone();
                 let o = *o;
@@ -1341,7 +1346,7 @@ pub fn evaluate_pcg_volumes_in(
                     data.height_at(DVec2::new(x - o.x, z - o.z))
                         .map(|h| h + o.y)
                 });
-                let mut v = inf_pcg::evaluate(&job.document, &provider, region);
+                let v = inf_pcg::evaluate(&job.document, &provider, region);
                 let mut g = inf_pcg::evaluate_grammars(&job.grammars, &splines, &provider, &cx);
                 g.extend(inf_pcg::evaluate_buildings(
                     &job.buildings,
@@ -1349,12 +1354,11 @@ pub fn evaluate_pcg_volumes_in(
                     &provider,
                     &cx,
                 ));
-                v.extend(g.instances);
-                (v, g.colliders)
+                (v, g)
             }
             None => {
                 let provider = FnHeight::new(|_, _| Some(0.0));
-                let mut v = inf_pcg::evaluate(&job.document, &provider, region);
+                let v = inf_pcg::evaluate(&job.document, &provider, region);
                 let mut g = inf_pcg::evaluate_grammars(&job.grammars, &splines, &provider, &cx);
                 g.extend(inf_pcg::evaluate_buildings(
                     &job.buildings,
@@ -1362,33 +1366,80 @@ pub fn evaluate_pcg_volumes_in(
                     &provider,
                     &cx,
                 ));
-                v.extend(g.instances);
-                (v, g.colliders)
+                (v, g)
             }
         };
-        let baked: Vec<ScatteredInstance> = raw
-            .drain(..)
-            .map(|i| ScatteredInstance {
-                position: i.pos,
-                rotation: i.rotation,
-                scale: i.scale,
-                kind: i.kind_index,
-            })
-            .collect();
-        let solid: Vec<inf_ecs::components::ScatteredSolid> = solids
-            .iter()
-            .map(|s| inf_ecs::components::ScatteredSolid {
-                center: s.center,
-                half_extents: s.half_extents,
-                rotation: s.rotation,
-            })
-            .collect();
+        let (baked, solid, groups) = population_of(inf_pcg::compose_volume(scatter, grammar));
 
         if let Some(mut vol) = world.world_mut().get_mut::<PcgVolume>(job.entity) {
-            vol.evaluated = baked;
-            vol.set_structures(solid);
+            vol.set_population(baked, solid, groups);
         }
     }
+}
+
+/// A [`VolumeOutput`](inf_pcg::VolumeOutput) in the ECS's own dependency-light
+/// mirror types.
+///
+/// # Why this body is duplicated, and what guards it
+///
+/// `inf-pcg` deliberately does **not** depend on `inf-ecs` (the P19.5
+/// "dependency-light mirror" ruling: `PcgCollider`/`ScatteredSolid`,
+/// `PcgInstance`/`ScatteredInstance`), and `inf-studio` cannot link this crate
+/// (rings 2 → 2, and the player is a binary). So the translation between the two
+/// mirror families is written once *per host* and cannot be hoisted into a
+/// shared crate without reversing an architecture decision that predates this
+/// wave.
+///
+/// The hazard that creates is specific and worth naming: `start` and
+/// `inst_start` are both `u32`, so **swapping them compiles**, and a host that
+/// swapped them would draw a distant building with somebody else's walls. It is
+/// therefore fenced by `MIRROR-BEGIN`/`MIRROR-END` markers and compared
+/// character for character against the editor's copy by
+/// `inf-editor-core`'s `biome_binding_mirror::the_population_mapping_is_one_body`.
+pub fn population_of(
+    out: inf_pcg::VolumeOutput,
+) -> (
+    Vec<ScatteredInstance>,
+    Vec<inf_ecs::components::ScatteredSolid>,
+    Vec<inf_ecs::StructureGroup>,
+) {
+    // MIRROR-BEGIN population_of
+    let instances = out
+        .instances
+        .into_iter()
+        .map(|i| ScatteredInstance {
+            position: i.pos,
+            rotation: i.rotation,
+            scale: i.scale,
+            kind: i.kind_index,
+        })
+        .collect();
+    let solids: Vec<inf_ecs::components::ScatteredSolid> = out
+        .colliders
+        .iter()
+        .map(|s| inf_ecs::components::ScatteredSolid {
+            center: s.center,
+            half_extents: s.half_extents,
+            rotation: s.rotation,
+        })
+        .collect();
+    let groups = out
+        .groups
+        .iter()
+        .map(|g| inf_ecs::StructureGroup {
+            shell: inf_ecs::components::ScatteredSolid {
+                center: g.shell.center,
+                half_extents: g.shell.half_extents,
+                rotation: g.shell.rotation,
+            },
+            start: g.start,
+            len: g.len,
+            inst_start: g.inst_start,
+            inst_len: g.inst_len,
+        })
+        .collect();
+    (instances, solids, groups)
+    // MIRROR-END population_of
 }
 
 /// Every entity's [`Spline`] resolved into **world space**, keyed by its stable

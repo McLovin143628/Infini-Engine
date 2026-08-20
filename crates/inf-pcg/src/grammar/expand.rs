@@ -842,13 +842,35 @@ pub struct GrammarOutput {
     pub instances: Vec<PcgInstance>,
     /// Solid boxes, in the same order their instances were placed.
     pub colliders: Vec<PcgCollider>,
+    /// **Which runs of those lists are one building** (IB-2b), and what each
+    /// building's shell box is.
+    ///
+    /// Emitted only by
+    /// [`evaluate_buildings_in`](crate::building::evaluate_buildings_in): a
+    /// `grammar.expand` pass has no notion of "one structure", so a fence
+    /// contributes no group and is banded box by box. Empty is the correct
+    /// answer, not a missing one.
+    pub groups: Vec<crate::building::StructureGroup>,
 }
 
 impl GrammarOutput {
-    /// Append `other`'s lists to this one's.
+    /// Append `other`'s lists to this one's, **re-basing its group ranges** onto
+    /// the concatenated lists.
+    ///
+    /// A range is only meaningful against the list it indexes, so the offset has
+    /// to be applied exactly where the concatenation happens — anywhere else and
+    /// a caller has to remember to do it, which is the shape of defect this
+    /// repository keeps paying for. Concatenation stays associative, so
+    /// `evaluate_*_in`'s `parallel_map` fold is still pool-size invariant.
     pub fn extend(&mut self, other: GrammarOutput) {
+        let (ci, ii) = (self.colliders.len() as u32, self.instances.len() as u32);
         self.instances.extend(other.instances);
         self.colliders.extend(other.colliders);
+        self.groups.extend(other.groups.into_iter().map(|mut g| {
+            g.start += ci;
+            g.inst_start += ii;
+            g
+        }));
     }
 
     /// `true` when nothing was placed at all.
@@ -913,6 +935,9 @@ pub fn expand_span(
     let mut out = GrammarOutput {
         instances: Vec::with_capacity(lay.slots.len()),
         colliders: Vec::new(),
+        // A 1-D expansion has no notion of "one structure": a fence is a run of
+        // modules, not a building, and is banded box by box.
+        groups: Vec::new(),
     };
     for (i, slot) in lay.slots.iter().enumerate() {
         let Some(kind) = slot.module else { continue };

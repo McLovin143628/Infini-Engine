@@ -114,6 +114,13 @@ pub const SPAN_KEY: &str = "span";
 pub const RULES_KEY: &str = "rules";
 /// A building archetype (palette + plan parameters) — P19.5.
 pub const BUILDING_KEY: &str = "building";
+/// A block subdivided into building lots — IB-2c.
+///
+/// A distinct wire from [`SPAN_KEY`] on purpose: a span is a *one-dimensional
+/// domain* a grammar walks, and a subdivision is a *set of oriented rectangles*.
+/// Reusing the span wire would have let a `grammar.expand` node be dragged onto
+/// a subdivision and lower into something that silently ignored the cut.
+pub const LOTS_KEY: &str = "lots";
 
 /// A density-field port.
 fn density(name: &str) -> PortDef {
@@ -143,6 +150,11 @@ fn rules(name: &str) -> PortDef {
 /// A building-archetype port.
 fn building(name: &str) -> PortDef {
     PortDef::new(name, PortType::Named(BUILDING_KEY.into()))
+}
+
+/// A subdivided-block port (IB-2c).
+fn lots(name: &str) -> PortDef {
+    PortDef::new(name, PortType::Named(LOTS_KEY.into()))
 }
 
 /// Resolves a texture asset GUID into a **grayscale bitmap** for the `mask.image`
@@ -486,12 +498,45 @@ fn building_nodes() -> Vec<NodeDef> {
                 ParamDef::toggle("furnish", true)
                     .described("Populate rooms with the archetype's furniture set"),
             ]),
+        NodeDef::new("building.lots", "Subdivide Block", "building")
+            .described(
+                "Cut a block polygon into oriented building lots — frontage along \
+                 the block's long side, depth across it",
+            )
+            .with_inputs(vec![span("block")])
+            .with_outputs(vec![lots("out")])
+            .with_params(vec![
+                ParamDef::number("frontage", crate::building::LotRules::default().frontage_m)
+                    .range(0.0, 10_000.0)
+                    .described(
+                        "Street frontage per lot in metres, along the block's LONG \
+                         axis (0 -> one column, the whole block)",
+                    ),
+                ParamDef::number("depth", crate::building::LotRules::default().depth_m)
+                    .range(0.0, 10_000.0)
+                    .described(
+                        "Lot depth in metres, across the block (0 -> one row; a 60 m \
+                         block at 30 m depth is two rows back to back)",
+                    ),
+                ParamDef::number("jitter", crate::building::LotRules::default().jitter)
+                    .range(0.0, crate::building::subdivide::MAX_JITTER)
+                    .described(
+                        "Boundary variation as a fraction of a lot — the district \
+                         variety knob; the lots still tile the block exactly",
+                    ),
+                ParamDef::number("setback", crate::building::LotRules::default().setback_m)
+                    .range(0.0, 1_000.0)
+                    .described("Metres of yard shaved off every side of every lot"),
+                ParamDef::number("min_area", crate::building::LotRules::default().min_area_m2)
+                    .range(0.0, 1_000_000.0)
+                    .described("Lots smaller than this are dropped rather than built"),
+            ]),
         NodeDef::new("building.plan", "Plan Building", "building")
             .described(
                 "Stand a building on a lot: floor stack, rooms, doors and windows, \
                  stairs and furniture",
             )
-            .with_inputs(vec![building("archetype"), span("lot")])
+            .with_inputs(vec![building("archetype"), span("lot"), lots("lots")])
             .with_outputs(vec![scatter("out")])
             .with_params(vec![
                 ParamDef::text("name", "building")
@@ -1219,6 +1264,57 @@ impl Ctx<'_> {
             None => None,
         };
 
+        // ── the subdivision (optional, IB-2c) ───────────────────────────────
+        //
+        // A `building.lots` node carries the RULES and takes the block on its own
+        // `block` pin, so a subdivided pass resolves its block through the same
+        // `lower_span` door a single lot does. When both pins are connected the
+        // block wins, because a block is what an author dragged most recently
+        // and silently ignoring one of two connected inputs is worse than saying
+        // which was used.
+        let (lots, lot) = match self.graph.link_into(node_id, "lots") {
+            Some(link) => {
+                let ln = link.from;
+                let Some(n) = self.graph.node(ln) else {
+                    return;
+                };
+                if n.type_id != "building.lots" {
+                    self.error(
+                        Some(ln),
+                        format!("`{}` does not produce subdivided lots", n.type_id),
+                    );
+                    return;
+                }
+                let lp = resolved(self.reg, n);
+                let rules = crate::building::LotRules {
+                    frontage_m: pf(&lp, "frontage"),
+                    depth_m: pf(&lp, "depth"),
+                    jitter: pf(&lp, "jitter"),
+                    setback_m: pf(&lp, "setback"),
+                    min_area_m2: pf(&lp, "min_area"),
+                }
+                .sane();
+                let block = match self.graph.link_into(ln, "block") {
+                    Some(bl) => match self.lower_span(bl.from) {
+                        Some(source) => Some(source),
+                        None => return,
+                    },
+                    None => {
+                        // No block: the volume's own box is subdivided, which is
+                        // the same fall-through a lot-less `building.plan` takes.
+                        self.warn(
+                            Some(ln),
+                            "Subdivide Block has no block connected — the volume's \
+                             own extent is subdivided instead",
+                        );
+                        None
+                    }
+                };
+                (Some(rules), block.or(lot))
+            }
+            None => (None, lot),
+        };
+
         let name = ptext(&params, "name");
         self.buildings.push(BuildingPass {
             name: if name.trim().is_empty() {
@@ -1237,6 +1333,7 @@ impl Ctx<'_> {
                 pf(&params, "size_z").max(0.0),
             ),
             lot,
+            lots,
             ground: if penum(&params, "ground") == "Span" {
                 Ground::Span
             } else {

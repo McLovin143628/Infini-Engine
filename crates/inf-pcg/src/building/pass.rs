@@ -66,8 +66,23 @@ pub struct BuildingPass {
     /// A span whose XZ bounds become the lot, when the node's `lot` pin is
     /// connected.
     pub lot: Option<SpanSource>,
+    /// **Subdivision rules** (IB-2c): when set, the span on the `lot` pin is a
+    /// *block*, and this pass builds one building per lot the block is cut into
+    /// rather than one building on the block.
+    ///
+    /// `None` is the pre-I3 behaviour exactly — one pass, one lot, one building —
+    /// so every committed graph lowers to the population it always did.
+    pub lots: Option<super::LotRules>,
     pub ground: Ground,
     pub altitude_offset: f64,
+}
+
+/// One lot a pass will build on, with the seed the building standing on it draws
+/// from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlacedLot {
+    pub lot: crate::building::OrientedLot,
+    pub seed: u64,
 }
 
 /// The seed one pass runs under: its authored seed folded with the building salt
@@ -122,30 +137,7 @@ pub fn oriented_lot_of(
     use crate::building::{LotFrame, OrientedLot};
 
     if let Some(source) = &pass.lot {
-        // A span is a polyline; its XZ bounds are the lot. `build_spans` needs a
-        // `GrammarPass` shell — only its `span` field is read.
-        let shell = GrammarPass {
-            name: pass.name.clone(),
-            layer: pass.layer.clone(),
-            enabled: true,
-            seed: 0,
-            grammar: Default::default(),
-            axiom: String::new(),
-            span: source.clone(),
-            corner_module: String::new(),
-            ground: pass.ground,
-            altitude_offset: 0.0,
-        };
-        let set = build_spans(&shell, splines, cx);
-        let mut pts: Vec<DVec2> = Vec::new();
-        for span in &set.spans {
-            for p in span.points() {
-                pts.push(DVec2::new(p.x, p.z));
-            }
-        }
-        for f in &set.corners {
-            pts.push(DVec2::new(f.position.x, f.position.z));
-        }
+        let pts = span_points(pass, source, splines, cx);
         if let Some(mar) = inf_math::min_area_rect(&pts) {
             if mar.half.x > 0.0 && mar.half.y > 0.0 {
                 return OrientedLot {
@@ -177,6 +169,149 @@ pub fn oriented_lot_of(
     ))
 }
 
+/// The world-XZ points a pass's `lot` span resolves to — the block polygon.
+///
+/// Hoisted out of [`oriented_lot_of`] so the *subdivider* fits the block's own
+/// hull rather than re-fitting a rectangle that has already thrown the hull away:
+/// [`min_area_rect`](inf_math::min_area_rect) is a lossy summary of a polygon,
+/// and a lot-containment test run against it could never refuse a corner lot on
+/// a chamfered block.
+fn span_points(
+    pass: &BuildingPass,
+    source: &SpanSource,
+    splines: &dyn SplineSource,
+    cx: &GrammarContext,
+) -> Vec<DVec2> {
+    // `build_spans` needs a `GrammarPass` shell — only its `span` field is read.
+    let shell = GrammarPass {
+        name: pass.name.clone(),
+        layer: pass.layer.clone(),
+        enabled: true,
+        seed: 0,
+        grammar: Default::default(),
+        axiom: String::new(),
+        span: source.clone(),
+        corner_module: String::new(),
+        ground: pass.ground,
+        altitude_offset: 0.0,
+    };
+    let set = build_spans(&shell, splines, cx);
+    let mut pts: Vec<DVec2> = Vec::new();
+    for span in &set.spans {
+        for p in span.points() {
+            pts.push(DVec2::new(p.x, p.z));
+        }
+    }
+    for f in &set.corners {
+        pts.push(DVec2::new(f.position.x, f.position.z));
+    }
+    pts
+}
+
+/// **Every lot this pass builds on** (IB-2c) — one, or one per subdivided lot.
+///
+/// This is the function that retires the certification's *"one `building.plan`
+/// node is one building"*. With [`BuildingPass::lots`] unset it returns exactly
+/// one lot with exactly the seed the pass has always drawn, so no committed
+/// content moves; with it set, the `lot` span is treated as a **block** and cut
+/// by [`subdivide_block`](crate::building::subdivide_block).
+///
+/// The per-lot seeds come from the subdivider, which folds the lot's `(col,
+/// row)` into the block seed — `plan.rs` states that two buildings handed the
+/// same seed *are* the same building, so a district of identical towers is
+/// exactly what a shared seed would produce.
+pub fn oriented_lots_of(
+    pass: &BuildingPass,
+    splines: &dyn SplineSource,
+    cx: &GrammarContext,
+) -> Vec<PlacedLot> {
+    let seed = pass_seed(pass.seed, cx.seed_offset);
+    let Some(rules) = pass.lots else {
+        return vec![PlacedLot {
+            lot: oriented_lot_of(pass, splines, cx),
+            seed,
+        }];
+    };
+    let Some(source) = &pass.lot else {
+        // Subdivision with no block to subdivide: the volume's own box is the
+        // block, which is the same fall-through the single-lot path takes.
+        let lot = oriented_lot_of(pass, splines, cx);
+        let block = lot.world_corners().to_vec();
+        return placed(&block, &rules, seed);
+    };
+    let pts = span_points(pass, source, splines, cx);
+    placed(&pts, &rules, seed)
+}
+
+fn placed(block: &[DVec2], rules: &super::LotRules, seed: u64) -> Vec<PlacedLot> {
+    crate::building::subdivide_block(block, rules, seed)
+        .lots
+        .into_iter()
+        .map(|l| PlacedLot {
+            lot: l.lot,
+            seed: l.seed,
+        })
+        .collect()
+}
+
+/// Everything one building needs, resolved against the world — the ONE
+/// resolution [`evaluate_buildings_in`] and [`plans_of`] share.
+///
+/// Before I3 these two functions each spelled the lot resolution, the datum
+/// lookup and the seed fold out for themselves, which is two authorities on
+/// "what does this pass build" and exactly the shape
+/// `plans_match_what_evaluation_builds` exists to catch after the fact. Now the
+/// arm is a tautology on purpose.
+struct BuildJob {
+    params: BuildingParams,
+    frame: crate::building::LotFrame,
+    seed: u64,
+    furnish: bool,
+}
+
+fn jobs_of(
+    passes: &[BuildingPass],
+    splines: &dyn SplineSource,
+    height: &dyn HeightProvider,
+    cx: &GrammarContext,
+) -> Vec<BuildJob> {
+    let mut jobs = Vec::new();
+    for pass in passes.iter().filter(|p| p.enabled) {
+        for placed in oriented_lots_of(pass, splines, cx) {
+            let lot = placed.lot;
+            if !lot.rect.is_positive() {
+                continue;
+            }
+            // The datum is asked for at the lot's centre **in the world**, which
+            // is where the ground is; the plan is built in the lot's frame.
+            let c = lot.frame.to_world(lot.rect.center());
+            let base = match pass.ground {
+                Ground::Span => cx.center.y,
+                // Fail closed, exactly like a scattered instance over a hole:
+                // no ground under the footprint centre means no building, not a
+                // building at y = 0.
+                Ground::Terrain => match height.height(c.x, c.y) {
+                    Some(h) => h,
+                    None => continue,
+                },
+            } + pass.altitude_offset;
+            jobs.push(BuildJob {
+                params: BuildingParams {
+                    archetype: pass.archetype,
+                    footprint: lot.rect,
+                    base_y: base,
+                    seed: placed.seed,
+                    floors: pass.floors,
+                },
+                frame: lot.frame,
+                seed: placed.seed,
+                furnish: pass.furnish,
+            });
+        }
+    }
+    jobs
+}
+
 /// Evaluate every enabled building pass on the process-wide job pool.
 pub fn evaluate_buildings(
     passes: &[BuildingPass],
@@ -205,47 +340,29 @@ pub fn evaluate_buildings_in(
     // The lot and the datum are resolved OUTSIDE the pool: `SplineSource` and
     // `HeightProvider` are `&dyn`, and the world walk behind them is the one
     // part of the path each host writes for itself.
-    let jobs: Vec<(BuildingParams, crate::building::LotFrame, u64, bool)> = passes
-        .iter()
-        .filter(|p| p.enabled)
-        .filter_map(|pass| {
-            let lot = oriented_lot_of(pass, splines, cx);
-            if !lot.rect.is_positive() {
-                return None;
-            }
-            // The datum is asked for at the lot's centre **in the world**, which
-            // is where the ground is; the plan is built in the lot's frame.
-            let c = lot.frame.to_world(lot.rect.center());
-            let base = match pass.ground {
-                Ground::Span => cx.center.y,
-                // Fail closed, exactly like a scattered instance over a hole:
-                // no ground under the footprint centre means no building, not a
-                // building at y = 0.
-                Ground::Terrain => height.height(c.x, c.y)?,
-            } + pass.altitude_offset;
-            let seed = pass_seed(pass.seed, cx.seed_offset);
-            Some((
-                BuildingParams {
-                    archetype: pass.archetype,
-                    footprint: lot.rect,
-                    base_y: base,
-                    seed,
-                    floors: pass.floors,
-                },
-                lot.frame,
-                seed,
-                pass.furnish,
-            ))
-        })
-        .collect();
+    let jobs = jobs_of(passes, splines, height, cx);
     if jobs.is_empty() {
         return GrammarOutput::default();
     }
-    let per: Vec<GrammarOutput> = pool.parallel_map(jobs, |(params, frame, seed, furnish)| {
-        let out = build_in(&params, frame, seed, furnish);
+    let per: Vec<GrammarOutput> = pool.parallel_map(jobs, |job| {
+        let out = build_in(&job.params, job.frame, job.seed, job.furnish);
+        // **One building is one group** (IB-2b): the shell is derived here,
+        // where the lot frame is in hand, and the ranges are local to this
+        // chunk — `GrammarOutput::extend` re-bases them as the chunks fold.
+        let groups = match super::lod::group_shell(job.frame, &out.colliders) {
+            Some(shell) => vec![super::StructureGroup {
+                shell,
+                start: 0,
+                len: out.colliders.len() as u32,
+                inst_start: 0,
+                inst_len: out.instances.len() as u32,
+            }],
+            None => Vec::new(),
+        };
         GrammarOutput {
             instances: out.instances,
             colliders: out.colliders,
+            groups,
         }
     });
     let mut out = GrammarOutput::default();
@@ -267,30 +384,9 @@ pub fn plans_of(
     height: &dyn HeightProvider,
     cx: &GrammarContext,
 ) -> Vec<super::BuildingPlan> {
-    passes
+    jobs_of(passes, splines, height, cx)
         .iter()
-        .filter(|p| p.enabled)
-        .filter_map(|pass| {
-            let lot = oriented_lot_of(pass, splines, cx);
-            if !lot.rect.is_positive() {
-                return None;
-            }
-            let c = lot.frame.to_world(lot.rect.center());
-            let base = match pass.ground {
-                Ground::Span => cx.center.y,
-                Ground::Terrain => height.height(c.x, c.y)?,
-            } + pass.altitude_offset;
-            Some(super::plan::plan_building_in(
-                &BuildingParams {
-                    archetype: pass.archetype,
-                    footprint: lot.rect,
-                    base_y: base,
-                    seed: pass_seed(pass.seed, cx.seed_offset),
-                    floors: pass.floors,
-                },
-                lot.frame,
-            ))
-        })
+        .map(|job| super::plan::plan_building_in(&job.params, job.frame))
         .collect()
 }
 
@@ -317,6 +413,7 @@ mod tests {
             furnish: true,
             size: DVec2::new(20.0, 14.0),
             lot: None,
+            lots: None,
             ground: Ground::Terrain,
             altitude_offset: 0.0,
         }
@@ -649,6 +746,149 @@ mod tests {
         assert_ne!(pass_seed(4, 7), crate::grammar::pass_seed(4, 7).finish());
     }
 
+    /// **IB-2c: one `building.plan` node stops meaning one building.**
+    ///
+    /// The claim is not that a struct grew a field — it is that the *world* holds
+    /// several separate buildings on separate lots, each with its own plan, each
+    /// square to the block, none overlapping another. So the arm reads the
+    /// assembled population and the resolved plans, and prices the alternative
+    /// the wave retires (one building on the whole block) in square metres.
+    #[test]
+    fn a_block_pass_builds_one_building_per_lot() {
+        let centre = DVec2::new(0.0, 0.0);
+        let ring: Vec<DVec3> = [(-50.0, -30.0), (50.0, -30.0), (50.0, 30.0), (-50.0, 30.0)]
+            .iter()
+            .map(|&(x, z)| DVec3::new(centre.x + x, 0.0, centre.y + z))
+            .collect();
+        let block = BuildingPass {
+            lot: Some(SpanSource::Polyline {
+                points: ring,
+                closed: true,
+            }),
+            ground: Ground::Span,
+            floors: 2,
+            size: DVec2::ZERO,
+            ..pass()
+        };
+        let cx = GrammarContext {
+            entity: None,
+            center: DVec3::new(0.0, 0.0, 0.0),
+            extent: DVec2::new(60.0, 40.0),
+            seed_offset: 11,
+        };
+
+        // Without rules: one lot, the whole block — the pre-I3 answer, unmoved.
+        let one = oriented_lots_of(&block, &NoSplines, &cx);
+        assert_eq!(one.len(), 1);
+        assert!((one[0].lot.rect.area() - 100.0 * 60.0).abs() < 1e-6);
+        assert_eq!(one[0].seed, pass_seed(block.seed, cx.seed_offset));
+
+        // With rules: 4 x 2 lots, each a building of its own.
+        let sub = BuildingPass {
+            lots: Some(crate::building::LotRules {
+                frontage_m: 25.0,
+                depth_m: 30.0,
+                jitter: 0.0,
+                setback_m: 2.0,
+                min_area_m2: 0.0,
+            }),
+            ..block.clone()
+        };
+        let many = oriented_lots_of(&sub, &NoSplines, &cx);
+        assert_eq!(many.len(), 8, "{} lots", many.len());
+
+        let plans = plans_of(&[sub.clone()], &NoSplines, &flat(0.0), &cx);
+        assert_eq!(plans.len(), 8, "one plan per lot");
+        for p in &plans {
+            assert!(p.fully_reachable(), "every subdivided lot is enterable");
+            assert!(!p.rooms.is_empty());
+        }
+        // Eight DIFFERENT buildings, not eight copies: the room counts differ.
+        let mut shapes: Vec<usize> = plans.iter().map(|p| p.rooms.len()).collect();
+        shapes.sort_unstable();
+        shapes.dedup();
+        assert!(
+            shapes.len() > 1,
+            "eight lots produced one building shape — the lot seeds are correlated"
+        );
+
+        let out = evaluate_buildings(&[sub], &NoSplines, &flat(0.0), &cx);
+        assert_eq!(out.groups.len(), 8, "one structure group per building");
+        // The groups partition the collider list exactly.
+        let mut covered = 0usize;
+        for (i, g) in out.groups.iter().enumerate() {
+            assert_eq!(g.start as usize, covered, "group {i} is not contiguous");
+            covered += g.len as usize;
+        }
+        assert_eq!(covered, out.colliders.len());
+        let mut inst = 0usize;
+        for g in &out.groups {
+            assert_eq!(g.inst_start as usize, inst);
+            inst += g.inst_len as usize;
+        }
+        assert_eq!(inst, out.instances.len());
+
+        // Every collider is inside its own group's shell.
+        for g in &out.groups {
+            for c in &out.colliders[g.range()] {
+                let d = crate::building::lod::distance_xz_to_box(
+                    c.center,
+                    g.shell.center,
+                    g.shell.half_extents,
+                    g.shell.rotation,
+                );
+                assert!(d < 1e-6, "a part sits {d} m outside its own shell");
+            }
+        }
+
+        // THE ALTERNATIVE, PRICED: the whole block as one building.
+        let whole = evaluate_buildings(&[block], &NoSplines, &flat(0.0), &cx);
+        println!(
+            "IB-2c: block -> {} buildings / {} solids / {} instances, against \
+             1 building / {} solids for the same block",
+            out.groups.len(),
+            out.colliders.len(),
+            out.instances.len(),
+            whole.colliders.len()
+        );
+        assert_eq!(whole.groups.len(), 1);
+    }
+
+    /// The fan-out stays a pure map: any pool size, the same population.
+    #[test]
+    fn a_subdivided_block_is_invariant_under_pool_size() {
+        let cx = GrammarContext {
+            entity: None,
+            center: DVec3::ZERO,
+            extent: DVec2::new(50.0, 30.0),
+            seed_offset: 3,
+        };
+        let sub = BuildingPass {
+            size: DVec2::ZERO,
+            lots: Some(crate::building::LotRules::default()),
+            ground: Ground::Span,
+            ..pass()
+        };
+        let want = evaluate_buildings_in(
+            &inf_core::JobPool::new(1),
+            std::slice::from_ref(&sub),
+            &NoSplines,
+            &flat(0.0),
+            &cx,
+        );
+        assert!(want.groups.len() > 1, "{} groups", want.groups.len());
+        for workers in [2usize, 4, 8] {
+            let got = evaluate_buildings_in(
+                &inf_core::JobPool::new(workers),
+                std::slice::from_ref(&sub),
+                &NoSplines,
+                &flat(0.0),
+                &cx,
+            );
+            assert_eq!(want, got, "output moved at {workers} workers");
+        }
+    }
+
     /// `plans_of` resolves exactly what `evaluate_buildings_in` assembles — the
     /// property that lets a gate assert plan invariants about shipped content.
     #[test]
@@ -659,7 +899,18 @@ mod tests {
         assert_eq!(plans.len(), 1);
         let direct = crate::building::assemble(&plans[0], pass_seed(3, 11), true);
         let via = evaluate_buildings(&passes, &NoSplines, &flat(5.0), &cx);
-        assert_eq!(direct, via);
+        // The population is the same population. The **grouping** is not part of
+        // that claim: `assemble` is handed a plan and knows nothing about lots,
+        // so it emits no group — which is why the two are compared list by list
+        // and the group is asserted against the lists rather than against
+        // `direct`. Comparing the whole struct would have meant either a
+        // vacuous group on both sides or a false failure here.
+        assert_eq!(direct.instances, via.instances);
+        assert_eq!(direct.colliders, via.colliders);
+        assert!(direct.groups.is_empty(), "assemble does not group");
+        assert_eq!(via.groups.len(), 1, "one pass, one lot, one group");
+        assert_eq!(via.groups[0].range(), 0..via.colliders.len());
+        assert_eq!(via.groups[0].instance_range(), 0..via.instances.len());
         assert!(plans[0].fully_reachable());
     }
 }

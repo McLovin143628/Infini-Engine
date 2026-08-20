@@ -240,6 +240,63 @@ fn scattered_solid_and_pcg_collider_stay_in_sync() {
     );
 }
 
+/// **The second mirror pin** (IB-2b): `inf_ecs::StructureGroup` and
+/// `inf_pcg::building::StructureGroup` are the same five fields declared twice,
+/// for the same dependency reason the pin above states.
+///
+/// Sharper than its sibling, because four of the five fields are `u32` and a
+/// permutation of them **compiles on both sides**. So the round trip uses four
+/// distinct values and checks each by name, and the size check catches a field
+/// added to both.
+#[test]
+fn structure_group_stays_in_sync_with_its_pcg_twin() {
+    let shell = ScatteredSolid {
+        center: DVec3::new(-8.0, 4.5, 12.0),
+        half_extents: DVec3::new(6.0, 9.0, 3.5),
+        rotation: inf_pcg::grammar::yaw_onto(DVec3::Z),
+    };
+    // Four DIFFERENT numbers: equal ones would let any permutation pass.
+    let e = inf_ecs::StructureGroup {
+        shell,
+        start: 11,
+        len: 22,
+        inst_start: 33,
+        inst_len: 44,
+    };
+    let p = inf_pcg::StructureGroup {
+        shell: inf_pcg::PcgCollider {
+            center: e.shell.center,
+            half_extents: e.shell.half_extents,
+            rotation: e.shell.rotation,
+        },
+        start: e.start,
+        len: e.len,
+        inst_start: e.inst_start,
+        inst_len: e.inst_len,
+    };
+    let back = inf_ecs::StructureGroup {
+        shell: ScatteredSolid {
+            center: p.shell.center,
+            half_extents: p.shell.half_extents,
+            rotation: p.shell.rotation,
+        },
+        start: p.start,
+        len: p.len,
+        inst_start: p.inst_start,
+        inst_len: p.inst_len,
+    };
+    assert_eq!(back, e, "the mirrored groups round-trip losslessly");
+    assert_eq!(back.range(), 11..33);
+    assert_eq!(back.instance_range(), 33..77);
+    assert_eq!(p.range(), back.range());
+    assert_eq!(p.instance_range(), back.instance_range());
+    assert_eq!(
+        std::mem::size_of::<inf_ecs::StructureGroup>(),
+        std::mem::size_of::<inf_pcg::StructureGroup>(),
+        "the mirrored groups have diverged in shape"
+    );
+}
+
 /// The synthetic identity is a pure function of `(volume, index)`, distinct
 /// across both — a XOR-based derivation would alias two volumes whose GUIDs
 /// differ only in the low bits, which is exactly what sequential test GUIDs are.

@@ -65,10 +65,12 @@
 //!   project has one, with no code change (`module Panel = mesh <guid> …`).
 
 pub mod assemble;
+pub mod lod;
 pub mod palettes;
 pub mod partition;
 pub mod pass;
 pub mod plan;
+pub mod subdivide;
 
 use glam::{DVec2, DVec3};
 
@@ -76,15 +78,17 @@ use crate::grammar::span::positive;
 use crate::scatter::PcgCollider;
 
 pub use assemble::{assemble, assemble_in, build, build_in, BuildingOutput};
+pub use lod::{StructureGroup, StructureTier, DEFAULT_STRUCTURE_LOD_M};
 pub use palettes::{
     archetype, archetypes, ArchetypeId, BuildingArchetype, FurnitureDef, RoomWeight,
 };
 pub use partition::{connect, partition_floor, walls_of, Adjacency};
 pub use pass::{
-    evaluate_buildings, evaluate_buildings_in, lot_of, oriented_lot_of, pass_seed, plans_of,
-    BuildingPass,
+    evaluate_buildings, evaluate_buildings_in, lot_of, oriented_lot_of, oriented_lots_of,
+    pass_seed, plans_of, BuildingPass,
 };
 pub use plan::{plan_building, plan_building_in, BuildingParams, MAX_FLOORS};
+pub use subdivide::{subdivide_block, BlockLot, BlockSubdivision, LotRules, MAX_LOTS_PER_AXIS};
 
 /// **The lot's own frame on the XZ plane** (IB-6): where its origin is and
 /// which way its long side runs.

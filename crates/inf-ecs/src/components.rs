@@ -3182,6 +3182,52 @@ pub struct ScatteredSolid {
     pub rotation: DQuat,
 }
 
+/// **Which run of a volume's derived lists is one building**, and what that
+/// building's shell box is (IB-2b).
+///
+/// A dependency-light mirror of `inf_pcg::building::StructureGroup`, on exactly
+/// the terms [`ScatteredSolid`] mirrors `inf_pcg::PcgCollider`. Derived, never
+/// serialized, never reflected.
+///
+/// # What it buys
+///
+/// A grammar building is ~800–2 000 boxes; a city of a thousand is ~10⁶, and at
+/// the certification's measured **0.363 µs per collider per fixed step** that is
+/// a third of a second of physics for a scene nobody can walk across. A group
+/// lets both consumers of a volume's derived state work in units of *buildings*
+/// rather than boxes: the physics bridge attaches a distant building's **shell**
+/// (one collider) instead of its parts, and a host's projection draws one
+/// instance instead of a thousand. Ranges rather than a per-box tag because a
+/// building's boxes are already contiguous and a `u32` on every
+/// [`ScatteredSolid`] would be megabytes of tag per city.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StructureGroup {
+    /// The smallest oriented box containing the group's solids.
+    pub shell: ScatteredSolid,
+    /// First index into [`PcgVolume::structures`].
+    pub start: u32,
+    /// Solid count.
+    pub len: u32,
+    /// First index into [`PcgVolume::evaluated`].
+    pub inst_start: u32,
+    /// Instance count.
+    pub inst_len: u32,
+}
+
+impl StructureGroup {
+    /// The half-open range this group covers in [`PcgVolume::structures`].
+    #[inline]
+    pub fn range(&self) -> std::ops::Range<usize> {
+        self.start as usize..(self.start as usize + self.len as usize)
+    }
+
+    /// The half-open range this group covers in [`PcgVolume::evaluated`].
+    #[inline]
+    pub fn instance_range(&self) -> std::ops::Range<usize> {
+        self.inst_start as usize..(self.inst_start as usize + self.inst_len as usize)
+    }
+}
+
 /// A procedural scatter volume (P10.5b): a rectangular XZ region, centered on the
 /// entity's [`Transform`], populated by evaluating a `.inf_pcg` graph over the
 /// scene terrain. The editor evaluates on demand (`pcg_evaluate`) and stores the
@@ -3259,6 +3305,20 @@ pub struct PcgVolume {
     #[serde(skip)]
     #[reflect(ignore)]
     pub structures_gen: u64,
+    /// Which runs of [`structures`](Self::structures) and
+    /// [`evaluated`](Self::evaluated) are one building, and each building's shell
+    /// (IB-2b). Empty for a volume that grows no buildings — a scatter or a
+    /// `grammar.expand` fence is banded box by box, which is correct for content
+    /// that has no "one structure" to speak of.
+    ///
+    /// Derived and stamped with [`structures`](Self::structures): the two are
+    /// written together through
+    /// [`set_structures_with_groups`](Self::set_structures_with_groups), because
+    /// a range that outlived the list it indexes would name somebody else's
+    /// walls and nothing would fail.
+    #[serde(skip)]
+    #[reflect(ignore)]
+    pub structure_groups: Vec<StructureGroup>,
 }
 
 fn default_pcg_extent() -> Vec2d {
@@ -3278,12 +3338,14 @@ impl Default for PcgVolume {
             evaluated: Vec::new(),
             structures: Vec::new(),
             structures_gen: 0,
+            structure_groups: Vec::new(),
         }
     }
 }
 
 impl PcgVolume {
-    /// Replace the derived solid cache and **bump its change stamp**.
+    /// Replace the derived solid cache and **bump its change stamp**, with no
+    /// grouping — every solid stands on its own.
     ///
     /// The one supported way to write [`structures`](Self::structures): the
     /// physics bridge skips rebuilding a volume's colliders while
@@ -3293,6 +3355,40 @@ impl PcgVolume {
     /// generation `0` and therefore always resync once).
     pub fn set_structures(&mut self, solids: Vec<ScatteredSolid>) {
         self.structures = solids;
+        self.structure_groups = Vec::new();
+        self.structures_gen = self.structures_gen.wrapping_add(1);
+    }
+
+    /// Replace a volume's **whole derived population** — instances, solids and
+    /// grouping — bumping the change stamp once.
+    ///
+    /// # Why all three at once
+    ///
+    /// A [`StructureGroup`] is a pair of index ranges, and an index range is only
+    /// meaningful against the exact lists it was derived from. Writing the three
+    /// through three setters would make the *order* of those writes load-bearing
+    /// — set the groups before the instances and every range validates against a
+    /// list that is not there yet — and an ordering nobody can see is exactly the
+    /// hazard `set_structures` was introduced to close for the change stamp.
+    /// One call, one stamp, one validation.
+    ///
+    /// Groups whose ranges fall outside either list are **dropped here**: an
+    /// out-of-range group is a composition bug, and the honest response at the
+    /// door is to refuse the group rather than to panic inside a fixed step sixty
+    /// times a second. Nothing downstream may assume the groups cover the lists.
+    pub fn set_population(
+        &mut self,
+        instances: Vec<ScatteredInstance>,
+        solids: Vec<ScatteredSolid>,
+        groups: Vec<StructureGroup>,
+    ) {
+        let (ns, ni) = (solids.len(), instances.len());
+        self.evaluated = instances;
+        self.structures = solids;
+        self.structure_groups = groups
+            .into_iter()
+            .filter(|g| g.range().end <= ns && g.instance_range().end <= ni)
+            .collect();
         self.structures_gen = self.structures_gen.wrapping_add(1);
     }
 }
@@ -5914,16 +6010,32 @@ mod tests {
                 rotation: DQuat::IDENTITY,
             }],
             structures_gen: 9,
+            // IB-2b's grouping rides on exactly the same terms — derived,
+            // skipped, and therefore free of the schema window this wave has
+            // already spent.
+            structure_groups: vec![StructureGroup {
+                shell: ScatteredSolid {
+                    center: DVec3::new(4.0, 5.0, 6.0),
+                    half_extents: DVec3::new(0.1, 1.5, 1.0),
+                    rotation: DQuat::IDENTITY,
+                },
+                start: 0,
+                len: 1,
+                inst_start: 0,
+                inst_len: 1,
+            }],
         };
         let json = serde_json::to_string(&v).unwrap();
         // The skipped caches are absent from the serialized form …
         assert!(!json.contains("evaluated"));
         assert!(!json.contains("structures"));
         assert!(!json.contains("structures_gen"));
+        assert!(!json.contains("structure_groups"));
         let back: PcgVolume = serde_json::from_str(&json).unwrap();
         // … and decode empty, while the persisted fields round-trip.
         assert!(back.evaluated.is_empty());
         assert!(back.structures.is_empty());
+        assert!(back.structure_groups.is_empty());
         assert_eq!(back.structures_gen, 0, "the change stamp is derived too");
         assert_eq!(back.graph, v.graph);
         assert_eq!(back.extent, v.extent);
@@ -5935,6 +6047,64 @@ mod tests {
         assert_eq!(d, PcgVolume::default());
         assert_eq!(d.extent, Vec2d::splat(50.0));
         assert_eq!(d.draw_distance, 1000.0);
+    }
+
+    /// **The whole population is written through one door, and the door checks
+    /// the ranges** (IB-2b).
+    ///
+    /// A `StructureGroup` naming solids that are not there is not a crash — it is
+    /// a distant building drawn with somebody else's walls, or a shell collider
+    /// with nothing inside it. So the setter refuses out-of-range groups, and
+    /// this arm is what says so; without it, the filter could be deleted and
+    /// every other test in the tree would stay green.
+    #[test]
+    fn the_population_door_refuses_a_group_that_names_solids_that_are_not_there() {
+        let solid = ScatteredSolid {
+            center: DVec3::ZERO,
+            half_extents: DVec3::splat(1.0),
+            rotation: DQuat::IDENTITY,
+        };
+        let inst = ScatteredInstance {
+            position: DVec3::ZERO,
+            rotation: DQuat::IDENTITY,
+            scale: 1.0,
+            kind: 0,
+        };
+        let group = |start, len, inst_start, inst_len| StructureGroup {
+            shell: solid,
+            start,
+            len,
+            inst_start,
+            inst_len,
+        };
+
+        let mut v = PcgVolume::default();
+        v.set_population(
+            vec![inst; 4],
+            vec![solid; 3],
+            vec![
+                group(0, 3, 0, 4), // fits both lists
+                group(0, 4, 0, 4), // one solid past the end
+                group(2, 1, 3, 2), // one instance past the end
+            ],
+        );
+        assert_eq!(v.structure_groups.len(), 1, "{:?}", v.structure_groups);
+        assert_eq!(v.structure_groups[0].range(), 0..3);
+        assert_eq!(v.structure_groups[0].instance_range(), 0..4);
+        assert_eq!(v.structures_gen, 1, "one write is one stamp");
+
+        // The three-list write is one stamp, and re-writing bumps it once more.
+        v.set_population(vec![inst; 1], vec![solid; 1], vec![group(0, 1, 0, 1)]);
+        assert_eq!(v.structures_gen, 2);
+        assert_eq!(v.evaluated.len(), 1);
+
+        // `set_structures` still means "no grouping", and clears a stale one.
+        v.set_structures(vec![solid; 2]);
+        assert!(
+            v.structure_groups.is_empty(),
+            "a stale range must not survive"
+        );
+        assert_eq!(v.structures_gen, 3);
     }
 
     #[test]

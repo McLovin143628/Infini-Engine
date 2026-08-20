@@ -98,6 +98,71 @@ fn both_paths_prefer_the_authored_graph_over_the_stored_mirror() {
     }
 }
 
+/// **The two hosts translate a volume's population with ONE body** (I3).
+///
+/// `inf-pcg` does not depend on `inf-ecs` and `inf-studio` cannot link
+/// `inf-player`, so the map from `inf_pcg::VolumeOutput` into the ECS's own
+/// mirror types is written once per host and cannot be hoisted. Until IB-2b it
+/// was three field-for-field copies and a drift would have been a wrong
+/// *position*, which is visible. Now it carries `StructureGroup`, whose `start`,
+/// `len`, `inst_start` and `inst_len` are four `u32`s in a row: **any
+/// permutation of them compiles**, and the symptom is a distant building drawn
+/// or collided with another building's walls — found by a player, not by a
+/// compiler.
+///
+/// So the two bodies are compared character for character (whitespace squeezed,
+/// so rustfmt's line breaking is not the subject). The markers are asserted to
+/// appear **exactly once** on each side: the I1 audit's law that a `contains`
+/// needle which is a prefix of a declaration can never fail applies to a fence
+/// too — a second `MIRROR-BEGIN` would silently change which block is compared.
+#[test]
+fn the_population_mapping_is_one_body() {
+    fn fenced(src: &str, who: &str) -> String {
+        assert_eq!(
+            src.matches("// MIRROR-BEGIN population_of").count(),
+            1,
+            "{who} has the wrong number of population_of fences"
+        );
+        assert_eq!(
+            src.matches("// MIRROR-END population_of").count(),
+            1,
+            "{who} has the wrong number of population_of fences"
+        );
+        let a = src.find("// MIRROR-BEGIN population_of").expect("checked");
+        let b = src.find("// MIRROR-END population_of").expect("checked");
+        assert!(b > a, "{who}'s population_of fence is inverted");
+        src[a..b].chars().filter(|c| !c.is_whitespace()).collect()
+    }
+    let editor = fenced(&read(EDITOR), "the editor");
+    let player = fenced(&read(PLAYER), "the player");
+    assert!(
+        editor.len() > 400,
+        "the fenced body is suspiciously short ({} chars) — an empty fence would \
+         make this gate vacuous",
+        editor.len()
+    );
+    assert_eq!(
+        editor, player,
+        "the editor and the player translate a PCG volume's population \
+         differently. `start`/`len`/`inst_start`/`inst_len` are four u32s in a \
+         row: a swap compiles and draws one building with another's walls."
+    );
+    // …and both really do go through the Ring-0 composition door, which is what
+    // makes the ORDER of the three passes one decision rather than two.
+    for (who, src) in [("editor", read(EDITOR)), ("player", read(PLAYER))] {
+        assert_eq!(
+            src.matches("inf_pcg::compose_volume(").count(),
+            1,
+            "{who} no longer joins its three passes through the Ring-0 door"
+        );
+        assert_eq!(
+            src.matches("set_population(").count(),
+            1,
+            "{who} no longer writes the whole population through one setter"
+        );
+    }
+}
+
 /// Neither side may fold a *volume* seed into a biome dispatch, or a biome id
 /// into a volume: the two passes are siblings and their seed rules are distinct.
 ///
