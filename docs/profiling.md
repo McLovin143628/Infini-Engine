@@ -77,11 +77,12 @@ be lowered, never raised.** A regression must be fixed, not accommodated.
 | Player one-shot world build (the composed phase19 town) | `LOAD_BUDGET_MS` | 5000 ms | `inf-player` · `tests/phase19_gate.rs` |
 | Fixed step over the phase19 town's ~13 000 static colliders | `FRAME_BUDGET_MS` | 33.0 ms | `inf-player` · `tests/phase19_gate.rs` |
 | **Streamed** fixed step (mean, cell + terrain streaming live) | `STREAMED_STEP_BUDGET_MS` | 4.0 ms | `inf-player` · `tests/phase16_gate.rs` |
+| **Fixed step over a CITY** (the phase-30 city + streamed terrain + a character) | `CITY_STEP_BUDGET_MS` | 6.0 ms | `inf-player` · `tests/fps_instrument.rs` |
 | Terrain page bytes resident (peak over the flythrough) | `TERRAIN_RESIDENT_BYTES_CEILING` | 16 MiB | `inf-player` · `tests/phase16_gate.rs` |
 | Partition cell bytes resident (peak) | `CELL_RESIDENT_BYTES_CEILING` | 256 KiB | `inf-player` · `tests/phase16_gate.rs` |
 | Partition cells active at once (peak) | `CELL_RESIDENT_CEILING` | 8 | `inf-player` · `tests/phase16_gate.rs` |
-| **Shipping frame, p95** (city + streamed terrain + a character, 1080p and 1440p) | `SHIPPING_FRAME_CEILING_MS` | 58.0 ms | `inf-player` · `tests/fps_instrument.rs` |
-| …and its hitch twin, p99 | `SHIPPING_FRAME_P99_CEILING_MS` | 64.0 ms | `inf-player` · `tests/fps_instrument.rs` |
+| **Shipping frame, p95** (city + streamed terrain + a character, 1080p and 1440p) | `SHIPPING_FRAME_CEILING_MS` | 40.0 ms | `inf-player` · `tests/fps_instrument.rs` |
+| …and its hitch twin, p99 | `SHIPPING_FRAME_P99_CEILING_MS` | 48.0 ms | `inf-player` · `tests/fps_instrument.rs` |
 | **What "≥ 60 fps" MEANS** — a target, printed as a distance, never asserted | `SHIPPING_FRAME_BUDGET_MS` | 16.6 ms | `inf-player` · `tests/fps_instrument.rs` |
 
 Notes:
@@ -92,18 +93,29 @@ Notes:
   the phase-29 wizard character at 1920 × 1080 and 2560 × 1440, with **per-pass
   GPU timings** from `inf_render::timing` (one `QuerySet` written between encoder
   commands; off by default, and `timing_changes_no_pixel` proves attaching it
-  moves no pixel). Measured on an RTX 4070 Ti, release, over five independent
-  runs: **p50 37.8–39.9 ms (25–26 fps) at 1080p**, **44.4–47.5 ms at 1440p**, and
-  the frame is **CPU-bound in every run** — the sim fixed step alone is
-  13.0–14.9 ms against a 14.4–17.3 ms GPU frame, of which the scatter pass is
-  67.6–68.1 %. Quote the shape and treat any single millisecond as ±20 %.
+  moves no pixel). Measured on an RTX 4070 Ti, release, MIN of rounds, **after
+  island wave I4b**: **p50 10.8–16.6 ms (60–93 fps) at 1080p**, **18.2–18.9 ms at
+  1440p**, i.e. **1.5–2.4 ms INSIDE the 16.6 ms frame at 1080p p95** where wave I4
+  measured 28.5 ms outside it. Quote the shape and treat any single millisecond
+  as ±20 %.
+
+  *Wave I4's own reading, for the record: p50 37.8–41.0 at 1080p, CPU-bound, with
+  the sim fixed step alone at 13.0–14.9 ms. I4b attributed that step and took it
+  to **1.22–1.27 ms**; see `CITY_STEP_BUDGET_MS` and `inf_player::step_profile`.*
 
   **What that frame does not draw.** Shadows, GI, VSM, TAA, SSAO, bloom and the
   visbuffer are all **off** in it — the shipped defaults for a level with no
-  authored render block, not a choice the harness made. The same content at
-  1080p with the authorable half turned on measures **p95 92.3-92.9 ms (13 fps),
-  GPU frame 35.8-36.1 ms** over two runs: the stack roughly doubles the frame. The harness prints
-  both, and `SHIPPING_FRAME_CEILING_MS` is minted from the shipped one only.
+  authored render block, not a choice the harness made. The same content at 1080p
+  with the authorable half turned on measures **p95 38.1–41.8 ms, GPU frame
+  16.1–16.5 ms**, and a **pipelined estimate of 16.4–16.9 ms (59–61 fps)**; wave
+  I4 measured the same configuration at **p95 92.3–92.9, GPU frame 35.8–36.1**.
+  The harness prints both configurations with the same CPU-stage and per-pass
+  tables, and `SHIPPING_FRAME_CEILING_MS` is minted from the shipped one only.
+
+  **A GPU column is comparable only between runs whose CPU frames are
+  comparable.** The *unlit* GPU frame reads 2.2–6.0 ms after I4b against
+  14.4–19.8 before, and nothing on the unlit path can explain that: I4's frame
+  left the card idle two thirds of every frame, and an idle card downclocks.
 
   It reports and does not assert in **three** named cases: a software or
   paravirtual adapter, any CI runner, and **the `dev` profile** — `opt-level = 1`
