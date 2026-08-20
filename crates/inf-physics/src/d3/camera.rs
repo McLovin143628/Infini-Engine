@@ -48,10 +48,14 @@
 //! # The one `&mut` this door does hold, and why it is safe
 //!
 //! `bridge: &mut PhysicsBridge3D`, because `cast_shape_where` has to
-//! `ensure_query_pipeline()` and that rebuilds a BVH. That rebuild is a pure
-//! function of the colliders and the integration parameters, and every collider
-//! or body mutator sets `query_dirty`, so building it early yields the identical
-//! structure and the next step's own queries cannot tell. It is the only shared
+//! `ensure_query_pipeline()` and that brings a BVH in line with the colliders.
+//! The tree it produces is a pure function of the colliders and the integration
+//! parameters, and every collider or body mutator marks what it touched (island
+//! wave I4b replaced the one `query_dirty` flag with the
+//! `query_rebuild` / `query_moved` / `query_moved_bodies` marks — same rule, at
+//! the granularity of what actually changed), so bringing it up to date early
+//! yields the identical structure and the next step's own queries cannot tell.
+//! It is the only shared
 //! state the camera can touch, which is why
 //! `stepping_a_camera_changes_nothing_about_the_simulation` samples the bridge's
 //! bodies as well as the world's components — a mutation through this `&mut`

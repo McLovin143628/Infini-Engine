@@ -162,75 +162,124 @@ fn field(boxes: i32) -> (PhysicsWorld3D, inf_physics::d3::BodyId3D) {
 /// **THE EQUIVALENCE GATE.** A query tree maintained incrementally and one built
 /// from scratch answer the same question the same way.
 ///
-/// Built to falsify: the sequence steps a world with a body moving through a
-/// field of static boxes, and at every step it asks the same three questions
-/// twice — once of the incrementally-maintained tree, and once immediately after
-/// [`PhysicsWorld3D::force_query_rebuild`]. If the incremental path ever missed
-/// a leaf that moved, or held a leaf at a stale AABB, the two answers diverge on
-/// the step it happened.
+/// Two worlds, stepped identically: one whose tree is only ever *maintained*, and
+/// a control whose tree is thrown away and rebuilt before every question. At each
+/// of 180 steps both are asked the same four questions, of four different kinds,
+/// at the moving body. If the incremental path ever misses a leaf that moved, or
+/// holds one at a stale AABB, the two answers diverge on the step it happened.
 ///
-/// The mutation this is aimed at: deleting either half of the pair
-/// `query_moved_bodies.extend(islands.active_bodies())` in `step` (the
-/// before-the-step half covers a body that fell asleep during it, the after
-/// covers one that woke).
+/// # Two worlds, because one world could not accumulate staleness (the I4b audit)
+///
+/// The first cut of this gate stepped **one** world and called
+/// [`force_query_rebuild`](PhysicsWorld3D::force_query_rebuild) between the two
+/// halves of every iteration — which means the "incremental" tree it questioned
+/// at step *n* was the tree the control rebuilt at step *n − 1*, i.e. **exactly
+/// one step stale**. One step of a falling ball is centimetres and the leaf is
+/// the ball's own half-metre AABB, so the two halves agreed by construction.
+/// Measured: deleting the marking **entirely** — both
+/// `query_moved_bodies.extend(islands.active_bodies())` calls removed from
+/// `step` — left that gate green over all 540 answers. Here the incremental world
+/// is never rebuilt, so 180 steps of drift accumulate in it, and the same
+/// mutation dies.
+///
+/// # …and a point query, because a long ray cannot see a stale leaf either
+///
+/// The BVH's leaf AABB only decides what the narrow phase is *offered*; the
+/// narrow phase then reads the collider's real pose. So a 40 m ray cast from 6 m
+/// above traverses a leaf left at the body's spawn just as happily as a fresh
+/// one, and answers correctly. `intersect_point` at the body's own centre is the
+/// question that reaches the leaf **where the leaf says the body is**, and it is
+/// what makes the other three mean anything.
+///
+/// # What it does NOT arm, measured
+///
+/// The two `active_bodies()` extends are armed as a **pair**, not individually:
+/// deleting either one alone leaves this gate green, because a body that is awake
+/// on both sides of a step is marked by whichever half survives, and the AABB is
+/// recomputed lazily at query time from the collider's current pose. Each half
+/// earns its place on a case the other misses — the before-half a body that fell
+/// asleep *during* the step (rapier sleeps at the end of one, so the after-half
+/// no longer names it) and the after-half a body woken *by* the step — and
+/// neither case is expressible without reaching into rapier's sleep state, which
+/// this facade does not expose. Written down rather than implied.
 #[test]
 fn the_incremental_query_tree_answers_what_a_rebuilt_one_does() {
-    let (mut w, ball) = field(8);
+    let (mut inc, ball) = field(8);
+    let (mut reb, control_ball) = field(8);
     let mut compared = 0usize;
     let mut hits = 0usize;
     for step in 0..180 {
-        w.step(DT);
-        let p = w.body_translation(ball).expect("the ball exists");
+        inc.step(DT);
+        reb.step(DT);
+        let p = inc.body_translation(ball).expect("the ball exists");
+        let q = reb
+            .body_translation(control_ball)
+            .expect("the control's ball exists");
+        assert_eq!(
+            p, q,
+            "step {step}: the two worlds stopped being the same simulation, so \
+             comparing their query answers compares two different scenes"
+        );
+        // The control's tree is thrown away before every question; the
+        // incremental one is never rebuilt for the whole run.
+        reb.force_query_rebuild();
         let exclude: std::collections::BTreeSet<inf_physics::d3::ColliderId3D> =
             std::collections::BTreeSet::new();
-        // Three questions, of three different kinds, at the moving body.
-        let ray = w.cast_ray(p + DVec3::Y * 6.0, -DVec3::Y, 40.0);
-        let sweep = w.cast_shape(
-            &ColliderShape3D::Sphere { radius: 0.4 },
+        let sphere = ColliderShape3D::Sphere { radius: 0.4 };
+        let ray = inc.cast_ray(p + DVec3::Y * 6.0, -DVec3::Y, 40.0);
+        let sweep = inc.cast_shape(
+            &sphere,
             p + DVec3::Y * 6.0,
             DQuat::IDENTITY,
             -DVec3::Y,
             40.0,
             &exclude,
         );
-        let aabb = w.intersect_aabb(p - DVec3::splat(2.0), p + DVec3::splat(2.0));
-        w.force_query_rebuild();
-        let ray2 = w.cast_ray(p + DVec3::Y * 6.0, -DVec3::Y, 40.0);
-        let sweep2 = w.cast_shape(
-            &ColliderShape3D::Sphere { radius: 0.4 },
-            p + DVec3::Y * 6.0,
+        let aabb = inc.intersect_aabb(p - DVec3::splat(2.0), p + DVec3::splat(2.0));
+        let at = inc.intersect_point(p);
+        let ray2 = reb.cast_ray(q + DVec3::Y * 6.0, -DVec3::Y, 40.0);
+        let sweep2 = reb.cast_shape(
+            &sphere,
+            q + DVec3::Y * 6.0,
             DQuat::IDENTITY,
             -DVec3::Y,
             40.0,
             &exclude,
         );
-        let aabb2 = w.intersect_aabb(p - DVec3::splat(2.0), p + DVec3::splat(2.0));
-        compared += 3;
-        hits += usize::from(ray.is_some()) + usize::from(sweep.is_some());
+        let aabb2 = reb.intersect_aabb(q - DVec3::splat(2.0), q + DVec3::splat(2.0));
+        let at2 = reb.intersect_point(q);
+        compared += 4;
+        hits += usize::from(ray.is_some()) + usize::from(sweep.is_some()) + at.len();
+        assert_eq!(
+            at, at2,
+            "step {step}: a POINT query at the moving body's own centre answered \
+             differently from the rebuilt control — the incremental tree still \
+             has the body where it used to be"
+        );
         assert_eq!(
             ray.map(|h| (h.collider, h.toi.to_bits())),
             ray2.map(|h| (h.collider, h.toi.to_bits())),
-            "step {step}: the ray answered differently before and after a forced \
-             rebuild — the incremental tree has drifted from the colliders"
+            "step {step}: the ray answered differently from the rebuilt control \
+             — the incremental tree has drifted from the colliders"
         );
         assert_eq!(
             sweep.map(|h| (h.collider, h.toi.to_bits())),
             sweep2.map(|h| (h.collider, h.toi.to_bits())),
-            "step {step}: the sweep answered differently before and after a \
-             forced rebuild"
+            "step {step}: the sweep answered differently from the rebuilt control"
         );
         assert_eq!(
             aabb, aabb2,
-            "step {step}: the AABB query answered differently before and after a \
-             forced rebuild"
+            "step {step}: the AABB query answered differently from the rebuilt \
+             control"
         );
     }
     println!(
         "{compared} query answers compared across 180 steps, {hits} of them hits \
-         — incremental and rebuilt agree on every one"
+         — a never-rebuilt incremental tree and a rebuilt-every-step control \
+         agree on every one"
     );
     // Anti-vacuity: a run where nothing ever hit anything would compare `None`
-    // against `None` 540 times and prove nothing.
+    // against `None` 720 times and prove nothing.
     assert!(
         hits > 180,
         "only {hits} of the queries hit anything — this gate is comparing \
@@ -238,12 +287,188 @@ fn the_incremental_query_tree_answers_what_a_rebuilt_one_does() {
     );
 }
 
-/// **A removal still rebuilds, and the rebuild is correct.**
+/// **A BODY THE CALLER TELEPORTS ANSWERS WHERE IT LANDED, NOT WHERE IT WAS**
+/// (the I4b audit).
+///
+/// `set_body_translation` / `set_body_rotation` / `set_body_kind` mark their body
+/// stale because the solver never sees the move — and the shipped hosts' one
+/// per-step path for a **kinematic or static** body's pose,
+/// `set_body_pose_if_moved`, goes straight through the first two. A moving
+/// platform whose query leaf is never refreshed is a platform the character mover
+/// and the P29.6 camera sweep collide with where it *used to be*.
+///
+/// Measured blind before this arm existed: deleting
+/// `query_moved_bodies.push(body.0)` from `set_body_translation` left **every
+/// test in this crate green**. The equivalence gate above could not see it
+/// either — it moves its body with the *solver*.
+///
+/// # A FIXED body, and a `step` between the write and the query
+///
+/// Both halves of that shape are load-bearing and neither is a preference:
+///
+/// * **Fixed**, because a *kinematic* body is in `islands.active_bodies()` the
+///   moment it is touched, so the step's own union marks it and the explicit
+///   push is redundant. `set_body_pose_if_moved`'s other caller — a static
+///   collider an author, a gizmo or a Blueprint moved — is the case only the
+///   explicit push covers.
+/// * **A step between**, because rapier propagates a body's pose onto its
+///   colliders inside `PhysicsPipeline::step`; `Collider::compute_aabb` reads
+///   the collider's own position, so between a pose write and the next step the
+///   query pipeline answers at the OLD pose whatever the tree does. That is
+///   true of the from-scratch rebuild this incremental path replaced, word for
+///   word, and it is a property of the dependency rather than of this wave —
+///   written down here because an arm that queried without stepping would fail
+///   on both, and read as this wave's regression.
+#[test]
+fn a_teleported_body_answers_where_it_landed_and_not_where_it_was() {
+    let mut w = world();
+    let b = w.add_body(BodyKind3D::Static, DVec3::ZERO, DQuat::IDENTITY);
+    w.add_collider(
+        b,
+        ColliderDesc3D::new(ColliderShape3D::Box {
+            half_extents: DVec3::splat(1.0),
+        }),
+    )
+    .expect("the platform's collider attaches");
+    w.step(DT);
+    assert_eq!(
+        w.intersect_point(DVec3::ZERO).len(),
+        1,
+        "the platform answers where it was built"
+    );
+
+    // A teleport far past its own AABB — the case a refit cannot paper over.
+    assert!(w.set_body_translation(b, DVec3::new(50.0, 0.0, 0.0)));
+    w.step(DT);
+    let there = w.intersect_point(DVec3::new(50.0, 0.0, 0.0));
+    let back = w.intersect_point(DVec3::ZERO);
+    println!(
+        "after a 50 m teleport: {} there, {} behind",
+        there.len(),
+        back.len()
+    );
+    assert_eq!(
+        there.len(),
+        1,
+        "a body teleported 50 m does not answer at its new position — its query \
+         leaf was never marked stale, so the mover and the camera sweep still see \
+         it where it was"
+    );
+    assert!(
+        back.is_empty(),
+        "the teleported body still answers at its OLD position — the leaf held \
+         both places at once"
+    );
+
+    // …and a rotation, which moves the AABB of a long box without moving its
+    // centre at all — `set_body_rotation` is the second half of the bridge's
+    // one pose-write door.
+    let mut r = world();
+    let rb = r.add_body(BodyKind3D::Static, DVec3::ZERO, DQuat::IDENTITY);
+    r.add_collider(
+        rb,
+        ColliderDesc3D::new(ColliderShape3D::Box {
+            half_extents: DVec3::new(8.0, 0.5, 0.5),
+        }),
+    )
+    .expect("the beam's collider attaches");
+    r.step(DT);
+    let probe = DVec3::new(0.0, 0.0, 6.0);
+    assert!(
+        r.intersect_point(probe).is_empty(),
+        "the beam must not reach the probe before it turns"
+    );
+    assert!(r.set_body_rotation(rb, DQuat::from_rotation_y(std::f64::consts::FRAC_PI_2)));
+    r.step(DT);
+    let turned = r.intersect_point(probe);
+    println!("after a quarter turn: {} at the probe", turned.len());
+    assert_eq!(
+        turned.len(),
+        1,
+        "a rotated beam does not answer along its new axis — `set_body_rotation` \
+         did not mark its colliders' AABBs stale"
+    );
+}
+
+/// **A REMOVED BODY LEAVES THE QUERY TREE**, and not only a removed *collider*.
+///
+/// `remove_body` takes its colliders with it, so it has to force the same fresh
+/// build `remove_collider` does. This is the path a despawn takes: a streamed-out
+/// partition cell, a `Destroyed` actor, a Blueprint despawn — and the sequence
+/// here is the awkward one, **moved and then removed**, which leaves a stale mark
+/// behind a dead handle that the next query has to drop rather than trip over.
+///
+/// Like its collider twin above, this arm asserts the *behaviour* and not the
+/// flag: deleting `query_rebuild = true` from `remove_body` leaves it green, for
+/// the reason `PhysicsWorld3D::query_rebuild`'s doc gives. What it would catch is
+/// the incremental path panicking or answering on a dead handle, which is the
+/// failure mode a `Vec` of handles surviving its arena invites.
+#[test]
+fn a_removed_body_leaves_the_query_tree() {
+    let mut w = world();
+    box_at(
+        &mut w,
+        BodyKind3D::Static,
+        DVec3::new(9.0, 0.0, 0.0),
+        1.0,
+        false,
+    );
+    let victim = w.add_body(BodyKind3D::Static, DVec3::ZERO, DQuat::IDENTITY);
+    w.add_collider(
+        victim,
+        ColliderDesc3D::new(ColliderShape3D::Box {
+            half_extents: DVec3::splat(1.0),
+        }),
+    )
+    .expect("the victim's collider attaches");
+    w.step(DT);
+    assert_eq!(
+        w.intersect_point(DVec3::ZERO).len(),
+        1,
+        "the body answers before it is removed"
+    );
+
+    // **Moved, THEN removed** — the sequence that leaves a stale mark behind a
+    // dead handle, which the rebuild has to drop rather than trip over.
+    assert!(w.set_body_translation(victim, DVec3::new(0.0, 0.0, 4.0)));
+    assert!(w.remove_body(victim), "the body removes");
+    let (bodies, colliders) = w.pending_query_marks();
+    let gone = w.intersect_point(DVec3::new(0.0, 0.0, 4.0));
+    let old = w.intersect_point(DVec3::ZERO);
+    println!(
+        "after moving then removing: {} at the new place, {} at the old, marks \
+         pending before the query were ({bodies}, {colliders})",
+        gone.len(),
+        old.len()
+    );
+    assert!(
+        gone.is_empty() && old.is_empty(),
+        "a removed BODY still answers a point query — the removal did not force \
+         a rebuild, and `BroadPhaseBvh` cannot drop a leaf any other way"
+    );
+    // The control: the rest of the world is untouched by the rebuild.
+    assert_eq!(
+        w.intersect_point(DVec3::new(9.0, 0.0, 0.0)).len(),
+        1,
+        "the rebuild dropped a body it was not asked to drop"
+    );
+}
+
+/// **A removed collider stops answering**, and the rebuild it forces is correct.
 ///
 /// `BroadPhaseBvh` has no removal, so a leaf can only leave by a fresh build —
 /// which is a property of the dependency and therefore a property this file
-/// states out loud. Without the `query_rebuild` flag on the removal paths the
-/// tree would answer with a collider that no longer exists.
+/// states out loud.
+///
+/// **What this arm does NOT say** (the I4b audit): it does not say the
+/// `query_rebuild` flag is load-bearing, and the first write-up's claim that
+/// "without it the tree would answer with a collider that no longer exists" is
+/// wrong. Mutation-measured: deleting `query_rebuild = true` from
+/// `remove_collider` leaves this arm — and every other test in this crate —
+/// green, because the query pipeline resolves a leaf through
+/// `ColliderSet::get_unknown_gen` and a dead index yields nothing. The flag's job
+/// is the "one leaf per live collider" invariant, which this type exposes no way
+/// to observe. See `PhysicsWorld3D::query_rebuild`'s own doc.
 #[test]
 fn a_removed_collider_leaves_the_query_tree() {
     let mut w = world();

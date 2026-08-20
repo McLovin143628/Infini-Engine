@@ -11,9 +11,11 @@
 //!
 //! * `set_body_translation` + `set_body_rotation` on **every static and
 //!   kinematic body** — two `get_mut`s into rapier's body set, a wake, and
-//!   `query_dirty = true`, which invalidates the whole query BVH. That last one
+//!   a `query_dirty = true` that invalidated the whole query BVH. That last one
 //!   is lens 3's **P6** seen from the other end: the BVH was rebuilt once per
 //!   moving character because the *bridge* dirtied it on every step anyway.
+//!   *(Island wave I4b retired the flag for per-body marks; the skip this file
+//!   measures is what keeps those marks empty on a town that has not moved.)*
 //! * `reconcile_joint` for every entity, jointless or not (**P30**) — two to
 //!   three `BTreeMap` lookups each for a guaranteed no-op on a level with no
 //!   joints, plus a `Vec` of one entry per entity to carry the desires into it.

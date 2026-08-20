@@ -542,6 +542,20 @@ pub struct PhysicsWorld3D {
     /// A leaf has to LEAVE the tree, which only a fresh build can do —
     /// `BroadPhaseBvh` exposes no removal. Set by every removal, and once at
     /// construction.
+    ///
+    /// **And it is hygiene rather than correctness** (the I4b audit, which
+    /// mutation-measured it): `BroadPhaseBvh::set_aabb` keys a leaf by
+    /// `handle.into_raw_parts().0` — the collider's raw *index*, generation
+    /// discarded — and `QueryPipeline` resolves a leaf through
+    /// `ColliderSet::get_unknown_gen`, then tests the collider's own current
+    /// position. So a leaf left behind by a removal resolves to `None` and is
+    /// skipped, or to whatever collider later takes that index, which the
+    /// attach's own [`query_moved`](Self::query_moved) mark then refreshes.
+    /// Either way the answer is right and the cost is a wasted traversal. What
+    /// the flag buys is the invariant every other line here assumes — **one leaf
+    /// per live collider** — and that invariant is not observable through this
+    /// type's public surface, so deleting this flag kills no arm. Stated, not
+    /// implied.
     query_rebuild: bool,
     /// Colliders whose leaf AABB is stale: attached, teleported, re-shaped.
     query_moved: Vec<ColliderHandle>,
@@ -777,11 +791,15 @@ impl PhysicsWorld3D {
     /// second, and on a furnished town essentially none of them has moved since
     /// the level loaded. Each assertion was two `RigidBodySet::get_mut`s — which
     /// *mark the body modified* on their own, before anything is written — a
-    /// wake, and `query_dirty = true`, which throws away the whole query BVH.
-    /// That last one is why the BVH looked like it was being rebuilt once per
-    /// moving character: it was being invalidated once per *step* regardless, by
-    /// this path, and every rebuild after the first was the bridge's fault
-    /// rather than the character's.
+    /// wake, and — in the tree of the day — a `query_dirty = true` that threw
+    /// away the whole query BVH. That last one is why the BVH looked like it was
+    /// being rebuilt once per moving character: it was being invalidated once per
+    /// *step* regardless, by this path, and every rebuild after the first was the
+    /// bridge's fault rather than the character's. *(Island wave I4b retired that
+    /// flag: this path now marks the body it wrote, and only that body — see
+    /// [`ensure_query_pipeline`](Self::ensure_query_pipeline). The skip below is
+    /// what keeps the mark list empty on a town that has not moved, so both
+    /// halves still earn their place.)*
     ///
     /// The comparison reads the **body's own state** rather than a copy the
     /// bridge remembers writing. A remembered copy cannot see a body that
@@ -1088,9 +1106,22 @@ impl PhysicsWorld3D {
     /// and a trigger is a sensor. `ActiveCollisionTypes` is tested as a union of
     /// the pair's two colliders (rapier's `!a && !b`), so a static sensor over
     /// static scenery still reports: the sensor's own `all()` carries the pair.
-    /// Nothing an author can place loses an event; what is dropped is the
-    /// *solid-versus-solid* manifold, which no solver could ever act on and no
-    /// gameplay could ever read as an overlap.
+    ///
+    /// # The one thing that IS lost, stated exactly (the I4b audit)
+    ///
+    /// `ActiveEvents::COLLISION_EVENTS` is on every collider this world builds,
+    /// and both hosts' `drain_collisions` turns a `Started` contact into a
+    /// Blueprint `Collision` event whether the pair is a sensor or not. So the
+    /// pairing that is dropped did have one reader: **two overlapping static
+    /// SOLID colliders fired a `Collision` event once, on the first step, and no
+    /// longer do.** Nothing else changes — no solver could act on the pair, no
+    /// sensor overlap is affected, and a level that wants the event has the
+    /// mechanism the engine widened the flags for in the first place, which is to
+    /// make one of the two a sensor. It is written down here because "no gameplay
+    /// could read it" would have been one word too strong, and because the
+    /// difference between a manifold and an event is exactly the kind of thing a
+    /// later reader re-derives wrongly. This crate's `step_cost_3d.rs` holds both
+    /// halves: no manifold on a solid pair, an event on a sensor one.
     ///
     /// The 2D world mirrors this exactly — see `d2::world`'s twin.
     fn active_collision_types(sensor: bool) -> ActiveCollisionTypes {
