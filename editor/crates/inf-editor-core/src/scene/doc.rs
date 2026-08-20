@@ -1189,6 +1189,42 @@ impl SceneDoc {
         true
     }
 
+    /// Fill polygons of biome ids into a terrain and record the lot as **one**
+    /// undo step (IB-5).
+    ///
+    /// `fill` is a [`inf_terrain::BiomeFill`] the caller has already driven —
+    /// a land-cover import fills a hundred polygons at eight classes into one,
+    /// because a hundred undo steps is not an import an author can take back.
+    /// Records through the same `EditCommand::PaintBiome` a brush stroke does,
+    /// so undo, redo and the render re-upload are one path and not two.
+    pub fn edit_commit_biome_fill(
+        &mut self,
+        guid: Uuid,
+        label: &str,
+        fill: inf_terrain::BiomeFill,
+    ) -> bool {
+        let Some(e) = self.world.entity_of(guid) else {
+            return false;
+        };
+        let Some(terrain) = self.world.world().get::<Terrain>(e) else {
+            return false;
+        };
+        let delta = fill.finish(&terrain.data);
+        if delta.is_empty() {
+            return false;
+        }
+        self.history.record(
+            label,
+            EditCommand::PaintBiome {
+                guid,
+                delta: Box::new(delta),
+            },
+        );
+        self.world.mark_dirty();
+        self.touch();
+        true
+    }
+
     /// Redo a biome stroke: replay its `after` ids. Non-recording.
     pub(crate) fn raw_apply_biome_delta(&mut self, guid: Uuid, delta: &BiomeDelta) {
         let Some(e) = self.world.entity_of(guid) else {

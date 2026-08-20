@@ -83,7 +83,9 @@ pub use asset::{
 pub use biome::{
     BiomeDef, BiomeSet, BiomeSetError, BIOME_SET_SCHEMA_VERSION, UNASSIGNED_BIOME_COLOR,
 };
-pub use biomepaint::{apply_paint_biome, biome_claims, BiomeDelta, BiomePatch, BiomeStroke};
+pub use biomepaint::{
+    apply_paint_biome, biome_claims, BiomeDelta, BiomeFill, BiomePatch, BiomeStroke,
+};
 pub use brush::{
     apply_brush, dab_positions, dab_positions_3d, dab_positions_3d_capped, BrushOp, BrushParams,
     Falloff, FlattenTarget, Stroke,

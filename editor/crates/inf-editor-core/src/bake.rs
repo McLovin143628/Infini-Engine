@@ -381,7 +381,21 @@ pub fn bake_building(
     seed: u64,
     furnish: bool,
 ) -> Result<BakedMesh, BakeError> {
-    let out = inf_pcg::building::build(params, seed, furnish);
+    bake_building_in(params, inf_pcg::building::LotFrame::IDENTITY, seed, furnish)
+}
+
+/// [`bake_building`], on a lot with its own frame (IB-6).
+///
+/// `params.footprint` is read in `frame`'s coordinates; the baked mesh is in the
+/// world, so a rotated lot bakes a rotated building and
+/// [`BakedMesh::origin_world`] is where it stands.
+pub fn bake_building_in(
+    params: &BuildingParams,
+    frame: inf_pcg::building::LotFrame,
+    seed: u64,
+    furnish: bool,
+) -> Result<BakedMesh, BakeError> {
+    let out = inf_pcg::building::build_in(params, frame, seed, furnish);
     let arch = inf_pcg::archetype(params.archetype);
     let grammar = arch
         .grammar()

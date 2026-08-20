@@ -58,6 +58,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use glam::DVec2;
+
 use crate::brush::BrushParams;
 use crate::data::TerrainData;
 use crate::tile::{DEFAULT_BIOME, UNASSIGNED_BIOME};
@@ -319,6 +321,154 @@ fn apply_biome_op(
                 tile.set_biome_sample(res, i, j, biome);
             }
         }
+    }
+}
+
+// ── polygon fill (IB-5: land cover → biome ids) ──────────────────────────────
+
+/// Whether `p` is inside a ring, by the even-odd crossing rule.
+///
+/// The textbook half-open test (`(yi > y) != (yj > y)`), which is exactly the
+/// property that makes a shared edge between two adjacent land-cover polygons
+/// belong to precisely one of them — so a tiling of the map paints every sample
+/// once and leaves no seam of unassigned ground between neighbours.
+///
+/// Trig-free and division-guarded; a non-finite ring is rejected by the caller
+/// before it gets here.
+fn ring_contains(ring: &[DVec2], p: DVec2) -> bool {
+    let n = ring.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (a, b) = (ring[i], ring[j]);
+        if (a.y > p.y) != (b.y > p.y) {
+            let dy = b.y - a.y;
+            if dy != 0.0 && p.x < (b.x - a.x) * (p.y - a.y) / dy + a.x {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// **A polygon fill of biome ids** — the shape a land-cover layer is, and the
+/// one shape the circular brush cannot make.
+///
+/// Accumulates fills at **any** biome id into one reversible [`BiomeDelta`], so
+/// importing a hundred land-cover polygons at eight different classes is *one*
+/// undo step rather than a hundred. That is the difference between a usable
+/// import and one an author cannot take back.
+#[derive(Default)]
+pub struct BiomeFill {
+    builder: BiomeDeltaBuilder,
+    filled: usize,
+}
+
+impl BiomeFill {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Samples written so far.
+    pub fn filled(&self) -> usize {
+        self.filled
+    }
+
+    /// Paint `biome` into every existing terrain sample inside `exterior` and
+    /// outside every ring of `holes`. Returns how many samples changed.
+    ///
+    /// Like every other brush here, this **never authors a tile**: a polygon
+    /// covering ground the terrain does not have paints nothing there, which is
+    /// reported by the caller rather than silently materialising a landscape.
+    pub fn add_polygon(
+        &mut self,
+        data: &mut TerrainData,
+        biome: u8,
+        exterior: &[DVec2],
+        holes: &[Vec<DVec2>],
+    ) -> usize {
+        if exterior.len() < 3 || exterior.iter().any(|p| !p.is_finite()) {
+            return 0;
+        }
+        if holes
+            .iter()
+            .any(|h| h.iter().any(|p: &DVec2| !p.is_finite()))
+        {
+            return 0;
+        }
+        let mut min = DVec2::splat(f64::INFINITY);
+        let mut max = DVec2::splat(f64::NEG_INFINITY);
+        for p in exterior {
+            min = min.min(*p);
+            max = max.max(*p);
+        }
+        let res = data.tile_resolution();
+        let mps = data.meters_per_sample();
+        let c0 = data.tile_coord_of(min.x, min.y);
+        let c1 = data.tile_coord_of(max.x, max.y);
+        let mut written = 0usize;
+
+        for tz in c0.1..=c1.1 {
+            for tx in c0.0..=c1.0 {
+                let coord = (tx, tz);
+                if !data.has_tile(coord) {
+                    continue;
+                }
+                let o = data.tile_origin_xz(coord);
+                let Some((i_lo, i_hi)) = axis_range(min.x, max.x, o.x, mps, res) else {
+                    continue;
+                };
+                let Some((j_lo, j_hi)) = axis_range(min.y, max.y, o.y, mps, res) else {
+                    continue;
+                };
+                let was_default = data.get_tile(coord).is_some_and(|t| t.biomes_are_default());
+                let writes: Vec<(u32, u32, u8)> = {
+                    let tile = data.get_tile(coord).expect("has_tile checked");
+                    let mut ws = Vec::new();
+                    for j in j_lo..=j_hi {
+                        let wz = o.y + j as f64 * mps;
+                        for i in i_lo..=i_hi {
+                            let wx = o.x + i as f64 * mps;
+                            let p = DVec2::new(wx, wz);
+                            if !ring_contains(exterior, p) {
+                                continue;
+                            }
+                            if holes.iter().any(|h| ring_contains(h, p)) {
+                                continue;
+                            }
+                            let old = tile.biome_sample(res, i, j);
+                            if old != biome {
+                                ws.push((i, j, old));
+                            }
+                        }
+                    }
+                    ws
+                };
+                if writes.is_empty() {
+                    continue;
+                }
+                if was_default {
+                    self.builder.mark_materialized(coord);
+                }
+                let tile = data.get_tile_mut(coord).expect("has_tile checked");
+                for (i, j, before) in writes {
+                    self.builder.touch(coord, i, j, before);
+                    tile.set_biome_sample(res, i, j, biome);
+                    written += 1;
+                }
+            }
+        }
+        self.filled += written;
+        written
+    }
+
+    /// The accumulated reversible record.
+    pub fn finish(self, data: &TerrainData) -> BiomeDelta {
+        self.builder.finalize(data)
     }
 }
 

@@ -38,6 +38,13 @@ pub mod erosion_gpu;
 // creates, so the river validator and the cook advisory apply to imported water
 // on the day it lands.
 pub mod gis;
+// IB-5a: land cover becomes biome ids — the Jenks classifier's first caller
+// outside its own tests, and the first thing in the tree that writes a biome id
+// from data rather than from a brush.
+pub mod gisbiome;
+// IB-5b + IB-6: a footprint's attributes reach `BuildingParams::floors`, on the
+// footprint's OWN oriented lot rather than on its bounding box.
+pub mod gisbuild;
 // IB-4: the other half of a road import — the ribbon arrays become a real
 // `MeshAsset`, draped on the level's own terrains through the IB-15 ground rule
 // and spawned through the same door a dropped asset uses.
