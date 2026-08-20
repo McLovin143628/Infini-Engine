@@ -159,7 +159,20 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 ///   The anchor needs no envelope field of its own because it rides inside
 ///   `level_bytes` — the scene file record carries it, and this envelope's whole
 ///   job is to say which scene contract those bytes obey.
-pub const SCENE_PAYLOAD_VERSION: u32 = 10;
+/// * **v11** — the island phase, and the same shape of bump as v9 and v10 for
+///   the same reason: **no new slot**, recording that `level_bytes` is now a
+///   scene **v25** payload (the vehicle class).
+///
+///   The class needs no envelope field of its own because it rides inside
+///   `level_bytes` — it is a component on an entity, not a referenced asset, so
+///   there are no bytes to resolve and nothing for the collector to gather.
+///   What the bump buys is the refusal: without it, a v25 editor handing a stale
+///   v10 player a level would pass `check_version` — the envelope is unchanged,
+///   after all — and fail several layers deeper, in `inf_scene::decode`, with a
+///   message about a scene schema. The player's own refusal ("rebuild both from
+///   the same commit") is the one that names the actual fix, and it only fires
+///   if the envelope moves when the contract does.
+pub const SCENE_PAYLOAD_VERSION: u32 = 11;
 
 /// Upper bound on a single frame; anything larger means a desynced or
 /// corrupt stream and is treated as an error rather than an allocation. A

@@ -57,9 +57,9 @@ pub use components::{
     MeshRef, MovementDirection, MovementMode, MovementRefusal, MovementRuntime, Name, PcgVolume,
     Primitive, RigidBody2D, RigidBody3D, RootMotion, RootMotionMode, RotationMode,
     ScatteredInstance, ScatteredSolid, SkeletalMesh, SkyAtmosphere, SmRuntimeState, SpeedCurve,
-    Sprite, Terrain, TileBounds, TileChunk, Tilemap, TimeOfDay, Transform, Visibility, VoxelVolume,
-    CHUNK_DIM, CHUNK_TILES, DEFAULT_DESTRUCTIBLE_CHUNKS, DEFAULT_DESTRUCTIBLE_DENSITY,
-    DEFAULT_STRENGTH_PA,
+    Sprite, Terrain, TileBounds, TileChunk, Tilemap, TimeOfDay, Transform, VehicleClass,
+    Visibility, VoxelVolume, CHUNK_DIM, CHUNK_TILES, DEFAULT_DESTRUCTIBLE_CHUNKS,
+    DEFAULT_DESTRUCTIBLE_DENSITY, DEFAULT_STRENGTH_PA,
 };
 // P24.2: the IK write door. `pose` and `deform` are otherwise spelled in full
 // by callers (the source-text mirror gates key on that), but a *write door* a

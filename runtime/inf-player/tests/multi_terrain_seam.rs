@@ -136,7 +136,8 @@ fn two_adjacent_terrains_agree_on_the_heights_of_their_shared_border() {
             b.unwrap_or_else(|| panic!("terrain B does not reach its own edge at z = {z}")),
         );
         assert_eq!(
-            a, b,
+            a,
+            b,
             "the two terrains disagree at (x = {BORDER_X}, z = {z}) by {} m — both \
              authored the same world-space function at the same world coordinate, \
              so this is a lattice or anchoring failure, not rounding",
@@ -159,13 +160,14 @@ fn two_adjacent_terrains_agree_on_the_heights_of_their_shared_border() {
 fn walking_from_one_terrain_onto_the_other_never_falls_to_sea_level() {
     let (world, a_origin, b_origin) = two_adjacent_terrains();
     let w = world.world();
-    let terrains: Vec<(&inf_ecs::TerrainData, DVec3)> = [(TERRAIN_A, a_origin), (TERRAIN_B, b_origin)]
-        .iter()
-        .map(|(g, o)| {
-            let e = world.entity_of(*g).unwrap();
-            (&w.get::<Terrain>(e).unwrap().data, *o)
-        })
-        .collect();
+    let terrains: Vec<(&inf_ecs::TerrainData, DVec3)> =
+        [(TERRAIN_A, a_origin), (TERRAIN_B, b_origin)]
+            .iter()
+            .map(|(g, o)| {
+                let e = world.entity_of(*g).unwrap();
+                (&w.get::<Terrain>(e).unwrap().data, *o)
+            })
+            .collect();
     let volumes: std::collections::BTreeMap<u8, inf_voxel::VoxelData> =
         std::collections::BTreeMap::new();
 
@@ -302,7 +304,8 @@ fn adjacent_terrain_tiles_abut_when_the_author_lands_them_on_the_grid() {
     let a_east_edge = a.data.tile_origin_xz((1, 0)).x + a.data.tile_span();
     let b_west_edge = BORDER_X + b.data.tile_origin_xz((0, 0)).x;
     assert_eq!(
-        a_east_edge, b_west_edge,
+        a_east_edge,
+        b_west_edge,
         "A's eastern tile edge is at {a_east_edge} and B's western at \
          {b_west_edge} — a {} m gap in the collider surface",
         (a_east_edge - b_west_edge).abs()
@@ -339,12 +342,10 @@ fn the_terrain_asset_origin_is_carried_and_never_placed() {
     // Built through the SHIPPING builder with a non-zero anchor — the door Wave G
     // gave `with_origin` its first real caller through.
     let asset = {
-        let mut b = inf_terrain::TerrainAssetBuilder::new(
-            data.tile_resolution(),
-            data.meters_per_sample(),
-        )
-        .with_pyramid(opts)
-        .with_origin(anchor);
+        let mut b =
+            inf_terrain::TerrainAssetBuilder::new(data.tile_resolution(), data.meters_per_sample())
+                .with_pyramid(opts)
+                .with_origin(anchor);
         for (&coord, tile) in data.tiles() {
             b.insert(inf_terrain::TileKey::lod0(coord), tile).unwrap();
         }
@@ -362,14 +363,15 @@ fn the_terrain_asset_origin_is_carried_and_never_placed() {
 
     let store = inf_terrain::open_file_tile_store(&path).expect("open");
     let header = *store.header();
-    assert_eq!(header.origin, anchor, "the header no longer carries its origin");
+    assert_eq!(
+        header.origin, anchor,
+        "the header no longer carries its origin"
+    );
 
     let mut into = inf_terrain::TerrainData::new(RESOLUTION, METERS_PER_SAMPLE);
     let wants = inf_terrain::tile_range(0, (0, 0), (0, 0));
     into.request_tiles(&wants, &store);
-    let tile = into
-        .get_tile((0, 0))
-        .expect("the level-0 tile paged in");
+    let tile = into.get_tile((0, 0)).expect("the level-0 tile paged in");
     assert_eq!(
         (tile.origin.x, tile.origin.z),
         (0.0, 0.0),

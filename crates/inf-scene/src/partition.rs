@@ -1315,6 +1315,7 @@ mod tests {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            vehicle_class: None,
         }
     }
 

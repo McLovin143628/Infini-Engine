@@ -177,7 +177,10 @@ fn a_streamed_terrain_scatters_the_same_world_an_authored_one_does() {
     );
     let (lo, hi) = (
         authored.iter().map(|i| i.1).fold(f64::INFINITY, f64::min),
-        authored.iter().map(|i| i.1).fold(f64::NEG_INFINITY, f64::max),
+        authored
+            .iter()
+            .map(|i| i.1)
+            .fold(f64::NEG_INFINITY, f64::max),
     );
     assert!(
         lo > 40.0 && hi > lo + 1.0,

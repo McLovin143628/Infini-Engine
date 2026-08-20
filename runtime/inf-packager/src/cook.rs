@@ -1626,10 +1626,14 @@ pub fn sub_threshold_advisory(guid: AssetId, name: &str, triangles: usize, min: 
 /// unit-testable without a cook — the `sub_threshold_advisory` precedent.
 fn stranded_levels(project: &Project) -> Vec<String> {
     let legacy = project.legacy_levels_root();
-    // A project whose `levels_dir` resolves to the same place twice (an author
-    // who set `levels_dir = "."`, say) is not stranded — it is already correct,
-    // and saying otherwise would be a permanent false alarm.
-    if legacy == project.levels_root() {
+    // A project whose pre-ruling directory happens to sit INSIDE the content
+    // root is not stranded — the cook's scan is recursive, so those levels are
+    // already found. This is not hypothetical: an author with
+    // `content_dir = "."` has `<root>/Levels/` inside the content root, and
+    // comparing the two paths for equality (the first version of this guard)
+    // would have called every one of their levels stranded, for ever, while the
+    // cook was packing them.
+    if legacy.starts_with(project.content_root()) {
         return Vec::new();
     }
     let Ok(entries) = std::fs::read_dir(&legacy) else {
@@ -1650,7 +1654,11 @@ fn stranded_levels(project: &Project) -> Vec<String> {
     if names.is_empty() {
         return Vec::new();
     }
-    vec![stranded_levels_advisory(&legacy, &project.levels_root(), &names)]
+    vec![stranded_levels_advisory(
+        &legacy,
+        &project.levels_root(),
+        &names,
+    )]
 }
 
 /// The wording of [`stranded_levels`], pure so it can be pinned.

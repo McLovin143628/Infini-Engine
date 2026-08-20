@@ -644,7 +644,15 @@ impl PhysicsBridge3D {
         let mut buoyancy: Vec<(Uuid, BuoyancyDesc3D)> = Vec::new();
         // P29.7's two collections, gathered in this same walk. Both are empty on
         // every level with no vehicle in it.
-        let mut chassis_seats: BTreeMap<Uuid, inf_ecs::math::Vec3d> = BTreeMap::new();
+        // Schema v25 (island phase, IB-10): the seat AND the authored class, so a
+        // vehicle is created with its own numbers rather than the Ring-0 defaults.
+        let mut chassis_seats: BTreeMap<
+            Uuid,
+            (
+                inf_ecs::math::Vec3d,
+                Option<inf_ecs::components::VehicleClass>,
+            ),
+        > = BTreeMap::new();
         let mut wheel_candidates: Vec<(Uuid, inf_ecs::vehicle::WheelMount, EntitySync3D)> =
             Vec::new();
         for entity in world.world().iter_entities() {
@@ -705,7 +713,13 @@ impl PhysicsBridge3D {
             // in it too — a second walk over 13 000 entities to learn that no
             // vehicle moved is the cost this shape exists to avoid.
             if let Some(seat) = inf_ecs::vehicle::chassis_of(col.as_ref(), rb.as_ref()) {
-                chassis_seats.insert(guid, seat);
+                chassis_seats.insert(
+                    guid,
+                    (
+                        seat,
+                        entity.get::<inf_ecs::components::VehicleClass>().copied(),
+                    ),
+                );
             }
             let snap = EntitySync3D {
                 guid,
@@ -789,7 +803,13 @@ impl PhysicsBridge3D {
     /// not the controller's to take twice.
     fn reconcile_vehicles(
         &mut self,
-        chassis_seats: &BTreeMap<Uuid, inf_ecs::math::Vec3d>,
+        chassis_seats: &BTreeMap<
+            Uuid,
+            (
+                inf_ecs::math::Vec3d,
+                Option<inf_ecs::components::VehicleClass>,
+            ),
+        >,
         wheels: BTreeMap<Uuid, Vec<inf_ecs::vehicle::WheelMount>>,
     ) {
         // The off path: no vehicle in the scene and none running is one compare.
@@ -798,7 +818,7 @@ impl PhysicsBridge3D {
         }
         self.vehicles.retain(|guid, _| wheels.contains_key(guid));
         for (chassis, mut mounts) in wheels {
-            let Some(seat_local) = chassis_seats.get(&chassis).copied() else {
+            let Some((seat_local, class)) = chassis_seats.get(&chassis).copied() else {
                 continue;
             };
             // Guid order, so the wheel indices are a function of the level's
@@ -824,10 +844,26 @@ impl PhysicsBridge3D {
                         seat_local,
                         wheels: mounts,
                     };
-                    self.vehicles.insert(
-                        chassis,
-                        Box::new(inf_ecs::vehicle::RaycastVehicle::new(rig)),
-                    );
+                    let mut v: Box<dyn inf_ecs::vehicle::Vehicle> =
+                        Box::new(inf_ecs::vehicle::RaycastVehicle::new(rig));
+                    // Schema v25 (island phase, IB-10): the authored class, ONCE,
+                    // at creation — through the trait's own tuning door, so an
+                    // island class reads what it recognizes and refuses the rest.
+                    //
+                    // At creation and not per reconcile, for the reason the
+                    // authored mount is taken once (above): the live tuner writes
+                    // the same numbers the component holds, and re-installing
+                    // every step would silently undo every edit an author made
+                    // during Simulate. The component is the STARTING point; the
+                    // tuner owns it from there.
+                    if let Some(class) = class {
+                        let took = class.install(v.as_mut());
+                        tracing::debug!(
+                            "inf-physics: vehicle {chassis} installed its class \
+                             ({took} of 15 tunables taken)"
+                        );
+                    }
+                    self.vehicles.insert(chassis, v);
                 }
             }
         }

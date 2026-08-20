@@ -1,8 +1,8 @@
-schema_version = 24
+schema_version = 25
 guid = "00000000-0000-0000-0000-000084040000"
 title = "Character Demo"
 entity_count = 4
-content_hash = "5a82e638df5090dd"
+content_hash = "53167e5398051e12"
 dependencies = [
     "00000000-0000-0000-0000-0000840400a0",
     "00000000-0000-0000-0000-0000840400a4",

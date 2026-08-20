@@ -794,6 +794,7 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
             cloth_sim,
             hair_guides,
             character_movement,
+            vehicle_class,
         } = e;
 
         let entity = world.spawn_with_guid(guid, &name, None);
@@ -981,6 +982,10 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
             if let Some(c) = character_movement {
                 em.insert(c);
             }
+            // ── v25 (island phase) the vehicle class ──
+            if let Some(c) = vehicle_class {
+                em.insert(c);
+            }
         }
         world.mark_dirty();
         if let Some(p) = parent {
@@ -1144,7 +1149,8 @@ pub fn page_terrains_for_pcg(
             if !t.data.is_empty() {
                 continue;
             }
-            t.data = inf_terrain::TerrainData::new(source.tile_resolution, source.meters_per_sample);
+            t.data =
+                inf_terrain::TerrainData::new(source.tile_resolution, source.meters_per_sample);
         }
         for (min, max) in &regions {
             let local_min = DVec2::new(min.x - origin.x, min.y - origin.z);
@@ -2361,6 +2367,7 @@ mod tests {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            vehicle_class: None,
         };
         parent.sprite = Some(Sprite {
             size: Vec2d::new(1.0, 1.0),

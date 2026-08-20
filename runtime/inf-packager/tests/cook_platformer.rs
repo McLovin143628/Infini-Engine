@@ -543,6 +543,7 @@ fn make_streaming_terrain_project_with(root: &Path, biomes: BiomeSetFixture) -> 
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            vehicle_class: None,
         }],
         settings: Default::default(),
         geo: Default::default(),
@@ -976,6 +977,7 @@ fn bare_entity(guid: u128, name: &str) -> inf_scene::RuntimeEntity {
         cloth_sim: None,
         hair_guides: None,
         character_movement: None,
+        vehicle_class: None,
     }
 }
 

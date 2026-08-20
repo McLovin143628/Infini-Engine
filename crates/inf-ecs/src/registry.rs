@@ -21,7 +21,8 @@ use crate::components::{
     MovementDirection, MovementMode, MovementRefusal, Name, NineSlice, PcgVolume, Primitive,
     RigidBody2D, RigidBody3D, RotationMode, SkeletalMesh, SkyAtmosphere, SpeedCurve, Spline,
     SplineInterp, Sprite, StreamingSource, Terrain, Text2D, TextAlign, Tilemap, TimeOfDay,
-    Transform, Visibility, Volume, VolumeKind, VoxelVolume, WaterBody, WaterKind, WeatherPreset,
+    Transform, VehicleClass, Visibility, Volume, VolumeKind, VoxelVolume, WaterBody, WaterKind,
+    WeatherPreset,
 };
 use crate::math::{Color, Vec2d, Vec3d};
 
@@ -191,6 +192,12 @@ impl ComponentRegistry {
             // walks, how hard it stops, how tall it is when it crouches, what it
             // is doing). The fixed step reads both.
             CharacterMovement => "Character Movement",
+            // Schema v25 (island phase, IB-10) — the per-vehicle authored
+            // tunables. Beside the movement component because it is the same
+            // kind of thing one archetype up: that describes how a character
+            // moves, this describes how a vehicle does, and the fixed step reads
+            // whichever the entity carries.
+            VehicleClass => "Vehicle Class",
             Joint2D => "Joint 2D",
             Joint3D => "Joint 3D",
             AudioSource => "Audio Source",
@@ -290,8 +297,9 @@ mod tests {
     fn core_components_are_registered() {
         let reg = ComponentRegistry::new();
         // 36 through P20.2, + `VoxelVolume` at P21.1, + `Destructible` at P22.2,
-        // + the three character components at P24.3.
-        assert_eq!(reg.editable().len(), 42);
+        // + the three character components at P24.3, + `VehicleClass` at scene
+        // v25 (the island phase).
+        assert_eq!(reg.editable().len(), 43);
         // Every editable component resolves a ReflectComponent handle.
         for info in reg.editable() {
             assert!(

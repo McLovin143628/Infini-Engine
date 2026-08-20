@@ -715,6 +715,7 @@ fn a_persistent_blueprint_binds_in_a_partitioned_level() {
         cloth_sim: None,
         hair_guides: None,
         character_movement: None,
+        vehicle_class: None,
     };
 
     let level = inf_scene::RuntimeLevel {

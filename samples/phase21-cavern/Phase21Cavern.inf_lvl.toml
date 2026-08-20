@@ -1,8 +1,8 @@
-schema_version = 24
+schema_version = 25
 guid = "21040000-0000-4000-8000-000000000001"
 title = "Phase 21 Cavern"
 entity_count = 7
-content_hash = "5e52bc2354dfe735"
+content_hash = "50da0cdc2e4fbfce"
 dependencies = [
     "21040000-0000-4000-8000-000000000002",
     "21040000-0000-4000-8000-000000000003",

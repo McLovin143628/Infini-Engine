@@ -505,7 +505,8 @@ pub struct CellStreaming {
     /// (P16.6) — once per GUID, not once per step, so a cell that stays out of
     /// residency for a thousand steps says it one time.
     logged_unresolved: BTreeSet<Uuid>,
-    /// **The graphs and the ground a streamed [`PcgVolume`] needs** (island
+    /// **The graphs and the ground a streamed [`PcgVolume`](inf_ecs::components::PcgVolume)
+    /// needs** (island
     /// phase, IB-1). Empty for a world with no `.inf_pcg` content, in which case
     /// the activation pass below costs one `is_empty` check.
     ///
@@ -567,7 +568,8 @@ impl CellStreaming {
         self
     }
 
-    /// How many streamed [`PcgVolume`]s this manager has evaluated. Zero for a
+    /// How many streamed [`PcgVolume`](inf_ecs::components::PcgVolume)s this manager
+    /// has evaluated. Zero for a
     /// world whose PCG all lives in the persistent cell — which is what every
     /// pre-island level is, and why this counter exists: an arm that could not
     /// tell "no volumes streamed in" from "streamed volumes are not evaluated"
@@ -1090,6 +1092,7 @@ mod tests {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            vehicle_class: None,
         };
         e.visible = true;
         e

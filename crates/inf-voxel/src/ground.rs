@@ -90,6 +90,7 @@ use crate::data::VoxelData;
 /// * It returns `None` — never `0.0` — when nothing answers. Both host seams keep
 ///   their own documented default, so this function cannot invent a sea-level
 ///   floor under a level that has no ground at all.
+///
 /// # Multiple terrains: the position-aware rule (island phase, IB-15)
 ///
 /// This used to take **one** `Option<&TerrainData>`, and both host seams picked
@@ -423,10 +424,7 @@ mod tests {
             v.clear_dirty();
             v
         });
-        assert_eq!(
-            ground_height_at(&[(&t, DVec3::ZERO)], &air, 2.0, 2.0),
-            None
-        );
+        assert_eq!(ground_height_at(&[(&t, DVec3::ZERO)], &air, 2.0, 2.0), None);
         // …and so is a level with no terrain at all.
         assert_eq!(ground_height_at(&[], &empty, 2.0, 2.0), None);
     }

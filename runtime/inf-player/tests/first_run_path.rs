@@ -262,3 +262,46 @@ fn a_partly_migrated_project_still_hears_about_the_rest() {
         "the boot scene under Content/ must still have cooked"
     );
 }
+
+/// **A project whose content root IS the project root hears nothing** — the
+/// false-alarm guard.
+///
+/// `content_dir = "."` puts `<root>/Levels/` *inside* the content root, and the
+/// cook's scan is recursive, so those levels are packed. The first version of the
+/// guard compared the two paths for equality and would have called every one of
+/// them stranded, for ever, while the cook was shipping them.
+#[test]
+fn a_content_root_that_contains_the_legacy_directory_raises_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("Flat");
+    std::fs::create_dir_all(root.join("Levels")).unwrap();
+    let mut manifest = inf_project::ProjectManifest::new("Flat", "blank-3d");
+    manifest.content_dir = ".".into();
+    manifest.save(&root).unwrap();
+
+    // A real level, in the directory that would look "stranded" under the naive
+    // rule but is in fact inside the content root.
+    let starter = ProjectTemplate::Blank3d.starter_level();
+    std::fs::write(root.join("Levels").join(starter.file_name), starter.payload).unwrap();
+    std::fs::write(
+        root.join("Levels")
+            .join(format!("{}.toml", starter.file_name)),
+        starter.sidecar,
+    )
+    .unwrap();
+
+    let out = root.join("Build");
+    let report = cook(&root, &out, &CookOptions::default()).expect("cook runs");
+    assert!(
+        report.root_level.is_some(),
+        "the cook did not find a level that is inside its own content root"
+    );
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|w| w.contains("OUTSIDE the content root")),
+        "a level the cook PACKED was reported as stranded: {:?}",
+        report.warnings
+    );
+}

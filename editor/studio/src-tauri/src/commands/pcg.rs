@@ -165,8 +165,7 @@ fn page_terrains_for_pcg(
             if !t.data.is_empty() {
                 continue;
             }
-            t.data =
-                inf_ecs::TerrainData::new(header.tile_resolution, header.meters_per_sample);
+            t.data = inf_ecs::TerrainData::new(header.tile_resolution, header.meters_per_sample);
         }
         for (min, max) in &regions {
             let local_min = DVec2::new(min.x - origin.x, min.y - origin.z);

@@ -2489,6 +2489,156 @@ impl CharacterMovement {
     }
 }
 
+// ── The vehicle class (schema v25, island phase IB-10) ──────────────────────
+
+/// **A vehicle's authored tunables** — the per-vehicle numbers P29.7 could not
+/// spend a schema move on.
+///
+/// P29.7's own remainder, verbatim: *"The vehicle has no per-vehicle authored
+/// tuning. A committed rig uses the Ring-0 defaults in both hosts, because a tune
+/// is an editor-only door by law and a scene field is a schema move. The course
+/// therefore adapts to the car (six tenths of throttle) rather than the car to
+/// the course. A vehicle **class** with its own numbers is the island's, and it
+/// is what the `Vehicle` trait is shaped for."* This is that field set.
+///
+/// # It is exactly [`VehicleTuning::names`](crate::vehicle::VehicleTuning::names)
+///
+/// Fifteen `f64`s, in that function's own sorted order, and they reach a running
+/// vehicle through [`Vehicle::tune`](crate::vehicle::Vehicle::tune) — the door
+/// the live tuner already uses. Two consequences, both deliberate:
+///
+/// * **An island class gets this for free.** The bridge applies a class by name
+///   through the trait, so a motorbike or a tank implementing `Vehicle` reads the
+///   authored numbers it recognizes and refuses the ones it does not (a refusal
+///   is a value — `VehicleTuning::set` returns `bool`), rather than needing a
+///   parallel component per class.
+/// * **The component and the door cannot drift.** `names()` is the enumeration;
+///   a field added here without a name there fails
+///   `the_vehicle_class_is_exactly_the_tuning_door`.
+///
+/// # The bound, stated
+///
+/// `VehicleTuning::enter_window` is **not** here, because it is not nameable
+/// through `set` and the `Vehicle` trait exposes it read-only
+/// (`seat_warp`). A class that wants its own seat-warp window needs a trait
+/// setter first, which is a behaviour change with its own arms. Every other
+/// tunable is authored.
+///
+/// # Absent means the Ring-0 defaults
+///
+/// Which is exactly what every pre-v25 level meant, and what the committed P29.7
+/// rig still means: the component is opt-in, and a level that never adds one is
+/// byte-for-byte the level it was.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+#[serde(default)]
+pub struct VehicleClass {
+    /// Peak braking force, newtons, summed over all wheels.
+    pub brake_force_n: f64,
+    /// Damping, newton-seconds per metre, per wheel.
+    pub damping_ns_per_m: f64,
+    /// Aerodynamic drag, newtons per (m/s)².
+    pub drag_n_per_mps2: f64,
+    /// How long the enter/exit choreography takes, seconds.
+    pub enter_time_s: f64,
+    /// Peak handbrake force, newtons, applied to the **rear** wheels only.
+    pub handbrake_force_n: f64,
+    /// Lateral friction coefficient (µ) at the contact.
+    pub lateral_grip: f64,
+    /// Longitudinal friction coefficient (µ) for drive and brake force.
+    pub longitudinal_grip: f64,
+    /// Peak drive force, newtons, summed over the driven wheels.
+    pub max_engine_force_n: f64,
+    /// The speed at which the drive force reaches zero, m/s.
+    pub max_speed_mps: f64,
+    /// Steering angle at a standstill, degrees.
+    pub max_steer_deg: f64,
+    /// Steering angle at `max_speed_mps` and above, degrees.
+    pub min_steer_deg: f64,
+    /// Suspension length at full extension, metres.
+    pub rest_length_m: f64,
+    /// Rolling resistance coefficient — a force of `c × load` opposing motion.
+    pub rolling_resistance: f64,
+    /// Spring rate, newtons per metre, per wheel.
+    pub stiffness_n_per_m: f64,
+    /// How far the suspension may compress from rest, metres.
+    pub travel_m: f64,
+}
+
+impl Default for VehicleClass {
+    /// The Ring-0 defaults, read from the ONE definition of them rather than
+    /// restated — a second copy of fifteen numbers is a second thing to update.
+    fn default() -> Self {
+        Self::from_tuning(&crate::vehicle::VehicleTuning::default())
+    }
+}
+
+impl VehicleClass {
+    /// Project a [`VehicleTuning`](crate::vehicle::VehicleTuning) onto the
+    /// authored subset.
+    pub fn from_tuning(t: &crate::vehicle::VehicleTuning) -> Self {
+        Self {
+            brake_force_n: t.brake_force_n,
+            damping_ns_per_m: t.damping_ns_per_m,
+            drag_n_per_mps2: t.drag_n_per_mps2,
+            enter_time_s: t.enter_time_s,
+            handbrake_force_n: t.handbrake_force_n,
+            lateral_grip: t.lateral_grip,
+            longitudinal_grip: t.longitudinal_grip,
+            max_engine_force_n: t.max_engine_force_n,
+            max_speed_mps: t.max_speed_mps,
+            max_steer_deg: t.max_steer_deg,
+            min_steer_deg: t.min_steer_deg,
+            rest_length_m: t.rest_length_m,
+            rolling_resistance: t.rolling_resistance,
+            stiffness_n_per_m: t.stiffness_n_per_m,
+            travel_m: t.travel_m,
+        }
+    }
+
+    /// This class's `(name, value)` pairs in [`VehicleTuning::names`]'s sorted
+    /// order — what the bridge feeds
+    /// [`Vehicle::tune`](crate::vehicle::Vehicle::tune).
+    ///
+    /// Ordered, because two tunables can interact (a `max_speed_mps` below the
+    /// current speed changes what `max_engine_force_n` does) and an unordered
+    /// application would make the installed class depend on a map's iteration.
+    pub fn settings(&self) -> [(&'static str, f64); 15] {
+        [
+            ("brake_force_n", self.brake_force_n),
+            ("damping_ns_per_m", self.damping_ns_per_m),
+            ("drag_n_per_mps2", self.drag_n_per_mps2),
+            ("enter_time_s", self.enter_time_s),
+            ("handbrake_force_n", self.handbrake_force_n),
+            ("lateral_grip", self.lateral_grip),
+            ("longitudinal_grip", self.longitudinal_grip),
+            ("max_engine_force_n", self.max_engine_force_n),
+            ("max_speed_mps", self.max_speed_mps),
+            ("max_steer_deg", self.max_steer_deg),
+            ("min_steer_deg", self.min_steer_deg),
+            ("rest_length_m", self.rest_length_m),
+            ("rolling_resistance", self.rolling_resistance),
+            ("stiffness_n_per_m", self.stiffness_n_per_m),
+            ("travel_m", self.travel_m),
+        ]
+    }
+
+    /// **Install this class on a running vehicle**, through the trait's own
+    /// tuning door. Answers how many settings the implementation took.
+    ///
+    /// A class need not be understood in full: an island `Vehicle` that has no
+    /// handbrake refuses `handbrake_force_n` and keeps everything else, which is
+    /// the standing "a refusal is a value" rule and is why this returns a count
+    /// rather than a `Result`. A **non-finite** value is refused by
+    /// `VehicleTuning::set` for the same reason and is not this layer's business.
+    pub fn install(&self, vehicle: &mut dyn crate::vehicle::Vehicle) -> usize {
+        self.settings()
+            .into_iter()
+            .filter(|(name, value)| vehicle.tune(name, *value))
+            .count()
+    }
+}
+
 // ── Joints (P12.1) ──────────────────────────────────────────────────────────
 //
 // A `Joint2D`/`Joint3D` links its entity's body to ANOTHER entity's body,

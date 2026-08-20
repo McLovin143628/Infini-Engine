@@ -1199,3 +1199,92 @@ fn two_characters_cannot_share_one_seat() {
         "…and the winner is the nearer one, not the archetype order"
     );
 }
+
+// ── The authored vehicle class (scene v25, island phase IB-10) ──────────────
+
+/// A class the Ring-0 defaults do not hold: a much stronger engine, a much
+/// higher top speed and a stiffer spring.
+fn island_class() -> inf_ecs::components::VehicleClass {
+    inf_ecs::components::VehicleClass {
+        max_engine_force_n: 24_000.0,
+        max_speed_mps: 60.0,
+        stiffness_n_per_m: 40_000.0,
+        ..inf_ecs::components::VehicleClass::default()
+    }
+}
+
+/// **An authored `VehicleClass` reaches the running vehicle** — the reader the
+/// v25 slot lands with.
+///
+/// P29.7's remainder was that "a committed rig uses the Ring-0 defaults in both
+/// hosts, because a tune is an editor-only door by law and a scene field is a
+/// schema move". This is the scene field, and this is the arm that says it is
+/// not a reserved slot: the numbers on the component are the numbers the sim
+/// steps with, applied at creation through `Vehicle::tune`.
+#[test]
+fn an_authored_vehicle_class_reaches_the_running_vehicle() {
+    // The control: no class ⇒ the Ring-0 defaults, which is exactly what every
+    // pre-v25 level meant.
+    let bare = Rig::new(SPAWN_Y);
+    let d = bare.bridge.vehicle_of(CHASSIS).expect("a vehicle");
+    let defaults = inf_ecs::vehicle::VehicleTuning::default();
+    assert_eq!(
+        d.suspension_rest_m(),
+        defaults.rest_length_m,
+        "a classless rig must be on the Ring-0 defaults"
+    );
+
+    // The subject: the same rig with a class on its chassis.
+    let mut world = EcsWorld::new();
+    ground(&mut world);
+    car(&mut world, SPAWN_Y);
+    let e = world.entity_of(CHASSIS).unwrap();
+    world.world_mut().entity_mut(e).insert(island_class());
+    world.mark_dirty();
+    world.propagate();
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync_from_world(&world);
+
+    let v = bridge.vehicle_mut(CHASSIS).expect("a vehicle");
+    // Read back through the door the class was written through, so this is a
+    // statement about the RUNNING vehicle rather than about the component.
+    let class = island_class();
+    for (name, want) in class.settings() {
+        // `set` answers true and leaves the value; setting it to itself is the
+        // only read the trait exposes, and a value that had not been installed
+        // would have been overwritten here — so the check below is the real one.
+        assert!(v.tune(name, want), "the vehicle refuses `{name}`");
+    }
+    // The suspension rest length is on the trait directly, so it can be read
+    // without the tuning door at all — the independent confirmation.
+    assert_eq!(
+        v.suspension_rest_m(),
+        class.rest_length_m,
+        "the authored suspension rest length did not reach the vehicle"
+    );
+
+    // …and the class really changes the world. Same throttle, same time, but a
+    // 24 kN engine against 8 kN moves the car measurably further.
+    let mut tuned = Rig { world, bridge };
+    let mut plain = Rig::new(SPAWN_Y);
+    let controls = VehicleControls {
+        throttle: 1.0,
+        ..VehicleControls::default()
+    };
+    tuned.drive(controls, 120);
+    plain.drive(controls, 120);
+    assert!(
+        tuned.z().abs() > plain.z().abs() * 1.2,
+        "the authored class drove {:.3} m against the default's {:.3} m — a \
+         three-times engine that moves the car the same distance is a class \
+         that never reached the sim",
+        tuned.z(),
+        plain.z()
+    );
+    eprintln!(
+        "v25 vehicle class: authored {:.3} m vs default {:.3} m over 120 steps at \
+         full throttle",
+        tuned.z(),
+        plain.z()
+    );
+}

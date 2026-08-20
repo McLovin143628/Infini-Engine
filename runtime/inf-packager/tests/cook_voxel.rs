@@ -90,6 +90,7 @@ fn rec(guid: u128, name: &str) -> inf_scene::RuntimeEntity {
         cloth_sim: None,
         hair_guides: None,
         character_movement: None,
+        vehicle_class: None,
     }
 }
 

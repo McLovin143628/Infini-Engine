@@ -59,7 +59,8 @@ use inf_ecs::components::{
     Collider2D, Collider3D, Decal, Destructible, Foliage, HairGuides, IkTarget, Joint2D, Joint3D,
     Light, Light2D, LightKind, Material, MeshRef, NineSlice, PcgVolume, RigidBody2D, RigidBody3D,
     RootMotion, SkeletalMesh, SkyAtmosphere, Spline, Sprite, StreamingSource, Terrain,
-    TerrainLayer, Text2D, Tilemap, TimeOfDay, Transform, Volume, VoxelVolume, WaterBody,
+    TerrainLayer, Text2D, Tilemap, TimeOfDay, Transform, VehicleClass, Volume, VoxelVolume,
+    WaterBody,
 };
 use inf_ecs::math::{Color, Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
@@ -379,7 +380,52 @@ use uuid::Uuid;
 ///   costs a frozen `TerrainLayerV23`, a frozen `TerrainV23`, and repointing
 ///   the seven frozen entity records that carried the live `Terrain`. There is
 ///   no cheaper placement that puts the field where it belongs — on the layer.
-pub const SCHEMA_VERSION: u32 = 24;
+/// * **v25** — the island phase, and **the phase's only scene bump**. The entity
+///   record appends the **vehicle class** slot — `vehicle_class`
+///   ([`VehicleClass`]: a vehicle's fifteen authored tunables, exactly
+///   `inf_ecs::vehicle::VehicleTuning::names()`). A new slot at the record's
+///   tail, i.e. the cheap [`EntityRecordV10`] rung rather than the
+///   [`EntityRecordV14`] one, so every frozen record above is byte-unchanged.
+///
+///   **What it closes.** P29.7's own remainder: *"The vehicle has no per-vehicle
+///   authored tuning. A committed rig uses the Ring-0 defaults in both hosts,
+///   because a tune is an editor-only door by law and a scene field is a schema
+///   move. … A vehicle **class** with its own numbers is the island's."* An
+///   island's fleet is dozens of classes; without this, every one of them drives
+///   like the P29.7 test rig and the *course* has to adapt to the car.
+///
+///   **It reaches the sim through the trait's own tuning door**
+///   (`Vehicle::tune`), applied once at vehicle creation, so an island class that
+///   implements `Vehicle` differently reads what it recognizes and refuses the
+///   rest. The slot has its reader on the day it lands — the ladder's standing
+///   objection to reserved slots.
+///
+///   **The tail is generic** ([`RuntimeEntityGen`]'s second parameter), which is
+///   what makes this rung cheap: every frozen pre-v25 record instantiates it at
+///   `()`, which bincode encodes as zero bytes, so v23 and v24 are two type
+///   aliases over one 48-field declaration rather than two restatements. The
+///   claim about `()` is asserted, not assumed —
+///   `the_v25_tail_costs_a_pre_v25_record_nothing`.
+///
+///   The wire cost to a level with no vehicles is **one discriminant byte per
+///   entity**, the same price every additive slot since v8 has paid.
+///
+///   **Two things deliberately did NOT ride this bump**, and both are recorded
+///   because a schema window that carries less than it was budgeted for should
+///   say why:
+///
+///   * `Joint3D::contacts` (P29 disposition row 12) — **retired, not deferred**.
+///     `Collider3D` has carried `collision_memberships`/`collision_filter` since
+///     P12.1, so the persisted ragdoll's gap was a *generator* gap; and measured
+///     (`inf-physics`, `the_persisted_ragdolls_two_missing_fixes_are_not_equally_load_bearing`)
+///     the joint flag is worth **0.000000 m** of divergence once the layer mask
+///     is written, against **1.339 m** for the mask. There is no defect behind
+///     the field.
+///   * The per-transition blend mode (P29 disposition row 11) — its home is a
+///     field on `inf_anim::SmTransition`, i.e. **`.inf_sm` v3**, plus a
+///     `ScenePayload` slot. That is a different container, and bumping a second
+///     one was outside this wave's mandate. It does not want a scene rung.
+pub const SCHEMA_VERSION: u32 = 25;
 
 /// File-level simulation settings (schema v3+), mirroring the editor's
 /// `LevelSettings` byte-for-byte. The serde defaults preserve pre-v3 behaviour:
@@ -510,8 +556,24 @@ pub type Result<T> = std::result::Result<T, SceneError>;
 ///
 /// Nothing outside this module's ladder ever instantiates it at anything but
 /// [`Terrain`].
+///
+/// # And generic in its TAIL (island phase / v25)
+///
+/// The second parameter is the v25 slot's type, and it exists to make a *tail
+/// append* as cheap as the v24 component change was. Every frozen pre-v25 record
+/// instantiates it at **`()`**, which bincode encodes as **zero bytes** — so the
+/// 48-field declaration below is literally both shapes, and the v23/v24 records
+/// are two type aliases rather than two ninety-line restatements with two
+/// ninety-line conversions each.
+///
+/// That is a real economy and also a real claim about the encoding, so it is
+/// asserted rather than assumed: `the_v25_tail_costs_a_pre_v25_record_nothing`
+/// encodes a frozen record and the live one and checks the difference is exactly
+/// the one discriminant byte an empty `Option` costs, and the wire pin
+/// (`the_v25_wire_shape_is_pinned_against_an_independent_declaration`) re-derives
+/// the whole layout from independently declared shadow types.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RuntimeEntityGen<T = Terrain> {
+pub struct RuntimeEntityGen<T = Terrain, V = Option<VehicleClass>> {
     /// Stable entity GUID (what selection/hierarchy reference across a reload).
     pub guid: Uuid,
     /// Display / Outliner name.
@@ -678,136 +740,188 @@ pub struct RuntimeEntityGen<T = Terrain> {
     /// this version exists for.
     #[serde(default)]
     pub character_movement: Option<CharacterMovement>,
+    /// **The vehicle class** (schema v25, island phase): a vehicle's authored
+    /// tunables, or `()` in every frozen pre-v25 record — see the type's docs
+    /// for why the tail is generic.
+    #[serde(default)]
+    pub vehicle_class: V,
 }
 
-/// One entity's persisted state — **the live record**. Byte-for-byte what
-/// [`RuntimeEntityGen`] always was; see its docs for why the parameter exists.
-pub type RuntimeEntity = RuntimeEntityGen<Terrain>;
+/// One entity's persisted state — **the live record**.
+pub type RuntimeEntity = RuntimeEntityGen<Terrain, Option<VehicleClass>>;
 
-/// **The frozen v23 entity record.** Identical to the live one except that its
-/// terrain carries the pre-v24 [`TerrainV23`] — the shape before
-/// `TerrainLayer` gained its material binding.
-type EntityRecordV23 = RuntimeEntityGen<TerrainV23>;
+/// **The frozen v24 entity record**: the live shape *before* the vehicle class,
+/// with the live terrain (v25 changed no component). The `()` tail is the whole
+/// difference and costs zero bytes.
+type EntityRecordV24 = RuntimeEntityGen<Terrain, ()>;
+
+/// **The frozen v23 entity record.** [`EntityRecordV24`] with the pre-v24
+/// [`TerrainV23`] — the shape before `TerrainLayer` gained its material binding.
+type EntityRecordV23 = RuntimeEntityGen<TerrainV23, ()>;
+
+impl EntityRecordV24 {
+    /// Lift a frozen v24 record to the live [`RuntimeEntity`]: the vehicle class
+    /// arrives absent, which is exactly what every pre-v25 level meant — a
+    /// vehicle tuned by the Ring-0 defaults in both hosts.
+    fn into_runtime(self) -> RuntimeEntity {
+        self.map_tail(|()| None)
+    }
+
+    /// Project a live record onto the frozen v24 shape (the **downgrade-bless**
+    /// path). Only the authored class is lost.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn from_current(r: RuntimeEntity) -> Self {
+        r.map_tail(|_| ())
+    }
+}
+
+impl<T, V> RuntimeEntityGen<T, V> {
+    /// Replace the tail slot, moving every other field **wholesale**.
+    fn map_tail<W>(self, f: impl FnOnce(V) -> W) -> RuntimeEntityGen<T, W> {
+        self.map_slots(|t| t, f)
+    }
+
+    /// Replace the **terrain** slot, moving every other field wholesale.
+    fn map_terrain<U>(self, f: impl FnOnce(T) -> U) -> RuntimeEntityGen<U, V> {
+        self.map_slots(f, |v| v)
+    }
+
+    /// Replace both generic slots, moving every other field **wholesale**.
+    ///
+    /// The whole point of the two parameters: a restatement is where a slot goes
+    /// missing without the compiler noticing (the standing ladder rule), and
+    /// this is the ONE function in the ladder that names all forty-eight — so
+    /// there is one list to get right instead of one per rung per direction.
+    fn map_slots<U, W>(
+        self,
+        ft: impl FnOnce(T) -> U,
+        fv: impl FnOnce(V) -> W,
+    ) -> RuntimeEntityGen<U, W> {
+        let RuntimeEntityGen {
+            guid,
+            name,
+            parent,
+            transform,
+            visible,
+            mesh,
+            material,
+            light,
+            camera,
+            sprite,
+            tilemap,
+            nine_slice,
+            text2d,
+            light_2d,
+            rigid_body_2d,
+            collider_2d,
+            character_controller_2d,
+            rigid_body_3d,
+            collider_3d,
+            character_controller_3d,
+            actor,
+            terrain,
+            pcg_volume,
+            skeletal_mesh,
+            anim_player,
+            anim_state_machine,
+            root_motion,
+            attached_to,
+            joint_2d,
+            joint_3d,
+            audio_source,
+            audio_listener,
+            decal,
+            volume,
+            spline,
+            foliage,
+            streaming_source,
+            always_loaded,
+            time_of_day,
+            sky_atmosphere,
+            water_body,
+            buoyancy,
+            voxel_volume,
+            destructible,
+            ik_target,
+            cloth_sim,
+            hair_guides,
+            character_movement,
+            vehicle_class,
+        } = self;
+        let terrain = terrain.map(ft);
+        RuntimeEntityGen {
+            guid,
+            name,
+            parent,
+            transform,
+            visible,
+            mesh,
+            material,
+            light,
+            camera,
+            sprite,
+            tilemap,
+            nine_slice,
+            text2d,
+            light_2d,
+            rigid_body_2d,
+            collider_2d,
+            character_controller_2d,
+            rigid_body_3d,
+            collider_3d,
+            character_controller_3d,
+            actor,
+            terrain,
+            pcg_volume,
+            skeletal_mesh,
+            anim_player,
+            anim_state_machine,
+            root_motion,
+            attached_to,
+            joint_2d,
+            joint_3d,
+            audio_source,
+            audio_listener,
+            decal,
+            volume,
+            spline,
+            foliage,
+            streaming_source,
+            always_loaded,
+            time_of_day,
+            sky_atmosphere,
+            water_body,
+            buoyancy,
+            voxel_volume,
+            destructible,
+            ik_target,
+            cloth_sim,
+            hair_guides,
+            character_movement,
+            vehicle_class: fv(vehicle_class),
+        }
+    }
+}
 
 impl EntityRecordV23 {
     /// Lift a frozen v23 record to the live [`RuntimeEntity`]: every splat layer
     /// comes up with `material: None`, which is exactly what a v23 level meant —
-    /// a solid albedo plus the procedural grain, and no textures.
+    /// a solid albedo plus the procedural grain, and no textures. The v25 tail
+    /// arrives absent through [`EntityRecordV24::into_runtime`], which is the one
+    /// rung above.
     fn into_runtime(self) -> RuntimeEntity {
-        // Only the terrain slot differs, so the rest is moved wholesale rather
-        // than restated field by field — a restatement is where a slot goes
+        // Only the terrain slot differs, so the rest is moved wholesale through
+        // the ladder's one field list — a restatement is where a slot goes
         // missing without the compiler noticing.
-        let RuntimeEntityGen { terrain, .. } = &self;
-        let lifted = terrain.clone().map(TerrainV23::into_current);
-        let this = self;
-        RuntimeEntity {
-            terrain: lifted,
-            guid: this.guid,
-            name: this.name,
-            parent: this.parent,
-            transform: this.transform,
-            visible: this.visible,
-            mesh: this.mesh,
-            material: this.material,
-            light: this.light,
-            camera: this.camera,
-            sprite: this.sprite,
-            tilemap: this.tilemap,
-            nine_slice: this.nine_slice,
-            text2d: this.text2d,
-            light_2d: this.light_2d,
-            rigid_body_2d: this.rigid_body_2d,
-            collider_2d: this.collider_2d,
-            character_controller_2d: this.character_controller_2d,
-            rigid_body_3d: this.rigid_body_3d,
-            collider_3d: this.collider_3d,
-            character_controller_3d: this.character_controller_3d,
-            actor: this.actor,
-            pcg_volume: this.pcg_volume,
-            skeletal_mesh: this.skeletal_mesh,
-            anim_player: this.anim_player,
-            anim_state_machine: this.anim_state_machine,
-            root_motion: this.root_motion,
-            attached_to: this.attached_to,
-            joint_2d: this.joint_2d,
-            joint_3d: this.joint_3d,
-            audio_source: this.audio_source,
-            audio_listener: this.audio_listener,
-            decal: this.decal,
-            volume: this.volume,
-            spline: this.spline,
-            foliage: this.foliage,
-            streaming_source: this.streaming_source,
-            always_loaded: this.always_loaded,
-            time_of_day: this.time_of_day,
-            sky_atmosphere: this.sky_atmosphere,
-            water_body: this.water_body,
-            buoyancy: this.buoyancy,
-            voxel_volume: this.voxel_volume,
-            destructible: this.destructible,
-            ik_target: this.ik_target,
-            cloth_sim: this.cloth_sim,
-            hair_guides: this.hair_guides,
-            character_movement: this.character_movement,
-        }
+        self.map_terrain(TerrainV23::into_current).into_runtime()
     }
 
     /// Project a live record back onto the frozen v23 shape (the
     /// **downgrade-bless** path that regenerates the committed v23 fixture).
-    /// Only the per-layer material binding is lost.
+    /// The per-layer material binding and the vehicle class are what is lost.
     #[cfg_attr(not(test), allow(dead_code))]
     fn from_current(r: RuntimeEntity) -> Self {
-        let terrain = r.terrain.clone().map(TerrainV23::from_current);
-        Self {
-            terrain,
-            guid: r.guid,
-            name: r.name,
-            parent: r.parent,
-            transform: r.transform,
-            visible: r.visible,
-            mesh: r.mesh,
-            material: r.material,
-            light: r.light,
-            camera: r.camera,
-            sprite: r.sprite,
-            tilemap: r.tilemap,
-            nine_slice: r.nine_slice,
-            text2d: r.text2d,
-            light_2d: r.light_2d,
-            rigid_body_2d: r.rigid_body_2d,
-            collider_2d: r.collider_2d,
-            character_controller_2d: r.character_controller_2d,
-            rigid_body_3d: r.rigid_body_3d,
-            collider_3d: r.collider_3d,
-            character_controller_3d: r.character_controller_3d,
-            actor: r.actor,
-            pcg_volume: r.pcg_volume,
-            skeletal_mesh: r.skeletal_mesh,
-            anim_player: r.anim_player,
-            anim_state_machine: r.anim_state_machine,
-            root_motion: r.root_motion,
-            attached_to: r.attached_to,
-            joint_2d: r.joint_2d,
-            joint_3d: r.joint_3d,
-            audio_source: r.audio_source,
-            audio_listener: r.audio_listener,
-            decal: r.decal,
-            volume: r.volume,
-            spline: r.spline,
-            foliage: r.foliage,
-            streaming_source: r.streaming_source,
-            always_loaded: r.always_loaded,
-            time_of_day: r.time_of_day,
-            sky_atmosphere: r.sky_atmosphere,
-            water_body: r.water_body,
-            buoyancy: r.buoyancy,
-            voxel_volume: r.voxel_volume,
-            destructible: r.destructible,
-            ik_target: r.ik_target,
-            cloth_sim: r.cloth_sim,
-            hair_guides: r.hair_guides,
-            character_movement: r.character_movement,
-        }
+        EntityRecordV24::from_current(r).map_terrain(TerrainV23::from_current)
     }
 }
 
@@ -870,12 +984,12 @@ struct Header {
     schema_version: u32,
 }
 
-/// The schema-v24 file layout (current). `entities` reuses [`RuntimeEntity`].
+/// The schema-v25 file layout (current). `entities` reuses [`RuntimeEntity`].
 ///
 /// The geo-anchor is the file's **tail** — see the [`SCHEMA_VERSION`] ladder for
 /// why it lives here rather than inside [`RuntimeSettings`].
 #[derive(Serialize, Deserialize)]
-struct SceneFileV24 {
+struct SceneFileV25 {
     schema_version: u32,
     title: String,
     entities: Vec<RuntimeEntity>,
@@ -892,6 +1006,20 @@ struct SceneFileV24 {
     /// converted with `geo: Default::default()`. The attribute here earns its
     /// place only for the self-describing formats this struct also travels
     /// through, and as a statement of intent.
+    #[serde(default)]
+    geo: inf_math::geo::GeoAnchor,
+}
+
+/// A frozen schema-v24 file layout. v25 appended the vehicle-class slot to the
+/// **entity** record, so the file record's own shape is unchanged and only
+/// `entities` is repointed at the frozen [`EntityRecordV24`].
+#[derive(Serialize, Deserialize)]
+struct SceneFileV24 {
+    schema_version: u32,
+    title: String,
+    entities: Vec<EntityRecordV24>,
+    #[serde(default)]
+    settings: RuntimeSettings,
     #[serde(default)]
     geo: inf_math::geo::GeoAnchor,
 }
@@ -1703,6 +1831,8 @@ impl EntityRecordV1 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 }
@@ -1758,6 +1888,8 @@ impl EntityRecordV2 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 }
@@ -1813,6 +1945,8 @@ impl EntityRecordV3 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 }
@@ -1868,6 +2002,8 @@ impl EntityRecordV4 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 }
@@ -1923,6 +2059,8 @@ impl EntityRecordV5 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 }
@@ -1981,6 +2119,8 @@ impl EntityRecordV6 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 }
@@ -2441,6 +2581,8 @@ impl EntityRecordV7 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 }
@@ -2583,6 +2725,8 @@ impl EntityRecordV8 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 }
@@ -2724,6 +2868,8 @@ impl EntityRecordV9 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 }
@@ -2857,6 +3003,8 @@ impl EntityRecordV10 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 
@@ -3147,6 +3295,8 @@ impl EntityRecordV11 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 
@@ -3509,6 +3659,8 @@ impl EntityRecordV12 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 
@@ -3958,6 +4110,8 @@ impl EntityRecordV13 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 
@@ -4146,6 +4300,8 @@ impl EntityRecordV14 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 
@@ -4335,6 +4491,8 @@ impl EntityRecordV15 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 
@@ -4524,6 +4682,8 @@ impl EntityRecordV16 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 
@@ -4719,6 +4879,8 @@ impl EntityRecordV17 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 
@@ -5346,6 +5508,8 @@ impl EntityRecordV20 {
             cloth_sim: None,
             hair_guides: None,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 
@@ -5555,6 +5719,8 @@ impl EntityRecordV22 {
             cloth_sim: self.cloth_sim,
             hair_guides: self.hair_guides,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 
@@ -5771,6 +5937,8 @@ impl EntityRecordV21 {
             cloth_sim: self.cloth_sim,
             hair_guides: self.hair_guides,
             character_movement: None,
+            // v25: a pre-v25 level authors no vehicle class.
+            vehicle_class: None,
         }
     }
 
@@ -6197,9 +6365,24 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map_err(|e| SceneError::Decode(format!("v24: {e}")))?;
             Ok(RuntimeLevel {
                 title: v24.title,
-                entities: v24.entities,
+                entities: v24
+                    .entities
+                    .into_iter()
+                    .map(EntityRecordV24::into_runtime)
+                    .collect(),
                 settings: v24.settings,
                 geo: v24.geo,
+            })
+        }
+        25 => {
+            let (v25, _): (SceneFileV25, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| SceneError::Decode(format!("v25: {e}")))?;
+            Ok(RuntimeLevel {
+                title: v25.title,
+                entities: v25.entities,
+                settings: v25.settings,
+                geo: v25.geo,
             })
         }
         // A refusal that names the wrong cause sends the user to the wrong fix
@@ -6217,9 +6400,10 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
     }
 }
 
-/// Encode a level to the current schema (v23) as a deterministic bincode payload.
+/// Encode a level to the current schema ([`SCHEMA_VERSION`]) as a deterministic
+/// bincode payload.
 pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
-    let file = SceneFileV24 {
+    let file = SceneFileV25 {
         schema_version: SCHEMA_VERSION,
         title: level.title.clone(),
         entities: level.entities.clone(),
@@ -8113,7 +8297,8 @@ mod tests {
                         + VOXEL_SLOT_BYTES
                         + DESTRUCTIBLE_SLOT_BYTES
                         + CHARACTER_SLOT_BYTES
-                        + MOVEMENT_SLOT_BYTES)
+                        + MOVEMENT_SLOT_BYTES
+                        + VEHICLE_SLOT_BYTES)
                 + materialed * MATERIAL_BINDING_BYTES
                 + terrained * TERRAIN_LAYER_MATERIAL_BYTES
                 + geo_anchor_bytes(),
@@ -8570,7 +8755,8 @@ mod tests {
                         + VOXEL_SLOT_BYTES
                         + DESTRUCTIBLE_SLOT_BYTES
                         + CHARACTER_SLOT_BYTES
-                        + MOVEMENT_SLOT_BYTES)
+                        + MOVEMENT_SLOT_BYTES
+                        + VEHICLE_SLOT_BYTES)
                 + materialed * MATERIAL_BINDING_BYTES
                 + terrained * TERRAIN_LAYER_MATERIAL_BYTES
                 + geo_anchor_bytes(),
@@ -8993,7 +9179,8 @@ mod tests {
                         + VOXEL_SLOT_BYTES
                         + DESTRUCTIBLE_SLOT_BYTES
                         + CHARACTER_SLOT_BYTES
-                        + MOVEMENT_SLOT_BYTES)
+                        + MOVEMENT_SLOT_BYTES
+                        + VEHICLE_SLOT_BYTES)
                 + materialed * MATERIAL_BINDING_BYTES
                 + terrained * TERRAIN_LAYER_MATERIAL_BYTES
                 + geo_anchor_bytes(),
@@ -9567,7 +9754,7 @@ mod tests {
     #[test]
     fn the_frozen_tile_generation_covers_this_schema() {
         assert_eq!(
-            SCHEMA_VERSION, 24,
+            SCHEMA_VERSION, 25,
             "the scene schema moved. Generation-1 frozen tiles (TerrainTileFrozenV1, via \
              TerrainV14) cover .inf_lvl v1..=v14, generation-2 (TerrainTileFrozenV2, via \
              TerrainV15) covers v15, and generation-3 (TerrainTileFrozenV3, which \
@@ -10589,7 +10776,11 @@ mod tests {
         // is what makes the line above a price rather than a coincidence.
         assert_eq!(
             solid_bytes.len(),
-            v20_bytes.len() + CHARACTER_SLOT_BYTES + MOVEMENT_SLOT_BYTES + geo_anchor_bytes(),
+            v20_bytes.len()
+                + CHARACTER_SLOT_BYTES
+                + MOVEMENT_SLOT_BYTES
+                + VEHICLE_SLOT_BYTES
+                + geo_anchor_bytes(),
             "the v21 slots must cost exactly three discriminant bytes, v23's one, \
              and v24's anchor its file-level constant"
         );
@@ -10888,7 +11079,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             live.len(),
-            frozen.len() + CHARACTER_SLOT_BYTES + MOVEMENT_SLOT_BYTES + geo_anchor_bytes(),
+            frozen.len()
+                + CHARACTER_SLOT_BYTES
+                + MOVEMENT_SLOT_BYTES
+                + VEHICLE_SLOT_BYTES
+                + geo_anchor_bytes(),
             "the three v21 slots must cost exactly one discriminant byte each, \
              and v23's movement slot one more"
         );
@@ -11038,12 +11233,15 @@ mod tests {
     /// and P29.3's movement slot **re-declared field-for-field**. A `type`
     /// because clippy counts the tuple's nesting, and because naming it says
     /// what it is.
-    type V24EntityWire = (
+    type V25EntityWire = (
         EntityRecordV20Gen<MaterialV22Wire, TerrainV24Wire>,
         Option<IkTarget>,
         Option<ClothSim>,
         Option<HairGuides>,
         Option<CharacterMovementWire>,
+        // The v25 tail, re-declared below so a class short or long by a field
+        // cannot pass.
+        Option<VehicleClassWire>,
     );
 
     /// The **v24 splat layer**, re-declared independently of `inf_ecs`.
@@ -11081,6 +11279,35 @@ mod tests {
         biome_set: Option<Uuid>,
     }
 
+    /// **`VehicleClass`, re-declared independently** for the v25 wire pin — the
+    /// `MaterialV22Wire` idiom, at the slot v25 exists for.
+    ///
+    /// Fifteen `f64`s in `VehicleTuning::names()`'s sorted order. A field added
+    /// to the live component without a bump leaves bytes this shape cannot
+    /// account for; a field REMOVED makes it over-read into the record's tail.
+    #[derive(serde::Deserialize)]
+    // A wire pin exists to be DECODED THROUGH, not read — the same reason
+    // CharacterMovementWire beside it carries this. Its fields ARE the
+    // assertion: naming them is what makes the shape independent.
+    #[allow(dead_code)]
+    struct VehicleClassWire {
+        brake_force_n: f64,
+        damping_ns_per_m: f64,
+        drag_n_per_mps2: f64,
+        enter_time_s: f64,
+        handbrake_force_n: f64,
+        lateral_grip: f64,
+        longitudinal_grip: f64,
+        max_engine_force_n: f64,
+        max_speed_mps: f64,
+        max_steer_deg: f64,
+        min_steer_deg: f64,
+        rest_length_m: f64,
+        rolling_resistance: f64,
+        stiffness_n_per_m: f64,
+        travel_m: f64,
+    }
+
     /// The **v24 geo-anchor**, re-declared independently — the file's new tail.
     #[derive(Default, serde::Deserialize)]
     // A wire pin exists to be DECODED THROUGH, not read — the same reason
@@ -11099,15 +11326,15 @@ mod tests {
         vertical_datum: String,
     }
 
-    /// The live entity plus one appended slot — the shadow v25's entity.
+    /// The live entity plus one appended slot — the shadow v26's entity.
     ///
     /// Serialized from the **live** record rather than reassembled from frozen
     /// parts, because the shadow's only job is to produce bytes that carry one
     /// slot more than the current wire; reassembling it would make the fixture
     /// depend on the very downgrade the pin is meant to be independent of.
-    type V25EntityShadow<'a> = (&'a RuntimeEntity, Option<u8>);
+    type V26EntityShadow<'a> = (&'a RuntimeEntity, Option<u8>);
 
-    /// **The v23 wire shape, pinned against an INDEPENDENT declaration.**
+    /// **The v25 wire shape, pinned against an INDEPENDENT declaration.**
     ///
     /// The `SkeletonAssetV2Wire` idiom (`inf-anim`), applied to the scene. The
     /// pair this replaces proved nothing: one encoded *and* decoded with
@@ -11127,30 +11354,31 @@ mod tests {
     /// `Material` without a bump shifts every byte after it, which is the case
     /// v22 itself is.
     #[derive(serde::Deserialize)]
-    struct SceneFileV24Wire {
+    struct SceneFileV25Wire {
         schema_version: u32,
         title: String,
-        entities: Vec<V24EntityWire>,
+        entities: Vec<V25EntityWire>,
         settings: RuntimeSettings,
         /// The v24 tail. Declared here so a payload whose anchor is short or
         /// long by a field cannot pass — the anchor is the *file's* growth, and
-        /// nothing else in this shape would notice it.
+        /// nothing else in this shape would notice it. (The v25 tail is on the
+        /// ENTITY, so it is the last element of `V25EntityWire` above.)
         geo: GeoAnchorWire,
     }
 
-    /// A **shadow v25** — the live wire plus one appended tail slot, exactly
+    /// A **shadow v26** — the live wire plus one appended tail slot, exactly
     /// what an author adding a component would write.
     #[derive(serde::Serialize)]
-    struct SceneFileV25Shadow<'a> {
+    struct SceneFileV26Shadow<'a> {
         schema_version: u32,
         title: &'a str,
-        entities: Vec<V25EntityShadow<'a>>,
+        entities: Vec<V26EntityShadow<'a>>,
         settings: RuntimeSettings,
         geo: &'a inf_math::geo::GeoAnchor,
     }
 
     #[test]
-    fn the_v24_wire_shape_is_pinned_against_an_independent_declaration() {
+    fn the_v25_wire_shape_is_pinned_against_an_independent_declaration() {
         let bound = Uuid::from_u128(0x00FA_7E12);
         let level = RuntimeLevel {
             title: "Pinned".into(),
@@ -11164,6 +11392,7 @@ mod tests {
                     cloth_sim: Some(v21_fixture_cloth()),
                     hair_guides: Some(v21_fixture_hair()),
                     character_movement: Some(v23_fixture_movement()),
+                    vehicle_class: Some(v25_fixture_class()),
                     ..v9_rec(Uuid::from_u128(0xFD10), "Hero", None).into_runtime()
                 },
                 v9_rec(Uuid::from_u128(0xFD11), "Prop", None).into_runtime(),
@@ -11173,9 +11402,9 @@ mod tests {
         };
         let bytes = encode(&level).unwrap();
 
-        let (wire, consumed): (SceneFileV24Wire, usize) =
+        let (wire, consumed): (SceneFileV25Wire, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode_config())
-                .expect("the pinned v24 shape decodes the v24 wire");
+                .expect("the pinned v25 shape decodes the v25 wire");
         assert_eq!(
             consumed,
             bytes.len(),
@@ -11212,10 +11441,27 @@ mod tests {
             wire.entities[0].4.is_some(),
             "the CharacterMovement is not in slot 48"
         );
+        // The v25 tail landed in slot 49, and the pin read it through its OWN
+        // fifteen-field declaration — so a class short or long by a field, or
+        // reordered, is a decode failure rather than a silently shifted read.
+        let class = wire.entities[0]
+            .5
+            .as_ref()
+            .expect("the VehicleClass is not in slot 49");
+        assert_eq!(
+            class.travel_m,
+            v25_fixture_class().travel_m,
+            "the LAST field of the class — if this is wrong the slot is short"
+        );
+        assert_eq!(class.brake_force_n, v25_fixture_class().brake_force_n);
         assert!(wire.entities[1].1.is_none() && wire.entities[1].3.is_none());
         assert!(
             wire.entities[1].4.is_none(),
             "and an entity without one really has none"
+        );
+        assert!(
+            wire.entities[1].5.is_none(),
+            "and an entity with no vehicle class really has none"
         );
         // The v24 tail landed in ITS OWN slot, field for field — the anchor is
         // the file's growth, and nothing else in this shape would notice if it
@@ -11270,7 +11516,7 @@ mod tests {
         };
         let v23 = encode(&level).unwrap();
         let v24 = bincode::serde::encode_to_vec(
-            &SceneFileV25Shadow {
+            &SceneFileV26Shadow {
                 schema_version: SCHEMA_VERSION,
                 title: &level.title,
                 entities: vec![(&level.entities[0], Some(7u8))],
@@ -11302,7 +11548,7 @@ mod tests {
         // needs a version bump rather than a `#[serde(default)]`, and it is the
         // failure this pin exists to produce.
         let err =
-            bincode::serde::decode_from_slice::<SceneFileV24Wire, _>(&v24, bincode_config()).err();
+            bincode::serde::decode_from_slice::<SceneFileV25Wire, _>(&v24, bincode_config()).err();
         assert!(
             err.is_some(),
             "the pinned v24 shape read a payload with an extra entity slot as if nothing had changed — the shape pin has no forcing function at all"
@@ -11310,7 +11556,7 @@ mod tests {
         // …and the SAME bytes minus the appended slot decode cleanly, so the
         // refusal above is the slot's doing and not a broken fixture.
         assert!(
-            bincode::serde::decode_from_slice::<SceneFileV24Wire, _>(&one_entity, bincode_config())
+            bincode::serde::decode_from_slice::<SceneFileV25Wire, _>(&one_entity, bincode_config())
                 .is_ok(),
             "the control payload does not decode either — the fixture is wrong, not the pin"
         );
@@ -11554,6 +11800,7 @@ mod tests {
             frozen(&materialed).len()
                 + MATERIAL_BINDING_BYTES
                 + MOVEMENT_SLOT_BYTES
+                + VEHICLE_SLOT_BYTES
                 + geo_anchor_bytes(),
             "the v22 binding must cost exactly one discriminant byte on a \
              materialed entity (v23's slot one more, and v24's anchor a \
@@ -11561,7 +11808,7 @@ mod tests {
         );
         assert_eq!(
             live(&bare).len(),
-            frozen(&bare).len() + MOVEMENT_SLOT_BYTES + geo_anchor_bytes(),
+            frozen(&bare).len() + MOVEMENT_SLOT_BYTES + VEHICLE_SLOT_BYTES + geo_anchor_bytes(),
             "an entity with no Material must pay nothing for v22 — the field is \
              inside the component, not on the entity record — and exactly one \
              byte for v23, whose slot is on the record"
@@ -11629,6 +11876,11 @@ mod tests {
     /// `Option` discriminant, and nothing else. Unlike v22's binding it is on
     /// the **record**, not inside a component, so every entity pays it.
     const MOVEMENT_SLOT_BYTES: usize = 1;
+
+    /// What the v25 slot costs an entity with no vehicle class: one `Option`
+    /// discriminant, on the record, so every entity pays it — exactly like the
+    /// v23 slot above and every additive slot since v8.
+    const VEHICLE_SLOT_BYTES: usize = 1;
 
     /// The movement component the v23 arms author — deliberately non-default in
     /// every family of field (a mode, a gait, a rotation mode, an overlay name,
@@ -11799,6 +12051,279 @@ mod tests {
             entities,
             settings: v22.settings,
         }
+    }
+
+    /// A vehicle class with numbers no default holds — so a fixture that lost
+    /// the field cannot pass by accident.
+    fn v25_fixture_class() -> VehicleClass {
+        VehicleClass {
+            max_engine_force_n: 21_500.0,
+            max_speed_mps: 41.5,
+            brake_force_n: 33_000.0,
+            handbrake_force_n: 17_250.0,
+            max_steer_deg: 27.5,
+            min_steer_deg: 4.25,
+            lateral_grip: 1.65,
+            longitudinal_grip: 1.85,
+            rolling_resistance: 0.011,
+            drag_n_per_mps2: 0.72,
+            rest_length_m: 0.42,
+            travel_m: 0.19,
+            stiffness_n_per_m: 46_000.0,
+            damping_ns_per_m: 5_400.0,
+            enter_time_s: 0.83,
+        }
+    }
+
+    /// Rebuild the exact schema-v24 file the committed v24 fixture was generated
+    /// from, out of the frozen v24 record type (the provenance lock).
+    ///
+    /// Built by lifting the **v23** reference one rung, so the field list can
+    /// never drift from the ladder.
+    fn v24_scene_reference() -> SceneFileV24 {
+        let v23 = v23_scene_reference();
+        let entities: Vec<EntityRecordV24> = v23
+            .entities
+            .into_iter()
+            .map(|e| EntityRecordV24::from_current(e.into_runtime()))
+            .collect();
+        SceneFileV24 {
+            schema_version: 24,
+            title: "V24 Fixture Level".into(),
+            entities,
+            settings: v23.settings,
+            // The geo-anchor is what only v24 could write.
+            geo: v24_fixture_geo(),
+        }
+    }
+
+    /// Regenerate `tests/fixtures/scene_v24.inf_lvl` — the **downgrade-bless**
+    /// path for the v25 rung.
+    #[test]
+    fn bless_scene_v24_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").as_deref() != Ok("1") {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v24_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 24);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v24.inf_lvl");
+        std::fs::write(&path, &bytes).unwrap();
+        eprintln!("blessed {} ({} bytes)", path.display(), bytes.len());
+    }
+
+    #[test]
+    fn v24_fixture_is_reproducible_and_genuinely_v24() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v24.inf_lvl");
+        let bytes = std::fs::read(&path).expect("committed v24 fixture present");
+        assert_eq!(bytes[0], 24, "fixture must be a genuine schema-v24 payload");
+        let rebuilt =
+            bincode::serde::encode_to_vec(v24_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v24 fixture must match our frozen v24 writer"
+        );
+    }
+
+    /// **The claim the v25 rung's whole economy rests on: `()` costs nothing.**
+    ///
+    /// The frozen pre-v25 records are `RuntimeEntityGen<_, ()>` rather than
+    /// ninety-line restatements, which is only sound if bincode encodes the unit
+    /// type as zero bytes. Asserted rather than assumed, and asserted **twice**:
+    /// against the empty tail directly, and against the one discriminant byte an
+    /// absent `Option` costs on the live record.
+    #[test]
+    fn the_v25_tail_costs_a_pre_v25_record_nothing() {
+        let live = v9_rec(Uuid::from_u128(0xFD30), "Marker", None).into_runtime();
+        assert!(live.vehicle_class.is_none());
+        let frozen = EntityRecordV24::from_current(live.clone());
+
+        let a = bincode::serde::encode_to_vec(&live, bincode_config()).unwrap();
+        let b = bincode::serde::encode_to_vec(&frozen, bincode_config()).unwrap();
+        assert_eq!(
+            a.len(),
+            b.len() + 1,
+            "an absent vehicle class costs {} byte(s), not the one discriminant \
+             an empty Option is — so `()` is NOT free and every frozen record \
+             below v25 is mis-shaped",
+            a.len() - b.len()
+        );
+        // …and the frozen record's bytes are a strict prefix of the live one's,
+        // which is what "appended at the tail" means and is the property the
+        // whole ladder rests on.
+        assert_eq!(&a[..b.len()], &b[..], "the v25 slot is not at the tail");
+
+        // A PRESENT class really costs more, so the check above is about an
+        // absent one rather than about a field that never encodes.
+        let mut with = live.clone();
+        with.vehicle_class = Some(v25_fixture_class());
+        let c = bincode::serde::encode_to_vec(&with, bincode_config()).unwrap();
+        assert!(
+            c.len() > a.len(),
+            "an authored vehicle class encoded to the same size as an absent one"
+        );
+    }
+
+    /// **The "old bytes load forever" gate for the v25 bump.**
+    #[test]
+    fn v24_loads_and_lifts_without_a_vehicle_class() {
+        let bytes = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v24.inf_lvl"),
+        )
+        .expect("committed v24 fixture present");
+        assert_eq!(bytes[0], 24);
+        let level = decode(&bytes).expect("a v24 level decodes");
+        assert!(!level.entities.is_empty());
+
+        // Nothing in a v24 file could have authored the v25 addition.
+        for e in &level.entities {
+            assert!(
+                e.vehicle_class.is_none(),
+                "{} arrived with a vehicle class out of a v24 file",
+                e.name
+            );
+        }
+        // …and everything v24 COULD express survived.
+        assert_eq!(level.geo, v24_fixture_geo(), "the v24 anchor survived");
+        let hero = level
+            .entities
+            .iter()
+            .find(|e| e.name == "Cube")
+            .expect("the fixture's hero");
+        assert!(hero.ik_target.is_some(), "the v21 IK survived");
+        assert!(hero.cloth_sim.is_some(), "the v21 garment survived");
+        assert!(hero.hair_guides.is_some(), "the v21 hair survived");
+        assert!(
+            hero.character_movement.is_some(),
+            "the v23 movement component survived"
+        );
+
+        // Re-encoding stamps the CURRENT version.
+        let re = encode(&level).unwrap();
+        assert_eq!(re[0], SCHEMA_VERSION as u8);
+    }
+
+    /// The v25 slot round-trips through the codec, field for field.
+    #[test]
+    fn v25_vehicle_class_round_trips_through_the_codec() {
+        let level = RuntimeLevel {
+            title: "V25".into(),
+            entities: vec![
+                RuntimeEntity {
+                    vehicle_class: Some(v25_fixture_class()),
+                    ..v9_rec(Uuid::from_u128(0xFD31), "Car", None).into_runtime()
+                },
+                // A second entity with NO class, so a codec that wrote one value
+                // into every slot would fail here.
+                v9_rec(Uuid::from_u128(0xFD32), "Cone", None).into_runtime(),
+            ],
+            settings: RuntimeSettings::default(),
+            geo: Default::default(),
+        };
+        let bytes = encode(&level).unwrap();
+        assert_eq!(bytes[0], SCHEMA_VERSION as u8);
+        let back = decode(&bytes).expect("a v25 level decodes");
+        assert_eq!(back, level);
+        assert_eq!(back.entities[0].vehicle_class, Some(v25_fixture_class()));
+        assert_eq!(back.entities[1].vehicle_class, None);
+
+        // Clearing it really changes the bytes (the field is persisted, not
+        // inferred from anything else on the entity).
+        let mut bare = level.clone();
+        bare.entities[0].vehicle_class = None;
+        assert_ne!(encode(&bare).unwrap(), bytes);
+    }
+
+    /// The **downgrade** direction for v25: projecting a live record onto the
+    /// frozen v24 shape loses the vehicle class and **nothing else**.
+    ///
+    /// Asserted as a property (compare by `PartialEq` after patching back the one
+    /// field) rather than as a field list, which would silently stop covering a
+    /// slot added later.
+    #[test]
+    fn v24_entity_downgrade_is_lossless_except_for_the_vehicle_class() {
+        let live = RuntimeEntity {
+            vehicle_class: Some(v25_fixture_class()),
+            character_movement: Some(v23_fixture_movement()),
+            terrain: Some(fixture_terrain()),
+            ..v9_rec(Uuid::from_u128(0xFD33), "Car", None).into_runtime()
+        };
+        let round = EntityRecordV24::from_current(live.clone()).into_runtime();
+        assert_ne!(round, live, "the class must really be lost");
+        let mut patched = round.clone();
+        patched.vehicle_class = live.vehicle_class;
+        assert_eq!(
+            patched, live,
+            "the v24 downgrade lost something other than the vehicle class"
+        );
+    }
+
+    /// What v25 costs: **one discriminant byte per entity**, and nothing else —
+    /// no file-level field, and nothing at all inside any existing component.
+    #[test]
+    fn v25_costs_one_discriminant_per_entity_and_no_more() {
+        let plain = v9_rec(Uuid::from_u128(0xFD34), "Marker", None).into_runtime();
+        let live = |n: usize| {
+            encode(&RuntimeLevel {
+                title: "t".into(),
+                entities: vec![plain.clone(); n],
+                settings: RuntimeSettings::default(),
+                geo: Default::default(),
+            })
+            .unwrap()
+            .len()
+        };
+        let frozen = |n: usize| {
+            bincode::serde::encode_to_vec(
+                &SceneFileV24 {
+                    schema_version: 24,
+                    title: "t".into(),
+                    entities: vec![EntityRecordV24::from_current(plain.clone()); n],
+                    settings: RuntimeSettings::default(),
+                    geo: Default::default(),
+                },
+                bincode_config(),
+            )
+            .unwrap()
+            .len()
+        };
+        for n in [1usize, 4, 16] {
+            assert_eq!(
+                live(n),
+                frozen(n) + n,
+                "v25 costs {} bytes over {n} entities, not {n}",
+                live(n) - frozen(n)
+            );
+        }
+    }
+
+    /// **The component IS the tuning door** — the drift gate.
+    ///
+    /// `VehicleClass` exists to be applied through `Vehicle::tune`, and its
+    /// fields are `VehicleTuning::names()`. A field added to one and not the
+    /// other is a tunable an author can type and the sim ignores, silently, which
+    /// is the whole class of defect the "restated list" rule (P29.6 A14) is
+    /// about.
+    #[test]
+    fn the_vehicle_class_is_exactly_the_tuning_door() {
+        let class = v25_fixture_class();
+        let settings = class.settings();
+        let names = inf_ecs::vehicle::VehicleTuning::names();
+        assert_eq!(
+            settings.len(),
+            names.len(),
+            "the class carries {} settings against the door's {}",
+            settings.len(),
+            names.len()
+        );
+        for (i, (name, value)) in settings.iter().enumerate() {
+            assert_eq!(*name, names[i], "the class is not in the door's order");
+            // …and every one really reaches a tuning.
+            let mut t = inf_ecs::vehicle::VehicleTuning::default();
+            assert!(t.set(name, *value), "the door refuses `{name}`");
+        }
+        // ANTI-VACUITY: the fixture is not the default, so a class that silently
+        // installed nothing would be visible.
+        assert_ne!(class, VehicleClass::default());
     }
 
     /// Regenerate `tests/fixtures/scene_v23.inf_lvl` — the **downgrade-bless**
@@ -12018,7 +12543,7 @@ mod tests {
         // An entity with no terrain pays only the file-level anchor.
         assert_eq!(
             live(&plain).len(),
-            frozen(&plain).len() + geo_anchor_bytes(),
+            frozen(&plain).len() + geo_anchor_bytes() + VEHICLE_SLOT_BYTES,
             "an entity with no terrain must pay nothing for the layer bindings — \
              the field is inside the component"
         );
@@ -12030,7 +12555,10 @@ mod tests {
         };
         assert_eq!(
             live(&ground).len(),
-            frozen(&ground).len() + geo_anchor_bytes() + TERRAIN_LAYER_MATERIAL_BYTES,
+            frozen(&ground).len()
+                + geo_anchor_bytes()
+                + TERRAIN_LAYER_MATERIAL_BYTES
+                + VEHICLE_SLOT_BYTES,
             "a terrain must pay exactly one discriminant per splat layer"
         );
 
@@ -12113,7 +12641,7 @@ mod tests {
         };
         assert_eq!(
             live(&plain).len(),
-            frozen(&plain).len() + MOVEMENT_SLOT_BYTES + geo_anchor_bytes(),
+            frozen(&plain).len() + MOVEMENT_SLOT_BYTES + VEHICLE_SLOT_BYTES + geo_anchor_bytes(),
             "the v23 slot must cost exactly one discriminant byte on an entity \
              that has no movement component"
         );
@@ -12189,7 +12717,7 @@ mod tests {
     /// the message — the [`SceneError::SchemaTooNew`] doctrine, re-checked at the
     /// new ceiling.
     #[test]
-    fn a_v24_payload_is_refused_by_name() {
+    fn a_v26_payload_is_refused_by_name() {
         let level = RuntimeLevel {
             title: "Future".into(),
             entities: vec![v9_rec(Uuid::from_u128(0xFF01), "A", None).into_runtime()],
