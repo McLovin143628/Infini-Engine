@@ -16,6 +16,7 @@ import PackageDialog from "./shell/PackageDialog";
 import ErodeDialog from "./shell/ErodeDialog";
 import CaptureWizardDialog from "./shell/CaptureWizardDialog";
 import CharacterWizardDialog from "./shell/CharacterWizardDialog";
+import GisImportDialog from "./shell/GisImportDialog";
 import TerrainImportDialog from "./shell/TerrainImportDialog";
 import ContentDrawer from "./shell/ContentDrawer";
 import CommandPalette from "./shell/CommandPalette";
@@ -322,6 +323,7 @@ export default function App() {
       <PackageDialog />
       <ErodeDialog />
       <TerrainImportDialog />
+      <GisImportDialog />
       <CharacterWizardDialog />
       <CaptureWizardDialog />
       <CommandPalette />

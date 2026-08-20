@@ -49,6 +49,21 @@ rmb_click_travel_px: number,
  */
 rmb_click_ms: number, 
 /**
+ * **The GIS vector-import entity cap** (IB-14), remembered per user.
+ *
+ * The certification's complaint about this number was that it was
+ * "reported and never silent, which is the right design — but with no
+ * wizard there is nowhere for an author to raise it". This is the
+ * somewhere: the wizard opens on it, `inf_gis::DEFAULT_MAX_ENTITIES` is
+ * what it starts at, and an author who raises it once does not raise it
+ * again on the next layer.
+ *
+ * Clamped to `1..=`[`inf_gis::ISLAND_MAX_ENTITIES`] by
+ * [`Self::normalize`], because a settings file is a text file a human can
+ * edit and a cap of zero imports nothing while looking like a preference.
+ */
+gis_max_entities: number, 
+/**
  * 3D gizmo snap increments (was `inf.viewport.snap3d` in localStorage).
  */
 snap_3d: Snap3DDto, 

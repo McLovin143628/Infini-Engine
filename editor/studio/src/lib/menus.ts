@@ -66,6 +66,9 @@ export const MENU_BAR: TopMenu[] = [
       sep,
       act("file.importIntoLevel", "Import Into Level…"),
       act("file.importTerrain", "Import Terrain…"),
+      // IB-3: the one door for vector data — roads, water, land cover,
+      // footprints, parcels.
+      act("file.importGis", "Import GIS Data…"),
       // The P25.4 capture wizard. Its own entry for the Terrain Import wizard's
       // reason: a folder of JPEGs is far more often a texture set than a scan.
       act("file.captureFromPhotos", "Capture from Photographs…"),

@@ -22,6 +22,8 @@ interface ShellState {
   erodeOpen: boolean;
   /** Terrain Import wizard open (File ▸ Import Terrain…, P16.4a). */
   terrainImportOpen: boolean;
+  /** GIS Import wizard open (File ▸ Import GIS Data…, IB-3). */
+  gisImportOpen: boolean;
   /** New Character wizard open (Actor ▸ New Character from Template…, P24.5). */
   characterWizardOpen: boolean;
   /** Capture wizard open (File ▸ Capture from Photographs…, P25.4). */
@@ -42,6 +44,7 @@ interface ShellState {
   setPackageDialogOpen: (open: boolean) => void;
   setErodeOpen: (open: boolean) => void;
   setTerrainImportOpen: (open: boolean) => void;
+  setGisImportOpen: (open: boolean) => void;
   setCharacterWizardOpen: (open: boolean) => void;
   setCaptureWizardOpen: (open: boolean) => void;
   setPreferencesOpen: (open: boolean) => void;
@@ -60,6 +63,7 @@ export const useShellStore = create<ShellState>((set) => ({
   packageDialogOpen: false,
   erodeOpen: false,
   terrainImportOpen: false,
+  gisImportOpen: false,
   characterWizardOpen: false,
   captureWizardOpen: false,
   preferencesOpen: false,
@@ -81,6 +85,7 @@ export const useShellStore = create<ShellState>((set) => ({
   setPackageDialogOpen: (packageDialogOpen) => set({ packageDialogOpen }),
   setErodeOpen: (erodeOpen) => set({ erodeOpen }),
   setTerrainImportOpen: (terrainImportOpen) => set({ terrainImportOpen }),
+  setGisImportOpen: (gisImportOpen) => set({ gisImportOpen }),
   setCharacterWizardOpen: (characterWizardOpen) => set({ characterWizardOpen }),
   setCaptureWizardOpen: (captureWizardOpen) => set({ captureWizardOpen }),
   setPreferencesOpen: (preferencesOpen) => set({ preferencesOpen }),

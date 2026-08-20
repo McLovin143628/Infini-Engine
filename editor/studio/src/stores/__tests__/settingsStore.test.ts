@@ -138,6 +138,8 @@ describe("settingsStore", () => {
       camera_look_sensitivity: 1,
       rmb_click_travel_px: 4,
       rmb_click_ms: 250,
+      // IB-14: `inf_gis::DEFAULT_MAX_ENTITIES`.
+      gis_max_entities: 4096,
       snap_3d: { translate: 1, rotate_deg: 15, scale: 0.1, always_on: false },
       foliage: {
         radius: 3,

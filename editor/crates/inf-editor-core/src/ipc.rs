@@ -686,6 +686,187 @@ pub struct TerrainImportResultDto {
     pub bytes: u64,
 }
 
+// ── GIS import (IB-3) ────────────────────────────────────────────────────
+
+/// One attribute field of a vector source, summarised over the whole layer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct GisFieldDto {
+    pub name: String,
+    #[ts(type = "number")]
+    pub present: usize,
+    #[ts(type = "number")]
+    pub numeric: usize,
+    pub sample: Option<String>,
+}
+
+/// A source CRS as the import door resolved it, with where it came from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct GisCrsDto {
+    /// The spelling handed to the projection library.
+    pub spec: String,
+    /// `"stated"`, `"prj"` or `"prj-name"`.
+    pub origin: String,
+    /// The `.prj`'s own name for the projection, when there was one.
+    pub name: Option<String>,
+    pub vertical_unit_m: f64,
+    /// The `.prj` text, so a wizard can show what it read.
+    pub prj_wkt: Option<String>,
+}
+
+/// What is inside a vector source — the wizard's preview step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct GisProbeDto {
+    pub path: String,
+    pub format: String,
+    pub layer_name: String,
+    #[ts(type = "number")]
+    pub features: usize,
+    #[ts(type = "number")]
+    pub points: usize,
+    #[ts(type = "number")]
+    pub polylines: usize,
+    #[ts(type = "number")]
+    pub polygons: usize,
+    /// `"point"`, `"polyline"` or `"polygon"` — what the layer mostly is, and
+    /// therefore which target kinds make sense.
+    pub dominant_kind: String,
+    pub fields: Vec<GisFieldDto>,
+    pub crs: GisCrsDto,
+    /// The layer's centre on Earth, degrees.
+    pub centre_lat: Option<f64>,
+    pub centre_lon: Option<f64>,
+    /// The UTM zone this engine suggests anchoring a world in.
+    pub suggested_anchor_epsg: Option<u32>,
+    /// The level's current anchor CRS, or `None` when it has no anchor. The
+    /// wizard shows both, because "the file says zone 10 and your world is
+    /// anchored in zone 11" is the question an author needs asked.
+    pub level_anchor_crs: Option<String>,
+    pub skipped: Vec<String>,
+    pub advisories: Vec<String>,
+}
+
+/// Everything the GIS wizard sends back.
+///
+/// **The caps are here, which is the whole of IB-14's editor half.**
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct GisImportSettingsDto {
+    /// A [`inf_gis::LayerKind`] label: `roads`, `streams`, `lakes`, `biomes`,
+    /// `buildings`, `parcels`, `generic`.
+    pub kind: String,
+    /// Empty reads the `.prj`.
+    pub source_crs: String,
+    /// `0` reads the `.prj`'s vertical unit.
+    pub vertical_unit_m: f64,
+    /// The entity cap. See `inf_gis::DEFAULT_MAX_ENTITIES` and
+    /// `ISLAND_MAX_ENTITIES`.
+    #[ts(type = "number")]
+    pub max_entities: usize,
+    pub min_length_m: f64,
+    pub reverse_flow: bool,
+    pub name_prefix: String,
+    /// Build a real road surface (`.inf_mesh` + entity) as well as the
+    /// centreline splines — IB-4.
+    pub road_surface: bool,
+    pub road_lift_m: f64,
+    pub road_ground_step_m: f64,
+    /// Paint the layer's classes into a terrain's biome ids — IB-5a. Empty
+    /// means "do not".
+    pub biome_terrain: String,
+    /// The class attribute; empty probes the known spellings.
+    pub biome_attribute: String,
+    #[ts(type = "number")]
+    pub biome_classes: usize,
+    /// Build each footprint into geometry — IB-5b + IB-6.
+    pub buildings: bool,
+    #[ts(type = "number")]
+    pub max_buildings: usize,
+    pub furnish: bool,
+}
+
+impl GisImportSettingsDto {
+    /// The wizard's defaults for a probed source: the layer kind its geometry
+    /// suggests, and the author's own remembered cap.
+    pub fn suggested(probe: &GisProbeDto, max_entities: usize) -> Self {
+        let kind = match probe.dominant_kind.as_str() {
+            "polyline" => "roads",
+            "polygon" => "buildings",
+            _ => "generic",
+        };
+        Self {
+            kind: kind.to_string(),
+            source_crs: String::new(),
+            vertical_unit_m: 0.0,
+            max_entities,
+            min_length_m: inf_gis::import::MIN_FEATURE_LENGTH_M,
+            reverse_flow: false,
+            name_prefix: String::new(),
+            road_surface: kind == "roads",
+            road_lift_m: inf_gis::DEFAULT_ROAD_LIFT_M,
+            road_ground_step_m: inf_gis::DEFAULT_GROUND_STEP_M,
+            biome_terrain: String::new(),
+            biome_attribute: String::new(),
+            biome_classes: crate::gisbiome::DEFAULT_CLASSES,
+            buildings: false,
+            max_buildings: crate::gisbuild::DEFAULT_MAX_BUILDINGS,
+            furnish: false,
+        }
+    }
+
+    /// The Ring-0 import request this describes.
+    ///
+    /// **All of it goes through `inf_gis::ImportRequest`** — the DTO carries the
+    /// author's answers and decides nothing, which is what keeps the wizard and
+    /// `inf gis` on one door.
+    pub fn to_request(&self, path: &std::path::Path) -> inf_gis::ImportRequest {
+        let mut req = inf_gis::ImportRequest::new(path, inf_gis::LayerKind::from_label(&self.kind));
+        let crs = self.source_crs.trim();
+        if !crs.is_empty() {
+            req.source_crs = Some(crs.to_string());
+        }
+        if self.vertical_unit_m.is_finite() && self.vertical_unit_m > 0.0 {
+            req.vertical_unit_m = Some(self.vertical_unit_m);
+        }
+        req.options.max_entities = self.max_entities.max(1);
+        if self.min_length_m.is_finite() && self.min_length_m >= 0.0 {
+            req.options.min_length_m = self.min_length_m;
+        }
+        req.options.reverse_flow = self.reverse_flow;
+        req.options.name_prefix = self.name_prefix.trim().to_string();
+        req
+    }
+}
+
+/// What a GIS import produced — the wizard's done state.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+pub struct GisImportResultDto {
+    pub layer_name: String,
+    pub crs: String,
+    #[ts(type = "number")]
+    pub spawned: usize,
+    #[ts(type = "number")]
+    pub too_short: usize,
+    #[ts(type = "number")]
+    pub unusable: usize,
+    #[ts(type = "number")]
+    pub truncated: usize,
+    #[ts(type = "number")]
+    pub cap: usize,
+    /// The one-line summary, written once in Ring 0 and shown here, in the log
+    /// and by `inf gis`.
+    pub summary: String,
+    /// A stable digest of the plan — the same number `inf gis plan` prints.
+    pub digest: String,
+    /// The road surface's summary, when one was built.
+    pub road_summary: Option<String>,
+    /// The land-cover paint's summary, when one was painted.
+    pub biome_summary: Option<String>,
+    /// The footprint bake's summary, when buildings were built.
+    pub building_summary: Option<String>,
+    /// GUIDs of every `.inf_mesh` the import wrote.
+    pub meshes: Vec<String>,
+    pub advisories: Vec<String>,
+}
+
 /// The `assets://changed` event payload — a version bump prompting a re-fetch.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
 pub struct AssetChanged {

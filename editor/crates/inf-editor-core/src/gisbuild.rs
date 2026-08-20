@@ -23,7 +23,7 @@
 //! number to raise — the IB-14 discipline, applied to the expensive half rather
 //! than to the cheap one.
 
-use glam::{DVec2, DVec3};
+use glam::DVec2;
 use uuid::Uuid;
 
 use inf_asset::AssetId;
@@ -365,6 +365,7 @@ pub fn import_footprints(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::DVec3;
     use inf_gis::feature::{Attr, GeoFeature, LayerKind};
     use inf_terrain::{TerrainData, TerrainTile};
 

@@ -104,6 +104,9 @@ import type { TerrainBiomesDto } from "../bindings/TerrainBiomesDto";
 import type { CharacterCreateDto } from "../bindings/CharacterCreateDto";
 import type { CharacterPreviewDto } from "../bindings/CharacterPreviewDto";
 import type { CharacterSpecDto } from "../bindings/CharacterSpecDto";
+import type { GisImportResultDto } from "../bindings/GisImportResultDto";
+import type { GisImportSettingsDto } from "../bindings/GisImportSettingsDto";
+import type { GisProbeDto } from "../bindings/GisProbeDto";
 import type { TerrainImportPlanDto } from "../bindings/TerrainImportPlanDto";
 import type { TerrainImportResultDto } from "../bindings/TerrainImportResultDto";
 import type { TerrainImportSettingsDto } from "../bindings/TerrainImportSettingsDto";
@@ -406,6 +409,48 @@ export const terrain = {
    */
   setBiomeSet: (entity: string, asset: string | null): Promise<boolean> =>
     invoke<boolean>("terrain_set_biome_set", { entity, asset }),
+};
+
+/**
+ * The GIS import door (IB-3): probe a vector source, get the settings the
+ * wizard should open on, import it.
+ *
+ * All three go through `inf_gis::import` in Ring 0 — the same door `inf gis`
+ * uses headlessly — so the wizard makes no import decision of its own. The
+ * `digest` on the result is the same number `inf gis plan` prints.
+ */
+export const gis = {
+  /**
+   * What is inside a Shapefile or GeoJSON, BEFORE the level needs an anchor —
+   * fields with their coverage and a sample value, the `.prj`'s CRS and where
+   * it came from, the layer's centre on Earth and the UTM zone to anchor in.
+   *
+   * `sourceCrs` empty reads the `.prj`; a file with neither is a refusal
+   * naming the remedy rather than a guess.
+   */
+  probe: (path: string, sourceCrs = ""): Promise<GisProbeDto> =>
+    invoke<GisProbeDto>("gis_probe", { path, sourceCrs }),
+
+  /**
+   * The defaults for a probed source: the layer kind its geometry suggests,
+   * and the author's own remembered entity cap (IB-14).
+   */
+  suggestedSettings: (
+    probe: GisProbeDto,
+    maxEntities: number,
+  ): Promise<GisImportSettingsDto> =>
+    invoke<GisImportSettingsDto>("gis_suggested_settings", { probe, maxEntities }),
+
+  /**
+   * Import. Spawns the layer's centrelines or boundaries, plus whichever of
+   * the road surface, the land-cover paint and the footprint bake was asked
+   * for. Emits `world://delta` and `assets://changed`.
+   */
+  import: (
+    path: string,
+    settings: GisImportSettingsDto,
+  ): Promise<GisImportResultDto> =>
+    invoke<GisImportResultDto>("gis_import", { path, settings }),
 };
 
 /**

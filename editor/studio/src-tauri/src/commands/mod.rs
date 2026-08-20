@@ -15,6 +15,7 @@ mod collision_layers;
 mod dcc;
 mod diagnostics;
 mod files;
+mod gis;
 mod git;
 mod graph;
 mod layout;
@@ -135,6 +136,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         terrain::terrain_spawn_streamed,
         terrain::terrain_biomes,
         terrain::terrain_set_biome_set,
+        // IB-3: the GIS import wizard — probe, suggest, import.
+        gis::gis_probe,
+        gis::gis_suggested_settings,
+        gis::gis_import,
         water::water_defaults,
         water::water_lake_preview,
         water::water_create_lake,

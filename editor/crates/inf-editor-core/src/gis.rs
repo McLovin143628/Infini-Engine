@@ -156,6 +156,191 @@ pub fn apply_plan(doc: &mut SceneDoc, plan: &SpawnPlan) -> SpawnReport {
     report
 }
 
+/// **The probe, as a wire value** — what is inside a vector source, before
+/// importing it.
+///
+/// Ring 2 calls this rather than [`inf_gis::probe`] directly, so the studio
+/// crate names no GIS type at all and the DTO conversion lives beside the DTO.
+/// `source_crs` empty reads the `.prj`; `level_anchor_crs` is what the open
+/// level is anchored in, carried back so the wizard can show both.
+pub fn probe_dto(
+    path: &std::path::Path,
+    source_crs: &str,
+    level_anchor_crs: Option<String>,
+) -> Result<crate::ipc::GisProbeDto, String> {
+    let crs = source_crs.trim();
+    let p = inf_gis::probe(path, (!crs.is_empty()).then_some(crs)).map_err(|e| e.to_string())?;
+    Ok(crate::ipc::GisProbeDto {
+        path: p.path.display().to_string(),
+        format: p.format.to_string(),
+        layer_name: p.layer_name.clone(),
+        features: p.features,
+        points: p.points,
+        polylines: p.polylines,
+        polygons: p.polygons,
+        dominant_kind: p.dominant_kind().to_string(),
+        fields: p
+            .fields
+            .iter()
+            .map(|f| crate::ipc::GisFieldDto {
+                name: f.name.clone(),
+                present: f.present,
+                numeric: f.numeric,
+                sample: f.sample.clone(),
+            })
+            .collect(),
+        crs: crate::ipc::GisCrsDto {
+            spec: p.crs.spec.clone(),
+            origin: p.crs.origin.label().to_string(),
+            name: p.crs.name.clone(),
+            vertical_unit_m: p.crs.vertical_unit_m,
+            prj_wkt: p.crs.prj_wkt.clone(),
+        },
+        centre_lat: p.centre_lat_lon.map(|(lat, _)| lat),
+        centre_lon: p.centre_lat_lon.map(|(_, lon)| lon),
+        suggested_anchor_epsg: p.suggested_anchor_epsg,
+        level_anchor_crs,
+        skipped: p.skipped.clone(),
+        advisories: p.advisories.iter().map(|a| a.to_string()).collect(),
+    })
+}
+
+/// **The whole import, once** — the function the wizard, the CLI's editor twin
+/// and any future cook-time pipeline all call (IB-3).
+///
+/// One request in, one report out, and every target the door offers reached
+/// through the module that owns it:
+///
+/// | the author asked for | this calls |
+/// |---|---|
+/// | any layer | [`inf_gis::import_layer`] + [`apply_plan`] |
+/// | a road surface | [`crate::gisroad::import_road_surface`] (IB-4) |
+/// | land cover | [`crate::gisbiome::paint_biomes_from_layer`] (IB-5a) |
+/// | footprints | [`crate::gisbuild::import_footprints`] (IB-5b, IB-6) |
+///
+/// The extras are **additive**: every layer spawns its centrelines or its
+/// boundaries first, so an author who asks for a road surface gets the splines
+/// the grammar's span source consumes *as well as* the mesh, and turning the
+/// surface off does not change what else the import produced.
+pub fn run_import(
+    project: &mut crate::assets::AssetProject,
+    doc: &mut SceneDoc,
+    path: &std::path::Path,
+    settings: &crate::ipc::GisImportSettingsDto,
+) -> Result<crate::ipc::GisImportResultDto, String> {
+    let req = settings.to_request(path);
+    let anchor = doc.geo().clone();
+    let imported = inf_gis::import_layer(&req, &anchor).map_err(|e| e.to_string())?;
+
+    doc.begin_transaction("Import GIS Layer");
+    let report = apply_plan(doc, &imported.plan);
+    doc.commit_transaction();
+
+    let mut out = crate::ipc::GisImportResultDto {
+        layer_name: imported.layer.name.clone(),
+        crs: imported.crs.spec.clone(),
+        spawned: report.count(),
+        too_short: report.too_short,
+        unusable: report.unusable,
+        truncated: report.truncated,
+        cap: report.cap,
+        summary: report.summary(&imported.layer.name),
+        digest: format!("{:016x}", imported.plan.digest()),
+        advisories: report.advisories.clone(),
+        ..Default::default()
+    };
+
+    if settings.road_surface {
+        let opts = crate::gisroad::RoadImportOptions {
+            surface: inf_gis::SurfaceOptions {
+                lift_m: settings.road_lift_m,
+                ground_step_m: settings.road_ground_step_m,
+                fill_junctions: true,
+            },
+            ..Default::default()
+        };
+        match crate::gisroad::import_road_surface(project, doc, &imported.layer, &opts) {
+            Ok(r) => {
+                out.road_summary = Some(r.summary());
+                out.meshes.push(r.mesh.0.to_string());
+                out.advisories.extend(r.advisories);
+            }
+            // A refused *extra* must not lose the import that succeeded: the
+            // splines are already in the document, and an author who asked for
+            // a surface and got a reason is better off than one whose whole
+            // import vanished.
+            Err(e) => out
+                .advisories
+                .push(format!("no road surface was built: {e}")),
+        }
+    }
+
+    let terrain = settings.biome_terrain.trim();
+    if !terrain.is_empty() {
+        match uuid::Uuid::parse_str(terrain) {
+            Ok(guid) => {
+                let names = biome_names_of(project, doc, guid);
+                let opts = crate::gisbiome::BiomeImportOptions {
+                    attribute: settings.biome_attribute.clone(),
+                    classes: settings.biome_classes,
+                    ..Default::default()
+                };
+                match crate::gisbiome::paint_biomes_from_layer(
+                    doc,
+                    guid,
+                    &imported.layer,
+                    &opts,
+                    &names,
+                ) {
+                    Ok(r) => {
+                        out.biome_summary = Some(r.summary(&imported.layer.name));
+                        out.advisories.extend(r.advisories);
+                    }
+                    Err(e) => out.advisories.push(format!("no biomes were painted: {e}")),
+                }
+            }
+            Err(_) => out
+                .advisories
+                .push(format!("{terrain:?} is not a terrain entity id")),
+        }
+    }
+
+    if settings.buildings {
+        let opts = crate::gisbuild::BuildingImportOptions {
+            max_buildings: settings.max_buildings,
+            furnish: settings.furnish,
+            ..Default::default()
+        };
+        match crate::gisbuild::import_footprints(project, doc, &imported.layer, &opts) {
+            Ok(r) => {
+                out.building_summary = Some(r.summary(&imported.layer.name));
+                out.meshes
+                    .extend(r.built.iter().map(|b| b.mesh.0.to_string()));
+                out.advisories.extend(r.advisories);
+            }
+            Err(e) => out.advisories.push(format!("no buildings were built: {e}")),
+        }
+    }
+    Ok(out)
+}
+
+/// The `(id, name)` pairs of a terrain's own biome set, for the named-class
+/// route. Empty when the terrain names no set — then only the numeric route can
+/// classify, which [`crate::gisbiome`] says out loud.
+fn biome_names_of(
+    project: &crate::assets::AssetProject,
+    doc: &SceneDoc,
+    terrain: Uuid,
+) -> Vec<(u8, String)> {
+    let Some(set_id) = doc.terrain_biome_set(terrain) else {
+        return Vec::new();
+    };
+    match project.load_payload::<inf_terrain::BiomeSet>(inf_asset::AssetId(set_id)) {
+        Ok(set) => set.biomes.iter().map(|b| (b.id, b.name.clone())).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// **The import's ground door.** Run `f` with a ground query over the level's
 /// terrains, then hand the document back.
 ///
@@ -497,6 +682,161 @@ mod tests {
         let via_layer = spawn_layer(&mut doc2, &l, &opts);
         assert_eq!(via_layer.count(), report.count());
         assert_eq!(via_layer.truncated, report.truncated);
+    }
+
+    /// **One door, every target.** `run_import` spawns the centrelines AND
+    /// builds the road surface, and the extras are additive — turning the
+    /// surface off changes nothing else the import produced.
+    ///
+    /// The digest it reports is the same number `inf gis plan` prints, which is
+    /// what makes the CLI's cross-process comparison a comparison of *this*.
+    #[test]
+    fn run_import_spawns_the_layer_and_builds_the_extras_through_one_request() {
+        use crate::ipc::GisImportSettingsDto;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("roads.geojson");
+        // Two roads meeting at a shared endpoint, in the anchor's own CRS.
+        std::fs::write(
+            &src,
+            r#"{"type":"FeatureCollection","features":[
+              {"type":"Feature","properties":{"name":"Main","road_type":"arterial"},
+               "geometry":{"type":"LineString","coordinates":[[491000,5459000],[491120,5459000]]}},
+              {"type":"Feature","properties":{"name":"Elm"},
+               "geometry":{"type":"LineString","coordinates":[[491120,5459000],[491120,5459100]]}}
+            ]}"#,
+        )
+        .unwrap();
+        let mut proj = crate::assets::AssetProject::open(tmp.path().join("Content")).unwrap();
+
+        // A level anchored at Vancouver, with a terrain under the roads.
+        let mut doc = SceneDoc::new();
+        doc.edit_geo(
+            inf_gis::anchor_at("EPSG:32610", 491_000.0, 5_459_000.0, 0.0, "EGM2008").unwrap(),
+        );
+        {
+            let guid = doc.edit_create(crate::ipc::SpawnKind::Empty, "Ground", None);
+            let e = doc.world().entity_of(guid).unwrap();
+            let res = 129u32;
+            let tile = inf_terrain::TerrainTile::from_heights(
+                res,
+                DVec3::ZERO,
+                vec![0.0; (res * res) as usize],
+            )
+            .unwrap();
+            let mut data = inf_terrain::TerrainData::new(res, 2.0);
+            data.insert_tile((0, 0), tile).ok();
+            let mut t = inf_ecs::components::Transform::IDENTITY;
+            t.translation = inf_ecs::math::Vec3d::new(-40.0, 0.0, -40.0);
+            doc.world_mut().world_mut().entity_mut(e).insert((
+                inf_ecs::components::Terrain {
+                    data,
+                    ..Default::default()
+                },
+                t,
+            ));
+            doc.world_mut().propagate();
+        }
+
+        let mut settings = GisImportSettingsDto {
+            kind: "roads".into(),
+            source_crs: "EPSG:32610".into(),
+            vertical_unit_m: 0.0,
+            max_entities: 4096,
+            min_length_m: 8.0,
+            reverse_flow: false,
+            name_prefix: String::new(),
+            road_surface: true,
+            road_lift_m: 0.02,
+            road_ground_step_m: 1.0,
+            biome_terrain: String::new(),
+            biome_attribute: String::new(),
+            biome_classes: 8,
+            buildings: false,
+            max_buildings: 16,
+            furnish: false,
+        };
+
+        let with_surface = run_import(&mut proj, &mut doc, &src, &settings).unwrap();
+        assert_eq!(with_surface.spawned, 2, "{with_surface:?}");
+        assert_eq!(with_surface.truncated, 0);
+        assert!(
+            with_surface.road_summary.is_some(),
+            "the surface was asked for: {with_surface:?}"
+        );
+        assert_eq!(with_surface.meshes.len(), 1);
+        assert!(
+            with_surface.summary.contains("2 entities"),
+            "{with_surface:?}"
+        );
+
+        // The digest is the plan's, so the CLI's cross-process comparison is a
+        // comparison of THIS.
+        let anchor = doc.geo().clone();
+        let mut req = inf_gis::ImportRequest::new(&src, inf_gis::LayerKind::Roads);
+        req.source_crs = Some("EPSG:32610".into());
+        let lib = inf_gis::import_layer(&req, &anchor).unwrap();
+        assert_eq!(with_surface.digest, format!("{:016x}", lib.plan.digest()));
+
+        // Turning the extra off changes the extra and nothing else. Re-run on
+        // the same document: an import's report is about that import, so the
+        // comparison is valid and it also proves a second import of one file
+        // reports the same plan.
+        settings.road_surface = false;
+        let plain = run_import(&mut proj, &mut doc, &src, &settings).unwrap();
+        assert_eq!(plain.spawned, with_surface.spawned);
+        assert_eq!(plain.digest, with_surface.digest);
+        assert!(plain.road_summary.is_none());
+        assert!(plain.meshes.is_empty());
+    }
+
+    /// A level with no geo-anchor refuses the whole import at the door, rather
+    /// than spawning a city at the world origin.
+    #[test]
+    fn run_import_refuses_a_level_with_no_anchor() {
+        use crate::ipc::GisImportSettingsDto;
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("roads.geojson");
+        std::fs::write(
+            &src,
+            r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{},
+               "geometry":{"type":"LineString","coordinates":[[491000,5459000],[491120,5459000]]}}]}"#,
+        )
+        .unwrap();
+        let mut proj = crate::assets::AssetProject::open(tmp.path().join("Content")).unwrap();
+        let mut doc = SceneDoc::new();
+        let settings = GisImportSettingsDto::suggested(
+            &crate::ipc::GisProbeDto {
+                path: String::new(),
+                format: "geojson".into(),
+                layer_name: "roads".into(),
+                features: 1,
+                points: 0,
+                polylines: 1,
+                polygons: 0,
+                dominant_kind: "polyline".into(),
+                fields: Vec::new(),
+                crs: crate::ipc::GisCrsDto {
+                    spec: "EPSG:32610".into(),
+                    origin: "stated".into(),
+                    name: None,
+                    vertical_unit_m: 1.0,
+                    prj_wkt: None,
+                },
+                centre_lat: None,
+                centre_lon: None,
+                suggested_anchor_epsg: None,
+                level_anchor_crs: None,
+                skipped: Vec::new(),
+                advisories: Vec::new(),
+            },
+            4096,
+        );
+        let mut settings = settings;
+        settings.source_crs = "EPSG:32610".into();
+        let e = run_import(&mut proj, &mut doc, &src, &settings).unwrap_err();
+        assert!(e.to_ascii_lowercase().contains("anchor"), "{e}");
+        assert_eq!(doc.order().len(), 0, "nothing was created");
     }
 
     /// A layer's own advisories ride through to the import's report — an axis

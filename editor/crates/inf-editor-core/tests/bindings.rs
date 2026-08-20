@@ -139,6 +139,15 @@ fn export_bindings() {
     TerrainImportSettingsDto::export_all(&cfg).expect("export TerrainImportSettingsDto");
     TerrainImportPlanDto::export_all(&cfg).expect("export TerrainImportPlanDto");
     TerrainImportResultDto::export_all(&cfg).expect("export TerrainImportResultDto");
+    // IB-3: the GIS import wizard's wire. Rooted here rather than mirrored by
+    // hand in TypeScript — the `sm.rs` trade (hand-written mirrors, no drift
+    // guard) is the one thing a wizard with a dozen fields must not repeat.
+    inf_editor_core::ipc::GisFieldDto::export_all(&cfg).expect("export GisFieldDto");
+    inf_editor_core::ipc::GisCrsDto::export_all(&cfg).expect("export GisCrsDto");
+    inf_editor_core::ipc::GisProbeDto::export_all(&cfg).expect("export GisProbeDto");
+    inf_editor_core::ipc::GisImportSettingsDto::export_all(&cfg)
+        .expect("export GisImportSettingsDto");
+    inf_editor_core::ipc::GisImportResultDto::export_all(&cfg).expect("export GisImportResultDto");
     AssetChanged::export_all(&cfg).expect("export AssetChanged");
     DataAssetDto::export_all(&cfg).expect("export DataAssetDto");
     DataFieldDto::export_all(&cfg).expect("export DataFieldDto");

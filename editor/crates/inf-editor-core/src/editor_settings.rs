@@ -88,6 +88,9 @@ fn default_rmb_travel() -> f32 {
 fn default_rmb_ms() -> u32 {
     DEFAULT_RMB_CLICK_MS
 }
+fn default_gis_max_entities() -> u32 {
+    inf_gis::DEFAULT_MAX_ENTITIES as u32
+}
 fn default_snap_3d() -> Snap3DDto {
     Snap3DDto {
         translate: 1.0,
@@ -145,6 +148,20 @@ pub struct EditorSettings {
     /// The time half of the same discrimination, milliseconds.
     #[serde(default = "default_rmb_ms")]
     pub rmb_click_ms: u32,
+    /// **The GIS vector-import entity cap** (IB-14), remembered per user.
+    ///
+    /// The certification's complaint about this number was that it was
+    /// "reported and never silent, which is the right design — but with no
+    /// wizard there is nowhere for an author to raise it". This is the
+    /// somewhere: the wizard opens on it, `inf_gis::DEFAULT_MAX_ENTITIES` is
+    /// what it starts at, and an author who raises it once does not raise it
+    /// again on the next layer.
+    ///
+    /// Clamped to `1..=`[`inf_gis::ISLAND_MAX_ENTITIES`] by
+    /// [`Self::normalize`], because a settings file is a text file a human can
+    /// edit and a cap of zero imports nothing while looking like a preference.
+    #[serde(default = "default_gis_max_entities")]
+    pub gis_max_entities: u32,
     /// 3D gizmo snap increments (was `inf.viewport.snap3d` in localStorage).
     #[serde(default = "default_snap_3d")]
     pub snap_3d: Snap3DDto,
@@ -169,6 +186,7 @@ impl Default for EditorSettings {
             camera_look_sensitivity: DEFAULT_LOOK_SENSITIVITY,
             rmb_click_travel_px: DEFAULT_RMB_CLICK_TRAVEL_PX,
             rmb_click_ms: DEFAULT_RMB_CLICK_MS,
+            gis_max_entities: default_gis_max_entities(),
             snap_3d: default_snap_3d(),
             foliage: default_foliage(),
             keybindings: BTreeMap::new(),
@@ -274,6 +292,11 @@ impl EditorSettings {
         self.rmb_click_ms = self
             .rmb_click_ms
             .clamp(RMB_CLICK_MS_RANGE.0, RMB_CLICK_MS_RANGE.1);
+        // A cap of zero imports nothing while looking like a preference, and a
+        // cap past the island ceiling is a promise the document cannot keep.
+        self.gis_max_entities = self
+            .gis_max_entities
+            .clamp(1, inf_gis::ISLAND_MAX_ENTITIES as u32);
 
         // Snap steps divide, so zero and NaN are both fatal downstream.
         let d = default_snap_3d();
@@ -342,6 +365,7 @@ mod tests {
             camera_look_sensitivity: 2.5,
             rmb_click_travel_px: 7.0,
             rmb_click_ms: 300,
+            gis_max_entities: 60_000,
             snap_3d: Snap3DDto {
                 translate: 0.25,
                 rotate_deg: 5.0,

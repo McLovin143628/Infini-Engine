@@ -176,6 +176,14 @@ export function bootstrapShellCommands(): void {
     useShellStore.getState().setTerrainImportOpen(true);
   });
 
+  // The GIS Import wizard (IB-3): File ▸ Import GIS Data… — the one door for
+  // roads, watercourses, land cover, footprints and parcels. Its own entry for
+  // the Terrain Import wizard's reason: a `.geojson` is never a texture, and a
+  // vector layer needs a target kind that no generic importer can guess.
+  setCommandHandler("file.importGis", () => {
+    useShellStore.getState().setGisImportOpen(true);
+  });
+
   // The capture wizard (P25.4): File ▸ Capture from Photographs… — photographs
   // in, a textured, retopologized asset out, entirely in-engine.
   setCommandHandler("file.captureFromPhotos", () => {
