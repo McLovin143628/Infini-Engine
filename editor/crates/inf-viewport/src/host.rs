@@ -2667,6 +2667,7 @@ fn push_scatter(
     instances: &[ScatteredInstance],
     translation: DVec3,
     draw_distance: f64,
+    near_distance: f64,
     id: u32,
 ) {
     if instances.is_empty() {
@@ -2678,7 +2679,7 @@ fn push_scatter(
         instances.iter().map(|si| ScatterInstance {
             position: si.position,
             rotation: si.rotation.as_quat(),
-            scale: si.scale as f32,
+            scale: glam::Vec3::splat(si.scale as f32),
             color: pcg_kind_color(si.kind),
         }),
     );
@@ -2690,14 +2691,142 @@ fn push_scatter(
         emissive: [0.0; 3],
         id,
         draw_distance,
+        near_distance,
     });
 }
 
-/// Project a [`PcgVolume`]'s evaluated cache into ONE GPU-instanced scatter batch
+/// The shell batch: one oriented **box** per structure group, banded
+/// `[near, far)`.
+///
+/// Separate from [`push_scatter`] because a shell is the one scatter instance
+/// that is not uniformly scaled — its three half-extents are the building's, and
+/// a cube of the wrong proportions is a different building rather than a coarser
+/// one.
+///
+/// MIRROR: identical in `inf_viewport::host` and `inf_player::render`.
+#[allow(clippy::too_many_arguments)]
+fn push_shells(
+    scene: &mut RenderScene,
+    shells: &[ScatteredInstance],
+    vol: &PcgVolume,
+    translation: DVec3,
+    draw_distance: f64,
+    near_distance: f64,
+    id: u32,
+) {
+    // MIRROR-BEGIN pcg_shell_batch
+    if shells.is_empty() {
+        return;
+    }
+    let data = ScatterData::build(
+        PrimMesh::Cube,
+        translation,
+        shells.iter().zip(&vol.structure_groups).map(|(si, g)| {
+            let h = g.shell.half_extents;
+            ScatterInstance {
+                position: si.position,
+                rotation: si.rotation.as_quat(),
+                scale: glam::Vec3::new((h.x * 2.0) as f32, (h.y * 2.0) as f32, (h.z * 2.0) as f32),
+                color: pcg_kind_color(si.kind),
+            }
+        }),
+    );
+    scene.scatter.push(ScatterBatch {
+        data: Arc::new(data),
+        anchor: translation,
+        metallic: 0.0,
+        roughness: 0.75,
+        emissive: [0.0; 3],
+        id,
+        draw_distance,
+        near_distance,
+    });
+    // MIRROR-END pcg_shell_batch
+}
+
+/// Project a [`PcgVolume`]'s evaluated cache into GPU-instanced scatter batches
 /// (P18.5), anchored at the volume entity's world `translation`, carrying the
-/// volume's authored content draw distance. Body: [`push_scatter`].
+/// volume's authored content draw distance.
+///
+/// # The structure LOD (IB-2b)
+///
+/// A volume that grew **buildings** carries `structure_groups`, and its parts are
+/// swapped for one **shell** box per building past
+/// [`STRUCTURE_LOD_M`](inf_render::STRUCTURE_LOD_M). That is three batches, not
+/// one, and their distance bands are *complementary*: ungrouped content keeps
+/// `[0, draw_distance)`, the parts take `[0, lod)` and the shells take
+/// `[lod, draw_distance)`.
+///
+/// **The camera is nowhere in this function**, which is the whole point: a
+/// selection made on the CPU would put the eye inside a batch's *content key*,
+/// and a content key that moves with the camera re-uploads a city's instance
+/// buffer every time the player walks. The bands are constants of the content;
+/// the cull compute — which has already computed each instance's distance —
+/// makes the choice per instance, per frame.
+///
+/// A volume with no groups takes exactly the pre-I3 path: one batch, one band,
+/// byte-identical.
+///
+/// MIRROR: identical in `inf_viewport::host` and `inf_player::render`, pinned by
+/// `inf-editor-core`'s `tests/projector_mirror.rs`.
 fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3, id: u32) {
-    push_scatter(scene, &vol.evaluated, translation, vol.draw_distance, id)
+    // MIRROR-BEGIN pcg_scatter_lod
+    if vol.structure_groups.is_empty() {
+        push_scatter(
+            scene,
+            &vol.evaluated,
+            translation,
+            vol.draw_distance,
+            0.0,
+            id,
+        );
+        return;
+    }
+    let lod = if vol.draw_distance > 0.0 {
+        inf_render::STRUCTURE_LOD_M.min(vol.draw_distance)
+    } else {
+        inf_render::STRUCTURE_LOD_M
+    };
+    let first = vol.structure_groups[0].inst_start as usize;
+    let last = vol
+        .structure_groups
+        .last()
+        .map(|g| g.instance_range().end)
+        .unwrap_or(first)
+        .min(vol.evaluated.len());
+    // Content the groups do not cover keeps its full band: a fence has no shell
+    // to be replaced by, so cutting it at the LOD distance would delete it.
+    let mut loose: Vec<ScatteredInstance> = Vec::new();
+    loose.extend_from_slice(&vol.evaluated[..first.min(vol.evaluated.len())]);
+    loose.extend_from_slice(&vol.evaluated[last..]);
+    push_scatter(scene, &loose, translation, vol.draw_distance, 0.0, id);
+    push_scatter(
+        scene,
+        &vol.evaluated[first.min(last)..last],
+        translation,
+        lod,
+        0.0,
+        id,
+    );
+    let shells: Vec<ScatteredInstance> = vol
+        .structure_groups
+        .iter()
+        .map(|g| ScatteredInstance {
+            position: g.shell.center,
+            rotation: g.shell.rotation,
+            // The primitive is a UNIT cube (half-extent 0.5), so a box of
+            // half-extents `h` is a scale of `2h`.
+            scale: 1.0,
+            // The shell wears the colour of the building's first part, so a
+            // district of offices does not turn grey at the LOD distance.
+            kind: vol
+                .evaluated
+                .get(g.inst_start as usize)
+                .map_or(0, |i| i.kind),
+        })
+        .collect();
+    push_shells(scene, &shells, vol, translation, vol.draw_distance, lod, id);
+    // MIRROR-END pcg_scatter_lod
 }
 
 /// Project a [`Terrain`]'s **biome population** — P19.3's biome→PCG binding, i.e.
@@ -2718,7 +2847,7 @@ fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3
 /// MIRROR: identical in `inf_viewport::host` and `inf_player::render`, pinned by
 /// `inf-editor-core`'s `tests/projector_mirror.rs`.
 fn push_biome_population(scene: &mut RenderScene, terrain: &Terrain, translation: DVec3, id: u32) {
-    push_scatter(scene, &terrain.biome_population, translation, 0.0, id)
+    push_scatter(scene, &terrain.biome_population, translation, 0.0, 0.0, id)
 }
 
 /// Project a [`Foliage`] component's painted instances into GPU-instanced scatter
@@ -2754,7 +2883,7 @@ fn push_foliage_scatter(scene: &mut RenderScene, fol: &Foliage, translation: DVe
             // Entity-LOCAL, paired with the ZERO build-anchor below.
             position: fi.position.to_dvec3(),
             rotation: foliage_rot_quat(fi.rotation),
-            scale: fi.scale as f32,
+            scale: glam::Vec3::splat(fi.scale as f32),
             color,
         });
     }
@@ -2771,6 +2900,7 @@ fn push_foliage_scatter(scene: &mut RenderScene, fol: &Foliage, translation: DVe
             emissive: [0.0; 3],
             id,
             draw_distance: 0.0,
+            near_distance: 0.0,
         });
     }
 }

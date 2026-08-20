@@ -701,7 +701,7 @@ fn scatter_cost_at_one_hundred_thousand_instances() {
                 (gz - (N as f64 - 1.0) * 0.5 + jz * 0.7) * step,
             ),
             rotation: Quat::IDENTITY,
-            scale: 0.8,
+            scale: glam::Vec3::splat(0.8),
             color: [0.24, 0.52, 0.20, 1.0],
         });
     }

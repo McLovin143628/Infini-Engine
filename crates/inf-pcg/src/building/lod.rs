@@ -183,6 +183,7 @@ pub fn shell_tier(p: DVec3, shell: &PcgCollider, near_m: f64, far_m: f64) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::DQuat;
 
     fn boxed(center: DVec3, half: DVec3, rotation: DQuat) -> PcgCollider {
         PcgCollider {

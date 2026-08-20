@@ -280,7 +280,7 @@ pub fn debris_instances(
             out.push(ScatterInstance {
                 position,
                 rotation,
-                scale,
+                scale: glam::Vec3::splat(scale),
                 // Tint is the caller's: rubble off a painted wall is that wall's
                 // colour, which is what stops it reading as a second material.
                 // It rides on the *instance* because `ScatterBatch` has no tint —
@@ -414,6 +414,7 @@ impl DebrisCache {
             emissive: [0.0; 3],
             id: ID_NONE,
             draw_distance: 0.0,
+            near_distance: 0.0,
         })
     }
 }
@@ -456,6 +457,7 @@ pub fn debris_batch(
         // draws, and content that asked for less would be asking on behalf of a
         // machine it cannot see.
         draw_distance: 0.0,
+        near_distance: 0.0,
     })
 }
 
@@ -670,7 +672,8 @@ mod tests {
                 (i.position - s.center).length() <= s.radius_m + 1e-9,
                 "a fragment escaped its chunk's sphere"
             );
-            assert!(i.scale > 0.0 && i.scale <= s.radius_m as f32 * DEBRIS_MAX_SCALE + 1e-6);
+            assert!(i.scale.x > 0.0 && i.scale.x <= s.radius_m as f32 * DEBRIS_MAX_SCALE + 1e-6);
+            assert_eq!(i.scale, glam::Vec3::splat(i.scale.x), "debris is uniform");
             assert!((i.rotation.length() - 1.0).abs() < 1e-5, "not a unit quat");
         }
     }

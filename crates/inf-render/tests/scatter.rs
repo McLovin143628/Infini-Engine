@@ -66,7 +66,7 @@ fn scatter_field(anchor: DVec3, n: u32, span: f64, scale: f32) -> ScatterBatch {
                     (gz - (n as f64 - 1.0) * 0.5 + jz * 0.6) * step,
                 ),
             rotation: Quat::IDENTITY,
-            scale,
+            scale: Vec3::splat(scale),
             color: [0.25, 0.55, 0.22, 1.0],
         });
     }
@@ -188,7 +188,7 @@ fn identical_content_is_one_content_key() {
         (0..64).map(|i| ScatterInstance {
             position: DVec3::new(10.0 + i as f64, 0.0, -3.0),
             rotation: Quat::IDENTITY,
-            scale: 1.0,
+            scale: Vec3::ONE,
             color: [1.0, 0.0, 0.0, 1.0],
         }),
     );
@@ -198,7 +198,7 @@ fn identical_content_is_one_content_key() {
         (0..64).map(|i| ScatterInstance {
             position: DVec3::new(10.0 + i as f64, 0.0, -3.0),
             rotation: Quat::IDENTITY,
-            scale: 1.0,
+            scale: Vec3::ONE,
             color: [1.0, 0.0, 0.0, 1.0],
         }),
     );
@@ -213,7 +213,7 @@ fn identical_content_is_one_content_key() {
             position: DVec3::new(10.0, 0.0, -3.0)
                 + DVec3::new(i.offset[0] as f64, i.offset[1] as f64, i.offset[2] as f64),
             rotation: Quat::from_array(i.rotation),
-            scale: i.scale,
+            scale: Vec3::new(i.scale, i.scale_yz[0], i.scale_yz[1]),
             color: i.color,
         }),
     );
@@ -228,7 +228,7 @@ fn identical_content_is_one_content_key() {
             position: DVec3::new(10.0, 0.0, -3.0)
                 + DVec3::new(i.offset[0] as f64, i.offset[1] as f64, i.offset[2] as f64),
             rotation: Quat::from_array(i.rotation),
-            scale: i.scale,
+            scale: Vec3::new(i.scale, i.scale_yz[0], i.scale_yz[1]),
             color: i.color,
         })
         .collect();
@@ -246,7 +246,7 @@ fn the_payload_does_not_depend_on_the_floating_origin() {
         .map(|i| ScatterInstance {
             position: anchor + DVec3::new(i as f64 * 0.5, 0.0, 0.0),
             rotation: Quat::IDENTITY,
-            scale: 1.0,
+            scale: Vec3::ONE,
             color: [1.0; 4],
         })
         .collect();
@@ -378,6 +378,152 @@ fn the_authored_draw_distance_only_pulls_the_band_in() {
         a_far.distance_culled, a_unlimited.distance_culled,
         "content must not be able to EXTEND the tier's band"
     );
+}
+
+/// **The inner band, and the two-batch LOD it exists for** (IB-2b).
+///
+/// A level of detail is two batches whose bands are *complementary*:
+/// `[0, lod)` for the parts and `[lod, far)` for the shell. Without an inner cut
+/// the only way to express that is to pack the two on the CPU against the camera,
+/// which puts the eye inside a batch's content key and re-uploads a city's
+/// instance buffer every time the player walks.
+///
+/// So the arm asserts the property that makes the pair a partition, on the GPU's
+/// own audit counters: **every instance is drawn by exactly one of the two**, and
+/// the split really moves with the cut rather than being all-or-nothing.
+#[test]
+fn an_inner_band_partitions_a_field_between_two_batches() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let s = settings(|s| {
+        s.mesh_distance_m = 10_000.0;
+        s.cull_distance_m = 10_000.0;
+        s.impostors = false;
+    });
+    let view = corridor_view(60.0);
+
+    // The whole field, unbanded: the population every split must add up to.
+    let (_, whole) = shot(
+        &gpu,
+        &lit_scene(vec![scatter_field(DVec3::ZERO, 24, 60.0, 1.0)]),
+        &view,
+        &s,
+        true,
+    );
+    assert!(whole.mesh > 100, "{} instances is not a field", whole.mesh);
+
+    let mut seen_split = false;
+    for cut in [30.0f64, 60.0, 90.0] {
+        let mut inner = scatter_field(DVec3::ZERO, 24, 60.0, 1.0);
+        inner.draw_distance = cut;
+        let mut outer = scatter_field(DVec3::ZERO, 24, 60.0, 1.0);
+        outer.near_distance = cut;
+
+        let (_, a) = shot(&gpu, &lit_scene(vec![inner]), &view, &s, true);
+        let (_, b) = shot(&gpu, &lit_scene(vec![outer]), &view, &s, true);
+        println!(
+            "IB-2b inner band at {cut:>5.1} m: {:>4} parts + {:>4} shells = {:>4} of {}",
+            a.mesh,
+            b.mesh,
+            a.mesh + b.mesh,
+            whole.mesh
+        );
+        // THE PARTITION: half-open on both sides means every instance lands in
+        // exactly one batch. A closed inner test would double-count the boundary,
+        // which on a shell/parts pair is a solid box inside a building.
+        assert_eq!(
+            a.mesh + b.mesh,
+            whole.mesh,
+            "the {cut} m split drew {} of {} instances — the bands are not \
+             complementary",
+            a.mesh + b.mesh,
+            whole.mesh
+        );
+        seen_split |= a.mesh > 0 && b.mesh > 0;
+    }
+    assert!(
+        seen_split,
+        "no cut put instances on BOTH sides — this fixture never exercises the \
+         inner band"
+    );
+    // An inner cut past the outer one is an empty interval, and draws nothing —
+    // the honest reading, rather than a silently inverted band.
+    let mut inverted = scatter_field(DVec3::ZERO, 24, 60.0, 1.0);
+    inverted.near_distance = 10_000.0;
+    let (_, none) = shot(&gpu, &lit_scene(vec![inverted]), &view, &s, true);
+    assert_eq!(none.mesh, 0, "an empty band drew {} instances", none.mesh);
+}
+
+/// A **non-uniformly** scaled instance is an oriented box, not a cube (IB-2b) —
+/// and a uniform one is bit-identical to what it was before the record grew.
+#[test]
+fn a_non_uniform_instance_draws_as_a_box() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let s = settings(|s| {
+        s.mesh_distance_m = 10_000.0;
+        s.cull_distance_m = 10_000.0;
+        s.impostors = false;
+    });
+    let view = corridor_view(30.0);
+    let one = |scale: Vec3| {
+        let data = ScatterData::build(
+            PrimMesh::Cube,
+            DVec3::ZERO,
+            [ScatterInstance {
+                position: DVec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale,
+                color: [0.8, 0.8, 0.8, 1.0],
+            }],
+        );
+        lit_scene(vec![ScatterBatch::lit(Arc::new(data), DVec3::ZERO, 0.7, 1)])
+    };
+
+    // Coverage is measured against a GEOMETRY-FREE frame, not against a
+    // brightness threshold: the sky fills 77% of this viewport and a threshold
+    // counts it, which made the first draft of this arm report 44 224 px for both
+    // the cube and the slab and pass on nothing.
+    let empty = shot(&gpu, &lit_scene(vec![]), &view, &s, true).0;
+    let cube = shot(&gpu, &one(Vec3::splat(4.0)), &view, &s, true).0;
+    let slab = shot(&gpu, &one(Vec3::new(4.0, 0.5, 4.0)), &view, &s, true).0;
+    let covered = |img: &[u8]| {
+        img.chunks_exact(4)
+            .zip(empty.chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count()
+    };
+    let (c, sl) = (covered(&cube), covered(&slab));
+    println!("IB-2b non-uniform: cube covers {c} px, a 1/8-height slab covers {sl}");
+    assert!(c > 500, "the cube drew {c} px — nothing to compare");
+    assert!(
+        sl * 2 < c,
+        "a slab an eighth as tall covered {sl} px against the cube's {c} — the \
+         per-axis scale is not reaching the vertex"
+    );
+    assert!(sl > 0, "the slab drew nothing at all");
+    // …and a uniform instance is still exactly a cube: the same field packed
+    // through `ScatterInstance::uniform` and through an explicit `splat` are one
+    // content key, so the growth added no second spelling.
+    let a = ScatterData::build(
+        PrimMesh::Cube,
+        DVec3::ZERO,
+        [ScatterInstance::uniform(
+            DVec3::ZERO,
+            Quat::IDENTITY,
+            4.0,
+            [0.8, 0.8, 0.8, 1.0],
+        )],
+    );
+    let b = ScatterData::build(
+        PrimMesh::Cube,
+        DVec3::ZERO,
+        [ScatterInstance {
+            position: DVec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::splat(4.0),
+            color: [0.8, 0.8, 0.8, 1.0],
+        }],
+    );
+    assert_eq!(a.key(), b.key());
 }
 
 /// Impostors off is not "impostors, invisibly": the impostor list stays empty and

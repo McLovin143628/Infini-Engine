@@ -1006,7 +1006,7 @@ fn scatter_field(anchor: DVec3, n: u32, span: f64, scale: f32, id: u32) -> Scatt
                     (gz - (n as f64 - 1.0) * 0.5 + jz * 0.6) * step,
                 ),
             rotation: Quat::IDENTITY,
-            scale,
+            scale: glam::Vec3::splat(scale),
             color: [0.24, 0.52, 0.20, 1.0],
         });
     }

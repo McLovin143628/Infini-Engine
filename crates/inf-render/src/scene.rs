@@ -354,14 +354,47 @@ pub struct ScatterInstance {
     /// World-space position (f64 — architecture rule 3).
     pub position: DVec3,
     pub rotation: Quat,
-    /// Uniform scale.
-    pub scale: f32,
+    /// Per-axis scale in the instance's **own rotated frame**.
+    ///
+    /// Uniform for every caller that predates IB-2b (`Vec3::splat`, and
+    /// [`ScatterInstance::uniform`] spells it). It is a vector because a
+    /// building's far-LOD **shell** is an oriented *box* with three different
+    /// half-extents, and a shell drawn as a cube of the wrong proportions is not
+    /// a level of detail — it is a different building. The same argument as
+    /// "a shell that is not a barrier is a hole, not a LOD", one pass over.
+    pub scale: Vec3,
     /// Linear-space tint (rgba).
     pub color: [f32; 4],
 }
 
-/// One scattered instance as the **GPU** stores it (P18.5) — 48 bytes, `Pod`, and
+impl ScatterInstance {
+    /// An instance scaled the same on every axis — what every scatter that is
+    /// not a structure shell wants.
+    pub fn uniform(position: DVec3, rotation: Quat, scale: f32, color: [f32; 4]) -> Self {
+        Self {
+            position,
+            rotation,
+            scale: Vec3::splat(scale),
+            color,
+        }
+    }
+}
+
+/// One scattered instance as the **GPU** stores it (P18.5) — 64 bytes, `Pod`, and
 /// deliberately **origin-independent**.
+///
+/// # Why 64 and not 48 (IB-2b)
+///
+/// The first fourty-eight bytes are **byte-identical** to the P18.5 record, on
+/// purpose: `offset`, `scale`, `rotation` and `color` sit exactly where the two
+/// shaders already read them, so the only shader line the growth touches is the
+/// one that builds the local vertex position. The eight bytes of padding are the
+/// price of keeping `scale_yz` in its own 16-byte slot rather than re-cutting a
+/// hot record two shaders and four passes read.
+///
+/// The cost is 33% of an instance buffer — 6.8 MB on the thousand-building city
+/// fixture's 427 351 instances — bought for the ability to draw an oriented
+/// **box**, which is what a structure's far-LOD shell is.
 ///
 /// `offset` is relative to the batch's [`ScatterBatch::anchor`], not to the
 /// floating origin. That is the load-bearing part: a render-local pack would be
@@ -379,12 +412,18 @@ pub struct ScatterInstance {
 pub struct ScatterInstanceRaw {
     /// Position relative to the batch anchor (metres).
     pub offset: [f32; 3],
-    /// Uniform scale.
+    /// Scale along the instance's own **X**. Named `scale` and left in place
+    /// because both shaders already read it here and a uniform instance sets all
+    /// three to the same number.
     pub scale: f32,
     /// Orientation quaternion, `xyzw`.
     pub rotation: [f32; 4],
     /// Linear-space tint (rgba).
     pub color: [f32; 4],
+    /// Scale along the instance's own **Y** and **Z**.
+    pub scale_yz: [f32; 2],
+    /// Padding to a 16-byte slot — WGSL storage layout, not spare capacity.
+    pub _pad: [f32; 2],
 }
 
 /// The immutable, content-addressed payload of a [`ScatterBatch`] (P18.5).
@@ -426,18 +465,27 @@ impl ScatterData {
         let mut max_scale: f32 = 0.0;
         for i in instances {
             let o = i.position - anchor;
-            max_scale = max_scale.max(i.scale.abs());
+            // The cull radius is one conservative scalar for the whole batch, so
+            // a non-uniform instance contributes its LARGEST axis — an
+            // over-approximation, which is all the subtractive cull proof needs.
+            max_scale = max_scale
+                .max(i.scale.x.abs())
+                .max(i.scale.y.abs())
+                .max(i.scale.z.abs());
             packed.push(ScatterInstanceRaw {
                 offset: [o.x as f32, o.y as f32, o.z as f32],
-                scale: i.scale,
+                scale: i.scale.x,
                 rotation: i.rotation.to_array(),
                 color: i.color,
+                scale_yz: [i.scale.y, i.scale.z],
+                _pad: [0.0; 2],
             });
         }
         // The primitive kind is part of the identity: the same placements drawn as
         // cubes and as spheres are two different batches, and an id that did not
         // say so would serve one from the other's cached buffers.
-        let mut bytes = Vec::with_capacity(packed.len() * 48 + 4);
+        let mut bytes =
+            Vec::with_capacity(packed.len() * std::mem::size_of::<ScatterInstanceRaw>() + 4);
         bytes.extend_from_slice(&(mesh as u32).to_le_bytes());
         bytes.extend_from_slice(bytemuck::cast_slice(&packed));
         let key = xxhash_rust::xxh3::xxh3_128(&bytes);
@@ -485,6 +533,27 @@ impl ScatterData {
 /// The batch is one *object* as far as selection is concerned — a scatter is
 /// authored, moved and deleted as a whole — so it carries one pick [`id`](Self::id)
 /// rather than one per instance.
+/// Metres beyond which a grammar structure draws as its **shell** instead of its
+/// parts (IB-2b) — the draw-side twin of `inf_ecs::DEFAULT_COLLIDER_NEAR_M`, and
+/// deliberately a *different* number.
+///
+/// The collider band is bounded by what a 4.0 ms fixed step affords (measured:
+/// 64 m); a draw band is bounded by what a silhouette can get away with, and a
+/// shell swapped in at 64 m would be visible from the pavement. 192 m is three
+/// times the collider band, which puts the swap well past the range at which a
+/// two-storey building's parts are a pixel wide — and, being strictly larger,
+/// guarantees that **every building a body can collide with is drawn as its
+/// parts**, which is the invariant that keeps "what I can touch" and "what I can
+/// see" the same building.
+///
+/// Here, in `inf-render`, because **both hosts' projections need it and neither
+/// can see the other's crate**: the shipped player links `inf-pcg` and the editor
+/// viewport does not (it hand-mirrors `pcg_kind_color` for exactly that reason),
+/// so a constant in `inf-pcg` would have to be duplicated — and two numbers named
+/// "the LOD distance" is how a building comes to draw as a shell it can still be
+/// walked into.
+pub const STRUCTURE_LOD_M: f64 = 192.0;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScatterBatch {
     /// The content-addressed payload. `Arc` so a projection that re-runs without
@@ -510,6 +579,28 @@ pub struct ScatterBatch {
     /// camera eye on the CPU while the player ignored the field entirely, so a
     /// shipped build drew strictly more scatter than its preview.
     pub draw_distance: f64,
+    /// **Inner** draw distance in metres; `0` ⇒ no inner cut (IB-2b).
+    ///
+    /// An instance closer to the eye than this is culled, so a batch occupies the
+    /// half-open interval `[near_distance, draw_distance)` instead of
+    /// `[0, draw_distance)`.
+    ///
+    /// # Why the engine needed this
+    ///
+    /// A level of detail is two batches whose bands are **complementary**: a
+    /// building's parts inside the structure-LOD distance, its shell outside it.
+    /// Without an inner cut the only way to express that is to decide, on the
+    /// CPU, which instances to pack — which puts the camera inside the batch's
+    /// *content*, and a content key that moves with the camera re-uploads a
+    /// city's instance buffer every time the player walks. The inner cut keeps
+    /// both batches a pure function of the content and lets the cull compute —
+    /// which has already computed the distance — do the selection per instance,
+    /// per frame, for free.
+    ///
+    /// Clamped against `draw_distance` by nothing: a batch whose inner cut
+    /// exceeds its outer one draws nothing, which is the honest reading of an
+    /// empty interval and is what an author who inverted the two asked for.
+    pub near_distance: f64,
 }
 
 impl ScatterBatch {
@@ -523,6 +614,7 @@ impl ScatterBatch {
             emissive: [0.0; 3],
             id,
             draw_distance: 0.0,
+            near_distance: 0.0,
         }
     }
 }

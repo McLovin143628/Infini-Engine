@@ -1301,7 +1301,10 @@ impl RenderNode for ScatterNode {
                     bytemuck::bytes_of(&CullParamsGpu {
                         view_proj: vp.to_cols_array(),
                         frustum: planes.map(|p| p.to_array()),
-                        eye: eye.extend(0.0).to_array(),
+                        // IB-2b: `eye.w` carries the batch's INNER cut. The slot was
+                        // documented "unused" in the shader's own header; spending it
+                        // keeps `CullParamsGpu` at its size and the bind group unchanged.
+                        eye: eye.extend(b.near_distance.max(0.0) as f32).to_array(),
                         anchor: anchor.extend(radius).to_array(),
                         counts: [
                             g.upload.count,
@@ -1790,7 +1793,7 @@ mod tests {
         let insts = (0..n).map(|i| crate::scene::ScatterInstance {
             position: DVec3::new(i as f64 * spacing, 0.0, 0.0),
             rotation: glam::Quat::IDENTITY,
-            scale: 1.0,
+            scale: glam::Vec3::ONE,
             color: [1.0; 4],
         });
         crate::scene::ScatterBatch::lit(

@@ -6019,7 +6019,7 @@ fn scatter_field(n: u32, span: f64, scale: f32, color: [f32; 4]) -> ScatterBatch
                 (gz - (n as f64 - 1.0) * 0.5 + jz * 0.7) * step,
             ),
             rotation: Quat::IDENTITY,
-            scale,
+            scale: Vec3::splat(scale),
             color,
         });
     }
@@ -7949,7 +7949,7 @@ fn grass_over(n: u32, span: f64, center: DVec3) -> ScatterBatch {
                 center.z + (gz - (n as f64 - 1.0) * 0.5 + jz * 0.7) * step,
             ),
             rotation: Quat::IDENTITY,
-            scale,
+            scale: Vec3::splat(scale),
             color: [0.20, 0.42, 0.16, 1.0],
         });
     }

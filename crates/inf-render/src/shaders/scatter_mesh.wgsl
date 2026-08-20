@@ -33,11 +33,15 @@
 // determinism gate renders two: anything remembered between frames would make a
 // fade band a function of history.
 
+// 64 B — mirrors `scene::ScatterInstanceRaw`. The first 48 bytes are the P18.5
+// record unchanged; `scale_yz` (IB-2b) makes an instance an oriented box.
 struct ScatterInst {
     offset: vec3<f32>,
     scale: f32,
     rotation: vec4<f32>,
     color: vec4<f32>,
+    scale_yz: vec2<f32>,
+    _pad: vec2<f32>,
 };
 
 struct ScatterParams {
@@ -180,9 +184,14 @@ fn vs_mesh(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32)
     // squash)` and is exactly `vec3(0, 0, 1)` on every scene with no deformation
     // field, so this is `local` unchanged and every pre-P22.1 scatter frame is
     // byte-identical.
-    var local = qrot(inst.rotation, vert[0] * inst.scale);
+    // IB-2b: the scale is per-axis in the instance's OWN frame, so it multiplies
+    // the vertex BEFORE the rotation. `scale_yz == vec2(scale, scale)` for every
+    // uniform instance, which is every caller that is not a structure shell, and
+    // the arithmetic is then bit-identical to the P18.5 `vert[0] * inst.scale`.
+    let iscale = vec3<f32>(inst.scale, inst.scale_yz.x, inst.scale_yz.y);
+    var local = qrot(inst.rotation, vert[0] * iscale);
     let bend = scatter_bend(center.xz);
-    let radius = max(sp.anchor.w * inst.scale, 1e-4);
+    let radius = max(sp.anchor.w * max(iscale.x, max(iscale.y, iscale.z)), 1e-4);
     let h = max(local.y, 0.0);
     let shear = h * clamp(h / radius, 0.0, 1.0);
     local = vec3<f32>(
@@ -192,9 +201,19 @@ fn vs_mesh(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32)
     );
     let world = center + local;
     // Uniform scale ⇒ the inverse-transpose of R·S is R·S⁻¹, which normalizes back
-    // to R. So a scatter normal needs no normal matrix at all — one of the two
-    // reasons the instance record fits in 48 bytes.
-    let normal = qrot(inst.rotation, vert[1]);
+    // to R. So a UNIFORM scatter normal needs no normal matrix at all, and the
+    // branch below is not taken for any instance that predates IB-2b — which is
+    // what keeps every committed golden byte-identical, because `normalize` is
+    // not a no-op in floating point even where it is one in algebra.
+    //
+    // A non-uniform instance does need the correction: the inverse-transpose of
+    // R·S is R·S⁻¹, i.e. divide by the scale, rotate, renormalize. Skipping it
+    // would light a squat shell as though it were a cube.
+    var nrm = vert[1];
+    if (iscale.x != iscale.y || iscale.x != iscale.z) {
+        nrm = normalize(nrm / max(iscale, vec3<f32>(1.0e-6)));
+    }
+    let normal = qrot(inst.rotation, nrm);
 
     var out: VsOut;
     out.pos = view.view_proj * vec4<f32>(world, 1.0);
@@ -217,7 +236,9 @@ fn vs_impostor(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: 
     );
     let c = corners[vidx];
     let base = sp.anchor.xyz + inst.offset;
-    let r = sp.anchor.w * inst.scale;
+    // The card's radius takes the instance's LARGEST axis, which is `inst.scale`
+    // itself for every uniform instance (max of three equal numbers).
+    let r = sp.anchor.w * max(inst.scale, max(inst.scale_yz.x, inst.scale_yz.y));
     // P22.1: an impostor leans as a WHOLE CARD, evaluated once at its centre —
     // never per vertex. A card is a billboard: shearing its corners individually
     // would rotate the quad out of its screen-facing plane and it would stop

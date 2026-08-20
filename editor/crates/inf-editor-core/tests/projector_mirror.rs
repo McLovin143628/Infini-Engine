@@ -767,6 +767,81 @@ fn both_projectors_scatter_pcg_and_foliage_the_same_way() {
 /// It is the terrain-level sibling of `PcgVolume::evaluated`, and it reaches the
 /// GPU the same way: one `ScatterBatch`.
 ///
+/// **The structure LOD is one selection, made twice** (IB-2b).
+///
+/// A volume that grew buildings projects as *three* batches with complementary
+/// distance bands — ungrouped content, the parts inside the LOD distance, one
+/// shell box per building outside it. Every number in that split is a number the
+/// two hosts must agree on: a host whose parts band is wider than its shell band
+/// draws both (a solid box standing inside a building), and one whose bands leave
+/// a gap draws neither (a hole in the skyline).
+///
+/// So the two selections are compared **character for character** between fences,
+/// and the fences are counted — a `contains` needle that is a prefix of a
+/// declaration can never fail, and neither can a second fence (the I1 audit's
+/// law, applied to a delimiter).
+#[test]
+fn both_projectors_band_a_structure_lod_the_same_way() {
+    fn fenced(src: &str, tag: &str, who: &str) -> String {
+        let (b, e) = (
+            format!("// MIRROR-BEGIN {tag}"),
+            format!("// MIRROR-END {tag}"),
+        );
+        assert_eq!(src.matches(&b).count(), 1, "{who}: {tag} begin fences");
+        assert_eq!(src.matches(&e).count(), 1, "{who}: {tag} end fences");
+        let (i, j) = (
+            src.find(&b).expect("checked"),
+            src.find(&e).expect("checked"),
+        );
+        assert!(j > i, "{who}: the {tag} fence is inverted");
+        src[i..j].chars().filter(|c| !c.is_whitespace()).collect()
+    }
+    for tag in ["pcg_scatter_lod", "pcg_shell_batch"] {
+        let editor = fenced(&read(VIEWPORT), tag, "the editor viewport");
+        let player = fenced(&read(PLAYER), tag, "the shipped player");
+        assert!(
+            editor.len() > 300,
+            "the `{tag}` fence is {} chars — an empty fence would make this gate \
+             vacuous",
+            editor.len()
+        );
+        assert_eq!(
+            editor, player,
+            "`{tag}` has drifted between the editor viewport and the shipped \
+             player. The two bands must stay complementary: overlap draws a shell \
+             inside a building, a gap deletes it from the skyline."
+        );
+    }
+    // Both reach the one shared LOD distance rather than each naming a number.
+    // The fenced comparison above already forbids the two from *differing*; this
+    // forbids them from agreeing on a literal, which would be a third place the
+    // number lives and the one nobody would think to update.
+    for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
+        let src = read(path);
+        assert!(
+            src.contains("inf_render::STRUCTURE_LOD_M"),
+            "the {label} no longer reads the shared structure LOD distance"
+        );
+        let block = fenced(&src, "pcg_scatter_lod", label);
+        assert!(
+            !block.contains("192"),
+            "the {label}'s LOD band names a literal distance instead of the \
+             constant"
+        );
+        assert!(
+            src.contains("near_distance"),
+            "the {label} no longer bands a batch from below — without the inner \
+             cut the shells draw on top of the parts"
+        );
+    }
+    assert_eq!(
+        extract_fn(&read(VIEWPORT), "push_shells"),
+        extract_fn(&read(PLAYER), "push_shells"),
+        "`push_shells` has drifted between the editor viewport and the shipped \
+         player"
+    );
+}
+
 /// This is exactly the shape of divergence this file exists to catch. A population
 /// projected by the editor and not by the player is *"the biome scatter shows in
 /// the preview and is missing from the shipped build"* — a whole layer of world

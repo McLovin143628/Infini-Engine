@@ -753,6 +753,7 @@ mod tests {
                 kind_index: 0,
             }],
             colliders: vec![],
+            groups: vec![],
         };
         assert_eq!(
             parts_from_output(&out, &grammar),

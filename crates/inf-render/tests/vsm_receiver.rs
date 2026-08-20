@@ -1418,7 +1418,7 @@ fn green_field() -> inf_render::ScatterBatch {
                 (gz - (n as f64 - 1.0) * 0.5) * step,
             ),
             rotation: glam::Quat::IDENTITY,
-            scale: 0.3,
+            scale: glam::Vec3::splat(0.3),
             color: [0.12, 0.62, 0.14, 1.0],
         });
     }

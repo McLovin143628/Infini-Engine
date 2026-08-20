@@ -33,7 +33,12 @@
 struct CullParams {
     view_proj: mat4x4<f32>,
     frustum: array<vec4<f32>, 6>,
-    // xyz = eye (render-local), w unused.
+    // xyz = eye (render-local), w = the batch's INNER draw distance in metres
+    // (IB-2b; 0 ⇒ no inner cut). A batch therefore occupies the half-open band
+    // [eye.w, bands.y), which is what lets a structure's parts and its far-LOD
+    // shell be two batches whose bands are complementary — without the camera
+    // ever entering either batch's CONTENT, so neither re-uploads when the
+    // player walks.
     eye: vec4<f32>,
     // xyz = the batch anchor in render-local space, w = the instance cull radius
     // at unit scale (primitive bounding radius × the batch's max scale).
@@ -48,12 +53,16 @@ struct CullParams {
     hzb: vec4<f32>,
 };
 
-// One scattered instance, 48 B — mirrors `scene::ScatterInstanceRaw`.
+// One scattered instance, 64 B — mirrors `scene::ScatterInstanceRaw`. The first
+// 48 bytes are the P18.5 record unchanged; `scale_yz` (IB-2b) is appended so a
+// structure's far-LOD shell can be an oriented BOX rather than a cube.
 struct ScatterInst {
     offset: vec3<f32>,
     scale: f32,
     rotation: vec4<f32>,
     color: vec4<f32>,
+    scale_yz: vec2<f32>,
+    _pad: vec2<f32>,
 };
 
 // Non-indexed indirect draw args (vertex pulling ⇒ no index buffer). Written by
@@ -137,8 +146,12 @@ fn cs_classify(
         if (audit) { atomicAdd(&stats[AUDIT_CANDIDATES], 1u); }
 
         // Distance first: it is a scalar compare and removes the far field before
-        // anything projective runs.
-        if (d >= params.bands.y) {
+        // anything projective runs. The band is HALF-OPEN — `[eye.w, bands.y)` —
+        // so an instance exactly on the inner cut belongs to the outer batch and
+        // to exactly one of the two. A closed test on both ends would draw the
+        // boundary instance twice, which on a shell/parts pair is a solid box
+        // standing inside a building.
+        if (d >= params.bands.y || d < params.eye.w) {
             alive = false;
             if (audit) { atomicAdd(&stats[AUDIT_DISTANCE], 1u); }
         }
