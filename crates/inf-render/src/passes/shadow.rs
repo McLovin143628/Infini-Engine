@@ -33,15 +33,37 @@ use crate::renderer::FrameData;
 use crate::scene::LightKind;
 
 /// The scatter half of the caster-pack key (P18.5): the re-pack eye bucket, the
-/// shadow range's bits, and the scatter band stamp. Present only while the scene
-/// carries scatter — these are inputs to the *scatter* caster pack and to nothing
-/// else, so folding them in unconditionally would re-pack every rigid caster in a
-/// foliage-free level each time the camera crossed an 8 m lattice cell.
+/// shadow range's bits, the scatter band stamp, the batches' content fold and
+/// **the floating origin the pack was packed against**. Present only while the
+/// scene carries scatter — these are inputs to the *scatter* caster pack and to
+/// nothing else, so folding them in unconditionally would re-pack every rigid
+/// caster in a foliage-free level each time the camera crossed an 8 m lattice
+/// cell.
+///
 /// Widened by island wave I4b with the batches' own **content fold**, which is
 /// what lets the pack be *cached*: before it, the key leaned on
 /// `RenderScene::version` to notice a changed batch, and a version that moves
 /// with every pose re-packed eleven thousand casters a frame.
-type ScatterCasterKey = ([i64; 3], u32, u64, u128);
+///
+/// # …and the origin, because the pack is RENDER-LOCAL (the I4b audit)
+///
+/// [`pack_fallback`](super::scatter::pack_fallback) turns each instance's world
+/// position into a **render-local model matrix** through the
+/// [`FloatingOrigin`](inf_math::FloatingOrigin) it is handed, so the packed bytes
+/// are a function of the origin as well as of the content. I4b's cache keyed on
+/// everything *except* that, and the two lattices do not line up: an origin
+/// rebase moves the origin by `REBASE_DISTANCE` (1 024 m) while
+/// [`eye_bucket`](super::scatter::eye_bucket) quantizes the **world** eye onto an
+/// 8 m lattice, so the overwhelmingly likely frame in which a rebase fires is one
+/// where the bucket did *not* tick — and the cached pack was then re-merged and
+/// re-uploaded with every scatter caster a kilometre out of place, until the
+/// camera happened to leave its bucket. The whole-key `CasterKey` noticed the
+/// rebase and re-uploaded; what it re-uploaded was stale.
+///
+/// The bits rather than the `DVec3` so the key stays `Eq`, and because an origin
+/// is snapped to `ORIGIN_SNAP` and can never legitimately be `NaN` — a door that
+/// compares by bits refuses one instead of matching everything against it.
+type ScatterCasterKey = ([i64; 3], u32, u64, u128, [u64; 3]);
 
 /// What the packed caster buffer is a function of: the **packed rigid bytes**,
 /// their per-kind ranges, the floating origin, and the scatter terms if any.
@@ -51,6 +73,37 @@ type ScatterCasterKey = ([i64; 3], u32, u64, u128);
 /// the bytes the pack just produced is exact, costs `O(scene.instances)`, and is
 /// zero on a level whose casters are all scatter — see [`ShadowNode::sync`].
 type CasterKey = (u128, [Range<u32>; 5], glam::DVec3, Option<ScatterCasterKey>);
+
+/// **Everything the cached scatter caster pack is a function of**, in one place
+/// (the I4b audit).
+///
+/// A free function rather than a closure inside
+/// [`ShadowNode::sync`](ShadowNode::sync) so the question "does this key move
+/// when the pack would" is one a unit test can ask without a GPU, a `FrameData`
+/// or a surface — which is what
+/// `the_scatter_caster_key_moves_when_the_pack_it_caches_would` does, and what
+/// nothing in the tree could do while the derivation lived inside `sync`.
+///
+/// `None` on a scatter-free scene: see [`ScatterCasterKey`] for why the terms
+/// stay out of the key entirely rather than entering it as zeroes.
+fn scatter_caster_key(
+    batches: &[crate::scene::ScatterBatch],
+    origin: &inf_math::FloatingOrigin,
+    scatter_eye: glam::DVec3,
+    max_distance: f32,
+    caster_stamp: u64,
+) -> Option<ScatterCasterKey> {
+    (!batches.is_empty()).then(|| {
+        let o = origin.origin();
+        (
+            super::scatter::eye_bucket(scatter_eye),
+            max_distance.to_bits(),
+            caster_stamp,
+            super::scatter::scatter_caster_fold(batches),
+            [o.x.to_bits(), o.y.to_bits(), o.z.to_bits()],
+        )
+    })
+}
 
 /// Forward-Z shadow depth: nearest caster wins (clear to 1.0 = far, keep smaller).
 ///
@@ -351,14 +404,13 @@ impl ShadowNode {
     /// level with no foliage at all pays nothing for them.
     fn sync(&mut self, gpu: &GpuContext, frame: &FrameData) {
         let scatter_eye = frame.view.origin.to_world(frame.view.eye_local());
-        let scatter_key = (!frame.scene.scatter.is_empty()).then(|| {
-            (
-                super::scatter::eye_bucket(scatter_eye),
-                frame.settings.shadows.max_distance.to_bits(),
-                frame.settings.scatter.caster_stamp(),
-                super::scatter::scatter_caster_fold(&frame.scene.scatter),
-            )
-        });
+        let scatter_key = scatter_caster_key(
+            &frame.scene.scatter,
+            &frame.view.origin,
+            scatter_eye,
+            frame.settings.shadows.max_distance,
+            frame.settings.scatter.caster_stamp(),
+        );
         // Opaque+masked casters only (translucent geometry doesn't cast; folding
         // translucent shadows in is a documented follow-up).
         let (raw, ranges, _translucent) = pack_bucketed(&frame.view.origin, &frame.scene.instances);
@@ -591,5 +643,118 @@ impl RenderNode for ShadowNode {
             pass.set_bind_group(0, &self.cascade_bgs[c], &[]);
             self.prim.draw(&mut pass, instances, &self.ranges);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::{ScatterBatch, ScatterData, ScatterInstance};
+    use glam::{DVec3, Quat, Vec3};
+    use inf_math::FloatingOrigin;
+    use std::sync::Arc;
+
+    fn batch(anchor: DVec3) -> ScatterBatch {
+        ScatterBatch::lit(
+            Arc::new(ScatterData::build(
+                crate::primitives::PrimMesh::Cube,
+                anchor,
+                [ScatterInstance {
+                    position: anchor + DVec3::new(3.0, 0.0, -2.0),
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::new(20.0, 30.0, 7.4),
+                    color: [1.0; 4],
+                }],
+            )),
+            anchor,
+            0.5,
+            7,
+        )
+    }
+
+    /// **A CACHED PACK IS A PACK AT AN ORIGIN** (the I4b audit).
+    ///
+    /// `pack_fallback` writes render-local model matrices, so the bytes it
+    /// produces are a function of the [`FloatingOrigin`] it was handed as much as
+    /// of the batches. Island wave I4b cached that pack under a key of the eye
+    /// bucket, the shadow range, the caster stamp and the content fold — and *not*
+    /// the origin. The two lattices do not line up: a rebase moves the origin by
+    /// `REBASE_DISTANCE` (1 024 m) and the eye bucket quantizes the **world** eye
+    /// onto 8 m, so the frame a rebase fires in is almost always one where the
+    /// bucket did not tick. The whole-pack key saw the rebase and re-uploaded a
+    /// merge of the STALE cached scatter half.
+    ///
+    /// Built to falsify in both directions: the same batches at two origins must
+    /// give two keys (or the cache serves the wrong bytes), and the same batches
+    /// at one origin must give one key (or the cache never hits and the 3.15 ms
+    /// this wave removed comes straight back).
+    #[test]
+    fn the_scatter_caster_key_moves_when_the_pack_it_caches_would() {
+        let batches = [batch(DVec3::new(120.0, 0.0, -40.0))];
+        let eye = DVec3::new(100.0, 2.0, -30.0);
+        let a = FloatingOrigin::new(DVec3::ZERO);
+        let mut b = FloatingOrigin::new(DVec3::ZERO);
+        assert!(
+            b.maybe_rebase(eye + DVec3::new(inf_math::REBASE_DISTANCE + 50.0, 0.0, 0.0)),
+            "the fixture must actually rebase, or this arm compares one origin \
+             with itself"
+        );
+        assert_ne!(a.origin(), b.origin(), "the two origins must differ");
+
+        let ka = scatter_caster_key(&batches, &a, eye, 250.0, 11);
+        let kb = scatter_caster_key(&batches, &b, eye, 250.0, 11);
+        assert_eq!(
+            ka.map(|k| k.0),
+            kb.map(|k| k.0),
+            "the eye bucket must be the SAME across the rebase — otherwise this \
+             arm is passing because the bucket ticked, which is the case the \
+             defect does NOT occur in"
+        );
+        assert_ne!(
+            ka, kb,
+            "the same scatter batches at two floating origins produced one cache \
+             key, so a rebase serves a cached caster pack whose model matrices are \
+             a kilometre out of place — every scatter shadow in the frame is \
+             displaced until the camera leaves its 8 m eye bucket"
+        );
+
+        // …and the pack really is different, which is what makes the key's job
+        // real rather than defensive.
+        let settings = crate::settings::ScatterSettings::default();
+        let cs = super::super::scatter::shadow_caster_settings(&settings, 250.0);
+        let pa = super::super::scatter::pack_fallback(
+            &a,
+            &batches,
+            super::super::scatter::bucket_center(eye),
+            &cs,
+            super::super::scatter::MAX_CPU_SCATTER_INSTANCES,
+        );
+        let pb = super::super::scatter::pack_fallback(
+            &b,
+            &batches,
+            super::super::scatter::bucket_center(eye),
+            &cs,
+            super::super::scatter::MAX_CPU_SCATTER_INSTANCES,
+        );
+        assert_eq!(pa.instances.len(), 1, "the fixture packs its one instance");
+        assert_ne!(
+            bytemuck::cast_slice::<_, u8>(&pa.instances),
+            bytemuck::cast_slice::<_, u8>(&pb.instances),
+            "the packed caster bytes did not move with the origin, so this arm \
+             cannot say the key needs to"
+        );
+
+        // The control: nothing moved, so the key must not move either.
+        assert_eq!(
+            scatter_caster_key(&batches, &a, eye, 250.0, 11),
+            ka,
+            "an unchanged scene produced two different keys — the cache would \
+             never hit"
+        );
+        assert_eq!(
+            scatter_caster_key(&[], &a, eye, 250.0, 11),
+            None,
+            "a scatter-free scene must keep the scatter terms out of the key"
+        );
     }
 }
