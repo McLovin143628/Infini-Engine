@@ -314,6 +314,24 @@ twice.
 * **Price the fidelity fix too** (I4b). The impostor sizing halves a silhouette and moves no
   milliseconds. Saying so is what stops the next reader budgeting for a saving that is not
   there — the same discipline as pricing what you reject, applied to what you accept.
+* **A pending list drained by an EVENT is unbounded when the event is optional** (I4b). The
+  incremental query tree's marks are drained by the next *query*, and a level with no character,
+  no camera subject and no gameplay cast never makes one. Bounded in `step`: the body list by a
+  sort-and-dedup, the collider list by the observation that makes it moot — past
+  `colliders.len()` pending, **a fresh build is cheaper than re-inserting**, so the list is
+  dropped and the next query rebuilds. Measured at **1 pending body and 17 pending colliders
+  after 600 unqueried steps of a 17-collider world**, with a query re-asked before and after a
+  forced rebuild, because a bound that works by forgetting is only a bound if what it forgot was
+  recoverable.
+* **The chr(92) law's FOURTEENTH catch was this wave's own** (I4b). Seven user-facing literals —
+  two assertion messages and five `println!`s — shipped mid-wave with the P22 shape, and the
+  mangled output had already been read into this wave's own notes. The tree's guard
+  (`inf_packager`'s workspace sweep) would have caught every one, so the repair is the repair,
+  through the Edit tool, which is what the law prescribes. **And the same sweep found an eighth
+  that is a collision rather than a defect**: `rustfmt` aligns trailing comments into runs of
+  fourteen spaces on lines that carry string literals, which is exactly the shape the sweep
+  reads. *A table maintained around a gate is a table that trips it* — the contents moved onto
+  the constants they describe.
 * **A payload with a migrating rung must not be diagnosed as "too old".**
   `AssetPayload::migrates_from` exists so a v2 `.inf_sm` that fails for a *structural*
   reason reports that reason. Telling an author to re-create a machine whose problem is
@@ -1290,8 +1308,14 @@ numbers (63 of 2 903 px, unmoved). The scatter pass did **not** move (2.98 ms un
 ### The commits
 
 **`5012f4c..`** this tree — `55ee02e` the fixed step · `42c60ef` the lit frame's recording ·
-`4dbf937` the impostor sphere + the ratchets · `f5556e2` the VSM scatter's own number · plus
-this ledger. (Re-state the range from the tree the audit certifies — I3's law.)
+`4dbf937` the impostor sphere + the ratchets · `f5556e2` the VSM scatter's own number ·
+`1ea4888` seven eaten continuations · `c46d146` the pending marks' bound · plus the ledger
+commits. (Re-state the range from the tree the audit certifies — I3's law.)
+
+**Verified at the closing head, release, MIN of rounds:** step **1.267 ms** against a 6.0 ms
+ceiling; 1080p unlit p50 **12.076** / p95 **15.095** — **−4.524 and −1.505 ms against the
+16.6 ms frame**; 1440p p50 18.192 / p95 19.668; lit p50 33.220 / p95 40.539, GPU frame 16.426,
+**pipelined 16.531 ms (60.5 fps)**.
 
 ---
 

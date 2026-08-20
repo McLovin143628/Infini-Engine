@@ -24941,3 +24941,34 @@ present-to-present harness still needs a window and is carried.
 * **A GPU millisecond is a fact about the device in the state the frame put it in.** A frame
   that starves the GPU measures a downclocked one. Comparing GPU columns across a wave that
   changed the CPU frame by 25 ms is comparing two power states.
+* **A pending list drained by an EVENT is unbounded when the event is optional.** The
+  incremental query tree's marks are drained by the next *query*, and a level with no
+  character, no camera subject and no gameplay cast never makes one. Both lists are bounded in
+  `step` — the body list by a sort-and-dedup (at most the distinct bodies that moved), the
+  collider list by the observation that makes it moot: **past `colliders.len()` pending, a
+  fresh build is cheaper than re-inserting**, so the list is dropped and the next query
+  rebuilds. Measured: **600 unqueried steps leave 1 pending body and 17 pending colliders over
+  a world of 17**, and the arm re-asks a query before and after a forced rebuild, because a
+  bound that works by forgetting is only a bound if what it forgot was recoverable.
+
+### The chr(92) law's fourteenth catch — in this wave's own edits
+
+Seven user-facing literals shipped mid-wave with the P22 shape: a scripted edit whose Python
+string ate the `\` before the newline and left the indentation behind. It had **already reached
+a reader** — this wave's own VSM measurements were read out of
+
+```
+lit VSM group mask: 4022852 indirect draws skipped                      (8416 per ...)
+```
+
+The tree's guard is `inf_packager`'s workspace-wide
+`no_string_literal_in_the_workspace_carries_an_eaten_continuation`, and it would have caught
+all seven, so the repair is the repair and not a new gate — every one re-written **through the
+Edit tool**, which is the law's own prescription.
+
+And the same sweep found an **eighth that is a collision rather than a defect**:
+`STEP_PHASE_NAMES` carried its indices as trailing comments, `rustfmt` aligns trailing comments
+into runs of up to fourteen spaces, and those lines contain string literals — exactly the shape
+the sweep reads as an eaten continuation. **A table maintained around a gate is a table that
+trips it**, so the contents moved onto the `phase` constants, which is where a reader looks an
+index up anyway.
