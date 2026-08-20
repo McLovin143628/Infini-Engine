@@ -22,7 +22,7 @@
 
 use std::path::PathBuf;
 
-use glam::DVec3;
+use glam::{DVec2, DVec3};
 use uuid::Uuid;
 
 use inf_blueprint::{
@@ -9027,6 +9027,433 @@ driven through the `anim.*` kit, the one-line-diff demonstration, and a camera\n
 trace that is deterministic and is NOT part of the sim trace.\n\n\
 Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
 
+// ── the island's city fixture (I3) ───────────────────────────────────────────
+//
+// The wave's benchmark, and the shape the certification's IB-2 is about: not
+// "seven buildings cost 28 % of a frame" but "what does a THOUSAND do". Every
+// piece of it is generated — the samples law — so every number the gate prints
+// is a property of a rule rather than of hand-authored bytes.
+
+/// Blocks on a side. `CITY_BLOCKS² × lots-per-block` is the building count.
+pub const CITY_BLOCKS: u32 = 10;
+/// A downtown block, in metres. 100 × 60 cuts into 5 × 2 lots at
+/// [`CITY_FRONTAGE_M`] of frontage and [`CITY_DEPTH_M`] of depth.
+pub const CITY_BLOCK_M: (f64, f64) = (100.0, 60.0);
+/// Block pitch: the block plus the street between two of them — 40 m of street
+/// on either axis.
+pub const CITY_PITCH_M: (f64, f64) = (140.0, 100.0);
+/// Street frontage per lot.
+pub const CITY_FRONTAGE_M: f64 = 20.0;
+/// Lot depth. Two rows back to back on a 60 m block.
+pub const CITY_DEPTH_M: f64 = 30.0;
+/// Yard on every side of every lot.
+pub const CITY_SETBACK_M: f64 = 1.5;
+/// Storeys. Two, so the fixture is a *city* rather than a stress test of the
+/// floor stack: IB-2's subject is the building count.
+pub const CITY_FLOORS: u32 = 2;
+/// Metres a scripted drive-through advances per fixed step. 15 m/s at 60 Hz is
+/// a car in town, and it crosses an `inf_ecs::BAND_LATTICE_M` lattice cell every
+/// 64 steps — so a 240-step run re-bands several times rather than never.
+pub const CITY_DRIVE_STEP_M: f64 = 0.25;
+/// Fixed steps the gate's drive-through runs. 480 at 60 Hz is eight seconds and
+/// 120 m — one whole block pitch, so the band leaves a block as well as entering
+/// one. A shorter run is an *approach* rather than a drive-through, and an
+/// approach only ever exercises the band growing.
+pub const CITY_STEPS: usize = 480;
+
+pub const CITY_LEVEL_GUID: Uuid = Uuid::from_u128(0x8430_0000);
+pub const CITY_PCG_GUID: Uuid = Uuid::from_u128(0x8430_0001);
+pub const CITY_ROAD_MESH_GUID: Uuid = Uuid::from_u128(0x8430_0002);
+pub const CITY_SUN_GUID: Uuid = Uuid::from_u128(0x8430_0003);
+pub const CITY_DRIVER_GUID: Uuid = Uuid::from_u128(0x8430_0004);
+pub const CITY_ROAD_GUID: Uuid = Uuid::from_u128(0x8430_0005);
+const CITY_BLOCK_BASE: u128 = 0x8430_1000;
+
+/// Block `i`'s stable GUID.
+pub fn city_block_guid(i: u32) -> Uuid {
+    Uuid::from_u128(CITY_BLOCK_BASE + u128::from(i))
+}
+
+/// Block `i`'s centre in world XZ, with the grid centred on the origin.
+pub fn city_block_centre(i: u32) -> DVec2 {
+    let (cx, cz) = (i % CITY_BLOCKS, i / CITY_BLOCKS);
+    DVec2::new(
+        (f64::from(cx) - f64::from(CITY_BLOCKS - 1) * 0.5) * CITY_PITCH_M.0,
+        (f64::from(cz) - f64::from(CITY_BLOCKS - 1) * 0.5) * CITY_PITCH_M.1,
+    )
+}
+
+/// The city's ground: **flat, at zero**, and that is a decision.
+///
+/// A terrain would make every building's datum a height query and every one of
+/// the gate's numbers a statement about the terrain sampler as much as about the
+/// band. IB-2's subject is the collider count, so the ground is held constant
+/// and the measurement has one variable. `phase19-town` is the composed scene
+/// with real terrain, biomes and streaming, and it stays that.
+pub fn city_ground(_x: f64, _z: f64) -> f64 {
+    0.0
+}
+
+/// Where the driver is at `step` — a straight run down the middle street, west
+/// to east, at [`CITY_DRIVE_STEP_M`] per fixed step.
+///
+/// Scripted rather than input-driven so the trace is a function of the level
+/// alone — the phase-16 gate's own discipline, applied to a drive-through.
+pub fn city_drive_point(step: u64) -> DVec3 {
+    // Starts on the **westernmost block's own centre line**, not outside the
+    // city: a run that begins in open ground spends its first half approaching,
+    // and an approach only ever exercises the band growing.
+    let half = f64::from(CITY_BLOCKS - 1) * 0.5 * CITY_PITCH_M.0;
+    DVec3::new(-half + step as f64 * CITY_DRIVE_STEP_M, 1.0, 0.0)
+}
+
+/// **The city's one graph** — every block volume points at it and differs only
+/// by its own `PcgVolume::seed`.
+///
+/// `grammar.footprint` gives the block its rectangle, `building.lots` cuts it
+/// into lots, `building.plan` stands one building on each. One asset rather than
+/// a hundred, because a district's variety comes from the *seed* and a hundred
+/// near-identical graphs would be a hundred things to keep in step.
+pub fn city_block_graph() -> inf_graph::Graph {
+    let reg = inf_pcg::pcg_registry();
+    let mut g = inf_graph::Graph::empty();
+    use inf_graph::ParamValue as P;
+    let add = |g: &mut inf_graph::Graph,
+               n: u32,
+               type_id: &str,
+               params: &[(&str, inf_graph::ParamValue)]| {
+        let node = inf_graph::NodeId(n);
+        let mut m = inf_graph::ParamMap::new();
+        for (k, v) in params {
+            m.insert((*k).to_string(), v.clone());
+        }
+        inf_graph::apply_edits(
+            g,
+            &reg,
+            &[inf_graph::GraphEdit::AddNode {
+                id: node,
+                type_id: type_id.into(),
+                x: 0.0,
+                y: 0.0,
+                params: m,
+            }],
+        );
+        node
+    };
+    let block = add(
+        &mut g,
+        1,
+        "grammar.footprint",
+        &[
+            ("size_x", P::Float(CITY_BLOCK_M.0)),
+            ("size_z", P::Float(CITY_BLOCK_M.1)),
+        ],
+    );
+    let lots = add(
+        &mut g,
+        2,
+        "building.lots",
+        &[
+            ("frontage", P::Float(CITY_FRONTAGE_M)),
+            ("depth", P::Float(CITY_DEPTH_M)),
+            ("jitter", P::Float(0.1)),
+            ("setback", P::Float(CITY_SETBACK_M)),
+            ("min_area", P::Float(40.0)),
+        ],
+    );
+    let arch = add(
+        &mut g,
+        3,
+        "building.archetype",
+        &[
+            (
+                "archetype",
+                P::Enum(inf_pcg::ArchetypeId::Office.name().into()),
+            ),
+            ("floors", P::Int(i64::from(CITY_FLOORS))),
+            ("furnish", P::Bool(false)),
+        ],
+    );
+    let plan = add(
+        &mut g,
+        4,
+        "building.plan",
+        &[
+            ("name", P::Text("block".into())),
+            ("seed", P::Int(30)),
+            // The volume's own datum, because the level carries no terrain: a
+            // `Terrain` lookup would fail closed and the city would be empty.
+            ("ground", P::Enum("Span".into())),
+        ],
+    );
+    let out = add(&mut g, 5, "output.pcg", &[]);
+    for (from, fp, to, tp) in [
+        (block, "out", lots, "block"),
+        (lots, "out", plan, "lots"),
+        (arch, "out", plan, "archetype"),
+        (plan, "out", out, "scatter"),
+    ] {
+        inf_graph::apply_edits(
+            &mut g,
+            &reg,
+            &[inf_graph::GraphEdit::Connect {
+                link: inf_graph::Link {
+                    from,
+                    from_port: fp.into(),
+                    to,
+                    to_port: tp.into(),
+                },
+            }],
+        );
+    }
+    g
+}
+
+/// The street grid as a **vector layer** — the input `RoadGraph::from_layer`
+/// takes, which is I2's import door and not a shortcut past it.
+///
+/// One polyline per street *segment*, split at every crossing, because
+/// `RoadGraph` derives its junctions from segment ENDPOINTS: a street digitised
+/// as one feature passing *through* a crossing creates no node there. That is
+/// I2's own carried bound, and the reason its junction fixture splits its
+/// through-road.
+pub fn city_road_layer() -> inf_gis::GeoLayer {
+    use inf_gis::{Attr, GeoFeature, GeoGeometry, GeoLayer, LayerKind};
+    let n = CITY_BLOCKS;
+    let xs: Vec<f64> = (0..=n)
+        .map(|k| (f64::from(k) - f64::from(n) * 0.5) * CITY_PITCH_M.0)
+        .collect();
+    let zs: Vec<f64> = (0..=n)
+        .map(|k| (f64::from(k) - f64::from(n) * 0.5) * CITY_PITCH_M.1)
+        .collect();
+
+    let mut features = Vec::new();
+    let mut seg = |a: DVec3, b: DVec3| {
+        let mut f = GeoFeature::new(GeoGeometry::Polyline {
+            points: vec![a, b],
+            closed: false,
+        });
+        f.attributes
+            .insert("highway".to_string(), Attr::Text("residential".to_string()));
+        features.push(f);
+    };
+    for &x in &xs {
+        for w in zs.windows(2) {
+            seg(DVec3::new(x, 0.0, w[0]), DVec3::new(x, 0.0, w[1]));
+        }
+    }
+    for &z in &zs {
+        for w in xs.windows(2) {
+            seg(DVec3::new(w[0], 0.0, z), DVec3::new(w[1], 0.0, z));
+        }
+    }
+    GeoLayer {
+        name: "City Streets".to_string(),
+        kind: LayerKind::Roads,
+        features,
+        source_crs: "EPSG:32610".to_string(),
+        advisories: Vec::new(),
+        skipped: Vec::new(),
+    }
+}
+
+/// The road **mesh**, through I2's own `RoadGraph` → `build_surface` →
+/// `surface_to_mesh` door.
+/// # The step is [`CITY_ROAD_STEP_M`], not the 1 m default, and that is a
+/// measurement rather than a saving
+///
+/// `build_surface` resamples both axes at the **ground's** pitch, because what
+/// the step buys is conformance to the terrain's chord between samples — I2's
+/// own finding, and the reason the default is a metre. This city's ground is
+/// [`city_ground`]: flat, at zero. A plane has no chord error at any step, so
+/// every extra vertex is a vertex that says exactly what its neighbour said.
+///
+/// At the default the committed mesh is **213 941 vertices / 15.1 MB**; at 20 m
+/// it is a fraction of that, and
+/// `the_citys_streets_conform_to_their_flat_ground_at_any_step` measures the
+/// deviation at **0.000000 m** so the trade is stated rather than assumed. The
+/// day this fixture grows a terrain the step goes back to the terrain's pitch,
+/// and that arm is what will say so.
+pub const CITY_ROAD_STEP_M: f64 = 20.0;
+
+pub fn city_road_mesh() -> Result<inf_mesh::MeshAsset, String> {
+    let layer = city_road_layer();
+    let graph = inf_gis::RoadGraph::from_layer(&layer);
+    let opts = inf_gis::SurfaceOptions {
+        ground_step_m: CITY_ROAD_STEP_M,
+        ..Default::default()
+    };
+    let surface = inf_gis::build_surface(&graph, &opts, &mut |x, z| Some(city_ground(x, z)));
+    let (mesh, _report) = inf_gis::surface_to_mesh(&surface, DVec3::ZERO)
+        .map_err(|e| format!("the city's roads did not build a surface: {e}"))?;
+    Ok(mesh)
+}
+
+/// `samples/phase30-city`.
+pub fn city_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/phase30-city")
+}
+
+/// The city level: one `PcgVolume` per block, a driver that is the sim's
+/// streaming source, the road mesh, and a sun.
+pub fn city_scene() -> SceneDoc {
+    use inf_ecs::components::{Light, LightKind, MeshRef, PcgVolume, StreamingSource, Transform};
+    use inf_ecs::math::{Color, Vec2d, Vec3d};
+
+    let mut doc = SceneDoc::new();
+    doc.set_title("Island City");
+
+    doc.create_with_guid(CITY_SUN_GUID, SpawnKind::Empty, "Sun", None);
+    insert!(
+        doc,
+        CITY_SUN_GUID,
+        Transform {
+            translation: Vec3d::ZERO,
+            rotation: Vec3d::new(-52.0, -34.0, 0.0),
+            scale: Vec3d::ONE,
+        }
+    );
+    insert!(
+        doc,
+        CITY_SUN_GUID,
+        Light {
+            kind: LightKind::Directional,
+            color: Color::WHITE,
+            intensity: 3.0,
+            ..Default::default()
+        }
+    );
+
+    // **The driver IS the band's anchor**, and it carries `StreamingSource`
+    // rather than a marker of its own: the collider band reads exactly the set
+    // P16's cell activation reads, so a level cannot arrange for the two to
+    // disagree about where the simulation is.
+    doc.create_with_guid(CITY_DRIVER_GUID, SpawnKind::Empty, "Driver", None);
+    let start = city_drive_point(0);
+    insert!(
+        doc,
+        CITY_DRIVER_GUID,
+        Transform {
+            translation: Vec3d::new(start.x, start.y, start.z),
+            rotation: Vec3d::ZERO,
+            scale: Vec3d::ONE,
+        }
+    );
+    insert!(doc, CITY_DRIVER_GUID, StreamingSource { radius_m: 256.0 });
+
+    doc.create_with_guid(CITY_ROAD_GUID, SpawnKind::Empty, "Streets", None);
+    insert!(doc, CITY_ROAD_GUID, Transform::IDENTITY);
+    insert!(
+        doc,
+        CITY_ROAD_GUID,
+        MeshRef {
+            asset: Some(CITY_ROAD_MESH_GUID),
+            ..Default::default()
+        }
+    );
+
+    for i in 0..(CITY_BLOCKS * CITY_BLOCKS) {
+        let guid = city_block_guid(i);
+        let c = city_block_centre(i);
+        doc.create_with_guid(guid, SpawnKind::Empty, &format!("Block {i}"), None);
+        insert!(
+            doc,
+            guid,
+            Transform {
+                translation: Vec3d::new(c.x, 0.0, c.y),
+                rotation: Vec3d::ZERO,
+                scale: Vec3d::ONE,
+            }
+        );
+        insert!(
+            doc,
+            guid,
+            PcgVolume {
+                graph: Some(CITY_PCG_GUID),
+                extent: Vec2d::new(CITY_BLOCK_M.0 * 0.5, CITY_BLOCK_M.1 * 0.5),
+                // The block's own seed is what makes a hundred volumes sharing
+                // one graph a hundred different blocks.
+                seed: i,
+                ..Default::default()
+            }
+        );
+    }
+    doc
+}
+
+/// Write every committed city file.
+pub fn write_city() -> Result<(), String> {
+    let dir = city_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    crate::scene::serialize::save(
+        &city_scene(),
+        &dir.join("City.inf_lvl"),
+        Some(CITY_LEVEL_GUID),
+    )?;
+
+    let graph = city_block_graph();
+    let lowered = inf_pcg::lower_graph(&graph, &inf_pcg::pcg_registry());
+    if !lowered.ok {
+        return Err(format!(
+            "the city's block graph does not lower: {:?}",
+            lowered.issues
+        ));
+    }
+    let pcg = inf_pcg::PcgAssetPayload::from_graph(&graph, lowered.document);
+    let bytes = inf_asset::encode(&pcg).map_err(|e| format!("encode .inf_pcg: {e}"))?;
+    write_phase19_asset(
+        &dir.join("CityBlock.inf_pcg"),
+        &bytes,
+        CITY_PCG_GUID,
+        inf_asset::AssetKind::Pcg,
+    )?;
+
+    let mesh = city_road_mesh()?;
+    let bytes = inf_asset::encode(&mesh).map_err(|e| format!("encode road mesh: {e}"))?;
+    write_phase19_asset(
+        &dir.join("CityRoads.inf_mesh"),
+        &bytes,
+        CITY_ROAD_MESH_GUID,
+        inf_asset::AssetKind::Mesh,
+    )?;
+
+    std::fs::write(dir.join("README.md"), CITY_README).map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
+const CITY_README: &str = "# The island city (wave I3's benchmark)\n\n\
+Generated by `inf_editor_core::samples::city_scene` and its siblings. **A thousand\n\
+buildings on subdivided blocks**, which is the scale the AAA-readiness\n\
+certification's IB-2 is about: not \"seven buildings cost 28 % of a frame\" but what\n\
+a city does.\n\n\
+- `City.inf_lvl` -- a sun, the street mesh, a **Driver** carrying\n\
+  `StreamingSource` (the collider band's anchor, and the same component P16's\n\
+  cell activation reads), and 100 `PcgVolume` blocks that all point at the one\n\
+  graph below and differ only by their own `seed`.\n\
+- `CityBlock.inf_pcg` -- `grammar.footprint -> building.lots -> building.plan`.\n\
+  IB-2c's subdivision node is what makes one `building.plan` node ten buildings;\n\
+  before it, one node was one building and two cities meant thousands of\n\
+  hand-authored nodes.\n\
+- `CityRoads.inf_mesh` -- the street grid through I2's own import door\n\
+  (`RoadGraph::from_layer -> build_surface -> surface_to_mesh`), one polyline per\n\
+  segment split at every crossing because `RoadGraph` derives its junctions from\n\
+  segment ENDPOINTS.\n\n\
+## The ground is flat, on purpose\n\n\
+A terrain would make every building's datum a height query and every measured\n\
+number a statement about the terrain sampler as much as about the band. IB-2's\n\
+subject is the collider count, so the ground is held constant and the measurement\n\
+has one variable. `phase19-town` is the composed scene with real terrain, biomes\n\
+and streaming, and it stays that.\n\n\
+## What the gate does with it\n\n\
+`runtime/inf-player/tests/city_scale.rs`: the banded collider count against the\n\
+`STREAMED_STEP_BUDGET_MS` the phase-16 gate holds a streamed world to, the\n\
+unbanded alternative priced in the same run, the building count and the\n\
+subdivision's world proof, and **PIE == shipping on a scripted drive-through**\n\
+-- because the collider band is a function of sim state, and a band that read a\n\
+camera would make two hosts simulate different worlds.\n\n\
+Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9394,6 +9821,7 @@ mod tests {
             write_phase22_playground().expect("regenerate phase22 playground");
             write_phase23_workshop().expect("regenerate phase23 workshop");
             write_phase29_locomotion().expect("regenerate phase29 locomotion");
+            write_city().expect("regenerate the island city");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }
@@ -9961,6 +10389,195 @@ mod tests {
                 "committed phase29-locomotion README drifted from the generator"
             );
         }
+
+        // The island city lock (I3). The `.inf_pcg` and the `.inf_mesh` are
+        // locked beside the level for the same reason `phase22-playground` locks
+        // its meshes: the level says nothing about what the graph GROWS or what
+        // the streets look like, so a drifted graph would not fail here as a byte
+        // diff — it would fail in the gate as "the city is a different size",
+        // which is a much worse place to learn it.
+        let citydir = city_dir();
+        let citylvl = citydir.join("City.inf_lvl");
+        if citylvl.exists() {
+            assert_eq!(
+                std::fs::read(&citylvl).unwrap(),
+                crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(
+                    &city_scene()
+                ))
+                .unwrap(),
+                "committed City.inf_lvl drifted from the generator"
+            );
+            let graph = city_block_graph();
+            let lowered = inf_pcg::lower_graph(&graph, &inf_pcg::pcg_registry());
+            assert!(
+                lowered.ok,
+                "the city's graph stopped lowering: {:?}",
+                lowered.issues
+            );
+            assert_eq!(
+                std::fs::read(citydir.join("CityBlock.inf_pcg")).unwrap(),
+                inf_asset::encode(&inf_pcg::PcgAssetPayload::from_graph(
+                    &graph,
+                    lowered.document
+                ))
+                .unwrap(),
+                "committed CityBlock.inf_pcg drifted from the generator"
+            );
+            assert_eq!(
+                std::fs::read(citydir.join("CityRoads.inf_mesh")).unwrap(),
+                inf_asset::encode(&city_road_mesh().unwrap()).unwrap(),
+                "committed CityRoads.inf_mesh drifted from the I2 road door"
+            );
+            assert_eq!(
+                std::fs::read_to_string(citydir.join("README.md")).unwrap(),
+                CITY_README,
+                "committed city README drifted from the generator"
+            );
+        }
+    }
+
+    /// **The city's graph really cuts blocks into lots** (IB-2c), checked at the
+    /// generator rather than only in the gate.
+    ///
+    /// The fixture's whole value is its size, and its size is a *derived*
+    /// number: a lowering that silently dropped the `lots` pin would still
+    /// produce a level, a `.inf_pcg` and a hundred volumes — and a city of one
+    /// building per block. That is a hundred buildings where the gate expects a
+    /// thousand, and every measured number would be off by ten with nothing to
+    /// see.
+    #[test]
+    fn the_citys_graph_subdivides_its_blocks() {
+        let lowered = inf_pcg::lower_graph(&city_block_graph(), &inf_pcg::pcg_registry());
+        assert!(lowered.ok, "{:?}", lowered.issues);
+        assert_eq!(lowered.buildings.len(), 1, "one pass per block volume");
+        let pass = &lowered.buildings[0];
+        let rules = pass
+            .lots
+            .expect("the block graph's `building.lots` node must reach the pass");
+        assert_eq!(rules.frontage_m, CITY_FRONTAGE_M);
+        assert_eq!(rules.depth_m, CITY_DEPTH_M);
+        assert_eq!(rules.setback_m, CITY_SETBACK_M);
+        assert!(
+            pass.lot.is_some(),
+            "the block's own footprint is the lot span"
+        );
+
+        // …and the pass really fans out, on the volume the level places.
+        let cx = inf_pcg::GrammarContext {
+            entity: Some(city_block_guid(0)),
+            center: DVec3::ZERO,
+            extent: DVec2::new(CITY_BLOCK_M.0 * 0.5, CITY_BLOCK_M.1 * 0.5),
+            seed_offset: 0,
+        };
+        let lots = inf_pcg::building::oriented_lots_of(pass, &inf_pcg::NoSplines, &cx);
+        assert_eq!(
+            lots.len(),
+            10,
+            "a {} x {} block at {CITY_FRONTAGE_M} m frontage and {CITY_DEPTH_M} m \
+             depth is 5 x 2 lots; got {}",
+            CITY_BLOCK_M.0,
+            CITY_BLOCK_M.1,
+            lots.len()
+        );
+        let total = u32::try_from(lots.len()).unwrap() * CITY_BLOCKS * CITY_BLOCKS;
+        assert!(
+            total >= 1_000,
+            "the city is {total} buildings, and the brief asked for a thousand"
+        );
+        println!(
+            "I3 city: {} blocks x {} lots = {total} buildings",
+            CITY_BLOCKS * CITY_BLOCKS,
+            lots.len()
+        );
+    }
+
+    /// The streets go through **I2's own import door**, and the door is what
+    /// finds the junctions.
+    #[test]
+    fn the_citys_streets_are_a_road_graph_with_real_junctions() {
+        let layer = city_road_layer();
+        let graph = inf_gis::RoadGraph::from_layer(&layer);
+        assert!(
+            graph.skipped.is_empty(),
+            "the road door skipped {:?}",
+            graph.skipped
+        );
+        // (n+1) streets each way, each split into n segments.
+        let want = 2 * (CITY_BLOCKS + 1) * CITY_BLOCKS;
+        assert_eq!(graph.segments.len(), want as usize);
+        // Every crossing is a node, and the interior ones are four-way. A street
+        // digitised as ONE feature through its crossings would give 2(n+1) nodes
+        // of degree 1 instead — which is I2's carried bound, and this is the
+        // assertion that says the fixture does not walk into it.
+        let interior = graph.junctions().filter(|j| j.degree() == 4).count();
+        assert_eq!(
+            interior,
+            ((CITY_BLOCKS - 1) * (CITY_BLOCKS - 1)) as usize,
+            "the interior crossings are not four-way; the layer is not split at \
+             its junctions"
+        );
+        let mesh = city_road_mesh().expect("the streets build a surface");
+        let verts: usize = mesh.submeshes.iter().map(|s| s.vertices.len()).sum();
+        assert!(verts > 0, "the streets built no vertices");
+        println!(
+            "I3 city streets: {} segments, {interior} four-way junctions, {verts} \
+             road vertices",
+            graph.segments.len()
+        );
+    }
+
+    /// **The coarse step costs nothing on flat ground, and here is the number.**
+    ///
+    /// `build_surface` resamples at the ground's pitch because what the step buys
+    /// is conformance to the terrain's chord between samples (I2's own finding).
+    /// This fixture's ground is a plane, which has no chord, so
+    /// `CITY_ROAD_STEP_M` is 20 m rather than the 1 m default — 213 941 vertices
+    /// down to a fraction. The saving is only legitimate while the claim below
+    /// holds, so the claim is measured rather than assumed, and the day the city
+    /// grows a terrain this arm fails and the step goes back to its pitch.
+    #[test]
+    fn the_citys_streets_conform_to_their_flat_ground_at_any_step() {
+        let layer = city_road_layer();
+        let graph = inf_gis::RoadGraph::from_layer(&layer);
+        let build = |step: f64| {
+            let opts = inf_gis::SurfaceOptions {
+                ground_step_m: step,
+                ..Default::default()
+            };
+            inf_gis::build_surface(&graph, &opts, &mut |x, z| Some(city_ground(x, z)))
+        };
+        let coarse = build(CITY_ROAD_STEP_M);
+        let mut worst = 0.0f64;
+        for ribbon in coarse.parts.values() {
+            for p in &ribbon.vertices {
+                let want = city_ground(p.x, p.z) + inf_gis::DEFAULT_ROAD_LIFT_M;
+                worst = worst.max((p.y - want).abs());
+            }
+        }
+        let fine = build(1.0);
+        let n = |s: &inf_gis::RoadSurface| s.vertex_count();
+        println!(
+            "I3 city streets: worst deviation {worst:.6} m at a {CITY_ROAD_STEP_M} m \
+             step; {} vertices against {} at the 1 m default ({:.0}x)",
+            n(&coarse),
+            n(&fine),
+            n(&fine) as f64 / n(&coarse).max(1) as f64
+        );
+        assert!(
+            worst < 1e-9,
+            "the streets miss their own flat ground by {worst} m at a \
+             {CITY_ROAD_STEP_M} m step — the coarse step is no longer free and \
+             this fixture needs the ground's pitch back"
+        );
+        // ANTI-VACUITY: the two steps really are different surfaces, so the
+        // claim above is about a coarsening rather than about nothing.
+        assert!(
+            n(&fine) > n(&coarse) * 8,
+            "the 1 m step built {} vertices against the coarse {} — this arm is \
+             not comparing two different resamplings",
+            n(&fine),
+            n(&coarse)
+        );
     }
 
     /// **The showcase's character is the WIZARD's character** (P29.6 audit, A8).
