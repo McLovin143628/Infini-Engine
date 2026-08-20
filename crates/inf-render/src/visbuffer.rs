@@ -999,6 +999,46 @@ mod tests {
                      and one of them has drifted"
                 );
             }
+
+            // **And the DECLARATION is not the contract — the USE is** (I3
+            // audit). Every shader above declared the widened constants and one
+            // of them could still have masked with the old literal: replacing
+            // `VIS_MESHLET_BITS` with `14u` inside `vis_feedback.wgsl`'s unpack
+            // left all seven feedback arms green, because no fixture in the tree
+            // resides past the old field and a truncating mask is a no-op until
+            // one does. That is the I1 audit's law met in WGSL — a pin on a
+            // needle that is a prefix of a declaration can never fail — so the
+            // use sites are pinned as COUNTS.
+            //
+            // Per shader: `VIS_TRI_BITS` three times (its own declaration,
+            // `VIS_MESHLET_SHIFT`'s definition, and the triangle mask);
+            // `VIS_MESHLET_BITS` / `VIS_MESHLET_SHIFT` / `VIS_INSTANCE_SHIFT`
+            // twice. `VIS_INSTANCE_BITS` is twice in the writer, which masks the
+            // biased instance into its field, and ONCE in each reader, which
+            // subtracts one from the whole word because the bias is what makes
+            // word 1 unambiguous. If a use site is legitimately added or
+            // removed, rewrite this pin rather than deleting it.
+            let uses = |needle: &str| code.iter().filter(|l| l.contains(needle)).count();
+            for (needle, want) in [
+                ("VIS_TRI_BITS", 3),
+                ("VIS_MESHLET_BITS", 2),
+                ("VIS_MESHLET_SHIFT", 2),
+                ("VIS_INSTANCE_SHIFT", 2),
+                (
+                    "VIS_INSTANCE_BITS",
+                    if name == "visbuffer.wgsl" { 2 } else { 1 },
+                ),
+            ] {
+                assert_eq!(
+                    uses(needle),
+                    want,
+                    "{name} names `{needle}` on {} code lines and the layout \
+                     expects {want} — a field that is declared and then masked \
+                     with a literal is a truncation nothing in this tree renders \
+                     large enough to see",
+                    uses(needle)
+                );
+            }
         }
     }
 
