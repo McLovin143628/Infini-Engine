@@ -3312,10 +3312,9 @@ pub struct PcgVolume {
     /// that has no "one structure" to speak of.
     ///
     /// Derived and stamped with [`structures`](Self::structures): the two are
-    /// written together through
-    /// [`set_structures_with_groups`](Self::set_structures_with_groups), because
-    /// a range that outlived the list it indexes would name somebody else's
-    /// walls and nothing would fail.
+    /// written together through [`set_population`](Self::set_population),
+    /// because a range that outlived the list it indexes would name somebody
+    /// else's walls and nothing would fail.
     #[serde(skip)]
     #[reflect(ignore)]
     pub structure_groups: Vec<StructureGroup>,

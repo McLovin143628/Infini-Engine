@@ -15,9 +15,10 @@
 //!     ~1500 boxes        1 box                    0 boxes
 //! ```
 //!
-//! [`tier_at`] is called by two consumers with two different pairs of radii —
-//! the physics bridge bands **colliders** off the sim's own streaming sources,
-//! and each host's projection bands **instances** off the camera. Writing the
+//! [`inf_math::tier_at`] is called by two consumers with two different pairs of
+//! radii — the physics bridge bands **colliders** off the sim's own streaming
+//! sources, and each host's projection bands **instances** off the camera.
+//! Writing the
 //! three-way comparison twice is exactly how the two would come to disagree about
 //! what "far" means, and the day they do, a building draws as a shell you can
 //! still walk into (or as parts you fall through). One function, two callers.

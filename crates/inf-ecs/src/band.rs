@@ -20,7 +20,7 @@
 //! stop equalling shipping the moment the editor's free camera moved.
 //!
 //! So the band's anchors are [`streaming_sources`] — entities carrying
-//! [`StreamingSource`](crate::components::StreamingSource), which is exactly the
+//! [`StreamingSource`], which is exactly the
 //! set P16's cell activation already reads to decide which parts of the world
 //! exist at all. The active collider set is therefore a pure function of the
 //! world's own contents: same entities, same positions, same colliders, in every
@@ -261,7 +261,7 @@ fn unlattice(c: i64) -> f64 {
 }
 
 /// **Where the simulation says it is** — every entity carrying a
-/// [`StreamingSource`](crate::components::StreamingSource), as
+/// [`StreamingSource`], as
 /// `(world position, radius)`, ordered by stable [`Guid`].
 ///
 /// # The one authority

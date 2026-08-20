@@ -3476,9 +3476,11 @@ impl SceneDoc {
     ///
     /// # The scope, and the contract that makes it safe
     ///
-    /// A mutation declares what it moved. [`touch`](Self::touch) means "I do not
-    /// know" and costs a full projection; [`touch_at`](Self::touch_at) names the
-    /// guids and costs `O(named)`. A scope is a **conservative union**: one
+    /// A mutation declares what it moved. `touch` means "I do not know" and
+    /// costs a full projection; `touch_at` names the guids and costs
+    /// `O(named)`. (Both are `pub(crate)`, so they are named rather than linked
+    /// — a public doc that links a private item is a rustdoc warning and a dead
+    /// link on the rendered page.) A scope is a **conservative union**: one
     /// `touch` anywhere in a batch widens the whole batch to everything, so
     /// converting a call site is a strict improvement and forgetting to convert
     /// one is only slow.

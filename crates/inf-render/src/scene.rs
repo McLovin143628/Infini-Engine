@@ -531,7 +531,7 @@ impl ScatterData {
 /// selecting full mesh / impostor / nothing.
 ///
 /// The batch is one *object* as far as selection is concerned — a scatter is
-/// authored, moved and deleted as a whole — so it carries one pick [`id`](Self::id)
+/// authored, moved and deleted as a whole — so it carries one pick [`id`](ScatterBatch::id)
 /// rather than one per instance.
 /// Metres beyond which a grammar structure draws as its **shell** instead of its
 /// parts (IB-2b) — the draw-side twin of `inf_ecs::DEFAULT_COLLIDER_NEAR_M`, and
