@@ -1114,10 +1114,12 @@ fn the_frame_at_shipping_resolution() {
                     v.draws as f64 / v.frames.max(1) as f64,
                 );
                 println!(
-                    "{label} lit VSM group mask: {} indirect draws skipped                      ({:.0} per rastering frame) against {} issued",
+                    "{label} lit VSM group mask: {} indirect draws skipped                      ({:.0} per rastering frame) against {} issued;                      {} invalidation touches ({:.0} per frame)",
                     v.skipped_draws,
                     v.skipped_draws as f64 / v.frames.max(1) as f64,
                     v.draws,
+                    v.invalidation_touches,
+                    v.invalidation_touches as f64 / v.frames.max(1) as f64,
                 );
             }
             let lit_cpu: f64 = m.cpu_ms.iter().sum();
