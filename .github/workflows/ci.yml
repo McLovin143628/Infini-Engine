@@ -8,7 +8,15 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
+  # `-A clippy::chunks_exact_to_as_chunks`: rustc 1.98 shipped this lint on
+  # 2026-08-20 and CI rides stable while the local toolchain is 1.97, where the
+  # lint does not exist and a rewrite cannot be verified to zero. The workspace
+  # has 104 constant-size `chunks_exact` sites; chasing a lint only CI can run
+  # is the one-platform-bounds law wearing a toolchain face. RETIREMENT: when
+  # the local toolchain reaches 1.98, land the `as_chunks::<N>()` pass (the
+  # target API is stable since 1.88, so the rewrite is bi-compatible) and drop
+  # this flag in the same commit.
+  RUSTFLAGS: "-D warnings -A clippy::chunks_exact_to_as_chunks"
   # The dependency tree (tauri + wgpu + bevy + the Phase 4 gltf/image/meshopt/exr
   # importers) makes full debuginfo archives large enough to exhaust the
   # ubuntu runner's disk. Line-tables keep panic locations while cutting the
