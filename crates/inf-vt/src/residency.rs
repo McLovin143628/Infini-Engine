@@ -299,7 +299,13 @@ pub struct VtStats {
     pub admits: u64,
     /// Pages evicted since the residency was created.
     pub evicts: u64,
-    /// Whether the last transaction had to defer a want for want of a slot.
+    /// Whether the last transaction deferred a want at all — `deferred > 0`.
+    ///
+    /// **It stopped meaning "for want of a slot" when IB-16 landed** (corrected by
+    /// the I4 audit): a want held back by the per-frame upload budget is deferred
+    /// too, so this is now true in both regimes. [`throttled`](Self::throttled) is
+    /// how the two are told apart, and `budget_clamped && throttled == deferred`
+    /// is "nothing was short of a slot".
     pub budget_clamped: bool,
     /// Of [`deferred`](Self::deferred), how many the **per-frame upload budget**
     /// held back rather than the pool being full (IB-16).

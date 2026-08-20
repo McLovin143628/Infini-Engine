@@ -155,7 +155,7 @@ fn surface_count() -> usize {
 ///
 /// **Every arm here runs at the shipped default**, and it BITES on this fixture:
 /// four 2048² surfaces under a whip pan want more than 113 BC1 pages in a frame,
-/// and the default budget costs this fixture 1 220 blur tiles. What the arms
+/// and the default budget costs this fixture 790 blur tiles. What the arms
 /// measure is therefore latency *with the throttle on*, which is what a shipped
 /// frame does — and `the_lead_time_ruling_is_conditional_on_the_upload_budget`
 /// is where the unthrottled control is run and the price is a number.
@@ -938,8 +938,11 @@ fn every_horizon_in_the_roadmaps_band_beats_the_predictor_being_off() {
 /// > *head* of one, and a page is still sampleable the frame it is admitted. So
 /// > asking earlier still buys nothing. Measured both ways in
 /// > `the_lead_time_ruling_is_conditional_on_the_upload_budget`: unthrottled
-/// > h=0 18 752 against h=18 18 976, and at the shipped budget 19 972 against
-/// > 20 196 — the same inequality, 1 220 blur tiles dearer. The remaining half
+/// > h=0 18 752 against h=18 18 976, and at the shipped budget 19 542 against
+/// > 19 766 — the same inequality, 790 blur tiles dearer. (The first write-up of
+/// > this block said 19 972 / 20 196 / 1 220; the arm that prints them says
+/// > 19 542 / 19 766 / 790 — corrected by the I4 audit, which is this file's own
+/// > law that the numbers live in the test that prints them.) The remaining half
 /// > of §3.5's condition, a loader with real latency, is still not built.
 #[test]
 fn a_lead_time_costs_this_fixture_what_the_lane_earns_it() {

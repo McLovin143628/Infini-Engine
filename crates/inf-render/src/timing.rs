@@ -2,7 +2,9 @@
 //! that lives in the renderer.
 //!
 //! Until this module the tree had no GPU timing at all: the whole repo contained
-//! zero `QuerySet`s and sixty literal `timestamp_writes: None`s, and every frame
+//! zero `QuerySet`s and **sixty-one** literal `timestamp_writes: None`s (the
+//! wave's own ledger said sixty; `git grep -o` on its base tree says 61, and a
+//! number that only lives in prose drifts), and every frame
 //! number ever quoted was a CPU wall clock around
 //! `render(); poll(wait_indefinitely())`. That number is honest about the frame
 //! as a whole and says nothing about *where the frame went*, which is the
