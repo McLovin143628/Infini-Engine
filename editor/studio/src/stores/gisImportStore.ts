@@ -18,6 +18,7 @@ import type { GisImportResultDto } from "../bindings/GisImportResultDto";
 import type { GisImportSettingsDto } from "../bindings/GisImportSettingsDto";
 import type { GisProbeDto } from "../bindings/GisProbeDto";
 import { gis as gisIpc } from "../lib/ipc";
+import { useSettingsStore } from "./settingsStore";
 
 /** Where the wizard is. */
 export type GisImportStep = "pick" | "configure" | "done";
@@ -155,7 +156,12 @@ export const useGisImportStore = create<GisImportState>((set, get) => ({
     set({ busy: true, error: null, path });
     try {
       const probe = await gisIpc.probe(path, sourceCrs);
-      const settings = await gisIpc.suggestedSettings(probe, GIS_DEFAULT_MAX_ENTITIES);
+      // **IB-14: the wizard opens on the author's OWN cap**, not on the guard.
+      // An author who raised it once for a county road layer should not raise
+      // it again for the county's footprints.
+      const remembered =
+        useSettingsStore.getState().settings.gis_max_entities || GIS_DEFAULT_MAX_ENTITIES;
+      const settings = await gisIpc.suggestedSettings(probe, remembered);
       set({ probe, settings, step: "configure", result: null, busy: false });
     } catch (e) {
       set({ busy: false, error: String(e) });
@@ -166,6 +172,16 @@ export const useGisImportStore = create<GisImportState>((set, get) => ({
     const settings = get().settings;
     if (!settings) return;
     set({ settings: { ...settings, ...patch } });
+    // …and raising it here is what "remembered" means. Written through the
+    // settings store's debounced door, so dragging the field does not write a
+    // file per keystroke.
+    if (
+      patch.max_entities !== undefined &&
+      Number.isFinite(patch.max_entities) &&
+      patch.max_entities >= 1
+    ) {
+      useSettingsStore.getState().patch({ gis_max_entities: patch.max_entities });
+    }
   },
 
   restateCrs: async (crs) => {

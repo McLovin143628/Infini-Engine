@@ -17,7 +17,9 @@ import {
   GIS_ISLAND_MAX_ENTITIES,
   initialGisMachine,
   kindsFor,
+  useGisImportStore,
 } from "../gisImportStore";
+import { DEFAULT_EDITOR_SETTINGS, useSettingsStore } from "../settingsStore";
 
 function probe(over: Partial<GisProbeDto> = {}): GisProbeDto {
   return {
@@ -141,6 +143,25 @@ describe("kindsFor", () => {
     expect(kindsFor("polyline")).not.toContain("buildings");
     expect(kindsFor("polygon")).not.toContain("roads");
     expect(kindsFor("point")).toEqual(["generic"]);
+  });
+});
+
+describe("the remembered cap — IB-14's settings half", () => {
+  it("raising the cap in the wizard writes it back to the editor settings", () => {
+    useSettingsStore.getState().hydrate({
+      ...DEFAULT_EDITOR_SETTINGS,
+      gis_max_entities: 4096,
+    });
+    // The wizard needs settings in hand before it can patch them.
+    useGisImportStore.setState({ settings: settings(), step: "configure" });
+    useGisImportStore.getState().patchSettings({ max_entities: 60000 });
+    expect(useGisImportStore.getState().settings?.max_entities).toBe(60000);
+    expect(useSettingsStore.getState().settings.gis_max_entities).toBe(60000);
+
+    // A patch that is not about the cap leaves the preference alone.
+    useGisImportStore.getState().patchSettings({ furnish: true });
+    expect(useSettingsStore.getState().settings.gis_max_entities).toBe(60000);
+    useGisImportStore.getState().reset();
   });
 });
 
