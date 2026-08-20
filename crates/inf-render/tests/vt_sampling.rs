@@ -2976,3 +2976,98 @@ fn the_detail_fade_ramps_across_the_last_two_levels() {
          {mid} against {half}"
     );
 }
+
+/// **IB-16's ONE PRODUCTION DOOR, ARMED** (the I4 audit).
+///
+/// `VirtualTextureSettings::upload_budget_bytes` reaches a real pool through
+/// exactly one line — `build_vt_level`'s `VtPoolConfig` — and that line is what
+/// makes the editor viewport and the shipped player throttle a burst at the same
+/// rate. Every arm the wave wrote for the throttle builds its `VtPoolConfig` by
+/// hand (`inf-vt`'s `upload_budget.rs`, `inf-render`'s `whip_pan.rs`), so the
+/// **door** had none: replacing that line with a literal `0` left `whip_pan`,
+/// `phase26_gate` and every VT test in the tree green, with the throttle
+/// silently off in both hosts.
+///
+/// That is the I1-audit law — *"a gate must run the DOOR, not the function
+/// behind it"* — met one wave later on a different setting. This arm goes
+/// through `build_vt_level` and asserts the **state** the setting produces: a
+/// budget of one page throttles a sixteen-tile burst, and `0` does not.
+#[test]
+fn the_registration_door_carries_the_upload_budget() {
+    let Some(gpu) = gpu_or_skip("IB-16's registration door") else {
+        return;
+    };
+    let bytes = container(1024, 1024, true, inf_material::TextureCompression::None);
+    let page = PageFormat::Rgba8.page_bytes(STORED_TILE_SIZE);
+
+    let burst_throttled = |upload_budget_bytes: u64| -> (u32, usize) {
+        let mut settings = inf_render::RenderSettings::default();
+        settings.vt.upload_budget_bytes = upload_budget_bytes;
+        let mut mats: std::collections::BTreeMap<u128, inf_render::VtMaterialMaps> =
+            std::collections::BTreeMap::new();
+        mats.insert(
+            100,
+            inf_render::VtMaterialMaps {
+                albedo: Some(1),
+                normal: None,
+                orm: None,
+                detail: None,
+                detail_scale_q8: 0,
+            },
+        );
+        let payload = bytes.clone();
+        let (mut lib, _pools, report) = inf_render::build_vt_level(
+            &gpu.device,
+            &gpu.queue,
+            &settings,
+            inf_vt::DEFAULT_VT_BUDGET_BYTES,
+            &mats,
+            move |g| {
+                (g == 1).then(|| Arc::new(payload.clone()) as Arc<dyn inf_render::VtTileSource>)
+            },
+        )
+        .expect("the level builds");
+        assert_eq!(report.textures, 1, "the door registered the wrong count");
+        let h = lib.handle(1).expect("the texture has a handle");
+        let res = lib.residency_mut();
+        res.apply_wants(&[]);
+        // Sixteen level-0 tiles of an 8 x 8 grid — well inside the 24 MiB pool,
+        // so nothing below can be deferred for want of a slot.
+        let wants: Vec<inf_vt::VtWant> = (0..4)
+            .flat_map(|x| {
+                (0..4).map(move |y| {
+                    inf_vt::VtWant::new(h, TileCoord::new(0, x, y))
+                        .with_priority(inf_vt::VT_PRIORITY_FEEDBACK)
+                })
+            })
+            .collect();
+        let txn = res.apply_wants(&wants);
+        (txn.throttled, txn.admits.len())
+    };
+
+    let (throttled, admitted) = burst_throttled(page);
+    let (free_throttled, free_admitted) = burst_throttled(0);
+    eprintln!(
+        "IB-16 door: a {page} B/frame budget through `build_vt_level` admitted \
+         {admitted} of a 16-tile burst and threw back {throttled}; unthrottled it \
+         admitted {free_admitted} and threw back {free_throttled}"
+    );
+    assert_eq!(
+        (free_throttled, free_admitted),
+        (0, 16),
+        "the UNTHROTTLED control did not seat the whole burst — the fixture is \
+         short of slots and the comparison below is about capacity, not about \
+         the budget"
+    );
+    assert!(
+        throttled > 0,
+        "`RenderSettings::vt::upload_budget_bytes` was set to one page and the \
+         level built through `build_vt_level` threw nothing back — the shipped \
+         door does not carry the setting, so both hosts page a burst unthrottled \
+         however the project configures it"
+    );
+    assert_eq!(
+        admitted, 1,
+        "a one-page budget seated {admitted} pages through the door"
+    );
+}
