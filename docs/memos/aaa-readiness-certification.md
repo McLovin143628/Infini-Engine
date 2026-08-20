@@ -229,6 +229,17 @@ compile time) — a format change, and the meshlet slot field would have to give
 Related caps, verified: `MAX_CPU_SCATTER_INSTANCES = 65 536` (CPU fallback drops beyond),
 GI `instance_budget = 4096`.
 
+> **CLOSED by island wave I3 (2026-08-20).** The id is **sixty-four bits** —
+> triangle 7 / meshlet 25 in word 0, instance 24 + 8 reserved in word 1 — and
+> `VIS_MAX_INSTANCES` is **16 777 214**, 8 196× the number above. The re-cut this
+> entry proposes was measured and refused: the meshlet field addresses pool
+> *capacity* and was already the binding ceiling at 7.4 % of the default streaming
+> budget, so buying instance bits from it would have made an already-firing
+> refusal fire at 0.9 %. Cost: 4 bytes a pixel, paid only while the mode is on,
+> which is off on every tier. All twelve P28.1 parity arms, the seven feedback
+> arms, the seven `phase28_gate` arms and the 54 goldens under
+> `INF_GOLDEN_STRICT=1` pass unchanged. `docs/memos/p28-1-visbuffer.md` §1.1.
+
 ### IB-9 · The terrain ratchet and the terrain budget are 16× apart — VERIFIED
 
 `TERRAIN_RESIDENT_BYTES_CEILING = 16 MiB` (asserted by `phase16_gate`) against

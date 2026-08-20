@@ -138,11 +138,11 @@ const VGEOM_VSTRIDE: u32 = 9u;
 
 // ── the packing contract (crates/inf-render/src/visbuffer.rs) ────────────────
 const VIS_TRI_BITS: u32 = 7u;
-const VIS_MESHLET_BITS: u32 = 14u;
-const VIS_INSTANCE_BITS: u32 = 11u;
+const VIS_MESHLET_BITS: u32 = 25u;
+const VIS_INSTANCE_BITS: u32 = 24u;
 const VIS_EMPTY: u32 = 0u;
 const VIS_MESHLET_SHIFT: u32 = VIS_TRI_BITS;
-const VIS_INSTANCE_SHIFT: u32 = VIS_TRI_BITS + VIS_MESHLET_BITS;
+const VIS_INSTANCE_SHIFT: u32 = 0u;
 // The degenerate floor, one number in two languages
 // (`the_degenerate_floor_is_one_number`).
 const VIS_DET_EPS: f32 = 1e-20;
@@ -312,22 +312,25 @@ struct FsOut {
 fn fs(in: VsOut) -> FsOut {
     var out: FsOut;
     let px = vec2<i32>(i32(in.pos.x), i32(in.pos.y));
-    let id = textureLoad(vis_buf, px, 0).r;
-    if (id == VIS_EMPTY) {
+    let id = textureLoad(vis_buf, px, 0).rg;
+    // Word 1 carries `instance + 1`, so a zero there is the cleared texel and
+    // nothing else. Testing word 1 alone rather than the pair is exact, not a
+    // shortcut: the bias is what makes it so.
+    if (id.y == VIS_EMPTY) {
         // `discard` is a statement and not a terminator, so the `return` is
         // load-bearing: without it the unpack below would run on the cleared
-        // word, and `(0u >> 21u) - 1u` is `0xFFFFFFFF` — a bounds-clamped read
-        // of an unrelated instance, every frame, for every pixel the meshlets do
-        // not cover.
+        // word, and `0u - 1u` is `0xFFFFFFFF` — a bounds-clamped read of an
+        // unrelated instance, every frame, for every pixel the meshlets do not
+        // cover.
         discard;
         out.color = vec4<f32>(0.0);
         out.depth = 0.0;
         return out;
     }
 
-    let instance_id = (id >> VIS_INSTANCE_SHIFT) - 1u;
-    let meshlet_id = (id >> VIS_MESHLET_SHIFT) & ((1u << VIS_MESHLET_BITS) - 1u);
-    let tri = id & ((1u << VIS_TRI_BITS) - 1u);
+    let instance_id = (id.y >> VIS_INSTANCE_SHIFT) - 1u;
+    let meshlet_id = (id.x >> VIS_MESHLET_SHIFT) & ((1u << VIS_MESHLET_BITS) - 1u);
+    let tri = id.x & ((1u << VIS_TRI_BITS) - 1u);
 
     let inst = vis_instance(instance_id);
     let m = v_meshlets[meshlet_id];

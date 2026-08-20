@@ -10,7 +10,7 @@
 // the same instance table, the same `view.view_proj` — because a parity claim
 // about two programs fed different data is about nothing.
 //
-// Output: one `R32Uint` texel per pixel, `instance ⊕ meshlet ⊕ triangle` packed
+// Output: one `Rg32Uint` texel per pixel, `instance ⊕ meshlet ⊕ triangle` packed
 // by `crates/inf-render/src/visbuffer.rs`'s contract. Depth-tested last-writer-
 // wins into a single-sample depth of its own.
 //
@@ -142,27 +142,37 @@ struct VisFlags {
 const NOT_RESIDENT: u32 = 0xFFFFFFFFu;
 
 // ── the packing contract (crates/inf-render/src/visbuffer.rs) ────────────────
+// IB-8: the id is SIXTY-FOUR bits, in two words, because WGSL has no 64-bit
+// integer and a field that straddled the boundary would need two shifts, a mask
+// and an or in each of the three shaders that touch it. Word 0 is exactly
+// `tri | meshlet` and word 1 is the biased instance, so both unpacks below stay
+// single-word expressions.
 const VIS_TRI_BITS: u32 = 7u;
-const VIS_MESHLET_BITS: u32 = 14u;
-const VIS_INSTANCE_BITS: u32 = 11u;
+const VIS_MESHLET_BITS: u32 = 25u;
+const VIS_INSTANCE_BITS: u32 = 24u;
 const VIS_EMPTY: u32 = 0u;
 const VIS_MESHLET_SHIFT: u32 = VIS_TRI_BITS;
-const VIS_INSTANCE_SHIFT: u32 = VIS_TRI_BITS + VIS_MESHLET_BITS;
+const VIS_INSTANCE_SHIFT: u32 = 0u;
 
 // The instance field stores `instance + 1`, which is what makes VIS_EMPTY
-// unreachable from a real fragment. Admission (`VisPacking::admit`) has already
-// refused any frame whose fields do not fit, so this masks rather than checks —
-// a per-fragment branch on a ceiling the frame was admitted under would be a
-// second, weaker copy of the door.
-fn vis_pack(instance: u32, meshlet: u32, tri: u32) -> u32 {
-    return ((instance + 1u) << VIS_INSTANCE_SHIFT)
-        | ((meshlet & ((1u << VIS_MESHLET_BITS) - 1u)) << VIS_MESHLET_SHIFT)
-        | (tri & ((1u << VIS_TRI_BITS) - 1u));
+// unreachable from a real fragment — WORD 1 of a real fragment is never zero.
+// Admission (`VisPacking::admit`) has already refused any frame whose fields do
+// not fit, so this masks rather than checks — a per-fragment branch on a ceiling
+// the frame was admitted under would be a second, weaker copy of the door.
+//
+// The eight bits of word 1 above the instance field are RESERVED and left zero;
+// `VisPacking::unpack` rejects an id that sets them.
+fn vis_pack(instance: u32, meshlet: u32, tri: u32) -> vec2<u32> {
+    return vec2<u32>(
+        ((meshlet & ((1u << VIS_MESHLET_BITS) - 1u)) << VIS_MESHLET_SHIFT)
+            | (tri & ((1u << VIS_TRI_BITS) - 1u)),
+        ((instance + 1u) & ((1u << VIS_INSTANCE_BITS) - 1u)) << VIS_INSTANCE_SHIFT,
+    );
 }
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
-    @location(0) @interpolate(flat) id: u32,
+    @location(0) @interpolate(flat) id: vec2<u32>,
 };
 
 fn read_tri_byte(byte_addr: u32) -> u32 {
@@ -184,7 +194,7 @@ fn vs(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32) -> V
     // the forward path's own guard, and for the same reason.
     if (slot == NOT_RESIDENT) {
         out.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
-        out.id = VIS_EMPTY;
+        out.id = vec2<u32>(VIS_EMPTY, VIS_EMPTY);
         return out;
     }
     let m = v_meshlets[slot];
@@ -192,7 +202,7 @@ fn vs(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32) -> V
     // Degenerate padding for the fixed-index-count draw's unused triangles.
     if (tri >= m.triangle_count) {
         out.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
-        out.id = VIS_EMPTY;
+        out.id = vec2<u32>(VIS_EMPTY, VIS_EMPTY);
         return out;
     }
 
@@ -213,6 +223,6 @@ fn vs(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32) -> V
 }
 
 @fragment
-fn fs(in: VsOut) -> @location(0) u32 {
+fn fs(in: VsOut) -> @location(0) vec2<u32> {
     return in.id;
 }

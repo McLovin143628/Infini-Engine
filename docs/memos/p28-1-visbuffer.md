@@ -13,6 +13,13 @@ changes.
 
 ## 1. The bit split, and the ceilings it was designed against
 
+> **SUPERSEDED BY IB-8 (island wave I3, 2026-08-20).** The id is now **sixty-four
+> bits** in two words — triangle 7 / meshlet 25 in word 0, instance 24 + 8
+> reserved in word 1 — and `VIS_MAX_INSTANCES` is **16 777 214**. §1.1 below is
+> the ruling and the arithmetic that forced it; the rest of §1 is kept because
+> the *measurements* in it are what made the case, and because a superseded
+> section that is deleted takes its reasoning with it.
+
 One `R32Uint` texel names a triangle. Thirty-two bits, three fields:
 
 | field | bits | range | the measured ceiling it was designed against |
@@ -20,6 +27,72 @@ One `R32Uint` texel names a triangle. Thirty-two bits, three fields:
 | triangle | 7 | 0..=127 | `BuildParams::max_triangles` defaults to **124**, and every cooked `.inf_vmesh` in the tree carries that. `meshopt`'s hard cap is 512, so 128 is a *refusal boundary* rather than a format one. |
 | meshlet | 14 | 0..=16 383 | a slot in the **shared pool**, not an asset-local id, and **not the DAG's size** — see the correction below. 16 384 slots is 1 MiB of 64-byte records. |
 | instance | 11 | 0..=2 046 | `RenderScene::vgeom_instances`. `vgeom-demo` places **324** (an 18 × 18 grid). |
+
+### 1.1 IB-8: the id is sixty-four bits, and thirty-two could not be re-cut
+
+The AAA-readiness certification's IB-8 is the instance field: 2 047, refused
+beyond, so *"a city of thousands of Nanite-class building meshes cannot all enter
+the visbuffer path in one frame"*. The island's I3 wave had to kill it.
+
+**It could not be bought from the other two fields, and §1's own correction is
+why.** The meshlet field addresses the pool's *capacity*, and this memo measured
+descriptors at a stable **5.26 – 5.44 %** of a cooked asset's pool bytes:
+
+| meshlet bits | slots | descriptors | resident pool it refuses past | of the 256 MiB default |
+|---|---|---|---|---|
+| **14** (as shipped) | 16 384 | 1 MiB | ~18.4 – 19.0 MiB | **7.4 %** |
+| 12 | 4 096 | 256 KiB | ~4.6 – 4.8 MiB | 1.8 % |
+| 11 | 2 048 | 128 KiB | ~2.3 – 2.4 MiB | **0.9 %** |
+
+The meshlet field was *already* the binding one — this memo's own words, "the
+ceiling is nonetheless reachable by ordinary streamed content" — so buying
+instance bits with meshlet bits would have made an already-firing refusal fire at
+a ninth of the budget. The triangle field is worse: shrinking it means lowering
+`max_triangles`, which *increases* the meshlet count for the same geometry and
+spends the bits it borrowed. **Every re-cut of thirty-two bits makes the frame
+refuse sooner somewhere.**
+
+So the id widened. `VIS_FORMAT` is `Rg32Uint`; **WGSL has no 64-bit integer**, so
+the id is a `vec2<u32>` and no field may straddle the word boundary — which is
+why the split is 7 + 25 filling word 0 exactly and 24 + 8 reserved in word 1,
+rather than a carefully-sized share of a flat 64. Both unpacks stay single-word
+expressions, unchanged in shape from the 32-bit contract.
+
+| | before | after |
+|---|---|---|
+| instances | 2 047 | **16 777 214** (8 196×; the brief asked for 16 384) |
+| meshlet slots | 16 384 (1 MiB of descriptors, 7.4 % of budget) | 33 554 432 (**2 GiB** of descriptors — 6.0× the *whole* default streaming budget, i.e. a ~36.8 GiB pool) |
+| triangles a meshlet | 128 | 128, deliberately unchanged |
+| cost | 4 B/pixel | **8 B/pixel** — 3.7 MB at 1280 × 720, 33 MB at 4K, paid only while `VgeomSettings::visbuffer` is on, which is off on every tier (§5) |
+
+**Two of the three refusals are now unreachable by real content, and that is the
+point rather than a defect.** The binding ceiling moves to
+`VgeomStreamBudget::budget_bytes` and to `MAX_CPU_SCATTER_INSTANCES`, which are
+tunable and reported where a packed-field ceiling was neither. The **triangle**
+refusal stays reachable — it is `meshopt`'s own configurable cap — which is what
+keeps `a_scene_past_a_ceiling_falls_back_to_the_forward_path_and_says_which`
+running the fallback verbatim.
+
+**All twelve P28.1 parity arms pass unchanged on the device**, as does
+`visbuffer_feedback` (7), `phase28_gate` (7), and the 54 goldens under
+`INF_GOLDEN_STRICT=1`.
+
+**The frame-derived split** (below) is hereby **retired rather than deferred
+again**: widening buys the same capacity while keeping the layout a compile-time
+constant, the shaders free of a per-unpack uniform read, the arms a compile-time
+mirror, and the refusal at registration.
+
+**And it settled a question §6 could not.** §6 says the voxel routing is blocked
+because *"all thirty-two bits are spent"*. Eight bits are now free and the
+routing **stands anyway**: the resolve shades by pulling three vertices out of
+the shared meshlet pool, and a voxel chunk has no meshlet structure to pull from.
+Exhaustion was the reason *given*; having no meshlet structure is the reason.
+`the_visbuffer_id_space_has_no_room_for_a_second_geometry_kind` — whose own doc
+said it was "the falsifier: it fails the day the id space grows, which is the day
+the voxel door genuinely opens" — failed exactly as designed, and its prediction
+was wrong. It is now `the_voxel_routing_survives_the_id_widening`, and it asserts
+both halves: the room exists, and `voxel.wgsl` names the real blocker and no
+longer names the retired one.
 
 ### The meshlet ceiling, restated against the quantity the door reads (P28.1 audit)
 
@@ -357,8 +430,9 @@ Three things, and P28.1 built none of them:
   does not survive it.** The visibility packing's meshlet field is a slot in the
   shared meshlet pool and a voxel chunk — a Surface-Nets mesh in its own buffers,
   no meshlet structure, no DAG, no page — has none. The resolve cannot shade what
-  the packing cannot name, and all thirty-two bits are spent
-  (`the_visbuffer_id_space_has_no_room_for_a_second_geometry_kind`). The two real
+  the packing cannot name. *(This bullet also said "and all thirty-two bits are
+  spent". They are not, since IB-8 — and the routing stands anyway, which is §1.1's
+  finding: `the_voxel_routing_survives_the_id_widening`.)* The two real
   doors are **meshletizing voxel chunks** (P28.2, and it closes the three other
   gaps `voxel.wgsl`'s header names — casting, GI, the prepass) and **the env
   group alone** (cheap, and refused for the reason P27.5 gave, which P28.1 did

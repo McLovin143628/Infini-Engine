@@ -1,4 +1,4 @@
-//! **The visibility-buffer path's GPU resources** (P28.1): the `R32Uint` target
+//! **The visibility-buffer path's GPU resources** (P28.1): the `Rg32Uint` target
 //! and its single-sample depth, the three pipelines, and the per-frame flat
 //! instance table the resolve addresses.
 //!
@@ -15,7 +15,7 @@
 //! # The three passes, in order
 //!
 //! 1. **`visbuffer`** — the same indirect, vertex-pulled draw the forward path
-//!    issues, into `R32Uint` + its own single-sample depth. Depth-tested
+//!    issues, into `Rg32Uint` + its own single-sample depth. Depth-tested
 //!    last-writer-wins.
 //! 2. **`vis_resolve`** — one fullscreen triangle into the **MSAA** scene colour
 //!    and the **MSAA** scene depth, writing `@builtin(frag_depth)` so the
@@ -27,7 +27,7 @@
 //! # Why the resolve writes into a 4x target from a 1x buffer
 //!
 //! [`crate::renderer::SCENE_SAMPLES`] is a compile-time `4` and the ROADMAP's
-//! clause 1 says *single-sample* `R32Uint`. Those are not reconcilable by
+//! clause 1 says *single-sample*. Those are not reconcilable by
 //! configuration: a fullscreen fragment shading from a 1x id buffer writes one
 //! colour to all four samples of its pixel, so a meshlet silhouette is a hard
 //! edge where the forward path resolves four. That is the whole content of the
@@ -51,7 +51,8 @@ use inf_vgeom::asset::MESHLET_REC_LEN;
 /// texels an instance buy the ability to `write_texture` the whole table in one
 /// call: the alignment is a hard requirement above one row, and the alternative
 /// is a per-row upload or a staging buffer, either of which is more moving parts
-/// than 112 bytes an instance (229 KiB at the packing's own 2 047-instance
+/// than 112 bytes an instance (1.8 MiB at 16 384 instances, and the packing's own
+/// ceiling is 16 777 214 since IB-8 — the table is sized by the FRAME, not by the
 /// ceiling).
 pub const VIS_INSTANCE_TEXELS: u32 = 16;
 
@@ -81,11 +82,16 @@ pub const VIS_INSTANCE_TEXELS: u32 = 16;
 /// here instead of failing `create_pipeline_layout` on a user's machine.
 pub const VIS_FRAGMENT_STORAGE_BINDINGS: u32 = 8;
 
-/// The visibility buffer's own format. `R32Uint` because the packing is exactly
-/// thirty-two bits and an integer target neither filters nor blends — a
+/// The visibility buffer's own format. `Rg32Uint` because the packing is exactly
+/// sixty-four bits (IB-8) and an integer target neither filters nor blends — a
 /// visibility id that a driver was free to average would be a different
 /// triangle.
-pub const VIS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
+pub const VIS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Uint;
+
+/// Bytes one visibility texel occupies — `VIS_ID_BITS / 8`, and the stride the
+/// readback walks. Derived rather than written, because a literal here and a
+/// format there is how a readback comes to decode half a frame.
+pub const VIS_TEXEL_BYTES: u32 = crate::visbuffer::VIS_ID_BITS / 8;
 
 /// Per-asset uniform for the visibility raster: `x` = this asset's base in the
 /// flat instance table.
@@ -263,7 +269,7 @@ impl VisReadback {
             return;
         }
         let (w, h) = targets.size;
-        let row = (w * 4).next_multiple_of(COPY_ALIGN);
+        let row = (w * VIS_TEXEL_BYTES).next_multiple_of(COPY_ALIGN);
         let bytes = row as u64 * h as u64;
         if bytes > self.capacity {
             self.buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -312,8 +318,17 @@ impl VisReadback {
         let mut ids = Vec::with_capacity((w * h) as usize);
         for y in 0..h {
             let start = (y * row) as usize;
-            let bytes = &view[start..start + (w * 4) as usize];
-            ids.extend_from_slice(bytemuck::cast_slice::<u8, u32>(bytes));
+            let bytes = &view[start..start + (w * VIS_TEXEL_BYTES) as usize];
+            // Decoded as PAIRS of `u32` and folded by hand rather than cast
+            // straight to `u64`: `bytemuck::cast_slice` requires the slice to be
+            // 8-aligned and a mapped sub-range's alignment is the driver's to
+            // decide. The fold is the same arithmetic `VisPacking::from_words`
+            // states, and it is called rather than restated.
+            ids.extend(
+                bytemuck::cast_slice::<u8, u32>(bytes)
+                    .chunks_exact(2)
+                    .map(|w| crate::visbuffer::VisPacking::from_words([w[0], w[1]])),
+            );
         }
         drop(view);
         self.buffer.unmap();
@@ -332,12 +347,12 @@ pub struct VisImage {
     pub height: u32,
     /// Row-major, `width * height` entries. [`crate::visbuffer::VIS_EMPTY`] where
     /// no meshlet covered the pixel.
-    pub ids: Vec<u32>,
+    pub ids: Vec<u64>,
 }
 
 impl VisImage {
     /// The id at `(x, y)`, or [`crate::visbuffer::VIS_EMPTY`] outside the image.
-    pub fn at(&self, x: u32, y: u32) -> u32 {
+    pub fn at(&self, x: u32, y: u32) -> u64 {
         if x >= self.width || y >= self.height {
             return crate::visbuffer::VIS_EMPTY;
         }
@@ -1002,9 +1017,35 @@ mod tests {
         s.refuse(e);
         assert_eq!(s.refused_meshlet_slots, 1);
         // …and the byte figure the ceiling corresponds to, stated so a reader of
-        // the ledger can check it: 16 384 slots x 64 B = 1 MiB of meshlet
-        // records.
-        assert_eq!(at, 1024 * 1024);
+        // the ledger can check it. It was 16 384 slots x 64 B = 1 MiB, which
+        // P28.1 measured at ~19 MiB of resident pool — 7.4 % of the 256 MiB
+        // default budget, and the binding ceiling. IB-8 made it 33 554 432 slots
+        // x 64 B = **2 GiB of meshlet records**, which is eight times the whole
+        // budget: the meshlet refusal is no longer reachable by a configuration
+        // anyone would ship, and the binding ceiling moved to `budget_bytes`,
+        // which is tunable and reported where a packed field was neither.
+        assert_eq!(at, 2 * 1024 * 1024 * 1024);
+        // The field can no longer bind before the BUDGET does, and that is the
+        // whole of IB-8's meshlet half. The descriptors the field addresses are
+        // themselves larger than the entire default streaming budget — and
+        // descriptors are only 5.26 – 5.44 % of a cooked asset's pool bytes
+        // (P28.1's measurement), so the pool this ceiling corresponds to is
+        // ~37 – 39 GiB against a 344 MiB budget.
+        let budget = crate::settings::DEFAULT_STREAM_BUDGET_BYTES;
+        println!(
+            "IB-8 meshlet ceiling: {} slots = {at} B of descriptors, {:.1}x the \
+             {budget} B default budget; at 5.44 % descriptor share that is a \
+             {:.1} GiB pool",
+            VIS_MAX_MESHLET_SLOTS,
+            at as f64 / budget as f64,
+            at as f64 / 0.0544 / (1024.0 * 1024.0 * 1024.0),
+        );
+        assert!(
+            at > budget,
+            "the meshlet field addresses {at} B of descriptors against a \
+             {budget} B budget — the field is becoming the binding ceiling again \
+             and IB-8's ledger needs re-reading"
+        );
     }
 
     #[test]
@@ -1012,5 +1053,45 @@ mod tests {
         // `vgeom-demo`: an 18 x 18 grid, one asset, 124 triangles a meshlet.
         assert_eq!(VisPacking::admit(324, 512, 124), Ok(()));
         assert!(VisPacking::admit(VIS_MAX_INSTANCES + 1, 512, 124).is_err());
+    }
+
+    /// **IB-8: a city enters the visibility path.**
+    ///
+    /// The certification's complaint is one number — `VIS_MAX_INSTANCES = 2047`,
+    /// refused beyond, so *"a city of thousands of Nanite-class building meshes
+    /// cannot all enter the visbuffer path in one frame"*. This arm is that
+    /// sentence, made false, at the shape the island's own city fixture has and
+    /// at the brief's target.
+    #[test]
+    fn the_instance_ceiling_admits_a_city() {
+        // The thousand-building city fixture, and the brief's 16k target.
+        for instances in [1_000u32, 4_096, 16_384, 65_536] {
+            assert_eq!(
+                VisPacking::admit(instances, 512, 124),
+                Ok(()),
+                "{instances} instances must enter the visibility path"
+            );
+        }
+        // The old ceiling, which is what this item retired.
+        const WAS: u32 = 2_047;
+        assert!(
+            VIS_MAX_INSTANCES > 8_000 * WAS,
+            "the instance ceiling is {VIS_MAX_INSTANCES}, only {:.0}x the {WAS} \
+             IB-8 names",
+            f64::from(VIS_MAX_INSTANCES) / f64::from(WAS)
+        );
+        println!(
+            "IB-8 instance ceiling: {WAS} -> {VIS_MAX_INSTANCES} ({:.0}x); the \
+             brief asked for 16 384",
+            f64::from(VIS_MAX_INSTANCES) / f64::from(WAS)
+        );
+        // …and it is still a CEILING, not an absence of one: the refusal is
+        // typed, named and reachable by construction.
+        let e = VisPacking::admit(VIS_MAX_INSTANCES + 1, 512, 124).unwrap_err();
+        assert!(
+            matches!(e, VisPackError::Instances { .. }),
+            "the instance ceiling stopped being an instance refusal: {e:?}"
+        );
+        assert!(e.to_string().contains(&VIS_MAX_INSTANCES.to_string()));
     }
 }

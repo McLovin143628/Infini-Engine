@@ -150,11 +150,11 @@ const VGEOM_VSTRIDE: u32 = 9u;
 
 // ── the packing contract (crates/inf-render/src/visbuffer.rs) ────────────────
 const VIS_TRI_BITS: u32 = 7u;
-const VIS_MESHLET_BITS: u32 = 14u;
-const VIS_INSTANCE_BITS: u32 = 11u;
+const VIS_MESHLET_BITS: u32 = 25u;
+const VIS_INSTANCE_BITS: u32 = 24u;
 const VIS_EMPTY: u32 = 0u;
 const VIS_MESHLET_SHIFT: u32 = VIS_TRI_BITS;
-const VIS_INSTANCE_SHIFT: u32 = VIS_TRI_BITS + VIS_MESHLET_BITS;
+const VIS_INSTANCE_SHIFT: u32 = 0u;
 
 // `inf_vt::table`'s layout — the same four constants `vt_sample.wgsl` and
 // `vt_feedback.wgsl` carry.
@@ -272,13 +272,13 @@ fn cs_feedback(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= w || gid.y >= h) {
         return;
     }
-    let id = textureLoad(vis_buf, vec2<i32>(i32(gid.x), i32(gid.y)), 0).r;
-    if (id == VIS_EMPTY) {
+    let id = textureLoad(vis_buf, vec2<i32>(i32(gid.x), i32(gid.y)), 0).rg;
+    if (id.y == VIS_EMPTY) {
         return;
     }
-    let instance_id = (id >> VIS_INSTANCE_SHIFT) - 1u;
-    let meshlet_id = (id >> VIS_MESHLET_SHIFT) & ((1u << VIS_MESHLET_BITS) - 1u);
-    let tri = id & ((1u << VIS_TRI_BITS) - 1u);
+    let instance_id = (id.y >> VIS_INSTANCE_SHIFT) - 1u;
+    let meshlet_id = (id.x >> VIS_MESHLET_SHIFT) & ((1u << VIS_MESHLET_BITS) - 1u);
+    let tri = id.x & ((1u << VIS_TRI_BITS) - 1u);
 
     let inst = vis_instance(instance_id);
     if (inst.vt.x == 0u && inst.vt.y == 0u && inst.vt.z == 0u) {

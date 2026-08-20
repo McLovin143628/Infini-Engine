@@ -75,12 +75,23 @@
 // MESHLET POOL, and a voxel chunk has no such slot. It is a Surface-Nets mesh in
 // its own vertex and index buffers, produced by `inf_voxel`'s mesher, with no
 // meshlet structure, no LOD DAG and no page. `vis_resolve.wgsl` cannot shade
-// what the packing cannot name, and the packing has **no spare bits to name it
-// with**: `crates/inf-render/src/visbuffer.rs` asserts
-// `VIS_TRI_BITS + VIS_MESHLET_BITS + VIS_INSTANCE_BITS == 32` as a `const`, so a
-// second geometry kind would have to be paid for out of one of the three fields
-// — and `the_visbuffer_id_space_has_no_room_for_a_second_geometry_kind` is the
-// arm that fails the day someone assumes otherwise.
+// what the packing cannot name.
+//
+// -- IB-8: THE ID GREW, AND THE ROUTING DID NOT MOVE -------------------------
+//
+// The paragraph above used to end "and the packing has no spare bits to name it
+// with", citing `VIS_TRI_BITS + VIS_MESHLET_BITS + VIS_INSTANCE_BITS == 32`.
+// The island's IB-8 widened the id to sixty-four bits and there are now EIGHT
+// RESERVED BITS in word 1 — so that reason is retired, and it is deleted here
+// rather than left standing, because a stale blocker sends the next reader to
+// widen an id that is already wide.
+//
+// The refusal itself is unchanged, and the widening is what shows which of the
+// two reasons was load-bearing: exhaustion was the reason GIVEN, and having
+// **no meshlet structure** is the reason. A kind field in the reserved bits
+// would name a geometry the resolve still cannot read.
+// `the_voxel_routing_survives_the_id_widening` is the arm that says so, and it
+// fails the day someone spends those bits without revisiting this.
 //
 // The two real doors, both measured rather than guessed:
 //

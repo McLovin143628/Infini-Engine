@@ -18,18 +18,70 @@
 //!
 //! # The bit split, designed against the real ceilings
 //!
-//! | field | bits | range | the ceiling it was designed against |
-//! |---|---|---|---|
-//! | triangle | 7 | 0..=127 | `inf_vgeom::MeshletParams::max_triangles` defaults to **124** and every cooked `.inf_vmesh` in the tree carries that; `meshopt`'s hard cap is 512, so 128 is a *refusal* boundary rather than a format one |
-//! | meshlet | 14 | 0..=16 383 | a **shared pool slot**, not an asset-local id. The flagship `vgeom-demo` DAG is ~500 slots for a 10 M-triangle scene, because meshlets are stored once per asset and instanced — 16 384 is 32× that |
-//! | instance | 11 | 0..=2 046 | `RenderScene::vgeom_instances`; `vgeom-demo` places **324** (an 18 × 18 grid) |
+//! | field | word | bits | range | the ceiling it is designed against |
+//! |---|---|---|---|---|
+//! | triangle | 0 | 7 | 0..=127 | `inf_vgeom::BuildParams::max_triangles` defaults to **124** and every cooked `.inf_vmesh` in the tree carries that; `meshopt`'s hard cap is 512, so 128 is a *refusal* boundary rather than a format one, and it is deliberately kept reachable |
+//! | meshlet | 0 | 25 | 0..=33 554 431 | a **shared pool slot**, not an asset-local id. `VisState::admit` reads the pool's **capacity**, so the ceiling is a fraction of the streaming budget — see below |
+//! | instance | 1 | 24 | 0..=16 777 214 | `RenderScene::vgeom_instances` |
+//! | *reserved* | 1 | 8 | must be zero | see "what the widening did NOT close" |
 //!
 //! The instance field stores `instance + 1`, which is what makes [`VIS_EMPTY`]
 //! (zero) unreachable by a real fragment and therefore usable as the cleared
 //! value. Spending one instance rather than one *packed word* is the cheaper
-//! side of that trade: the alternative — clearing to `u32::MAX` — costs the
-//! all-ones combination, which is a legal triangle of a legal meshlet of a legal
-//! instance and would have to be refused at pack time, inside the hot loop.
+//! side of that trade: the alternative — clearing to all-ones — costs a
+//! combination that is a legal triangle of a legal meshlet of a legal instance
+//! and would have to be refused at pack time, inside the hot loop.
+//!
+//! # IB-8: why the id is SIXTY-FOUR bits
+//!
+//! It was thirty-two — triangle 7, meshlet 14, instance **11** — and the
+//! certification's IB-8 is that `VIS_MAX_INSTANCES = 2047`, refused beyond, so
+//! *"a city of thousands of Nanite-class building meshes cannot all enter the
+//! visbuffer path in one frame"*.
+//!
+//! Thirty-two bits could not be re-cut to fix it, and the arithmetic says so.
+//! The meshlet field addresses **pool capacity**, and P28.1 measured descriptors
+//! at a stable **5.26 – 5.44 %** of a cooked asset's pool bytes, so:
+//!
+//! | meshlet bits | slots | descriptor bytes | resident pool it refuses past | of the 256 MiB default budget |
+//! |---|---|---|---|---|
+//! | 14 (as shipped) | 16 384 | 1 MiB | ~18.4 – 19.0 MiB | **7.4 %** |
+//! | 12 | 4 096 | 256 KiB | ~4.6 – 4.8 MiB | 1.8 % |
+//! | 11 | 2 048 | 128 KiB | ~2.3 – 2.4 MiB | **0.9 %** |
+//!
+//! So the meshlet field was *already* the binding one — P28.1's own words: "the
+//! ceiling is nonetheless reachable by ordinary streamed content" — and buying
+//! instances with meshlet bits would have made an already-firing refusal fire at
+//! a ninth of the budget. The triangle field is worse still: shrinking it means
+//! lowering `max_triangles`, which *increases* the meshlet count for the same
+//! geometry and spends the bits it borrowed. Every re-cut of thirty-two bits
+//! makes the frame refuse sooner somewhere.
+//!
+//! Widening is what a visibility buffer does elsewhere for the same reason, and
+//! it costs **four bytes a pixel** — 3.7 MB at 1280 × 720, 33 MB at 4K — paid
+//! only while `VgeomSettings::visbuffer` is on, which is off on every tier
+//! (§5 of the memo). Against that: the instance ceiling goes from 2 047 to
+//! **16 777 214**, which is 8 192× the brief's 16k target, and the meshlet
+//! ceiling stops being a fraction of the budget at all.
+//!
+//! **WGSL has no 64-bit integer**, so the id is a `vec2<u32>` and no field may
+//! straddle the word boundary. That is not a limitation worked around — it is
+//! the reason the split is 7 + 25 in word 0 and 24 + 8 reserved in word 1, and
+//! why the meshlet field got the whole remainder of word 0 rather than a
+//! carefully-sized share.
+//!
+//! # What the widening did NOT close, precisely
+//!
+//! P28.1's `voxel.wgsl` header says the visibility path cannot name a second
+//! geometry kind because *"all thirty-two bits are spent"*. Eight bits are now
+//! free, and **the routing stands anyway**: the resolve shades by pulling three
+//! vertices out of the shared meshlet pool, and a voxel chunk is a Surface-Nets
+//! mesh in its own buffers with no meshlet structure, no DAG and no page. The
+//! id was never the binding constraint; exhaustion was the reason *given*.
+//! Widening it is what tells the two apart, and the shader's header now says so.
+//! The reserved bits are asserted zero by [`VisPacking::pack`] and rejected by
+//! [`VisPacking::unpack`], so the day a kind field is real it starts from a
+//! stated invariant rather than from whatever happened to be there.
 //!
 //! # What happens when a scene exceeds them
 //!
@@ -41,40 +93,68 @@
 //! function of the committed scene and the streamer's residency, so two runs of
 //! one scripted path refuse on the same frames.
 //!
+//! Two of the three refusals are now unreachable by real content, and that is
+//! the point rather than a defect: the binding ceiling moves to the streaming
+//! budget (`VgeomStreamBudget::budget_bytes`) and to
+//! `MAX_CPU_SCATTER_INSTANCES`, which are *tunable* and *reported*, where a
+//! packed-field ceiling was neither. The **triangle** refusal stays reachable —
+//! it is `meshopt`'s own configurable cap, and
+//! `a_scene_past_a_ceiling_falls_back_to_the_forward_path_and_says_which` cooks
+//! a scene past it verbatim.
+//!
 //! # The alternative that was measured and not taken
 //!
 //! A **frame-derived** split — `meshlet_bits = ceil(log2(resident_slots))`, the
-//! remaining 25 − that going to instances — is strictly more capacious: the
-//! `vgeom-demo`'s 500 slots would leave 16 bits for instances (65 535 of them)
-//! instead of 11. It is not taken here because it makes the layout a per-frame
-//! value rather than a constant, which costs the shaders a uniform read per
-//! unpack, costs the arms below their ability to be a *compile-time* mirror, and
-//! moves the refusal from registration into the frame. Recorded in
-//! `docs/memos/p28-1-visbuffer.md` §2 with its arithmetic, and routed to P28.3,
-//! where one streamer decides pool capacities and therefore knows the answer
-//! before a frame starts.
+//! rest going to instances — is more capacious still within 32 bits. It is not
+//! taken because it makes the layout a per-frame value rather than a constant,
+//! which costs the shaders a uniform read per unpack, costs the arms below their
+//! ability to be a *compile-time* mirror, and moves the refusal from
+//! registration into the frame. Widening buys the same capacity and keeps all
+//! three properties; it was routed to P28.3 and is hereby retired rather than
+//! deferred again. Recorded in `docs/memos/p28-1-visbuffer.md` §1.
 
 use glam::{Mat3, Vec2, Vec3, Vec4};
 
 // ── the split ────────────────────────────────────────────────────────────────
 
-/// Bits the **triangle index within its meshlet** occupies (LSB-most field).
+/// Bits the **triangle index within its meshlet** occupies — word 0, LSB-most.
 pub const VIS_TRI_BITS: u32 = 7;
-/// Bits the **shared-pool meshlet slot** occupies.
-pub const VIS_MESHLET_BITS: u32 = 14;
-/// Bits the **biased instance index** occupies (MSB-most field).
-pub const VIS_INSTANCE_BITS: u32 = 11;
+/// Bits the **shared-pool meshlet slot** occupies — word 0, above the triangle.
+pub const VIS_MESHLET_BITS: u32 = 25;
+/// Bits the **biased instance index** occupies — word 1, LSB-most.
+pub const VIS_INSTANCE_BITS: u32 = 24;
 
-const _: () = assert!(VIS_TRI_BITS + VIS_MESHLET_BITS + VIS_INSTANCE_BITS == 32);
+/// Word 0 is exactly full. **WGSL has no 64-bit integer**, so the id is a
+/// `vec2<u32>` and a field that straddled the word boundary would need two
+/// shifts, a mask and an or in every one of the three shaders that touch it —
+/// which is a packing bug waiting to be written three times. Word 0 being
+/// exactly 32 bits is what makes the triangle and meshlet unpacks single-word
+/// expressions, unchanged from the 32-bit contract.
+const _: () = assert!(VIS_TRI_BITS + VIS_MESHLET_BITS == 32);
+/// …and word 1 has room to spare, which is stated rather than spent (see the
+/// module docs on what the widening did *not* close).
+const _: () = assert!(VIS_INSTANCE_BITS <= 32);
+/// The whole id, both words.
+pub const VIS_ID_BITS: u32 = 64;
+const _: () = assert!(VIS_TRI_BITS + VIS_MESHLET_BITS + VIS_INSTANCE_BITS <= VIS_ID_BITS);
 
-/// First bit of the meshlet field.
+/// First bit of the meshlet field **within word 0**.
 pub const VIS_MESHLET_SHIFT: u32 = VIS_TRI_BITS;
-/// First bit of the instance field.
-pub const VIS_INSTANCE_SHIFT: u32 = VIS_TRI_BITS + VIS_MESHLET_BITS;
+/// First bit of the instance field **within word 1**.
+///
+/// Zero, and named anyway: the shaders' three unpack expressions read the same
+/// four constants the Rust side declares, and a shift that is implicitly zero is
+/// a shift nobody notices when the layout moves.
+pub const VIS_INSTANCE_SHIFT: u32 = 0;
+
+/// Bits of word 1 above the instance field. **Must be zero.** Reserved, not
+/// spare: see the module docs.
+pub const VIS_RESERVED_BITS: u32 = 32 - VIS_INSTANCE_BITS;
 
 /// The cleared value: **no geometry at this pixel**. Unreachable by
-/// [`VisPacking::pack`] because the instance field is stored biased by one.
-pub const VIS_EMPTY: u32 = 0;
+/// [`VisPacking::pack`] because the instance field is stored biased by one, so
+/// word 1 of a real fragment is never zero.
+pub const VIS_EMPTY: u64 = 0;
 
 /// Triangles a meshlet may hold and still be addressable — `1 << VIS_TRI_BITS`.
 pub const VIS_MAX_TRIANGLES_PER_MESHLET: u32 = 1 << VIS_TRI_BITS;
@@ -181,28 +261,49 @@ impl VisPacking {
     /// Pack one fragment id. `None` when any field is out of range — the caller
     /// is [`admit`](Self::admit)'s downstream, so this returning `None` in the
     /// renderer means the admission door was bypassed.
-    pub fn pack(f: VisFragment) -> Option<u32> {
+    pub fn pack(f: VisFragment) -> Option<u64> {
         if f.instance >= VIS_MAX_INSTANCES
             || f.meshlet >= VIS_MAX_MESHLET_SLOTS
             || f.tri >= VIS_MAX_TRIANGLES_PER_MESHLET
         {
             return None;
         }
-        Some(((f.instance + 1) << VIS_INSTANCE_SHIFT) | (f.meshlet << VIS_MESHLET_SHIFT) | f.tri)
+        Some(Self::from_words([
+            (f.meshlet << VIS_MESHLET_SHIFT) | f.tri,
+            (f.instance + 1) << VIS_INSTANCE_SHIFT,
+        ]))
     }
 
     /// Unpack one texel. `None` for [`VIS_EMPTY`] — the cleared value, which the
-    /// bias makes unreachable from [`pack`](Self::pack).
-    pub fn unpack(id: u32) -> Option<VisFragment> {
-        let biased = id >> VIS_INSTANCE_SHIFT;
+    /// bias makes unreachable from [`pack`](Self::pack) — and `None` for an id
+    /// whose reserved bits are set, which no packer of this contract can produce.
+    pub fn unpack(id: u64) -> Option<VisFragment> {
+        let [w0, w1] = Self::words(id);
+        if VIS_RESERVED_BITS > 0 && (w1 >> VIS_INSTANCE_BITS) != 0 {
+            return None;
+        }
+        let biased = w1 >> VIS_INSTANCE_SHIFT;
         if biased == 0 {
             return None;
         }
         Some(VisFragment {
             instance: biased - 1,
-            meshlet: (id >> VIS_MESHLET_SHIFT) & (VIS_MAX_MESHLET_SLOTS - 1),
-            tri: id & (VIS_MAX_TRIANGLES_PER_MESHLET - 1),
+            meshlet: (w0 >> VIS_MESHLET_SHIFT) & (VIS_MAX_MESHLET_SLOTS - 1),
+            tri: w0 & (VIS_MAX_TRIANGLES_PER_MESHLET - 1),
         })
+    }
+
+    /// The id's two GPU words, `[word 0, word 1]` — the `vec2<u32>` the shaders
+    /// write and read, in the channel order the `Rg32Uint` texel stores.
+    #[inline]
+    pub fn words(id: u64) -> [u32; 2] {
+        [id as u32, (id >> 32) as u32]
+    }
+
+    /// The inverse of [`words`](Self::words).
+    #[inline]
+    pub fn from_words(w: [u32; 2]) -> u64 {
+        u64::from(w[0]) | (u64::from(w[1]) << 32)
     }
 }
 
@@ -651,31 +752,58 @@ mod tests {
     }
 
     /// The exhaustive half the corners cannot give: every id in a dense sweep of
-    /// the two small fields, against every instance, unpacks to what packed it.
-    /// 2 047 × 64 × 8 is 1 048 064 round trips and runs in well under a second.
+    /// the three fields unpacks to what packed it, and no two of them collide.
+    ///
+    /// **The strides are derived from the field widths** (IB-8). They used to be
+    /// literals — `instance 0..2047`, `meshlet` by 256, `tri` by 16 — which was
+    /// 1 048 064 round trips at 32 bits and would be **2.1 × 10⁹** at 64. A sweep
+    /// whose size is a function of the constants it sweeps is the only kind that
+    /// survives the constants moving, and this file exists to let them move.
+    ///
+    /// Injectivity is asserted directly rather than inferred from the round
+    /// trip: `unpack(pack(f)) == f` for every `f` already implies `pack` is
+    /// injective, but it implies it by an argument a reader has to make, and the
+    /// property that matters — two different fragments are never the same texel —
+    /// is one line to state.
     #[test]
     fn the_packing_is_injective_over_a_dense_sweep() {
-        let mut seen_empty = 0u32;
-        for instance in 0..VIS_MAX_INSTANCES {
-            for meshlet in (0..VIS_MAX_MESHLET_SLOTS).step_by(256) {
-                for tri in (0..VIS_MAX_TRIANGLES_PER_MESHLET).step_by(16) {
+        const SAMPLES: u32 = 64;
+        let stride = |max: u32| (max / SAMPLES).max(1);
+        let (si, sm, st) = (
+            stride(VIS_MAX_INSTANCES),
+            stride(VIS_MAX_MESHLET_SLOTS),
+            stride(VIS_MAX_TRIANGLES_PER_MESHLET),
+        );
+        let mut seen: std::collections::BTreeMap<u64, VisFragment> =
+            std::collections::BTreeMap::new();
+        for instance in (0..VIS_MAX_INSTANCES).step_by(si as usize) {
+            for meshlet in (0..VIS_MAX_MESHLET_SLOTS).step_by(sm as usize) {
+                for tri in (0..VIS_MAX_TRIANGLES_PER_MESHLET).step_by(st as usize) {
                     let f = VisFragment {
                         instance,
                         meshlet,
                         tri,
                     };
                     let id = VisPacking::pack(f).unwrap();
-                    if id == VIS_EMPTY {
-                        seen_empty += 1;
-                    }
+                    assert_ne!(
+                        id, VIS_EMPTY,
+                        "{f:?} packs to the cleared value, so an empty pixel and \
+                         a real one are the same word"
+                    );
                     assert_eq!(VisPacking::unpack(id), Some(f));
+                    if let Some(other) = seen.insert(id, f) {
+                        panic!("{f:?} and {other:?} pack to the same id {id:#018x}");
+                    }
                 }
             }
         }
-        assert_eq!(
-            seen_empty, 0,
-            "the cleared value is reachable from a real fragment, so an empty \
-             pixel and a real one are the same word"
+        // ANTI-VACUITY: a sweep that visited one cell of each field would satisfy
+        // every line above.
+        assert!(
+            seen.len() > 200_000,
+            "the sweep covered {} fragments — too few to be exhaustive of \
+             anything",
+            seen.len()
         );
     }
 
@@ -694,12 +822,36 @@ mod tests {
                 })
                 .unwrap();
                 assert_ne!(id, VIS_EMPTY);
+                let [_, w1] = VisPacking::words(id);
                 assert!(
-                    id >> VIS_INSTANCE_SHIFT >= 1,
+                    w1 >> VIS_INSTANCE_SHIFT >= 1,
                     "instance 0 must store as 1, or the empty sentinel is a lie"
+                );
+                assert_eq!(
+                    w1 >> VIS_INSTANCE_BITS,
+                    0,
+                    "the reserved bits of word 1 must be zero"
                 );
             }
         }
+        // …and an id that DOES set them is refused, so the reserved bits are an
+        // invariant rather than a note. Nothing this contract packs can reach
+        // here; the day a geometry-kind field is real it starts from a stated
+        // zero rather than from whatever a stale texel held.
+        let good = VisPacking::pack(VisFragment {
+            instance: 3,
+            meshlet: 4,
+            tri: 5,
+        })
+        .unwrap();
+        assert!(VisPacking::unpack(good).is_some());
+        let [w0, w1] = VisPacking::words(good);
+        let poisoned = VisPacking::from_words([w0, w1 | (1 << VIS_INSTANCE_BITS)]);
+        assert_eq!(
+            VisPacking::unpack(poisoned),
+            None,
+            "an id with a reserved bit set must not decode as geometry"
+        );
     }
 
     #[test]
@@ -982,29 +1134,49 @@ mod tests {
         assert!(inf_vgeom::unpack_tangent(inf_vgeom::NO_TANGENT).is_none());
     }
 
-    /// **The structural reason a voxel surface is still not shaded here**
-    /// (P28.1's correction to P27.5's routing).
+    /// **The voxel routing survives the id widening** — and the widening is what
+    /// tells the two reasons apart (IB-8).
     ///
-    /// P27.5 refused `voxel.wgsl` a shadow receiver and routed the fix to "the
-    /// VisBuffer resolve, where meshlet and voxel surfaces are shaded through one
-    /// material pass". Building the pass showed the sentence to be wrong: the
-    /// meshlet field is a slot in the **shared meshlet pool**, and a voxel chunk
-    /// — a Surface-Nets mesh in its own buffers, with no meshlet structure, no
-    /// DAG and no page — has none. Naming a second geometry kind would have to be
-    /// paid for out of one of the three fields, and all thirty-two bits are
-    /// spent.
+    /// This arm was `the_visbuffer_id_space_has_no_room_for_a_second_geometry_
+    /// kind`, and it asserted `VIS_TRI_BITS + VIS_MESHLET_BITS +
+    /// VIS_INSTANCE_BITS == 32`. Its own doc said it was *"the falsifier: it
+    /// fails the day the id space grows, which is the day the voxel door
+    /// genuinely opens"*. IB-8 grew the id space, the arm failed exactly as
+    /// designed — and the prediction it encoded turned out to be **wrong**, which
+    /// is the whole value of having written it down.
     ///
-    /// This arm is the falsifier: it fails the day the id space grows, which is
-    /// the day the voxel door genuinely opens, and it fails if any field is
-    /// widened at another's expense without the routing being revisited.
+    /// The door did not open. P27.5 routed `voxel.wgsl`'s missing shadow receiver
+    /// to "the VisBuffer resolve, where meshlet and voxel surfaces are shaded
+    /// through one material pass", and P28.1 refused it citing bit exhaustion.
+    /// There are now **eight reserved bits** in word 1, and the refusal stands
+    /// anyway: the resolve shades by pulling three vertices out of the *shared
+    /// meshlet pool*, and a voxel chunk is a Surface-Nets mesh in its own
+    /// buffers, with no meshlet structure, no DAG and no page. A kind field would
+    /// name a geometry the resolve still cannot read.
+    ///
+    /// So the arm keeps its job with its subject corrected: the id has room, the
+    /// routing is structural, and both statements are checked. It fails the day
+    /// somebody spends the reserved bits without revisiting the routing, and the
+    /// day `voxel.wgsl` stops naming its real blocker.
     #[test]
-    fn the_visbuffer_id_space_has_no_room_for_a_second_geometry_kind() {
+    fn the_voxel_routing_survives_the_id_widening() {
+        assert!(
+            VIS_RESERVED_BITS > 0,
+            "the id has no reserved bits left; if a kind field was added, this \
+             arm's subject — 'there is room and it is still not enough' — has \
+             changed and needs rewriting rather than deleting"
+        );
+        // The room is real: a kind would fit where nothing is packed today.
+        let id = VisPacking::pack(VisFragment {
+            instance: VIS_MAX_INSTANCES - 1,
+            meshlet: VIS_MAX_MESHLET_SLOTS - 1,
+            tri: VIS_MAX_TRIANGLES_PER_MESHLET - 1,
+        })
+        .expect("the widest legal fragment packs");
         assert_eq!(
-            VIS_TRI_BITS + VIS_MESHLET_BITS + VIS_INSTANCE_BITS,
-            32,
-            "the packing no longer spends exactly one R32Uint; voxel.wgsl's \
-             refusal cites this arithmetic as the reason it has no door, and \
-             that reason has just changed"
+            VisPacking::words(id)[1] >> VIS_INSTANCE_BITS,
+            0,
+            "even the widest fragment leaves the reserved bits clear"
         );
         // …and the refusal's own text, so the two cannot drift apart. Read over
         // `lines()` because every `.wgsl` in the working tree is CRLF.
@@ -1014,8 +1186,11 @@ mod tests {
             .collect();
         for want in [
             "P28.1: THE ROUTING WAS WRONG, AND HERE IS THE MEASUREMENT",
-            "the_visbuffer_id_space_has_no_room_for_a_second_geometry_kind",
+            "the_voxel_routing_survives_the_id_widening",
             "meshletize voxel chunks",
+            // The corrected blocker, by name. A routing whose stated reason has
+            // been retired and not replaced is a routing nobody can act on.
+            "no meshlet structure",
         ] {
             assert!(
                 voxel.iter().any(|l| l.contains(want)),
@@ -1024,6 +1199,16 @@ mod tests {
                  one phase later"
             );
         }
+        // The retired reason must be GONE, not merely joined by the real one:
+        // leaving "all thirty-two bits are spent" in the file would send the next
+        // reader to widen an id that is already wide.
+        assert!(
+            !voxel
+                .iter()
+                .any(|l| l.contains("thirty-two bits are spent")),
+            "voxel.wgsl still gives bit exhaustion as its blocker, and the id is \
+             sixty-four bits with eight reserved"
+        );
     }
 
     /// **The parity oracle's independence, pinned** (P28.1 audit).
