@@ -19,7 +19,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | Wave | Scope | Status |
 |---|---|---|
 | **I1** | foundations — IB-7 layout, IB-1 PCG/streaming, IB-10 schema window, IB-15 multi-terrain | **DONE + AUDITED** (+ `.inf_sm` v3 addendum) |
-| **I2** | the GIS door — IB-3, IB-4, IB-5, IB-6, IB-14, IB-11's near half | **DONE**, not yet audited — battery 296 / 5 612 / 0 / 13, frontend 702 / 78, goldens 54, clippy 0, rustdoc 443 |
+| **I2** | the GIS door — IB-3, IB-4, IB-5, IB-6, IB-14, IB-11's near half | **DONE + AUDITED** — battery 296 / 5 619 / 0 / 13, frontend 702 / 78, goldens 54, clippy 0, rustdoc 443 |
 | I3 | city scale — IB-2 (grammar collider LOD/budget, lot subdivision) | not started |
 | I4 | the fps instrument + budgets — IB-9, IB-16, the shipping-resolution harness | not started |
 | I5 | source data — IB-11 (DEM ingest reality, CRS, LiDAR) | not started |
@@ -114,6 +114,17 @@ Wave numbering is this file's; the certification's ordering is what it follows.
   wizard field backed by `EditorSettings::gis_max_entities`, a `capNote` that says what
   will be dropped *before* the button, and `inf gis plan` **exiting non-zero** when it
   fires so a pipeline stops instead of shipping a city with a hard edge.
+* **An arm at datum zero cannot see an ordering** (I2 audit). "The vertical unit is applied
+  before the projection, because the anchor subtracts a metric datum height" is a claim about
+  `origin_height_m`, and the arm anchored at `origin_height_m = 0` — where converting before
+  and converting after are *algebraically the same expression*. Moving the multiplication
+  past the anchor passed all 78 tests in the crate. When a claim names the thing that makes
+  two orderings differ, the fixture has to contain it.
+* **A number that only lives in a ledger drifts** (I2 audit). Two of this wave's reported
+  figures did not reproduce — its own commit range, and the road's mid-span pair — and both
+  were numbers no test printed. Every claimed measurement now has a `println!` beside its
+  assertion, which is this file's own rule ("the numbers live in the tests that print them")
+  applied to the ledger as well as to the tests.
 * **A payload with a migrating rung must not be diagnosed as "too old".**
   `AssetPayload::migrates_from` exists so a v2 `.inf_sm` that fails for a *structural*
   reason reports that reason. Telling an author to re-create a machine whose problem is
@@ -246,9 +257,11 @@ fans the junctions; `surface_to_mesh` writes a real `MeshAsset` with a submesh a
 material slot per road class; `gisroad::import_road_surface` supplies the ground from the
 level's terrains through the IB-15 rule and spawns through
 `edit_create_mesh_asset` — one transaction, one Ctrl+Z. Measured: **3 758 road vertices,
-worst deviation 0.000000 m** from `ground + lift`; mid-span 0.0004 m dense against **3.2 m**
-on the centreline's own vertices; a road across two terrains at **west 28.460 m, east
-48.460 m**.
+worst deviation 0.000000 m** from `ground + lift`; on a 14 m arterial at a 1 m step, mid-span
+**0.000750 m** with both axes subdivided against **5.0490 m** on the centreline's own
+vertices (along) and **0.0495 m** with one quad across (across); a road across two terrains
+at **west 28.460 m, east 48.460 m**; and the built `.inf_mesh` is bit-identical across two
+builds (4 005 vertices / 7 284 triangles, digest `65471d72982b118a`).
 
 **IB-5 · both wires.** Land cover → biome ids through `classify_to_ids` (its first caller
 outside its own tests) and a new `inf_terrain::BiomeFill` polygon fill that accumulates any
@@ -275,6 +288,39 @@ needed no terrain-keyed field — the field is a global world-XZ lattice), and
 live world, and a cooked-path reader through `manifest.toml` →
 `build_world_from_pack`.
 
+## The I2 audit (adversarial, `6990247..d186525`)
+
+**Every measured claim above HELD on re-measurement** — the numbers reproduce from the tests
+that print them (3 758 vertices at 0.000000 m; west 28.460 / east 48.460; 581 of 15 178 open
+samples paved; 2 496 biome samples at {1: 1456, 2: 1040} with unpainted ground still 0 and
+one undo restoring it; floors 6/10/2 → 21.9 m and 5.6 m; 300 vs 780 and 288 vs 633.6;
+10 000 and 50 000 whole; goldens 54 and byte-unchanged; schemas unmoved). Both routed items
+are genuinely closed — each fix dies alone under the mutation that names it.
+
+**Two reported numbers did not reproduce and are corrected**: the ROADMAP block's commit
+range/count, and the road's mid-span pair (see above — "0.0004 m against 3.2 m" was neither).
+Both were numbers no test printed. *That is the rule this file already states, met the hard
+way: **the numbers live in the tests that print them**, and a number that only lives in a
+ledger drifts.*
+
+**Mutation-measured gate blindness, four found and closed:**
+
+| mutation | before the audit | now |
+|---|---|---|
+| the vertical unit is applied AFTER the anchor's metric datum height instead of before | **all 78 `inf-gis` tests green** — the arm anchors at `origin_height_m = 0`, where the orderings are identical | `the_vertical_unit_is_applied_before_the_anchors_metric_datum_height` (50 m datum: −19.52 m vs the alternative's 15.24 m) |
+| `obb2::canonical_dir` becomes the identity | **`inf-math` and `inf-pcg` entire, green** | `a_shape_and_its_half_turn_get_the_same_basis` |
+| `SpawnPlan::digest` drops two of its four counts | **all `inf-gis` tests green** | `the_digest_separates_plans_that_differ_by_one_bit` (one ULP, every count, kind, feature, order) |
+| `BiomeFill::ring_contains` stops being half-open | `BiomeFill` had **no test in its own crate**; its one caller paints three *disjoint* squares | `adjacent_polygons_tile_a_terrain_…` + `a_fill_honours_holes_…` |
+
+Two more were sound but silent: the **transverse** alternative was not priced though the
+longitudinal one was (the wave's own headline law), and the road mesh had a determinism gate
+at the *graph* and none at the *asset* it writes. Both are measured and printed now.
+
+Ten new mutations and eight of the implementer's were re-run; each dies at exactly the arm
+that names it and at no other, including both blend-mode halves separately (1 of 15 in
+`pose_parity` each), the re-aimed portability ban **and its anti-vacuity control**, and
+`inf-packager`'s manifest ban (untouched, still biting).
+
 ## Next — wave I3 (city scale)
 
 IB-2: 12 850 static colliders cost 4.663 ms/step, so the 60 fps ceiling is ≈ 46 000
@@ -296,6 +342,14 @@ buildings, a lot-subdivision node, and a collider budget.
   `build_world_from_pack` applies it.
 
 **Measured and bounded (I2 owns these numbers):**
+* **A land-cover tiling drawn FLUSH with the terrain leaves its far row and column
+  unpainted** — **15 of 64** samples on an 8 × 8 tile (found by the I2 audit). It is the
+  half-open crossing rule behaving correctly: a sample lying exactly on a polygon's
+  *outermost* edge has no neighbour on that side to claim it, and the same property is what
+  makes an *interior* shared edge belong to exactly one of two neighbours (64 of 64, exactly
+  once). Trading it for an inclusive test would double-paint every interior seam instead.
+  The remedy is a source ring that runs past the ground, which a clipped published layer
+  normally does. Named on `BiomeFill::add_polygon`.
 * **A junction fan paves the CORE, not the kerbs.** `fan_at` covers the convex hull of the
   legs' end cross-sections — 581 open samples (5.8 m²) on the acute-fork fixture — and the
   wedges *outside* that hull, between adjacent kerbs, stay open. Closing them needs

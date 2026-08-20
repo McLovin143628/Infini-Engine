@@ -23575,7 +23575,9 @@ it and at no other. The full table is in `docs/memos/island-progress.md`.
 
 ## Phase 30 (the island) — wave I2: the GIS door (2026-08-19)
 
-`d942140..` — six commits, sole tree-writer, tagged `(I2)`.
+`6990247..d186525` — **fifteen** commits, sole tree-writer, tagged `(I2)`, rebased onto the
+clock-arm hotfix. (The block first read "`d942140..` — six commits", which was neither the
+count nor the post-rebase range; corrected by the audit.)
 
 The certification called IB-3 *"the single largest piece of connective work the island
 needs"*. `inf-gis` was 5 732 lines across nine modules with **one** dependent crate using
@@ -23643,13 +23645,16 @@ through `edit_create_mesh_asset` — the same doors a dropped asset uses — in 
 
 * **A road has to be subdivided ACROSS its width, not only along its length.** Resampling
   the spine at the terrain's own pitch closes the longitudinal gap and does nothing for the
-  transverse one, and the transverse one is bigger: **49 mm** between a 14 m arterial's
-  crown and the ground, against **0.4 mm** along it at a 1 m step. The first builder had one
-  quad across, and the longitudinal fix hid the transverse defect perfectly — both are "the
-  road does not follow the ground" and only one was being measured. After
-  `build_ribbon_across`: every vertex at `ground + lift` **exactly** (3 758 vertices,
-  worst deviation **0.000000 m**), mid-span 0.0004 m dense against **3.2 m** on the
-  centreline's own vertices. The alternative is priced in the test, in metres.
+  transverse one. The first builder had one quad across, and the longitudinal fix hid the
+  transverse defect perfectly — both are "the road does not follow the ground" and only one
+  was being measured. After `build_ribbon_across`: every vertex at `ground + lift`
+  **exactly** (3 758 vertices, worst deviation **0.000000 m**). Both alternatives are now
+  priced in the test and **printed**, on a 14 m arterial at a 1 m step: **0.000750 m**
+  mid-span with both axes subdivided, against **5.0490 m** on the centreline's own vertices
+  (along) and **0.0495 m** with one quad across (across). *(The block first read "0.0004 m
+  dense against 3.2 m"; neither number reproduces on the committed fixture — the audit
+  measured it, printed it, and corrected this line. The 49 mm the law is named for is the
+  49.5 mm above.)*
 * **A junction hub must ask the ground, not average its rim.** One corner whose XZ falls off
   the terrain keeps the published centreline's elevation, and one such corner in six dragged
   a hub **7.78 m** below the ground under it.
@@ -23809,3 +23814,99 @@ The rustdoc number is +1 on the audited baseline and every file this wave create
 **none** — the three it did add (a bracketed editorial insertion inside a quotation, which
 rustdoc reads as an intra-doc link, and two redundant explicit link targets) were cleared;
 the residual +1 could not be attributed to a file this wave touched.
+
+---
+
+## Wave I2 — the adversarial audit (`6990247..d186525`, 2026-08-20)
+
+**Every measured claim in the block above reproduces on re-measurement**, on a fresh
+checkout, from the tests that print them: 3 758 road vertices at worst deviation
+**0.000000 m**; road across two terrains **west 28.460 m, east 48.460 m**; the junction fan
+paving **581 of 15 178** open samples; land cover **2 496 samples, {1: 1456, 2: 1040}**,
+breaks `[5.0, 92.0, 92.0]`, unpainted ground still 0 and one undo restoring it; floors
+**6 / 10 / 2** producing **21.9 m** and **5.6 m**; oriented lots **300 m² vs 780** and
+**288 vs 633.6**; 10 000 roads → 4 096 (5 904 truncated) → 10 000 whole, 50 000 footprints →
+4 096 (45 904) → 50 000 whole; goldens **54** and not one byte moved; schemas unchanged.
+Both routed items are genuinely closed.
+
+**Two reported numbers did not reproduce**, and are corrected in place above: the block's
+commit range and count (`d942140..`, "six commits" — it is `6990247..d186525` and fifteen),
+and the road's mid-span pair ("0.0004 m dense against 3.2 m" — measured **0.000750 m** and
+**5.0490 m** on the committed fixture). Neither changes a verdict; both were numbers no test
+printed, which is how they drifted.
+
+### What the audit found: four arms that could not fail
+
+Measured by mutation, on the tree as the wave left it.
+
+| mutation | before the audit | now |
+|---|---|---|
+| the vertical unit is applied **after** `world_from_projected` instead of before | **all 78 `inf-gis` tests green** — the arm anchors at `origin_height_m = 0`, where the two orderings are algebraically identical | `the_vertical_unit_is_applied_before_the_anchors_metric_datum_height`: a 50 m datum, −19.52 m against the alternative's 15.24 m |
+| `obb2::canonical_dir` becomes the identity | **`inf-math` (71) and `inf-pcg` entire, green** | `a_shape_and_its_half_turn_get_the_same_basis` — a shape and its 180° twin are one orientation; 4 of 8 rational quadrant rotations flip `u.x` without it |
+| `SpawnPlan::digest` drops `too_short` and `truncated` from the fold | **all `inf-gis` tests green** | `the_digest_separates_plans_that_differ_by_one_bit` — one ULP of one coordinate, every count, the kind, the feature index, the order |
+| `BiomeFill::ring_contains` stops being half-open | `BiomeFill` had **no test in its own crate**, and its one caller's fixture paints three *disjoint* squares | `adjacent_polygons_tile_a_terrain_with_no_seam_and_no_overlap` + `a_fill_honours_holes_refuses_garbage_and_never_authors_ground` |
+
+Two more were sound but silent, and are now measured rather than asserted:
+
+* **the transverse alternative was not priced**, though the longitudinal one was, and the
+  law the wave named itself after ("a fix that closes one axis can hide the same defect on
+  the other") rested on a bound that printed nothing. `cross_strips` returning 1 *does* fail
+  `roads_follow_the_ground_they_are_draped_on`, at **0.0495 m** — but only the audit's
+  mutation could say so. Both alternatives are priced and printed now.
+* **the road mesh had a determinism gate at the GRAPH and none at the ASSET**, which is what
+  reaches committed content — a `BTreeMap` per class, a `BTreeMap` of junction ends, a radial
+  sort and a normal/tangent fold sit between the two. `the_same_layer_builds_a_bit_identical_road_mesh`
+  folds every vertex field's `to_bits` (4 005 vertices / 7 284 triangles, digest
+  `65471d72982b118a`) and prices its own anti-vacuity with a different lift.
+
+### One new bound, found by an arm the wave did not have
+
+**A land-cover tiling drawn FLUSH with the terrain leaves its far row and column
+unpainted** — **15 of 64** samples on an 8 × 8 tile. It is the half-open crossing rule
+behaving correctly (a sample on a polygon's outermost edge has no neighbour on that side to
+claim it), not a defect to trade an interior double-paint for; the remedy is a source ring
+that runs past the ground. Named on `BiomeFill::add_polygon`, measured in its arm, carried
+in `island-progress.md`.
+
+### Two hardenings
+
+* `SpawnPlan::digest` length-prefixes the entity count and every name, so what is folded is
+  a self-delimiting encoding rather than a concatenation whose only variable-length field
+  runs straight into a fixed-width word. *(The audit could not construct an actual alias and
+  says so — this is hygiene on the identity proof's foundation, not a fixed defect.)*
+* `MAX_ATTR_FLOORS` stops clamping silently. A `HEIGHT` column of `9999` sentinels is
+  3 333 storeys per record and clamped to 200 with nothing to see but a skyline;
+  `FootprintAttrs::clamped` + `AttrCoverage::floors_clamped` count it and
+  `attrs.floors_clamped` names the sentinel — **40 of 40** on the arm's fixture.
+
+### Independent mutations, re-run
+
+Ten new and eight of the implementer's own. Every one dies at exactly the arm that names it
+and at no other: `with_ground` narrowed to one terrain (the eastern half falls to 0.0200 m);
+the junction hub averaging its rim (worst vertex 0.0408 m); the CLI renaming an entity after
+the door (the cross-process digest); `ground_contacts` resolving one terrain; the `.prj`
+taking its *first* authority; `archetype_of` matching substrings (a lighthouse is a house);
+`HEIGHT_FT` read as metres; `inf-packager` naming `inf-gis` (the linkage ban, **untouched and
+still biting**); `cmd_cook` naming `inf_gis` (the re-aimed use-site ban); the GIS verb not
+naming it (**the anti-vacuity control fires**: "the exemption above is vacuous"); the cook
+dropping the project's blend mode and the player dropping `set_blend_mode` — **each dies
+alone**, 1 of 15 in `pose_parity`.
+
+**One acknowledged hole, not load-bearing.** The re-aimed portability ban reads six function
+*bodies*, so a helper called from `cmd_cook` that named `inf_gis` would pass it. It is a
+second belt: `inf cook` is `inf_packager::cook`, and that crate's manifest ban is absolute,
+unchanged, and verified biting.
+
+### Counts after the audit
+
+| | after I2 | after the audit |
+|---|---|---|
+| battery blocks | 296 | **296** |
+| tests passed / failed / ignored | 5 612 / 0 / 13 | **5 619 / 0 / 13** |
+| frontend tests / files | 702 / 78 | **702 / 78** |
+| goldens | 54 | **54**, byte-unchanged |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| rustdoc warnings (ceiling 450) | 443 | **443** |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged** |
+
+No schema moved, no golden moved, no sample moved, and no P29-or-prior arm changed meaning.
