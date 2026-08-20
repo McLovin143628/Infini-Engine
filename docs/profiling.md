@@ -80,8 +80,34 @@ be lowered, never raised.** A regression must be fixed, not accommodated.
 | Terrain page bytes resident (peak over the flythrough) | `TERRAIN_RESIDENT_BYTES_CEILING` | 16 MiB | `inf-player` · `tests/phase16_gate.rs` |
 | Partition cell bytes resident (peak) | `CELL_RESIDENT_BYTES_CEILING` | 256 KiB | `inf-player` · `tests/phase16_gate.rs` |
 | Partition cells active at once (peak) | `CELL_RESIDENT_CEILING` | 8 | `inf-player` · `tests/phase16_gate.rs` |
+| **Shipping frame, p95** (city + streamed terrain + a character, 1080p and 1440p) | `SHIPPING_FRAME_CEILING_MS` | 58.0 ms | `inf-player` · `tests/fps_instrument.rs` |
+| …and its hitch twin, p99 | `SHIPPING_FRAME_P99_CEILING_MS` | 64.0 ms | `inf-player` · `tests/fps_instrument.rs` |
+| **What "≥ 60 fps" MEANS** — a target, printed as a distance, never asserted | `SHIPPING_FRAME_BUDGET_MS` | 16.6 ms | `inf-player` · `tests/fps_instrument.rs` |
 
 Notes:
+
+- **THE FPS INSTRUMENT** (island wave I4) is the only harness in this repository
+  that measures a frame at a shipping resolution, and it is the only place a
+  60 fps claim may come from. It renders the phase-30 city + a streamed terrain +
+  the phase-29 wizard character at 1920 × 1080 and 2560 × 1440, with **per-pass
+  GPU timings** from `inf_render::timing` (one `QuerySet` written between encoder
+  commands; off by default, and `timing_changes_no_pixel` proves attaching it
+  moves no pixel). First measured on an RTX 4070 Ti, release: **p50 39.792 ms
+  (25.1 fps) at 1080p**, **47.424 ms (21.1 fps) at 1440p**, and the frame is
+  **CPU-bound** — the sim fixed step alone is 13.659 ms against a 15.875 ms GPU
+  frame, of which the scatter pass is 67.8 %.
+
+  It reports and does not assert in **three** named cases: a software or
+  paravirtual adapter, any CI runner, and **the `dev` profile** — `opt-level = 1`
+  with debug assertions is a build nobody ships, which is the paravirtual-adapter
+  rule one layer down. `cargo test --release -p inf-player --test fps_instrument`
+  is the run that asserts, and the run the I9 certification makes.
+
+  `SHIPPING_FRAME_BUDGET_MS` and `SHIPPING_FRAME_CEILING_MS` are deliberately two
+  constants: the first is the **target** and is never asserted (a constant
+  asserted where it fails is a red build somebody raises); the second is the
+  ratcheting **tripwire** that walks down toward it. The instrument prints the
+  distance every run.
 
 - The four **streamed-scene** budgets (P16.6) live in `inf_player::budget`, are
   asserted over the composed `samples/phase16-world` gate scene, and print their
