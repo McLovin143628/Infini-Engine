@@ -205,7 +205,11 @@ impl FrameTimer {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        if gpu.device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+        if gpu
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .is_err()
+        {
             return None;
         }
         if !matches!(rx.recv(), Ok(Ok(()))) {
@@ -233,10 +237,7 @@ impl FrameTimer {
             .enumerate()
             .filter_map(|(i, name)| {
                 let (a, b) = (*ticks.get(i)?, *ticks.get(i + 1)?);
-                Some(PassTime {
-                    name,
-                    ms: ms(a, b),
-                })
+                Some(PassTime { name, ms: ms(a, b) })
             })
             .collect();
         Some(FrameTimings {

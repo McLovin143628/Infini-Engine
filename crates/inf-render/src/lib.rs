@@ -129,7 +129,6 @@ pub use precip::{
 };
 pub use primitives::{PrimGpu, PrimMesh, PrimRange};
 pub use readback::{ReadbackRing, READBACK_LATENCY_FRAMES};
-pub use timing::{FrameTimer, FrameTimings, PassTime, MAX_FRAME_MARKS};
 pub use renderer::{
     EngineRenderer, ViewMode, AO_FORMAT, HDR_FORMAT, LDR_FORMAT, MASK_FORMAT, SCENE_FORMAT,
     SCENE_SAMPLES,
@@ -158,6 +157,7 @@ pub use settings::{
     VSM_BUDGET_MEDIUM_BYTES, VSM_CLIPMAP_PAGES_MEDIUM, VSM_MARK_STRIDE_MEDIUM, VSM_MAX_MARK_STRIDE,
     VSM_MAX_PCF_RADIUS, VSM_PCF_RADIUS_MEDIUM,
 };
+pub use timing::{FrameTimer, FrameTimings, PassTime, MAX_FRAME_MARKS};
 // P28.3: the streamer's audit, and the arbiter's own vocabulary re-exported for
 // the same reason `inf_vt`'s is below — a host or a gate that reads a
 // `StreamReport` must be able to name a `Consumer` without adding `inf-stream`

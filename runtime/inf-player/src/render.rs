@@ -125,32 +125,7 @@ impl PlayerRenderHost {
         // to the renderer's settings. High enables the GPU meshlet path; Medium/Low
         // fall back to the classic discrete-LOD path (and Low drops the expensive
         // post effects). The decision is logged by `detect_tier`.
-        let base = apply_record(&record);
-        let tier = detect_tier(&gpu, &base);
-        // Desktop requests the meshlet path (the tier clamps it on Medium/Low);
-        // mobile/web (P14.1) clamps the level's block down to the mobile ceiling —
-        // no vgeom, no SSAO/GI/TAA/bloom/shadows — then the live-adapter tier
-        // applies on top (Low still drops what little remains).
-        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
-        let requested = inf_render::RenderTier::clamp_mobile(base);
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-        let requested = RenderSettings {
-            vgeom: inf_render::VgeomSettings {
-                enabled: true,
-                ..base.vgeom
-            },
-            ..base
-        };
-        // BOTH gates, not just the tier — the pair `inf_render::detect_and_clamp`
-        // is, inlined only so the adapter is probed once here rather than a
-        // second time. The editor viewport has applied both since P18.1; this
-        // host applied the tier alone, which meant every *capability* clamp
-        // (`vgeom.occlusion`/`two_pass`, scatter, and P26.1's `vt.bc_tiles`) was
-        // granted in the shipped player on adapters that cannot run it, and
-        // clamped in the editor — two different renderers on one machine.
-        // `clamp_occlusion` only ever turns things off, so this can never grant
-        // the level's block more than it asked for.
-        let settings = AdapterCaps::probe(&gpu).clamp_occlusion(tier.apply(requested));
+        let (settings, tier) = shipped_settings(&gpu, record);
         let vgeom_enabled = settings.vgeom.enabled;
         renderer.set_settings(settings);
 
@@ -1464,6 +1439,55 @@ fn blend_code(b: BlendMode) -> u8 {
         BlendMode::Masked => 1,
         BlendMode::Translucent => 2,
     }
+}
+
+/// **The settings a shipped player runs**, for `record` on `gpu`'s adapter —
+/// the level's authored render block, the platform request, the auto-tier and
+/// the capability clamp, in that order.
+///
+/// Extracted from [`PlayerRenderHost::new`] (island wave I4) and called by it, so
+/// there is exactly **one** answer to "what does the player render with". The
+/// caller that made this necessary is the fps instrument: a harness that rebuilt
+/// this chain by hand would measure a configuration nobody ships, and the first
+/// thing it would get wrong is the pair of clamps below — which is the very
+/// mistake P18.1 found this host making against the editor's.
+///
+/// Returns the settings **and** the tier, because a caller that reports a frame
+/// time without saying which tier produced it has reported a number about an
+/// unnamed machine.
+pub fn shipped_settings(
+    gpu: &GpuContext,
+    record: RenderSettingsRecord,
+) -> (RenderSettings, inf_render::RenderTier) {
+    let base = apply_record(&record);
+    let tier = detect_tier(gpu, &base);
+    // Desktop requests the meshlet path (the tier clamps it on Medium/Low);
+    // mobile/web (P14.1) clamps the level's block down to the mobile ceiling —
+    // no vgeom, no SSAO/GI/TAA/bloom/shadows — then the live-adapter tier
+    // applies on top (Low still drops what little remains).
+    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+    let requested = inf_render::RenderTier::clamp_mobile(base);
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    let requested = RenderSettings {
+        vgeom: inf_render::VgeomSettings {
+            enabled: true,
+            ..base.vgeom
+        },
+        ..base
+    };
+    // BOTH gates, not just the tier — the pair `inf_render::detect_and_clamp`
+    // is, inlined only so the adapter is probed once here rather than a
+    // second time. The editor viewport has applied both since P18.1; this
+    // host applied the tier alone, which meant every *capability* clamp
+    // (`vgeom.occlusion`/`two_pass`, scatter, and P26.1's `vt.bc_tiles`) was
+    // granted in the shipped player on adapters that cannot run it, and
+    // clamped in the editor — two different renderers on one machine.
+    // `clamp_occlusion` only ever turns things off, so this can never grant
+    // the level's block more than it asked for.
+    (
+        AdapterCaps::probe(gpu).clamp_occlusion(tier.apply(requested)),
+        tier,
+    )
 }
 
 /// Map the level's scene-persisted [`RenderSettingsRecord`] onto a live

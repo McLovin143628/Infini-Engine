@@ -9454,6 +9454,280 @@ subdivision's world proof, and **PIE == shipping on a scripted drive-through**\n
 camera would make two hosts simulate different worlds.\n\n\
 Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
 
+// ── the fps instrument's scene (island wave I4) ─────────────────────────────
+//
+// **Composed, not committed.** Everything below builds a level out of content
+// that is already in the tree — the phase-30 city, a streamed terrain, and the
+// phase-29 wizard character — and nothing below writes a file into `samples/`.
+// A frame-time instrument needs *one* scene that is honestly heavy, and the
+// honest way to get one is to put the heaviest things this engine already ships
+// into the same frame rather than to author a new benchmark that flatters it.
+
+/// The instrument level's GUID.
+const ISLAND_FRAME_LEVEL_GUID: Uuid = Uuid::from_u128(0x8431_0000);
+/// The streamed terrain entity under the city.
+const ISLAND_FRAME_TERRAIN_GUID: Uuid = Uuid::from_u128(0x8431_0001);
+/// …and its `.inf_terrain` asset.
+const ISLAND_FRAME_TERRAIN_ASSET_GUID: Uuid = Uuid::from_u128(0x8431_00AA);
+
+/// Samples per side of the instrument terrain's source heightmap.
+///
+/// `2·1024 + 1`: a whole number of 128 m tiles with the shared edge, so the
+/// import produces exactly [`ISLAND_FRAME_TERRAIN_TILES`]² level-0 pages and no
+/// partial row.
+pub const ISLAND_FRAME_SOURCE_SAMPLES: u32 = 2049;
+/// Samples per tile side — the same 129 the phase-16 gate streams.
+pub const ISLAND_FRAME_TILE_RESOLUTION: u32 = 129;
+/// Metres per sample. 1 m, so a tile spans 128 m and the terrain's LOD cut turns
+/// over several times across the city rather than covering it in one page.
+pub const ISLAND_FRAME_MPS: f64 = 1.0;
+/// Level-0 tiles per side (`(2049 − 1) / (129 − 1)`).
+pub const ISLAND_FRAME_TERRAIN_TILES: u32 =
+    (ISLAND_FRAME_SOURCE_SAMPLES - 1) / (ISLAND_FRAME_TILE_RESOLUTION - 1);
+
+/// The terrain's world span, metres (2 048 m — the city plus a kilometre of
+/// margin in each direction).
+pub fn island_frame_terrain_span_m() -> f64 {
+    f64::from(ISLAND_FRAME_SOURCE_SAMPLES - 1) * ISLAND_FRAME_MPS
+}
+
+/// Where the terrain entity stands, so its `+X/+Z` grid is **centred on the
+/// city**: the city occupies x ∈ [−630, 630] and z ∈ [−450, 450].
+pub fn island_frame_terrain_origin() -> DVec3 {
+    let half = island_frame_terrain_span_m() * 0.5;
+    DVec3::new(-half, 0.0, -half)
+}
+
+/// The instrument terrain's source heightmap: **constant, and that is the whole
+/// point**.
+///
+/// A rolling terrain would move every building's datum and the composed level
+/// would stop being the city wave I3 measured — 370 468 solids, 1 000 buildings,
+/// 6 067 banded colliders. Held flat at zero, the ground under the city is a
+/// *real streamed terrain doing real streaming work* whose height answer is
+/// byte-identical to [`city_ground`], so the instrument renders exactly the city
+/// the ledger describes with ground beneath it, and
+/// `the_ground_under_the_city_changes_no_building` says so rather than assuming
+/// it.
+///
+/// Flat costs the measurement nothing: a terrain page is `res²` heights whatever
+/// they are, the clipmap draws the same vertices, and the fragment work does not
+/// vary with slope.
+fn island_frame_source_png() -> Result<Vec<u8>, String> {
+    let n = ISLAND_FRAME_SOURCE_SAMPLES;
+    inf_terrain::encode_png16(&inf_terrain::HeightImage {
+        width: n,
+        height: n,
+        samples: vec![0u16; (n as usize) * (n as usize)],
+    })
+    .map_err(|e| format!("encode instrument heightmap: {e}"))
+}
+
+/// Import the instrument's `.inf_terrain` through the **same chunked door** the
+/// Terrain Import wizard uses (`phase16_terrain_asset`'s path, different grid).
+pub fn island_frame_terrain_asset() -> Result<inf_terrain::TerrainAsset, String> {
+    let png = island_frame_source_png()?;
+    let probe = inf_terrain::probe_heightmap_bytes(&png).map_err(|e| format!("probe: {e}"))?;
+    let settings = crate::assets::terrain_import::TerrainImportSettings {
+        tile_resolution: ISLAND_FRAME_TILE_RESOLUTION,
+        meters_per_sample: ISLAND_FRAME_MPS,
+        min_height: 0.0,
+        // A one-metre band with every sample at its floor: heights are exactly
+        // 0.0, which is what makes the ground query agree with `city_ground` bit
+        // for bit rather than nearly.
+        max_height: 1.0,
+        float_meters: false,
+        center: false,
+        ..Default::default()
+    };
+    let import = settings.to_import(probe.width, probe.height);
+    let opts = inf_terrain::ChunkedImportOptions {
+        pyramid: settings.pyramid(),
+        world_origin: glam::DVec3::ZERO,
+        nodata: inf_terrain::NodataHandling::NONE,
+    };
+    let (asset, _report) = inf_terrain::import_heightmap_reader(
+        std::io::Cursor::new(png),
+        import,
+        opts,
+        &mut |_| {},
+        &|| false,
+    )
+    .map_err(|e| format!("chunked import: {e}"))?;
+    Ok(asset)
+}
+
+/// Write the instrument terrain (+ its sidecar) into a scaffolded project's
+/// `Content`. **Fixture setup — never `samples/`.**
+pub fn write_island_frame_terrain(dir: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir: {e}"))?;
+    let asset = island_frame_terrain_asset()?;
+    let path = dir.join("IslandFrame.inf_terrain");
+    let bytes = inf_terrain::write_terrain_asset(&path, &asset)
+        .map_err(|e| format!("write terrain asset: {e}"))?;
+    inf_asset::AssetSidecar::new(
+        inf_asset::AssetId(ISLAND_FRAME_TERRAIN_ASSET_GUID),
+        inf_asset::AssetKind::Terrain,
+        inf_asset::ContentHash::of(bytes),
+    )
+    .save(&path)
+    .map_err(|e| format!("write terrain sidecar: {e}"))
+}
+
+/// The character asset files the instrument borrows from `samples/phase29-locomotion`.
+///
+/// The *level* is not among them: the instrument composes its own, and copying
+/// a second `.inf_lvl` into the project would give the cook two startup levels
+/// to choose between.
+pub fn island_frame_character_files() -> [&'static str; 15] {
+    [
+        "Hero Body.inf_mesh",
+        "Hero Body.inf_mesh.toml",
+        "Hero Controller.inf_act",
+        "Hero Controller.inf_act.toml",
+        "Hero Idle.inf_anim",
+        "Hero Idle.inf_anim.toml",
+        "Hero Locomotion.inf_sm",
+        "Hero Locomotion.inf_sm.toml",
+        "Hero Run.inf_anim",
+        "Hero Run.inf_anim.toml",
+        "Hero Walk.inf_anim",
+        "Hero Walk.inf_anim.toml",
+        "Hero.inf_skel",
+        "Hero.inf_skel.toml",
+        "Hero Locomotion.inf_sm.txt",
+    ]
+}
+
+/// The instrument character's GUID — the entity a camera follows, and the one
+/// the skinned pass draws.
+pub fn island_frame_hero() -> Uuid {
+    PHASE29_HERO_GUID
+}
+
+/// Where the character stands: on the drive-through's own line, one block east
+/// of its start, so the flythrough passes it rather than starting on top of it.
+pub fn island_frame_hero_feet() -> DVec3 {
+    let p = city_drive_point(0);
+    DVec3::new(p.x + CITY_PITCH_M.0, 0.0, p.z + 3.0)
+}
+
+/// **The instrument's level**: the phase-30 city, a streamed terrain beneath it,
+/// and the phase-29 wizard character standing on the middle street.
+///
+/// Everything a shipping frame of this engine has to do at once — a thousand
+/// grammar buildings in a hundred banded volumes, a real road mesh, a paging
+/// heightfield, a skinned character with a live state machine, and a sun — in
+/// one scene, so "what does a frame cost" has a single answer instead of six
+/// per-feature ones.
+///
+/// The character is built the way the P24 wizard builds one (a capsule derived
+/// from the creature's own height, feet on the floor, the movement component
+/// carrying its own half-heights) — the same construction
+/// `phase29_locomotion_scene` commits, because a benchmark character assembled
+/// differently from a shipped one measures a character nobody ships.
+pub fn island_frame_scene() -> SceneDoc {
+    use inf_ecs::components::{
+        ActorClass, AlwaysLoaded, AnimStateMachine, BodyKind3D, CharacterController3D,
+        CharacterMovement, Collider3D, ColliderShape3DKind, RigidBody3D, SkeletalMesh, Terrain,
+    };
+
+    let mut doc = city_scene();
+    doc.set_title("Island Frame");
+
+    // ── the ground the city has never had ──
+    //
+    // `AlwaysLoaded` for `phase16_world_scene`'s reason: a Terrain occupies
+    // space, so a partitioner would bin the whole heightfield into one cell.
+    doc.create_with_guid(ISLAND_FRAME_TERRAIN_GUID, SpawnKind::Empty, "Ground", None);
+    insert!(
+        doc,
+        ISLAND_FRAME_TERRAIN_GUID,
+        Transform::from_translation(island_frame_terrain_origin())
+    );
+    {
+        let mut terrain = Terrain::configured(ISLAND_FRAME_TILE_RESOLUTION, ISLAND_FRAME_MPS);
+        terrain.asset = Some(ISLAND_FRAME_TERRAIN_ASSET_GUID);
+        debug_assert!(terrain.data.is_empty(), "a streamed terrain ships no tiles");
+        insert!(doc, ISLAND_FRAME_TERRAIN_GUID, terrain);
+    }
+    insert!(doc, ISLAND_FRAME_TERRAIN_GUID, AlwaysLoaded);
+
+    // ── the character, as the wizard makes one ──
+    let radius = (PHASE29_HEIGHT_M * 0.15).clamp(0.1, 0.5);
+    let half_h = (PHASE29_HEIGHT_M * 0.5 - radius).max(0.05);
+    let feet = island_frame_hero_feet();
+    doc.create_with_guid(PHASE29_HERO_GUID, SpawnKind::Empty, "Hero", None);
+    insert!(
+        doc,
+        PHASE29_HERO_GUID,
+        Transform::from_translation(DVec3::new(feet.x, feet.y + half_h + radius, feet.z))
+    );
+    insert!(
+        doc,
+        PHASE29_HERO_GUID,
+        SkeletalMesh {
+            mesh: Some(PHASE29_MESH_GUID),
+            skeleton: Some(PHASE29_SKELETON_GUID),
+        }
+    );
+    insert!(
+        doc,
+        PHASE29_HERO_GUID,
+        AnimStateMachine {
+            sm: Some(PHASE29_SM_GUID),
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PHASE29_HERO_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Kinematic,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PHASE29_HERO_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Capsule,
+            half_extents: inf_ecs::math::Vec3d::new(radius, half_h, radius),
+            radius,
+            ..Default::default()
+        }
+    );
+    insert!(doc, PHASE29_HERO_GUID, CharacterController3D::default());
+    insert!(
+        doc,
+        PHASE29_HERO_GUID,
+        CharacterMovement {
+            player_controlled: true,
+            stand_half_height_m: half_h,
+            crouch_half_height_m: (half_h * 0.5).max(0.05),
+            prone_half_height_m: (radius * 0.6).max(0.03),
+            ..Default::default()
+        }
+    );
+    insert!(doc, PHASE29_HERO_GUID, ActorClass(PHASE29_ACTOR_GUID));
+    insert!(doc, PHASE29_HERO_GUID, AlwaysLoaded);
+
+    doc.world_mut().propagate();
+    doc.mark_saved();
+    doc
+}
+
+/// Save the instrument's level (+ sidecar) into a scaffolded project's
+/// `Content`. **Fixture setup — never `samples/`.**
+pub fn write_island_frame_level(dir: &std::path::Path) -> Result<(), String> {
+    crate::scene::serialize::save(
+        &island_frame_scene(),
+        &dir.join("IslandFrame.inf_lvl"),
+        Some(ISLAND_FRAME_LEVEL_GUID),
+    )
+    .map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

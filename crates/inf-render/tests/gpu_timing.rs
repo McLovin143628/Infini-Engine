@@ -190,13 +190,10 @@ fn timing_changes_no_pixel() {
         timed.len(),
         "the two frames are not the same size"
     );
-    let differing = plain
-        .iter()
-        .zip(&timed)
-        .filter(|(a, b)| a != b)
-        .count();
+    let differing = plain.iter().zip(&timed).filter(|(a, b)| a != b).count();
     assert_eq!(
-        differing, 0,
+        differing,
+        0,
         "{differing} of {} bytes moved when the GPU stopwatch was attached — a \
          golden would move with them",
         plain.len()

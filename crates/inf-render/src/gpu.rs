@@ -197,8 +197,8 @@ impl GpuContext {
         //    `supports_timestamp_query` is a single question with a single answer.
         //    Absent, `EngineRenderer::gpu_timings` returns `None` and the
         //    instrument reports CPU frame time alone.
-        let timestamps = wgpu::Features::TIMESTAMP_QUERY
-            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        let timestamps =
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
         let mut optional_features = adapter.features()
             & (wgpu::Features::POLYGON_MODE_LINE | wgpu::Features::TEXTURE_COMPRESSION_BC);
         if adapter.features().contains(timestamps) {

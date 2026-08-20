@@ -403,6 +403,105 @@ pub const VT_ADMITS_PER_FRAME_CEILING: u64 = 16;
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.**
 pub const VT_WANTS_PER_FRAME_CEILING: u64 = 48;
 
+/// **What "≥ 60 fps" means** (island wave I4): the 95th-percentile frame, at a
+/// shipping resolution, over composed content, on a reference desktop GPU.
+///
+/// Every other frame number in this tree is measured against
+/// [`inf_core::FRAME_BUDGET_MS`] — **33 ms, a 30 fps floor**, and deliberately
+/// so: those gates run on CI machines with software adapters, where *"a budget
+/// nobody can meet is a budget everybody disables"*. That number could never
+/// carry a 60 fps claim, and until this constant existed no number in the
+/// repository could: the AAA-readiness certification's finding was that *"the
+/// only GPU frame harness renders 640 × 360"* and *"no test in this repo measures
+/// fps at a shipping resolution"*.
+///
+/// # What this is measured over
+///
+/// `runtime/inf-player/tests/fps_instrument.rs`: the phase-30 city (1 000
+/// grammar buildings, 370 468 solids, 100 banded volumes, a real road mesh), a
+/// streamed terrain paging beneath it, the phase-29 wizard character skinned and
+/// animating, and the render settings a shipped player builds for that level on
+/// the live adapter — driven down a scripted street at 1920 × 1080 and
+/// 2560 × 1440, re-projected in full every frame.
+///
+/// # Why the 95th percentile and not the mean
+///
+/// A mean hides the frame that stutters, and a stutter is the only frame a
+/// player notices. p50 says whether the engine is fast; **p95 says whether it is
+/// smooth**, and 60 fps is a claim about smoothness. [`SHIPPING_FRAME_P99_BUDGET_MS`]
+/// is the hitch ceiling beside it.
+///
+/// # This is a TARGET, and it is not met
+///
+/// It is deliberately **not asserted**, because on 2026-08-20 the engine does not
+/// meet it and a constant asserted where it fails is a red build somebody
+/// silently raises. What the instrument does with it is print the **distance**,
+/// every run, at both resolutions. The tripwire that *is* asserted is
+/// [`SHIPPING_FRAME_CEILING_MS`] beside it, which ratchets down toward this
+/// number; the day the two meet, this one becomes the assertion and the other is
+/// deleted.
+///
+/// Separating them is the point. A single constant would have had to be either
+/// the goal (and permanently red) or the measurement (and silently a claim that
+/// 46 ms is what 60 fps means).
+///
+/// The reference card is this machine's **RTX 4070 Ti**; the instrument prints
+/// the adapter it ran on beside every number, because a frame time without an
+/// adapter name is a number about an unnamed machine.
+pub const SHIPPING_FRAME_BUDGET_MS: f64 = 16.6;
+
+/// The **hitch target** beside [`SHIPPING_FRAME_BUDGET_MS`]: the 99th-percentile
+/// frame of the same run.
+///
+/// Two frames in a hundred are allowed to miss the 60 fps deadline; what they may
+/// not do is miss it by a lot. Twice the frame budget is one dropped frame — the
+/// player sees a hitch and the next frame is on time. A p99 past this means the
+/// hundredth frame is not a jitter but a *stall*: a pipeline compile, a synchronous
+/// upload, a residency cliff — something with a name, which is what makes this a
+/// separate number rather than a looser version of the first.
+///
+/// A target, on the same terms as the budget above.
+pub const SHIPPING_FRAME_P99_BUDGET_MS: f64 = 33.2;
+
+/// **The ratcheting tripwire** the instrument asserts: the 95th-percentile frame
+/// at the worse of the two shipping resolutions, on a real adapter, in a
+/// **release** build.
+///
+/// # The measurement it comes from
+///
+/// Island wave I4, RTX 4070 Ti, `cargo test --release`, MIN of three rounds of
+/// 120 frames after 24 warm-up, over the composed instrument scene (1 000
+/// grammar buildings / 370 468 solids, a streamed terrain, a skinned character):
+/// see the wave's ROADMAP block for the p50/p95/p99 pair at 1080p and 1440p and
+/// the per-pass breakdown. This constant is set with headroom over the measured
+/// p95 the way every §8 tripwire is — *"deliberately generous… a regression that
+/// matters moves these by an order of magnitude and trips them; a 20 % drift does
+/// not, and is not what CI is for."*
+///
+/// # Where it is asserted
+///
+/// **Locally, in a release build, on a real adapter, and in the I9
+/// certification.** Nowhere else, each exemption taken by name in the test:
+///
+/// * a software or paravirtual adapter reports (the P15.1 rule);
+/// * **every CI runner** reports (the P26.5 rule this file's header records);
+/// * the **dev profile** reports — `[profile.dev]` is `opt-level = 1` with debug
+///   assertions on, so the CPU half of a frame measured there is a fact about a
+///   build nobody ships. That is the paravirtual-adapter law one layer down, and
+///   it is why the full battery running this test does not assert it.
+///
+/// **RATCHET RULE (§8): this constant may only ever DECREASE.** It is expected to
+/// walk down toward [`SHIPPING_FRAME_BUDGET_MS`] as the frame's named costs are
+/// paid off; the instrument prints the distance so the next step is always
+/// visible.
+pub const SHIPPING_FRAME_CEILING_MS: f64 = 58.0;
+
+/// The 99th-percentile twin of [`SHIPPING_FRAME_CEILING_MS`], asserted on exactly
+/// the same terms by the same test.
+///
+/// **RATCHET RULE (§8): this constant may only ever DECREASE.**
+pub const SHIPPING_FRAME_P99_CEILING_MS: f64 = 64.0;
+
 /// The message every budget assertion fails with — the ratchet rule, at the point
 /// where somebody is most tempted to break it.
 pub const RATCHET_NOTE: &str =
