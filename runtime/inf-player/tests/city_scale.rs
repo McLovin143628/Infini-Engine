@@ -517,7 +517,10 @@ fn the_shipped_projection_emits_complementary_parts_and_shell_batches() {
         part_inst as f64 / shell_inst.max(1) as f64
     );
     // A city with no buildings at all would satisfy "every batch is banded".
-    assert!(loose == 0, "{loose} ungrouped instances in a city of buildings");
+    assert!(
+        loose == 0,
+        "{loose} ungrouped instances in a city of buildings"
+    );
     let _ = &mut sim;
 }
 
