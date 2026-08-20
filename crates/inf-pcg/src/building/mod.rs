@@ -100,7 +100,7 @@ pub use plan::{plan_building, plan_building_in, BuildingParams, MAX_FLOORS};
 /// So the plan is built in the **lot's** coordinates, where it is axis-aligned
 /// by construction and every existing rule reads the same way it always did, and
 /// the finished output is transformed into the world at exactly one place
-/// ([`assemble_in`](crate::building::assemble_in)). A rotated lot costs one
+/// ([`assemble_in`]). A rotated lot costs one
 /// rotation per placed box, and the adjacency test — whose world-axis
 /// `same_line` comparison would silently find **zero** doors between rotated
 /// rooms — never sees a rotation at all.
@@ -513,7 +513,7 @@ pub struct BuildingPlan {
     /// this engine produced before IB-6.
     pub footprint: Rect2,
     /// Where this plan's own axes sit in the world. `LotFrame::IDENTITY` for an
-    /// axis-aligned lot; [`assemble_in`](crate::building::assemble_in) applies
+    /// axis-aligned lot; [`assemble_in`] applies
     /// it to the finished output and skips the pass entirely when it is the
     /// identity.
     pub frame: LotFrame,

@@ -7,7 +7,7 @@
 //! `Rect2 { min, max }` over its own XZ bounds, so a city whose streets are not
 //! on a compass grid — Vancouver's West End and downtown are both rotated — sat
 //! on parcels that were not its own. The certification calls it IB-6 and the
-//! Wave-G memo calls it "a deep change [that] deserves its own sub-phase".
+//! Wave-G memo calls it "a deep change ... deserves its own sub-phase".
 //!
 //! # Deterministic, owned, and trig-free
 //!
