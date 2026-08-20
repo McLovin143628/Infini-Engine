@@ -848,6 +848,20 @@ fn the_shipped_lots_are_disjoint_and_deterministic() {
         shell_bits(&groups(&b)),
         "two loads of one pack built different buildings"
     );
+    // …and the same shells fold to a number, so "deterministic across two
+    // PROCESSES" is a diff of two lines of output rather than a claim nobody can
+    // check (I3 audit). Two loads in one process cannot see a difference that
+    // needs a fresh address space to appear.
+    let mut fold: u64 = 0xcbf2_9ce4_8422_2325;
+    for row in shell_bits(&groups(&a)) {
+        for w in row {
+            for byte in w.to_le_bytes() {
+                fold ^= u64::from(byte);
+                fold = fold.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+    }
+    println!("IB-2c (shipped city): shell digest {fold:#018x}");
 
     // Per block, the shells must not overlap on the ground. Measured as a real
     // area rather than as a predicate, so the failure says how badly.
