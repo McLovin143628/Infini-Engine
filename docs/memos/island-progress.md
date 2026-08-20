@@ -22,7 +22,8 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **I2** | the GIS door — IB-3, IB-4, IB-5, IB-6, IB-14, IB-11's near half | **DONE + AUDITED** — battery 296 / 5 618 / 0 / 13, frontend 702 / 78, goldens 54, clippy 0, rustdoc 443 |
 | **I3** | city scale — IB-2a/b/c, IB-8, IB-13, the city fixture | **DONE + AUDITED** — see below |
 | **I4** | the fps instrument + budgets — IB-9, IB-16, IB-12, the shipping-resolution harness | **DONE + AUDITED** — see below |
-| **IP** | **performance** — the cook's PCG evaluation, the sim fixed step, the lighting stack, IB-9's island ceiling | **NEXT** — the wave the instrument makes possible; routed by the I4 audit, see *What IP inherits* below |
+| **I4b** | **performance** — the sim fixed step, the lighting stack, the scatter impostor, the pipelining | **DONE** (audit pending) — see below. Step 12.7 → 1.2 ms; lit p95 92.3 → 38–42; unlit 1080p now **inside** the 60 fps budget |
+| **IP** | the remainder of the performance list — the cook's PCG evaluation, IB-9's island ceiling, the VSM caster scatter | **carried** — see *What is still open after I4b* below |
 | I5 | source data — IB-11 (DEM ingest reality, CRS, LiDAR) | not started |
 | ~~I6~~ | ~~scale seams — IB-12~~ *(pulled into I4; IB-8 and IB-13 into I3)* | **absorbed** |
 | I7 | content — the 50 km² Vancouver map itself | not started |
@@ -279,6 +280,40 @@ twice.
   **1.848e6× better** at half a million metres. The pre-IB-12 spelling is kept as
   `axis_independent_lag_absolute` and pinned at **zero** production call sites, because a fix
   whose predecessor has been deleted cannot be shown to have been necessary.
+* **A DEFAULT CHOSEN FOR ONE CASE PAYS IN EVERY OTHER** (I4b). `ActiveCollisionTypes::all()`
+  was widened so a static *sensor* trigger over static scenery would report, and it charged
+  every static *solid* in the world a contact manifold at 60 Hz — **9.2 ms of a 12.7 ms fixed
+  step** on a city, and invisible on every hand-authored level it was chosen against. The
+  narrowing keeps `all()` for **sensors** (the flags are tested as the pair's union, so the
+  sensor's own carry the pair) and drops `FIXED_FIXED` for solids. *Generalize:* when a default
+  is widened for a case, widen it **on that case**, not on the type.
+* **The dearest half of a lit frame was the RECORDING, not the drawing** (I4b). Two passes cost
+  **12 ms of CPU for 1.3 ms of GPU** — a caster re-pack keyed on a version that moves when a
+  pose moves, and a `pages × groups` draw loop over a group set that is one per terrain tile.
+  A per-pass report with only a GPU column sends the next reader to the wrong processor;
+  `PassTime::cpu_ms` costs one `Instant` per mark and is now beside it.
+* **A cache key that over-approximates is a cache that never hits** (I4b). `RenderScene::version`
+  is a *guess* at any one subsystem's inputs. Key on what the thing reads, and when the content
+  has no cheaper identity, hash the bytes the pass just produced — exact, and `O(n)` in the same
+  n the pass already walked.
+* **Conservative in ONE direction is a licence; conservative in the other is a bug** (I4b). The
+  VSM group mask may name a group the GPU cull finds nothing for and can never hide one it would
+  keep. That asymmetry — and only that — is what makes skipping a draw on a clear bit move the
+  clock and not a pixel.
+* **A GPU millisecond is a fact about the device in the state the frame put it in** (I4b). The
+  *unlit* GPU frame fell 14.4–19.8 → 2.2–6.0 across this wave, which nothing on the unlit path
+  can explain: I4's frame left the card idle two thirds of every frame and an idle card
+  downclocks. **GPU columns are comparable only between runs whose CPU frames are comparable**,
+  and a ledger that quotes one across a wave that moved the CPU frame by 25 ms is quoting two
+  power states.
+* **A fix that lands has to re-take the refusal it was conditional on** (I4b). Clause 6's
+  cross-fade refusal was armed to go red the day the billboard sizing was repaired. It did. The
+  refusal was re-taken on the geometry numbers, kept, and the arms re-aimed at the repaired
+  ratio — *not* deleted, because an arm that fired as designed is the most valuable one in the
+  file.
+* **Price the fidelity fix too** (I4b). The impostor sizing halves a silhouette and moves no
+  milliseconds. Saying so is what stops the next reader budgeting for a saving that is not
+  there — the same discipline as pricing what you reject, applied to what you accept.
 * **A payload with a migrating rung must not be diagnosed as "too old".**
   `AssetPayload::migrates_from` exists so a v2 `.inf_sm` that fails for a *structural*
   reason reports that reason. Telling an author to re-create a machine whose problem is
@@ -1176,28 +1211,141 @@ run and each dies at exactly the arm that names it.
 
 ---
 
+## Done — wave I4b (the performance wave)
+
+**THE INSTRUMENT WAS RIGHT AND THE ATTRIBUTION WAS THE WORK.** Every number below is
+before → after on I4's own instrument, RTX 4070 Ti, release, MIN of rounds, same scene.
+
+| | wave I4 | **after I4b** |
+|---|---|---|
+| **the fixed step over the city** | 13.0–14.9 ms | **1.222–1.258 ms** |
+| 1080p **unlit** p50 / p95 | 37.8–41.0 / 43.7–46.1 | **10.8–16.6 / 14.2–19.5** |
+| 1440p unlit p50 / p95 | 43.3–48.2 / 49.3–51.6 | **18.2–18.9 / 20.2–25.4** |
+| 1080p **lit** p50 / p95 | — / 92.3–92.9 | **32.8–33.4 / 38.1–41.8** |
+| 1080p lit GPU frame | 35.8–36.1 | **16.1–16.5** |
+| 1080p lit **pipelined estimate** | 24.4 | **16.4–16.9 (59.3–60.9 fps)** |
+| **distance from 60 fps, 1080p unlit** | p50 +23.2, p95 +28.5 | **p50 −5.8, p95 −2.4** |
+
+**The shipped-default 1080p frame is inside the 60 fps budget at p50 and p95.** The **lit**
+frame is at the line on the *pipelined* measure (16.4–16.9 against 16.6) and not on the
+serialized one (32.8–33.4) — and the serialized number is the one the instrument asserts,
+because a present-to-present harness needs a window this battery does not have. That gap is
+the wave's honest remainder and it is a **measurement question, not an engine one**: the
+shipped player's frame path is four calls with no device poll, and there is now an arm that
+says so.
+
+**The fixed step, phase by phase** — the table wave I4 could not print. Two of the three
+answers were surprises:
+
+| phase | before | after |
+|---|---|---|
+| solver | **9.224 ms (72.5 %)** | 0.319 |
+| camera (P29.6, one sphere sweep) | **2.258 ms (17.8 %)** | 0.003 |
+| physics3d sync (the I3 band's gather) | 0.932 | 0.769 |
+| **the step** | **12.715** | **1.222** |
+
+*The I3 ledger's "the band is ~2.0–2.2 ms of the step" was an inference, not a measurement:
+2.202 ms is the certification's per-collider rate times the banded count, which predicts the
+**solver's** share of those colliders. The band's own gather costs **0.93 ms**, and the
+solver's 9.2 was something else entirely.*
+
+**Both fixes, and what they cost before:**
+
+* `ActiveCollisionTypes::all()` includes `FIXED_FIXED`, so **every banded building box resting
+  on a streamed terrain heightfield had a contact manifold recomputed at 60 Hz for a pair no
+  solver can move**. On the 1 000-building city with 25 heightfield tiles under it:
+  **4.259 → 0.319 ms/step**, of which the ground is +3.704 → +0.036. A **sensor** keeps
+  `all()`, which is the one case the flags were widened for.
+* `ensure_query_pipeline` rebuilt the whole query BVH whenever anything changed and `step`
+  declared it stale unconditionally, so one camera sweep paid a 6 000-collider rebuild every
+  step. Incremental now, with a **540-answer equivalence gate** against a forced rebuild.
+
+**The lighting stack's dearest half was the RECORDING.** `PassTime::cpu_ms` (the wall clock
+between the same two marks that bracket the GPU segment) named it: `render (record)` was
+**18.7 ms of a 50.5 ms lit CPU frame**, and two passes owned it —
+
+| pass | GPU | record before | record after |
+|---|---|---|---|
+| `vsm-raster` | 0.949 ms | **8.847 ms** | 6.048 |
+| `shadow` | 0.344 ms | **3.149 ms** | 0.157 |
+
+The shadow node re-packed **eleven thousand scatter casters every frame** because its cache key
+was `RenderScene::version`, which moves when a *pose* moves. The VSM caster pass recorded
+`pages × groups` indirect draws — **8 426 a frame** → **384** — because a geometry group is one
+per resident terrain tile and nothing told the pass which tiles a 128 m page overlaps; a
+per-page group mask, derived free from the invalidation scatter, now does, and drives a compact
+slot table that also took 2.16 MB of per-pair uniforms a frame down to 98 KB.
+
+**The impostor's sizing, IP item 5, closed with the pop halved and the frame unmoved.** The
+card's radius is the instance's own bounding sphere per primitive kind instead of
+`unit_radius × max(scale)`: a building's impostor silhouette at 192 m falls **55 868 → 26 792
+px**, i.e. **19.2× the mesh's → 9.2×**. `structure_lod_pop` was written by I4 to go red the day
+this landed; it did, and clause 6's cross-fade refusal was **re-taken and kept** on the geometry
+numbers (63 of 2 903 px, unmoved). The scatter pass did **not** move (2.98 ms unlit against
+2.70–3.31 before; 7.44 lit against 7.49) — a fidelity fix, priced.
+
+**Ratchets:** `CITY_STEP_BUDGET_MS` minted 20.0 → **6.0**; `SHIPPING_FRAME_CEILING_MS`
+58.0 → **40.0**; `SHIPPING_FRAME_P99_CEILING_MS` 64.0 → **48.0**.
+
+### The commits
+
+**`5012f4c..`** this tree — `55ee02e` the fixed step · `42c60ef` the lit frame's recording ·
+`4dbf937` the impostor sphere + the ratchets · `f5556e2` the VSM scatter's own number · plus
+this ledger. (Re-state the range from the tree the audit certifies — I3's law.)
+
+---
+
+## What is still open after I4b
+
+1. **The lit frame is at the line on the PIPELINED estimate and not on the serialized one**
+   (16.4–16.9 against 32.8–33.4). Both halves of the pipelined number sit at ~16.5, so it is
+   genuinely balanced rather than bound by one side. Closing it honestly needs the
+   **present-to-present harness**, which needs a window; the player's own pipelining is now
+   armed, so what is missing is the measurement, not the mechanism.
+2. **`vsm-raster` still records 6.05 ms**, and the residue is measured rather than guessed:
+   **206 399 invalidation touches per frame over 11 047 casters** — 19 page-cells each, because
+   `scatter_caster_stamps` is `casters × levels × pages each covers` and the city's buildings
+   all cast into a five-level clipmap. Caching the caster pack itself (the way the shadow node's
+   now is) is the next move; it needs a content key over four heterogeneous caster sources.
+3. **When VSM is bound the receivers ignore the cascades entirely** (`env_lighting.wgsl`: *"VSM
+   replaces the cascades rather than adding to them"*), so a lit frame with both on rasters
+   three cascades nobody reads — 0.23 ms of GPU and 0.16 of record at this scene's scale, found
+   and deliberately not taken.
+4. **The unlit GPU frame's 14.4–19.8 → 2.2–6.0 is partly a power state, not the engine.** I4's
+   frame left the GPU idle two thirds of every frame and an idle card downclocks. A GPU column
+   is comparable only between runs whose CPU frames are comparable, and the instrument's header
+   now says so.
+5. **The projection is now the dearest CPU stage of an unlit frame** (3.9–5.0 ms of ~13.7), and
+   `render (record)` the second (3.0). Neither was touched; both are named with their numbers.
+
 ## What IP inherits (the performance wave), in the order the numbers imply
 
-Routed here by the I4 audit. Every item is a number this tree already prints.
+Routed here by the I4 audit. Items 2, 3 and 5 are **closed by I4b** (see above); the rest
+stand, with I4b's amendments applied in place.
 
 1. **The cook does not evaluate PCG volumes.** The one thing between the engine and a city of
    real geometry, and the only item on this list that is a *feature* rather than a budget.
    `inf-packager` + `inf-dcc` is a one-line Cargo change; what is missing is an evaluated
    population at cook time to bake from. Everything about the shape of the fix is above.
-2. **The sim fixed step has no §8 budget and costs 13.0–14.9 ms on the city.** Mint the
-   budget over a CITY (`STREAMED_STEP_BUDGET_MS` is 4.0 ms over a walker on a heightfield),
-   and break the step down before optimising it — 2.2 ms is the I3 collider band at the
-   certification's own rate and the other ~11 ms has never been attributed.
-3. **The lighting stack costs +42.9 ms of p95 and is in no ceiling.** Shadows, GI, VSM, TAA,
-   SSAO and bloom are off by default, so every frame number this repository carries is for a
-   frame without them. Decide what a shipped island level authors, then re-mint the ceilings
-   over that configuration.
+2. ~~**The sim fixed step has no §8 budget and costs 13.0–14.9 ms on the city.**~~ **CLOSED by
+   I4b.** `CITY_STEP_BUDGET_MS` exists, the step is broken down by
+   `inf_player::step_profile` into 22 phases that tile it, and it costs **1.222 ms**. The
+   "2.2 ms is the I3 collider band" line was an *inference* and is retired: the band's gather
+   is 0.93 ms, and 9.2 of the 12.7 was rapier computing static-versus-static manifolds.
+3. ~~**The lighting stack costs +42.9 ms of p95 and is in no ceiling.**~~ **Mostly closed by
+   I4b**: lit p95 **92.3–92.9 → 38.1–41.8**, and the pipelined estimate is 16.4–16.9 ms.
+   What stands is the second half of the sentence — *decide what a shipped island level
+   authors, then mint a ceiling over THAT configuration*. The lit numbers are still reported
+   and never asserted, because every ceiling in the file is set from the shipped default.
 4. **IB-9's ceiling is a gate-scene constant at island scale** — 116.91 MiB derived and
-   63.0 MiB measured against 16 MiB. `phase16_gate` arm (e2) holds the gap open.
-5. **The scatter impostor is sized from a bounding SPHERE**, so a 20 × 30 × 7.4 m box gets a
-   billboard 19.2× its silhouette and 93.9 % of it changes at the structure swap. This is the
-   repair clause 6's cross-fade refusal is conditional on, and `structure_lod_pop.rs` goes red
-   the day it lands.
+   63.0 MiB measured against 16 MiB. `phase16_gate` arm (e2) holds the gap open. *Untouched by
+   I4b.*
+5. ~~**The scatter impostor is sized from a bounding SPHERE**~~ **— CLOSED by I4b**, with both
+   halves measured: the card is the instance's own bounding sphere per primitive kind, the
+   ratio fell **19.2× → 9.2×**, `structure_lod_pop` went red as designed and clause 6's refusal
+   was re-taken and kept — and the frame **did not move**, which is recorded rather than hoped
+   for. What is left is what an impostor is: a bounding-sphere card is intrinsically about twice
+   a box's silhouette, and closing *that* means an oriented card or a real impostor atlas.
 6. **`resident_bytes` counts heights only** — not `maps`, `biomes` or `holes` — so an eroded,
    painted or carved terrain under-reports against both the ceiling and the bound, which are
    now derived from the same under-count.

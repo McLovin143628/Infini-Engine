@@ -24743,3 +24743,201 @@ production path.
 * **A default that is off is part of the measurement.** "≥ 60 fps" measured over a frame with
   no shadows, GI, VSM, TAA, SSAO or bloom is a true number about a configuration, and a
   constitution has to name the configuration.
+
+---
+
+## Phase 30 (the island) — wave I4b: the performance wave (2026-08-20)
+
+Range: **`5012f4c..`** this tree (re-stated by the audit that closes the wave, per I3's law).
+Five commits, of which four carry the work — `55ee02e` the fixed step's eleven and a half
+unattributed milliseconds · `42c60ef` the lit frame's recording · `4dbf937` the impostor's own
+bounding sphere and three ratchets · `f5556e2` the VSM invalidation scatter's own number —
+and one closes the ledger.
+
+The wave the I4 instrument made possible. I4 measured and refused to prescribe; this one
+prescribes, and every prescription is measured on that instrument before and after.
+
+### The headline, on the instrument, RTX 4070 Ti, release, MIN of rounds
+
+| | wave I4 | **after I4b** |
+|---|---|---|
+| **the fixed step over the city** | 13.0–14.9 ms | **1.222–1.258 ms** |
+| 1080p **unlit** p50 / p95 | 37.8–41.0 / 43.7–46.1 | **10.8–16.6 / 14.2–19.5** |
+| 1080p unlit GPU frame | 14.4–19.8 | **2.2–6.0** |
+| 1440p unlit p50 / p95 | 43.3–48.2 / 49.3–51.6 | **18.2–18.9 / 20.2–25.4** |
+| 1080p **lit** p50 / p95 | — / 92.3–92.9 | **32.8–33.4 / 38.1–41.8** |
+| 1080p lit GPU frame | 35.8–36.1 | **16.1–16.5** |
+| 1080p lit **pipelined estimate** | (24.4, measured this wave on the base) | **16.4–16.9 ms, 59.3–60.9 fps** |
+| **distance from 60 fps, 1080p unlit** | p50 +23.2, p95 +28.5 | **p50 −5.8, p95 −2.4** |
+
+**The shipped-default 1080p frame is now inside the 60 fps budget at p50 and p95**, and the
+**lit** frame is at the line on the pipelined measure and not on the serialized one. Ranges,
+not figures — the I3 law the I4 audit sharpened.
+
+**Two of those movements are not the engine's, and the instrument's header now says so.** The
+*unlit* GPU frame fell 14.4–19.8 → 2.2–6.0, which no change on the unlit path can explain: I4's
+frame left the GPU idle two thirds of every frame, and a card that is idle downclocks. **A GPU
+millisecond is a measurement of the device in the state the frame put it in**, so a GPU column
+is comparable only between runs whose CPU frames are comparable. The lit GPU frame's
+35.8–36.1 → 16.1–16.5 has the same component in it, on top of a real reduction.
+
+### Clause 1 — the fixed step, attributed and then removed
+
+I4 left **~11.5 ms of a 13–15 ms step unattributed** and the audit routed "attribute it before
+prescribing" here. So: `inf_player::step_profile` is the CPU twin of I4's query-set clock.
+`RuntimeSim::fixed_step` marks all **22** phases of its own body, each mark charging from the
+previous one, so **the phases tile the step by construction** rather than by an assertion
+somebody has to remember. Off by default (one branch per mark);
+`the_profile_does_not_move_the_simulation` compares `state_bytes()` after 24 steps of a
+profiled and an unprofiled sim, byte for byte.
+
+What it said, at 1080p over the city — and both answers were surprises:
+
+| phase | before | after | |
+|---|---|---|---|
+| solver | **9.224 ms (72.5 %)** | 0.319 | rapier itself |
+| camera | **2.258 ms (17.8 %)** | 0.003 | the P29.6 locomotion camera, one sphere sweep |
+| physics3d sync | 0.932 | 0.769 | the I3 collider band's gather |
+| everything else | < 0.13 each | | |
+| **the step** | **12.715** | **1.222** | |
+
+* **The solver.** Every collider asked for `ActiveCollisionTypes::all()`, which includes
+  `FIXED_FIXED`, so **every banded building box resting on a streamed terrain heightfield had a
+  contact manifold computed and re-computed at 60 Hz for a pair no solver can ever move.**
+  Priced on the 1 000-building city, MIN of five rounds of sixty steps:
+
+  | configuration | before | after |
+  |---|---|---|
+  | the banded city alone | 0.555–0.600 ms/step | **0.283** |
+  | + the host's per-step sync | 1.369–1.413 | **1.044** |
+  | + one awake dynamic body | 0.571–0.593 | **0.285** |
+  | **+ 25 heightfield tiles under it** | **4.259** | **0.319** |
+
+  The **ground** is the whole story: 3 446 box-versus-heightfield pairs cost **+3.704 ms/step**
+  and now cost **+0.036**. A **sensor** keeps `all()`, so a static trigger volume over static
+  scenery still reports — which is the one case the engine widened the flags for, and
+  `ActiveCollisionTypes` is tested as the pair's union so the sensor's own flags carry it. The
+  2D world mirrors it.
+
+* **The camera.** `ensure_query_pipeline` threw the whole query BVH away and re-inserted every
+  collider whenever anything changed, and `step` declared it stale **unconditionally** — so the
+  camera's single sweep paid a 6 000-collider rebuild every step. It is incremental now: the
+  colliders of the bodies the solver moved (`islands.active_bodies()`, taken **before and
+  after** the step, which is what covers a body that fell asleep during it and one that woke),
+  plus anything explicitly attached or teleported. **A removal still forces a full rebuild**,
+  because `BroadPhaseBvh` exposes no removal — a property of the dependency, stated rather than
+  hidden.
+
+  Armed by an **equivalence gate**: 180 steps, three query kinds, each asked of the incremental
+  tree and again immediately after `force_query_rebuild()` — **540 answers, 360 of them hits,
+  all identical**.
+
+**The §8 budget the certification said was missing.** `CITY_STEP_BUDGET_MS`, over a CITY, beside
+`STREAMED_STEP_BUDGET_MS`'s walker-on-a-heightfield — one number cannot be both, and stretching
+the walker's would have retired the only tripwire the walker has. Minted at **20.0** against the
+unrepaired measurement (`PROJECTION_BUDGET_MS`'s precedent: a budget minted after a fix cannot
+certify the fix), ratcheted to **6.0** in the same wave against 1.222.
+
+### Clause 2 — the lighting stack, and the finding that it was not the drawing
+
+I4's corrected baseline made the stack a top-order item at +43–48 ms of p95. Attributing it
+needed an instrument the tree did not have: **`PassTime::cpu_ms`** — the wall clock between the
+same two marks that bracket the GPU segment, so every pass reports what it cost to *ask* as well
+as what the device did. `vsm-sync` is split out of `vsm-raster` for the same reason: a segment
+must be named for what is inside it.
+
+At 1080p with the stack on, `render (record)` was **18.7 ms of a 50.5 ms CPU frame**, and two
+passes owned it:
+
+| pass | GPU | record |
+|---|---|---|
+| `vsm-raster` | 0.949 ms | **8.847 ms** |
+| `shadow` | 0.344 ms | **3.149 ms** |
+
+* **The shadow node re-packed eleven thousand scatter casters every frame**, because its cache
+  key was `RenderScene::version` — which moves when a *pose* moves. Both halves are keyed on
+  what they read now: the rigid half on a hash of the bytes the pack just produced (exact,
+  `O(scene.instances)`, **zero** on a level whose casters are all scatter), the scatter half on
+  the new `scatter_caster_fold` — the batches' own content keys plus anchor, bands and material,
+  i.e. everything `pack_fallback` reads — and its result is **cached**. **3.149 → 0.157 ms.**
+
+* **The VSM caster pass recorded `pages × groups` indirect draws** — **8 426 a frame** — because
+  a geometry group is one per resident terrain tile and the pass had no way to know which tiles
+  a 128 m shadow page overlaps. It does now: the scatter that folds each caster's content stamp
+  into the pages its light-space bounds touch also sets a bit in that page's `group_mask`, at no
+  extra cost and **conservative in the cull's own direction** — a set bit may name a group the
+  GPU cull finds nothing for; a clear bit can never hide one it would keep, and that asymmetry
+  is the whole licence for skipping. The mask drives the draw loop **and a compact slot table**:
+  the per-pair uniforms and args blocks are built for the live pairs only and the cull reads
+  `slots[page × groups + group]` to find its args block. **8 426 draws → 384**, and 2.16 MB of
+  256-byte dynamic-offset uniforms a frame → **98 KB**. **8.85 → 6.05 ms.**
+
+Together: lit p50 **48.4 → 32.8–33.4**, p95 **65.0 → 38.1–41.8**, and the pipelined estimate
+**24.4 → 16.4–16.9 ms (59.3–60.9 fps)**.
+
+### Clause 3 — the impostor's own bounding sphere
+
+The fifth item on IP's inherited list. A scatter billboard's radius was
+`unit_radius × max(sx, sy, sz)` — exact for a uniform instance, wildly generous for anything
+else. `impostor_radius` answers the instance's **smallest containing sphere**, per primitive
+kind (a cube's is half its diagonal; a **sphere**'s is its largest semi-axis, which is the old
+formula and is why this is not a blanket `length`; a plane's ignores Y; a cylinder's and a
+cone's is the hypotenuse of disc radius and half height).
+
+`structure_lod_pop` — which I4 wrote to go **red** the day this landed — measures a building's
+impostor silhouette at 192 m falling **55 868 px → 26 792 px**, i.e. **19.2× the mesh's →
+9.2×**, exactly `0.866 × 30 = 25.98 m` against `0.5 × |(20, 30, 7.4)| = 18.38 m`, squared. The
+condition fired and clause 6's cross-fade refusal is **re-taken and kept**: the geometry reading
+it rests on did not move (63 of 2 903 px), and what remains is a bounding-sphere card, which is
+what an impostor *is* rather than a defect it has.
+
+**And it did not move the frame** — scatter 2.98 ms unlit against 2.70–3.31 before, 7.44 lit
+against 7.49, inside the run-to-run spread both times. Recorded as a fidelity fix with its
+price, because this scene's scatter cost is its **mesh band** and not impostor overdraw.
+
+### Clause 4 — the pipelining, checked rather than claimed
+
+Every run prints a `PIPELINED ESTIMATE` on the grounds that "a real presenter overlaps the
+halves", and I4 carried that as arithmetic over two measurements.
+`the_shipped_players_frame_path_does_not_wait_for_the_gpu` now **checks the player**: it
+extracts `PlayerRenderHost::render`'s body — a source **scope**, not a substring ban, so a poll
+moved one function away does not satisfy it — and requires the four-call path (acquire, record
++ submit, present) to contain no device poll. It does not. The model is the player. A
+present-to-present harness still needs a window and is carried.
+
+### The ratchets
+
+| constant | was | now | measured |
+|---|---|---|---|
+| `CITY_STEP_BUDGET_MS` | (minted 20.0) | **6.0** | 1.222–1.258 |
+| `SHIPPING_FRAME_CEILING_MS` | 58.0 | **40.0** | worst p95 25.4 |
+| `SHIPPING_FRAME_P99_CEILING_MS` | 64.0 | **48.0** | worst p99 28.2 |
+
+### Laws this wave paid for
+
+* **A step that cannot say where its milliseconds went is the CPU twin of a frame that cannot.**
+  The certification's GPU complaint, one processor over, and the answer is the same shape: marks
+  that tile the whole by construction.
+* **The dearest half of a lit frame was the RECORDING.** Two passes cost 12 ms of CPU for
+  1.3 ms of GPU. A per-pass report with only a GPU column sends the next reader to the wrong
+  processor; the CPU column is now beside it and cost one `Instant` per mark.
+* **A cache key that over-approximates is a cache that never hits.** `RenderScene::version`
+  moves when a pose moves, so a shadow pack keyed on it re-packed a city because a character
+  breathed. Key on what the thing reads, and hash the bytes when the content has no cheaper
+  identity.
+* **A default chosen for one case pays in every other.** `ActiveCollisionTypes::all()` was
+  widened for static *sensor* triggers and charged every static *solid* in the world for it —
+  9 ms of a 12.7 ms step on a city, invisible on the hand-authored levels it was chosen against.
+  Narrow the default to the case, and let the case that wanted it keep it.
+* **Conservative in one direction is a licence; conservative in the other is a bug.** The VSM
+  group mask may name a group the cull finds nothing for and can never hide one it would keep,
+  which is exactly why skipping on a clear bit moves the clock and not a pixel.
+* **A fix that lands has to re-take the refusal it was conditional on.** Clause 6's refusal was
+  armed to go red when the billboard sizing was repaired. It did; the refusal was re-taken on
+  the geometry numbers and kept, and the arms were re-aimed rather than deleted.
+* **Price the fidelity fix too.** The impostor sizing halves a silhouette and moves no
+  milliseconds, and saying so is what stops the next reader budgeting for a saving that is not
+  there.
+* **A GPU millisecond is a fact about the device in the state the frame put it in.** A frame
+  that starves the GPU measures a downclocked one. Comparing GPU columns across a wave that
+  changed the CPU frame by 25 ms is comparing two power states.
