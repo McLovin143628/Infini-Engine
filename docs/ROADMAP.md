@@ -23792,6 +23792,20 @@ every time somebody nudged the pixel grid.
 
 ### Counts
 
-Battery, `fmt`, `clippy --workspace --all-targets` with `-D warnings`, the frontend suite
-and the golden count are in the wave's closing commit message; goldens stayed **54** and no
-schema moved (scene v25 / `ScenePayload` v11 / `.inf_sm` v3, all as I1 left them).
+| | before (I1 audit) | after I2 |
+|---|---|---|
+| battery blocks | 295 | **296** |
+| tests passed / failed / ignored | 5 566 / 0 / 13 | **5 612 / 0 / 13** |
+| frontend tests / files | 691 / 77 | **702 / 78** |
+| goldens | 54 | **54**, byte-unchanged |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| rustdoc warnings (ceiling 450) | 442 | **443** |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged** |
+
+`cargo fmt --all --check` clean, `tsc --noEmit` and `eslint --max-warnings 0` clean, five
+new ts-rs bindings generated and committed.
+
+The rustdoc number is +1 on the audited baseline and every file this wave created generates
+**none** — the three it did add (a bracketed editorial insertion inside a quotation, which
+rustdoc reads as an intra-doc link, and two redundant explicit link targets) were cleared;
+the residual +1 could not be attributed to a file this wave touched.

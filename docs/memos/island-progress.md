@@ -19,7 +19,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | Wave | Scope | Status |
 |---|---|---|
 | **I1** | foundations — IB-7 layout, IB-1 PCG/streaming, IB-10 schema window, IB-15 multi-terrain | **DONE + AUDITED** (+ `.inf_sm` v3 addendum) |
-| **I2** | the GIS door — IB-3, IB-4, IB-5, IB-6, IB-14, IB-11's near half | **DONE**, not yet audited |
+| **I2** | the GIS door — IB-3, IB-4, IB-5, IB-6, IB-14, IB-11's near half | **DONE**, not yet audited — battery 296 / 5 612 / 0 / 13, frontend 702 / 78, goldens 54, clippy 0, rustdoc 443 |
 | I3 | city scale — IB-2 (grammar collider LOD/budget, lot subdivision) | not started |
 | I4 | the fps instrument + budgets — IB-9, IB-16, the shipping-resolution harness | not started |
 | I5 | source data — IB-11 (DEM ingest reality, CRS, LiDAR) | not started |
