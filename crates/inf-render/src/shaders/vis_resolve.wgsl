@@ -8,7 +8,8 @@
 // of a binding whose whole point is that it has one.
 //
 // One fullscreen triangle. Per pixel:
-//   1. load the `R32Uint` visibility id and unpack instance ⊕ meshlet ⊕ triangle;
+//   1. load the `Rg32Uint` visibility id and unpack instance ⊕ meshlet ⊕ triangle
+//      (IB-8: sixty-four bits in two words, because WGSL has no `u64`);
 //   2. pull the triangle's three vertices from the shared pools and put them
 //      through the instance's model matrix and `view.view_proj` — the same
 //      jittered matrix the buffer was rasterized with (the P27.1 jitter law);

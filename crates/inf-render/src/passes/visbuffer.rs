@@ -52,7 +52,7 @@ use inf_vgeom::asset::MESHLET_REC_LEN;
 /// call: the alignment is a hard requirement above one row, and the alternative
 /// is a per-row upload or a staging buffer, either of which is more moving parts
 /// than 112 bytes an instance (1.8 MiB at 16 384 instances, and the packing's own
-/// ceiling is 16 777 214 since IB-8 — the table is sized by the FRAME, not by the
+/// ceiling is 16 777 215 since IB-8 — the table is sized by the FRAME, not by the
 /// ceiling).
 pub const VIS_INSTANCE_TEXELS: u32 = 16;
 

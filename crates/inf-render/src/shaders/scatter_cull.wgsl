@@ -137,8 +137,9 @@ fn cs_classify(
         let center = params.anchor.xyz + inst.offset;
         // One conservative radius for the whole batch: the primitive's unit
         // bounding radius times the batch's LARGEST scale. Per-instance would cull
-        // marginally more; a single scalar keeps the record at 48 B and the bound
-        // is still an over-approximation, which is all the subtractive proof needs.
+        // marginally more; a single scalar keeps the record to its 64 B and the
+        // bound is still an over-approximation, which is all the subtractive proof
+        // needs.
         let radius = params.anchor.w;
         let d = distance(center, params.eye.xyz);
 

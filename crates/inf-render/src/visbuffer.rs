@@ -60,9 +60,10 @@
 //! Widening is what a visibility buffer does elsewhere for the same reason, and
 //! it costs **four bytes a pixel** — 3.7 MB at 1280 × 720, 33 MB at 4K — paid
 //! only while `VgeomSettings::visbuffer` is on, which is off on every tier
-//! (§5 of the memo). Against that: the instance ceiling goes from 2 047 to
-//! **16 777 214**, which is 8 192× the brief's 16k target, and the meshlet
-//! ceiling stops being a fraction of the budget at all.
+//! (§5 of the memo) — eight bytes a pixel in total, 7.4 MB at 1280 × 720.
+//! Against that: [`VIS_MAX_INSTANCES`] goes from 2 047 to **16 777 215**
+//! (indices `0..=16 777 214`), which is 8 196× the brief's 16k target, and the
+//! meshlet ceiling stops being a fraction of the budget at all.
 //!
 //! **WGSL has no 64-bit integer**, so the id is a `vec2<u32>` and no field may
 //! straddle the word boundary. That is not a limitation worked around — it is
