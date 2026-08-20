@@ -17,6 +17,15 @@
 //! `validity_holds_after_every_op`), an op that mutates without journalling
 //! (caught by `replay_is_a_pure_function_of_the_ops`), and a seam reconstruction
 //! that averages corner attributes (caught by `export_is_a_fixed_point`).
+//!
+//! Two of the properties are paired with **deterministic pins** rather than left
+//! to the generator, and the reason is the same in both cases: the input that
+//! found the defect turns up in roughly one script in three thousand, so a
+//! 256-case run on a random seed is not a re-test of it. See
+//! `a_double_sided_sheet_saves_as_two_shells_and_then_holds_still` and
+//! `a_repaired_winding_settles_on_the_second_save_not_the_first`. A seed in
+//! `property.proptest-regressions` says "this broke once"; a named pin says what
+//! broke and holds the numbers.
 
 use proptest::prelude::*;
 
@@ -42,6 +51,19 @@ fn choice() -> impl Strategy<Value = Choice> {
         b,
         p,
     })
+}
+
+/// A shrunk proptest script, written out as `(kind, a, b, p)` tuples.
+///
+/// Purely for legibility, and it earns its place: rustfmt puts each field of a
+/// four-field struct literal on its own line, so an eighteen-op pin becomes a
+/// hundred and ten lines in which the *sequence* — the only thing a reader of a
+/// regression fixture cares about — is invisible. The tuple order is the field
+/// order, checked by the compiler.
+fn choices(raw: &[(u8, u16, u16, u8)]) -> Vec<Choice> {
+    raw.iter()
+        .map(|&(kind, a, b, p)| Choice { kind, a, b, p })
+        .collect()
 }
 
 fn base_mesh() -> impl Strategy<Value = Mesh> {
@@ -523,6 +545,235 @@ fn every_modelling_op_applies_at_least_once_somewhere_in_the_battery() {
     }
 }
 
+/// The mesh the asset format cannot carry, held still: **a two-sided coincident
+/// sheet saves as two shells, and then it stops moving.**
+///
+/// This is `export_is_a_fixed_point`'s counter-example, made deterministic. The
+/// fuzzer found it on Windows CI at wave I2 and proptest's shrunk input lives on
+/// a runner that has since been recycled, so the script is written out here
+/// rather than left to a seed — the P21 law that a pin nobody can re-run is not
+/// a pin. It is also the *only* fixture in the tree where the round trip moves
+/// with `coincident_vertices == 0`: every other counter-example in this crate is
+/// the f32-coincidence hazard, and that is precisely why the property's evidence
+/// clause had no word for this one.
+///
+/// # What the mesh is, and why one save cannot keep it
+///
+/// `BridgeLoops` closes the two boundary loops of a dart-shaped quad onto each
+/// other, leaving **two coincident faces with opposite windings on the same four
+/// vertices** — a flat balloon. That is legal in the kernel and `validate`
+/// agrees: no directed edge repeats, every edge has exactly two half-edges.
+///
+/// It cannot survive a write, and the reason is arithmetic rather than a bug.
+/// The quad is non-convex, so exactly **one** of its two diagonals lies inside
+/// it; the second sheet is the same polygon reversed, so its only legal diagonal
+/// is the same one. Four triangles therefore meet on that one edge, which is not
+/// a surface — and no reader can tell that soup apart from a genuine interior
+/// partition. The writer says so (`reused_diagonals`), the reader detaches the
+/// second sheet and says so (`non_manifold_splits`), and the mesh comes back as
+/// two shells at the same coordinates with private vertices.
+///
+/// The claim that survives, and the one this test exists to hold, is the last
+/// paragraph: **the repair is idempotent**. The second save reproduces the first
+/// one's bytes, so an author who opens and saves a file they never edited does
+/// not watch it grow a vertex buffer every time.
+#[test]
+fn a_double_sided_sheet_saves_as_two_shells_and_then_holds_still() {
+    // The shrunk input from the I2 run, verbatim: `plane(2.0)` and five choices.
+    let script = choices(&[
+        (4, 26429, 0, 106),  // SplitEdge
+        (3, 0, 0, 0),        // RemoveFace
+        (2, 41239, 4801, 0), // AddFace
+        (4, 21971, 0, 79),   // SplitEdge
+        (31, 35761, 0, 0),   // BridgeLoops
+    ]);
+    let mut session = MeshSession::new(plane(2.0));
+    let (applied, refused) = drive(&mut session, &script);
+    assert_eq!(
+        (applied, refused),
+        (5, 0),
+        "every op in the pin must still apply"
+    );
+
+    // ── the world, not the report ──────────────────────────────────────────
+    //
+    // Asserted on the face loops rather than on a count, because "2 faces" is
+    // also what an ordinary two-triangle mesh has and the whole fixture rests on
+    // these two being the SAME polygon wound both ways.
+    let faces: Vec<Vec<VertId>> = session
+        .mesh()
+        .face_ids()
+        .map(|f| session.mesh().face_verts(f).expect("live face"))
+        .collect();
+    assert_eq!(faces.len(), 2, "the bridge left two faces: {faces:?}");
+    let mut reversed = faces[0].clone();
+    reversed.reverse();
+    let start = reversed
+        .iter()
+        .position(|v| *v == faces[1][0])
+        .expect("the second face is drawn on the first one's vertices");
+    let rotated: Vec<VertId> = reversed[start..]
+        .iter()
+        .chain(&reversed[..start])
+        .copied()
+        .collect();
+    assert_eq!(
+        rotated, faces[1],
+        "the second face is the first one reversed"
+    );
+    assert_eq!(
+        validate(session.mesh()),
+        Ok(()),
+        "and the kernel calls it legal"
+    );
+
+    // ── the write: entitled by a diagonal, and by nothing else ─────────────
+    let opts = ExportOptions::default();
+    let (a1, w1) = to_mesh_asset(session.mesh(), &opts);
+    assert_eq!(
+        (w1.coincident_vertices, w1.reused_diagonals),
+        (0, 2),
+        "the ONLY advisory here is the reused diagonal — if coincidence has \
+         appeared, the fixture has drifted onto the hazard it was written to \
+         exclude: {w1:?}"
+    );
+    assert_eq!(
+        w1.fan_fallbacks, 0,
+        "the clipper found real ears; it did not give up"
+    );
+
+    // ── the read: a detach, and pointedly not a fusion ─────────────────────
+    let read = from_mesh_asset(&a1).expect("Wave D repairs this rather than refusing it");
+    assert_eq!(validate(&read.mesh), Ok(()));
+    assert_eq!(
+        read.report.non_manifold_splits, 2,
+        "both sheets' triangles detach"
+    );
+    assert_eq!(
+        read.report.detach_severity,
+        inf_dcc::DetachSeverity::Pervasive
+    );
+    assert_eq!(
+        read.report.degenerate_triangles_skipped, 0,
+        "nothing collapsed"
+    );
+    assert_eq!(
+        read.report.welded_positions, w1.vertices,
+        "and nothing fused — the exact terms the old evidence clause tested, \
+         all false, on a round trip that was entitled to move"
+    );
+
+    // ── and then it holds still ────────────────────────────────────────────
+    let (a2, _) = to_mesh_asset(&read.mesh, &opts);
+    let e1 = inf_asset::encode(&a1).expect("encodable");
+    let e2 = inf_asset::encode(&a2).expect("encodable");
+    assert_ne!(e1, e2, "the first save is where the sheet is lost");
+    let read2 = from_mesh_asset(&a2).expect("a2 reads back");
+    let (a3, _) = to_mesh_asset(&read2.mesh, &opts);
+    assert_eq!(
+        e2,
+        inf_asset::encode(&a3).expect("encodable"),
+        "the repair must be idempotent: save, open, save again is where an \
+         author finds out whether their file grows without being edited"
+    );
+    assert_eq!(
+        read.mesh.canonical(),
+        read2.mesh.canonical(),
+        "and the mesh it settled on is the same mesh, not merely the same size"
+    );
+}
+
+/// **The winding repair settles on the second save, not the first** — the
+/// measured witness for `export_is_a_fixed_point`'s `SETTLE_CAP`.
+///
+/// The intuitive form of that property's last clause is "the round trip moves at
+/// most once and then holds still", and it is false. This is the fixture that
+/// says so, and it is here because the property will almost never find it again:
+/// at 20 000 random scripts — 78× what CI runs per push — the *observed* rate of
+/// scripts needing a second pass was about one in three thousand, and two
+/// separate 20 000-case runs produced **zero**. A cap justified only by a number
+/// nobody can re-derive is the P25 law about unmeasured prescriptions; this is
+/// the derivation.
+///
+/// # Why a second pass is needed, and why it is not a defect
+///
+/// The reader's winding repair walks each component from its lowest-indexed face
+/// and flips whatever disagrees, then applies the **minority rule** — if it
+/// flipped more than half the component, it flips the whole component back, so
+/// the source's own majority winding is what survives. That rule is a decision
+/// about the component *as the reader found it*.
+///
+/// But the writer emits triangles in the winding the mesh now has, so a repaired
+/// component comes back out re-wound — and the next read's walk is looking at a
+/// different arrangement, from a different seed, with a different majority. It
+/// can still find one face to agree. Here the counts are legible: **39
+/// reoriented on the first read, 1 on the second, 0 on the third.** Monotone,
+/// converging, and finished — the repair is a fixed point reached by iteration
+/// rather than a projection reached in one step.
+///
+/// Making it a projection is a change to the repair rule and not a test's to
+/// make; what is pinned here is the behaviour as it stands, so that a future
+/// change to `repair_non_manifold` has to come past these three numbers on
+/// purpose.
+#[test]
+fn a_repaired_winding_settles_on_the_second_save_not_the_first() {
+    // `cube(1.0)` under the shrunk 18-op script from the I2 measurement run.
+    let script = choices(&[
+        (27, 0, 0, 14),
+        (13, 40748, 48368, 0),
+        (4, 11148, 0, 0),
+        (3, 15760, 0, 0),
+        (28, 57108, 0, 0),
+        (3, 37691, 0, 0),
+        (22, 12653, 0, 59),
+        (0, 0, 0, 1),
+        (13, 11546, 1448, 31),
+        (4, 55618, 0, 0),
+        (0, 0, 0, 1),
+        (21, 0, 0, 68),
+        (28, 32504, 0, 0),
+        (4, 31354, 0, 0),
+        (31, 26126, 0, 0),
+        (25, 1387, 7398, 0),
+        (6, 0, 0, 0),
+        (28, 37058, 0, 0),
+    ]);
+    let mut session = MeshSession::new(cube(1.0));
+    drive(&mut session, &script);
+    let opts = ExportOptions::default();
+
+    // Four saves and the three reads between them, kept as a sequence so the
+    // claim is about the SERIES and not about one comparison.
+    let mut asset = to_mesh_asset(session.mesh(), &opts).0;
+    let mut bytes = vec![inf_asset::encode(&asset).expect("encodable")];
+    let mut reoriented = Vec::new();
+    for _ in 0..3 {
+        let read = from_mesh_asset(&asset).expect("Wave D repairs rather than refusing");
+        assert_eq!(
+            validate(&read.mesh),
+            Ok(()),
+            "every mesh in the chain is legal"
+        );
+        reoriented.push(read.report.faces_reoriented);
+        asset = to_mesh_asset(&read.mesh, &opts).0;
+        bytes.push(inf_asset::encode(&asset).expect("encodable"));
+    }
+
+    assert_eq!(
+        reoriented,
+        vec![39, 1, 0],
+        "the winding repair converges by iteration: a big first agreement, one \
+         straggler the re-written winding exposed, then nothing"
+    );
+    // The world, not the report: the bytes are what an author's file is.
+    assert_ne!(bytes[0], bytes[1], "the first save is repaired");
+    assert_ne!(
+        bytes[1], bytes[2],
+        "and one pass was NOT enough — the point"
+    );
+    assert_eq!(bytes[2], bytes[3], "the second pass is the fixed point");
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 256, max_shrink_iters: 4_000, ..ProptestConfig::default() })]
 
@@ -669,12 +920,23 @@ proptest! {
     /// The asset round trip: an exported mesh read back and written again is
     /// byte-identical, and the mesh that came back is valid.
     ///
+    /// Where it is *not* byte-identical, both halves have to account for
+    /// themselves — the writer's report names a reason, the reader's report
+    /// names what it did about it — **and one pass is all it gets**: the second
+    /// round trip must reproduce the first one's bytes exactly. That is the
+    /// surviving form of "open, save, open, save is a no-op" for a mesh the
+    /// asset format cannot carry, and it is a stronger claim than the
+    /// unconditional one it replaces on those inputs, not a weaker one.
+    ///
     /// Exactly two refusals are permitted, and each one has to *prove* it was
     /// entitled: `NoGeometry` only when the mesh has no faces, and
     /// `NonManifoldEdge` only when the writer's own report says why — coincident
     /// distinct vertices (which the reader's exact weld fuses) or a triangulation
     /// diagonal that had to repeat an existing edge. Anything else means the
     /// writer emitted a soup its own reader calls illegal, with nothing to blame.
+    /// (`NonManifoldEdge` is a **convergence guard** since Wave D and is not
+    /// expected to be reached; the case that used to reach it now arrives in the
+    /// `Ok` arm as a repair, which is exactly what this property missed.)
     #[test]
     fn export_is_a_fixed_point(base in base_mesh(), script in prop::collection::vec(choice(), 1..40)) {
         let mut session = MeshSession::new(base);
@@ -714,11 +976,112 @@ proptest! {
                          to blame: {:?}",
                         report
                     );
+                    // **The fourth face, and it is Wave D's** — found by the I2
+                    // fuzzer, not by the wave that opened it. This clause read
+                    // `degenerate_triangles_skipped > 0 || welded_positions <
+                    // report.vertices` from P23.4 until now: *fusion*, which is
+                    // the reader's answer to a COINCIDENCE and to nothing else.
+                    // Wave D gave the reader a second answer. A reused diagonal
+                    // used to make the read fail with `NonManifoldEdge` — the
+                    // arm below, which accepts `reused_diagonals` on its own —
+                    // and Wave D turned that refusal into a repair, so those
+                    // cases moved up here into `Ok` and landed on an evidence
+                    // clause that has no word for what the reader did. Measured
+                    // on the case that caught it (a two-sided coincident sheet,
+                    // pinned deterministically as
+                    // `a_double_sided_sheet_saves_as_two_shells_and_then_holds_still`):
+                    // writer `coincident_vertices: 0, reused_diagonals: 2`,
+                    // reader `welded_positions: 4 == vertices, degenerate: 0,
+                    // non_manifold_splits: 2` — every term false, nothing wrong.
+                    // Same class as the Wave-D audit's A11, which found a
+                    // *different* gate still aimed at the refusal Wave D had
+                    // made impossible.
+                    //
+                    // The clause the wave should have written, and it is a
+                    // PAIRING rather than a longer `||` chain. Simply adding the
+                    // three Wave-D counters to the old list would have gone
+                    // green — and would have been unfalsifiable: measured, a
+                    // reader that detaches sheets *without counting them* still
+                    // passes a flat five-way `||` on 256 random cases, because
+                    // the cases that move are nearly all the fusion kind and one
+                    // of the fusion terms carries the clause. So each advisory is
+                    // matched to the symptom it predicts, and neither half can
+                    // stand in for the other:
+                    //
+                    // * `coincident_vertices` → the reader **fused** (positions
+                    //   welded away, or a triangle collapsed and was skipped).
+                    // * `reused_diagonals` → the reader **repaired an edge** it
+                    //   could not hold: a detach, a dropped duplicate, or a
+                    //   winding flip.
+                    let fused = read.report.degenerate_triangles_skipped > 0
+                        || read.report.welded_positions < report.vertices;
+                    let edge_repaired = read.report.non_manifold_splits > 0
+                        || read.report.duplicate_faces_dropped > 0
+                        || read.report.faces_reoriented > 0;
                     prop_assert!(
-                        read.report.degenerate_triangles_skipped > 0
-                            || read.report.welded_positions < report.vertices,
-                        "…and the reader did not actually fuse anything: {:?}",
+                        (report.coincident_vertices > 0 && fused)
+                            || (report.reused_diagonals > 0 && edge_repaired),
+                        "…and the reader did not do what the writer's advisory \
+                         predicted: writer {:?}, reader {:?}",
+                        report,
                         read.report
+                    );
+                    // **The arming.** Widening the clause above costs a claim,
+                    // so it is replaced here by one the old property never made
+                    // at all: whatever the repair, **the round trip settles**.
+                    // Iterating `export ∘ import` from `a2` reaches a fixed
+                    // point, and every mesh along the way is valid.
+                    //
+                    // The first draft of this said "settles in ONE pass", which
+                    // is the intuitive claim and is false — measured, not
+                    // reasoned: a `cube(1.0)` under an 18-op script needs
+                    // **three**, and the reason is legible in the reports
+                    // (`faces_reoriented` 39 → 1 → 0). The winding repair is not
+                    // a projection. Flipping a component changes the winding the
+                    // *writer* then emits, which changes what the next read's
+                    // walk sees, so a second look can still find one face to
+                    // agree — and only then does it stop. That is a fixed point
+                    // reached by iteration rather than in one step, and pinning
+                    // the wrong one of those would have red-flagged CI on about
+                    // one script in three thousand: measured at 20 000 cases,
+                    // which is 78× what CI runs per push, so the one-pass version
+                    // would have looked green here and gone off in someone
+                    // else's wave.
+                    //
+                    // What the cap still falsifies is everything worse than slow:
+                    // a repair that oscillates between two forms, or that mints a
+                    // vertex on every pass, never reaches a fixed point and never
+                    // will — and it satisfies every clause above while doing it.
+                    const SETTLE_CAP: usize = 8;
+                    let mut asset = a2;
+                    let mut bytes = e2;
+                    let mut passes = 0usize;
+                    let settled = loop {
+                        if passes == SETTLE_CAP {
+                            break false;
+                        }
+                        let again = from_mesh_asset(&asset).map_err(|e| {
+                            TestCaseError::fail(format!("pass {passes} does not read back: {e}"))
+                        })?;
+                        prop_assert_eq!(validate(&again.mesh), Ok(()));
+                        let (next, _) = to_mesh_asset(&again.mesh, &opts);
+                        let next_bytes = inf_asset::encode(&next).expect("encodable");
+                        passes += 1;
+                        if next_bytes == bytes {
+                            break true;
+                        }
+                        asset = next;
+                        bytes = next_bytes;
+                    };
+
+                    prop_assert!(
+                        settled,
+                        "the round trip never settled: {} passes of \
+                         export∘import and the bytes were still moving ({} at \
+                         the last one). Writer {:?}",
+                        SETTLE_CAP,
+                        bytes.len(),
+                        report
                     );
                 }
             }
