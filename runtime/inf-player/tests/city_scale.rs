@@ -162,6 +162,36 @@ fn volumes(built: &BuiltWorld) -> Vec<(Uuid, PcgVolume)> {
     out
 }
 
+/// `(guid, world translation, volume)` — the batch anchor a projection uses is
+/// the volume entity's own translation, so this is what pairs a `ScatterBatch`
+/// back to the volume it came from.
+fn placed_volumes(built: &BuiltWorld) -> Vec<(Uuid, DVec3, PcgVolume)> {
+    let w = built.world.world();
+    let mut out: Vec<(Uuid, DVec3, PcgVolume)> = w
+        .iter_entities()
+        .filter_map(|e| {
+            let t = e.get::<Transform>()?;
+            Some((
+                e.get::<Guid>()?.0,
+                DVec3::new(t.translation.x, t.translation.y, t.translation.z),
+                e.get::<PcgVolume>()?.clone(),
+            ))
+        })
+        .collect();
+    out.sort_by_key(|(g, _, _)| *g);
+    out
+}
+
+/// The widest shell's own half-diagonal — the distance by which a part may be
+/// nearer the eye than its group's shell centre is, and therefore the width of
+/// the overlap the parts band must carry (I3 audit).
+fn reach_of_volume(v: &PcgVolume) -> f64 {
+    v.structure_groups
+        .iter()
+        .map(|g| g.shell.half_extents.length())
+        .fold(0.0_f64, f64::max)
+}
+
 fn solids(built: &BuiltWorld) -> Vec<ScatteredSolid> {
     volumes(built)
         .into_iter()
@@ -448,15 +478,29 @@ fn a_near_building_is_whole_and_a_far_one_is_one_box() {
 /// implements it leaves the wiring unarmed — so this arm drives the real
 /// `project_scene` over the real city and reads the batches out.
 ///
-/// The property is that the bands are **complementary**: every parts batch is
-/// bounded above by the LOD distance, every shell batch is bounded below by it,
-/// and no batch spans the boundary. An overlap draws a solid box inside a
-/// building; a gap deletes it from the skyline.
+/// The property is that the bands are **complementary**: every shell batch is
+/// bounded below by the LOD distance, every parts batch is bounded above by it
+/// **plus its widest shell's own half-diagonal**, and no batch bands from
+/// anywhere else. The `reach` is the I3 audit's correction and it is what makes
+/// a gap impossible — see
+/// `no_eye_position_leaves_a_building_partly_drawn_with_no_shell`, which
+/// measures the failure it prevents.
 #[test]
 fn the_shipped_projection_emits_complementary_parts_and_shell_batches() {
     let tmp = tempfile::tempdir().unwrap();
     let pack = cook_city(tmp.path());
     let built = pack_built(&pack);
+    // Read before the sim consumes the world: the expected parts cut is a
+    // function of each volume's own shells.
+    let reach_of: BTreeMap<[u64; 3], f64> = placed_volumes(&built)
+        .into_iter()
+        .map(|(_, t, v)| {
+            (
+                [t.x.to_bits(), t.y.to_bits(), t.z.to_bits()],
+                reach_of_volume(&v),
+            )
+        })
+        .collect();
     let mut sim = inf_player::sim_from_built(built);
     let mut scene = inf_render::RenderScene::default();
     inf_player::render::project_scene(
@@ -469,6 +513,7 @@ fn the_shipped_projection_emits_complementary_parts_and_shell_batches() {
     let lod = inf_render::STRUCTURE_LOD_M;
     let (mut parts, mut shells, mut loose) = (0usize, 0usize, 0usize);
     let (mut part_inst, mut shell_inst) = (0usize, 0usize);
+    let mut worst_reach = 0.0f64;
     for b in &scene.scatter {
         let n = b.data.instances.len();
         assert!(
@@ -476,6 +521,11 @@ fn the_shipped_projection_emits_complementary_parts_and_shell_batches() {
             "a batch bands from {} m, which is neither 0 nor the LOD distance",
             b.near_distance
         );
+        let key = [
+            b.anchor.x.to_bits(),
+            b.anchor.y.to_bits(),
+            b.anchor.z.to_bits(),
+        ];
         if b.near_distance == lod {
             // The shell band: bounded below by the LOD distance, and above only
             // by the volume's own authored draw distance.
@@ -486,7 +536,21 @@ fn the_shipped_projection_emits_complementary_parts_and_shell_batches() {
             );
             shells += 1;
             shell_inst += n;
-        } else if b.draw_distance == lod {
+        } else if b.draw_distance > lod {
+            // The parts band: bounded above by the LOD distance **plus this
+            // volume's own reach**, which is what makes the pair gap-free.
+            let reach = *reach_of
+                .get(&key)
+                .expect("a parts batch anchored where no volume is");
+            assert!(reach > 0.0, "a building with a zero-size shell");
+            assert_eq!(
+                b.draw_distance,
+                lod + reach,
+                "a parts batch is bounded above at {} m, which is neither the LOD \
+                 distance nor the LOD distance plus its own {reach} m reach",
+                b.draw_distance
+            );
+            worst_reach = worst_reach.max(reach);
             parts += 1;
             part_inst += n;
         } else {
@@ -495,8 +559,9 @@ fn the_shipped_projection_emits_complementary_parts_and_shell_batches() {
     }
     println!(
         "IB-2b (shipped projection): {parts} parts batches ({part_inst} instances) \
-         bounded above at {lod} m, {shells} shell batches ({shell_inst} instances) \
-         bounded below at {lod} m, {loose} ungrouped instances"
+         bounded above at {lod} m + a reach of at most {worst_reach:.3} m, {shells} \
+         shell batches ({shell_inst} instances) bounded below at {lod} m, {loose} \
+         ungrouped instances"
     );
     assert_eq!(
         parts,
@@ -522,6 +587,97 @@ fn the_shipped_projection_emits_complementary_parts_and_shell_batches() {
         "{loose} ungrouped instances in a city of buildings"
     );
     let _ = &mut sim;
+}
+
+/// **No eye position leaves a building partly drawn with nothing standing in for
+/// it** (I3 audit).
+///
+/// The two bands are complementary in the **group's** distance; the cull is per
+/// **instance**. A part sits up to its shell's own half-diagonal nearer the eye
+/// than the shell's centre does, so with both cuts at `STRUCTURE_LOD_M` a
+/// building whose shell centre is just *inside* the line loses the parts that
+/// are just *outside* it — and grows no shell to stand in for them. That is a
+/// hole through the back of a building, and on a city it is not a corner case:
+/// it is every building in a `2 × reach`-wide annulus, at all times.
+///
+/// The property asserted is the disjunction, because it is what the eye needs:
+/// **either the shell is drawn or every part is**. The naive equal cuts are
+/// priced in the same run — a "zero" over a city that never straddles the line
+/// would be a statement about the fixture rather than about the rule.
+#[test]
+fn no_eye_position_leaves_a_building_partly_drawn_with_no_shell() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pack = cook_city(tmp.path());
+    let built = pack_built(&pack);
+    let lod = inf_render::STRUCTURE_LOD_M;
+
+    // Per building: its shell's centre, its parts' own world positions, and the
+    // reach its BATCH carries (a volume's widest shell, since the band is a
+    // property of the batch and not of one building).
+    let mut buildings: Vec<(DVec3, Vec<DVec3>, f64)> = Vec::new();
+    for (_, _, v) in placed_volumes(&built) {
+        let reach = reach_of_volume(&v);
+        for g in &v.structure_groups {
+            buildings.push((
+                g.shell.center,
+                v.evaluated[g.instance_range()]
+                    .iter()
+                    .map(|i| i.position)
+                    .collect(),
+                reach,
+            ));
+        }
+    }
+    assert!(buildings.len() >= 1_000, "not a city");
+
+    // A building is whole when the shell is drawn OR every part is. `parts_cut`
+    // is the batch's own upper band; the two candidates differ only in whether
+    // it carries the reach.
+    let gapped = |carry_reach: bool| {
+        let mut worst = (0usize, 0u64);
+        let mut total = 0usize;
+        for step in (0..CITY_STEPS as u64).step_by(24) {
+            let eye = city_drive_point(step);
+            let mut n = 0usize;
+            for (centre, parts, reach) in &buildings {
+                let cut = if carry_reach { lod + reach } else { lod };
+                let shell = (*centre - eye).length() >= lod;
+                let whole = parts.iter().all(|p| (*p - eye).length() < cut);
+                if !shell && !whole {
+                    n += 1;
+                }
+            }
+            total += n;
+            if n > worst.0 {
+                worst = (n, step);
+            }
+        }
+        (total, worst)
+    };
+
+    let (shipped, _) = gapped(true);
+    let (naive, naive_worst) = gapped(false);
+    println!(
+        "IB-2b gap sweep ({} buildings, {} eyes on the drive line): shipped \
+         (parts band + reach) {shipped} part-drawn buildings with no shell; the \
+         equal-cut alternative {naive}, worst {} at step {}",
+        buildings.len(),
+        CITY_STEPS / 24,
+        naive_worst.0,
+        naive_worst.1
+    );
+    assert_eq!(
+        shipped, 0,
+        "{shipped} buildings are drawn in pieces with no shell behind them — \
+         the parts band no longer carries its reach"
+    );
+    // ANTI-VACUITY: the alternative this arm exists to refuse must really fail
+    // on this fixture, or the fixture never straddles the LOD line.
+    assert!(
+        naive > 0,
+        "the equal-cut alternative left nothing gapped — no building on this \
+         city straddles the {lod} m line, so this arm measures nothing"
+    );
 }
 
 // ── (d) PIE == shipping, driving ────────────────────────────────────────────

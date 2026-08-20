@@ -1218,8 +1218,15 @@ fn push_scatter(
 /// | batch | band | what it holds |
 /// |---|---|---|
 /// | ungrouped | `[0, draw_distance)` | scatter and fences — content that has no shell to stand in for it |
-/// | parts | `[0, lod)` | every building's own boxes |
+/// | parts | `[0, lod + reach)` | every building's own boxes |
 /// | shells | `[lod, draw_distance)` | one oriented box per building |
+///
+/// `reach` is the widest shell's own half-diagonal, and it is there because the
+/// bands are complementary in the **group's** distance while the cull is per
+/// **instance** (I3 audit): without it a building straddling the line loses its
+/// far parts and grows no shell — a hole through its back. The two bands
+/// therefore overlap by `reach` rather than meeting, and in that overlap a
+/// building draws its parts inside its own shell, which contains them.
 ///
 /// **The camera is nowhere in this function**, which is the whole point: a
 /// selection made on the CPU would put the eye inside a batch's *content key*,
@@ -1264,11 +1271,30 @@ fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3
     loose.extend_from_slice(&vol.evaluated[..first.min(vol.evaluated.len())]);
     loose.extend_from_slice(&vol.evaluated[last..]);
     push_scatter(scene, &loose, translation, vol.draw_distance, 0.0, id);
+    // **The two bands are complementary in the GROUP's distance, and the cull is
+    // per INSTANCE** (I3 audit). A part sits up to its shell's own half-diagonal
+    // nearer the eye than the shell's centre does, so cutting both at `lod`
+    // leaves a building whose shell is just inside the line without the parts
+    // that are just outside it — and with no shell to stand in for them. That is
+    // a hole through the back of a building, not a level of detail. Widening the
+    // parts band by exactly that reach makes a gap impossible; the price is a
+    // `reach`-wide overlap in which a building draws its parts INSIDE its own
+    // shell, which is bounded, contained, and never a hole.
+    let reach = vol
+        .structure_groups
+        .iter()
+        .map(|g| g.shell.half_extents.length())
+        .fold(0.0_f64, f64::max);
+    let parts_far = if vol.draw_distance > 0.0 {
+        (lod + reach).min(vol.draw_distance)
+    } else {
+        lod + reach
+    };
     push_scatter(
         scene,
         &vol.evaluated[first.min(last)..last],
         translation,
-        lod,
+        parts_far,
         0.0,
         id,
     );
