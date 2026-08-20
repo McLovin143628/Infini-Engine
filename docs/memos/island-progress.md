@@ -18,7 +18,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 
 | Wave | Scope | Status |
 |---|---|---|
-| **I1** | foundations — IB-7 layout, IB-1 PCG/streaming, IB-10 schema window, IB-15 multi-terrain | **DONE** (+ `.inf_sm` v3 addendum) |
+| **I1** | foundations — IB-7 layout, IB-1 PCG/streaming, IB-10 schema window, IB-15 multi-terrain | **DONE + AUDITED** (+ `.inf_sm` v3 addendum) |
 | I2 | the GIS door — IB-3, IB-4, IB-5, IB-6, IB-14 | not started |
 | I3 | city scale — IB-2 (grammar collider LOD/budget, lot subdivision) | not started |
 | I4 | the fps instrument + budgets — IB-9, IB-16, the shipping-resolution harness | not started |
@@ -65,6 +65,23 @@ Wave numbering is this file's; the certification's ordering is what it follows.
   Found on `.inf_sm` v2: `decode_wire` dispatches straight into `v2::Motion`, which had no
   depth guard, so a crafted sub-machine chain would have hit the stack before `validate`.
   The guard is now shared, not restated.
+* **A gate must run the DOOR, not the function behind it** (I1 audit). Three of I1's four
+  items were armed by calling the fixed Ring-0 rule directly, so the *wiring* — the one call
+  site in each host — was unarmed, and stubbing it left all 64 `inf-player` test binaries
+  green. An arm that builds the rule's inputs by hand measures the rule; only an arm that
+  goes through the boot path measures the fix.
+* **A `contains` needle that is a prefix of a declaration can never fail** (I1 audit).
+  `contains("page_terrains_for_pcg(")` reads TRUE off `fn page_terrains_for_pcg(`, so a
+  host that defined the pre-pass and stopped calling it satisfied the mirror gate perfectly.
+  Use-site pins are **counts**, not substrings.
+* **A gate against a cheaper alternative has to price the alternative** (I1 audit). "Not a
+  bounding box" was asserted as `paged < 16` over two volumes on the same `z` row, where a
+  union costs 4 — so the mutation the gate names passed it. The fixture now puts them on a
+  diagonal and *measures* the union at 16.
+* **A rule that changes has to change everywhere it is written down.** IB-15 retired the
+  lowest-`Guid` ground pick and left ~8 doc sites in five crates still teaching it, plus one
+  function (`inf_ecs::deform::ground_terrain`) whose doc asserted an invariant the change had
+  just broken. Corrected, and the broken invariant is now a measured bound.
 * **A payload with a migrating rung must not be diagnosed as "too old".**
   `AssetPayload::migrates_from` exists so a v2 `.inf_sm` that fails for a *structural*
   reason reports that reason. Telling an author to re-create a machine whose problem is
@@ -122,6 +139,50 @@ P16 pyramid anchor **stands verbatim**. Plus the position-aware ground-query fix
 
 ---
 
+## The I1 audit (adversarial, `2151826..c9ce76a`)
+
+Every claim above **HELD on re-measurement** — the numbers reproduce exactly (220/220
+identical, 2 of 16 tiles, 495 on the hill, 33 bit-identical border samples, 127 ground
+samples, 66.8707°, delta == entity_count on all 19 levels, `Playground.inf_lvl` 8 839 →
+8 839 with 40 bytes differing, `.inf_sm` +5/+4 bytes and +4 lines × 18 B, frontend 691/77,
+goldens 54 and unmoved, exactly the three authorized container bumps). What the audit found
+was **not wrong claims — it was arms that could not fail**, in three of the four items.
+
+**Mutation-measured gate blindness, all four now closed:**
+
+| mutation | before the audit | now |
+|---|---|---|
+| `InfSceneWorldBuilder::build` stops paging (the IB-1 fix's one production site) | **all 64 `inf-player` test binaries green** | `a_payload_that_carries_its_terrain_scatters_on_the_hill` |
+| the shipped host's ground gather narrows back to the lowest `Guid` (the IB-15 defect) | **all 64 green** | `the_shipped_host_seam_answers_on_both_terrains` + the host mirror |
+| the editor host stops calling `page_terrains_for_pcg` | mirror gate green (`contains("page_terrains_for_pcg(")` reads TRUE off `fn page_terrains_for_pcg(`) | occurrence **counts**, both hosts |
+| `pcg_regions_of` becomes a union bounding box, **both** mirrors | footprint arm green (both volumes shared a `z` row, so the union was 4 tiles of 16) | volumes on a diagonal, `paged == 2` exact, and the union's own cost measured at 16 |
+| `ScenePayload::blend_mode` is never applied by the player | **all 64 green** | `the_payloads_session_blend_mode_reaches_the_built_world` |
+| the platformer template's actor sidecar GUID drifts to anything | **nothing red** — the arm asserted the sidecar contained the text `"guid = "` | the GUID's 16 bytes must be in the level payload; the committed sidecar is locked to `COYOTE_ASSET_GUID` |
+| `stranded_levels`' guard reverts to `legacy == levels_root()` | its own arm green (`Path` equality normalizes `.` away, so the `content_dir = "."` fixture never discriminated) | a second fixture (`levels_dir = "Content/Levels"`) that does |
+| `PoseBlender::mode_for` reads *any* authored mode | nothing red (every parity fixture has one transition) | `the_precedence_reads_the_fired_edge_and_not_its_siblings` |
+
+After the repairs: battery **295 / 5 566 / 0 / 13** (+9 arms, no new test binaries), `fmt`
+clean, `clippy --workspace --all-targets` with `-D warnings` **zero**, frontend **691 / 77**
+and `tsc --noEmit` clean, rustdoc **442 of 450** (the wave had taken it to 448), goldens
+**54** and byte-unchanged.
+
+Nine independent mutations were re-run after the fixes and each dies at exactly the arm that
+names it, and at no other. The implementer's own mutations were re-run too and all hold
+(template scaffolding to the legacy path trips six arms; deleting the cook advisory trips
+two; reverting the Ring-0 ground rule trips the 127-sample arm **and nothing else in three
+crates**, which is the proof that single-terrain behaviour is unchanged by construction).
+
+**The one behavioural consequence the wave did not enumerate.** IB-15 made the *height*
+query position-aware; `inf_ecs::deform::ground_terrain` — the deformation footprint pass —
+did **not** move with it, and its doc claimed the two rules could never disagree. Measured
+and now asserted (`a_contact_over_a_second_terrain_leaves_no_footprint`): on a two-terrain
+level a body standing on the **second** terrain stands correctly and leaves **zero**
+footprints against the control's one, because the pass resolves one terrain for the whole
+world and `height_at` answers `None` outside it. Carried below; closing it means resolving
+per contact and keying the field by terrain entity.
+
+---
+
 ## Next — wave I2 (the GIS door)
 
 The certification calls this *"the single largest piece of connective work the island
@@ -157,6 +218,23 @@ finally a thing that can be measured rather than a thing that returns zeros.
 ## Open questions / carried bounds
 
 **Measured and bounded (I1 owns the numbers):**
+* **The deformation footprint pass is still single-terrain.** `ground_terrain` picks the
+  lowest `Guid` once per step and every contact is resolved against it, so on a two-terrain
+  level a body on the second one leaves **0 footprints** against a control's 1 — measured by
+  `inf_ecs::deform`'s `a_contact_over_a_second_terrain_leaves_no_footprint`. Found by the I1
+  audit as a consequence of IB-15: the two rules used to be the same rule.
+* **`ScenePayload::blend_mode` has a reader and no writer.** The PIE path applies it
+  (`build_world_from_payload`), and nothing sets `inf_ecs::pose::set_blend_mode` outside
+  tests — no panel, no Ring-2 command, and the blueprint kit declines it by name. So the
+  session default is `Inertialize` in practice, and the **cooked** path carries no payload
+  and applies none at all: a project that ever gains a way to change it would preview one
+  blend and ship another. The per-edge `.inf_sm` v3 field is the surface that *is* authored
+  and *does* ship; this slot is the inherit-target, waiting for its author-facing half.
+* **The rustdoc ceiling has 8 of 450 left** — measured at **442** after this audit; the wave
+  took it to 448 with six new links (two private ladder aliases, three unqualified
+  `SmBlendMode`/`PoseBlender` paths, one private `stranded_levels`), all now item-scoped or
+  unlinked. `cargo doc --no-deps --workspace` is the cheapest CI leg to turn red; run it
+  before adding an intra-doc link, and prefer `[X](crate::X)` over a bare `[X]`.
 * Adjacent terrains' shading **normals differ by 66.8707°** at a shared border — `normal_at`
   clamps a missing neighbour to the centre height, so an outer edge reads a one-sided
   gradient. Asserted as a bound with an interior control; closing it fails that arm.

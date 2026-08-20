@@ -2737,16 +2737,22 @@ fn arg_f64(args: &[Value], i: usize) -> f64 {
     }
 }
 
-/// Sample the world's terrain height at world `(x, z)` — the `terrain.height_at`
-/// host seam (P11.4). Uses the **lowest-`Guid`** non-empty [`Terrain`] (a
+/// The **ground** height at world `(x, z)` — the `terrain.height_at` host seam
+/// (P11.4), byte-for-byte the shipped runtime host's (preview == shipped). A
 /// heightfield carries no physics collider, so a 3D character reads its height
-/// here to stay grounded); returns `0.0` with no terrain. Shared shape with the
-/// shipped runtime host so preview == shipped. Deterministic (Guid-picked).
-/// The **ground** height at world `(x, z)` — the `terrain.height_at` host seam.
+/// here to stay grounded.
 ///
-/// Picks the lowest-`Guid` non-empty terrain, remembering only its entity + origin —
-/// never a clone of the (multi-MB) heightfield. The component is re-fetched after
-/// the scan (all EntityRef borrows released) and sampled in place.
+/// **POSITION-AWARE since the island phase (IB-15).** It used to pick the
+/// lowest-`Guid` non-empty terrain and sample only that one, with no test of
+/// whether it covered `(x, z)` — so over a second terrain it read `None` and a
+/// character walking across the border fell to the `0.0` below. Every non-empty
+/// terrain now goes to the Ring-0 rule with its origin and the topmost surface
+/// that answers wins; ties go to the first in `Guid` order, which both hosts sort
+/// by, so the answer is a function of the level and not of an archetype walk.
+///
+/// Only entities + origins are remembered during the scan, never a clone of a
+/// (multi-MB) heightfield; the components are re-fetched afterwards (all
+/// `EntityRef` borrows released) and sampled in place.
 ///
 /// P21.2: the answer is the **combined** ground query, not the heightfield alone.
 /// A carved sample makes `TerrainData::height_at` return `None` through its whole

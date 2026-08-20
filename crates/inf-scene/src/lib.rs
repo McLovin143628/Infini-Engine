@@ -384,8 +384,10 @@ use uuid::Uuid;
 ///   record appends the **vehicle class** slot — `vehicle_class`
 ///   ([`VehicleClass`]: a vehicle's fifteen authored tunables, exactly
 ///   `inf_ecs::vehicle::VehicleTuning::names()`). A new slot at the record's
-///   tail, i.e. the cheap [`EntityRecordV10`] rung rather than the
-///   [`EntityRecordV14`] one, so every frozen record above is byte-unchanged.
+///   tail, i.e. the cheap `EntityRecordV10` rung rather than the
+///   `EntityRecordV14` one, so every frozen record above is byte-unchanged.
+///   (Plain, not linked: both are private ladder-local aliases, and a public doc
+///   that links to a private item is a rustdoc warning against a pinned ceiling.)
 ///
 ///   **What it closes.** P29.7's own remainder: *"The vehicle has no per-vehicle
 ///   authored tuning. A committed rig uses the Ring-0 defaults in both hosts,

@@ -265,8 +265,8 @@ impl RenderWater {
     /// * P19.5's `ScatteredSolid` → collider path likewise — hiding a `PcgVolume`
     ///   removes its instances from the frame and leaves every building collider
     ///   standing;
-    /// * `terrain.height_at` picks the lowest-`Guid` non-empty terrain with no
-    ///   visibility test; `AudioSource`s keep playing; sensors keep triggering;
+    /// * `terrain.height_at` reads every non-empty terrain with no visibility
+    ///   test; `AudioSource`s keep playing; sensors keep triggering;
     ///   `partition::occupies_space` bins a hidden entity like any other.
     ///
     /// `ComputedVisibility` has exactly three readers in the whole repository:

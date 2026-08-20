@@ -12,8 +12,8 @@
 //! * the 2D and 3D bridges gather rigid bodies, colliders and joints on component
 //!   presence alone — a hidden wall still blocks;
 //! * P19.5's `ScatteredSolid` colliders likewise;
-//! * `terrain.height_at` picks the lowest-`Guid` non-empty terrain with no
-//!   visibility test, `AudioSource`s keep playing, sensors keep triggering, and
+//! * `terrain.height_at` reads every non-empty terrain with no visibility test,
+//!   `AudioSource`s keep playing, sensors keep triggering, and
 //!   `partition::occupies_space` bins a hidden entity like any other.
 //!
 //! `ComputedVisibility` has exactly three readers in the repository: the two

@@ -23420,3 +23420,153 @@ measured per-level byte block, like its v3 sibling.
 * **A cook advisory must fire on the SUCCESSFUL cook too.** "No levels" already had a
   message; the case with no symptom is the project that cooks fine with one level stranded
   outside.
+
+---
+
+## Phase 30 (the island) — wave I1 AUDIT (2026-08-19)
+
+Adversarial audit of `2151826..c9ce76a` (7 commits), by a separate agent, sole tree-writer.
+
+**Every numeric claim the wave made HELD on re-measurement.** 220 authored vs 220 streamed
+instances, positions identical; 2 of 16 level-0 tiles; 495 instances at y 15.004..16.404 on
+the hill; 33 border samples bit-identical; 127 ground samples, 63 past the border, none at
+sea level; 66.8707° normal seam; the header origin still never placing a tile; `delta ==
+entity_count` on all nineteen committed levels; `Playground.inf_lvl` 8 839 → 8 839 with
+exactly 40 bytes differing; `Locomotion.inf_sm` +5 over 5 transitions and
+`Hero Locomotion.inf_sm` +4 over 4; the `.txt` 66 → 70 lines and 1 413 → 1 485 bytes;
+`scene_v24.inf_lvl` byte-identical across both mirrors; four templates cooking and running
+300 frames through the real `Project::create` and a real subprocess; frontend 691 tests in
+77 files; goldens 54 and **not one byte moved**; exactly the three authorized container
+bumps (scene v24→v25, `ScenePayload` v10→v11, `.inf_sm` v2→v3) and no fourth.
+
+What the audit found was not a wrong claim. It was **arms that could not fail**.
+
+### The findings
+
+**A1 — the IB-1 fix's production wiring had no arm. (HIGH, fixed)**
+`pcg_over_streamed_terrain` called `page_terrains_for_pcg` directly. Stubbing the one call
+site the shipped player runs it from — the `if let Some(resolve) = &self.terrain_resolver`
+inside `InfSceneWorldBuilder::build` — left **all 64 `inf-player` test binaries green**.
+Now `a_payload_that_carries_its_terrain_scatters_on_the_hill` builds a world through
+`build_world_from_payload` and asserts where the instances *are*: 220 at y 50.068..59.806
+with the `.inf_terrain` bytes carried, and — the control — **929 at exactly sea level**
+without them, which is the certification's own measurement reproduced end to end through a
+production door. `every_boot_path_wires_the_pcg_terrain_resolver` pins the count at three,
+because the loose-dir path is not reachable from a test in this crate and a boot path that
+forgets an attachment does not crash, it agrees with itself (the P21 law).
+
+**A2 — the IB-15 fix's host seam had no arm either. (HIGH, fixed)**
+The 127-sample walk calls `inf_voxel::ground_height_at` with a `terrains` slice the test
+built itself. The defect was never in that function; it was in the **gather** that fills the
+slice, which exists twice, once per host. Narrowing the shipped host's gather back to the
+lowest `Guid` — the defect, exactly — left all 64 binaries green. Now
+`the_shipped_host_seam_answers_on_both_terrains` walks `RuntimeSim::terrain_height_at`
+across the border (127 samples, 31 that only the second terrain answers), and
+`projector_mirror::both_hosts_gather_every_terrain_for_the_ground_query` compares the two
+hosts' `terrain_height_at` character for character — anchored on the free function's
+multi-line signature, because `item_start` finds the `RuntimeSim` method of the same name
+first.
+
+**A2b — the change broke an invariant one system over, and nobody enumerated it. (MEDIUM,
+bounded)** `inf_ecs::deform::ground_terrain` still picks the lowest `Guid`, once, for every
+contact — and its doc said a footprint and a ground query "can never pick different ground",
+which was true until IB-15. Measured and asserted
+(`a_contact_over_a_second_terrain_leaves_no_footprint`): on a two-terrain level a body
+standing on the **second** terrain stands correctly and leaves **zero** footprints against
+the control's one. Bounded rather than fixed — the answer is an entity and the field is
+stamped in that terrain's frame, so closing it is a per-contact resolve and a
+terrain-keyed field, not a swapped comparison.
+
+**A3 — a mirror needle that could not fail. (MEDIUM, fixed)** `contains("page_terrains_for_pcg(")`
+is satisfied by `fn page_terrains_for_pcg(`. Deleting the editor host's one call site left
+`both_hosts_page_the_same_ground_before_evaluating` green. Both use sites are now pinned as
+**counts** (2 per host: the declaration and the call), as is `pcg_regions_of`.
+
+**A4 — the anti-bounding-box arm did not falsify a bounding box. (MEDIUM, fixed)**
+`the_paged_footprint_follows_the_volumes_rather_than_their_bounding_box` asserted
+`paged < 16` over two volumes at `(0,0)` and `(SPAN-8, 0)` — the same `z` row, so their union
+is a thin strip costing 4 tiles. Rewriting `pcg_regions_of` to a union bounding box **in both
+mirrors** left it green. The volumes are now diagonal, the claim is `paged == 2` exactly, and
+the union's cost is *measured in the test* at 16 of 16 — a gate against a cheaper alternative
+has to price the alternative.
+
+**A5 — `ScenePayload::blend_mode` is a slot with a reader, no arm, and no writer. (MEDIUM,
+armed + bounded)** Deleting the one line that applies it in `build_world_from_payload` left
+all 64 binaries green; the parity arm sets the resource itself and never ran the wire.
+`the_payloads_session_blend_mode_reaches_the_built_world` now asserts the built world's
+resource for wire 0, 1 and an unknown discriminant, with the two-values-differ control.
+**And the honest bound, now carried:** nothing *writes* the session default — no panel, no
+Ring-2 command, and `inf-blueprint`'s node kit declines it by name — so it is `Inertialize`
+in practice, and the **cooked** path carries no payload and applies none at all. The
+authored, shipping surface is the per-edge `.inf_sm` v3 field; this slot is what an
+inheriting edge inherits, waiting for its author-facing half.
+
+**A6 — the template's actor GUID was unpinned. (MEDIUM, fixed)** The commit says the
+platformer template "ships the actor its level binds"; the arm asserted the sidecar text
+contained `"guid = "`. Changing the committed `Coyote.inf_act.toml` GUID to anything at all
+turned nothing red — which scaffolds precisely the project the commit says it prevents, a
+player that does not move. The arm now decodes the sidecar's GUID and requires its sixteen
+bytes to appear in the level payload (with a one-bit-flipped control), and
+`committed_sample_matches_generators` locks the sidecar to `COYOTE_ASSET_GUID` and its
+content hash to the generated actor.
+
+**A7 — the false-alarm guard's fixture could not tell the two rules apart. (LOW, fixed)**
+`a_content_root_that_contains_the_legacy_directory_raises_nothing` documents the guard as
+replacing a naive `legacy == levels_root()`. It passes under the naive rule too: Rust's
+`Path` equality normalizes a `.` component away, so `<root>/./Levels` **is** `<root>/Levels`
+and the `content_dir = "."` case was never the discriminating one. A second fixture
+(`levels_dir = "Content/Levels"` under `content_dir = "Content"` — the mistake an author who
+read the ruling literally would make) does discriminate, and both the test's prose and
+`stranded_levels`' comment now say which is which.
+
+**A8/A9 — the retired rule was still being taught. (LOW, fixed)** IB-15 changed which
+terrain answers and left ~8 doc sites in five crates describing the lowest-`Guid` rule as
+current — including an orphaned doc block in `runtime_sim.rs` that had drifted onto
+`guid_source_key`, and `inf-editor-core::hydro`'s note explaining a deliberate divergence
+from the runtime that the change had just retired. `inf-blueprint`'s node kit also still said
+`set_blend_mode` "nothing outside its own tests calls", one commit after `pie.rs` started
+reading it. All corrected.
+
+**A10 — the v3 rung's hostile sweep only swept v2. (LOW, fixed)** The truncation sweep runs
+over `v2_sm_bytes()`, where every `Option<SmBlendMode>` is a byte the decoder never reads.
+`a_v3_payload_with_every_mode_authored_is_refused_at_every_truncation` sweeps a payload where
+every transition — the sub-machine's included — names a mode. Beside it,
+`an_authored_mode_does_not_leak_onto_its_siblings` and
+`the_precedence_reads_the_fired_edge_and_not_its_siblings`: every parity fixture in the tree
+has **one** transition, so "the fired edge" and "any authored edge" were indistinguishable.
+
+**A11 — the wave spent the rustdoc margin. (LOW, fixed)** Six new warnings (private
+`EntityRecordV10`/`EntityRecordV14` links, three unqualified `SmBlendMode`/`PoseBlender`
+links from `state_machine.rs`, a private `stranded_levels` link) took the count from 442 to
+**448 against a pinned ceiling of 450**. Item-scoped or unlinked; measured back at 442.
+
+### What the audit re-ran
+
+Four of the implementer's own mutations, all holding: a template that scaffolds into the
+pre-ruling `<root>/Levels/` trips **six** arms across two crates; deleting the cook advisory
+trips the blocked-cook arm and the successful-cook arm and nothing else; reverting the Ring-0
+ground rule to first-terrain-only trips the 127-sample arm **and nothing else in three
+crates** — which is the proof that single-terrain behaviour is unchanged by construction;
+making the `.inf_sm.txt` blend token conditional is caught (by
+`committed_sample_matches_generators`, not by `phase29_gate`'s line-count arm, which compares
+two writer outputs and so cannot see a token that is absent from both). Plus: removing a name
+from `VehicleTuning::names()` trips `the_vehicle_class_is_exactly_the_tuning_door`; dropping
+`blend_mode` from the 20-field wire pin trips it; inverting `mode_for`'s precedence trips the
+precedence arm; removing the v2 record's depth guard trips the nested-payload refusal.
+
+Then nine new mutations against the repaired arms, each dying at exactly the arm that names
+it and at no other. The full table is in `docs/memos/island-progress.md`.
+
+### Laws this audit paid for
+
+* **A gate must run the DOOR, not the function behind it.** Three of four items were armed
+  against the fixed Ring-0 rule and left the wiring — one call site per host — unmeasured.
+* **A `contains` needle that is a prefix of a declaration can never fail.** Use-site pins are
+  counts.
+* **A gate against a cheaper alternative has to price the alternative**, in the test, in the
+  same units.
+* **A rule that changes has to change everywhere it is written down** — including in the
+  function one system over whose doc asserted the invariant the change just broke.
+* **A payload slot needs a writer, not only a reader.** `blend_mode` round-trips, is applied,
+  and is armed; nothing can set it, and the shipping path never sees it. That is a bound, and
+  it is now written down instead of implied by a builder method.

@@ -1628,11 +1628,18 @@ fn stranded_levels(project: &Project) -> Vec<String> {
     let legacy = project.legacy_levels_root();
     // A project whose pre-ruling directory happens to sit INSIDE the content
     // root is not stranded — the cook's scan is recursive, so those levels are
-    // already found. This is not hypothetical: an author with
-    // `content_dir = "."` has `<root>/Levels/` inside the content root, and
-    // comparing the two paths for equality (the first version of this guard)
-    // would have called every one of their levels stranded, for ever, while the
-    // cook was packing them.
+    // already found.
+    //
+    // `starts_with`, not `==` against `levels_root()`. The equality rule looks
+    // equivalent and is not: an author who read "levels live under
+    // `Content/Levels/`" and wrote *that whole path* into `levels_dir` — which is
+    // relative to the CONTENT root — has real levels at `<root>/Content/Levels`
+    // that the cook packs, while `levels_root()` resolves to
+    // `<root>/Content/Content/Levels`. Under `==` every one of those packed
+    // levels would be named as stranded, for ever. (The `content_dir = "."` case
+    // is NOT the one that separates the two rules: `Path` equality normalizes the
+    // `.` away, so `<root>/./Levels == <root>/Levels` and the naive rule happens
+    // to be right there. `first_run_path` carries both fixtures and says so.)
     if legacy.starts_with(project.content_root()) {
         return Vec::new();
     }
@@ -1661,7 +1668,7 @@ fn stranded_levels(project: &Project) -> Vec<String> {
     )]
 }
 
-/// The wording of [`stranded_levels`], pure so it can be pinned.
+/// The wording of `stranded_levels` (private), pure so it can be pinned.
 pub fn stranded_levels_advisory(
     legacy: &Path,
     levels_root: &Path,

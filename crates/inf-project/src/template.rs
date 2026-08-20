@@ -443,17 +443,69 @@ mod tests {
         );
     }
 
-    /// The 2D platformer's boot scene binds a blueprint, and the sidecar beside
-    /// that blueprint carries the GUID the binding names.
+    /// The 16 bytes a UUID is written as inside a bincode payload, parsed out of
+    /// a sidecar's `guid = "…"` line.
+    ///
+    /// Hand-rolled because `inf-project` does not depend on `uuid` and must not
+    /// grow a dependency to check its own committed content.
+    fn sidecar_guid_bytes(sidecar: &str) -> [u8; 16] {
+        let line = sidecar
+            .lines()
+            .find(|l| l.trim_start().starts_with("guid = "))
+            .expect("the sidecar names a GUID");
+        let hex: String = line
+            .split('"')
+            .nth(1)
+            .expect("the GUID is quoted")
+            .chars()
+            .filter(|c| *c != '-')
+            .collect();
+        assert_eq!(hex.len(), 32, "not a UUID: {hex}");
+        let mut out = [0u8; 16];
+        for (i, b) in out.iter_mut().enumerate() {
+            *b = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).expect("hex");
+        }
+        out
+    }
+
+    /// **The 2D platformer's boot scene binds a blueprint, and the sidecar beside
+    /// that blueprint carries THE GUID THE BINDING NAMES.**
+    ///
+    /// The I1 audit found this arm asserting only that the sidecar text contained
+    /// `"guid = "`, and measured the consequence: the committed
+    /// `Coyote.inf_act.toml` GUID could be changed to anything at all with nothing
+    /// in the workspace going red — which scaffolds exactly the project the
+    /// commit that added this said it prevented, *"a player that does not move"*.
+    ///
+    /// So the check is the identity itself. `ActorClass` is a `Uuid` written by
+    /// bincode as its sixteen raw bytes, so those bytes are in the level payload
+    /// verbatim, and a sidecar that names a different asset cannot contain them.
     #[test]
     fn the_platformer_template_ships_the_actor_its_level_binds() {
         let extra = ProjectTemplate::Platformer2d.starter_content();
         assert_eq!(extra.len(), 2, "the actor payload and its sidecar");
+        assert_eq!(extra[1].0, "Coyote.inf_act.toml");
         let side = std::str::from_utf8(extra[1].1).unwrap();
+        let guid = sidecar_guid_bytes(side);
+
+        let level = ProjectTemplate::Platformer2d.starter_level().payload;
         assert!(
-            side.contains("guid = "),
-            "the actor sidecar must name a stable GUID, else the level's \
-             ActorClass binding resolves to nothing: {side}"
+            level.windows(16).any(|w| w == guid),
+            "the platformer's boot scene does not bind the actor scaffolded \
+             beside it — the sidecar names {side:?}, and those bytes are nowhere \
+             in the level payload, so `inf new --template 2d-platformer` \
+             scaffolds a player that does not move"
+        );
+
+        // ANTI-VACUITY: a level does not contain every GUID. The nil UUID would
+        // match a run of zero bytes, so the control is the real GUID with one
+        // byte moved — same shape, same length, different asset.
+        let mut wrong = guid;
+        wrong[15] ^= 0xFF;
+        assert!(
+            !level.windows(16).any(|w| w == wrong),
+            "a GUID the level does not bind was found in it anyway, so the \
+             assertion above is not about the binding"
         );
     }
 

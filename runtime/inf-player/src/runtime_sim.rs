@@ -763,16 +763,18 @@ impl RuntimeSim {
     }
 
     /// The `terrain.height_at` **host seam**, as the simulation sees it: the exact
-    /// function the Blueprint node dispatches to (lowest-`Guid` non-empty
-    /// [`Terrain`], its component-resident working set, entity-origin shifted).
+    /// function the Blueprint node dispatches to (every non-empty [`Terrain`],
+    /// each on its component-resident working set and shifted by its own entity
+    /// origin, topmost surface that answers winning — the island phase's IB-15
+    /// rule; see the free function below).
     ///
     /// Exposed so the streaming gate can assert sim determinism against the real
     /// seam rather than a re-implementation of it.
-    /// `&mut` since Hardening Wave E: the seam resolves its terrain through an
+    ///
+    /// `&mut` since Hardening Wave E: the seam resolves its terrains through an
     /// archetype-scoped query instead of a whole-world walk, and building one
-    /// needs the world mutably. The **answer is unchanged** — it is still the
-    /// lowest-`Guid` non-empty terrain — and nothing is cached, so a gate that
-    /// traces this still traces the live simulation.
+    /// needs the world mutably. Nothing is cached, so a gate that traces this
+    /// still traces the live simulation.
     pub fn terrain_height_at(&mut self, x: f64, z: f64) -> f64 {
         terrain_height_at(&mut self.world, &self.voxels, x, z)
     }
@@ -2635,9 +2637,6 @@ fn arg_f64(args: &[Value], i: usize) -> f64 {
     }
 }
 
-/// Sample the world's terrain height at world `(x, z)` — the `terrain.height_at`
-/// host seam (P11.4), byte-for-byte the editor `SimHost`'s (preview == shipped).
-/// Uses the lowest-`Guid` non-empty [`Terrain`]; `0.0` with no terrain.
 /// A stable audio source key for a scene-placed emitter (the `Guid`'s low bits) —
 /// the shipped mirror of the editor helper.
 fn guid_source_key(guid: Uuid) -> u64 {
@@ -2726,11 +2725,22 @@ fn attenuation_of(src: &AudioSource) -> Attenuation {
     }
 }
 
-/// The **ground** height at world `(x, z)` — the `terrain.height_at` host seam.
+/// The **ground** height at world `(x, z)` — the `terrain.height_at` host seam
+/// (P11.4), byte-for-byte the editor `SimHost`'s (preview == shipped). A
+/// heightfield carries no physics collider, so a 3D character reads its height
+/// here to stay grounded.
 ///
-/// Picks the lowest-`Guid` non-empty terrain, remembering only its entity + origin —
-/// never a clone of the (multi-MB) heightfield. The component is re-fetched after
-/// the scan (all EntityRef borrows released) and sampled in place.
+/// **POSITION-AWARE since the island phase (IB-15).** It used to pick the
+/// lowest-`Guid` non-empty terrain and sample only that one, with no test of
+/// whether it covered `(x, z)` — so over a second terrain it read `None` and a
+/// character walking across the border fell to the `0.0` below. Every non-empty
+/// terrain now goes to the Ring-0 rule with its origin and the topmost surface
+/// that answers wins; ties go to the first in `Guid` order, which both hosts sort
+/// by, so the answer is a function of the level and not of an archetype walk.
+///
+/// Only entities + origins are remembered during the scan, never a clone of a
+/// (multi-MB) heightfield; the components are re-fetched afterwards (all
+/// `EntityRef` borrows released) and sampled in place.
 ///
 /// P21.2: the answer is the **combined** ground query, not the heightfield alone.
 /// A carved sample makes `TerrainData::height_at` return `None` through its whole

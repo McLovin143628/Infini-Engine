@@ -2232,3 +2232,73 @@ fn the_hair_trace_is_appended_after_the_cloth_trace() {
          snapshot ++ deform ++ pose ++ cloth ++ hair, in that order"
     );
 }
+
+/// **Both hosts gather EVERY terrain for the ground query** — the island phase's
+/// IB-15 seam, mirrored.
+///
+/// The Ring-0 rule (`inf_voxel::ground_height_at`) takes a slice of
+/// `(terrain, origin)` pairs and returns the topmost surface that answers. The
+/// **gather** that fills that slice is written twice, once per host, and it is
+/// where the defect lived: both hosts used to hand the rule the lowest-`Guid`
+/// terrain and nothing else, so a character walking onto a second terrain read
+/// `None` and fell to the host default `0.0`.
+///
+/// The I1 audit measured what an unmirrored gather is worth: reverting the
+/// player's to a single terrain left all 64 `inf-player` test binaries green,
+/// because the only behavioural arm called the Ring-0 rule with a slice it had
+/// built itself. `multi_terrain_seam::the_shipped_host_seam_answers_on_both_terrains`
+/// is now that arm for the player, and this is what carries it to the editor —
+/// which cannot be reached behaviourally from here at all.
+///
+/// Anchored on the free function's own multi-line signature rather than through
+/// [`item_start`], because `runtime_sim.rs` also has a `RuntimeSim::terrain_height_at`
+/// **method** that forwards to it and is the first item of that name in the file.
+#[test]
+fn both_hosts_gather_every_terrain_for_the_ground_query() {
+    const RUNTIME_SIM: &str = "runtime/inf-player/src/runtime_sim.rs";
+    const SIMULATE: &str = "editor/crates/inf-editor-core/src/simulate.rs";
+    const ANCHOR: &str = "fn terrain_height_at(\n    world: &mut EcsWorld,";
+
+    let body = |path: &str| -> String {
+        let src = read(path).replace("\r\n", "\n");
+        let at = src.find(ANCHOR).unwrap_or_else(|| {
+            panic!("{path}: the free `terrain_height_at(world, ..)` is not there under that name")
+        });
+        let rest = &src[at..];
+        let end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("{path}: `terrain_height_at` does not end at column 0"))
+            + 3;
+        rest[..end].to_string()
+    };
+    let player = body(RUNTIME_SIM);
+    let editor = body(SIMULATE);
+    assert_eq!(
+        player, editor,
+        "the two hosts resolve the ground differently — one of them will drop a \
+         character to sea level at a border the other walks across"
+    );
+
+    // …and it really is the position-aware gather, not a one-terrain pick with a
+    // slice wrapped round it.
+    for needle in [
+        "let mut found: Vec<(Uuid, Entity, DVec3)> = Vec::new();",
+        "found.sort_unstable_by_key(|(g, _, _)| *g);",
+        "inf_voxel::ground_height_at(&terrains, voxels, x, z)",
+    ] {
+        assert!(
+            player.contains(needle),
+            "the shared ground gather no longer contains `{needle}`"
+        );
+    }
+    // ANTI-VACUITY: every terrain the scan found reaches the rule. The defect
+    // was a *narrowing* between the scan and the call, and it is spelled as one.
+    for narrowing in [".take(1)", ".first()", ".into_iter().next()", "found[0]"] {
+        assert!(
+            !player.contains(narrowing),
+            "the ground gather narrows its terrain set with `{narrowing}` — that \
+             is the IB-15 defect, which reads as a character falling to y = 0 at \
+             a two-terrain border"
+        );
+    }
+}

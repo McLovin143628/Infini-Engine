@@ -1099,4 +1099,70 @@ mod tests {
             "matching did not reduce the deviation ({matched_dev} vs {restart_dev})"
         );
     }
+
+    /// **`mode_for` reads THE FIRED EDGE, and nothing beside it.**
+    ///
+    /// The precedence rule is one function, and a per-edge override on a
+    /// *sibling* must not reach an inheriting edge. A lookup that keyed on
+    /// "does this machine have any authored mode" — or on the wrong index —
+    /// would satisfy every parity trace this repository runs, because those
+    /// fixtures have one transition.
+    ///
+    /// Three cases, one machine: the authored edge answers its own mode, the
+    /// inheriting sibling answers the SESSION default, and with nothing fired at
+    /// all the session default is still what a blender falls back to.
+    #[test]
+    fn the_precedence_reads_the_fired_edge_and_not_its_siblings() {
+        let mut sm = StateMachine {
+            states: vec![
+                SmState::clip("a", [1; 16]),
+                SmState::clip("b", [2; 16]),
+                SmState::clip("c", [3; 16]),
+            ],
+            ..Default::default()
+        };
+        sm.transitions
+            .push(SmTransition::new(0, 1, 0.2).with_blend(SmBlendMode::CrossFade));
+        sm.transitions.push(SmTransition::new(1, 2, 0.2));
+        assert!(sm.transitions[1].blend.is_none(), "edge 1 must inherit");
+
+        let runtime = SmRuntime::default();
+        let mut blender = PoseBlender::new();
+        blender.mode = SmBlendMode::Inertialize;
+
+        let step = |fired: Option<usize>| SmStep {
+            fired,
+            ..Default::default()
+        };
+        // The authored edge overrides a session default that disagrees with it.
+        assert_eq!(
+            blender.mode_for(&sm, &runtime, &step(Some(0))),
+            SmBlendMode::CrossFade
+        );
+        // Its sibling inherits — it does NOT pick up edge 0's answer.
+        assert_eq!(
+            blender.mode_for(&sm, &runtime, &step(Some(1))),
+            SmBlendMode::Inertialize,
+            "an inheriting edge took its sibling's authored mode"
+        );
+        // …and the same with the session default the other way round, so the
+        // equalities above are about precedence and not about one constant.
+        blender.mode = SmBlendMode::CrossFade;
+        assert_eq!(
+            blender.mode_for(&sm, &runtime, &step(Some(1))),
+            SmBlendMode::CrossFade,
+            "an inheriting edge did not follow the session default"
+        );
+        assert_eq!(
+            blender.mode_for(&sm, &runtime, &step(None)),
+            SmBlendMode::CrossFade,
+            "a quiet step must still answer the session default"
+        );
+        // An out-of-range index (a machine edited under a running blender) falls
+        // back rather than panicking — a refusal is a value.
+        assert_eq!(
+            blender.mode_for(&sm, &runtime, &step(Some(99))),
+            SmBlendMode::CrossFade
+        );
+    }
 }

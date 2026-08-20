@@ -151,18 +151,48 @@ fn both_hosts_page_the_same_ground_before_evaluating() {
     for needle in [
         // The pre-pass, by name, on both sides.
         "fn page_terrains_for_pcg(",
-        "page_terrains_for_pcg(",
         // …through the ONE Ring-0 rule, not a second spelling of it.
         "inf_terrain::residency::page_region(",
         // …onto the ASSET's grid. A host that skipped this check would page
         // tiles onto a stale level grid and place every one of them wrong.
         "tile_resolution()",
         "meters_per_sample()",
-        // The region set both sides feed it.
-        "pcg_regions_of(",
     ] {
         assert!(editor.contains(needle), "editor lost `{needle}`");
         assert!(player.contains(needle), "player lost `{needle}`");
+    }
+
+    // **AND THE PRE-PASS IS CALLED** — the use site, not the declaration
+    // (the byte-pin law). `contains("page_terrains_for_pcg(")` reads TRUE off
+    // `fn page_terrains_for_pcg(` alone, so the first draft of this loop was
+    // satisfied by a host that had defined the pre-pass and stopped calling it.
+    // Mutation-measured during the I1 audit: deleting the editor's one call
+    // site left this whole gate green.
+    //
+    // Counted rather than spelled, because the two hosts call it with different
+    // arguments (`doc.world_mut(), &terrain_paths` vs `&mut world, |g| ...`) and
+    // a gate that pinned the argument text would fail on a rename that changed
+    // nothing.
+    for (label, src, want) in [
+        // editor: `fn page_terrains_for_pcg(` + one call in `pcg_evaluate`
+        ("editor", &editor, 2usize),
+        // player: `pub fn page_terrains_for_pcg(` + one call in the world
+        // builder. `cell_stream.rs` calls it too, and is a different file.
+        ("player", &player, 2usize),
+    ] {
+        let n = src.matches("page_terrains_for_pcg(").count();
+        assert_eq!(
+            n, want,
+            "{label}: `page_terrains_for_pcg` appears {n} time(s), not {want} — a \
+             host that declares the pre-pass and never calls it pages nothing, \
+             and every scatter over a streamed terrain goes back to sea level"
+        );
+        let m = src.matches("pcg_regions_of(").count();
+        assert_eq!(
+            m, 2,
+            "{label}: `pcg_regions_of` appears {m} time(s), not 2 (its \
+             declaration and the pre-pass's use of it)"
+        );
     }
 
     // ANTI-VACUITY: the sea-level fallback still EXISTS on both sides (it is the

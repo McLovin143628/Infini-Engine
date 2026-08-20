@@ -263,45 +263,71 @@ fn a_partly_migrated_project_still_hears_about_the_rest() {
     );
 }
 
-/// **A project whose content root IS the project root hears nothing** — the
-/// false-alarm guard.
+/// **A project whose legacy directory is INSIDE the content root hears
+/// nothing** — the false-alarm guard, in the two shapes that reach it.
 ///
-/// `content_dir = "."` puts `<root>/Levels/` *inside* the content root, and the
-/// cook's scan is recursive, so those levels are packed. The first version of the
-/// guard compared the two paths for equality and would have called every one of
-/// them stranded, for ever, while the cook was shipping them.
+/// `stranded_levels` skips when `<root>/<levels_dir>` sits under the content
+/// root, because the cook's scan is recursive and those levels are packed.
+///
+/// # The first fixture does not falsify the guard, and the second does
+///
+/// `content_dir = "."` was the case this arm was written for, and the I1 audit
+/// measured that it passes under the **naive** `legacy == levels_root` rule too:
+/// Rust's `Path` equality normalizes a `.` component away, so `<root>/./Levels`
+/// *is* `<root>/Levels` and the naive guard fires correctly by accident. An arm
+/// that cannot fail under the rule it replaced is not testing the replacement.
+///
+/// The case that does is an author who read *"levels live under
+/// `Content/Levels/`"* and wrote that whole path into `levels_dir`, which is
+/// relative to the **content root**: their levels really are at
+/// `<root>/Content/Levels`, the cook really does pack them, and
+/// `levels_root()` resolves somewhere else entirely — so `==` is false and the
+/// advisory would name packed content as stranded, for ever.
 #[test]
 fn a_content_root_that_contains_the_legacy_directory_raises_nothing() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join("Flat");
-    std::fs::create_dir_all(root.join("Levels")).unwrap();
-    let mut manifest = inf_project::ProjectManifest::new("Flat", "blank-3d");
-    manifest.content_dir = ".".into();
-    manifest.save(&root).unwrap();
-
-    // A real level, in the directory that would look "stranded" under the naive
-    // rule but is in fact inside the content root.
     let starter = ProjectTemplate::Blank3d.starter_level();
-    std::fs::write(root.join("Levels").join(starter.file_name), starter.payload).unwrap();
-    std::fs::write(
-        root.join("Levels")
-            .join(format!("{}.toml", starter.file_name)),
-        starter.sidecar,
-    )
-    .unwrap();
+    // (label, content_dir, levels_dir, the directory the levels are written to)
+    let cases = [
+        ("content_dir = \".\"", ".", "Levels", "Levels"),
+        (
+            "levels_dir spelled from the project root",
+            "Content",
+            "Content/Levels",
+            "Content/Levels",
+        ),
+    ];
+    for (label, content_dir, levels_dir, at) in cases {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Flat");
+        std::fs::create_dir_all(root.join(at)).unwrap();
+        let mut manifest = inf_project::ProjectManifest::new("Flat", "blank-3d");
+        manifest.content_dir = content_dir.into();
+        manifest.levels_dir = levels_dir.into();
+        manifest.save(&root).unwrap();
 
-    let out = root.join("Build");
-    let report = cook(&root, &out, &CookOptions::default()).expect("cook runs");
-    assert!(
-        report.root_level.is_some(),
-        "the cook did not find a level that is inside its own content root"
-    );
-    assert!(
-        !report
-            .warnings
-            .iter()
-            .any(|w| w.contains("OUTSIDE the content root")),
-        "a level the cook PACKED was reported as stranded: {:?}",
-        report.warnings
-    );
+        // A real level, in the directory that would look "stranded" under a
+        // naive rule but is in fact inside the content root.
+        std::fs::write(root.join(at).join(starter.file_name), starter.payload).unwrap();
+        std::fs::write(
+            root.join(at).join(format!("{}.toml", starter.file_name)),
+            starter.sidecar,
+        )
+        .unwrap();
+
+        let out = root.join("Build");
+        let report = cook(&root, &out, &CookOptions::default()).expect("cook runs");
+        assert!(
+            report.root_level.is_some(),
+            "{label}: the cook did not find a level that is inside its own \
+             content root"
+        );
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.contains("OUTSIDE the content root")),
+            "{label}: a level the cook PACKED was reported as stranded: {:?}",
+            report.warnings
+        );
+    }
 }

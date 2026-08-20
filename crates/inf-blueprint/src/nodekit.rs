@@ -999,10 +999,16 @@ fn ik_nodes() -> Vec<NodeDef> {
 /// # What is deliberately NOT here
 ///
 /// * **The blend mode.** `inf_ecs::pose::set_blend_mode` is a world-level
-///   resource that nothing outside its own tests calls, and P29.2 recorded the
-///   consequence of exposing it: PIE has to carry it or the two hosts stop
-///   agreeing. Exposing it is a decision with a parity arm attached, and this
-///   wave did not spend either — the boundary stays named rather than half-closed.
+///   resource, and P29.2 recorded the consequence of exposing it: PIE has to
+///   carry it or the two hosts stop agreeing. `ScenePayload` v11 pays that half
+///   (the editor's session default is written by `inf_editor_core::pie` and
+///   applied by `inf_player::build_world_from_payload`), so the parity arm now
+///   exists — but there is still **no writer**: no panel, no Ring-2 command and
+///   no node sets the resource, so in practice the session default is always
+///   `Inertialize`, and the **cooked** path carries no payload and applies none
+///   at all. A node here would be the first way to change it, and it would need
+///   the shipping half of that story first. The boundary stays named rather
+///   than half-closed; the island phase's I1 ledger carries the measured bound.
 /// * **The overlay state.** `inf_ecs::movement::OverlayRegistry` interns names by
 ///   first-seen order, so an id means something different per process; a node that
 ///   handed one out would need an interning-determinism arm across a process

@@ -1367,3 +1367,63 @@ fn the_per_transition_mode_overrides_the_session_default_and_inherit_follows_it(
         "the session default changes nothing, so this whole arm is vacuous"
     );
 }
+
+/// **`ScenePayload::blend_mode` reaches the world it describes** — the reading
+/// half of the v11 slot.
+///
+/// The I1 audit deleted the one line in `build_world_from_payload` that applies
+/// it and watched all 64 `inf-player` test binaries stay green: the parity arm
+/// above sets the resource *itself*, so it never ran the wire. A payload field
+/// nothing reads is a preview that ignores a setting the editor just wrote,
+/// which is the exact P29.2 boundary v11 was spent on.
+///
+/// Asserts the WORLD — `inf_ecs::pose::blend_mode` on the built world, which is
+/// what an inheriting edge resolves against — and the arm above is what proves
+/// that resource changes the pose. Together they are payload → resource → pose.
+///
+/// The unknown-discriminant case is asserted too, because the reader's documented
+/// failure model is "read as the default rather than refusing": a preview that
+/// blends conservatively beats a preview that will not start.
+#[test]
+fn the_payloads_session_blend_mode_reaches_the_built_world() {
+    use inf_anim::SmBlendMode::{CrossFade, Inertialize};
+
+    let level = inf_editor_core::scene::serialize::encode(
+        &inf_editor_core::scene::serialize::to_scene_file(&SceneDoc::new()),
+    )
+    .expect("an empty level encodes");
+
+    for (wire, want) in [(0u8, Inertialize), (1, CrossFade), (200, Inertialize)] {
+        let payload =
+            inf_runtime::pie::ScenePayload::new("blend", level.clone(), Vec::new(), 60, false)
+                .with_blend_mode(wire);
+        let built =
+            inf_player::build_world_from_payload(&payload).expect("the payload builds a world");
+        assert_eq!(
+            inf_ecs::pose::blend_mode(&built.world),
+            want,
+            "a payload carrying blend_mode = {wire} built a world whose session \
+             default is not {want:?} — an inheriting transition in PIE would blend \
+             differently from the editor that spawned it"
+        );
+    }
+
+    // ANTI-VACUITY: the two wire values really produce different worlds, so the
+    // equalities above are about the field being read and not about a default
+    // that happens to match.
+    let world_of = |wire: u8| {
+        inf_ecs::pose::blend_mode(
+            &inf_player::build_world_from_payload(
+                &inf_runtime::pie::ScenePayload::new("blend", level.clone(), Vec::new(), 60, false)
+                    .with_blend_mode(wire),
+            )
+            .unwrap()
+            .world,
+        )
+    };
+    assert_ne!(
+        world_of(0),
+        world_of(1),
+        "both wire values built the same session default, so this arm is vacuous"
+    );
+}

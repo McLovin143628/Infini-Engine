@@ -860,7 +860,7 @@ pub struct SmTransition {
     ///
     /// # Deferred five waves, and this is the shape it was deferred as
     ///
-    /// P29.2 shipped [`SmBlendMode`] as a **world-level** resource
+    /// P29.2 shipped [`SmBlendMode`](crate::SmBlendMode) as a **world-level** resource
     /// (`inf_ecs::pose::set_blend_mode`) and wrote down why: *"a per-transition
     /// choice would be a field on `SmTransition`, and that format bumped in P29.1
     /// and does not bump again in this phase."* P29's disposition table then
@@ -879,9 +879,11 @@ pub struct SmTransition {
     /// (b) means a machine authored before anyone thought about blending is
     /// indistinguishable from one that chose the default deliberately.
     ///
-    /// **Precedence, stated once** (see [`PoseBlender::mode_for`]): this field
+    /// **Precedence, stated once** (see
+    /// [`PoseBlender::mode_for`](crate::PoseBlender::mode_for)): this field
     /// when `Some`; otherwise the session default; otherwise
-    /// [`SmBlendMode::Inertialize`]. There is exactly one place that rule is
+    /// [`SmBlendMode::Inertialize`](crate::SmBlendMode::Inertialize). There is
+    /// exactly one place that rule is
     /// written, because two authorities that disagree is the P29.3 slope-limit
     /// defect and this is the seam it would recur at.
     ///

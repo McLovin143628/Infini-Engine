@@ -127,15 +127,18 @@ impl RiverReport {
 /// answers here** wins, with ties going to the lower `Guid` so the answer is a
 /// function of the level rather than of a traversal order.
 ///
-/// Topmost rather than the runtime's lowest-`Guid`-first, and the difference is
-/// deliberate. `inf_ecs::hydro::terrain_flow` and the player's
-/// `terrain_height_at` answer *the simulation's* question ("which terrain owns
-/// this point"), where a stable authority matters more than which surface is
-/// visible. These functions answer *the author's* question — "what am I
-/// pointing at" — and on overlapping terrains the author is pointing at the one
-/// they can see. The brush ring and the foliage drop height already use the same
-/// topmost rule (`topmost_surface` in `inf-viewport`), so the water tools agree
-/// with the tools beside them rather than with the fixed step.
+/// **This used to be the odd one out, and as of IB-15 it is not.** P20.4 wrote
+/// the rule down as *"topmost rather than the runtime's lowest-`Guid`-first, and
+/// the difference is deliberate"* — the authoring query answered "what am I
+/// pointing at" while the fixed step answered "which terrain owns this point".
+/// The island phase found what that divergence cost: the fixed step's rule had
+/// **no position test at all**, so a character walking onto a second terrain fell
+/// to sea level. `inf_voxel::ground_height_at` now takes every terrain and
+/// returns the topmost surface that answers, which is this rule. So the water
+/// tools, the brush ring and the foliage drop height (`topmost_surface` in
+/// `inf-viewport`), and the two hosts' `terrain_height_at` all agree; what
+/// remains here is the *tie* rule and the `(data, origin)` the caller needs back,
+/// which the Ring-0 function does not return.
 ///
 /// `None` where no terrain answers (a hole, off the authored extent, or a level
 /// with no terrain).

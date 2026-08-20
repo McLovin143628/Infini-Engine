@@ -204,6 +204,75 @@ fn walking_from_one_terrain_onto_the_other_never_falls_to_sea_level() {
     );
 }
 
+/// **Claim 2b: the SHIPPED HOST SEAM answers across the whole walk** — the same
+/// claim through the function a character actually calls.
+///
+/// Claim 2 above hands `inf_voxel::ground_height_at` a `terrains` slice this test
+/// built by hand, which measures the **Ring-0 rule** and not the seam. The I1
+/// audit mutated `runtime_sim::terrain_height_at` back to "only the lowest-`Guid`
+/// terrain" — the defect, exactly — and all 64 `inf-player` test binaries stayed
+/// green, because nothing ran the host's own gather. The gather is half the fix
+/// (the rule cannot answer about a terrain it was never handed), and it exists
+/// twice, once per host. This is the shipped half.
+///
+/// The editor half is `inf_editor_core::simulate::terrain_height_at`, a private
+/// twin of this one; `both_hosts_gather_every_terrain_for_the_ground_query` in
+/// `projector_mirror` is what keeps the two the same code.
+#[test]
+fn the_shipped_host_seam_answers_on_both_terrains() {
+    use inf_ecs::components::Guid;
+
+    let (world, a_origin, b_origin) = two_adjacent_terrains();
+    // The sim takes the world as-is; nothing here steps, so gravity and hz are
+    // irrelevant and the query is read straight off the seam.
+    let mut sim = inf_player::runtime_sim::RuntimeSim::new(world, Vec::new(), DVec2::ZERO, 60.0);
+
+    let z = TILE_SPAN;
+    let mut answered = 0usize;
+    // Samples only TERRAIN B answers — the ones the old one-terrain gather could
+    // not have reached. This is the anti-vacuity counter, and it is counted
+    // rather than assumed because `write_region` authors whole tiles, so A's
+    // lattice runs past the border it was authored to.
+    let mut only_b = 0usize;
+    let mut x = 1.0;
+    while x < BORDER_X * 2.0 - 1.0 {
+        let got = sim.terrain_height_at(x, z);
+        let want = ground(x, z);
+        assert!(
+            (got - want).abs() < 0.5,
+            "the SHIPPED host seam answered {got:.4} m at x = {x} against the \
+             authored {want:.4} m. Before IB-15 the seam handed the Ring-0 rule \
+             ONE terrain (the lowest `Guid`), so every x past A's own lattice \
+             fell through to the host default 0.0."
+        );
+        answered += 1;
+        let (a, b) = heights_at(sim.world(), x, z);
+        if a.is_none() && b.is_some() {
+            only_b += 1;
+        }
+        x += 2.0;
+    }
+    assert!(
+        only_b > 10,
+        "only {only_b} of {answered} samples are answered by the SECOND terrain \
+         alone, so this walk would pass with the old one-terrain gather and \
+         proves nothing about it"
+    );
+
+    // …and the two terrains really are two entities the seam had to gather.
+    let w = sim.world().world();
+    let terrains = w
+        .iter_entities()
+        .filter(|e| e.contains::<Terrain>() && e.contains::<Guid>())
+        .count();
+    assert_eq!(terrains, 2, "the fixture stopped posing the problem");
+    let _ = (a_origin, b_origin);
+    eprintln!(
+        "IB-15 shipped seam: {answered} samples across the border ({only_b} that \
+         ONLY the second terrain answers), none at sea level"
+    );
+}
+
 /// **Claim 3 — the measured bound: normals do NOT agree at the border.**
 ///
 /// `TerrainData::normal_at` takes central differences and `unwrap_or(c)`s a

@@ -9485,6 +9485,25 @@ mod tests {
                 PLATFORMER_TEMPLATE_LEVEL_GUID, LEVEL_GUID,
                 "the template level and the sample level must not share a GUID"
             );
+            // …and the ACTOR SIDECAR names the GUID the level's `ActorClass`
+            // binds. The bytes above are locked to the generator; the sidecar was
+            // not, and the I1 audit measured that its GUID could be changed to
+            // anything with nothing in the workspace going red — which scaffolds
+            // a project whose player does not move.
+            let side =
+                inf_asset::AssetSidecar::load(&ptact).expect("the template actor has a sidecar");
+            assert_eq!(
+                side.guid,
+                inf_asset::AssetId(COYOTE_ASSET_GUID),
+                "the template's Coyote.inf_act.toml names a different asset from \
+                 the one `platformer_scene`'s ActorClass binds"
+            );
+            assert_eq!(
+                side.content_hash,
+                inf_asset::ContentHash::of(&encode_actor(&coyote_class()).unwrap()),
+                "the template actor's sidecar hash does not describe the payload \
+                 beside it"
+            );
         }
 
         // Terrain-demo lock: the committed `.inf_lvl` + `.inf_pcg` still match the

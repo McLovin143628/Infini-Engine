@@ -111,9 +111,30 @@ pub struct GroundContact {
     pub layer: u8,
 }
 
-/// The lowest-`Guid` non-empty [`Terrain`] and its world origin — the same
-/// "which terrain answers" rule the hosts' `terrain.height_at` seam applies, so
-/// a footprint and a ground query can never pick different ground.
+/// The lowest-`Guid` non-empty [`Terrain`] and its world origin — **one terrain
+/// for the whole world**, resolved once per step and used for every contact.
+///
+/// # This no longer matches `terrain.height_at`, and that is a carried bound
+///
+/// It used to: both were "lowest `Guid`, no position test", and this doc used to
+/// say a footprint and a ground query could never pick different ground. The
+/// island phase's IB-15 made the *height* query position-aware (every terrain,
+/// topmost surface that answers) because the old rule dropped a character to sea
+/// level at a two-terrain border. This pass did not move with it, because its
+/// answer is an **entity** — the deformation field is stamped into one terrain's
+/// frame — and making it per-contact is a structural change to
+/// [`ground_contacts`], not a swapped comparison.
+///
+/// The measured consequence, asserted by
+/// `a_contact_over_a_second_terrain_leaves_no_footprint`: on a level with two
+/// terrains, a body standing on the **second** one is resolved against the first,
+/// `height_at` answers `None` outside its extent, and the contact is skipped — so
+/// it stands correctly and leaves **no mark at all**. No committed scene places
+/// two terrains within a kilometre of each other, which is why nothing has seen
+/// it; a 50 km² island is multi-terrain by construction and will.
+///
+/// Closing it means resolving the terrain per contact and keying the field by
+/// terrain entity. When that lands, that arm fails and this note goes away.
 fn ground_terrain(world: &EcsWorld) -> Option<(Entity, DVec3)> {
     let w = world.world();
     let mut picked: Option<(Uuid, DVec3, Entity)> = None;
@@ -398,6 +419,101 @@ mod tests {
         }
         let f = deform_field(&world).expect("a contact must grow the field");
         assert!(f.depth_at(DVec2::new(4.0, 4.0)) > 0.0);
+    }
+
+    /// **THE MEASURED BOUND (open): a contact over a SECOND terrain leaves no
+    /// footprint**, because this pass resolves one terrain for the whole world.
+    ///
+    /// The island phase's IB-15 made `terrain.height_at` position-aware — every
+    /// terrain, topmost surface that answers — after finding that the old
+    /// lowest-`Guid`-with-no-position-test rule dropped a character to sea level
+    /// at a two-terrain border. `ground_terrain` did **not** move with it: its
+    /// answer is an entity, and the deformation field is stamped into that one
+    /// terrain's frame.
+    ///
+    /// So on a two-terrain level the two rules now disagree, and this arm is the
+    /// number: the walker stands correctly on terrain B (the height query answers
+    /// from B) and prints **nothing**, because the footprint pass sampled terrain
+    /// A outside its extent and skipped the contact.
+    ///
+    /// Recorded as a bound rather than fixed here, on the house pattern: the day
+    /// `ground_contacts` resolves per contact, this arm fails and
+    /// `ground_terrain`'s note gets deleted with it.
+    #[test]
+    fn a_contact_over_a_second_terrain_leaves_no_footprint() {
+        let span = f64::from(RES - 1); // one tile, 1 m/sample
+        let mut world = EcsWorld::new();
+        // A is the lower `Guid`, so it is the one `ground_terrain` picks.
+        for (guid, x) in [(0x00A0u128, 0.0), (0x00B0, span)] {
+            let e = world.spawn_with_guid(uuid::Uuid::from_u128(guid), "terrain", None);
+            world.world_mut().entity_mut(e).insert((
+                flat_terrain(3),
+                Transform {
+                    translation: crate::math::Vec3d::new(x, 0.0, 0.0),
+                    ..Default::default()
+                },
+            ));
+        }
+        let walker = |world: &mut EcsWorld, x: f64| {
+            let a = world.spawn("walker", None);
+            world.world_mut().entity_mut(a).insert((
+                Transform {
+                    translation: crate::math::Vec3d::new(x, 0.75, 4.0),
+                    ..Default::default()
+                },
+                Collider3D {
+                    shape_kind: ColliderShape3DKind::Capsule,
+                    half_extents: crate::math::Vec3d::new(0.25, 0.5, 0.25),
+                    radius: 0.25,
+                    ..Default::default()
+                },
+                CharacterController3D::default(),
+            ));
+            a
+        };
+        // THE CONTROL: over terrain A, everything works exactly as it always did.
+        let on_a = walker(&mut world, 4.0);
+        world.propagate();
+        assert_eq!(
+            ground_contacts(&world).len(),
+            1,
+            "the control lost its footprint, so the bound below is not about the \
+             second terrain"
+        );
+
+        // THE BOUND: over terrain B, in the middle of B's own tile.
+        world.despawn(on_a);
+        walker(&mut world, span + 4.0);
+        world.propagate();
+        // …and the ground really IS there: terrain B answers at that point, which
+        // is what makes this a divergence rather than a body over a hole.
+        {
+            let b = world.entity_of(uuid::Uuid::from_u128(0x00B0)).unwrap();
+            let w = world.world();
+            assert!(
+                w.get::<Terrain>(b)
+                    .unwrap()
+                    .data
+                    .height_at(DVec2::new(4.0, 4.0))
+                    .is_some(),
+                "terrain B does not cover the walker, so this arm is about a hole"
+            );
+        }
+        let contacts = ground_contacts(&world);
+        assert!(
+            contacts.is_empty(),
+            "a contact over the second terrain produced {} footprint(s) — if \
+             `ground_contacts` became position-aware, DELETE this arm and the \
+             carried bound on `ground_terrain` with it",
+            contacts.len()
+        );
+        eprintln!(
+            "IB-15 BOUND (open): the deformation footprint pass resolves ONE \
+             terrain for the world (lowest `Guid`), so a contact at x = {} — on \
+             the second terrain, where `terrain.height_at` answers correctly — \
+             leaves 0 footprints against the control's 1.",
+            span + 4.0
+        );
     }
 
     #[test]

@@ -1555,6 +1555,96 @@ mod tests {
             "variant index 200 decoded as a blend mode"
         );
     }
+
+    /// **The v3 shape survives truncation at every byte, with every mode
+    /// authored** — the sibling of the arm above, on the CURRENT wire.
+    ///
+    /// The arm above sweeps a **v2** payload, which is the migrating rung and
+    /// therefore the interesting one for the ladder. It is not the interesting
+    /// one for the *field*: a v2 payload carries no `blend` at all, so every
+    /// `Option<SmBlendMode>` in it is a byte the decoder never reads. This sweeps
+    /// a payload where every transition — the sub-machine's included — names a
+    /// mode, so the tail slot is present at every nesting depth and a cut lands
+    /// inside one of them.
+    #[test]
+    fn a_v3_payload_with_every_mode_authored_is_refused_at_every_truncation() {
+        let mut m = v2_machine();
+        let mut authored = 0usize;
+        for t in m.transitions.iter_mut() {
+            t.blend = Some(crate::SmBlendMode::CrossFade);
+            authored += 1;
+        }
+        for s in m.states.iter_mut() {
+            if let crate::state_machine::Motion::SubMachine(inner) = &mut s.motion {
+                for t in inner.transitions.iter_mut() {
+                    t.blend = Some(crate::SmBlendMode::Inertialize);
+                    authored += 1;
+                }
+            }
+        }
+        assert!(
+            authored > 1,
+            "the fixture authored {authored} mode(s) — a sweep over one slot is \
+             not a sweep over the tail"
+        );
+        let good = inf_asset::encode(&StateMachineAsset::new(m, Some([7u8; 16]))).unwrap();
+        // The control: whole, it decodes and keeps every mode.
+        let whole: StateMachineAsset = decode(&good).expect("the fixture decodes");
+        assert!(
+            whole.machine.transitions.iter().all(|t| t.blend.is_some()),
+            "the fixture lost its modes, so the sweep below is over the wrong bytes"
+        );
+        for cut in 1..good.len() {
+            let r = std::panic::catch_unwind(|| decode::<StateMachineAsset>(&good[..cut]));
+            let r = r.unwrap_or_else(|_| panic!("truncating to {cut} bytes PANICKED the decoder"));
+            assert!(
+                r.is_err(),
+                "a v3 payload truncated to {cut} of {} bytes decoded as a machine",
+                good.len()
+            );
+        }
+    }
+
+    /// **A per-edge override does not leak onto its SIBLINGS.**
+    ///
+    /// `Option` makes *inherit* a state, and the whole point of that is that an
+    /// author can cross-fade one edge without re-authoring the rest. A codec (or
+    /// a lift) that wrote one value into every slot would satisfy "the field
+    /// round-trips" perfectly, so the absence is asserted per edge — including
+    /// through the **migration**, where every slot is filled at once by
+    /// construction and a stray `Some` would be invisible.
+    #[test]
+    fn an_authored_mode_does_not_leak_onto_its_siblings() {
+        let mut m = v2_machine();
+        assert!(
+            m.transitions.len() > 1,
+            "the fixture has one transition, so 'siblings' is vacuous"
+        );
+        m.transitions[0].blend = Some(crate::SmBlendMode::CrossFade);
+        let bytes = inf_asset::encode(&StateMachineAsset::new(m, None)).unwrap();
+        let back: StateMachineAsset = decode(&bytes).unwrap();
+        assert_eq!(
+            back.machine.transitions[0].blend,
+            Some(crate::SmBlendMode::CrossFade)
+        );
+        for (i, t) in back.machine.transitions.iter().enumerate().skip(1) {
+            assert!(
+                t.blend.is_none(),
+                "transition {i} inherited its sibling's authored mode"
+            );
+        }
+        // …and the sub-machine's own edges are untouched too: a leak that stopped
+        // at the top level would pass the loop above.
+        for s in &back.machine.states {
+            if let crate::state_machine::Motion::SubMachine(inner) = &s.motion {
+                assert!(
+                    inner.transitions.iter().all(|t| t.blend.is_none()),
+                    "a nested transition inherited the outer edge's authored mode"
+                );
+            }
+        }
+    }
+
     /// **The v1 → v2 break is a NAMED refusal that says what to do.**
     ///
     /// v2 changed shapes *inside* the payload (a condition list became a tree, a

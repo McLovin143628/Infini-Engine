@@ -11,11 +11,14 @@
 //!
 //! Two arms, and the first is the one that matters.
 //!
-//! * **The answer is identical at every world size.** The seam picks the
-//!   lowest-`Guid` non-empty terrain by an explicit comparison, not by iteration
-//!   order, so scoping the walk to the archetypes that actually carry a `Terrain`
-//!   cannot move it. Exact, machine-independent, and the property that makes the
-//!   change a repair rather than a policy.
+//! * **The answer is identical at every world size.** The seam gathers its
+//!   terrains by an explicit `Guid` sort, not by iteration order, so scoping the
+//!   walk to the archetypes that actually carry a `Terrain` cannot move it.
+//!   Exact, machine-independent, and the property that makes the change a repair
+//!   rather than a policy. (Which terrain *answers* became position-aware in the
+//!   island phase's IB-15 — topmost surface that answers, ties to the first in
+//!   `Guid` order — and this fixture has one terrain, where the two rules are the
+//!   same answer by construction.)
 //! * **The cost does not grow with the world.** A ratio measured on one machine
 //!   in one process — far more robust than an absolute millisecond, and
 //!   deliberately generous (4x) against a regression that would be 15x. Each leg
