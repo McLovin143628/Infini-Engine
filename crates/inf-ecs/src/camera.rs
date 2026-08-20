@@ -737,6 +737,38 @@ pub fn interp_angle_deg(current: f64, target: f64, speed: f64, dt: f64) -> f64 {
 /// (`x`), and be softer again vertically so stairs do not bounce the view (`y`).
 /// Expressing that in world space would make the answer depend on which way
 /// north is.
+///
+/// # It unrotates the DELTA, not two absolute positions (IB-12)
+///
+/// The port did what ALS does: unrotate `current` and `target` into yaw space,
+/// interpolate each axis, rotate the result back. That is *algebraically*
+/// origin-independent — `R(c + (t − c)·α) = c + R((t − c)·α)` because `R` is
+/// linear and `R⁻¹R = 1` — and **it is not origin-independent in floating
+/// point**, which is the exact wording P29's disposition row 23 carried and the
+/// AAA-readiness certification relayed as IB-12: *"unrotates absolute world
+/// positions rather than the delta — algebraically origin-independent, not so in
+/// floating point at partition scale. It wants a floating-origin-aware camera,
+/// which is a streaming-scale question and belongs with the island's 50 km²."*
+///
+/// At the origin both spellings agree bit for bit. Fifty kilometres out, the
+/// rotation multiplies two coordinates of magnitude ~1e5 by a sine and a cosine
+/// and then subtracts them — and the *difference* it is really after is the
+/// centimetre the character moved this step. Every ULP lost at 1e5 lands whole on
+/// a 1e-2 quantity. The absolute form's own inverse does not recover it either:
+/// `rotate_from_frame(rotate_into_frame(p))` is not the identity in f64.
+///
+/// So the delta goes into the frame and the anchor never does. This is the
+/// **Wave-T terrain-UV precedent** in a camera: that shader recovered an absolute
+/// world position by adding back the grid-axis uniform rather than letting the
+/// floating origin into the uv, because *"a uv derived from it is not a property
+/// of the ground — it steps by Δorigin/tex_scale tiles at every rebase"*. Here
+/// the same rule reads: the reference frame is anchored on `current`, so an
+/// origin rebase — which moves nothing this function can see — cannot move the
+/// pose, and neither can being a long way from zero.
+///
+/// The two forms are compared, at the origin and at partition scale, by
+/// `crates/inf-ecs/tests/camera_at_scale.rs`, which prices the alternative it
+/// rejects rather than asserting the new one is better.
 pub fn axis_independent_lag(
     current: Vec3d,
     target: Vec3d,
@@ -745,7 +777,44 @@ pub fn axis_independent_lag(
     dt: f64,
 ) -> Vec3d {
     // `rotate_into_frame` is the movement model's own XZ rotation — one spelling
-    // of "unrotate into a yaw frame" for the whole engine.
+    // of "unrotate into a yaw frame" for the whole engine. It is applied to the
+    // **delta**: `current` is the frame's anchor and never enters the rotation.
+    let d = crate::movement::rotate_into_frame(
+        Vec2d::new(target.x - current.x, target.z - current.z),
+        yaw_deg,
+    );
+    let local = Vec2d::new(
+        interp_to(0.0, d.x, speeds.x, dt),
+        interp_to(0.0, d.y, speeds.z, dt),
+    );
+    let world = crate::movement::rotate_from_frame(local, yaw_deg);
+    Vec3d::new(
+        current.x + world.x,
+        interp_to(current.y, target.y, speeds.y, dt),
+        current.z + world.y,
+    )
+}
+
+/// The **pre-IB-12 spelling** of [`axis_independent_lag`]: unrotate both absolute
+/// world positions, interpolate, rotate back.
+///
+/// Kept, and public, for exactly one reason — `crates/inf-ecs/tests/camera_at_scale.rs`
+/// prices it against the delta form at the origin and at partition scale. A fix
+/// whose predecessor has been deleted cannot be shown to have been necessary, and
+/// "price the alternative you reject" cuts both ways: the alternative a wave
+/// *replaces* has to be priced too.
+///
+/// Nothing else may call this. `LocomotionCamera::advance` calls the delta form,
+/// and a source gate in the same test pins that there is exactly one production
+/// call site.
+#[doc(hidden)]
+pub fn axis_independent_lag_absolute(
+    current: Vec3d,
+    target: Vec3d,
+    yaw_deg: f64,
+    speeds: Vec3d,
+    dt: f64,
+) -> Vec3d {
     let c = crate::movement::rotate_into_frame(Vec2d::new(current.x, current.z), yaw_deg);
     let t = crate::movement::rotate_into_frame(Vec2d::new(target.x, target.z), yaw_deg);
     let local = Vec2d::new(
