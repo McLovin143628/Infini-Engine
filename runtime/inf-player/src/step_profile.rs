@@ -53,7 +53,8 @@ pub const STEP_PHASES: usize = 22;
 /// asking "what does transform propagation cost this world" wants one number;
 /// the same goes for the two dispatch drains folded into their event phases.
 /// What each one covers, in order, is documented on the matching constant in
-/// [`phase`] — deliberately there and not as a trailing comment here, because
+/// this module's `phase` — deliberately there and not as a trailing comment
+/// here, because
 /// `rustfmt` aligns trailing comments into runs of spaces on lines that contain
 /// a string literal, and `inf_packager`'s workspace-wide
 /// `no_string_literal_in_the_workspace_carries_an_eaten_continuation` reads such
@@ -85,8 +86,8 @@ pub const STEP_PHASE_NAMES: [&str; STEP_PHASES] = [
 ];
 
 /// Phase indices, named so a mark cannot drift from its meaning — and the place
-/// each phase's *contents* are written down, since [`STEP_PHASE_NAMES`] carries
-/// only the labels.
+/// each phase's *contents* are written down, since [`super::STEP_PHASE_NAMES`]
+/// carries only the labels.
 pub(crate) mod phase {
     /// P16.5 partition cells.
     pub const CELL_STREAM: usize = 0;
