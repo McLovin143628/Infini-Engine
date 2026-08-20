@@ -255,7 +255,7 @@ twice.
   draws no shadows, GI, VSM, TAA, SSAO, bloom or visbuffer, because those are the shipped
   defaults for a level that authors no render block. The number is true; it is a number about
   a configuration, and a constitution has to name the configuration. Measured: the same
-  content lit is **p95 92.853 ms against 43.679**, GPU frame **36.116 against 17.323**.
+  content lit is **p95 92.3-92.9 ms against 43.7-44.0**, GPU frame **35.8-36.1 against 17.3-19.4**.
 * **The render cut is O(LEVELS), not O(pages)** (IB-9). A quadtree cut's refine radius
   doubles exactly when its node size doubles, so a level contributes the same ring however
   large the world is, and the pyramid terminates at `min_tiles`. Measured across four world
@@ -654,8 +654,8 @@ shadows / GI / TAA / SSAO / bloom off, `VsmSettings::default().enabled` is `fals
 engine-wide, and the visbuffer is off on every tier — so every number below is an honest
 measurement of **what a shipped player draws for a level that authors no render block**, and
 is not a lit AAA frame. The harness now says so in its own output and measures the
-difference through the same `shipped_settings` door: at 1080p, **p95 92.853 ms (13.3 fps)
-lit against 43.679 as shipped, GPU frame 36.116 against 17.323** — the stack roughly doubles
+difference through the same `shipped_settings` door: at 1080p, **p95 92.3-92.9 ms (13.4 fps)
+lit against 43.7-44.0 as shipped, GPU frame 35.8-36.1 against 17.3-19.4** — the stack roughly doubles
 the frame, and none of it is in `SHIPPING_FRAME_CEILING_MS`.
 
 **RTX 4070 Ti, release, tier High, 3 rounds × 120 frames after a discarded pass of 120, MIN
@@ -854,7 +854,7 @@ the five ranges** the wave tabulated.
 
 | finding | what shipped | now |
 |---|---|---|
-| **The instrument measures a frame with the expensive half of the renderer OFF** — no shadows, GI, VSM, TAA, SSAO, bloom or visbuffer — and nothing said so | a "≥ 60 fps means this" constitution quoting 39.8 ms for an unlit frame | the harness prints what it does not draw and **measures the stack**: p95 92.853 lit against 43.679, GPU frame 36.116 against 17.323 |
+| **The instrument measures a frame with the expensive half of the renderer OFF** — no shadows, GI, VSM, TAA, SSAO, bloom or visbuffer — and nothing said so | a "≥ 60 fps means this" constitution quoting 39.8 ms for an unlit frame | the harness prints what it does not draw and **measures the stack**: p95 92.3-92.9 lit against 43.7-44.0, GPU frame 35.8-36.1 against 17.3-19.4 |
 | **Clause 5's price compared two culling policies and its sign moved** | "+1.416 ms dearer", from a cube side that drew **zero** meshes (432 046 of 434 176 distance-culled) against a meshlet path with no distance cull, on a 30-frame mean that answered −2.03 / −0.28 / +2.00 / −0.86 across four runs | both sides audited, the cube side measured at both band settings, MIN-of-5-rounds: **0.539 / 1.25 / 1.573 ms → +0.32 ms** against a comparable configuration, reproducible to three decimals |
 | **IB-16's one production door was unarmed** | `build_vt_level`'s `upload_budget_bytes: 0` left the entire tree green with the throttle off in both hosts | `the_registration_door_carries_the_upload_budget` — 1 of 16 seated at a one-page budget, 16 of 16 unthrottled as the control |
 
@@ -936,8 +936,8 @@ it builds its pool config directly.
   **→ IP: a §8 budget for the fixed step over a CITY, and a breakdown that names its parts,
   before anything is optimised.**
 * **…and the lighting stack is the other half, unmeasured until the audit.** The frame above
-  has no shadows, GI, VSM, TAA, SSAO or bloom in it. Turned on: **p95 92.853 ms, GPU frame
-  36.116 ms** (scatter 16.124 | gi 6.049 | terrain 4.716 | vgeom 2.495 | vsm-raster 1.411 |
+  has no shadows, GI, VSM, TAA, SSAO or bloom in it. Turned on: **p95 92.3-92.9 ms, GPU frame
+  35.8-36.1 ms** (scatter 16.124 | gi 6.049 | terrain 4.716 | vgeom 2.495 | vsm-raster 1.411 |
   sky 1.319). Any 60 fps target that includes shadows is starting **56 ms** from 16.6, not
   27. **→ IP.**
 * **The instrument's frame is SERIALIZED and a presenter's is not.** It polls to completion

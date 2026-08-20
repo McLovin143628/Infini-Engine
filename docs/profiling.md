@@ -101,8 +101,8 @@ Notes:
   **What that frame does not draw.** Shadows, GI, VSM, TAA, SSAO, bloom and the
   visbuffer are all **off** in it — the shipped defaults for a level with no
   authored render block, not a choice the harness made. The same content at
-  1080p with the authorable half turned on measures **p95 92.853 ms (13 fps),
-  GPU frame 36.116 ms**: the stack roughly doubles the frame. The harness prints
+  1080p with the authorable half turned on measures **p95 92.3-92.9 ms (13 fps),
+  GPU frame 35.8-36.1 ms** over two runs: the stack roughly doubles the frame. The harness prints
   both, and `SHIPPING_FRAME_CEILING_MS` is minted from the shipped one only.
 
   It reports and does not assert in **three** named cases: a software or

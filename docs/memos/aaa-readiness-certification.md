@@ -602,7 +602,7 @@ Two honest bounds on that machinery, both material for the island:
   > **Read with its scope** (the I4 audit): that frame draws **no shadows, no GI, no VSM, no
   > TAA, no SSAO, no bloom and no visbuffer** — the shipped defaults for a level that authors
   > no render block. The same content at 1080p with the authorable half of that stack turned
-  > on measures **p95 92.853 ms (13 fps), GPU frame 36.116 ms**: the lighting stack roughly
+  > on measures **p95 92.3-92.9 ms (13 fps), GPU frame 35.8-36.1 ms** over two runs: the stack roughly
   > doubles the frame, and it is not in any number above or in
   > `SHIPPING_FRAME_CEILING_MS`. The harness prints both.
 * **Every wall-clock assertion is disabled on software/paravirtual adapters** (they print

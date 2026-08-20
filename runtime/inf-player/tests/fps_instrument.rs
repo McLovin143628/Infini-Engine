@@ -38,8 +38,8 @@
 //! audit's addition is that the harness says so in its own output and then
 //! measures the difference: `THE STACK'S PRICE` runs the same content at 1080p
 //! with the authorable half turned on through the same `shipped_settings` door,
-//! and prints it. Measured on an RTX 4070 Ti: **p95 92.853 ms lit against
-//! 43.679 ms as shipped, GPU frame 36.116 against 17.323** — the stack roughly
+//! and prints it. Measured on an RTX 4070 Ti over two runs: **p95 92.3-92.9 ms
+//! lit against 43.7-44.0 as shipped, GPU frame 35.8-36.1 against 17.3-19.4** — the stack roughly
 //! doubles the frame, and quoting the shipped number as "what the engine costs"
 //! without that line would be quoting a frame with no shadows in it.
 //!
@@ -112,9 +112,14 @@ const FRAMES: usize = 120;
 /// and a whole discarded pass runs first. The first version of this harness let
 /// `step` run on across rounds, so each round flew a *different* stretch of the
 /// city and MIN-of-rounds picked the cheapest stretch rather than the least
-/// disturbed round — it reported 28.3 ms where the same code repeating one
-/// sequence reports what it really costs. A MIN over samples of different things
-/// is not a minimum, it is a selection.
+/// disturbed round. A MIN over samples of different things is not a minimum, it
+/// is a selection, and that is why the reset is here.
+///
+/// *The 28.3 ms the wave attributed to its absence does not reproduce* (the I4
+/// audit re-ran the mutation): `CITY_DRIVE_STEP_M` is 0.25 m, so a 120-frame
+/// round is **thirty metres** and every round is inside the same district —
+/// removing the reset moves the p50 by about 1 %, to 39.104 ms. The discipline is
+/// right and is kept; the figure was retired.
 const ROUNDS: usize = 3;
 
 /// The CPU stages one frame is split into, in the order the frame runs them.
@@ -719,6 +724,23 @@ fn the_frame_at_shipping_resolution() {
         worst_p99 = worst_p99.max(r.p99);
     }
 
+    if !real {
+        eprintln!(
+            "\n{}: timing reported, not asserted (software/paravirtual adapter)",
+            info.name
+        );
+        return;
+    }
+    if std::env::var_os("CI").is_some() {
+        // **Every CI runner reports and does not assert, by name** — the law
+        // `inf-anim`'s inertialization harness paid for and `inf_player::budget`'s
+        // header states. A frame time on a shared virtualized runner is a
+        // measurement of the runner. Locally, and in the I9 certification, the
+        // ceilings below still bite.
+        eprintln!("\nCI: frame times reported, not asserted (shared runner)");
+        return;
+    }
+
     // ── THE PRICE OF THE LIGHTING STACK (the I4 audit) ──────────────────────
     //
     // Everything above is the shipped default, and the shipped default has no
@@ -737,6 +759,11 @@ fn the_frame_at_shipping_resolution() {
     // **Reported, never asserted, and never folded into `worst_p95`.** The
     // ratchets are set from the shipped configuration; a second configuration
     // asserted against them would be a ceiling for a frame nobody has ratcheted.
+    //
+    // **Behind the adapter and CI gates, on purpose.** It is 480 more frames of a
+    // GI + VSM + TAA frame, which on a software rasterizer is minutes rather than
+    // seconds, and the two runners this repository has are software rasterizers.
+    // A diagnostic nobody asserts must not be a CI cost.
     {
         let lit_record = inf_scene::RenderSettingsRecord {
             bloom_enabled: true,
@@ -749,79 +776,78 @@ fn the_frame_at_shipping_resolution() {
         let (mut lit, lit_tier) = shipped_settings(&gpu, lit_record);
         lit.vsm.enabled = true;
         let (w, h, label) = RESOLUTIONS[0];
-        let m = measure(&gpu, &mut fx, w, h, lit);
-        let r = m.round();
-        let (base_p95, base_gpu) = shipped_1080;
-        println!(
-            "\n{label} WITH THE LIGHTING STACK ON (tier {lit_tier:?}; shadows {} / \
-             gi {} / vsm {} / taa {} / ssao {} / bloom {}): p50 {:.3} ms ({:.1} fps) \
-             | p95 {:.3} ms | p99 {:.3} ms | GPU frame {:.3} ms",
-            lit.shadows.enabled,
-            lit.gi.enabled,
-            lit.vsm.enabled,
-            lit.taa,
-            lit.ssao.enabled,
-            lit.bloom.enabled,
-            r.p50,
-            1000.0 / r.p50.max(1.0e-9),
-            r.p95,
-            r.p99,
-            m.gpu_frame_ms,
-        );
-        if !m.passes.is_empty() {
-            let mut by_cost = m.passes.clone();
-            by_cost.sort_by(|a, b| b.1.total_cmp(&a.1));
+        // **A tier below High clamps the stack straight back off** (`RenderTier::Low`
+        // sets `shadows.enabled` and `gi.enabled` to `false`), and a price printed
+        // for a configuration the tier refused is the price of nothing. Reported
+        // rather than asserted, because "this adapter is Medium" is a fact about a
+        // machine and a red build on one is the one-platform hazard P25 paid for.
+        let clamped = !(lit.shadows.enabled && lit.gi.enabled);
+        if clamped {
             println!(
-                "{label} lit, dearest passes: {}",
-                by_cost
-                    .iter()
-                    .take(6)
-                    .map(|(n, ms)| format!("{n} {ms:.3} ms"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "\n{label} the lighting stack is clamped off at tier {lit_tier:?} \
+                 (shadows {} / gi {}) — no price to print on this adapter, and the \
+                 shipped ceilings below still bite",
+                lit.shadows.enabled, lit.gi.enabled
             );
         }
-        println!(
-            "{label} THE STACK'S PRICE, same resolution and same content: p95 \
+        if !clamped {
+            let m = measure(&gpu, &mut fx, w, h, lit);
+            let r = m.round();
+            let (base_p95, base_gpu) = shipped_1080;
+            println!(
+                "\n{label} WITH THE LIGHTING STACK ON (tier {lit_tier:?}; shadows {} / \
+             gi {} / vsm {} / taa {} / ssao {} / bloom {}): p50 {:.3} ms ({:.1} fps) \
+             | p95 {:.3} ms | p99 {:.3} ms | GPU frame {:.3} ms",
+                lit.shadows.enabled,
+                lit.gi.enabled,
+                lit.vsm.enabled,
+                lit.taa,
+                lit.ssao.enabled,
+                lit.bloom.enabled,
+                r.p50,
+                1000.0 / r.p50.max(1.0e-9),
+                r.p95,
+                r.p99,
+                m.gpu_frame_ms,
+            );
+            if !m.passes.is_empty() {
+                let mut by_cost = m.passes.clone();
+                by_cost.sort_by(|a, b| b.1.total_cmp(&a.1));
+                println!(
+                    "{label} lit, dearest passes: {}",
+                    by_cost
+                        .iter()
+                        .take(6)
+                        .map(|(n, ms)| format!("{n} {ms:.3} ms"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            println!(
+                "{label} THE STACK'S PRICE, same resolution and same content: p95 \
              {:.3} ms lit against {base_p95:.3} ms as shipped ({:+.3} ms), GPU \
              frame {:.3} ms against {base_gpu:.3} ms ({:+.3} ms). Reported, never \
              asserted — every ceiling in this file is set from the shipped \
              configuration, and this is what the shipped configuration is NOT \
              paying for.",
-            r.p95,
-            r.p95 - base_p95,
-            m.gpu_frame_ms,
-            m.gpu_frame_ms - base_gpu,
-        );
-        // Anti-vacuity: the two configurations really are different renderers.
-        // A tier that clamped the stack back off would make the line above a
-        // comparison of one configuration with itself.
-        assert!(
-            lit.shadows.enabled && lit.gi.enabled,
-            "the lit configuration came back with shadows {} / gi {} — the tier \
-             clamped the stack off, so the price printed above is the price of \
-             nothing",
-            lit.shadows.enabled,
-            lit.gi.enabled
-        );
+                r.p95,
+                r.p95 - base_p95,
+                m.gpu_frame_ms,
+                m.gpu_frame_ms - base_gpu,
+            );
+            // Anti-vacuity: the two configurations really are different renderers.
+            // A GPU frame that did not move is a price printed for nothing — and
+            // unlike the tier clamp above, that is a defect rather than a machine.
+            assert!(
+                m.gpu_frame_ms > base_gpu,
+                "the lit frame's GPU time ({:.3} ms) is no dearer than the shipped \
+             one's ({base_gpu:.3} ms) — shadows, GI and VSM came back enabled and \
+             cost nothing, so the price printed above is the price of nothing",
+                m.gpu_frame_ms
+            );
+        }
     }
 
-    if !real {
-        eprintln!(
-            "\n{}: timing reported, not asserted (software/paravirtual adapter)",
-            info.name
-        );
-        return;
-    }
-    if std::env::var_os("CI").is_some() {
-        // **Every CI runner reports and does not assert, by name** — the law
-        // `inf-anim`'s inertialization harness paid for and `inf_player::budget`'s
-        // header states. A frame time on a shared virtualized runner is a
-        // measurement of the runner. Locally, and in the I9 certification, the
-        // ceilings below still bite.
-        eprintln!("\nCI: frame times reported, not asserted (shared runner)");
-        return;
-    }
     if cfg!(debug_assertions) {
         // **The build is not the build, so this reports rather than asserts** —
         // the paravirtual-adapter law, one layer down. `[profile.dev]` is

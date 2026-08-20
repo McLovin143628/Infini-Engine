@@ -24437,7 +24437,7 @@ AAA frame. The same content at 1080p with the authorable half turned on, through
 ```text
                         as shipped     with the stack on
   p50                   39.561 ms      75.172 ms  (13.3 fps)
-  p95                   43.679 ms      92.853 ms  (+42.9 ms)
+  p95                   43.7-44.0 ms   92.3-92.9 ms  (+48 ms on the run they share)
   GPU frame             17.323 ms      36.116 ms  (+18.8 ms)
   dearest passes                       scatter 16.124 | gi 6.049 | terrain 4.716
                                        vgeom 2.495 | vsm-raster 1.411 | sky 1.319
@@ -24675,7 +24675,7 @@ table above.
 
 | # | severity | finding | disposition |
 |---|---|---|---|
-| A1 | **high** | **The instrument measures a frame with the expensive half of the renderer off** — no shadows, GI, VSM, TAA, SSAO, bloom or visbuffer — and neither the harness, the ledger, the certification nor `docs/profiling.md` said so. Those are the shipped defaults, so the measurement is honest; quoting it as "what the engine costs" is not. | FIXED. The harness prints what the frame does not draw, and **measures the stack**: p95 92.853 ms lit against 43.679 as shipped, GPU frame 36.116 against 17.323. Reported, never asserted, never folded into the ceilings. |
+| A1 | **high** | **The instrument measures a frame with the expensive half of the renderer off** — no shadows, GI, VSM, TAA, SSAO, bloom or visbuffer — and neither the harness, the ledger, the certification nor `docs/profiling.md` said so. Those are the shipped defaults, so the measurement is honest; quoting it as "what the engine costs" is not. | FIXED. The harness prints what the frame does not draw, and **measures the stack**: p95 92.3-92.9 ms lit against 43.7-44.0 as shipped, GPU frame 35.8-36.1 against 17.3-19.4. Reported, never asserted, never folded into the ceilings. |
 | A2 | med | The headline p50/p95/p99 is a **percentile** and the whole stage table beside it a **mean**, with an unnamed residue between them; the timestamp readback ran inside the timed span and inside no stage. | FIXED. A sixth stage ("timing readback", 0.015 ms), the round's mean printed beside the percentiles, and an assertion that the stages **tile** the mean frame (0.001 ms apart). |
 | A3 | med | Four of the wave's five run-to-run ranges are too narrow — three independent audit runs fall outside them. The GPU frame moves **37 %**, not 20 %. | CORRECTED in place; the table now carries six runs. |
 | A4 | **high** | **Clause 5's price compared two culling policies**: the cube side was distance-culled at 400 m (432 046 of 434 176 thrown away, **zero** drawn as meshes) against a meshlet path with no distance cull. Its anti-vacuity clause counted `Vec::len()` on the CPU, which a cull cannot see. And a 30-frame mean answered with a **different sign on three of four runs**. | FIXED. Both sides audited, the cube side measured at both band settings, MIN-of-5-rounds. Reproducible: 0.539 / 1.25 / 1.573 ms, i.e. **+0.32 ms** against a comparable configuration, not +1.416. |

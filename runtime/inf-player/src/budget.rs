@@ -487,7 +487,8 @@ pub const SHIPPING_FRAME_P99_BUDGET_MS: f64 = 33.2;
 /// about the engine's defaults rather than about the harness, and it is stated
 /// here because a ceiling is quoted long after the run that minted it: the same
 /// content at 1080p with the authorable half of that stack turned on measures
-/// **p95 92.853 ms against 43.679** (GPU frame 36.116 against 17.323). This
+/// **p95 92.3-92.9 ms against 43.7-44.0** (GPU frame 35.8-36.1 against 17.3-19.4)
+/// over two runs. This
 /// constant does not cover that frame and was never measured over it. The day a
 /// shipped level turns the stack on, this ceiling is measuring a different
 /// renderer and has to be re-minted, not raised.
