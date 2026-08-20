@@ -176,9 +176,20 @@ fn a_rebase_mid_lag_moves_the_camera_by_exactly_the_origin_and_no_more() {
             // `to_render` is f32, so the comparison carries a float-precision
             // tolerance rather than being exact — at a 1024 m origin distance an
             // f32 metre is ~1e-4 m.
+            //
+            // **The snap is only forgiven on the step that rebased** (the I4
+            // audit). Rounding every step to the nearest multiple of `ORIGIN_SNAP`
+            // forgives a jump of exactly 10 m — or 20, or 30 — on *any* step, so
+            // a camera that teleported by one snap on an ordinary frame passed
+            // this arm unremarked. The origin only moves when `maybe_rebase` says
+            // it did, and that is the only step allowed to be a multiple of the
+            // snap.
             let unexplained = (render_step - world_step).length();
-            let snapped = (unexplained / ORIGIN_SNAP).round() * ORIGIN_SNAP;
-            worst_render_jump = worst_render_jump.max((unexplained - snapped).abs());
+            let residue = match moved {
+                true => (unexplained - (unexplained / ORIGIN_SNAP).round() * ORIGIN_SNAP).abs(),
+                false => unexplained,
+            };
+            worst_render_jump = worst_render_jump.max(residue);
         }
         prev_render = Some(glam::DVec3::new(
             f64::from(render.x),
@@ -332,11 +343,19 @@ fn a_partition_handoff_at_speed_is_absorbed_by_the_lag() {
         prev = p;
     }
 
+    // **THE ALTERNATIVE, PRICED.** A cut is the whole two frames of subject
+    // motion arriving in one step, which at this speed is exactly `2 · dt · v`.
+    // The number matters because the arm's first ceiling was `3 x` the steady
+    // step and the steady step is 0.377 m, not "a few centimetres" as its own
+    // comment claimed — so a full cut at 0.667 m is **1.77x**, comfortably inside
+    // a 3x ceiling. The arm named a defect it could not see (the I4 audit).
+    let cut = 2.0 * DT * SPEED;
     println!(
         "IB-12 handoff: {gaps} cell crossings at {SPEED} m/s over {CELL_M} m cells; \
          worst camera step {worst_normal:.6} m normally, {worst_after_gap:.6} m \
-         across a handoff ({:.2}x)",
-        worst_after_gap / worst_normal.max(f64::MIN_POSITIVE)
+         across a handoff ({:.2}x); a CUT would be {cut:.6} m ({:.2}x)",
+        worst_after_gap / worst_normal.max(f64::MIN_POSITIVE),
+        cut / worst_normal.max(f64::MIN_POSITIVE),
     );
     assert!(
         gaps >= 4,
@@ -351,14 +370,22 @@ fn a_partition_handoff_at_speed_is_absorbed_by_the_lag() {
         worst_after_gap > 0.0,
         "no step was ever recorded as following a handoff — the branch that measures the recovery never ran, which is how the first version of this arm reported 0.000000 m and passed"
     );
-    // A handoff may cost at most one extra step of catch-up. Three times the
-    // steady step is the honest ceiling for "the lag absorbed it": a CUT would be
-    // the whole two frames of subject motion arriving at once, which at this
-    // speed is 0.667 m against a steady step of a few centimetres.
+    // A handoff may cost at most one extra step of catch-up, and the ceiling has
+    // to sit **below the cut it names** or it cannot see one. Measured: 0.385 m
+    // across a handoff against a 0.377 m steady step (1.02x) and a 0.667 m cut
+    // (1.77x). 1.5x is halfway between the measurement and the defect, which is
+    // where a falsifying threshold goes.
     assert!(
-        worst_after_gap <= worst_normal * 3.0,
+        worst_after_gap <= worst_normal * 1.5,
         "the camera moved {worst_after_gap:.6} m in the step after a partition \
-         handoff against a steady {worst_normal:.6} m — the handoff shows as a \
-         cut rather than being absorbed by the lag"
+         handoff against a steady {worst_normal:.6} m — the handoff is no longer \
+         being absorbed by the lag, and a full cut here would be {cut:.6} m"
+    );
+    assert!(
+        worst_normal * 1.5 < cut,
+        "the ceiling above ({:.6} m) is not below the cut it exists to catch \
+         ({cut:.6} m), so a handoff that arrived as a cut would satisfy it — which \
+         is what a 3x ceiling did before the I4 audit measured the steady step",
+        worst_normal * 1.5
     );
 }

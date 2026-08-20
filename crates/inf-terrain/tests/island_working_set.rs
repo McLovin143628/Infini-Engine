@@ -211,9 +211,13 @@ fn the_render_cut_is_camera_local_and_both_budgets_derive_from_it() {
     let b = cut_page_bound(deepest.1.levels, RENDER_LOD0_RADIUS_TILES);
     assert!(
         deepest.1.pages * 2 >= b,
-        "the island-class cut peaked at {} pages against a {b}-page rule — the \
-         rule is more than twice the thing it bounds, so nothing can ever \
-         approach it",
+        // `deepest` is the row with the most LEVELS, which is the 64 x 64 world,
+        // not the island-class 32 x 32 one — the message said "island-class"
+        // until the I4 audit read it against the printed table.
+        "the deepest measured cut ({} levels) peaked at {} pages against a \
+         {b}-page rule — the rule is more than twice the thing it bounds, so \
+         nothing can ever approach it",
+        deepest.1.levels,
         deepest.1.pages
     );
 

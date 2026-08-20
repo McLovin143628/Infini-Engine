@@ -578,6 +578,46 @@ fn streamed_scene_budgets_hold() {
          disagree again, which is IB-9 exactly {RATCHET_NOTE}"
     );
 
+    // (e2) **…AND THEY ONLY AGREE AT THIS SCENE'S LADDER** (the I4 audit).
+    //
+    // The clause above closes the *derivation*: one quantity, two readings, and
+    // they meet on the gate scene's own three-level 129² ladder. What it does not
+    // close is the half of IB-9 that says *"at island scale the ratchet fires
+    // first"* — because `TERRAIN_RESIDENT_BYTES_CEILING` is still a **flat
+    // constant sized for this scene**, while `for_ladder` grows with the terrain
+    // in hand. At the certification's own island row — 32 × 32 level-0 pages,
+    // five levels, a 257² page — the derived budget is 464 pages = **116.9 MiB**
+    // and `island_working_set` measures a peak cut of 250 pages = **63.0 MiB**,
+    // against the same **16 MiB**. That is 7.3× and 3.9×, where the certification
+    // found 16.4×.
+    //
+    // Asserted as the KNOWN GAP, so the day somebody makes the ceiling a function
+    // of the terrain — which is what closing this needs — the arm goes red and
+    // the ledger is re-read rather than quietly inherited. This is the tree's
+    // "a gate written to notice an improvement reports one" idiom.
+    const ISLAND_LEVELS: u32 = 5;
+    const SHIPPING_PAGE: u32 = 257;
+    let island = inf_terrain::stream::resident_bytes_bound(
+        inf_terrain::stream::StreamBudget::for_ladder(ISLAND_LEVELS).max_resident_tiles,
+        SHIPPING_PAGE,
+    );
+    eprintln!(
+        "phase16 IB-9 (carried): an ISLAND-class ladder ({ISLAND_LEVELS} levels at \
+         {SHIPPING_PAGE}^2) derives {:.2} MiB against the same {:.0} MiB flat \
+         ceiling — {:.1}x. The ceiling is a GATE-SCENE tripwire and is not yet a \
+         function of the terrain; closing that is the island's, not this scene's.",
+        island as f64 / (1024.0 * 1024.0),
+        TERRAIN_RESIDENT_BYTES_CEILING as f64 / (1024.0 * 1024.0),
+        island as f64 / TERRAIN_RESIDENT_BYTES_CEILING as f64,
+    );
+    assert!(
+        island > TERRAIN_RESIDENT_BYTES_CEILING,
+        "an island-class ladder now derives {island} B, inside the \
+         {TERRAIN_RESIDENT_BYTES_CEILING} B ceiling. Island wave I4 closed IB-9's \
+         derivation and carried the ceiling's island-scale gap as open; if that \
+         gap has closed, say so in the ledger instead of leaving this arm here"
+    );
+
     // The ceilings only mean something if residency was really moving.
     assert!(t.peaks.terrain_bytes > 0 && t.peaks.cell_bytes > 0);
     assert!(t.peaks.cells > 0);
