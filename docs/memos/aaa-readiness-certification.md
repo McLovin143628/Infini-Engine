@@ -279,6 +279,21 @@ GI `instance_budget = 4096`.
 scene never approaches either, so the two have never had to agree. At island scale the
 ratchet fires first, and whoever is holding it will not know which number is the real one.
 
+> **CLOSED by island wave I4 (2026-08-20).** They were two guesses at one quantity: how many
+> pages a render cut holds. `inf_terrain::stream::cut_page_bound` is that quantity, and
+> `StreamBudget::for_ladder` and `resident_bytes_bound` are two readings of it.
+>
+> The cut is **O(levels), not O(pages)** — measured across four world sizes whose catalog
+> quadruples each step (84 → 340 → 1 364 → 5 460 pages), the peak cut goes **64 → 157 → 250
+> → 340**: a constant ring of **93, 93, 90** per LOD level, and identical at two page
+> resolutions. That invariance is what makes a budget derivable; the finding's own premise —
+> that the working set grows with the map — is false in the direction that matters.
+>
+> **They meet now**: `phase16_gate` arm (e) computes what the budget would let its own scene
+> hold and asserts it inside the ratchet — **200 pages → 12.70 MiB** at 129² against a
+> **16 MiB** ceiling and a **5.90 MiB** measured peak. The same arithmetic before this wave
+> gave **65 MiB against 16 MiB**. `crates/inf-terrain/tests/island_working_set.rs`.
+
 ### IB-10 · The island needs a schema window on day one — RELAYED
 
 P29's disposition table defers two items **to "the island's schema window"** and says they
@@ -315,6 +330,16 @@ than the delta — algebraically origin-independent, not so in floating point **
 scale**. It wants a floating-origin-aware camera, which is a streaming-scale question and
 **belongs with the island's 50 km²**." Routed to the island by name, by the wave that wrote
 the camera.
+
+> **CLOSED by island wave I4 (2026-08-20).** The delta goes into the yaw frame and the anchor
+> never does — the Wave-T terrain-UV precedent applied to a camera. Error against the same
+> relative run at the origin, 600 steps at 37° yaw: **6.551e-14 / 8.207e-11 / 7.082e-10 m** at
+> 1 km / 50 km / 500 km, against the old form's **2.618e-6 / 1.309e-4 / 1.309e-3** —
+> **1.848e6× better**. A rebase mid-lag moves the render-local camera by the world step and
+> the origin's own snap and nothing else; a partition handoff at speed (7 crossings of a 256 m
+> cell at 20 m/s, each with a one-step subject gap) costs **1.02×** a steady step rather than
+> a cut. The pre-IB-12 spelling is kept and pinned at **zero** production call sites.
+> `crates/inf-ecs/tests/camera_at_scale.rs`.
 
 ### IB-13 · The editor's own scene projection at city scale — MEASURED
 
@@ -383,6 +408,22 @@ ceiling.** … Adding one is not a local change — it re-opens a measurement, a
 tripwire tests are built to go red when it lands. Do it deliberately or not at all."
 Coupled to T51 (no request→residency window, so no async upload path). This is the most
 60 fps-relevant carried item in the texture stack.
+
+> **CLOSED by island wave I4 (2026-08-20), deliberately.** `inf_stream::AdmitBudget` goes into
+> the one admission walk both page systems run, in **bytes** rather than pages (an RGBA8
+> transcode page is 8× BC1's). Default **1 MiB/frame**. A burst is **smoothed, never dropped**:
+> 40 tiles at 4 pages/frame drain in exactly 10 frames, worst upload 36 992 B against a
+> 36 992 B budget, every tile arrives. **The floor is never throttled** — measured: throttling
+> it retracted a P28.2 cluster page and left the P28.3 load at 3 of 5 pages resident.
+>
+> The named tripwires were re-aimed and **none of them went red**.
+> `p28-5-lead-time-ruling.md` §3.5 predicted this would reverse
+> `DEFAULT_PREDICT_HORIZON_TICKS = 0`; at the shipped budget h=0 still wins (19 542 blur
+> against 19 766), because a throttle takes the *tail* of a lane and does not delay the *head*
+> of one. Under a budget nothing ships — two pages a frame — **a lead does win** (75 928
+> against 76 074), reported and never asserted. T51's half of the condition, a loader with
+> real latency, is still not built.
+> `crates/inf-vt/tests/upload_budget.rs`, `crates/inf-render/tests/whip_pan.rs`.
 
 ---
 
@@ -537,6 +578,14 @@ Two honest bounds on that machinery, both material for the island:
 * **The only GPU frame harness renders 640 × 360.** `frame_budget.rs` measures 484 lit
   cubes at that size. **No test in this repo measures fps at a shipping resolution**, so
   "≥60 fps" for the island has no existing instrument.
+  > **CLOSED by island wave I4 (2026-08-20)** — `runtime/inf-player/tests/fps_instrument.rs`,
+  > 1920 × 1080 and 2560 × 1440 over the phase-30 city + a streamed terrain + the phase-29
+  > wizard character, with per-pass GPU timings from `inf_render::timing` (the repo had **no**
+  > GPU timing at all before this wave). On an RTX 4070 Ti in release: **p50 39.792 ms
+  > (25.1 fps) at 1080p** and **47.424 ms (21.1 fps) at 1440p**, p95 45.057 / 51.136. The
+  > frame is **CPU-bound** — the sim fixed step alone is 13.659 ms against a 15.875 ms GPU
+  > frame. `SHIPPING_FRAME_BUDGET_MS = 16.6` is what "≥ 60 fps" now MEANS, it is a target and
+  > not an assertion, and the instrument prints the distance from it every run.
 * **Every wall-clock assertion is disabled on software/paravirtual adapters** (they print
   and return), and `create_instance()` hard-codes `VULKAN | METAL` with no DX12/GL and no
   `WGPU_BACKEND` override honoured. On a Windows box without a Vulkan ICD every GPU test
@@ -570,7 +619,8 @@ Stated plainly because the island will rely on some of it:
   arm is synthetic.
 * **The `.inf_gis` → island chain has never been run end to end**, because IB-3 means there
   is no end to run it to.
-* **No fps measurement at shipping resolution exists** (above).
+* ~~**No fps measurement at shipping resolution exists**~~ — closed by island wave I4; the
+  numbers are above, and they are not 60 fps.
 * LSP, terminal and git runtime remain human-verified (CI spawns none of them).
 
 ---
@@ -589,8 +639,12 @@ Not a plan — an ordering the numbers imply.
    *(wave I3 — re-measured on a thousand-building city: 2.202 ms/step banded against
    134.480 ms unbanded. I3 also pulled **IB-8** and **IB-13** forward out of their wave,
    because both are ceilings a city walks into on its first frame.)*
-6. **Build an fps instrument at shipping resolution** before claiming 60 fps, and settle
-   the terrain ratchet-vs-budget disagreement (IB-9). ← **next**
-7. Verify IB-15 (pyramid seam, global silhouette) before committing to multi-terrain.
+6. ~~**Build an fps instrument at shipping resolution** before claiming 60 fps, and settle
+   the terrain ratchet-vs-budget disagreement (IB-9).~~ *(wave I4 — with **IB-12** and
+   **IB-16**, both pulled forward. The instrument exists and says 25.1 fps at 1080p; the
+   dearest single thing in the frame is the **sim fixed step at 13.659 ms**, which no §8
+   budget covers and which is where the next 60 fps work is.)*
+7. Verify IB-15 (pyramid seam, global silhouette) before committing to multi-terrain. ←
+   **next**, with IB-11's far half (I5).
 
 Only then author content.

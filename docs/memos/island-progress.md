@@ -21,9 +21,9 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **I1** | foundations — IB-7 layout, IB-1 PCG/streaming, IB-10 schema window, IB-15 multi-terrain | **DONE + AUDITED** (+ `.inf_sm` v3 addendum) |
 | **I2** | the GIS door — IB-3, IB-4, IB-5, IB-6, IB-14, IB-11's near half | **DONE + AUDITED** — battery 296 / 5 618 / 0 / 13, frontend 702 / 78, goldens 54, clippy 0, rustdoc 443 |
 | **I3** | city scale — IB-2a/b/c, IB-8, IB-13, the city fixture | **DONE + AUDITED** — see below |
-| I4 | the fps instrument + budgets — IB-9, IB-16, the shipping-resolution harness | not started |
+| **I4** | the fps instrument + budgets — IB-9, IB-16, IB-12, the shipping-resolution harness | **DONE** — see below |
 | I5 | source data — IB-11 (DEM ingest reality, CRS, LiDAR) | not started |
-| I6 | scale seams — IB-12 (floating-origin camera) *(IB-8 and IB-13 were pulled into I3)* | not started |
+| ~~I6~~ | ~~scale seams — IB-12~~ *(pulled into I4; IB-8 and IB-13 into I3)* | **absorbed** |
 | I7 | content — the 50 km² Vancouver map itself | not started |
 
 Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
@@ -218,6 +218,46 @@ twice.
   speaks. Containment, not equality: a transform write names an entity whose `SceneNode` did
   not change, so one redundant node ships against a hundred thousand. A fast projection with
   no independent statement of what it should have said would be unfalsifiable.
+* **A budget is a TARGET or a TRIPWIRE and cannot be both** (I4). The instrument's
+  `SHIPPING_FRAME_BUDGET_MS = 16.6` is what "≥ 60 fps" *means* and is never asserted,
+  because the engine does not meet it and a constant asserted where it fails is a red build
+  somebody raises. `SHIPPING_FRAME_CEILING_MS = 58.0` is the ratcheting tripwire beside it,
+  and the instrument prints the **distance** between them every run. The day they meet, the
+  target becomes the assertion and the ceiling is deleted.
+* **The build is not the build, so the instrument reports rather than asserts in `dev`**
+  (I4). `[profile.dev]` is `opt-level = 1` with debug assertions for every workspace crate,
+  so the CPU half of a frame measured there is a fact about a build nobody ships. That is
+  the paravirtual-adapter law one layer down, and it is why the full battery running the
+  instrument does not assert it: `cargo test --release` is the run that does. Measured: the
+  same frame is **39.8 ms** release and **46.4 ms** dev at 1080p.
+* **A MIN over samples of different things is a selection, not a minimum** (I4). The
+  instrument's first draft let its camera step run on across rounds, so each round flew a
+  different stretch of the city and MIN-of-rounds reported **28.3 ms** by picking the
+  cheapest stretch. Every round replays the identical sequence now, and the honest number is
+  **39.8 ms**.
+* **The render cut is O(LEVELS), not O(pages)** (IB-9). A quadtree cut's refine radius
+  doubles exactly when its node size doubles, so a level contributes the same ring however
+  large the world is, and the pyramid terminates at `min_tiles`. Measured across four world
+  sizes whose catalog quadruples each step: **64 → 157 → 250 → 340** pages, a constant ring
+  of **93, 93, 90**. That is what makes a residency budget derivable at all — and the first
+  draft of the arm asserted the peak was *identical* across world sizes, which is false.
+* **The FLOOR is never throttled** (IB-16). The per-frame upload budget bounds *refinement*,
+  which is where a burst lives; the analytic floor is the mandatory residency class, bounded
+  per visible surface, and a P28.2 cluster's tiles ride its lane. Measured: throttling it
+  retracted a cluster page and left the P28.3 load at 3 of 5 pages resident. VSM is exempt
+  whole — a missing shadow page has no coarser ancestor to fall back to, so it is a wrong
+  answer rather than a blurry one.
+* **A throttle takes the TAIL of a lane; it does not delay the HEAD of one** (IB-16).
+  `p28-5-lead-time-ruling.md` §3.5 predicted a per-frame admission throttle would reverse
+  `DEFAULT_PREDICT_HORIZON_TICKS = 0`. It landed and it did not: at the shipped budget h=0
+  still wins (19 542 blur against 19 766), because a page is still sampleable the frame it
+  is admitted. Under a budget nothing ships — two pages a frame — **a lead does win**
+  (75 928 against 76 074), which is reported and never asserted. The memo named the right
+  mechanism and the wrong threshold.
+* **The camera lag unrotates the DELTA** (IB-12). Algebraically the same; in floating point
+  **1.848e6× better** at half a million metres. The pre-IB-12 spelling is kept as
+  `axis_independent_lag_absolute` and pinned at **zero** production call sites, because a fix
+  whose predecessor has been deleted cannot be shown to have been necessary.
 * **A payload with a migrating rung must not be diagnosed as "too old".**
   `AssetPayload::migrates_from` exists so a v2 `.inf_sm` that fails for a *structural*
   reason reports that reason. Telling an author to re-create a machine whose problem is
@@ -569,9 +609,200 @@ camera the band had to be tested against · fmt · the ungrouped band + a memory
 exception · the lot digest · three sentences IB-13 made false · this ledger. Nine gates were
 added or sharpened; `docs/ROADMAP.md`'s audit block tables them.
 
+## Done — wave I4 (the instrument & the budgets)
+
+**THE FIRST HONEST FRAME NUMBERS.** Before this wave the tree had **no GPU timing at all**
+— zero `QuerySet`s, sixty literal `timestamp_writes: None` — and its only frame harness
+rendered 484 lit cubes at 640 × 360. `inf_render::timing::FrameTimer` writes timestamps
+between encoder commands, which needs **one seam** (`RenderGraph::run`, beside the tracing
+span that has bracketed every node since Phase 2) and also sees the four segments recorded
+*outside* the graph: the VT sync point, the VSM caster raster, the feedback ring copy, the
+VSM marking. Off by default, and `timing_changes_no_pixel` is what the 54 frozen goldens
+rest on — the same scene through two renderers differing only in the flag, **0 of 230 400
+bytes moved**.
+
+**The scene** (`samples::island_frame_scene`, composed, never committed): the phase-30 city
++ a streamed terrain paging beneath it + the phase-29 wizard character, skinned, animating.
+The terrain is held flat at **exactly zero** so the composed level is *the same city wave I3
+measured* — asserted at **370 468 solids**, not assumed. The settings come from
+`inf_player::render::shipped_settings`, extracted out of `PlayerRenderHost::new` so there is
+one answer to "what does the player render with".
+
+**RTX 4070 Ti, release, tier High, 3 rounds × 120 frames after a discarded pass, MIN of
+rounds, every round replaying the same camera sequence:**
+
+| | p50 | p95 | p99 | fps at p50 |
+|---|---|---|---|---|
+| **1080p** | **39.792 ms** | 45.057 | 46.709 | **25.1** |
+| **1440p** | **47.424 ms** | 51.136 | 52.322 | **21.1** |
+
+**and the frame is CPU-BOUND**, which no previous harness could have said:
+
+| | 1080p | 1440p |
+|---|---|---|
+| sim fixed step | **13.659 ms** | **15.631 ms** |
+| stream sync | 0.003 | 0.003 |
+| projection | 3.913 | 4.189 |
+| render (record) | 3.399 | 3.607 |
+| poll (GPU wait) | 16.865 | 23.733 |
+| **CPU frame** | **37.839** | **47.164** |
+| **GPU frame** | **15.875** | **22.716** |
+
+GPU, dearest first at 1080p: **scatter 10.758 ms (67.8 %)**, terrain 1.402, vgeom 1.125,
+resolve 1.117, sky 1.075, everything else under 0.13. At 1440p scatter is 13.034 (57.4 %),
+terrain 2.605, resolve 2.400, sky 1.870, vgeom 1.849.
+
+**Distance from 60 fps: p50 +23.2 / +30.8 ms, p95 +28.5 / +34.5 ms.** The harness frame is
+*serialized* (it polls every frame, because a frame time with no sync point is a submission
+time) while a presenter overlaps the halves, so a **pipelined estimate** is printed beside
+it and never asserted: **20.975 ms (47.7 fps)** at 1080p, **23.430 ms (42.7 fps)** at 1440p.
+
+**IB-9 · both terrain budgets derived from one measurement.** The certification found
+`TERRAIN_RESIDENT_BYTES_CEILING` (16 MiB) and `max_resident_tiles` (1 024 = 264 MiB at 257²)
+**16.4× apart** with nothing making them agree. They were two guesses at one quantity —
+how many pages a render cut holds — which is now `inf_terrain::stream::cut_page_bound`.
+Measured over a flythrough across each world's own diagonal:
+
+| world | levels | catalog | **peak cut** |
+|---|---|---|---|
+| 8 × 8 | 3 | 84 | 64 (clips) |
+| 16 × 16 | 4 | 340 | **157** |
+| 32 × 32 (island class) | 5 | 1 364 | **250** |
+| 64 × 64 | 6 | 5 460 | **340** |
+| 32 × 32 @ 65² page | 5 | 1 364 | **250** (page-size independent) |
+
+`StreamBudget::for_ladder(levels)` is the bound, with **no second multiplier** —
+`sync_render` evicts outside the cut it publishes and then loads, so steady residency *is*
+the cut, and the bound already exceeds its measurement by 1.75×. Both hosts size the budget
+to the terrain in hand. **They meet**: `phase16_gate` arm (e) computes 200 pages → **12.70
+MiB** at 129² against a **16 MiB** ceiling and a **5.90 MiB** measured peak. Before, the
+same arithmetic gave **65 MiB against 16 MiB**. `RENDER_LOD0_RADIUS_TILES`, declared twice
+with a `MIRROR of` comment, is Ring 0 now.
+
+**IB-16 · the per-frame VT upload budget.** `inf_stream::AdmitBudget`, in the one admission
+walk both page systems run, in **bytes** (an RGBA8 transcode page is 8× BC1's, so a page
+budget throttles a BC-less adapter eight times as hard while looking identical). Default
+**1 MiB/frame** = 113 BC1 pages. Burst proof: 40 tiles at 4 pages/frame drain in **exactly
+10 frames**, worst upload 36 992 B against a 36 992 B budget, 180 deferrals **all flow
+control**, every tile arrives. The advisory fires on a **run** of 15 throttled frames and
+resets when one drains. Deferrals are counted apart from pool-full, because the two want
+opposite fixes.
+
+**IB-12 · the camera at partition scale.** Error against the same relative run at the
+origin, 600 steps at 37° yaw:
+
+| anchor | delta form (now) | absolute form (before) |
+|---|---|---|
+| 1 km | 6.551e-14 m | 2.618e-6 m |
+| 50 km (the island) | 8.207e-11 m | 1.309e-4 m |
+| 500 km | **7.082e-10 m** | **1.309e-3 m** |
+
+**1.848e6× better.** A rebase mid-lag moves the render-local camera by the world step and
+the origin's snap and nothing else (2 rebases over 3 km, worst unexplained 3.7e-5 m = f32 at
+1024 m). A partition handoff at speed — 7 crossings of a 256 m cell at 20 m/s, each with a
+one-step subject gap — is absorbed by the lag: **0.385 m recovery against a 0.377 m steady
+step, 1.02×**, not a cut.
+
+**Clause 6 · the LOD pop, measured, and the cross-fade REFUSED.** At 1080p, noise floor
+**zero** (the frame is bit-deterministic across two fresh renderers):
+
+* **as geometry** at 192 m the building is **88 × 33 px** (the I3 ledger's "about thirty
+  pixels tall", now measured); the swap moves **63 of its 2 903 px (2.2 %)**, worst channel
+  **18/255**, frame-level perceptual mean **0.00000**. Invisible. **Refused**, armed against
+  the golden harness's own re-render tolerance.
+* **and the finding beside it**: `mesh_distance_m` is **120 m**, so *at* the 192 m swap the
+  scatter path is already in its **impostor** band — and a building's impostor silhouette is
+  **19.2×** its mesh's (55 868 px against 2 903), of which **93.9 %** moves. The
+  discontinuity a player sees at 192 m is the impostor's, not the band pair's, and a
+  cross-fade built for the band pair would have polished the wrong seam.
+
+**Clause 5 · real building geometry — the path proven, the price measured with the wrong
+sign.** bake → `MeshAsset` → `build_vgeom` → `VgeomAsset` → `VgeomInstance` runs end to end
+in memory with no schema and no cook: **424 parts, 10 176 vertices / 5 088 triangles, 144
+meshlets**, and such a frame carries the baked id on every instance with **zero**
+placeholder batches. But at 1080p: **434 176 placeholder cubes cost 3.378 ms of GPU frame
+and 1 024 baked vgeom instances cost 4.793 ms** — real geometry is **1.416 ms DEARER**. It
+is a fidelity decision with a cost, not the performance win the 67.8 % scatter share makes
+it look like. What is missing to ship it is named below.
+
+### Counts
+
+| | after the I3 audit | after I4 |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 298 / 5 670 / 0 / 13 | see the ROADMAP block |
+| goldens | 54, byte-frozen | **54, byte-frozen** — `timing_changes_no_pixel` is the arm that says so |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved** |
+| new ratchet constants | — | `SHIPPING_FRAME_CEILING_MS` 58.0, `SHIPPING_FRAME_P99_CEILING_MS` 64.0 (targets 16.6 / 33.2, never asserted) |
+
 ---
 
 ## Open questions / carried bounds
+
+**Closed by I4:**
+* ~~**IB-9**~~ — `cut_page_bound` is the one quantity; `StreamBudget::for_ladder` and
+  `resident_bytes_bound` are two readings of it, and `phase16_gate` compares them
+  (12.70 MiB derived against a 16 MiB ceiling, where the old arithmetic gave 65 MiB).
+* ~~**IB-12**~~ — the lag unrotates the delta; 1.848e6× at 500 km, a rebase mid-lag moves
+  nothing the origin's snap does not explain, and a handoff at speed costs 1.02× a step.
+* ~~**IB-16**~~ — a per-frame upload budget in bytes, floor-exempt, burst-smoothed
+  ("late, never never"), with a sustained-demand advisory; the three named tripwires
+  re-aimed and the P28.5 ruling re-measured with the throttle on.
+* ~~**No fps instrument at shipping resolution exists**~~ — `fps_instrument.rs` at 1080p and
+  1440p over composed content, with the per-pass GPU clock. The numbers are above, and they
+  are not 60 fps.
+* ~~**The parts↔shell swap is a hard cut**~~ — **refused with the measurement**: 63 px of a
+  2 903 px building, worst channel 18/255. The pop a player sees at that distance is the
+  impostor band's, carried below.
+
+**Measured and bounded (I4 owns these numbers):**
+* **THE FRAME IS CPU-BOUND, AND THE SINGLE DEAREST THING IS THE FIXED STEP.** 13.659 ms at
+  1080p and 15.631 ms at 1440p, against a 15.875 / 22.716 ms GPU frame — the *whole* GPU
+  frame at 1080p costs barely more than one sim step. Nothing in this tree had measured it
+  over a thousand-building city before, and no §8 budget covers it: `STREAMED_STEP_BUDGET_MS`
+  is 4.0 ms and is asserted over the phase-16 gate scene, which is a walker on a heightfield.
+  Deleting the scatter pass entirely would still leave a 21 ms frame. **This is where the
+  next 60 fps work is**, and it is a sim question rather than a render one.
+* **The instrument's frame is SERIALIZED and a presenter's is not.** It polls to completion
+  every frame, because a frame time without a sync point is a submission time; a real
+  presenter overlaps the halves. The pipelined estimate (20.975 / 23.430 ms) is arithmetic
+  over two measurements and is printed, never asserted. A windowed harness that measured
+  present-to-present would be the honest closure and needs a window.
+* **The instrument asserts nothing in the `dev` profile**, so the full battery runs it as a
+  functional smoke and the ratchets only bite under `cargo test --release`. A regression that
+  lands between two release runs is caught late.
+* **The composed instrument scene has no virtual textures** (`0 virtual textures` in its own
+  report): the city's materials bind no `.inf_tex`, so the `vt-stream` segment costs 0.002 ms
+  and the SVT stack is *present but unengaged* in the headline frame. IB-16's own numbers
+  come from `whip_pan`'s four 2048² surfaces instead. A textured island fixture would make
+  the instrument's VT column mean something.
+* **A building's scatter IMPOSTOR is 19.2× its mesh's screen area** (55 868 px against
+  2 903 at 192 m), and 93.9 % of it changes at the structure swap. An impostor is sized from
+  the instance's bounding *sphere*, and a 20 × 30 × 7.4 m box's sphere is much wider than the
+  box — so a non-uniformly-scaled instance gets a billboard far larger than its silhouette.
+  Armed as a bound in `structure_lod_pop.rs`, not fixed.
+* **The cook does not evaluate PCG volumes, which is the one thing between the engine and a
+  city of real geometry.** The bake→vgeom path works in memory (424 parts → 144 meshlets),
+  `bake.rs`'s dependencies are all Ring 0 so `inf_dcc::bake` is acyclic, and `inf-packager`
+  taking `inf-dcc` would keep the kernel out of the shipped player. What is missing is
+  something cook-side to bake *from*. And the measurement says it costs **+1.416 ms** rather
+  than saving time, so it is a fidelity decision to be taken knowingly.
+* **`AdmitBudget` is a seat count derived from bytes, so it is exact only for uniform-size
+  pages.** True of every VT pool by construction (one format, one slot size) and *not* true
+  of the meshlet pools, which is why `inf-vgeom` deliberately does not implement `SlotPool`.
+  A future byte-accurate throttle over variable-size pages is a different mechanism.
+* **`resident_bytes` still counts heights and materialized weights only** — not `maps`
+  (erosion, `res² × 12 B`), `biomes` (`res²`) or `holes`. So an eroded, painted or carved
+  terrain under-reports against both the ceiling and `resident_bytes_bound`, which are now
+  derived from the same under-count and therefore still agree with each other.
+* **`cut_page_bound` is a bound and not the cut.** It allows 464 pages at five levels where
+  250 are measured — 1.75× — and the tightness clause only requires it to be within 2×. A
+  budget derived from a bound is generous by construction; the alternative is a budget
+  derived from a measurement, which would be a budget that a slightly different ladder
+  overruns.
+* **The lag's last precision is the accumulator, not the rotation.** `pivot` is still an
+  absolute world position, so `current.x + world.x` loses ULPs at the anchor's magnitude —
+  7.082e-10 m at 500 km. Closing it means an origin-relative camera, which is a different
+  change.
 
 **Closed by I2 (were I1's carried bounds):**
 * ~~The deformation footprint pass is single-terrain~~ — per-contact resolve, same
@@ -716,12 +947,10 @@ added or sharpened; `docs/ROADMAP.md`'s audit block tables them.
   and 0.0006 ms on a select frame. The residue is `EcsWorld::propagate`, named above.
 
 **Pending their waves (from the certification):**
-* **IB-9** — `TERRAIN_RESIDENT_BYTES_CEILING = 16 MiB` against `max_resident_tiles = 1024`
-  ≈ 264 MiB. **16.4× apart**, and no scene has made them meet.
-* **IB-12** — `axis_independent_lag` unrotates absolute world positions, not the delta; not
-  floating-origin-safe at partition scale.
-* **IB-16** — no per-frame time budget or upload throttle in the VT loop; only a byte
-  residency ceiling. Coupled to T51 (no request→residency window).
-* **No fps instrument at shipping resolution exists.** The only GPU frame harness renders
-  640 × 360, and every wall-clock assertion is disabled on software/paravirtual adapters.
-  Nothing may claim "≥60 fps" until I4 builds the instrument.
+* **IB-11's far half** — LERC / BigTIFF / JPEG2000 / LAS, reprojection, the geoid. I5's.
+* **IB-15's open halves** — the 66.8707° adjacent-terrain normal seam, and the fact that
+  abutment is conditional and unenforced.
+* ~~IB-9~~, ~~IB-12~~, ~~IB-16~~ and ~~the missing fps instrument~~ — **closed by I4**, above.
+  The instrument exists, and what it says is that the engine renders this content at
+  **25.1 fps at 1080p** and **21.1 fps at 1440p** on an RTX 4070 Ti. Nothing in this
+  repository may claim ≥ 60 fps; what it may now claim is a number.
