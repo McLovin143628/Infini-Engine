@@ -46,7 +46,7 @@
 use glam::{DVec2, DVec3};
 
 use super::palettes::{archetype, BuildingArchetype, FurnitureDef};
-use super::plan::{plan_building, BuildingParams};
+use super::plan::BuildingParams;
 use super::{BuildingPlan, Opening, OpeningKind, Rect2, Room, RoomType, Wall};
 use crate::grammar::dsl::Grammar;
 use crate::grammar::expand::{expand_span, GrammarOutput, GrammarPass, Ground, SpanSource};
@@ -117,7 +117,20 @@ impl HeightProvider for Levelled {
 /// Plan and assemble one building in a single call — the shape both evaluation
 /// sites use.
 pub fn build(params: &BuildingParams, seed: u64, furnish: bool) -> BuildingOutput {
-    let plan = plan_building(params);
+    build_in(params, crate::building::LotFrame::IDENTITY, seed, furnish)
+}
+
+/// [`build`], on a lot with its own frame (IB-6).
+///
+/// `params.footprint` is read in `frame`'s coordinates; the returned
+/// instances and colliders are in the world.
+pub fn build_in(
+    params: &BuildingParams,
+    frame: crate::building::LotFrame,
+    seed: u64,
+    furnish: bool,
+) -> BuildingOutput {
+    let plan = crate::building::plan::plan_building_in(params, frame);
     let out = assemble(&plan, seed, furnish);
     BuildingOutput {
         plan,
@@ -171,7 +184,42 @@ pub fn assemble_in(
     }
     ctx.roof(&mut out);
     ctx.stairs(&mut out);
+    place_in_frame(&mut out, plan.frame);
     out
+}
+
+/// **The one place a lot's frame is applied** (IB-6).
+///
+/// Everything above this line planned and assembled in the lot's own
+/// coordinates, where it is axis-aligned; this turns the finished output into
+/// the world. One rotation per placed box, at one site — against an oriented
+/// rectangle type through the slicer, the adjacency test, the wall builder, the
+/// roof, the stairs and the furniture grid.
+///
+/// **The identity frame is skipped entirely**, so a level that already contains
+/// grammar buildings is byte-identical by construction rather than by a
+/// tolerance: `is_identity` is an exact comparison and the early return means
+/// not one multiplication happens.
+fn place_in_frame(out: &mut GrammarOutput, frame: crate::building::LotFrame) {
+    if frame.is_identity() {
+        return;
+    }
+    let yaw = frame.yaw();
+    let map = |p: DVec3| {
+        let xz = frame.to_world(glam::DVec2::new(p.x, p.z));
+        DVec3::new(xz.x, p.y, xz.y)
+    };
+    for i in &mut out.instances {
+        i.pos = map(i.pos);
+        // The module's own rotation composes with the lot's: a wall run placed
+        // by `expand_span` already carries a yaw onto its span, and that span
+        // was in lot coordinates.
+        i.rotation = yaw * i.rotation;
+    }
+    for c in &mut out.colliders {
+        c.center = map(c.center);
+        c.rotation = yaw * c.rotation;
+    }
 }
 
 /// A synthesized pass: everything `expand_span` reads and nothing it does not.

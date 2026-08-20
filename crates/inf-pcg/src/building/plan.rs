@@ -257,6 +257,21 @@ fn carve_core(plate: Rect2, arch: &super::BuildingArchetype, hash: Hash64) -> Co
 /// any thread count (nothing here is parallel; the parallelism lives one level
 /// up, over passes and spans).
 pub fn plan_building(params: &BuildingParams) -> BuildingPlan {
+    plan_building_in(params, crate::building::LotFrame::IDENTITY)
+}
+
+/// [`plan_building`], on a lot with its own frame (IB-6).
+///
+/// `params.footprint` is read in `frame`'s coordinates, so **the plan itself is
+/// unchanged** — every rule in this file, in `partition.rs` and in `assemble.rs`
+/// is axis-aligned in the lot's frame and stays that way. The frame rides on the
+/// plan and is applied once, to the finished output, by
+/// [`assemble_in`](crate::building::assemble_in).
+///
+/// Two buildings with the same seed and the same *local* footprint are the same
+/// building in two places — which is what the frame means, and why it is a
+/// placement rather than a design parameter on [`BuildingParams`].
+pub fn plan_building_in(params: &BuildingParams, frame: crate::building::LotFrame) -> BuildingPlan {
     let arch = archetype(params.archetype);
     let hash = building_hash(params.seed);
     let plate = params.footprint;
@@ -313,6 +328,7 @@ pub fn plan_building(params: &BuildingParams) -> BuildingPlan {
     let mut plan = BuildingPlan {
         archetype: params.archetype,
         footprint: plate,
+        frame,
         base_y: params.base_y,
         floors,
         floor_height: arch.floor_height,

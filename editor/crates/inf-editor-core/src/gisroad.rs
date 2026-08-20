@@ -33,8 +33,9 @@
 //! It was priced rather than assumed. IB-2 measured a static collider at
 //! **0.363 µs/step**, so the 10 000-road layer the certification names would
 //! cost **3.63 ms/step** — 22% of a 60 fps frame — to duplicate a surface that
-//! is already there. `a_body_lands_on_the_road_through_the_terrain_collider`
-//! asserts the world half; the arithmetic is here.
+//! is already there. `the_ground_under_the_road_is_the_road` asserts the world
+//! half — 3 758 road vertices, worst deviation 0.000000 m from `ground + lift`
+//! — and the arithmetic is here.
 //!
 //! The case that genuinely needs its own collider is a road that **leaves** the
 //! ground — a bridge, an overpass — and that needs a bridge/tunnel attribute

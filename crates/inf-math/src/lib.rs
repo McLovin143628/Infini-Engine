@@ -14,6 +14,12 @@ pub mod libm_ban;
 pub mod geo;
 pub use geo::{GeoAnchor, GeoAnchorError};
 
+// IB-6: planar convex hulls and oriented minimum-area rectangles — the lot
+// primitive the workspace had nowhere. Trig-free, so a lot's orientation can
+// reach committed content.
+pub mod obb2;
+pub use obb2::{convex_hull_2d, min_area_rect, MinAreaRect};
+
 pub mod portable;
 pub use portable::{
     pacos64, patan2_64, pcbrt, pcos, pcos64, proll, psin, psin64, pslerp, pyaw,

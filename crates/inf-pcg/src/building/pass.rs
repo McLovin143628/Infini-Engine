@@ -33,7 +33,7 @@
 use glam::DVec2;
 
 use super::palettes::ArchetypeId;
-use super::{build, BuildingParams, Rect2};
+use super::{build_in, BuildingParams, Rect2};
 use crate::grammar::expand::{build_spans, GrammarContext, GrammarOutput, GrammarPass, Ground};
 use crate::grammar::span::SplineSource;
 use crate::grammar::SpanSource;
@@ -83,8 +83,44 @@ pub fn pass_seed(pass_seed: u64, volume_seed: u64) -> u64 {
         .finish()
 }
 
-/// The lot this pass builds on, resolving a connected span through `splines`.
+/// The lot this pass builds on, as a world-axis-aligned rectangle.
+///
+/// **Kept for callers that want a bounding box and know it.** The lot a building
+/// is actually planned on is [`oriented_lot_of`]; this is its world AABB, which
+/// for an identity frame is the same rectangle.
 pub fn lot_of(pass: &BuildingPass, splines: &dyn SplineSource, cx: &GrammarContext) -> Rect2 {
+    let lot = oriented_lot_of(pass, splines, cx);
+    if lot.frame.is_identity() {
+        return lot.rect;
+    }
+    let mut min = DVec2::splat(f64::INFINITY);
+    let mut max = DVec2::splat(f64::NEG_INFINITY);
+    for c in lot.world_corners() {
+        min = min.min(c);
+        max = max.max(c);
+    }
+    Rect2 { min, max }
+}
+
+/// **The lot, in its own frame** (IB-6).
+///
+/// A span's points are hulled and fitted with an oriented minimum-area rectangle
+/// ([`inf_math::min_area_rect`]), so a footprint that is not on the compass grid
+/// gets the rectangle it actually is rather than the bounding box of its
+/// corners. Vancouver's West End and downtown are both rotated; the axis-aligned
+/// box of a 30 × 10 lot turned off the grid is **780 m² against 300**, measured
+/// in `inf_math::obb2`'s own arm.
+///
+/// The volume-box fall-through — a `building.plan` node with **no** `lot` pin,
+/// which is what every committed sample uses — keeps the world axes and the
+/// identity frame, so nothing in the tree moves.
+pub fn oriented_lot_of(
+    pass: &BuildingPass,
+    splines: &dyn SplineSource,
+    cx: &GrammarContext,
+) -> crate::building::OrientedLot {
+    use crate::building::{LotFrame, OrientedLot};
+
     if let Some(source) = &pass.lot {
         // A span is a polyline; its XZ bounds are the lot. `build_spans` needs a
         // `GrammarPass` shell — only its `span` field is read.
@@ -101,23 +137,29 @@ pub fn lot_of(pass: &BuildingPass, splines: &dyn SplineSource, cx: &GrammarConte
             altitude_offset: 0.0,
         };
         let set = build_spans(&shell, splines, cx);
-        let mut min = DVec2::splat(f64::INFINITY);
-        let mut max = DVec2::splat(f64::NEG_INFINITY);
+        let mut pts: Vec<DVec2> = Vec::new();
         for span in &set.spans {
             for p in span.points() {
-                min = min.min(DVec2::new(p.x, p.z));
-                max = max.max(DVec2::new(p.x, p.z));
+                pts.push(DVec2::new(p.x, p.z));
             }
         }
         for f in &set.corners {
-            min = min.min(DVec2::new(f.position.x, f.position.z));
-            max = max.max(DVec2::new(f.position.x, f.position.z));
+            pts.push(DVec2::new(f.position.x, f.position.z));
         }
-        if min.x <= max.x && min.y <= max.y {
-            return Rect2 { min, max };
+        if let Some(mar) = inf_math::min_area_rect(&pts) {
+            if mar.half.x > 0.0 && mar.half.y > 0.0 {
+                return OrientedLot {
+                    rect: Rect2 {
+                        min: -mar.half,
+                        max: mar.half,
+                    },
+                    frame: LotFrame::new(mar.center, mar.u),
+                };
+            }
         }
-        // A span that resolved to nothing falls through to the volume's box
-        // rather than building a zero-size building on top of the origin.
+        // A span that resolved to nothing — or to a line with no area — falls
+        // through to the volume's box rather than building a zero-size building
+        // on top of the origin.
     }
     let sx = if pass.size.x > 0.0 {
         pass.size.x
@@ -129,7 +171,10 @@ pub fn lot_of(pass: &BuildingPass, splines: &dyn SplineSource, cx: &GrammarConte
     } else {
         cx.extent.y * 2.0
     };
-    Rect2::from_center(DVec2::new(cx.center.x, cx.center.z), DVec2::new(sx, sz))
+    OrientedLot::axis_aligned(Rect2::from_center(
+        DVec2::new(cx.center.x, cx.center.z),
+        DVec2::new(sx, sz),
+    ))
 }
 
 /// Evaluate every enabled building pass on the process-wide job pool.
@@ -160,15 +205,17 @@ pub fn evaluate_buildings_in(
     // The lot and the datum are resolved OUTSIDE the pool: `SplineSource` and
     // `HeightProvider` are `&dyn`, and the world walk behind them is the one
     // part of the path each host writes for itself.
-    let jobs: Vec<(BuildingParams, u64, bool)> = passes
+    let jobs: Vec<(BuildingParams, crate::building::LotFrame, u64, bool)> = passes
         .iter()
         .filter(|p| p.enabled)
         .filter_map(|pass| {
-            let lot = lot_of(pass, splines, cx);
-            if !lot.is_positive() {
+            let lot = oriented_lot_of(pass, splines, cx);
+            if !lot.rect.is_positive() {
                 return None;
             }
-            let c = lot.center();
+            // The datum is asked for at the lot's centre **in the world**, which
+            // is where the ground is; the plan is built in the lot's frame.
+            let c = lot.frame.to_world(lot.rect.center());
             let base = match pass.ground {
                 Ground::Span => cx.center.y,
                 // Fail closed, exactly like a scattered instance over a hole:
@@ -180,11 +227,12 @@ pub fn evaluate_buildings_in(
             Some((
                 BuildingParams {
                     archetype: pass.archetype,
-                    footprint: lot,
+                    footprint: lot.rect,
                     base_y: base,
                     seed,
                     floors: pass.floors,
                 },
+                lot.frame,
                 seed,
                 pass.furnish,
             ))
@@ -193,8 +241,8 @@ pub fn evaluate_buildings_in(
     if jobs.is_empty() {
         return GrammarOutput::default();
     }
-    let per: Vec<GrammarOutput> = pool.parallel_map(jobs, |(params, seed, furnish)| {
-        let out = build(&params, seed, furnish);
+    let per: Vec<GrammarOutput> = pool.parallel_map(jobs, |(params, frame, seed, furnish)| {
+        let out = build_in(&params, frame, seed, furnish);
         GrammarOutput {
             instances: out.instances,
             colliders: out.colliders,
@@ -223,22 +271,25 @@ pub fn plans_of(
         .iter()
         .filter(|p| p.enabled)
         .filter_map(|pass| {
-            let lot = lot_of(pass, splines, cx);
-            if !lot.is_positive() {
+            let lot = oriented_lot_of(pass, splines, cx);
+            if !lot.rect.is_positive() {
                 return None;
             }
-            let c = lot.center();
+            let c = lot.frame.to_world(lot.rect.center());
             let base = match pass.ground {
                 Ground::Span => cx.center.y,
                 Ground::Terrain => height.height(c.x, c.y)?,
             } + pass.altitude_offset;
-            Some(super::plan_building(&BuildingParams {
-                archetype: pass.archetype,
-                footprint: lot,
-                base_y: base,
-                seed: pass_seed(pass.seed, cx.seed_offset),
-                floors: pass.floors,
-            }))
+            Some(super::plan::plan_building_in(
+                &BuildingParams {
+                    archetype: pass.archetype,
+                    footprint: lot.rect,
+                    base_y: base,
+                    seed: pass_seed(pass.seed, cx.seed_offset),
+                    floors: pass.floors,
+                },
+                lot.frame,
+            ))
         })
         .collect()
 }
@@ -311,6 +362,163 @@ mod tests {
         );
         assert_eq!(spanned.size(), DVec2::new(8.0, 6.0));
         assert_eq!(spanned.center(), DVec2::new(100.0, -50.0));
+    }
+
+    /// **IB-6: a rotated lot builds a rotated building, and the world says so.**
+    ///
+    /// The claim is not that a number in a struct changed — it is that the
+    /// *walls* run along the lot's edges. So the arm reads the assembled
+    /// population and asserts, for every placed box:
+    ///
+    /// * its centre is inside the lot rectangle (not merely inside the lot's
+    ///   bounding box, which is 2.6× larger and is exactly the wrong answer this
+    ///   item exists to retire);
+    /// * its rotation carries the lot's basis, so its faces are parallel to the
+    ///   lot's edges.
+    ///
+    /// The axis-aligned alternative is priced in the test, in square metres.
+    #[test]
+    fn a_rotated_lot_builds_a_rotated_building() {
+        // A 24 × 12 lot turned by the 3-4-5 rotation (cos 0.8, sin 0.6), which
+        // is exact in binary and needs no trigonometry.
+        let (c, s) = (0.8f64, 0.6f64);
+        let centre = DVec2::new(140.0, -70.0);
+        let turn = |p: DVec2| DVec2::new(p.x * c - p.y * s, p.x * s + p.y * c) + centre;
+        let ring: Vec<DVec3> = [(-12.0, -6.0), (12.0, -6.0), (12.0, 6.0), (-12.0, 6.0)]
+            .iter()
+            .map(|&(x, z)| {
+                let w = turn(DVec2::new(x, z));
+                DVec3::new(w.x, 0.0, w.y)
+            })
+            .collect();
+
+        let p = BuildingPass {
+            lot: Some(SpanSource::Polyline {
+                points: ring.clone(),
+                closed: true,
+            }),
+            ground: Ground::Span,
+            floors: 2,
+            ..pass()
+        };
+        let cx = GrammarContext {
+            entity: None,
+            center: DVec3::new(centre.x, 0.0, centre.y),
+            extent: DVec2::new(40.0, 40.0),
+            seed_offset: 11,
+        };
+
+        let lot = oriented_lot_of(&p, &NoSplines, &cx);
+        assert!(
+            (lot.rect.size() - DVec2::new(24.0, 12.0)).length() < 1e-9,
+            "the lot is 24 x 12 however it is turned; got {:?}",
+            lot.rect.size()
+        );
+        assert!((lot.frame.origin - centre).length() < 1e-9);
+        assert!(
+            (lot.frame.u - DVec2::new(c, s)).length() < 1e-9,
+            "the frame's +X is the lot's long side: {:?}",
+            lot.frame.u
+        );
+        assert!(!lot.frame.is_identity());
+
+        // THE ALTERNATIVE, PRICED: the axis-aligned box of the same lot.
+        let aabb = lot_of(&p, &NoSplines, &cx);
+        assert!(
+            aabb.area() > lot.rect.area() * 1.5,
+            "the axis-aligned lot is {:.1} m2 against the oriented {:.1} — if that \
+             ratio is not large this fixture is not rotated",
+            aabb.area(),
+            lot.rect.area()
+        );
+        println!(
+            "IB-6 lot: oriented {:.1} m2 vs axis-aligned {:.1} m2",
+            lot.rect.area(),
+            aabb.area()
+        );
+
+        let out = evaluate_buildings(&[p.clone()], &NoSplines, &flat(0.0), &cx);
+        assert!(out.colliders.len() > 20, "{} boxes", out.colliders.len());
+
+        // (a) Every box is inside the LOT, not merely inside its bounding box.
+        let mut outside_lot = 0usize;
+        let mut outside_aabb = 0usize;
+        for col in &out.colliders {
+            let w = DVec2::new(col.center.x, col.center.z);
+            let l = lot.frame.to_local(w);
+            if l.x.abs() > lot.rect.max.x + 0.6 || l.y.abs() > lot.rect.max.y + 0.6 {
+                outside_lot += 1;
+            }
+            if w.x < aabb.min.x - 0.6
+                || w.x > aabb.max.x + 0.6
+                || w.y < aabb.min.y - 0.6
+                || w.y > aabb.max.y + 0.6
+            {
+                outside_aabb += 1;
+            }
+        }
+        assert_eq!(outside_lot, 0, "{outside_lot} boxes escaped the lot");
+        assert_eq!(outside_aabb, 0);
+
+        // (b) **The walls are parallel to the lot's edges, not to the axes.**
+        // Every placed box's rotation must map the lot's basis onto a world axis
+        // of its own faces: rotating local +X by the collider's own quaternion
+        // gives a direction that is (anti)parallel to `u` or to `v`.
+        let u = DVec3::new(lot.frame.u.x, 0.0, lot.frame.u.y);
+        let v3 = lot.frame.v();
+        let v = DVec3::new(v3.x, 0.0, v3.y);
+        let mut aligned_to_lot = 0usize;
+        let mut aligned_to_axes = 0usize;
+        for col in &out.colliders {
+            let f = col.rotation * DVec3::X;
+            let par = |d: DVec3| f.dot(d).abs() > 0.999_9;
+            if par(u) || par(v) {
+                aligned_to_lot += 1;
+            }
+            if par(DVec3::X) || par(DVec3::Z) {
+                aligned_to_axes += 1;
+            }
+        }
+        assert_eq!(
+            aligned_to_lot,
+            out.colliders.len(),
+            "every box must be square to the LOT; {aligned_to_lot} of {} are",
+            out.colliders.len()
+        );
+        assert_eq!(
+            aligned_to_axes,
+            0,
+            "and NONE may be square to the world axes — {aligned_to_axes} of {} \
+             still are, which is the defect IB-6 names",
+            out.colliders.len()
+        );
+
+        // (c) The control: the same lot un-rotated builds the same building.
+        let flat_ring: Vec<DVec3> = [(-12.0, -6.0), (12.0, -6.0), (12.0, 6.0), (-12.0, 6.0)]
+            .iter()
+            .map(|&(x, z)| DVec3::new(centre.x + x, 0.0, centre.y + z))
+            .collect();
+        let straight = BuildingPass {
+            lot: Some(SpanSource::Polyline {
+                points: flat_ring,
+                closed: true,
+            }),
+            ..p.clone()
+        };
+        let plain = evaluate_buildings(&[straight], &NoSplines, &flat(0.0), &cx);
+        assert_eq!(
+            plain.colliders.len(),
+            out.colliders.len(),
+            "turning a lot must not change WHAT is built, only where it faces"
+        );
+        for (a, b) in plain.colliders.iter().zip(&out.colliders) {
+            assert!(
+                (a.half_extents - b.half_extents).length() < 1e-9,
+                "the same building, turned: {:?} vs {:?}",
+                a.half_extents,
+                b.half_extents
+            );
+        }
     }
 
     /// A **spline** lot: the closure P19.4's remainder asked for — a curve's

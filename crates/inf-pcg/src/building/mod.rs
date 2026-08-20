@@ -75,21 +75,151 @@ use glam::{DVec2, DVec3};
 use crate::grammar::span::positive;
 use crate::scatter::PcgCollider;
 
-pub use assemble::{assemble, assemble_in, build, BuildingOutput};
+pub use assemble::{assemble, assemble_in, build, build_in, BuildingOutput};
 pub use palettes::{
     archetype, archetypes, ArchetypeId, BuildingArchetype, FurnitureDef, RoomWeight,
 };
 pub use partition::{connect, partition_floor, walls_of, Adjacency};
 pub use pass::{
-    evaluate_buildings, evaluate_buildings_in, lot_of, pass_seed, plans_of, BuildingPass,
+    evaluate_buildings, evaluate_buildings_in, lot_of, oriented_lot_of, pass_seed, plans_of,
+    BuildingPass,
 };
-pub use plan::{plan_building, BuildingParams, MAX_FLOORS};
+pub use plan::{plan_building, plan_building_in, BuildingParams, MAX_FLOORS};
+
+/// **The lot's own frame on the XZ plane** (IB-6): where its origin is and
+/// which way its long side runs.
+///
+/// # Plan in the lot's frame, place in the world's
+///
+/// Every rectangle in this module — the plate, the rooms, the core, the stair
+/// flights — is axis-aligned, and making each of them oriented would mean an OBB
+/// type through the slicer, the adjacency test, the wall builder, the roof, the
+/// stairs and the furniture grid: ten methods on [`Rect2`] and a dozen
+/// world-axis comparisons, every one of which is *correct* in a local frame.
+///
+/// So the plan is built in the **lot's** coordinates, where it is axis-aligned
+/// by construction and every existing rule reads the same way it always did, and
+/// the finished output is transformed into the world at exactly one place
+/// ([`assemble_in`](crate::building::assemble_in)). A rotated lot costs one
+/// rotation per placed box, and the adjacency test — whose world-axis
+/// `same_line` comparison would silently find **zero** doors between rotated
+/// rooms — never sees a rotation at all.
+///
+/// The identity frame is bit-exact: `to_world` multiplies by `1.0` and `0.0`,
+/// and `assemble_in` skips the pass entirely when
+/// [`is_identity`](LotFrame::is_identity) holds, so nothing a level already
+/// contains moves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LotFrame {
+    /// Where the lot's local origin sits in world XZ.
+    pub origin: DVec2,
+    /// Unit direction of the lot's local `+X` in world XZ.
+    pub u: DVec2,
+}
+
+impl Default for LotFrame {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+impl LotFrame {
+    /// World axes: local == world.
+    pub const IDENTITY: Self = Self {
+        origin: DVec2::ZERO,
+        u: DVec2::X,
+    };
+
+    /// A frame from an oriented rectangle's centre and basis.
+    pub fn new(origin: DVec2, u: DVec2) -> Self {
+        let u = if u.length_squared() > 0.0 && u.is_finite() {
+            u.normalize()
+        } else {
+            DVec2::X
+        };
+        Self { origin, u }
+    }
+
+    /// The lot's local `+Z` direction in world XZ.
+    #[inline]
+    pub fn v(&self) -> DVec2 {
+        DVec2::new(-self.u.y, self.u.x)
+    }
+
+    /// Whether this frame is the world's own.
+    #[inline]
+    pub fn is_identity(&self) -> bool {
+        self.origin == DVec2::ZERO && self.u == DVec2::X
+    }
+
+    /// A lot-frame XZ position in world XZ.
+    #[inline]
+    pub fn to_world(&self, local: DVec2) -> DVec2 {
+        self.origin + self.u * local.x + self.v() * local.y
+    }
+
+    /// A world XZ position in the lot's frame.
+    #[inline]
+    pub fn to_local(&self, world: DVec2) -> DVec2 {
+        let d = world - self.origin;
+        DVec2::new(d.dot(self.u), d.dot(self.v()))
+    }
+
+    /// The yaw-only rotation taking a lot-frame direction into the world.
+    ///
+    /// Built through [`crate::grammar::span::yaw_onto`] — the crate's one
+    /// trig-free yaw door — because a lot's rotation reaches committed content
+    /// and `DQuat::from_axis_angle` is `sin_cos` inside glam (the P14 law).
+    pub fn yaw(&self) -> glam::DQuat {
+        if self.is_identity() {
+            return glam::DQuat::IDENTITY;
+        }
+        // Local `+Z` is `v` in world XZ, and `yaw_onto` takes `+Z` onto a
+        // direction — so the frame's rotation is exactly `yaw_onto(v)`.
+        let v = self.v();
+        crate::grammar::span::yaw_onto(DVec3::new(v.x, 0.0, v.y))
+    }
+}
+
+/// A lot, in its own frame: an axis-aligned rectangle plus where that frame sits
+/// in the world. See [`LotFrame`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OrientedLot {
+    /// The lot rectangle, in [`frame`](Self::frame)'s coordinates.
+    pub rect: Rect2,
+    pub frame: LotFrame,
+}
+
+impl OrientedLot {
+    /// A lot on the world axes — what every pre-IB-6 caller produced.
+    pub fn axis_aligned(rect: Rect2) -> Self {
+        Self {
+            rect,
+            frame: LotFrame::IDENTITY,
+        }
+    }
+
+    /// The lot's four corners in world XZ, counter-clockwise from `min`.
+    pub fn world_corners(&self) -> [DVec2; 4] {
+        let (a, b) = (self.rect.min, self.rect.max);
+        [
+            self.frame.to_world(a),
+            self.frame.to_world(DVec2::new(b.x, a.y)),
+            self.frame.to_world(b),
+            self.frame.to_world(DVec2::new(a.x, b.y)),
+        ]
+    }
+}
 
 /// An axis-aligned rectangle on the world **XZ** plane (Y is the floor's own
 /// height, carried by whatever owns the rect).
 ///
 /// `min` is componentwise ≤ `max` for every rectangle this module produces;
 /// [`Rect2::new`] enforces it so a caller cannot build an inverted one.
+///
+/// **On an oriented lot these are the LOT's axes, not the world's** — see
+/// [`LotFrame`]. Nothing in the plan changes; the frame is applied once, on the
+/// way out.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect2 {
     pub min: DVec2,
@@ -378,8 +508,15 @@ pub struct Stair {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BuildingPlan {
     pub archetype: ArchetypeId,
-    /// The lot the building stands on, in world XZ.
+    /// The lot the building stands on, in [`frame`](Self::frame)'s XZ — which
+    /// **is** world XZ whenever the frame is the identity, i.e. for every lot
+    /// this engine produced before IB-6.
     pub footprint: Rect2,
+    /// Where this plan's own axes sit in the world. `LotFrame::IDENTITY` for an
+    /// axis-aligned lot; [`assemble_in`](crate::building::assemble_in) applies
+    /// it to the finished output and skips the pass entirely when it is the
+    /// identity.
+    pub frame: LotFrame,
     /// World Y of the ground floor's walking surface.
     pub base_y: f64,
     pub floors: u32,
