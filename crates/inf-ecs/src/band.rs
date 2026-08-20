@@ -479,7 +479,11 @@ mod tests {
              two cells it is between",
             distinct.len()
         );
-        assert_eq!(changes, stamps.len() - 1, "the arm is not measuring the edge");
+        assert_eq!(
+            changes,
+            stamps.len() - 1,
+            "the arm is not measuring the edge"
+        );
 
         // THE CONTROL, and it is what says the quantization does its job at all:
         // the same jitter a metre away from the line re-stamps NEVER.
