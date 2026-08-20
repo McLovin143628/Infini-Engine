@@ -26,6 +26,32 @@
 //! outermost faces are coplanar. A dither there is a dither between two surfaces
 //! at the same depth, which is a different problem from the one the scatter path
 //! solved.
+//!
+//! # What the refusal is a refusal ABOUT (the I4 audit)
+//!
+//! Two readings are taken, and only one of them is the shipped configuration.
+//! With `impostors = false` the swap is between the parts' **geometry** and the
+//! shell's, and it is invisible — that is the reading the cross-fade is refused
+//! on. With `impostors = true`, which is the default, **both** sides are drawn as
+//! billboards and 93.9 % of a silhouette 19.2× the mesh's moves. The change there
+//! is still the band pair's; what the impostor contributes is its *size*, because
+//! a billboard is sized from the instance's bounding sphere and a 20 × 30 × 7.4 m
+//! box's sphere is far wider than the box.
+//!
+//! So the refusal is **conditional**: no cross-fade, because as geometry there is
+//! nothing to fade — and the first repair at this distance is the billboard's
+//! sizing, not a fade. Both halves are armed below, and the shipped half is armed
+//! so that fixing the sizing turns this file red and clause 6 is re-decided
+//! rather than quietly inherited.
+//!
+//! # The fixture is hand-authored, and that is a bound
+//!
+//! `parts()` and `shell()` are `ScatterInstance` literals shaped like what
+//! `inf_pcg::building::assemble` and `group_shell` produce. Neither production
+//! function is called here, and neither is the band test that *chooses* between
+//! them (`push_shells` / `push_pcg_scatter` are private to the two hosts). So this
+//! file measures the difference between the two sides of the swap; it does not
+//! prove that the engine's own two sides are those two.
 
 use std::sync::Arc;
 
@@ -205,14 +231,24 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
         target.read_rgba(&gpu).expect("read back")
     };
 
-    // **THE NOISE FLOOR.** The same scene, rendered twice by two fresh
-    // renderers. Whatever differs here is not a LOD pop — it is MSAA resolve,
-    // the scatter path's GPU cull, and driver scheduling — and a "pixels moved"
-    // number quoted without it is a number about the renderer's repeatability as
-    // much as about the swap.
+    // **THE NOISE FLOOR, ONCE PER CONFIGURATION.** The same scene, rendered
+    // twice by two fresh renderers. Whatever differs here is not a LOD pop — it
+    // is MSAA resolve, the scatter path's GPU cull, and driver scheduling — and a
+    // "pixels moved" number quoted without it is a number about the renderer's
+    // repeatability as much as about the swap.
+    //
+    // **Per configuration**, because the impostor path and the mesh path are
+    // different pipelines: the I4 audit found the floor measured with
+    // `impostors = true` and then compared against a `differing` taken with
+    // `impostors = false`, which is a floor for one renderer held against a delta
+    // from another.
+    let (noise_imp, noise_imp_worst) = moved(
+        &shoot(&parts_scene, STRUCTURE_LOD_M, true),
+        &shoot(&parts_scene, STRUCTURE_LOD_M, true),
+    );
     let (noise, noise_worst) = moved(
-        &shoot(&parts_scene, STRUCTURE_LOD_M, true),
-        &shoot(&parts_scene, STRUCTURE_LOD_M, true),
+        &shoot(&parts_scene, STRUCTURE_LOD_M, false),
+        &shoot(&parts_scene, STRUCTURE_LOD_M, false),
     );
 
     println!(
@@ -220,7 +256,16 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
         info.name, info.device_type
     );
     println!(
-        "  noise floor (the same scene twice): {noise} px differ, worst channel {noise_worst}/255"
+        "  noise floor (the same scene twice): impostors OFF {noise} px differ, worst channel {noise_worst}/255; impostors ON {noise_imp} px, worst {noise_imp_worst}/255"
+    );
+    // **The determinism claim, ARMED.** "The frame is bit-deterministic across
+    // two fresh renderers" was printed and never asserted, so a renderer that
+    // became non-deterministic would have raised the floor silently and gutted
+    // every ratio below without a red arm anywhere (the I4 audit).
+    assert_eq!(
+        (noise, noise_imp),
+        (0, 0),
+        "two fresh renderers drew the same scene differently ({noise} px mesh / {noise_imp} px impostor) — the frame is no longer bit-deterministic, and every 'pixels moved' number below is measuring the renderer's repeatability as well as the swap"
     );
     println!(
         "  NOTE: `ScatterSettings::default().mesh_distance_m` is {} m, so at the {STRUCTURE_LOD_M} m structure swap the scatter path is ALREADY in its impostor band. Both readings are given.",
@@ -292,24 +337,45 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
         inf_render::golden::GOLDEN_MEAN_TOLERANCE,
     );
     println!(
-        "  …and the finding beside it: with the SHIPPED impostor band on (`mesh_distance_m` {} m < {STRUCTURE_LOD_M} m), the same building's silhouette is {imp_w} x {imp_h} px / {imp_covered} px — {:.1}x the mesh's {covered} px — and {imp_moved} of it ({:.1} %) moves at the swap, worst channel {imp_worst}/255, mean {imp_mean:.5} / max {imp_max:.5}. The discontinuity a player sees at 192 m is the IMPOSTOR's, not the band pair's.",
+        "  …and the finding beside it: with the SHIPPED impostor band on (`mesh_distance_m` {} m < {STRUCTURE_LOD_M} m), the same building's silhouette is {imp_w} x {imp_h} px / {imp_covered} px — {:.1}x the mesh's {covered} px — and {imp_moved} of it ({:.1} %) moves at the swap, worst channel {imp_worst}/255, mean {imp_mean:.5} / max {imp_max:.5}. Both frames there are impostors, so the CHANGE is still the band pair's; what the impostor owns is its SIZE — a billboard sized from the instance's bounding sphere. The repair that comes first is the sizing, not the fade.",
         inf_render::RenderSettings::default().scatter.mesh_distance_m,
         imp_covered as f64 / covered.max(1) as f64,
         imp_moved as f64 / imp_covered.max(1) as f64 * 100.0,
     );
 
-    // **THE REFUSAL, ARMED.** The wave refuses a band-pair cross-fade on the
-    // strength of the GEOMETRY reading, so that is the number the arm holds: a
-    // 33-pixel-tall building whose swap moves 63 pixels by at most 18/255.
+    // **THE REFUSAL, ARMED — AT THE BUILDING'S OWN SCALE.**
     //
-    // Held against the golden harness's own re-render tolerance rather than a
-    // threshold invented here — that number is what this repository already
-    // means by "a viewer would not call these two frames different", and
-    // inventing a second one would be inventing the answer.
+    // The wave refuses a band-pair cross-fade on the strength of the GEOMETRY
+    // reading, so that is the number the arm holds: a 33-pixel-tall building
+    // whose swap moves 63 of its 2 903 pixels by at most 18/255.
+    //
+    // The first version held it against `GOLDEN_MEAN_TOLERANCE` alone, and the I4
+    // audit measured that clause: `image_diff` averages `|Δ|` over a **64 × 36**
+    // downscale, so a change confined to a 2 903-pixel object can move the mean
+    // by at most `3 × 2903 / 900 / 6912 = 0.0014` — **43× under the 0.06
+    // tolerance at its arithmetic maximum**. The clause could not fail for any
+    // change to this building, whatever the LOD did. A frame-scale tolerance
+    // cannot arm a claim about an object that is 0.14 % of the frame.
+    //
+    // So the refusal is armed on the object: the fraction of the building's own
+    // pixels that move, and the worst channel step. Both are measured (2.2 %,
+    // 18/255) and both can fail — a shell that rendered as a different silhouette
+    // or a different colour moves them immediately. The frame-scale pair is kept
+    // *beside* them, because it is what the repository means by "a viewer would
+    // not call these two frames different", with its own ceiling written down.
+    let moved_pct = differing as f64 / covered.max(1) as f64 * 100.0;
+    assert!(
+        moved_pct <= 5.0,
+        "the parts->shell swap moves {moved_pct:.1} % of the building's own {covered} pixels (measured at 2.2 % when island wave I4 refused a cross-fade on the strength of it). The refusal no longer has evidence, and the band pair needs the dither the I3 ledger describes."
+    );
+    assert!(
+        worst <= 32,
+        "the parts->shell swap's worst channel step is {worst}/255 against the 18/255 island wave I4 refused a cross-fade on. A step this size is a visible edge on a 33-pixel-tall building."
+    );
     assert!(
         mean <= inf_render::golden::GOLDEN_MEAN_TOLERANCE
             && max <= inf_render::golden::GOLDEN_MAX_TOLERANCE,
-        "the parts->shell swap now moves the frame by mean {mean:.5} / max {max:.5}, past the golden harness's own re-render tolerance. Island wave I4 REFUSED a cross-fade because this pop was far under it; that refusal no longer has evidence, and the band pair needs the dither the I3 ledger describes."
+        "the parts->shell swap now moves the frame by mean {mean:.5} / max {max:.5}, past the golden harness's own re-render tolerance — which for an object this small takes a change far larger than the LOD swap itself."
     );
 
     // **THE CARRIED BOUND, ARMED.** The impostor silhouette being many times the
@@ -317,8 +383,28 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
     // impostor is sized from the instance's bounding sphere, and a 20 x 30 x 7.4 m
     // box's sphere is much wider than the box. The day that changes, this arm
     // says so instead of the ledger quietly going stale.
+    //
+    // *The attribution, corrected by the I4 audit.* Both frames in the shipped
+    // reading are drawn as impostors, so the change between them is the **band
+    // pair's** — parts against shell — seen through a billboard. What the
+    // impostor owns is the change's SIZE, not its cause: it is what turns a
+    // 2 903-pixel difference into a 55 868-pixel one. The first write-up said the
+    // discontinuity "belongs to the impostor band rather than to the structure
+    // band pair", which sends the next reader to the wrong repair.
     assert!(
         imp_covered > covered * 4,
-        "the impostor silhouette ({imp_covered} px) is no longer far larger than the mesh's ({covered} px) — island wave I4 carried that ratio as the reason the visible discontinuity at {STRUCTURE_LOD_M} m belongs to the impostor band rather than to the structure band pair, and the ledger needs re-reading"
+        "the impostor silhouette ({imp_covered} px) is no longer far larger than the mesh's ({covered} px) — island wave I4 carried that ratio as the reason the discontinuity at {STRUCTURE_LOD_M} m is so much bigger than the geometry reading, and the ledger needs re-reading"
+    );
+    // **AND THE SHIPPED POP IS NOT SMALL, ARMED AS THE REFUSAL'S CONDITION.**
+    // The refusal above is a statement about geometry; the configuration that
+    // ships draws both sides as impostors and moves 93.9 % of a silhouette 19.2x
+    // the mesh's. That is carried rather than fixed, and it is the reason the
+    // cross-fade refusal is CONDITIONAL on the billboard sizing being repaired
+    // first. The day it is, this arm goes red and clause 6 is re-decided on the
+    // geometry numbers alone.
+    let imp_pct = imp_moved as f64 / imp_covered.max(1) as f64 * 100.0;
+    assert!(
+        imp_pct > 50.0,
+        "the SHIPPED parts->shell swap now moves only {imp_pct:.1} % of the building's impostor silhouette, against the 93.9 % island wave I4 measured. The impostor billboard has been re-sized or the band pair has gained a fade; either way the I4 refusal of a band-pair cross-fade was conditional on this number and has to be re-taken."
     );
 }
