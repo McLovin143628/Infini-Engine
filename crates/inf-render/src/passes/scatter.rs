@@ -886,6 +886,53 @@ pub struct ScatterPack {
     pub clamped: bool,
 }
 
+/// **Everything [`pack_fallback`] reads off the batches themselves, folded into
+/// one key** (island wave I4b).
+///
+/// `ScatterData::key` is the *payload's* identity and deliberately excludes the
+/// anchor, because a batch whose anchor moves keeps its GPU buffer. A CPU pack is
+/// the other case: it turns anchor-relative offsets into world positions, so the
+/// anchor, the two band distances and the material fields that land in an
+/// `InstanceRaw` are all part of what the pack IS.
+///
+/// # Why a caller wants this
+///
+/// The shadow caster pack used to be keyed on `RenderScene::version`, which moves
+/// whenever *anything* in the scene does — a character's pose, a streamed terrain
+/// tile. On the phase-30 city that meant re-packing eleven thousand scatter
+/// casters **every frame**, measured by wave I4b's per-pass record clock at
+/// **3.15 ms of CPU for 0.34 ms of GPU**. Keyed on this instead, a frame in which
+/// no scatter changed and the camera stayed inside its bucket does no work at all.
+///
+/// O(batches), not O(instances): each batch contributes its own precomputed
+/// content key.
+pub fn scatter_caster_fold(batches: &[ScatterBatch]) -> u128 {
+    let mut bytes: Vec<u8> = Vec::with_capacity(batches.len() * 64);
+    for b in batches {
+        bytes.extend_from_slice(&b.data.key().to_le_bytes());
+        for v in [
+            b.anchor.x,
+            b.anchor.y,
+            b.anchor.z,
+            b.draw_distance,
+            b.near_distance,
+        ] {
+            bytes.extend_from_slice(&v.to_bits().to_le_bytes());
+        }
+        for v in [
+            b.metallic,
+            b.roughness,
+            b.emissive[0],
+            b.emissive[1],
+            b.emissive[2],
+        ] {
+            bytes.extend_from_slice(&v.to_bits().to_le_bytes());
+        }
+        bytes.extend_from_slice(&b.id.to_le_bytes());
+    }
+    xxhash_rust::xxh3::xxh3_128(&bytes)
+}
+
 /// Pack a scene's scatter batches into `InstanceRaw`s — for the CPU fallback and
 /// for the shadow caster set — bucketed by primitive kind exactly as
 /// `mesh::pack_bucketed` does.

@@ -1972,6 +1972,14 @@ impl EngineRenderer {
         // before any command in this encoder runs. The marking pass itself is
         // recorded AFTER the graph, where the depth buffer it reads exists.
         self.vsm_sync(gpu, scene, view);
+        // **Its own segment** (island wave I4b). `vsm_sync` and the cluster-page
+        // commit above it are CPU work between two GPU marks, so without a mark
+        // here their recording cost is charged to `vsm-raster` — which is how a
+        // caster pass that draws for 0.9 ms came to read as 8.8 ms of recording.
+        // A segment must be named for what is inside it.
+        if let Some(t) = self.frame_timer.as_mut() {
+            t.mark(&mut encoder, "vsm-sync");
+        }
 
         // **THE CASTER PASS** (P27.2), recorded here and deliberately BEFORE the
         // graph: it produces the depth P27.4's receivers sample from inside the

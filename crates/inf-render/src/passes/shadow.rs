@@ -37,12 +37,20 @@ use crate::scene::LightKind;
 /// carries scatter — these are inputs to the *scatter* caster pack and to nothing
 /// else, so folding them in unconditionally would re-pack every rigid caster in a
 /// foliage-free level each time the camera crossed an 8 m lattice cell.
-type ScatterCasterKey = ([i64; 3], u32, u64);
+/// Widened by island wave I4b with the batches' own **content fold**, which is
+/// what lets the pack be *cached*: before it, the key leaned on
+/// `RenderScene::version` to notice a changed batch, and a version that moves
+/// with every pose re-packed eleven thousand casters a frame.
+type ScatterCasterKey = ([i64; 3], u32, u64, u128);
 
-/// What the packed caster buffer is a function of: `(scene.version, floating
-/// origin, the scatter terms if any)`. A scatter-free scene keeps exactly the
-/// pre-P18.5 `(version, origin)` pair.
-type CasterKey = (u64, glam::DVec3, Option<ScatterCasterKey>);
+/// What the packed caster buffer is a function of: the **packed rigid bytes**,
+/// their per-kind ranges, the floating origin, and the scatter terms if any.
+///
+/// The first term used to be `scene.version`, which is a *guess* at the rigid
+/// caster content and moves for reasons that have nothing to do with it. Hashing
+/// the bytes the pack just produced is exact, costs `O(scene.instances)`, and is
+/// zero on a level whose casters are all scatter — see [`ShadowNode::sync`].
+type CasterKey = (u128, [Range<u32>; 5], glam::DVec3, Option<ScatterCasterKey>);
 
 /// Forward-Z shadow depth: nearest caster wins (clear to 1.0 = far, keep smaller).
 ///
@@ -177,6 +185,12 @@ pub struct ShadowNode {
     ranges: [Range<u32>; 5],
     /// See [`CasterKey`]. `None` until the first pack.
     uploaded_version: Option<CasterKey>,
+    /// The cached P18.5 scatter caster pack, and the key it was built for
+    /// (island wave I4b). Held so a frame in which only the rigid casters moved
+    /// re-merges rather than re-packs; `None` on every scatter-free level, where
+    /// it costs one `Option` and no allocation.
+    scatter_pack: Option<(Vec<InstanceRaw>, [Range<u32>; 5])>,
+    scatter_key: Option<ScatterCasterKey>,
     /// Whether the disabled-shadows uniform is already published to the (stable,
     /// created-once) `frame.shadow.uniform`. Gates the constant re-write while
     /// shadows stay off; the enabled path clears it so a later disable re-publishes.
@@ -303,51 +317,118 @@ impl ShadowNode {
             instance_count: 0,
             ranges: EMPTY_RANGES,
             uploaded_version: None,
+            scatter_pack: None,
+            scatter_key: None,
             published_disabled: false,
         }
     }
 
-    /// Re-pack the caster instance buffer when the scene changed or the origin
-    /// rebased (mirrors [`crate::passes::depth_prepass`]).
+    /// Re-pack the caster instance buffer when the caster CONTENT changed or the
+    /// origin rebased (mirrors [`crate::passes::depth_prepass`]).
+    ///
+    /// # The key is the content, not the scene's version (island wave I4b)
+    ///
+    /// This used to be keyed on `RenderScene::version`, which moves whenever
+    /// anything in the scene does — a pose, a streamed terrain tile, an
+    /// interpolated actor. On the phase-30 city that made the scatter caster pack
+    /// run **every frame** over eleven thousand instances: wave I4b's per-pass
+    /// record clock measured this node at **3.149 ms of CPU against 0.344 ms of
+    /// GPU**, the second-dearest thing to record in a lit frame and one nobody
+    /// had reason to suspect, because a shadow pass that draws nothing looks free.
+    ///
+    /// Both halves are keyed on what they actually read:
+    ///
+    /// * the **rigid** half on the packed bytes themselves, which is exact and
+    ///   costs `O(scene.instances)` — the same order as the pack whose guess it
+    ///   replaces, and *zero* on a level whose casters are all scatter;
+    /// * the **scatter** half on
+    ///   [`scatter_caster_fold`](super::scatter::scatter_caster_fold) plus the
+    ///   camera bucket, the shadow range and the caster settings — everything
+    ///   `pack_fallback` reads and nothing else. Its result is **cached**, so a
+    ///   frame in which only the rigid half moved re-merges rather than re-packs.
+    ///
+    /// The scatter terms enter the key only when the scene carries scatter, so a
+    /// level with no foliage at all pays nothing for them.
     fn sync(&mut self, gpu: &GpuContext, frame: &FrameData) {
         let scatter_eye = frame.view.origin.to_world(frame.view.eye_local());
-        // The camera bucket and the shadow range enter the key **only** when the
-        // scene actually carries scatter. They are inputs to the *scatter* caster
-        // pack and to nothing else, so widening the key unconditionally would
-        // re-pack every rigid caster in the scene each time the camera crossed an
-        // 8 m lattice cell — a cost paid by every level that has no foliage at all,
-        // for a term that could not change its answer. A scatter-free scene keeps
-        // exactly the pre-P18.5 `(version, origin)` key.
         let scatter_key = (!frame.scene.scatter.is_empty()).then(|| {
             (
                 super::scatter::eye_bucket(scatter_eye),
                 frame.settings.shadows.max_distance.to_bits(),
                 frame.settings.scatter.caster_stamp(),
+                super::scatter::scatter_caster_fold(&frame.scene.scatter),
             )
         });
-        let key = (frame.scene.version, frame.view.origin.origin(), scatter_key);
-        if self.uploaded_version == Some(key) {
-            return;
-        }
         // Opaque+masked casters only (translucent geometry doesn't cast; folding
         // translucent shadows in is a documented follow-up).
         let (raw, ranges, _translucent) = pack_bucketed(&frame.view.origin, &frame.scene.instances);
-        // P18.5: scatter batches cast too. Before that batch a PCG volume's and a
-        // foliage entity's instances WERE `scene.instances`, so they cast shadows
-        // for free; moving them onto the GPU scatter path would have silently
-        // deleted every blade of grass's shadow, which is the worst shape a
-        // regression can have — invisible in a compile, invisible in a unit test,
-        // and obvious the moment someone looks at the ground. They are packed
-        // here through the same `pack_fallback` the CPU fallback uses, under
-        // `shadow_caster_settings` — so the caster band is exactly
-        // `min(mesh_distance_m, cull_distance_m, shadows.max_distance × 1.5)`, every
-        // term of it a clamp DOWN against a knob the host already set (the tier's
-        // ceilings, the authored draw distance), and the impostor band is dropped
-        // entirely because a camera-facing card is not a silhouette from the sun's
-        // point of view. The eye is the same
-        // bucketed lattice the fallback uses, so the caster set is a pure function
-        // of the key above rather than of every camera micro-motion, and the pack
-        // is bounded by `MAX_CPU_SCATTER_INSTANCES`.
+        let rigid_fold = xxhash_rust::xxh3::xxh3_128(bytemuck::cast_slice(&raw));
+        let key = (
+            rigid_fold,
+            ranges.clone(),
+            frame.view.origin.origin(),
+            scatter_key,
+        );
+        if self.uploaded_version.as_ref() == Some(&key) {
+            return;
+        }
+        if self.scatter_key != scatter_key {
+            self.scatter_pack = scatter_key.map(|_| self.pack_scatter_casters(frame, scatter_eye));
+            self.scatter_key = scatter_key;
+        }
+        let cached = self
+            .scatter_pack
+            .clone()
+            .unwrap_or((Vec::new(), EMPTY_RANGES));
+        frame
+            .scatter_audit
+            .record_shadow_casters(cached.0.len() as u32);
+        let (raw, ranges) = super::scatter::merge_bucketed((raw, ranges), cached);
+        self.ranges = ranges;
+        self.instance_count = raw.len() as u32;
+        if !raw.is_empty() {
+            if self.instances.is_none() || self.instance_capacity < raw.len() {
+                let capacity = raw.len().next_power_of_two().max(64);
+                self.instances = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("shadow-instances"),
+                    size: (capacity * std::mem::size_of::<InstanceRaw>()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+                self.instance_capacity = capacity;
+            }
+            gpu.queue.write_buffer(
+                self.instances.as_ref().unwrap(),
+                0,
+                bytemuck::cast_slice(&raw),
+            );
+        }
+        self.uploaded_version = Some(key);
+    }
+
+    /// The P18.5 scatter caster pack — the half of [`sync`](Self::sync) whose
+    /// result is cached on `scatter_key`.
+    ///
+    /// Before P18.5 a PCG volume's and a foliage entity's instances WERE
+    /// `scene.instances`, so they cast shadows for free; moving them onto the GPU
+    /// scatter path would have silently deleted every blade of grass's shadow,
+    /// which is the worst shape a regression can have — invisible in a compile,
+    /// invisible in a unit test, and obvious the moment someone looks at the
+    /// ground. They are packed here through the same `pack_fallback` the CPU
+    /// fallback uses, under `shadow_caster_settings` — so the caster band is
+    /// exactly `min(mesh_distance_m, cull_distance_m, shadows.max_distance ×
+    /// 1.5)`, every term of it a clamp DOWN against a knob the host already set
+    /// (the tier's ceilings, the authored draw distance), and the impostor band
+    /// is dropped entirely because a camera-facing card is not a silhouette from
+    /// the sun's point of view. The eye is the same bucketed lattice the fallback
+    /// uses, so the caster set is a pure function of the key rather than of every
+    /// camera micro-motion, and the pack is bounded by
+    /// `MAX_CPU_SCATTER_INSTANCES`.
+    fn pack_scatter_casters(
+        &self,
+        frame: &FrameData,
+        scatter_eye: glam::DVec3,
+    ) -> (Vec<InstanceRaw>, [std::ops::Range<u32>; 5]) {
         let caster_settings = super::scatter::shadow_caster_settings(
             &frame.settings.scatter,
             frame.settings.shadows.max_distance,
@@ -371,31 +452,7 @@ impl ShadowNode {
                 pack.considered,
             );
         }
-        frame
-            .scatter_audit
-            .record_shadow_casters(pack.instances.len() as u32);
-        let (raw, ranges) =
-            super::scatter::merge_bucketed((raw, ranges), (pack.instances, pack.ranges));
-        self.ranges = ranges;
-        self.instance_count = raw.len() as u32;
-        if !raw.is_empty() {
-            if self.instances.is_none() || self.instance_capacity < raw.len() {
-                let capacity = raw.len().next_power_of_two().max(64);
-                self.instances = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("shadow-instances"),
-                    size: (capacity * std::mem::size_of::<InstanceRaw>()) as u64,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }));
-                self.instance_capacity = capacity;
-            }
-            gpu.queue.write_buffer(
-                self.instances.as_ref().unwrap(),
-                0,
-                bytemuck::cast_slice(&raw),
-            );
-        }
-        self.uploaded_version = Some(key);
+        (pack.instances, pack.ranges)
     }
 }
 

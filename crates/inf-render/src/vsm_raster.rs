@@ -165,6 +165,10 @@ pub const VSM_MAX_GROUPS: u32 = 1_024;
 
 const _: () = assert!(VSM_MAX_GROUPS as usize > PrimMesh::ALL.len());
 
+/// `u64` words in a per-page group bitmask (island wave I4b) — see
+/// `PageDraw::group_mask`.
+const VSM_GROUP_MASK_WORDS: usize = (VSM_MAX_GROUPS as usize).div_ceil(64);
+
 /// Words in one `DrawIndexedIndirectArgs`: `index_count, instance_count,
 /// first_index, base_vertex, first_instance`. **Word 1 is the counter** — the
 /// `inf_vgeom` construction, where the atomic the cull increments *is* the draw's
@@ -465,6 +469,13 @@ pub struct VsmRasterStats {
     pub pages: u64,
     /// Indirect draws issued, summed over frames.
     pub draws: u64,
+    /// Indirect draws the per-page **group mask** removed, summed over frames
+    /// (island wave I4b) — the `pages x groups` pairs whose group has no caster
+    /// in that page, and which therefore drew zero instances before it existed.
+    ///
+    /// Reported rather than inferred, because "the mask is working" and "the mask
+    /// is masking everything" look identical in a frame time.
+    pub skipped_draws: u64,
     /// Caster records packed, summed over frames.
     pub casters: u64,
     /// Of those, the ones that came from GPU scatter batches rather than from
@@ -576,6 +587,12 @@ pub struct VsmRaster {
     /// `pages × groups × 5` words, `STORAGE | INDIRECT | COPY_DST`.
     args: wgpu::Buffer,
     args_words: u64,
+    /// **`pages × groups` compact draw slots** (island wave I4b): the args index
+    /// a `(page, group)` pair owns, or `u32::MAX` for a pair whose group has no
+    /// caster in that page. See `PageDraw::group_mask` for why most of them are
+    /// `u32::MAX` on a streamed world.
+    slots: wgpu::Buffer,
+    slot_entries: u64,
     casters: wgpu::Buffer,
     caster_capacity: u64,
     pages: wgpu::Buffer,
@@ -670,6 +687,11 @@ pub struct VsmRaster {
     /// `(page, group)` grid and nothing else in the tree knows its order.
     last_pages: Vec<(VsmLightHandle, VsmPage, (u32, u32, u32))>,
     last_groups: usize,
+    /// The compact draw-slot table the last [`record`](Self::record) uploaded
+    /// (island wave I4b), `last_pages × last_groups` entries. Kept so
+    /// [`read_draw_counts`](Self::read_draw_counts) can still answer in
+    /// `(page, group)` order over a compacted args buffer.
+    last_slots: Vec<u32>,
     /// The frame's packed caster records, moved out of `pack_casters` rather than
     /// copied. See [`last_casters`](Self::last_casters).
     last_casters: Vec<VsmCasterRaw>,
@@ -692,9 +714,10 @@ impl VsmRaster {
             has_dynamic_offset: false,
             min_binding_size: None,
         };
-        // Five bindings, four of them storage — under the six the P18.5 scatter
-        // cull budgets for and well under the eight `inf_vgeom`'s cull spends
-        // with no headroom left.
+        // Six bindings, five of them storage — exactly what the P18.5 scatter
+        // cull budgets for and still under the eight `inf_vgeom`'s cull spends
+        // with no headroom left. The sixth is island wave I4b's compact slot
+        // table.
         let cull_bgl = gpu
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -712,6 +735,7 @@ impl VsmRaster {
                     entry(2, storage(true)),
                     entry(3, storage(false)),
                     entry(4, storage(false)),
+                    entry(5, storage(true)),
                 ],
             });
         let cull_shader = gpu
@@ -935,6 +959,11 @@ impl VsmRaster {
             visible_entries: 64,
             args: empty("vsm-draw-args", ARGS_USAGE),
             args_words: 64,
+            slots: empty(
+                "vsm-draw-slots",
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            ),
+            slot_entries: 64,
             casters: empty(
                 "vsm-casters",
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
@@ -969,6 +998,7 @@ impl VsmRaster {
             prev_view: None,
             last_pages: Vec::new(),
             last_groups: 0,
+            last_slots: Vec::new(),
             last_casters: Vec::new(),
             stats: VsmRasterStats::default(),
         }
@@ -1027,7 +1057,16 @@ impl VsmRaster {
         if n == 0 {
             return Vec::new();
         }
-        let bytes = n * VSM_ARG_WORDS * 4;
+        // The args buffer is COMPACT since island wave I4b — one block per pair
+        // that exists — so the readback is over the live blocks and the answer is
+        // expanded back into `(page, group)` order through `last_slots`. A pair
+        // that has no block never had a caster in that page, and the count it is
+        // owed is exactly zero.
+        let live = self.last_slots.iter().filter(|&&s| s != u32::MAX).count() as u64;
+        if live == 0 {
+            return vec![0; n as usize];
+        }
+        let bytes = live * VSM_ARG_WORDS * 4;
         let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vsm-draw-args-readback"),
             size: bytes,
@@ -1054,9 +1093,17 @@ impl VsmRaster {
             return Vec::new();
         };
         let words: &[u32] = bytemuck::cast_slice(&data);
-        let out = words
+        let compact: Vec<u32> = words
             .chunks_exact(VSM_ARG_WORDS as usize)
             .map(|a| a[1])
+            .collect();
+        let out = self
+            .last_slots
+            .iter()
+            .map(|&s| match s {
+                u32::MAX => 0,
+                s => compact.get(s as usize).copied().unwrap_or(0),
+            })
             .collect();
         drop(data);
         staging.unmap();
@@ -1156,7 +1203,7 @@ impl VsmRaster {
         // conservative in the cull's own direction: it may fold a caster into a
         // page the page's frustum would reject, never miss one it would keep.
         self.stats.invalidation_touches +=
-            scatter_caster_stamps(&mut pages, residency, geom, &casters, &hashes);
+            scatter_caster_stamps(&mut pages, residency, geom, &casters, &hashes, &groups);
 
         // ── 2. the dirty set: a page whose slot already holds this content is not
         // touched at all — no viewport, no clear, no draw, and it is not even in
@@ -1205,6 +1252,12 @@ impl VsmRaster {
         let group_count = groups.len() as u32;
         self.ensure(gpu, page_count, caster_count.max(1), group_count.max(1));
 
+        // The compact draw-slot table, hoisted so the raster below can index it
+        // (island wave I4b). Empty when there are no casters, in which case the
+        // raster records clears alone.
+        let mut slot_map: Vec<u32> = Vec::new();
+        let mut skipped = 0u64;
+
         // ── 3. uploads, all through the queue, so they are ordered BEFORE every
         // command this encoder holds (the `crate::vt` ordering contract).
         if caster_count > 0 {
@@ -1232,8 +1285,25 @@ impl VsmRaster {
             // together so a draw and the args it reads can never name different
             // groups. `instance_count` is written as **zero** and only the GPU ever
             // raises it — the `inf_vgeom` reset, at one args block per (page, group).
-            let mut draw_raw = Vec::with_capacity(pages.len() * groups.len());
-            let mut arg_raw: Vec<u32> = Vec::with_capacity(pages.len() * groups.len() * 5);
+            //
+            // **And they are built for the ACTIVE pairs only** (island wave
+            // I4b). A `(page, group)` pair whose group has no caster in that page
+            // — most of them on a streamed world, where a group is one per
+            // resident terrain tile and a 128 m page overlaps one or two — needs
+            // no uniform, no args block and no draw. Writing them anyway was
+            // 2.16 MB of `VsmPageDrawRaw` a frame (the record is 240 bytes of
+            // dynamic-offset padding on 80 bytes of payload) and it is what was
+            // left of the 8.66 ms record after the draws themselves were skipped.
+            //
+            // `slot_map` is the compact index each pair owns, `u32::MAX` for
+            // "this pair does not exist this frame" — the cull reads it, and it
+            // is `pages × groups` **u32s** (34 KB) against `pages × groups`
+            // 256-byte uniforms.
+            let pairs = pages.len() * groups.len();
+            slot_map = vec![u32::MAX; pairs];
+            let mut active = 0usize;
+            let mut draw_raw = Vec::with_capacity(pairs.min(4096));
+            let mut arg_raw: Vec<u32> = Vec::with_capacity(pairs.min(4096) * 5);
             // Hardening Wave E: hoisted. `group_first` is a prefix sum over
             // `groups[..g]` and is independent of the PAGE index, but it used to be
             // evaluated inside both loops — `pages x G^2 / 2` scalar adds where
@@ -1245,6 +1315,14 @@ impl VsmRaster {
             let firsts = group_prefix(&groups);
             for (i, p) in pages.iter().enumerate() {
                 for (g, geo) in groups.iter().enumerate() {
+                    if geo.casters == 0
+                        || geo.index_count == 0
+                        || p.group_mask[g / 64] & (1u64 << (g % 64)) == 0
+                    {
+                        continue;
+                    }
+                    slot_map[i * groups.len() + g] = draw_raw.len() as u32;
+                    active += 1;
                     draw_raw.push(VsmPageDrawRaw {
                         view_proj: p.view_proj.to_cols_array(),
                         info: [i as u32 * caster_count + firsts[g], p.slot, g as u32, 0],
@@ -1259,10 +1337,15 @@ impl VsmRaster {
                     ]);
                 }
             }
+            skipped = (pairs - active) as u64;
             gpu.queue
-                .write_buffer(&self.draws, 0, bytemuck::cast_slice(&draw_raw));
-            gpu.queue
-                .write_buffer(&self.args, 0, bytemuck::cast_slice(&arg_raw));
+                .write_buffer(&self.slots, 0, bytemuck::cast_slice(&slot_map));
+            if !draw_raw.is_empty() {
+                gpu.queue
+                    .write_buffer(&self.draws, 0, bytemuck::cast_slice(&draw_raw));
+                gpu.queue
+                    .write_buffer(&self.args, 0, bytemuck::cast_slice(&arg_raw));
+            }
             self.rebuild_binds(gpu);
 
             // ── the cull: one thread per (caster, page) pair.
@@ -1335,6 +1418,18 @@ impl VsmRaster {
                         if geo.casters == 0 || geo.index_count == 0 {
                             continue;
                         }
+                        // **The page's own group mask** (island wave I4b). A clear
+                        // bit means no caster of this group has light-space bounds
+                        // touching this page, so the cull cannot raise its
+                        // instance count above zero and the indirect draw below
+                        // would draw nothing. The mask is conservative in the
+                        // cull's direction — see `PageDraw::group_mask` — so this
+                        // skips only draws that were already empty, which is why
+                        // it moves the record clock and not a pixel.
+                        let slot = match slot_map.get(i * groups.len() + g) {
+                            Some(&s) if s != u32::MAX => u64::from(s),
+                            _ => continue,
+                        };
                         // Bound per group rather than once per pass: the built-in
                         // primitives share one pair of buffers, and every other
                         // caster path brings its own. The pipeline switches only for
@@ -1389,7 +1484,6 @@ impl VsmRaster {
                                 );
                             }
                         }
-                        let slot = (i * groups.len() + g) as u64;
                         pass.set_bind_group(
                             0,
                             page_bind,
@@ -1416,11 +1510,13 @@ impl VsmRaster {
             .map(|p| (VsmLightHandle(p.light), p.page, p.rect))
             .collect();
         self.last_groups = if caster_count > 0 { groups.len() } else { 0 };
+        self.last_slots = std::mem::take(&mut slot_map);
         self.last_casters = casters;
         self.stats.frames += 1;
         self.stats.pages += u64::from(page_count);
         self.stats.cleared_pages += u64::from(page_count);
         self.stats.draws += draws;
+        self.stats.skipped_draws += skipped;
         self.stats.casters += u64::from(caster_count);
         self.stats.scatter_casters += u64::from(scattered);
         let of = |f: fn(&GroupSource) -> bool| -> u64 {
@@ -1495,6 +1591,10 @@ impl VsmRaster {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: self.args.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: self.slots.as_entire_binding(),
                     },
                 ],
             }));
@@ -1590,6 +1690,7 @@ impl VsmRaster {
                 page,
                 casters: 0,
                 caster_fold: 0,
+                group_mask: [0; VSM_GROUP_MASK_WORDS],
             });
         }
         out
@@ -2007,6 +2108,14 @@ impl VsmRaster {
             "vsm-page-draws",
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
+        grow(
+            &mut self.slots,
+            &mut self.slot_entries,
+            u64::from(pages) * u64::from(groups),
+            4,
+            "vsm-draw-slots",
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
         if grew {
             self.cull_bind = None;
             self.caster_bind = None;
@@ -2045,6 +2154,23 @@ struct PageDraw {
     /// page, and how many there were.
     caster_fold: u64,
     casters: u32,
+    /// **Which geometry groups have a caster in this page** (island wave I4b),
+    /// one bit per group index.
+    ///
+    /// Filled by the same scatter that folds the content stamps, so it costs
+    /// nothing extra to compute and is **conservative in the cull's own
+    /// direction**: a set bit may name a group the GPU cull then finds nothing
+    /// for (a draw that draws zero instances, exactly as before), and a clear bit
+    /// can never hide a group the cull would have kept. That asymmetry is what
+    /// makes skipping the draw safe.
+    ///
+    /// Why it exists: the raster loop is `pages × groups`, and a group is one per
+    /// primitive kind, per vgeom asset, per skinned pair **and per resident
+    /// terrain tile** — so a streamed world puts it in the hundreds while a
+    /// single 128 m shadow page overlaps one or two tiles. Measured on the
+    /// phase-30 city at 1080p with the lighting stack on: **8 426 indirect draws
+    /// per rastering frame**, 8.66 ms of CPU *recording* against 1.08 ms of GPU.
+    group_mask: [u64; VSM_GROUP_MASK_WORDS],
     /// The whole content stamp: `geo_key`, the caster fold and the caster count.
     /// Zero until [`scatter_caster_stamps`] finishes it.
     key: u64,
@@ -2122,6 +2248,7 @@ fn scatter_caster_stamps(
     geom: PageGeometry<'_>,
     casters: &[VsmCasterRaw],
     hashes: &[u64],
+    groups: &[GroupGeom],
 ) -> u64 {
     let mut grids: std::collections::BTreeMap<u32, LightGrids> = std::collections::BTreeMap::new();
     let mut perspective: Vec<usize> = Vec::new();
@@ -2172,7 +2299,19 @@ fn scatter_caster_stamps(
     }
 
     let mut touches = 0u64;
-    for (c, &hash) in casters.iter().zip(hashes) {
+    // **Which group this caster belongs to** (island wave I4b). Casters are
+    // pushed contiguously per group — that is the same layout `group_prefix`
+    // encodes and the cull indexes with — so a running cursor is exact and costs
+    // one compare per caster, against a `group_prefix` binary search per caster
+    // or a group id stored on every `VsmCasterRaw` (which is 96 bytes already).
+    let mut group = 0usize;
+    let mut group_end = groups.first().map(|g| g.casters as usize).unwrap_or(0);
+    for (ci, (c, &hash)) in casters.iter().zip(hashes).enumerate() {
+        while ci >= group_end && group + 1 < groups.len() {
+            group += 1;
+            group_end += groups[group].casters as usize;
+        }
+        let (word, bit) = (group / 64, 1u64 << (group % 64));
         let centre = glam::Vec3::new(c.sphere[0], c.sphere[1], c.sphere[2]);
         let radius = c.sphere[3];
         for grid in grids.values() {
@@ -2225,6 +2364,9 @@ fn scatter_caster_stamps(
                             let p = &mut pages[idx as usize];
                             fold_into(&mut p.caster_fold, hash);
                             p.casters += 1;
+                            if let Some(w) = p.group_mask.get_mut(word) {
+                                *w |= bit;
+                            }
                         }
                     }
                 }
@@ -2236,6 +2378,9 @@ fn scatter_caster_stamps(
             if crate::vsm::vsm_page_sees_sphere(&p.view_proj, centre, radius) {
                 fold_into(&mut p.caster_fold, hash);
                 p.casters += 1;
+                if let Some(w) = p.group_mask.get_mut(word) {
+                    *w |= bit;
+                }
             }
         }
     }
@@ -2990,6 +3135,7 @@ mod tests {
             frames: 3,
             pages: 17,
             draws: 51,
+            skipped_draws: 0,
             casters: 9,
             scatter_casters: 2,
             deferred_pages: 1,

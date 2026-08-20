@@ -109,7 +109,7 @@ fn the_report_names_every_pass_and_the_segments_tile_the_frame() {
     let t = r.gpu_timings(&gpu).expect("a timed frame reports timings");
 
     let names: Vec<&str> = t.passes.iter().map(|p| p.name).collect();
-    let mut expected: Vec<&str> = vec!["vt-stream", "vsm-raster"];
+    let mut expected: Vec<&str> = vec!["vt-stream", "vsm-sync", "vsm-raster"];
     expected.extend(r.pass_names());
     expected.extend(["vt-feedback", "vsm-mark"]);
     assert_eq!(

@@ -62,6 +62,19 @@ struct VsmCaster {
 // `DrawIndexedIndirectArgs` is five words — index_count, instance_count,
 // first_index, base_vertex, first_instance — and word 1 IS the counter.
 @group(0) @binding(4) var<storage, read_write> args: array<atomic<u32>>;
+// **The compact draw-slot table** (island wave I4b), `pages * groups` entries:
+// the args block a `(page, group)` pair owns, or `0xFFFFFFFF` when the pair does
+// not exist this frame because no caster of that group has light-space bounds
+// touching that page.
+//
+// The CPU derives it from the same scatter that folds the page content stamps
+// and it is **conservative in this cull's own direction** — a live slot may name
+// a pair this cull then finds nothing for, and a dead slot can never hide one it
+// would have kept. That is what makes the early return below safe: on a streamed
+// world a geometry group is one per resident terrain tile and a 128 m shadow page
+// overlaps one or two of them, so the great majority of pairs are dead and the
+// CPU no longer writes a 256-byte uniform and a five-word args block for each.
+@group(0) @binding(5) var<storage, read> slots: array<u32>;
 
 const VSM_ARG_WORDS: u32 = 5u;
 
@@ -109,7 +122,11 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!page_sees_sphere(p.view_proj, c.sphere.xyz, c.sphere.w)) {
         return;
     }
-    let arg = (pi * params.counts.z + c.ids.x) * VSM_ARG_WORDS + 1u;
+    let pair = slots[pi * params.counts.z + c.ids.x];
+    if (pair == 0xFFFFFFFFu) {
+        return;
+    }
+    let arg = pair * VSM_ARG_WORDS + 1u;
     let slot = atomicAdd(&args[arg], 1u);
     visible[pi * params.counts.x + c.ids.z + slot] = ci;
 }

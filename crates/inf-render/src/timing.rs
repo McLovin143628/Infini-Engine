@@ -56,6 +56,19 @@ pub struct PassTime {
     pub name: &'static str,
     /// GPU milliseconds from the previous mark to this one.
     pub ms: f64,
+    /// **CPU milliseconds spent RECORDING this segment** (island wave I4b) —
+    /// the wall clock between the previous mark and this one, on the thread that
+    /// built the command buffer.
+    ///
+    /// The GPU number above says what the device did; this says what it cost to
+    /// *ask*. They are different questions and on a lit frame they had different
+    /// answers: wave I4b measured a 1080p frame whose GPU half was 23.9 ms and
+    /// whose `render (record)` CPU stage was **18.7 ms**, and with only the GPU
+    /// column the next reader would have gone looking on the wrong processor.
+    /// Same construction as the GPU column — each value is "since the previous
+    /// mark" — so the CPU segments tile the record phase exactly as the GPU
+    /// segments tile the frame.
+    pub cpu_ms: f64,
 }
 
 /// One frame's GPU timings, newest resolved frame first-and-only.
@@ -65,6 +78,22 @@ pub struct FrameTimings {
     pub total_ms: f64,
     /// Every segment, in submission order.
     pub passes: Vec<PassTime>,
+}
+
+impl FrameTimings {
+    /// The whole frame's **recording** cost on the CPU — the sum of the
+    /// segments' [`cpu_ms`](PassTime::cpu_ms) (island wave I4b).
+    pub fn cpu_total_ms(&self) -> f64 {
+        self.passes.iter().map(|p| p.cpu_ms).sum()
+    }
+
+    /// The segments sorted by CPU recording cost, dearest first.
+    pub fn by_cpu_cost(&self) -> Vec<(&'static str, f64)> {
+        let mut v: Vec<(&'static str, f64)> =
+            self.passes.iter().map(|p| (p.name, p.cpu_ms)).collect();
+        v.sort_by(|a, b| b.1.total_cmp(&a.1));
+        v
+    }
 }
 
 impl FrameTimings {
@@ -81,13 +110,13 @@ impl FrameTimings {
 
 /// How many timestamps one frame may write.
 ///
-/// The graph is 29 nodes and the renderer brackets four more segments around it,
-/// plus the frame's own origin mark: 34. Sixty-four leaves room for the passes a
+/// The graph is 29 nodes and the renderer brackets five more segments around it,
+/// plus the frame's own origin mark: 35. Sixty-four leaves room for the passes a
 /// later phase adds without anyone having to remember this constant exists, and
 /// costs 512 bytes of query-set storage.
 pub const MAX_FRAME_MARKS: u32 = 64;
 
-/// The frame writes 29 graph nodes + 4 out-of-graph segments + the origin mark.
+/// The frame writes 29 graph nodes + 5 out-of-graph segments + the origin mark.
 ///
 /// A **compile-time** assertion rather than a test, because both sides are
 /// constants and clippy is right that a runtime `assert!` over two `const`s is
@@ -97,8 +126,9 @@ pub const MAX_FRAME_MARKS: u32 = 64;
 /// — that the report names every node the renderer actually built — is
 /// `gpu_timing::the_report_names_every_pass_and_the_segments_tile_the_frame`,
 /// which reads `EngineRenderer::pass_names` and cannot be folded away.
-/// 29 graph nodes, 4 out-of-graph segments, and the frame's origin mark.
-const FRAME_MARKS_NEEDED: u32 = 34;
+/// 29 graph nodes, 5 out-of-graph segments (island wave I4b split `vsm-sync`
+/// out of `vsm-raster`), and the frame's origin mark.
+const FRAME_MARKS_NEEDED: u32 = 35;
 const _: () = assert!(MAX_FRAME_MARKS >= FRAME_MARKS_NEEDED);
 
 /// A per-frame GPU stopwatch over one `wgpu::QuerySet`.
@@ -117,6 +147,11 @@ pub struct FrameTimer {
     /// Names of the segments marked so far this frame; `names[i]` describes the
     /// interval that ENDS at timestamp `i + 1`.
     names: Vec<&'static str>,
+    /// CPU recording milliseconds per segment, index-aligned with `names`
+    /// (island wave I4b).
+    cpu_ms: Vec<f64>,
+    /// When the segment currently being recorded started, on the CPU.
+    at: Option<std::time::Instant>,
     /// Timestamps written this frame (`names.len() + 1` once `begin` has run).
     written: u32,
     /// Whether a resolved frame is sitting in `read` waiting to be taken.
@@ -158,6 +193,8 @@ impl FrameTimer {
             }),
             period_ns: gpu.queue.get_timestamp_period(),
             names: Vec::with_capacity(MAX_FRAME_MARKS as usize),
+            cpu_ms: Vec::with_capacity(MAX_FRAME_MARKS as usize),
+            at: None,
             written: 0,
             ready: false,
         })
@@ -166,10 +203,12 @@ impl FrameTimer {
     /// Open a frame: clear last frame's marks and stamp the frame's origin.
     pub fn begin(&mut self, encoder: &mut wgpu::CommandEncoder) {
         self.names.clear();
+        self.cpu_ms.clear();
         self.written = 0;
         self.ready = false;
         encoder.write_timestamp(&self.set, 0);
         self.written = 1;
+        self.at = Some(std::time::Instant::now());
     }
 
     /// Close the segment that has just been recorded and name it.
@@ -183,6 +222,14 @@ impl FrameTimer {
             return;
         }
         encoder.write_timestamp(&self.set, self.written);
+        // The CPU half of the same segment (island wave I4b): the wall clock
+        // since the previous mark, which is the time this node spent building
+        // commands. Pushed with the name so the two can never fall out of step.
+        let now = std::time::Instant::now();
+        let since = self.at.unwrap_or(now);
+        self.cpu_ms
+            .push(now.duration_since(since).as_secs_f64() * 1000.0);
+        self.at = Some(now);
         self.names.push(name);
         self.written += 1;
     }
@@ -253,7 +300,11 @@ impl FrameTimer {
             .enumerate()
             .filter_map(|(i, name)| {
                 let (a, b) = (*ticks.get(i)?, *ticks.get(i + 1)?);
-                Some(PassTime { name, ms: ms(a, b) })
+                Some(PassTime {
+                    name,
+                    ms: ms(a, b),
+                    cpu_ms: self.cpu_ms.get(i).copied().unwrap_or(0.0),
+                })
             })
             .collect();
         Some(FrameTimings {
@@ -280,22 +331,27 @@ mod tests {
                 PassTime {
                     name: "sky",
                     ms: 1.0,
+                    cpu_ms: 0.0,
                 },
                 PassTime {
                     name: "mesh",
                     ms: 4.0,
+                    cpu_ms: 0.0,
                 },
                 PassTime {
                     name: "grid",
                     ms: 0.0,
+                    cpu_ms: 0.0,
                 },
                 PassTime {
                     name: "debug-lines",
                     ms: 0.0,
+                    cpu_ms: 0.0,
                 },
                 PassTime {
                     name: "composite",
                     ms: 1.0,
+                    cpu_ms: 0.0,
                 },
             ],
         };

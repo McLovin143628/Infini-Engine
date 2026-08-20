@@ -341,7 +341,10 @@ fn representative(info: &wgpu::AdapterInfo) -> bool {
 struct Measured {
     rounds: Vec<Round>,
     best: usize,
-    passes: Vec<(&'static str, f64)>,
+    /// `(name, GPU ms, CPU record ms)` per pass — the CPU column is island
+    /// wave I4b's addition, because a lit frame's dearest half turned out to be
+    /// the recording rather than the drawing.
+    passes: Vec<(&'static str, f64, f64)>,
     gpu_frame_ms: f64,
     cpu_ms: [f64; CPU_STAGES],
     instances: usize,
@@ -350,6 +353,10 @@ struct Measured {
     skinned: usize,
     terrain_tiles: usize,
     vt_textures: usize,
+    /// The VSM caster pass's own counters over the measured rounds (island wave
+    /// I4b) — `pages x groups` is what the pass RECORDS, and the record column
+    /// is meaningless without them.
+    vsm: Option<inf_render::VsmRasterStats>,
 }
 
 impl Measured {
@@ -442,13 +449,13 @@ fn measure(
     }
 
     let mut rounds: Vec<Round> = Vec::with_capacity(ROUNDS);
-    let mut best_passes: Vec<(&'static str, f64)> = Vec::new();
+    let mut best_passes: Vec<(&'static str, f64, f64)> = Vec::new();
     let mut best_gpu = 0.0;
     let mut best_cpu = [0.0f64; CPU_STAGES];
     let mut best = 0usize;
     for r in 0..ROUNDS {
         let mut ms = Vec::with_capacity(FRAMES);
-        let mut sums: Vec<(&'static str, f64)> = Vec::new();
+        let mut sums: Vec<(&'static str, f64, f64)> = Vec::new();
         let mut gpu_total = 0.0;
         let mut cpu_total = [0.0f64; CPU_STAGES];
         step = 0;
@@ -463,10 +470,11 @@ fn measure(
             if let Some(t) = timings {
                 gpu_total += t.total_ms;
                 if sums.is_empty() {
-                    sums = t.passes.iter().map(|p| (p.name, p.ms)).collect();
+                    sums = t.passes.iter().map(|p| (p.name, p.ms, p.cpu_ms)).collect();
                 } else {
                     for (slot, p) in sums.iter_mut().zip(&t.passes) {
                         slot.1 += p.ms;
+                        slot.2 += p.cpu_ms;
                     }
                 }
             }
@@ -478,7 +486,7 @@ fn measure(
             best_cpu = cpu_total.map(|v| v / FRAMES as f64);
             best_passes = sums
                 .into_iter()
-                .map(|(n, total)| (n, total / FRAMES as f64))
+                .map(|(n, gpu, cpu)| (n, gpu / FRAMES as f64, cpu / FRAMES as f64))
                 .collect();
         }
         rounds.push(round);
@@ -499,6 +507,7 @@ fn measure(
         skinned: scene.skinned.len(),
         terrain_tiles: scene.terrains.iter().map(|t| t.tiles.len()).sum(),
         vt_textures,
+        vsm: renderer.vsm_raster_stats(),
     }
 }
 
@@ -882,15 +891,15 @@ fn the_frame_at_shipping_resolution() {
                 "{label} GPU frame {:.3} ms; dearest passes:",
                 m.gpu_frame_ms
             );
-            for (n, ms) in by_cost.iter().take(12) {
+            for (n, ms, cpu) in by_cost.iter().take(12) {
                 println!(
-                    "{label}   {n:<16} {ms:7.3} ms  ({:5.1} % of the GPU frame)",
+                    "{label}   {n:<16} {ms:7.3} ms  ({:5.1} % of the GPU frame)                        record {cpu:6.3} ms",
                     ms / m.gpu_frame_ms.max(1.0e-9) * 100.0
                 );
             }
             // Anti-vacuity: a report whose segments do not add up to the frame is
             // a report about a frame the renderer did not draw.
-            let sum: f64 = m.passes.iter().map(|(_, ms)| ms).sum();
+            let sum: f64 = m.passes.iter().map(|(_, ms, _)| ms).sum();
             assert!(
                 (sum - m.gpu_frame_ms).abs() < 1.0e-6,
                 "{label}: the per-pass segments ({sum:.6} ms) do not tile the \
@@ -1010,19 +1019,65 @@ fn the_frame_at_shipping_resolution() {
                 r.p99,
                 m.gpu_frame_ms,
             );
-            if !m.passes.is_empty() {
-                let mut by_cost = m.passes.clone();
-                by_cost.sort_by(|a, b| b.1.total_cmp(&a.1));
+            // **The lit frame gets the SAME two tables the shipped one gets**
+            // (island wave I4b). A configuration whose price is quoted as one
+            // number cannot be optimised: I4b's first act was to attribute the
+            // CPU frame and the sim step, and a lit frame that says only "p95
+            // 64.9" sends the next reader to the GPU when a third of it may be
+            // on the other processor.
+            if let Some(v) = m.vsm.as_ref() {
                 println!(
-                    "{label} lit, dearest passes: {}",
-                    by_cost
-                        .iter()
-                        .take(6)
-                        .map(|(n, ms)| format!("{n} {ms:.3} ms"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    "{label} lit VSM raster: {} frames opened the page pass,                      {} page rectangles, {} indirect draws, {} casters                      ({} from scatter, {} terrain), {} deferred pages, {}                      dropped casters — i.e. {:.1} pages and {:.0} draws per                      rastering frame",
+                    v.frames,
+                    v.pages,
+                    v.draws,
+                    v.casters,
+                    v.scatter_casters,
+                    v.terrain_casters,
+                    v.deferred_pages,
+                    v.dropped_casters,
+                    v.pages as f64 / v.frames.max(1) as f64,
+                    v.draws as f64 / v.frames.max(1) as f64,
+                );
+                println!(
+                    "{label} lit VSM group mask: {} indirect draws skipped                      ({:.0} per rastering frame) against {} issued",
+                    v.skipped_draws,
+                    v.skipped_draws as f64 / v.frames.max(1) as f64,
+                    v.draws,
                 );
             }
+            let lit_cpu: f64 = m.cpu_ms.iter().sum();
+            println!("{label} lit CPU frame {lit_cpu:.3} ms (a MEAN), stage by stage:");
+            for (n, ms) in CPU_STAGE_NAMES.iter().zip(m.cpu_ms) {
+                println!(
+                    "{label}   lit {n:<16} {ms:7.3} ms  ({:5.1} % of the lit CPU frame)",
+                    ms / lit_cpu.max(1.0e-9) * 100.0
+                );
+            }
+            if !m.passes.is_empty() {
+                let mut by_cost = m.passes.clone();
+                by_cost.sort_by(|a, b| (b.1 + b.2).total_cmp(&(a.1 + a.2)));
+                println!(
+                    "{label} lit GPU frame {:.3} ms; every pass, with what it cost                      to RECORD it:",
+                    m.gpu_frame_ms
+                );
+                for (n, ms, cpu) in by_cost
+                    .iter()
+                    .filter(|(_, ms, cpu)| *ms >= 0.0005 || *cpu >= 0.0005)
+                {
+                    println!(
+                        "{label}   lit {n:<16} {ms:7.3} ms  ({:5.1} % of the lit GPU                          frame)   record {cpu:6.3} ms",
+                        ms / m.gpu_frame_ms.max(1.0e-9) * 100.0
+                    );
+                }
+            }
+            let lit_submitted = lit_cpu - m.cpu_ms[4] - m.cpu_ms[5];
+            println!(
+                "{label} lit PIPELINED ESTIMATE {:.3} ms ({:.1} fps) = max(CPU without the wait or the stopwatch {lit_submitted:.3}, GPU frame {:.3})",
+                lit_submitted.max(m.gpu_frame_ms),
+                1000.0 / lit_submitted.max(m.gpu_frame_ms).max(1.0e-9),
+                m.gpu_frame_ms
+            );
             println!(
                 "{label} THE STACK'S PRICE, same resolution and same content: p95 \
              {:.3} ms lit against {base_p95:.3} ms as shipped ({:+.3} ms), GPU \
