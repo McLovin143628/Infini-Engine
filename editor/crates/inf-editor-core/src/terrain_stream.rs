@@ -83,10 +83,13 @@ pub const STREAMED_TERRAIN_COARSE_REJECTION: &str =
 
 /// Refinement radius of a level-0 node, in level-0 tile spans.
 ///
-/// MIRROR of `inf_player::terrain_stream::RENDER_LOD0_RADIUS_TILES` — the editor
+/// **Re-exported from Ring 0 since island wave I4**, where it used to be a
+/// `MIRROR of inf_player::terrain_stream::RENDER_LOD0_RADIUS_TILES`. The editor
 /// viewport and the shipped player must page the same cut from the same camera,
-/// or "what you see is what ships" stops being true for terrain detail.
-pub const RENDER_LOD0_RADIUS_TILES: f64 = 2.5;
+/// or "what you see is what ships" stops being true for terrain detail — and
+/// IB-9 derives a residency budget from this number, which settles where it
+/// lives: one declaration, in the crate that owns the cut.
+pub use inf_terrain::stream::RENDER_LOD0_RADIUS_TILES;
 
 /// One streamed terrain entity in the open document.
 struct EditorStream {
@@ -298,11 +301,22 @@ impl EditorTerrainStreams {
             RENDER_LOD0_RADIUS_TILES * grid.level0_span(),
             catalog.max_lod() + 1,
         );
+        // **IB-9: the budget is sized to THIS terrain's ladder.** MIRROR of
+        // `inf_player::terrain_stream`'s line — the two hosts must clamp the same
+        // cut or the editor previews a detail level the player will not page.
+        let derived = inf_terrain::stream::StreamBudget::for_ladder(catalog.max_lod() + 1);
+        let budget = StreamBudget {
+            max_resident_tiles: match self.budget.max_resident_tiles {
+                0 => derived.max_resident_tiles,
+                n => n.min(derived.max_resident_tiles),
+            },
+            max_loads_per_sync: self.budget.max_loads_per_sync,
+        };
         let mut streamer = TerrainStreamer::new(
             grid,
             catalog,
             params,
-            self.budget,
+            budget,
             header.tile_resolution,
             header.meters_per_sample,
         );

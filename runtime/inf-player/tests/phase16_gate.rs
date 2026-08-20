@@ -41,7 +41,7 @@ use inf_editor_core::samples::{
     phase16_walk_point, write_phase16_terrain_asset, PHASE16_ACTIVATION_RADIUS_M,
     PHASE16_CELL_SIZE_M, PHASE16_GRID, PHASE16_INLINE_TERRAIN_GUID, PHASE16_LEVEL_GUID,
     PHASE16_MANAGER_GUID, PHASE16_SUN_GUID, PHASE16_TERRAIN_ASSET_GUID, PHASE16_TERRAIN_GUID,
-    PHASE16_WALKER_GUID,
+    PHASE16_TILE_RESOLUTION, PHASE16_WALKER_GUID,
 };
 use inf_packager::{cook, CookOptions, DEFAULT_PACK_NAME};
 use inf_player::budget::{
@@ -542,6 +542,40 @@ fn streamed_scene_budgets_hold() {
         "streamed fixed step mean {:.4} ms exceeded the {STREAMED_STEP_BUDGET_MS} ms \
          budget {RATCHET_NOTE}",
         t.mean_step_ms
+    );
+
+    // (e) **IB-9: the ratchet and the residency BUDGET now have to agree.**
+    //
+    // The AAA-readiness certification's finding was that these two numbers had
+    // never met — `TERRAIN_RESIDENT_BYTES_CEILING` (16 MiB) against
+    // `StreamBudget::default().max_resident_tiles` (1 024 pages = 264 MiB at a
+    // 257² page), *"16.4× apart, and the gate scene never approaches either, so
+    // the two have never had to agree."* They are two readings of one quantity,
+    // and this is where the readings are compared: the pages the budget lets
+    // this scene's ladder hold, at this scene's page size, must fit inside the
+    // ceiling this test asserts. Before IB-9 that arithmetic gave 65 MiB against
+    // a 16 MiB ceiling — the ratchet fired first and the budget was never the
+    // binding number.
+    let levels = 3; // 64 level-0 pages -> 16 -> 4, and the pyramid stops at 4.
+    let budget = inf_terrain::stream::StreamBudget::for_ladder(levels);
+    let derived = inf_terrain::stream::resident_bytes_bound(
+        budget.max_resident_tiles,
+        PHASE16_TILE_RESOLUTION,
+    );
+    eprintln!(
+        "phase16 IB-9: ladder {levels} levels -> budget {} pages -> {:.2} MiB at \
+         {PHASE16_TILE_RESOLUTION}^2, against a {:.0} MiB ceiling and a {:.2} MiB \
+         measured peak",
+        budget.max_resident_tiles,
+        derived as f64 / (1024.0 * 1024.0),
+        TERRAIN_RESIDENT_BYTES_CEILING as f64 / (1024.0 * 1024.0),
+        t.peaks.terrain_bytes as f64 / (1024.0 * 1024.0),
+    );
+    assert!(
+        derived <= TERRAIN_RESIDENT_BYTES_CEILING,
+        "the residency BUDGET would let this scene hold {derived} B while the \
+         ratchet asserts {TERRAIN_RESIDENT_BYTES_CEILING} B — the two numbers \
+         disagree again, which is IB-9 exactly {RATCHET_NOTE}"
     );
 
     // The ceilings only mean something if residency was really moving.

@@ -86,11 +86,14 @@ pub const SIM_MARGIN_TILES: f64 = 2.0;
 /// than silently absorbed.
 pub const SIM_WANT_SOFT_CEILING: usize = 256;
 
-/// Refinement radius of a level-0 node, in level-0 tile spans — the anchor of the
-/// geometric ladder [`RenderWantsParams::geometric`] builds. Matches the
-/// renderer's clipmap ladder (`TERRAIN_LOD_SCALE`-class spacing), so the streamed
-/// cut and the drawn rings stay in step.
-pub const RENDER_LOD0_RADIUS_TILES: f64 = 2.5;
+/// Refinement radius of a level-0 node, in level-0 tile spans.
+///
+/// **Re-exported from Ring 0 since island wave I4.** It used to be declared here
+/// and again in `inf_editor_core::terrain_stream`, one of the two carrying a
+/// `MIRROR of` comment — and IB-9's fix derives a residency budget from it, so a
+/// number two hosts must agree on and a budget is computed from cannot live in
+/// either host.
+pub use inf_terrain::stream::RENDER_LOD0_RADIUS_TILES;
 
 /// A store that can be shared with the job pool.
 pub type SharedTileStore = Arc<dyn TileStore + Send + Sync>;
@@ -266,6 +269,21 @@ impl TerrainStreaming {
                 RENDER_LOD0_RADIUS_TILES * grid.level0_span(),
                 inf_terrain::wants::TileIndex::max_lod(&catalog) + 1,
             );
+            // **IB-9: the budget is sized to THIS terrain's ladder**, not to a
+            // constant. `budget` is what the caller asked for; the derived one
+            // is what the cut can actually need, and the tighter of the two
+            // wins — a caller's explicit budget may narrow the bound but never
+            // widen it past what the ladder justifies.
+            let derived = inf_terrain::stream::StreamBudget::for_ladder(
+                inf_terrain::wants::TileIndex::max_lod(&catalog) + 1,
+            );
+            let budget = StreamBudget {
+                max_resident_tiles: match budget.max_resident_tiles {
+                    0 => derived.max_resident_tiles,
+                    n => n.min(derived.max_resident_tiles),
+                },
+                max_loads_per_sync: budget.max_loads_per_sync,
+            };
             let streamer = TerrainStreamer::new(grid, catalog, params, budget, res, mps);
             tracing::info!(
                 "inf-player: streaming terrain {entity} from .inf_terrain {asset} \

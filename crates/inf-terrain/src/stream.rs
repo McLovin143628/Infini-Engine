@@ -193,15 +193,152 @@ pub struct StreamBudget {
     pub max_loads_per_sync: usize,
 }
 
-impl Default for StreamBudget {
-    /// 1024 resident pages (≈ 268 MB of `f32` heights at 256², ≈ 1 MB at 16²) and
-    /// 16 loads per sync.
-    fn default() -> Self {
+impl StreamBudget {
+    /// **The budget for a terrain with `levels` LOD levels** (IB-9) — the page
+    /// bound of the cut that terrain's ladder produces, and 16 loads per sync.
+    ///
+    /// `max_resident_tiles` used to be a bare `1024` for every terrain, which at
+    /// a 257² page is ≈ 264 MiB — 16.4× `inf_player::budget::TERRAIN_RESIDENT_BYTES_CEILING`,
+    /// and the AAA-readiness certification's IB-9 was exactly that: *"the gate
+    /// scene never approaches either, so the two have never had to agree…
+    /// whoever is holding it will not know which number is the real one."* Two
+    /// independent guesses at one quantity. There is now one quantity —
+    /// [`cut_page_bound`] — and both budgets are read off it.
+    ///
+    /// **The bound IS the budget, with no second multiplier**, and that is
+    /// deliberate. `sync_render` evicts everything outside the cut it is about to
+    /// publish and then loads what is missing, so steady residency is the
+    /// published cut and nothing else; the pins and the residency floor are
+    /// charged separately by `pin_ceiling`. A headroom factor on top would be a
+    /// number nobody measured sitting in front of a bound that already exceeds
+    /// its own measurement by 1.75× (464 pages allowed against 250 measured, at
+    /// the island's five levels).
+    pub fn for_ladder(levels: u32) -> Self {
         Self {
-            max_resident_tiles: 1024,
+            max_resident_tiles: cut_page_bound(levels, RENDER_LOD0_RADIUS_TILES),
             max_loads_per_sync: 16,
         }
     }
+}
+
+impl Default for StreamBudget {
+    /// The budget for a terrain whose ladder is **not known yet** — the deepest
+    /// pyramid this engine can import ([`DEFAULT_LADDER_LEVELS`]).
+    ///
+    /// A caller that has the asset in hand should use
+    /// [`for_ladder`](StreamBudget::for_ladder) instead, and both hosts do: a
+    /// budget sized for a two-million-square-kilometre world is not wrong for a
+    /// small one, only useless as a bound.
+    fn default() -> Self {
+        Self::for_ladder(DEFAULT_LADDER_LEVELS)
+    }
+}
+
+/// Refinement radius of a level-0 node, in level-0 tile spans — the anchor of the
+/// geometric ladder [`RenderWantsParams::geometric`](crate::wants::RenderWantsParams::geometric)
+/// builds, and the one number every render cut in this engine is shaped by.
+///
+/// **Ring 0 since island wave I4**, and that is the point: it was declared twice,
+/// as `inf_player::terrain_stream::RENDER_LOD0_RADIUS_TILES` and
+/// `inf_editor_core::terrain_stream::RENDER_LOD0_RADIUS_TILES`, one of them
+/// carrying a `MIRROR of` comment. A constant the two hosts must agree on, that
+/// a budget is derived from, cannot live in either host — the P16 doctrine
+/// applied to a number instead of to a rule. Both now re-export this.
+///
+/// Matches the renderer's clipmap ladder (`TERRAIN_LOD_SCALE`-class spacing), so
+/// the streamed cut and the drawn rings stay in step.
+pub const RENDER_LOD0_RADIUS_TILES: f64 = 2.5;
+
+/// How many LOD levels [`StreamBudget::default`] sizes itself for.
+///
+/// A pyramid stops once a level holds `PyramidOptions::min_tiles` (4) pages or
+/// fewer, so the level count is `log₄(level-0 pages)`-ish and **bounded by
+/// content, not by policy**: the certification's island-class row (8192²
+/// samples, 257² pages) is 1 364 pages over **5** levels, and its 16 384² row is
+/// 5 460 over 6. Eight is `PyramidOptions::default().max_levels` — the most any
+/// asset can carry — so a budget derived from it fits every terrain this engine
+/// can import rather than the one it was measured on.
+pub const DEFAULT_LADDER_LEVELS: u32 = crate::pyramid::DEFAULT_MAX_PYRAMID_LEVELS;
+
+/// **How many pages a render cut can hold** — the rule IB-9 replaces two
+/// independent guesses with.
+///
+/// A quadtree cut is a *camera-local ring structure*: the refine radius doubles
+/// exactly when the node size doubles, so in its own units **every level is the
+/// same shape**, and a level contributes the same ring of pages however large the
+/// world is. The cut therefore grows with the **ladder's depth** — one ring per
+/// LOD level — and depth is `log₄` of the level-0 page count, capped by
+/// `PyramidOptions::max_levels`.
+///
+/// That is a measured law, not an argument.
+/// `crates/inf-terrain/tests/island_working_set.rs` flies a camera across each
+/// world's own diagonal at 8², 16², 32² and 64² pages:
+///
+/// | world | levels | catalog | **peak cut** |
+/// |---|---|---|---|
+/// | 8 × 8 | 3 | 84 | 64 (clips — the world is narrower than the outer ring) |
+/// | 16 × 16 | 4 | 340 | **157** |
+/// | 32 × 32 (island class) | 5 | 1 364 | **250** |
+/// | 64 × 64 | 6 | 5 460 | **340** |
+///
+/// The catalog **quadruples** each row and the cut grows by a **constant 93, 93,
+/// 90 pages**. That is the claim the test asserts — `O(levels)`, not
+/// `O(pages)` — and it is what makes a budget derivable at all. It also
+/// asserts page-size independence (the 32² world at a 65² page peaks at the same
+/// 250), which is what lets `resident_bytes_bound` be a multiplication.
+///
+/// *The first version of that harness flew a fixed 32-span path whatever the
+/// world was, so the 16 × 16 row spent half its path off its own terrain and
+/// reported a cut that was falling over an edge. A working set measured over
+/// ground that is not there is not a working set.*
+///
+/// # The derivation
+///
+/// Let `r = lod0_radius_tiles · (1 + hysteresis)` be the refine radius in level-0
+/// spans, taking the *outer* edge of the dead band because that is the widest a
+/// node's refinement ever reaches.
+///
+/// * **Level 0** keeps every node inside `r`: at most a square block of side
+///   `2⌈r⌉ + 2` (the `+2` is the pair of nodes the camera's own cell can straddle).
+/// * **Every level in between** keeps the annulus between its own refine radius
+///   and its parent's — `[r, 2r]` in *that level's* units, which is the same
+///   number of pages at every level because the ladder is geometric.
+/// * **The coarsest level** has no parent to refine it, so it keeps whatever the
+///   pyramid left: at most `PyramidOptions::min_tiles`.
+///
+/// The result is a bound and not a measurement, so it is generous by construction
+/// — but it is *tight*, which the same test asserts: the island-class cut must
+/// reach at least half of it, because a bound nothing approaches is a bound that
+/// cannot fail, and "the gate scene never approaches either" is half of what IB-9
+/// says is wrong.
+pub fn cut_page_bound(levels: u32, lod0_radius_tiles: f64) -> usize {
+    let r = lod0_radius_tiles.max(0.0) * (1.0 + crate::wants::DEFAULT_HYSTERESIS);
+    // Pages of one level inside radius `x` (in that level's own spans).
+    let block = |x: f64| {
+        let side = 2.0 * x.ceil() + 2.0;
+        (side * side) as usize
+    };
+    let level0 = block(r);
+    if levels <= 1 {
+        return level0;
+    }
+    let ring = block(2.0 * r).saturating_sub(level0);
+    let coarsest = crate::pyramid::DEFAULT_MIN_PYRAMID_TILES;
+    level0 + ring * (levels as usize - 2) + coarsest
+}
+
+/// The bytes `pages` of a `tile_resolution²` terrain occupy resident — the second
+/// reading of [`cut_page_bound`], and the one
+/// `inf_player::budget::TERRAIN_RESIDENT_BYTES_CEILING` is checked against.
+///
+/// A page is `res² f32` heights. Splat weights are `res² × 4` more **when
+/// materialized**, which a streamed page's are not (the pyramid deliberately
+/// carries none above level 0), so this is the heights alone — the same thing
+/// `resident_bytes` counts, and deliberately the same omission, because a bound
+/// that counted a byte the meter does not would never be reached.
+pub fn resident_bytes_bound(pages: usize, tile_resolution: u32) -> u64 {
+    let per_page = u64::from(tile_resolution) * u64::from(tile_resolution) * 4;
+    pages as u64 * per_page
 }
 
 /// Streaming counters for the debug/stats path.
