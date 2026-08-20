@@ -327,6 +327,46 @@ mod tests {
         );
     }
 
+    /// **A scoped projection reports a named guid that has stopped existing**
+    /// (I3 audit).
+    ///
+    /// `project_delta`'s scoped arm has a removal branch, and nothing reached
+    /// it: every path that deletes an entity calls `touch()`, which widens the
+    /// scope to everything and takes the full arm — so deleting the branch's
+    /// `removed.push` left all 238 of this crate's scene tests green. The branch
+    /// is right and is kept (a future `touch_at` site for a change that can drop
+    /// an entity would need it, and the conservative direction is to *say* the
+    /// node is gone rather than to leave the Outliner drawing it), so what it
+    /// needed was an arm rather than a deletion.
+    ///
+    /// Reached the only way it can be: by despawning behind the document's back
+    /// and then naming the guid, which is exactly the shape such a future site
+    /// would have.
+    #[test]
+    fn a_scoped_projection_reports_a_named_guid_that_is_gone() {
+        let mut doc = SceneDoc::new();
+        let keep = doc.create(SpawnKind::Cube, "Keep", None);
+        let gone = doc.create(SpawnKind::Cube, "Gone", None);
+        let seeded = doc.snapshot();
+        assert_eq!(seeded.nodes.len(), 2);
+
+        let e = doc.world().entity_of(gone).expect("it is in the world");
+        doc.world_mut().despawn(e);
+        doc.touch_at([keep, gone]);
+        let d = doc.project_delta();
+        assert_eq!(
+            d.removed,
+            vec![gone.to_string()],
+            "the scoped delta kept a node the world no longer has"
+        );
+        assert_eq!(d.updated.len(), 1, "the survivor is still projected");
+        assert_eq!(d.updated[0].guid, keep.to_string());
+        // …and the guid is gone from the published set, so a second projection
+        // does not report it twice.
+        doc.touch_at([gone]);
+        assert!(doc.project_delta().removed.is_empty());
+    }
+
     /// **A scoped node lists its children in the same order the full projection
     /// does** (I3 audit).
     ///
