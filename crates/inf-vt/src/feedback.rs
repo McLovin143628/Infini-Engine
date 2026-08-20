@@ -214,6 +214,9 @@ mod tests {
             budget_bytes: PageFormat::Bc1.page_bytes(136) * pages,
             max_texture_dim: 8192,
             trilinear: false,
+            // Unthrottled: these arms measure the residency RULE, and a throttle
+            // would make every one of them a statement about flow control.
+            upload_budget_bytes: 0,
         });
         r
     }

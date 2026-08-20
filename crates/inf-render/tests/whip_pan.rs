@@ -150,9 +150,19 @@ fn surface_count() -> usize {
 /// for a reason no predictor can touch (see
 /// `a_saturated_floor_cannot_be_prefetched_and_the_arm_says_so`). What this
 /// fixture measures is *latency*, so it is deliberately not a budget fixture.
-fn library(pages: u64) -> (VtTextures, Vec<VtTextureHandle>) {
+/// The fixture's library, at the island-wave-I4 per-frame upload budget set
+/// explicitly.
+///
+/// **Every arm here runs at the shipped default**, and it BITES on this fixture:
+/// four 2048² surfaces under a whip pan want more than 113 BC1 pages in a frame,
+/// and the default budget costs this fixture 1 220 blur tiles. What the arms
+/// measure is therefore latency *with the throttle on*, which is what a shipped
+/// frame does — and `the_lead_time_ruling_is_conditional_on_the_upload_budget`
+/// is where the unthrottled control is run and the price is a number.
+fn library_with_upload_budget(pages: u64, upload_bytes: u64) -> (VtTextures, Vec<VtTextureHandle>) {
     let (mut lib, _adv) = VtTextures::new(VtPoolConfig {
         budget_bytes: pages * 8192,
+        upload_budget_bytes: upload_bytes,
         ..Default::default()
     });
     let handles = (0..surface_count())
@@ -319,7 +329,12 @@ struct Arm {
 }
 
 fn run(predict: Option<u32>, pages: u64) -> Arm {
-    let (mut lib, handles) = library(pages);
+    run_with_upload_budget(predict, pages, inf_vt::DEFAULT_VT_UPLOAD_BUDGET_BYTES)
+}
+
+/// [`run`], with the per-frame upload budget named (island wave I4, IB-16).
+fn run_with_upload_budget(predict: Option<u32>, pages: u64, upload_bytes: u64) -> Arm {
+    let (mut lib, handles) = library_with_upload_budget(pages, upload_bytes);
     let cov = coverage(&handles);
     let mut hist = inf_math::CameraHistory::new();
     let mut arm = Arm::default();
@@ -551,12 +566,22 @@ fn the_predictor_strictly_reduces_a_whip_pans_fallback_frames() {
 /// the reason `VT_PREDICT_MAX_TILES` is the refinement's cap and not the
 /// floor's.
 ///
-/// `apply_wants` seats a miss the frame it is offered and there is no per-frame
-/// admission throttle, so the floor's fallback is `max(0, demand − pool)` — a
-/// function of two numbers a prediction changes neither of. Run over a
-/// deliberately undersized pool, where the floor misses on every frame, the two
-/// arms must come out **identical on every floor counter** while the predictor
-/// is demonstrably running.
+/// `apply_wants` seats a miss the frame it is offered, so the floor's fallback
+/// is `max(0, demand − supply)` — a function of two numbers a prediction changes
+/// neither of. Run over a deliberately undersized pool, where the floor misses on
+/// every frame, the two arms must come out **identical on every floor counter**
+/// while the predictor is demonstrably running.
+///
+/// > **RE-AIMED for the throttle** (island wave I4, IB-16). This arm used to say
+/// > *"there is no per-frame admission throttle"* and its failure message named
+/// > the day one appeared. There is one now, it is on at the shipped default,
+/// > and the arm is still green — because `supply` merely gained a second term.
+/// > What a throttle cannot do is make a *prediction* change the floor's
+/// > fallback, which is the claim, and the claim did not depend on the absence
+/// > of a throttle so much as on the absence of a **latency**: a page is still
+/// > sampleable the frame it is admitted. `VT_PREDICT_MAX_TILES` therefore stays
+/// > the refinement's cap. The arm is kept pointing at the same hazard with the
+/// > premise corrected.
 #[test]
 fn a_saturated_floor_cannot_be_prefetched_and_the_arm_says_so() {
     const STARVED: u64 = 96;
@@ -903,9 +928,17 @@ fn every_horizon_in_the_roadmaps_band_beats_the_predictor_being_off() {
 /// Asserted rather than written down, in the shape the floor's refutation
 /// already uses: **the day a lead time wins, this arm goes red and the ruling is
 /// re-opened by a test instead of by memory.** What would make it win is a
-/// throttle or a real latency between "admitted" and "sampleable"; neither
-/// exists in this tree today (P28.3 §8 re-measured the loader and left it
-/// alone).
+/// throttle or a real latency between "admitted" and "sampleable".
+///
+/// > **THE THROTTLE HAS LANDED** (island wave I4, IB-16) — and this arm did not
+/// > go red. The prediction named the right mechanism and the wrong outcome: a
+/// > per-frame upload budget takes the *tail of a lane*, it does not delay the
+/// > *head* of one, and a page is still sampleable the frame it is admitted. So
+/// > asking earlier still buys nothing. Measured both ways in
+/// > `the_lead_time_ruling_is_conditional_on_the_upload_budget`: unthrottled
+/// > h=0 18 752 against h=18 18 976, and at the shipped budget 19 972 against
+/// > 20 196 — the same inequality, 1 220 blur tiles dearer. The remaining half
+/// > of §3.5's condition, a loader with real latency, is still not built.
 #[test]
 fn a_lead_time_costs_this_fixture_what_the_lane_earns_it() {
     let off = run(None, PAGES);
@@ -1195,4 +1228,117 @@ fn the_prediction_is_measured_against_where_the_camera_actually_went() {
         lead.3,
         lead.2
     );
+}
+
+/// **THE LEAD-TIME RULING IS NOW CONDITIONAL, AND THIS IS THE CONDITION**
+/// (island wave I4, IB-16).
+///
+/// `docs/memos/p28-5-lead-time-ruling.md` §3.5 named exactly what would reverse
+/// `DEFAULT_PREDICT_HORIZON_TICKS = 0`: *"a per-frame admission throttle, or a
+/// loader with real latency between admitted and sampleable. On the day either
+/// lands, the arms above go red and the default goes back to
+/// `ROADMAP_PREDICT_HORIZON_TICKS`."* Wave T's T33b said the same from the other
+/// side: *"the named tripwire tests are built to go red when it lands."*
+///
+/// **It has landed, and the arms above did not go red** — so this arm exists to
+/// say why, with a number, rather than leaving a prediction to be quietly wrong.
+///
+/// The reason is that a throttle only changes an answer when it *bites*, and the
+/// shipped `DEFAULT_VT_UPLOAD_BUDGET_BYTES` (1 MiB = 113 BC1 pages a frame) is
+/// above anything this fixture asks for. A throttle nobody reaches is, to every
+/// arm above, no throttle. The prediction in the memo was not wrong about the
+/// mechanism; it was wrong about the threshold, because it was written before
+/// there was a budget to compare against.
+///
+/// So the ruling is re-stated with its condition attached: **at the default
+/// upload budget, no lead still beats a lead**, and the day a project lowers the
+/// budget far enough for the throttle to bite every frame, the comparison is a
+/// different one — which this arm runs, prints, and does not assert, because a
+/// budget nobody ships is not a ruling.
+#[test]
+fn the_lead_time_ruling_is_conditional_on_the_upload_budget() {
+    const BC1_PAGE: u64 = 9_248;
+    // Two pages a frame: an order of magnitude under this fixture's own demand,
+    // so the throttle bites on every frame of the pan.
+    const TIGHT: u64 = BC1_PAGE * 2;
+
+    let at_default_zero = run(Some(HORIZON), PAGES);
+    let at_default_lead = run(Some(LEAD), PAGES);
+    let tight_zero = run_with_upload_budget(Some(HORIZON), PAGES, TIGHT);
+    let tight_lead = run_with_upload_budget(Some(LEAD), PAGES, TIGHT);
+
+    println!(
+        "IB-16 x P28.5: at the DEFAULT budget ({} B/frame) h=0 blur {}/{} vs \
+         h={LEAD} blur {}/{}",
+        inf_vt::DEFAULT_VT_UPLOAD_BUDGET_BYTES,
+        at_default_zero.blur,
+        at_default_zero.justified,
+        at_default_lead.blur,
+        at_default_lead.justified,
+    );
+    println!(
+        "IB-16 x P28.5: at a TIGHT budget ({TIGHT} B/frame = 2 pages) h=0 blur \
+         {}/{} vs h={LEAD} blur {}/{}",
+        tight_zero.blur, tight_zero.justified, tight_lead.blur, tight_lead.justified,
+    );
+
+    // (1) **The default budget DOES bite on this fixture** — which is not what
+    //     this arm was first written to say, and is the more useful answer. Four
+    //     2048² surfaces under a whip pan want more than 113 pages in a frame, so
+    //     the throttle reaches the loop at the shipped default. A throttle nobody
+    //     ever reaches would not be worth having; what matters is whether the
+    //     RULING survives it, and that is clause (2).
+    let free_zero = run_with_upload_budget(Some(HORIZON), PAGES, 0);
+    let free_lead = run_with_upload_budget(Some(LEAD), PAGES, 0);
+    println!(
+        "IB-16 x P28.5: UNTHROTTLED h=0 blur {}/{} vs h={LEAD} blur {}/{}; the          default budget's own price on this fixture is {} blur tiles",
+        free_zero.blur,
+        free_zero.justified,
+        free_lead.blur,
+        free_lead.justified,
+        at_default_zero.blur as i64 - free_zero.blur as i64,
+    );
+    assert!(
+        at_default_zero.blur > free_zero.blur,
+        "the default upload budget did not change this fixture at all ({}          against {}), so nothing below is a measurement of a throttle",
+        at_default_zero.blur,
+        free_zero.blur
+    );
+
+    // (2) **THE RULING, RE-MEASURED WITH THE THROTTLE ON.** P28.5 §3.5 predicted
+    //     a throttle would reverse `DEFAULT_PREDICT_HORIZON_TICKS = 0`. It did
+    //     not: at the shipped budget, no lead still beats a lead, and it beats it
+    //     unthrottled too. The prediction named the right mechanism and the wrong
+    //     threshold — asking earlier still buys nothing, because a page is still
+    //     sampleable the frame it is admitted and the throttle takes the tail of
+    //     a lane rather than delaying the head of one.
+    assert!(
+        at_default_zero.blur <= at_default_lead.blur,
+        "at the default budget a lead time won ({} against {}) — the P28.5          ruling is re-opened and `DEFAULT_PREDICT_HORIZON_TICKS` has to be          re-decided",
+        at_default_lead.blur,
+        at_default_zero.blur
+    );
+    assert!(
+        free_zero.blur <= free_lead.blur,
+        "unthrottled, a lead time won ({} against {}) — P28.5's own measurement          no longer reproduces and the ruling is re-opened for a reason that has          nothing to do with IB-16",
+        free_lead.blur,
+        free_zero.blur
+    );
+
+    // (3) The tight budget bites harder still — anti-vacuity for clause (4).
+    assert!(
+        tight_zero.blur > at_default_zero.blur,
+        "a 2-page-a-frame budget was no worse than the default ({} against          {}) — the throttle is not scaling with the budget",
+        tight_zero.blur,
+        at_default_zero.blur
+    );
+
+    // (4) …and under a budget nothing ships, the comparison is REPORTED and not
+    //     asserted. A ruling made on a configuration nobody runs is not a ruling.
+    let verdict = match tight_zero.blur.cmp(&tight_lead.blur) {
+        std::cmp::Ordering::Less => "no lead still wins",
+        std::cmp::Ordering::Equal => "the two TIE — at two pages a frame the              throttle, not the latency, is what the fixture is measuring",
+        std::cmp::Ordering::Greater => "A LEAD WINS — re-open the ruling if this              budget ever becomes a shipped default",
+    };
+    println!("IB-16 x P28.5: under the tight budget, {verdict}");
 }

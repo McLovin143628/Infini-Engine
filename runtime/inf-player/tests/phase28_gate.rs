@@ -677,6 +677,10 @@ fn the_visbuffer_path_shades_at_parity_with_the_forward_path() {
             budget_bytes: inf_vt::PageFormat::Rgba8.page_bytes(inf_vt::STORED_TILE_SIZE) * 256,
             max_texture_dim: 8192,
             trilinear: false,
+            // **Unthrottled** (IB-16): this arm compares the visbuffer feedback
+            // producer against the per-surface one, and a deferred page would
+            // change both arms' residency for a reason neither is about.
+            upload_budget_bytes: 0,
         });
         lib.register_or_record(1, Arc::new(bytes.clone()))
             .unwrap_or_else(|| panic!("the fixture registers: {:?}", lib.refusals()));

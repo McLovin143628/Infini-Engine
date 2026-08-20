@@ -564,7 +564,18 @@ impl VsmResidency {
         // split could not express (the P28.2 audit's priority-blind protection
         // order, fixed for both consumers by one walk).
         let mut protected: BTreeSet<u32> = BTreeSet::new();
-        let log = inf_stream::admit_by_lane(&mut PoolView(self), &lanes, &mut protected);
+        let log = inf_stream::admit_by_lane(
+            &mut PoolView(self),
+            &lanes,
+            &mut protected,
+            // **VSM is not throttled** (IB-16). A shadow page the receiver is
+            // sampling THIS frame that has not arrived is a lit surface with no
+            // shadow on it — a visible wrong answer, not a blurry one. The VT
+            // path can defer because a missing tile resolves through its own
+            // coarser ancestor; a missing shadow page has no ancestor to fall
+            // back to.
+            inf_stream::AdmitBudget::UNLIMITED,
+        );
         for (slot, (l, page)) in log.evicts {
             let light = VsmLightHandle(l);
             dirty.insert(light);

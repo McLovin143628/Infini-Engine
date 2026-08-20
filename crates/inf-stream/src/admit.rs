@@ -96,6 +96,63 @@ pub trait SlotPool {
     fn seat(&mut self, slot: u32, key: Self::Key);
 }
 
+/// **How much one walk may admit** — the per-frame upload throttle (island wave
+/// I4, IB-16).
+///
+/// Wave T's T33b refused a throttle *on purpose* — *"there is no per-frame time
+/// budget and no per-frame admission or upload throttle in the VT loop; the only
+/// budget is a byte residency ceiling… adding one is not a local change — it
+/// re-opens a measurement, and the named tripwire tests are built to go red when
+/// it lands."* This is that change, made deliberately, and every named tripwire
+/// is re-aimed in the same commit.
+///
+/// It lives here rather than in `inf-vt` because [`admit_by_lane`] is the one
+/// admission walk both page systems run, and a throttle that only one of them
+/// obeyed would be a second answer to "how much does a frame page in".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdmitBudget {
+    /// Maximum seats this walk may fill. Wants past it are **deferred, not
+    /// dropped** — they are re-offered on the next frame's want set, so a tile
+    /// arrives late and never never.
+    pub max_admits: u32,
+}
+
+impl AdmitBudget {
+    /// No throttle — the pre-IB-16 behaviour, and what a consumer with no
+    /// upload budget passes.
+    pub const UNLIMITED: Self = Self {
+        max_admits: u32::MAX,
+    };
+
+    /// A budget of `bytes` over pages of `page_bytes` each.
+    ///
+    /// **Bytes in, seats out**, and the conversion is the point: every page in a
+    /// virtual-texture pool is the same size, so a byte budget over uniform pages
+    /// *is* a seat count — but the size depends on the format, and an RGBA8
+    /// transcode page is **8×** a BC1 one. A seat budget would therefore throttle
+    /// a BC-less adapter eight times as hard in bytes as a BC one while looking
+    /// identical, which is exactly the kind of number that reads as fair and is
+    /// not.
+    ///
+    /// Never zero: a budget that admits nothing is a page that never arrives, and
+    /// "late, never never" is the whole contract. `0` bytes means unlimited, on
+    /// the convention every other budget in this tree uses.
+    pub fn from_bytes(bytes: u64, page_bytes: u64) -> Self {
+        if bytes == 0 || page_bytes == 0 {
+            return Self::UNLIMITED;
+        }
+        Self {
+            max_admits: u32::try_from((bytes / page_bytes).max(1)).unwrap_or(u32::MAX),
+        }
+    }
+}
+
+impl Default for AdmitBudget {
+    fn default() -> Self {
+        Self::UNLIMITED
+    }
+}
+
 /// What one [`admit_by_lane`] did, in the order it did it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmitLog<K> {
@@ -105,6 +162,16 @@ pub struct AdmitLog<K> {
     pub evicts: Vec<(u32, K)>,
     /// Wants that found no slot. **Never a silent cap.**
     pub deferred: u32,
+    /// Of [`deferred`](Self::deferred), how many were held back by the
+    /// [`AdmitBudget`] rather than by the pool being full (IB-16).
+    ///
+    /// The two are different defects wearing one number: **pool-full** is a
+    /// residency problem — the working set does not fit and the answer is a
+    /// bigger pool — while **throttled** is flow control, and the answer is to
+    /// wait one frame. Reporting them together would make a burst look like a
+    /// capacity failure, which is precisely the diagnosis a streaming engine
+    /// must not get wrong.
+    pub throttled: u32,
 }
 
 impl<K> Default for AdmitLog<K> {
@@ -113,6 +180,7 @@ impl<K> Default for AdmitLog<K> {
             admits: Vec::new(),
             evicts: Vec::new(),
             deferred: 0,
+            throttled: 0,
         }
     }
 }
@@ -130,6 +198,7 @@ pub fn admit_by_lane<P: SlotPool>(
     pool: &mut P,
     wants: &[(Lane, P::Key)],
     protected: &mut BTreeSet<u32>,
+    budget: AdmitBudget,
 ) -> AdmitLog<P::Key> {
     let mut log = AdmitLog::default();
     // **The slots this transaction's own wants are sitting in, in any lane** —
@@ -159,7 +228,19 @@ pub fn admit_by_lane<P: SlotPool>(
     // this: the reserved attempt failing means only that every spare slot is
     // spoken for, not that the pool is out.
     let mut exhausted = false;
-    for (_, from, to) in lane_runs(wants, |(l, _)| *l) {
+    for (lane, from, to) in lane_runs(wants, |(l, _)| *l) {
+        // **THE FLOOR IS NEVER THROTTLED** (IB-16). The budget bounds
+        // *refinement*, which is where a burst lives; the analytic floor is the
+        // mandatory residency class and is bounded by construction
+        // (`VT_FLOOR_MAX_TILES` per visible surface), so deferring one of its
+        // tiles would sacrifice the floor to flow control — which is what
+        // `a_refinement_never_evicts_the_floor_and_a_dropped_mask_is_the_floors_trace`
+        // exists to forbid, and would break P28.2's rule that the two halves of
+        // one cluster transaction are seated at the same depth of the frame (a
+        // cluster's tiles ride this lane). Measured: throttling the floor made
+        // `one_transaction_admits_a_cluster_page_and_its_tiles` retract a page
+        // and left the P28.3 load at 3 of 5 pages resident.
+        let throttled_lane = lane > crate::lane::LANE_FLOOR;
         // (a) this lane's residents: touched and protected, *before* this lane
         //     admits anything and *after* every stronger lane already has.
         let mut misses: Vec<P::Key> = Vec::new();
@@ -177,6 +258,17 @@ pub fn admit_by_lane<P: SlotPool>(
         for (i, key) in misses.iter().enumerate() {
             if exhausted {
                 log.deferred += (misses.len() - i) as u32;
+                break;
+            }
+            // **The throttle** (IB-16), tested here and not before the lane loop
+            // so that a stronger lane's residents are still touched and
+            // protected: a budget must decide what is UPLOADED this frame and
+            // must never change what outranks what. A tile held back here is
+            // re-offered on the next frame's want set — late, never never.
+            if throttled_lane && log.admits.len() as u32 >= budget.max_admits {
+                let held = (misses.len() - i) as u32;
+                log.deferred += held;
+                log.throttled += held;
                 break;
             }
             // A slot nothing in this transaction wants, or — failing that —
@@ -280,7 +372,7 @@ mod tests {
     fn run(pool: &mut TestPool, wants: &[(Lane, u32)]) -> AdmitLog<u32> {
         let norm = normalize(wants, |(_, k)| *k, |(l, _)| *l);
         let mut protected = BTreeSet::new();
-        admit_by_lane(pool, &norm, &mut protected)
+        admit_by_lane(pool, &norm, &mut protected, AdmitBudget::UNLIMITED)
     }
 
     /// **THE FIX, asserted as the audit stated the defect**: a floor want that
@@ -554,7 +646,7 @@ mod tests {
         protected.insert(0u32);
         protected.insert(1u32);
         let norm = normalize(&[(LANE_FLOOR, 9u32)], |(_, k)| *k, |(l, _)| *l);
-        let txn = admit_by_lane(&mut pool, &norm, &mut protected);
+        let txn = admit_by_lane(&mut pool, &norm, &mut protected, AdmitBudget::UNLIMITED);
         assert!(txn.admits.is_empty() && txn.evicts.is_empty());
         assert_eq!(txn.deferred, 1);
     }
@@ -594,5 +686,84 @@ mod tests {
         let tb = run(&mut b, &wants);
         assert_eq!(ta, tb, "two routes to one residency disagree");
         assert!(!ta.evicts.is_empty(), "the fixture did not contest a slot");
+    }
+
+    /// **The throttle defers rather than drops, and it says which** (IB-16).
+    ///
+    /// A budget of two seats against four misses must seat two, defer two, and
+    /// report BOTH of those deferrals as throttled — because a pool with spare
+    /// slots reporting "deferred" and nothing else is indistinguishable from a
+    /// pool that is full, and the two want opposite fixes.
+    ///
+    /// **Feedback lane, not floor**: the floor is exempt by construction (see
+    /// the walk), so a floor-lane fixture here would report a throttle that
+    /// never fires.
+    #[test]
+    fn the_admit_budget_defers_the_tail_and_names_it_throttled() {
+        let mut pool = TestPool::new(16);
+        let wants: Vec<(Lane, u32)> = (0..4).map(|k| (LANE_FEEDBACK, k)).collect();
+        let norm = normalize(&wants, |(_, k)| *k, |(l, _)| *l);
+        let mut protected = BTreeSet::new();
+        let txn = admit_by_lane(
+            &mut pool,
+            &norm,
+            &mut protected,
+            AdmitBudget { max_admits: 2 },
+        );
+        assert_eq!(txn.admits.len(), 2, "the budget must bound the seats");
+        assert_eq!(txn.deferred, 2, "the tail is deferred, not dropped");
+        assert_eq!(
+            txn.throttled, 2,
+            "every deferral here is flow control — the pool has 16 slots and              four wants, so nothing was deferred for want of a slot"
+        );
+
+        // …and the FLOOR is exempt: the same over-ask in lane 0 seats whole.
+        let mut floor_pool = TestPool::new(16);
+        let floor: Vec<(Lane, u32)> = (0..4).map(|k| (LANE_FLOOR, k + 100)).collect();
+        let norm_floor = normalize(&floor, |(_, k)| *k, |(l, _)| *l);
+        let mut protected_floor = BTreeSet::new();
+        let txn_floor = admit_by_lane(
+            &mut floor_pool,
+            &norm_floor,
+            &mut protected_floor,
+            AdmitBudget { max_admits: 2 },
+        );
+        assert_eq!(
+            txn_floor.admits.len(),
+            4,
+            "the floor lane must ignore the upload budget — it is the mandatory              residency class and a cluster's tiles ride it"
+        );
+        assert_eq!(txn_floor.throttled, 0);
+
+        // …and the very next walk seats the rest: LATE, never never.
+        let mut protected = BTreeSet::new();
+        let txn = admit_by_lane(
+            &mut pool,
+            &norm,
+            &mut protected,
+            AdmitBudget { max_admits: 2 },
+        );
+        assert_eq!(txn.admits.len(), 2);
+        assert_eq!(
+            txn.deferred, 0,
+            "the deferred tail arrived on the next walk"
+        );
+        assert_eq!(txn.throttled, 0);
+    }
+
+    /// A byte budget over uniform pages is a seat count — and the conversion has
+    /// to notice that an RGBA8 page is eight times a BC1 one, or a BC-less
+    /// adapter is throttled eight times as hard while the number looks the same.
+    #[test]
+    fn a_byte_budget_becomes_seats_at_the_pages_own_size() {
+        const BC1: u64 = 9_248;
+        const RGBA8: u64 = 73_984;
+        assert_eq!(AdmitBudget::from_bytes(1 << 20, BC1).max_admits, 113);
+        assert_eq!(AdmitBudget::from_bytes(1 << 20, RGBA8).max_admits, 14);
+        // Zero bytes is the tree's "no ceiling" convention, not "admit nothing".
+        assert_eq!(AdmitBudget::from_bytes(0, BC1), AdmitBudget::UNLIMITED);
+        // …and a budget under one page still admits one: a page that never
+        // arrives is not "late".
+        assert_eq!(AdmitBudget::from_bytes(1, BC1).max_admits, 1);
     }
 }

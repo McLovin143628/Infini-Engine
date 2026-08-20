@@ -1038,6 +1038,17 @@ impl EngineRenderer {
         ))
     }
 
+    /// **The per-frame upload budget's sustained-demand advisory** (island wave
+    /// I4, IB-16), or `None` while the throttle is only absorbing a burst.
+    ///
+    /// A host logs this the way it logs the registration advisories beside it: a
+    /// burst that drains is the budget working, and a run of frames that never
+    /// drains is content asking for more bandwidth than the budget grants, which
+    /// is an author's decision rather than the renderer's.
+    pub fn vt_upload_advisory(&self) -> Option<inf_vt::VtAdvisory> {
+        self.vt_textures.as_ref()?.residency().upload_advisory()
+    }
+
     /// **The streaming loop**, run once per frame at the sync point (P26.4).
     ///
     /// The five steps in `crate::vt_stream`'s module docs, in that order, and

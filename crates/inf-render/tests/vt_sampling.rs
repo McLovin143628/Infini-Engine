@@ -90,6 +90,11 @@ fn pool_cfg(format: PageFormat, pages: u64) -> VtPoolConfig {
         budget_bytes: format.page_bytes(STORED_TILE_SIZE) * pages,
         max_texture_dim: 8192,
         trilinear: false,
+        // **Unthrottled** (IB-16): this file asserts what a page CONTAINS and
+        // where the address walk lands, and a per-frame upload budget would make
+        // "the tile is not there yet" an outcome every byte-for-byte comparison
+        // had to distinguish from "the tile is wrong".
+        upload_budget_bytes: 0,
     }
 }
 

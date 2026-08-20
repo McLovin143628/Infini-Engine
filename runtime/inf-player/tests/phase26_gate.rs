@@ -868,6 +868,11 @@ fn a_bound_material_becomes_a_per_instance_texture_set_on_both_wires() {
             budget_bytes: inf_vt::DEFAULT_VT_BUDGET_BYTES,
             max_texture_dim: 8192,
             trilinear: false,
+            // **Unthrottled** (IB-16). This arm builds a registry without a
+            // device to compare TWO REGISTRIES' residency; a per-frame upload
+            // budget would bound both identically and prove nothing, and the
+            // gate's own budget arm (e) measures the loop's admits directly.
+            upload_budget_bytes: 0,
         });
         let n = lib.register_materials(&mats, |g| content.source(g));
         assert_eq!(n, BOUND_TEXTURES, "the door registered the wrong count");

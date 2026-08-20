@@ -72,7 +72,7 @@ pub mod lane;
 pub mod ring;
 pub mod stamp;
 
-pub use admit::{admit_by_lane, Acquired, AdmitLog, SlotPool};
+pub use admit::{admit_by_lane, Acquired, AdmitBudget, AdmitLog, SlotPool};
 pub use budget::{arbitrate, BudgetGrant, BudgetRequest, Consumer, CONSUMERS};
 pub use couple::{breaches, Coupling};
 pub use lane::{normalize, Lane, LANE_FEEDBACK, LANE_FLOOR, LANE_PREDICT};

@@ -61,6 +61,13 @@ fn library(n: u32, budget_pages: u64) -> VtTextures {
         budget_bytes: PageFormat::Rgba8.page_bytes(inf_vt::STORED_TILE_SIZE) * budget_pages,
         max_texture_dim: 8192,
         trilinear: false,
+        // **Unthrottled** (IB-16): every arm in this file is about the WANT
+        // half — the analytic floor, the coverage mask, the floor law — and a
+        // per-frame upload budget bounds what is SEATED. Throttling here would
+        // make each of them a statement about flow control on top of the thing
+        // it names, and the floor law's own arm would stop distinguishing "the
+        // floor was not asked for" from "the floor was asked for and deferred".
+        upload_budget_bytes: 0,
     });
     let bytes = Arc::new(tiled(n)) as Arc<dyn VtTileSource>;
     let mut mats = std::collections::BTreeMap::new();

@@ -139,7 +139,7 @@ pub use feedback::{VtFeedbackLayout, FEEDBACK_BITS_PER_WORD};
 pub use fill::{fill_from_ancestor, replicate2x, upscale2x, MAX_FILL_STEPS};
 pub use pool::{
     plan_pool, PageFormat, VtAdvisory, VtPoolConfig, VtPoolGeometry, DEFAULT_MAX_TEXTURE_DIM,
-    DEFAULT_VT_BUDGET_BYTES,
+    DEFAULT_VT_BUDGET_BYTES, DEFAULT_VT_UPLOAD_BUDGET_BYTES, VT_SUSTAINED_THROTTLE_FRAMES,
 };
 pub use residency::{
     resolved_table, VtAdmit, VtError, VtEvict, VtPriority, VtResidency, VtResolved, VtStats,

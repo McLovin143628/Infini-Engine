@@ -579,6 +579,18 @@ pub struct VirtualTextureSettings {
     /// between levels, which is a quality/cost trade an author makes rather than
     /// a capability a machine has.
     pub trilinear: bool,
+    /// **Per-frame page-upload ceiling, in bytes** (island wave I4, IB-16). `0`
+    /// = unlimited.
+    ///
+    /// The third knob, and the first that is about *time* rather than about
+    /// space: `budget_bytes` is how much the atlas holds and is never exceeded;
+    /// this is how much one frame may write, and a want past it is **deferred,
+    /// not dropped** — re-offered on the next frame's want set, so a burst is
+    /// smoothed and a tile arrives late rather than never.
+    ///
+    /// Not an on/off switch either, for [`VirtualTextureSettings`]' own reason:
+    /// virtual texturing is the only way a `.inf_tex` reaches the GPU.
+    pub upload_budget_bytes: u64,
 }
 
 impl Default for VirtualTextureSettings {
@@ -587,6 +599,7 @@ impl Default for VirtualTextureSettings {
             bc_tiles: true,
             budget_bytes: crate::DEFAULT_VT_BUDGET_BYTES,
             trilinear: false,
+            upload_budget_bytes: inf_vt::DEFAULT_VT_UPLOAD_BUDGET_BYTES,
         }
     }
 }

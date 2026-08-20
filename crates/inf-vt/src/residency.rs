@@ -207,6 +207,10 @@ pub struct VtTransaction {
     /// or touched this transaction. Never a silent cap: this is the number, and
     /// [`VtStats::budget_clamped`] is the flag.
     pub deferred: u32,
+    /// Of [`deferred`](Self::deferred), how many the **per-frame upload budget**
+    /// held back (IB-16) rather than the pool being full. These arrive on a later
+    /// frame; the rest need a bigger pool.
+    pub throttled: u32,
     /// Wants naming a tile outside their texture's grid — a caller bug, counted
     /// rather than panicked on, because a want set is computed from a camera.
     pub out_of_range: u32,
@@ -297,6 +301,20 @@ pub struct VtStats {
     pub evicts: u64,
     /// Whether the last transaction had to defer a want for want of a slot.
     pub budget_clamped: bool,
+    /// Of [`deferred`](Self::deferred), how many the **per-frame upload budget**
+    /// held back rather than the pool being full (IB-16).
+    ///
+    /// A pool with spare slots reporting only `deferred` is indistinguishable
+    /// from a pool that is out of them, and the two want opposite fixes: a
+    /// bigger pool against one more frame's patience.
+    pub throttled: u32,
+    /// Bytes of page data the last transaction admitted — what the upload budget
+    /// is spent in, reported whether or not it bit.
+    pub upload_bytes: u64,
+    /// Consecutive frames the upload budget has held pages back. Past
+    /// [`VT_SUSTAINED_THROTTLE_FRAMES`](crate::VT_SUSTAINED_THROTTLE_FRAMES) the
+    /// residency raises [`VtAdvisory::UploadBudgetSustained`](crate::VtAdvisory).
+    pub throttled_frames: u32,
     /// Wants naming an unknown texture handle since the residency was created
     /// (P26.4). Cumulative, unlike [`VtTransaction::unknown_texture`], because
     /// the interesting reading is "has this ever happened" — one stale mask is
@@ -401,6 +419,10 @@ pub struct VtResidency {
     layout_generation: u64,
     layout_dirty: bool,
     stats: VtStats,
+    /// Consecutive frames the per-frame upload budget has held pages back
+    /// (IB-16). Reset the moment a frame throttles nothing, so it counts a
+    /// *run* rather than a total — a burst that drains is not sustained demand.
+    throttled_run: u32,
 }
 
 impl VtResidency {
@@ -424,6 +446,7 @@ impl VtResidency {
             cfg,
             geometry,
             page_bytes,
+            throttled_run: 0,
             slots: vec![
                 Slot {
                     occupant: None,
@@ -472,6 +495,25 @@ impl VtResidency {
         u64::from(self.stats.resident) * self.page_bytes
     }
     #[inline]
+    /// **The sustained-demand advisory** (IB-16), or `None` while the budget is
+    /// only absorbing a burst.
+    ///
+    /// Read once per frame by the host beside [`stats`](Self::stats). It fires on
+    /// a *run* of throttled frames rather than on a total, because a burst that
+    /// drains is the throttle working and a run that does not drain is content
+    /// asking for more bandwidth than the budget grants — and telling an author
+    /// the second thing when the first happened is the wrong-diagnosis hazard
+    /// this tree has already paid for once (`AssetPayload::migrates_from`).
+    pub fn upload_advisory(&self) -> Option<crate::VtAdvisory> {
+        (self.throttled_run >= crate::VT_SUSTAINED_THROTTLE_FRAMES).then(|| {
+            crate::VtAdvisory::UploadBudgetSustained {
+                budget_bytes: self.cfg.upload_budget_bytes,
+                frames: self.throttled_run,
+                pages: self.stats.throttled,
+            }
+        })
+    }
+
     pub fn stats(&self) -> &VtStats {
         &self.stats
     }
@@ -679,7 +721,15 @@ impl VtResidency {
         // cluster pairing's floor tiles were deferred for ever. Now a floor
         // miss may take a resident refinement's slot, and a refinement may
         // never take a floor tile's.
-        let log = inf_stream::admit_by_lane(&mut PoolView(self), &lanes, &mut protected);
+        // **The per-frame upload budget** (IB-16). Bytes in, seats out, at this
+        // pool's own page size — so the BC1 and RGBA8-transcode arms of the same
+        // configuration get the same *bandwidth* rather than the same page count.
+        // A want past it is deferred and re-offered next frame: late, never
+        // never. `0` is unlimited, which is what every gate written before IB-16
+        // configures and why none of their transactions move.
+        let budget =
+            inf_stream::AdmitBudget::from_bytes(self.cfg.upload_budget_bytes, self.page_bytes);
+        let log = inf_stream::admit_by_lane(&mut PoolView(self), &lanes, &mut protected, budget);
         for (slot, (t, tile)) in log.evicts {
             let texture = VtTextureHandle(t);
             dirty.insert(texture);
@@ -703,9 +753,19 @@ impl VtResidency {
 
         let deferred = log.deferred;
         txn.deferred = deferred;
+        txn.throttled = log.throttled;
         txn.tables = dirty.into_iter().collect();
         self.stats.deferred = deferred;
         self.stats.budget_clamped = deferred > 0;
+        self.stats.throttled = log.throttled;
+        self.stats.upload_bytes = txn.admits.len() as u64 * self.page_bytes;
+        // A RUN, not a total: a burst that drains resets it, and only demand that
+        // never drains crosses the advisory's threshold.
+        self.throttled_run = match log.throttled {
+            0 => 0,
+            _ => self.throttled_run.saturating_add(1),
+        };
+        self.stats.throttled_frames = self.throttled_run;
         self.stats.resident = self.slots.iter().filter(|s| s.occupant.is_some()).count() as u32;
         txn
     }
@@ -1043,6 +1103,9 @@ mod tests {
             budget_bytes: PageFormat::Bc1.page_bytes(136) * pages,
             max_texture_dim: 8192,
             trilinear: false,
+            // Unthrottled: these arms measure the residency RULE, and a throttle
+            // would make every one of them a statement about flow control.
+            upload_budget_bytes: 0,
         });
         r
     }

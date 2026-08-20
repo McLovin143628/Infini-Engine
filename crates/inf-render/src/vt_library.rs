@@ -660,6 +660,11 @@ pub fn build_vt_level(
         // Wave T (T47). One door, so the editor viewport and the shipped player
         // cannot filter a virtual texture differently — the P16.6 mirror law.
         trilinear: settings.vt.trilinear,
+        // IB-16, through the same one door and for the same reason: a host that
+        // throttled uploads differently from the other would page a burst in at
+        // two different rates and "preview == shipping" would stop being true of
+        // texture residency under motion.
+        upload_budget_bytes: settings.vt.upload_budget_bytes,
     });
     let mut by_guid: BTreeMap<u128, Arc<dyn VtTileSource>> = BTreeMap::new();
     for (g, bytes) in resolved {
@@ -702,6 +707,7 @@ mod tests {
             budget_bytes: DEFAULT_VT_BUDGET_BYTES,
             max_texture_dim: 8192,
             trilinear: false,
+            upload_budget_bytes: 0,
         }
     }
 

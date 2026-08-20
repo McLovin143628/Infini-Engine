@@ -235,6 +235,11 @@ fn harness_as(
         budget_bytes: format.page_bytes(stored_side) * pages,
         max_texture_dim: gpu.device.limits().max_texture_dimension_2d,
         trilinear: false,
+        // **Unthrottled** (IB-16): this file asserts what a page CONTAINS and
+        // where the address walk lands, and a per-frame upload budget would make
+        // "the tile is not there yet" an outcome every byte-for-byte comparison
+        // had to distinguish from "the tile is wrong".
+        upload_budget_bytes: 0,
     });
     assert!(advisories.is_empty(), "{advisories:?}");
     let handle = residency.register_texture(desc).expect("the floor fits");

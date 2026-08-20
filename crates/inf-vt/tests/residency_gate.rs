@@ -38,6 +38,12 @@ fn pool(pages: u64) -> VtResidency {
         budget_bytes: PageFormat::Bc1.page_bytes(136) * pages,
         max_texture_dim: 8192,
         trilinear: false,
+        // **Unthrottled** (IB-16): every arm in this file measures the residency
+        // RULE — rank, LRU, the mandatory floor, determinism — and a per-frame
+        // upload budget would turn each of them into a statement about flow
+        // control instead. The throttle has its own gate,
+        // `crates/inf-vt/tests/upload_budget.rs`.
+        upload_budget_bytes: 0,
     });
     assert!(advisories.is_empty(), "unexpected advisory: {advisories:?}");
     assert_eq!(r.geometry().slot_count() as u64, pages, "{pages} pages");

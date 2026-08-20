@@ -93,6 +93,11 @@ fn pool_cfg(pages: u64) -> VtPoolConfig {
         budget_bytes: PageFormat::Rgba8.page_bytes(STORED_TILE_SIZE) * pages,
         max_texture_dim: 8192,
         trilinear: false,
+        // **Unthrottled** (IB-16): these arms ask what a bound splat layer puts
+        // on the terrain fragment, and a deferred page would make every answer
+        // "the coarser ancestor" for a reason that has nothing to do with the
+        // rule being tested.
+        upload_budget_bytes: 0,
     }
 }
 

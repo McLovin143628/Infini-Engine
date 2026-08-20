@@ -106,6 +106,42 @@ impl PageFormat {
 /// arm, paid in resolution rather than in a silent failure.
 pub const DEFAULT_VT_BUDGET_BYTES: u64 = 24 * 1024 * 1024;
 
+/// **The per-frame upload budget** (island wave I4, IB-16): how many bytes of
+/// page data one [`VtResidency::apply_wants`](crate::VtResidency::apply_wants)
+/// may seat.
+///
+/// Wave T's T33b refused a throttle on purpose and named the price: *"there is
+/// no per-frame time budget and no per-frame admission or upload throttle in the
+/// VT loop; the only budget is a byte residency ceiling."* The AAA-readiness
+/// certification relayed it as IB-16 — *"the most 60 fps-relevant carried item in
+/// the texture stack"*.
+///
+/// # The number
+///
+/// A megabyte a frame. At a BC1 page (9 248 B) that is **113 pages**; at the
+/// RGBA8 transcode fallback (73 984 B) it is **14**. Held against P26.5's
+/// measurements over the phase-26 gate path — a peak of **6** admits in a steady
+/// frame and **18** in the cold one — it is 19× the steady peak and 6× the cold
+/// frame on a BC adapter. It is deliberately a number a settled frame never
+/// reaches: a throttle exists to bound a **burst**, and one that bit in the
+/// steady state would be a residency ceiling wearing the wrong name.
+///
+/// Sustained demand past it is a *content* signal rather than a stall, and it is
+/// reported as one — [`VtAdvisory::UploadBudgetSustained`].
+///
+/// **Bytes and not pages**, because a page is not one size: the transcode
+/// fallback's is 8× BC1's, so a page budget would throttle a BC-less adapter
+/// eight times as hard in bytes while looking identical.
+pub const DEFAULT_VT_UPLOAD_BUDGET_BYTES: u64 = 1024 * 1024;
+
+/// How many consecutive frames of throttled demand raise
+/// [`VtAdvisory::UploadBudgetSustained`].
+///
+/// A quarter of a second at 60 Hz. A burst is by definition transient — a whip
+/// pan, a teleport, a level's first frames — and one that has not drained in
+/// fifteen frames is not a burst, it is a working set the budget cannot serve.
+pub const VT_SUSTAINED_THROTTLE_FRAMES: u32 = 15;
+
 /// How a pool is configured. One atlas, one format, one slot size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VtPoolConfig {
@@ -134,6 +170,13 @@ pub struct VtPoolConfig {
     /// bit 1 reconstruct_z). Pool-wide today and per-texture by construction,
     /// which is the shape filtering has in every graphics API.
     pub trilinear: bool,
+    /// **Per-frame upload ceiling, in bytes** (IB-16). `0` = unlimited, which is
+    /// the pre-IB-16 behaviour and what every gate that predates it passes.
+    ///
+    /// Distinct from [`budget_bytes`](Self::budget_bytes) in *kind*, not only in
+    /// size: that one is how much the atlas HOLDS and is never exceeded; this is
+    /// how much one frame may WRITE, and going over it defers rather than drops.
+    pub upload_budget_bytes: u64,
 }
 
 /// `Limits::default().max_texture_dimension_2d` in wgpu 30 — the value the
@@ -149,6 +192,7 @@ impl Default for VtPoolConfig {
             budget_bytes: DEFAULT_VT_BUDGET_BYTES,
             max_texture_dim: DEFAULT_MAX_TEXTURE_DIM,
             trilinear: false,
+            upload_budget_bytes: DEFAULT_VT_UPLOAD_BUDGET_BYTES,
         }
     }
 }
@@ -220,6 +264,14 @@ pub enum VtAdvisory {
         wanted_slots: u64,
         granted_slots: u32,
         budget_bytes: u64,
+    },
+    #[error(
+        "the {budget_bytes} B/frame upload budget has been over-subscribed for          {frames} consecutive frames ({pages} page(s) held back on the last one);          this is sustained demand rather than a burst — the working set wants more          bandwidth than the budget grants, so raise `upload_budget_bytes`, lower          the content's texel density, or accept a permanently coarser mip"
+    )]
+    UploadBudgetSustained {
+        budget_bytes: u64,
+        frames: u32,
+        pages: u32,
     },
 }
 
