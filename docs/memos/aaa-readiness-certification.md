@@ -142,6 +142,22 @@ city block into lots. Two cities implies thousands of graph nodes or thousands o
 **Fix shape:** LOD/streaming for grammar colliders (they are static — most need not be
 resident), a lot-subdivision node, and a collider budget. All three are features.
 
+> **CLOSED by island wave I3 (2026-08-20)**, all three, and measured on a committed
+> thousand-building city (`samples/phase30-city`, 370 468 solids):
+>
+> * **IB-2a** — `inf_ecs::SimBand` bands static structural colliders off the simulation's own
+>   `StreamingSource` entities (never a camera). **6 067 colliders, 1.64 %, 2.202 ms/step** at
+>   the 0.363 µs above, against **134.480 ms** unbanded and a 4.0 ms
+>   `STREAMED_STEP_BUDGET_MS`. The 64 m radius is the widest on a printed six-row sweep that
+>   stays inside the budget.
+> * **IB-2b** — `StructureGroup` + `ScatterBatch::near_distance`: a far building is one shell
+>   box, drawn and collided. 14 whole / 788 shells / 198 out on the fixture.
+> * **IB-2c** — `building.lots`, so one `building.plan` node is as many buildings as its block
+>   has lots. 4 500 shipped lot pairs at **0.000e0 m²** of overlap.
+>
+> `runtime/inf-player/tests/city_scale.rs` — eight arms through the cooked pack, including
+> **PIE == shipping at every one of 480 drive-through steps**. `docs/ROADMAP.md`'s I3 block.
+
 ### IB-3 · The GIS vector path has no caller — RELAYED, verified by grep
 
 `inf-gis` is 5 732 lines across nine modules. **One** workspace crate depends on it, using
@@ -303,6 +319,19 @@ Beside it, the vector spawn path itself is *fine*: 10 000 road polylines spawn i
 50 000 footprints in 513.5 ms. It is the document projection that does not scale, and it is
 already a known hot spot (`SceneDoc::snapshot` was 3 277.5 ms at 15 000 entities before its
 P-wave fix; it is 3.232 ms now).
+
+> **CLOSED by island wave I3 (2026-08-20)** — and the table above **understates** it, because
+> it counts only the snapshot half. Every `world://delta` also paid a full `diff`: the round
+> trip at 100 000 entities, moving one entity, measures **52.857 ms**.
+>
+> `SceneDoc::project_delta` replaces both. A mutation declares what it moved (`touch_at`), and
+> `touch` still means "everything" for the 41 of 45 call sites this wave did not narrow — a
+> conservative union, so an unconverted site is slow and never wrong. Measured after:
+> **8.105 ms** for a drag frame and **0.0006 ms** for a select frame, at the same 100 000.
+>
+> The residue is named rather than absorbed: the 8.105 ms is `EcsWorld::propagate`, which the
+> select-only column isolates at 0.0006 ms. Incremental transform propagation is its own item.
+> `docs/ROADMAP.md`'s I3 block.
 
 ### IB-14 · The default vector import cap silently amputates a city — MEASURED
 
@@ -535,16 +564,18 @@ Stated plainly because the island will rely on some of it:
 
 Not a plan — an ordering the numbers imply.
 
-1. **Decide the project layout** and close IB-7. Everything else is authored inside it.
-2. **Take the schema window** (IB-10) once, carrying the three deferred items.
-3. **Connect PCG to streamed terrain** (IB-1). Nothing about a 50 km² world works until
-   this does, and the gate is already written.
-4. **Build the GIS door** (IB-3), then roads-as-geometry (IB-4) and the two attribute wires
-   (IB-5). This is the largest single piece.
-5. **Give grammar buildings an LOD/streaming story and a collider budget** (IB-2), and a
-   lot-subdivision node; then re-measure against the 0.363 µs/collider figure.
+1. ~~**Decide the project layout** and close IB-7.~~ *(done — wave I1)*
+2. ~~**Take the schema window** (IB-10) once, carrying the three deferred items.~~ *(I1)*
+3. ~~**Connect PCG to streamed terrain** (IB-1).~~ *(I1)*
+4. ~~**Build the GIS door** (IB-3), then roads-as-geometry (IB-4) and the two attribute
+   wires (IB-5).~~ *(wave I2 — with IB-6, IB-14 and IB-11's near half)*
+5. ~~**Give grammar buildings an LOD/streaming story and a collider budget** (IB-2), and a
+   lot-subdivision node; then re-measure against the 0.363 µs/collider figure.~~
+   *(wave I3 — re-measured on a thousand-building city: 2.202 ms/step banded against
+   134.480 ms unbanded. I3 also pulled **IB-8** and **IB-13** forward out of their wave,
+   because both are ceilings a city walks into on its first frame.)*
 6. **Build an fps instrument at shipping resolution** before claiming 60 fps, and settle
-   the terrain ratchet-vs-budget disagreement (IB-9).
+   the terrain ratchet-vs-budget disagreement (IB-9). ← **next**
 7. Verify IB-15 (pyramid seam, global silhouette) before committing to multi-terrain.
 
 Only then author content.

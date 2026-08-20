@@ -30,6 +30,24 @@
 # .inf_pack: the frozen v1 pack fixture (P16.1 back-compat gate) is compared
 # byte-for-byte; a cooked ship pack is binary by construction.
 *.inf_pack -text
+# The remaining committed binary payloads (I3). Every one of these is locked
+# byte-for-byte by `samples::tests::committed_sample_matches_generators` —
+# `.inf_mesh` five times over, `.inf_terrain` and `.inf_voxel` by the P21/P22
+# samples, `.inf_audio` by the playgrounds — and every one was relying on git's
+# BINARY AUTO-DETECTION to survive a Windows checkout rather than on a rule.
+#
+# Auto-detection works (it reads NUL bytes in the first 8 KiB) right up until a
+# payload's first block happens not to contain one, and this file's own header
+# records what that costs: `Coyote.inf_act` was mangled exactly that way. A lock
+# that depends on a heuristic is a lock with a coin flip in it. `.inf_vmesh` and
+# `.inf_fracture` are derived at cook and not committed today; they are listed
+# because the day one is, the rule should already be here.
+*.inf_mesh -text
+*.inf_vmesh -text
+*.inf_terrain -text
+*.inf_voxel -text
+*.inf_audio -text
+*.inf_fracture -text
 *.png -text
 
 # TOML (asset sidecars included) participates in byte-determinism tests and is

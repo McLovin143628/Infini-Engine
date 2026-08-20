@@ -440,6 +440,87 @@ fn a_near_building_is_whole_and_a_far_one_is_one_box() {
     );
 }
 
+/// **The DRAW side, through the shipped projection** (IB-2b).
+///
+/// `both_projectors_band_a_structure_lod_the_same_way` compares the two hosts'
+/// *source text*; nothing in it asserts that a `RenderScene` ever receives a
+/// shell batch. That is the P21.4 law — a rule proven by reading the code that
+/// implements it leaves the wiring unarmed — so this arm drives the real
+/// `project_scene` over the real city and reads the batches out.
+///
+/// The property is that the bands are **complementary**: every parts batch is
+/// bounded above by the LOD distance, every shell batch is bounded below by it,
+/// and no batch spans the boundary. An overlap draws a solid box inside a
+/// building; a gap deletes it from the skyline.
+#[test]
+fn the_shipped_projection_emits_complementary_parts_and_shell_batches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pack = cook_city(tmp.path());
+    let built = pack_built(&pack);
+    let mut sim = inf_player::sim_from_built(built);
+    let mut scene = inf_render::RenderScene::default();
+    inf_player::render::project_scene(
+        &mut scene,
+        &sim,
+        0.0,
+        &inf_player::vmesh::VmeshRegistry::new(),
+    );
+
+    let lod = inf_render::STRUCTURE_LOD_M;
+    let (mut parts, mut shells, mut loose) = (0usize, 0usize, 0usize);
+    let (mut part_inst, mut shell_inst) = (0usize, 0usize);
+    for b in &scene.scatter {
+        let n = b.data.instances.len();
+        assert!(
+            b.near_distance == 0.0 || b.near_distance == lod,
+            "a batch bands from {} m, which is neither 0 nor the LOD distance",
+            b.near_distance
+        );
+        if b.near_distance == lod {
+            // The shell band: bounded below by the LOD distance, and above only
+            // by the volume's own authored draw distance.
+            assert!(
+                b.draw_distance > lod,
+                "a shell batch spans [{lod}, {}) — an empty interval draws nothing",
+                b.draw_distance
+            );
+            shells += 1;
+            shell_inst += n;
+        } else if b.draw_distance == lod {
+            parts += 1;
+            part_inst += n;
+        } else {
+            loose += n;
+        }
+    }
+    println!(
+        "IB-2b (shipped projection): {parts} parts batches ({part_inst} instances) \
+         bounded above at {lod} m, {shells} shell batches ({shell_inst} instances) \
+         bounded below at {lod} m, {loose} ungrouped instances"
+    );
+    assert_eq!(
+        parts,
+        (CITY_BLOCKS * CITY_BLOCKS) as usize,
+        "one parts batch per block"
+    );
+    assert_eq!(shells, parts, "every parts batch needs its complement");
+    // **The reduction, measured**: one instance a building against ~370 a
+    // building. Without it the far field is the whole city's geometry.
+    assert_eq!(
+        shell_inst, 1_000,
+        "one shell instance per building; got {shell_inst}"
+    );
+    assert!(
+        part_inst > shell_inst * 100,
+        "the far tier draws {shell_inst} instances against the near tier's \
+         {part_inst} — only {:.0}x, which is not an LOD",
+        part_inst as f64 / shell_inst.max(1) as f64
+    );
+    // A city with no buildings at all would satisfy "every batch is banded".
+    assert!(loose == 0, "{loose} ungrouped instances in a city of buildings");
+    let _ = &mut sim;
+}
+
 // ── (d) PIE == shipping, driving ────────────────────────────────────────────
 
 /// **PIE == shipping on a scripted drive-through.**

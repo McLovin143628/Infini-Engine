@@ -26,7 +26,7 @@
 //!
 //! The standing law is *visibility filters what is DRAWN, never what is
 //! SIMULATED*. The collider band therefore takes its anchors from
-//! [`inf_ecs::StreamingSource`] entities — the same sim-side positions P16's cell
+//! `inf_ecs::StreamingSource` entities — the same sim-side positions P16's cell
 //! activation reads, never a camera and never a frame counter — so the active
 //! collider set is a pure function of the world's contents and PIE == shipping
 //! holds on a drive-through. The render band takes the camera, because a draw
@@ -74,7 +74,7 @@ pub type StructureTier = inf_math::Tier;
 ///
 /// # Why a RANGE and not a group id per solid
 ///
-/// [`inf_ecs::ScatteredSolid`] is a hot, derived, 80-byte record and a city holds
+/// `inf_ecs::ScatteredSolid` is a hot, derived, 80-byte record and a city holds
 /// a million of them; a `u32` on each is 4 MB of tag to express what is already
 /// true of the layout. `evaluate_buildings_in` concatenates one building's output
 /// at a time, so a building's solids are **already contiguous**, and a range says
