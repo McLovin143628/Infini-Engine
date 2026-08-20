@@ -24749,10 +24749,11 @@ production path.
 ## Phase 30 (the island) — wave I4b: the performance wave (2026-08-20)
 
 Range: **`5012f4c..`** this tree (re-stated by the audit that closes the wave, per I3's law).
-Five commits, of which four carry the work — `55ee02e` the fixed step's eleven and a half
-unattributed milliseconds · `42c60ef` the lit frame's recording · `4dbf937` the impostor's own
-bounding sphere and three ratchets · `f5556e2` the VSM invalidation scatter's own number —
-and one closes the ledger.
+Six commits carry the work — `55ee02e` the fixed step's eleven and a half unattributed
+milliseconds · `42c60ef` the lit frame's recording · `4dbf937` the impostor's own bounding
+sphere and three ratchets · `f5556e2` the VSM invalidation scatter's own number · `1ea4888`
+seven eaten continuations · `c46d146` the pending marks' bound — and the rest close the ledger
+and the docs the numbers live in.
 
 The wave the I4 instrument made possible. I4 measured and refused to prescribe; this one
 prescribes, and every prescription is measured on that instrument before and after.
@@ -24768,13 +24769,13 @@ prescribes, and every prescription is measured on that instrument before and aft
 | 1080p **lit** p50 / p95 | — / 92.3–92.9 | **32.8–33.4 / 38.1–41.8** |
 | 1080p lit GPU frame | 35.8–36.1 | **16.1–16.5** |
 | 1080p lit **pipelined estimate** | **24.4\*** | **16.4–16.9 ms, 59.3–60.9 fps** |
-
-\* **I4 printed no lit pipelined estimate at all** — the lit block reported one p95 and a GPU
-frame, which is the gap this wave's first act was to close. The 24.4 was measured **mid-wave**,
-after the fixed step's repair and before the record's, so it is the right comparison for
-clauses 2 onward and is *not* an I4 number. Said here because a number that only lives in a
-ledger drifts, and this one is one commit message away from being read as one.
 | **distance from 60 fps, 1080p unlit** | p50 +23.2, p95 +28.5 | **p50 −5.8, p95 −2.4** |
+
+\* **I4 printed no lit pipelined estimate at all** — its lit block reported one p95 and a GPU
+frame, which is the gap this wave's clause 2 began by closing. The 24.4 was therefore measured
+**mid-wave**, after the fixed step's repair and before the record's, so it is the right
+comparison for clauses 2 onward and is *not* an I4 number. Said out loud because a number that
+only lives in a ledger drifts, and this one is one commit message away from being read as one.
 
 **The shipped-default 1080p frame is now inside the 60 fps budget at p50 and p95**, and the
 **lit** frame is at the line on the pipelined measure and not on the serialized one. Ranges,
