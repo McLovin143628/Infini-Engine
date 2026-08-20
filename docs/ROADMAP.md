@@ -23910,3 +23910,262 @@ unchanged, and verified biting.
 | schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged** |
 
 No schema moved, no golden moved, no sample moved, and no P29-or-prior arm changed meaning.
+
+---
+
+## Phase 30 (the island) — wave I3: city scale (2026-08-20)
+
+`866fb55..` — six commits, sole tree-writer, tagged `(I3)`. Three certified ceilings killed,
+and **every number below lives in a test that prints it**.
+
+The certification's IB-2 is one arithmetic and it is about scale: *"12 850 static colliders
+cost 4.663 ms/step (0.363 µs each); the town is **seven** buildings; 60 fps ceiling ≈ 25
+buildings"*. Against `STREAMED_STEP_BUDGET_MS = 4.0` the whole simulation affords ~11 000
+colliders. The island needs two cities and five towns.
+
+### The fixture, first — because every other number is about it
+
+`samples/phase30-city` (262 KB, committed as a **generator**): 100 `PcgVolume` blocks sharing
+one `CityBlock.inf_pcg` and differing only by their own `seed`, a Driver carrying
+`StreamingSource`, and a street grid through I2's own import door
+(`RoadGraph::from_layer` → `build_surface` → `surface_to_mesh`) — **220 segments, 81 four-way
+junctions, 4 061 road vertices**. The graph is
+`grammar.footprint` → `building.lots` → `building.plan`:
+
+> **100 blocks × 10 lots = 1 000 buildings / 370 468 solids.**
+
+Two fixture decisions, each with its reason and its arm:
+
+* **The ground is flat.** A terrain would make every building's datum a height query and
+  every measured number a statement about the terrain sampler as much as about the band.
+  IB-2's subject is the collider count, so the ground is held constant and the measurement
+  has one variable. `phase19-town` remains the composed scene with terrain, biomes and
+  streaming.
+* **The road step is 20 m, not the 1 m default.** The step buys conformance to the terrain's
+  *chord* between samples (I2's own finding), and a plane has no chord. Measured at
+  **0.000000 m** deviation: 4 061 vertices against 213 941 at the default, 222 KB against
+  15.1 MB. `the_citys_streets_conform_to_their_flat_ground_at_any_step` is what will fail the
+  day this city grows a terrain.
+
+### IB-2a — the collider band
+
+**The shipped city unbanded is 134.480 ms/step.** Banded it is **6 067 colliders — 1.64 % —
+2.202 ms** at the certification's own 0.363 µs, and **1.991 ms** measured on this machine.
+
+`inf_ecs::SimBand`'s anchors are `StreamingSource` entities — *the same set P16's cell
+activation reads* — so the active set is a pure function of the world's contents and there is
+no camera in scope to pass by accident. It is derived **inside** `sync_from_world_sim` rather
+than handed in, because a parameter is a thing a host can forget and a host that forgot it
+would agree with itself perfectly (the P21.4 law).
+
+**The radius is a measurement**, printed by `the_radius_sweep_states_what_the_default_buys`
+over a 427 351-solid city and asserted against the 11 019 colliders a 4.0 ms step buys:
+
+| near_m | colliders | cert ms | measured ms |
+|---|---|---|---|
+| 16 | 1 000 | 0.363 | 0.1899 |
+| 32 | 1 563 | 0.567 | 0.3821 |
+| 48 | 4 241 | 1.539 | 1.4143 |
+| **64** | **7 513** | **2.727** | **2.8703** |
+| 96 | 14 666 | 5.324 | 6.8114 |
+| 128 | 21 544 | 7.820 | 11.0419 |
+
+64 m is the widest radius on that table inside the budget, and the arm fails if the shipped
+default stops being one.
+
+**Two rulings, both priced.** *A radius, not a partition CELL*: admitting active cells'
+colliders is the obvious reading, and at 256 m cells with a 256 m activation radius the
+active set is at least 590 000 m² — ~840 buildings of interiors, two orders past the budget.
+**The cells decide what EXISTS; the band decides what is SOLID.** *Anchors are quantized to a
+16 m lattice*, so membership changes on a lattice crossing rather than every step — the P19.5
+11.62 ms regression's own mechanism, reused; worst measured slop **11.180 m against the
+11.314 m half-diagonal bound**.
+
+**It fails OPEN**: no streaming source means no banding, which is every pre-island level and
+every unit fixture. Dropping colliders drops a body through the world and keeps it falling;
+keeping them is merely slow.
+
+### IB-2b — the structure LOD, and the primitive the engine did not have
+
+`ScatterBatch::near_distance`: a batch now occupies `[near, draw)` instead of `[0, draw)`.
+**The alternative is priced and it is the reason the field exists** — selecting instances on
+the CPU puts the eye inside the batch's *content key*, and a content key that moves with the
+camera re-uploads a city's instance buffer every time the player walks. The bands are
+constants of the content; the cull compute, which has already computed the distance, chooses
+per instance per frame. It rides `params.eye.w`, a slot the cull shader's own header
+documented as unused, so `CullParamsGpu` keeps its size and the bind group is untouched.
+
+The band is **half-open on both ends**, and the partition is measured: 576 instances split
+**0/576, 265/311, 559/17** across three cuts, summing to 576 every time. A closed inner test
+double-counts the boundary, which on a shell/parts pair is a solid box standing inside a
+building.
+
+`ScatterInstance::scale` became per-axis (48 → 64 B) because a shell is an oriented **box**
+and a cube of the wrong proportions is not a coarser building, it is a different one. The
+first 48 bytes are byte-identical to the P18.5 record, the normal correction is behind a
+uniformity branch precisely so a uniform instance's arithmetic does not move, and **the 54
+goldens are byte-identical under `INF_GOLDEN_STRICT=1`**. A 1/8-height slab covers 151 px
+against the cube's 547 (measured against a geometry-free frame — the first draft thresholded
+on brightness, counted the sky, and reported 44 224 for both).
+
+`STRUCTURE_LOD_M = 192` is deliberately **three times** the 64 m collider band, so every
+building a body can collide with is drawn as its parts: *what I can touch* and *what I can
+see* stay the same building. On the shipped city: **14 whole, 788 shells, 198 out**. A probe
+dropped on a far building's shell rests at **7.599 m** on a 7.200 m box — a shell that is not
+a barrier is a hole, not a LOD.
+
+### IB-2c — lot subdivision
+
+`subdivide_block` cuts a block polygon into oriented lots off I2's rotating-calipers
+substrate. Measured: a 100 × 60 block gives 8 lots totalling **6000.0 m² of 6000.0**; a
+rotated 120 × 70 block at maximum jitter gives 12 lots, worst pairwise overlap
+**1.4e-12 m²**; a triangular block keeps **3 of 12** cells and says so, where a centre-only
+containment test would have admitted all 12. Containment is tested on the lot's four
+**corners** because the hull is convex and so is the lot — four corners inside a convex set
+is a *proof* the whole rectangle is, where a centre is a sample.
+
+The jitter is bounded at **0.45 of a cell** so two adjacent boundaries moving towards each
+other still leave 0.1 of a cell between them: the tiling stays a tiling with no repair pass,
+and a repair pass would have made the result depend on the order boundaries were visited.
+
+On the shipped city: **4 500 lot pairs, worst overlap 0.000e0 m²**, and two loads of one pack
+build bit-identical shells.
+
+`building.lots` is the node, on its own `lots` wire rather than reusing `span` — a span is a
+1-D domain a grammar *walks*, a subdivision is a set of rectangles, and sharing the wire
+would have let a `grammar.expand` be dragged onto a block and silently ignore the cut.
+`BuildingPass::lots` is `None` for every committed graph, so nothing in the tree moved.
+
+### IB-8 — the visbuffer id is 64 bits
+
+**2 047 → 16 777 214** (8 196×; the brief asked for 16 384).
+
+The 32-bit re-cut the certification proposes was **measured and refused**. The meshlet field
+addresses the pool's *capacity*, and P28.1's own measurement puts descriptors at a stable
+5.26–5.44 % of a cooked asset's pool bytes:
+
+| meshlet bits | slots | descriptors | pool it refuses past | of the 256 MiB default |
+|---|---|---|---|---|
+| **14** (as shipped) | 16 384 | 1 MiB | ~18.4–19.0 MiB | **7.4 %** |
+| 12 | 4 096 | 256 KiB | ~4.6–4.8 MiB | 1.8 % |
+| 11 | 2 048 | 128 KiB | ~2.3–2.4 MiB | **0.9 %** |
+
+The meshlet field was *already* the binding one — P28.1's own words, "the ceiling is
+nonetheless reachable by ordinary streamed content" — so buying instance bits with meshlet
+bits makes an already-firing refusal fire at a ninth of the budget. The triangle field is
+worse: shrinking it lowers `max_triangles`, which *increases* the meshlet count for the same
+geometry and spends the bits it borrowed. **Every re-cut of 32 bits makes the frame refuse
+sooner somewhere.**
+
+So `VIS_FORMAT` is `Rg32Uint`. **WGSL has no 64-bit integer**, so the id is a `vec2<u32>` and
+no field may straddle the word boundary — which is why the split is 7 + 25 filling word 0
+exactly and 24 + 8 reserved in word 1 rather than a sized share of a flat 64: both unpacks
+stay single-word expressions. Meshlet slots go to 33 554 432 = **2 GiB of descriptors, 6.0×
+the whole default streaming budget** (a ~36.8 GiB pool). Cost: **8 bytes a pixel** — 3.7 MB
+at 720p — paid only while `VgeomSettings::visbuffer` is on, which is `false` on every tier.
+
+Two of the three refusals are now unreachable by real content, **and that is the point**: the
+binding ceiling moves to `budget_bytes` and `MAX_CPU_SCATTER_INSTANCES`, which are tunable
+and reported where a packed field was neither. The **triangle** refusal stays reachable — it
+is meshopt's own configurable cap — which is what keeps
+`a_scene_past_a_ceiling_falls_back_to_the_forward_path_and_says_which` running the fallback
+verbatim.
+
+**Parity, re-run on the device:** all **12** `visbuffer_parity` arms unchanged (including
+`the_devices_ids_decode_to_the_scene_the_host_placed`, a real readback through the new
+format), `visbuffer_feedback` **7**, `phase28_gate` **7**, and the **54 goldens
+byte-identical** under `INF_GOLDEN_STRICT=1`.
+
+**And it settled a question P28.1 could not.** §6 blocked the voxel shadow-receiver routing
+because "all thirty-two bits are spent", and
+`the_visbuffer_id_space_has_no_room_for_a_second_geometry_kind` called itself *"the
+falsifier: it fails the day the id space grows, which is the day the voxel door genuinely
+opens"*. The id grew, the arm failed exactly as designed — **and its prediction was wrong**.
+Eight bits are free and the routing stands: the resolve shades by pulling three vertices out
+of the shared meshlet pool, and a voxel chunk has no meshlet structure to pull from.
+Exhaustion was the reason *given*; no meshlet structure is the reason. Renamed
+`the_voxel_routing_survives_the_id_widening`, and the retired reason is **deleted** from
+`voxel.wgsl` rather than joined — a stale blocker sends the next reader to widen an id that
+is already wide.
+
+### IB-13 — the scene projection stops being O(entities) per delta
+
+The certification names 0.34 µs/entity and 34 ms at 100 000, and it counted only the snapshot
+half. Measured here, moving **one** entity:
+
+| entities | snapshot | diff | old round trip | drag | select-only |
+|---|---|---|---|---|---|
+| 15 000 | 4.841 ms | 2.432 ms | 7.272 ms | 0.978 ms | 0.0003 ms |
+| 50 000 | 18.823 ms | 8.744 ms | 24.734 ms | 3.882 ms | 0.0004 ms |
+| **100 000** | 35.724 ms | 17.133 ms | **52.857 ms** | **8.105 ms** | **0.0006 ms** |
+
+`SceneDoc::project_delta` replaces both halves. A mutation declares what it moved: `touch`
+means "I do not know" and costs a full walk, `touch_at` names guids. The scope is a
+**conservative union**, so converting a call site is a strict improvement and leaving one
+unconverted is only slow — 41 of the 45 `touch()` sites were not touched. `touch_at` may only
+be used for changes that cannot MOVE an entity in the hierarchy; `set_visible` and
+`write_prop` go through `touch_subtree` because `effective_visible` is a property of the
+ancestry.
+
+`SceneDelta::roots` became `Option`: it rode along whole on every delta for a trivially
+correct reducer, and at 100 000 entities that clone alone was **3.496 ms** of an otherwise
+0.0006 ms frame. The arm is *stronger* than the equality it replaces — an omitted list is
+legal **only** when the roots did not move.
+
+`diff` stays, as the **oracle**.
+`the_scoped_projection_never_misses_a_change_and_never_states_a_stale_one` runs both
+computations over one script — create, rename, hide, select, reparent, hide-a-parent, delete,
+unparent — and requires the scoped answer to *contain* the full one and to equal the current
+snapshot where it speaks. A fast projection with no independent statement of what it should
+have said would be unfalsifiable.
+
+**Honest remainder, isolated by the select-only column:** the 8.105 ms a drag frame still
+costs is `EcsWorld::propagate`, not the projection. Incremental transform propagation is its
+own item.
+
+### The gate
+
+`runtime/inf-player/tests/city_scale.rs`, seven arms, **all through the cooked pack** rather
+than by calling the rules — the P21.4 law that a rule proven by calling it leaves the
+*wiring* unarmed, and every claim here lives on a wire between a graph, a derived cache, a
+bridge and two hosts.
+
+```text
+the shipped city: 100 blocks, 1 000 buildings, 370 468 solids
+IB-2a: 370 468 solids -> 6 067 banded colliders (1.64 %) at near 64 m / far 1024 m;
+       2.202 ms/step at the certification's rate against 134.480 ms, budget 4.000 ms
+       (measured 1.991 ms here)
+IB-2b: 14 whole, 788 shells, 198 out
+IB-2c: 4 500 lot pairs, worst overlap 0.000e0 m2, two loads bit-identical
+drive: 480 steps, PIE == shipping at EVERY ONE, 9 distinct active sets,
+       6 054..=7 538 colliders
+```
+
+The drive-through starts **inside** the city: a run that begins in open ground spends its
+first half approaching, and an approach only exercises the band growing. Two anti-vacuity
+clauses say so — the active set must change (at least 7 distinct) and it must **shrink** at
+least once, because a band that grows and never releases is a leak with the same symptoms as
+working.
+
+### Gates the wave added or moved
+
+| gate | what it now says |
+|---|---|
+| `the_population_mapping_is_one_body` | the two hosts' `VolumeOutput` → ECS translation, character for character between fences — `start`/`len`/`inst_start`/`inst_len` are four `u32`s in a row, so any permutation compiles and draws one building with another's walls |
+| `both_projectors_band_a_structure_lod_the_same_way` | both fenced LOD selections compared character for character, fences counted, a literal distance forbidden inside them |
+| `the_voxel_routing_survives_the_id_widening` | *(renamed)* the id has room, the routing is structural, and `voxel.wgsl` names the real blocker and no longer names the retired one |
+| `node_of_does_not_rescan_the_order_list` | *(moved with the index, per its own instruction)* the hierarchy is built in exactly **one** place and `snapshot` and `project_delta` are its two callers |
+| `the_packing_is_injective_over_a_dense_sweep` | strides **derived** from the field widths (they were literals: 1 M round trips at 32 bits, 2.1e9 at 64), and injectivity asserted rather than inferred |
+| `structure_group_stays_in_sync_with_its_pcg_twin` | the second mirror pin, with four distinct values because four `u32`s in a row make any permutation compile |
+| `the_population_door_refuses_a_group_that_names_solids_that_are_not_there` | out-of-range and out-of-order groups refused at the setter |
+
+### Counts
+
+| | after the I2 audit | after I3 |
+|---|---|---|
+| goldens | 54, byte-frozen | **54, byte-identical under `INF_GOLDEN_STRICT=1`** |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged** |
+| committed levels | 19 | **20** (the city) |
+
+**No schema moved and no golden moved.** Every new field is `serde(skip)` derived state,
+asserted absent from the encoded form.

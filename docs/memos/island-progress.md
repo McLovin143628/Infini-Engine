@@ -20,13 +20,16 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 |---|---|---|
 | **I1** | foundations — IB-7 layout, IB-1 PCG/streaming, IB-10 schema window, IB-15 multi-terrain | **DONE + AUDITED** (+ `.inf_sm` v3 addendum) |
 | **I2** | the GIS door — IB-3, IB-4, IB-5, IB-6, IB-14, IB-11's near half | **DONE + AUDITED** — battery 296 / 5 618 / 0 / 13, frontend 702 / 78, goldens 54, clippy 0, rustdoc 443 |
-| I3 | city scale — IB-2 (grammar collider LOD/budget, lot subdivision) | not started |
+| **I3** | city scale — IB-2a/b/c, IB-8, IB-13, the city fixture | **DONE** — see below |
 | I4 | the fps instrument + budgets — IB-9, IB-16, the shipping-resolution harness | not started |
 | I5 | source data — IB-11 (DEM ingest reality, CRS, LiDAR) | not started |
-| I6 | scale seams — IB-8 (2 047 vis instances), IB-12 (floating-origin camera), IB-13 (`SceneDoc::snapshot`) | not started |
+| I6 | scale seams — IB-12 (floating-origin camera) *(IB-8 and IB-13 were pulled into I3)* | not started |
 | I7 | content — the 50 km² Vancouver map itself | not started |
 
-Wave numbering is this file's; the certification's ordering is what it follows.
+Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
+IB-8 and IB-13 forward out of I6**: both are ceilings a thousand-building fixture walks into
+on its first frame, and measuring them against a real city was cheaper than measuring them
+twice.
 
 ---
 
@@ -126,6 +129,57 @@ Wave numbering is this file's; the certification's ordering is what it follows.
   were numbers no test printed. Every claimed measurement now has a `println!` beside its
   assertion, which is this file's own rule ("the numbers live in the tests that print them")
   applied to the ledger as well as to the tests.
+* **A radius, not a partition CELL** (IB-2a). The obvious reading of "band by the
+  partition" is to admit the colliders of active cells. The measurement refuses it:
+  `DEFAULT_CELL_SIZE_M` is 256 m and the activation radius is 256 m, so the active set is at
+  least a 3 × 3 block — ≥ 590 000 m², ~840 buildings of interiors, two orders past the
+  budget. **The cells decide what EXISTS; the band decides what is SOLID**, and they are
+  different questions at different scales. What the band *does* take from P16 is its
+  **anchors**: `StreamingSource` entities, exactly the set cell activation reads, so the two
+  cannot disagree about where the simulation is.
+* **The band fails OPEN.** No streaming source ⇒ no banding, which is every level committed
+  before the island and every unit fixture. Dropping colliders is the direction that drops a
+  body through the world and keeps it falling; keeping them is merely slow.
+* **Anchors are quantized to a 16 m lattice, and the cost is a number.** The band's
+  membership rides the P19.5 change stamp, and a stamp that moved every step would
+  re-describe the active set 60 times a second — the 11.62 ms regression that memo records.
+  Snapping means membership changes on a lattice crossing instead. Worst measured slop:
+  **11.180 m against the 11.314 m half-diagonal bound.**
+* **Thirty-two bits could not be re-cut** (IB-8). The instance field is the one the
+  certification names, but the *meshlet* field was already the binding ceiling — P28.1's own
+  measurement puts descriptors at 5.26–5.44 % of pool bytes, so 14 bits refuses past 7.4 % of
+  the default streaming budget and 11 bits past **0.9 %**. Shrinking the triangle field is
+  worse: it lowers `max_triangles`, which *increases* the meshlet count and spends the bits
+  it borrowed. **Every re-cut of 32 bits makes the frame refuse sooner somewhere.** So the id
+  widened to 64, WGSL has no `u64` so it is a `vec2<u32>` and no field may straddle the word
+  boundary, and that is why the split is 7 + 25 filling word 0 exactly.
+* **A refusal that stops firing is the point, not a defect** (IB-8). Two of the three
+  ceilings are now unreachable by real content; the binding ceiling moves to
+  `budget_bytes` and `MAX_CPU_SCATTER_INSTANCES`, which are *tunable and reported* where a
+  packed field was neither. The **triangle** refusal stays reachable on purpose — it is
+  meshopt's own configurable cap, and it is what keeps the fallback arm running.
+* **Widening the id told two reasons apart.** P28.1 blocked the voxel shadow-receiver routing
+  because "all thirty-two bits are spent", and
+  `the_visbuffer_id_space_has_no_room_for_a_second_geometry_kind` called itself *"the
+  falsifier: it fails the day the id space grows, which is the day the voxel door genuinely
+  opens"*. The id grew, the arm failed as designed, and **its prediction was wrong**: eight
+  bits are free and the routing stands, because the resolve shades by pulling vertices out of
+  the shared meshlet pool and a voxel chunk has none. Exhaustion was the reason *given*; no
+  meshlet structure is the reason. Renamed `the_voxel_routing_survives_the_id_widening`, and
+  the retired reason is **deleted** from `voxel.wgsl` rather than joined — a stale blocker
+  sends the next reader to widen an id that is already wide.
+* **A mutation declares what it moved; "I do not know" is legal and costs a full walk**
+  (IB-13). `touch` widens the projection scope to everything, `touch_at` names guids. The
+  scope is a *conservative union*, so converting a call site is a strict improvement and
+  leaving one unconverted is only slow — which is why 41 of 45 sites were not touched.
+  `touch_at` may only be used for changes that cannot MOVE an entity in the hierarchy,
+  because `children` and `roots` are derived from *other* entities' parent links.
+* **The projection's oracle is the thing it replaced.** `diff` is kept — not as a fallback but
+  as a second, independent computation — and the gate requires the scoped delta to *contain*
+  what the full diff would have said and to be *equal to the current snapshot* where it
+  speaks. Containment, not equality: a transform write names an entity whose `SceneNode` did
+  not change, so one redundant node ships against a hundred thousand. A fast projection with
+  no independent statement of what it should have said would be unfalsifiable.
 * **A payload with a migrating rung must not be diagnosed as "too old".**
   `AssetPayload::migrates_from` exists so a v2 `.inf_sm` that fails for a *structural*
   reason reports that reason. Telling an author to re-create a machine whose problem is
@@ -322,13 +376,67 @@ that names it and at no other, including both blend-mode halves separately (1 of
 `pose_parity` each), the re-aimed portability ban **and its anti-vacuity control**, and
 `inf-packager`'s manifest ban (untouched, still biting).
 
-## Next — wave I3 (city scale)
+## Done — wave I3 (city scale)
 
-IB-2: 12 850 static colliders cost 4.663 ms/step, so the 60 fps ceiling is ≈ 46 000
-colliders ≈ **25 archetype buildings**, and one `building.plan` node is one building. I2
-built the footprint→building wire and capped its bake at 512 for exactly this reason: the
-attribute pass scales and the geometry does not. I3 owns collider LOD/streaming for grammar
-buildings, a lot-subdivision node, and a collider budget.
+Three certified ceilings killed, and the numbers that killed them all live in tests that
+print them.
+
+**The fixture first, because every other number is about it.**
+`samples/phase30-city` (262 KB, committed as a *generator*): 100 `PcgVolume` blocks sharing
+one `.inf_pcg`, a Driver carrying `StreamingSource`, and a street grid through I2's own
+import door — **220 segments, 81 four-way junctions, 4 061 road vertices**. The graph is
+`grammar.footprint → building.lots → building.plan`, so **100 blocks × 10 lots = 1 000
+buildings / 370 468 solids**.
+
+**IB-2a · the collider band.** The certification: 12 850 colliders at 0.363 µs each is
+4.663 ms/step, the town is *seven* buildings, and `STREAMED_STEP_BUDGET_MS` = 4.0 ms buys
+~11 000 colliders. The shipped city unbanded is **134.480 ms/step**. Banded it is
+**6 067 colliders — 1.64 % — 2.202 ms** at the certification's own rate, and **1.991 ms**
+measured here. The radius is a measurement, not a preference:
+
+| near_m | colliders | cert ms | measured ms |
+|---|---|---|---|
+| 16 | 1 000 | 0.363 | 0.1899 |
+| 32 | 1 563 | 0.567 | 0.3821 |
+| 48 | 4 241 | 1.539 | 1.4143 |
+| **64** | **7 513** | **2.727** | **2.8703** |
+| 96 | 14 666 | 5.324 | 6.8114 |
+| 128 | 21 544 | 7.820 | 11.0419 |
+
+64 m is the widest radius inside the budget and the arm fails if the shipped default stops
+being one. (The sweep is over the programmatic 427 351-solid city in `inf-physics`; the
+shipped one is 370 468 solids, hence the two slightly different counts at 64 m.)
+
+**IB-2b · the draw LOD.** Three complementary batches per volume — ungrouped content keeps
+`[0, draw)`, the parts take `[0, lod)`, the shells take `[lod, draw)` — where `lod` is
+`STRUCTURE_LOD_M = 192`, deliberately **three times** the 64 m collider band so every
+building a body can collide with is drawn as its parts. On the shipped city: **14 whole,
+788 shells, 198 out.** A probe dropped on a far building's shell rests at 7.599 m on a
+7.200 m box, because a shell that is not a barrier is a hole rather than a LOD.
+
+**IB-2c · lot subdivision.** 100 × 60 block → 8 lots totalling **6000.0 m² of 6000.0**; a
+rotated 120 × 70 block at maximum jitter → 12 lots, worst pairwise overlap **1.4e-12 m²**; a
+triangular block keeps **3 of 12** and says so, where a centre-only containment test would
+have admitted all 12. On the shipped city: **4 500 lot pairs, worst overlap 0.000e0 m².**
+
+**IB-8 · the instance ceiling.** 2 047 → **16 777 214** (8 196×; the brief asked for 16 384).
+
+**IB-13 · the scene projection.** 100 000 entities, moving one: **52.857 ms → 8.105 ms** for
+a drag frame and **0.0006 ms** for a select frame.
+
+### The commits
+
+`cdeb888` lot subdivision + structure groups + the composition door · `29ac631` the sim-side
+collider band · `fa4963b` the structure draw LOD + the inner band · `d170651` the scoped
+scene projection · `d83b762` the 64-bit visbuffer id · `666d63d` the city fixture + gate.
+
+### Counts
+
+| | after I2's audit | after I3 |
+|---|---|---|
+| battery blocks / passed | 296 / 5 618 | see the ROADMAP block |
+| goldens | 54, byte-frozen | **54, byte-identical under `INF_GOLDEN_STRICT=1`** |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved** |
 
 ---
 
@@ -341,6 +449,33 @@ buildings, a lot-subdivision node, and a collider budget.
 * ~~`ScenePayload::blend_mode` has a reader and no writer~~ — Project Settings ▸ Animation
   writes `inf.toml` and the live world; the cook copies the name into `manifest.toml` and
   `build_world_from_pack` applies it.
+
+**Measured and bounded (I3 owns these numbers):**
+* **A drag frame still costs 8.105 ms at 100 000 entities, and it is not the projection.**
+  The select-only column isolates the projection at **0.0006 ms**; the rest is
+  `EcsWorld::propagate` — a full DFS over the world with an archetype-touching bundle insert
+  per entity, dirty-gated but not *incremental*. Making transform propagation incremental is
+  its own item and this wave did not take it.
+* **The parts↔shell swap is a hard cut, not a cross-fade.** The scatter path's existing
+  `fade_band_m` resolves mesh↔impostor with a complementary dither; the structure LOD's two
+  batches meet at `STRUCTURE_LOD_M` with no overlap, because an overlap draws both (a solid
+  box inside a building) and the dither is per-pipeline rather than per-band. At 192 m the
+  pop is small; closing it needs the fade to become a property of the *band pair*.
+* **A far building's shell is a BOX, not its baked mesh.** IB-2b's brief names the P23
+  grammar→mesh bake feeding vgeom as the far tier's geometry. What ships is the derived
+  oriented shell — correct in silhouette and proportion (the non-uniform instance scale
+  exists for exactly that), and consistent with the near tier, which draws placeholder cubes
+  too (`kind_index → real mesh` is the standing P19 gap). Wiring `bake_building_in` into a
+  runtime vgeom asset per archetype is a project; `gisbuild` already bakes footprints to real
+  meshes on the authored path and is where it would start.
+* **The city fixture's ground is FLAT.** Deliberate — see the sample's README. It means the
+  fixture says nothing about a banded city over streamed terrain, which is I7's.
+* **A `PcgVolume` is banded as a whole in the RENDER path.** The collider band is per
+  building (per `StructureGroup`); the draw band is per instance on the GPU, but the three
+  batches are built per *volume*, so a volume spanning a whole district would put its parts
+  batch in one content key. City blocks are 100 × 60 m and this is not reached.
+* **The visbuffer costs 8 bytes a pixel now** — 3.7 MB at 1280 × 720, 33 MB at 4K. Paid only
+  while `VgeomSettings::visbuffer` is on, which is `false` on every tier.
 
 **Measured and bounded (I2 owns these numbers):**
 * **A land-cover tiling drawn FLUSH with the terrain leaves its far row and column
@@ -406,18 +541,20 @@ buildings, a lot-subdivision node, and a collider budget.
 * **The SM DTOs have no ts-rs bindings** (Ring-2 types; generation runs from Ring 1), so the
   camelCase key assertions in `sm.rs` are the only drift guard for that wire.
 
-**Pending their waves (from the certification, unchanged by I1):**
-* **IB-2** — 12 850 static colliders cost 4.663 ms/step (0.363 µs each); 60 fps ceiling
-  ≈ 46 000 colliders ≈ **25 archetype buildings**. One `building.plan` node is one building;
-  there is no lot-subdivision node.
-* **IB-8** — `VIS_MAX_INSTANCES = 2047` per frame, refused beyond; raising it re-cuts a
-  packed 32-bit GPU id.
+**Closed by I3 (were pending):**
+* ~~**IB-2**~~ — the band, the tiers and the subdivision node; a 1 000-building city is
+  6 067 colliders / 2.202 ms against a 4.0 ms budget, and one `building.plan` node is now as
+  many buildings as its block has lots.
+* ~~**IB-8**~~ — the id is 64 bits; `VIS_MAX_INSTANCES` is 16 777 214. The 32-bit re-cut the
+  certification proposed was measured and refused (see the decisions above).
+* ~~**IB-13**~~ — `project_delta`; 52.857 ms → 8.105 ms on a drag frame at 100 000 entities
+  and 0.0006 ms on a select frame. The residue is `EcsWorld::propagate`, named above.
+
+**Pending their waves (from the certification):**
 * **IB-9** — `TERRAIN_RESIDENT_BYTES_CEILING = 16 MiB` against `max_resident_tiles = 1024`
   ≈ 264 MiB. **16.4× apart**, and no scene has made them meet.
 * **IB-12** — `axis_independent_lag` unrotates absolute world positions, not the delta; not
   floating-origin-safe at partition scale.
-* **IB-13** — `SceneDoc::snapshot` is 0.34 µs/entity: a 100 000-entity city ≈ **34 ms per
-  snapshot**, past the 33 ms tripwire before anything renders.
 * **IB-16** — no per-frame time budget or upload throttle in the VT loop; only a byte
   residency ceiling. Coupled to T51 (no request→residency window).
 * **No fps instrument at shipping resolution exists.** The only GPU frame harness renders
