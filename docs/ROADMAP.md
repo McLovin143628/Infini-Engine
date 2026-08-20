@@ -24920,6 +24920,18 @@ present-to-present harness still needs a window and is carried.
 | `SHIPPING_FRAME_CEILING_MS` | 58.0 | **40.0** | worst p95 25.4 |
 | `SHIPPING_FRAME_P99_CEILING_MS` | 64.0 | **48.0** | worst p99 28.2 |
 
+### Counts
+
+| | after the I4 audit | **after I4b** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 305 / 5 690 / 0 / 14 | **306 / 5 704 / 0 / 14** — exactly **one** new test binary (`inf-physics`'s `step_cost_3d.rs`) and **fourteen** new arms: six there, one in `city_collider_band`, three in `fps_instrument`, four unit tests in `step_profile` |
+| frontend tests / files | 702 / 78 | **702 / 78**, `tsc` and `eslint` clean — no UI was touched |
+| goldens | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical under `INF_GOLDEN_STRICT=1`** (100 golden arms), re-run after the VSM group mask, the compact slot table AND the impostor re-sizing |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** (local toolchain 1.97; the `chunks_exact_to_as_chunks` lint CI is now allowing by name does not exist here) |
+| rustdoc individual warnings (cold, all roots touched) | 412 | **413** — 447 `^warning` lines − 34 summaries. **No warning sits at a line this wave wrote**: every site in the three crates it touched (`shadow.rs` 4, `scatter.rs` 1, `runtime_sim.rs` 4, `inf-physics` 4) is at a pre-existing doc whose line number this wave's insertions moved, and `step_profile.rs`, `budget.rs`, `timing.rs`, `vsm_raster.rs` and `d3/world.rs` emit none. The `+1` is therefore unattributed and most likely predates the wave (I4's own closing commits `62d6a33` / `5012f4c` touched doc comments after the audit measured 412). Carried for the audit rather than claimed away. |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved, no golden moved, no committed sample moved** |
+| ratchets | — | three, all **down**: `SHIPPING_FRAME_CEILING_MS` 58.0 → 40.0, `SHIPPING_FRAME_P99_CEILING_MS` 64.0 → 48.0, and `CITY_STEP_BUDGET_MS` minted at 20.0 and ratcheted to 6.0 in the same wave |
+
 ### Laws this wave paid for
 
 * **A step that cannot say where its milliseconds went is the CPU twin of a frame that cannot.**

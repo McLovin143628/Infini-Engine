@@ -22,7 +22,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **I2** | the GIS door — IB-3, IB-4, IB-5, IB-6, IB-14, IB-11's near half | **DONE + AUDITED** — battery 296 / 5 618 / 0 / 13, frontend 702 / 78, goldens 54, clippy 0, rustdoc 443 |
 | **I3** | city scale — IB-2a/b/c, IB-8, IB-13, the city fixture | **DONE + AUDITED** — see below |
 | **I4** | the fps instrument + budgets — IB-9, IB-16, IB-12, the shipping-resolution harness | **DONE + AUDITED** — see below |
-| **I4b** | **performance** — the sim fixed step, the lighting stack, the scatter impostor, the pipelining | **DONE** (audit pending) — see below. Step 12.7 → 1.2 ms; lit p95 92.3 → 38–42; unlit 1080p now **inside** the 60 fps budget |
+| **I4b** | **performance** — the sim fixed step, the lighting stack, the scatter impostor, the pipelining | **DONE** (audit pending) — battery 306 / 5 704 / 0 / 14, frontend 702 / 78, goldens 54 strict, clippy 0, rustdoc 413. Step 12.7 → 1.2 ms; lit p95 92.3 → 38–42; unlit 1080p now **inside** the 60 fps budget |
 | **IP** | the remainder of the performance list — the cook's PCG evaluation, IB-9's island ceiling, the VSM caster scatter | **carried** — see *What is still open after I4b* below |
 | I5 | source data — IB-11 (DEM ingest reality, CRS, LiDAR) | not started |
 | ~~I6~~ | ~~scale seams — IB-12~~ *(pulled into I4; IB-8 and IB-13 into I3)* | **absorbed** |
@@ -1322,6 +1322,18 @@ commits. (Re-state the range from the tree the audit certifies — I3's law.)
 ceiling; 1080p unlit p50 **12.076** / p95 **15.095** — **−4.524 and −1.505 ms against the
 16.6 ms frame**; 1440p p50 18.192 / p95 19.668; lit p50 33.220 / p95 40.539, GPU frame 16.426,
 **pipelined 16.531 ms (60.5 fps)**.
+
+### Counts
+
+| | after the I4 audit | **after I4b** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 305 / 5 690 / 0 / 14 | **306 / 5 704 / 0 / 14** — one new test binary and fourteen new arms, which is exactly what the wave added |
+| frontend tests / files | 702 / 78 | **702 / 78**, `tsc` + `eslint` clean |
+| goldens | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical** — re-run after the VSM group mask, the compact slot table and the impostor re-sizing |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| rustdoc individual warnings (cold) | 412 | **413**, with **no warning at a line this wave wrote** — see the ROADMAP block for the per-file audit and why the `+1` is carried rather than claimed away |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged** |
+| ratchets | — | three, all **down** |
 
 ---
 
