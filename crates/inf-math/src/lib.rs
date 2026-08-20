@@ -11,6 +11,13 @@ pub use glam;
 
 pub mod libm_ban;
 
+// I3: the three-way distance-band rule the physics collider bands and the
+// hosts' draw bands SHARE. Here rather than beside either consumer because
+// `inf-pcg` and `inf-ecs` do not depend on one another and this crate is the one
+// they both already name.
+pub mod band;
+pub use band::{distance_xz_to_box, nearest_xz_to_box, tier_at, Tier};
+
 pub mod geo;
 pub use geo::{GeoAnchor, GeoAnchorError};
 

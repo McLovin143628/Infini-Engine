@@ -16,6 +16,9 @@ pub mod anim;
 // movement step share.
 pub mod anim_bridge;
 pub mod attach;
+// IB-2a: which static structural colliders a fixed step may hold. Sim-side by
+// construction — its anchors are `StreamingSource` entities, never a camera.
+pub mod band;
 // P29.6: the locomotion camera's pure half. NOT sim state — it is owned by a
 // host, never a component and never a resource (Ruling 4).
 pub mod camera;
@@ -43,6 +46,9 @@ pub mod vehicle;
 pub mod world;
 
 pub use attach::update_attachments;
+pub use band::{
+    streaming_sources, SimBand, BAND_LATTICE_M, DEFAULT_COLLIDER_FAR_M, DEFAULT_COLLIDER_NEAR_M,
+};
 pub use bevy_ecs::prelude::Entity;
 pub use camera::{
     axis_independent_lag, blend_settings, CameraInput, CameraPose, CameraSettings, CameraTuning,

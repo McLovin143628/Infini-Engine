@@ -33,7 +33,8 @@ use inf_ecs::components::{
     CombineRule as SceneCombineRule, GlobalTransform, Joint3D, JointKind3D as SceneJointKind3D,
     PcgVolume, RigidBody3D, Spline, Terrain, Transform, WaterBody,
 };
-use inf_ecs::{EcsWorld, Vec3d};
+use inf_ecs::{EcsWorld, SimBand, Vec3d};
+use inf_math::Tier;
 use inf_terrain::TileKey;
 use uuid::Uuid;
 
@@ -175,7 +176,19 @@ pub struct PhysicsBridge3D {
     /// `guid → (structures_gen, count)`. While both match, the volume's
     /// colliders are **retained without being re-described** — see
     /// [`pcg_structure_snaps`].
-    structure_stamps: BTreeMap<Uuid, (u64, usize)>,
+    structure_stamps: BTreeMap<Uuid, (u64, usize, u64)>,
+    /// Per volume, the synthetic guids the last structural gather **admitted**,
+    /// ascending (IB-2a).
+    ///
+    /// Under a band the attached set is no longer `0..structures.len()`, so the
+    /// retain pass cannot re-derive it from a count: re-offering every solid
+    /// would keep colliders the band dropped, and offering fewer would delete
+    /// ones it holds. Memory is bounded by the *active* set, not by the city —
+    /// which is the whole point of the item.
+    structure_admitted: BTreeMap<Uuid, Vec<Uuid>>,
+    /// The band's `(near, far)` radii in metres. Defaults to the engine
+    /// constants; `set_collider_band_radii` retunes them.
+    band_radii: (f64, f64),
     /// Per-voxel-chunk change stamp (P21.4): `(volume entity, chunk key) →
     /// `inf_voxel::source_key`. The `structure_stamps` twin, keyed one level
     /// finer because a runtime carve moves a *handful* of chunks and re-meshing a
@@ -337,6 +350,11 @@ impl PhysicsBridge3D {
             world: PhysicsWorld3D::new(gravity),
             entities: BTreeMap::new(),
             structure_stamps: BTreeMap::new(),
+            structure_admitted: BTreeMap::new(),
+            band_radii: (
+                inf_ecs::DEFAULT_COLLIDER_NEAR_M,
+                inf_ecs::DEFAULT_COLLIDER_FAR_M,
+            ),
             voxel_stamps: BTreeMap::new(),
             terrain_stamps: BTreeMap::new(),
             terrain_audit: TerrainColliderAudit::default(),
@@ -768,7 +786,15 @@ impl PhysicsBridge3D {
         self.reconcile_water(buoyancy);
         // P19.5: a volume's derived solids. Unchanged volumes are **retained**
         // rather than re-described — see the doc on `structure_stamps`.
-        let mut retained = self.gather_structures(world, &mut snaps);
+        //
+        // IB-2a: the band is derived HERE, from the world, on every step — not
+        // handed in. A parameter would be a thing a host could forget, and a
+        // host that forgot it would simulate a different city than its twin
+        // while agreeing with itself perfectly (the P21.4 law). It reads
+        // `StreamingSource` entities and nothing else, so it is sim state by
+        // construction and there is no camera in scope to pass by accident.
+        let band = SimBand::from_world(world, self.band_radii.0, self.band_radii.1);
+        let mut retained = self.gather_structures(world, &band, &mut snaps);
         // P21.4: the sim's voxel chunks, on the same rule one level finer.
         self.gather_voxels(volumes, &mut snaps, &mut retained);
         // P22.3: the sim's terrain tiles, on the same rule again. Before this the
@@ -928,6 +954,7 @@ impl PhysicsBridge3D {
     fn gather_structures(
         &mut self,
         world: &EcsWorld,
+        band: &SimBand,
         snaps: &mut Vec<EntitySync3D>,
     ) -> BTreeSet<Uuid> {
         let mut retained: BTreeSet<Uuid> = BTreeSet::new();
@@ -948,19 +975,63 @@ impl PhysicsBridge3D {
                 continue;
             };
             live_volumes.insert(guid);
-            let stamp = (vol.structures_gen, vol.structures.len());
+            // **The band's stamp rides in the volume's stamp** (IB-2a). The
+            // membership of the active set is as much a part of "what is
+            // attached for this volume" as the solid list itself, so a band that
+            // moved must re-describe exactly as a re-evaluated volume does.
+            // Folding it in here rather than adding a second early-out is what
+            // keeps ONE condition deciding retain-versus-rebuild.
+            let stamp = (vol.structures_gen, vol.structures.len(), band.stamp());
             if self.structure_stamps.get(&guid) == Some(&stamp) {
-                retained.extend((0..stamp.1).map(|i| pcg_structure_guid(guid, i)));
+                // Retain exactly what is attached, which under a band is NOT
+                // `0..len`: re-offering every solid would keep colliders the
+                // band dropped, and offering fewer would delete ones it holds.
+                if let Some(cached) = self.structure_admitted.get(&guid) {
+                    retained.extend(cached.iter().copied());
+                }
                 continue;
             }
             self.structure_stamps.insert(guid, stamp);
-            snaps.extend(structure_snaps_of(guid, vol));
+            let admitted = structure_snaps_of(guid, vol, band, snaps);
+            self.structure_admitted.insert(guid, admitted);
         }
         // A volume that disappeared drops its stamp, so a later volume reusing
         // the guid cannot inherit a stale one.
         self.structure_stamps
             .retain(|g, _| live_volumes.contains(g));
+        self.structure_admitted
+            .retain(|g, _| live_volumes.contains(g));
         retained
+    }
+
+    /// The band's radii, in metres: full parts inside the first, a shell inside
+    /// the second, nothing beyond.
+    pub fn collider_band_radii(&self) -> (f64, f64) {
+        self.band_radii
+    }
+
+    /// Retune the band.
+    ///
+    /// A **tuning** knob, not an attachment: the defaults
+    /// ([`inf_ecs::DEFAULT_COLLIDER_NEAR_M`] /
+    /// [`inf_ecs::DEFAULT_COLLIDER_FAR_M`]) are already correct, and the band
+    /// itself is derived inside `sync_from_world_sim` from the world's own
+    /// streaming sources — so a host that never calls this still bands, and the
+    /// P21.4 "a boot path that forgets an attachment agrees with itself" failure
+    /// has no way in.
+    ///
+    /// Non-finite input is ignored rather than stored; a NaN radius would make
+    /// every tier `Out` and empty the physics world.
+    pub fn set_collider_band_radii(&mut self, near_m: f64, far_m: f64) {
+        if near_m.is_finite() && far_m.is_finite() && near_m >= 0.0 && far_m >= near_m {
+            self.band_radii = (near_m, far_m);
+        }
+    }
+
+    /// What the last structural gather admitted, per volume — the active set,
+    /// for gates and diagnostics.
+    pub fn admitted_structures(&self) -> usize {
+        self.structure_admitted.values().map(Vec::len).sum()
     }
 
     /// Append a static trimesh collider for every voxel chunk whose field
@@ -2079,6 +2150,25 @@ pub fn pcg_structure_guid(volume: Uuid, index: usize) -> Uuid {
     Uuid::from_u128(x)
 }
 
+/// Salt for [`pcg_shell_guid`] (IB-2b). A different constant from
+/// [`PCG_STRUCTURE_SALT`] because a group's shell and its own parts must never
+/// alias: a shell that answered to a part's guid would make the far→near swap
+/// an *update* of one collider instead of a removal and an add, and the building
+/// would keep a wall-sized box through its own front door.
+const PCG_SHELL_SALT: u128 = 0x7030_0200_5348_454c_4c5f_4c4f_4432_6231;
+
+/// The synthetic identity of structure group `group`'s shell collider inside the
+/// volume on entity `volume`.
+///
+/// The [`pcg_structure_guid`] rule with a different salt, for the same 128-bit
+/// mix reason.
+pub fn pcg_shell_guid(volume: Uuid, group: usize) -> Uuid {
+    let mut x = volume.as_u128() ^ PCG_SHELL_SALT;
+    x ^= (group as u128).wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5cec_c5c3);
+    x = x.rotate_left(37) ^ x.wrapping_mul(0xff51_afd7_ed55_8ccd_c4ce_b9fe_1a85_ec53);
+    Uuid::from_u128(x)
+}
+
 /// Salt for [`voxel_chunk_guid`]. A different constant from
 /// [`PCG_STRUCTURE_SALT`] so a scattered solid and a voxel chunk can never
 /// collide in the bridge's one entity map.
@@ -2259,21 +2349,94 @@ pub fn terrain_tile_collider(
 /// Every box is **static**: a building does not fall over, and a dynamic body
 /// per wall panel would be a physics bill nobody asked for. Destruction is
 /// Phase 22's, and it will want fracture chunks rather than these.
-fn structure_snaps_of(guid: Uuid, vol: &PcgVolume) -> Vec<EntitySync3D> {
-    vol.structures
-        .iter()
-        .enumerate()
-        .map(|(i, solid)| EntitySync3D {
-            guid: pcg_structure_guid(guid, i),
-            body: None,
-            collider: Some(ColliderDesc3D::new(ColliderShape3D::Box {
-                half_extents: solid.half_extents,
-            })),
-            translation: solid.center,
-            rotation: solid.rotation,
-            joint: None,
-        })
-        .collect()
+/// # The band (IB-2a/IB-2b)
+///
+/// A volume's solids are not all described. Each [`inf_ecs::StructureGroup`] —
+/// one building — is tiered by [`SimBand::tier`] against its own **shell**:
+///
+/// * [`Tier::Near`]: every part, exactly as before. The building is enterable,
+///   its doorways are real gaps, and the P19 enterability invariant is
+///   untouched.
+/// * [`Tier::Far`]: **one** collider, the shell box. A body cannot walk through
+///   a distant building, and the swap costs one description instead of ~800.
+/// * [`Tier::Out`]: nothing.
+///
+/// Solids covered by no group — a fence, a `grammar.expand` run, a scatter —
+/// are tiered box by box and admitted only at `Near`, because a lone box has no
+/// shell to stand in for it.
+///
+/// Returns the guids it admitted, ascending, which is what
+/// [`gather_structures`](PhysicsBridge3D::gather_structures) re-offers to the
+/// despawn sweep while the stamp holds.
+fn structure_snaps_of(
+    guid: Uuid,
+    vol: &PcgVolume,
+    band: &SimBand,
+    out: &mut Vec<EntitySync3D>,
+) -> Vec<Uuid> {
+    let mut admitted: Vec<Uuid> = Vec::new();
+    let solid_snap = |i: usize, solid: &inf_ecs::ScatteredSolid| EntitySync3D {
+        guid: pcg_structure_guid(guid, i),
+        body: None,
+        collider: Some(ColliderDesc3D::new(ColliderShape3D::Box {
+            half_extents: solid.half_extents,
+        })),
+        translation: solid.center,
+        rotation: solid.rotation,
+        joint: None,
+    };
+    let ungrouped = |i: usize, out: &mut Vec<EntitySync3D>, admitted: &mut Vec<Uuid>| {
+        let solid = &vol.structures[i];
+        if band
+            .tier(solid.center, solid.half_extents, solid.rotation)
+            .is_near()
+        {
+            let s = solid_snap(i, solid);
+            admitted.push(s.guid);
+            out.push(s);
+        }
+    };
+
+    // `PcgVolume::set_population` guarantees the groups are ascending and
+    // non-overlapping in both lists, so one cursor walks the gaps between them.
+    let mut cursor = 0usize;
+    for (gi, group) in vol.structure_groups.iter().enumerate() {
+        let range = group.range();
+        for i in cursor..range.start.min(vol.structures.len()) {
+            ungrouped(i, out, &mut admitted);
+        }
+        cursor = range.end.min(vol.structures.len());
+        let shell = &group.shell;
+        match band.tier(shell.center, shell.half_extents, shell.rotation) {
+            Tier::Near => {
+                for i in range {
+                    let s = solid_snap(i, &vol.structures[i]);
+                    admitted.push(s.guid);
+                    out.push(s);
+                }
+            }
+            Tier::Far => {
+                let g = pcg_shell_guid(guid, gi);
+                admitted.push(g);
+                out.push(EntitySync3D {
+                    guid: g,
+                    body: None,
+                    collider: Some(ColliderDesc3D::new(ColliderShape3D::Box {
+                        half_extents: shell.half_extents,
+                    })),
+                    translation: shell.center,
+                    rotation: shell.rotation,
+                    joint: None,
+                });
+            }
+            Tier::Out => {}
+        }
+    }
+    for i in cursor..vol.structures.len() {
+        ungrouped(i, out, &mut admitted);
+    }
+    admitted.sort_unstable();
+    admitted
 }
 
 /// Map a scene [`Collider3D`] onto the facade-local [`ColliderDesc3D`].

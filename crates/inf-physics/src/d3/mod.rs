@@ -34,8 +34,8 @@ mod world;
 pub use camera::step_locomotion_camera;
 pub use character::{AutoStep3D, CharacterMove3D, CharacterMover3D};
 pub use ecs::{
-    pcg_structure_guid, terrain_tile_collider, terrain_tile_guid, voxel_chunk_guid, BodyDesc3D,
-    EntitySync3D, JointSync3D, PhysicsBridge3D, PoseWriteback3D, TerrainColliderAudit,
+    pcg_shell_guid, pcg_structure_guid, terrain_tile_collider, terrain_tile_guid, voxel_chunk_guid,
+    BodyDesc3D, EntitySync3D, JointSync3D, PhysicsBridge3D, PoseWriteback3D, TerrainColliderAudit,
     DEBRIS_LAYER,
 };
 pub use events::ContactEvent3D;

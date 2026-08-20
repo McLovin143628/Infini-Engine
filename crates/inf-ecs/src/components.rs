@@ -3372,10 +3372,18 @@ impl PcgVolume {
     /// hazard `set_structures` was introduced to close for the change stamp.
     /// One call, one stamp, one validation.
     ///
-    /// Groups whose ranges fall outside either list are **dropped here**: an
-    /// out-of-range group is a composition bug, and the honest response at the
-    /// door is to refuse the group rather than to panic inside a fixed step sixty
-    /// times a second. Nothing downstream may assume the groups cover the lists.
+    /// Groups whose ranges fall outside either list, or which are not in
+    /// **strictly ascending, non-overlapping** order in *both* lists, are
+    /// **dropped here**: a bad range is a composition bug, and the honest
+    /// response at the door is to refuse it rather than to panic inside a fixed
+    /// step sixty times a second.
+    ///
+    /// The ordering guarantee is not decoration — it is the invariant the
+    /// physics bridge's single-cursor walk relies on to find the solids that
+    /// belong to **no** group (a fence beside a building), and an overlapping
+    /// pair would make one solid both a part and part of another's shell.
+    /// Nothing downstream may assume the groups *cover* the lists; everything
+    /// downstream may assume they are ordered.
     pub fn set_population(
         &mut self,
         instances: Vec<ScatteredInstance>,
@@ -3385,9 +3393,18 @@ impl PcgVolume {
         let (ns, ni) = (solids.len(), instances.len());
         self.evaluated = instances;
         self.structures = solids;
+        let (mut sc, mut ic) = (0usize, 0usize);
         self.structure_groups = groups
             .into_iter()
-            .filter(|g| g.range().end <= ns && g.instance_range().end <= ni)
+            .filter(|g| {
+                let (s, i) = (g.range(), g.instance_range());
+                let ok = s.end <= ns && i.end <= ni && s.start >= sc && i.start >= ic;
+                if ok {
+                    sc = s.end;
+                    ic = i.end;
+                }
+                ok
+            })
             .collect();
         self.structures_gen = self.structures_gen.wrapping_add(1);
     }
@@ -6105,6 +6122,26 @@ mod tests {
             "a stale range must not survive"
         );
         assert_eq!(v.structures_gen, 3);
+
+        // **And the ORDER is part of the contract**, because the bridge finds
+        // the ungrouped solids with a single forward cursor: an overlapping or
+        // out-of-order pair would make one box both a building's part and part
+        // of another building's shell.
+        let mut w = PcgVolume::default();
+        w.set_population(
+            vec![inst; 6],
+            vec![solid; 6],
+            vec![
+                group(0, 2, 0, 2), // kept
+                group(1, 2, 2, 2), // overlaps the first in SOLIDS
+                group(2, 2, 1, 2), // overlaps the first in INSTANCES
+                group(2, 2, 2, 2), // kept — the first legal successor
+                group(0, 1, 0, 1), // backwards
+            ],
+        );
+        assert_eq!(w.structure_groups.len(), 2, "{:?}", w.structure_groups);
+        assert_eq!(w.structure_groups[0].range(), 0..2);
+        assert_eq!(w.structure_groups[1].range(), 2..4);
     }
 
     #[test]

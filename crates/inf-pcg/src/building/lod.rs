@@ -42,7 +42,7 @@
 //! while a world-axis bound of a block turned 37° is up to 2.6× too large and
 //! would put an invisible wall in the street.
 
-use glam::{DQuat, DVec2, DVec3};
+use glam::{DVec2, DVec3};
 
 use super::LotFrame;
 use crate::scatter::PcgCollider;
@@ -63,49 +63,12 @@ pub const DEFAULT_STRUCTURE_LOD_M: f64 = 96.0;
 pub const DEFAULT_STRUCTURE_CULL_M: f64 = 4_000.0;
 
 /// What a building is, at a given distance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StructureTier {
-    /// Full grammar geometry: every part drawn, every solid simulated, every
-    /// door a real gap. A building in this tier is enterable exactly as it was
-    /// before IB-2b existed.
-    Near,
-    /// The building's shell: one instance, one collider. Solid, so a body cannot
-    /// pass through it; opaque, so the skyline is right.
-    Far,
-    /// Out of range: no instance, no collider.
-    Out,
-}
-
-impl StructureTier {
-    /// `true` when this tier carries the building's own parts.
-    #[inline]
-    pub fn is_near(self) -> bool {
-        matches!(self, Self::Near)
-    }
-}
-
-/// The tier a building at `distance_m` belongs to.
 ///
-/// **Half-open on the near boundary** (`distance <= near_m` is Near), so a
-/// building exactly on the line is the *richer* tier — a boundary case that
-/// resolves towards "enterable" cannot strand a character inside a shell.
-///
-/// A non-finite distance is [`StructureTier::Out`]: a NaN compares false against
-/// every bound, and letting it fall through to `Near` would put a
-/// nowhere-in-particular building into the physics world (the NaN-at-doors law).
-#[inline]
-pub fn tier_at(distance_m: f64, near_m: f64, far_m: f64) -> StructureTier {
-    if !distance_m.is_finite() {
-        return StructureTier::Out;
-    }
-    if distance_m <= near_m {
-        StructureTier::Near
-    } else if distance_m <= far_m {
-        StructureTier::Far
-    } else {
-        StructureTier::Out
-    }
-}
+/// The rule itself is [`inf_math::tier_at`], and this is an alias rather than a
+/// second enum: the physics bridge (through `inf_ecs::band`) and each host's
+/// projection band the *same buildings* by the *same arithmetic*, and two enums
+/// with the same three variants is exactly how one of them would grow a fourth.
+pub type StructureTier = inf_math::Tier;
 
 /// One structural group — one building — inside a volume's flat solid list.
 ///
@@ -203,19 +166,18 @@ pub fn group_shell(frame: LotFrame, colliders: &[PcgCollider]) -> Option<PcgColl
     })
 }
 
-/// Distance from `p` to an oriented box, measured on the **XZ plane only**.
+/// The tier a building whose shell is `shell` takes, from `p`.
 ///
-/// Zero inside the box's footprint. Y is deliberately ignored: a character
-/// twelve metres below a tower's slab is at the tower, and a band that measured
-/// the full 3-D distance would drop a skyscraper's colliders the moment the
-/// player walked into its basement.
-///
-/// Trig-free: one quaternion inverse-rotation and two clamped subtractions.
-pub fn distance_xz_to_box(p: DVec3, center: DVec3, half: DVec3, rotation: DQuat) -> f64 {
-    let rel = rotation.inverse() * (p - center);
-    let dx = (rel.x.abs() - half.x).max(0.0);
-    let dz = (rel.z.abs() - half.z).max(0.0);
-    (dx * dx + dz * dz).sqrt()
+/// A one-line composition of [`inf_math::distance_xz_to_box`] and
+/// [`inf_math::tier_at`], named so the two consumers of the *building* LOD read
+/// the same sentence rather than each composing the pair for themselves.
+#[inline]
+pub fn shell_tier(p: DVec3, shell: &PcgCollider, near_m: f64, far_m: f64) -> StructureTier {
+    inf_math::tier_at(
+        inf_math::distance_xz_to_box(p, shell.center, shell.half_extents, shell.rotation),
+        near_m,
+        far_m,
+    )
 }
 
 #[cfg(test)]
@@ -231,16 +193,23 @@ mod tests {
     }
 
     #[test]
-    fn the_tier_rule_is_three_way_and_nan_is_out() {
-        assert_eq!(tier_at(0.0, 10.0, 100.0), StructureTier::Near);
-        assert_eq!(tier_at(10.0, 10.0, 100.0), StructureTier::Near);
-        assert_eq!(tier_at(10.000_1, 10.0, 100.0), StructureTier::Far);
-        assert_eq!(tier_at(100.0, 10.0, 100.0), StructureTier::Far);
-        assert_eq!(tier_at(100.1, 10.0, 100.0), StructureTier::Out);
-        assert_eq!(tier_at(f64::NAN, 10.0, 100.0), StructureTier::Out);
-        assert_eq!(tier_at(f64::INFINITY, 10.0, 100.0), StructureTier::Out);
-        // A degenerate pair still answers: near_m > far_m means nothing is Far.
-        assert_eq!(tier_at(50.0, 100.0, 10.0), StructureTier::Near);
+    fn a_shells_tier_is_the_shared_rule_over_the_shared_distance() {
+        let shell = boxed(
+            DVec3::new(100.0, 5.0, 0.0),
+            DVec3::new(10.0, 5.0, 10.0),
+            DQuat::IDENTITY,
+        );
+        // 80 m from the shell's own face, not from its centre — the difference
+        // is a whole building, which is why the distance is to the BOX.
+        let p = DVec3::new(10.0, 0.0, 0.0);
+        assert_eq!(shell_tier(p, &shell, 90.0, 500.0), StructureTier::Near);
+        assert_eq!(shell_tier(p, &shell, 70.0, 500.0), StructureTier::Far);
+        assert_eq!(shell_tier(p, &shell, 70.0, 79.0), StructureTier::Out);
+        // Standing inside it is Near at any radius, including zero.
+        assert_eq!(
+            shell_tier(DVec3::new(100.0, -30.0, 0.0), &shell, 0.0, 1.0),
+            StructureTier::Near
+        );
     }
 
     /// **The shell is tight in the LOT's frame** — and the world-axis
@@ -294,51 +263,5 @@ mod tests {
 
         // An empty group is no shell, not a zero box at the origin.
         assert!(group_shell(frame, &[]).is_none());
-    }
-
-    #[test]
-    fn the_distance_is_to_the_box_on_the_xz_plane_and_ignores_height() {
-        let b = boxed(DVec3::ZERO, DVec3::new(10.0, 20.0, 5.0), DQuat::IDENTITY);
-        // Inside the footprint, at any height.
-        assert_eq!(
-            distance_xz_to_box(
-                DVec3::new(0.0, 900.0, 0.0),
-                b.center,
-                b.half_extents,
-                b.rotation
-            ),
-            0.0
-        );
-        assert_eq!(
-            distance_xz_to_box(
-                DVec3::new(0.0, -900.0, 0.0),
-                b.center,
-                b.half_extents,
-                b.rotation
-            ),
-            0.0
-        );
-        // Straight out along X.
-        let d = distance_xz_to_box(
-            DVec3::new(13.0, 0.0, 0.0),
-            b.center,
-            b.half_extents,
-            b.rotation,
-        );
-        assert!((d - 3.0).abs() < 1e-12, "{d}");
-        // Diagonally off a corner: 3-4-5.
-        let d = distance_xz_to_box(
-            DVec3::new(13.0, 0.0, 9.0),
-            b.center,
-            b.half_extents,
-            b.rotation,
-        );
-        assert!((d - 5.0).abs() < 1e-12, "{d}");
-        // Rotated: the same point relative to the box's own axes.
-        let yaw = DQuat::from_xyzw(0.0, 0.6, 0.0, 0.8).normalize();
-        let rot = boxed(DVec3::ZERO, DVec3::new(10.0, 20.0, 5.0), yaw);
-        let p = yaw * DVec3::new(13.0, 0.0, 9.0);
-        let d = distance_xz_to_box(p, rot.center, rot.half_extents, rot.rotation);
-        assert!((d - 5.0).abs() < 1e-9, "{d}");
     }
 }

@@ -831,7 +831,7 @@ mod tests {
         // Every collider is inside its own group's shell.
         for g in &out.groups {
             for c in &out.colliders[g.range()] {
-                let d = crate::building::lod::distance_xz_to_box(
+                let d = inf_math::distance_xz_to_box(
                     c.center,
                     g.shell.center,
                     g.shell.half_extents,
