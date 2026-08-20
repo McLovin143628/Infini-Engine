@@ -131,6 +131,15 @@ pub struct FootprintAttrs {
     /// Storeys, always at least 1.
     pub floors: u32,
     pub floor_source: FloorSource,
+    /// The source asked for more than [`MAX_ATTR_FLOORS`] and was cut down to
+    /// it.
+    ///
+    /// **Carried because a clamp is a silent hazard otherwise** (I2 audit). A
+    /// `HEIGHT` column full of the `9999` sentinel asks for 3 333 storeys on
+    /// every record; clamping each one produces a downtown of 200-storey towers
+    /// with nothing to see but the skyline. Counted per layer by
+    /// [`AttrCoverage`] and raised as an advisory there.
+    pub clamped: bool,
     /// The stated height in metres, when the source had one.
     pub height_m: Option<f64>,
     /// The stated use/type, verbatim, when the source had one.
@@ -167,25 +176,30 @@ pub fn footprint_attrs(f: &GeoFeature, d: &FootprintDefaults) -> FootprintAttrs 
         .or_else(|| f.attr_number(&HEIGHT_FT_FIELDS).map(|v| v * FOOT_M))
         .filter(|v| v.is_finite() && *v > 0.0);
 
+    // Not clamped here: the ceiling is applied at ONE place below, so the
+    // difference between what the source asked for and what it got is visible
+    // (`FootprintAttrs::clamped`) rather than absorbed on the way past.
     let stated = f
         .attr_number(&FLOOR_FIELDS)
         .filter(|v| v.is_finite() && *v >= 1.0)
-        .map(|v| (v as u32).min(MAX_ATTR_FLOORS));
+        .map(|v| v as u32);
 
-    let (floors, floor_source) = match stated {
+    let (asked, floor_source) = match stated {
         Some(n) => (n, FloorSource::Attribute),
         None => match height_m {
             Some(h) => (
-                ((h / storey).round() as u32).clamp(1, MAX_ATTR_FLOORS),
+                (h / storey).round().max(0.0) as u32,
                 FloorSource::DerivedFromHeight,
             ),
-            None => (d.floors.clamp(1, MAX_ATTR_FLOORS), FloorSource::Default),
+            None => (d.floors, FloorSource::Default),
         },
     };
+    let floors = asked.clamp(1, MAX_ATTR_FLOORS);
 
     FootprintAttrs {
         floors,
         floor_source,
+        clamped: asked > MAX_ATTR_FLOORS,
         height_m,
         kind: f
             .attr_text(&TYPE_FIELDS)
@@ -202,6 +216,9 @@ pub struct AttrCoverage {
     pub floors_from_attribute: usize,
     pub floors_from_height: usize,
     pub floors_defaulted: usize,
+    /// Features whose stated storey count or height asked for more than
+    /// [`MAX_ATTR_FLOORS`]. See [`FootprintAttrs::clamped`].
+    pub floors_clamped: usize,
     pub typed: usize,
     pub untyped: usize,
 }
@@ -213,6 +230,9 @@ impl AttrCoverage {
             FloorSource::Attribute => self.floors_from_attribute += 1,
             FloorSource::DerivedFromHeight => self.floors_from_height += 1,
             FloorSource::Default => self.floors_defaulted += 1,
+        }
+        if a.clamped {
+            self.floors_clamped += 1;
         }
         if a.kind.is_some() {
             self.typed += 1;
@@ -252,6 +272,19 @@ impl AttrCoverage {
                      is right for residential stock and runs one or two storeys high \
                      for offices and warehouses.",
                     self.floors_from_height, self.features
+                ),
+            ));
+        }
+        if self.floors_clamped > 0 {
+            out.push(crate::Advisory::new(
+                "attrs.floors_clamped",
+                format!(
+                    "{} of {} footprints asked for more than {MAX_ATTR_FLOORS} \
+                     storeys and were cut down to it. A height column full of a \
+                     sentinel — 9999 is the common one, and is 3 333 storeys at \
+                     {DEFAULT_STOREY_HEIGHT_M} m — reads exactly like this. Check \
+                     the column before building the layer.",
+                    self.floors_clamped, self.features
                 ),
             ));
         }
@@ -360,9 +393,18 @@ mod tests {
             a.floors, MAX_ATTR_FLOORS,
             "a sentinel height is clamped, not planned"
         );
-        // A stated count past the ceiling clamps too.
+        assert!(
+            a.clamped,
+            "…and the clamp SAYS SO — a whole layer of sentinels is a downtown of \
+             200-storey towers with nothing to see (I2 audit)"
+        );
+        // A stated count past the ceiling clamps too, and also says so.
         let a = footprint_attrs(&feature(&[("floors", Attr::Number(5000.0))]), &d);
         assert_eq!(a.floors, MAX_ATTR_FLOORS);
+        assert!(a.clamped);
+        // A count the ceiling did not touch does NOT say so.
+        assert!(!footprint_attrs(&feature(&[("floors", Attr::Number(12.0))]), &d).clamped);
+        assert!(!footprint_attrs(&feature(&[]), &d).clamped);
         // A degenerate storey height falls back rather than dividing by ~zero.
         let a = footprint_attrs(
             &feature(&[("HEIGHT", Attr::Number(30.0))]),
@@ -424,5 +466,29 @@ mod tests {
             ));
         }
         assert!(good.advisories().is_empty(), "{:?}", good.advisories());
+        assert_eq!(good.floors_clamped, 0);
+
+        // **A SENTINEL COLUMN IS AN ADVISORY, NOT A SKYLINE** (I2 audit). The
+        // clamp is per feature and was silent: a `HEIGHT` of 9999 everywhere
+        // gave a whole downtown of `MAX_ATTR_FLOORS` towers with nothing that
+        // said the data had been overruled.
+        let mut sentinel = AttrCoverage::default();
+        for _ in 0..40 {
+            sentinel.observe(&footprint_attrs(
+                &feature(&[
+                    ("HEIGHT", Attr::Number(9999.0)),
+                    ("building", Attr::Text("office".into())),
+                ]),
+                &d,
+            ));
+        }
+        assert_eq!(sentinel.floors_clamped, 40);
+        let a = sentinel.advisories();
+        assert!(
+            a.iter().any(|x| x.code == "attrs.floors_clamped"
+                && x.message.contains("40 of 40")
+                && x.message.contains("9999")),
+            "the clamp has to name the number and the sentinel: {a:?}"
+        );
     }
 }

@@ -45,8 +45,6 @@ use inf_terrain::BiomeFill;
 use crate::scene::SceneDoc;
 
 /// The attribute spellings a land-cover class is stored under, most specific
-/// first.
-/// The attribute spellings a land-cover class is stored under, most specific
 /// first — **named** classes then **numeric** ones, because a layer that has
 /// both wants its name.
 ///

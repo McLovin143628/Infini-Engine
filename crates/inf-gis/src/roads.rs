@@ -1239,7 +1239,7 @@ fn fan_at(
         uvs: vec![[0.5, 0.5]],
         indices: Vec::new(),
     };
-    for (n, i) in order.iter().enumerate() {
+    for i in &order {
         ribbon.vertices.push(pts[*i]);
         // The junction's UVs are a unit-square projection about the centre, so
         // a road texture continues across it at roughly its own scale rather
@@ -1248,7 +1248,6 @@ fn fan_at(
         ribbon
             .uvs
             .push([(0.5 + d.x * 0.1) as f32, (0.5 + d.y * 0.1) as f32]);
-        let _ = n;
     }
     let n = order.len() as u32;
     for i in 0..n {
@@ -1366,20 +1365,21 @@ mod tests {
 
         // (b) Between vertices — the claim that matters. Walk each ribbon edge's
         // midpoint and compare the interpolated road against the real ground.
-        let midspan_error = |surf: &RoadSurface| -> f64 {
+        fn ribbon_error(r: &RoadRibbon) -> f64 {
             let mut worst = 0.0f64;
-            for r in surf.parts.values() {
-                for t in r.indices.chunks_exact(3) {
-                    for (i, j) in [(0, 1), (1, 2), (2, 0)] {
-                        let a = r.vertices[t[i] as usize];
-                        let b = r.vertices[t[j] as usize];
-                        let m = (a + b) * 0.5;
-                        let g = hill(m.x, m.z).unwrap();
-                        worst = worst.max((m.y - g - 0.02).abs());
-                    }
+            for t in r.indices.chunks_exact(3) {
+                for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+                    let a = r.vertices[t[i] as usize];
+                    let b = r.vertices[t[j] as usize];
+                    let m = (a + b) * 0.5;
+                    let g = hill(m.x, m.z).unwrap();
+                    worst = worst.max((m.y - g - 0.02).abs());
                 }
             }
             worst
+        }
+        let midspan_error = |surf: &RoadSurface| -> f64 {
+            surf.parts.values().map(ribbon_error).fold(0.0f64, f64::max)
         };
         let dense = midspan_error(&ribbons);
         let coarse = midspan_error(&build_surface(
@@ -1405,6 +1405,53 @@ mod tests {
         assert!(
             coarse / dense > 100.0,
             "dense {dense:.6} m vs coarse {coarse:.4} m"
+        );
+
+        // (c) **THE OTHER AXIS, PRICED THE SAME WAY** (I2 audit). The wave's own
+        // law is that closing the longitudinal gap *hid* the transverse one,
+        // and the only thing standing behind it was the `dense` bound above —
+        // which does catch a one-quad ribbon, but never says by how much, so
+        // the number the law is named for lived in a ledger rather than in a
+        // test. Here it is: the SAME densified spine through `build_ribbon`,
+        // which is one quad across, i.e. exactly what this builder had before
+        // IB-4.
+        let arterial = graph
+            .segments
+            .values()
+            .find(|s| s.kind == RoadKind::Arterial)
+            .expect("the fixture has an arterial");
+        let spine = densify_spine(&arterial.spine, opts.ground_step_m);
+        let one_quad =
+            build_ribbon(&spine, arterial.width_m(), opts.lift_m, &mut h).expect("a ribbon builds");
+        let across = ribbon_error(&one_quad);
+        let subdivided = build_ribbon_across(
+            &spine,
+            arterial.width_m(),
+            opts.lift_m,
+            cross_strips(arterial.width_m(), opts.ground_step_m),
+            &mut h,
+        )
+        .expect("a ribbon builds");
+        let subdivided = ribbon_error(&subdivided);
+        assert!(
+            across > 0.02,
+            "THE TRANSVERSE ALTERNATIVE MUST BE PRICED: one quad across a {} m \
+             carriageway leaves its crown off the ground by the half-width's own \
+             chord, and that has to be centimetres for this arm to mean anything \
+             — it measured {across:.6} m",
+            arterial.width_m()
+        );
+        assert!(
+            across / subdivided > 20.0,
+            "subdividing across must be the fix, not a rounding: one quad \
+             {across:.6} m vs {} strips {subdivided:.6} m",
+            cross_strips(arterial.width_m(), opts.ground_step_m)
+        );
+        println!(
+            "IB-4 draping on a {} m arterial: dense {dense:.6} m (both axes) vs \
+             centreline-only {coarse:.4} m ALONG vs one-quad-across \
+             {across:.4} m ACROSS; subdivided across = {subdivided:.6} m",
+            arterial.width_m()
         );
     }
 
@@ -1451,6 +1498,109 @@ mod tests {
             }
         }
         false
+    }
+
+    /// **The road MESH is a function of the layer, not of a walk over it**
+    /// (I2 audit).
+    ///
+    /// `the_graph_is_order_independent` holds the graph to this and stops there;
+    /// what reaches committed content is the `.inf_mesh` two crates further on,
+    /// which adds a `BTreeMap` per class, a `BTreeMap` of junction ends, a radial
+    /// sort and a normal/tangent accumulation on top. So the arm goes all the way
+    /// to the bytes the asset writer would write: build the same layer twice and
+    /// encode both. An iteration order that stopped being a `BTreeMap`, a sort
+    /// that stopped breaking its ties, or a fold that picked up a `HashMap`
+    /// would show here and nowhere else.
+    ///
+    /// It is deliberately **not** an order-independence claim: segment ids are
+    /// encounter-order, so reversing the file renumbers them and the vertex
+    /// order moves with them — the graph arm says exactly that.
+    #[test]
+    fn the_same_layer_builds_a_bit_identical_road_mesh() {
+        // FNV-1a over every field of the asset, floats as `to_bits` — the same
+        // construction `SpawnPlan::digest` uses, and for the same reason: a
+        // comparison of the exact numbers rather than of printed ones.
+        fn mesh_digest(m: &inf_mesh::MeshAsset) -> u64 {
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            let mut w = |v: u64| {
+                for b in v.to_le_bytes() {
+                    h ^= u64::from(b);
+                    h = h.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            };
+            w(u64::from(m.schema_version));
+            w(m.material_slots.len() as u64);
+            for s in &m.material_slots {
+                w(s.len() as u64);
+                for b in s.as_bytes() {
+                    w(u64::from(*b));
+                }
+            }
+            w(m.submeshes.len() as u64);
+            for sub in &m.submeshes {
+                w(sub.name.len() as u64);
+                for b in sub.name.as_bytes() {
+                    w(u64::from(*b));
+                }
+                w(sub.material_slot.map_or(u64::MAX, u64::from));
+                w(sub.indices.len() as u64);
+                for i in &sub.indices {
+                    w(u64::from(*i));
+                }
+                w(sub.vertices.len() as u64);
+                for v in &sub.vertices {
+                    for f in v
+                        .position
+                        .iter()
+                        .chain(&v.normal)
+                        .chain(&v.uv)
+                        .chain(&v.tangent)
+                    {
+                        w(u64::from(f.to_bits()));
+                    }
+                }
+            }
+            h
+        }
+
+        let graph = t_junction();
+        let build = || {
+            let mut h = |x: f64, z: f64| hill(x, z);
+            let s = build_surface(&graph, &SurfaceOptions::default(), &mut h);
+            surface_to_mesh(&s, DVec3::new(100.0, 20.0, 0.0)).unwrap()
+        };
+        let (a, ra) = build();
+        let (b, rb) = build();
+        assert_eq!(ra, rb, "one layer, one report");
+        assert_eq!(
+            mesh_digest(&a),
+            mesh_digest(&b),
+            "two builds of one layer are one asset, bit for bit"
+        );
+        assert_eq!(
+            a, b,
+            "…and structurally, so the digest is not the only reader"
+        );
+        // …and the digest is not a constant: a different lift is a different
+        // asset, so an arm that stopped building would not pass by accident.
+        let mut h = |x: f64, z: f64| hill(x, z);
+        let other = build_surface(
+            &graph,
+            &SurfaceOptions {
+                lift_m: 0.05,
+                ..Default::default()
+            },
+            &mut h,
+        );
+        let (other, _) = surface_to_mesh(&other, DVec3::new(100.0, 20.0, 0.0)).unwrap();
+        assert_ne!(mesh_digest(&other), mesh_digest(&a));
+        println!(
+            "IB-4 determinism: {} vertices / {} triangles, digest {:016x}, \
+             identical across two builds",
+            ra.vertices,
+            ra.triangles,
+            mesh_digest(&a)
+        );
     }
 
     /// **A junction's core is PAVED, not holed** — and the arm measures *ground*

@@ -46,7 +46,6 @@ pub async fn project_settings_get(
 /// Persist the editor settings; returns the normalized values.
 #[tauri::command]
 pub async fn project_settings_set(
-    app: tauri::AppHandle,
     assets: State<'_, AssetState>,
     project: State<'_, super::project::ProjectState>,
     scene: State<'_, super::scene::SceneState>,
@@ -88,8 +87,6 @@ pub async fn project_settings_set(
         };
         inf_ecs::pose::set_blend_mode(doc.world_mut(), mode);
     }
-    let _ = &app;
-
     Ok(ProjectSettingsDto {
         pixels_per_unit: s.pixels_per_unit,
         anim_blend: Some(project_anim_blend(&project)),

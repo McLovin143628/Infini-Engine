@@ -356,6 +356,71 @@ mod tests {
         assert_eq!(seg.area(), 0.0);
     }
 
+    /// **The basis is sign-normalised, so a lot digitised upside down is the
+    /// same lot** (I2 audit).
+    ///
+    /// The module docs call the canonicalisation load-bearing — "without that, a
+    /// square lot has four equally-minimal answers and a rebuild can pick a
+    /// different one" — and nothing was holding it to that: replacing
+    /// `canonical_dir` with the identity passed every test in this crate and in
+    /// `inf-pcg`.
+    ///
+    /// The property that fails when it goes is this one. A shape and the same
+    /// shape turned by **180°** are two different point sets describing
+    /// rectangles at the *same* orientation, and `u` and `-u` describe one
+    /// rectangle — so `min_area_rect` has to answer with the same basis for
+    /// both, or a footprint whose ring happens to have been digitised from the
+    /// far corner builds a building facing the other way. Measured: four of the
+    /// eight rational quadrant rotations of this L come back with `u.x < 0`
+    /// without the normalisation, and their half-turn twins come back with
+    /// `u.x > 0`.
+    #[test]
+    fn a_shape_and_its_half_turn_get_the_same_basis() {
+        let l = [
+            DVec2::new(0.0, 0.0),
+            DVec2::new(20.0, 0.0),
+            DVec2::new(20.0, 6.0),
+            DVec2::new(8.0, 6.0),
+            DVec2::new(8.0, 18.0),
+            DVec2::new(0.0, 18.0),
+        ];
+        // Exact-in-binary rotations (3-4-5 and 7-24-25), so nothing here depends
+        // on a transcendental — the P14 law reaches the fixture too.
+        let turn = |p: DVec2, c: f64, s: f64| DVec2::new(p.x * c - p.y * s, p.x * s + p.y * c);
+        for (c, s) in [(0.8f64, 0.6f64), (0.6, 0.8), (0.28, 0.96), (0.96, -0.28)] {
+            assert!((c * c + s * s - 1.0).abs() < 1e-15, "({c}, {s}) is a unit");
+            let up: Vec<DVec2> = l.iter().map(|p| turn(*p, c, s)).collect();
+            // The half turn: rotating by 180° more is negating the direction.
+            let over: Vec<DVec2> = l.iter().map(|p| turn(*p, -c, -s)).collect();
+            let a = min_area_rect(&up).unwrap();
+            let b = min_area_rect(&over).unwrap();
+            assert!(
+                (a.u - b.u).length() < 1e-12,
+                "a shape and its half turn describe rectangles at one orientation; \
+                 got {:?} and {:?} at rotation ({c}, {s})",
+                a.u,
+                b.u
+            );
+            assert!(
+                (a.half - b.half).length() < 1e-12,
+                "{:?} {:?}",
+                a.half,
+                b.half
+            );
+            assert!(
+                (a.center + b.center).length() < 1e-9,
+                "the half turn is about the origin, so the centres negate"
+            );
+            // …and the basis is in the canonical half-plane, which is what makes
+            // the two agree rather than merely being consistent with each other.
+            assert!(
+                a.u.x > 0.0 || (a.u.x == 0.0 && a.u.y >= 0.0),
+                "{:?} is outside the canonical half-plane",
+                a.u
+            );
+        }
+    }
+
     /// An L-shaped footprint — the case a bounding box is worst at — still gets
     /// the rectangle that actually encloses it, and every input point is inside.
     #[test]

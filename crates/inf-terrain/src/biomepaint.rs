@@ -384,6 +384,19 @@ impl BiomeFill {
     /// Like every other brush here, this **never authors a tile**: a polygon
     /// covering ground the terrain does not have paints nothing there, which is
     /// reported by the caller rather than silently materialising a landscape.
+    ///
+    /// # What the half-open rule costs at the OUTER boundary
+    ///
+    /// The property that makes an interior seam belong to exactly one of two
+    /// neighbours is the same one that puts a sample lying exactly on a
+    /// polygon's outermost edge *outside* it — there is no neighbour on that
+    /// side to claim it. So a land-cover layer whose outer ring is drawn flush
+    /// with the terrain's own extent leaves the far row and column unpainted:
+    /// measured at **15 of 64** samples on an 8 × 8 tile
+    /// (`adjacent_polygons_tile_a_terrain_with_no_seam_and_no_overlap`). That is
+    /// even-odd fill behaving correctly, not a defect to trade an interior
+    /// double-paint for; the remedy is a source ring that runs past the ground,
+    /// which is what a clipped published layer normally does anyway.
     pub fn add_polygon(
         &mut self,
         data: &mut TerrainData,
@@ -600,6 +613,172 @@ mod tests {
     fn dab(t: &TerrainData, frac: f64, strength: f64) -> BrushParams {
         let span = t.tile_span();
         BrushParams::new(DVec2::new(span * 0.5, span * 0.5), span * frac, strength)
+    }
+
+    // ── the polygon fill (IB-5) ──────────────────────────────────────────────
+
+    fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<DVec2> {
+        vec![
+            DVec2::new(x0, y0),
+            DVec2::new(x1, y0),
+            DVec2::new(x1, y1),
+            DVec2::new(x0, y1),
+        ]
+    }
+
+    /// **A TILING OF THE MAP LEAVES NO SEAM, AND PAINTS NOTHING TWICE** — which
+    /// is the whole reason [`ring_contains`] is half-open, and was armed nowhere
+    /// (I2 audit: `BiomeFill` shipped with no test in its own crate, and its one
+    /// caller's fixture paints three *disjoint* squares with gaps between them,
+    /// so the shared-edge rule the doc names could not fail).
+    ///
+    /// Four quadrants meeting on the interior lines `x = mid` and `y = mid`,
+    /// each running **past** the terrain on its outward sides (see the second
+    /// half of this arm for why). Every sample must end up in exactly one of
+    /// them: the count written is the sample count exactly, so a seam (a sample
+    /// nobody claims) shows up as a shortfall and a double claim shows up as an
+    /// excess — a sample written twice is written twice, because the second
+    /// write changes the id.
+    #[test]
+    fn adjacent_polygons_tile_a_terrain_with_no_seam_and_no_overlap() {
+        let mut t = terrain();
+        let res = t.tile_resolution();
+        let samples = (res * res) as usize;
+        let span = t.tile_span();
+        let mid = span * 0.5;
+        let out = span + 1.0; // past the terrain's own edge
+        let lo = -1.0;
+
+        let mut fill = BiomeFill::new();
+        let quadrants = [
+            (1u8, rect(lo, lo, mid, mid)),
+            (2, rect(mid, lo, out, mid)),
+            (3, rect(lo, mid, mid, out)),
+            (4, rect(mid, mid, out, out)),
+        ];
+        for (id, ring) in &quadrants {
+            fill.add_polygon(&mut t, *id, ring, &[]);
+        }
+        assert_eq!(
+            fill.filled(),
+            samples,
+            "a tiling must claim every sample EXACTLY once: {} written over {} \
+             samples — short means an unassigned seam between neighbours, over \
+             means a shared edge painted by both",
+            fill.filled(),
+            samples
+        );
+
+        // THE WORLD: no sample is left unassigned, and each quadrant's interior
+        // carries its own id.
+        let mps = t.meters_per_sample();
+        let mut unassigned = 0usize;
+        for j in 0..res {
+            for i in 0..res {
+                let p = DVec2::new(i as f64 * mps, j as f64 * mps);
+                if t.biome_at(p) == Some(UNASSIGNED_BIOME) {
+                    unassigned += 1;
+                }
+            }
+        }
+        assert_eq!(unassigned, 0, "{unassigned} samples were left unpainted");
+        assert_eq!(t.biome_at(DVec2::new(1.0, 1.0)), Some(1));
+        assert_eq!(t.biome_at(DVec2::new(span - 1.0, 1.0)), Some(2));
+        assert_eq!(t.biome_at(DVec2::new(1.0, span - 1.0)), Some(3));
+        assert_eq!(t.biome_at(DVec2::new(span - 1.0, span - 1.0)), Some(4));
+
+        // ONE reversible record for all four, and reverting it takes the terrain
+        // back to byte-stable unpainted space.
+        let delta = fill.finish(&t);
+        assert!(!delta.is_empty());
+        t.revert_biome_delta(&delta);
+        assert!(
+            t.biomes_are_default(),
+            "one undo must drop the whole fill back to the sparse default"
+        );
+
+        // ── THE BOUND THE HALF-OPEN RULE COSTS, MEASURED ────────────────────
+        //
+        // The rule that makes an interior seam belong to exactly one polygon is
+        // the same rule that puts a point on a polygon's **outermost** edge
+        // outside it — there is no neighbour on that side to claim it. So a
+        // tiling whose outer boundary lands exactly on the terrain's last sample
+        // line leaves that line unpainted, and the number is not small on a
+        // small terrain. It is a property of even-odd fill, not a defect to
+        // trade an interior double-paint for; the remedy is to draw the outer
+        // ring past the ground, which is what the fixture above does.
+        let mut edge = TerrainData::new(8, 1.0);
+        edge.author_tile((0, 0), |_, _| 0.0);
+        let mut flush = BiomeFill::new();
+        for (id, ring) in [
+            (1u8, rect(0.0, 0.0, mid, mid)),
+            (2, rect(mid, 0.0, span, mid)),
+            (3, rect(0.0, mid, mid, span)),
+            (4, rect(mid, mid, span, span)),
+        ] {
+            flush.add_polygon(&mut edge, id, &ring, &[]);
+        }
+        let missed = samples - flush.filled();
+        assert_eq!(
+            missed,
+            2 * res as usize - 1,
+            "a tiling flush with the terrain's own extent leaves its far row and \
+             column unpainted — {} of {samples} samples",
+            missed
+        );
+        println!(
+            "IB-5a bound: a land-cover tiling drawn FLUSH with the terrain leaves \
+             {missed} of {samples} samples unpainted (its far row and column); \
+             drawn past the edge it leaves none"
+        );
+    }
+
+    /// A hole is a hole, a polygon over ground the terrain does not have paints
+    /// nothing, and a non-finite ring is refused rather than propagated.
+    #[test]
+    fn a_fill_honours_holes_refuses_garbage_and_never_authors_ground() {
+        let mut t = terrain();
+        let span = t.tile_span();
+        let mut fill = BiomeFill::new();
+
+        // A ring with a NaN in it is refused as a value — nothing painted.
+        let mut bad = rect(0.0, 0.0, span, span);
+        bad[2].x = f64::NAN;
+        assert_eq!(fill.add_polygon(&mut t, 1, &bad, &[]), 0);
+        assert_eq!(
+            fill.add_polygon(&mut t, 1, &rect(0.0, 0.0, span, span), &[bad.clone()]),
+            0,
+            "a hole with a NaN in it refuses the whole polygon"
+        );
+        // …and a ring with fewer than three positions is not an area.
+        assert_eq!(
+            fill.add_polygon(&mut t, 1, &[DVec2::ZERO, DVec2::new(1.0, 1.0)], &[]),
+            0
+        );
+
+        // A polygon over ground the terrain has not authored paints nothing.
+        assert_eq!(
+            fill.add_polygon(
+                &mut t,
+                1,
+                &rect(span * 10.0, span * 10.0, span * 11.0, span * 11.0),
+                &[]
+            ),
+            0,
+            "painting never creates ground"
+        );
+        assert!(t.biomes_are_default(), "nothing was written at all");
+
+        // The hole stays unassigned while the ring around it is painted.
+        let inner = rect(2.0, 2.0, span - 2.0, span - 2.0);
+        let n = fill.add_polygon(&mut t, 5, &rect(0.0, 0.0, span, span), &[inner]);
+        assert!(n > 0);
+        assert_eq!(t.biome_at(DVec2::new(0.0, 0.0)), Some(5));
+        assert_eq!(
+            t.biome_at(DVec2::new(span * 0.5, span * 0.5)),
+            Some(UNASSIGNED_BIOME),
+            "the hole is not painted"
+        );
     }
 
     // ── the hard-edge rule ───────────────────────────────────────────────────

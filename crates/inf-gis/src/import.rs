@@ -705,6 +705,18 @@ impl SpawnPlan {
     /// exact and a rounded comparison would pass for two imports that differ by
     /// a metre in the eighth digit. Deterministic across machines: this is
     /// integer arithmetic over IEEE bit patterns, with no float operation in it.
+    ///
+    /// The entity count and every name are **length-prefixed** (I2 audit), so
+    /// what is folded is a self-delimiting encoding rather than a concatenation
+    /// in which the only variable-length field — the name — runs straight into a
+    /// fixed-width word it could have spelled. That costs two `u64`s and removes
+    /// a whole class of question from the one-door proof's foundation.
+    ///
+    /// What it deliberately does **not** fold is [`SpawnPlan::advisories`]: the
+    /// digest answers "will these two imports create the same things", and an
+    /// advisory is a sentence about the file rather than a thing that is
+    /// created. `the_digest_separates_plans_that_differ_by_one_bit` is what
+    /// keeps every other field in.
     pub fn digest(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         let byte = |h: &mut u64, b: u8| {
@@ -716,7 +728,9 @@ impl SpawnPlan {
                 byte(h, b);
             }
         };
+        word(&mut h, self.entities.len() as u64);
         for e in &self.entities {
+            word(&mut h, e.name.len() as u64);
             for b in e.name.as_bytes() {
                 byte(&mut h, *b);
             }
@@ -1168,6 +1182,156 @@ mod tests {
         // NaN-ing every elevation.
         assert!(Transform::with_vertical_unit("EPSG:26910", &anchor, 0.0).is_err());
         assert!(Transform::with_vertical_unit("EPSG:26910", &anchor, f64::NAN).is_err());
+    }
+
+    /// **BEFORE the projection — and an anchor at datum zero cannot see it.**
+    ///
+    /// [`Transform::with_vertical_unit`]'s doc says the conversion happens
+    /// before `GeoAnchor::world_from_projected` "because it subtracts
+    /// `origin_height_m`, which is in metres: scaling afterwards would scale the
+    /// anchor's own datum height along with the sample". The arm above anchors
+    /// at `origin_height_m = 0`, where the two orderings are algebraically
+    /// identical — so moving the multiplication past the anchor **passed every
+    /// test in this crate** (measured, I2 audit). This is the arm that fails
+    /// when it moves.
+    #[test]
+    fn the_vertical_unit_is_applied_before_the_anchors_metric_datum_height() {
+        // Fifty metres of datum, which is what an anchor above sea level looks
+        // like — and the only thing that makes the two orders differ.
+        let datum = anchor_at("EPSG:26910", 491_000.0, 5_459_000.0, 50.0, "NAVD88").unwrap();
+        assert_eq!(datum.origin_height_m, 50.0, "the fixture must have a datum");
+        let feet = Transform::with_vertical_unit("EPSG:26910", &datum, 0.3048).unwrap();
+        let w = feet.to_world(491_100.0, 5_459_100.0, 100.0).unwrap();
+
+        // Convert first: 100 ft is 30.48 m, and the anchor's origin is 50 m up.
+        let before = 100.0 * 0.3048 - 50.0;
+        assert!(
+            (w.y - before).abs() < 1e-9,
+            "the vertical unit must be applied BEFORE the anchor's metric datum \
+             height is subtracted; got {} rather than {before}",
+            w.y
+        );
+        // THE ALTERNATIVE, PRICED: converting after the anchor gives
+        // (100 - 50) x 0.3048 = 15.24 m — 34.76 m of silent error on every
+        // vertex of every layer, with nothing to see but a world that is in the
+        // wrong place vertically.
+        let after = (100.0 - 50.0) * 0.3048;
+        assert!(
+            (after - w.y).abs() > 30.0,
+            "the two orderings differ by {:.2} m; if that is small this fixture \
+             has no datum in it and the arm cannot fail",
+            (after - w.y).abs()
+        );
+        println!(
+            "IB-11 vertical unit: before-the-anchor {before:.2} m vs \
+             after-the-anchor {after:.2} m ({:.2} m apart)",
+            (after - before).abs()
+        );
+    }
+
+    /// **What the digest can and cannot tell apart**, measured.
+    ///
+    /// [`SpawnPlan::digest`] is the foundation of the one-door proof — the CLI
+    /// prints it and `tools/inf-cli/tests/cli.rs` compares it against a plan
+    /// built in-process — and nothing was holding it to its own claims. Dropping
+    /// two of the four counts out of the fold passed every test in this crate
+    /// (measured, I2 audit), and the stated reason for hashing **bit patterns**
+    /// rather than a formatted decimal had no arm at all.
+    ///
+    /// So: one ULP of one coordinate is a different plan, every count is part of
+    /// the plan, and an advisory is not.
+    #[test]
+    fn the_digest_separates_plans_that_differ_by_one_bit() {
+        let base = SpawnPlan {
+            entities: vec![
+                PlannedEntity {
+                    name: "Main St".into(),
+                    points: vec![DVec3::new(1.0, 2.0, 3.0), DVec3::new(4.0, 5.0, 6.0)],
+                    kind: PlannedKind::Spline { closed: false },
+                    feature: 0,
+                },
+                PlannedEntity {
+                    name: "Still Creek".into(),
+                    points: vec![DVec3::new(7.0, 8.0, 9.0)],
+                    kind: PlannedKind::River {
+                        width_m: 3.0,
+                        depth_m: 0.8,
+                        flow_m_s: 0.6,
+                    },
+                    feature: 1,
+                },
+            ],
+            too_short: 2,
+            unusable: 3,
+            truncated: 4,
+            cap: 4_096,
+            advisories: vec!["the layer is in feet".into()],
+        };
+        let d = base.digest();
+        assert_eq!(base.clone().digest(), d, "a plan is its own digest");
+
+        // **ONE ULP of ONE coordinate** — the claim `to_bits` exists to make.
+        let mut ulp = base.clone();
+        ulp.entities[0].points[0].y = f64::from_bits(2.0f64.to_bits() + 1);
+        assert_ne!(
+            ulp.entities[0].points[0].y, 2.0,
+            "the fixture has to actually move"
+        );
+        assert_eq!(
+            format!("{:.12}", ulp.entities[0].points[0].y),
+            format!("{:.12}", 2.0),
+            "…and it has to be invisible to a formatted comparison, or this arm \
+             measures rounding rather than bits"
+        );
+
+        let mut counts_moved = Vec::new();
+        for i in 0..4 {
+            let mut p = base.clone();
+            match i {
+                0 => p.too_short += 1,
+                1 => p.unusable += 1,
+                2 => p.truncated += 1,
+                _ => p.cap += 1,
+            }
+            counts_moved.push((["too_short", "unusable", "truncated", "cap"][i], p.digest()));
+        }
+
+        let mut dropped = base.clone();
+        dropped.entities.pop();
+        let mut reordered = base.clone();
+        reordered.entities.swap(0, 1);
+        let mut renamed = base.clone();
+        renamed.entities[0].name = "Main Street".into();
+        let mut rekinded = base.clone();
+        rekinded.entities[0].kind = PlannedKind::Spline { closed: true };
+        let mut refeatured = base.clone();
+        refeatured.entities[0].feature = 7;
+        let mut rechannelled = base.clone();
+        rechannelled.entities[1].kind = PlannedKind::River {
+            width_m: 3.5,
+            depth_m: 0.8,
+            flow_m_s: 0.6,
+        };
+
+        let mut differ: Vec<(&str, u64)> = vec![
+            ("one ulp of one coordinate", ulp.digest()),
+            ("a dropped entity", dropped.digest()),
+            ("a reordered plan", reordered.digest()),
+            ("a renamed entity", renamed.digest()),
+            ("a closed ring", rekinded.digest()),
+            ("a different source feature", refeatured.digest()),
+            ("a wider channel", rechannelled.digest()),
+        ];
+        differ.extend(counts_moved);
+        for (what, other) in &differ {
+            assert_ne!(*other, d, "the digest cannot see {what}");
+        }
+
+        // An ADVISORY is deliberately not folded: it is a sentence about the
+        // file, not a thing the import creates.
+        let mut chattier = base.clone();
+        chattier.advisories.push("and its .prj guessed".into());
+        assert_eq!(chattier.digest(), d);
     }
 
     fn write_geojson(dir: &Path, name: &str, body: &str) -> PathBuf {
