@@ -374,6 +374,13 @@ pub struct RuntimeSim {
     /// This step's fracture audit — how many chunks the structural solve dropped,
     /// how many the budget reclaimed, how much debris is live. Read by gates.
     fracture_audit: FractureAudit,
+    /// Whether [`fixed_step`](Self::fixed_step) marks its phases (island wave
+    /// I4b). `false` on every shipped run; see [`crate::step_profile`] for why a
+    /// stopwatch here cannot move the simulation.
+    profiling: bool,
+    /// The last profiled step's breakdown. All zeroes until
+    /// [`set_step_profiling`](Self::set_step_profiling) is armed.
+    step_profile: crate::step_profile::StepProfile,
 }
 
 /// The **committed camera fold**: the centroid of a set of world positions,
@@ -508,6 +515,8 @@ impl RuntimeSim {
             debris_budget: DebrisBudget::default(),
             fracture_audit: FractureAudit::default(),
             voxels: BTreeMap::new(),
+            profiling: false,
+            step_profile: crate::step_profile::StepProfile::default(),
         };
 
         sim.bridge.sync_from_world(&sim.world);
@@ -968,17 +977,27 @@ impl RuntimeSim {
 
     fn fixed_step(&mut self) {
         let dt = self.stepper.fixed_dt();
+        // **The phase clock** (island wave I4b). Off by default and one branch
+        // per mark when it is; see `crate::step_profile` for why a stopwatch in
+        // this body reads no sim state, writes none, and changes no ordering.
+        // Every mark charges the time since the previous one, so the phases tile
+        // the step by construction rather than by an assertion somebody has to
+        // remember to write.
+        use crate::step_profile::phase;
+        let mut clk = crate::step_profile::StepClock::start(self.profiling);
         // 0a. World-partition CELL streaming (P16.5). Spawn/despawn the cells the
         //     sim's own `StreamingSource` entities want, in ascending cell order,
         //     BEFORE anything else — including terrain's observer scan, which has
         //     to see the entities a freshly-activated cell brought in. Camera-free
         //     by construction: `sync_sim` has no camera to be given.
         self.cells.sync_sim(&mut self.world, self.steps);
+        clk.mark(phase::CELL_STREAM);
         // 0b. Terrain streaming, SIM side (P16.3b2). Level-0 pages around the sim's
         //    own entities, loaded synchronously in key order BEFORE anything in
         //    this step can query a height. Camera-free by construction — see
         //    `crate::terrain_stream` for why that separation is structural.
         self.terrain.sync_sim(&mut self.world);
+        clk.mark(phase::TERRAIN_STREAM);
         // ── P17.1 time of day ── advance the level clock ONCE per fixed step,
         //    before anything reads it, so blueprints, the projected sun, shadows,
         //    GI and audio all observe one consistent clock for the step. Pure IEEE
@@ -994,8 +1013,10 @@ impl RuntimeSim {
         // observe ONE weather state for the step. Inert unless a transition is
         // actually in flight on an enabled weather block.
         inf_ecs::sky::advance_weather(&mut self.world, dt);
+        clk.mark(phase::SKY);
         // 1. ECS → physics.
         self.bridge.sync_from_world(&self.world);
+        clk.mark(phase::PHYSICS2D_SYNC);
         // ── P22.3 fracture follow ── an INTACT destructible is a normal
         //    entity a Blueprint or a gizmo can move, so its placement tracks
         //    its transform right up until the first chunk comes off (after
@@ -1007,6 +1028,7 @@ impl RuntimeSim {
         //    so a runtime carve is something a body can fall into.
         self.bridge3d
             .sync_from_world_sim(&self.world, &self.voxels, &self.fractures);
+        clk.mark(phase::PHYSICS3D_SYNC);
         // ── P20.2 water forces ── buoyancy + hydrodynamic drag, between the sync
         //    and the solver: after the sync because a body must be sampled where it
         //    IS, and before the step because that is the step the forces belong to.
@@ -1014,26 +1036,29 @@ impl RuntimeSim {
         //    below so the fixed step has ONE event point. One branch on a level with
         //    no `Buoyancy` component. (MIRROR of `SimSession::fixed_step`.)
         self.bridge3d.apply_water_forces(dt);
+        clk.mark(phase::WATER);
         // ── Wave 3 input events ── (MIRROR of SimSession) fire Input(action) edges
         //    BEFORE the Tick pass, then drain any dispatches they queued.
         self.fire_input_events();
         self.drain_dispatch();
+        clk.mark(phase::INPUT_EVENTS);
         // 2. Blueprint Tick for every actor (Guid order).
         let args: HashMap<String, Value> = [("dt".to_string(), Value::Float(dt))].into();
         self.run_all_with_args(&EventKind::Tick, &args);
         self.drain_dispatch(); // Wave 3: Tick may dispatch custom events.
-                               // ── P29.3 character movement ── the ONE Ring-0 fixed step, called by
-                               //    both hosts, so the editor preview and the shipped player cannot
-                               //    integrate a character differently (the `step_pose_evaluation`
-                               //    shape). HERE, and not earlier: it runs AFTER the Blueprint Tick, so
-                               //    gameplay that set a character's intent this step is honoured this
-                               //    step; and BEFORE the solver, which is the slot
-                               //    `physics3d.move_and_slide` has always occupied. Inert (one empty
-                               //    query) on every level with no `CharacterMovement`.
-                               //
-                               //    Two calls rather than one because an intent is not input: a
-                               //    Blueprint, an AI or a replay can write one, and `apply_intent` is
-                               //    only the local player's path into the same field.
+        clk.mark(phase::BLUEPRINT_TICK);
+        // ── P29.3 character movement ── the ONE Ring-0 fixed step, called by
+        //    both hosts, so the editor preview and the shipped player cannot
+        //    integrate a character differently (the `step_pose_evaluation`
+        //    shape). HERE, and not earlier: it runs AFTER the Blueprint Tick, so
+        //    gameplay that set a character's intent this step is honoured this
+        //    step; and BEFORE the solver, which is the slot
+        //    `physics3d.move_and_slide` has always occupied. Inert (one empty
+        //    query) on every level with no `CharacterMovement`.
+        //
+        //    Two calls rather than one because an intent is not input: a
+        //    Blueprint, an AI or a replay can write one, and `apply_intent` is
+        //    only the local player's path into the same field.
         let intent = inf_ecs::movement::MovementIntent::from_actions(
             |a| self.input.axis(a),
             |a| self.input.is_down(a),
@@ -1041,17 +1066,22 @@ impl RuntimeSim {
         );
         inf_ecs::movement::apply_intent(&mut self.world, &intent);
         inf_physics::d3::step_character_movement(&mut self.world, &mut self.bridge3d, dt);
+        clk.mark(phase::CHARACTER_MOVE);
         // 3. Solver.
         self.bridge.step(dt);
         self.bridge3d.step(dt); // ── P11.3 3D bridge: step ──
-                                // ── Wave 3 collision + overlap drain ── (MIRROR of SimSession) between the
-                                //    solver and write-back: fire `Collision` events + collect OverlapEvents.
+        clk.mark(phase::SOLVER);
+        // ── Wave 3 collision + overlap drain ── (MIRROR of SimSession) between the
+        //    solver and write-back: fire `Collision` events + collect OverlapEvents.
         self.drain_collisions();
         self.drain_dispatch();
+        clk.mark(phase::COLLISION_DRAIN);
         // 4. Physics → ECS.
         self.bridge.write_back(&mut self.world);
         self.bridge3d.write_back_into(&mut self.world); // ── P11.3 3D bridge: write-back ──
+        clk.mark(phase::WRITE_BACK);
         self.world.propagate();
+        clk.mark(phase::PROPAGATE);
         // ── P22.1 surface deformation ── the ground remembers what stood on it.
         //    Here, and not earlier: a footprint's XZ is read off the transform
         //    the solver just wrote and `propagate` just settled, so the print
@@ -1062,6 +1092,7 @@ impl RuntimeSim {
         //    allocation) on every level whose bodies never touch a terrain.
         //    (MIRROR of `SimSession::fixed_step`.)
         inf_ecs::deform::step_deformation(&mut self.world, dt);
+        clk.mark(phase::DEFORMATION);
         // 5. Advance skeletal-animation play-heads (P11.1) — the same order-free,
         //    fixed-`dt` integration the editor Simulate tick runs (preview ==
         //    shipped). ── P11.3 root motion ── snapshot play-heads, advance, apply.
@@ -1072,10 +1103,14 @@ impl RuntimeSim {
         //    actor's Blueprint variables.
         self.advance_state_machines(dt);
         self.apply_root_motion(&prev_ts);
+        clk.mark(phase::ANIMATION);
         self.world.propagate();
+        clk.mark(phase::PROPAGATE);
         // ── P11.3 attachments ── entities ride their target's socket, post-anim.
         update_attachments(&mut self.world);
+        clk.mark(phase::ATTACHMENTS);
         self.world.propagate();
+        clk.mark(phase::PROPAGATE);
         // ── P24.4 cloth ── garments fall on the body the pose just put them on.
         //    HERE, and not earlier: the capsules are read off the pose this step
         //    published and the model frame off a `GlobalTransform` the propagate
@@ -1090,9 +1125,11 @@ impl RuntimeSim {
         //    in the same slot and for the same reasons as the garment above.
         //    (MIRROR of `SimSession::fixed_step`.)
         self.step_hair(dt);
+        clk.mark(phase::CLOTH_HAIR);
         // ── P14.5 WASM mods ── tick sandboxed mods against the world (after
         //    gameplay/physics/anim), then propagate their transform edits.
         self.tick_mods(dt);
+        clk.mark(phase::MODS);
         // ── P22.3 runtime destruction ── advance the fracture states: age the
         //    debris, run the structural solve, apply the level's budget, latch
         //    `Destroyed`. HERE, and not earlier: the support probes read where
@@ -1107,9 +1144,11 @@ impl RuntimeSim {
                 .step_fractures(&mut self.fractures, dt, self.debris_budget);
         self.fracture_audit = audit;
         self.fire_destroyed(&destroyed);
+        clk.mark(phase::DESTRUCTION);
         // ── P12.3 audio step ── last, observing this step's final transforms
         //    (preview == shipped: the same logic the editor SimSession runs).
         self.audio_step();
+        clk.mark(phase::AUDIO);
         // ── P29.6 the locomotion camera ── LAST, and outside everything the
         //    trace folds: it reads where the character ended this step and writes
         //    nothing back. `step_locomotion_camera` is the ONE door, so the
@@ -1118,11 +1157,31 @@ impl RuntimeSim {
         //    `None`) on every level with no player-controlled character.
         //    (MIRROR of `SimSession::fixed_step`.)
         self.step_camera(dt);
+        clk.mark(phase::CAMERA);
         // Roll interpolation history + rising edges.
         std::mem::swap(&mut self.prev_positions, &mut self.cur_positions);
         self.capture_positions();
         self.just_pressed.clear();
         self.steps += 1;
+        clk.mark(phase::POSITION_CAPTURE);
+        if let Some(p) = clk.finish() {
+            self.step_profile = p;
+        }
+    }
+
+    /// Arm (or disarm) the fixed step's per-phase clock (island wave I4b).
+    ///
+    /// Off on every shipped run. See [`crate::step_profile`] for the cost and for
+    /// why a profiled step and an unprofiled one produce byte-identical sim
+    /// state.
+    pub fn set_step_profiling(&mut self, on: bool) {
+        self.profiling = on;
+    }
+
+    /// The last profiled step's per-phase breakdown — all zeroes until
+    /// [`set_step_profiling`](Self::set_step_profiling) is armed.
+    pub fn step_profile(&self) -> crate::step_profile::StepProfile {
+        self.step_profile
     }
 
     /// Advance the locomotion camera against this step's world.

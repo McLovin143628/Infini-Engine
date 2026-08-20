@@ -44,6 +44,8 @@ pub mod runtime_sim;
 /// Skeletal render assets (the P18.3 follow-up) — bind-space skinned geometry,
 /// skeletons and clips, resolved out of a cooked pack or a dev dir.
 pub mod skinned;
+/// The fixed step's own per-phase breakdown (island wave I4b) — off by default.
+pub mod step_profile;
 /// Camera-driven terrain streaming (P16.3b2) — the sim/render want split.
 pub mod terrain_stream;
 pub mod vmesh;

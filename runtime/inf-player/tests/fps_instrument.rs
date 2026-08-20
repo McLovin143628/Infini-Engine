@@ -87,7 +87,7 @@ use inf_editor_core::samples;
 use inf_math::FloatingOrigin;
 use inf_packager::{cook, CookOptions};
 use inf_player::budget::{
-    RATCHET_NOTE, SHIPPING_FRAME_BUDGET_MS, SHIPPING_FRAME_CEILING_MS,
+    CITY_STEP_BUDGET_MS, RATCHET_NOTE, SHIPPING_FRAME_BUDGET_MS, SHIPPING_FRAME_CEILING_MS,
     SHIPPING_FRAME_P99_CEILING_MS,
 };
 use inf_player::level::PackLevelSource;
@@ -121,6 +121,17 @@ const FRAMES: usize = 120;
 /// removing the reset moves the p50 by about 1 %, to 39.104 ms. The discipline is
 /// right and is kept; the figure was retired.
 const ROUNDS: usize = 3;
+
+/// Steps discarded before the fixed step's own breakdown is measured (island
+/// wave I4b) — the `FRAMES`-long discarded pass, one processor over: the band
+/// seats, the terrain tiles mesh, and every `structure_stamps` miss there is
+/// happens in here.
+const STEP_WARMUP: usize = 120;
+/// Steps per profiling round.
+const STEP_SAMPLES: usize = 120;
+/// Independent profiling rounds; the cheapest by the step's own total is
+/// reported (MIN-of-rounds, the instrument's discipline).
+const STEP_ROUNDS: usize = 3;
 
 /// The CPU stages one frame is split into, in the order the frame runs them.
 ///
@@ -548,6 +559,195 @@ fn the_instrument_scene_carries_the_city_the_ground_and_the_character() {
     );
     assert_eq!(terrains, 1, "the streamed ground must be in the world");
     assert_eq!(characters, 1, "the wizard character must be in the world");
+}
+
+/// **THE FIXED STEP'S OWN BREAKDOWN** (island wave I4b) — the table wave I4
+/// could not print.
+///
+/// I4 measured the frame, found it CPU-bound, and found the single dearest thing
+/// in it to be the fixed step at **13.0–14.9 ms** over this city — of which
+/// ~2.2 ms was the I3 collider band **and ~11.5 ms was unattributed**. "Attribute
+/// it before prescribing" is what the I4 audit routed to this wave, and this arm
+/// is the attribution: `RuntimeSim` marks every phase of its own body and the
+/// phases tile the step by construction.
+///
+/// **No GPU.** The step is CPU work over a cooked pack, so this arm runs
+/// everywhere the battery runs — and the number it prints in the `dev` profile
+/// is a number about a build nobody ships (the I4 law), which is why the
+/// **budget is asserted only in `--release`**, on a machine whose milliseconds
+/// mean something, exactly like every other wall clock in this tree.
+#[test]
+fn the_fixed_steps_own_budget() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let pack = cook_instrument(tmp.path());
+    let mut fx = open(&pack);
+
+    // The discarded pass, for the frame instrument's reason one processor over:
+    // the first steps seat the collider band, mesh the terrain tiles, and take
+    // every `structure_stamps` miss there is. Measuring them would be measuring
+    // a step that happens once.
+    for _ in 0..STEP_WARMUP {
+        fx.sim
+            .step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    fx.sim.set_step_profiling(true);
+
+    let mut rounds: Vec<(f64, inf_player::step_profile::StepProfile)> = Vec::new();
+    for _ in 0..STEP_ROUNDS {
+        let mut acc = inf_player::step_profile::StepProfile::default();
+        let t0 = std::time::Instant::now();
+        for _ in 0..STEP_SAMPLES {
+            fx.sim
+                .step_once(inf_player::runtime_sim::RuntimeInput::default());
+            acc.accumulate(&fx.sim.step_profile());
+        }
+        let wall = t0.elapsed().as_secs_f64() * 1000.0 / STEP_SAMPLES as f64;
+        acc.scale(1.0 / STEP_SAMPLES as f64);
+        rounds.push((wall, acc));
+    }
+    // MIN of rounds, by the step's own total — the instrument's own discipline.
+    let best = rounds
+        .iter()
+        .enumerate()
+        .min_by(|a, b| a.1 .1.total_ms().total_cmp(&b.1 .1.total_ms()))
+        .map(|(i, _)| i)
+        .expect("at least one round");
+    let (wall, prof) = rounds[best];
+
+    println!(
+        "\n=== THE FIXED STEP, PHASE BY PHASE === {STEP_ROUNDS} rounds x \
+         {STEP_SAMPLES} steps after {STEP_WARMUP} discarded, MIN of rounds; \
+         content: the phase-30 city (370 468 solids, 1 000 buildings), a streamed \
+         terrain and a skinned character — the fps instrument's own scene"
+    );
+    for (i, (w, p)) in rounds.iter().enumerate() {
+        println!(
+            "round {}: step {:.3} ms (wall {:.3} ms)",
+            i + 1,
+            p.total_ms(),
+            w
+        );
+    }
+    println!(
+        "STEP {:.3} ms  [round {} of {STEP_ROUNDS}]",
+        prof.total_ms(),
+        best + 1
+    );
+    for (n, ms) in prof.dearest_first() {
+        if ms <= 0.0005 {
+            continue;
+        }
+        println!(
+            "  {n:<18} {ms:7.3} ms  ({:5.1} % of the step)",
+            ms / prof.total_ms().max(1.0e-9) * 100.0
+        );
+    }
+    let silent: Vec<&str> = prof
+        .rows()
+        .filter(|(_, ms)| *ms <= 0.0005)
+        .map(|(n, _)| n)
+        .collect();
+    if !silent.is_empty() {
+        println!("  under 0.0005 ms: {}", silent.join(", "));
+    }
+    println!(
+        "  the step's own wall clock is {wall:.3} ms; the phases sum to {:.3} ms",
+        prof.total_ms()
+    );
+    // **What the solver is actually paying for.** A step whose dearest phase is
+    // `bridge3d.step` over a world with one moving thing in it is a step paying
+    // for its own STATIC geometry, and the pair count is the evidence.
+    let (tracked, touching) = fx.sim.bridge3d().world().contact_pair_counts();
+    println!(
+        "  physics world: {} bodies, {} admitted structure colliders, \
+         {tracked} contact pairs tracked ({touching} touching)",
+        fx.sim.bridge3d().body_count(),
+        fx.sim.bridge3d().admitted_structures(),
+    );
+
+    // **THE PHASES TILE THE STEP.** The GPU segments' tiling assertion and the
+    // CPU stages', one processor over: a breakdown whose parts do not add up to
+    // the whole it sits beside is a breakdown of a step nobody measured. The
+    // wall clock also carries `set_input` and the profile does not, which is
+    // three `BTreeSet` differences on an empty input — hence a tolerance rather
+    // than an equality, and it is in PROPORTION rather than in milliseconds so
+    // it means the same thing in `dev` (where the step is slower) as in release.
+    let drift = (wall - prof.total_ms()).abs() / wall.max(1.0e-9);
+    assert!(
+        drift < 0.10,
+        "the phases sum to {:.3} ms beside a {wall:.3} ms step — {:.1} % of the \
+         step is in no phase, so the breakdown describes a step this arm did not \
+         time",
+        prof.total_ms(),
+        drift * 100.0
+    );
+
+    // The §8 budget itself — release only, real machine only, for
+    // `inf_player::budget`'s stated reason.
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "\ndev profile (opt-level 1, debug assertions ON): the step is \
+             reported, not asserted — re-run with --release for the number \
+             CITY_STEP_BUDGET_MS is set from"
+        );
+        return;
+    }
+    if std::env::var_os("CI").is_some() {
+        eprintln!("\nCI: the step is reported, not asserted (shared runner)");
+        return;
+    }
+    println!(
+        "STEP BUDGET: {:.3} ms measured against a {CITY_STEP_BUDGET_MS} ms \
+         ceiling {RATCHET_NOTE}",
+        prof.total_ms()
+    );
+    assert!(
+        prof.total_ms() <= CITY_STEP_BUDGET_MS,
+        "the fixed step cost {:.3} ms over the city, past the \
+         {CITY_STEP_BUDGET_MS} ms ceiling {RATCHET_NOTE}",
+        prof.total_ms()
+    );
+}
+
+/// **A stopwatch is not behaviour.** The phase clock reads no sim state, writes
+/// none and changes no ordering, so a profiled step and an unprofiled one must
+/// produce byte-identical sim state — and this is the arm that says so rather
+/// than the comment that claims it.
+///
+/// Built to falsify: it compares `state_bytes()` (the same buffer the replay
+/// fold, `step_state_hash` and every PIE == shipping arm consume) after the same
+/// number of steps on two sims built from the same pack, one profiled.
+#[test]
+fn the_profile_does_not_move_the_simulation() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let pack = cook_instrument(tmp.path());
+    let mut plain = open(&pack);
+    let mut profiled = open(&pack);
+    profiled.sim.set_step_profiling(true);
+    for _ in 0..24 {
+        plain
+            .sim
+            .step_once(inf_player::runtime_sim::RuntimeInput::default());
+        profiled
+            .sim
+            .step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let a = plain.sim.state_bytes();
+    let b = profiled.sim.state_bytes();
+    println!(
+        "24 steps: {} bytes of sim state, profiled and not, identical = {}",
+        a.len(),
+        a == b
+    );
+    assert!(
+        profiled.sim.step_profile().total_ms() > 0.0,
+        "the profiled sim reported a zero step — the clock is not armed, so the \
+         comparison below is between two unprofiled runs"
+    );
+    assert_eq!(
+        a, b,
+        "a profiled step and an unprofiled one produced different sim state"
+    );
 }
 
 /// **The instrument, at shipping resolution.** The wave's headline number.

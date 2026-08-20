@@ -659,3 +659,174 @@ fn the_radius_sweep_states_what_the_default_buys() {
         rows[0].1
     );
 }
+
+/// **WHERE THE SOLVER'S MILLISECONDS WENT** (island wave I4b) - the measurement
+/// behind `PhysicsWorld3D::active_collision_types`.
+///
+/// Wave I4 measured the shipped player's fixed step over this city at
+/// 13.0-14.9 ms and could not say where it went; I4b's phase clock said
+/// **72.9 % of it was `bridge3d.step`** - the rapier call itself, over a world
+/// whose only moving thing is one character. This arm is the why, and the price
+/// of the alternative, on four configurations of one city.
+///
+/// A building's boxes **touch each other** (a wall meets a floor meets a stair)
+/// and every one of them rests on the **ground**, which under a streamed terrain
+/// is a heightfield of 32 768 triangles. Under
+/// `ActiveCollisionTypes::all()` every one of those adjacencies is a manifold
+/// the narrow phase computes and re-computes at 60 Hz for a pair no solver can
+/// ever move. Measured here before the rule landed, on this machine, MIN of five
+/// rounds of sixty steps:
+///
+/// | configuration | ms/step, before | after |
+/// |---|---|---|
+/// | the banded city alone | 0.555-0.600 | **0.283** |
+/// | + the host's per-step sync | 1.369-1.413 | **1.044** |
+/// | + one awake dynamic body | 0.571-0.593 | **0.285** |
+/// | **+ 25 heightfield tiles under it** | **4.259** | **0.319** |
+///
+/// The ground is the whole story: 3 446 box-versus-heightfield pairs cost
+/// **+3.704 ms/step** and now cost **+0.036**. In the shipped instrument's scene,
+/// with its real terrain residency under it, the same mechanism was **9.2 ms of a
+/// 12.7 ms fixed step** and is now 0.3 of 1.2.
+///
+/// Printed, never asserted as a clock (the standing rule); the **pair counts**
+/// are asserted, because a pair is a pair on every machine.
+#[test]
+fn the_solver_pays_for_static_pairs_the_city_can_never_move() {
+    let city = city(DVec3::ZERO);
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync_from_world(&city.world);
+    let dt = 1.0 / 60.0;
+    // Warm: the first steps build the broad-phase tree and seat every manifold.
+    for _ in 0..30 {
+        bridge.step(dt);
+    }
+    let (tracked, touching) = bridge.world().contact_pair_counts();
+    let colliders = bridge.admitted_structures();
+    // MIN of rounds, the instrument's own discipline one crate down.
+    let mut best = f64::INFINITY;
+    for _ in 0..5 {
+        let t = Instant::now();
+        for _ in 0..60 {
+            bridge.step(dt);
+        }
+        best = best.min(t.elapsed().as_secs_f64() * 1000.0 / 60.0);
+    }
+    println!(
+        "banded city: {colliders} structure colliders, {tracked} contact pairs \
+         tracked ({touching} touching), solver {best:.3} ms/step — \
+         {:.1} pairs per collider",
+        tracked as f64 / colliders.max(1) as f64
+    );
+    // …and the same step with the HOST'S OWN SHAPE around it: a sync before
+    // every step, which is what `RuntimeSim::fixed_step` and `SimSession` both
+    // do. A step measured without its sync is a step no host runs.
+    let mut synced = f64::INFINITY;
+    for _ in 0..5 {
+        let t = Instant::now();
+        for _ in 0..60 {
+            bridge.sync_from_world(&city.world);
+            bridge.step(dt);
+        }
+        synced = synced.min(t.elapsed().as_secs_f64() * 1000.0 / 60.0);
+    }
+    println!(
+        "  with the host's per-step sync in front of it: {synced:.3} ms/step \
+         ({:+.3} ms)",
+        synced - best
+    );
+    // …and with ONE AWAKE BODY in it. The instrument's scene has a character;
+    // this one has none, and a world where nothing is awake is a world where
+    // rapier's narrow phase early-outs on every edge it owns.
+    {
+        let mut w = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+        w.sync_from_world(&city.world);
+        let b = w.world_mut().add_body(
+            inf_physics::d3::BodyKind3D::Dynamic,
+            DVec3::new(0.0, 40.0, 0.0),
+            DQuat::IDENTITY,
+        );
+        let _ = w.world_mut().add_collider(
+            b,
+            inf_physics::d3::ColliderDesc3D::new(inf_physics::d3::ColliderShape3D::Sphere {
+                radius: 0.5,
+            }),
+        );
+        for _ in 0..30 {
+            w.step(dt);
+        }
+        let (t2, _) = w.world().contact_pair_counts();
+        let mut awake = f64::INFINITY;
+        for _ in 0..5 {
+            let t = Instant::now();
+            for _ in 0..60 {
+                w.step(dt);
+            }
+            awake = awake.min(t.elapsed().as_secs_f64() * 1000.0 / 60.0);
+        }
+        println!(
+            "  with ONE awake dynamic body among the {colliders} static ones: \
+             {awake:.3} ms/step ({:+.3} ms), {t2} pairs",
+            awake - best
+        );
+    }
+    // …and with the GROUND under it. The instrument's scene has a streamed
+    // terrain and this one is a city floating in space; a heightfield tile is
+    // 128 x 128 m of 32 768 triangles, and every box in the tile's footprint
+    // pairs with it.
+    {
+        let mut w = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+        w.sync_from_world(&city.world);
+        let span = 128.0f64;
+        let res = 129u32;
+        for tz in -2i32..=2 {
+            for tx in -2i32..=2 {
+                let b = w.world_mut().add_body(
+                    inf_physics::d3::BodyKind3D::Static,
+                    DVec3::new(f64::from(tx) * span, 0.0, f64::from(tz) * span),
+                    DQuat::IDENTITY,
+                );
+                let _ = w.world_mut().add_collider(
+                    b,
+                    inf_physics::d3::ColliderDesc3D::new(
+                        inf_physics::d3::ColliderShape3D::Heightfield {
+                            samples_x: res,
+                            samples_z: res,
+                            heights: vec![0.0; (res * res) as usize],
+                            removed_cells: Vec::new(),
+                            span: DVec2::splat(span),
+                        },
+                    ),
+                );
+            }
+        }
+        for _ in 0..30 {
+            w.step(dt);
+        }
+        let (t3, u3) = w.world().contact_pair_counts();
+        let mut ground = f64::INFINITY;
+        for _ in 0..5 {
+            let t = Instant::now();
+            for _ in 0..60 {
+                w.step(dt);
+            }
+            ground = ground.min(t.elapsed().as_secs_f64() * 1000.0 / 60.0);
+        }
+        println!(
+            "  with 25 heightfield tiles under it: {ground:.3} ms/step \
+             ({:+.3} ms), {t3} pairs ({u3} touching)",
+            ground - best
+        );
+    }
+    assert!(
+        tracked > colliders,
+        "the narrow phase tracks {tracked} pairs over {colliders} colliders -          fewer pairs than colliders means the city's boxes are not touching each          other and this arm is measuring a different world than the one its          header describes"
+    );
+    // **AND NONE OF THEM IS A MANIFOLD.** This is the arm the rule dies at: put
+    // `FIXED_FIXED` back on solids and a city of static boxes on static ground
+    // starts computing twenty thousand contact manifolds a step again.
+    assert_eq!(
+        touching, 0,
+        "{touching} of the city's {tracked} static pairs computed a contact          manifold - `ActiveCollisionTypes` is back to `all()` for solids, and          this city's fixed step has just gone back to paying nine milliseconds          for contacts no solver can act on"
+    );
+}

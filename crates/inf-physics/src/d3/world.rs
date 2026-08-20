@@ -9,9 +9,9 @@ use rapier3d_f64::dynamics::CoefficientCombineRule;
 use rapier3d_f64::geometry::{Group, InteractionGroups, InteractionTestMode};
 use rapier3d_f64::prelude::{
     Aabb, ActiveCollisionTypes, ActiveEvents, BroadPhaseBvh, CCDSolver, ColliderBuilder,
-    ColliderSet, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet,
-    NarrowPhase, PhysicsPipeline, Pose, QueryFilter, QueryPipeline, Ray, RigidBodyBuilder,
-    RigidBodySet, RigidBodyType, SharedShape,
+    ColliderHandle, ColliderSet, ImpulseJointSet, IntegrationParameters, IslandManager,
+    MultibodyJointSet, NarrowPhase, PhysicsPipeline, Pose, QueryFilter, QueryPipeline, Ray,
+    RigidBodyBuilder, RigidBodyHandle, RigidBodySet, RigidBodyType, SharedShape,
 };
 
 use super::character::{CharacterMove3D, CharacterMover3D};
@@ -536,9 +536,18 @@ pub struct PhysicsWorld3D {
     ccd_solver: CCDSolver,
 
     /// A broad-phase BVH kept purely for scene queries / the character mover,
-    /// rebuilt lazily from the current colliders whenever the world changed.
+    /// maintained **incrementally** from the current colliders (island wave
+    /// I4b) — see [`ensure_query_pipeline`](Self::ensure_query_pipeline).
     query_bvh: BroadPhaseBvh,
-    query_dirty: bool,
+    /// A leaf has to LEAVE the tree, which only a fresh build can do —
+    /// `BroadPhaseBvh` exposes no removal. Set by every removal, and once at
+    /// construction.
+    query_rebuild: bool,
+    /// Colliders whose leaf AABB is stale: attached, teleported, re-shaped.
+    query_moved: Vec<ColliderHandle>,
+    /// Bodies the solver moved — resolved to their colliders at query time,
+    /// because a body's collider list is the body's to know.
+    query_moved_bodies: Vec<RigidBodyHandle>,
 
     pending_contacts: Vec<ContactEvent3D>,
 }
@@ -560,7 +569,9 @@ impl PhysicsWorld3D {
             multibody_joints: MultibodyJointSet::new(),
             ccd_solver: CCDSolver::new(),
             query_bvh: BroadPhaseBvh::new(),
-            query_dirty: false,
+            query_rebuild: true,
+            query_moved: Vec::new(),
+            query_moved_bodies: Vec::new(),
             pending_contacts: Vec::new(),
         }
     }
@@ -585,6 +596,15 @@ impl PhysicsWorld3D {
     /// read them with [`drain_contact_events`](Self::drain_contact_events).
     pub fn step(&mut self, dt: f64) {
         self.integration_parameters.dt = dt;
+        // **What the solver is about to move** (island wave I4b). Awake bodies
+        // are the ones the integrator touches, so their query-BVH leaves are the
+        // ones that go stale — and taking the set BEFORE the step as well as
+        // after is what covers a body that fell asleep during it (its last
+        // motion happened while it was still awake) and one that woke during it.
+        // A world where nothing is awake marks nothing, which is the whole point:
+        // a city of static geometry stops re-describing itself sixty times a
+        // second to conclude that it has not moved.
+        self.query_moved_bodies.extend(self.islands.active_bodies());
         let collector = EventCollector::default();
         self.physics_pipeline.step(
             self.gravity,
@@ -601,7 +621,28 @@ impl PhysicsWorld3D {
             &collector,
         );
         collector.append_into(&mut self.pending_contacts);
-        self.query_dirty = true;
+        self.query_moved_bodies.extend(self.islands.active_bodies());
+    }
+
+    /// **How much narrow phase this world is paying for** (island wave I4b) —
+    /// `(pairs tracked, pairs with at least one contact point)`.
+    ///
+    /// A diagnostic, and the evidence behind this wave's largest sim finding: a
+    /// contact pair is a manifold the narrow phase recomputes every step, so a
+    /// world whose *static* geometry pairs with itself pays for thousands of
+    /// manifolds that no solver can ever act on. The two numbers are separate
+    /// because they answer different questions — the first is what the broad
+    /// phase handed over, the second is what is actually touching.
+    pub fn contact_pair_counts(&self) -> (usize, usize) {
+        let mut tracked = 0usize;
+        let mut touching = 0usize;
+        for pair in self.narrow_phase.contact_graph().interactions() {
+            tracked += 1;
+            if pair.has_any_active_contact() {
+                touching += 1;
+            }
+        }
+        (tracked, touching)
     }
 
     /// Remove and return all contact events accumulated since the last drain,
@@ -624,7 +665,8 @@ impl PhysicsWorld3D {
             .rotation(rotation.to_scaled_axis())
             .build();
         let handle = self.bodies.insert(rb);
-        self.query_dirty = true;
+        // No `query_*` mark: a body owns no query leaf — its COLLIDERS do, and
+        // every one of them arrives through `try_add_collider` below.
         BodyId3D(handle)
     }
 
@@ -643,7 +685,8 @@ impl PhysicsWorld3D {
             )
             .is_some();
         if removed {
-            self.query_dirty = true;
+            // A leaf has to LEAVE, and only a fresh build can take it out.
+            self.query_rebuild = true;
         }
         removed
     }
@@ -675,7 +718,7 @@ impl PhysicsWorld3D {
     pub fn set_body_translation(&mut self, body: BodyId3D, translation: DVec3) -> bool {
         if let Some(rb) = self.bodies.get_mut(body.0) {
             rb.set_translation(translation, true);
-            self.query_dirty = true;
+            self.query_moved_bodies.push(body.0);
             true
         } else {
             false
@@ -686,7 +729,7 @@ impl PhysicsWorld3D {
     pub fn set_body_rotation(&mut self, body: BodyId3D, rotation: DQuat) -> bool {
         if let Some(rb) = self.bodies.get_mut(body.0) {
             rb.set_rotation(rotation, true);
-            self.query_dirty = true;
+            self.query_moved_bodies.push(body.0);
             true
         } else {
             false
@@ -872,7 +915,7 @@ impl PhysicsWorld3D {
     pub fn set_body_kind(&mut self, body: BodyId3D, kind: BodyKind3D) -> bool {
         if let Some(rb) = self.bodies.get_mut(body.0) {
             rb.set_body_type(kind.to_rapier(), true);
-            self.query_dirty = true;
+            self.query_moved_bodies.push(body.0);
             true
         } else {
             false
@@ -986,6 +1029,48 @@ impl PhysicsWorld3D {
         self.try_add_collider(body, desc).ok()
     }
 
+    /// **Which body-type pairings a collider takes part in** (island wave I4b).
+    ///
+    /// Rapier's own default is dynamic-involving only
+    /// (`DYNAMIC_DYNAMIC | DYNAMIC_KINEMATIC | DYNAMIC_FIXED`), which is too
+    /// narrow for this engine: game triggers routinely involve
+    /// kinematic-vs-static overlaps, and a level author expects a static sensor
+    /// volume placed over static scenery to report it. So this engine has always
+    /// used [`ActiveCollisionTypes::all()`] — and that is one pairing too many.
+    ///
+    /// # The one pairing that is removed, and what it was costing
+    ///
+    /// `FIXED_FIXED` on a **solid** asks rapier to compute, and re-compute at
+    /// 60 Hz, a contact manifold between two things that can never move. On a
+    /// hand-authored level that is a handful of pairs and invisible. On the
+    /// phase-30 city it is the **dominant cost of the whole fixed step**: every
+    /// banded building box rests on a streamed terrain **heightfield**, and a
+    /// box-versus-heightfield manifold walks the tile's cells under the box.
+    /// Measured on the 1 000-building city (`the_solver_pays_for_static_pairs…`
+    /// in this crate's `city_collider_band.rs`), with 25 heightfield tiles under
+    /// it: **+3.704 ms/step** for 3 446 such pairs, against a whole solver of
+    /// 0.555 ms without the ground. In the shipped instrument's scene, with the
+    /// city's real terrain residency under it, that same mechanism was
+    /// **9.2 ms of a 12.7 ms fixed step**.
+    ///
+    /// # …and why a SENSOR keeps all of them
+    ///
+    /// The reason the engine widened the flags in the first place is a *trigger*,
+    /// and a trigger is a sensor. `ActiveCollisionTypes` is tested as a union of
+    /// the pair's two colliders (rapier's `!a && !b`), so a static sensor over
+    /// static scenery still reports: the sensor's own `all()` carries the pair.
+    /// Nothing an author can place loses an event; what is dropped is the
+    /// *solid-versus-solid* manifold, which no solver could ever act on and no
+    /// gameplay could ever read as an overlap.
+    ///
+    /// The 2D world mirrors this exactly — see `d2::world`'s twin.
+    fn active_collision_types(sensor: bool) -> ActiveCollisionTypes {
+        match sensor {
+            true => ActiveCollisionTypes::all(),
+            false => ActiveCollisionTypes::all() - ActiveCollisionTypes::FIXED_FIXED,
+        }
+    }
+
     /// Attach a collider to a body, **or say why not** (C4-30).
     pub fn try_add_collider(
         &mut self,
@@ -1006,15 +1091,12 @@ impl PhysicsWorld3D {
             .friction_combine_rule(to_combine_rule(desc.friction_combine))
             .restitution_combine_rule(to_combine_rule(desc.restitution_combine))
             .active_events(ActiveEvents::COLLISION_EVENTS)
-            // Report every body-type pairing, not just rapier's dynamic-involving
-            // default — game triggers routinely involve kinematic-vs-static and
-            // static-vs-static sensor overlaps, which would otherwise be silent.
-            .active_collision_types(ActiveCollisionTypes::all())
+            .active_collision_types(Self::active_collision_types(desc.sensor))
             .build();
         let handle = self
             .colliders
             .insert_with_parent(collider, body.0, &mut self.bodies);
-        self.query_dirty = true;
+        self.query_moved.push(handle);
         Ok(ColliderId3D(handle))
     }
 
@@ -1025,7 +1107,8 @@ impl PhysicsWorld3D {
             .remove(collider.0, &mut self.islands, &mut self.bodies, true)
             .is_some();
         if removed {
-            self.query_dirty = true;
+            // A leaf has to LEAVE — see `remove_body`.
+            self.query_rebuild = true;
         }
         removed
     }
@@ -1051,7 +1134,11 @@ impl PhysicsWorld3D {
         match self.colliders.get_mut(collider.0) {
             Some(c) => {
                 c.set_enabled(enabled);
-                self.query_dirty = true;
+                // The membership does not change — this tree has always held
+                // disabled colliders and `QueryFilter` has always answered them
+                // — but the mark keeps the AABB honest if the shape moved with
+                // it.
+                self.query_moved.push(collider.0);
                 true
             }
             None => false,
@@ -1410,20 +1497,98 @@ impl PhysicsWorld3D {
 
     // ── internal ──────────────────────────────────────────────────────────────
 
-    /// Rebuild the query BVH from the current colliders if the world changed
-    /// since the last query. Kept separate from the simulation broad-phase so a
-    /// query never perturbs the deterministic step state.
+    /// **Throw the query BVH away and build it fresh on the next query**
+    /// (island wave I4b).
+    ///
+    /// The incremental maintenance in [`ensure_query_pipeline`](Self::ensure_query_pipeline)
+    /// tracks what this world knows moved. This is the door for the two cases it
+    /// cannot know about, and there are exactly two:
+    ///
+    /// * a caller that has changed collider geometry through some future escape
+    ///   hatch this type does not own, and
+    /// * the **equivalence gate** — `the_incremental_query_tree_answers_what_a_
+    ///   rebuilt_one_does` runs a scripted sequence, records every query answer,
+    ///   forces a rebuild here, and re-asks. A tree maintained incrementally and
+    ///   a tree built from scratch must answer the same question the same way,
+    ///   and that is a comparison a test can make rather than a property a
+    ///   comment can claim.
+    ///
+    /// Cheap to call and idempotent; the cost lands on the next query.
+    pub fn force_query_rebuild(&mut self) {
+        self.query_rebuild = true;
+    }
+
+    /// Bring the query BVH in line with the colliders. Kept separate from the
+    /// simulation broad-phase so a query never perturbs the deterministic step
+    /// state.
+    ///
+    /// # Incremental, because a step is not a rebuild (island wave I4b)
+    ///
+    /// This used to throw the whole tree away and re-insert **every** collider
+    /// whenever anything in the world changed — and `step` declared that
+    /// unconditionally, so a query after a step paid a full rebuild every step.
+    /// On the phase-30 city that is 6 000-odd `compute_aabb` + insert pairs to
+    /// discover that a city of static buildings has not moved: measured at
+    /// **2.29 ms of a 12.7 ms fixed step**, all of it inside the P29.6 camera's
+    /// one sweep, which was the second-dearest phase in the whole step and read
+    /// like an inexplicably expensive camera.
+    ///
+    /// What actually goes stale is small and knowable: the colliders of the
+    /// bodies the solver moved (`islands.active_bodies()`, recorded by
+    /// [`step`](Self::step)), plus anything a caller explicitly attached,
+    /// teleported or re-shaped. Those get a `set_aabb`, which is rapier's own
+    /// incremental door.
+    ///
+    /// **A REMOVAL still forces a full rebuild**, and that is a property of the
+    /// dependency rather than a choice: `BroadPhaseBvh` exposes `set_aabb` and
+    /// no removal, so a leaf can only leave by being rebuilt without it. On a
+    /// banded city that happens when the band crosses its 16 m lattice — a few
+    /// steps in a hundred — and the cost is the old cost, once, where it used to
+    /// be the cost of every step.
+    ///
+    /// # The membership is unchanged
+    ///
+    /// The tree holds one leaf per collider in `self.colliders`, **including
+    /// disabled ones**, exactly as the from-scratch build did (`ColliderSet::iter`
+    /// yields them and `QueryFilter::test` does not test `is_enabled`). Nothing
+    /// about what a query can see moved with this change; only how often the
+    /// tree is thrown away did.
     fn ensure_query_pipeline(&mut self) {
-        if !self.query_dirty {
+        let params = self.integration_parameters;
+        if self.query_rebuild {
+            let mut bvh = BroadPhaseBvh::new();
+            for (handle, collider) in self.colliders.iter() {
+                bvh.set_aabb(&params, handle, collider.compute_aabb());
+            }
+            self.query_bvh = bvh;
+            self.query_rebuild = false;
+            self.query_moved.clear();
+            self.query_moved_bodies.clear();
             return;
         }
-        let params = self.integration_parameters;
-        let mut bvh = BroadPhaseBvh::new();
-        for (handle, collider) in self.colliders.iter() {
-            bvh.set_aabb(&params, handle, collider.compute_aabb());
+        if self.query_moved.is_empty() && self.query_moved_bodies.is_empty() {
+            return;
         }
-        self.query_bvh = bvh;
-        self.query_dirty = false;
+        // Both scratch buffers come out of `self` so the loops below can read
+        // `self.bodies` / `self.colliders` while writing `self.query_bvh`; they
+        // go back cleared, so the allocation is made once per world.
+        let mut moved = std::mem::take(&mut self.query_moved);
+        let mut bodies = std::mem::take(&mut self.query_moved_bodies);
+        for h in &bodies {
+            if let Some(rb) = self.bodies.get(*h) {
+                moved.extend_from_slice(rb.colliders());
+            }
+        }
+        for c in &moved {
+            let Some(aabb) = self.colliders.get(*c).map(|col| col.compute_aabb()) else {
+                continue;
+            };
+            self.query_bvh.set_aabb(&params, *c, aabb);
+        }
+        moved.clear();
+        bodies.clear();
+        self.query_moved = moved;
+        self.query_moved_bodies = bodies;
     }
 
     fn query_pipeline<'a>(&'a self, filter: QueryFilter<'a>) -> QueryPipeline<'a> {

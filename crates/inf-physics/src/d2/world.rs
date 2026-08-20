@@ -565,6 +565,21 @@ impl PhysicsWorld2D {
 
     // ── Colliders ─────────────────────────────────────────────────────────────
 
+    /// **Which body-type pairings a collider takes part in** — the MIRROR of
+    /// `d3::PhysicsWorld3D::active_collision_types` (island wave I4b), which
+    /// carries the full argument and the measurement.
+    ///
+    /// In one line: everything rapier's narrow default leaves out, except
+    /// **solid fixed ↔ fixed**, which is a manifold no solver can act on. A
+    /// **sensor** keeps `all()`, so a static trigger volume over static scenery
+    /// still reports — which is the case the engine widened the flags for.
+    fn active_collision_types(sensor: bool) -> ActiveCollisionTypes {
+        match sensor {
+            true => ActiveCollisionTypes::all(),
+            false => ActiveCollisionTypes::all() - ActiveCollisionTypes::FIXED_FIXED,
+        }
+    }
+
     /// Attach a collider to a body. Returns `None` if the body handle is invalid.
     pub fn add_collider(&mut self, body: BodyId, desc: ColliderDesc2D) -> Option<ColliderId> {
         if !self.bodies.contains(body.0) {
@@ -580,10 +595,7 @@ impl PhysicsWorld2D {
             .friction_combine_rule(to_combine_rule(desc.friction_combine))
             .restitution_combine_rule(to_combine_rule(desc.restitution_combine))
             .active_events(ActiveEvents::COLLISION_EVENTS)
-            // Report every body-type pairing, not just rapier's dynamic-involving
-            // default — game triggers routinely involve kinematic-vs-static and
-            // static-vs-static sensor overlaps, which would otherwise be silent.
-            .active_collision_types(ActiveCollisionTypes::all())
+            .active_collision_types(Self::active_collision_types(desc.sensor))
             .build();
         let handle = self
             .colliders
