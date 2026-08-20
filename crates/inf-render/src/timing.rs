@@ -65,9 +65,19 @@ pub struct PassTime {
     /// answers: wave I4b measured a 1080p frame whose GPU half was 23.9 ms and
     /// whose `render (record)` CPU stage was **18.7 ms**, and with only the GPU
     /// column the next reader would have gone looking on the wrong processor.
-    /// Same construction as the GPU column — each value is "since the previous
-    /// mark" — so the CPU segments tile the record phase exactly as the GPU
-    /// segments tile the frame.
+    /// Same construction as the GPU column: each value is "since the previous
+    /// mark".
+    ///
+    /// **What they tile is the MARKED SPAN, not the whole record stage** (the
+    /// I4b audit — the first write-up said "exactly as the GPU segments tile the
+    /// frame", and that is one word too strong). [`FrameTimer::begin`] opens at
+    /// the frame's first *command*, so whatever `EngineRenderer::render` does
+    /// before it — the view matrices, the light and deform uniform writes, the
+    /// encoder itself — is inside a caller's `render (record)` clock and inside
+    /// no segment, and so are `encoder.finish()` and the submit after the last
+    /// mark. `fps_instrument.rs` prints that residue every run beside the column,
+    /// and bounds the one direction that must hold: the segments may not sum past
+    /// the stage that contains them.
     pub cpu_ms: f64,
 }
 

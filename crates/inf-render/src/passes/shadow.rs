@@ -392,8 +392,8 @@ impl ShadowNode {
     /// Both halves are keyed on what they actually read:
     ///
     /// * the **rigid** half on the packed bytes themselves, which is exact and
-    ///   costs `O(scene.instances)` — the same order as the pack whose guess it
-    ///   replaces, and *zero* on a level whose casters are all scatter;
+    ///   costs `O(scene.instances)` — and *zero* on a level whose casters are all
+    ///   scatter, which is what the phase-30 city is;
     /// * the **scatter** half on
     ///   [`scatter_caster_fold`](super::scatter::scatter_caster_fold) plus the
     ///   camera bucket, the shadow range and the caster settings — everything
@@ -402,6 +402,24 @@ impl ShadowNode {
     ///
     /// The scatter terms enter the key only when the scene carries scatter, so a
     /// level with no foliage at all pays nothing for them.
+    ///
+    /// # …and what the exact key COSTS, which the first write-up did not say
+    ///
+    /// The old key was `scene.version`, a `u64`, compared **before**
+    /// `pack_bucketed` ran — so a frame in which nothing changed left this node
+    /// at `O(1)`. The content key has to be computed from the content, so a
+    /// frame in which nothing changed now packs every rigid instance and hashes
+    /// the result: **the cache HIT went from `O(1)` to `O(scene.instances)`**,
+    /// and only the MISS is the same order it always was. That is the trade the
+    /// wave took and it is the right one on the scene it was taken for — the
+    /// city's casters are all scatter, `scene.instances` is the character and a
+    /// few props, and the node measured 3.149 → 0.157 ms — but a level with tens
+    /// of thousands of rigid casters and a still camera pays a pack and a hash
+    /// per frame where it used to pay a comparison. Priced, carried, not hidden;
+    /// the cheap way out (keeping `version` as a *negative* pre-filter, which is
+    /// sound because a version that has not moved cannot hide a change) is
+    /// refused here because it puts back the over-approximating coupling this
+    /// change exists to remove, and nothing in the tree could arm it.
     fn sync(&mut self, gpu: &GpuContext, frame: &FrameData) {
         let scatter_eye = frame.view.origin.to_world(frame.view.eye_local());
         let scatter_key = scatter_caster_key(

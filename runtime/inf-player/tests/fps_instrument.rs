@@ -1001,6 +1001,33 @@ fn the_frame_at_shipping_resolution() {
                     ms / m.gpu_frame_ms.max(1.0e-9) * 100.0
                 );
             }
+            // **The CPU column does NOT tile the record stage, and by how much**
+            // (the I4b audit). `inf_render::timing` said the CPU segments "tile
+            // the record phase exactly as the GPU segments tile the frame"; they
+            // do not, and the difference is not an epsilon. `FrameTimer::begin`
+            // opens at the frame's first *command*, so everything
+            // `EngineRenderer::render` does before that — the view matrices, the
+            // light and deform uniform writes, the encoder itself — is inside
+            // `render (record)` and inside no segment, and so are
+            // `encoder.finish()` and the submit after the last mark. Printed
+            // rather than asserted away, and bounded in the one direction that
+            // has to hold: a part may not exceed its whole.
+            let record_sum: f64 = m.passes.iter().map(|(_, _, cpu)| cpu).sum();
+            println!(
+                "{label} the per-pass RECORD column sums to {record_sum:.3} ms of \
+                 the {:.3} ms `render (record)` stage — the {:.3} ms outside it is \
+                 the setup before the timer's first command plus the finish and \
+                 submit after its last",
+                m.cpu_ms[3],
+                m.cpu_ms[3] - record_sum,
+            );
+            assert!(
+                record_sum <= m.cpu_ms[3] + 0.5,
+                "{label}: the per-pass record column sums to {record_sum:.3} ms \
+                 inside a {:.3} ms record stage — a part cannot exceed its whole, \
+                 so one of the two clocks is measuring something else",
+                m.cpu_ms[3]
+            );
             // Anti-vacuity: a report whose segments do not add up to the frame is
             // a report about a frame the renderer did not draw.
             let sum: f64 = m.passes.iter().map(|(_, ms, _)| ms).sum();
