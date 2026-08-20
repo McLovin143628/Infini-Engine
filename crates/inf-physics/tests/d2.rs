@@ -295,3 +295,66 @@ fn fixed_stepper_drives_step_count() {
         "expected 3 fixed steps across two 1.5-tick frames"
     );
 }
+
+/// **THE 2D MIRROR OF THE `FIXED_FIXED` NARROWING** (island wave I4b; armed by
+/// its audit).
+///
+/// `PhysicsWorld2D::active_collision_types` is written as "the MIRROR of
+/// `d3::PhysicsWorld3D::active_collision_types`, which carries the full argument
+/// and the measurement" — and a mirror with no arm is two declarations agreeing
+/// with each other rather than with the world. The 3D half has two arms in
+/// `step_cost_3d.rs` and this is their twin, in the units this facade exposes:
+/// **contact events**, not the narrow phase's pair table (`contact_pair_counts`
+/// is a 3D diagnostic and 2D has no equivalent).
+///
+/// Both halves, because only the pair says anything: a static **solid** pair that
+/// overlaps must now report nothing, and a static **sensor** over the same static
+/// scenery must still report — which is the one case the flags were widened for
+/// and is what `sensor => all()` keeps.
+#[test]
+fn a_static_solid_pair_reports_nothing_and_a_static_sensor_pair_still_does() {
+    let overlap = |sensor: bool| -> usize {
+        let mut world = PhysicsWorld2D::new(DVec2::new(0.0, -9.81));
+        let a = world.add_body(BodyKind::Static, DVec2::ZERO, 0.0);
+        world
+            .add_collider(
+                a,
+                ColliderDesc2D::new(ColliderShape2D::Box {
+                    half_width: 1.0,
+                    half_height: 1.0,
+                }),
+            )
+            .expect("the scenery's collider attaches");
+        let b = world.add_body(BodyKind::Static, DVec2::new(0.5, 0.0), 0.0);
+        let mut desc = ColliderDesc2D::new(ColliderShape2D::Box {
+            half_width: 1.0,
+            half_height: 1.0,
+        });
+        desc.sensor = sensor;
+        world
+            .add_collider(b, desc)
+            .expect("the second collider attaches");
+        let mut events = 0usize;
+        for _ in 0..4 {
+            world.step(DT);
+            events += world.drain_contact_events().len();
+        }
+        events
+    };
+
+    let solid = overlap(false);
+    let sensor = overlap(true);
+    println!("2D static pair: {solid} events solid, {sensor} events with a sensor");
+    assert_eq!(
+        solid, 0,
+        "two overlapping static SOLID colliders reported {solid} contact events \
+         — `FIXED_FIXED` is back on for 2D solids, and the 2D world is paying \
+         the manifold the 3D one stopped paying"
+    );
+    assert!(
+        sensor > 0,
+        "a static 2D sensor over static scenery reported nothing — the \
+         `FIXED_FIXED` narrowing took the sensor case with it, which is the one \
+         case the engine widened the flags for"
+    );
+}

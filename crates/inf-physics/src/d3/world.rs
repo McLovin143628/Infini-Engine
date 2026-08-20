@@ -1617,6 +1617,21 @@ impl PhysicsWorld3D {
     /// steps in a hundred — and the cost is the old cost, once, where it used to
     /// be the cost of every step.
     ///
+    /// # Where the trade turns over, unmeasured (the I4b audit)
+    ///
+    /// This is a win in proportion to how much of the world *stands still*: the
+    /// city it was measured on is 6 000 static colliders and one moving
+    /// character, so [`step`](Self::step) marks one or two bodies where the old
+    /// code re-described six thousand. The other end of that scale is a world in
+    /// which nearly everything is awake — a debris field, a physics playground —
+    /// where the step now pays a sort and a dedup over the awake set and then a
+    /// `compute_aabb` + `set_aabb` per moved leaf, against a from-scratch build
+    /// of the same leaves. **The crossover is not measured**, and no arm in this
+    /// crate stands at it: `step_cost_3d`'s worlds all have one dynamic body.
+    /// The direction is safe either way — both paths answer identically, which
+    /// is what the equivalence gate says — so this is a cost note rather than a
+    /// correctness one.
+    ///
     /// # The membership is unchanged
     ///
     /// The tree holds one leaf per collider in `self.colliders`, **including

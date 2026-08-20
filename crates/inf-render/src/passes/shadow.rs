@@ -775,4 +775,176 @@ mod tests {
             "a scatter-free scene must keep the scatter terms out of the key"
         );
     }
+
+    /// **THE FOLD IS PINNED FIELD BY FIELD**, which is the P22 allowlist law
+    /// applied to a cache key (the I4b audit).
+    ///
+    /// [`super::scatter::scatter_caster_fold`] exists to fold "everything
+    /// `pack_fallback` reads off the batches themselves". A ban enumerates what
+    /// somebody thought of; an allowlist enumerates what is allowed — so this
+    /// walks **every field of `ScatterBatch`**, changes it, and requires the fold
+    /// to move. A field that stops being folded is a cached shadow caster pack
+    /// that never notices the change: a batch whose anchor moved keeps its old
+    /// world positions, a batch whose bands moved keeps the wrong instance set,
+    /// a batch whose material moved casts with the wrong `InstanceRaw`.
+    ///
+    /// `ScatterBatch` has eight fields and eight rows below. The day a ninth is
+    /// added, `..Default::default()` does not exist on this type — the struct
+    /// literal in `mutate` stops compiling, which is the point of writing it as a
+    /// literal rather than a `let mut b = base; b.x = …`.
+    #[test]
+    fn the_scatter_caster_fold_moves_for_every_field_of_a_batch() {
+        use crate::passes::scatter::scatter_caster_fold;
+        let anchor = DVec3::new(120.0, 0.0, -40.0);
+        let base = batch(anchor);
+        let baseline = scatter_caster_fold(std::slice::from_ref(&base));
+
+        // Every field, one at a time, spelled out as a whole literal so a new
+        // field cannot be added without this list refusing to compile.
+        let variants: [(&str, ScatterBatch); 8] = [
+            (
+                "data (the payload's own content key)",
+                ScatterBatch {
+                    data: Arc::new(ScatterData::build(
+                        crate::primitives::PrimMesh::Cube,
+                        anchor,
+                        [ScatterInstance {
+                            // one instance moved by a metre
+                            position: anchor + DVec3::new(4.0, 0.0, -2.0),
+                            rotation: Quat::IDENTITY,
+                            scale: Vec3::new(20.0, 30.0, 7.4),
+                            color: [1.0; 4],
+                        }],
+                    )),
+                    anchor: base.anchor,
+                    metallic: base.metallic,
+                    roughness: base.roughness,
+                    emissive: base.emissive,
+                    id: base.id,
+                    draw_distance: base.draw_distance,
+                    near_distance: base.near_distance,
+                },
+            ),
+            (
+                "anchor",
+                ScatterBatch {
+                    data: base.data.clone(),
+                    anchor: anchor + DVec3::new(0.0, 0.0, 1.0),
+                    metallic: base.metallic,
+                    roughness: base.roughness,
+                    emissive: base.emissive,
+                    id: base.id,
+                    draw_distance: base.draw_distance,
+                    near_distance: base.near_distance,
+                },
+            ),
+            (
+                "metallic",
+                ScatterBatch {
+                    data: base.data.clone(),
+                    anchor: base.anchor,
+                    metallic: 1.0,
+                    roughness: base.roughness,
+                    emissive: base.emissive,
+                    id: base.id,
+                    draw_distance: base.draw_distance,
+                    near_distance: base.near_distance,
+                },
+            ),
+            (
+                "roughness",
+                ScatterBatch {
+                    data: base.data.clone(),
+                    anchor: base.anchor,
+                    metallic: base.metallic,
+                    roughness: 0.25,
+                    emissive: base.emissive,
+                    id: base.id,
+                    draw_distance: base.draw_distance,
+                    near_distance: base.near_distance,
+                },
+            ),
+            (
+                "emissive",
+                ScatterBatch {
+                    data: base.data.clone(),
+                    anchor: base.anchor,
+                    metallic: base.metallic,
+                    roughness: base.roughness,
+                    emissive: [0.0, 0.0, 1.0],
+                    id: base.id,
+                    draw_distance: base.draw_distance,
+                    near_distance: base.near_distance,
+                },
+            ),
+            (
+                "id (the pick id every InstanceRaw carries)",
+                ScatterBatch {
+                    data: base.data.clone(),
+                    anchor: base.anchor,
+                    metallic: base.metallic,
+                    roughness: base.roughness,
+                    emissive: base.emissive,
+                    id: base.id + 1,
+                    draw_distance: base.draw_distance,
+                    near_distance: base.near_distance,
+                },
+            ),
+            (
+                "draw_distance (the outer band)",
+                ScatterBatch {
+                    data: base.data.clone(),
+                    anchor: base.anchor,
+                    metallic: base.metallic,
+                    roughness: base.roughness,
+                    emissive: base.emissive,
+                    id: base.id,
+                    draw_distance: 500.0,
+                    near_distance: base.near_distance,
+                },
+            ),
+            (
+                "near_distance (the IB-2b inner cut)",
+                ScatterBatch {
+                    data: base.data.clone(),
+                    anchor: base.anchor,
+                    metallic: base.metallic,
+                    roughness: base.roughness,
+                    emissive: base.emissive,
+                    id: base.id,
+                    draw_distance: base.draw_distance,
+                    near_distance: 192.0,
+                },
+            ),
+        ];
+
+        for (field, v) in &variants {
+            assert_ne!(
+                scatter_caster_fold(std::slice::from_ref(v)),
+                baseline,
+                "changing `ScatterBatch::{field}` left the caster fold where it \
+                 was, so a shadow caster pack cached on it never notices — the \
+                 fold has stopped covering a field `pack_fallback` reads"
+            );
+        }
+        println!(
+            "the caster fold separates all {} fields of a ScatterBatch",
+            variants.len()
+        );
+
+        // …and the anti-vacuity control: two batches instead of one, and an empty
+        // list, are not the same fold either — a fold that hashed nothing would
+        // pass every row above by answering a different constant each call.
+        assert_ne!(
+            scatter_caster_fold(&[base.clone(), base.clone()]),
+            baseline,
+            "two copies of a batch fold to the same key as one — the fold is not \
+             reading the list"
+        );
+        assert_eq!(
+            scatter_caster_fold(std::slice::from_ref(&base)),
+            baseline,
+            "the fold is not a pure function of its input"
+        );
+    }
 }
