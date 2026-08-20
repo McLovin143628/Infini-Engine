@@ -114,6 +114,9 @@ describe("capNote — IB-14's missing half", () => {
     expect(note).toMatch(/5904 of 10000/);
     expect(note).toMatch(/NOT be imported/);
     expect(note).toMatch(/Raise it to 10000/);
+    // …and it is honest about being an ESTIMATE: the cap counts entities, and a
+    // polygon with holes plans one per ring while a point plans none.
+    expect(note).toMatch(/^about /);
   });
 
   it("is silent when the whole layer fits", () => {

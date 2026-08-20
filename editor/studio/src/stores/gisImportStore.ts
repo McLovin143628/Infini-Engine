@@ -94,12 +94,18 @@ export function gisSettingsIssue(
 /**
  * What the cap will do to this layer — shown BEFORE the import, which is the
  * half IB-14 says was missing.
+ *
+ * **An estimate, and it says so.** The cap counts *entities*, not features, and
+ * the two differ: a polygon with holes plans one entity per ring, a point plans
+ * none, and a feature below the stub floor plans none either. The exact numbers
+ * come back on the report; this is the warning that lets an author raise the cap
+ * before pressing the button instead of after.
  */
 export function capNote(probe: GisProbeDto | null, s: GisImportSettingsDto | null): string | null {
   if (!probe || !s || !Number.isFinite(s.max_entities)) return null;
   if (probe.features <= s.max_entities) return null;
   const lost = probe.features - s.max_entities;
-  return `${lost} of ${probe.features} features will NOT be imported at a cap of ${s.max_entities}. Raise it to ${probe.features} to take the whole layer.`;
+  return `about ${lost} of ${probe.features} features will NOT be imported at a cap of ${s.max_entities}. Raise it to ${probe.features} to take the whole layer.`;
 }
 
 /** One line describing where a source's CRS came from. */
