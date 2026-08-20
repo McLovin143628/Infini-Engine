@@ -183,8 +183,15 @@ pub struct PhysicsBridge3D {
     /// Under a band the attached set is no longer `0..structures.len()`, so the
     /// retain pass cannot re-derive it from a count: re-offering every solid
     /// would keep colliders the band dropped, and offering fewer would delete
-    /// ones it holds. Memory is bounded by the *active* set, not by the city —
-    /// which is the whole point of the item.
+    /// ones it holds.
+    ///
+    /// Memory is one `Uuid` per **admitted** collider, so it is bounded by the
+    /// active set exactly as the solver bill is — 6 067 × 16 B ≈ 97 KB on the
+    /// city fixture. The exception is the fail-open case, where the active set
+    /// *is* the world: an unbanded thousand-building city carries all 370 468
+    /// (5.9 MB), which is the price of the direction that keeps a body on the
+    /// floor (I3 audit — the first draft of this doc said "not by the city"
+    /// without the exception).
     structure_admitted: BTreeMap<Uuid, Vec<Uuid>>,
     /// The band's `(near, far)` radii in metres. Defaults to the engine
     /// constants; `set_collider_band_radii` retunes them.

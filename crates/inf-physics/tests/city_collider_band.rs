@@ -405,6 +405,88 @@ fn near_buildings_keep_every_part_and_far_buildings_keep_exactly_one() {
     println!("IB-2b: a probe rests at {rest:.3} m on a shell whose top is {top:.3} m");
 }
 
+/// **Content covered by no group is banded box by box** (IB-2a, I3 audit).
+///
+/// A fence, a `grammar.expand` run or a plain scatter has no shell to stand in
+/// for it, so `structure_snaps_of` admits a loose solid only at [`Tier::Near`]
+/// and drops it beyond. That is a ruling with a consequence — a fence seventy
+/// metres away is walk-through — and it had **no fixture**: every solid in this
+/// file's city and in `samples/phase30-city` belongs to a building, so the loose
+/// branch could be widened to admit at any tier, or narrowed to admit at none,
+/// with every arm in both files green.
+///
+/// The two posts are appended AFTER the block's grouped solids, which is the
+/// shape the cursor walk handles last and therefore the one most likely to be
+/// dropped by an off-by-one.
+#[test]
+fn a_solid_covered_by_no_group_is_banded_box_by_box() {
+    let mut city = city(DVec3::ZERO);
+    let post = |c: DVec3| ScatteredSolid {
+        center: c,
+        half_extents: DVec3::new(0.3, 1.2, 0.3),
+        rotation: DQuat::IDENTITY,
+    };
+    let (near_post, far_post) = (DVec3::new(2.0, 1.2, 2.0), DVec3::new(520.0, 1.2, 380.0));
+
+    let guid = block_guid(0);
+    let e = city.world.entity_of(guid).expect("block 0");
+    let (instances, mut solids, groups) = {
+        let vol = city.world.world().get::<PcgVolume>(e).expect("a volume");
+        (
+            vol.evaluated.clone(),
+            vol.structures.clone(),
+            vol.structure_groups.clone(),
+        )
+    };
+    let grouped = solids.len();
+    solids.push(post(near_post));
+    solids.push(post(far_post));
+    {
+        let mut vol = city
+            .world
+            .world_mut()
+            .get_mut::<PcgVolume>(e)
+            .expect("live");
+        vol.set_population(instances, solids, groups);
+        assert_eq!(
+            vol.structures.len(),
+            grouped + 2,
+            "the door refused the loose posts"
+        );
+    }
+    city.world.mark_dirty();
+
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync_from_world(&city.world);
+    let (near_m, far_m) = bridge.collider_band_radii();
+    let band = inf_ecs::SimBand::from_world(&city.world, near_m, far_m);
+
+    // ANTI-VACUITY FIRST: the two posts must really be on opposite sides of the
+    // band, or this arm is two assertions about one tier.
+    let half = post(near_post).half_extents;
+    assert_eq!(band.tier(near_post, half, DQuat::IDENTITY), Tier::Near);
+    assert_ne!(band.tier(far_post, half, DQuat::IDENTITY), Tier::Near);
+
+    assert!(
+        bridge
+            .collider_of(pcg_structure_guid(guid, grouped))
+            .is_some(),
+        "a loose post beside the player has no collider — an ungrouped solid \
+         inside the band must be solid"
+    );
+    assert!(
+        bridge
+            .collider_of(pcg_structure_guid(guid, grouped + 1))
+            .is_none(),
+        "a loose post {far_post:?} away kept its collider — an ungrouped solid \
+         has no shell to be replaced by, so past the band it is dropped"
+    );
+    println!(
+        "IB-2a ungrouped: 2 loose posts on {grouped} grouped solids — the near \
+         one is solid, the far one is not"
+    );
+}
+
 /// **Walking re-bands, and the swap is atomic.** A building that was a shell
 /// becomes whole when the player reaches it — never both, never neither.
 #[test]
