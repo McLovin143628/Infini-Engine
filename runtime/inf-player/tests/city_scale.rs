@@ -604,6 +604,10 @@ fn the_shipped_projection_emits_complementary_parts_and_shell_batches() {
 /// **either the shell is drawn or every part is**. The naive equal cuts are
 /// priced in the same run — a "zero" over a city that never straddles the line
 /// would be a statement about the fixture rather than about the rule.
+///
+/// The bands are **read off the real `project_scene`**, never restated here: an
+/// arm that recomputed the cuts would agree with a projection that had stopped
+/// emitting shells at all.
 #[test]
 fn no_eye_position_leaves_a_building_partly_drawn_with_no_shell() {
     let tmp = tempfile::tempdir().unwrap();
@@ -612,37 +616,69 @@ fn no_eye_position_leaves_a_building_partly_drawn_with_no_shell() {
     let lod = inf_render::STRUCTURE_LOD_M;
 
     // Per building: its shell's centre, its parts' own world positions, and the
-    // reach its BATCH carries (a volume's widest shell, since the band is a
-    // property of the batch and not of one building).
-    let mut buildings: Vec<(DVec3, Vec<DVec3>, f64)> = Vec::new();
-    for (_, _, v) in placed_volumes(&built) {
-        let reach = reach_of_volume(&v);
+    // anchor of the volume whose batches band it.
+    let mut buildings: Vec<([u64; 3], DVec3, Vec<DVec3>)> = Vec::new();
+    for (_, t, v) in placed_volumes(&built) {
+        let key = [t.x.to_bits(), t.y.to_bits(), t.z.to_bits()];
         for g in &v.structure_groups {
             buildings.push((
+                key,
                 g.shell.center,
                 v.evaluated[g.instance_range()]
                     .iter()
                     .map(|i| i.position)
                     .collect(),
-                reach,
             ));
         }
     }
     assert!(buildings.len() >= 1_000, "not a city");
 
-    // A building is whole when the shell is drawn OR every part is. `parts_cut`
-    // is the batch's own upper band; the two candidates differ only in whether
-    // it carries the reach.
-    let gapped = |carry_reach: bool| {
+    // The cuts, as the shipped projection states them: for each volume, the
+    // widest band a parts batch ends at and the narrowest a shell batch begins
+    // at. A volume with no shell batch keeps `INFINITY` — the honest reading of
+    // "its shell is never drawn", and what makes this arm fail if the far tier
+    // stops being emitted.
+    let sim = inf_player::sim_from_built(built);
+    let mut scene = inf_render::RenderScene::default();
+    inf_player::render::project_scene(
+        &mut scene,
+        &sim,
+        0.0,
+        &inf_player::vmesh::VmeshRegistry::new(),
+    );
+    let mut cuts: BTreeMap<[u64; 3], (f64, f64)> = BTreeMap::new();
+    for b in &scene.scatter {
+        let key = [
+            b.anchor.x.to_bits(),
+            b.anchor.y.to_bits(),
+            b.anchor.z.to_bits(),
+        ];
+        let e = cuts.entry(key).or_insert((0.0, f64::INFINITY));
+        if b.near_distance > 0.0 {
+            e.1 = e.1.min(b.near_distance);
+        } else {
+            e.0 = e.0.max(b.draw_distance);
+        }
+    }
+
+    // A building is whole when the shell is drawn OR every part is.
+    let gapped = |shipped: bool| {
         let mut worst = (0usize, 0u64);
         let mut total = 0usize;
         for step in (0..CITY_STEPS as u64).step_by(24) {
             let eye = city_drive_point(step);
             let mut n = 0usize;
-            for (centre, parts, reach) in &buildings {
-                let cut = if carry_reach { lod + reach } else { lod };
-                let shell = (*centre - eye).length() >= lod;
-                let whole = parts.iter().all(|p| (*p - eye).length() < cut);
+            for (key, centre, parts) in &buildings {
+                let (parts_cut, shell_cut) = cuts[key];
+                // The alternative: both bands cut at the LOD distance, which is
+                // what shipped before the reach was carried.
+                let (parts_cut, shell_cut) = if shipped {
+                    (parts_cut, shell_cut)
+                } else {
+                    (lod, lod)
+                };
+                let shell = (*centre - eye).length() >= shell_cut;
+                let whole = parts.iter().all(|p| (*p - eye).length() < parts_cut);
                 if !shell && !whole {
                     n += 1;
                 }
