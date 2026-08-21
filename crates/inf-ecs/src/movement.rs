@@ -88,6 +88,83 @@ pub mod actions {
 /// ALS's `RollDoubleTapTimeout`: two crouch presses inside this window roll.
 pub const ROLL_DOUBLE_TAP_S: f64 = 0.3;
 
+// ── click versus long press (I5) ────────────────────────────────────────────
+
+/// **How long a press has to be held to count as a long press**, seconds.
+///
+/// 250 ms is the desk convention — it is `DEFAULT_RMB_CLICK_MS` one ring up,
+/// arrived at independently for the viewport's right-drag, and it is what every
+/// shipped console game uses for a hold. Tunable per player through the
+/// controls settings; guarded at that door, and guarded again here, because a
+/// threshold is a number a settings file can carry.
+pub const DEFAULT_PRESS_THRESHOLD_S: f64 = 0.25;
+
+/// The band a press threshold is clamped into, seconds.
+///
+/// The floor is not zero: at zero every press is a long press on the frame it
+/// arrives and the click can never fire, which is a control scheme with half
+/// its verbs unreachable. The ceiling is two seconds because a hold nobody will
+/// wait out is the same unreachable verb from the other end.
+pub const PRESS_THRESHOLD_RANGE_S: (f64, f64) = (0.05, 2.0);
+
+/// How a press was classified by its duration (I5).
+///
+/// Not a wire type and not a component: it is derived every frame from two
+/// durations and thrown away, exactly like [`ModeVerdict`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PressClass {
+    /// Nothing happened to this control on this frame.
+    #[default]
+    None,
+    /// It was released having been held for **less** than the threshold.
+    Click,
+    /// It has just been held **past** the threshold — reported on the frame the
+    /// hold crosses it, while the control is still down.
+    LongPress,
+}
+
+/// **The one rule that turns a press duration into a click or a long press**
+/// (I5).
+///
+/// `hold_s` is how long the control has been active and `prev_hold_s` is the
+/// same number one frame ago (`inf_input::InputState` measures both, and a
+/// released control carries its final duration through the release frame).
+///
+/// Two properties are what make this worth being one function:
+///
+/// * **The two are mutually exclusive.** A long press fires on the frame the
+///   hold *crosses* the threshold, and the click only fires on a release that
+///   never crossed it. A control held down for a second therefore produces
+///   exactly one `LongPress` and no `Click`; a tap produces exactly one `Click`.
+/// * **The long press fires while the key is still down**, which is what makes
+///   the control feel like a hold rather than like a slow tap. A rule that
+///   waited for the release would put the whole verb behind letting go.
+///
+/// NaN-guarded on every input: a non-finite duration or threshold answers
+/// [`PressClass::None`], because every comparison a NaN takes part in is false
+/// and the alternative is a control that silently stops responding. The
+/// threshold is clamped into [`PRESS_THRESHOLD_RANGE_S`] so a settings file
+/// cannot make a verb unreachable.
+pub fn classify_press(
+    held: bool,
+    released: bool,
+    hold_s: f64,
+    prev_hold_s: f64,
+    threshold_s: f64,
+) -> PressClass {
+    if !hold_s.is_finite() || !prev_hold_s.is_finite() || !threshold_s.is_finite() {
+        return PressClass::None;
+    }
+    let t = threshold_s.clamp(PRESS_THRESHOLD_RANGE_S.0, PRESS_THRESHOLD_RANGE_S.1);
+    if held && hold_s >= t && prev_hold_s < t {
+        return PressClass::LongPress;
+    }
+    if released && hold_s < t {
+        return PressClass::Click;
+    }
+    PressClass::None
+}
+
 /// The gait hysteresis band, m/s. ALS uses 10 cm/s: the *actual* gait only steps
 /// up once the body has genuinely exceeded the tier below, so a character
 /// decelerating out of a sprint keeps running until it has really slowed.
@@ -841,6 +918,55 @@ pub fn transition_is_legal(from: MovementMode, to: MovementMode) -> bool {
     }
 }
 
+// ── dive into water (I5) ────────────────────────────────────────────────────
+
+/// How far in front of the feet the jump control looks for water, metres.
+///
+/// A stride and a half. It has to be far enough that a character running at a
+/// pool's edge finds the water *before* it runs out of ground, and short enough
+/// that standing on a jetty three metres back is still a jump.
+pub const DIVE_WATER_REACH_M: f64 = 2.5;
+
+/// **Whether a jump press is a dive into water** (I5, the owner's table's
+/// "Space = jump / dive-into-water").
+///
+/// Pure, so it can be measured without a physics world and so both hosts run
+/// the same arithmetic: they call it through one movement step, but a rule this
+/// small stated inside a 2 000-line integrator is a rule nothing can point an
+/// arm at.
+///
+/// Three conditions, all necessary:
+///
+/// * **There is water ahead.** `surface_ahead_y` is the water surface a reach in
+///   front of the feet, or `None` where there is none — so a jump on dry land is
+///   a jump, always, and the whole feature is inert on every level with no water
+///   in it.
+/// * **It is below the feet.** You dive *down* into water. A character already
+///   at or under the surface is swimming, and the swim latch owns it.
+/// * **The character is committed** — airborne, or sprinting. Walking up to a
+///   lake and tapping jump hops in feet-first, which is what a player means;
+///   sprinting at it, or already falling toward it, is what a dive means. This
+///   is the same "a dive needs a sprint" ruling the C key's long press carries,
+///   with the airborne case added because a dive off a cliff has no sprint left
+///   to hold.
+///
+/// Non-finite geometry answers `false`: a jump is the safe reading, and a NaN
+/// height compares false against everything anyway.
+pub fn dive_into_water(
+    airborne: bool,
+    sprinting: bool,
+    feet_y: f64,
+    surface_ahead_y: Option<f64>,
+) -> bool {
+    let Some(surface) = surface_ahead_y else {
+        return false;
+    };
+    if !surface.is_finite() || !feet_y.is_finite() {
+        return false;
+    }
+    (airborne || sprinting) && surface < feet_y
+}
+
 // ── flight (P29.7) ──────────────────────────────────────────────────────────
 //
 // The catalogue's row is "6-DOF integration, no gravity, banking". These are
@@ -1020,7 +1146,7 @@ impl MovementIntent {
     /// Build an intent from a host's resolved input, by the names in
     /// [`actions`].
     ///
-    /// # Why two closures and not an `InputState`
+    /// # Why closures and not an `InputState`
     ///
     /// `inf-ecs` does not depend on `inf-input`, and it should not have to: an
     /// intent is not input. A Blueprint, an AI or a replay can produce one. What
@@ -1028,10 +1154,41 @@ impl MovementIntent {
     /// what lives here — both hosts call this with one line each, so a control
     /// cannot mean one thing in the editor's Simulate and another in the shipped
     /// player.
+    ///
+    /// # The C key does four things, and the discrimination happens HERE (I5)
+    ///
+    /// The owner's table gives one key four verbs: **click** crouches, or slides
+    /// if the character is sprinting fast enough; **long press** goes prone, or
+    /// dives if the character is sprinting. Two of those four are the movement
+    /// step's own business — it is the step that knows the planar speed a slide
+    /// needs — so what this function decides is only the *click versus hold*
+    /// half, and it raises the `crouch` edge or the `prone`/`dive` edge
+    /// accordingly.
+    ///
+    /// It happens at **intent** level rather than in the input layer for one
+    /// reason: `hold` is fed from the caller's own clock, and a sim feeds it its
+    /// **fixed step**. The duration is then a function of the simulation rather
+    /// than of the frame rate, the edge that crosses into the world is the same
+    /// discrete set it has always been, and PIE stays byte-identical to
+    /// shipping. See [`classify_press`] for the rule and `inf_input::HoldClock`
+    /// for the accumulator.
+    ///
+    /// **The click fires on RELEASE**, because nothing can know a press is short
+    /// until it ends. The cost is real and is bounded by the threshold: a crouch
+    /// lands on the frame the key comes up, at most
+    /// [`DEFAULT_PRESS_THRESHOLD_S`] after it went down. A design that fired the
+    /// crouch on the press and "upgraded" to prone would do both.
+    ///
+    /// `prone` and `dive` are still read directly as well, so a dedicated key,
+    /// a Blueprint, an AI or a replay can raise either without the C key's
+    /// timing.
     pub fn from_actions(
         axis: impl Fn(&str) -> f32,
         held: impl Fn(&str) -> bool,
         pressed: impl Fn(&str) -> bool,
+        released: impl Fn(&str) -> bool,
+        hold: impl Fn(&str) -> (f64, f64),
+        press_threshold_s: f64,
     ) -> Self {
         let ax = |n: &str| {
             let v = axis(n) as f64;
@@ -1041,6 +1198,15 @@ impl MovementIntent {
                 0.0
             }
         };
+        let sprint = held(actions::SPRINT);
+        let (crouch_hold, crouch_prev) = hold(actions::CROUCH);
+        let stance = classify_press(
+            held(actions::CROUCH),
+            released(actions::CROUCH),
+            crouch_hold,
+            crouch_prev,
+            press_threshold_s,
+        );
         Self {
             move_input: Vec2d::new(
                 ax(actions::MOVE_X).clamp(-1.0, 1.0),
@@ -1049,14 +1215,14 @@ impl MovementIntent {
             look_yaw_dps: ax(actions::LOOK_X),
             look_pitch_dps: ax(actions::LOOK_Y),
             vertical: ax(actions::MOVE_UP).clamp(-1.0, 1.0),
-            sprint: held(actions::SPRINT),
+            sprint,
             walk: held(actions::WALK),
             aim: held(actions::AIM),
             jump: pressed(actions::JUMP),
-            crouch: pressed(actions::CROUCH),
-            prone: pressed(actions::PRONE),
+            crouch: stance == PressClass::Click,
+            prone: pressed(actions::PRONE) || (stance == PressClass::LongPress && !sprint),
             roll: pressed(actions::ROLL),
-            dive: pressed(actions::DIVE),
+            dive: pressed(actions::DIVE) || (stance == PressClass::LongPress && sprint),
             interact: pressed(actions::INTERACT),
             fly: pressed(actions::FLY),
             handbrake: held(actions::HANDBRAKE),
@@ -2028,6 +2194,9 @@ mod tests {
             },
             |n| n == actions::SPRINT,
             |n| n == actions::JUMP,
+            |_| false,
+            |_| (0.0, 0.0),
+            DEFAULT_PRESS_THRESHOLD_S,
         );
         assert_eq!(intent.move_input, Vec2d::new(0.5, -1.0));
         assert_eq!(intent.look_yaw_dps, 42.0);
@@ -2037,9 +2206,154 @@ mod tests {
         assert!((intent.magnitude() - (0.25f64 + 1.0).sqrt().min(1.0)).abs() < 1e-12);
 
         // A NaN axis is zero, not a NaN that reaches the velocity integrator.
-        let bad = MovementIntent::from_actions(|_| f32::NAN, |_| false, |_| false);
+        let bad = MovementIntent::from_actions(
+            |_| f32::NAN,
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| (0.0, 0.0),
+            DEFAULT_PRESS_THRESHOLD_S,
+        );
         assert_eq!(bad.move_input, Vec2d::ZERO);
         assert_eq!(bad.look_yaw_dps, 0.0);
+    }
+
+    /// **The C key's four verbs, as a matrix** (I5).
+    ///
+    /// Click × long press against standing × sprinting, through the one door
+    /// both hosts call. The *slide* half of the click row is the movement
+    /// step's (it needs a planar speed), so what this measures is which EDGE
+    /// the intent raises; `inf-physics`' own arms take it from there.
+    #[test]
+    fn the_c_key_discriminates_click_from_long_press_and_reads_the_sprint() {
+        let t = DEFAULT_PRESS_THRESHOLD_S;
+        let dt = 1.0 / 60.0;
+        // (held, released, hold_s, prev_hold_s, sprinting) → the three edges.
+        let intent = |held: bool, released: bool, hold: f64, prev: f64, sprint: bool| {
+            MovementIntent::from_actions(
+                |_| 0.0,
+                |n| (n == actions::CROUCH && held) || (n == actions::SPRINT && sprint),
+                |_| false,
+                |n| n == actions::CROUCH && released,
+                |n| {
+                    if n == actions::CROUCH {
+                        (hold, prev)
+                    } else {
+                        (0.0, 0.0)
+                    }
+                },
+                t,
+            )
+        };
+
+        // ── the click row: released short ──
+        for sprint in [false, true] {
+            let i = intent(false, true, 3.0 * dt, 3.0 * dt, sprint);
+            assert!(
+                i.crouch && !i.prone && !i.dive,
+                "a 50 ms press must be a crouch, sprinting = {sprint}"
+            );
+        }
+        // ── the long-press row: the hold crosses the threshold ──
+        let standing = intent(true, false, t, t - dt, false);
+        assert!(
+            standing.prone && !standing.crouch && !standing.dive,
+            "a long press while standing is PRONE"
+        );
+        let sprinting = intent(true, false, t, t - dt, true);
+        assert!(
+            sprinting.dive && !sprinting.crouch && !sprinting.prone,
+            "a long press while sprinting is a DIVE"
+        );
+
+        // ── and the two are mutually exclusive over the whole press ──
+        //
+        // A key held for a second must produce exactly ONE long press and NO
+        // click: the crossing fires once while the key is still down, and the
+        // release that follows is already past the threshold. Without the
+        // `prev < t` half this fires every frame for the rest of the press.
+        let mut long = 0;
+        let mut clicks = 0;
+        let mut hold = 0.0;
+        for step in 0..60 {
+            let prev = hold;
+            hold = if step == 0 { 0.0 } else { prev + dt };
+            let i = intent(true, false, hold, prev, false);
+            long += i.prone as u32;
+            clicks += i.crouch as u32;
+        }
+        // …then the release, carrying its final duration.
+        let i = intent(false, true, hold, hold, false);
+        long += i.prone as u32;
+        clicks += i.crouch as u32;
+        assert_eq!((long, clicks), (1, 0), "one long press, no click");
+
+        // A hostile threshold cannot silence the control: NaN classifies as
+        // nothing, and a zero threshold is clamped up rather than making the
+        // click unreachable.
+        let nan = MovementIntent::from_actions(
+            |_| 0.0,
+            |n| n == actions::CROUCH,
+            |_| false,
+            |_| false,
+            |_| (1.0, 0.0),
+            f64::NAN,
+        );
+        assert!(!nan.crouch && !nan.prone && !nan.dive);
+        assert_eq!(
+            classify_press(false, true, 0.01, 0.01, 0.0),
+            PressClass::Click,
+            "a zero threshold clamps to the band's floor, so a 10 ms tap is still a click"
+        );
+    }
+
+    /// **The dive-into-water rule, case by case** (I5).
+    ///
+    /// Three conditions, and each is measured on its own with the other two
+    /// satisfied — a table where only the combined case is tested cannot say
+    /// which condition is load-bearing, and a rule with a redundant condition
+    /// looks identical to one with a missing one.
+    #[test]
+    fn a_jump_becomes_a_dive_only_when_all_three_conditions_hold() {
+        let feet = 3.0;
+        let below = Some(0.0);
+        // All three: committed, water ahead, and it is below.
+        assert!(dive_into_water(true, false, feet, below), "airborne");
+        assert!(dive_into_water(false, true, feet, below), "sprinting");
+        assert!(dive_into_water(true, true, feet, below), "both");
+
+        // …and each condition alone.
+        assert!(
+            !dive_into_water(false, false, feet, below),
+            "walking up to a lake and tapping jump is a hop, not a dive"
+        );
+        assert!(
+            !dive_into_water(true, true, feet, None),
+            "there is no water in front of a jump on dry land"
+        );
+        assert!(
+            !dive_into_water(true, true, feet, Some(feet + 1.0)),
+            "a surface ABOVE the feet is a character already in the water; the swim latch owns it"
+        );
+        assert!(
+            !dive_into_water(true, true, feet, Some(feet)),
+            "and one exactly at the feet is the same case"
+        );
+
+        // Hostile geometry answers `false` — a jump is the safe reading, and a
+        // NaN comparison is false against everything anyway, so the guard is
+        // about being able to *say* what happens rather than about the answer.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!dive_into_water(true, true, bad, below), "feet {bad}");
+            assert!(
+                !dive_into_water(true, true, feet, Some(bad)),
+                "surface {bad}"
+            );
+        }
+        // The reach is a real distance rather than a placeholder: at zero the
+        // probe would sample the character's own feet and every jump over water
+        // would already be in it.
+        assert!(DIVE_WATER_REACH_M > 1.0 && DIVE_WATER_REACH_M < 10.0);
     }
 
     // -- P29.4: turn/rotate in place, aim offsets, mantle timing --------------

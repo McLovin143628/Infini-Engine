@@ -62,6 +62,18 @@ pub const SETTLE_SPEED_MPS: f64 = 0.35;
 /// See [`SETTLE_SPEED_MPS`].
 pub const SETTLE_TIME_S: f64 = 0.6;
 
+/// **The fastest a ragdoll limb may be travelling**, m/s (island wave I5).
+///
+/// The magnitude of [`inf_anim::ragdoll::GRAVITY_CUTOFF_MPS`] — the speed past
+/// which that module already stops a limb *accelerating*. The two are one number
+/// read twice, so a limb in free fall is never clamped by this and a limb the
+/// solver is feeding energy into always is.
+///
+/// It exists because the cutoff bounds an acceleration and nothing bounded the
+/// speed. See the loop that applies it for the measurement that made it
+/// necessary.
+pub const MAX_LIMB_SPEED_MPS: f64 = -inf_anim::ragdoll::GRAVITY_CUTOFF_MPS;
+
 /// How long the bridge waits for the pose step to answer a rig request before
 /// concluding that **no rig is coming**, seconds (P29.4 audit, A1).
 ///
@@ -330,6 +342,37 @@ pub fn step_ragdoll(
                 .world_mut()
                 .set_body_gravity_scale(*b, if gravity_on { 1.0 } else { 0.0 });
         }
+        // **…AND A CEILING ON THE SPEED ITSELF** (island wave I5).
+        //
+        // The cutoff above bounds an *acceleration*; nothing bounded the
+        // velocity. An articulated body whose joints are seeded in a pose that
+        // violates their limits does not settle — the solver feeds energy into
+        // it every step and the numbers leave the world. Measured on the
+        // phase-29 course: the committed run settles in 46 steps, and the same
+        // ragdoll entered from **2.7 cm further along the same fall**, at a
+        // bit-identical handoff velocity of `(0, -10.706, 3.750)`, reaches
+        // `z = -3.85e13`. The jitter is in **both** — the pelvis moves a metre a
+        // step from the first step of the committed run too — so the 46-step
+        // settle was luck rather than stability.
+        //
+        // This is a **bound, not a cure**: the instability is upstream in the
+        // joint seeding and is carried by name in the wave's ledger. What the
+        // bound buys is that a simulation which cannot be trusted to settle can
+        // still be trusted to stay in the level, which is the difference between
+        // a ragdoll that looks wrong and a world with no finite state.
+        for b in &spawned.bodies {
+            let Some(v) = bridge.world().body_linvel(*b) else {
+                continue;
+            };
+            let speed = v.length();
+            if !speed.is_finite() {
+                bridge.world_mut().set_body_linvel(*b, DVec3::ZERO);
+            } else if speed > MAX_LIMB_SPEED_MPS {
+                bridge
+                    .world_mut()
+                    .set_body_linvel(*b, v * (MAX_LIMB_SPEED_MPS / speed));
+            }
+        }
         // **The pelvis decides which way up the character is.**
         if let Some(p) = spawned.pelvis {
             let (t, r) = (
@@ -375,7 +418,23 @@ pub fn step_ragdoll(
                 on_ground = hit.is_some();
                 let feet_y = match hit {
                     Some(h) if !h.started_penetrating => h.point.y,
-                    _ => t.y - (half + radius),
+                    // **The probe began inside something** (island wave I5). The
+                    // line above this one says a pelvis in the floor is on it —
+                    // and then the placement put the capsule's FEET a whole body
+                    // below the pelvis, which on a pelvis already in the floor is
+                    // a whole body below the floor. The collider is switched back
+                    // on down there when the ragdoll ends and the character falls
+                    // out of the world: measured on the phase-29 course at
+                    // **y = -132 m and still falling**, from hips that ended
+                    // 0.8 m under the ground.
+                    //
+                    // A pelvis at a surface has its feet AT that surface. This
+                    // only ever RAISES the placement — the same direction, and
+                    // the same argument, as `settle_on_spawn`'s: the wrong way
+                    // round is the one that drops a body through the world and
+                    // keeps it falling.
+                    Some(_) => t.y,
+                    None => t.y - (half + radius),
                 };
                 position = DVec3::new(t.x, feet_y + half + radius, t.z);
             }

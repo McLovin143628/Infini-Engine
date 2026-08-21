@@ -51,6 +51,14 @@ pub struct InputState {
     // ── resolved snapshot (recomputed each frame) ──
     actions_prev: BTreeSet<String>,
     actions_cur: BTreeSet<String>,
+    // ── how long each action has been held, on the WALL clock (I5) ──
+    //
+    // Driven by `apply_dt` and read by the in-game UI (key repeat, capture
+    // feedback), which runs while the simulation is paused and therefore cannot
+    // use a sim clock. The *gameplay* durations are accumulated by each sim on
+    // its own fixed step, through a second instance of this same type — see
+    // `crate::hold`, which is where the reason for the split is written down.
+    holds: crate::hold::HoldClock,
     // The two halves each axis resolved into this frame, kept because
     // `axis_snapshot` must divide only the delta one by `dt` and the raw mouse
     // deltas are cleared by `commit_frame` before anyone can ask again.
@@ -71,6 +79,7 @@ impl InputState {
             mouse_axes: BTreeMap::new(),
             actions_prev: BTreeSet::new(),
             actions_cur: BTreeSet::new(),
+            holds: crate::hold::HoldClock::new(),
             axis_positions: BTreeMap::new(),
             axis_deltas: BTreeMap::new(),
             axis_values: BTreeMap::new(),
@@ -101,6 +110,11 @@ impl InputState {
         self.mouse_down.clear();
         self.mouse_axes.clear();
         self.commit_frame();
+        // A window losing focus is not a tap. `commit_frame` above fired the
+        // release edges on purpose — an ability that ends on one must end — but
+        // leaving the durations behind would let a UI read a *click* out of the
+        // same event, which is the opposite of what the player did.
+        self.holds.clear();
     }
 
     /// Whether any raw device input is currently held.
@@ -140,11 +154,34 @@ impl InputState {
     /// roll the edge-detection snapshot forward. Call once per frame with that
     /// frame's events (an empty slice is fine — it still commits the frame, so a
     /// `just_pressed` from last frame clears).
+    ///
+    /// This is [`apply_dt`](Self::apply_dt) with `dt = 0`, so every hold reads
+    /// **zero seconds** and every press classifies as a click. A host that wants
+    /// the click/long-press distinction has to say how long its frame was.
     pub fn apply(&mut self, events: &[InputEvent]) {
+        self.apply_dt(events, 0.0);
+    }
+
+    /// [`apply`](Self::apply), told how long the frame was — **the door a host
+    /// that wants press durations uses** (I5).
+    ///
+    /// `dt` is wall-clock seconds. It accumulates into each active action's hold
+    /// ([`hold_s`](Self::hold_s)), which is what turns "C is down" into "C has
+    /// been down for 310 ms" and therefore into the click-versus-long-press
+    /// distinction. Non-finite or negative `dt` contributes **zero** rather than
+    /// poisoning every hold in the map with a NaN that no comparison can ever
+    /// escape — the same guard, for the same reason, as
+    /// [`axis_snapshot`](Self::axis_snapshot)'s.
+    ///
+    /// The duration is measured **here** and never in the sim, so the sim's
+    /// input is the same discrete edge set it has always been and a trace stays
+    /// byte-exact between the editor's preview and the shipped player.
+    pub fn apply_dt(&mut self, events: &[InputEvent], dt: f64) {
         for e in events {
             self.apply_raw(e);
         }
-        self.commit_frame();
+        let dt = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };
+        self.commit_frame_dt(dt);
     }
 
     fn apply_raw(&mut self, event: &InputEvent) {
@@ -274,6 +311,10 @@ impl InputState {
     }
 
     fn commit_frame(&mut self) {
+        self.commit_frame_dt(0.0);
+    }
+
+    fn commit_frame_dt(&mut self, dt: f64) {
         std::mem::swap(&mut self.actions_prev, &mut self.actions_cur);
         self.actions_cur.clear();
         for (name, sources) in self.map.actions_iter() {
@@ -281,6 +322,9 @@ impl InputState {
                 self.actions_cur.insert(name.to_string());
             }
         }
+        // The wall-clock holds, rolled forward against the action set just
+        // settled. One implementation, two instances — see `crate::hold`.
+        self.holds.advance(&self.actions_cur, dt);
         self.axis_values.clear();
         self.axis_positions.clear();
         self.axis_deltas.clear();
@@ -316,6 +360,27 @@ impl InputState {
     /// Whether `action` became inactive this frame (falling edge).
     pub fn just_released(&self, action: &str) -> bool {
         !self.actions_cur.contains(action) && self.actions_prev.contains(action)
+    }
+
+    /// **How long `action` has been held on the WALL clock**, as
+    /// `(this frame, last frame)` seconds — `(0, 0)` if it is neither held nor
+    /// released this frame.
+    ///
+    /// Zero on the frame the action becomes active, and **carried unchanged
+    /// through the frame it is released** — so `just_released(a)` together with
+    /// this is the length of the press that just ended, read at the one moment
+    /// it is still knowable.
+    ///
+    /// It only grows if the host drives the state through
+    /// [`apply_dt`](Self::apply_dt); a host that calls [`apply`](Self::apply)
+    /// gets zero for ever, which classifies every press as a click rather than
+    /// inventing a clock.
+    ///
+    /// **This is the UI's clock, not the sim's.** Gameplay durations are
+    /// accumulated by each sim on its own fixed step — see [`crate::HoldClock`]
+    /// for why the two must not be the same number.
+    pub fn hold_s(&self, action: &str) -> (f64, f64) {
+        self.holds.hold(action)
     }
 
     /// The resolved value of `axis` in `[-1, 1]` (0 if unbound).

@@ -698,7 +698,18 @@ fn step_one(
     if !cm.mode.is_swimming() {
         // Edge intents, in the order a controller resolves them.
         if cm.runtime.press_dive {
-            let from_ground = cm.mode.is_grounded_family();
+            // **A dive needs a sprint** (I5, the owner's ruling), exactly as a
+            // slide does forty lines down. The two are the same move at two
+            // heights and it was never coherent that one was gated and the
+            // other was free: a dive from a standing start is a belly-flop, and
+            // the P29 catalogue's `dive_speed_mps` is a *launch* speed that
+            // assumes a body already moving.
+            //
+            // Folded into the condition rather than branched around, so a
+            // refusal is a **value** — `request_mode` answers
+            // `ConditionNotMet` and the character does whatever it was going to
+            // do instead, which is stand there. Nothing here can fail.
+            let from_ground = cm.mode.is_grounded_family() && cm.runtime.want_sprint;
             cm.mode = request(
                 &mut cm,
                 bridge,
@@ -737,6 +748,21 @@ fn step_one(
             let sliding = cm.mode == MovementMode::Grounded
                 && cm.runtime.want_sprint
                 && speed_planar >= cm.slide_entry_speed_mps;
+            // **The slide's refusal is a value too** (I5). A player holding
+            // sprint and pressing crouch has asked for a slide; if the body is
+            // not moving fast enough the answer is `ConditionNotMet`, and the
+            // stance toggle below is what the character does *instead*. Before
+            // this the refusal was a silent fall-through — the one entry
+            // condition in the catalogue that the outcome could not be
+            // distinguished from a deliberate crouch, so nothing downstream
+            // (a HUD hint, a tutorial, a telemetry counter) could ever say why.
+            if cm.mode == MovementMode::Grounded
+                && cm.runtime.want_sprint
+                && speed_planar < cm.slide_entry_speed_mps
+            {
+                refusal = MovementRefusal::ConditionNotMet;
+                cm.runtime.refusals = cm.runtime.refusals.saturating_add(1);
+            }
             let to = if sliding {
                 MovementMode::Slide
             } else if cm.mode == MovementMode::Crouch || cm.mode == MovementMode::Slide {
@@ -746,54 +772,97 @@ fn step_one(
             };
             cm.mode = request(&mut cm, bridge, &probe, to, true, &mut refusal);
         } else if cm.runtime.press_jump {
-            // **The mantle is tried FIRST** (ALS trigger path 1): a jump at a
-            // ledge with the stick forward is a climb, and only a jump that
-            // finds no ledge is a jump. Ordering it the other way round would
-            // make every mantle a jump that happened to end on a ledge.
-            let wants = cm
-                .runtime
-                .intent_move
-                .x
-                .abs()
-                .max(cm.runtime.intent_move.y.abs())
-                >= MANTLE_MIN_INPUT;
-            let mantled = wants
-                && (cm.mode == MovementMode::Grounded || cm.mode == MovementMode::Crouch)
-                && try_mantle(
-                    &mut cm,
-                    characters,
-                    bridge,
-                    &probe,
-                    position,
-                    radius,
-                    &LedgeSettings::default(),
-                    &mut refusal,
-                );
-            if mantled {
-                // The mantle owns the character from here; the rest of this
-                // step's decisions are not its to make.
-            } else if cm.mode == MovementMode::Crouch || cm.mode == MovementMode::Prone {
-                // Jump is also "stand up", and standing up under a table is the
-                // catalogue's own example of a refusal.
+            // ── **Space is a DIVE when there is water to dive into** (I5) ──
+            //
+            //    Tried before the mantle and before the jump, because all three
+            //    are the same gesture and only the world can tell them apart.
+            //    The rule is `model::dive_into_water` — pure, so it is measured
+            //    on its own — and it is fed the water surface a reach ahead of
+            //    the feet, through the bridge's place query rather than the
+            //    character's own probe: "is there water in front of me" is a
+            //    question about a place.
+            //
+            //    Inert on every level with no water: `water_surface_at` answers
+            //    `None` in `O(1)` when the index is empty, `dive_into_water`
+            //    answers `false`, and the jump below runs exactly as it did.
+            let feet_y = position.y - (cm.half_height_for(cm.mode) + radius);
+            let ahead = model::rotate_from_frame(Vec2d::new(0.0, 1.0), cm.runtime.aim_yaw_deg);
+            let probe_xz = glam::DVec2::new(
+                position.x + ahead.x * model::DIVE_WATER_REACH_M,
+                position.z + ahead.y * model::DIVE_WATER_REACH_M,
+            );
+            let water_dive = model::dive_into_water(
+                !cm.mode.is_grounded_family(),
+                cm.runtime.want_sprint,
+                feet_y,
+                bridge.water_surface_at(probe_xz),
+            );
+            if water_dive {
                 cm.mode = request(
                     &mut cm,
                     bridge,
                     &probe,
-                    MovementMode::Grounded,
+                    MovementMode::Dive,
                     true,
                     &mut refusal,
                 );
-            } else if cm.mode == MovementMode::Grounded && cm.runtime.grounded {
-                cm.mode = request(
-                    &mut cm,
-                    bridge,
-                    &probe,
-                    MovementMode::FallFree,
-                    true,
-                    &mut refusal,
-                );
-                if cm.mode == MovementMode::FallFree {
-                    cm.runtime.velocity.y = cm.jump_speed_mps;
+                if cm.mode == MovementMode::Dive && previous_mode != MovementMode::Dive {
+                    cm.runtime.velocity = Vec3d::new(
+                        ahead.x * cm.dive_speed_mps,
+                        cm.dive_up_speed_mps,
+                        ahead.y * cm.dive_speed_mps,
+                    );
+                }
+            } else {
+                // **The mantle is tried FIRST** (ALS trigger path 1): a jump at a
+                // ledge with the stick forward is a climb, and only a jump that
+                // finds no ledge is a jump. Ordering it the other way round would
+                // make every mantle a jump that happened to end on a ledge.
+                let wants = cm
+                    .runtime
+                    .intent_move
+                    .x
+                    .abs()
+                    .max(cm.runtime.intent_move.y.abs())
+                    >= MANTLE_MIN_INPUT;
+                let mantled = wants
+                    && (cm.mode == MovementMode::Grounded || cm.mode == MovementMode::Crouch)
+                    && try_mantle(
+                        &mut cm,
+                        characters,
+                        bridge,
+                        &probe,
+                        position,
+                        radius,
+                        &LedgeSettings::default(),
+                        &mut refusal,
+                    );
+                if mantled {
+                    // The mantle owns the character from here; the rest of this
+                    // step's decisions are not its to make.
+                } else if cm.mode == MovementMode::Crouch || cm.mode == MovementMode::Prone {
+                    // Jump is also "stand up", and standing up under a table is the
+                    // catalogue's own example of a refusal.
+                    cm.mode = request(
+                        &mut cm,
+                        bridge,
+                        &probe,
+                        MovementMode::Grounded,
+                        true,
+                        &mut refusal,
+                    );
+                } else if cm.mode == MovementMode::Grounded && cm.runtime.grounded {
+                    cm.mode = request(
+                        &mut cm,
+                        bridge,
+                        &probe,
+                        MovementMode::FallFree,
+                        true,
+                        &mut refusal,
+                    );
+                    if cm.mode == MovementMode::FallFree {
+                        cm.runtime.velocity.y = cm.jump_speed_mps;
+                    }
                 }
             }
         }
@@ -1056,11 +1125,23 @@ fn step_one(
     // engine that can tell a player asking to dive from a body integrating
     // gravity, and `apply_swim_motion` cannot. Without the distinction the float
     // balance wins every argument and `SwimUnder` is a mode no input reaches.
+    // …and **a dive that has just reached the water is deliberate too** (I5).
+    // The step a `Dive` becomes a swim is the one step where the player's whole
+    // committed intent is "go under", and the vertical axis is not being asked
+    // for — the hands are on the movement keys. Without this the float balance
+    // wins on entry and the dive that the owner's Space control exists for ends
+    // with the character bobbing on the surface, which is the same defect P29.6
+    // measured from the other direction.
+    //
+    // `previous_mode` is this step's own local, so there is no latch and no
+    // state to serialize: the door is open for exactly the transition step.
+    let deliberate = cm.mode.is_swimming()
+        && (cm.runtime.intent_vertical < 0.0 || previous_mode == MovementMode::Dive);
     let motion = bridge.apply_swim_motion_where(
         guid,
         DVec3::new(planar.x * dt, vertical * dt, planar.y * dt) + root_world,
         dt,
-        cm.mode.is_swimming() && cm.runtime.intent_vertical < 0.0,
+        deliberate,
     );
     // The mover is rebuilt with THIS step's capsule, so a crouch takes effect on
     // the step it is decided rather than on the next bridge sync.

@@ -516,3 +516,162 @@ fn a_delta_axis_snapshots_as_a_rate_and_a_bounded_one_as_a_position() {
         );
     }
 }
+
+// ── I5: press durations and the rebinding doors ─────────────────────────────
+
+/// **The wall clock only runs when the host says how long the frame was**.
+///
+/// `apply` is `apply_dt(events, 0)` and a host that never told the state its
+/// frame time gets zero for ever, which classifies every press as a click rather
+/// than inventing a clock. The arm is what stops that being a silent property.
+#[test]
+fn a_hold_only_grows_when_the_frame_time_is_supplied() {
+    let mut st = InputState::new(platformer_map());
+    for _ in 0..30 {
+        st.apply(&[key("Space", true)]);
+    }
+    assert_eq!(
+        st.hold_s("jump"),
+        (0.0, 0.0),
+        "`apply` invented a clock it was not given"
+    );
+
+    let mut st = InputState::new(platformer_map());
+    st.apply_dt(&[key("Space", true)], 1.0 / 60.0);
+    assert_eq!(st.hold_s("jump").0, 0.0, "a press starts at zero");
+    for _ in 0..30 {
+        st.apply_dt(&[], 1.0 / 60.0);
+    }
+    let (cur, prev) = st.hold_s("jump");
+    assert!(
+        (cur - 0.5).abs() < 1e-9,
+        "thirty sixtieths of a second is half a second: {cur}"
+    );
+    assert!(cur > prev, "and the pair moves forward");
+
+    // The release carries the duration, so a reader can tell a tap from a hold
+    // at the one moment both are knowable.
+    st.apply_dt(&[key("Space", false)], 1.0 / 60.0);
+    assert!(st.just_released("jump"));
+    assert!((st.hold_s("jump").0 - 0.5).abs() < 1e-9);
+
+    // …and a window losing focus is not a tap.
+    let mut st = InputState::new(platformer_map());
+    st.apply_dt(&[key("Space", true)], 0.1);
+    st.apply_dt(&[], 0.1);
+    st.release_all();
+    assert_eq!(
+        st.hold_s("jump"),
+        (0.0, 0.0),
+        "a focus loss left a duration behind, so a UI could read a click out of it"
+    );
+}
+
+/// **The rebinding doors edit ONE source of one name** (I5).
+///
+/// A pad binding is not something a player rebinds with a keyboard, so replacing
+/// the whole list would silently unbind the controller. Every door names the
+/// *desk* source and the arm measures that the gamepad ones survive — which is
+/// the mutation that would otherwise ship as "rebinding works".
+#[test]
+fn a_rebinding_replaces_the_desk_source_and_leaves_the_pad_alone() {
+    use inf_input::ActionSource;
+    let mut m = inf_input::default_map();
+    let pads_before = m
+        .action_sources("crouch")
+        .unwrap()
+        .iter()
+        .filter(|s| matches!(s, ActionSource::GamepadButton(_)))
+        .count();
+    assert!(
+        pads_before > 0,
+        "the fixture has no pad binding to preserve"
+    );
+
+    assert_eq!(
+        m.desk_source("crouch"),
+        Some(&ActionSource::Key("KeyC".into()))
+    );
+    let old = m.set_desk_source("crouch", ActionSource::Key("KeyB".into()));
+    assert_eq!(old, Some(ActionSource::Key("KeyC".into())));
+    assert_eq!(
+        m.desk_source("crouch"),
+        Some(&ActionSource::Key("KeyB".into()))
+    );
+    assert_eq!(
+        m.action_sources("crouch")
+            .unwrap()
+            .iter()
+            .filter(|s| matches!(s, ActionSource::GamepadButton(_)))
+            .count(),
+        pads_before,
+        "the rebinding unbound the controller"
+    );
+
+    // An axis row is one SIGN of one axis, and the scale survives the swap: a
+    // rebinding changes which key, never how far the key deflects.
+    assert_eq!(m.axis_key("move_y", true), Some("KeyW"));
+    assert_eq!(m.axis_key("move_y", false), Some("KeyS"));
+    assert_eq!(m.set_axis_key("move_y", true, "KeyT"), Some("KeyW".into()));
+    assert_eq!(m.axis_key("move_y", true), Some("KeyT"));
+    assert_eq!(
+        m.axis_key("move_y", false),
+        Some("KeyS"),
+        "editing one sign moved the other"
+    );
+    let forward = m
+        .axis_sources("move_y")
+        .unwrap()
+        .iter()
+        .find_map(|s| match s {
+            AxisSource::Key { code, scale } if code == "KeyT" => Some(*scale),
+            _ => None,
+        })
+        .expect("the new key is bound");
+    assert_eq!(forward, 1.0, "the scale did not survive the rebinding");
+
+    // Clearing returns what it removed, and the row can still be shown.
+    assert_eq!(
+        m.clear_desk_source("crouch"),
+        Some(ActionSource::Key("KeyB".into()))
+    );
+    assert_eq!(m.desk_source("crouch"), None);
+    assert!(
+        m.action_names().any(|n| n == "crouch"),
+        "an unbound action lost its row"
+    );
+}
+
+/// **A CONFLICT NAMES EVERY OWNER, NOT THE FIRST** (I5).
+///
+/// A key legitimately means one thing to an axis and another to an action —
+/// Space is `jump`, `handbrake` **and** `move_up` in the shipped table — so a
+/// conflict dialog that answered with the first would name whichever row sorted
+/// lowest and quietly steal the rest.
+#[test]
+fn a_key_reports_all_of_its_owners() {
+    let m = inf_input::default_map();
+    let owners = m.owners_of_key("Space");
+    let names: Vec<&str> = owners.iter().map(|(n, _, _)| *n).collect();
+    println!("Space is owned by {names:?}");
+    assert!(names.contains(&"jump"), "{names:?}");
+    assert!(names.contains(&"handbrake"), "{names:?}");
+    assert!(names.contains(&"move_up"), "{names:?}");
+    assert!(
+        owners.iter().any(|(n, is_axis, _)| *n == "move_up" && *is_axis),
+        "the axis half of the answer is missing, so a bindings table would show the row and the conflict would not"
+    );
+    assert!(
+        owners.len() >= 3,
+        "a conflict that names one of three owners steals the other two"
+    );
+
+    // A key nobody has answers with nothing, rather than with a guess.
+    assert!(m.owners_of_key("KeyJ").is_empty());
+    // And the mouse half is walked too.
+    let lmb = m.owners_of_mouse(MouseButton::Left);
+    assert_eq!(
+        lmb.iter().map(|(n, _, _)| *n).collect::<Vec<_>>(),
+        ["attack"]
+    );
+}

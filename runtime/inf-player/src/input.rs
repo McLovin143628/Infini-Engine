@@ -147,6 +147,14 @@ pub fn keycode_to_code(code: KeyCode) -> Option<&'static str> {
         // ── P29.7: the flight toggle. `interact` and `handbrake` share keys
         //    that were already here (E and Space).
         KeyCode::KeyV => "KeyV",
+        // ── I5: the owner's table. `Tab` opens the in-game menu, `KeyI` the
+        //    inventory, and the roll moved to `KeyZ` because R is now reload.
+        //    A binding whose key never maps here is a control that silently
+        //    does nothing — see `every_movement_action_the_intent_reads_is_bound`,
+        //    which is the arm that says so.
+        KeyCode::Tab => "Tab",
+        KeyCode::KeyI => "KeyI",
+        KeyCode::KeyZ => "KeyZ",
         _ => return None,
     })
 }
@@ -197,8 +205,9 @@ mod tests {
         assert_eq!(keycode_to_code(KeyCode::Space), Some("Space"));
         assert_eq!(keycode_to_code(KeyCode::KeyW), Some("KeyW"));
         // P29.3 added three, and a binding whose key never maps is a binding
-        // that silently does nothing.
-        for key in ["Shift", "KeyC", "KeyX", "AltLeft"] {
+        // that silently does nothing. I5 replaced `AltLeft` with `Control`
+        // (Ctrl walks) and added the four the owner's table names.
+        for key in ["Shift", "KeyC", "KeyX", "Control", "Tab", "KeyI", "KeyZ"] {
             assert!(
                 default_map()
                     .actions_iter()
@@ -212,7 +221,130 @@ mod tests {
         assert_eq!(keycode_to_code(KeyCode::KeyX), Some("KeyX"));
         assert_eq!(keycode_to_code(KeyCode::AltLeft), Some("AltLeft"));
         assert_eq!(keycode_to_code(KeyCode::ShiftLeft), Some("Shift"));
+        assert_eq!(keycode_to_code(KeyCode::ControlLeft), Some("Control"));
+        assert_eq!(keycode_to_code(KeyCode::ControlRight), Some("Control"));
         assert_eq!(keycode_to_code(KeyCode::KeyC), Some("KeyC"));
+        assert_eq!(keycode_to_code(KeyCode::Tab), Some("Tab"));
+        assert_eq!(keycode_to_code(KeyCode::KeyI), Some("KeyI"));
+        assert_eq!(keycode_to_code(KeyCode::KeyZ), Some("KeyZ"));
+    }
+
+    /// **The owner's table, as shipped** (I5) — the binding a player meets on
+    /// the first run, asserted key by key.
+    ///
+    /// It is a *table* rather than a sweep because the claim is about specific
+    /// keys: "Ctrl walks" and "Shift sprints" are the owner's ruling, and a
+    /// sweep over "every action is bound to something" is satisfied perfectly by
+    /// a table that binds walk to the semicolon.
+    #[test]
+    fn the_shipped_bindings_are_the_owners_table() {
+        use inf_input::{ActionSource, MouseButton};
+        let m = default_map();
+        let key = |action: &str| match m.desk_source(action) {
+            Some(ActionSource::Key(c)) => c.clone(),
+            other => panic!("`{action}` is bound to {other:?}, not a key"),
+        };
+        assert_eq!(key("menu"), "Tab");
+        assert_eq!(key("sprint"), "Shift");
+        assert_eq!(key("walk"), "Control");
+        assert_eq!(key("interact"), "KeyE");
+        assert_eq!(key("reload"), "KeyR");
+        assert_eq!(key("crouch"), "KeyC");
+        assert_eq!(key("jump"), "Space");
+        assert_eq!(key("inventory"), "KeyI");
+        assert_eq!(
+            m.desk_source("attack"),
+            Some(&ActionSource::MouseButton(MouseButton::Left))
+        );
+        assert_eq!(
+            m.desk_source("aim"),
+            Some(&ActionSource::MouseButton(MouseButton::Right))
+        );
+        assert_eq!(m.axis_key("move_y", true), Some("KeyW"));
+        assert_eq!(m.axis_key("move_y", false), Some("KeyS"));
+        assert_eq!(m.axis_key("move_x", true), Some("KeyD"));
+        assert_eq!(m.axis_key("move_x", false), Some("KeyA"));
+        assert!(
+            m.axis_sources("weapon_switch")
+                .is_some_and(|s| s.iter().any(
+                    |s| matches!(s, inf_input::AxisSource::MouseAxis { axis, .. }
+                                      if *axis == inf_input::MouseAxis::WheelY)
+                )),
+            "the wheel is not bound to the weapon switch"
+        );
+
+        // **W is no longer a jump.** It was, because the 2D vocabulary bound it
+        // there and the 3D intent reads the same name — so every step forward
+        // on a character was also a jump, and no scripted trace could see it
+        // because every one of them presses action NAMES.
+        assert!(
+            !m.action_sources("jump").is_some_and(|s| s
+                .iter()
+                .any(|s| matches!(s, ActionSource::Key(c) if c == "KeyW" || c == "ArrowUp"))),
+            "W or Up is bound to `jump`, so walking forward jumps"
+        );
+        // …and the 2D vocabulary the Coyote blueprint queries is untouched.
+        for a in ["up", "down", "left", "right"] {
+            assert!(m.action_sources(a).is_some(), "the 2D `{a}` action is gone");
+        }
+    }
+
+    /// **The two vocabularies do not overlap** (I5).
+    ///
+    /// `inf_ecs::movement::actions` is the movement half and
+    /// `inf_input::actions` is the rest, and this crate is the only one that
+    /// names both. If a name appeared in both, one of them would be a second
+    /// spelling of the other and the two would drift — which is the exact
+    /// defect the P29.6 note above this arm describes from the other side.
+    #[test]
+    fn the_two_vocabularies_do_not_overlap() {
+        use inf_ecs::movement::actions as mv;
+        let movement = [
+            mv::MOVE_X,
+            mv::MOVE_Y,
+            mv::LOOK_X,
+            mv::LOOK_Y,
+            mv::MOVE_UP,
+            mv::SPRINT,
+            mv::WALK,
+            mv::AIM,
+            mv::JUMP,
+            mv::CROUCH,
+            mv::PRONE,
+            mv::ROLL,
+            mv::DIVE,
+            mv::INTERACT,
+            mv::FLY,
+            mv::HANDBRAKE,
+        ];
+        let game = [
+            inf_input::actions::MENU,
+            inf_input::actions::RELOAD,
+            inf_input::actions::ATTACK,
+            inf_input::actions::INVENTORY,
+            inf_input::actions::WEAPON_SWITCH,
+        ];
+        for g in game {
+            assert!(
+                !movement.contains(&g),
+                "`{g}` is in both vocabularies, so one of them is a second spelling of the other"
+            );
+            let m = default_map();
+            assert!(
+                m.action_names().any(|n| n == g) || m.axis_names().any(|n| n == g),
+                "`{g}` is named by the game vocabulary and bound to nothing"
+            );
+        }
+        // …and the four with no consumer are exactly the four the list names,
+        // extracted rather than restated so the list cannot rot.
+        assert_eq!(
+            inf_input::actions::NOT_YET_CONSUMED.len(),
+            4,
+            "the not-yet list changed size without this arm noticing"
+        );
+        for a in inf_input::actions::NOT_YET_CONSUMED {
+            assert!(game.contains(&a), "`{a}` is not in the game vocabulary");
+        }
     }
 
     /// **Every action the movement intent reads is BOUND** (P29.6).
@@ -351,12 +483,15 @@ mod tests {
             KeyCode::KeyD,
             KeyCode::KeyE,
             KeyCode::KeyF,
+            KeyCode::KeyI,
             KeyCode::KeyQ,
             KeyCode::KeyR,
             KeyCode::KeyS,
             KeyCode::KeyV,
             KeyCode::KeyW,
             KeyCode::KeyX,
+            KeyCode::KeyZ,
+            KeyCode::Tab,
             KeyCode::ArrowLeft,
             KeyCode::ArrowRight,
             KeyCode::ArrowUp,

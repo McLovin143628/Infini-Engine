@@ -190,6 +190,13 @@ struct Driver {
     /// Steps spent in the current stage, for the stations that WAIT rather than
     /// press (the ragdoll settles before it is ended).
     held: u32,
+    /// Alternates so [`tap`](Self::tap) can let a key back up (I5).
+    ///
+    /// Deliberately **not** reset by [`next`](Self::next): it is a property of
+    /// the keyboard, not of the station, and a station that started on the
+    /// "down" half would press two steps running and turn its click into a
+    /// hold.
+    tap_phase: u32,
 }
 
 impl Driver {
@@ -200,13 +207,60 @@ impl Driver {
         self.held = 0;
     }
 
-    /// One step's input.
-    fn step(&mut self, z: f64, mode: MovementMode, grounded: bool) -> Drive {
+    /// **Press `action` on alternate steps** — a click rather than a hold (I5).
+    ///
+    /// The stance control is click-or-long-press since the island's player-core
+    /// wave: a click crouches (or slides), and a key held past
+    /// `DEFAULT_PRESS_THRESHOLD_S` goes prone (or dives). The click fires on the
+    /// **release**, because nothing can know a press is short until it ends —
+    /// so a station that wants a crouch has to let the key back up, exactly as a
+    /// player does.
+    ///
+    /// A course that held the key would get the other verb: measured, holding
+    /// `crouch` through the slide station turns its sprint into a **dive**.
+    /// Nothing about the gate's claims moved; what moved is that the script now
+    /// types like a human.
+    ///
+    /// `held_with` rides along on both halves (the slide's `sprint`, which is a
+    /// *modifier* and must stay down while the stance key goes up and down).
+    ///
+    /// **One step down, two up.** The cadence is not load-bearing — a two-step
+    /// one reaches every station of the course too, which is the point: the
+    /// stations stopped depending on the route since the lateral correction and
+    /// the ragdoll's speed ceiling landed. What the three-step cadence buys is
+    /// only that the whole course fits inside [`STEPS`].
+    fn tap(&mut self, action: &'static str, held_with: &[&'static str]) -> Vec<&'static str> {
+        self.tap_phase = self.tap_phase.wrapping_add(1);
+        let mut out = held_with.to_vec();
+        if self.tap_phase % 3 == 1 {
+            out.push(action);
+        }
+        out
+    }
+
+    /// One step's input. `x` is the character's lateral world offset — see
+    /// [`state_of_xz`].
+    fn step(&mut self, z: f64, x: f64, mode: MovementMode, grounded: bool) -> Drive {
         use MovementMode as M;
-        // Press `action` until `mode` becomes `want`, then move on once the mode
+        // **Steer back onto the line** (I5): a proportional correction toward
+        // `x = 0`, saturating at half a metre of error. The course's road, pool
+        // and car all sit on that line, and nothing before this wave brought a
+        // character back to it — so a station's success depended on the route
+        // having stayed straight, which a tumbling ragdoll makes untrue.
+        //
+        // `move_x` is the aim frame's lateral axis and the course never turns
+        // the aim except in flight, so at yaw 0 it is the world's — the same
+        // axis the driving station steers the car with, which is the point of
+        // routing every control through one intent.
+        let correct = (-x / 0.5).clamp(-1.0, 1.0) as f32;
+        // Press `actions` until `mode` becomes `want`, then move on once the mode
         // has left it again — the shape every one-shot station has.
+        //
+        // `actions` is a SLICE since I5: a dive needs the sprint held beside it,
+        // because "slide and dive both require a sprint" is the owner's ruling
+        // and the movement step refuses a standing dive as a value.
         macro_rules! oneshot {
-            ($action:expr, $want:expr) => {{
+            ($actions:expr, $want:expr) => {{
                 if mode == $want {
                     self.took = true;
                     forward(&[])
@@ -214,11 +268,11 @@ impl Driver {
                     self.next();
                     forward(&[])
                 } else if matches!(mode, M::Grounded) {
-                    (vec![$action], axes(&[("move_y", 1.0)]))
+                    ($actions.to_vec(), axes(&[("move_y", 1.0)]))
                 } else {
                     // Somewhere in between (a crouch left over from the last
-                    // station): stand up first.
-                    (vec!["crouch"], axes(&[("move_y", 1.0)]))
+                    // station): stand up first, with a CLICK.
+                    (self.tap("crouch", &[]), axes(&[("move_y", 1.0)]))
                 }
             }};
         }
@@ -250,7 +304,7 @@ impl Driver {
                 if mode == M::Crouch {
                     forward(&[])
                 } else {
-                    (vec!["crouch"], axes(&[("move_y", 1.0)]))
+                    (self.tap("crouch", &[]), axes(&[("move_y", 1.0)]))
                 }
             }
             // ── prone, and the crawl ──
@@ -270,7 +324,7 @@ impl Driver {
             // ── back to a stand, one press at a time ──
             5 => match mode {
                 M::Prone => (vec!["prone"], axes(&[("move_y", 1.0)])),
-                M::Crouch => (vec!["crouch"], axes(&[("move_y", 1.0)])),
+                M::Crouch => (self.tap("crouch", &[]), axes(&[("move_y", 1.0)])),
                 _ => {
                     self.next();
                     forward(&[])
@@ -294,21 +348,26 @@ impl Driver {
                     return forward(&[]);
                 }
                 if mode == M::Grounded {
-                    (vec!["sprint", "crouch"], axes(&[("move_y", 1.0)]))
+                    // Sprint stays DOWN while the stance key clicks: a slide is
+                    // "sprint held, crouch tapped", and a crouch key held down
+                    // beside a sprint is the long press that dives.
+                    (self.tap("crouch", &["sprint"]), axes(&[("move_y", 1.0)]))
                 } else {
                     forward(&["sprint"])
                 }
             }
             // ── stand out of whatever the slide left behind ──
             8 => match mode {
-                M::Slide | M::Crouch => (vec!["crouch"], axes(&[("move_y", 1.0)])),
+                M::Slide | M::Crouch => (self.tap("crouch", &[]), axes(&[("move_y", 1.0)])),
                 _ => {
                     self.next();
                     forward(&[])
                 }
             },
-            9 => oneshot!("roll", M::Roll),
-            10 => oneshot!("dive", M::Dive),
+            9 => oneshot!(["roll"], M::Roll),
+            // **A dive needs a sprint** (I5) — the owner's ruling, refused as a
+            // value by the movement step, so the station has to ask for it.
+            10 => oneshot!(["dive", "sprint"], M::Dive),
             // ── a jump on open ground: `FallFree`, which only a jump makes ──
             11 => {
                 if mode == M::FallFree {
@@ -321,7 +380,7 @@ impl Driver {
                 }
                 match mode {
                     M::Grounded if grounded => (vec!["jump"], axes(&[("move_y", 1.0)])),
-                    M::Crouch | M::Prone => (vec!["crouch"], axes(&[("move_y", 1.0)])),
+                    M::Crouch | M::Prone => (self.tap("crouch", &[]), axes(&[("move_y", 1.0)])),
                     _ => forward(&[]),
                 }
             }
@@ -427,10 +486,16 @@ impl Driver {
             //    134.5 left it 3.38 m away and pressing a control that answered
             //    "nothing in reach" for four thousand steps.
             23 => {
-                if z >= 136.0 {
+                if z >= 136.0 && x.abs() < 0.25 {
                     self.next();
                 }
-                forward(&[])
+                (
+                    Vec::new(),
+                    axes(&[
+                        ("move_y", if z >= 136.0 { 0.0 } else { 1.0 }),
+                        ("move_x", correct),
+                    ]),
+                )
             }
             // ── climb in. `interact` is an EDGE, so it is pressed on one step
             //    and released on the next; holding it would enter and leave. ──
@@ -619,19 +684,33 @@ fn record(world: &EcsWorld) -> Vec<u8> {
 
 /// Where the character is, and what it is doing — the driver's input.
 fn state_of(world: &EcsWorld) -> (f64, MovementMode, bool) {
+    let s = state_of_xz(world);
+    (s.0, s.2, s.3)
+}
+
+/// The same, with the **lateral** offset beside it (I5): `(z, x, mode, grounded)`.
+///
+/// The course's car station used to walk forward and hope. Every station asks for
+/// `move_y` and none of them corrects across, so a character that arrives two and
+/// a half metres to one side finds nothing within `ENTER_REACH_M` and presses a
+/// control that answers "nothing here" for a thousand steps. A **ragdoll tumbles**
+/// — where it ends is not where it started — and one measured **x = −2.494 m**.
+/// Walking *to* the car is what a player does, and it is what makes the station a
+/// fact about the world rather than about the route that happened to be taken.
+fn state_of_xz(world: &EcsWorld) -> (f64, f64, MovementMode, bool) {
     let Some(e) = world.entity_of(hero()) else {
-        return (0.0, MovementMode::Grounded, false);
+        return (0.0, 0.0, MovementMode::Grounded, false);
     };
     let w = world.world();
-    let z = w
+    let (z, x) = w
         .get::<Transform>(e)
-        .map(|t| t.translation.z)
-        .unwrap_or(0.0);
+        .map(|t| (t.translation.z, t.translation.x))
+        .unwrap_or((0.0, 0.0));
     let (mode, grounded) = w
         .get::<CharacterMovement>(e)
         .map(|cm| (cm.mode, cm.runtime.grounded))
         .unwrap_or((MovementMode::Grounded, false));
-    (z, mode, grounded)
+    (z, x, mode, grounded)
 }
 
 // ── the two hosts ───────────────────────────────────────────────────────────
@@ -767,8 +846,8 @@ fn run_trace(mut sim: RuntimeSim, steps: u32) -> Vec<Vec<u8>> {
     let mut driver = Driver::default();
     let mut out = Vec::with_capacity(steps as usize);
     for _ in 0..steps {
-        let (z, mode, grounded) = state_of(sim.world());
-        let (held, ax) = driver.step(z, mode, grounded);
+        let (z, x, mode, grounded) = state_of_xz(sim.world());
+        let (held, ax) = driver.step(z, x, mode, grounded);
         sim.step_once(RuntimeInput::with_down(held).with_axes(ax));
         out.push(record(sim.world()));
     }
@@ -780,8 +859,8 @@ fn editor_trace(machine: Option<inf_anim::StateMachine>, steps: u32) -> Vec<Vec<
     let mut driver = Driver::default();
     let mut out = Vec::with_capacity(steps as usize);
     for _ in 0..steps {
-        let (z, mode, grounded) = state_of(doc.world());
-        let (held, ax) = driver.step(z, mode, grounded);
+        let (z, x, mode, grounded) = state_of_xz(doc.world());
+        let (held, ax) = driver.step(z, x, mode, grounded);
         session.step_once(&mut doc, SimInput::with_down(held).with_axes(ax));
         out.push(record(doc.world()));
     }
@@ -970,8 +1049,8 @@ fn probe_the_course() {
     let mut log: Vec<(u32, f64, f64, String)> = Vec::new();
     let mut last = MovementMode::Grounded;
     for i in 0..STEPS {
-        let (z, mode, grounded) = state_of(sim.world());
-        let (held, ax) = driver.step(z, mode, grounded);
+        let (z, x, mode, grounded) = state_of_xz(sim.world());
+        let (held, ax) = driver.step(z, x, mode, grounded);
         sim.step_once(RuntimeInput::with_down(held).with_axes(ax));
         let (z, mode, _) = state_of(sim.world());
         let y = sim
@@ -1398,8 +1477,8 @@ fn kit_segment(steps: u32) -> Vec<KitStep> {
     let mut driver = Driver::default();
     let mut out = Vec::with_capacity(steps as usize);
     for _ in 0..steps {
-        let (z, mode, grounded) = state_of(sim.world());
-        let (held, ax) = driver.step(z, mode, grounded);
+        let (z, x, mode, grounded) = state_of_xz(sim.world());
+        let (held, ax) = driver.step(z, x, mode, grounded);
         sim.step_once(RuntimeInput::with_down(held).with_axes(ax));
         let world = sim.world();
         // The state's NAME, straight off the bridge — the same door
@@ -1759,8 +1838,8 @@ fn camera_run(steps: u32) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
     let mut driver = Driver::default();
     let (mut sim_trace, mut cam_trace) = (Vec::new(), Vec::new());
     for i in 0..steps {
-        let (z, mode, grounded) = state_of(sim.world());
-        let (held, ax) = driver.step(z, mode, grounded);
+        let (z, x, mode, grounded) = state_of_xz(sim.world());
+        let (held, ax) = driver.step(z, x, mode, grounded);
         // First person for one stretch, so the trace exercises the blend weight
         // and the seat as well as the third-person arm.
         sim.camera_mut().view_mode = if (900..1500).contains(&i) {
@@ -1852,8 +1931,8 @@ fn the_camera_trace_is_deterministic_and_is_not_the_sim_trace() {
         assert!(t.set("pivot_height_ratio", 0.55));
         let (mut s, mut c) = (Vec::new(), Vec::new());
         for _ in 0..CAMERA_STEPS {
-            let (z, mode, grounded) = state_of(sim.world());
-            let (held, ax) = driver.step(z, mode, grounded);
+            let (z, x, mode, grounded) = state_of_xz(sim.world());
+            let (held, ax) = driver.step(z, x, mode, grounded);
             sim.step_once(RuntimeInput::with_down(held).with_axes(ax));
             s.push(record(sim.world()));
             c.push(sim.camera().trace_bytes());
@@ -1884,8 +1963,8 @@ fn the_camera_sweeps_against_the_course() {
     let mut pulled = 0u32;
     let mut worst = 0.0f64;
     for _ in 0..CAMERA_STEPS {
-        let (z, mode, grounded) = state_of(sim.world());
-        let (held, ax) = driver.step(z, mode, grounded);
+        let (z, x, mode, grounded) = state_of_xz(sim.world());
+        let (held, ax) = driver.step(z, x, mode, grounded);
         sim.step_once(RuntimeInput::with_down(held).with_axes(ax));
         let pull = sim.camera().collision_pull_m;
         if pull > 1e-6 {
@@ -1943,8 +2022,8 @@ fn the_camera_keeps_its_distance_while_driving() {
     let mut close = 0u32;
     let mut worst = f64::MAX;
     for _ in 0..STEPS {
-        let (z, mode, grounded) = state_of(sim.world());
-        let (held, ax) = driver.step(z, mode, grounded);
+        let (z, x, mode, grounded) = state_of_xz(sim.world());
+        let (held, ax) = driver.step(z, x, mode, grounded);
         sim.step_once(RuntimeInput::with_down(held).with_axes(ax));
         if state_of(sim.world()).1 != MovementMode::Driving {
             continue;
@@ -2262,8 +2341,8 @@ fn the_course_drives_the_car_and_flies_the_character() {
     let mut flying = 0u32;
     let mut peak_air = f64::MIN;
     for _ in 0..STEPS {
-        let (z, mode, grounded) = state_of(sim.world());
-        let (held, ax) = driver.step(z, mode, grounded);
+        let (z, x, mode, grounded) = state_of_xz(sim.world());
+        let (held, ax) = driver.step(z, x, mode, grounded);
         sim.step_once(RuntimeInput::with_down(held).with_axes(ax));
         match state_of(sim.world()).1 {
             MovementMode::Driving => driving += 1,

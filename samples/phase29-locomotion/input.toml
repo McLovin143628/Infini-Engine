@@ -3,6 +3,15 @@ deadzone = 0.1
 [[actions.aim]]
 MouseButton = "Right"
 
+[[actions.aim]]
+GamepadButton = "LeftTrigger"
+
+[[actions.attack]]
+MouseButton = "Left"
+
+[[actions.attack]]
+GamepadButton = "RightTrigger"
+
 [[actions.crouch]]
 Key = "KeyC"
 
@@ -36,14 +45,14 @@ Key = "KeyE"
 [[actions.interact]]
 GamepadButton = "North"
 
+[[actions.inventory]]
+Key = "KeyI"
+
+[[actions.inventory]]
+GamepadButton = "Select"
+
 [[actions.jump]]
 Key = "Space"
-
-[[actions.jump]]
-Key = "KeyW"
-
-[[actions.jump]]
-Key = "ArrowUp"
 
 [[actions.jump]]
 GamepadButton = "South"
@@ -54,8 +63,17 @@ Key = "KeyA"
 [[actions.left]]
 Key = "ArrowLeft"
 
+[[actions.menu]]
+Key = "Tab"
+
+[[actions.menu]]
+GamepadButton = "Start"
+
 [[actions.prone]]
 Key = "KeyX"
+
+[[actions.reload]]
+Key = "KeyR"
 
 [[actions.right]]
 Key = "KeyD"
@@ -64,7 +82,7 @@ Key = "KeyD"
 Key = "ArrowRight"
 
 [[actions.roll]]
-Key = "KeyR"
+Key = "KeyZ"
 
 [[actions.sprint]]
 Key = "Shift"
@@ -79,7 +97,7 @@ Key = "KeyW"
 Key = "ArrowUp"
 
 [[actions.walk]]
-Key = "AltLeft"
+Key = "Control"
 
 [[axes.look_x]]
 
@@ -108,13 +126,13 @@ scale = -180.0
 [[axes.move_up]]
 
 [axes.move_up.Key]
-code = "KeyE"
+code = "Space"
 scale = 1.0
 
 [[axes.move_up]]
 
 [axes.move_up.Key]
-code = "KeyQ"
+code = "Control"
 scale = -1.0
 
 [[axes.move_x]]
@@ -176,3 +194,9 @@ scale = -1.0
 [axes.move_y.Key]
 code = "ArrowDown"
 scale = -1.0
+
+[[axes.weapon_switch]]
+
+[axes.weapon_switch.MouseAxis]
+axis = "WheelY"
+scale = 1.0

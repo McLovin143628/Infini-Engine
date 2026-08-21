@@ -454,7 +454,14 @@ impl PlayerApp {
             live.last = now;
             (dt, std::mem::take(&mut live.pending))
         };
-        self.input_state.apply(&events);
+        // **`apply_dt`, not `apply`** (island wave I5): the frame time is what
+        // makes `InputState::hold_s` a duration rather than a zero, and that is
+        // the in-game UI's clock — a menu's key repeat and a rebinding capture
+        // both happen while the simulation is paused, so neither can be timed by
+        // a sim step. Gameplay durations are a different clock and are
+        // accumulated by `RuntimeSim` on its fixed step; see
+        // `inf_input::HoldClock` for why the two must not be the same number.
+        self.input_state.apply_dt(&events, dt);
         let held = input::held_actions(&self.input_state, dt);
         // PIE pause freezes the sim but keeps rendering the last frame.
         if !self.paused {

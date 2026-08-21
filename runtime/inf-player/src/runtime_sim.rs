@@ -261,6 +261,22 @@ pub struct RuntimeSim {
     /// Falling edges pending this fixed step (Wave 3 input release events) —
     /// MIRROR of the editor `SimSession::just_released`.
     just_released: BTreeSet<String>,
+    /// **How long each action has been held, in SIM seconds** (I5) — MIRROR of
+    /// `SimSession::holds`.
+    ///
+    /// Advanced by [`step_once`](Self::step_once) with the *fixed* `dt`, never
+    /// with a frame time, which is what makes a press duration a function of the
+    /// simulation rather than of the machine it ran on. It is what the C key's
+    /// click-versus-long-press discrimination reads; see `inf_input::HoldClock`
+    /// for why this is a second instance of the type the input layer also runs.
+    holds: inf_input::HoldClock,
+    /// The click/long-press threshold this session runs with, seconds (I5).
+    ///
+    /// A player setting, so it lives on the session rather than in a constant —
+    /// but it reaches the sim through one setter and is guarded there, because
+    /// a threshold arriving as a NaN would make every press classify as nothing
+    /// at all.
+    press_threshold_s: f64,
     /// Wave 3 event dispatchers (MIRROR of `SimSession::bindings`): `(source
     /// entity, event name) → {listener entity → handler custom-event name}`.
     bindings: BTreeMap<(i64, String), BTreeMap<i64, String>>,
@@ -495,6 +511,8 @@ impl RuntimeSim {
             prev_down: BTreeSet::new(),
             just_pressed: BTreeSet::new(),
             just_released: BTreeSet::new(),
+            holds: inf_input::HoldClock::new(),
+            press_threshold_s: inf_ecs::movement::DEFAULT_PRESS_THRESHOLD_S,
             bindings: BTreeMap::new(),
             dispatch_queue: VecDeque::new(),
             drained_overlaps: Vec::new(),
@@ -917,6 +935,30 @@ impl RuntimeSim {
         self.fixed_step();
     }
 
+    /// The click/long-press threshold this session runs with, seconds (I5).
+    pub fn press_threshold_s(&self) -> f64 {
+        self.press_threshold_s
+    }
+
+    /// Set it — the controls settings' door into the sim (I5).
+    ///
+    /// **Guarded here** rather than trusted from the caller: a non-finite value
+    /// falls back to [`inf_ecs::movement::DEFAULT_PRESS_THRESHOLD_S`] (an
+    /// infinity is not "a very long press", it is a verb nobody can reach) and a
+    /// finite one is clamped into
+    /// [`inf_ecs::movement::PRESS_THRESHOLD_RANGE_S`]. The same rule the
+    /// settings file's own door applies, restated at the sim's boundary because
+    /// a value can arrive here from a mod, a test or a future network path that
+    /// never passed through a settings file.
+    pub fn set_press_threshold_s(&mut self, seconds: f64) {
+        let (lo, hi) = inf_ecs::movement::PRESS_THRESHOLD_RANGE_S;
+        self.press_threshold_s = if seconds.is_finite() {
+            seconds.clamp(lo, hi)
+        } else {
+            inf_ecs::movement::DEFAULT_PRESS_THRESHOLD_S
+        };
+    }
+
     /// bincode of the `Guid`-sorted sim snapshot **followed by the surface
     /// deformation field's bytes and the evaluated poses'** — the per-step trace
     /// unit folded by the determinism harness (same shape `inf_runtime::replay`
@@ -1059,10 +1101,22 @@ impl RuntimeSim {
         //    Two calls rather than one because an intent is not input: a
         //    Blueprint, an AI or a replay can write one, and `apply_intent` is
         //    only the local player's path into the same field.
+        //    **The press durations advance on the FIXED step** (I5), against
+        //    this step's own held set, so "C has been down for 300 ms" is a
+        //    fact about the simulation and not about the machine's frame rate.
+        //    A frame that runs three fixed steps advances it three times; a
+        //    frame that runs none advances it not at all, which is the same
+        //    discipline every other integration in this body follows.
+        //    (MIRROR of `SimSession::fixed_step`.)
+        self.holds.advance(&self.input.down, dt);
+        let threshold = self.press_threshold_s;
         let intent = inf_ecs::movement::MovementIntent::from_actions(
             |a| self.input.axis(a),
             |a| self.input.is_down(a),
             |a| self.just_pressed.contains(a),
+            |a| self.just_released.contains(a),
+            |a| self.holds.hold(a),
+            threshold,
         );
         inf_ecs::movement::apply_intent(&mut self.world, &intent);
         inf_physics::d3::step_character_movement(&mut self.world, &mut self.bridge3d, dt);

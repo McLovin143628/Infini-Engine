@@ -527,6 +527,196 @@ fn each_stance_resizes_the_capsule_and_plants_the_feet() {
     assert!((hero_capsule_half(&w) - cm.crouch_half_height_m).abs() < 1e-9);
 }
 
+/// **RUN IS THE DEFAULT GAIT, CTRL WALKS, SHIFT SPRINTS** (island wave I5).
+///
+/// The owner's ruling, measured as three speeds rather than three enum values —
+/// a gait that is *requested* and never reached is not a gait. The character
+/// runs a second and a half at each tier and the arm reads the speed it actually
+/// settles at, so a model that granted `Sprint` and integrated toward the run
+/// speed would fail here and pass every enum comparison.
+///
+/// The default is what makes it worth an arm: **no modifier held** is the case
+/// no test in the tree pinned, and it is the case every player is in.
+#[test]
+fn run_is_the_default_gait_and_the_two_modifiers_move_off_it() {
+    let mut w = EcsWorld::new();
+    let mut b = PhysicsBridge3D::new(GRAVITY);
+    spawn_block(
+        &mut w,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(200.0, 0.5, 200.0),
+    );
+    spawn_hero(&mut w, 0.0, 0.0, 0.0);
+    let cm = CharacterMovement::default();
+
+    let settle = |w: &mut EcsWorld, b: &mut PhysicsBridge3D, walk: bool, sprint: bool| {
+        let intent = MovementIntent {
+            move_input: EcsVec2d::new(0.0, 1.0),
+            walk,
+            sprint,
+            ..Default::default()
+        };
+        for _ in 0..180 {
+            step(w, b, &intent);
+        }
+        let h = hero(w);
+        (h.runtime.velocity.z, h.gait, h.runtime.actual_gait)
+    };
+
+    let (run_v, run_g, run_actual) = settle(&mut w, &mut b, false, false);
+    println!(
+        "no modifier: {run_v:.3} m/s against a run speed of {:.3}, requested {run_g:?}, actual {run_actual:?}",
+        cm.run_speed_mps
+    );
+    assert_eq!(run_g, Gait::Run, "the DEFAULT gait must be Run");
+    assert!(
+        (run_v - cm.run_speed_mps).abs() < 0.2,
+        "with nothing held the character must reach the RUN speed, not the walk speed: {run_v} vs {}",
+        cm.run_speed_mps
+    );
+
+    let (walk_v, walk_g, _) = settle(&mut w, &mut b, true, false);
+    println!(
+        "walk held: {walk_v:.3} m/s against a walk speed of {:.3}, requested {walk_g:?}",
+        cm.walk_speed_mps
+    );
+    assert_eq!(walk_g, Gait::Walk);
+    assert!(
+        (walk_v - cm.walk_speed_mps).abs() < 0.2,
+        "the walk modifier must reach the WALK speed: {walk_v}"
+    );
+
+    let (sprint_v, sprint_g, _) = settle(&mut w, &mut b, false, true);
+    println!(
+        "sprint held: {sprint_v:.3} m/s against a sprint speed of {:.3}, requested {sprint_g:?}",
+        cm.sprint_speed_mps
+    );
+    assert_eq!(sprint_g, Gait::Sprint);
+    assert!(
+        (sprint_v - cm.sprint_speed_mps).abs() < 0.2,
+        "the sprint modifier must reach the SPRINT speed: {sprint_v}"
+    );
+
+    // …and the three are genuinely three, in the right order. Without this a
+    // model whose walk, run and sprint speeds were all equal would satisfy every
+    // assertion above.
+    assert!(
+        walk_v < run_v && run_v < sprint_v,
+        "the three tiers must be three different speeds: {walk_v} / {run_v} / {sprint_v}"
+    );
+    // The default is a *default*, not a floor: `Gait::default()` is what an
+    // authored character starts with and what the intent asks for when nothing
+    // is held, and the two must be the same tier or the two answers disagree.
+    assert_eq!(Gait::default(), Gait::Run);
+}
+
+/// **A DIVE NEEDS A SPRINT, AND THE REFUSAL IS A VALUE** (island wave I5).
+///
+/// The owner's ruling: slide and dive both require the sprint. The slide was
+/// gated from P29.3 and the dive was free, which was never coherent — a dive
+/// from a standing start is a belly-flop, and `dive_speed_mps` is a *launch*
+/// speed that assumes a body already moving.
+///
+/// Both halves are asserted: the standing dive does **not** happen, and the
+/// character is told **why** through `MoveOutcome::refusal` rather than being
+/// left to infer it from a mode that did not change.
+#[test]
+fn a_dive_needs_a_sprint_and_the_refusal_is_a_value() {
+    let mut w = EcsWorld::new();
+    let mut b = PhysicsBridge3D::new(GRAVITY);
+    spawn_block(
+        &mut w,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(60.0, 0.5, 60.0),
+    );
+    spawn_hero(&mut w, 0.0, 0.0, 0.0);
+
+    // Standing on the floor, no sprint: the dive is refused, as a value.
+    b.sync_from_world(&w);
+    inf_ecs::movement::apply_intent(
+        &mut w,
+        &MovementIntent {
+            dive: true,
+            ..Default::default()
+        },
+    );
+    let out = step_character_movement(&mut w, &mut b, DT);
+    let hero_out = out
+        .iter()
+        .find(|o| o.guid == HERO)
+        .expect("the hero was stepped");
+    assert_eq!(
+        hero_out.mode,
+        MovementMode::Grounded,
+        "a standing dive must not happen"
+    );
+    assert_eq!(
+        hero_out.refusal,
+        MovementRefusal::ConditionNotMet,
+        "and the character must be told WHY — a refusal nobody can read is a control that silently does nothing"
+    );
+
+    // The same press with sprint held — from a **run-up**, because that is what
+    // a dive is. A standing dive's 2.5 m/s launch is 4 cm in a fixed step, which
+    // the ground snap is entitled to take back; the refusal above is about the
+    // sprint and this half is about the arc.
+    let sprint = MovementIntent {
+        move_input: EcsVec2d::new(0.0, 1.0),
+        sprint: true,
+        ..Default::default()
+    };
+    for _ in 0..120 {
+        step(&mut w, &mut b, &sprint);
+    }
+    b.sync_from_world(&w);
+    inf_ecs::movement::apply_intent(
+        &mut w,
+        &MovementIntent {
+            move_input: EcsVec2d::new(0.0, 1.0),
+            dive: true,
+            sprint: true,
+            ..Default::default()
+        },
+    );
+    let out = step_character_movement(&mut w, &mut b, DT);
+    let hero_out = out.iter().find(|o| o.guid == HERO).unwrap();
+    let h = hero(&w);
+    println!(
+        "the sprinting dive: refusal {:?}, launch velocity {:?}",
+        hero_out.refusal, h.runtime.velocity
+    );
+    assert_eq!(hero_out.refusal, MovementRefusal::None, "nothing to refuse");
+    assert!(
+        h.runtime.velocity.y > 0.0 && h.runtime.velocity.z > 0.0,
+        "a dive launches forward and up before it comes down: {:?}",
+        h.runtime.velocity
+    );
+    // **The launch is the dive's own, not the run's**, which is what says the
+    // request was GRANTED rather than ignored: the run-up above reaches
+    // `sprint_speed_mps` and the dive overwrites the whole velocity with
+    // `dive_speed_mps`, so a granted dive and a refused one differ by a number
+    // this arm can read.
+    let cm = CharacterMovement::default();
+    assert!(
+        (h.runtime.velocity.z - cm.dive_speed_mps).abs() < 1e-6,
+        "the forward launch must be the DIVE speed ({}), not the run-up's ({}): {:?}",
+        cm.dive_speed_mps,
+        cm.sprint_speed_mps,
+        h.runtime.velocity
+    );
+    assert!(
+        (cm.dive_speed_mps - cm.sprint_speed_mps).abs() > 0.1,
+        "the two speeds are the same number, so the assertion above cannot fail"
+    );
+    // **How long the mode LASTS is the course's arm, not this one.** A dive from
+    // a flat floor leaves the ground by 4 cm in a fixed step and the ground snap
+    // is entitled to take that back, so the mode's persistence is a fact about a
+    // dive with somewhere to go — which is what `phase29_gate`'s station is, and
+    // it holds the mode for at least `MODE_FLOOR` steps there.
+}
+
 /// A slide is entered from **sprint + crouch** and only from there, runs on the
 /// crouch capsule, and exits into a crouch when it has run out of speed.
 #[test]
@@ -544,19 +734,46 @@ fn a_slide_needs_sprint_speed_and_ends_in_a_crouch() {
     // Crouch pressed from a standstill with sprint held is NOT a slide: the
     // entry condition is speed, which is what makes it a slide rather than a
     // second crouch button.
-    step(
+    //
+    // **And the refusal is a VALUE** (island wave I5). A player holding sprint
+    // and pressing crouch has asked for a *slide*; the crouch below is what the
+    // character does INSTEAD, and until this wave the two outcomes were
+    // indistinguishable — the one entry condition in the catalogue whose refusal
+    // nothing downstream (a HUD hint, a tutorial, a telemetry counter) could
+    // ever read.
+    b.sync_from_world(&w);
+    inf_ecs::movement::apply_intent(
         &mut w,
-        &mut b,
         &MovementIntent {
             sprint: true,
             crouch: true,
             ..Default::default()
         },
     );
+    let out = step_character_movement(&mut w, &mut b, DT);
+    let hero_out = out.iter().find(|o| o.guid == HERO).unwrap();
     assert_eq!(
         hero(&w).mode,
         MovementMode::Crouch,
         "standing still, crouch is a crouch"
+    );
+    assert_eq!(
+        hero_out.refusal,
+        MovementRefusal::ConditionNotMet,
+        "the slide was refused for want of speed and nothing said so"
+    );
+
+    // The control: the same crouch press with **no sprint held** is not a
+    // refusal at all — it is a crouch, which is what the player asked for.
+    step(&mut w, &mut b, &press_crouch());
+    assert_eq!(hero(&w).mode, MovementMode::Grounded);
+    b.sync_from_world(&w);
+    inf_ecs::movement::apply_intent(&mut w, &press_crouch());
+    let out = step_character_movement(&mut w, &mut b, DT);
+    assert_eq!(
+        out.iter().find(|o| o.guid == HERO).unwrap().refusal,
+        MovementRefusal::None,
+        "a plain crouch refuses nothing, so the refusal above is about the SPRINT and not about the press"
     );
 
     // Stand back up, get to sprint speed, then press crouch.

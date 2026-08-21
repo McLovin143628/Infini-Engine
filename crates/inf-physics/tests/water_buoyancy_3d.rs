@@ -559,6 +559,174 @@ fn a_character_flips_into_swim_mode_when_it_is_deep_enough() {
     assert!(!bridge.update_swim(hero), "wading is not swimming");
 }
 
+/// **SPACE IS A DIVE WHEN THERE IS WATER TO DIVE INTO** (island wave I5).
+///
+/// The owner's table gives one key two verbs and only the world can tell them
+/// apart. This is the **wiring** arm: `inf_ecs::movement::dive_into_water` has
+/// its own arms for the rule, and what is measured here is that the shipped
+/// movement step asks it, with the surface a reach in front of the feet, and
+/// acts on the answer.
+///
+/// Three cases, and the third is what makes the arm able to fail: a jump at the
+/// water while **sprinting** dives; the same jump **walking** is a jump; and the
+/// same sprinting jump on **dry land** is a jump. Without the dry-land control a
+/// step that turned every sprinting jump into a dive would pass.
+#[test]
+fn a_sprinting_jump_at_the_water_is_a_dive_and_on_dry_land_is_a_jump() {
+    use inf_ecs::components::CharacterMovement;
+    use inf_ecs::movement::MovementIntent;
+
+    let hero = Uuid::from_u128(0x2002_0011);
+    let ground = Uuid::from_u128(0x2002_0012);
+
+    // The lake's near edge is at z = 0 (a 100 m half-extent lake centred there
+    // would cover the character too), so it is placed ahead: a lake centred at
+    // z = 105 with a 100 m half-extent starts at z = 5, and the character stands
+    // at z = 0 facing it. One reach (2.5 m) in front of the feet is z = 2.5,
+    // which is dry; four metres along it is not.
+    // A lake's centre is its ENTITY'S transform, not a field — so the fixture
+    // moves the entity rather than the body.
+    let lake = || WaterBody {
+        wave_amplitude_m: 0.0,
+        ..WaterBody::lake(-0.5, Vec2d::splat(100.0))
+    };
+
+    let build = |water_centre_z: f64| {
+        let mut w = EcsWorld::new();
+        let mut bridge = PhysicsBridge3D::new(GRAVITY);
+        // A floor to stand on, well above the water's surface.
+        let e = w.spawn_with_guid(ground, "Ground", None);
+        let mut t = Transform::IDENTITY;
+        t.translation = Vec3d::new(0.0, -0.5, 0.0);
+        w.world_mut().entity_mut(e).insert((
+            RigidBody3D {
+                kind: BodyKind3D::Static,
+                ..Default::default()
+            },
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Box,
+                half_extents: Vec3d::new(60.0, 0.5, 60.0),
+                ..Default::default()
+            },
+            t,
+        ));
+        let e = w.spawn_with_guid(LAKE, "Water", None);
+        let mut t = Transform::IDENTITY;
+        t.translation = Vec3d::new(0.0, 0.0, water_centre_z);
+        w.world_mut().entity_mut(e).insert((lake(), t));
+        let cm = CharacterMovement {
+            player_controlled: true,
+            ..Default::default()
+        };
+        let e = w.spawn_with_guid(hero, "Hero", None);
+        let mut t = Transform::IDENTITY;
+        t.translation = Vec3d::new(0.0, cm.stand_half_height_m + 0.3, 0.0);
+        w.world_mut().entity_mut(e).insert((
+            RigidBody3D {
+                kind: BodyKind3D::Kinematic,
+                ..Default::default()
+            },
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Capsule,
+                half_extents: Vec3d::new(0.3, cm.stand_half_height_m, 0.3),
+                radius: 0.3,
+                ..Default::default()
+            },
+            CharacterController3D::default(),
+            cm,
+            t,
+        ));
+        w.mark_dirty();
+        w.propagate();
+        bridge.sync_from_world(&w);
+        (w, bridge)
+    };
+
+    let press = |w: &mut EcsWorld, bridge: &mut PhysicsBridge3D, sprint: bool| {
+        // Settle first, so the character is standing rather than falling.
+        for _ in 0..10 {
+            bridge.sync_from_world(w);
+            inf_ecs::movement::apply_intent(w, &MovementIntent::default());
+            inf_physics::d3::step_character_movement(w, bridge, DT);
+        }
+        bridge.sync_from_world(w);
+        inf_ecs::movement::apply_intent(
+            w,
+            &MovementIntent {
+                jump: true,
+                sprint,
+                ..Default::default()
+            },
+        );
+        let out = inf_physics::d3::step_character_movement(w, bridge, DT);
+        let e = w.entity_of(hero).unwrap();
+        let v = w
+            .world()
+            .get::<CharacterMovement>(e)
+            .unwrap()
+            .runtime
+            .velocity;
+        (out.iter().find(|o| o.guid == hero).unwrap().mode, v)
+    };
+
+    // **The LAUNCH is what the two verbs differ by**, and it is what this arm
+    // reads. A dive overwrites the whole velocity with `(dive_speed forward,
+    // dive_up_speed up)`; a jump writes only `velocity.y = jump_speed` and
+    // leaves the planar velocity alone — so with no movement input a jump's
+    // forward speed is zero and a dive's is `dive_speed_mps`.
+    //
+    // The *mode* is deliberately not asserted: a dive off a flat floor is 4 cm
+    // of clearance in a fixed step and the ground snap is entitled to take it
+    // back, so the mode at the end of the launch step is a fact about the floor
+    // rather than about the verb. `phase29_gate`'s station holds the mode.
+    let tune = CharacterMovement::default();
+
+    // ── water within reach, sprinting: a DIVE ──
+    let (mut w, mut b) = build(101.0);
+    let surface = b.water_surface_at(DVec2::new(0.0, 2.5));
+    assert!(
+        surface.is_some(),
+        "the fixture has no water a reach in front of the feet, so the claim cannot be tested"
+    );
+    let (mode, v) = press(&mut w, &mut b, true);
+    println!("water at a reach, sprinting: mode {mode:?}, launch {v:?}, surface {surface:?}");
+    assert!(
+        (v.z - tune.dive_speed_mps).abs() < 1e-6,
+        "a sprinting jump at the water must launch at the DIVE speed ({}): {v:?}",
+        tune.dive_speed_mps
+    );
+
+    // ── the same water, WALKING: a jump ──
+    let (mut w, mut b) = build(101.0);
+    let (_, v) = press(&mut w, &mut b, false);
+    println!("water at a reach, walking: launch {v:?}");
+    assert!(
+        v.z.abs() < 1e-6,
+        "a walking jump at the water is a JUMP — the dive is the committed gesture: {v:?}"
+    );
+
+    // ── the same sprinting jump on DRY LAND: a jump ──
+    //
+    // The lake is moved far enough that nothing is under the probe. This is the
+    // control that makes the first case mean something: without it, a step that
+    // turned every sprinting jump into a dive would pass.
+    let (mut w, mut b) = build(400.0);
+    assert!(
+        b.water_surface_at(DVec2::new(0.0, 2.5)).is_none(),
+        "the dry fixture still has water under the probe"
+    );
+    let (_, v) = press(&mut w, &mut b, true);
+    println!("dry land, sprinting: launch {v:?}");
+    assert!(
+        v.z.abs() < 1e-6,
+        "a sprinting jump with no water in front of it must be a JUMP: {v:?}"
+    );
+    assert!(
+        tune.dive_speed_mps > 1.0,
+        "the two launches are told apart by the dive's forward speed, and a zero one makes the assertions above vacuous"
+    );
+}
+
 // ── determinism ─────────────────────────────────────────────────────────────
 
 /// The replay gate at the facade level: a floating stack over a wavy sea traces

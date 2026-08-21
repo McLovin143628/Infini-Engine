@@ -1926,6 +1926,28 @@ impl PhysicsBridge3D {
         Some(water::probe(&self.water, self.water_env.0, &state, &geo))
     }
 
+    /// **The water surface over an arbitrary world XZ point**, metres, or `None`
+    /// where no water body covers it (I5).
+    ///
+    /// [`water_probe`](Self::water_probe) answers about a *body* — how submerged
+    /// it is where it stands. This answers about a *place*, which is what a
+    /// contextual control needs: "is there water two and a half metres in front
+    /// of me" cannot be asked of a probe attached to the character.
+    ///
+    /// It reads the same [`WaterIndex`](super::water::WaterIndex) and the same
+    /// sim-clock environment the buoyancy pass does — the wall clock never
+    /// reaches it — so the answer is a pure function of sim state and PIE gets
+    /// the same one as the shipped player. `O(bodies over the cell)`, and `O(1)`
+    /// on a level with no water.
+    pub fn water_surface_at(&self, p: glam::DVec2) -> Option<f64> {
+        if self.water.is_empty() {
+            return None;
+        }
+        self.water
+            .highest_surface_at(p, self.water_env.0)
+            .map(|(_, y)| y)
+    }
+
     /// The sample layout the water pass uses for `guid`, if it is tracked and has
     /// a collider. Exposed so a test can assert against the same geometry the pass
     /// used rather than against a second copy of it.

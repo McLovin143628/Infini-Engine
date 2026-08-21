@@ -414,6 +414,149 @@ fn a_ragdoll_that_ends_airborne_resumes_falling_with_its_own_velocity() {
     assert_eq!(sim.state(), "idle");
 }
 
+/// **A RAGDOLL WHOSE HIPS END INSIDE THE FLOOR DOES NOT PUT THE CHARACTER UNDER
+/// IT** (island wave I5).
+///
+/// The capsule follows the pelvis, "lifted onto the floor under it" — and where
+/// the ground probe *started penetrating*, the placement used to put the feet a
+/// whole `half + radius` **below the pelvis**, which on a pelvis already in the
+/// floor is a whole body below the floor. The collider is switched back on down
+/// there when the ragdoll ends, and the character falls out of the world:
+/// measured on the phase-29 course at **y = −132 m and still falling**, from
+/// hips that ended 0.8 m under the ground.
+///
+/// The fixture puts the hazard the claim names in the world — it drives the
+/// pelvis body *below the ground's top face* — and measures the placement
+/// against the alternative, which is the thing that makes the arm able to fail:
+/// the old rule and the new one differ by exactly one body height, and a
+/// tolerance loose enough to cover both would have covered the defect.
+#[test]
+fn a_ragdoll_that_ends_inside_the_floor_leaves_the_character_on_it() {
+    const GROUND_TOP: f64 = 0.0;
+    let mut sim = Sim::new(GROUND_TOP);
+    for _ in 0..10 {
+        sim.step(&MovementIntent::default());
+    }
+    assert!(ragdoll_bridge::start_ragdoll(&mut sim.world, HERO));
+    sim.step(&MovementIntent::default());
+    sim.step(&MovementIntent::default());
+    assert!(sim.hero().runtime.ragdoll.spawned, "no bodies to sink");
+
+    // Drive every limb below the ground's top face, so the pelvis probe begins
+    // inside the floor — the case the placement got wrong.
+    const SUNK: f64 = 0.5;
+    let bodies = sim.bridge.ragdoll_of(HERO).unwrap().bodies.clone();
+    let pelvis = sim.bridge.ragdoll_of(HERO).unwrap().pelvis.unwrap();
+    for b in &bodies {
+        let Some(p) = sim.bridge.world().body_translation(*b) else {
+            continue;
+        };
+        sim.bridge
+            .world_mut()
+            .set_body_translation(*b, DVec3::new(p.x, GROUND_TOP - SUNK, p.z));
+        sim.bridge.world_mut().set_body_linvel(*b, DVec3::ZERO);
+    }
+    sim.step(&MovementIntent::default());
+
+    let pelvis_y = sim.bridge.world().body_translation(pelvis).unwrap().y;
+    let e = sim.world.entity_of(HERO).unwrap();
+    let placed = sim.world.world().get::<Transform>(e).unwrap().translation.y;
+    let cm = sim.hero();
+    let body = cm.half_height_for(MovementMode::Grounded) + RADIUS;
+    // The alternative, priced: the rule this replaced put the FEET at the
+    // pelvis, i.e. the centre a body below it.
+    let old_rule = pelvis_y;
+    println!(
+        "pelvis y = {pelvis_y:.3}, placed centre = {placed:.3}, the old rule would have placed {old_rule:.3} (one body = {body:.3} m lower)"
+    );
+    assert!(
+        placed > old_rule + body * 0.5,
+        "the character was placed at {placed:.3}, which is within half a body of the rule that dropped it through the world ({old_rule:.3})"
+    );
+    assert!(
+        placed >= pelvis_y,
+        "a placement below the pelvis is a placement below the surface the pelvis is resting in"
+    );
+    assert!(
+        cm.runtime.ragdoll.on_ground,
+        "a pelvis in the floor is on it — the doc says so and the settle depends on it"
+    );
+}
+
+/// **A LIMB MAY NOT EXCEED THE SPEED THE GRAVITY CUTOFF ALREADY NAMES** (island
+/// wave I5).
+///
+/// `gravity_enabled` bounds an *acceleration*; nothing bounded the velocity, and
+/// an articulated body seeded in a pose that violates its joint limits is fed
+/// energy by the solver every step until the numbers leave the world — measured
+/// on the phase-29 course at `z = −3.85e13` from a ragdoll entered 2.7 cm
+/// further along the same fall than the one that settles.
+///
+/// This is a bound rather than a cure and the arm says only what the bound says:
+/// whatever a limb is doing, it is doing it at a speed a falling body could
+/// reach. The `+ 1e-9` is the clamp's own arithmetic and nothing else; a
+/// tolerance wide enough to admit the 4 000 m/s a diverging run reaches would be
+/// no bound at all.
+#[test]
+fn a_ragdoll_limb_cannot_exceed_the_terminal_speed() {
+    let mut sim = Sim::new(0.0);
+    for _ in 0..10 {
+        sim.step(&MovementIntent::default());
+    }
+    assert!(ragdoll_bridge::start_ragdoll(&mut sim.world, HERO));
+    sim.step(&MovementIntent::default());
+    sim.step(&MovementIntent::default());
+    let bodies = sim.bridge.ragdoll_of(HERO).unwrap().bodies.clone();
+    assert!(!bodies.is_empty(), "no limbs to bound");
+
+    // ── the SPEED half, on its own ──
+    //
+    // One limb thrown at four kilometres a second, alone, so the assertion below
+    // is about the ceiling and not about a NaN that would have failed anyway.
+    // The step is taken with the throw *between* the sync and the drive, which
+    // is where the ceiling runs.
+    const THROWN: f64 = 4000.0;
+    sim.bridge
+        .world_mut()
+        .set_body_linvel(bodies[0], DVec3::new(THROWN, 0.0, 0.0));
+    sim.step(&MovementIntent::default());
+    let after = sim
+        .bridge
+        .world()
+        .body_linvel(bodies[0])
+        .unwrap_or(DVec3::ZERO);
+    println!(
+        "the thrown limb: {THROWN:.0} m/s in, {:.3} m/s out, against a ceiling of {:.1}",
+        after.length(),
+        ragdoll_bridge::MAX_LIMB_SPEED_MPS
+    );
+    assert!(
+        after.length() <= ragdoll_bridge::MAX_LIMB_SPEED_MPS + 1e-9,
+        "a limb thrown at {THROWN} m/s came out at {}, past the ceiling of {}",
+        after.length(),
+        ragdoll_bridge::MAX_LIMB_SPEED_MPS
+    );
+
+    // ── the NaN half, on its own ──
+    //
+    // The other way a solver leaves the world, and the reason the branch is a
+    // `!is_finite` rather than a plain `>`: every comparison a NaN takes part in
+    // is false, so a clamp written as one lets it straight through.
+    if let Some(b) = bodies.get(1) {
+        sim.bridge
+            .world_mut()
+            .set_body_linvel(*b, DVec3::splat(f64::NAN));
+        sim.step(&MovementIntent::default());
+        for h in &bodies {
+            let v = sim.bridge.world().body_linvel(*h).unwrap_or(DVec3::ZERO);
+            assert!(
+                v.is_finite(),
+                "a limb is carrying {v:?}, and a NaN pose is a world with no finite state"
+            );
+        }
+    }
+}
+
 /// **The purity arm.** Two worlds in the same sim state produce the same blend
 /// weight — bit for bit, through the shipped door, with nothing in between.
 ///

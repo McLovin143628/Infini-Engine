@@ -27,6 +27,7 @@
 //! [`InputMap`] is `Serialize`/`Deserialize` (deterministic `BTreeMap` ordering)
 //! because it will live in project settings (P9); a round-trip is byte-stable.
 
+mod hold;
 mod map;
 mod state;
 pub mod touch;
@@ -35,7 +36,8 @@ mod types;
 #[cfg(feature = "gamepad")]
 pub mod poller;
 
-pub use map::{default_map, InputMap};
+pub use hold::HoldClock;
+pub use map::{actions, default_map, InputMap};
 pub use state::InputState;
 pub use touch::{Rect, TouchButton, TouchControls, VirtualStick};
 pub use types::{
