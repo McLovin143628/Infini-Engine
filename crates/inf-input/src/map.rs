@@ -117,6 +117,40 @@ impl InputMap {
         self.bind_axis(axis, AxisSource::MouseAxis { axis: mouse, scale })
     }
 
+    /// The scale `axis` gives the named mouse channel, if it binds one (I5).
+    ///
+    /// A *sensitivity*, in the axis's own units per raw device count — see
+    /// [`AxisSource::MouseAxis`]. Read by the controls settings, which scale it
+    /// rather than replacing it, so a project that authored its own look
+    /// sensitivity keeps the number it chose and the player's slider is a
+    /// multiplier on it.
+    pub fn mouse_axis_scale(&self, axis: &str, mouse: MouseAxis) -> Option<f32> {
+        self.axes.get(axis)?.iter().find_map(|s| match s {
+            AxisSource::MouseAxis { axis: m, scale } if *m == mouse => Some(*scale),
+            _ => None,
+        })
+    }
+
+    /// Set it, returning whether the binding was there to set (I5).
+    ///
+    /// **Does not create one.** A map that does not bind the mouse to this axis
+    /// is a project that chose not to, and a settings slider is not the place to
+    /// overrule that — it would put a control on a device the author left out.
+    pub fn set_mouse_axis_scale(&mut self, axis: &str, mouse: MouseAxis, scale: f32) -> bool {
+        let Some(list) = self.axes.get_mut(axis) else {
+            return false;
+        };
+        for s in list.iter_mut() {
+            if let AxisSource::MouseAxis { axis: m, scale: v } = s {
+                if *m == mouse {
+                    *v = scale;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Bind `action` to a mouse button (P29.3).
     pub fn bind_mouse(&mut self, action: impl Into<String>, button: MouseButton) -> &mut Self {
         self.bind_action(action, ActionSource::MouseButton(button))

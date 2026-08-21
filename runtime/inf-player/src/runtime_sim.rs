@@ -966,6 +966,38 @@ impl RuntimeSim {
         self.press_threshold_s
     }
 
+    /// **Set the three built-in mixer buses' gains** (island wave I5) — the
+    /// audio page's consumer.
+    ///
+    /// Guarded here rather than trusted from the caller, for the reason every
+    /// numeric door in this wave is: a value can arrive from a settings file, a
+    /// slider, a mod or a test. Non-finite takes `1.0` (an infinity is not "very
+    /// loud", it is the absence of a gain) and finite clamps to `[0, 1]` — a
+    /// bus gain above unity is a clip, and a settings slider is not the place to
+    /// author one.
+    ///
+    /// **Not sim state**: the mixer is a property of the *listener*, two players
+    /// with different volumes run the same simulation, and nothing here reaches
+    /// a trace.
+    pub fn set_bus_volumes(&mut self, master: f32, sfx: f32, music: f32) {
+        let g = |v: f32| -> f64 {
+            if v.is_finite() {
+                f64::from(v.clamp(0.0, 1.0))
+            } else {
+                1.0
+            }
+        };
+        self.audio.set_bus_volume(inf_audio::Bus::Master, g(master));
+        self.audio.set_bus_volume(inf_audio::Bus::Sfx, g(sfx));
+        self.audio.set_bus_volume(inf_audio::Bus::Music, g(music));
+    }
+
+    /// A built-in bus's gain — what the arm beside [`set_bus_volumes`](Self::set_bus_volumes)
+    /// reads back.
+    pub fn bus_volume(&self, bus: inf_audio::Bus) -> f64 {
+        self.audio.bus_volume(bus)
+    }
+
     /// **Whether the fixed step is frozen** (island wave I5).
     ///
     /// Set by a host when the in-game menu opens a single-player session — see

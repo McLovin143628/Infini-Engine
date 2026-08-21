@@ -297,6 +297,58 @@ pub fn apply_overrides(map: &mut InputMap, overrides: &BTreeMap<String, String>)
     applied
 }
 
+/// **Apply the controls page's look tuning** to `map` (island wave I5).
+///
+/// The sensitivity is a **multiplier on what the project authored**, read from
+/// `base` rather than from `map`: that makes the operation idempotent (applying
+/// it twice is applying it once) and it keeps a project that chose its own
+/// degrees-per-count. A slider that overwrote the number would make every
+/// project's feel identical at the default.
+///
+/// `invert_y` flips the y channel's **sign against the shipped convention**.
+/// The engine reports `+y` down and a look control wants `+pitch` up, so the
+/// table binds `look_y` at a negative scale; inverting means the player wants
+/// the other one, whatever the project's is.
+///
+/// The axis NAMES are the caller's, because `inf-ui` must not name
+/// `inf-ecs`'s movement vocabulary — the crate that owns both is the one that
+/// passes them, which is the same discipline
+/// `every_movement_action_the_intent_reads_is_bound` already runs on.
+///
+/// A non-finite or non-positive sensitivity reads as `1.0`: a slider is not a
+/// place to author a mouse that does not move.
+pub fn apply_look_tuning(
+    map: &mut InputMap,
+    base: &InputMap,
+    x_axis: &str,
+    y_axis: &str,
+    sensitivity: f32,
+    invert_y: bool,
+) {
+    let m = if sensitivity.is_finite() && sensitivity > 0.0 {
+        sensitivity
+    } else {
+        1.0
+    };
+    for (axis, mouse, invert) in [
+        (x_axis, inf_input::MouseAxis::X, false),
+        (y_axis, inf_input::MouseAxis::Y, invert_y),
+    ] {
+        let Some(authored) = base.mouse_axis_scale(axis, mouse) else {
+            continue;
+        };
+        if !authored.is_finite() {
+            continue;
+        }
+        let sign = if (authored < 0.0) != invert {
+            -1.0
+        } else {
+            1.0
+        };
+        map.set_mouse_axis_scale(axis, mouse, sign * authored.abs() * m);
+    }
+}
+
 /// One row of the table as a surface renders it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableRow {
@@ -549,6 +601,66 @@ mod tests {
         // A row id this build has never heard of is a no-op rather than a guess.
         let out = apply_row(&base, &empty, "grapple", "KeyG", true);
         assert_eq!(out.overrides, empty);
+    }
+
+    /// **The look tuning multiplies what the project authored, and is
+    /// idempotent** (I5).
+    ///
+    /// The mutation this kills: reading the *current* map instead of the base,
+    /// which compounds — two frames of a held slider would square the
+    /// sensitivity and a settings file re-applied on every load would run away.
+    #[test]
+    fn the_look_tuning_scales_the_authored_sensitivity_and_can_be_reapplied() {
+        let base = inf_input::default_map();
+        let shipped_x = base
+            .mouse_axis_scale("look_x", inf_input::MouseAxis::X)
+            .expect("the shipped table binds the mouse to look_x");
+        let shipped_y = base
+            .mouse_axis_scale("look_y", inf_input::MouseAxis::Y)
+            .expect("…and to look_y");
+        println!("the shipped look is {shipped_x} / {shipped_y} degrees per count");
+        assert!(shipped_x > 0.0 && shipped_y < 0.0, "the y channel inverts");
+
+        let mut map = base.clone();
+        apply_look_tuning(&mut map, &base, "look_x", "look_y", 2.0, false);
+        assert_eq!(
+            map.mouse_axis_scale("look_x", inf_input::MouseAxis::X),
+            Some(shipped_x * 2.0)
+        );
+        assert_eq!(
+            map.mouse_axis_scale("look_y", inf_input::MouseAxis::Y),
+            Some(shipped_y * 2.0)
+        );
+        // Idempotent: it reads the BASE, so a second application is the first.
+        let once = map.clone();
+        apply_look_tuning(&mut map, &base, "look_x", "look_y", 2.0, false);
+        assert_eq!(map, once, "the tuning compounded");
+
+        // Invert flips the y channel's sign against the shipped convention and
+        // leaves x alone.
+        let mut map = base.clone();
+        apply_look_tuning(&mut map, &base, "look_x", "look_y", 1.0, true);
+        assert_eq!(
+            map.mouse_axis_scale("look_y", inf_input::MouseAxis::Y),
+            Some(-shipped_y)
+        );
+        assert_eq!(
+            map.mouse_axis_scale("look_x", inf_input::MouseAxis::X),
+            Some(shipped_x)
+        );
+
+        // A hostile sensitivity reads as 1, and an axis the project did not bind
+        // to the mouse is left alone rather than given one.
+        for bad in [f32::NAN, 0.0, -3.0, f32::INFINITY] {
+            let mut map = base.clone();
+            apply_look_tuning(&mut map, &base, "look_x", "look_y", bad, false);
+            assert_eq!(map, base, "sensitivity {bad} moved the table");
+        }
+        let mut bare = InputMap::new();
+        bare.bind_axis_key("look_x", "KeyL", 1.0);
+        let before = bare.clone();
+        apply_look_tuning(&mut bare, &InputMap::new(), "look_x", "look_y", 4.0, true);
+        assert_eq!(bare, before, "a keyboard-only look axis was given a mouse");
     }
 
     /// The projection a surface renders, and the two flags it needs.

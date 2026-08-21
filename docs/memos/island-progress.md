@@ -1894,12 +1894,18 @@ simulation happened to settle is a gate that has not been falsified.
    `INF_PLAYER_SETTINGS_DIR` as an override. Those *are* the platform conventions and a crate
    that resolved them would read the same two variables, but a platform crate would also handle
    the cases they do not (a portable install, a sandboxed store build).
-6. **The video page's window mode and resolution are stored and not applied.** They reach the
-   settings file and the dialog reads them back; nothing resizes the window or reconfigures the
-   swap chain yet, because that is a winit/surface change on a path CI cannot run. The
-   **quality tier** is in the same position. The three rows are honest about what they are —
-   preferences a later wave connects — and the *audio* buses, the sensitivity, the invert-Y and
-   the press threshold do all reach their consumers.
+6. **The video page's window mode, resolution and quality tier are stored and not applied.**
+   They reach the settings file and the dialog reads them back; nothing resizes the window,
+   reconfigures the swap chain or re-detects the tier yet, because that is a winit/surface
+   change on a path CI cannot run. The three rows are honest about what they are —
+   preferences a later wave connects.
+
+   **The other five ARE live**, in the session the player is in, and
+   `the_controls_and_audio_pages_reach_their_consumers` is what says so: the look sensitivity
+   multiplies the project's authored degrees-per-count in the live map, invert-Y flips the y
+   channel's sign, the hold threshold reaches the sim's own copy, and the three mixer buses
+   reach `AudioEngine`. A setting that is stored and read by nothing is a dead slider, which
+   is the dead-key defect this wave is about, one level up.
 7. **`weapon_switch` reaches a consumer as a RATE.** The wheel is a delta source, so
    `axis_snapshot` divides it by the frame time; a consumer must read its sign or integrate it.
    A notch count would need the wheel to be a button, which it is not on any platform this

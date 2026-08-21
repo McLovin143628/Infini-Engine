@@ -232,14 +232,11 @@ impl PlayerApp {
         // dev level, or the shipped default for a cooked pack — and the player's
         // overrides are applied on top of it, so a rebinding survives a level
         // change and a level that ships its own table still gets one.
-        let (ui, overridden) = crate::ui::PlayerUi::open(crate::ui::settings_dir());
+        let (ui, map) = crate::ui::PlayerUi::open(crate::ui::settings_dir(), map);
         if let Some(e) = &ui.load_error {
             tracing::warn!("inf-player: {e}");
         }
-        let mut map = map;
-        inf_ui::bindings::apply_overrides(&mut map, &ui.settings.bindings);
-        let _ = overridden;
-        sim.set_press_threshold_s(ui.settings.press_threshold_s());
+        ui.apply_to_sim(&mut sim);
         Self {
             title,
             width,
@@ -807,11 +804,16 @@ impl ApplicationHandler for PlayerApp {
                         // is being taken from, which is the worst of the two.
                         let mut map = self.input_state.map().clone();
                         let verdict = self.ui.key(name, pressed, &mut map);
-                        if verdict.bindings_changed {
-                            // Re-seated on the live state, which keeps the raw
-                            // device state (a key held across a rebinding is
-                            // still held) and re-resolves against the new table.
-                            self.input_state.set_map(map);
+                        if verdict.changed() {
+                            // **Rebuilt from the level's table**, not patched:
+                            // the look tuning is a multiplier on what the
+                            // project authored, and applying it to the live map
+                            // would compound it once a frame. Re-seating keeps
+                            // the raw device state (a key held across a
+                            // rebinding is still held) and re-resolves against
+                            // the new table.
+                            self.input_state.set_map(self.ui.tuned_map());
+                            self.ui.apply_to_sim(&mut self.sim);
                         }
                         if verdict.consumed {
                             return;
@@ -840,8 +842,9 @@ impl ApplicationHandler for PlayerApp {
                     if pressed {
                         let mut map = self.input_state.map().clone();
                         let verdict = self.ui.mouse(button, &mut map);
-                        if verdict.bindings_changed {
-                            self.input_state.set_map(map);
+                        if verdict.changed() {
+                            self.input_state.set_map(self.ui.tuned_map());
+                            self.ui.apply_to_sim(&mut self.sim);
                         }
                         if verdict.consumed {
                             return;

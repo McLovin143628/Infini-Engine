@@ -81,11 +81,14 @@ pub struct PlayerUi {
     pub toasts: Toasts,
     /// Where [`settings`](Self::settings) is written.
     dir: PathBuf,
-    /// The shipped table, kept so an override set can be derived against it.
+    /// **The level's own table**, kept so every derived thing is derived against
+    /// it: the override set, and the look tuning's multiplier.
     ///
-    /// **Not the live map**: the overrides a settings file stores are the
-    /// *difference* from the shipped table, so deriving them needs the table a
-    /// fresh install would have had, not the one the player is running.
+    /// **Not the live map.** The overrides a settings file stores are the
+    /// *difference* from the table the player was given, so deriving them needs
+    /// that table rather than the one they are running; and the look tuning is a
+    /// multiplier, so applying it to the live map would compound it once a
+    /// frame.
     base: InputMap,
     /// The finished draw list, rebuilt each frame and reused so a menu costs no
     /// allocation per frame.
@@ -106,27 +109,67 @@ impl PlayerUi {
     /// `player.toml` does for a *boot config* it cannot honour, and a
     /// preferences file is not that. A player whose sensitivity file has a
     /// stray comma should get their game, told.
-    pub fn open(dir: PathBuf) -> (Self, InputMap) {
-        let base = inf_input::default_map();
+    ///
+    /// `base` is **the level's own table** — `input.toml` beside a dev level, or
+    /// the shipped default for a cooked pack. Every override and every tuning is
+    /// relative to it, so a project that authored its own bindings or its own
+    /// look sensitivity keeps them and the player's settings are a difference
+    /// against what they were actually given.
+    pub fn open(dir: PathBuf, base: InputMap) -> (Self, InputMap) {
         let (settings, load_error) = match GameSettings::load_or_default(&dir) {
             Ok(s) => (s, None),
             Err(e) => (GameSettings::default(), Some(e)),
         };
-        let mut map = base.clone();
-        inf_ui::bindings::apply_overrides(&mut map, &settings.bindings);
-        (
-            Self {
-                menu: MenuState::new(),
-                settings,
-                toasts: Toasts::default(),
-                dir,
-                base,
-                list: UiDrawList::new(Vec2::new(1.0, 1.0)),
-                dirty: false,
-                load_error,
-            },
-            map,
-        )
+        let ui = Self {
+            menu: MenuState::new(),
+            settings,
+            toasts: Toasts::default(),
+            dir,
+            base,
+            list: UiDrawList::new(Vec2::new(1.0, 1.0)),
+            dirty: false,
+            load_error,
+        };
+        let map = ui.tuned_map();
+        (ui, map)
+    }
+
+    /// **The map the player is actually playing with**: the level's table, plus
+    /// their binding overrides, plus their look tuning.
+    ///
+    /// Rebuilt from `base` rather than patched in place, which is what makes it
+    /// idempotent — a sensitivity applied to the *current* map compounds, and a
+    /// held slider would square it in two frames.
+    pub fn tuned_map(&self) -> InputMap {
+        use inf_ecs::movement::actions as mv;
+        let mut map = self.base.clone();
+        inf_ui::bindings::apply_overrides(&mut map, &self.settings.bindings);
+        inf_ui::bindings::apply_look_tuning(
+            &mut map,
+            &self.base,
+            mv::LOOK_X,
+            mv::LOOK_Y,
+            self.settings.look_sensitivity,
+            self.settings.invert_look_y,
+        );
+        map
+    }
+
+    /// **Push the settings into the simulation** — the press threshold and the
+    /// three mixer buses.
+    ///
+    /// Called at boot and again whenever the dialog changed something, so a
+    /// slider moves the thing it names in the session the player is in rather
+    /// than on their next launch. The bindings' half is
+    /// [`tuned_map`](Self::tuned_map), which the caller re-seats on the live
+    /// input state.
+    pub fn apply_to_sim(&self, sim: &mut crate::runtime_sim::RuntimeSim) {
+        sim.set_press_threshold_s(self.settings.press_threshold_s());
+        sim.set_bus_volumes(
+            self.settings.master_volume,
+            self.settings.sfx_volume,
+            self.settings.music_volume,
+        );
     }
 
     /// Whether the simulation should be frozen this frame.
@@ -177,6 +220,7 @@ impl PlayerUi {
         KeyVerdict {
             consumed: out.consumed,
             bindings_changed: out.bindings_changed,
+            settings_changed: out.settings_changed,
         }
     }
 
@@ -200,6 +244,7 @@ impl PlayerUi {
         KeyVerdict {
             consumed: out.consumed,
             bindings_changed: out.bindings_changed,
+            settings_changed: out.settings_changed,
         }
     }
 
@@ -302,6 +347,16 @@ pub struct KeyVerdict {
     pub consumed: bool,
     /// The input map changed and must be re-seated on the live state.
     pub bindings_changed: bool,
+    /// A setting changed and must be pushed into the sim
+    /// ([`PlayerUi::apply_to_sim`]) — and, for the look tuning, into the map.
+    pub settings_changed: bool,
+}
+
+impl KeyVerdict {
+    /// Whether anything the host has to act on moved.
+    pub fn changed(&self) -> bool {
+        self.bindings_changed || self.settings_changed
+    }
 }
 
 /// **Project a world point onto the screen**, in pixels, or `None` behind the
@@ -352,7 +407,7 @@ mod tests {
     #[test]
     fn a_key_rebound_in_the_dialog_survives_a_restart() {
         let dir = tmp();
-        let (mut ui, mut map) = PlayerUi::open(dir.clone());
+        let (mut ui, mut map) = PlayerUi::open(dir.clone(), inf_input::default_map());
         assert!(ui.load_error.is_none(), "{:?}", ui.load_error);
         let table = inf_ui::bindings::rows();
         let interact = table.iter().position(|r| r.id == "interact").unwrap();
@@ -384,7 +439,7 @@ mod tests {
         assert!(!ui.menu.open);
 
         // A fresh session — a restart — finds it.
-        let (again, map2) = PlayerUi::open(dir.clone());
+        let (again, map2) = PlayerUi::open(dir.clone(), inf_input::default_map());
         assert!(again.load_error.is_none(), "{:?}", again.load_error);
         assert_eq!(inf_ui::bindings::token_in(&map2, &table[interact]), "KeyJ");
         // …and everything the player did NOT touch is still the shipped table.
@@ -410,7 +465,7 @@ mod tests {
     #[test]
     fn an_open_dialog_eats_every_press_and_a_closed_one_eats_none() {
         let dir = tmp();
-        let (mut ui, mut map) = PlayerUi::open(dir.clone());
+        let (mut ui, mut map) = PlayerUi::open(dir.clone(), inf_input::default_map());
         for k in ["KeyW", "Space", "ArrowDown", "Enter", "KeyC"] {
             assert!(
                 !ui.key(k, true, &mut map).consumed,
@@ -434,7 +489,7 @@ mod tests {
     fn a_corrupt_settings_file_is_reported_and_the_game_still_runs() {
         let dir = tmp();
         std::fs::write(inf_ui::settings::settings_path(&dir), "nonsense = = 1").unwrap();
-        let (ui, map) = PlayerUi::open(dir.clone());
+        let (ui, map) = PlayerUi::open(dir.clone(), inf_input::default_map());
         assert!(ui.load_error.is_some(), "the failure was swallowed");
         assert_eq!(ui.settings, GameSettings::default());
         assert_eq!(map, inf_input::default_map());
@@ -445,7 +500,7 @@ mod tests {
     #[test]
     fn an_unconsumed_control_says_so_and_a_wired_one_stays_quiet() {
         let dir = tmp();
-        let (mut ui, map) = PlayerUi::open(dir.clone());
+        let (mut ui, map) = PlayerUi::open(dir.clone(), inf_input::default_map());
         let mut state = InputState::new(map);
         state.apply(&[inf_input::InputEvent::Key {
             code: "KeyR".into(),
@@ -456,7 +511,7 @@ mod tests {
         assert!(ui.toasts.live()[0].text.contains("reload"));
 
         // A control with a consumer is silent.
-        let mut ui2 = PlayerUi::open(dir.clone()).0;
+        let mut ui2 = PlayerUi::open(dir.clone(), inf_input::default_map()).0;
         let mut state = InputState::new(inf_input::default_map());
         state.apply(&[inf_input::InputEvent::Key {
             code: "Space".into(),

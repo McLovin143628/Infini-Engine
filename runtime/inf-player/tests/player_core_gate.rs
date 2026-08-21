@@ -164,7 +164,7 @@ impl Host {
         // Each host gets its own EMPTY settings directory, so both start from the
         // shipped table — which is what makes a divergence a divergence rather
         // than one of them having found a file.
-        let (mut ui, map) = PlayerUi::open(dir.path().to_path_buf());
+        let (mut ui, map) = PlayerUi::open(dir.path().to_path_buf(), inf_input::default_map());
         ui.menu.single_player = true;
         let mut sim = sim;
         sim.set_press_threshold_s(ui.settings.press_threshold_s());
@@ -204,9 +204,12 @@ impl Host {
         for (code, pressed) in events {
             let mut map = self.map.clone();
             let verdict = self.ui.key(&code, pressed, &mut map);
-            if verdict.bindings_changed {
-                self.map = map;
+            if verdict.changed() {
+                // Rebuilt from the level's table, not patched — `PlayerApp`'s
+                // own rule, and the reason is the look tuning's multiplier.
+                self.map = self.ui.tuned_map();
                 self.state.set_map(self.map.clone());
+                self.ui.apply_to_sim(&mut self.sim);
             }
             if !verdict.consumed {
                 forwarded.push(InputEvent::Key { code, pressed });
@@ -868,6 +871,110 @@ fn the_menu_pauses_the_sim_and_the_rebinding_takes_effect() {
         (speed - tune.run_speed_mps).abs() < 0.25,
         "Shift still sprints after being rebound away: {speed}"
     );
+}
+
+/// **EVERY SLIDER ON THE CONTROLS AND AUDIO PAGES MOVES THE THING IT NAMES**,
+/// in the session the player is in (island wave I5).
+///
+/// The defect this refuses is the one the whole wave is about, one level up: a
+/// control that is *bound* and consumed by nothing is a dead key, and a
+/// *setting* that is stored and read by nothing is a dead slider. The dialog
+/// carries five of them and this is what says they are live.
+///
+/// Every step is a key a player pressed. Nothing here reaches into a struct to
+/// set a value, because the claim is about the dialog and not about the model.
+#[test]
+fn the_controls_and_audio_pages_reach_their_consumers() {
+    use inf_ui::menu::{self, RowId};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut host = Host::new(pack_sim(tmp.path()));
+
+    // ── the look sensitivity: a multiplier on what the project authored ──
+    let shipped = host
+        .map
+        .mouse_axis_scale("look_x", inf_input::MouseAxis::X)
+        .expect("the shipped table binds the mouse to look_x");
+    host.ui.toggle();
+    host.ui.menu.page = inf_ui::Page::Controls;
+    let focus_on = |host: &Host, id: RowId| {
+        menu::rows(&host.ui.menu, &host.ui.settings, &host.map)
+            .iter()
+            .position(|r| r.id == id)
+            .unwrap_or_else(|| panic!("{id:?} is not on this page"))
+    };
+    host.ui.menu.focus = focus_on(&host, RowId::LookSensitivity);
+    for _ in 0..10 {
+        host.frame(&["ArrowRight"], 0.0);
+        host.frame(&[], 0.0);
+    }
+    let tuned = host
+        .map
+        .mouse_axis_scale("look_x", inf_input::MouseAxis::X)
+        .expect("still bound");
+    println!(
+        "the sensitivity slider moved look_x from {shipped} to {tuned} deg/count ({}x)",
+        tuned / shipped
+    );
+    assert!(
+        tuned > shipped * 1.2,
+        "the sensitivity slider did not reach the live map: {shipped} -> {tuned}"
+    );
+    assert!(
+        (tuned / shipped - host.ui.settings.look_sensitivity).abs() < 1e-5,
+        "the live scale is not the authored one times the setting"
+    );
+
+    // ── invert-Y: the sign of the y channel, against the shipped convention ──
+    let before = host
+        .map
+        .mouse_axis_scale("look_y", inf_input::MouseAxis::Y)
+        .expect("bound");
+    host.ui.menu.focus = focus_on(&host, RowId::InvertLookY);
+    host.frame(&["Enter"], 0.0);
+    host.frame(&[], 0.0);
+    let after = host
+        .map
+        .mouse_axis_scale("look_y", inf_input::MouseAxis::Y)
+        .expect("bound");
+    println!("invert-Y moved look_y from {before} to {after}");
+    assert!(host.ui.settings.invert_look_y);
+    assert_eq!(after, -before, "invert-Y did not reach the live map");
+
+    // ── the hold threshold: the sim's own copy ──
+    host.ui.menu.focus = focus_on(&host, RowId::PressThreshold);
+    let before = host.sim.press_threshold_s();
+    for _ in 0..5 {
+        host.frame(&["ArrowRight"], 0.0);
+        host.frame(&[], 0.0);
+    }
+    let after = host.sim.press_threshold_s();
+    println!("the hold threshold moved from {before} s to {after} s");
+    assert!(after > before, "the threshold slider did not reach the sim");
+    assert!(
+        (after - host.ui.settings.press_threshold_s()).abs() < 1e-9,
+        "the sim and the settings disagree about the threshold"
+    );
+
+    // ── the three mixer buses ──
+    host.ui.menu.page = inf_ui::Page::Audio;
+    for (id, bus, name) in [
+        (RowId::MasterVolume, inf_audio::Bus::Master, "master"),
+        (RowId::SfxVolume, inf_audio::Bus::Sfx, "sfx"),
+        (RowId::MusicVolume, inf_audio::Bus::Music, "music"),
+    ] {
+        host.ui.menu.focus = focus_on(&host, id.clone());
+        let before = host.sim.bus_volume(bus);
+        for _ in 0..4 {
+            host.frame(&["ArrowLeft"], 0.0);
+            host.frame(&[], 0.0);
+        }
+        let after = host.sim.bus_volume(bus);
+        println!("the {name} bus moved from {before} to {after}");
+        assert!(
+            after < before - 0.1,
+            "the {name} slider did not reach the mixer: {before} -> {after}"
+        );
+    }
 }
 
 /// **A KEY THE DIALOG TOOK NEVER REACHED THE GAME.**
