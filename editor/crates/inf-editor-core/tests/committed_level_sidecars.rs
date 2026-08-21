@@ -72,11 +72,13 @@ fn committed_levels() -> Vec<PathBuf> {
 /// The sixteen the P26.4 audit counted, plus P29.6's locomotion course, the two
 /// starter levels the island phase's IB-7 ruling owes the templates that had none
 /// (`templates/blank-3d/Blank.inf_lvl`, `templates/2d-platformer/Platformer.inf_lvl`),
-/// **plus wave I3's thousand-building city** (`samples/phase30-city/City.inf_lvl`).
+/// **plus wave I3's thousand-building city** (`samples/phase30-city/City.inf_lvl`)
+/// **and wave I6's gameplay fixture**
+/// (`samples/phase30-gameplay/Gameplay.inf_lvl`).
 ///
 /// Exact, not `>= 1`: this arm's whole subject is *shipped content*, and a walk
 /// that quietly found one file would pass every assertion below.
-const EXPECTED_LEVELS: usize = 20;
+const EXPECTED_LEVELS: usize = 21;
 
 #[test]
 fn every_committed_level_sidecar_declares_its_bindings() {

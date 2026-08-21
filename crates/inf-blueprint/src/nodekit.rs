@@ -52,6 +52,7 @@ pub fn blueprint_registry() -> NodeRegistry {
     reg.register_all(water_nodes());
     reg.register_all(voxel_nodes());
     reg.register_all(destruct_nodes());
+    reg.register_all(gameplay_nodes());
     reg.register_all(ik_nodes());
     reg.register_all(anim_nodes());
     reg
@@ -1228,6 +1229,148 @@ fn destruct_nodes() -> Vec<NodeDef> {
             )
             .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
             .with_outputs(vec![PortDef::new("chunks", PortType::Int)]),
+    ]
+}
+
+/// **The gameplay kit** (island wave I6): items, doors and health.
+///
+/// # Why this is the authoring surface, and why there is no `.inf_item` asset
+///
+/// A level's content has to reach **three** hosts: the editor's Simulate, a PIE
+/// payload and a cooked pack. An asset would need a scene field for an entity to
+/// name it (a scene bump) *and* a `ScenePayload` vector to cross the PIE wire (a
+/// payload bump); an `items.toml` beside the level reaches exactly one of the
+/// three (the I5 audit's finding A6 about `input.toml`). A **Blueprint class**
+/// reaches all three with none: `.inf_act` bytes ride `ScenePayload::classes`
+/// and cook as a root kind, and this is the surface `destruct.*` and `voxel.*`
+/// already are.
+///
+/// So the catalogue is authored as **name-keyed TOML in a string**, which is
+/// what the mandate asked for, in the one place that carries it everywhere.
+fn gameplay_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("item.define", "Define Items", "item")
+            .described(
+                "Add item definitions to the session's catalogue, as name-keyed TOML. \
+                 Each table is one item id; `label`, `stack_max` and `mass_kg` are \
+                 optional, and a `[<id>.weapon]` sub-table makes it a weapon (damage_j, \
+                 rounds_per_minute, magazine, reload_s, spread_deg, range_m, automatic, \
+                 kind). Reports how many definitions were taken; a malformed document \
+                 takes NONE and logs why.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("toml", PortType::Str).required(),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("count", PortType::Int),
+            ]),
+        NodeDef::new("item.spawn_pickup", "Spawn Pickup", "item")
+            .described(
+                "Put an item on the ground as an entity the interact key can pick up. \
+                 The id must already be in the catalogue (Define Items); an unknown id \
+                 spawns nothing and says so.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("id", PortType::Str).required(),
+                PortDef::new("x", PortType::Float),
+                PortDef::new("y", PortType::Float),
+                PortDef::new("z", PortType::Float),
+                PortDef::new("count", PortType::Int),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("ok", PortType::Bool),
+            ]),
+        NodeDef::new("item.give", "Give Item", "item")
+            .described(
+                "Put items straight into an actor's inventory, creating one if it has \
+                 none. Reports how many did NOT fit — 0 means all of them did.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("id", PortType::Str).required(),
+                PortDef::new("count", PortType::Int),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("left", PortType::Int),
+            ]),
+        NodeDef::new("item.equip", "Equip Item", "item")
+            .described(
+                "Equip an item the actor is already carrying, and give it a full \
+                 magazine if it is a weapon. False when the actor does not have one.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("id", PortType::Str).required(),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("ok", PortType::Bool),
+            ]),
+        NodeDef::new("item.count", "Item Count", "item")
+            .described("How many of an item the actor is carrying, across every slot.")
+            .with_inputs(vec![
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("id", PortType::Str).required(),
+            ])
+            .with_outputs(vec![PortDef::new("count", PortType::Int)]),
+        NodeDef::new("door.spawn", "Spawn Doors", "door")
+            .described(
+                "Hang doors in the world, as name-keyed TOML. Each table is one door: \
+                 `hinge = [x, y, z]` at the leaf's mid-height, `closed_yaw_deg` toward \
+                 the free edge, `inside_yaw_deg` for the face the lock is on, plus the \
+                 optional `width_m`, `height_m`, `thickness_m`, `open_limit_deg`, \
+                 `locked` and `label`. Reports how many were hung. The building grammar \
+                 hangs its own without this.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("toml", PortType::Str).required(),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("count", PortType::Int),
+            ]),
+        NodeDef::new("door.is_open", "Is Door Open", "door")
+            .described(
+                "True when the door nearest a world point is open far enough to walk \
+                 through. False when there is no door within a few metres of it.",
+            )
+            .with_inputs(vec![
+                PortDef::new("x", PortType::Float),
+                PortDef::new("y", PortType::Float),
+                PortDef::new("z", PortType::Float),
+            ])
+            .with_outputs(vec![PortDef::new("open", PortType::Bool)]),
+        NodeDef::new("health.set", "Set Health", "health")
+            .described(
+                "Give an actor a body worth this many JOULES — what it can absorb before \
+                 it stops working and goes limp. This engine has no hit points: a bullet, \
+                 a kick and a collapsing wall are all energy, which is why there is no \
+                 conversion to tune. A rifle round is about 1 700 J.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("joules", PortType::Float),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("ok", PortType::Bool),
+            ]),
+        NodeDef::new("health.get", "Get Health", "health")
+            .described(
+                "How many joules the actor can still absorb. 0 for an actor with no \
+                 health at all, which is every actor nothing has given one to.",
+            )
+            .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
+            .with_outputs(vec![PortDef::new("joules", PortType::Float)]),
     ]
 }
 

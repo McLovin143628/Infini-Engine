@@ -20,6 +20,7 @@ use std::path::PathBuf;
 
 use glam::Vec2;
 use inf_input::{InputMap, InputState};
+use inf_ui::inventory::{self, InventoryState, InventoryVerb, InventoryView};
 use inf_ui::menu::{self, MenuInput, MenuState};
 use inf_ui::{settings::GameSettings, toast::Toasts, UiDrawList};
 
@@ -75,6 +76,20 @@ pub fn settings_dir() -> PathBuf {
 pub struct PlayerUi {
     /// The dialog.
     pub menu: MenuState,
+    /// **The inventory panel** (I6). Beside the dialog rather than inside it
+    /// because they are different kinds of surface: the dialog is modal and
+    /// pauses, the panel is a HUD and does not.
+    pub inventory: InventoryState,
+    /// What the panel is showing — the host's projection of the character's own
+    /// bag, refreshed once a frame.
+    pub bag: InventoryView,
+    /// Verbs the panel produced and the sim has not applied yet.
+    ///
+    /// A queue rather than a direct edit, and the reason is the wave's own:
+    /// gameplay happens on the **fixed** step. A panel that reached into the
+    /// world would move a player's things on the frame clock, which is the one
+    /// thing a PIE-versus-shipping trace cannot survive.
+    pending: Vec<InventoryVerb>,
     /// The player's settings, as loaded and as edited.
     pub settings: GameSettings,
     /// What is on screen.
@@ -122,6 +137,9 @@ impl PlayerUi {
         };
         let ui = Self {
             menu: MenuState::new(),
+            inventory: InventoryState::default(),
+            bag: InventoryView::default(),
+            pending: Vec::new(),
             settings,
             toasts: Toasts::default(),
             dir,
@@ -181,6 +199,10 @@ impl PlayerUi {
 
     /// Whether the simulation should be frozen this frame.
     pub fn pauses_sim(&self) -> bool {
+        // **The inventory panel is deliberately NOT here.** See
+        // `inf_ui::inventory`'s header: a bag that froze the world would be a
+        // safe place to stand, which is the opposite of what an inventory in a
+        // game of this kind is for.
         self.menu.pauses_sim()
     }
 
@@ -208,7 +230,24 @@ impl PlayerUi {
             // an edge needs the previous frame to have had the action down.
             return KeyVerdict::default();
         }
+        // **The dialog outranks the panel.** Both can be open — the panel does
+        // not pause, so a player can open the menu over it — and a key can only
+        // belong to one of them. The modal one wins, which is what modal means.
         if !self.menu.open {
+            if self.inventory.open {
+                let out = inventory::handle(
+                    &mut self.inventory,
+                    &self.bag,
+                    &inf_ui::inventory::InventoryInput::Key(code.to_string()),
+                );
+                if let Some(v) = out.verb {
+                    self.pending.push(v);
+                }
+                return KeyVerdict {
+                    consumed: out.consumed,
+                    ..Default::default()
+                };
+            }
             return KeyVerdict::default();
         }
         let out = menu::handle(
@@ -253,6 +292,32 @@ impl PlayerUi {
             bindings_changed: out.bindings_changed,
             settings_changed: out.settings_changed,
         }
+    }
+
+    /// **Open or close the inventory panel** — the `inventory` action's
+    /// consumer, and the last of the four controls I5 bound against nothing.
+    ///
+    /// Refused while the settings dialog is open, because the dialog is modal:
+    /// a panel that opened behind it would take keys the dialog had already
+    /// claimed.
+    pub fn toggle_inventory(&mut self) {
+        if self.menu.open {
+            return;
+        }
+        let open = !self.inventory.open;
+        self.inventory.set_open(open);
+    }
+
+    /// What the panel produced since the last drain — the host applies these on
+    /// the sim's own step.
+    pub fn take_inventory_verbs(&mut self) -> Vec<InventoryVerb> {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Refresh what the panel is showing. Called once a frame with the
+    /// character's own bag, projected out of the sim.
+    pub fn set_bag(&mut self, bag: InventoryView) {
+        self.bag = bag;
     }
 
     /// Open or close the dialog — the `menu` action's consumer.
@@ -311,6 +376,10 @@ impl PlayerUi {
         self.toasts.advance(dt);
         self.list = UiDrawList::new(viewport);
         inf_ui::view::menu(&mut self.list, &self.menu, &self.settings, map);
+        // The panel draws UNDER the toasts and under the dialog: a modal is on
+        // top of everything, and a toast is what tells a player why something
+        // did not happen.
+        inf_ui::inventory::draw(&mut self.list, &self.inventory, &self.bag);
         inf_ui::view::toasts(&mut self.list, &self.toasts);
         &self.list
     }

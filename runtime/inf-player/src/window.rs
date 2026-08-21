@@ -509,6 +509,44 @@ impl PlayerApp {
         Some((at, text))
     }
 
+    /// **What the camera subject is carrying**, as the panel renders it
+    /// (island wave I6).
+    ///
+    /// The projection `inf-ui` cannot make for itself: a UI crate does not
+    /// depend on the world model, so the host walks the character's own
+    /// `Inventory` and the item catalogue once a frame and hands over a
+    /// snapshot. `None` on a level with no character or no bag produces an empty
+    /// panel rather than a missing one, which is what a player with nothing sees.
+    fn bag_of(sim: &RuntimeSim) -> inf_ui::InventoryView {
+        let world = sim.world();
+        let Some(actor) = inf_ecs::movement::camera_subject(world) else {
+            return inf_ui::InventoryView::default();
+        };
+        let Some(inv) = inf_ecs::item::inventory_of(world, actor) else {
+            return inf_ui::InventoryView::default();
+        };
+        let defs = inf_ecs::item::item_defs(world);
+        inf_ui::InventoryView {
+            slots: inv
+                .slots
+                .iter()
+                .enumerate()
+                .map(|(i, slot)| match slot {
+                    Some(s) => {
+                        let def = defs.and_then(|d| d.get(&s.id));
+                        inf_ui::InventorySlot {
+                            label: def.map(|d| d.label.clone()).unwrap_or_else(|| s.id.clone()),
+                            count: s.count,
+                            equipped: inv.equipped == Some(i),
+                            equippable: def.is_some_and(|d| d.is_weapon()),
+                        }
+                    }
+                    None => inf_ui::InventorySlot::default(),
+                })
+                .collect(),
+        }
+    }
+
     /// One frame: fold input, advance the sim by the elapsed time, project, draw.
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
         // **The window-handle re-attempt** (round-2 finding B7). `resumed`
@@ -546,6 +584,23 @@ impl PlayerApp {
         //    it is open.
         if self.input_state.just_pressed(inf_input::actions::MENU) {
             self.ui.toggle();
+        }
+        // ── the inventory panel (island wave I6) ──
+        //
+        //    The `inventory` action's edge, read from the resolved state for
+        //    exactly the reason the menu's is: the key that opens it is a
+        //    *binding*, so a player who rebound it opens it with what they
+        //    bound. It is the last of the four controls I5 bound against
+        //    consumers that did not exist.
+        if self.input_state.just_pressed(inf_input::actions::INVENTORY) {
+            self.ui.toggle_inventory();
+        }
+        //    What the panel is showing, and what it decided. The projection is
+        //    one way and the verbs the other, and the verbs are applied on the
+        //    SIM's step rather than here — see `PlayerUi::pending`.
+        self.ui.set_bag(Self::bag_of(&self.sim));
+        for verb in self.ui.take_inventory_verbs() {
+            self.sim.apply_inventory_verb(verb);
         }
         //    Tab pauses the single-player simulation, and the pause is on the
         //    SIM rather than on this host — see `inf_ui::menu`'s ruling and
@@ -616,6 +671,10 @@ impl PlayerApp {
         if self.debug_cells {
             live.host.draw_cell_overlay(&self.sim);
         }
+        // I6: this step's tracers. After the cell overlay, which clears the
+        // debug list — see `draw_tracers` for why a tracer is a line and not a
+        // particle.
+        live.host.draw_tracers(&self.sim);
         // ── the in-game UI (island wave I5) ──
         //
         //    BETWEEN the projection and the render, which is the only window in

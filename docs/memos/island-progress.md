@@ -2146,3 +2146,174 @@ would be present in a dev run and absent in the build. What content authors
 instead is the **Blueprint kit**, which rides `.inf_act` bytes that a cooked pack
 and a PIE payload already both carry — the surface `destruct.*` and `voxel.*`
 already are.
+
+### The grammar's own doors, and what a city's doors cost
+
+`inf_pcg::building::doorway` turns each `Opening { kind: Door }` the grammar
+already plans into a hinge, a facing and a size, derived in the one pass that has
+a `BuildingPlan` in hand (`evaluate_buildings_in` throws it away) and carried out
+through `GrammarOutput` → `VolumeOutput` → both hosts' `population_of` → a
+`#[serde(skip)]` `PcgVolume::doorways`. **No schema moves.** The leaf swings into
+the room its wall serves, which is what `Wall::inside` means.
+
+| the shipped city | number |
+|---|---|
+| blocks | 100 |
+| structural solids | 370 468 |
+| **doorways planned** | **19 790** (197.9 a block) |
+| **doorways the band makes SOLID** | **234 — 1.18 %** |
+| door leaves the physics world actually holds | **234**, equal to the band's list |
+
+1.18 % against the walls' own 1.64 %: the same discipline, at the same radii,
+through one new door (`PhysicsBridge3D::sim_band`) so a level's doors and its
+walls cannot be solid at different distances. And the two hosts plan the same
+doors **byte for byte** — all 19 790 placements compared as raw bit patterns
+across the cook and the PIE payload, because two of a doorway's eight mirrored
+fields are angles and **swapping them compiles**.
+
+### THE GATE — `phase30_gameplay_gate`, and the fixture under it
+
+`samples/phase30-gameplay` (a grammar-built House, four hand-hung doors, a rifle
+on the floor, a destructible target and one hero). Everything the scene cannot
+carry is authored by the hero's own Blueprint on `BeginPlay`, through the new
+`item.*` / `door.*` / `health.*` kit.
+
+Six arms. The headline runs the same scripted trace on a **cooked pack** and on a
+**PIE payload** and compares `state_bytes` step for step, with the coverage check
+FIRST so two identical empty worlds cannot agree their way through:
+
+| verb | what the trace measured |
+|---|---|
+| E picks the rifle up | 1 rifle, floor entity gone |
+| I opens the panel | the panel's own `open` |
+| F equips from the panel | `equipped_id() == "rifle"` |
+| the wheel changes weapon | the sign reached the cycle |
+| RMB aims | `RotationMode::Aiming` |
+| LMB fires at the destructible | 6 rounds; **1 reached the target owing 1 700 J at the P22 door, and 12 chunks came off** |
+| R reloads | magazine 24 → 30 |
+| E opens the front door | −80.7 degrees |
+| the hero walks through it | z −7.30 → −5.45, past a doorway at −6 |
+| E locks it from the inside | the door's own `locked` |
+| LMB kicks the locked gate in | **151.875 J against a 120 J lock** |
+| a sprint breaches the shed door | **6.500 m/s in, 5.406 m/s out — 83.2 % kept** |
+| a dive goes through the hatch | **5.499999691 m/s — the dive's own launch speed, 3.09e-7 off nominal** |
+
+The anti-vacuity list is a `match` with no wildcard (`duty_of`), so a verb
+deleted from the enum is a compile error rather than a silently dropped
+obligation — `phase29_gate`'s own A3 lesson.
+
+Two more arms are about what the comparison is *of*: `a_rifle_round_spends_its_
+joules_at_the_p22_door` refuses a world where nothing can break (forcing `Fire`
+only needs a magazine to move), and `the_trace_carries_the_doors_the_bag_the_
+magazine_and_the_body` refuses a `state_bytes` that folded none of the four new
+sections. Plus a two-cook replay and a fixture-file lock.
+
+### What the gate itself found
+
+* **`sim_from_built` does not attach fractures** — the shipped `--pack` boot
+  does, in `lib.rs`. A gate that skipped it ran a world where **nothing can
+  break**: six rounds owing 10 200 J at a door that answered `NoFracture` for
+  every one, which reads as "the shot missed" and is not.
+* **A character standing in a door's own arc BLOCKS it.** The lock station
+  pressed E from the middle of the doorway and watched the leaf stop at 77
+  degrees against the hero's own capsule. The script steps aside; the system was
+  right.
+* **E is a TOGGLE**, so a script that pressed it every twenty frames opened the
+  door and shut it again — the first draft left the leaf at 11 degrees after two
+  hundred steps.
+* **Relative turns accumulate.** After the lock station — which faces the *door*
+  rather than a cardinal direction — every later "walk east" walked somewhere
+  else. `Host::turn_to` takes an absolute heading.
+* **The breach is priced before the mode table honours a dive**, so a dive
+  requested on the step it reaches a door is still `Grounded` when the breach is
+  decided. The script arms it two steps out, and the arm asserts the *speed* —
+  which is the dive's own launch speed — rather than the mode, because a dive off
+  flat ground lasts one fixed step (I5's carried remainder #2, met again).
+
+### THE FIFTEENTH chr(92) CATCH, and it was this wave's own
+
+Three literals — two assertion messages in `commands/sim.rs` and one in the gate
+— shipped mid-wave with an eaten `\` continuation, from scripted edits written
+through a shell heredoc. `inf-packager`'s workspace sweep caught all three and
+the repair went through the Edit tool, which is what the law prescribes.
+
+## Decisions (I6's, binding on later waves)
+
+* **A door's state is a sparse RESOURCE, not a component.** A grammar doorway has
+  no entity to put one on, so a component would be two authorities on "is this
+  door open" — and the city's twenty thousand doorways would be twenty thousand
+  records nobody had touched. Absent means closed. It is P22's own split
+  (`Destructible` authored, `FractureState` mutable) and it moves no schema.
+* **Health is JOULES.** `docs/memos/p22-strength.md` §1 refuses damage numbers
+  for walls; a character is the one place a bullet, a kick, a fall and a
+  collapsing wall all meet, so a conversion table there would be the same mistake
+  with more consumers.
+* **The Blueprint class is the authoring surface for gameplay content**, and the
+  two alternatives are refused with their prices: a `.inf_item` asset needs a
+  scene field to be named *and* a `ScenePayload` vector to reach PIE (two bumps);
+  an `items.toml` beside the level reaches exactly one of the three boot paths.
+  `.inf_act` bytes reach all three with none.
+* **`try_query_filtered`'s `None` fast path cannot carry a `Without`.** It
+  refuses when a component it names has never been inserted — which is the
+  `O(1)` answer everything relies on and is exactly backwards for a negative
+  filter. Read the latch per entity.
+* **A leaf's box axes follow the yaw convention, not the field order.** Yaw zero
+  is `+Z`, so a leaf's length is its local `+Z` and a box written
+  `(width, height, thickness)` lies across its own doorway at every angle.
+* **A sweep that STARTS penetrating is not a block.** A door stands on the floor
+  and between two walls; its own box is in resting contact with three solids at
+  all times, so an exact-shape probe reads `toi == 0` and no door in the engine
+  can open. The probe is inset by a 2 cm skin and ignores `started_penetrating`.
+* **A reach measured from the FEET must budget the thing's height.**
+  `interact::resolve` measures from the ground contact and a door's interaction
+  point is at the leaf's mid-height, so a 2.0 m reach is 1.70 m of floor. The
+  constant carries the arithmetic.
+* **The inventory panel does not pause the simulation**, and the settings dialog
+  does. A menu that did not pause would make the UI part of the sim's input; a
+  bag that DID pause would be a safe place to stand in a firefight. The dialog
+  outranks the panel when both are open, because that is what modal means.
+* **A kick lands on the animation's notify, never on the button** — with a fuse
+  for a character that has no rig to notify it, so the verb is not dead on every
+  level committed before this wave. Both paths are armed and the report says
+  which ran.
+* **A corpse does not get up.** The ragdoll's get-up fires on settle, so a body
+  the damage system handed over was re-handed on the next step. `Downed` is the
+  latch and `Health::dead` is the guard on the get-up.
+* **The panel's verbs are VALUES the host applies**, never edits the panel makes.
+  A UI that reached into the world would move a player's things on the frame
+  clock instead of the fixed one.
+
+## What is still open after I6
+
+1. **A drop lands on the FRAME the key was pressed, not on a fixed step.**
+   `RuntimeSim::apply_inventory_verb` is called by the host between frames, so a
+   windowed player's own drop is the one place the frame clock touches gameplay.
+   Every gate drives `step_once` and presses the verb through the same door, so
+   the traces are exact; closing it properly means a queue on `RuntimeSim` that
+   the fixed step drains. Stated on the function.
+2. **A projectile is resolved as a hitscan.** `ShotKind::Projectile` changes the
+   tracer's speed and nothing else in I6 — a body in flight is a wave of its own.
+   Stated on `resolve_shot`.
+3. **A tracer is a debug-line segment and a muzzle flash is the first 2 % of it.**
+   There is no particle system (P22's own carried remainder), so a bullet leaves
+   no smoke and a break still makes a sound and no dust.
+4. **The editor's Simulate draws neither the settings dialog nor the inventory
+   panel.** I5's remainder 8, extended: the editor's viewport has its own
+   projector, and an author who wants either previews it with PIE.
+5. **The authored-interactable walk is still `O(interactables)`** — I5's carried
+   remainder 9. Doors ARE banded now (`placements_near`, the same band the walls
+   use), so the largest new source of candidates is bounded; the pre-existing
+   `Interactable` walk is not, and the fix is the same band.
+6. **A dive off flat ground lasts one fixed step**, so the hatch breach is
+   measured by the dive's own launch speed rather than by the mode at the end of
+   the step. That is I5's remainder 2 met from the other side, and it is why the
+   gate asserts a speed.
+7. **Nothing persists.** A door a player kicked in, a bag they filled and a body
+   they emptied are all runtime state, like a broken wall and a carved cave
+   before them. `.inf_lvl` is the author's document and this engine still has no
+   save-game container — see `inf_ecs::item`'s header for the exact wire field an
+   authored starting inventory would force.
+8. **A grammar door's lock is never engaged.** Nothing the building grammar
+   builds starts locked, because a city whose every interior door was bolted is a
+   city nobody can walk through and there is no authored intent to read one from.
+   Locking is a verb a player or a Blueprint uses.

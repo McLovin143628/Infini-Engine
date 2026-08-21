@@ -232,6 +232,39 @@ pub fn placement_of(world: &EcsWorld, guid: Uuid) -> Option<DoorPlacement> {
     placements(world).into_iter().find(|p| p.guid == guid)
 }
 
+/// How close a point has to be to a door for [`is_open_near`] to be about it,
+/// metres — a doorway's own reach plus a stride.
+pub const NEAR_DOOR_M: f64 = 3.0;
+
+/// **Is the door nearest `at` open** — the Blueprint kit's `door.is_open`.
+///
+/// A place rather than an entity, because half the doors in this engine have no
+/// entity: a grammar doorway is a record on a volume. `false` when there is no
+/// door within [`NEAR_DOOR_M`], which is the honest answer for "is the door
+/// here open" when there is no door here.
+pub fn is_open_near(world: &EcsWorld, at: DVec3) -> bool {
+    let field = door::door_field(world);
+    let mut best: Option<(f64, DoorPlacement)> = None;
+    for p in placements(world) {
+        let d = (door::prompt_position(&p) - at).length();
+        if !d.is_finite() || d > NEAR_DOOR_M {
+            continue;
+        }
+        // Strict `<` over the `Guid`-ordered walk `placements` returns, so two
+        // doors at the same distance answer the same way in both hosts.
+        if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
+            best = Some((d, p));
+        }
+    }
+    match best {
+        Some((_, p)) => field
+            .map(|f| f.get(p.guid, &p.spec))
+            .unwrap_or_else(|| DoorState::fresh(&p.spec))
+            .is_open(&p.spec),
+        None => false,
+    }
+}
+
 /// **The E key on a door** — the consumer the one interaction site calls when
 /// the hit it resolved is a door.
 ///

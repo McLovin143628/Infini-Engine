@@ -9728,6 +9728,583 @@ pub fn write_island_frame_level(dir: &std::path::Path) -> Result<(), String> {
     .map(|_| ())
 }
 
+// ── the island's gameplay fixture (I6) ──────────────────────────────────────
+//
+// One house the grammar built, one weapon on the floor, one destructible target
+// and one hero — the smallest world in which every verb the owner's mandate
+// names can be forced by a scripted trace.
+//
+// **Small on purpose.** The city fixture is a thousand buildings and 19 790
+// doorways, and a gate that walked a character across it would spend its whole
+// budget travelling. What a gameplay gate needs is one of each thing, close
+// enough together that a script can reach them all — and the city's own numbers
+// are measured where they belong, by `city_scale`.
+
+/// The gameplay fixture's level.
+pub const GAMEPLAY_LEVEL_GUID: Uuid = Uuid::from_u128(0x8460_0000);
+/// Its one-house PCG graph.
+pub const GAMEPLAY_PCG_GUID: Uuid = Uuid::from_u128(0x8460_0001);
+/// The hero's Blueprint class — the authoring door for every item, door and
+/// health value in this level.
+pub const GAMEPLAY_ACTOR_GUID: Uuid = Uuid::from_u128(0x8460_0002);
+/// The sun.
+pub const GAMEPLAY_SUN_GUID: Uuid = Uuid::from_u128(0x8460_0003);
+/// The ground slab.
+pub const GAMEPLAY_GROUND_GUID: Uuid = Uuid::from_u128(0x8460_0004);
+/// The hero.
+pub const GAMEPLAY_HERO_GUID: Uuid = Uuid::from_u128(0x8460_0005);
+/// The volume the house is grown in.
+pub const GAMEPLAY_HOUSE_GUID: Uuid = Uuid::from_u128(0x8460_0006);
+/// The destructible a bullet is fired at.
+pub const GAMEPLAY_TARGET_GUID: Uuid = Uuid::from_u128(0x8460_0007);
+/// The mesh the target fractures from.
+pub const GAMEPLAY_TARGET_MESH_GUID: Uuid = Uuid::from_u128(0x8460_0008);
+
+/// The house's footprint, metres.
+pub const GAMEPLAY_HOUSE_M: (f64, f64) = (14.0, 10.0);
+/// Where the hero starts, world metres — outside the house, facing `+Z`.
+pub const GAMEPLAY_HERO_START: (f64, f64, f64) = (0.0, 0.0, -9.0);
+/// Where the rifle lies, world metres.
+pub const GAMEPLAY_RIFLE_AT: (f64, f64, f64) = (0.0, 0.4, -7.4);
+/// Where the destructible target stands, world metres.
+pub const GAMEPLAY_TARGET_AT: (f64, f64, f64) = (-6.0, 1.0, -9.0);
+
+/// The hero's own body, joules — two rifle rounds' worth, so the gate can name
+/// what it takes to stop one.
+pub const GAMEPLAY_HERO_J: f64 = 2000.0;
+
+/// **The item catalogue this level authors**, as the name-keyed TOML the
+/// `item.define` node takes.
+///
+/// A `const` rather than a file, because it rides the Blueprint's own bytes —
+/// see `inf_blueprint::nodekit`'s `gameplay_nodes` for why that is the only
+/// surface that reaches Simulate, PIE and a cooked pack at once.
+pub const GAMEPLAY_ITEMS_TOML: &str = concat!(
+    "[rifle]\n",
+    "label = \"Rifle\"\n",
+    "stack_max = 1\n",
+    "mass_kg = 3.6\n",
+    "[rifle.weapon]\n",
+    "damage_j = 1700.0\n",
+    "rounds_per_minute = 600.0\n",
+    "magazine = 30\n",
+    "reserve = 120\n",
+    "reload_s = 2.0\n",
+    "spread_deg = 0.0\n",
+    "range_m = 400.0\n",
+    "automatic = true\n",
+    "\n",
+    "[bandage]\n",
+    "label = \"Bandage\"\n",
+    "stack_max = 5\n",
+    "mass_kg = 0.1\n",
+);
+
+/// **The doors this level hangs by hand**, as the `door.spawn` node's TOML.
+///
+/// Two of them, and they are the two the grammar cannot give a gate: a door the
+/// script can lock from the inside and kick in from the outside, and a second
+/// one out in the open for a sprint to go through. The house's own doorways are
+/// the grammar's and are hung without any of this.
+pub const GAMEPLAY_DOORS_TOML: &str = concat!(
+    "[front]
+",
+    "label = \"front door\"
+",
+    "hinge = [-0.45, 1.05, -6.0]
+",
+    "closed_yaw_deg = 90.0
+",
+    "inside_yaw_deg = 0.0
+",
+    "open_limit_deg = -95.0
+",
+    "locked = false
+",
+    "
+",
+    "[gate]
+",
+    "label = \"yard gate\"
+",
+    "hinge = [7.55, 1.05, -9.45]
+",
+    "closed_yaw_deg = 0.0
+",
+    "inside_yaw_deg = 90.0
+",
+    "open_limit_deg = 95.0
+",
+    "locked = true
+",
+    "
+",
+    "[shed]
+",
+    "label = \"shed door\"
+",
+    "hinge = [17.55, 1.05, -9.45]
+",
+    "closed_yaw_deg = 0.0
+",
+    "inside_yaw_deg = 90.0
+",
+    "open_limit_deg = 95.0
+",
+    "locked = true
+",
+    "
+",
+    "[hatch]
+",
+    "label = \"hatch\"
+",
+    "hinge = [27.55, 1.05, -9.45]
+",
+    "closed_yaw_deg = 0.0
+",
+    "inside_yaw_deg = 90.0
+",
+    "open_limit_deg = 95.0
+",
+    "locked = false
+",
+);
+
+/// Where each hand-hung door's PROMPT is, world metres — the point a script
+/// walks to and a gate measures from.
+///
+/// Half a leaf-width along its closed facing from the hinge, which is
+/// `inf_ecs::door::prompt_position`'s own arithmetic. The three yard doors run
+/// east along the hero's own row so one script can reach them all in a line.
+pub const GAMEPLAY_FRONT_DOOR_AT: (f64, f64, f64) = (0.0, 1.05, -6.0);
+/// The locked gate a kick opens.
+pub const GAMEPLAY_GATE_AT: (f64, f64, f64) = (7.55, 1.05, -9.0);
+/// The locked shed door a sprint goes through.
+pub const GAMEPLAY_SHED_AT: (f64, f64, f64) = (17.55, 1.05, -9.0);
+/// The shut hatch a dive goes through.
+pub const GAMEPLAY_HATCH_AT: (f64, f64, f64) = (27.55, 1.05, -9.0);
+
+/// The repo-root `samples/phase30-gameplay/` directory.
+pub fn gameplay_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/phase30-gameplay")
+}
+
+/// One `House`, grown on the volume's own datum — the level carries no terrain,
+/// so a `Terrain` lookup would fail closed and the house would be nothing.
+pub fn gameplay_house_graph() -> inf_graph::Graph {
+    let reg = inf_pcg::pcg_registry();
+    let mut g = inf_graph::Graph::empty();
+    use inf_graph::ParamValue as P;
+    let add = |g: &mut inf_graph::Graph,
+               n: u32,
+               type_id: &str,
+               params: &[(&str, inf_graph::ParamValue)]| {
+        let node = inf_graph::NodeId(n);
+        let mut m = inf_graph::ParamMap::new();
+        for (k, v) in params {
+            m.insert((*k).to_string(), v.clone());
+        }
+        inf_graph::apply_edits(
+            g,
+            &reg,
+            &[inf_graph::GraphEdit::AddNode {
+                id: node,
+                type_id: type_id.into(),
+                x: 0.0,
+                y: 0.0,
+                params: m,
+            }],
+        );
+        node
+    };
+    let plot = add(
+        &mut g,
+        1,
+        "grammar.footprint",
+        &[
+            ("size_x", P::Float(GAMEPLAY_HOUSE_M.0)),
+            ("size_z", P::Float(GAMEPLAY_HOUSE_M.1)),
+        ],
+    );
+    // **ONE lot filling the whole plot.** The subdivider is the only thing that
+    // produces the `lots` a `building.plan` takes, and a frontage as wide as the
+    // footprint gives it exactly one — which is what "one house" means here.
+    let lots = add(
+        &mut g,
+        2,
+        "building.lots",
+        &[
+            ("frontage", P::Float(GAMEPLAY_HOUSE_M.0)),
+            ("depth", P::Float(GAMEPLAY_HOUSE_M.1)),
+            ("jitter", P::Float(0.0)),
+            ("setback", P::Float(0.0)),
+            ("min_area", P::Float(20.0)),
+        ],
+    );
+    let arch = add(
+        &mut g,
+        3,
+        "building.archetype",
+        &[
+            (
+                "archetype",
+                P::Enum(inf_pcg::ArchetypeId::House.name().into()),
+            ),
+            ("floors", P::Int(1)),
+            ("furnish", P::Bool(false)),
+        ],
+    );
+    let plan = add(
+        &mut g,
+        4,
+        "building.plan",
+        &[
+            ("name", P::Text("house".into())),
+            ("seed", P::Int(11)),
+            ("ground", P::Enum("Span".into())),
+        ],
+    );
+    let out = add(&mut g, 5, "output.pcg", &[]);
+    for (from, fp, to, tp) in [
+        (plot, "out", lots, "block"),
+        (lots, "out", plan, "lots"),
+        (arch, "out", plan, "archetype"),
+        (plan, "out", out, "scatter"),
+    ] {
+        inf_graph::apply_edits(
+            &mut g,
+            &reg,
+            &[inf_graph::GraphEdit::Connect {
+                link: inf_graph::Link {
+                    from,
+                    from_port: fp.into(),
+                    to,
+                    to_port: tp.into(),
+                },
+            }],
+        );
+    }
+    g
+}
+
+/// **The level's own authoring**: on `BeginPlay`, define the catalogue, hang the
+/// two hand-placed doors, put a rifle on the floor and give the hero a body.
+///
+/// Everything a gameplay level needs that the scene cannot carry, in the one
+/// place that rides `.inf_act` bytes to all three hosts.
+pub fn gameplay_controller() -> BlueprintClass {
+    let mut class = BlueprintClass::new("act:phase30-gameplay", "Gameplay Author");
+    class.variables = vec![Variable {
+        name: "entity".into(),
+        ty: Ty::Int,
+        default: Lit::Int(0),
+        exposed: false,
+    }];
+    let me = || Expr::Call {
+        path: vec!["vars".into(), "get".into()],
+        args: vec![Expr::Lit(Lit::Str("entity".into()))],
+    };
+    let f = |v: f64| Expr::Lit(Lit::Float(v));
+    let s = |v: &str| Expr::Lit(Lit::Str(v.into()));
+    let call = |path: &[&str], args: Vec<Expr>| {
+        Stmt::ExprStmt(Expr::Call {
+            path: path.iter().map(|p| (*p).to_string()).collect(),
+            args,
+        })
+    };
+    class.events = vec![EventBinding {
+        event: EventKind::BeginPlay,
+        body: BlueprintFn {
+            id: "begin".into(),
+            name: "begin".into(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+            body: vec![
+                call(&["item", "define"], vec![s(GAMEPLAY_ITEMS_TOML)]),
+                call(&["door", "spawn"], vec![s(GAMEPLAY_DOORS_TOML)]),
+                call(
+                    &["item", "spawn_pickup"],
+                    vec![
+                        s("rifle"),
+                        f(GAMEPLAY_RIFLE_AT.0),
+                        f(GAMEPLAY_RIFLE_AT.1),
+                        f(GAMEPLAY_RIFLE_AT.2),
+                        Expr::Lit(Lit::Int(1)),
+                    ],
+                ),
+                call(
+                    &["item", "give"],
+                    vec![me(), s("bandage"), Expr::Lit(Lit::Int(3))],
+                ),
+                call(&["health", "set"], vec![me(), f(GAMEPLAY_HERO_J)]),
+            ],
+        },
+    }];
+    class
+}
+
+/// The gameplay fixture's scene.
+pub fn gameplay_scene() -> SceneDoc {
+    use inf_ecs::components::{
+        BodyKind3D, CharacterController3D, CharacterMovement, Collider3D, ColliderShape3DKind,
+        Destructible, Light, LightKind, MeshRef, PcgVolume, RigidBody3D, StreamingSource,
+        Transform,
+    };
+    use inf_ecs::math::{Color, Vec2d, Vec3d};
+
+    let mut doc = SceneDoc::new();
+    doc.set_title("Island Gameplay");
+
+    doc.create_with_guid(GAMEPLAY_SUN_GUID, SpawnKind::Empty, "Sun", None);
+    insert!(
+        doc,
+        GAMEPLAY_SUN_GUID,
+        Transform {
+            translation: Vec3d::ZERO,
+            rotation: Vec3d::new(-52.0, -34.0, 0.0),
+            scale: Vec3d::ONE,
+        }
+    );
+    insert!(
+        doc,
+        GAMEPLAY_SUN_GUID,
+        Light {
+            kind: LightKind::Directional,
+            color: Color::WHITE,
+            intensity: 3.0,
+            ..Default::default()
+        }
+    );
+
+    // The ground: one static slab, because the level carries no terrain and a
+    // character with nothing under it falls out of the world.
+    doc.create_with_guid(GAMEPLAY_GROUND_GUID, SpawnKind::Empty, "Ground", None);
+    insert!(
+        doc,
+        GAMEPLAY_GROUND_GUID,
+        Transform {
+            translation: Vec3d::new(0.0, -0.5, 0.0),
+            rotation: Vec3d::ZERO,
+            scale: Vec3d::ONE,
+        }
+    );
+    insert!(
+        doc,
+        GAMEPLAY_GROUND_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Static,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        GAMEPLAY_GROUND_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(60.0, 0.5, 60.0),
+            ..Default::default()
+        }
+    );
+
+    // The house, grown by the grammar — its doorways become doors with no
+    // authoring at all, which is clause 1 of the mandate.
+    doc.create_with_guid(GAMEPLAY_HOUSE_GUID, SpawnKind::Empty, "House", None);
+    insert!(doc, GAMEPLAY_HOUSE_GUID, Transform::IDENTITY);
+    insert!(
+        doc,
+        GAMEPLAY_HOUSE_GUID,
+        PcgVolume {
+            graph: Some(GAMEPLAY_PCG_GUID),
+            extent: Vec2d::new(GAMEPLAY_HOUSE_M.0 * 0.5, GAMEPLAY_HOUSE_M.1 * 0.5),
+            seed: 1,
+            ..Default::default()
+        }
+    );
+
+    // The destructible: a box a rifle round is fired at, so the gate can watch
+    // joules cross the P22 door.
+    doc.create_with_guid(GAMEPLAY_TARGET_GUID, SpawnKind::Empty, "Target", None);
+    insert!(
+        doc,
+        GAMEPLAY_TARGET_GUID,
+        Transform {
+            translation: Vec3d::new(
+                GAMEPLAY_TARGET_AT.0,
+                GAMEPLAY_TARGET_AT.1,
+                GAMEPLAY_TARGET_AT.2
+            ),
+            rotation: Vec3d::ZERO,
+            scale: Vec3d::ONE,
+        }
+    );
+    insert!(
+        doc,
+        GAMEPLAY_TARGET_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Static,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        GAMEPLAY_TARGET_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(1.0, 1.0, 1.0),
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        GAMEPLAY_TARGET_GUID,
+        MeshRef {
+            asset: Some(GAMEPLAY_TARGET_MESH_GUID),
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        GAMEPLAY_TARGET_GUID,
+        Destructible {
+            // Soft enough that a rifle round moves it: a 5 MPa masonry block
+            // shares square-metre faces and costs kilojoules a bullet does not
+            // have. The number is the fixture's, and the gate prints what it
+            // measured against it.
+            strength: 2.0e4,
+            ..Default::default()
+        }
+    );
+
+    // The hero.
+    let half_h = 0.9;
+    let radius = 0.3;
+    doc.create_with_guid(GAMEPLAY_HERO_GUID, SpawnKind::Empty, "Hero", None);
+    insert!(
+        doc,
+        GAMEPLAY_HERO_GUID,
+        Transform {
+            translation: Vec3d::new(
+                GAMEPLAY_HERO_START.0,
+                GAMEPLAY_HERO_START.1 + half_h + radius,
+                GAMEPLAY_HERO_START.2
+            ),
+            rotation: Vec3d::ZERO,
+            scale: Vec3d::ONE,
+        }
+    );
+    insert!(
+        doc,
+        GAMEPLAY_HERO_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Kinematic,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        GAMEPLAY_HERO_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Capsule,
+            half_extents: Vec3d::new(radius, half_h, radius),
+            radius,
+            ..Default::default()
+        }
+    );
+    insert!(doc, GAMEPLAY_HERO_GUID, CharacterController3D::default());
+    insert!(
+        doc,
+        GAMEPLAY_HERO_GUID,
+        CharacterMovement {
+            player_controlled: true,
+            stand_half_height_m: half_h,
+            crouch_half_height_m: (half_h * 0.5).max(0.05),
+            prone_half_height_m: (radius * 0.6).max(0.03),
+            ..Default::default()
+        }
+    );
+    insert!(doc, GAMEPLAY_HERO_GUID, ActorClass(GAMEPLAY_ACTOR_GUID));
+    // The hero is the band's anchor, exactly as the city's Driver is: the
+    // collider band reads the set P16's cell activation reads, so a level cannot
+    // arrange for the two to disagree about where the simulation is.
+    insert!(doc, GAMEPLAY_HERO_GUID, StreamingSource { radius_m: 128.0 });
+
+    doc.world_mut().propagate();
+    doc
+}
+
+const GAMEPLAY_README: &str = concat!(
+    "# samples/phase30-gameplay\n",
+    "\n",
+    "The island's gameplay fixture (wave I6): one grammar-built house, two\n",
+    "hand-hung doors, a rifle on the floor, a destructible target and one hero.\n",
+    "\n",
+    "Everything a level cannot carry in its scene is authored by the hero's own\n",
+    "Blueprint on `BeginPlay` - the item catalogue, the two doors, the pickup and\n",
+    "the hero's own health. That is the one authoring surface which reaches the\n",
+    "editor's Simulate, a PIE payload AND a cooked pack with no schema move; see\n",
+    "`inf_blueprint::nodekit`'s `gameplay_nodes` for the accounting.\n",
+    "\n",
+    "The gate over it is `runtime/inf-player/tests/phase30_gameplay_gate.rs`.\n",
+    "\n",
+    "Generated - do not hand-edit. Regenerate with:\n",
+    "\n",
+    "```sh\n",
+    "INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples\n",
+    "```\n",
+);
+
+/// Write every committed gameplay-fixture file.
+pub fn write_gameplay() -> Result<(), String> {
+    let dir = gameplay_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    crate::scene::serialize::save(
+        &gameplay_scene(),
+        &dir.join("Gameplay.inf_lvl"),
+        Some(GAMEPLAY_LEVEL_GUID),
+    )?;
+
+    let graph = gameplay_house_graph();
+    let lowered = inf_pcg::lower_graph(&graph, &inf_pcg::pcg_registry());
+    if !lowered.ok {
+        return Err(format!(
+            "the gameplay house graph does not lower: {:?}",
+            lowered.issues
+        ));
+    }
+    let pcg = inf_pcg::PcgAssetPayload::from_graph(&graph, lowered.document);
+    write_phase19_asset(
+        &dir.join("GameplayHouse.inf_pcg"),
+        &inf_asset::encode(&pcg).map_err(|e| format!("encode pcg: {e}"))?,
+        GAMEPLAY_PCG_GUID,
+        inf_asset::AssetKind::Pcg,
+    )?;
+
+    write_phase19_asset(
+        &dir.join("Target.inf_mesh"),
+        &inf_asset::encode(&phase22_box_mesh(
+            [-1.0, -1.0, -1.0],
+            [1.0, 1.0, 1.0],
+            "mat:target",
+        ))
+        .map_err(|e| format!("encode target: {e}"))?,
+        GAMEPLAY_TARGET_MESH_GUID,
+        inf_asset::AssetKind::Mesh,
+    )?;
+
+    write_phase19_asset(
+        &dir.join("Gameplay.inf_act"),
+        &encode_actor(&gameplay_controller())?,
+        GAMEPLAY_ACTOR_GUID,
+        inf_asset::AssetKind::Blueprint,
+    )?;
+
+    std::fs::write(dir.join("README.md"), GAMEPLAY_README)
+        .map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10096,6 +10673,7 @@ mod tests {
             write_phase23_workshop().expect("regenerate phase23 workshop");
             write_phase29_locomotion().expect("regenerate phase29 locomotion");
             write_city().expect("regenerate the island city");
+            write_gameplay().expect("regenerate the island gameplay fixture");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }

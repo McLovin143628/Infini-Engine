@@ -1648,7 +1648,7 @@ export const sim = {
    * author can stop.
    */
   tune: (
-    kind: "field" | "param" | "trigger" | "vehicle" | "camera",
+    kind: "field" | "param" | "trigger" | "vehicle" | "camera" | "weapon",
     guid: string,
     name: string,
     value: number,

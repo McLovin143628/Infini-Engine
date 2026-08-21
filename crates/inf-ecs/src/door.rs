@@ -800,6 +800,111 @@ pub fn doors_in_world(world: &EcsWorld) -> Vec<DoorPlacement> {
     out
 }
 
+/// The salt that carves **authored** doors' GUID space out of the scene's own.
+const AUTHORED_DOOR_SALT: u128 = 0x6006_0500_444f_4f52_5350_4157_4e21_2121;
+
+/// **The identity of a door a Blueprint hung**, folded from its name and its
+/// hinge — a pure function of what the author asked for, never of a counter.
+pub fn authored_door_guid(name: &str, hinge: DVec3) -> Uuid {
+    let mut x = AUTHORED_DOOR_SALT;
+    for b in name.trim().as_bytes() {
+        x ^= u128::from(*b);
+        x = x
+            .rotate_left(11)
+            .wrapping_mul(0x0100_0000_01b3_0100_0000_01b3_0100_0001);
+    }
+    for v in [hinge.x, hinge.y, hinge.z] {
+        x ^= u128::from(v.to_bits());
+        x = x.rotate_left(29) ^ x.wrapping_mul(0xff51_afd7_ed55_8ccd_c4ce_b9fe_1a85_ec53);
+    }
+    Uuid::from_u128(x)
+}
+
+/// **Hang doors from a name-keyed TOML document** — the Blueprint kit's
+/// `door.spawn`.
+///
+/// ```text
+/// [front]
+/// hinge = [-0.45, 1.05, 4.0]
+/// closed_yaw_deg = 90.0
+/// inside_yaw_deg = 0.0
+/// locked = true
+/// ```
+///
+/// The editor's own doctrine, restated where content reaches it: absent is the
+/// default, a malformed document is an **error with nothing applied**, and every
+/// numeric is guarded — a non-finite angle takes the default rather than
+/// becoming a door nothing can place.
+///
+/// Returns how many were hung.
+pub fn spawn_doors_from_toml(world: &mut EcsWorld, text: &str) -> Result<usize, String> {
+    let doc: toml::Value = toml::from_str(text).map_err(|e| e.to_string())?;
+    let table = doc
+        .as_table()
+        .ok_or_else(|| "a door list is a table of named doors".to_string())?;
+    // Parsed WHOLE before anything is spawned: a document whose third door is
+    // malformed must leave the first two unhung, or a retry hangs them twice.
+    let mut plan: Vec<(Uuid, DoorSpec, String, DVec3)> = Vec::new();
+    for (name, value) in table {
+        let t = value
+            .as_table()
+            .ok_or_else(|| format!("door {name} is not a table"))?;
+        let num = |k: &str, d: f64| -> f64 {
+            t.get(k)
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|n| n as f64)))
+                .filter(|x| x.is_finite())
+                .unwrap_or(d)
+        };
+        let hinge = match t.get("hinge").and_then(|v| v.as_array()) {
+            Some(a) if a.len() == 3 => {
+                let c = |i: usize| -> f64 {
+                    a[i].as_float()
+                        .or_else(|| a[i].as_integer().map(|n| n as f64))
+                        .filter(|x| x.is_finite())
+                        .unwrap_or(0.0)
+                };
+                DVec3::new(c(0), c(1), c(2))
+            }
+            _ => return Err(format!("door {name} needs `hinge = [x, y, z]`")),
+        };
+        let spec = DoorSpec {
+            closed_yaw_deg: num("closed_yaw_deg", 0.0),
+            width_m: num("width_m", DEFAULT_DOOR_WIDTH_M),
+            height_m: num("height_m", DEFAULT_DOOR_HEIGHT_M),
+            thickness_m: num("thickness_m", DEFAULT_DOOR_THICKNESS_M),
+            open_limit_deg: num("open_limit_deg", -DEFAULT_OPEN_LIMIT_DEG),
+            inside_yaw_deg: num("inside_yaw_deg", 90.0),
+            lock_strength_pa: num("lock_strength_pa", DEFAULT_LOCK_STRENGTH_PA),
+            lock_area_m2: num("lock_area_m2", DEFAULT_LOCK_AREA_M2),
+            lock_side: DoorSide::Inside,
+            locked_at_spawn: t.get("locked").and_then(|v| v.as_bool()).unwrap_or(false),
+        };
+        if !spec.is_usable() {
+            return Err(format!("door {name} has unusable geometry"));
+        }
+        let label = t
+            .get("label")
+            .and_then(|v| v.as_str())
+            .unwrap_or(name.as_str())
+            .to_string();
+        plan.push((authored_door_guid(name, hinge), spec, label, hinge));
+    }
+    let hung = plan.len();
+    for (guid, spec, label, hinge) in plan {
+        let e = world.spawn_with_guid(guid, &label, None);
+        let mut t = crate::components::Transform::IDENTITY;
+        t.translation = crate::math::Vec3d::from_dvec3(hinge);
+        world
+            .world_mut()
+            .entity_mut(e)
+            .insert((t, Door { spec, label }));
+    }
+    if hung > 0 {
+        world.mark_dirty();
+    }
+    Ok(hung)
+}
+
 /// **Every doorway the building grammar planned**, as
 /// `(volume guid, index, slot)` in `(volume, index)` order.
 ///

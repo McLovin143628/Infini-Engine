@@ -86,6 +86,26 @@ const CAMERA_TUNABLES: { cfield: string; label: string; step: number }[] = [
   { cfield: "pivot_height_ratio", label: "Pivot height", step: 0.05 },
 ];
 
+/// The weapon numbers the panel offers, by `WeaponDef::set`'s own names (I6).
+///
+/// Keyed by `wfield` rather than `cfield` so the source gate that pins the
+/// camera's list cannot accidentally read these as camera names — two lists in
+/// one file need two markers, or a gate reading the first would pass the second
+/// by walking past it.
+const WEAPON_TUNABLES: { wfield: string; label: string; step: number }[] = [
+  { wfield: "damage_j", label: "Damage (J)", step: 50 },
+  { wfield: "rounds_per_minute", label: "Rate (rpm)", step: 25 },
+  { wfield: "spread_deg", label: "Spread (deg)", step: 0.1 },
+  { wfield: "magazine", label: "Magazine", step: 1 },
+  { wfield: "reload_s", label: "Reload (s)", step: 0.1 },
+  { wfield: "range_m", label: "Range (m)", step: 10 },
+];
+
+/// Which item id the weapon rows tune. A weapon is a DEFINITION, so tuning it
+/// means every one in the level — which is what a designer dragging a fire-rate
+/// slider means.
+const WEAPON_ITEM_ID = "rifle";
+
 export function LiveTuning({ params }: { params: SmParamDto[] }) {
   const running = useSimStore((s) => s.running);
   const selection = useSceneStore((s) => s.selection);
@@ -95,15 +115,19 @@ export function LiveTuning({ params }: { params: SmParamDto[] }) {
 
   const push = useCallback(
     async (
-      kind: "field" | "param" | "trigger" | "vehicle" | "camera",
+      kind: "field" | "param" | "trigger" | "vehicle" | "camera" | "weapon",
       name: string,
       value: number,
+      // I6: a weapon is tuned by ITEM ID rather than by entity, so the identity
+      // argument carries a name on that path. The command's own `guid` field is
+      // reused rather than a second one added; see `sim_tune`.
+      subject?: string,
     ) => {
-      // The camera belongs to the session rather than to an entity, so it is the
-      // one kind that does not need a selection.
-      if (!guid && kind !== "camera") return;
+      // The camera belongs to the session and a weapon to the item catalogue, so
+      // those two are the kinds that do not need a selection.
+      if (!guid && kind !== "camera" && kind !== "weapon") return;
       try {
-        const applied = await simIpc.tune(kind, guid ?? "", name, value, keep);
+        const applied = await simIpc.tune(kind, subject ?? guid ?? "", name, value, keep);
         setStatus(applied ? `${name} = ${value} (next step)` : "no Simulate session is running");
       } catch (e) {
         setStatus(String(e));
@@ -206,6 +230,22 @@ export function LiveTuning({ params }: { params: SmParamDto[] }) {
             placeholder="set"
             onChange={(e) =>
               e.target.value !== "" && void push("camera", t.cfield, Number(e.target.value))
+            }
+          />
+        </label>
+      ))}
+
+      <div className="sm-insp__subtitle">Weapon ({WEAPON_ITEM_ID})</div>
+      {WEAPON_TUNABLES.map((t) => (
+        <label className="sm-insp__row" key={t.wfield}>
+          <span>{t.label}</span>
+          <input
+            type="number"
+            step={t.step}
+            placeholder="set"
+            onChange={(e) =>
+              e.target.value !== "" &&
+              void push("weapon", t.wfield, Number(e.target.value), WEAPON_ITEM_ID)
             }
           />
         </label>

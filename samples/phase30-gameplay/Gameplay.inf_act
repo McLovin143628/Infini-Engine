@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "id": "act:phase30-gameplay",
+  "name": "Gameplay Author",
+  "components": [],
+  "variables": [
+    {
+      "name": "entity",
+      "ty": "Int",
+      "default": {
+        "Int": 0
+      },
+      "exposed": false
+    }
+  ],
+  "events": [
+    {
+      "event": "BeginPlay",
+      "body": {
+        "id": "begin",
+        "name": "begin",
+        "params": [],
+        "ret": "Unit",
+        "body": [
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "item",
+                  "define"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "[rifle]\nlabel = \"Rifle\"\nstack_max = 1\nmass_kg = 3.6\n[rifle.weapon]\ndamage_j = 1700.0\nrounds_per_minute = 600.0\nmagazine = 30\nreserve = 120\nreload_s = 2.0\nspread_deg = 0.0\nrange_m = 400.0\nautomatic = true\n\n[bandage]\nlabel = \"Bandage\"\nstack_max = 5\nmass_kg = 0.1\n"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "door",
+                  "spawn"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "[front]\nlabel = \"front door\"\nhinge = [-0.45, 1.05, -6.0]\nclosed_yaw_deg = 90.0\ninside_yaw_deg = 0.0\nopen_limit_deg = -95.0\nlocked = false\n\n[gate]\nlabel = \"yard gate\"\nhinge = [7.55, 1.05, -9.45]\nclosed_yaw_deg = 0.0\ninside_yaw_deg = 90.0\nopen_limit_deg = 95.0\nlocked = true\n\n[shed]\nlabel = \"shed door\"\nhinge = [17.55, 1.05, -9.45]\nclosed_yaw_deg = 0.0\ninside_yaw_deg = 90.0\nopen_limit_deg = 95.0\nlocked = true\n\n[hatch]\nlabel = \"hatch\"\nhinge = [27.55, 1.05, -9.45]\nclosed_yaw_deg = 0.0\ninside_yaw_deg = 90.0\nopen_limit_deg = 95.0\nlocked = false\n"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "item",
+                  "spawn_pickup"
+                ],
+                "args": [
+                  {
+                    "Lit": {
+                      "Str": "rifle"
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": 0.0
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": 0.4
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": -7.4
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Int": 1
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "item",
+                  "give"
+                ],
+                "args": [
+                  {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "get"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "entity"
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Str": "bandage"
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Int": 3
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "health",
+                  "set"
+                ],
+                "args": [
+                  {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "get"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "entity"
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Float": 2000.0
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "functions": []
+}

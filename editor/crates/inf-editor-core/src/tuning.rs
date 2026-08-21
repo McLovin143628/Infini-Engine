@@ -110,6 +110,21 @@ pub enum Tune {
     /// drain. It closes the P29.6 remainder that said "live-tunable through
     /// P29.5's door" was true of the tuning *type* and not yet of the queue.
     Camera { name: String, value: f64 },
+    /// A **weapon** tunable, by name (island wave I6) — `WeaponDef::set`'s
+    /// vocabulary (`damage_j`, `rounds_per_minute`, `spread_deg`, …), applied to
+    /// one item id in the session's catalogue.
+    ///
+    /// Keyed by the item **id** and not by an entity, because a weapon is a
+    /// definition and not an instance: tuning "the rifle" means every rifle in
+    /// the level, which is what a designer dragging a fire-rate slider means.
+    /// The catalogue is a resource the session builds, so — like
+    /// [`Tune::Vehicle`] and [`Tune::Camera`] — there is no document field for a
+    /// `Keep` to land on, and [`kept_edits`] says so by returning nothing.
+    Weapon {
+        item_id: String,
+        name: String,
+        value: f64,
+    },
 }
 
 impl Tune {
@@ -120,8 +135,9 @@ impl Tune {
             | Tune::Param { guid, .. }
             | Tune::Trigger { guid, .. }
             | Tune::Vehicle { guid, .. } => *guid,
-            // The camera is one per session and belongs to no entity.
-            Tune::Camera { .. } => Uuid::nil(),
+            // The camera is one per session and belongs to no entity, and a
+            // weapon definition belongs to an item id rather than to one.
+            Tune::Camera { .. } | Tune::Weapon { .. } => Uuid::nil(),
         }
     }
 
@@ -179,11 +195,12 @@ pub fn apply_tune(doc: &mut SceneDoc, tune: &Tune) -> bool {
             inf_ecs::set_anim_param(doc.world_mut(), *guid, name, *value)
         }
         Tune::Trigger { guid, name } => inf_ecs::set_anim_trigger(doc.world_mut(), *guid, name),
-        // Neither of these lives on the document: a vehicle is on the physics
-        // bridge and the camera is a field on the session. `SimSession` applies
-        // them in the same drain, and this door answers `false` so a caller that
-        // reached the wrong one is told rather than silently obeyed.
-        Tune::Vehicle { .. } | Tune::Camera { .. } => false,
+        // NONE of these three lives on the document: a vehicle is on the
+        // physics bridge, the camera is a field on the session, and a weapon's
+        // numbers are in the world's item catalogue (a resource). `SimSession`
+        // applies them in the same drain, and this door answers `false` so a
+        // caller that reached the wrong one is told rather than silently obeyed.
+        Tune::Vehicle { .. } | Tune::Camera { .. } | Tune::Weapon { .. } => false,
     }
 }
 

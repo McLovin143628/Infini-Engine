@@ -365,6 +365,38 @@ impl PlayerRenderHost {
         }
     }
 
+    /// **Draw this step's tracers** (island wave I6) — one line per round that
+    /// left a barrel, from the muzzle to wherever it stopped.
+    ///
+    /// Minimal on purpose and honest about it: a tracer here is a debug-line
+    /// segment, which is the substrate this engine has. There is no particle
+    /// system (the P22 remainder, still open), so a muzzle flash is the first
+    /// twenty centimetres of the same line drawn brighter, and a bullet leaves
+    /// no smoke.
+    ///
+    /// **Read-only, like every other overlay**: it copies out of the report the
+    /// fixed step produced and writes into `scene.debug`, so there is no path
+    /// from here back into the sim, and a frame that drew no tracer and a frame
+    /// that drew ten are the same simulation.
+    ///
+    /// Drawn AFTER `draw_cell_overlay`, which clears the list, so the two do not
+    /// erase each other.
+    pub fn draw_tracers(&mut self, sim: &RuntimeSim) {
+        let hits = &sim.gameplay().hits;
+        if hits.is_empty() {
+            return;
+        }
+        for hit in hits {
+            let from = self.origin.to_render(hit.from);
+            let to = self.origin.to_render(hit.to);
+            self.scene.debug.line(from, to, TRACER_COLOR);
+            // The flash: the first stretch of the same line, brighter. A
+            // fraction rather than a length, so a point-blank shot still has one.
+            let flash = from + (to - from) * MUZZLE_FLASH_FRACTION;
+            self.scene.debug.line(from, flash, MUZZLE_COLOR);
+        }
+    }
+
     /// Whether the GPU meshlet path is active (the auto-picked tier is High).
     /// **The one line a host logs about virtual shadow maps** (P27.5) — the
     /// P27.1 remainder *"nothing logs `vsm_summary` in a host"*, closed on the
@@ -466,6 +498,15 @@ impl PlayerRenderHost {
 /// Half-height (metres) of a cell-overlay wireframe slab. Low enough to read the
 /// grid from a ground camera without boxing the world in.
 const CELL_OVERLAY_HALF_HEIGHT_M: f64 = 0.5;
+
+/// A tracer's colour — a warm streak, bright enough to read against daylight.
+const TRACER_COLOR: [f32; 4] = [1.0, 0.82, 0.35, 0.85];
+/// The muzzle flash's, drawn over the first stretch of the same line.
+const MUZZLE_COLOR: [f32; 4] = [1.0, 0.96, 0.80, 1.0];
+/// How much of a shot's own length the flash covers — a FRACTION, so a
+/// point-blank shot still has one and a four-hundred-metre one does not have a
+/// forty-metre flash.
+const MUZZLE_FLASH_FRACTION: f32 = 0.02;
 
 /// Fill `scene` from `sim`'s world, blending actor positions by `alpha`.
 /// Deterministic `Guid` iteration order. `vmeshes` resolves a `MeshRef.asset` to

@@ -597,6 +597,59 @@ pub fn spawn_pickup(
     Some(guid)
 }
 
+/// The salt that carves **authored** pickups' GUID space out of the scene's own.
+const AUTHORED_PICKUP_SALT: u128 = 0x6006_0400_4954_454d_5350_4157_4e21_2121;
+
+/// **The identity of a pickup a Blueprint spawned**, folded from its id and its
+/// place.
+///
+/// A pure function of what the author asked for, and **not** of a counter: a
+/// spawn keyed on how many times a graph had run would put two hosts' worlds out
+/// of step the first time one of them ran a handler twice. Two pickups of the
+/// same item at the same point are the same entity, which is the right answer —
+/// an author who wants two puts them in two places.
+pub fn authored_pickup_guid(id: &str, at: Vec3d) -> Uuid {
+    let mut x = AUTHORED_PICKUP_SALT;
+    for b in canonical_id(id).as_bytes() {
+        x ^= u128::from(*b);
+        x = x
+            .rotate_left(11)
+            .wrapping_mul(0x0100_0000_01b3_0100_0000_01b3_0100_0001);
+    }
+    for v in [at.x, at.y, at.z] {
+        x ^= u128::from(v.to_bits());
+        x = x.rotate_left(29) ^ x.wrapping_mul(0xff51_afd7_ed55_8ccd_c4ce_b9fe_1a85_ec53);
+    }
+    Uuid::from_u128(x)
+}
+
+/// **Put items straight into a character's bag**, creating one if it has none.
+///
+/// The Blueprint kit's `item.give`, and the one door that door goes through.
+/// Returns how many did **not** fit, so a refusal is a number a graph can read.
+///
+/// Creating the inventory here rather than requiring one first is deliberate:
+/// an author who says "give this actor a rifle" has said everything needed, and
+/// a second node called *Give Inventory* would be a step nobody would remember
+/// and a failure nothing would explain.
+pub fn give(world: &mut EcsWorld, character: Uuid, id: &str, count: u32) -> u32 {
+    let Some(entity) = world.entity_of(character) else {
+        return count;
+    };
+    if world.world().get::<Inventory>(entity).is_none() {
+        world
+            .world_mut()
+            .entity_mut(entity)
+            .insert(Inventory::default());
+    }
+    let defs = item_defs(world).cloned().unwrap_or_default();
+    let w = world.world_mut();
+    match w.get_mut::<Inventory>(entity) {
+        Some(mut inv) => inv.add(&defs, id, count),
+        None => count,
+    }
+}
+
 /// What a pick-up did. **A refusal is a value.**
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PickUpVerdict {

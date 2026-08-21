@@ -607,7 +607,11 @@ pub async fn sim_tune(
     type_path: Option<String>,
     keep: bool,
 ) -> Result<bool, String> {
-    let guid: uuid::Uuid = if kind == "camera" {
+    // I6: a weapon is tuned by ITEM ID rather than by entity — a weapon is a
+    // definition and tuning it means every one in the level — so the `guid`
+    // argument carries a name on that path and must not be parsed as one.
+    let item_id = guid.clone();
+    let guid: uuid::Uuid = if kind == "camera" || kind == "weapon" {
         uuid::Uuid::nil()
     } else {
         guid.parse().map_err(|e| format!("bad guid: {e}"))?
@@ -627,9 +631,14 @@ pub async fn sim_tune(
         "trigger" => inf_editor_core::tuning::Tune::Trigger { guid, name },
         "vehicle" => inf_editor_core::tuning::Tune::Vehicle { guid, name, value },
         "camera" => inf_editor_core::tuning::Tune::Camera { name, value },
+        "weapon" => inf_editor_core::tuning::Tune::Weapon {
+            item_id,
+            name,
+            value,
+        },
         other => {
             return Err(format!(
-                "unknown tune kind `{other}` (expected field, param, trigger, vehicle or camera)"
+                "unknown tune kind `{other}` (expected field, param, trigger, vehicle, camera or weapon)"
             ))
         }
     };
@@ -868,5 +877,47 @@ mod tests {
         }
         let mut t = inf_ecs::camera::CameraTuning::default();
         assert!(!t.set("run.arm_length", 1.0));
+    }
+
+    /// **The panel's WEAPON tunables are names the door knows** (island wave
+    /// I6).
+    ///
+    /// Fourth time, fourth truth: a weapon's numbers live in the session's item
+    /// catalogue — a resource on the world rather than a component on an entity
+    /// — so a `kind: "weapon"` tune is matched against `WeaponDef::set`'s
+    /// by-name vocabulary.
+    ///
+    /// The panel marks these rows `wfield` and the camera's `cfield`, so this
+    /// extraction and the camera's cannot read each other's list. Two lists in
+    /// one file with one marker is a gate that walks past half of what it is
+    /// meant to pin.
+    #[test]
+    fn every_weapon_tunable_the_panel_offers_is_a_name_the_door_knows() {
+        const PANEL: &str = include_str!("../../../src/panels/sm/LiveTuning.tsx");
+        let named: Vec<&str> = PANEL
+            .split("wfield: \"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert!(
+            named.len() >= 5,
+            "found {} weapon tunables in LiveTuning.tsx — the wrong file or the wrong shape",
+            named.len()
+        );
+        for n in &named {
+            let mut w = inf_ecs::weapon::WeaponDef::default();
+            assert!(
+                w.set(n, 1.0),
+                "LiveTuning.tsx offers weapon tunable `{n}`, which the door refuses"
+            );
+        }
+        // Anti-vacuity: the door really does refuse something, and the list the
+        // door publishes really is the door's own.
+        let mut w = inf_ecs::weapon::WeaponDef::default();
+        assert!(!w.set("damage", 1.0));
+        for n in inf_ecs::weapon::WeaponDef::names() {
+            let mut w = inf_ecs::weapon::WeaponDef::default();
+            assert!(w.set(n, 1.0), "`{n}` is published and refused");
+        }
     }
 }

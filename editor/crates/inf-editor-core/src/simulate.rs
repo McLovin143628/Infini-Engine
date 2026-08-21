@@ -696,6 +696,25 @@ impl SimSession {
                     .map(|v| v.tune(name, *value))
                     .unwrap_or(false),
                 crate::tuning::Tune::Camera { name, value } => self.camera.tuning.set(name, *value),
+                // ── I6 ── and a third: a weapon's numbers live in the session's
+                //    item catalogue, which is a resource on the world rather
+                //    than a component on an entity, for the reason
+                //    `inf_ecs::item`'s header gives. Same shape as the two
+                //    above: session-scoped, and it answers with a value.
+                crate::tuning::Tune::Weapon {
+                    item_id,
+                    name,
+                    value,
+                } => {
+                    let defs = inf_ecs::item::item_defs_mut(doc.world_mut());
+                    match defs.0.get_mut(&inf_ecs::item::canonical_id(item_id)) {
+                        Some(def) => match def.weapon.as_mut() {
+                            Some(w) => w.set(name, *value),
+                            None => false,
+                        },
+                        None => false,
+                    }
+                }
                 _ => crate::tuning::apply_tune(doc, &tune),
             };
             if !applied {
@@ -1088,7 +1107,7 @@ impl SimSession {
         //    says it is rather than where it was last step. Inert on a level
         //    with no door, no weapon and no inventory.
         //    (MIRROR of `RuntimeSim::fixed_step`.)
-        let report = inf_physics::d3::step_gameplay(doc.world_mut(), &mut self.bridge3d, dt);
+        let mut report = inf_physics::d3::step_gameplay(doc.world_mut(), &mut self.bridge3d, dt);
         for (entity, energy_j) in &report.destruct {
             runtime_destruct_damage(
                 &mut self.bridge3d,
@@ -1099,6 +1118,9 @@ impl SimSession {
                 *energy_j,
             );
         }
+        let hits = std::mem::take(&mut report.hits);
+        self.fire_weapon_audio(doc.world(), &hits);
+        report.hits = hits;
         self.gameplay = report;
         // 3. Solver.
         self.bridge.step(dt);
@@ -1686,6 +1708,40 @@ impl SimSession {
     /// dispatches append to the queue and are processed in turn; once
     /// [`DISPATCH_ROUND_CAP`] dispatches have run the remainder is logged + dropped
     /// (a deterministic cycle guard). No-op when the queue is empty.
+
+    /// **This step's impacts, as sound** (island wave I6) — one `Play` per round
+    /// that landed on something with an emitter, through the P12 command queue.
+    ///
+    /// MIRROR of the other host's, character for character, for the reason
+    /// `fire_destroyed` is: a preview that made a different noise from the
+    /// shipped build is a bug no compiler and no screenshot finds.
+    ///
+    /// **The clip is the TARGET's own `AudioSource`**, which is exactly the rule
+    /// `destroyed_emitter` follows and it is the same argument: a wall usually
+    /// has no Blueprint at all, so a handler-only route would make every wall
+    /// silent. There is deliberately no "impact sound" slot on a weapon — P22's
+    /// §5 refuses that class of field, and a shot into concrete and a shot into
+    /// glass should differ by what was hit rather than by what fired.
+    ///
+    /// Positioned at the **hit**, not at the emitter: a round that struck the far
+    /// end of a wall should be heard from there.
+    fn fire_weapon_audio(&mut self, world: &EcsWorld, hits: &[inf_physics::d3::WeaponHit]) {
+        if hits.is_empty() {
+            return;
+        }
+        for hit in hits {
+            let Some(target) = hit.target else {
+                continue;
+            };
+            let Some((src, _)) = destroyed_emitter(world, target) else {
+                continue;
+            };
+            let cmd =
+                play_command_for(guid_source_key(target), &src, src.spatial.then_some(hit.to));
+            self.audio_cmds.push(AudioCommand::Play(cmd));
+        }
+    }
+
     fn drain_dispatch(&mut self, doc: &mut SceneDoc) {
         let mut rounds = 0u32;
         loop {
@@ -2288,6 +2344,110 @@ impl Host for SimHost<'_> {
                 Ok(Value::Int(match entity {
                     Ok(guid) => PhysicsBridge3D::fracture_chunk_count(self.fractures, guid) as i64,
                     Err(_) => 0,
+                }))
+            }
+            // ── the `item.*`, `door.*` and `health.*` kit (island wave I6) ──
+            //
+            // Nine arms, identical in both hosts, over the Ring-0 doors in
+            // `inf_ecs::item`, `inf_ecs::door` and `inf_ecs::weapon`. This is the
+            // authoring surface for gameplay content, and it is a Blueprint kit
+            // rather than an asset for the reason `inf_blueprint::nodekit`'s
+            // `gameplay_nodes` gives: `.inf_act` bytes are the only thing that
+            // reaches Simulate, a PIE payload AND a cooked pack with no schema
+            // move.
+            //
+            // Every one of them **reports rather than fails**: a malformed
+            // catalogue, an unknown id or an entity that is not there is a thing
+            // an author fixes by typing, not a reason to take the whole handler
+            // down with it (the P21.4 law).
+            (Some("item"), Some("define")) => {
+                let text = arg_str(args, 0);
+                let taken = match inf_ecs::item::item_defs_mut(self.world).merge_toml(&text) {
+                    Ok(n) => n as i64,
+                    Err(e) => {
+                        self.logs.push(format!("item::define: {e}"));
+                        0
+                    }
+                };
+                Ok(Value::Int(taken))
+            }
+            (Some("item"), Some("spawn_pickup")) => {
+                let id = arg_str(args, 0);
+                let at = inf_ecs::Vec3d::new(arg_f64(args, 1), arg_f64(args, 2), arg_f64(args, 3));
+                let count = arg_i64(args, 4).clamp(0, i64::from(u32::MAX)) as u32;
+                // The identity is a pure function of the id and the place, so
+                // two hosts running one trace put the same entity in the same
+                // spot — a spawn keyed on a counter would depend on how many
+                // times the graph had run.
+                let guid = inf_ecs::item::authored_pickup_guid(&id, at);
+                let ok =
+                    inf_ecs::item::spawn_pickup(self.world, guid, &id, count.max(1), at).is_some();
+                if !ok {
+                    self.logs.push(format!(
+                        "item::spawn_pickup: `{id}` is not in the catalogue (call Define Items first)"
+                    ));
+                }
+                Ok(Value::Bool(ok))
+            }
+            (Some("item"), Some("give")) => {
+                let id = arg_str(args, 1);
+                let count = arg_i64(args, 2).clamp(0, i64::from(u32::MAX)) as u32;
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Int(match entity {
+                    Ok(guid) => i64::from(inf_ecs::item::give(self.world, guid, &id, count.max(1))),
+                    Err(_) => i64::from(count.max(1)),
+                }))
+            }
+            (Some("item"), Some("equip")) => {
+                let id = arg_str(args, 1);
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Bool(match entity {
+                    Ok(guid) => inf_physics::d3::gameplay::equip_weapon(self.world, guid, &id),
+                    Err(_) => false,
+                }))
+            }
+            (Some("item"), Some("count")) => {
+                let id = arg_str(args, 1);
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Int(match entity {
+                    Ok(guid) => inf_ecs::item::inventory_of(self.world, guid)
+                        .map(|inv| i64::from(inv.count_of(&id)))
+                        .unwrap_or(0),
+                    Err(_) => 0,
+                }))
+            }
+            (Some("door"), Some("spawn")) => {
+                let text = arg_str(args, 0);
+                let hung = match inf_ecs::door::spawn_doors_from_toml(self.world, &text) {
+                    Ok(n) => n as i64,
+                    Err(e) => {
+                        self.logs.push(format!("door::spawn: {e}"));
+                        0
+                    }
+                };
+                Ok(Value::Int(hung))
+            }
+            (Some("door"), Some("is_open")) => {
+                Ok(Value::Bool(inf_physics::d3::door::is_open_near(
+                    self.world,
+                    DVec3::new(arg_f64(args, 0), arg_f64(args, 1), arg_f64(args, 2)),
+                )))
+            }
+            (Some("health"), Some("set")) => {
+                let joules = arg_f64(args, 1);
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Bool(match entity {
+                    Ok(guid) => inf_ecs::weapon::give_health(self.world, guid, joules),
+                    Err(_) => false,
+                }))
+            }
+            (Some("health"), Some("get")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Float(match entity {
+                    Ok(guid) => inf_ecs::weapon::health_of(self.world, guid)
+                        .map(|h| h.joules)
+                        .unwrap_or(0.0),
+                    Err(_) => 0.0,
                 }))
             }
             // ── the `ik.*` kit (P24.3) ──
