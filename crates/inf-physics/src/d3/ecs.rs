@@ -347,6 +347,24 @@ pub struct PhysicsBridge3D {
     /// descriptors hold voxel and fracture geometry, and a capacity kept alive
     /// between steps must not keep *contents* alive with it.
     snaps_scratch: Vec<EntitySync3D>,
+    /// The reconcile's own two per-call buffers, kept for the same reason
+    /// [`snaps_scratch`](Self::snaps_scratch) is (island wave I4b).
+    ///
+    /// `sync_retaining` built both from empty every fixed step: the sorted
+    /// working list (one `usize` per described entity) and the seen-guid list
+    /// (one `Uuid`). At 13 000 entities that is **104 KB + 208 KB allocated and
+    /// freed sixty times a second**, and past glibc's 128 KB mmap threshold the
+    /// second one is a fresh mapping whose every page faults on first touch. It
+    /// is also the term that made this crate's steady-state scaling arm
+    /// load-sensitive out of proportion to its own work: the reconcile paid a
+    /// page fault per 4 KB where the arm's control, which allocates once, paid
+    /// none, so a busy runner separated the two.
+    ///
+    /// Neither holds anything that owns memory, so unlike `snaps_scratch` these
+    /// do not have to be emptied on the way out to avoid pinning contents —
+    /// only on the way in, so a shorter level cannot read a longer one's tail.
+    live_scratch: Vec<usize>,
+    seen_scratch: Vec<Uuid>,
 }
 
 impl PhysicsBridge3D {
@@ -381,6 +399,8 @@ impl PhysicsBridge3D {
             swimming: BTreeMap::new(),
             water_events: Vec::new(),
             snaps_scratch: Vec::new(),
+            live_scratch: Vec::new(),
+            seen_scratch: Vec::new(),
         }
     }
 
@@ -1473,11 +1493,22 @@ impl PhysicsBridge3D {
     fn sync_retaining(&mut self, entities: &[EntitySync3D], retained: &BTreeSet<Uuid>) {
         // 1. Sort the snapshot into deterministic Guid order (and drop entities
         //    with neither a body nor a collider — nothing to simulate).
-        let mut live: Vec<&EntitySync3D> = entities
-            .iter()
-            .filter(|e| e.body.is_some() || e.collider.is_some())
-            .collect();
-        live.sort_by_key(|e| e.guid);
+        //
+        // Indices rather than references, into a buffer this bridge keeps
+        // (island wave I4b): a `Vec<&EntitySync3D>` borrows the argument and so
+        // can never outlive the call, which is what forced a fresh 104 KB
+        // allocation per fixed step. A `usize` is the same eight bytes and
+        // carries no lifetime. See `live_scratch`.
+        let mut live: Vec<usize> = std::mem::take(&mut self.live_scratch);
+        live.clear();
+        live.extend(
+            entities
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.body.is_some() || e.collider.is_some())
+                .map(|(i, _)| i),
+        );
+        live.sort_by_key(|i| entities[*i].guid);
 
         // 2. Spawn / update. (Joints are reconciled in a second pass, below, once
         //    every body exists, so a joint can always resolve its other body.)
@@ -1487,14 +1518,17 @@ impl PhysicsBridge3D {
         // one consumer — the despawn sweep below — needs `contains`, which a
         // `binary_search` answers at the same complexity without one B-tree node
         // allocation per tracked entity per fixed step.
-        let mut seen: Vec<Uuid> = Vec::with_capacity(live.len());
+        let mut seen: Vec<Uuid> = std::mem::take(&mut self.seen_scratch);
+        seen.clear();
+        seen.reserve(live.len());
         // Only entities that HAVE a joint or that HAD one need pass 4 (P30). A
         // level with no joints — which is most of them, and all of the 13 000
         // static colliders a furnished town is made of — leaves this empty and
         // skips the pass entirely, instead of paying two `BTreeMap` probes per
         // entity to be told there is nothing to reconcile.
         let mut joint_desires: Vec<(Uuid, Option<JointSync3D>)> = Vec::new();
-        for snap in live {
+        for &i in &live {
+            let snap = &entities[i];
             seen.push(snap.guid);
             let kind = snap.body.map(|b| b.kind).unwrap_or(BodyKind3D::Static);
             let pos = snap.translation;
@@ -1664,6 +1698,12 @@ impl PhysicsBridge3D {
         let mut swimming = std::mem::take(&mut self.swimming);
         swimming.retain(|g, _| self.entities.contains_key(g));
         self.swimming = swimming;
+
+        // 7. Both working buffers go home with their capacity — see
+        //    `live_scratch`. A panic between here and the `take` above loses
+        //    them, which costs one allocation on the next step and nothing else.
+        self.live_scratch = live;
+        self.seen_scratch = seen;
     }
 
     /// Bring one entity's joint in line with its desired snapshot. Resolves the
