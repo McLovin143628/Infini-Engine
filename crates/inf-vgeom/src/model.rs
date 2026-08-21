@@ -424,7 +424,7 @@ impl VgeomMesh {
     /// [`VgeomVertex::tangent`], which bincode encodes positionally, so the
     /// version has to move for the two shapes to be told apart at all — v1 blobs
     /// decode through the frozen shadow record in
-    /// [`crate::asset`](crate::asset) and are converted. Nothing in the tree
+    /// [`crate::asset`] and are converted. Nothing in the tree
     /// *writes* this bincode form any more (the cook and the editor both emit the
     /// paged container), so no committed payload is downgraded by the bump;
     /// what it buys is that the frozen v1 fixture keeps loading.

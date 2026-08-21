@@ -17,7 +17,7 @@
 //! * **`inf-vt` has 3 290 non-test lines. Nineteen of them are reusable
 //!   unchanged** — `pack_entry`, `MAX_SLOT_INDEX`, `lru_victim` and
 //!   `VtPoolGeometry::slot_origin`, 0.6 % — and even `unpack_entry` is not among
-//!   them, because a shadow entry has a [`VSM_ENTRY_NONE`](table::VSM_ENTRY_NONE)
+//!   them, because a shadow entry has a [`VSM_ENTRY_NONE`]
 //!   state a virtual texture's cannot have. Everything else is keyed on
 //!   `VtTextureDesc`, `TileCoord`, `PageFormat` or the `.inf_tex` container.
 //! * **The address spaces are different shapes, not different sizes.** A mip

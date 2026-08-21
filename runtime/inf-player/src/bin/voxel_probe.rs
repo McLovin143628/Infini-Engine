@@ -33,12 +33,15 @@
 //!
 //! Usage: `voxel_probe [threads] [steps]`  (defaults: threads=0→auto, steps=160)
 //! Output (stdout, one `key=value` per line):
-//!   threads=<actual pool worker count>
-//!   steps=<n>
-//!   first=<hex 128-bit hash of the first frame>
-//!   last=<hex 128-bit hash of the last frame>
-//!   trace=<hex 128-bit hash of every frame>
-//!   field=<hex 128-bit hash of the FINAL voxel field + hole mask>
+//!
+//! ```text
+//! threads=<actual pool worker count>
+//! steps=<n>
+//! first=<hex 128-bit hash of the first frame>
+//! last=<hex 128-bit hash of the last frame>
+//! trace=<hex 128-bit hash of every frame>
+//! field=<hex 128-bit hash of the FINAL voxel field + hole mask>
+//! ```
 
 use std::collections::BTreeMap;
 

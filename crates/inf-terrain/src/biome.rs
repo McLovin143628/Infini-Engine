@@ -22,7 +22,7 @@
 //!
 //! # Id 0 is reserved, and that is what makes the storage sparse
 //!
-//! [`UNASSIGNED_BIOME`](crate::UNASSIGNED_BIOME) is `0`. A tile that has never
+//! [`UNASSIGNED_BIOME`] is `0`. A tile that has never
 //! been biome-painted stores **no** per-sample ids at all
 //! ([`TerrainTile::biomes`](crate::TerrainTile::biomes)), which only works if the
 //! default value means something coherent — so `0` is permanently *"no biome"* and
@@ -191,7 +191,7 @@ impl BiomeSet {
     }
 
     /// The definition with `id`, or `None` (including for
-    /// [`UNASSIGNED_BIOME`](crate::UNASSIGNED_BIOME), which is never defined).
+    /// [`UNASSIGNED_BIOME`], which is never defined).
     pub fn get(&self, id: u8) -> Option<&BiomeDef> {
         self.biomes.iter().find(|b| b.id == id)
     }

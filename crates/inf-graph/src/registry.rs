@@ -70,7 +70,7 @@ impl PortType {
 /// It is serialized **as its variant name** (`"number"`, `"multiline"`, …), not
 /// as a positional index, and it appears only on a [`NodeDef`] — a registry DTO
 /// the backend serves fresh on every editor session. Nothing persists a
-/// `UiHint`: a saved graph stores [`ParamValue`](crate::ParamValue)s, which are
+/// `UiHint`: a saved graph stores [`ParamValue`]s, which are
 /// unchanged. So a new variant costs one arm in the frontend's param-editor
 /// switch and nothing else — none of the append-only discriminant reasoning that
 /// governs `SamplerDef` or a component's bincode layout applies.
@@ -82,7 +82,7 @@ pub enum UiHint {
     Toggle,
     Choice,
     /// A multi-line text area (P19.4). The value is still a
-    /// [`ParamValue::Text`](crate::ParamValue::Text); only the control differs.
+    /// [`ParamValue::Text`]; only the control differs.
     /// Added for the PCG grammar's rule text, which is an authored *document*
     /// living on its node rather than in a panel of its own.
     Multiline,

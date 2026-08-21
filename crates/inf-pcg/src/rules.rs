@@ -257,7 +257,7 @@ pub fn evaluate_with(
 
 /// [`evaluate_with`] on a **caller-supplied pool** — the seam the determinism
 /// guard drives, mirroring
-/// [`scatter_region_in`](crate::scatter::scatter_region_in) one layer up.
+/// [`scatter_region_in`] one layer up.
 ///
 /// The result is independent of the pool's thread count, so a test can prove the
 /// property through the *real* evaluation path (documents, layers, rules, kind

@@ -8,7 +8,7 @@
 //! functions. At runtime an [`ActorInstance`] holds the live variable values;
 //! [`ActorHost`] bridges the pure interpreter to that state and to the engine,
 //! so a Tick handler can read/write `vars::*` and call engine APIs through the
-//! same [`Host`](crate::interp::Host) boundary the transpiled Rust uses.
+//! same [`Host`] boundary the transpiled Rust uses.
 //!
 //! Enums here use serde's **default (externally-tagged) representation** — kept
 //! that way because bincode rejects internally-tagged enums, and because it is

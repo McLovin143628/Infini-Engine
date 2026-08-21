@@ -2717,7 +2717,7 @@ pub enum JointKind3D {
 #[reflect(Component, Default)]
 pub struct Joint3D {
     /// The OTHER body's entity `Guid`. `None` → the joint is unbound and the
-    /// bridge skips it. An [`EntityRef`](crate::refs::EntityRef) (E-P1): reflected
+    /// bridge skips it. An [`EntityRef`] (E-P1): reflected
     /// opaquely so the Details panel shows an entity-picker widget;
     /// serde-transparent, so the on-disk stream is byte-identical to the old
     /// `Option<Uuid>`.

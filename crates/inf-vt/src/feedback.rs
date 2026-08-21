@@ -23,7 +23,7 @@
 //!
 //! And the third price, which is the one that makes a dropped frame harmless:
 //! feedback only ever **refines**. Every want it produces is
-//! [`VT_PRIORITY_FEEDBACK`](crate::VT_PRIORITY_FEEDBACK), so it is served after
+//! [`VT_PRIORITY_FEEDBACK`], so it is served after
 //! the whole analytic floor and can never take a slot from it.
 //!
 //! # The layout

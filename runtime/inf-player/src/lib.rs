@@ -1,7 +1,7 @@
 //! Infinity Engine standalone player (P9.3) — library entry.
 //!
 //! The player runs a cooked game: it opens a window and drives a fixed-step
-//! [`RuntimeSim`](runtime_sim::RuntimeSim) (Blueprints + 2D physics) with
+//! [`RuntimeSim`] (Blueprints + 2D physics) with
 //! interpolated rendering, or — for CI — runs the same simulation **headless**
 //! and prints a determinism hash. It also doubles as the play-in-editor
 //! subprocess (the `--pie` / `--embed-probe` modes, owned by the binary entry in
@@ -275,7 +275,7 @@ pub fn material_content_for_world(content: &TerrainContent) -> MaterialContent {
 /// The persistent cell is already in `sim`'s world: the level builder spawned it
 /// before actor binding, because it *is* the level at step 0. This only attaches
 /// the manager for what streams.
-/// `pcg` is the [`BuiltWorld`](level::BuiltWorld)'s own PCG context (island
+/// `pcg` is the [`BuiltWorld`]'s own PCG context (island
 /// phase, IB-1) — the same graphs and the same terrain resolver the load-time
 /// pass used, so a `PcgVolume` that arrives with a cell is evaluated the way one
 /// in the persistent cell was, rather than not at all. Pass

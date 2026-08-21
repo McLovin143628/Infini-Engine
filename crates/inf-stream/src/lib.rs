@@ -25,7 +25,7 @@
 //!   trace.
 //! * [`lane`] + [`admit`] — **one want pipeline.** A want carries a [`Lane`]
 //!   (analytic floor ∪ feedback refinement ∪ predictor), and
-//!   [`admit_by_lane`](admit::admit_by_lane) is the single admission walk both
+//!   [`admit_by_lane`] is the single admission walk both
 //!   slot-pool consumers run. It is where the P28.2 audit's **priority-blind
 //!   protection order** is fixed: a floor want outranks a resident refinement.
 //! * [`budget`] — **one budget arbiter.** One unified byte ceiling divided into
@@ -53,7 +53,7 @@
 //!
 //! `inf-vt` and `inf-vsm` are **slot pools**: a flat array of interchangeable
 //! slots, a residency map, an LRU victim. Both implement
-//! [`SlotPool`](admit::SlotPool) and both run [`admit_by_lane`], so the
+//! [`SlotPool`] and both run [`admit_by_lane`], so the
 //! admission order is one implementation.
 //!
 //! `inf-vgeom` is **not** a slot pool and is not made into one here. Its

@@ -14,7 +14,7 @@
 //! It reuses **`mesh.wgsl` unchanged**. The vertex layout
 //! ([`RenderFractureVertex`] is byte-identical to
 //! [`MeshVertex`](super::mesh::MeshVertex)), the instance layout
-//! ([`InstanceRaw`](super::mesh::InstanceRaw)), the three bind groups (view,
+//! ([`InstanceRaw`]), the three bind groups (view,
 //! lights, environment) and both pipeline states are the mesh pass's own. What
 //! differs is where the *vertices* come from: a per-chunk buffer instead of the
 //! shared primitive one. Sharing the shader is what keeps debris lit exactly like

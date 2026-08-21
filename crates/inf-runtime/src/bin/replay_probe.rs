@@ -9,10 +9,13 @@
 //!
 //! Usage: `replay_probe [threads] [steps]`  (defaults: threads=0→auto, steps=300)
 //! Output (stdout, one `key=value` per line):
-//!   threads=<actual pool worker count>
-//!   steps=<n>
-//!   serial=<hex 128-bit trace hash>
-//!   parallel=<hex 128-bit trace hash>
+//!
+//! ```text
+//! threads=<actual pool worker count>
+//! steps=<n>
+//! serial=<hex 128-bit trace hash>
+//! parallel=<hex 128-bit trace hash>
+//! ```
 
 use inf_runtime::replay;
 use inf_runtime::ScheduleMode;

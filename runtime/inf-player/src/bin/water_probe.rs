@@ -19,11 +19,14 @@
 //!
 //! Usage: `water_probe [threads] [steps]`  (defaults: threads=0→auto, steps=240)
 //! Output (stdout, one `key=value` per line):
-//!   threads=<actual pool worker count>
-//!   steps=<n>
-//!   first=<hex 128-bit hash of the first frame>
-//!   last=<hex 128-bit hash of the last frame>
-//!   trace=<hex 128-bit hash of every frame>
+//!
+//! ```text
+//! threads=<actual pool worker count>
+//! steps=<n>
+//! first=<hex 128-bit hash of the first frame>
+//! last=<hex 128-bit hash of the last frame>
+//! trace=<hex 128-bit hash of every frame>
+//! ```
 
 use glam::DVec2;
 use inf_ecs::components::{

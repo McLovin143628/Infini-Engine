@@ -29,7 +29,7 @@
 //! # Determinism (the house law)
 //!
 //! Every trigonometric evaluation goes through [`inf_math::portable::psin64`] /
-//! [`pcos64`](inf_math::portable::pcos64) — the f64 bit-portable pair — because
+//! [`inf_math::portable::pcos64`]— the f64 bit-portable pair — because
 //! `f64::sin` is **not** bit-identical across platforms (the P14 LAW), and these
 //! numbers reach committed content: a buoyancy force in the fixed step, a replay
 //! trace, a PIE-vs-shipping comparison. `sqrt` is used freely: IEEE-754 specifies

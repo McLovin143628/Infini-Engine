@@ -33,7 +33,7 @@
 //! the want set**, never of what happened to finish in time: each
 //! [`sync_render`] advances the published cut by at most
 //! [`StreamBudget::max_loads_per_sync`] not-yet-resident pages
-//! ([`advance_cut`](crate::wants::advance_cut)), and every intermediate state is
+//! ([`crate::wants::advance_cut`]), and every intermediate state is
 //! itself a valid quadtree cut. That buys the two things timing-driven
 //! asynchrony was wanted for — no whole-cut hitch, work spread across frames —
 //! while keeping the property the replay / PIE-==-shipping gates need: a scripted
@@ -184,7 +184,7 @@ pub fn open_file_tile_store(path: &std::path::Path) -> std::io::Result<FileTileS
 pub struct StreamBudget {
     /// Ceiling on **render-resident** tiles (`0` = unlimited). Over it, the
     /// target cut is coarsened farthest-first
-    /// ([`clamp_cut`](crate::wants::clamp_cut)).
+    /// ([`crate::wants::clamp_cut`]).
     pub max_resident_tiles: usize,
     /// Ceiling on how many not-yet-resident pages one
     /// [`sync_render`](TerrainStreamer::sync_render) may bring in (`0` =
@@ -563,7 +563,7 @@ impl TerrainStreamer {
     ///
     /// # Why a floor exists
     ///
-    /// [`render_wants`](crate::wants::render_wants) seeds from the pyramid's
+    /// [`crate::wants::render_wants`] seeds from the pyramid's
     /// coarsest level and *replaces* a node by its children whenever the camera is
     /// inside the refine radius. A terrain small enough to sit entirely inside the
     /// finest refine ring therefore refines **every root away**, and the

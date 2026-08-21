@@ -2003,7 +2003,7 @@ pub struct RenderFractureChunk {
 /// a second PBR shader that would then have to be kept in step with it. The
 /// `uv` followed `MeshVertex`'s in P26.5 and it is a *layout* obligation before
 /// it is a feature: a `RenderFractureChunk` carries no
-/// [`VtTextureSet`](crate::VtTextureSet), so nothing samples with it — but a
+/// [`VtTextureSet`], so nothing samples with it— but a
 /// buffer whose stride disagrees with the pipeline's is not a subtle bug, it is
 /// every chunk drawn from the wrong bytes. The projectors fill it from the
 /// `.inf_fracture` chunk's own `inf_mesh::MeshVertex::uv`, which the Voronoi cut

@@ -20,7 +20,7 @@ use crate::residency::{ChunkStore, ResidencyReport};
 /// Chunk `(x, y, z)` owns global sample coordinates `x·CHUNK_DIM + i`; the world
 /// position of global sample `(gx, gy, gz)` is
 /// `origin + (gx, gy, gz) · voxel_size_m`. Absent chunks read as
-/// [`EMPTY_SDF`](crate::EMPTY_SDF) — **non-resident is indistinguishable from
+/// [`EMPTY_SDF`]— **non-resident is indistinguishable from
 /// never-authored**, exactly as it is for terrain tiles, so streaming can never
 /// *change* an answer, only make one available.
 ///

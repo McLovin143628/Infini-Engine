@@ -41,7 +41,7 @@
 //! attenuation (linear / inverse / **exponential**, with min/max clamps) feeding
 //! kira volume + panning, plus an **occlusion** multiplier the caller supplies
 //! ([`AudioEngine::set_occlusion_hook`] / [`AudioEngine::set_occlusion`]). The
-//! named-bus [`mixer`] adds a hierarchical [`MixerConfig`](mixer::MixerConfig)
+//! named-bus [`mixer`] adds a hierarchical [`MixerConfig`]
 //! with per-bus volume + a v1 effect chain (compute-side `Gain`, device-side
 //! `Lowpass`), persisted at `.infinity/mixer.toml`. The sim drives playback
 //! through the deterministic [`command`] queue, drained host-side by
@@ -50,7 +50,7 @@
 //!
 //! # Asset
 //!
-//! [`asset`] is the `.inf_audio` [`AudioAsset`](asset::AudioAsset) payload:
+//! [`asset`] is the `.inf_audio` [`AudioAsset`] payload:
 //! original compressed bytes + format tag + duration metadata, decoded on load
 //! (see its module docs for why not PCM).
 

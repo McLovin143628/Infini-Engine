@@ -52,7 +52,7 @@
 //!
 //! The maps are extracted from and written back to the tiles through the same
 //! [`HeightRegion`] seam as the heights, and the write-back yields a reversible
-//! [`DataMapDelta`](crate::DataMapDelta) beside the [`HeightDelta`].
+//! [`DataMapDelta`] beside the [`HeightDelta`].
 //!
 //! **What "bakes compose" does and does not mean.** The *accumulators* compose:
 //! a second bake reads the tiles' existing totals and adds to them, so nothing is

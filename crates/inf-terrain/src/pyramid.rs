@@ -96,7 +96,7 @@
 //!
 //! ## Why flow **sums** and the metre channels **average**
 //!
-//! [`DataMapKind`](crate::DataMapKind) defines all three as raw, monotone
+//! [`DataMapKind`] defines all three as raw, monotone
 //! **accumulators**, but they are not the same *kind* of quantity, and the
 //! reduction has to follow the dimension rather than the word "accumulator":
 //!

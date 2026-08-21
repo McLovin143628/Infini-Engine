@@ -154,7 +154,7 @@ type PendingTile = ((i32, i32), Vec<(u32, u32)>);
 /// The `builder` is threaded in rather than returned so a **stroke** — many dabs
 /// under one mouse-down — merges into a single reversible record whose `before`
 /// is the state at the first touch. Exactly the contract
-/// [`HoleDeltaBuilder`](inf_terrain::HoleDeltaBuilder) documents, and the reason
+/// [`inf_terrain::HoleDeltaBuilder`] documents, and the reason
 /// a stroke undoes in one step to where it started.
 pub fn touch_surface_cut(
     terrain: &mut TerrainData,

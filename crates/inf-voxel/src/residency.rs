@@ -6,7 +6,7 @@
 //! * **[`ChunkStore`]** is the cold side — anything that can hand back a chunk's
 //!   canonical blob bytes for a [`ChunkKey`]. Two implementations ship here: an
 //!   in-memory [`MemoryChunkStore`] (tests, an editor scratch buffer) and the
-//!   asset-backed [`VoxelAssetReader`](crate::VoxelAssetReader), which slices the
+//!   asset-backed [`VoxelAssetReader`], which slices the
 //!   bytes out of a `.inf_voxel` payload — a pack mapping included — with no
 //!   decode and no copy.
 //! * **The caller computes the wants.** [`VoxelData::sync_residency`] takes an

@@ -3,7 +3,7 @@
 //! At renderer/host init the adapter is probed ([`AdapterCaps::probe`]) and a
 //! [`RenderTier`] is chosen ([`choose_tier`]) from a handful of portable signals
 //! (compute + indirect support, storage-buffer count/size, workgroup limits).
-//! The tier maps to a [`RenderSettings`](crate::RenderSettings) profile
+//! The tier maps to a [`RenderSettings`] profile
 //! ([`RenderTier::apply`]) that turns the virtualized-geometry meshlet path (and,
 //! on the lowest tier, the expensive post effects) on or off — so a machine that
 //! cannot run the GPU-driven meshlet cull automatically falls back to the classic

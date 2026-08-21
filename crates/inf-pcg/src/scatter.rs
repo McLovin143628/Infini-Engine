@@ -9,7 +9,7 @@
 //! ## Determinism (the P7.0 guard, extended)
 //!
 //! Placement is a pure function of `(seed, cell, slot)` via
-//! [`Hash64`](crate::hash::Hash64) — never a stateful RNG. Cells are mapped in a
+//! [`Hash64`]— never a stateful RNG. Cells are mapped in a
 //! fixed order through [`inf_core::parallel_map`] (a deterministic in-order pure
 //! map) and their per-cell instance lists concatenated in cell order. The output
 //! is therefore **byte-identical for any worker-pool size** (unit-tested against

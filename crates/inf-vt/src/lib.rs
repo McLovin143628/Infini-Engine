@@ -15,7 +15,7 @@
 //!
 //! `inf-material` depends on **this** crate, not the other way round: the address
 //! of a tile is more primitive than the file that stores it, so
-//! [`TileCoord`](address::TileCoord) lives here and `inf_material::tiles`
+//! [`TileCoord`] lives here and `inf_material::tiles`
 //! re-exports it. That ordering is not a taste question. `inf-material` pulls
 //! `image` and `naga`, and the shipped player does not link it (it is a **dev**
 //! dependency of `inf-render`); if `inf-vt` named `inf-material`, then P26.3
@@ -25,7 +25,7 @@
 //! a compile error rather than a review question.
 //!
 //! What crosses the seam instead is bytes and geometry: the container hands a
-//! residency its [`VtTextureDesc`](address::VtTextureDesc) (through
+//! residency its [`VtTextureDesc`] (through
 //! [`TiledTextureReader::vt_desc`](container::TiledTextureReader::vt_desc)), and
 //! the caller hands the GPU mirror one tile's stored blob (through
 //! [`tile`](container::TiledTextureReader::tile) or, on an adapter without
