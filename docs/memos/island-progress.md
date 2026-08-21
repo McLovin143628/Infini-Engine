@@ -1389,12 +1389,29 @@ ceiling; 1080p unlit p50 **12.076** / p95 **15.095** — **−4.524 and −1.505
    (16.4–16.9 against 32.8–33.4). Both halves of the pipelined number sit at ~16.5, so it is
    genuinely balanced rather than bound by one side. Closing it honestly needs the
    **present-to-present harness**, which needs a window; the player's own pipelining is now
-   armed, so what is missing is the measurement, not the mechanism.
+   armed — at **both** scopes since the I4b audit, `PlayerRenderHost::render` and
+   `PlayerApp::frame` — so what is missing is the measurement, not the mechanism.
+   **→ IP, and it is IP's first *measurement* clause**: until a windowed harness exists, every
+   "60 fps lit" sentence in this repository is an **estimate**, `max(CPU without the wait or
+   the stopwatch, GPU frame)`, and must be written as one. The serialized number is what the
+   instrument asserts.
+   **And the estimate is a LOWER bound on the player's frame time** (I4b audit):
+   `SurfaceChain::new` sets `PresentMode::AutoVsync`, so the player's presented cadence has a
+   third term — `max(CPU, GPU, the refresh interval)` — and what makes `acquire` block is the
+   *display* as much as the GPU. An engine that computes a frame in 16.5 ms presents at 60 Hz
+   on a 60 Hz panel whatever else is true. The same fact constrains the owed harness: a
+   windowed one measuring `AutoVsync` measures the **panel**, so it has to configure
+   `Immediate` or `Mailbox` to measure the engine — and then say which it measured.
 2. **`vsm-raster` still records 6.05 ms**, and the residue is measured rather than guessed:
    **206 399 invalidation touches per frame over 11 047 casters** — 19 page-cells each, because
    `scatter_caster_stamps` is `casters × levels × pages each covers` and the city's buildings
    all cast into a five-level clipmap. Caching the caster pack itself (the way the shadow node's
    now is) is the next move; it needs a content key over four heterogeneous caster sources.
+   **→ IP.** Two conditions the I4b audit attaches to it, both learned from the shadow node's
+   cache: the key must carry the **floating origin** (A1 — `pack_casters` writes render-local
+   matrices exactly as `pack_fallback` does), and it must be pinned **field by field** against
+   what each of the four sources reads (A9), because a caster pack that caches on an
+   under-specified key is a shadow that stops moving.
 3. **When VSM is bound the receivers ignore the cascades entirely** (`env_lighting.wgsl`: *"VSM
    replaces the cascades rather than adding to them"*), so a lit frame with both on rasters
    three cascades nobody reads — 0.23 ms of GPU and 0.16 of record at this scene's scale, found
@@ -1425,10 +1442,23 @@ stand, with I4b's amendments applied in place.
    budget starting a geometry project would have shipped neither.
 
    What the wave *did* change about it is the arithmetic: real geometry costs **+0.32 ms**
-   against a comparable configuration (the I4 audit's corrected figure), and the shipped
-   1080p frame now sits **1.5–2.4 ms under** the 60 fps budget at p95 where it was 28.5 ms
-   over. **The headroom to spend on it exists now**, which it did not when the number was
-   quoted.
+   against a comparable configuration (the I4 audit's corrected figure), where the shipped
+   1080p p95 was **28.5 ms over** the 60 fps budget and is now within a few milliseconds of it
+   either side (see the audit's own re-measurement below — the headroom is a *range* and one
+   end of it is negative). **The headroom to spend on it exists on a good run**, which it did
+   not when the number was quoted.
+
+   **THE HALF THAT IS THE PROJECT, ROUTED BY NAME** (I4b audit). The Cargo edge and a cook-time
+   evaluation are near-one-line; the half after is the **P19 `kind_index → real mesh` gap** —
+   a runtime vgeom asset per archetype, one door, so cook, PIE payload and the editor's
+   Simulate all resolve an archetype to the same geometry (the P22 "one door for three paths"
+   law, which is exactly the shape this will otherwise grow three of). `gisbuild` is the only
+   existing path toward it and `inf_dcc::bake` is the only existing archetype→mesh function.
+   It is a *phase-sized* item and it belongs at the head of IP as a named project rather than
+   as a clause of the cook item it blocks. Nothing in the tree asserts it today; the first
+   thing it needs is an arm that says a shipped city draws **zero placeholder batches**, which
+   the I4 audit deleted as a fixture tautology and which has to come back as a measurement
+   over a real cooked pack.
 2. ~~**The sim fixed step has no §8 budget and costs 13.0–14.9 ms on the city.**~~ **CLOSED by
    I4b.** `CITY_STEP_BUDGET_MS` exists, the step is broken down by
    `inf_player::step_profile` into 22 phases that tile it, and it costs **1.222 ms**. The

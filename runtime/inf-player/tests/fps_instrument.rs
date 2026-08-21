@@ -597,9 +597,24 @@ fn the_instrument_scene_carries_the_city_the_ground_and_the_character() {
 /// `SurfaceChain::acquire` → `EngineRenderer::render` (record + submit) →
 /// `Queue::present` — and it contains **no blocking device poll**. The CPU
 /// therefore runs ahead into the next frame while the GPU drains this one, and
-/// `acquire` blocks only when the swap chain has no free image, which is the
-/// definition of "the GPU is the bottleneck". That is exactly the model the
-/// estimate is.
+/// `acquire` blocks only when the swap chain has no free image. That is the
+/// overlap the estimate models.
+///
+/// # …AND THE PLAYER HAS A THIRD TERM THE ESTIMATE DOES NOT (the I4b audit)
+///
+/// `SurfaceChain::new` sets `PresentMode::AutoVsync`, so what makes the swap
+/// chain run out of images is not only the GPU — it is the **display**. The
+/// player's real presented cadence is
+/// `max(CPU without the wait, GPU frame, the refresh interval)`, and the estimate
+/// this file prints is the first two. That makes it a **lower bound on the
+/// player's frame time and an upper bound on its fps**, which is the direction
+/// that matters for a "≥ 60 fps" claim and is why the claim is written as an
+/// estimate everywhere it appears: an engine that computes a frame in 16.5 ms
+/// presents at 60 Hz on a 60 Hz panel whatever else is true.
+///
+/// It also constrains the **owed present-to-present harness**: a windowed harness
+/// measuring `AutoVsync` measures the panel, so it has to configure `Immediate`
+/// or `Mailbox` to measure the engine — and then say which one it measured.
 ///
 /// This arm is a **source scope**, not a substring ban: it extracts
 /// `PlayerRenderHost::render`'s body and the windowed loop's own frame block, and
