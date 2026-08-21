@@ -291,20 +291,19 @@ fn a_steady_state_sync_marks_no_body_as_moved() {
     );
 }
 
-/// **One pass of the reference workload both halves below are calibrated
-/// against.** The arm times it in **this** process, on **this** machine, in the
-/// same loop as the syncs it divides; the return value exists only so the
-/// compiler cannot delete the loop.
+/// **The structures the reference workload walks** — the model both halves below
+/// are calibrated against, built per population in **this** process, on **this**
+/// machine, and walked by [`calibration_pass`] between the syncs it divides.
 ///
-/// It is deliberately the steady-state sync's own dominant term and nothing
-/// else: for each entry of a snapshot already in `guid` order, one descent
-/// through a `BTreeMap` keyed by `Uuid` to the record the bridge kept, and then
-/// the comparisons the skip is made of — pose against pose, collider descriptor
-/// against collider descriptor, every one of them answering *equal*, which is
+/// It is deliberately the steady-state sync's own memory traffic and nothing
+/// else: a snapshot already in `guid` order, a map from guid to the record the
+/// bridge kept, and the second arena the pose compare reads. Walked as
+/// `sync_retaining` walks them, comparing what the skip compares — pose against
+/// pose, descriptor against descriptor, every one answering *equal*, which is
 /// what a town that has not moved answers. That is what the reconcile does per
-/// tracked entity once every skip has fired, so this converts a nanosecond on
-/// the machine running it into a nanosecond on the machine the ceiling was
-/// minted on.
+/// tracked entity once every skip has fired, so it converts a nanosecond on the
+/// machine running it into a nanosecond on the machine the ceiling was minted
+/// on.
 ///
 /// # The value type is the whole point (island wave I4b)
 ///
@@ -339,26 +338,6 @@ fn a_steady_state_sync_marks_no_body_as_moved() {
 /// at 1 000, so this pass's cost per entry rises with the population by close to
 /// the amount the reconcile's does, on whatever machine is running it.
 ///
-/// # One pass, run ITERS times **interleaved with the subject's own**
-///
-/// The second half of the third red, and the one that took a second attempt to
-/// see. A control taken as its own short block — even beside the subject's, even
-/// best-of-three — is measuring a *different moment*. The subject's leg is 60
-/// syncs, ~70 ms quiet and ~350 ms on a busy runner, and it cannot dodge a
-/// burst; a 1 ms control block can land between two of them, and best-of-three
-/// actively *selects* for landing there. Measured: with the whole crate running
-/// under `cargo nextest` — the battery's own parallelism, which is what CI runs
-/// — a best-of-three control read 132.1 ns/entry against a subject at 448.4, a
-/// 3.4x gap on the same 13 000 records this function is made of, and the arm
-/// went red once in ten runs on a tree with nothing wrong with it.
-///
-/// So the arm below calls this once per subject sync, inside the same timed
-/// loop, into a second accumulator. Sixty bursts, both sides, alternating —
-/// "one machine, one cache hierarchy, one load, and one instant" is then
-/// literally true rather than nearly true.
-///
-/// `black_box` on the key and the result: the whole loop is dead code otherwise,
-/// since every comparison in it answers *equal*.
 struct Control {
     /// The bridge's `entities` map: one 520-byte `BodyRecord` per guid, which
     /// pass 2 descends to and pass 3 walks in order. Modelled by an
@@ -385,6 +364,28 @@ impl Control {
     }
 }
 
+/// One pass of the control over the whole population — **called once per
+/// subject sync, from inside the same timed loop.**
+///
+/// The second half of the third red, and the one that took a second attempt to
+/// see. A control taken as its own short block — even beside the subject's, even
+/// best-of-three — is measuring a *different moment*. The subject's leg is sixty
+/// syncs, ~70 ms quiet and ~350 ms on a busy runner, and it cannot dodge a
+/// burst; a 1 ms control block can land between two of them, and best-of-three
+/// actively *selects* for landing there. Measured twice: with the whole crate
+/// running under `cargo nextest` — the battery's own parallelism, which is what
+/// CI runs — that arrangement read 132.1 ns/entry against a subject at 448.4 and
+/// went red once in ten runs on a byte-untouched reconcile; and on the ubuntu
+/// runner it read 147.5 against 632.4, a **4.29x** gap over the same 13 000
+/// records.
+///
+/// Called from the loop, sixty bursts on each side, alternating, "one machine,
+/// one cache hierarchy, one load, and one instant" is literally true rather than
+/// nearly true.
+///
+/// `black_box` on the key and on the result: the whole thing is dead code
+/// otherwise, since every comparison in it answers *equal* — which is exactly
+/// what it is here to model.
 fn calibration_pass(c: &Control, want: &[EntitySync3D]) -> u32 {
     let mut moved = 0u32;
     // Pass 2, per entity: one descent, the compares the skip is made of, and
@@ -418,8 +419,9 @@ fn calibration_pass(c: &Control, want: &[EntitySync3D]) -> u32 {
 }
 
 /// The steady-state cost, measured as a **scaling ratio** (WORLD — asserted
-/// everywhere) and as an **absolute per-entity ceiling** (CLOCK — asserted only
-/// where the machine is in the class the number was measured on).
+/// everywhere) and as an **absolute per-entity ceiling** (CLOCK — asserted in
+/// the calibrating machine's nanoseconds, which [`calibration_pass`] converts
+/// this machine's into).
 ///
 /// # Why the split (round 2, Hardening Wave H)
 ///
@@ -432,8 +434,8 @@ fn calibration_pass(c: &Control, want: &[EntitySync3D]) -> u32 {
 ///
 /// * **WORLD** — the *scaling* property, measured **against the calibration's
 ///   own scaling**. The reconcile's per-entity cost may grow from 1 000 to
-///   13 000 entities by at most `GROWTH_MARGIN` times as much as a bare
-///   `BTreeMap` descent does over the same two populations, in the same
+///   13 000 entities by at most `GROWTH_MARGIN` times as much as
+///   [`calibration_pass`] does over the same two populations, in the same
 ///   process, on the same machine.
 ///
 ///   **A fixed ratio ceiling here was wrong, and this arm's own failure is the
