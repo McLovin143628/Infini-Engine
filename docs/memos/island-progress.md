@@ -26,7 +26,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **IP** | the remainder of the performance list — the cook's PCG evaluation, IB-9's island ceiling, the VSM caster scatter | **carried** — see *What is still open after I4b* below |
 | **I5** | **player core** — the owner's binding table, the C key's four verbs, the in-game UI layer, the settings dialog + rebinding, the interaction core | **DONE + AUDITED** — battery 309 / **5 796** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, rustdoc 413, no schema moved. Two pre-existing ragdoll defects found and fixed by the wave; **five more found and fixed by the audit** (A1 the settings-dialog lockout, A2 the half-built Simulate pause mirror, A3 an unarmed determinism sort, A5 three silent dead sliders, A6 two false doc invariants) plus A4 an arm that could not fail and A7 a count that was one low. See below. *(This wave took the I5 slot; **IB-11's far half — LERC / BigTIFF / JPEG2000 / LAS, reprojection, the geoid — is NOT in it** and moves to a later wave.)* |
 | ~~I6 (old)~~ | ~~scale seams — IB-12~~ *(pulled into I4; IB-8 and IB-13 into I3)* | **absorbed** |
-| **I6** | **gameplay systems** — doors + locks + the kick + crash-through, inventory, weapons v1, health | **DONE — awaiting audit** — battery 312 / **5 867** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, **no schema moved**. `NOT_YET_CONSUMED` is empty. Six defects found by the wave's own world-level arms and five more by its gate; one energy door for the kick, the breach and the bullet; the city plans **19 790** doorways and the band makes **234** solid. See *Done — wave I6* below |
+| **I6** | **gameplay systems** — doors + locks + the kick + crash-through, inventory, weapons v1, health | **DONE — awaiting audit** — battery 312 / **5 867** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, rustdoc 447 of a 450 ceiling (measured cold — and the recorded 413 was stale by 34; the wave adds zero), **no schema moved**. `NOT_YET_CONSUMED` is empty. Six defects found by the wave's own world-level arms and five more by its gate; one energy door for the kick, the breach and the bullet; the city plans **19 790** doorways and the band makes **234** solid. See *Done — wave I6* below |
 | I7 | content — the 50 km² Vancouver map itself | not started |
 
 Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
@@ -2245,15 +2245,44 @@ the repair went through the Edit tool, which is what the law prescribes.
 | frontend tests / files | 702 / 78 | **702 / 78**, `tsc --noEmit` and `eslint` clean |
 | goldens | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical** over 101 arms — re-run after the inventory panel and the tracer node landed, **no PNG rewritten** |
 | `clippy --workspace --all-targets` under `-D warnings` | 0 | **0** |
+| rustdoc warnings (ceiling 450) | *recorded as 413* | **447 over 45 documented crates — and 447 is what the base commit's own CI leg printed**, so the wave adds **zero**. See below: the recorded 413 was stale by 34 and the real headroom was **three** |
 | schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved**, and the accounting for the one that was considered is in `inf_ecs::item`'s module header |
 | fixed-step phases | 22 | **23** — `gameplay`, between the character step and the solver, in both hosts |
 | committed samples | 20 levels | **21** — `samples/phase30-gameplay` is new; not one byte of the other twenty moved |
 | `inf_input::actions::NOT_YET_CONSUMED` | 4 controls | **0** |
 
+### THE RUSTDOC HEADROOM WAS THREE, NOT THIRTY-SEVEN
+
+Every wave since P28.5 has carried "rustdoc 413" forward against a **450**
+ceiling, which reads as thirty-seven warnings of room. It is not: the base
+commit's own CI leg printed **`rustdoc warnings: 447 (ceiling 450) over 45
+documented crates`**. The recorded number was stale by 34 and the true headroom
+was **three**.
+
+The way the wrong number survives is worth writing down, because it is the CI
+step's own documented trap wearing a local disguise: **`cargo doc` re-emits
+warnings only for crates it re-documents.** A warm local run documents whatever
+the last interrupted run did not, and counts a fraction of the tree with total
+confidence — this wave's first measurement was **449 over 17 crates**, a number
+that is neither the baseline nor comparable to it, and it *looked* like the wave
+had spent its whole allowance. CI already knows this and does `cargo clean --doc`
+before it counts; a local measurement that skips that step is measuring its own
+build cache. **Measure rustdoc the way CI measures it, or do not write the number
+down.**
+
+Measured properly (`cargo clean --doc` first): **447 over 45 crates**, equal to
+the base's CI figure, and the wave's own contribution is **zero** — every
+warning's `file:line` was checked against the diff's added-line set and **none**
+falls on a line this wave wrote. Two did while the wave was in flight, both in
+new code and both repaired here: a `[yaw_dir]` intra-doc link to a private
+function in `inf_ecs::door`, and an `[inf_physics::d3::pcg_structure_guid]` link
+in `inf_ecs::item` naming a crate that — by the facade rule — `inf-ecs` cannot
+and must not depend on.
+
 Five commits, `(I6)`-tagged, none pushed: the door core and the P22 energy rule's
 one home; the gameplay engine half (doors, kicks, crashes, weapons, health); the
 grammar's doors, banded; the gate, the fixture, the Blueprint kit and the tuning
-door; and the doorway-walk visitor with this ledger. *(A sha is only true of the
+door; the doorway-walk visitor; and the two doc links plus this ledger. *(A sha is only true of the
 tree it was written in — the I3 audit's law — so the wave that closes this one
 re-states the range rather than trusting a number copied out of this file.)*
 

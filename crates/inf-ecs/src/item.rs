@@ -538,7 +538,7 @@ const DROPPED_ITEM_SALT: u128 = 0x6006_0200_4954_454d_4452_4f50_5045_4421;
 ///
 /// A pure function of sim state — the character's own guid and its own drop
 /// count — so two hosts running one trace put the same entity in the same place
-/// with the same name. The [`inf_physics::d3::pcg_structure_guid`] rule with its
+/// with the same name. The `inf_physics::d3::pcg_structure_guid` rule with its
 /// own salt; a 128-bit mix rather than a XOR, because XORing a small counter
 /// into a guid makes two characters whose ids differ in the low bits alias each
 /// other's drops.

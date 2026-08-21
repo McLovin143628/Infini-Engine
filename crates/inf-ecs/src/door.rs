@@ -476,7 +476,7 @@ fn yaw_dir(yaw_deg: f64) -> DVec3 {
 ///
 /// # The half extents are `(thickness, height, width)`, and the order matters
 ///
-/// The yaw is applied as `DQuat::from_rotation_y`, and [`yaw_dir`] puts yaw
+/// The yaw is applied as `DQuat::from_rotation_y`, and `yaw_dir` puts yaw
 /// **zero at `+Z`** (the engine's one compass convention). So the leaf's *length*
 /// runs along its own local `+Z` and its thickness along local `+X` — and a box
 /// written `(width, height, thickness)` would be a leaf lying across its own
