@@ -24991,3 +24991,45 @@ into runs of up to fourteen spaces, and those lines contain string literals — 
 the sweep reads as an eaten continuation. **A table maintained around a gate is a table that
 trips it**, so the contents moved onto the `phase` constants, which is where a reader looks an
 index up anyway.
+
+---
+
+## Phase 30 (the island) — wave I4b AUDIT (adversarial, 2026-08-20)
+
+Range audited: **`3c9d87b..4e6e04c`, fourteen commits** (the wave was rebased onto the
+toolchain hotfix after it was written, so every sha its own ledger names is gone — the fourth
+time this file records that, and the reason the audit that closes a wave re-states the range
+from the tree it certifies). The audit's own commits follow `4e6e04c` and are listed at the
+end of this block.
+
+### The findings
+
+| # | finding | what shipped | now |
+|---|---|---|---|
+| **A1** | **THE CACHED SCATTER CASTER PACK WAS BLIND TO THE FLOATING ORIGIN.** `pack_fallback` writes **render-local** model matrices, so the bytes it produces are a function of the `FloatingOrigin` as much as of the batches. The wave's new cache keyed on the eye bucket, the shadow range, the caster stamp and the content fold — and not the origin. The two lattices do not line up: a rebase moves the origin by `REBASE_DISTANCE` = **1 024 m** while `eye_bucket` quantizes the **world** eye onto **8 m**, so the frame a rebase fires in is overwhelmingly one where the bucket did not tick. | the whole-pack `CasterKey` noticed the rebase, re-uploaded, and re-uploaded a **merge of the stale scatter half** — every scatter shadow caster a kilometre out of place until the camera left its 8 m bucket | the origin's bits are in `ScatterCasterKey`, the derivation is a free `scatter_caster_key` a unit test can ask without a GPU, and `the_scatter_caster_key_moves_when_the_pack_it_caches_would` asserts the bucket is IDENTICAL across the rebase (or it would be passing on the case the defect does not occur in), that the keys differ, that the packed bytes really differ, and — the control — that an unchanged scene keeps one key |
+| **A2** | **THE EQUIVALENCE GATE COULD NOT ACCUMULATE STALENESS.** It stepped **one** world and called `force_query_rebuild()` between the two halves of every iteration, so the "incremental" tree it questioned at step *n* was the control's tree from step *n − 1* — exactly one step stale, centimetres against a body's own half-metre leaf. | deleting the marking **entirely** (both `active_bodies()` extends removed from `step`) left it green over all **540** answers | two worlds stepped identically, the incremental one never rebuilt, and a fourth question — a **point query at the moving body's centre**, because a 40 m ray traverses a stale leaf just as happily as a fresh one. The same mutation now dies, and nothing else does |
+| **A3** | **TWO DOORS OF THE INCREMENTAL MARKING HAD NO ARM AT ALL.** `set_body_translation` / `set_body_rotation` — which is where `set_body_pose_if_moved` puts **every static and kinematic pose write both hosts make** — and `remove_body`. | deleting either mark left **every test in `inf-physics` green** | `a_teleported_body_answers_where_it_landed_and_not_where_it_was` (a FIXED body, because a kinematic one is in `active_bodies()` anyway; with a `step` between the write and the query, because rapier propagates a body's pose onto its colliders inside `step`) and `a_removed_body_leaves_the_query_tree` over the moved-then-removed sequence |
+| **A4** | **`query_rebuild` ON THE REMOVAL PATHS IS HYGIENE, NOT CORRECTNESS.** `BroadPhaseBvh::set_aabb` keys a leaf by `handle.into_raw_parts().0` — the raw index, generation discarded — and `QueryPipeline` resolves it through `ColliderSet::get_unknown_gen`. | the doc claimed "without it the tree would answer with a collider that no longer exists"; mutation-measured, deleting the flag from `remove_collider` leaves its own arm and the whole crate green | the claim is corrected on `PhysicsWorld3D::query_rebuild` and on both arms: a stale leaf is a **wasted traversal**, the flag buys the one-leaf-per-live-collider invariant, and that invariant is **unfalsifiable through this type's surface** — said out loud instead of dressed as an arm |
+| **A5** | **THE `FIXED_FIXED` NARROWING DID DROP ONE READER.** `ActiveEvents::COLLISION_EVENTS` is on every collider and both hosts' `drain_collisions` turns a `Started` contact into a Blueprint `Collision` event whether the pair is a sensor or not. | "no gameplay could ever read [it] as an overlap" — one word too strong | stated exactly on `active_collision_types`: two overlapping static **solid** colliders fired a `Collision` event once and no longer do; the remedy (make one a sensor) is the mechanism the flags were widened for |
+| **A6** | **THE 2D MIRROR HAD NO ARM OF ITS OWN**, and the mask's group id had **two spellings**. `PhysicsWorld2D::active_collision_types` is documented as "the MIRROR of the 3D one, which carries the full argument and the measurement" — two declarations agreeing with each other. And `scatter_caster_stamps` re-derived each caster's group with a running cursor over `groups[..].casters` while `vsm_cull.wgsl` indexes the slot table with `VsmCasterRaw::ids.x`. | — | a 2D twin in `tests/d2.rs` (solid pair silent, sensor pair reports), both directions mutation-verified; and the mask reads `ids.x`, the field the cull reads, with the `groups` parameter retired |
+| **A7** | **THE PIPELINING ARM READ ONE SCOPE AND SAID TWO.** Its own paragraph claims it extracts "`PlayerRenderHost::render`'s body **and the windowed loop's own frame block**". | it extracted the first only, and a poll one caller **up** serializes the halves exactly as a poll one caller down does | `PlayerApp::frame` is the second scope, with the same reading-the-wrong-function control. Both are clean; the claim now matches the check |
+| **A8** | **`PrimMesh as u32` NOW CROSSES INTO WGSL AND NOTHING PINNED IT.** The impostor sizing puts the discriminant in `RasterParamsGpu::material.z`, where `impostor_radius` branches `0u`/`1u`/`2u`; `pack_fallback` buckets with `PrimMesh::index()`. The enum has no `#[repr]` and no explicit discriminants. | reordering it gives every cube a sphere's billboard, and `structure_lod_pop`'s bounds (`> 4x`, `> 50 %`) are deliberately loose enough not to notice | a compile-time assertion over `PrimMesh::ALL`; the mutation stops the crate compiling |
+| **A9** | **THE CASTER FOLD WAS NOT PINNED FIELD BY FIELD.** `scatter_caster_fold` exists to fold "everything `pack_fallback` reads off the batches themselves" and nothing checked that it does — the P22 allowlist law, unapplied to the wave's own new key. | a field that quietly stopped being folded is a caster pack cached on a key that never notices | all **eight** fields of `ScatterBatch`, one at a time, spelled as whole struct literals so a ninth cannot be added without the list refusing to compile, plus the two anti-vacuity controls |
+| **A11** | **THREE DOCS STILL NAMED `query_dirty`**, the field this wave retired — and `inf_physics::d3::camera`'s was a **live claim** about why holding `&mut PhysicsBridge3D` is safe. | a rule that changed, still written down the old way in three places | all three corrected; the two historical ones say which field replaced it |
+
+### Laws the audit paid for
+
+* **A cached RENDER-LOCAL value is a function of its frame of reference, and the frame belongs
+  in the key.** Two quantizing lattices (1 024 m and 8 m) that both look like "the camera has
+  moved" do not agree about *when*, and the cheaper one hid the dearer one.
+* **A gate that rebuilds its own control every iteration cannot accumulate the drift it is
+  looking for.** One step of staleness is smaller than the thing being measured; 180 are not.
+* **A leaf decides what the narrow phase is OFFERED, not what it answers.** A long ray cannot
+  see a stale broad-phase leaf. Ask a point query at the body's own centre.
+* **Where a flag's value is unfalsifiable through the type's own surface, write that down**
+  rather than inventing an arm that cannot fail — and correct the claim that made it look
+  load-bearing.
+* **Two spellings of one index must not both exist where a mismatch is a hole.**
+* **An exact cache key costs what it measures, and the HIT is where the cost lands.**
+* **A mirror comment needs its own arm** — the P24 "two hosts agreeing is not the world being
+  right", one level down, at a *declaration* that says it mirrors another.

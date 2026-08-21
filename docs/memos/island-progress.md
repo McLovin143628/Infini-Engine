@@ -331,7 +331,53 @@ twice.
   that is a collision rather than a defect**: `rustfmt` aligns trailing comments into runs of
   fourteen spaces on lines that carry string literals, which is exactly the shape the sweep
   reads. *A table maintained around a gate is a table that trips it* — the contents moved onto
-  the constants they describe.
+  the constants they describe. *(And the reason moving it was the only option: the sweep's
+  `ALIGNED_ON_PURPOSE` allowlist is keyed on the **enclosing function**, so a module-level
+  `const` cannot be excepted at all — I4b audit.)*
+* **A CACHED RENDER-LOCAL PACK IS A FUNCTION OF THE ORIGIN, and two lattices that both
+  quantize do not agree** (I4b audit). `pack_fallback` writes render-local model matrices, so
+  the bytes it produces depend on the `FloatingOrigin` as much as on the batches — and I4b's
+  new scatter caster cache keyed on the eye bucket, the bands, the stamp and the content fold,
+  and not on that. The two lattices are **1 024 m** (`REBASE_DISTANCE`) and **8 m** (the eye
+  bucket over the *world* eye), so the frame a rebase fires in is almost always one where the
+  bucket did not tick: the whole-pack key noticed the rebase, re-uploaded, and re-uploaded a
+  merge of the stale half. *Generalize:* when a cache holds a value derived through a frame of
+  reference, the frame is part of the key.
+* **A GATE THAT REBUILDS ITS OWN CONTROL EVERY ITERATION CANNOT ACCUMULATE THE DRIFT IT IS
+  LOOKING FOR** (I4b audit). The incremental query tree's equivalence gate stepped one world
+  and forced a rebuild between the two halves of each iteration, so the "incremental" answer
+  was always **exactly one step** stale — centimetres against a body's own half-metre leaf.
+  Deleting the marking *entirely* left it green over all 540 answers. Two worlds, one never
+  rebuilt, and the same mutation dies. *And the second half of the same lesson:* a 40 m ray
+  cast from 6 m above traverses a stale leaf as happily as a fresh one, because a leaf decides
+  only what the narrow phase is **offered** and the narrow phase then reads the real pose. The
+  question that reaches a leaf where the leaf *says* the body is, is a **point query at its
+  centre**.
+* **A stale BVH leaf is a wasted traversal, not a wrong answer** (I4b audit). `BroadPhaseBvh`
+  keys a leaf by `handle.into_raw_parts().0` — the raw index, generation discarded — and
+  `QueryPipeline` resolves it through `ColliderSet::get_unknown_gen`, so a leaf a removal left
+  behind answers `None` or names whatever collider later takes that index (which the attach's
+  own mark refreshes). The `query_rebuild` flag on the removal paths therefore buys the
+  *invariant* — one leaf per live collider — and not correctness, and **deleting it kills no
+  arm**. Where a flag's value is unfalsifiable through the type's own surface, write that down
+  instead of inventing an arm that cannot fail.
+* **Two spellings of one index must not both exist where a mismatch is a hole** (I4b audit).
+  The VSM group mask re-derived each caster's geometry group with a running cursor over
+  `groups[..].casters`, while `vsm_cull.wgsl` indexes the compact slot table with the group id
+  the record already carries (`VsmCasterRaw::ids.x`). Exact today, and exact only while
+  "casters are pushed contiguously per group" holds in four separate push loops — and a
+  disagreement would look up one group's slot for a caster the mask registered under another.
+  One field, read twice.
+* **An exact cache key costs what it measures, and the HIT is where the cost lands** (I4b
+  audit). `scene.version` was a `u64` compared *before* the pack ran, so an unchanged frame
+  left the shadow node at `O(1)`; a key computed from the content has to pack and hash it, so
+  the **hit** went `O(1)` → `O(scene.instances)` and only the **miss** kept its old order. The
+  trade is right where it was taken (the city's casters are all scatter; 3.149 → 0.157 ms) and
+  it is a cost somewhere else. Price the direction you did not measure.
+* **A MIRROR needs its own arm** (I4b audit). `PhysicsWorld2D::active_collision_types` was
+  written as "the MIRROR of the 3D one, which carries the full argument and the measurement" —
+  which is two declarations agreeing with each other rather than with the world. The P24 law
+  ("two hosts agreeing ≠ the world being right") reaches a *mirror comment* too.
 * **A payload with a migrating rung must not be diagnosed as "too old".**
   `AssetPayload::migrates_from` exists so a v2 `.inf_sm` that fails for a *structural*
   reason reports that reason. Telling an author to re-create a machine whose problem is
