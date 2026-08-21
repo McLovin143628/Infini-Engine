@@ -1012,8 +1012,8 @@ fn the_cooked_and_previewed_cities_plan_the_same_doors() {
     let pack = cook_city(tmp.path());
     let shipped = pack_built(&pack);
     let previewed = pie_built();
-    let a: Vec<[u64; 8]> = doorway_bits(&shipped);
-    let b: Vec<[u64; 8]> = doorway_bits(&previewed);
+    let a: Vec<[u64; 10]> = doorway_bits(&shipped);
+    let b: Vec<[u64; 10]> = doorway_bits(&previewed);
     println!(
         "the cooked city plans {} doorways and the previewed one {}",
         a.len(),
@@ -1033,22 +1033,47 @@ fn the_cooked_and_previewed_cities_plan_the_same_doors() {
 /// Every doorway's placement as raw bits, in volume order — the same discipline
 /// `shell_bits` uses, and for the same reason: two hosts agreeing about a count
 /// and disagreeing about an angle is exactly what a byte comparison is for.
-fn doorway_bits(built: &BuiltWorld) -> Vec<[u64; 8]> {
+///
+/// **Every field of `DoorwaySlot`, not the ones that are angles** (the I6
+/// audit). The first draft folded the eight scalars and left `exterior` and
+/// `floor` out, which is the shape P22's own allowlist law refuses: a
+/// comparison enumerating what its author thought of lets the ninth field
+/// through. A mirror that dropped `exterior` — the flag that says which of a
+/// building's doors is its front one — would have been invisible here, and the
+/// way to keep it visible is to take the struct apart field by field, which is
+/// what the pattern below does: a field ADDED to `DoorwaySlot` makes that
+/// pattern non-exhaustive and this file stops compiling.
+fn doorway_bits(built: &BuiltWorld) -> Vec<[u64; 10]> {
     volumes(built)
         .into_iter()
         .flat_map(|(_, v)| {
             v.doorways
                 .into_iter()
                 .map(|d| {
+                    // Destructured, so a field ADDED to `DoorwaySlot` is a
+                    // compile error here rather than a field this comparison
+                    // silently stops making.
+                    let inf_ecs::components::DoorwaySlot {
+                        hinge,
+                        closed_yaw_deg,
+                        width_m,
+                        height_m,
+                        thickness_m,
+                        inside_yaw_deg,
+                        exterior,
+                        floor,
+                    } = d;
                     [
-                        d.hinge.x.to_bits(),
-                        d.hinge.y.to_bits(),
-                        d.hinge.z.to_bits(),
-                        d.closed_yaw_deg.to_bits(),
-                        d.inside_yaw_deg.to_bits(),
-                        d.width_m.to_bits(),
-                        d.height_m.to_bits(),
-                        d.thickness_m.to_bits(),
+                        hinge.x.to_bits(),
+                        hinge.y.to_bits(),
+                        hinge.z.to_bits(),
+                        closed_yaw_deg.to_bits(),
+                        inside_yaw_deg.to_bits(),
+                        width_m.to_bits(),
+                        height_m.to_bits(),
+                        thickness_m.to_bits(),
+                        u64::from(exterior),
+                        u64::from(floor),
                     ]
                 })
                 .collect::<Vec<_>>()

@@ -2077,14 +2077,27 @@ fn both_fixed_steps_run_the_cloth_slot() {
     }
 }
 
-/// The cloth trace is **appended to `state_bytes`, last, in a frozen position**.
+/// **Every trace section is folded, in a frozen order** — the whole list, not
+/// the newest one.
 ///
 /// Every committed trace hash in the tree was taken over the concatenation
-/// `snapshot ++ deform ++ pose`; P24.4 appends `cloth` after it. Inserting a
-/// section anywhere but the tail would change every one of those hashes silently,
-/// so the order is pinned here rather than trusted to a comment.
+/// `snapshot ++ deform ++ pose`; P24.4 appended `cloth` and `hair` after it and
+/// island wave I6 appended `door ++ item ++ weapon ++ health`. Inserting a
+/// section anywhere but the tail would change every one of those hashes
+/// silently, so the order is pinned here rather than trusted to a comment.
+///
+/// **It is an ALLOWLIST over the whole sequence, and the I6 audit is why.** The
+/// arm used to name three sections and assert their order, which said nothing
+/// about the five that arrived later: measured, deleting
+/// `door::door_state_bytes` from the fold — and, separately,
+/// `weapon::weapon_state_bytes` — left **all sixty-nine `inf-player` test
+/// binaries green**, the PIE-versus-shipping gate included, because two hosts
+/// that both stopped folding a section agree about it perfectly. A gate that
+/// compares two traces cannot see a section missing from both; only a pin on
+/// the fold itself can. (P22's own "a ban enumerates what you thought of, an
+/// allowlist what is allowed", at a trace.)
 #[test]
-fn the_cloth_trace_is_appended_last_to_the_state_bytes() {
+fn every_trace_section_is_folded_in_its_frozen_order() {
     let src = read("runtime/inf-player/src/runtime_sim.rs").replace("\r\n", "\n");
     let start = src
         .find("pub fn state_bytes(")
@@ -2092,20 +2105,41 @@ fn the_cloth_trace_is_appended_last_to_the_state_bytes() {
     let body = &src[start..];
     let end = body.find("\n    }\n").expect("the fn ends");
     let body = &body[..end];
-    let deform = body
-        .find("deform::deform_state_bytes")
-        .expect("the deform section");
-    let pose = body
-        .find("pose::pose_state_bytes")
-        .expect("the pose section");
-    let cloth = body
-        .find("cloth::cloth_state_bytes")
-        .expect("the cloth section is not appended at all");
-    assert!(
-        deform < pose && pose < cloth,
-        "the trace sections moved: every committed hash was folded over \
-         snapshot ++ deform ++ pose ++ cloth, in that order"
-    );
+    // The sequence, in the order the bytes are concatenated. A section deleted
+    // from the fold fails at its own `expect`; a section MOVED fails the
+    // ordering assertion below.
+    const SECTIONS: [&str; 8] = [
+        "deform::deform_state_bytes",
+        "pose::pose_state_bytes",
+        "cloth::cloth_state_bytes",
+        "hair::hair_state_bytes",
+        "door::door_state_bytes",
+        "item::item_state_bytes",
+        "weapon::weapon_state_bytes",
+        "weapon::health_state_bytes",
+    ];
+    let at: Vec<usize> = SECTIONS
+        .iter()
+        .map(|s| {
+            body.find(s).unwrap_or_else(|| {
+                panic!(
+                    "`{s}` is not appended to `state_bytes` at all — a section \
+                        missing from BOTH hosts is invisible to every trace comparison \
+                        in this repository"
+                )
+            })
+        })
+        .collect();
+    println!("the trace folds {} sections at {at:?}", SECTIONS.len());
+    for (i, w) in at.windows(2).enumerate() {
+        assert!(
+            w[0] < w[1],
+            "the trace sections moved: `{}` must be folded before `{}` — every \
+             committed hash was taken over {SECTIONS:?}, in that order",
+            SECTIONS[i],
+            SECTIONS[i + 1]
+        );
+    }
 }
 
 /// The two `project_cloth` projectors must be **byte-identical, doc block
