@@ -81,11 +81,30 @@ struct SimInner {
     ///
     /// The frontend sends raw `KeyboardEvent.code` values now; this turns them
     /// into the engine's actions and axes through
-    /// [`inf_input::default_map`] — the SAME table the shipped player reads, so
-    /// a control cannot mean one thing in Simulate and another in a build. It
-    /// used to be a set of *action names* mapped in TypeScript, which was a third
-    /// copy of the binding table across a language boundary (the campaign's Wave
-    /// I defect) and could not carry an analog axis at all.
+    /// [`inf_input::default_map`] — the same **Ring-0** table, so a control
+    /// cannot mean one thing in Simulate and another in a build *by way of a
+    /// second table*. It used to be a set of *action names* mapped in TypeScript,
+    /// which was a third copy of the binding table across a language boundary
+    /// (the campaign's Wave I defect) and could not carry an analog axis at all.
+    ///
+    /// # What it is NOT, and the gap that leaves (I5 audit, A6)
+    ///
+    /// The first draft of this doc said "the SAME table the shipped player
+    /// reads", and the one on `sim_tick` said an `input.toml` beside the level
+    /// "would change both". Neither is true. `input.toml` is read by exactly one
+    /// path in this repository — `inf_player::input::load_map_beside`, on
+    /// `WorldChoice::Level`, i.e. `inf player <level.inf_lvl>`. A **cooked pack**
+    /// takes `default_map()` (`lib.rs`'s own match says so, and the cook does not
+    /// carry the file), and Simulate takes it here.
+    ///
+    /// So a project that authors its own bindings gets them when it runs a dev
+    /// level directly, and does **not** get them in Simulate or in a shipped
+    /// build. That is a real gap and it is carried by name in
+    /// `docs/memos/island-progress.md`; closing it means moving
+    /// `load_map_beside` down into `inf-input` (Ring 0, beside `default_map`,
+    /// where a project's binding file belongs) and having this seam and the cook
+    /// both use it. It is not closed here because moving a loader between rings
+    /// is a change to a path this audit does not own.
     input: inf_input::InputState,
     /// Raw mouse-delta counts accumulated from the native viewport since the last
     /// tick, in device units. The viewport captures the pointer while Simulate is
@@ -291,9 +310,13 @@ pub async fn sim_start(
 /// three action names in TypeScript, which meant the engine's binding table
 /// existed twice in two languages and the second copy knew about three of its
 /// seventeen entries. It sends the physical key now and
-/// [`inf_input::default_map`] does the mapping — the same table the shipped
-/// player uses, so `C` crouches in Simulate because it crouches in a build, and
-/// an `input.toml` beside the level would change both.
+/// [`inf_input::default_map`] does the mapping — the same table a **cooked**
+/// build uses, so `C` crouches in Simulate because it crouches in a build.
+///
+/// An `input.toml` beside the level does **not** change both, and the first
+/// draft of this line said it did (I5 audit, A6): that file reaches exactly one
+/// path, `inf player <level.inf_lvl>`. See `SimInner::input`'s own note (this
+/// module, private) for the gap and the fix.
 #[tauri::command]
 pub async fn sim_tick(
     app: AppHandle,

@@ -24,7 +24,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **I4** | the fps instrument + budgets — IB-9, IB-16, IB-12, the shipping-resolution harness | **DONE + AUDITED** — see below |
 | **I4b** | **performance** — the sim fixed step, the lighting stack, the scatter impostor, the pipelining | **DONE + AUDITED** — battery 306 / 5 710 / 0 / 14, frontend 702 / 78, goldens 54 strict, clippy 0, rustdoc 413, no schema moved. Step 12.7 → **1.25 ms**; lit p95 92.3 → **38.9–41.3**; unlit 1080p **inside the 60 fps budget at p50 on every run and at p95 on two of three** (the audit's correction). One defect fixed: the scatter caster cache was blind to the floating origin |
 | **IP** | the remainder of the performance list — the cook's PCG evaluation, IB-9's island ceiling, the VSM caster scatter | **carried** — see *What is still open after I4b* below |
-| **I5** | **player core** — the owner's binding table, the C key's four verbs, the in-game UI layer, the settings dialog + rebinding, the interaction core | **DONE** — battery 309 / 5 788 / 0 / 14, frontend 702 / 78, goldens 54 strict, clippy 0, rustdoc 413, no schema moved. Two pre-existing ragdoll defects found and fixed. See below. *(This wave took the I5 slot; **IB-11's far half — LERC / BigTIFF / JPEG2000 / LAS, reprojection, the geoid — is NOT in it** and moves to a later wave.)* |
+| **I5** | **player core** — the owner's binding table, the C key's four verbs, the in-game UI layer, the settings dialog + rebinding, the interaction core | **DONE + AUDITED** — battery 309 / **5 796** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, rustdoc 413, no schema moved. Two pre-existing ragdoll defects found and fixed by the wave; **five more found and fixed by the audit** (A1 the settings-dialog lockout, A2 the half-built Simulate pause mirror, A3 an unarmed determinism sort, A5 three silent dead sliders, A6 two false doc invariants) plus A4 an arm that could not fail and A7 a count that was one low. See below. *(This wave took the I5 slot; **IB-11's far half — LERC / BigTIFF / JPEG2000 / LAS, reprojection, the geoid — is NOT in it** and moves to a later wave.)* |
 | ~~I6~~ | ~~scale seams — IB-12~~ *(pulled into I4; IB-8 and IB-13 into I3)* | **absorbed** |
 | I7 | content — the 50 km² Vancouver map itself | not started |
 
@@ -1890,7 +1890,7 @@ against `toml::to_string_pretty(&default_map())` rather than a byte count.
 `bridge_sync` hotfix's scratch buffers had never run together: `bridge_sync_scaling` 4/4 and
 `step_cost_3d` 8/8, then the whole of `inf-physics` green.
 
-**Four defects, and one arm that could not fail:**
+**Five defects, one arm that could not fail, and one ledger number that was one low:**
 
 | finding | what shipped | now |
 |---|---|---|
@@ -1898,6 +1898,8 @@ against `toml::to_string_pretty(&default_map())` rather than a byte count.
 | **A2 · the editor's pause was a half-built mirror with no arm at all** | `SimSession::sim_paused` shipped as a declared MIRROR of `RuntimeSim`'s. Deleting the check in `step_once` left **every test in the tree green**, and `tick` — the *other* door, the one a host drives by elapsed time — never had the check at all, so a paused Simulate would have advanced *and* banked the frames to spend in one burst on resume. (The same mutation on the player's `step_once` reds **four** arms.) The I4b law: a mirror needs its own arm | the check in `tick`, mirroring `run_frame`'s accumulate-nothing, and `a_paused_session_runs_no_fixed_step_through_either_door` — both doors, the no-banking claim, and a control at each |
 | **A3 · the merged candidate walk's `Guid` sort had no falsifier** | `d3::interact::candidates` concatenates two already-sorted lists and sorts the union, and its own comment says why ("a seat and an item at exactly the same distance must resolve the same way in both hosts"). **Deleting the sort killed nothing**: every other arm puts its candidates at different distances, where the tie-break never runs | `a_seat_and_an_item_at_the_same_distance_break_by_guid` puts the item **on the seat** — an exact tie, asserted exact — with a lower `Guid` than the chassis, so "lowest guid wins" and "whichever list came first wins" give different answers |
 | **A5 · the video page's three dead sliders said nothing to the player** | window mode, resolution and quality are stored and applied by nothing — and until this audit they said so **only in a ledger**, which is not where a player reads. This wave's whole subject is that *a dead key is indistinguishable from a broken one*: it put "not wired to anything yet" on every unwired binding ROW and raised a toast when one is pressed, and then left the three unwired *settings* silent. A player who changes the resolution and sees nothing happen cannot tell a preference from a bug | `STORED_NOT_APPLIED_NOTE` on the three rows, through the same `note` field `not_yet_note` uses. It does **not** promise a restart, because nothing reads these three at boot either — measured: they have no reader outside the dialog and the settings module. The arm counts them: exactly three noted, twenty-plus live, so the day the video half lands it fails and the note comes off |
+| **A6 · two doc comments asserted an invariant that is false** | `commands/sim.rs` said Simulate maps keys through "the SAME table the shipped player reads" and that "an `input.toml` beside the level would change both". Measured: that file reaches **one** path — `inf player <level.inf_lvl>` — and neither a cooked build nor Simulate. So a project's own bindings are lost by two of the three paths, which is this wave's own "settings only one host reads" trap a layer down, and the doc sent the next reader at a mechanism that does not connect | both lines say what is true, with the gap and its fix (**move `load_map_beside` into `inf-input`**) carried by name in *What is still open*. Not closed here: moving a loader between rings is a change to a path this audit does not own |
+| **A7 · the battery count was one low** (a number, not a defect) | the wave records **5 788** passed. Measured at this head: **5 796**, and the audit adds exactly **seven** arms and no doctest — `git grep -c '#\[test\]'` is `5 801 → 5 808` across the two trees. So the wave's own head was **5 789** | the I3 audit's law met a second time: *run the count at the head you are about to write down.* The figure below is this tree's |
 | **A4 · an arm whose failure message named a defect it could not see** | `the_editors_surface_reports_a_conflict_and_swaps_only_when_asked` swaps `KeyW`, which is Move Forward's **first** key — and "remove the exact token" and "remove whichever desk source is first" are the same expression there. Its message reads *"the swap took Move Forward's other key too"* | the same arm now also swaps `ArrowUp`, the **second** key, where the two rules differ. *(The property was not unheld: `menu`'s own `a_capture_can_bind_the_keys_the_dialog_navigates_with` swaps a second key and dies under the mutation. What was missing was the editor surface's own.)* |
 
 **Fifteen mutations, four of the implementer's and eleven new**, each run to the point of
@@ -1936,6 +1938,18 @@ does are one call.
 `step_ragdoll` comment ("This is a **bound, not a cure**"), the ROADMAP block and the ledger
 above — and the carried instability is named with its number (**z = −3.85e13** from a 2.7 cm
 entry shift) in *What is still open*, below.
+
+### Counts, at the head this audit certifies
+
+| | after I5 (as recorded) | **after the I5 audit** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 309 / 5 788 / 0 / 14 | **309 / 5 796 / 0 / 14** — seven new arms, **no new test binary**, and the wave's own figure was one low (finding A7) |
+| frontend tests / files | 702 / 78 | **702 / 78**, `tsc` and `eslint` clean |
+| goldens | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical**, re-run under `INF_GOLDEN_STRICT=1` over **101 arms** with no PNG rewritten — and the 54 files are byte-unchanged across the whole range `60d6f1d..` this tree |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** (local toolchain 1.97) |
+| rustdoc individual warnings (ceiling 450) | 413 | **413**, unmoved |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved** |
+| committed samples | 20 levels, `input.toml` regenerated | **unchanged** — the audit moved no committed byte |
 
 ## What is still open after I5
 
@@ -1988,3 +2002,31 @@ entry shift) in *What is still open*, below.
    (`inf-viewport::host`), which this wave did not touch; an author who wants the menu previews
    it with PIE. The editor's *preferences* panel carries the same bindings table, which is what
    the mandate asked for.
+9. **The interaction walk is `O(interactables)`, not the collider band's active set** (I5
+   audit, noted rather than fixed). The brief named the band as the mechanism; what shipped is
+   `try_query_filtered`, which restricts the walk to archetypes carrying an `Interactable` and
+   answers `O(1)` when the component was never inserted. The brief's binding constraint —
+   *never `O(entities)`* — is met, and the doc states the bound it actually has rather than the
+   one that was asked for, so nothing here is claimed that is not true.
+   *Why it is a remainder and not a defect:* P16's partition means an unstreamed cell's entities
+   are not in the world at all, so the walk is already over the **resident** set, which is the
+   band's own spirit at a coarser grain. It becomes a real cost the day one resident cell holds
+   thousands of authored interactables, and the fix then is the band — `IB-2a`'s anchors are
+   already the right input. The prompt asks the same `resolve` **every frame**, so that is the
+   site to measure first.
+10. **A project's `input.toml` reaches exactly ONE of the three paths** (I5 audit, A6 — the
+    doc was corrected, the gap is carried). `inf_player::input::load_map_beside` is read on
+    `WorldChoice::Level` only, i.e. `inf player <level.inf_lvl>`. A **cooked pack** takes
+    `default_map()` (`lib.rs`'s own match, and the cook does not carry the file) and the
+    editor's **Simulate** takes it too (`commands/sim.rs`). So an author who ships custom
+    bindings gets them running a dev level and loses them in Simulate *and* in the build —
+    which is the "settings only one host reads" trap this wave exists to close, one layer
+    below where it looked. Two doc comments in `commands/sim.rs` asserted the opposite
+    ("the SAME table the shipped player reads"; "an `input.toml` beside the level would change
+    both") and now say what is true. **The fix is to move `load_map_beside` down into
+    `inf-input`** — Ring 0, beside `default_map`, where a project's binding file belongs — and
+    have the cook and this seam both use it. Not done here: moving a loader between rings is a
+    change to a path this audit does not own.
+    *Nothing is currently wrong on disk*: `samples/phase29-locomotion/input.toml` is the only
+    committed one and it is byte-identical to `default_map()`, which is why the phase-29 gate's
+    editor-versus-player arm passes without noticing.

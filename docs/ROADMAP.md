@@ -25237,3 +25237,35 @@ is never consumed**, even by a modal dialog; an open dialog is **modal** — "co
 who the input belongs to; a binding **row** is not an action, and a row can have several keys a
 conflict must read all of; and **a station is at a place, not at a time**, met from the other
 side of phase 29's own lesson.
+
+### The I5 audit (adversarial, `60d6f1d..` this tree)
+
+**Every headline measurement above reproduces exactly**, from the tests that print them, and
+the merged tree — the wave's physics edits rebased onto the `bridge_sync` hotfix, which had
+never run together — was checked first and is green. `phase29_gate` **16/16**,
+`player_core_gate` **6/6**, goldens **54 byte-identical** under `INF_GOLDEN_STRICT` over 101
+arms, no schema moved, and the `input.toml` arithmetic recomputes to the byte. Battery
+**309 / 5 796 / 0 / 14** at this head. **Seven findings, all closed**, and the full ledger with
+its fifteen mutations is in `docs/memos/island-progress.md` under *The I5 audit*:
+
+* **A1** — a player could **permanently lock themselves out of the settings dialog** by
+  clearing or swapping away the menu key, and `RESERVED_KEYS`' own doc claimed that was already
+  refused. One rule (`bindings::guarded`) for both surfaces, plus a heal at the boot door for a
+  file an edit door cannot cover.
+* **A2** — the editor's `SimSession` pause was a **half-built mirror with no arm at all**:
+  deleting the check in `step_once` killed nothing (the same mutation on the player reds four
+  arms), and `tick` never had the check.
+* **A3** — `d3::interact::candidates`' merged `Guid` sort is load-bearing by its own comment
+  and **deleting it killed nothing**; the tie is manufactured exactly now.
+* **A4** — the editor-surface swap arm swapped a row's **first** key, where the exact-token
+  rule and the first-source rule are the same expression; its message named a defect it could
+  not see.
+* **A5** — the video page's three **stored-and-applied-by-nothing** rows said so only in a
+  ledger, while the wave's own rule for a control with no consumer is to say so on the row.
+* **A6** — two doc comments in `commands/sim.rs` asserted that Simulate reads "the SAME table
+  the shipped player reads" and that an `input.toml` beside the level "would change both".
+  Measured: that file reaches **one** path (`inf player <level.inf_lvl>`) and neither a cooked
+  build nor Simulate. Corrected; the gap and its fix (move `load_map_beside` into `inf-input`)
+  are carried by name.
+* **A7** — the wave's battery figure was **one low**: 5 788 recorded against 5 789 measured
+  (the audit adds exactly seven arms and reads 5 796). The I3 audit's law, met again.
