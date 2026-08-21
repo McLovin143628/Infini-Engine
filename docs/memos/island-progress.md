@@ -26,7 +26,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **IP** | the remainder of the performance list — the cook's PCG evaluation, IB-9's island ceiling, the VSM caster scatter | **carried** — see *What is still open after I4b* below |
 | **I5** | **player core** — the owner's binding table, the C key's four verbs, the in-game UI layer, the settings dialog + rebinding, the interaction core | **DONE + AUDITED** — battery 309 / **5 796** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, rustdoc 413, no schema moved. Two pre-existing ragdoll defects found and fixed by the wave; **five more found and fixed by the audit** (A1 the settings-dialog lockout, A2 the half-built Simulate pause mirror, A3 an unarmed determinism sort, A5 three silent dead sliders, A6 two false doc invariants) plus A4 an arm that could not fail and A7 a count that was one low. See below. *(This wave took the I5 slot; **IB-11's far half — LERC / BigTIFF / JPEG2000 / LAS, reprojection, the geoid — is NOT in it** and moves to a later wave.)* |
 | ~~I6 (old)~~ | ~~scale seams — IB-12~~ *(pulled into I4; IB-8 and IB-13 into I3)* | **absorbed** |
-| **I6** | **gameplay systems** — doors + locks + the kick + crash-through, inventory, weapons v1, health | **IN PROGRESS** — see *Done — wave I6* below |
+| **I6** | **gameplay systems** — doors + locks + the kick + crash-through, inventory, weapons v1, health | **DONE — awaiting audit** — battery 312 / **5 867** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, **no schema moved**. `NOT_YET_CONSUMED` is empty. Six defects found by the wave's own world-level arms and five more by its gate; one energy door for the kick, the breach and the bullet; the city plans **19 790** doorways and the band makes **234** solid. See *Done — wave I6* below |
 | I7 | content — the 50 km² Vancouver map itself | not started |
 
 Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
@@ -2237,6 +2237,26 @@ Three literals — two assertion messages in `commands/sim.rs` and one in the ga
 through a shell heredoc. `inf-packager`'s workspace sweep caught all three and
 the repair went through the Edit tool, which is what the law prescribes.
 
+### The closing ledger
+
+| | after the I5 audit | **after I6** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 309 / 5 796 / 0 / 14 | **312 / 5 867 / 0 / 14** — three new test binaries (`door_3d`, `weapon_3d`, `phase30_gameplay_gate`) and **71** new arms |
+| frontend tests / files | 702 / 78 | **702 / 78**, `tsc --noEmit` and `eslint` clean |
+| goldens | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical** over 101 arms — re-run after the inventory panel and the tracer node landed, **no PNG rewritten** |
+| `clippy --workspace --all-targets` under `-D warnings` | 0 | **0** |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved**, and the accounting for the one that was considered is in `inf_ecs::item`'s module header |
+| fixed-step phases | 22 | **23** — `gameplay`, between the character step and the solver, in both hosts |
+| committed samples | 20 levels | **21** — `samples/phase30-gameplay` is new; not one byte of the other twenty moved |
+| `inf_input::actions::NOT_YET_CONSUMED` | 4 controls | **0** |
+
+Five commits, `(I6)`-tagged, none pushed: the door core and the P22 energy rule's
+one home; the gameplay engine half (doors, kicks, crashes, weapons, health); the
+grammar's doors, banded; the gate, the fixture, the Blueprint kit and the tuning
+door; and the doorway-walk visitor with this ledger. *(A sha is only true of the
+tree it was written in — the I3 audit's law — so the wave that closes this one
+re-states the range rather than trusting a number copied out of this file.)*
+
 ## Decisions (I6's, binding on later waves)
 
 * **A door's state is a sparse RESOURCE, not a component.** A grammar doorway has
@@ -2304,6 +2324,16 @@ the repair went through the Edit tool, which is what the law prescribes.
    remainder 9. Doors ARE banded now (`placements_near`, the same band the walls
    use), so the largest new source of candidates is bounded; the pre-existing
    `Interactable` walk is not, and the fix is the same band.
+   *What the banding cost to get right:* the derived-doorway walk returned a
+   `Vec` for one afternoon, and on the shipped city that is **19 790 records,
+   about 1.9 MB, copied out on every call** — three or four times a fixed step —
+   so that the band could throw 98.8 % of them away.
+   `inf_ecs::door::for_each_volume_doorway` is a **visitor**, so a caller
+   band-checks before it allocates, and the per-step cost is `O(doorways)`
+   pointer bumps with `O(near)` allocations. Determinism costs nothing at that
+   shape: the hundred volumes are sorted and each one's slots are visited in
+   index order, so the sequence is `(guid, index)` sorted without a sort over
+   the doorways themselves.
 6. **A dive off flat ground lasts one fixed step**, so the hatch breach is
    measured by the dive's own launch speed rather than by the mode at the end of
    the step. That is I5's remainder 2 met from the other side, and it is why the

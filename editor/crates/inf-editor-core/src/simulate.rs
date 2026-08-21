@@ -1702,13 +1702,6 @@ impl SimSession {
         }
     }
 
-    /// Drain the FIFO dispatch queue (Wave 3): for each popped `(target, name)`,
-    /// fire `Custom(name)` on the target actor, then `Custom(handler)` on every
-    /// listener bound to `(target, name)` in ascending listener-id order. Nested
-    /// dispatches append to the queue and are processed in turn; once
-    /// [`DISPATCH_ROUND_CAP`] dispatches have run the remainder is logged + dropped
-    /// (a deterministic cycle guard). No-op when the queue is empty.
-
     /// **This step's impacts, as sound** (island wave I6) — one `Play` per round
     /// that landed on something with an emitter, through the P12 command queue.
     ///
@@ -1742,6 +1735,12 @@ impl SimSession {
         }
     }
 
+    /// Drain the FIFO dispatch queue (Wave 3): for each popped `(target, name)`,
+    /// fire `Custom(name)` on the target actor, then `Custom(handler)` on every
+    /// listener bound to `(target, name)` in ascending listener-id order. Nested
+    /// dispatches append to the queue and are processed in turn; once
+    /// [`DISPATCH_ROUND_CAP`] dispatches have run the remainder is logged + dropped
+    /// (a deterministic cycle guard). No-op when the queue is empty.
     fn drain_dispatch(&mut self, doc: &mut SceneDoc) {
         let mut rounds = 0u32;
         loop {

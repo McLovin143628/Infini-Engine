@@ -905,8 +905,8 @@ pub fn spawn_doors_from_toml(world: &mut EcsWorld, text: &str) -> Result<usize, 
     Ok(hung)
 }
 
-/// **Every doorway the building grammar planned**, as
-/// `(volume guid, index, slot)` in `(volume, index)` order.
+/// **Visit every doorway the building grammar planned**, in `(volume, index)`
+/// order.
 ///
 /// Here rather than in the physics bridge because this crate is the only one
 /// that may name `bevy_ecs` (the facade rule). The bridge turns each into a
@@ -914,27 +914,52 @@ pub fn spawn_doors_from_toml(world: &mut EcsWorld, text: &str) -> Result<usize, 
 /// bridge's, because that is where every other synthetic guid in this engine is
 /// minted.
 ///
+/// # A VISITOR, and the reason is twenty thousand doorways
+///
+/// This returned a `Vec` for one afternoon, and on the shipped city that is
+/// **19 790 records — about 2 MB — copied out on every call**, three or four
+/// times a fixed step, so that a band could then throw 98.8 % of them away. A
+/// visitor lets the caller band-check *before* it allocates anything, which is
+/// what turns the per-step cost from `O(doorways)` bytes into `O(doorways)`
+/// pointer bumps and `O(near)` allocations.
+///
+/// **Determinism costs nothing here.** The volumes are collected and sorted —
+/// there are a hundred of them — and each one's doorways are visited in index
+/// order, so the sequence is already `(guid, index)` sorted without a sort over
+/// the doorways themselves. A bevy archetype walk's order is an implementation
+/// detail and must never reach a result; this is how that is met at this scale.
+///
 /// `O(doorways)`, and `O(1)` on a level with no `PcgVolume`.
-pub fn volume_doorways(world: &EcsWorld) -> Vec<(Uuid, usize, crate::components::DoorwaySlot)> {
+pub fn for_each_volume_doorway(
+    world: &EcsWorld,
+    mut f: impl FnMut(Uuid, usize, &crate::components::DoorwaySlot),
+) {
     let w = world.world();
     let Some(mut q) = w.try_query_filtered::<
-        (&Guid, &crate::components::PcgVolume),
+        (&Guid, bevy_ecs::prelude::Entity),
         With<crate::components::PcgVolume>,
     >() else {
-        return Vec::new();
+        return;
     };
-    let mut out: Vec<(Uuid, usize, crate::components::DoorwaySlot)> = q
-        .iter(w)
-        .flat_map(|(g, v)| {
-            v.doorways
-                .iter()
-                .enumerate()
-                .map(move |(i, d)| (g.0, i, *d))
-        })
-        .collect();
-    // A bevy archetype walk's order is an implementation detail and must never
-    // reach a result.
-    out.sort_by_key(|(g, i, _)| (*g, *i));
+    let mut vols: Vec<(Uuid, bevy_ecs::prelude::Entity)> =
+        q.iter(w).map(|(g, e)| (g.0, e)).collect();
+    vols.sort_by_key(|(g, _)| *g);
+    for (guid, e) in vols {
+        let Some(v) = w.get::<crate::components::PcgVolume>(e) else {
+            continue;
+        };
+        for (i, d) in v.doorways.iter().enumerate() {
+            f(guid, i, d);
+        }
+    }
+}
+
+/// [`for_each_volume_doorway`] collected — the unbanded list, for a caller that
+/// genuinely wants all of them (a test, a debug view). Per-step callers take the
+/// visitor.
+pub fn volume_doorways(world: &EcsWorld) -> Vec<(Uuid, usize, crate::components::DoorwaySlot)> {
+    let mut out = Vec::new();
+    for_each_volume_doorway(world, |g, i, d| out.push((g, i, *d)));
     out
 }
 
@@ -1097,7 +1122,10 @@ mod tests {
             "run 3.750 m/s = {run} J - gate {BREACH_SPEED_MPS} m/s = {gate} J - sprint 6.500 m/s = {sprint} J, lock {} J",
             spec.lock_energy_j()
         );
-        assert!(BREACH_SPEED_MPS > 3.75 && BREACH_SPEED_MPS < 6.5);
+        // A claim about the SOURCE — the gate has to sit between the run and
+        // the sprint — so the build is where it belongs, which is the same
+        // reasoning `interact::VIEW_CONE_EPSILON_DEG`'s arm gives for its own.
+        const { assert!(BREACH_SPEED_MPS > 3.75 && BREACH_SPEED_MPS < 6.5) };
         assert!((gate - 1000.0).abs() < 1e-9);
         assert!((sprint - 1690.0).abs() < 1e-9);
         // The energy gate is not the interesting one at these speeds — the SPEED
@@ -1161,8 +1189,10 @@ mod tests {
     /// **Damage is not banked** — P22's rule, met at a door.
     #[test]
     fn two_half_kicks_do_not_open_what_one_kick_would_not() {
-        let mut spec = DoorSpec::default();
-        spec.locked_at_spawn = true;
+        let spec = DoorSpec {
+            locked_at_spawn: true,
+            ..Default::default()
+        };
         let state = DoorState::fresh(&spec);
         let half = spec.lock_energy_j() * 0.6;
         let a = try_break(&spec, &state, half);
@@ -1228,8 +1258,10 @@ mod tests {
     /// **A broken lock does not come back**, and the free swing settles.
     #[test]
     fn a_kicked_door_flies_open_and_cannot_be_relocked() {
-        let mut spec = DoorSpec::default();
-        spec.locked_at_spawn = true;
+        let spec = DoorSpec {
+            locked_at_spawn: true,
+            ..Default::default()
+        };
         let p = DoorPlacement {
             spec,
             ..placement(1)
@@ -1483,5 +1515,61 @@ mod tests {
         let ids: Vec<u128> = doors.iter().map(|d| d.guid.as_u128()).collect();
         assert_eq!(ids, vec![3, 5, 9], "the walk is not Guid-ordered");
         assert!((doors[0].hinge.x - 3.0).abs() < 1e-12);
+    }
+
+    /// **The doorway VISITOR is `(volume, index)` ordered without sorting the
+    /// doorways**, which is what lets a city's twenty thousand be walked without
+    /// being copied.
+    ///
+    /// The order is the claim: the volumes are sorted (there are a hundred) and
+    /// each one's slots are visited in index order, so the sequence is already
+    /// sorted. A bevy archetype walk's own order must never reach a result, and
+    /// this is how that is met at a scale where sorting the result would be the
+    /// cost the visitor exists to avoid.
+    #[test]
+    fn the_doorway_visitor_walks_volumes_in_guid_order_and_slots_in_index_order() {
+        use crate::components::{DoorwaySlot, PcgVolume};
+        let mut w = EcsWorld::new();
+        assert!(
+            volume_doorways(&w).is_empty(),
+            "an empty world walked something"
+        );
+        let slot = |x: f64| DoorwaySlot {
+            hinge: DVec3::new(x, 1.05, 0.0),
+            closed_yaw_deg: 0.0,
+            width_m: DEFAULT_DOOR_WIDTH_M,
+            height_m: DEFAULT_DOOR_HEIGHT_M,
+            thickness_m: DEFAULT_DOOR_THICKNESS_M,
+            inside_yaw_deg: 90.0,
+            exterior: false,
+            floor: 0,
+        };
+        // Spawned HIGH guid first, so a walk that followed insertion order would
+        // answer the other way round.
+        for (guid, n) in [(9u128, 3usize), (2, 2)] {
+            let e = w.spawn_with_guid(Uuid::from_u128(guid), "Vol", None);
+            let mut vol = PcgVolume::default();
+            let slots: Vec<DoorwaySlot> =
+                (0..n).map(|i| slot(guid as f64 + i as f64 * 0.1)).collect();
+            vol.set_population(Vec::new(), Vec::new(), Vec::new(), slots);
+            w.world_mut().entity_mut(e).insert(vol);
+        }
+        w.mark_dirty();
+        w.propagate();
+        let seen: Vec<(u128, usize)> = volume_doorways(&w)
+            .into_iter()
+            .map(|(g, i, _)| (g.as_u128(), i))
+            .collect();
+        println!("the visitor walked {seen:?}");
+        assert_eq!(seen, vec![(2, 0), (2, 1), (9, 0), (9, 1), (9, 2)]);
+        // …and the slots really arrive, not just their indices.
+        let hinges: Vec<f64> = {
+            let mut v = Vec::new();
+            for_each_volume_doorway(&w, |_, _, d| v.push(d.hinge.x));
+            v
+        };
+        assert_eq!(hinges.len(), 5);
+        assert!((hinges[0] - 2.0).abs() < 1e-12, "{hinges:?}");
+        assert!((hinges[2] - 9.0).abs() < 1e-12, "{hinges:?}");
     }
 }

@@ -140,57 +140,93 @@ pub fn placements(world: &EcsWorld) -> Vec<DoorPlacement> {
 /// EXISTS and the band decides what is SOLID.
 pub fn placements_near(world: &EcsWorld, band: &SimBand) -> Vec<DoorPlacement> {
     let mut out = door::doors_in_world(world);
-    out.extend(volume_doorways(world));
-    out.retain(|p| {
-        let (centre, yaw, half) = door::leaf_pose(p, 0.0);
-        band.tier(centre, half, DQuat::from_rotation_y(yaw.to_radians()))
-            .is_near()
+    out.retain(|p| in_band(p, band));
+    // **The band is checked BEFORE the placement is built**, and that is the
+    // whole point of the visitor: the shipped city plans 19 790 doorways and the
+    // band keeps 234, so collecting all of them to throw 98.8 % away would copy
+    // about 2 MB and allocate a label string per door — three or four times a
+    // fixed step, on a path whose per-step budget is 1.25 ms.
+    door::for_each_volume_doorway(world, |volume, i, slot| {
+        let Some(spec) = derived_spec(slot) else {
+            return;
+        };
+        let p = DoorPlacement {
+            guid: pcg_doorway_guid(volume, i),
+            hinge: slot.hinge,
+            spec,
+            // The label is the last thing built, because it is the only
+            // allocation in this closure.
+            label: String::new(),
+        };
+        if !in_band(&p, band) {
+            return;
+        }
+        out.push(DoorPlacement {
+            label: GRAMMAR_DOOR_LABEL.to_string(),
+            ..p
+        });
     });
     out.sort_by_key(|p| p.guid);
     out
 }
 
-/// The grammar's half of the door list, in `Guid` order.
+/// **The spec a derived doorway gets**, from the grammar's own slot.
 ///
-/// `O(doorways)`, and `O(1)` on a level with no `PcgVolume` — the
-/// `has_component` fast path every other derived walk in this bridge uses.
+/// One function, so the banded walk and the unbanded one cannot disagree about
+/// what a grammar door IS — which they would the first time one of them grew a
+/// field. `None` for a slot whose numbers are unusable.
+fn derived_spec(d: &inf_ecs::components::DoorwaySlot) -> Option<door::DoorSpec> {
+    let spec = door::DoorSpec {
+        closed_yaw_deg: d.closed_yaw_deg,
+        width_m: d.width_m,
+        height_m: d.height_m,
+        thickness_m: d.thickness_m,
+        // **A grammar door swings INTO the room its wall serves**, which is what
+        // the plan's own `Wall::inside` means — so the limit's sign follows the
+        // inside normal rather than being a constant. A door that opened the
+        // other way would open into the corridor it came from, and every
+        // interior door in a building would block the one opposite it.
+        open_limit_deg: -door::DEFAULT_OPEN_LIMIT_DEG,
+        inside_yaw_deg: d.inside_yaw_deg,
+        lock_strength_pa: door::DEFAULT_LOCK_STRENGTH_PA,
+        lock_area_m2: door::DEFAULT_LOCK_AREA_M2,
+        lock_side: door::DoorSide::Inside,
+        // **Nothing the grammar builds starts locked.** A city whose every
+        // interior door was bolted would be a city nobody can walk through, and
+        // there is no authored intent to read one from. Locking is a verb a
+        // player (or a Blueprint) uses.
+        locked_at_spawn: false,
+    };
+    spec.is_usable().then_some(spec)
+}
+
+/// Whether a placement's SHUT leaf is inside the band.
+fn in_band(p: &DoorPlacement, band: &SimBand) -> bool {
+    let (centre, yaw, half) = door::leaf_pose(p, 0.0);
+    // The band is asked with the leaf's REAL rotation, not the identity: a box's
+    // tier is computed from its oriented extent, and a door lying along its own
+    // local `+Z` is not the same shape rotated ninety degrees.
+    band.tier(centre, half, DQuat::from_rotation_y(yaw.to_radians()))
+        .is_near()
+}
+
+/// The grammar's half of the door list, in `Guid` order — **unbanded**.
+///
+/// `O(doorways)`, and `O(1)` on a level with no `PcgVolume`. Only
+/// [`placements`] uses it; every per-step caller takes [`placements_near`],
+/// which band-checks before it allocates.
 fn volume_doorways(world: &EcsWorld) -> Vec<DoorPlacement> {
     let mut out = Vec::new();
-    {
-        for (volume, i, d) in door::volume_doorways(world) {
-            let spec = door::DoorSpec {
-                closed_yaw_deg: d.closed_yaw_deg,
-                width_m: d.width_m,
-                height_m: d.height_m,
-                thickness_m: d.thickness_m,
-                // **A grammar door swings INTO the room its wall serves**, which
-                // is what the plan's own `Wall::inside` means — so the limit's
-                // sign follows the inside normal rather than being a constant.
-                // A door that opened the other way would open into the corridor
-                // it came from, and every interior door in a building would
-                // block the one opposite it.
-                open_limit_deg: -door::DEFAULT_OPEN_LIMIT_DEG,
-                inside_yaw_deg: d.inside_yaw_deg,
-                lock_strength_pa: door::DEFAULT_LOCK_STRENGTH_PA,
-                lock_area_m2: door::DEFAULT_LOCK_AREA_M2,
-                lock_side: door::DoorSide::Inside,
-                // **Nothing the grammar builds starts locked.** A city whose
-                // every interior door was bolted would be a city nobody can walk
-                // through, and there is no authored intent to read one from.
-                // Locking is a verb a player (or a Blueprint) uses.
-                locked_at_spawn: false,
-            };
-            if !spec.is_usable() {
-                continue;
-            }
+    door::for_each_volume_doorway(world, |volume, i, slot| {
+        if let Some(spec) = derived_spec(slot) {
             out.push(DoorPlacement {
                 guid: pcg_doorway_guid(volume, i),
-                hinge: d.hinge,
+                hinge: slot.hinge,
                 spec,
                 label: GRAMMAR_DOOR_LABEL.to_string(),
             });
         }
-    }
+    });
     out.sort_by_key(|p| p.guid);
     out
 }

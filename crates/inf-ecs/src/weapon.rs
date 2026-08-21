@@ -742,9 +742,11 @@ mod tests {
     /// press.
     #[test]
     fn a_semi_automatic_weapon_fires_once_per_press_and_an_automatic_one_does_not() {
-        let mut d = WeaponDef::default();
-        d.automatic = false;
-        d.rounds_per_minute = 600.0;
+        let d = WeaponDef {
+            automatic: false,
+            rounds_per_minute: 600.0,
+            ..Default::default()
+        };
         assert!((d.fire_interval_s() - 0.1).abs() < 1e-12);
         let mut s = WeaponState::full("rifle", &d);
         assert_eq!(try_fire(&d, &mut s, true), FireVerdict::Fired);
@@ -762,8 +764,10 @@ mod tests {
         assert_eq!(try_fire(&d, &mut s, true), FireVerdict::Fired);
         assert_eq!(s.magazine, 28);
         // Automatic: held is enough, and the rate is what bounds it.
-        let mut a = WeaponDef::default();
-        a.automatic = true;
+        let a = WeaponDef {
+            automatic: true,
+            ..Default::default()
+        };
         let mut t = WeaponState::full("rifle", &a);
         let mut fired = 0;
         for _ in 0..60 {
@@ -827,8 +831,10 @@ mod tests {
     /// scatters.
     #[test]
     fn a_shots_direction_is_deterministic_and_lands_inside_its_own_cone() {
-        let mut d = WeaponDef::default();
-        d.spread_deg = 4.0;
+        let d = WeaponDef {
+            spread_deg: 4.0,
+            ..Default::default()
+        };
         let centre = shot_direction(
             &WeaponDef {
                 spread_deg: 0.0,
