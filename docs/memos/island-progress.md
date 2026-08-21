@@ -24,7 +24,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **I4** | the fps instrument + budgets — IB-9, IB-16, IB-12, the shipping-resolution harness | **DONE + AUDITED** — see below |
 | **I4b** | **performance** — the sim fixed step, the lighting stack, the scatter impostor, the pipelining | **DONE + AUDITED** — battery 306 / 5 710 / 0 / 14, frontend 702 / 78, goldens 54 strict, clippy 0, rustdoc 413, no schema moved. Step 12.7 → **1.25 ms**; lit p95 92.3 → **38.9–41.3**; unlit 1080p **inside the 60 fps budget at p50 on every run and at p95 on two of three** (the audit's correction). One defect fixed: the scatter caster cache was blind to the floating origin |
 | **IP** | the remainder of the performance list — the cook's PCG evaluation, IB-9's island ceiling, the VSM caster scatter | **carried** — see *What is still open after I4b* below |
-| I5 | source data — IB-11 (DEM ingest reality, CRS, LiDAR) | not started |
+| **I5** | **player core** — the owner's binding table, the C key's four verbs, the in-game UI layer, the settings dialog + rebinding, the interaction core | **DONE** — see below. *(This wave took the I5 slot; **IB-11's far half — LERC / BigTIFF / JPEG2000 / LAS, reprojection, the geoid — is NOT in it** and moves to a later wave.)* |
 | ~~I6~~ | ~~scale seams — IB-12~~ *(pulled into I4; IB-8 and IB-13 into I3)* | **absorbed** |
 | I7 | content — the 50 km² Vancouver map itself | not started |
 
@@ -1599,3 +1599,313 @@ stand, with I4b's amendments applied in place.
 8. **The instrument's camera covers 120 m of a 1 260 m city**, and its scene has **zero
    virtual textures**. Both bound what the headline number is a number *about*; a textured,
    longer-path fixture is what would make the VT column and the p99 mean something.
+
+---
+
+## Done — wave I5 (the player core)
+
+**THE ENGINE HAD NO UI.** Before this wave `inf-render-2d` was a *world*-quad
+batcher going through the game camera, depth-tested and tonemapped with the scene; the
+shipped player had no HUD, no menu, no toast and no focus model; and a shipped game had no
+per-user settings file at all (`player.toml` is a boot config nothing writes at runtime and
+`input.toml` is a best-effort read a cooked pack never even looks at). A game with no
+settings dialog is a game a player cannot change the resolution of, and one with no
+rebinding screen is a game a left-handed player cannot play.
+
+### The shipped binding table
+
+| control | action / axis |
+|---|---|
+| W / S / A / D (and the arrows) | `move_y` / `move_x` |
+| mouse | `look_x` / `look_y` |
+| **Tab** | `menu` — the in-game settings dialog |
+| **Shift** | `sprint` |
+| **Ctrl** | `walk` (the gait default is **RUN**; this is the *slow* modifier) |
+| **E** | `interact` |
+| **R** | `reload` |
+| **C** | `crouch` — **click** crouches or slides, a **long press** goes prone or dives |
+| **Space** | `jump`; `move_up` while swimming or flying; `handbrake` while driving |
+| **LMB** | `attack` |
+| **RMB** | `aim` → `RotationMode::Aiming` |
+| **wheel** | `weapon_switch` |
+| **I** | `inventory` |
+| X · Z · F · V | `prone` · `roll` · `dive` · `fly`, the direct controls the table above folds |
+
+`reload`, `attack`, `inventory` and `weapon_switch` are bound against consumers that arrive
+with the weapons and inventory work, and the shipped player **says so** when one is pressed
+(`inf_ui::Toasts`, reading `inf_input::actions::NOT_YET_CONSUMED` rather than a second
+list). A dead key is indistinguishable from a broken one; a toast is the difference.
+
+**Two bindings moved for a reason rather than for the table.** `KeyW`/`ArrowUp` were bound
+to `jump` for the 2D platformer and the 3D intent reads the same name, so **every step
+forward on a character was also a jump** — and no scripted trace could have seen it, because
+every one of them presses action NAMES. `move_up` was on Q/E, so a swimmer who pressed E to
+open a hatch also rose; it is Space/Ctrl now, which is what every swimmer and pilot alive
+already expects.
+
+### The C key's four verbs, and where the duration is measured
+
+The discrimination is at **intent** level and the duration is measured on the **sim's fixed
+step**. `inf_input::HoldClock` is one accumulator with two instances — the wall clock for
+the in-game UI (which runs while the sim is frozen behind a menu) and each sim's fixed step
+for the intent — and `inf_ecs::movement::classify_press` is the one rule. A duration
+measured in fixed steps is a function of the simulation rather than of the frame rate, so
+PIE stays byte-identical to shipping and the edge that crosses into the world is the same
+discrete set it has always been.
+
+The matrix, measured end to end through the shipped keys in `player_core_gate`:
+
+| | standing | sprinting |
+|---|---|---|
+| **click** (release under 250 ms) | crouch | **slide** — 13 steps, 0 dive launches |
+| **long press** (held past 250 ms) | prone | **dive** — exactly 1 launch, 0 slide steps |
+
+**The click fires on the RELEASE**, because nothing can know a press is short until it ends.
+The cost is bounded by the threshold and is stated on the door: a crouch lands on the frame
+the key comes up, at most 250 ms after it went down. A design that fired the crouch on the
+press and "upgraded" to prone would do both.
+
+### Run by default, and both sprint gates
+
+Run was already the default tier (`Gait::default()` is `Run` and `desired_gait` falls
+through to it); what moved is the *binding* and the *proof*. Measured through the keys, on
+the cooked pack: **nothing held 3.750 m/s** (run is 3.750) · **Ctrl 1.783** (walk is 1.650)
+· **Shift 6.500** (sprint is 6.500).
+
+Two rulings, both refusals as **values**:
+
+* **A dive needs a sprint**, exactly as a slide does. It was never coherent that one was
+  gated and the other free — a dive from a standing start is a belly-flop, and
+  `dive_speed_mps` is a *launch* speed that assumes a body already moving. Folded into
+  `request_mode`'s condition, so the answer is `ConditionNotMet` and the character does
+  whatever it was going to do instead.
+* **The slide's own refusal is recorded.** A player holding sprint and pressing crouch has
+  asked for a slide; if the body is too slow the crouch below is what it does *instead*, and
+  until this wave the two outcomes were indistinguishable — the one entry condition in the
+  catalogue whose refusal nothing downstream could ever read.
+
+**Space is a dive when there is water to dive into.** One pure rule
+(`inf_ecs::movement::dive_into_water`) fed by a new *place* query
+(`PhysicsBridge3D::water_surface_at`), and a dive that reaches the water carries the P29.3
+deliberate-dive door for its entry step. Three cases measured: water at a reach while
+sprinting launches at `dive_speed_mps` **(0, 2.3365, 5.5)**; the same jump *walking* and the
+same sprinting jump on *dry land* both launch at the jump's **(0, 4.3365, 0)**.
+
+### The UI layer
+
+`crates/inf-ui` (Ring 0, **no new external crate** — glam, serde, toml, inf-render-2d,
+inf-input, inf-asset, every one already pinned): screen-space rects and text in virtual
+pixels; `GameSettings` under the editor's own doctrine; the rebinding table's rows; the
+dialog's state, reducer and projection; the toasts. Everything is a pure function of its
+inputs, which is what lets a settings dialog exist in a shipped player at all in a
+repository whose CI has no GPU.
+
+`inf_render::passes::ui` draws it **after the tonemap**, in pixels, with `LoadOp::Load`,
+nearest-filtered and with no depth. The sprite pass draws into the HDR MSAA target before
+resolve/TAA/bloom/tonemap, so a menu drawn through it would be bloomed, temporally
+reprojected and colour-graded with the world behind it, and depth-tested against the wall
+the player is standing next to.
+
+**The goldens are unmoved, and it is measured on both sides**: with an empty list the frame
+is byte-identical, and with one quad in it the frame differs *and the corner outside the
+quad does not*. All 101 golden arms pass under `INF_GOLDEN_STRICT` with no PNG rewritten.
+
+### The interaction core
+
+`inf_ecs::interact` is one rule: an `Interactable` (verb, label, range, enabled, view cone),
+a flat candidate whatever produced it, and a pure `resolve` that answers with the nearest one
+in range and in view, ties broken by `Guid` over a sorted walk with a strict `<`.
+`Interactable` is a **runtime** component with no scene slot — the shape `MovementRuntime`
+and P22's `DeformField` already have — so no schema moved.
+
+P29.7's `vehicle::try_enter` is now a call into `inf_physics::d3::interact` rather than a
+second implementation of "nearest thing in reach". **Nothing about its semantics moved**:
+the same `ENTER_REACH_M`, the same `Guid`-ordered walk with a strict `<`, the same
+occupied-seat skip, and still **no view test** (the seat candidate carries
+`NO_VIEW_TEST_DEG`). The seat also keeps its *pose* source — migrating it to the ECS
+transform would have moved it by one fixed step, which is a semantic change to a shipped
+gate. All 21 P29.7 vehicle arms stay green, and a 22nd says the migration is real: an
+authored `Interactable` half a metre away out-ranks the seat, pressing E with it nearest does
+**not** put the character in the driving seat, and disabling it makes the same press enter
+the car again.
+
+### The gate
+
+`runtime/inf-player/tests/player_core_gate.rs`. Every other scripted replay in this tree
+presses **action names** and is blind to the input layer; this one presses **keys**, through
+the shipped table, the shipped `InputState`, the shipped dialog and the shipped hold clock,
+in `PlayerApp::frame`'s own order — on a cooked pack and on a PIE payload, **byte for byte
+over 1 600 steps**.
+
+* the gait ladder above;
+* the C-key matrix above;
+* **the menu stood open for 137 frames and cost 0 fixed steps**, with the trace record
+  byte-identical across every one of them;
+* rebinding Sprint from Shift to B *inside the dialog*: B + W reaches **6.500** and Shift + W
+  settles at **3.750** — the control that says the claim is about the rebinding and not
+  about W;
+* no control was live while the menu was open, read off the **resolved input** rather than
+  off the world (a paused sim does not integrate, so the pause arm could not have caught a
+  leak).
+
+### Counts
+
+| | after the I4b audit | **after I5** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 306 / 5 710 / 0 / 14 | see the closing run below |
+| frontend tests / files | 702 / 78 | **702 / 78**, `tsc` and `eslint` clean |
+| goldens | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical** (101 arms), re-run after the UI node landed |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved** |
+| committed samples | 20 levels | **20** — `samples/phase29-locomotion/input.toml` regenerated through its generator (see below), no level moved |
+
+**The one committed byte that moved**, through the generator and with the arithmetic:
+`samples/phase29-locomotion/input.toml`, **2 072 → 2 423 bytes, +33 / −9 lines**. The plus
+side is eight new action-source blocks (aim/LeftTrigger, attack ×2, inventory ×2, menu ×2,
+reload) at three lines each = 24, plus the six-line `weapon_switch` axis, plus the four
+in-place value changes' new halves = 33. The minus side is `jump`'s two removed keys (five
+lines with their headers) and the four in-place changes' old halves = 9. Every line of the
+delta is a row of the table above.
+
+## Decisions (I5's, binding on later waves)
+
+* **Tab pauses the single-player simulation, and the pause is SIM state.** Two reasons and
+  the second is the one that matters: a menu that did not pause would make the UI part of the
+  simulation's input, so the frames a player spends reading a table would be frames the sim
+  advanced and a trace that opened the menu would depend on how long they took. `sim_paused`
+  lives on `RuntimeSim`/`SimSession` rather than on the host, because a host-level pause is
+  invisible to `step_once` — the door every trace in this repository is scripted through. A
+  multiplayer session cannot stop a shared world and does not: the host asks
+  `MenuState::pauses_sim`, which answers for the session it is given.
+* **A press duration is measured on the SIM clock and a UI's on the WALL clock, and they are
+  two instances of one implementation.** A gameplay fact measured in wall seconds is one the
+  frame rate can change; a menu's key repeat measured in sim seconds stops when the menu
+  pauses the sim. `inf_input::HoldClock` is the accumulator and
+  `inf_ecs::movement::classify_press` is the rule, and each host runs one instance per clock
+  it owns. **Two instances of one implementation is not the two-copies defect; two
+  implementations would be.**
+* **A RELEASE is never consumed, even by a modal dialog.** Measured: consuming them stranded
+  the input state holding the very key that opened the menu — Tab went down, the dialog
+  opened, the release was eaten, and `menu` read as *held* for the whole window. It is the
+  stuck-key failure `InputState::release_all` exists for, reached through the menu instead of
+  through a focus loss. Forwarding a release is safe by construction: the press never reached
+  the state, so there is no `just_released` edge for it to fire.
+* **An open dialog is MODAL — "consumed" is about who the input belongs to, not about whether
+  anything happened.** The reducer shipped for one afternoon with a `_ => consumed = false`
+  fallthrough, which reads as "the dialog only claims what it uses" and means the player jumps
+  while reading the video page and fires a weapon at whatever is behind the menu.
+* **A binding ROW is not an action.** UE lists *Move Forward / Back / Left / Right* as four
+  rows and this engine's `move_y` is one axis with a `+1` key and a `−1` key; a table built on
+  actions alone could not offer W, A, S or D at all. A row is an action **or one sign of one
+  axis**, it has a stable id, and the id is what a settings file stores.
+* **A row can have SEVERAL keys, and a conflict must read all of them.** Move Forward is W
+  *and* Up in the shipped table. A conflict check that read the displayed cell would let a
+  player bind Up to something else and leave two verbs on one key; a swap that cleared the row
+  would take the other key away too. Both read and write the **exact token** the dialog named.
+* **Only the DIFFERENCE from the shipped table is stored** — the editor keybinding door's
+  rule, and it earns its keep the same way: a file that shipped the whole table would freeze a
+  player's bindings at the build they first ran, so a control added later would arrive unbound
+  and a default corrected later would never reach them. An **empty value means "unbound"**,
+  which is the difference between a row a player cleared and one they never touched.
+* **Escape and Enter cannot be bound away.** A player who bound Escape to *Attack* would have
+  no way to leave a capture. Refused as a value, with the capture left open so a real key
+  still works.
+* **A shipped game's settings file obeys the editor's doctrine, restated where a player can
+  reach it**: absent is the default, corrupt is an **error with the bytes left untouched**,
+  newer is **refused**, every write is atomic, and every numeric is guarded — non-finite takes
+  the **default** (an infinity is not "very sensitive"), finite **clamps**. And a *preferences*
+  file is not a boot config: a corrupt one leaves the player on defaults and **says so**,
+  where `player.toml` refuses to boot.
+* **The editor's preferences panel is a second SURFACE, not a second rule.**
+  `inf_ui::bindings::table` and `apply_row` are what both it and the in-game capture call.
+  There is deliberately no binding table in TypeScript: the last copy of one across that
+  boundary knew about three of seventeen entries.
+* **`EditorSettings.game_bindings` is a different map from `keybindings`.** One is the
+  editor's chords (Ctrl+Shift+P) and the other is the game's controls (C). Folding them
+  together would put a chord and a key code in one namespace and make "unbind" mean two
+  things.
+* **A station is at a place, not at a time** — phase 29's own lesson, met from the other side.
+  A time-scripted run walks into the committed course's low roof at `z = 11` and
+  crouch-shuffles the rest of the way at 1.5 m/s, with the dive station spending all ninety of
+  its steps under a ceiling. The clear ground is twenty-one metres and a sprint station is
+  nineteen; the script turns the character round at its edge.
+* **A station that ACCELERATES into its tier is measured by its peak; one that DECELERATES
+  into a slower tier by where it settled.** A peak read **3.47 m/s** for the walk, which is
+  the run speed the character entered carrying.
+* **A UI quad is not rebased against the floating origin.** The sprite pass's pack calls
+  `origin.to_render` because a sprite is in the world; a UI quad is in pixels, and rebasing
+  one would move the menu every time the camera crossed a rebase boundary — every kilometre
+  of travel on a 50 km island.
+
+## What I5 found in other people's code
+
+Both pre-existing, both in the **ragdoll**, and both fixed with arms that die under the
+mutation that names them:
+
+1. **A ragdoll whose hips end inside the floor put the character's FEET a whole body below
+   the pelvis** — so it came out of the ragdoll underground, its collider was switched back on
+   inside the terrain, and it fell out of the world. Measured on the phase-29 course at
+   **y = −132 m and still falling**, from hips that ended 0.8 m under the ground. The line
+   above the placement already said *"a pelvis in the floor is on it"*; the placement did not
+   agree with it.
+2. **Nothing bounded a ragdoll limb's SPEED.** `gravity_enabled` bounds an *acceleration*; an
+   articulated body seeded in a pose that violates its joint limits is fed energy by the solver
+   every step until the numbers leave the world. Measured: the committed course settles in 46
+   steps, and the **same ragdoll entered 2.7 cm further along the same fall**, at a
+   bit-identical handoff velocity of `(0, −10.706, 3.750)`, reaches **z = −3.85e13**. The
+   jitter is in **both** — the pelvis moves a metre a step from the first step of the committed
+   run too — so **the 46-step settle was luck rather than stability**.
+
+   The ceiling is a **BOUND, not a cure**. The instability is upstream in the joint seeding and
+   is carried below. What the bound buys is that a simulation which cannot be trusted to settle
+   can still be trusted to stay in the level.
+
+   *Two things were ruled out on the way and are worth writing down:* forcing a full query-BVH
+   rebuild every step (I4b's incremental marking, which a CI red was being blamed on) changes
+   the outcome **not at all**, and the entry pose and handoff velocity are **identical** between
+   the run that settles and the run that diverges.
+
+**And the phase-29 course's ragdoll station was luck-dependent.** Its `held > 90` jump-out was
+**dead code** in the committed script — the ragdoll always settled at 46 — and the first script
+that reached it drove the character to `z = −3.85e13`. A gate whose station passes because the
+simulation happened to settle is a gate that has not been falsified.
+
+## What is still open after I5
+
+1. **The ragdoll is chaotically unstable and only bounded.** A 2.7 cm difference in entry is
+   the difference between settling in 46 steps and diverging without bound; the pelvis moves a
+   metre a step from the first step of *every* run, including the committed one. The fix is in
+   the joint seeding (limits violated at spawn) and it is a physics project, not a wave clause.
+   **The bound is in place and the two defects above are armed; the instability is not fixed.**
+2. **A dive off flat ground is 4 cm of clearance in a fixed step and the ground snap is
+   entitled to take it back**, so `MovementMode::Dive` lasts one step there. How long the mode
+   *lasts* is a fact about a dive with somewhere to go, and `phase29_gate`'s station (which
+   dives at `z = 36` with the whole floor ahead of it) is what holds it. The player-core gate
+   measures the **launch** instead and says so.
+3. **The UI's text is the built-in 8 × 8 bitmap font and nothing else.** A user font is an
+   `.inf_tex` grid atlas the player has no asset DB in the render thread to resolve — the gap
+   `inf_player::render`'s own header records. The dialog is monospace and will stay monospace
+   until that closes.
+4. **The settings dialog is keyboard-only.** Gamepad navigation is the brief's own "later" and
+   the mouse is not wired to it: the rows have hit-test rectangles (`Rect::contains`) and no
+   pointer reaches them. The rebinding *capture* does take a mouse button, because a mouse
+   button is a bindable source.
+5. **A shipped player's settings directory is resolved from environment variables** —
+   `%APPDATA%`, `$XDG_CONFIG_HOME`/`$HOME`, with the exe's own directory as the last resort and
+   `INF_PLAYER_SETTINGS_DIR` as an override. Those *are* the platform conventions and a crate
+   that resolved them would read the same two variables, but a platform crate would also handle
+   the cases they do not (a portable install, a sandboxed store build).
+6. **The video page's window mode and resolution are stored and not applied.** They reach the
+   settings file and the dialog reads them back; nothing resizes the window or reconfigures the
+   swap chain yet, because that is a winit/surface change on a path CI cannot run. The
+   **quality tier** is in the same position. The three rows are honest about what they are —
+   preferences a later wave connects — and the *audio* buses, the sensitivity, the invert-Y and
+   the press threshold do all reach their consumers.
+7. **`weapon_switch` reaches a consumer as a RATE.** The wheel is a delta source, so
+   `axis_snapshot` divides it by the frame time; a consumer must read its sign or integrate it.
+   A notch count would need the wheel to be a button, which it is not on any platform this
+   engine speaks to.
+8. **The in-game dialog draws in the shipped player and in a windowed PIE preview, and not in
+   the editor's own Simulate.** The editor's viewport has its own projector
+   (`inf-viewport::host`), which this wave did not touch; an author who wants the menu previews
+   it with PIE. The editor's *preferences* panel carries the same bindings table, which is what
+   the mandate asked for.

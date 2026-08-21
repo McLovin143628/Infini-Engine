@@ -25179,3 +25179,61 @@ windowed harness under `AutoVsync` measures the panel), the **VSM caster-pack ca
 key must carry the floating origin and be pinned field-by-field — A1 and A9, learned the hard
 way one cache earlier), and the **P19 `kind_index` → real mesh project**, named as a
 phase-sized item rather than as a clause of the cook item it blocks.
+
+---
+
+## Phase 30 (the island) — wave I5: the player core (2026-08-21)
+
+**THE ENGINE HAD NO UI.** `inf-render-2d` is a *world*-quad batcher going through the game
+camera, depth-tested and tonemapped with the scene; the shipped player had no HUD, no menu, no
+toast and no focus model; a shipped game had no per-user settings file at all. This wave ships
+the owner's binding table, the C key's four verbs, an engine-owned in-game UI layer, the
+settings dialog with UE-style rebinding, and the interaction core — with P29.7's vehicle
+migrated onto it.
+
+The full ledger, the shipped table, the decisions and the honest remainders live in
+`docs/memos/island-progress.md` under *Done — wave I5*. The headlines:
+
+**The table.** Tab menu · Shift sprint · **Ctrl walk** · E interact · R reload · **C
+crouch/slide on a click, prone/dive on a long press** · Space jump (and `move_up` swimming or
+flying, and `handbrake` driving) · LMB attack · RMB aim · wheel weapon-switch · I inventory.
+Four are bound against consumers that arrive with the weapons and inventory work and the player
+**says so** when one is pressed. Two bindings moved for a *defect* rather than for the table:
+`KeyW`/`ArrowUp` were bound to `jump`, so every step forward on a 3D character was also a jump
+and no scripted trace could have seen it (they all press action NAMES); and `move_up` was on
+Q/E, so a swimmer who pressed E to interact also rose.
+
+**The measurements, all end to end through the shipped keys**, on a cooked pack and on a PIE
+payload, byte for byte over 1 600 steps:
+
+| | measured | the model says |
+|---|---|---|
+| nothing held | **3.750 m/s** | run 3.750 |
+| Ctrl | **1.783** | walk 1.650 |
+| Shift | **6.500** | sprint 6.500 |
+| C click, sprinting | Slide **13 steps**, 0 dive launches | — |
+| C long press, sprinting | **exactly 1** dive launch, 0 slide steps | — |
+| the menu, open | **137 frames, 0 fixed steps**, record byte-identical throughout | — |
+| after rebinding Sprint to B | B + W **6.500**, Shift + W **3.750** | — |
+
+**No schema moved. Goldens 54, byte-identical under `INF_GOLDEN_STRICT`** with the new `ui`
+render node in the graph — measured on both sides: an empty list leaves the frame
+byte-identical, one quad changes it, and the corner outside the quad does not move. One
+committed byte moved, through its generator: `samples/phase29-locomotion/input.toml`,
+**2 072 → 2 423 bytes, +33 / −9 lines**, every line a row of the table.
+
+**Two pre-existing defects found and fixed, both in the ragdoll**, both armed and both
+mutation-verified: a ragdoll whose hips end inside the floor placed the character a whole body
+below it and fell out of the world (**y = −132 m and still falling**); and nothing bounded a
+limb's *speed*, so an articulated body seeded past its joint limits diverges — the committed
+course settles in 46 steps and the **same ragdoll entered 2.7 cm further along the same fall**
+reaches **z = −3.85e13**. The jitter is in *both*, so the 46-step settle was luck. The speed
+ceiling is a **bound, not a cure**, and the instability is carried by name.
+
+**Six laws this wave adds**, in `docs/memos/island-progress.md`'s decisions block: Tab pauses
+the *sim* and the pause is on the sim rather than on the host; a press duration is measured on
+the sim clock and a UI's on the wall clock, as two instances of one implementation; a **release
+is never consumed**, even by a modal dialog; an open dialog is **modal** — "consumed" is about
+who the input belongs to; a binding **row** is not an action, and a row can have several keys a
+conflict must read all of; and **a station is at a place, not at a time**, met from the other
+side of phase 29's own lesson.
