@@ -830,10 +830,25 @@ fn the_fixed_steps_own_budget() {
     // three `BTreeSet` differences on an empty input — hence a tolerance rather
     // than an equality, and it is in PROPORTION rather than in milliseconds so
     // it means the same thing in `dev` (where the step is slower) as in release.
+    //
+    // **AND THE TOLERANCE SITS BELOW THE DEFECT IT NAMES** (the I4b audit). It
+    // was `0.10`, against a residue that measures **0.000** — the two numbers
+    // print equal to three decimals on this scene. A tenth of a 1.25 ms step is
+    // 0.125 ms, which is more than nineteen of the twenty-two phases *put
+    // together*: 94 % of this step is `physics3d sync`, `solver` and `character
+    // move`, so a breakdown that lost every other phase would have passed.
+    // Mutation-measured: `StepProfile::total_ms` summing only the first eleven
+    // slots drops 5.6 % of the step and the old clause did not fire. 2 % is
+    // twenty times the observed residue and a third of that mutation, which is
+    // what "compute the defect, then put the threshold under it" asks for.
     let drift = (wall - prof.total_ms()).abs() / wall.max(1.0e-9);
+    println!(
+        "  the phases account for {:.3} % of the step's wall clock",
+        (1.0 - drift) * 100.0
+    );
     assert!(
-        drift < 0.10,
-        "the phases sum to {:.3} ms beside a {wall:.3} ms step — {:.1} % of the \
+        drift < 0.02,
+        "the phases sum to {:.3} ms beside a {wall:.3} ms step — {:.2} % of the \
          step is in no phase, so the breakdown describes a step this arm did not \
          time",
         prof.total_ms(),
