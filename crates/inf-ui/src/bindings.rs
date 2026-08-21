@@ -297,6 +297,97 @@ pub fn apply_overrides(map: &mut InputMap, overrides: &BTreeMap<String, String>)
     applied
 }
 
+/// One row of the table as a surface renders it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TableRow {
+    /// The stable id a settings file stores.
+    pub id: String,
+    /// What the player reads.
+    pub label: String,
+    /// What it is bound to, or empty for unbound.
+    pub token: String,
+    /// Whether the player has moved it off the shipped table.
+    pub overridden: bool,
+    /// Whether its consumer exists yet.
+    pub wired: bool,
+}
+
+/// **The table, resolved** — the shipped map plus a player's overrides.
+///
+/// One projection, so the in-game dialog and the editor's preferences panel
+/// render the same rows in the same order from the same source. A second table
+/// in TypeScript is the "two copies across a language boundary" defect the P29.6
+/// note beside `default_map` records; this is what stops there being one.
+pub fn table(base: &InputMap, overrides: &BTreeMap<String, String>) -> Vec<TableRow> {
+    let mut map = base.clone();
+    apply_overrides(&mut map, overrides);
+    rows()
+        .into_iter()
+        .map(|row| TableRow {
+            token: token_in(&map, &row),
+            overridden: overrides.contains_key(&row.id),
+            wired: !inf_input::actions::NOT_YET_CONSUMED.contains(&row.name),
+            id: row.id,
+            label: row.label.to_string(),
+        })
+        .collect()
+}
+
+/// What [`apply_row`] decided.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ApplyOutcome {
+    /// The override set after the edit — unchanged when a conflict blocked it.
+    pub overrides: BTreeMap<String, String>,
+    /// The row ids that already owned the token, when one did.
+    pub conflicts: Vec<String>,
+}
+
+/// **Bind `token` to `row_id`, through the same rule the in-game dialog uses.**
+///
+/// `swap` is the player's answer to the conflict the first call reports: with it
+/// `false`, a taken token changes nothing and the owners come back so a surface
+/// can name them; with it `true`, the token is taken **off those owners** — the
+/// exact token, not their whole binding, so a row with a second key keeps it —
+/// and bound here.
+///
+/// The editor's preferences panel is a second *surface*, not a second rule: it
+/// calls this, and so does `crate::menu`'s capture. A key bound to two rows is a
+/// key that fires two verbs, and there is one place that can produce one.
+pub fn apply_row(
+    base: &InputMap,
+    overrides: &BTreeMap<String, String>,
+    row_id: &str,
+    token: &str,
+    swap: bool,
+) -> ApplyOutcome {
+    let table = rows();
+    let Some(target) = table.iter().find(|r| r.id == row_id) else {
+        return ApplyOutcome {
+            overrides: overrides.clone(),
+            conflicts: Vec::new(),
+        };
+    };
+    let mut map = base.clone();
+    apply_overrides(&mut map, overrides);
+    let conflicts = conflicts(&map, token, row_id);
+    if !conflicts.is_empty() && !swap {
+        return ApplyOutcome {
+            overrides: overrides.clone(),
+            conflicts,
+        };
+    }
+    for id in &conflicts {
+        if let Some(other) = table.iter().find(|r| &r.id == id) {
+            unbind_token(&mut map, other, token);
+        }
+    }
+    set_row(&mut map, target, token);
+    ApplyOutcome {
+        overrides: overrides_from(base, &map),
+        conflicts: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +500,75 @@ mod tests {
         assert_eq!(conflicts(&map, "Mouse:Left", "aim"), ["attack"]);
         // A blank token is "unbind", which cannot conflict with anything.
         assert!(conflicts(&map, "", "interact").is_empty());
+    }
+
+    /// **THE EDITOR'S PANEL AND THE IN-GAME DIALOG SHARE ONE RULE** (I5).
+    ///
+    /// `apply_row` is what a second *surface* calls; it is not a second rule.
+    /// The arm measures the three things a surface needs and the one it must not
+    /// be able to do: report a conflict, refuse until asked, take the exact token
+    /// off the previous owner on a swap — and never leave a key bound to two
+    /// rows.
+    #[test]
+    fn the_editors_surface_reports_a_conflict_and_swaps_only_when_asked() {
+        let base = inf_input::default_map();
+        let empty = BTreeMap::new();
+
+        // A free key binds straight away, and the override set is the DIFFERENCE.
+        let out = apply_row(&base, &empty, "interact", "KeyJ", false);
+        assert!(out.conflicts.is_empty());
+        assert_eq!(out.overrides.len(), 1);
+        assert_eq!(out.overrides["interact"], "KeyJ");
+
+        // A taken key reports its owner and changes NOTHING.
+        let out = apply_row(&base, &empty, "interact", "KeyW", false);
+        assert_eq!(out.conflicts, ["move_y+"]);
+        assert_eq!(out.overrides, empty, "a refused edit changed the table");
+
+        // Asked, it swaps — and takes the exact token off the owner, leaving
+        // that row its other key.
+        let out = apply_row(&base, &empty, "interact", "KeyW", true);
+        assert!(out.conflicts.is_empty());
+        let mut after = base.clone();
+        apply_overrides(&mut after, &out.overrides);
+        let table = rows();
+        let interact = table.iter().find(|r| r.id == "interact").unwrap();
+        let forward = table.iter().find(|r| r.id == "move_y+").unwrap();
+        assert_eq!(token_in(&after, interact), "KeyW");
+        assert_eq!(
+            token_in(&after, forward),
+            "ArrowUp",
+            "the swap took Move Forward's other key too: {:?}",
+            tokens_in(&after, forward)
+        );
+        assert!(
+            conflicts(&after, "KeyW", "interact").is_empty(),
+            "W is still bound to two rows, so one press fires two verbs"
+        );
+
+        // A row id this build has never heard of is a no-op rather than a guess.
+        let out = apply_row(&base, &empty, "grapple", "KeyG", true);
+        assert_eq!(out.overrides, empty);
+    }
+
+    /// The projection a surface renders, and the two flags it needs.
+    #[test]
+    fn the_table_says_what_is_overridden_and_what_is_wired() {
+        let base = inf_input::default_map();
+        let mut overrides = BTreeMap::new();
+        overrides.insert("crouch".to_string(), "KeyB".to_string());
+        let t = table(&base, &overrides);
+        assert_eq!(t.len(), rows().len());
+        let crouch = t.iter().find(|r| r.id == "crouch").unwrap();
+        assert_eq!(crouch.token, "KeyB");
+        assert!(crouch.overridden);
+        assert!(crouch.wired);
+        let jump = t.iter().find(|r| r.id == "jump").unwrap();
+        assert_eq!(jump.token, "Space");
+        assert!(!jump.overridden, "an untouched row claims to be overridden");
+        // …and the four with no consumer say so.
+        let attack = t.iter().find(|r| r.id == "attack").unwrap();
+        assert!(!attack.wired, "attack claims a consumer it does not have");
     }
 
     /// Tokens are names, and the two directions agree for every source a desk

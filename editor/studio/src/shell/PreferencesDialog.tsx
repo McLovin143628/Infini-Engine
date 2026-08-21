@@ -12,24 +12,169 @@
  * Airspace: a modal overlays the native viewport hole, so `useViewportOverlay`
  * holds it hidden for the dialog's lifetime (`SortingLayersDialog` precedent).
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { RotateCcw, X } from "lucide-react";
 
+import type { GameBindingRowDto } from "../bindings/GameBindingRowDto";
 import { getCommand } from "../lib/commands";
+import { gameBindings } from "../lib/ipc";
 import { chordOf, DEFAULT_KEYBINDINGS, allKeybindings } from "../lib/keybindings";
 import { BUILTIN_THEMES } from "../lib/theme";
 import { useViewportOverlay } from "../lib/viewportOverlay";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useShellStore } from "../stores/shellStore";
 
-type TabId = "general" | "appearance" | "viewport" | "keyboard";
+type TabId = "general" | "appearance" | "viewport" | "keyboard" | "gameBindings";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "general", label: "General" },
   { id: "appearance", label: "Appearance" },
   { id: "viewport", label: "Viewport" },
   { id: "keyboard", label: "Keyboard" },
+  { id: "gameBindings", label: "Game Bindings" },
 ];
+
+/**
+ * **The GAME's binding table** (island wave I5) — the controls a player uses,
+ * not the editor's chords.
+ *
+ * Every row, every token and every conflict comes from the backend
+ * (`inf_ui::bindings`), which is the same source the in-game settings dialog
+ * reads. There is deliberately **no table in TypeScript**: a second one across a
+ * language boundary is the defect `inf_input::default_map`'s own note records,
+ * and the last copy of it knew about three of seventeen entries.
+ *
+ * The capture is the same flow the in-game dialog runs: click a row, press a
+ * key, and a key that is already taken names its owner and waits for an answer
+ * rather than being stolen.
+ */
+function GameBindingsTab() {
+  const settings = useSettingsStore((s) => s.settings);
+  const patch = useSettingsStore((s) => s.patch);
+  const [rows, setRows] = useState<GameBindingRowDto[]>([]);
+  const [capturing, setCapturing] = useState<string | null>(null);
+  const [conflict, setConflict] = useState<{ row: string; token: string; owners: string[] } | null>(
+    null,
+  );
+  const [error, setError] = useState<string | null>(null);
+  const overrides = settings.game_bindings;
+
+  useEffect(() => {
+    let live = true;
+    gameBindings
+      .table(overrides)
+      .then((t) => live && setRows(t))
+      .catch((e) => live && setError(String(e)));
+    return () => {
+      live = false;
+    };
+  }, [overrides]);
+
+  /** Apply a token to a row, asking first when it is already taken. */
+  const apply = (row: string, token: string, swap: boolean) => {
+    gameBindings
+      .apply(overrides, row, token, swap)
+      .then((out) => {
+        if (out.conflicts.length > 0) {
+          setConflict({ row, token, owners: out.conflicts });
+          return;
+        }
+        setConflict(null);
+        patch({ game_bindings: out.overrides });
+      })
+      .catch((e) => setError(String(e)));
+  };
+
+  return (
+    <>
+      <p className="mb-3 text-xs text-(--ink-text-faint)">
+        The controls a player uses. Click a row and press a key; a key that is already taken names
+        the control that has it. Only your changes are stored, so a control added by a later build
+        still arrives bound — and Simulate honours these, not just a shipped build.
+      </p>
+      {error && <p className="mb-2 text-xs text-(--ink-danger)">{error}</p>}
+      {conflict && (
+        <div className="mb-2 rounded border border-(--ink-accent) px-2 py-1 text-xs">
+          <span className="mr-2">
+            {conflict.token} is already used by {conflict.owners.join(", ")}.
+          </span>
+          <button
+            onClick={() => apply(conflict.row, conflict.token, true)}
+            className="mr-2 rounded bg-(--ink-accent) px-2 py-0.5 text-(--ink-text-onaccent)"
+          >
+            Swap
+          </button>
+          <button onClick={() => setConflict(null)} className="rounded px-2 py-0.5">
+            Cancel
+          </button>
+        </div>
+      )}
+      <div className="mb-1 flex gap-2 px-1 text-xs text-(--ink-text-faint)">
+        <span className="flex-1">Control</span>
+        <span className="w-40">Key</span>
+        <span className="w-6" />
+      </div>
+      {rows.map((r) => (
+        <div key={r.id} className="mb-1 flex items-center gap-2 text-xs">
+          <span className="min-w-0 flex-1 truncate" title={r.id}>
+            {r.label}
+            {!r.wired && (
+              <span className="ml-1 text-(--ink-text-faint)">(not wired to anything yet)</span>
+            )}
+          </span>
+          {capturing === r.id ? (
+            <input
+              autoFocus
+              readOnly
+              value="press a key…"
+              onKeyDown={(e) => {
+                e.preventDefault();
+                setCapturing(null);
+                if (e.code === "Escape") return;
+                apply(r.id, e.code, false);
+              }}
+              onBlur={() => setCapturing(null)}
+              className="w-40 rounded border border-(--ink-accent) bg-(--ink-bg-2) px-2 py-1 outline-none"
+            />
+          ) : (
+            <button
+              onClick={() => {
+                setConflict(null);
+                setCapturing(r.id);
+              }}
+              className={`w-40 rounded border px-2 py-1 text-left ${
+                r.overridden
+                  ? "border-(--ink-accent) text-(--ink-accent)"
+                  : "border-(--ink-border) text-(--ink-text)"
+              } hover:bg-(--ink-bg-3)`}
+            >
+              {r.token || "--"}
+            </button>
+          )}
+          <button
+            aria-label={`Reset ${r.label}`}
+            disabled={!r.overridden}
+            onClick={() => {
+              const next = { ...overrides };
+              delete next[r.id];
+              patch({ game_bindings: next });
+            }}
+            className="rounded p-1 text-(--ink-text-faint) disabled:opacity-30 hover:bg-(--ink-bg-3)"
+          >
+            <RotateCcw size={12} />
+          </button>
+        </div>
+      ))}
+      <button
+        onClick={() => patch({ game_bindings: {} })}
+        disabled={Object.keys(overrides).length === 0}
+        className="mt-2 rounded border border-(--ink-border) px-2 py-1 text-xs disabled:opacity-30 hover:bg-(--ink-bg-3)"
+      >
+        Reset all
+      </button>
+    </>
+  );
+}
 
 /** A labelled numeric row. Clamps at the door; the backend clamps again. */
 function NumberRow({
@@ -432,6 +577,8 @@ export default function PreferencesDialog() {
                 })}
               </>
             )}
+
+            {tab === "gameBindings" && <GameBindingsTab />}
           </div>
         </div>
 

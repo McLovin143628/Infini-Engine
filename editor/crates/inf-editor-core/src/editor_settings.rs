@@ -111,6 +111,79 @@ fn default_foliage() -> FoliageSettingsDto {
     }
 }
 
+/// One row of the **game's** binding table, as the preferences panel renders it
+/// (island wave I5).
+///
+/// A projection of `inf_ui::bindings::table`, not a second table: the in-game
+/// dialog and this panel show the same rows in the same order from the same
+/// source. A table restated in TypeScript is the "two copies across a language
+/// boundary" defect `inf_input::default_map`'s own note records.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct GameBindingRowDto {
+    /// The stable row id a settings file stores.
+    pub id: String,
+    /// What a player reads.
+    pub label: String,
+    /// What it is bound to; empty means unbound.
+    pub token: String,
+    /// Whether this row has been moved off the shipped table.
+    pub overridden: bool,
+    /// Whether the control's consumer exists yet.
+    pub wired: bool,
+}
+
+/// What an edit to the game's bindings decided (island wave I5).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct GameBindingApplyDto {
+    /// The override set after the edit — **unchanged** when a conflict blocked
+    /// it, so a caller that ignores `conflicts` cannot silently steal a key.
+    pub overrides: BTreeMap<String, String>,
+    /// The row labels that already own the token, when one did. Labels rather
+    /// than ids, because this is what a dialog puts in a sentence.
+    pub conflicts: Vec<String>,
+}
+
+/// **The game's binding table**, resolved against `overrides`.
+pub fn game_binding_table(overrides: &BTreeMap<String, String>) -> Vec<GameBindingRowDto> {
+    inf_ui::bindings::table(&inf_input::default_map(), overrides)
+        .into_iter()
+        .map(|r| GameBindingRowDto {
+            id: r.id,
+            label: r.label,
+            token: r.token,
+            overridden: r.overridden,
+            wired: r.wired,
+        })
+        .collect()
+}
+
+/// **Bind `token` to `row_id`**, through `inf_ui::bindings::apply_row` — the same
+/// rule the in-game dialog's capture uses.
+///
+/// `swap` is the player's answer to the conflict the first call reports.
+pub fn game_binding_apply(
+    overrides: &BTreeMap<String, String>,
+    row_id: &str,
+    token: &str,
+    swap: bool,
+) -> GameBindingApplyDto {
+    let base = inf_input::default_map();
+    let out = inf_ui::bindings::apply_row(&base, overrides, row_id, token, swap);
+    // Ids are what the map stores and labels are what a person reads; the panel
+    // asks a question in words.
+    let rows = inf_ui::bindings::rows();
+    let label_of = |id: &String| {
+        rows.iter()
+            .find(|r| &r.id == id)
+            .map(|r| r.label.to_string())
+            .unwrap_or_else(|| id.clone())
+    };
+    GameBindingApplyDto {
+        conflicts: out.conflicts.iter().map(label_of).collect(),
+        overrides: out.overrides,
+    }
+}
+
 /// Application-level (per-user) editor settings.
 ///
 /// This type is **also the wire type**: `ipc.rs` re-exports it and the ts-rs
@@ -173,6 +246,22 @@ pub struct EditorSettings {
     /// the user changed, so a new default chord reaches an existing user.
     #[serde(default)]
     pub keybindings: BTreeMap<String, String>,
+    /// **The GAME's binding overrides**, row id → source token (island wave I5).
+    ///
+    /// The same map, in the same format, that a shipped player writes into its
+    /// own settings file — `inf_ui::bindings`' row ids and name tokens, only
+    /// what differs from the shipped table. It lives here so an author can set a
+    /// project's controls from the editor's preferences and have Simulate and a
+    /// windowed PIE preview honour them, which is the second half of "rebinding
+    /// like UE5, in-game AND in the editor".
+    ///
+    /// **A different map from [`keybindings`](Self::keybindings)**, and
+    /// deliberately: that one is the *editor's* chords (Ctrl+Shift+P opens the
+    /// palette) and this one is the *game's* controls (C crouches). Folding them
+    /// together would put a chord and a key code in one namespace and make
+    /// "unbind" mean two things.
+    #[serde(default)]
+    pub game_bindings: BTreeMap<String, String>,
 }
 
 impl Default for EditorSettings {
@@ -190,6 +279,7 @@ impl Default for EditorSettings {
             snap_3d: default_snap_3d(),
             foliage: default_foliage(),
             keybindings: BTreeMap::new(),
+            game_bindings: BTreeMap::new(),
         }
     }
 }
@@ -311,6 +401,9 @@ impl EditorSettings {
             guard_f64(self.foliage.scale_jitter, (0.0, 1.0), f.scale_jitter);
 
         self.keybindings.retain(|chord, _| !chord.trim().is_empty());
+        // The same guard, for the same reason: a blank row id names nothing and
+        // could never be matched against the game's binding table.
+        self.game_bindings.retain(|row, _| !row.trim().is_empty());
     }
 
     /// Deterministic TOML for the (normalized) settings.
@@ -382,6 +475,7 @@ mod tests {
                 seed: 77,
             },
             keybindings: BTreeMap::from([("Ctrl+Alt+P".to_string(), "tools.profiler".to_string())]),
+            game_bindings: BTreeMap::from([("crouch".to_string(), "KeyB".to_string())]),
         };
         s.normalize();
         s.save(dir.path()).unwrap();

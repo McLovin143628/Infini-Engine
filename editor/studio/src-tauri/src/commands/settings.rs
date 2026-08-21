@@ -130,3 +130,37 @@ pub async fn editor_settings_set(
     s.save(&dir)?;
     Ok(s)
 }
+
+/// **The GAME's binding table** as the preferences panel renders it (island wave
+/// I5), resolved against the overrides the panel is holding.
+///
+/// A projection rather than a second table: the same rows, in the same order,
+/// from the same `inf_ui::bindings` source the in-game dialog reads. The
+/// overrides come *from the caller* rather than from the file, so a panel with
+/// an unsaved edit renders what the player is looking at.
+#[tauri::command]
+pub async fn game_bindings_table(
+    overrides: std::collections::BTreeMap<String, String>,
+) -> Result<Vec<inf_editor_core::ipc::GameBindingRowDto>, String> {
+    Ok(inf_editor_core::editor_settings::game_binding_table(
+        &overrides,
+    ))
+}
+
+/// **Bind a key to a row**, through the one apply rule.
+///
+/// With `swap = false` a taken key changes nothing and comes back with the rows
+/// that own it, so the panel can ask; with `swap = true` the key is taken off
+/// exactly those rows — the token, not their whole binding — and bound here.
+/// The identical rule the in-game dialog's capture runs.
+#[tauri::command]
+pub async fn game_binding_apply(
+    overrides: std::collections::BTreeMap<String, String>,
+    row: String,
+    token: String,
+    swap: bool,
+) -> Result<inf_editor_core::ipc::GameBindingApplyDto, String> {
+    Ok(inf_editor_core::editor_settings::game_binding_apply(
+        &overrides, &row, &token, swap,
+    ))
+}

@@ -76,6 +76,8 @@ import type { PackageErrorDto } from "../bindings/PackageErrorDto";
 import type { PackageResultDto } from "../bindings/PackageResultDto";
 import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
 import type { EditorSettings } from "../bindings/EditorSettings";
+import type { GameBindingApplyDto } from "../bindings/GameBindingApplyDto";
+import type { GameBindingRowDto } from "../bindings/GameBindingRowDto";
 import type { EntityEditorsDto } from "../bindings/EntityEditorsDto";
 import type { ViewportInteractionDto } from "../bindings/ViewportInteractionDto";
 import type { ProjectSettingsDto } from "../bindings/ProjectSettingsDto";
@@ -564,6 +566,28 @@ export const editorSettings = {
   get: (): Promise<EditorSettings> => invoke<EditorSettings>("editor_settings_get"),
   set: (settings: EditorSettings): Promise<EditorSettings> =>
     invoke<EditorSettings>("editor_settings_set", { settings }),
+};
+
+/**
+ * The **game's** binding table (island wave I5) — the controls a player uses,
+ * not the editor's chords.
+ *
+ * Both doors are projections of `inf_ui::bindings`, which is the same source the
+ * in-game settings dialog reads: there is no table in TypeScript, deliberately.
+ * `apply` with `swap = false` reports a conflict and changes NOTHING, so a panel
+ * that ignores `conflicts` cannot silently steal a key from another control;
+ * with `swap = true` the key is taken off exactly the rows that owned it.
+ */
+export const gameBindings = {
+  table: (overrides: Record<string, string>): Promise<GameBindingRowDto[]> =>
+    invoke<GameBindingRowDto[]>("game_bindings_table", { overrides }),
+  apply: (
+    overrides: Record<string, string>,
+    row: string,
+    token: string,
+    swap: boolean,
+  ): Promise<GameBindingApplyDto> =>
+    invoke<GameBindingApplyDto>("game_binding_apply", { overrides, row, token, swap }),
 };
 
 /**

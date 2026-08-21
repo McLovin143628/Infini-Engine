@@ -117,6 +117,31 @@ pub async fn sim_start(
     sim: State<'_, SimState>,
     assets: State<'_, AssetState>,
 ) -> Result<(), String> {
+    // **The author's GAME bindings, applied to Simulate** (island wave I5).
+    //
+    // The preferences panel's Game Bindings table writes overrides into
+    // `editor-settings.toml`; this is where they reach the preview. Without it
+    // an author could rebind C and watch Simulate ignore it, which is the
+    // "settings that only the shipped build honours" trap the whole wave is
+    // about avoiding. A failure to read them is not a reason to refuse to
+    // simulate — the shipped table is the honest fallback and the reason is
+    // logged.
+    {
+        let mut inner = sim.inner.lock().map_err(|_| "sim lock poisoned")?;
+        let mut map = inf_input::default_map();
+        match app
+            .path()
+            .app_config_dir()
+            .map_err(|e| e.to_string())
+            .and_then(|dir| inf_editor_core::editor_settings::EditorSettings::load_or_default(&dir))
+        {
+            Ok(s) => {
+                inf_ui::bindings::apply_overrides(&mut map, &s.game_bindings);
+            }
+            Err(e) => tracing::warn!("simulate: using the shipped bindings ({e})"),
+        }
+        inner.input.set_map(map);
+    }
     let mut doc = scene.doc.lock().map_err(|_| "scene lock poisoned")?;
     let actors = bound_actors(&doc, |guid| {
         assets.load_blueprint_class(inf_asset::AssetId(guid))

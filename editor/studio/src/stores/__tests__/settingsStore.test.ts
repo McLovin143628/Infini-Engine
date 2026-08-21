@@ -151,6 +151,9 @@ describe("settingsStore", () => {
         seed: 1,
       },
       keybindings: {},
+      // Island wave I5: the GAME's binding overrides, a different map from the
+      // editor's chords above — that one is Ctrl+Shift+P, this one is C.
+      game_bindings: {},
     });
   });
 });

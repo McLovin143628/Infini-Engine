@@ -27,6 +27,9 @@ inf-blueprint = { workspace = true }
 # own default bindings, so a generated character is playable the moment it
 # exists and the file an author edits is the one both hosts read.
 inf-input = { workspace = true }
+# The game's binding TABLE and its one apply rule (island wave I5), so the
+# editor's preferences panel is a second surface rather than a second rule.
+inf-ui = { workspace = true }
 inf-graph = { workspace = true }
 # PCG scatter runtime: the samples generator authors a `.inf_pcg` graph for the
 # terrain-demo gate scene (P10.6).

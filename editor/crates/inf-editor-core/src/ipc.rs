@@ -17,6 +17,10 @@ use ts_rs::TS;
 /// owner (validation, migration, atomic write) is
 /// [`crate::editor_settings::EditorSettings`].
 pub use crate::editor_settings::EditorSettings;
+/// The GAME's binding table and its one apply rule, as the editor's preferences
+/// panel renders them (island wave I5). See
+/// [`crate::editor_settings::game_binding_table`].
+pub use crate::editor_settings::{GameBindingApplyDto, GameBindingRowDto};
 
 /// The viewport hole's rectangle in PHYSICAL pixels relative to the window
 /// client area (the frontend multiplies CSS px by `devicePixelRatio`; the

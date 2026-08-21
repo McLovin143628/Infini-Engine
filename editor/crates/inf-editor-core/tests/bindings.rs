@@ -202,6 +202,11 @@ fn export_bindings() {
     // its two nested tables (`Snap3DDto`, `FoliageSettingsDto`), which are
     // rooted above in their own right.
     inf_editor_core::ipc::EditorSettings::export_all(&cfg).expect("export EditorSettings");
+    // Island wave I5: the GAME's binding table, rendered by the preferences
+    // panel from the same projection the in-game dialog uses.
+    inf_editor_core::ipc::GameBindingRowDto::export_all(&cfg).expect("export GameBindingRowDto");
+    inf_editor_core::ipc::GameBindingApplyDto::export_all(&cfg)
+        .expect("export GameBindingApplyDto");
     // Wave E batch B: the answer to "which editors can open this object".
     inf_editor_core::ipc::EntityEditorsDto::export_all(&cfg).expect("export EntityEditorsDto");
     // Wave E batch C: the two native-viewport pointer gestures and the pointer

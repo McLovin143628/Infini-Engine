@@ -317,6 +317,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         settings::project_settings_set,
         settings::editor_settings_get,
         settings::editor_settings_set,
+        settings::game_bindings_table,
+        settings::game_binding_apply,
         project::project_templates,
         project::project_recent,
         project::project_current,

@@ -76,4 +76,21 @@ foliage: FoliageSettingsDto,
  * "this default chord is unbound". Defaults are not written here; only what
  * the user changed, so a new default chord reaches an existing user.
  */
-keybindings: { [key in string]: string }, };
+keybindings: { [key in string]: string }, 
+/**
+ * **The GAME's binding overrides**, row id → source token (island wave I5).
+ *
+ * The same map, in the same format, that a shipped player writes into its
+ * own settings file — `inf_ui::bindings`' row ids and name tokens, only
+ * what differs from the shipped table. It lives here so an author can set a
+ * project's controls from the editor's preferences and have Simulate and a
+ * windowed PIE preview honour them, which is the second half of "rebinding
+ * like UE5, in-game AND in the editor".
+ *
+ * **A different map from [`keybindings`](Self::keybindings)**, and
+ * deliberately: that one is the *editor's* chords (Ctrl+Shift+P opens the
+ * palette) and this one is the *game's* controls (C crouches). Folding them
+ * together would put a chord and a key code in one namespace and make
+ * "unbind" mean two things.
+ */
+game_bindings: { [key in string]: string }, };

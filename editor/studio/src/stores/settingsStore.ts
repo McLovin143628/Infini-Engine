@@ -49,6 +49,9 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
     seed: 1,
   },
   keybindings: {},
+  // Island wave I5: the GAME's binding overrides, in the same format the shipped
+  // player writes. Only what differs from the shipped table lives here.
+  game_bindings: {},
 };
 
 /** How long `patch` waits before writing, so a dragged slider writes once. */
