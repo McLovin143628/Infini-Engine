@@ -361,8 +361,8 @@ fn choice(label: &str, value: &str, id: RowId) -> Row {
 ///
 /// **The ledger is not where a player reads it.** This wave's own rule for a
 /// control that is bound against a consumer that does not exist is to say so on
-/// the row it is on ([`not_yet_note`], and the toast beside it): *a dead key is
-/// indistinguishable from a broken one*. A slider that is stored and applied by
+/// the row it is on (`not_yet_note` in this module, and the toast beside it):
+/// *a dead key is indistinguishable from a broken one*. A slider that is stored and applied by
 /// nothing is the same thing one level up — the ledger says as much about the
 /// audio and controls pages, which were wired for exactly that reason — and these
 /// three were the ones left silent. A player who changes the resolution and sees
