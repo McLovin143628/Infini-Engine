@@ -1374,10 +1374,12 @@ numbers (63 of 2 903 px, unmoved). The scatter pass did **not** move (2.98 ms un
 
 ### The commits
 
-**`5012f4c..`** this tree — `55ee02e` the fixed step · `42c60ef` the lit frame's recording ·
-`4dbf937` the impostor sphere + the ratchets · `f5556e2` the VSM scatter's own number ·
-`1ea4888` seven eaten continuations · `c46d146` the pending marks' bound · plus the ledger
-commits. (Re-state the range from the tree the audit certifies — I3's law.)
+**`3c9d87b..4e6e04c`, fourteen commits** — `36d233a` the fixed step · `1967eab` the lit
+frame's recording · `cd3f9b0` the impostor sphere + the ratchets · `2a55e11` the VSM scatter's
+own number · `724dbe6` seven eaten continuations · `57cbc05` the pending marks' bound · plus
+the ledger commits. *Re-stated by the I4b audit, and this is the **fifth** time this field has
+gone stale: the wave wrote `5012f4c..` and named six shas the rebase onto the toolchain hotfix
+orphaned — all six. `5012f4c` survives as the pre-rebase base and is not the range's start.*
 
 **Verified at the closing head, release, MIN of rounds:** step **1.267 ms** against a 6.0 ms
 ceiling; 1080p unlit p50 **12.076** / p95 **15.095** — **−4.524 and −1.505 ms against the

@@ -24748,12 +24748,16 @@ production path.
 
 ## Phase 30 (the island) — wave I4b: the performance wave (2026-08-20)
 
-Range: **`5012f4c..`** this tree (re-stated by the audit that closes the wave, per I3's law).
-Six commits carry the work — `55ee02e` the fixed step's eleven and a half unattributed
-milliseconds · `42c60ef` the lit frame's recording · `4dbf937` the impostor's own bounding
-sphere and three ratchets · `f5556e2` the VSM invalidation scatter's own number · `1ea4888`
-seven eaten continuations · `c46d146` the pending marks' bound — and the rest close the ledger
-and the docs the numbers live in.
+Range: **`3c9d87b..4e6e04c`, fourteen commits** — *re-stated by the audit that closes the wave,
+per I3's law, and this is the **fifth** time that field has gone stale.* The wave wrote
+"`5012f4c..` this tree" and named `55ee02e` · `42c60ef` · `4dbf937` · `f5556e2` · `1ea4888` ·
+`c46d146`; the rebase onto the toolchain hotfix orphaned **all six** (`5012f4c` survives as the
+pre-rebase base and is no longer the range's start). The six that carry the work in the tree
+being certified are `36d233a` the fixed step's eleven and a half unattributed milliseconds ·
+`1967eab` the lit frame's recording · `cd3f9b0` the impostor's own bounding sphere and three
+ratchets · `2a55e11` the VSM invalidation scatter's own number · `724dbe6` seven eaten
+continuations · `57cbc05` the pending marks' bound — and the rest close the ledger and the docs
+the numbers live in.
 
 The wave the I4 instrument made possible. I4 measured and refused to prescribe; this one
 prescribes, and every prescription is measured on that instrument before and after.
