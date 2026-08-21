@@ -1,0 +1,50 @@
+[package]
+name = "inf-island"
+description = "The island generator: a recipe, real-Earth elevation, a designed coastline, and the layers derived from them (wave I7)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+glam = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+# Asset GUIDs. Derived from the island's own name and a per-asset salt (the
+# `pcg_structure_guid` pattern), so a rebuild produces the same identities and a
+# committed level keeps resolving against a terrain that is not committed.
+uuid = { workspace = true }
+
+# The recipe is a TOML document, read with the same crate every settings block in
+# this repository is read with.
+toml = { workspace = true }
+# The derived layers are GeoJSON, written through the workspace's
+# `float_roundtrip` pin — a stream vertex is exactly where a 1-ULP parse error
+# becomes a metre on the ground (the P19.3 law).
+serde_json = { workspace = true }
+
+# THE DOORS THIS CRATE GOES THROUGH, and the reason it owns none of them:
+#
+# * `inf-gis` — the terrarium codec, the XYZ tile math, the CRS/anchor door, the
+#   Jenks classifier, the road graph. Wave G ported every one of those and the
+#   disposition memo's largest honest limit was that they had "no caller outside
+#   their own tests". This crate is that caller.
+# * `inf-terrain` — `TerrainData`, `build_pyramid`, `build_terrain_asset`. The
+#   island is an ordinary `.inf_terrain`; nothing here is a second terrain
+#   format.
+# * `inf-math` — the geo-anchor's world frame (+X east, +Y up, **-Z north**) and
+#   the portable trig the derived layers are allowed to use.
+# * `inf-asset` — the sidecar every written asset carries.
+inf-gis = { workspace = true }
+inf-terrain = { workspace = true }
+inf-math = { workspace = true }
+inf-asset = { workspace = true }
+inf-mesh = { workspace = true }
+
+# An advisory is a value; a hazard the author cannot see is a defect.
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

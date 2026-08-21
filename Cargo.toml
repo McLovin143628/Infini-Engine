@@ -22,6 +22,7 @@ members = [
     "crates/inf-voxel",
     "crates/inf-water",
     "crates/inf-gis",
+    "crates/inf-island",
     "crates/inf-photo",
     "crates/inf-photo-gpu",
     "crates/inf-pcg",
@@ -464,6 +465,14 @@ inf-water = { path = "crates/inf-water" }
 # and nothing in the shipped player links it, the same discipline `inf-mesh`
 # applies to meshopt/gltf/image.
 inf-gis = { path = "crates/inf-gis" }
+# inf-island = the island GENERATOR (wave I7): a recipe, real-Earth elevation
+# through Wave G's terrarium path, a designed coastline, and the stream / lake /
+# biome layers derived from the result. HOST-ONLY by rule, for the same reason
+# inf-gis is: it runs at authoring and build time and the shipped player links
+# neither it nor anything it names. It adds NO external crate — every dependency
+# it has is already pinned above, which is what makes "real Vancouver elevation"
+# cost the tree nothing.
+inf-island = { path = "crates/inf-island" }
 # inf-photo = the photogrammetry SfM core (P25.1). Ring 0, and dependency-light
 # on purpose: glam + serde + thiserror + image + inf-core + inf-math, every one
 # already pinned above, so classical structure-from-motion adds NO new external

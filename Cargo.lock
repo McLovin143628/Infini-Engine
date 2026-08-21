@@ -3299,6 +3299,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "inf-island"
+version = "0.1.0"
+dependencies = [
+ "glam 0.33.2",
+ "inf-asset",
+ "inf-gis",
+ "inf-math",
+ "inf-mesh",
+ "inf-terrain",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "inf-material"
 version = "0.1.0"
 dependencies = [

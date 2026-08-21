@@ -437,6 +437,67 @@ impl Transform {
         Ok(w)
     }
 
+    /// **World metres → the source's own coordinates** — the exact inverse of
+    /// [`to_world`](Self::to_world), in file order (`(longitude, latitude,
+    /// elevation)` for a geographic source).
+    ///
+    /// # Why the inverse belongs here
+    ///
+    /// A raster resample is **destination-driven**: every output sample asks
+    /// "where did I come from", because the forward direction scatters and
+    /// leaves holes between the samples it lands on. Wave G's global-elevation
+    /// path is a forward door only, so an island built on a projected grid from
+    /// XYZ tiles had nowhere to ask that question — and the alternatives are all
+    /// second implementations of a projection: a locally-inverted lattice (an
+    /// approximation, with no statement of its error), or naming `proj4rs`
+    /// outside this crate (which is the facade rule broken for one caller).
+    ///
+    /// The vertical unit is **not** re-applied: `to_projected` multiplies a
+    /// source elevation by it once on the way in, so the way out divides by it,
+    /// and a transform whose unit is feet round-trips to feet.
+    ///
+    /// Refused for a [`source_space`](Self::source_space) probe transform, which
+    /// has no anchor to invert through.
+    pub fn to_source(&self, world: DVec3) -> Result<(f64, f64, f64), GisError> {
+        if self.source_space {
+            return Err(GisError::Crs(
+                "a probe transform has no anchor, so there is no world frame to \
+                 invert out of — build the transform with `Transform::new` \
+                 against the level's geo-anchor"
+                    .to_string(),
+            ));
+        }
+        if !world.is_finite() {
+            return Err(GisError::NotFinite(format!(
+                "the world position {world:?} is not finite"
+            )));
+        }
+        let (e, n, h) = self.anchor.projected_from_world(world);
+        let mut p = (e, n, h);
+        if !self.identity {
+            proj4rs::transform::transform(&self.target, &self.source, &mut p).map_err(|e| {
+                GisError::Crs(format!(
+                    "inverting the world position {world:?} back to {:?} failed: {e}",
+                    self.source_spec
+                ))
+            })?;
+            // The same NaN door as the forward direction, for the same reason:
+            // proj4rs reports failure by returning NaN.
+            if !(p.0.is_finite() && p.1.is_finite() && p.2.is_finite()) {
+                return Err(GisError::NotFinite(format!(
+                    "inverting the world position {world:?} back to {:?} produced \
+                     the non-finite result ({}, {}, {}) — the usual cause is a \
+                     position far outside the anchor's own projection zone.",
+                    self.source_spec, p.0, p.1, p.2
+                )));
+            }
+            if self.source_is_latlong {
+                p = (p.0.to_degrees(), p.1.to_degrees(), p.2);
+            }
+        }
+        Ok((p.0, p.1, p.2 / self.vertical_unit_m))
+    }
+
     /// The anchor this transform targets.
     pub fn anchor(&self) -> &GeoAnchor {
         &self.anchor
@@ -658,6 +719,75 @@ mod tests {
              this is ~0 the convergence is not being measured at all",
             at_edge.grid_convergence_deg
         );
+    }
+
+    /// **The inverse is an inverse**, and it is armed on the two things that
+    /// make it one rather than merely a function that returns numbers: it
+    /// round-trips a real position to sub-millimetre, and it disagrees with the
+    /// forward direction for a position that is not the one asked about.
+    ///
+    /// Un-fix mutations, both measured: transforming `source → target` instead
+    /// of `target → source` fails the round trip by ~kilometres; dropping the
+    /// `to_degrees` leaves a longitude of −2.149 radians reported as degrees.
+    #[test]
+    fn the_world_frame_inverts_back_to_the_source_it_came_from() {
+        let a = vancouver();
+        let t = Transform::new("EPSG:4326", &a).expect("wgs84 source");
+
+        // Four real positions spread across an island-sized world.
+        for (lon, lat, h) in [
+            (-123.12, 49.28, 0.0),
+            (-123.10, 49.34, 812.5),
+            (-123.155, 49.302, -3.0),
+            (-123.045, 49.377, 1_204.25),
+        ] {
+            let w = t.to_world(lon, lat, h).expect("forward");
+            let (lon2, lat2, h2) = t.to_source(w).expect("inverse");
+            // A degree of latitude is ~111 320 m, so 1e-9 deg is ~0.1 mm.
+            assert!(
+                (lon - lon2).abs() < 1e-9 && (lat - lat2).abs() < 1e-9,
+                "({lon}, {lat}) round-tripped to ({lon2}, {lat2})"
+            );
+            assert!((h - h2).abs() < 1e-6, "{h} m round-tripped to {h2} m");
+            // The degrees/radians contract: a longitude near -123 must not come
+            // back as the -2.149 radians that is the same angle.
+            assert!(
+                lon2 < -100.0,
+                "the inverse returned {lon2}, which is radians rather than degrees"
+            );
+        }
+
+        // It is a FUNCTION OF THE POSITION, not a stored constant: two world
+        // positions a kilometre apart invert to two different places, and the
+        // separation is the one the metres imply.
+        let p0 = t.to_source(DVec3::ZERO).unwrap();
+        let p1 = t.to_source(DVec3::new(1_000.0, 0.0, 0.0)).unwrap();
+        let dlon = (p1.0 - p0.0).abs();
+        let expect = 1_000.0 / (111_320.0 * p0.1.to_radians().cos());
+        assert!(
+            (dlon - expect).abs() < expect * 0.01,
+            "a kilometre east is {dlon} deg of longitude; {expect} was expected"
+        );
+
+        // The vertical unit divides back out, so a feet source round-trips to feet.
+        let ft = Transform::with_vertical_unit("EPSG:4326", &a, 0.3048).unwrap();
+        let w = ft
+            .to_world(-123.12, 49.28, 1_000.0)
+            .expect("forward in feet");
+        let (_, _, back_ft) = ft.to_source(w).expect("inverse in feet");
+        assert!(
+            (back_ft - 1_000.0).abs() < 1e-6,
+            "1000 ft round-tripped to {back_ft} ft"
+        );
+
+        // A probe transform is refused by name rather than answering with the
+        // file's own numbers pretending to be an inverse.
+        let probe = Transform::source_space("EPSG:4326").unwrap();
+        let e = probe.to_source(DVec3::ZERO).unwrap_err().to_string();
+        assert!(e.contains("geo-anchor"), "{e}");
+
+        // And the NaN door is on this direction too.
+        assert!(t.to_source(DVec3::new(f64::NAN, 0.0, 0.0)).is_err());
     }
 
     /// **The axis convention gate.** File order (X = longitude first), not the
