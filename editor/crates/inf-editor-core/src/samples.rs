@@ -9779,6 +9779,14 @@ pub const GAMEPLAY_HERO_J: f64 = 2000.0;
 /// A `const` rather than a file, because it rides the Blueprint's own bytes —
 /// see `inf_blueprint::nodekit`'s `gameplay_nodes` for why that is the only
 /// surface that reaches Simulate, PIE and a cooked pack at once.
+///
+/// **Two weapons, and the second one is the gate's** (I6 audit): a wheel with
+/// one weapon in the bag cycles back onto it, so "the wheel changed the equipped
+/// weapon" was a claim a wheel that did nothing satisfied perfectly — measured,
+/// deleting the wheel's whole consumer left `phase30_gameplay_gate` green. The
+/// pistol is what makes the notch observable, and its numbers differ from the
+/// rifle's in every field a trace can see so a cycle cannot be mistaken for a
+/// no-op.
 pub const GAMEPLAY_ITEMS_TOML: &str = concat!(
     "[rifle]\n",
     "label = \"Rifle\"\n",
@@ -9794,6 +9802,20 @@ pub const GAMEPLAY_ITEMS_TOML: &str = concat!(
     "range_m = 400.0\n",
     "automatic = true\n",
     "\n",
+    "[pistol]\n",
+    "label = \"Pistol\"\n",
+    "stack_max = 1\n",
+    "mass_kg = 0.9\n",
+    "[pistol.weapon]\n",
+    "damage_j = 600.0\n",
+    "rounds_per_minute = 400.0\n",
+    "magazine = 12\n",
+    "reserve = 36\n",
+    "reload_s = 1.4\n",
+    "spread_deg = 0.0\n",
+    "range_m = 60.0\n",
+    "automatic = false\n",
+    "\n",
     "[bandage]\n",
     "label = \"Bandage\"\n",
     "stack_max = 5\n",
@@ -9802,73 +9824,51 @@ pub const GAMEPLAY_ITEMS_TOML: &str = concat!(
 
 /// **The doors this level hangs by hand**, as the `door.spawn` node's TOML.
 ///
-/// Two of them, and they are the two the grammar cannot give a gate: a door the
-/// script can lock from the inside and kick in from the outside, and a second
-/// one out in the open for a sprint to go through. The house's own doorways are
-/// the grammar's and are hung without any of this.
+/// **Four** of them, and they are the four the grammar cannot give a gate: a
+/// front door the script opens, walks through and locks from the inside; a yard
+/// gate it locks and kicks in from the outside; a shed door a sprint breaches;
+/// and a hatch a dive goes through. The house's own doorways are the grammar's
+/// and are hung without any of this.
+///
+/// *Written with `\n` escapes, and the I6 audit is why: the first draft carried
+/// thirty-one **literal** newlines inside its string literals — the fifteenth
+/// `chr(92)` catch's own shape, a scripted edit that resolved the escape before
+/// the file was written. It was content-identical only because `.gitattributes`
+/// forces `*.rs text eol=lf`; on a checkout without that rule every line of this
+/// document would have arrived at the TOML parser with a `\r` on it. The escape
+/// does not depend on a checkout rule.*
 pub const GAMEPLAY_DOORS_TOML: &str = concat!(
-    "[front]
-",
-    "label = \"front door\"
-",
-    "hinge = [-0.45, 1.05, -6.0]
-",
-    "closed_yaw_deg = 90.0
-",
-    "inside_yaw_deg = 0.0
-",
-    "open_limit_deg = -95.0
-",
-    "locked = false
-",
-    "
-",
-    "[gate]
-",
-    "label = \"yard gate\"
-",
-    "hinge = [7.55, 1.05, -9.45]
-",
-    "closed_yaw_deg = 0.0
-",
-    "inside_yaw_deg = 90.0
-",
-    "open_limit_deg = 95.0
-",
-    "locked = true
-",
-    "
-",
-    "[shed]
-",
-    "label = \"shed door\"
-",
-    "hinge = [17.55, 1.05, -9.45]
-",
-    "closed_yaw_deg = 0.0
-",
-    "inside_yaw_deg = 90.0
-",
-    "open_limit_deg = 95.0
-",
-    "locked = true
-",
-    "
-",
-    "[hatch]
-",
-    "label = \"hatch\"
-",
-    "hinge = [27.55, 1.05, -9.45]
-",
-    "closed_yaw_deg = 0.0
-",
-    "inside_yaw_deg = 90.0
-",
-    "open_limit_deg = 95.0
-",
-    "locked = false
-",
+    "[front]\n",
+    "label = \"front door\"\n",
+    "hinge = [-0.45, 1.05, -6.0]\n",
+    "closed_yaw_deg = 90.0\n",
+    "inside_yaw_deg = 0.0\n",
+    "open_limit_deg = -95.0\n",
+    "locked = false\n",
+    "\n",
+    "[gate]\n",
+    "label = \"yard gate\"\n",
+    "hinge = [7.55, 1.05, -9.45]\n",
+    "closed_yaw_deg = 0.0\n",
+    "inside_yaw_deg = 90.0\n",
+    "open_limit_deg = 95.0\n",
+    "locked = true\n",
+    "\n",
+    "[shed]\n",
+    "label = \"shed door\"\n",
+    "hinge = [17.55, 1.05, -9.45]\n",
+    "closed_yaw_deg = 0.0\n",
+    "inside_yaw_deg = 90.0\n",
+    "open_limit_deg = 95.0\n",
+    "locked = true\n",
+    "\n",
+    "[hatch]\n",
+    "label = \"hatch\"\n",
+    "hinge = [27.55, 1.05, -9.45]\n",
+    "closed_yaw_deg = 0.0\n",
+    "inside_yaw_deg = 90.0\n",
+    "open_limit_deg = 95.0\n",
+    "locked = false\n",
 );
 
 /// Where each hand-hung door's PROMPT is, world metres — the point a script
@@ -10036,6 +10036,16 @@ pub fn gameplay_controller() -> BlueprintClass {
                 call(
                     &["item", "give"],
                     vec![me(), s("bandage"), Expr::Lit(Lit::Int(3))],
+                ),
+                // The second weapon, in the bag from the start — so the gate's
+                // wheel station has something to cycle TO. See
+                // `GAMEPLAY_ITEMS_TOML` for the measurement that put it here.
+                // The order is load-bearing: bandages take slot 0 and this takes
+                // slot 1, so the rifle the script picks up takes slot 2 and the
+                // panel's focus walk is a fixed number of presses.
+                call(
+                    &["item", "give"],
+                    vec![me(), s("pistol"), Expr::Lit(Lit::Int(1))],
                 ),
                 call(&["health", "set"], vec![me(), f(GAMEPLAY_HERO_J)]),
             ],

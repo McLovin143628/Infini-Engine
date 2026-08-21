@@ -235,6 +235,28 @@ impl PlayerUi {
         // belong to one of them. The modal one wins, which is what modal means.
         if !self.menu.open {
             if self.inventory.open {
+                // **THE KEY THAT OPENED IT CLOSES IT** — the owner's table says
+                // `I = inventory open/close`, and an open panel takes every key
+                // it is given (that is `inf_ui::inventory`'s own rule), so the
+                // press would never reach the host's `just_pressed` edge and the
+                // panel could only be left through `Escape`. The I6 audit
+                // measured that: `I` opened the bag and `I` did nothing.
+                //
+                // Asked of the **live map** rather than by literal, unlike the
+                // dialog's own `"Escape" | "Tab"` arm: the panel is opened by a
+                // binding a player can change, and a close key frozen at `KeyI`
+                // would strand anyone who moved it.
+                if map
+                    .owners_of_key(code)
+                    .iter()
+                    .any(|(name, axis, _)| !axis && *name == inf_input::actions::INVENTORY)
+                {
+                    self.inventory.set_open(false);
+                    return KeyVerdict {
+                        consumed: true,
+                        ..Default::default()
+                    };
+                }
                 let out = inventory::handle(
                     &mut self.inventory,
                     &self.bag,
@@ -694,5 +716,63 @@ mod tests {
         unsafe { std::env::remove_var(SETTINGS_DIR_ENV) };
         // Whatever it falls back to, it is a real path with a parent.
         assert!(settings_dir().components().count() > 0);
+    }
+
+    /// **`I` OPENS THE BAG AND `I` CLOSES IT** — the owner's control table's own
+    /// words, armed by the I6 audit.
+    ///
+    /// It could not, and the reason is structural rather than a typo: an open
+    /// panel consumes **every** key (`inf_ui::inventory`'s own rule, and the
+    /// dialog's), so the press never reached `InputState` and the host's
+    /// `just_pressed(INVENTORY)` edge — the thing that opened it — could never
+    /// fire again. `Escape` was the only way out.
+    ///
+    /// The close is decided against the **live map**, so the third block below
+    /// is the half a literal `"KeyI"` would fail.
+    #[test]
+    fn the_inventory_key_closes_the_panel_it_opened_and_a_rebound_one_does_too() {
+        let dir = tmp();
+        let (mut ui, mut map) = PlayerUi::open(dir.clone(), inf_input::default_map());
+        // Closed: the key belongs to the game, and the HOST's edge opens it.
+        assert!(!ui.key("KeyI", true, &mut map).consumed);
+        ui.toggle_inventory();
+        assert!(ui.inventory.open);
+
+        // Open: the same key closes it, and is taken rather than forwarded — a
+        // key that reached the game would move the character behind the panel.
+        let v = ui.key("KeyI", true, &mut map);
+        assert!(v.consumed, "the panel let its own key through to the game");
+        assert!(
+            !ui.inventory.open,
+            "`I` opened the bag and `I` could not close it"
+        );
+
+        // Rebound: the map is asked, so the new key closes it and the old one is
+        // just another key the open panel eats.
+        let mut rebound = inf_input::default_map();
+        rebound.remove_action_source(
+            inf_input::actions::INVENTORY,
+            &inf_input::ActionSource::Key("KeyI".into()),
+        );
+        rebound.bind_key(inf_input::actions::INVENTORY, "KeyB");
+        ui.toggle_inventory();
+        assert!(ui.inventory.open);
+        assert!(ui.key("KeyI", true, &mut rebound).consumed);
+        assert!(
+            ui.inventory.open,
+            "a key that is no longer bound to the inventory closed the panel"
+        );
+        assert!(ui.key("KeyB", true, &mut rebound).consumed);
+        assert!(
+            !ui.inventory.open,
+            "the rebound key did not close the panel"
+        );
+
+        // …and `Escape` still does, because a player must always have a way out
+        // (the I5 rule that `Escape` cannot be bound away).
+        ui.toggle_inventory();
+        assert!(ui.key("Escape", true, &mut map).consumed);
+        assert!(!ui.inventory.open);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

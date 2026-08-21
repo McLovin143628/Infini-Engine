@@ -553,13 +553,24 @@ fn run_course(sim: RuntimeSim) -> Run {
         run.notes.push("E picked up 1 rifle".into());
     }
 
-    // ── 2. I opens the panel, F equips, Esc closes ──
+    // ── 2. I opens the panel, F equips, I closes it again ──
+    //
+    //    The bag is `[bandage x3, pistol, rifle]` — `BeginPlay` stocked the
+    //    first two and station 1 picked the third up — so the focus walks two
+    //    slots to reach the rifle. Nothing is equipped when this station starts,
+    //    which is what makes the `F` observable a change rather than a re-write.
+    assert_eq!(
+        h.equipped(),
+        None,
+        "something was equipped before the panel"
+    );
     for i in 0..14 {
         let keys: &[&str] = match i {
             1 => &["KeyI"],
-            5 => &["ArrowRight"],
-            7 => &["KeyF"],
-            11 => &["Escape"],
+            4 => &["ArrowRight"],
+            6 => &["ArrowRight"],
+            8 => &["KeyF"],
+            11 => &["KeyI"],
             _ => &[],
         };
         if i == 2 && h.ui.inventory.open {
@@ -573,20 +584,41 @@ fn run_course(sim: RuntimeSim) -> Run {
         run.notes
             .push("the panel equipped the rifle from slot focus".into());
     }
-    assert!(!h.ui.inventory.open, "Escape did not close the panel");
+    // **`I` closed it**, which is the other half of the owner's `I = inventory
+    // open/close` and the half an open panel's own "take every key" rule makes
+    // hard: the press cannot reach the host's edge, so the panel has to answer
+    // it. (The I6 audit; `Escape` still works and `inf_player::ui` arms that.)
+    assert!(
+        !h.ui.inventory.open,
+        "`I` did not close the panel it opened"
+    );
 
-    // ── 3. The wheel changes weapon ── with one weapon in the bag it cycles
-    //    back onto it, which is still the wheel doing its job: what the arm
-    //    measures is that the SIGN reached a consumer.
+    // ── 3. The wheel changes weapon ──
+    //
+    //    **Two notches, and the equipped id must MOVE and come back.** With one
+    //    weapon in the bag the wheel cycles onto the weapon it is already on, so
+    //    "the equipped id is unchanged" is a claim a wheel wired to nothing
+    //    satisfies perfectly — measured: deleting `cycle_equipped`'s call left
+    //    this whole gate green. The fixture carries a pistol for exactly this,
+    //    and the second notch puts the rifle back so the stations after this one
+    //    are about the rifle.
     let before = h.equipped();
+    assert_eq!(before.as_deref(), Some("rifle"));
     for i in 0..6 {
         h.frame(&[], (0.0, 0.0), if i == 1 { 1.0 } else { 0.0 }, &[]);
         rec(&mut h, &mut run);
     }
-    if h.equipped().is_some() && h.equipped() == before {
+    let switched = h.equipped();
+    for i in 0..6 {
+        h.frame(&[], (0.0, 0.0), if i == 1 { 1.0 } else { 0.0 }, &[]);
+        rec(&mut h, &mut run);
+    }
+    let back = h.equipped();
+    if switched.as_deref() == Some("pistol") && back == before {
         run.saw(Verb::ScrollSwitch);
-        run.notes
-            .push(format!("the wheel left {:?} equipped", h.equipped()));
+        run.notes.push(format!(
+            "the wheel moved {before:?} -> {switched:?} -> {back:?}"
+        ));
     }
 
     // ── 4. Turn to face the target at −X, aim, fire ──
@@ -1068,6 +1100,60 @@ fn the_trace_carries_the_doors_the_bag_the_magazine_and_the_body() {
         assert!(
             all.windows(part.len()).any(|w| w == part),
             "the {name} section is not inside `state_bytes`"
+        );
+    }
+
+    // ── …and the two the emptiness above cannot speak for (the I6 audit) ──
+    //
+    // A section asserted EMPTY is satisfied perfectly by a fold that never
+    // appends it, and so is a magazine nobody has loaded: measured, deleting
+    // either `door_state_bytes` or `weapon_state_bytes` from
+    // `RuntimeSim::state_bytes` left **every** `inf-player` test binary green,
+    // this arm included. So the world is moved until both sections have
+    // something in them, and then the buffer is asked for them by content.
+    //
+    // Through the engine's own doors — the E key's `use_door` and the one
+    // `equip_weapon` a Blueprint and the panel both go through — rather than by
+    // writing the components, so a section that stopped being folded is caught
+    // and a section that stopped being *reachable* is caught too.
+    let front = inf_physics::d3::door::placements(sim.world())
+        .into_iter()
+        .find(|p| {
+            (inf_ecs::door::prompt_position(p) - glam::DVec3::new(0.0, 1.05, -6.0)).length() < 1.0
+        })
+        .expect("the fixture's front door");
+    let feet = inf_ecs::door::prompt_position(&front) - glam::DVec3::new(0.0, 1.05, 1.0);
+    let verdict = inf_physics::d3::door::use_door(sim.world_mut(), front.guid, feet);
+    assert_eq!(
+        verdict,
+        inf_ecs::door::DoorVerdict::Opening,
+        "the front door did not open for the one resolution site"
+    );
+    inf_ecs::item::give(sim.world_mut(), GAMEPLAY_HERO_GUID, "rifle", 1);
+    assert!(
+        inf_physics::d3::gameplay::equip_weapon(sim.world_mut(), GAMEPLAY_HERO_GUID, "rifle"),
+        "the rifle did not equip"
+    );
+    sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+
+    let world = sim.world();
+    let doors = inf_ecs::door::door_state_bytes(world);
+    let weapons = inf_ecs::weapon::weapon_state_bytes(world);
+    println!(
+        "once a door is open and a rifle is equipped: {} door bytes, {} weapon bytes",
+        doors.len(),
+        weapons.len()
+    );
+    let all = sim.state_bytes();
+    for (name, part) in [("doors", doors), ("weapons", weapons)] {
+        assert!(
+            !part.is_empty(),
+            "the {name} section is empty in a world that has one"
+        );
+        assert!(
+            all.windows(part.len()).any(|w| w == part),
+            "the {name} section is not inside `state_bytes` — the trace two hosts \
+             compare does not carry it, and neither host would notice"
         );
     }
 }

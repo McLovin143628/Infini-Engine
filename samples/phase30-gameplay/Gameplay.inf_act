@@ -32,7 +32,7 @@
                 "args": [
                   {
                     "Lit": {
-                      "Str": "[rifle]\nlabel = \"Rifle\"\nstack_max = 1\nmass_kg = 3.6\n[rifle.weapon]\ndamage_j = 1700.0\nrounds_per_minute = 600.0\nmagazine = 30\nreserve = 120\nreload_s = 2.0\nspread_deg = 0.0\nrange_m = 400.0\nautomatic = true\n\n[bandage]\nlabel = \"Bandage\"\nstack_max = 5\nmass_kg = 0.1\n"
+                      "Str": "[rifle]\nlabel = \"Rifle\"\nstack_max = 1\nmass_kg = 3.6\n[rifle.weapon]\ndamage_j = 1700.0\nrounds_per_minute = 600.0\nmagazine = 30\nreserve = 120\nreload_s = 2.0\nspread_deg = 0.0\nrange_m = 400.0\nautomatic = true\n\n[pistol]\nlabel = \"Pistol\"\nstack_max = 1\nmass_kg = 0.9\n[pistol.weapon]\ndamage_j = 600.0\nrounds_per_minute = 400.0\nmagazine = 12\nreserve = 36\nreload_s = 1.4\nspread_deg = 0.0\nrange_m = 60.0\nautomatic = false\n\n[bandage]\nlabel = \"Bandage\"\nstack_max = 5\nmass_kg = 0.1\n"
                     }
                   }
                 ]
@@ -124,6 +124,43 @@
                   {
                     "Lit": {
                       "Int": 3
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ExprStmt": {
+              "Call": {
+                "path": [
+                  "item",
+                  "give"
+                ],
+                "args": [
+                  {
+                    "Call": {
+                      "path": [
+                        "vars",
+                        "get"
+                      ],
+                      "args": [
+                        {
+                          "Lit": {
+                            "Str": "entity"
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Str": "pistol"
+                    }
+                  },
+                  {
+                    "Lit": {
+                      "Int": 1
                     }
                   }
                 ]
