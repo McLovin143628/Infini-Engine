@@ -10,7 +10,7 @@
 //! ```text
 //! sky → [depth prepass] → [SSAO] → mesh/skinned/terrain (sample AO) → grid →
 //! sprite → debug → resolve(MSAA→scene_hdr) → [TAA] → bloom → tonemap(→LDR) →
-//! mask → composite(→swapchain)
+//! ui → mask → composite(→swapchain)
 //! ```
 //!
 //! Bracketed passes are gated by [`RenderSettings`]; at the defaults (bloom off,
@@ -780,6 +780,16 @@ impl EngineRenderer {
         graph.add(passes::taa::TaaNode::new(gpu, &view_bgl));
         graph.add(passes::bloom::BloomNode::new(gpu));
         graph.add(passes::tonemap::TonemapNode::new(gpu));
+        // **The in-game UI, AFTER the tonemap** (island wave I5): a menu drawn
+        // into the HDR scene target would be bloomed, temporally reprojected and
+        // colour-graded along with the world behind it, and depth-tested against
+        // the wall the player is standing next to. It composites over the
+        // display-referred frame instead, in screen pixels, with `LoadOp::Load`.
+        //
+        // A **no-op** on every frame nobody opened a menu on: `RenderScene::ui`
+        // is empty and the node returns before it touches the encoder. That is
+        // what the frozen goldens rest on and it is asserted, not assumed.
+        graph.add(passes::ui::UiNode::new(gpu));
         // The mask feeds the composite's outline dilate; it renders into the
         // single-sample mask target independently of the scene resolve.
         graph.add(passes::mask::MaskNode::new(gpu, &view_bgl));

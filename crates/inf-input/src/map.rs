@@ -197,6 +197,67 @@ impl InputMap {
         Some(list.remove(i))
     }
 
+    /// **Remove one exact source from `action`**, returning whether it was
+    /// there.
+    ///
+    /// [`clear_desk_source`](Self::clear_desk_source) removes whichever desk
+    /// source is *first*, which is what a row's "clear" button means. This
+    /// removes the one a conflict is **about** — and the two differ whenever an
+    /// action has more than one key, which the shipped table's `jump` (Space and
+    /// a pad button) and `move_y` (W and Up) both do. A conflict resolved with
+    /// the first-source door would take the wrong key away.
+    pub fn remove_action_source(&mut self, action: &str, source: &ActionSource) -> bool {
+        let Some(list) = self.actions.get_mut(action) else {
+            return false;
+        };
+        let before = list.len();
+        list.retain(|s| s != source);
+        before != list.len()
+    }
+
+    /// **Remove one exact key from `axis`**, whichever sign it contributes on,
+    /// returning whether it was there. The twin of
+    /// [`remove_action_source`](Self::remove_action_source), and it exists for
+    /// the same reason: `move_y` is bound to W *and* Up on its positive half.
+    pub fn remove_axis_key(&mut self, axis: &str, code: &str) -> bool {
+        let Some(list) = self.axes.get_mut(axis) else {
+            return false;
+        };
+        let before = list.len();
+        list.retain(|s| !matches!(s, AxisSource::Key { code: c, .. } if c == code));
+        before != list.len()
+    }
+
+    /// Every key bound to `axis` on the given sign, in binding order — what a
+    /// conflict check has to walk, because a row shows its *first* key and can
+    /// answer a press with any of them.
+    pub fn axis_keys(&self, axis: &str, positive: bool) -> Vec<&str> {
+        self.axes
+            .get(axis)
+            .map(|list| {
+                list.iter()
+                    .filter_map(|s| match s {
+                        AxisSource::Key { code, scale }
+                            if (*scale > 0.0) == positive && *scale != 0.0 =>
+                        {
+                            Some(code.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Every keyboard/mouse source bound to `action`, in binding order — the
+    /// action twin of [`axis_keys`](Self::axis_keys).
+    pub fn desk_sources(&self, action: &str) -> Vec<&ActionSource> {
+        self.actions
+            .get(action)
+            .map(|list| list.iter().filter(|s| Self::is_desk(s)).collect())
+            .unwrap_or_default()
+    }
+
     /// The key bound to `axis` on the given **sign** — the half of an axis a
     /// bindings table shows as its own row ("Move Forward" is `move_y` at `+1`).
     ///

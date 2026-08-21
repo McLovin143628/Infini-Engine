@@ -1,0 +1,17 @@
+[package]
+name = "inf-ui"
+description = "The engine's in-game UI layer: screen-space panels, the settings dialog, key rebinding, toasts, and the shipped game's settings file."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+glam = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+inf-render-2d = { workspace = true }
+inf-input = { workspace = true }
+inf-asset = { workspace = true }

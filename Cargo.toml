@@ -10,6 +10,7 @@ members = [
     "crates/inf-scene",
     "crates/inf-render",
     "crates/inf-render-2d",
+    "crates/inf-ui",
     "crates/inf-mesh",
     "crates/inf-vgeom",
     "crates/inf-dcc",
@@ -406,6 +407,15 @@ inf-project = { path = "crates/inf-project" }
 inf-scene = { path = "crates/inf-scene" }
 inf-render = { path = "crates/inf-render" }
 inf-render-2d = { path = "crates/inf-render-2d" }
+# inf-ui = the engine's IN-GAME ui layer (island wave I5). Ring 0, and
+# dependency-light on purpose: glam + serde + toml + inf-render-2d + inf-input +
+# inf-asset, every one already pinned above, so the shipped player's menu adds
+# NO new external crate to the tree or to cargo-deny. It draws in SCREEN pixels
+# through its own render node, which is why it takes `inf-render-2d` (for the
+# instance shape and the built-in font) and NOT `inf-render` — the node lives in
+# `inf-render`, exactly as the sprite node does, and for the same acyclicity
+# reason that crate's own header gives.
+inf-ui = { path = "crates/inf-ui" }
 inf-mesh = { path = "crates/inf-mesh" }
 inf-vgeom = { path = "crates/inf-vgeom" }
 # inf-dcc = the embedded DCC's half-edge mesh kernel (P23.3). Ring 0, and

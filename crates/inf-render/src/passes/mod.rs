@@ -27,6 +27,7 @@ pub mod taa;
 pub mod terrain;
 pub mod tonemap;
 pub mod translucent;
+pub mod ui;
 pub mod underwater;
 pub mod vgeom;
 pub mod visbuffer;
@@ -1455,6 +1456,12 @@ mod shader_compose_tests {
             ("vgeom_hzb", include_str!("../shaders/vgeom_hzb.wgsl")),
             ("shadow_depth", include_str!("../shaders/shadow_depth.wgsl")),
             ("tonemap", include_str!("../shaders/tonemap.wgsl")),
+            // The in-game UI (island wave I5). Standalone for the reason
+            // `shadow_depth` and the VSM page rasters are: it owns its
+            // `@group(0)` and prepends nothing, because a UI has no camera —
+            // composing it would bind a `view` uniform it never reads at the
+            // binding its own params occupy.
+            ("ui", include_str!("../shaders/ui.wgsl")),
             // The two standalone COMPUTE modules the streamers compile. P26.4's
             // was missing from this list — the law is "every module the tree
             // compiles is validated here", and `vt_feedback` was validated only

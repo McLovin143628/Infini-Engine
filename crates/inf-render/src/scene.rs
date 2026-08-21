@@ -2385,6 +2385,18 @@ pub struct RenderScene {
     /// Immediate-mode debug lines, rebuilt by the host each frame
     /// (render-local space — not gated by `version`).
     pub debug: DebugDraw,
+    /// **The in-game UI**, in SCREEN pixels (island wave I5).
+    ///
+    /// Rebuilt by the host each frame from `inf_ui`'s pure projections, and — like
+    /// `debug` and unlike `sprites` — **not gated by `version`**, for the reason
+    /// the same word appears on both: a menu is a function of what the player has
+    /// pressed, not of what the document contains, so a version that only moves
+    /// when the scene does would freeze the cursor on the row it started on.
+    ///
+    /// Empty on every frame nobody opened a menu on, and `passes::ui` returns
+    /// before it touches the encoder when it is — which is what the frozen
+    /// goldens rest on.
+    pub ui: inf_ui::UiDrawList,
 }
 
 impl RenderScene {

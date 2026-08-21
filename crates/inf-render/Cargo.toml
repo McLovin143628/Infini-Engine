@@ -17,6 +17,12 @@ inf-math = { workspace = true }
 # existing in WGSL beside the one P20.2's buoyancy samples.
 inf-water = { workspace = true }
 inf-render-2d = { workspace = true }
+# The in-game UI layer (island wave I5). Ring 0 -> Ring 0, one direction only:
+# `inf-ui` is pure CPU (it takes `inf-render-2d` for the instance shape and the
+# built-in font, and nothing else from this crate's world), and the render NODE
+# lives here for exactly the reason the sprite node does -- a node in `inf-ui`
+# would make `inf-render -> inf-ui -> inf-render`.
+inf-ui = { workspace = true }
 # Virtualized geometry (P13.1b GPU meshlet path): the renderer uploads a
 # `VgeomMesh` (meshlet DAG) into storage buffers and culls/selects on the GPU.
 # Ring 0 → Ring 0; the shipping renderer consumes the cook-derived data model.

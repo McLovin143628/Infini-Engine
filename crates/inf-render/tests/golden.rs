@@ -156,6 +156,67 @@ fn check_golden_with(
     a
 }
 
+/// **THE UI NODE MOVES NO PIXEL UNTIL SOMETHING IS IN IT** (island wave I5).
+///
+/// This is what the 54 frozen goldens rest on. A new node in the graph is a new
+/// chance for a frame to change, so the claim is measured on both sides rather
+/// than argued: with an empty [`inf_ui::UiDrawList`] — which is every golden
+/// scene, and the default — the frame is **byte-identical** to the same frame,
+/// and with one quad in it the frame **differs**.
+///
+/// The second half is what makes the first mean something: without it, a node
+/// that silently failed to draw at all would pass.
+#[test]
+fn the_ui_node_is_a_no_op_on_an_empty_list_and_draws_when_it_is_not() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let scene = RenderScene {
+        grid_enabled: true,
+        ..Default::default()
+    };
+    assert!(
+        scene.ui.is_empty(),
+        "the default scene ships a UI, so every golden already has one in it"
+    );
+    let view = overlook_view();
+    let bare = render_with(&gpu, &scene, &view, RenderSettings::default());
+    let again = render_with(&gpu, &scene, &view, RenderSettings::default());
+    assert_eq!(
+        bare, again,
+        "the frame is not bit-deterministic, so the comparison below means nothing"
+    );
+
+    // One opaque white rect over the middle of the frame.
+    let mut with_ui = scene.clone();
+    with_ui.ui = inf_ui::UiDrawList::new(glam::Vec2::new(W as f32, H as f32));
+    with_ui.ui.rect(
+        inf_ui::Rect::new(
+            W as f32 * 0.25,
+            H as f32 * 0.25,
+            W as f32 * 0.5,
+            H as f32 * 0.5,
+        ),
+        [1.0, 1.0, 1.0, 1.0],
+    );
+    let drawn = render_with(&gpu, &with_ui, &view, RenderSettings::default());
+    assert_ne!(
+        bare, drawn,
+        "the UI node drew nothing, so the emptiness arm above cannot fail"
+    );
+    // …and it drew where it was told: the centre pixel is white and a corner is
+    // not, so the node is not merely clearing the frame.
+    let centre = px(&drawn, W / 2, H / 2);
+    let corner = px(&drawn, 2, 2);
+    assert!(
+        centre[0] > 240 && centre[1] > 240 && centre[2] > 240,
+        "the centre is {centre:?}, not the white rect that was asked for"
+    );
+    assert_eq!(
+        corner,
+        px(&bare, 2, 2),
+        "a corner outside the rect moved, so the node is drawing over the whole frame"
+    );
+}
+
 #[test]
 fn golden_grid_and_sky() {
     let Some(gpu) = gpu_or_skip() else { return };
