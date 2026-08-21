@@ -1871,6 +1871,71 @@ mutation that names them:
 that reached it drove the character to `z = −3.85e13`. A gate whose station passes because the
 simulation happened to settle is a gate that has not been falsified.
 
+## The I5 audit (adversarial, `60d6f1d..` this tree)
+
+**Every headline measurement HELD on re-measurement**, from the tests that print them —
+`3.750 / 1.783 / 6.500` m/s through the shipped keys; the C matrix at *slide 13 steps, 0
+dive launches* against *1 dive launch, 0 slide steps*; the menu at **137 frames, 0 fixed
+steps**; the rebinding at B + W **6.500** and Shift + W **3.750**; the dive launch
+`(0, 2.3365, 5.5)` against the dry-land jump `(0, 4.3365, 0)`; the ragdoll's *pelvis
+y = −0.321 → placed 0.400* (the old rule: −0.321) and its limb ceiling *4 000 m/s in,
+8.449 out, against 40.0*; the controls page's 0.15 → 0.225 deg/count, the invert, the
+0.25 → 0.30 s threshold and the three buses at 0.8. `phase29_gate` is **16 of 16** with two
+probes ignored, `player_core_gate` **6 of 6**, `movement_parity` and `character_demo` green.
+The committed `input.toml` arithmetic recomputes **exactly**: 2 072 → 2 423 bytes,
+`--numstat` +33 / −9, 178 → 202 lines, and the generator lock is a whole-content compare
+against `toml::to_string_pretty(&default_map())` rather than a byte count.
+
+**The merged tree was checked first**, because the wave's physics edits and the
+`bridge_sync` hotfix's scratch buffers had never run together: `bridge_sync_scaling` 4/4 and
+`step_cost_3d` 8/8, then the whole of `inf-physics` green.
+
+**Three defects, and one arm that could not fail:**
+
+| finding | what shipped | now |
+|---|---|---|
+| **A1 · a player could permanently lock themselves out of the settings dialog** | the *Menu* row is a table row like any other: a left arrow on it **cleared** `Tab`, and a capture on any other row could press `Tab`, be told the menu owned it, press Enter and **take** it. Either writes a settings file that outlives the process, so the screen that would undo it is the thing that was unbound. `RESERVED_KEYS`' own doc claimed this was already refused — *"one who bound the menu key to a game verb would have no way back into the settings that let them undo it"* — and only the Escape/Enter half was built. The **editor's** preferences panel reached the same edit through `apply_row`, which would ship a project *nobody* can open the settings of | `bindings::guarded` — one rule, both surfaces, applying an edit and taking the **whole** edit back if it left `menu_is_unreachable`. Plus `restore_menu_if_unreachable` at the boot door for the case an edit door cannot cover: a file, which outlives the build that wrote it |
+| **A2 · the editor's pause was a half-built mirror with no arm at all** | `SimSession::sim_paused` shipped as a declared MIRROR of `RuntimeSim`'s. Deleting the check in `step_once` left **every test in the tree green**, and `tick` — the *other* door, the one a host drives by elapsed time — never had the check at all, so a paused Simulate would have advanced *and* banked the frames to spend in one burst on resume. (The same mutation on the player's `step_once` reds **four** arms.) The I4b law: a mirror needs its own arm | the check in `tick`, mirroring `run_frame`'s accumulate-nothing, and `a_paused_session_runs_no_fixed_step_through_either_door` — both doors, the no-banking claim, and a control at each |
+| **A3 · the merged candidate walk's `Guid` sort had no falsifier** | `d3::interact::candidates` concatenates two already-sorted lists and sorts the union, and its own comment says why ("a seat and an item at exactly the same distance must resolve the same way in both hosts"). **Deleting the sort killed nothing**: every other arm puts its candidates at different distances, where the tie-break never runs | `a_seat_and_an_item_at_the_same_distance_break_by_guid` puts the item **on the seat** — an exact tie, asserted exact — with a lower `Guid` than the chassis, so "lowest guid wins" and "whichever list came first wins" give different answers |
+| **A4 · an arm whose failure message named a defect it could not see** | `the_editors_surface_reports_a_conflict_and_swaps_only_when_asked` swaps `KeyW`, which is Move Forward's **first** key — and "remove the exact token" and "remove whichever desk source is first" are the same expression there. Its message reads *"the swap took Move Forward's other key too"* | the same arm now also swaps `ArrowUp`, the **second** key, where the two rules differ. *(The property was not unheld: `menu`'s own `a_capture_can_bind_the_keys_the_dialog_navigates_with` swaps a second key and dies under the mutation. What was missing was the editor surface's own.)* |
+
+**Fifteen mutations, four of the implementer's and eleven new**, each run to the point of
+naming which arm dies:
+
+| mutation | dies at |
+|---|---|
+| the ragdoll's hips-inside-floor placement reverts to `t.y − (half + radius)` | `a_ragdoll_that_ends_inside_the_floor_leaves_the_character_on_it`, alone in four binaries |
+| the limb speed ceiling is deleted | `a_ragdoll_limb_cannot_exceed_the_terminal_speed`, alone |
+| the dive drops `&& want_sprint` | `a_dive_needs_a_sprint_and_the_refusal_is_a_value`, alone in the crate |
+| the slide's recorded refusal is deleted | `a_slide_needs_sprint_speed_and_ends_in_a_crouch`, alone in the crate |
+| `interact::resolve`'s strict `<` becomes `<=` | `a_tie_breaks_by_guid_whichever_order_the_walk_arrived_in` |
+| `candidates_in_world` stops filtering on `enabled` | the rule's own arm **and** the 22nd vehicle arm — the other **21 P29.7 arms stay green** |
+| `classify_press` drops `prev_hold_s < t` (a long press fires every step) | the rule's arm **and** `the_menu_pauses_the_sim_and_the_rebinding_takes_effect` |
+| `HoldClock` drops the release-carry | three arms across `inf-input` and the player gate |
+| the conflict swap takes the row instead of the exact token | `a_capture_can_bind_the_keys_the_dialog_navigates_with` — the arm that swaps a **second** key |
+| the dialog's `_ => {}` becomes `consumed = false` | two arms, in `inf-ui` and in the player's own routing |
+| `PlayerUi::key` consumes releases | `the_dialogs_keys_never_reach_the_resolved_input` |
+| `RuntimeSim::step_once` ignores `sim_paused` | **four** arms of `player_core_gate` |
+| `SimSession::step_once` ignores `sim_paused` | **nothing** — finding A2 |
+| `d3::interact::candidates` stops sorting | **nothing** — finding A3 |
+| `KeyW` is bound back to `jump` | **six** arms across three crates, including the committed-sample generator lock |
+
+**What the audit re-measured and did not move**: `inf-ui` is Ring-0 clean (no Tauri/winit/wgpu
+name in it) and adds **no external crate**; the `ui` render node sits after the tonemap and
+before mask/composite, returns before touching the encoder on an empty list, and the goldens
+are **54, byte-identical**; the `Interactable` component is runtime-only and no schema moved;
+`phase29_gate`'s anti-vacuity list is intact at **14 forced + 4 reserved = 18 = `ALL_MODES`**,
+with `reserved_slot` cross-checked variant by variant; `water_surface_at` is the water index's
+own `highest_surface_at` at `O(bodies over the cell)` and `O(1)` with no water, on the sim
+clock; and the E key has exactly **one** resolution site in the movement step, which both
+hosts run — the prompt asks the same function, so what the player is told and what the press
+does are one call.
+
+**The ragdoll bound is labelled a bound in all three places** the mandate asked for — the
+`step_ragdoll` comment ("This is a **bound, not a cure**"), the ROADMAP block and the ledger
+above — and the carried instability is named with its number (**z = −3.85e13** from a 2.7 cm
+entry shift) in *What is still open*, below.
+
 ## What is still open after I5
 
 1. **The ragdoll is chaotically unstable and only bounded.** A 2.7 cm difference in entry is
