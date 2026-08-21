@@ -675,8 +675,24 @@ pub fn apply_break(spec: &DoorSpec, state: &mut DoorState, verdict: &BreakVerdic
     if !verdict.broke {
         return;
     }
-    state.locked = false;
-    state.lock_broken = true;
+    // **A LOCK ONLY BREAKS IF IT WAS HOLDING** (I6 audit).
+    //
+    // [`try_break`] answers `broke` for a door that was merely *shut* as well as
+    // for one that was locked — nothing was holding it, so it opens for free and
+    // that is the right verdict. Marking it `lock_broken` anyway was not: a
+    // broken lock cannot be re-engaged (that is what breaking it buys), so one
+    // sprint through a house's own unlocked front door retired that door's lock
+    // for the session, and the lock verb stopped being offered on either face.
+    // Every door the building grammar emits starts unlocked, so on the shipped
+    // city that was every door in it — against a mandate whose first clause is
+    // that doors have locks.
+    //
+    // Read from the STATE rather than from `verdict.required_j`, because a lock
+    // an author gave no area is engaged and costs zero: it should still break.
+    if state.locked {
+        state.locked = false;
+        state.lock_broken = true;
+    }
     state.powered = false;
     state.target_deg = spec.open_limit_deg;
     // A leaf pushed with exactly a lock's worth of spare energy swings at
@@ -1126,6 +1142,24 @@ mod tests {
         // the sprint — so the build is where it belongs, which is the same
         // reasoning `interact::VIEW_CONE_EPSILON_DEG`'s arm gives for its own.
         const { assert!(BREACH_SPEED_MPS > 3.75 && BREACH_SPEED_MPS < 6.5) };
+        // …and the same claim **derived** rather than restated (I6 audit): the
+        // const above pins two literals, so a wave that retuned the character's
+        // own speeds would leave it passing while the sentence it encodes went
+        // false. `CharacterMovement::default()` is not a const fn, so this half
+        // runs.
+        let cm = crate::components::CharacterMovement::default();
+        println!(
+            "the character's own defaults are run {} m/s and sprint {} m/s",
+            cm.run_speed_mps, cm.sprint_speed_mps
+        );
+        assert!(
+            BREACH_SPEED_MPS > cm.run_speed_mps && BREACH_SPEED_MPS < cm.sprint_speed_mps,
+            "the breach gate is no longer between the run ({}) and the sprint ({})",
+            cm.run_speed_mps,
+            cm.sprint_speed_mps
+        );
+        assert!((cm.run_speed_mps - 3.75).abs() < 1e-9);
+        assert!((cm.sprint_speed_mps - 6.5).abs() < 1e-9);
         assert!((gate - 1000.0).abs() < 1e-9);
         assert!((sprint - 1690.0).abs() < 1e-9);
         // The energy gate is not the interesting one at these speeds — the SPEED
@@ -1306,6 +1340,53 @@ mod tests {
             (open - shut).length()
         );
         assert!((open - shut).length() > spec.width_m * 0.25);
+    }
+
+    /// **THE WEAKEST BREACH STILL REACHES THE FRAME** (I6 audit).
+    ///
+    /// `apply_break` gives the leaf `sqrt(remainder / lock) × BREACH_SWING_DPS`
+    /// with a floor of `0.35`, and nothing pushes it afterwards — so whether a
+    /// door that gave with **exactly** nothing to spare ends up open or ends up
+    /// ajar is a question about the drag, and it had no arm. `d3::door` used to
+    /// carry a `target_deg` re-write that claimed to finish the swing "under
+    /// power" and did not (it left `powered` false and wrote the value
+    /// `apply_break` had already written); it is gone, and this is what makes
+    /// its absence safe rather than lucky.
+    ///
+    /// Both signs, because a leaf that opens the other way is a leaf whose
+    /// clamp has the other bound.
+    #[test]
+    fn a_breach_with_nothing_to_spare_still_swings_the_leaf_to_its_stop() {
+        for limit in [DEFAULT_OPEN_LIMIT_DEG, -DEFAULT_OPEN_LIMIT_DEG] {
+            let spec = DoorSpec {
+                locked_at_spawn: true,
+                open_limit_deg: limit,
+                ..Default::default()
+            };
+            let mut s = DoorState::fresh(&spec);
+            // Exactly the lock's own worth: it breaks with a remainder of zero,
+            // which is the floor case.
+            let v = try_break(&spec, &s, spec.lock_energy_j());
+            assert!(v.broke);
+            assert_eq!(v.remainder_j, 0.0, "this arm is about the floor");
+            apply_break(&spec, &mut s, &v);
+            let launch = s.vel_dps;
+            let mut steps = 0;
+            while !s.is_at_rest() && steps < 3_000 {
+                advance(&spec, &mut s, DT, false);
+                steps += 1;
+            }
+            println!(
+                "a breach with nothing to spare launched the leaf at {launch} deg/s and it \
+                 settled at {} of {limit} degrees after {steps} steps",
+                s.open_deg
+            );
+            assert_eq!(
+                s.open_deg, limit,
+                "the leaf coasted to a stop short of its own frame"
+            );
+            assert!(s.is_open(&spec));
+        }
     }
 
     /// **The lock verb has a side.**

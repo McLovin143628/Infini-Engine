@@ -264,8 +264,34 @@ pub fn candidates(world: &EcsWorld, band: &SimBand, feet: DVec3) -> Vec<Interact
 }
 
 /// The one door whose guid is `guid`, if the world has it.
+///
+/// Through the **visitor**, not through [`placements`], for the reason that
+/// function's own doc gives and the I6 audit measured: a city plans 19 790
+/// doorways, and collecting them to find one would allocate a label string for
+/// every door in the world so that 19 789 of them could be dropped. This is
+/// `O(doorways)` pointer bumps and **one** allocation.
 pub fn placement_of(world: &EcsWorld, guid: Uuid) -> Option<DoorPlacement> {
-    placements(world).into_iter().find(|p| p.guid == guid)
+    if let Some(p) = door::doors_in_world(world)
+        .into_iter()
+        .find(|p| p.guid == guid)
+    {
+        return Some(p);
+    }
+    let mut found: Option<DoorPlacement> = None;
+    door::for_each_volume_doorway(world, |volume, i, slot| {
+        if found.is_some() || pcg_doorway_guid(volume, i) != guid {
+            return;
+        }
+        if let Some(spec) = derived_spec(slot) {
+            found = Some(DoorPlacement {
+                guid,
+                hinge: slot.hinge,
+                spec,
+                label: GRAMMAR_DOOR_LABEL.to_string(),
+            });
+        }
+    });
+    found
 }
 
 /// How close a point has to be to a door for [`is_open_near`] to be about it,
@@ -278,16 +304,54 @@ pub const NEAR_DOOR_M: f64 = 3.0;
 /// entity: a grammar doorway is a record on a volume. `false` when there is no
 /// door within [`NEAR_DOOR_M`], which is the honest answer for "is the door
 /// here open" when there is no door here.
+/// How far a point is from a door's prompt, or `None` when that is not a
+/// number or is out of [`NEAR_DOOR_M`].
+fn reach_to(p: &DoorPlacement, at: DVec3) -> Option<f64> {
+    let d = (door::prompt_position(p) - at).length();
+    (d.is_finite() && d <= NEAR_DOOR_M).then_some(d)
+}
+
 pub fn is_open_near(world: &EcsWorld, at: DVec3) -> bool {
+    // **The reach is checked BEFORE a placement is built** — the same discipline
+    // `placements_near` applies with the band, and for the same measurement:
+    // this is a Blueprint node an author may put on `Tick`, and the shipped city
+    // plans 19 790 doorways, so collecting them all would allocate a label
+    // string per door and sort twenty thousand records three times a second to
+    // answer a question about one. `String::new()` does not allocate, so the
+    // probe below costs nothing until a door is actually in reach. (I6 audit.)
+    let mut near: Vec<DoorPlacement> = door::doors_in_world(world)
+        .into_iter()
+        .filter(|p| reach_to(p, at).is_some())
+        .collect();
+    door::for_each_volume_doorway(world, |volume, i, slot| {
+        let Some(spec) = derived_spec(slot) else {
+            return;
+        };
+        let p = DoorPlacement {
+            guid: pcg_doorway_guid(volume, i),
+            hinge: slot.hinge,
+            spec,
+            label: String::new(),
+        };
+        if reach_to(&p, at).is_some() {
+            near.push(DoorPlacement {
+                label: GRAMMAR_DOOR_LABEL.to_string(),
+                ..p
+            });
+        }
+    });
+
+    // The `Guid` order the tie-break rests on, over the doors that are in reach
+    // rather than over every door in the world.
+    near.sort_by_key(|p| p.guid);
     let field = door::door_field(world);
     let mut best: Option<(f64, DoorPlacement)> = None;
-    for p in placements(world) {
-        let d = (door::prompt_position(&p) - at).length();
-        if !d.is_finite() || d > NEAR_DOOR_M {
+    for p in near {
+        let Some(d) = reach_to(&p, at) else {
             continue;
-        }
-        // Strict `<` over the `Guid`-ordered walk `placements` returns, so two
-        // doors at the same distance answer the same way in both hosts.
+        };
+        // Strict `<` over the `Guid`-ordered walk, so two doors at the same
+        // distance answer the same way in both hosts.
         if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
             best = Some((d, p));
         }
@@ -489,15 +553,17 @@ pub fn try_breach(
     let verdict = strike_door(world, p.guid, energy);
     // A door that is merely shut (not locked) opens for free and the body keeps
     // all of its speed; a locked one costs the lock's own joules.
+    // **The leaf reaches its stop on the free swing alone**, so there is nothing
+    // to do here but price the exit (the I6 audit). A first draft re-wrote
+    // `target_deg` at this point, claiming to "open it the rest of the way under
+    // power" — which it did not do (`apply_break` leaves `powered` false and had
+    // already set the same `target_deg`, so the write was a no-op that removed
+    // itself under mutation) and did not need to: `apply_break`'s own floor of
+    // `0.35 × BREACH_SWING_DPS` is 182 deg/s, and `DOOR_FREE_DRAG_PER_S` of 1.1
+    // carries that about 160 degrees before the settle threshold stops it,
+    // against a 95-degree limit. The weakest breach this door can price still
+    // reaches the frame.
     let out = if verdict.broke {
-        // The leaf is now swinging; open it the rest of the way under power too,
-        // so a body that breached at the very edge of the threshold does not
-        // arrive at a leaf that has coasted to a stop half way.
-        if let Some(f) = world.world_mut().get_resource_mut::<door::DoorField>() {
-            if let Some(s) = f.into_inner().0.get_mut(&p.guid) {
-                s.target_deg = p.spec.open_limit_deg;
-            }
-        }
         door::breach_exit_speed_mps(mass_kg, speed, verdict.absorbed_j)
     } else {
         speed

@@ -634,9 +634,17 @@ fn a_sprint_breaches_a_locked_door_and_a_jog_does_not() {
     );
     assert!(locked.door_state().lock_broken, "the sprint did not breach");
     assert!(!locked.door_state().locked);
+    // The control went through too, and the WORLD says so rather than a flag:
+    // its leaf is moving. It is deliberately **not** `lock_broken` — nothing was
+    // holding a shut door, so nothing about it broke, and a door somebody
+    // barged through is still a door they can lock behind them (I6 audit).
     assert!(
-        unlocked.door_state().lock_broken,
+        unlocked.door_state().open_deg != 0.0,
         "the control did not go through"
+    );
+    assert!(
+        !unlocked.door_state().lock_broken,
+        "barging through a door that was not locked broke its lock"
     );
     assert!(
         locked_out < unlocked_out,
@@ -691,7 +699,10 @@ fn a_sliding_body_is_still_sliding_on_the_other_side() {
         MovementMode::Slide,
         "the control is not a slide"
     );
-    assert!(rig.door_state().lock_broken, "the slide did not go through");
+    assert!(
+        rig.door_state().open_deg != 0.0,
+        "the slide did not go through"
+    );
     // It cost the leaf's restitution and no more: a slide keeps most of what it
     // had, and what it lost is the door.
     assert!(
@@ -981,4 +992,209 @@ fn a_doorway_outside_the_collider_band_gets_no_leaf() {
         "with no streaming source at all the band fails open: {solid} of {n} leaves are solid"
     );
     assert_eq!(solid, n, "the band did not fail open");
+}
+
+/// **AN EDGE A STEP COULD NOT USE MUST NOT SURVIVE IT** — the P29.7 A1 class,
+/// at the attack button (island wave I6 audit).
+///
+/// The law is the wave's own: `step_weapons` takes `press_attack` from the
+/// runtime **before** it decides whether anything can use it, so a press made
+/// where there is nothing to kick is spent there and not somewhere else. It had
+/// no arm — measured, deleting the line that clears the edge left `door_3d`,
+/// `weapon_3d` and `phase30_gameplay_gate` all green — and an unconsumed edge
+/// is latched by `apply_intent`'s `|=`, so it would survive for the rest of the
+/// session and kick the next door that happened to be locked.
+///
+/// The press here lands on an **unlocked** door in reach, which is the case
+/// that arms nothing. The door is then locked the way the lock verb would lock
+/// it, and the arm asserts that sixty idle steps kick nothing.
+#[test]
+fn an_attack_spent_at_an_unlocked_door_does_not_kick_it_when_it_is_locked_later() {
+    let mut rig = Rig::new(false, 3.0);
+    rig.step(&idle());
+    let r = rig.step(&press_attack());
+    assert_eq!(r.kicks, 0, "an unlocked door was kicked");
+    assert!(
+        door::pending_kick(&rig.world, HERO).is_none(),
+        "an unlocked door armed a kick"
+    );
+    // Lock it — the state the press could not have known about when it was made.
+    {
+        let spec = rig.door_spec();
+        door::door_field_mut(&mut rig.world)
+            .entry(DOOR, &spec)
+            .locked = true;
+    }
+    assert!(rig.door_state().locked, "the fixture did not lock");
+    let mut later = 0;
+    for _ in 0..60 {
+        later += rig.step(&idle()).kicks;
+    }
+    println!("sixty idle steps after a spent press landed {later} kick(s)");
+    assert_eq!(
+        later, 0,
+        "the press outlived the step that could not use it and kicked a door \
+         that was locked afterwards - `press_attack` is not being consumed"
+    );
+    assert!(
+        !rig.door_state().lock_broken,
+        "the lock broke with nobody pressing anything"
+    );
+    // …and the control: a press made NOW does kick it, so the arm above is
+    // about the edge's lifetime rather than about a rig that cannot kick.
+    let mut kicks = 0;
+    for _ in 0..40 {
+        kicks += rig.steps(&press_attack(), 1).kicks;
+    }
+    assert_eq!(kicks, 1, "a fresh press did not kick the locked door");
+    assert!(rig.door_state().lock_broken);
+}
+
+/// **`door.is_open` answers about the door that is THERE** — the Blueprint kit's
+/// one read, which had no arm at all (I6 audit).
+///
+/// Both kinds under one question, which is the point of the flattened
+/// `DoorPlacement` list: an authored `Door` entity and a doorway the grammar
+/// planned are the same subject. And a point with no door near it answers
+/// `false`, which is the honest value rather than a refusal.
+#[test]
+fn the_is_open_probe_reads_authored_doors_grammar_doorways_and_empty_air() {
+    let mut world = EcsWorld::new();
+    spawn_ground(&mut world);
+    spawn_door(&mut world, false);
+    spawn_hero(&mut world, 3.0);
+    let volume = Uuid::from_u128(0x1600_00AB);
+    let planned = spawn_house(&mut world, volume, DVec3::new(40.0, 0.0, 0.0));
+    assert!(planned > 0);
+    let mut bridge = PhysicsBridge3D::new(GRAVITY);
+    bridge.sync_from_world(&world);
+
+    // The authored door: shut, so the probe says so from its own doorway.
+    let spec = {
+        let e = world.entity_of(DOOR).expect("the door");
+        world.world().get::<Door>(e).expect("a door").spec
+    };
+    let at = HINGE + DVec3::new(spec.width_m * 0.5, 0.0, 0.0);
+    assert!(
+        !d3::door::is_open_near(&world, at),
+        "a shut door read as open"
+    );
+    // Empty air is `false` and not a panic — there is no door out there.
+    assert!(!d3::door::is_open_near(&world, DVec3::new(0.0, 0.0, 900.0)));
+
+    // Open it through the one resolution site, and the same probe flips.
+    let feet = DVec3::new(0.0, 0.0, 3.0);
+    assert_eq!(
+        d3::door::use_door(&mut world, DOOR, feet),
+        inf_ecs::door::DoorVerdict::Opening
+    );
+    for _ in 0..90 {
+        d3::step_gameplay(&mut world, &mut bridge, DT);
+    }
+    assert!(
+        d3::door::is_open_near(&world, at),
+        "an open door read as shut"
+    );
+
+    // A GRAMMAR doorway, forty metres away: shut, then open, through the same
+    // probe and the same field.
+    let house: Vec<_> = d3::door::placements(&world)
+        .into_iter()
+        .filter(|p| p.guid != DOOR)
+        .collect();
+    assert_eq!(house.len(), planned, "the house's doorways are not listed");
+    let target = &house[0];
+    let where_it_is = inf_ecs::door::prompt_position(target);
+    assert!(
+        !d3::door::is_open_near(&world, where_it_is),
+        "a fresh grammar doorway read as open"
+    );
+    let spec = target.spec;
+    let guid = target.guid;
+    {
+        let field = inf_ecs::door::door_field_mut(&mut world);
+        let s = field.entry(guid, &spec);
+        s.open_deg = spec.open_limit_deg;
+    }
+    assert!(
+        d3::door::is_open_near(&world, where_it_is),
+        "an open grammar doorway read as shut"
+    );
+    // …and the authored door forty metres away is not what answered.
+    assert!(!d3::door::is_open_near(
+        &world,
+        where_it_is + DVec3::new(0.0, 0.0, 100.0)
+    ));
+}
+
+/// **A DOOR YOU BARGED THROUGH IS STILL A DOOR YOU CAN LOCK** (I6 audit).
+///
+/// `try_break` answers `broke` for a shut-but-unlocked door too — nothing was
+/// holding it — and `apply_break` used to mark that as a broken lock. A broken
+/// lock never re-engages, so one sprint through a house's own front door
+/// retired its lock for the session; **every** door the building grammar emits
+/// starts unlocked, so on the shipped city that was every door in it.
+///
+/// The control is the locked half: a lock that *was* holding still breaks and
+/// still refuses to come back, which is what makes this arm about the
+/// distinction rather than about the flag.
+#[test]
+fn a_sprint_through_an_unlocked_door_leaves_a_lock_that_still_works() {
+    let mut rig = Rig::new(false, 3.4);
+    rig.set_hero_velocity(DVec3::new(0.0, 0.0, 6.5));
+    rig.step(&idle());
+    let after = rig.door_state();
+    println!("after barging through a shut door: {after:?}");
+    assert!(after.open_deg != 0.0, "the sprint did not go through");
+    assert!(
+        !after.lock_broken,
+        "a door that was not locked had its lock broken by a shoulder"
+    );
+    // …so the lock verb is still on offer, from the inside, and it works.
+    //
+    // **Two presses**, because `use_door` on the lock side is one verb with two
+    // meanings: an OPEN door shuts and a SHUT one locks — a door standing open
+    // with its bolt thrown would be a lock nobody could see. That is the gate's
+    // own lock station, met here from the other side of a breach.
+    rig.steps(&idle(), 90);
+    let spec = rig.door_spec();
+    let inside = HINGE + DVec3::new(0.0, 0.0, 1.0);
+    assert_eq!(spec.side_of(HINGE, inside), inf_ecs::door::DoorSide::Inside);
+    let shut = d3::door::use_door(&mut rig.world, DOOR, inside);
+    assert_eq!(shut, inf_ecs::door::DoorVerdict::Closing, "{shut:?}");
+    rig.steps(&idle(), 90);
+    // Not "exactly zero": the hero is standing where it landed, which is in the
+    // leaf's own arc, so the closing leaf stops against its capsule a few
+    // degrees out. That is the system working (the gate's lock station found the
+    // same thing from the other direction) and it is still shut for the lock's
+    // purposes, which is the question here.
+    assert!(
+        !rig.door_state().is_open(&spec),
+        "the leaf did not shut: {:?}",
+        rig.door_state()
+    );
+    let v = d3::door::use_door(&mut rig.world, DOOR, inside);
+    println!("pressing E from the inside face after the breach: {shut:?}, then {v:?}");
+    assert!(
+        rig.door_state().locked,
+        "the door could not be locked after being barged through: {v:?}"
+    );
+
+    // The control: a lock that WAS holding breaks, and stays broken.
+    let mut locked = Rig::new(true, 3.4);
+    locked.set_hero_velocity(DVec3::new(0.0, 0.0, 6.5));
+    locked.step(&idle());
+    assert!(locked.door_state().lock_broken, "the locked control held");
+    assert!(!locked.door_state().locked);
+    let spec = locked.door_spec();
+    assert_eq!(
+        inf_ecs::door::set_locked(
+            &spec,
+            &mut locked.door_state(),
+            inf_ecs::door::DoorSide::Inside,
+            true
+        ),
+        inf_ecs::door::DoorVerdict::WrongSide,
+        "a broken lock re-engaged"
+    );
 }

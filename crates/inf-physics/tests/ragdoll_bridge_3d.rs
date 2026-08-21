@@ -740,3 +740,75 @@ fn a_character_with_no_rig_is_handed_back_rather_than_left_in_a_ragdoll() {
         "a jump must end a ragdoll the bridge cannot build"
     );
 }
+
+/// **A CORPSE DOES NOT GET UP** (island wave I6) — the guard, armed at the only
+/// fixture in this repository that can reach it.
+///
+/// I6 put `Health::dead` on the get-up branch because a body the damage system
+/// had handed over settled, stood up, and was handed over again. The *handoff*
+/// half of that fix is the `Downed` latch and `weapon_3d` measures it; the
+/// **get-up** half had no arm at all, and the I6 audit measured why: removing
+/// `!dead` from the branch left every `weapon_3d` arm green, because that
+/// fixture's target has no skeleton, so P29.4's "no rig is coming" branch hands
+/// the body straight back and the settle path is never taken.
+///
+/// This one has a rig. Two bodies, one live and one dead, through the same
+/// bridge: the live one settles and gets up (the control, so a dead body that
+/// stayed limp because nothing settled at all would not pass), and the dead one
+/// stays where it fell.
+#[test]
+fn a_dead_body_stays_limp_where_a_live_one_gets_up() {
+    /// Ragdoll a rigged character and run until it either leaves the ragdoll or
+    /// the clock runs out. Answers `(mode, steps)`.
+    fn fall(dead: bool) -> (MovementMode, u32) {
+        let mut sim = Sim::new(0.0);
+        for _ in 0..10 {
+            sim.step(&MovementIntent::default());
+        }
+        if dead {
+            // Through the damage door, not by writing the flag: `Health::dead`
+            // is a latch the damage model owns, and a test that set it by hand
+            // would still pass if `damage` stopped setting it.
+            assert!(inf_ecs::weapon::give_health(&mut sim.world, HERO, 100.0));
+            let e = sim.world.entity_of(HERO).expect("the hero");
+            let mut h = sim
+                .world
+                .world_mut()
+                .get_mut::<inf_ecs::weapon::Health>(e)
+                .expect("a body");
+            assert!(inf_ecs::weapon::damage(&mut h, 1.0e6).killed);
+        }
+        assert!(ragdoll_bridge::start_ragdoll(&mut sim.world, HERO));
+        assert_eq!(sim.mode(), MovementMode::Ragdoll);
+        let mut steps = 0;
+        while sim.mode() == MovementMode::Ragdoll && steps < 900 {
+            sim.step(&MovementIntent::default());
+            steps += 1;
+        }
+        // The bodies really were built, so this is a settle rather than the
+        // rig-less bail-out measured one arm up.
+        assert!(
+            sim.hero().runtime.ragdoll.spawned || sim.mode() != MovementMode::Ragdoll,
+            "the ragdoll never spawned bodies"
+        );
+        (sim.mode(), steps)
+    }
+
+    let (live, live_steps) = fall(false);
+    println!("a live body left the ragdoll after {live_steps} steps as {live:?}");
+    assert_eq!(
+        live, MovementMode::Grounded,
+        "the control never got up, so this arm could not tell a corpse from a settle that never came"
+    );
+    assert!(live_steps < 900, "the control never settled");
+
+    let (corpse, corpse_steps) = fall(true);
+    println!("a dead body was still {corpse:?} after {corpse_steps} steps");
+    assert_eq!(
+        corpse,
+        MovementMode::Ragdoll,
+        "a corpse got up: `Health::dead` must guard the get-up, or a body the \
+         damage system handed over stands up at the settle interval for ever"
+    );
+    assert_eq!(corpse_steps, 900, "the corpse left the ragdoll early");
+}
