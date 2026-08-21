@@ -112,7 +112,14 @@ use crate::filtering::CollisionLayers;
 /// §5 of the memo gives about everything else that looked like a missing field:
 /// it describes fracture mechanics, not this actor's material. `strength` is the
 /// per-actor knob and it multiplies straight through.
-pub const CRACK_OPENING_M: f64 = 1.0e-3;
+///
+/// **The declaration moved to `inf_ecs::components` in island wave I6** and this
+/// is a re-export, so every path that already named it still resolves. It went
+/// where `Destructible` lives because I6 gave it a second caller outside
+/// destruction — a door's **lock is one bond** — and the multiplication is now
+/// written once, in [`Destructible::bond_energy_j`], rather than at each site
+/// that needs a break priced.
+pub use inf_ecs::components::CRACK_OPENING_M;
 
 /// The smallest `|det|` a destructible's placement may have and still be
 /// followed.
@@ -950,7 +957,7 @@ fn ground_bond_energies(asset: &FractureAsset, d: &Destructible, volume_scale: f
         .iter()
         .map(|c| {
             let area = area_from_volume(c.volume_m3 * volume_scale);
-            let e = d.bond_force_n(area) * CRACK_OPENING_M;
+            let e = d.bond_energy_j(area);
             if e.is_finite() {
                 e.max(0.0)
             } else {
@@ -1013,7 +1020,7 @@ fn bond_energies(asset: &FractureAsset, d: &Destructible, volume_scale: f64) -> 
             area = area_from_volume(ca.volume_m3.min(cb.volume_m3));
             estimated.insert((a, b));
         }
-        let energy = d.bond_force_n(area * area_scale) * CRACK_OPENING_M;
+        let energy = d.bond_energy_j(area * area_scale);
         out.insert(
             (a, b),
             if energy.is_finite() {

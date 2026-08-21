@@ -26,6 +26,9 @@ pub mod camera;
 pub mod cloth;
 pub mod components;
 pub mod deform;
+// I6: doors — a leaf on a hinge, a lock priced as one P22 bond, and the sparse
+// resource that holds what a player has done to them.
+pub mod door;
 // P24.4: the fixed-step slot that turns `HairGuides` into moving strands.
 pub mod hair;
 pub mod hierarchy;
@@ -65,8 +68,8 @@ pub use components::{
     Primitive, RigidBody2D, RigidBody3D, RootMotion, RootMotionMode, RotationMode,
     ScatteredInstance, ScatteredSolid, SkeletalMesh, SkyAtmosphere, SmRuntimeState, SpeedCurve,
     Sprite, StructureGroup, Terrain, TileBounds, TileChunk, Tilemap, TimeOfDay, Transform,
-    VehicleClass, Visibility, VoxelVolume, CHUNK_DIM, CHUNK_TILES, DEFAULT_DESTRUCTIBLE_CHUNKS,
-    DEFAULT_DESTRUCTIBLE_DENSITY, DEFAULT_STRENGTH_PA,
+    VehicleClass, Visibility, VoxelVolume, CHUNK_DIM, CHUNK_TILES, CRACK_OPENING_M,
+    DEFAULT_DESTRUCTIBLE_CHUNKS, DEFAULT_DESTRUCTIBLE_DENSITY, DEFAULT_STRENGTH_PA,
 };
 // P24.2: the IK write door. `pose` and `deform` are otherwise spelled in full
 // by callers (the source-text mirror gates key on that), but a *write door* a

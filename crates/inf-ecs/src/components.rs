@@ -5630,6 +5630,22 @@ pub const DEFAULT_STRENGTH_PA: f64 = 5.0e6;
 /// as polystyrene the first time an author adds the component.
 pub const DEFAULT_DESTRUCTIBLE_DENSITY: f64 = 2400.0;
 
+/// **How far a bond opens before it is broken, metres** (P22.3).
+///
+/// A bond holds `strength × area` newtons ([`Destructible::bond_force_n`]);
+/// work is force times distance; so the **energy** to break it is
+/// `strength × area × CRACK_OPENING_M` joules, and `Pa · m² · m = N · m = J`
+/// with no invented conversion anywhere. The number itself is the brittle
+/// strain range (`1e-4 … 1e-3`) over a chunk about a metre across.
+///
+/// **Here, beside `Destructible`, and no longer in `inf-physics`** (island wave
+/// I6). It is the *contract*, exactly as `bond_force_n`'s own doc says of the
+/// force half — and I6 needed a second caller: a door's **lock is one bond**,
+/// and a lock priced by a second expression would be a second answer to "what
+/// does this material cost to break". `inf_physics::d3::CRACK_OPENING_M` is now
+/// a re-export of this, so every path that already named it still resolves.
+pub const CRACK_OPENING_M: f64 = 1.0e-3;
+
 fn default_destructible_chunks() -> u32 {
     DEFAULT_DESTRUCTIBLE_CHUNKS
 }
@@ -5672,6 +5688,22 @@ impl Destructible {
             return 0.0;
         }
         self.strength * area_m2
+    }
+
+    /// **The energy, joules, to break one bond of `area_m2`** —
+    /// `strength × area × `[`CRACK_OPENING_M`], the P22 rule as one expression
+    /// (island wave I6).
+    ///
+    /// It was two: `bond_energies` and `ground_bond_energies` each spelled the
+    /// multiplication out, which was survivable while destruction was the only
+    /// consumer and stopped being so the moment a **door lock** became a bond.
+    /// A lock is one bond of a small steel area — see `inf_ecs::door` — and the
+    /// kick, the crash and the fracture solve all price a break here.
+    ///
+    /// Inherits `bond_force_n`'s refusal: a bond with no area cannot hold, so
+    /// it costs `0.0` to break.
+    pub fn bond_energy_j(&self, area_m2: f64) -> f64 {
+        self.bond_force_n(area_m2) * CRACK_OPENING_M
     }
 
     /// The mass, **kg**, of a chunk of the given volume.
