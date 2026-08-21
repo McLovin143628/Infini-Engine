@@ -170,6 +170,10 @@ pub struct Classifier {
     spec: BiomeSpec,
     sea_level_m: f64,
     breaks: Vec<f64>,
+    /// What each natural-break class means, lowest first. Never empty, and the
+    /// last entry answers for every class past its length — which is what lets a
+    /// three-name ladder describe four classes by merging the top two.
+    ladder: Vec<IslandBiome>,
     masks: Vec<BiomeMask>,
     /// `(centre, radius)` per urban reservation.
     reserved: Vec<(DVec2, f64)>,
@@ -201,16 +205,12 @@ impl Classifier {
         if slope_deg >= self.spec.rock_deg || height_m >= self.spec.alpine_m {
             return IslandBiome::Alpine.id();
         }
-        // The statistical half: which natural-break class this height falls in.
-        // The lowest class is open plain, the top is closed canopy, and anything
-        // between is meadow — which is what a break table of three means.
-        match inf_gis::class_of(height_m, &self.breaks) {
-            Some(0) => IslandBiome::Plain.id(),
-            Some(k) if k + 1 >= self.breaks.len().saturating_sub(1) => IslandBiome::Forest.id(),
-            Some(_) => IslandBiome::Meadow.id(),
-            // Above the top fencepost but below the treeline: forest.
-            None => IslandBiome::Forest.id(),
-        }
+        // The statistical half: which natural-break class this height falls in,
+        // and what the RECIPE says that class means. Jenks finds the gaps; an
+        // author says what grows in each band. See `BiomeSpec::class_biomes`.
+        let k = inf_gis::class_of(height_m, &self.breaks).unwrap_or(usize::MAX);
+        let last = self.ladder.len() - 1;
+        self.ladder[k.min(last)].id()
     }
 
     /// The fenceposts, for the report.
@@ -267,10 +267,25 @@ pub fn classify_biomes(
         spec.classes.max(1),
     );
 
+    // A name the recipe's own door already refused if it were wrong; falling back
+    // to forest here rather than panicking keeps a library call total.
+    let ladder: Vec<IslandBiome> = {
+        let v: Vec<IslandBiome> = spec
+            .class_biomes
+            .iter()
+            .filter_map(|n| IslandBiome::from_label(n))
+            .collect();
+        if v.is_empty() {
+            vec![IslandBiome::Forest]
+        } else {
+            v
+        }
+    };
     let c = Classifier {
         spec,
         sea_level_m: sea,
         breaks: breaks.clone(),
+        ladder,
         masks: masks.to_vec(),
         reserved,
     };

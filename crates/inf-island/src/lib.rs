@@ -85,15 +85,17 @@ pub use build::{
 };
 pub use hydro::{FlowField, HydroParams, Lake, Stream, StreamNetwork, Waterfall};
 pub use recipe::{
-    AnchorSpec, BiomeSpec, GridSpec, IslandRecipe, RoadSpec, SeaSpec, Site, SiteKind, SourceSpec,
-    RECIPE_SCHEMA_VERSION,
+    AnchorSpec, BiomeSpec, GridSpec, HydroSpec, IslandRecipe, RoadSpec, SeaSpec, Site, SiteKind,
+    SourceSpec, RECIPE_SCHEMA_VERSION,
 };
 pub use report::{IslandReport, LayerDrift};
 pub use roads::{grade_audit, plan_network, GradeAudit, RoadReport, Route};
 pub use shape::{
     carve_sample, flatten_sample, smooth01, Coastline, Field, SegmentIndex, ShapeStats, Vertex3,
 };
-pub use source::{cache_path, plan_tiles, tile_url, TileId, TileMosaic, TilePlan};
+pub use source::{
+    cache_path, plan_tiles, tile_url, TileId, TileMosaic, TilePlan, PLAUSIBLE_ELEVATION_M,
+};
 pub use terrain::{sample_terrain, CoarseHeights, IslandGrid, ProjectionLattice, SampleStats};
 
 /// Every step of the recipe, in the order the build runs them.

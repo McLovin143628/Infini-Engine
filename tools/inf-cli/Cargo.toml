@@ -24,6 +24,13 @@ inf-project = { workspace = true }
 # CLI linking an editor crate (and its wgpu), which is the same reason
 # `inf-project` exists.
 inf-gis = { workspace = true }
+# I7: `inf island` is the island generator's front end, and it links the Ring-0
+# crate and NOTHING else — every decision (which tiles, where they cache, what
+# the carve does, where a road may climb) is in `inf-island`, so this binary and
+# a future editor wizard cannot drift. The one thing that is NOT in Ring 0 is the
+# network transfer, deliberately: the engine makes no HTTP call, and this
+# subcommand shells out to `curl` the way `commands/git.rs` shells out to `git`.
+inf-island = { workspace = true }
 inf-math = { workspace = true }
 inf-scene = { workspace = true }
 serde_json = { workspace = true }

@@ -1,0 +1,165 @@
+# The Vancouver island — the recipe (wave I7).
+#
+# This file, the layers beside it and the level are what the repository commits.
+# The terrain, the road mesh and the biome set are gigabytes and are NOT:
+#
+#     inf island build --recipe samples/island/island.toml
+#
+# fetches the elevation this recipe names, samples it, carves the coastline,
+# derives the water and the biomes, drapes and audits the roads, and writes the
+# heavy halves into a project outside the tree.
+#
+# THE ELEVATION IS REAL. The source is the AWS terrain-tiles terrarium pyramid —
+# a keyless, worldwide DEM — over the North Shore mountains behind Vancouver.
+# What is designed is the SHAPE: the coastline that makes this a landmass, the
+# settlement sites, and the road network routed between them under a grade
+# ceiling.
+
+schema_version = 1
+name = "Vancouver Island"
+
+# Every stochastic step salts this through a name of its own; see
+# `IslandRecipe::seed_for`.
+seed = 20260821
+
+# The committed design and derived layers, relative to this file.
+coast = "layers/coast.geojson"
+streams = "layers/streams.geojson"
+lakes = "layers/lakes.geojson"
+
+# ─── where on Earth ────────────────────────────────────────────────────────────
+# UTM zone 10N. World (0, 0, 0) is 49.34 N, 123.10 W — the ground behind
+# Ambleside, with Grouse and Hollyburn to the north and the inlet to the south.
+# Remember the frame: +X east, +Y up, **-Z north**.
+[anchor]
+crs = "EPSG:32610"
+easting_m = 492600.0
+northing_m = 5465600.0
+height_m = 0.0
+vertical_datum = "EGM2008"
+
+# ─── the world grid ───────────────────────────────────────────────────────────
+# 28 x 28 level-0 tiles of 257 samples at 1 m = 7 168 m square = 51.38 km2, and
+# 51.4 million samples. That is the "island class" row of IB-9's own measured
+# table (32 x 32 level-0 pages, five LOD levels), which is why the streaming
+# budget already has a number for it.
+[grid]
+tile_resolution = 257
+meters_per_sample = 1.0
+tiles = 28
+
+# ─── the elevation source ─────────────────────────────────────────────────────
+# z15 is the pyramid's own ceiling: z16 answers `NoSuchKey`, and a cached error
+# document decodes as nothing at all. At 49.34 N a z15 pixel is 3.11 m of
+# ground, so the 1 m grid is a 3.1x upsample and the build says so every run —
+# detail below 3 m is the design's, not the survey's.
+#
+# The cache lives OUTSIDE the repository (this path resolves to
+# `<checkout>/../island-build/cache`). 132 tiles, about 10 MB.
+[source]
+kind = "terrarium"
+zoom = 15
+url = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+cache = "../../../island-build/cache"
+tile_margin = 1
+
+# ─── the sea ──────────────────────────────────────────────────────────────────
+[sea]
+level_m = 0.0
+shelf_depth_m = 60.0
+shelf_width_m = 500.0
+beach_width_m = 32.0
+beach_rise_m = 6.0
+
+# ─── the roads ────────────────────────────────────────────────────────────────
+# 8 % is about the steepest grade a highway is built at anywhere. The planner
+# works at 85 % of it (see `roads::PLAN_GRADE_MARGIN`) because it plans on an 8 m
+# lattice and the audit measures the 1 m terrain.
+[roads]
+layer = "layers/roads.geojson"
+max_grade = 0.08
+grade_step_m = 20.0
+shoulder_mult = 1.6
+
+# ─── the water ────────────────────────────────────────────────────────────────
+# The island's largest catchment is 2.4 km2 — it is an island, so nothing drains
+# far before it reaches the sea — and a threshold sized for a continent found
+# exactly one stream on the first build. 120 000 m2 is twelve hectares, which is
+# a creek.
+[hydro]
+stream_catchment_m2 = 120000.0
+lake_depth_m = 1.2
+lake_area_m2 = 2000.0
+waterfall_grade = 0.35
+vertex_stride = 4
+
+# ─── the biomes ───────────────────────────────────────────────────────────────
+# The treeline, the rock slope and the shore band are the author's; the classes
+# between them are Fisher-Jenks over the vegetated band's own histogram.
+#
+# `class_biomes` is what those classes MEAN, and it is the author's too. The
+# first build ran a hard-coded "lowest is plain, top is forest" ladder and put
+# 9.8 % of a rain-forest island under canopy. On this coast the forest is the
+# bulk and the open ground is the exception: coastal plain low down, forest over
+# the middle two bands, subalpine meadow under the treeline.
+[biomes]
+masks = "layers/biomes.geojson"
+alpine_m = 620.0
+rock_deg = 36.0
+beach_m = 14.0
+classes = 4
+class_biomes = ["plain", "forest", "forest", "meadow"]
+
+# ─── the settlements ──────────────────────────────────────────────────────────
+# Two cities and five towns, per the mandate. They are EMPTY sites: the roads
+# connect them and the biome map reserves their ground, and what stands on them
+# is wave I8's. Positions are world metres (+X east, -Z north).
+
+[[sites]]
+name = "Harbour City"
+kind = "city"
+x = -1750.0
+z = 2050.0
+radius_m = 520.0
+
+[[sites]]
+name = "Eastgate"
+kind = "city"
+x = 2050.0
+z = 1750.0
+radius_m = 480.0
+
+[[sites]]
+name = "Cedar Cove"
+kind = "town"
+x = -2650.0
+z = 900.0
+radius_m = 230.0
+
+[[sites]]
+name = "Millbrook"
+kind = "town"
+x = -450.0
+z = 1050.0
+radius_m = 230.0
+
+[[sites]]
+name = "Fernhill"
+kind = "town"
+x = 1500.0
+z = 250.0
+radius_m = 210.0
+
+[[sites]]
+name = "Alder Bay"
+kind = "town"
+x = 2600.0
+z = 2650.0
+radius_m = 210.0
+
+[[sites]]
+name = "Stonewater"
+kind = "town"
+x = -1150.0
+z = -450.0
+radius_m = 210.0

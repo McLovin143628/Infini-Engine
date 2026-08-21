@@ -436,26 +436,7 @@ pub fn extract(flow: &FlowField, p: &HydroParams) -> StreamNetwork {
     }
 
     // Waterfalls: a reach's own steep segments.
-    let mut waterfalls = Vec::new();
-    for (si, s) in streams.iter().enumerate() {
-        for w in s.points.windows(2) {
-            let run = (DVec2::new(w[1].x, w[1].z) - DVec2::new(w[0].x, w[0].z)).length();
-            let drop = w[0].y - w[1].y;
-            if run <= 0.0 || drop <= 0.0 {
-                continue;
-            }
-            let grade = drop / run;
-            if grade >= p.waterfall_grade {
-                waterfalls.push(Waterfall {
-                    stream: si,
-                    top: w[0],
-                    bottom: w[1],
-                    drop_m: drop,
-                    grade,
-                });
-            }
-        }
-    }
+    let waterfalls = waterfalls_of(&streams, p.waterfall_grade);
 
     StreamNetwork {
         lakes: lakes_of(flow, p),
@@ -597,6 +578,37 @@ pub fn carve_channels(
         }
     }
     moved
+}
+
+/// The waterfall sites a set of reaches carries.
+///
+/// A waterfall is a **measurement of a stream that already exists**, not a
+/// system: it is the segments whose bed falls faster than `grade`. Split out
+/// from [`extract`] so a network read back from its committed layer gets the
+/// same answer as one just derived — the alternative is a committed network with
+/// no waterfalls in it, which is what the first full build reported.
+pub fn waterfalls_of(streams: &[Stream], grade: f64) -> Vec<Waterfall> {
+    let mut out = Vec::new();
+    for (si, s) in streams.iter().enumerate() {
+        for w in s.points.windows(2) {
+            let run = (DVec2::new(w[1].x, w[1].z) - DVec2::new(w[0].x, w[0].z)).length();
+            let drop = w[0].y - w[1].y;
+            if run <= 0.0 || drop <= 0.0 {
+                continue;
+            }
+            let g = drop / run;
+            if g >= grade {
+                out.push(Waterfall {
+                    stream: si,
+                    top: w[0],
+                    bottom: w[1],
+                    drop_m: drop,
+                    grade: g,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Index the derived streams for the channel carve, keyed on the bed each reach

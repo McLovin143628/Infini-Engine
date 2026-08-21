@@ -3128,6 +3128,7 @@ dependencies = [
  "inf-asset",
  "inf-blueprint",
  "inf-gis",
+ "inf-island",
  "inf-math",
  "inf-packager",
  "inf-project",

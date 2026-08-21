@@ -45,6 +45,21 @@ use inf_gis::tilemath;
 use crate::recipe::IslandRecipe;
 use crate::IslandError;
 
+/// The elevation range a terrarium sample may plausibly carry, in metres.
+///
+/// # Why a range and not just a finiteness check
+///
+/// The codec's own floor is `(0, 0, 0)` → **−32 768 m**, and the shipped island's
+/// source really does contain it: the first full build reported a source range of
+/// `(-32768.0, 1239.0)`. That is not a trench, it is a black pixel — a tile the
+/// provider filled rather than surveyed — and it is *finite*, so every guard this
+/// repository already has waves it through. Inside a coastline it would carve a
+/// thirty-two-kilometre pit with no symptom other than a hole in the world.
+///
+/// The Mariana Trench is −10 935 m and Everest is 8 849 m; ±12 000 covers Earth
+/// with room and admits nothing that could be one of those two encodings.
+pub const PLAUSIBLE_ELEVATION_M: std::ops::RangeInclusive<f64> = -12_000.0..=12_000.0;
+
 /// One XYZ tile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TileId {
@@ -225,6 +240,10 @@ pub struct TileMosaic {
     sea_level_tiles: BTreeSet<(u32, u32)>,
     /// How many samples across the whole mosaic decoded to exactly sea level.
     sea_level_samples: usize,
+    /// How many decoded to an elevation Earth does not have. Counted rather than
+    /// silently dropped — a provider that fills a tile is a fact about the
+    /// source and an author should hear it.
+    implausible_samples: usize,
     /// Total samples decoded.
     samples: usize,
     lo: f64,
@@ -239,10 +258,6 @@ impl TileMosaic {
     /// once and the destination walk reads it, rather than the other way round.
     pub fn load(plan: &TilePlan, cache_dir: &Path) -> Result<Self, IslandError> {
         let mut tiles = BTreeMap::new();
-        let mut sea_level_tiles = BTreeSet::new();
-        let mut sea_level_samples = 0usize;
-        let mut samples = 0usize;
-        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
         for t in &plan.tiles {
             let path = cache_path(cache_dir, *t);
             let bytes = std::fs::read(&path).map_err(|_| IslandError::MissingTile {
@@ -259,34 +274,18 @@ impl TileMosaic {
                     path: path.display().to_string(),
                     message: e.to_string(),
                 })?;
-            if tile.is_uniformly_sea_level() {
-                sea_level_tiles.insert((t.x, t.y));
-            }
-            sea_level_samples += tile.sea_level_samples;
-            samples += tile.elevations.len();
-            if let Some((a, b)) = tile.range() {
-                lo = lo.min(a);
-                hi = hi.max(b);
-            }
             tiles.insert((t.x, t.y), tile);
         }
-        Ok(Self {
-            zoom: plan.zoom,
-            tiles,
-            sea_level_tiles,
-            sea_level_samples,
-            samples,
-            lo,
-            hi,
-        })
+        Ok(Self::from_tiles(plan.zoom, tiles))
     }
 
     /// Build a mosaic straight from decoded tiles — the seam a test uses so it
-    /// does not need a filesystem, and the same one a future in-memory fetch
-    /// would use.
+    /// does not need a filesystem, and the one [`TileMosaic::load`] goes through,
+    /// so the summary numbers cannot differ between the two.
     pub fn from_tiles(zoom: u8, tiles: BTreeMap<(u32, u32), TerrariumTile>) -> Self {
         let mut sea_level_tiles = BTreeSet::new();
         let mut sea_level_samples = 0usize;
+        let mut implausible_samples = 0usize;
         let mut samples = 0usize;
         let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
         for (k, t) in &tiles {
@@ -295,9 +294,17 @@ impl TileMosaic {
             }
             sea_level_samples += t.sea_level_samples;
             samples += t.elevations.len();
-            if let Some((a, b)) = t.range() {
-                lo = lo.min(a);
-                hi = hi.max(b);
+            // The range is over PLAUSIBLE samples only: a mosaic that reported
+            // −32 768 m as its floor would be reporting the codec, not the
+            // ground, and every number derived from it downstream would inherit
+            // that.
+            for v in &t.elevations {
+                if PLAUSIBLE_ELEVATION_M.contains(v) {
+                    lo = lo.min(*v);
+                    hi = hi.max(*v);
+                } else {
+                    implausible_samples += 1;
+                }
             }
         }
         Self {
@@ -305,10 +312,16 @@ impl TileMosaic {
             tiles,
             sea_level_tiles,
             sea_level_samples,
+            implausible_samples,
             samples,
             lo,
             hi,
         }
+    }
+
+    /// How many source samples carry an elevation Earth does not have.
+    pub fn implausible_samples(&self) -> usize {
+        self.implausible_samples
     }
 
     /// The tiles that are entirely sea level.
@@ -324,10 +337,10 @@ impl TileMosaic {
         self.sea_level_samples as f64 / self.samples as f64
     }
 
-    /// The `(min, max)` elevation the source carries, or `None` for an empty
-    /// mosaic.
+    /// The `(min, max)` **plausible** elevation the source carries, or `None`
+    /// when it carries none.
     pub fn range(&self) -> Option<(f64, f64)> {
-        (self.samples > 0).then_some((self.lo, self.hi))
+        (self.lo.is_finite() && self.hi.is_finite()).then_some((self.lo, self.hi))
     }
 
     /// How many tiles are loaded.
@@ -350,7 +363,13 @@ impl TileMosaic {
         } else {
             (gx % px, gy % px)
         };
+        // **The implausible-elevation door.** A filled black pixel decodes to
+        // −32 768 m, which is finite and therefore invisible to every other
+        // guard. `None` here makes it nodata, which the carve turns into ocean —
+        // the one policy this pipeline already has for "the source does not
+        // cover this ground". See [`PLAUSIBLE_ELEVATION_M`].
         t.get(ix as u32, iy as u32)
+            .filter(|v| PLAUSIBLE_ELEVATION_M.contains(v))
     }
 
     /// Bilinear elevation at a geodetic position, or `None` off the mosaic.
@@ -594,6 +613,70 @@ mod tests {
             "the mosaic's range is {:?} and the ramp's own corner is {want}",
             m.range()
         );
+    }
+
+    /// **A BLACK PIXEL IS FINITE**, and that is what makes it dangerous.
+    ///
+    /// The shipped island's own source carries `(0, 0, 0)` samples, which decode
+    /// to −32 768 m. Every guard in this repository checks finiteness; none of
+    /// them can see this. Un-fix mutation: delete the `.filter(...)` in `pixel`
+    /// and the sampler below returns −32 768 instead of `None`.
+    #[test]
+    fn an_implausible_elevation_is_nodata_rather_than_a_thirty_two_kilometre_pit() {
+        let px = tilemath::TILE_PX as u32;
+        // A tile that is half real ground and half the codec's own floor.
+        let mut rgb = Vec::new();
+        for j in 0..px {
+            for _ in 0..px {
+                if j < px / 2 {
+                    rgb.extend_from_slice(&encode_elevation(140.0));
+                } else {
+                    rgb.extend_from_slice(&[0u8, 0, 0]);
+                }
+            }
+        }
+        let tile = inf_gis::terrarium::decode_tile_rgb(&rgb, px, px, 3).unwrap();
+        // The codec itself is happy with it — the hazard is real and it is here.
+        assert_eq!(tile.range(), Some((-32768.0, 140.0)));
+        assert!(tile.range().unwrap().0.is_finite(), "and it is FINITE");
+
+        let mut tiles = BTreeMap::new();
+        tiles.insert((1, 1), tile);
+        let m = TileMosaic::from_tiles(2, tiles);
+        assert_eq!(
+            m.implausible_samples(),
+            (px * px / 2) as usize,
+            "half the tile is the codec's floor"
+        );
+        assert_eq!(
+            m.range(),
+            Some((140.0, 140.0)),
+            "the mosaic reports the GROUND's range, not the codec's"
+        );
+
+        // And the sampler answers nodata there, which the carve turns into ocean.
+        let n = 4.0 * tilemath::TILE_PX as f64;
+        let probe = |gy: f64| {
+            let mx = (300.5 / n) * tilemath::MERC_WORLD - tilemath::MERC_HALF_WORLD;
+            let my = tilemath::MERC_HALF_WORLD - (gy / n) * tilemath::MERC_WORLD;
+            let (lon, lat) = tilemath::mercator_to_lonlat(mx, my).unwrap();
+            m.elevation_at(lon, lat)
+        };
+        assert_eq!(probe(300.5), Some(140.0), "the real half answers");
+        assert_eq!(probe(420.5), None, "the filled half is nodata");
+        assert_eq!(
+            crate::shape::carve_sample(probe(420.5), 5_000.0, 0.0, 60.0, 500.0, 32.0),
+            0.0,
+            "and nodata inland becomes sea level, not a pit"
+        );
+        // The bound admits Earth and refuses both encodings that are not.
+        assert!(
+            PLAUSIBLE_ELEVATION_M.contains(&-10_935.0),
+            "the Mariana Trench"
+        );
+        assert!(PLAUSIBLE_ELEVATION_M.contains(&8_849.0), "Everest");
+        assert!(!PLAUSIBLE_ELEVATION_M.contains(&-32_768.0));
+        assert!(!PLAUSIBLE_ELEVATION_M.contains(&32_767.996));
     }
 
     #[test]

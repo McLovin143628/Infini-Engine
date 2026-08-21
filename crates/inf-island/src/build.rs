@@ -125,6 +125,7 @@ pub fn build_island(
 ) -> Result<IslandBuild, IslandError> {
     let mut log: Vec<StepLog> = Vec::new();
     let mut advisories: Vec<Advisory> = Vec::new();
+    let mut blocking: Vec<String> = Vec::new();
     let say = |step: BuildStep, note: String, log: &mut Vec<StepLog>| {
         tracing::info!(step = step.label(), "{note}");
         log.push(StepLog { step, note });
@@ -193,6 +194,19 @@ pub fn build_island(
                  identically — check the extent before trusting the coastline.",
                 mosaic.sea_level_tiles().len(),
                 plan.len()
+            ),
+        ));
+    }
+    if mosaic.implausible_samples() > 0 {
+        advisories.push(Advisory::new(
+            "source.implausible",
+            format!(
+                "{} source samples carry an elevation Earth does not have — the \
+                 terrarium codec's own floor is a black pixel at -32 768 m, which \
+                 is FINITE and therefore invisible to a finiteness check. They are \
+                 treated as nodata and become ocean; if they are inland, the \
+                 provider filled that tile rather than surveying it.",
+                mosaic.implausible_samples()
             ),
         ));
     }
@@ -301,7 +315,11 @@ pub fn build_island(
     // ── 5. HYDROLOGY ────────────────────────────────────────────────────────
     let hp = HydroParams {
         sea_level_m: recipe.sea.level_m,
-        ..Default::default()
+        stream_catchment_m2: recipe.hydro.stream_catchment_m2,
+        lake_depth_m: recipe.hydro.lake_depth_m,
+        lake_area_m2: recipe.hydro.lake_area_m2,
+        waterfall_grade: recipe.hydro.waterfall_grade,
+        vertex_stride: recipe.hydro.vertex_stride,
     };
     let coarse = CoarseHeights::of(&data, min, max, DERIVATION_PITCH_M);
     let flow = FlowField::derive(&coarse, &hp);
@@ -316,7 +334,7 @@ pub fn build_island(
         }
         derived.clone()
     } else {
-        committed_network(&stream_path, &lake_path, &anchor)?
+        committed_network(&stream_path, &lake_path, &anchor, hp.waterfall_grade)?
     };
     let stream_drift = LayerDrift {
         committed: network.streams.len(),
@@ -382,8 +400,11 @@ pub fn build_island(
     } else {
         (Vec::new(), Vec::new())
     };
+    // A mask that names no biome is a typo in committed design data — something
+    // an author can fix, and therefore blocking rather than informational.
     for s in &skipped {
         advisories.push(Advisory::new("biomes.mask_skipped", s.clone()));
+        blocking.push(format!("a biome mask was skipped: {s}"));
     }
     // Re-read the ground after the channels were cut, so a stream bed is
     // classified as the bed it now is.
@@ -437,17 +458,28 @@ pub fn build_island(
         advisories.push(Advisory::new(
             "roads.over_grade",
             format!(
-                "{} of {} measured stretches exceed the {:.3} grade ceiling; the \
-                 worst is {:.3} at ({:.1}, {:.1}). Re-plan with `inf island route`, \
-                 move the site, or raise the ceiling deliberately.",
+                "{} of {} measured stretches ({:.2} %) exceed the {:.3} grade \
+                 ceiling; the worst is {:.3} at ({:.1}, {:.1}). This generator \
+                 builds no grade separation, so every crossing of two routes at \
+                 different elevations leaves one step. Re-plan with `inf island \
+                 route`, move the site, or raise the ceiling deliberately.",
                 audit.over.len(),
                 audit.samples,
+                audit.over_fraction() * 100.0,
                 audit.ceiling,
                 audit.worst,
                 audit.worst_at.x,
                 audit.worst_at.y
             ),
         ));
+        if audit.over_fraction() > crate::report::ROAD_OVER_GRADE_CEILING {
+            blocking.push(format!(
+                "{:.2} % of the road network exceeds its own grade ceiling, past \
+                 the {:.2} % the crossings account for",
+                audit.over_fraction() * 100.0,
+                crate::report::ROAD_OVER_GRADE_CEILING * 100.0
+            ));
+        }
     }
     let mut road_report = RoadReport {
         audit: audit.clone(),
@@ -551,6 +583,7 @@ pub fn build_island(
         roads: road_report,
         steps: log.iter().map(|l| l.step).collect(),
         advisories,
+        blocking,
         stream_drift,
         lake_drift,
         ..Default::default()
@@ -595,6 +628,7 @@ fn committed_network(
     streams: &Path,
     lakes: &Path,
     anchor: &inf_math::geo::GeoAnchor,
+    waterfall_grade: f64,
 ) -> Result<StreamNetwork, IslandError> {
     let sl = layers::read_layer(streams, inf_gis::LayerKind::Streams, anchor)?;
     let ll = layers::read_layer(lakes, inf_gis::LayerKind::Lakes, anchor)?;
@@ -645,6 +679,15 @@ fn committed_network(
             outline,
         });
     }
+    // A committed network's waterfalls and its largest catchment are functions of
+    // the reaches, so they are re-derived rather than left empty — a network read
+    // back with no waterfall in it reads as "this island has none".
+    out.waterfalls = hydro::waterfalls_of(&out.streams, waterfall_grade);
+    out.max_catchment_m2 = out
+        .streams
+        .iter()
+        .map(|s| s.catchment_m2)
+        .fold(0.0f64, f64::max);
     Ok(out)
 }
 

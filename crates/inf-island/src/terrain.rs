@@ -241,13 +241,22 @@ pub fn sample_terrain(
             // Site pads, in recipe order. A sample inside two pads is moved by
             // both, nearest last — which is a design decision an author can see
             // (the pads overlap) rather than an ordering accident.
-            for (c, r, datum) in &plan.pads {
-                let dist = (p - *c).length();
-                if dist < *r {
-                    let before = h;
-                    h = flatten_sample(h, dist, *r, *datum);
-                    if (h - before).abs() > 1e-9 {
-                        tile_pad += 1;
+            //
+            // **A PAD DOES NOT BUILD LAND.** A city site near a shore has a
+            // radius that reaches past it, and a pad that flattened toward the
+            // site's own datum out there would raise the sea floor to thirteen
+            // metres and hand the island a rectangular headland nobody designed.
+            // The coastline is the authority on where the land ends; the pad only
+            // levels what is already inside it.
+            if d > 0.0 {
+                for (c, r, datum) in &plan.pads {
+                    let dist = (p - *c).length();
+                    if dist < *r {
+                        let before = h;
+                        h = flatten_sample(h, dist, *r, *datum);
+                        if (h - before).abs() > 1e-9 {
+                            tile_pad += 1;
+                        }
                     }
                 }
             }

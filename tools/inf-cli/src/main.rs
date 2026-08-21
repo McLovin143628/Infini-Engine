@@ -30,6 +30,7 @@ fn main() -> ExitCode {
         Some("export") => cmd_export(&args[1..]),
         Some("pack") => cmd_pack(&args[1..]),
         Some("gis") => cmd_gis(&args[1..]),
+        Some("island") => cmd_island(&args[1..]),
         Some("--help") | Some("-h") | None => {
             print_help();
             ExitCode::SUCCESS
@@ -55,6 +56,11 @@ fn print_help() {
              inf gis plan <file> [--kind <kind>] [--crs <spec>] [--max <n>] \
              [--min-length <m>] [--project <dir> | --level <file.inf_lvl> | \
              --anchor <crs>,<easting>,<northing>[,<height>]]\n  \
+             inf island plan  --recipe <island.toml>\n  \
+             inf island fetch --recipe <island.toml> [--jobs <n>]\n  \
+             inf island build --recipe <island.toml> [--out <dir>] [--offline] \
+             [--dry-run]\n  \
+             inf island route --recipe <island.toml> [--offline]\n  \
              inf --version\n\n\
          TEMPLATES:\n  \
              blank-3d (default), 2d-platformer, first-person, hybrid-2.5d\n\n\
@@ -411,6 +417,446 @@ fn report_export(result: Result<(String, bool), inf_packager::CookError>) -> Exi
             ExitCode::FAILURE
         }
     }
+}
+
+/// `inf island …` — build the island from its recipe (wave I7).
+///
+/// # THE ONE COMMAND, and what is in it and what is not
+///
+/// `inf island build --recipe <island.toml>` is the documented command that
+/// turns the committed generator into the gigabytes it describes: it plans the
+/// source tiles, **fetches the ones the cache lacks**, samples real elevation,
+/// carves the designed coastline, derives the water and the biomes, drapes and
+/// audits the roads, builds the pyramid and writes the `.inf_terrain`, the road
+/// mesh and the `.inf_biomes` into a project's `Content`.
+///
+/// **The fetch is the only thing in here that is not in Ring 0**, and that split
+/// is the whole design. `inf_island::plan_tiles` decides *which* tiles;
+/// `inf_island::cache_path` and `inf_island::tile_url` decide *where they live*
+/// and *what to ask for*; this binary runs the transfer. So the engine never
+/// makes a network call, CI runs every other step against committed bytes, and
+/// `--offline` is a refusal rather than a different code path.
+///
+/// The transfer shells out to `curl`, which is the same ruling `commands/git.rs`
+/// took in Phase 5: a subprocess over a CLI every developer machine and every CI
+/// runner already has, against linking an HTTPS stack whose root-certificate
+/// crate is off this project's licence allow-list (the `ureq`/`webpki-roots`
+/// refusal, still standing).
+///
+/// # C4-40
+///
+/// A report with a blocking finding **exits non-zero**. An island build is a
+/// twenty-minute operation and an advisory printed into a pipeline nobody reads
+/// the status of is an advisory nobody reads.
+fn cmd_island(args: &[String]) -> ExitCode {
+    match args.first().map(String::as_str) {
+        Some("plan") => cmd_island_plan(&args[1..]),
+        Some("fetch") => cmd_island_fetch(&args[1..]),
+        Some("build") => cmd_island_build(&args[1..], false),
+        Some("route") => cmd_island_build(&args[1..], true),
+        _ => {
+            eprintln!(
+                "usage: inf island plan  --recipe <island.toml>\n       \
+                 inf island fetch --recipe <island.toml> [--jobs <n>]\n       \
+                 inf island build --recipe <island.toml> [--out <dir>] \
+                 [--offline] [--dry-run]\n       \
+                 inf island route --recipe <island.toml> [--offline]"
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Everything the island verbs parse.
+#[derive(Default)]
+struct IslandArgs {
+    recipe: Option<PathBuf>,
+    out: Option<PathBuf>,
+    jobs: usize,
+    offline: bool,
+    dry_run: bool,
+}
+
+fn parse_island_args(args: &[String]) -> Result<IslandArgs, String> {
+    let mut out = IslandArgs {
+        jobs: 8,
+        ..Default::default()
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let take = |i: &mut usize| -> Result<String, String> {
+            *i += 1;
+            args.get(*i)
+                .cloned()
+                .ok_or_else(|| format!("{} needs a value", args[*i - 1]))
+        };
+        match args[i].as_str() {
+            "--recipe" | "-r" => out.recipe = Some(PathBuf::from(take(&mut i)?)),
+            "--out" | "-o" => out.out = Some(PathBuf::from(take(&mut i)?)),
+            "--jobs" | "-j" => {
+                let v = take(&mut i)?;
+                out.jobs = v
+                    .parse::<usize>()
+                    .map_err(|_| format!("--jobs needs a whole number, not {v:?}"))?
+                    .clamp(1, 64);
+            }
+            "--offline" => out.offline = true,
+            "--dry-run" => out.dry_run = true,
+            other if !other.starts_with('-') && out.recipe.is_none() => {
+                out.recipe = Some(PathBuf::from(other));
+            }
+            other => return Err(format!("unexpected argument: {other}")),
+        }
+        i += 1;
+    }
+    Ok(out)
+}
+
+fn island_recipe(a: &IslandArgs) -> Result<inf_island::IslandRecipe, String> {
+    let p = a
+        .recipe
+        .as_ref()
+        .ok_or_else(|| "no recipe: pass --recipe <island.toml>".to_string())?;
+    inf_island::IslandRecipe::load(p).map_err(|e| e.to_string())
+}
+
+/// `inf island plan` — what the recipe will ask the network for, before it does.
+fn cmd_island_plan(args: &[String]) -> ExitCode {
+    let a = match parse_island_args(args).and_then(|a| island_recipe(&a).map(|r| (a, r))) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (a, recipe) = a;
+    let plan = match inf_island::plan_tiles(&recipe) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let cache = recipe.cache_dir();
+    let missing = plan.missing_in(&cache);
+    println!("island:      {}", recipe.name);
+    println!(
+        "world:       {} x {} level-0 tiles of {}^2 at {} m = {:.0} x {:.0} m ({:.2} km2)",
+        recipe.grid.tiles,
+        recipe.grid.tiles,
+        recipe.grid.tile_resolution,
+        recipe.grid.meters_per_sample,
+        recipe.grid.extent_m(),
+        recipe.grid.extent_m(),
+        recipe.grid.extent_m() * recipe.grid.extent_m() / 1.0e6
+    );
+    println!("samples:     {}", recipe.grid.sample_count());
+    println!(
+        "extent:      lon {:.5}..{:.5}, lat {:.5}..{:.5}",
+        plan.lon.0, plan.lon.1, plan.lat.0, plan.lat.1
+    );
+    println!(
+        "source:      {} tiles at z{} = {:.3} m/px of ground against a {:.3} m \
+         grid ({:.2}x upsample)",
+        plan.len(),
+        plan.zoom,
+        plan.ground_m_per_px,
+        plan.grid_m_per_sample,
+        plan.upsample_ratio()
+    );
+    println!("cache:       {}", cache.display());
+    println!("to fetch:    {} of {}", missing.len(), plan.len());
+    if !missing.is_empty() {
+        println!(
+            "first:       {}",
+            inf_island::tile_url(&recipe.source.url, missing[0])
+        );
+    }
+    let _ = a;
+    ExitCode::SUCCESS
+}
+
+/// `inf island fetch` — fill the cache. **The one network step in this repo.**
+fn cmd_island_fetch(args: &[String]) -> ExitCode {
+    let a = match parse_island_args(args) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let recipe = match island_recipe(&a) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match fetch_tiles(&recipe, a.jobs, false) {
+        Ok(n) => {
+            println!("fetched {n} tiles into {}", recipe.cache_dir().display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Fetch every tile the plan names that the cache lacks.
+///
+/// # The two things a downloader must not do
+///
+/// **It must not keep what it was given.** The endpoint answers `NoSuchKey` with
+/// a 299-byte XML body and HTTP 200-shaped plumbing will happily write it to
+/// `15/5179/11205.png`. A cached error page decodes as nothing, which is a flat
+/// plain where a mountain is — so the response is checked for a PNG signature
+/// and refused by name if it is not one, before it reaches the cache.
+///
+/// **It must not half-write.** The transfer goes to a `.part` beside the target
+/// and is renamed on success, so an interrupted fetch leaves no file rather than
+/// a truncated one the next build would trust.
+fn fetch_tiles(
+    recipe: &inf_island::IslandRecipe,
+    jobs: usize,
+    quiet: bool,
+) -> Result<usize, String> {
+    let plan = inf_island::plan_tiles(recipe).map_err(|e| e.to_string())?;
+    let cache = recipe.cache_dir();
+    let missing = plan.missing_in(&cache);
+    if missing.is_empty() {
+        if !quiet {
+            println!("every one of the {} tiles is already cached", plan.len());
+        }
+        return Ok(0);
+    }
+    if !quiet {
+        println!(
+            "fetching {} of {} tiles at z{} into {}",
+            missing.len(),
+            plan.len(),
+            plan.zoom,
+            cache.display()
+        );
+    }
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let failed: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let chunk = missing.len().div_ceil(jobs.max(1));
+    std::thread::scope(|s| {
+        for part in missing.chunks(chunk.max(1)) {
+            let done = &done;
+            let failed = &failed;
+            let cache = &cache;
+            let url = &recipe.source.url;
+            s.spawn(move || {
+                for t in part {
+                    match fetch_one(url, *t, cache) {
+                        Ok(()) => {
+                            let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            if !quiet && n % 25 == 0 {
+                                println!("  {n} fetched");
+                            }
+                        }
+                        Err(e) => failed.lock().expect("fetch report").push(e),
+                    }
+                }
+            });
+        }
+    });
+    let failed = failed.into_inner().expect("fetch report");
+    if !failed.is_empty() {
+        return Err(format!(
+            "{} of {} tiles could not be fetched; the first is:\n  {}",
+            failed.len(),
+            missing.len(),
+            failed[0]
+        ));
+    }
+    Ok(done.into_inner())
+}
+
+/// PNG's own eight-byte signature. A response that does not start with it is not
+/// a tile, whatever the transfer said.
+const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'];
+
+fn fetch_one(
+    url_template: &str,
+    t: inf_island::TileId,
+    cache: &std::path::Path,
+) -> Result<(), String> {
+    let url = inf_island::tile_url(url_template, t);
+    let target = inf_island::cache_path(cache, t);
+    let dir = target
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", target.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let part = target.with_extension("part");
+    let out = std::process::Command::new("curl")
+        .arg("-sS")
+        .arg("--fail")
+        .arg("--retry")
+        .arg("3")
+        .arg("--retry-delay")
+        .arg("1")
+        .arg("-o")
+        .arg(&part)
+        .arg(&url)
+        .output()
+        .map_err(|e| {
+            format!(
+                "could not run `curl` for {url}: {e}. The island fetch shells out \
+                 to curl rather than linking an HTTPS stack — see the ruling on \
+                 `inf island`."
+            )
+        })?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&part);
+        return Err(format!(
+            "{url}: curl exited {} — {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let bytes = std::fs::read(&part).map_err(|e| format!("{}: {e}", part.display()))?;
+    if bytes.len() < PNG_MAGIC.len() || bytes[..PNG_MAGIC.len()] != PNG_MAGIC {
+        let head = String::from_utf8_lossy(&bytes[..bytes.len().min(120)]).to_string();
+        let _ = std::fs::remove_file(&part);
+        return Err(format!(
+            "{url} answered {} bytes that are not a PNG: {head:?}. A dataset that \
+             does not have a tile at this zoom answers with an error document, \
+             and caching one would build a flat plain where a mountain is.",
+            bytes.len()
+        ));
+    }
+    std::fs::rename(&part, &target)
+        .map_err(|e| format!("{} -> {}: {e}", part.display(), target.display()))?;
+    Ok(())
+}
+
+/// `inf island build` (and `inf island route`, which is the same build with the
+/// road planner switched on).
+fn cmd_island_build(args: &[String], replan_roads: bool) -> ExitCode {
+    let a = match parse_island_args(args) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let recipe = match island_recipe(&a) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if !a.offline {
+        if let Err(e) = fetch_tiles(&recipe, a.jobs, false) {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    let started = std::time::Instant::now();
+    // **`route` is TWO passes, and it has to be.** The first plans the network
+    // against the ground as it stands and writes the layer; the second reads that
+    // layer back, levels the road corridor into the terrain, and audits the
+    // ground the road will actually sit on. Auditing after only the first pass
+    // measures a road nobody has built yet — 8.11 % over the ceiling against the
+    // 0.29 % the finished one holds.
+    if replan_roads {
+        let plan_opts = inf_island::BuildOptions {
+            rederive_layers: true,
+            replan_roads: true,
+            dry_run: true,
+        };
+        match inf_island::build_island(&recipe, &plan_opts) {
+            Ok(b) => println!(
+                "[    route] planned {} links, {:.2} km; re-building against them",
+                b.routes.len(),
+                b.report
+                    .roads
+                    .total_km
+                    .max(b.routes.iter().map(|r| r.length_m()).sum::<f64>() / 1000.0)
+            ),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let opts = inf_island::BuildOptions {
+        rederive_layers: false,
+        replan_roads: false,
+        dry_run: a.dry_run,
+    };
+    let build = match inf_island::build_island(&recipe, &opts) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for l in &build.log {
+        println!("[{:>9}] {}", l.step.label(), l.note);
+    }
+    print!("{}", build.report.summary());
+    let start = build.player_start();
+    println!(
+        "  start      ({:.1}, {:.1}, {:.1})",
+        start.x, start.y, start.z
+    );
+    println!("  elapsed    {:.1} s", started.elapsed().as_secs_f64());
+
+    if !a.dry_run {
+        // **The default output is OUTSIDE the tree**, beside the tile cache the
+        // recipe already points out of it. A third of a gigabyte of terrain
+        // landing under `samples/` is a build artifact in a source tree, and the
+        // first run of this command put it there.
+        let out = a.out.clone().unwrap_or_else(|| {
+            recipe
+                .cache_dir()
+                .parent()
+                .map(|p| p.join("project"))
+                .unwrap_or_else(|| recipe.base_dir.join("build"))
+        });
+        let content = out.join("Content");
+        match inf_island::write_content(&build, &content) {
+            Ok(files) => {
+                for f in &files {
+                    println!("  wrote      {f}");
+                }
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        }
+        if let Err(e) = inf_project::ProjectManifest::new(&recipe.name, "blank-3d").save(&out) {
+            eprintln!(
+                "could not scaffold the island project at {}: {e}",
+                out.display()
+            );
+            return ExitCode::FAILURE;
+        }
+        println!("  project    {}", out.display());
+    }
+
+    // C4-40: a blocking finding exits non-zero.
+    if !build.report.is_clean() {
+        eprintln!(
+            "\nthe island has {} blocking finding(s); the first is: {}",
+            build.report.blocking.len(),
+            build
+                .report
+                .blocking
+                .first()
+                .map(String::as_str)
+                .unwrap_or("")
+        );
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }
 
 /// `inf gis …` — the headless half of the GIS import door (IB-3).

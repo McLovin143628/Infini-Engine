@@ -237,14 +237,85 @@ pub struct BiomeSpec {
     pub rock_deg: f64,
     /// How far inland from the water line beach reaches, in metres.
     pub beach_m: f64,
-    /// How many natural-break classes the vegetated band is cut into. The
-    /// lowest becomes plain, the middle meadow, the top forest.
+    /// How many natural-break classes the vegetated band is cut into.
     #[serde(default = "default_biome_classes")]
     pub classes: usize,
+    /// What each natural-break class MEANS, lowest first.
+    ///
+    /// # Why the mapping is the author's and not the classifier's
+    ///
+    /// Jenks finds where the histogram's gaps are. It has no opinion about what
+    /// grows in each band, and a hard-coded "lowest is plain, top is forest"
+    /// carries an opinion about *somewhere else*: on this coast the forest is the
+    /// bulk of the island and the open ground is the exception, so the first
+    /// build's ladder put **9.8 % of the land under canopy** and called a third
+    /// of a rain-forest island a grassy plain.
+    ///
+    /// Shorter than `classes` is legal — the last entry repeats — so
+    /// `["plain", "meadow", "forest"]` over four classes merges the top two.
+    #[serde(default = "default_class_biomes")]
+    pub class_biomes: Vec<String>,
 }
 
 fn default_biome_classes() -> usize {
     3
+}
+
+fn default_class_biomes() -> Vec<String> {
+    vec!["plain".into(), "meadow".into(), "forest".into()]
+}
+
+/// How the water is derived.
+///
+/// Every one of these is a threshold, and a threshold is a design decision about
+/// what counts — a catchment sized for a continent finds one river on an island,
+/// and one sized for a hillside finds a hundred rivulets that are really the
+/// source's own noise.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HydroSpec {
+    /// The catchment a cell needs before it is called a stream, square metres.
+    #[serde(default = "default_catchment")]
+    pub stream_catchment_m2: f64,
+    /// The shallowest depression fill that counts as a lake, metres.
+    #[serde(default = "default_lake_depth")]
+    pub lake_depth_m: f64,
+    /// The smallest lake worth a water body, square metres.
+    #[serde(default = "default_lake_area")]
+    pub lake_area_m2: f64,
+    /// The bed gradient at which a stream segment is called a waterfall.
+    #[serde(default = "default_waterfall")]
+    pub waterfall_grade: f64,
+    /// Derivation cells per committed stream vertex.
+    #[serde(default = "default_stride")]
+    pub vertex_stride: usize,
+}
+
+fn default_catchment() -> f64 {
+    1.0e6
+}
+fn default_lake_depth() -> f64 {
+    1.5
+}
+fn default_lake_area() -> f64 {
+    2_500.0
+}
+fn default_waterfall() -> f64 {
+    0.5
+}
+fn default_stride() -> usize {
+    8
+}
+
+impl Default for HydroSpec {
+    fn default() -> Self {
+        Self {
+            stream_catchment_m2: default_catchment(),
+            lake_depth_m: default_lake_depth(),
+            lake_area_m2: default_lake_area(),
+            waterfall_grade: default_waterfall(),
+            vertex_stride: default_stride(),
+        }
+    }
 }
 
 /// The recipe.
@@ -266,6 +337,8 @@ pub struct IslandRecipe {
     pub coast: String,
     pub roads: RoadSpec,
     pub biomes: BiomeSpec,
+    #[serde(default)]
+    pub hydro: HydroSpec,
     /// Where the derived stream layer is written and read from.
     pub streams: String,
     /// Where the derived lake layer is written and read from.
@@ -437,6 +510,37 @@ impl IslandRecipe {
                  to fall into"
                     .to_string(),
             ));
+        }
+        if self.biomes.class_biomes.is_empty() {
+            return Err(IslandError::Settings(
+                "[biomes] class_biomes is empty — Jenks would find the breaks and \
+                 nothing would say what they mean"
+                    .to_string(),
+            ));
+        }
+        for n in &self.biomes.class_biomes {
+            if crate::biome::IslandBiome::from_label(n).is_none() {
+                return Err(IslandError::Settings(format!(
+                    "[biomes] class_biomes names {n:?}, which is not one of the \
+                     island's biomes"
+                )));
+            }
+        }
+        for (name, v) in [
+            (
+                "[hydro] stream_catchment_m2",
+                self.hydro.stream_catchment_m2,
+            ),
+            ("[hydro] lake_depth_m", self.hydro.lake_depth_m),
+            ("[hydro] lake_area_m2", self.hydro.lake_area_m2),
+            ("[hydro] waterfall_grade", self.hydro.waterfall_grade),
+        ] {
+            if !(v.is_finite() && v > 0.0) {
+                return Err(IslandError::Settings(format!(
+                    "{name} is {v} — every hydrology threshold must be a positive \
+                     finite number"
+                )));
+            }
         }
         for s in &self.sites {
             if !(s.x.is_finite() && s.z.is_finite() && s.radius_m.is_finite()) {
