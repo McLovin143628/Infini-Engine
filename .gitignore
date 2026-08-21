@@ -16,6 +16,15 @@ CLAUDE.md
 *.local.json
 settings.local.*
 
+# ── The island's heavy halves (wave I7) ──
+# `inf island build` writes its terrain, road mesh and tile cache OUTSIDE the
+# tree by default (`<checkout>/../island-build/`), which is the whole point of a
+# recipe. These two entries are belt-and-braces for an author who points `--out`
+# or `[source] cache` back inside it — a third of a gigabyte of build artifact
+# in a source tree is not something to find out about from a push.
+island-build/
+samples/island/build/
+
 # ── Rust ──
 target/
 target-*/

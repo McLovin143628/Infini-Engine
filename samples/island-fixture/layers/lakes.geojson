@@ -1,0 +1,55 @@
+{
+  "crs": {
+    "properties": {
+      "name": "urn:ogc:def:crs:EPSG::32610"
+    },
+    "type": "name"
+  },
+  "features": [
+    {
+      "geometry": {
+        "coordinates": [
+          [
+            [
+              492424.0,
+              5467048.0,
+              156.1494140625
+            ],
+            [
+              492448.0,
+              5467048.0,
+              156.1494140625
+            ],
+            [
+              492448.0,
+              5467024.0,
+              156.1494140625
+            ],
+            [
+              492424.0,
+              5467024.0,
+              156.1494140625
+            ],
+            [
+              492424.0,
+              5467048.0,
+              156.1494140625
+            ]
+          ]
+        ],
+        "type": "Polygon"
+      },
+      "properties": {
+        "area_m2": 576.0,
+        "half_x_m": 12.0,
+        "half_z_m": 12.0,
+        "level_m": 156.1494140625,
+        "max_depth_m": 1.389129638671875,
+        "name": "Lake 0"
+      },
+      "type": "Feature"
+    }
+  ],
+  "name": "lakes derived from the depression fill",
+  "type": "FeatureCollection"
+}

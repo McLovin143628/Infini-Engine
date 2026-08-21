@@ -1,0 +1,92 @@
+# The CI-scale island — a corner of the real one, and the only island CI builds.
+#
+# It exercises EVERY step of the recipe against **committed** elevation bytes:
+# `[source] cache` points at `tiles/` beside this file, and the gate asserts the
+# plan's tile list is exactly what is committed there, so a build that needed one
+# more tile would go red rather than reach for a network.
+#
+#     cargo test -p inf-island --test island_fixture
+#
+# Provenance of the committed bytes: AWS terrain-tiles
+# (`s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png`), zoom 13,
+# fetched 2026-08-21. They are the same public, keyless, no-attribution-required
+# terrarium tiles the full recipe reads; nothing about them is synthetic, which
+# is the point — a fixture with a made-up DEM would certify a decoder against
+# itself.
+
+schema_version = 1
+name = "Island Fixture"
+seed = 7
+
+coast = "layers/coast.geojson"
+streams = "layers/streams.geojson"
+lakes = "layers/lakes.geojson"
+
+# The same UTM zone and the same ground as the full island, offset to sit over
+# the corner with the most relief per square kilometre — a fixture on flat ground
+# would certify the hydrology against a puddle.
+[anchor]
+crs = "EPSG:32610"
+easting_m = 492600.0
+northing_m = 5467400.0
+height_m = 0.0
+vertical_datum = "EGM2008"
+
+# 6 x 6 level-0 tiles of 129 samples at 2 m = 1 536 m square = 2.36 km2.
+[grid]
+tile_resolution = 129
+meters_per_sample = 2.0
+tiles = 6
+
+# z13 and NO margin: the margin exists so a bilinear read at the world's border
+# has a neighbour, and at this scale the extent sits four tiles' worth of ground
+# inside the ones it names anyway. Dropping it is what keeps the committed bytes
+# to four tiles instead of sixteen.
+[source]
+kind = "terrarium"
+zoom = 13
+url = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+cache = "tiles"
+tile_margin = 0
+
+[sea]
+level_m = 120.0
+shelf_depth_m = 40.0
+shelf_width_m = 200.0
+beach_width_m = 24.0
+beach_rise_m = 6.0
+
+[roads]
+layer = "layers/roads.geojson"
+max_grade = 0.10
+grade_step_m = 12.0
+shoulder_mult = 1.6
+
+[hydro]
+stream_catchment_m2 = 30000.0
+lake_depth_m = 1.0
+lake_area_m2 = 500.0
+waterfall_grade = 0.12
+vertex_stride = 2
+
+[biomes]
+masks = "layers/biomes.geojson"
+alpine_m = 560.0
+rock_deg = 34.0
+beach_m = 12.0
+classes = 3
+class_biomes = ["plain", "forest", "meadow"]
+
+[[sites]]
+name = "Fixture Town"
+kind = "city"
+x = -420.0
+z = 380.0
+radius_m = 120.0
+
+[[sites]]
+name = "Fixture Camp"
+kind = "town"
+x = 430.0
+z = -300.0
+radius_m = 90.0

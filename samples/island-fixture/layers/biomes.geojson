@@ -1,0 +1,88 @@
+{
+  "type": "FeatureCollection",
+  "name": "the fixture's biome design masks",
+  "crs": {
+    "type": "name",
+    "properties": {
+      "name": "urn:ogc:def:crs:EPSG::32610"
+    }
+  },
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "biome": "farmland"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              492320.0,
+              5467320.0,
+              0.0
+            ],
+            [
+              492680.0,
+              5467320.0,
+              0.0
+            ],
+            [
+              492680.0,
+              5467080.0,
+              0.0
+            ],
+            [
+              492320.0,
+              5467080.0,
+              0.0
+            ],
+            [
+              492320.0,
+              5467320.0,
+              0.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "biome": "meadow"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              492700.0,
+              5467370.0,
+              0.0
+            ],
+            [
+              493000.0,
+              5467370.0,
+              0.0
+            ],
+            [
+              493000.0,
+              5467130.0,
+              0.0
+            ],
+            [
+              492700.0,
+              5467130.0,
+              0.0
+            ],
+            [
+              492700.0,
+              5467370.0,
+              0.0
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

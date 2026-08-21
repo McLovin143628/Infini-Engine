@@ -165,8 +165,18 @@ pub struct SampleStats {
     pub corridor: u64,
     /// Samples a site pad moved.
     pub pad: u64,
+    /// Samples **inside** the coastline whose carved ground is still under the
+    /// waterline.
+    ///
+    /// A real inlet the design kept, or a design that put its shore across a
+    /// valley. The two are indistinguishable from inside the loop, so the number
+    /// is reported rather than acted on — and it is why the island's own floor
+    /// is not the same quantity as its sea floor.
+    pub submerged_land: u64,
     pub lo_m: f64,
     pub hi_m: f64,
+    /// The lowest sample **outside** the coastline — the sea floor proper.
+    pub sea_floor_m: f64,
     /// The highest point on **land**, which is the peak a ledger quotes (the
     /// overall maximum could be a sea-floor artefact and is not the same claim).
     pub peak_land_m: f64,
@@ -179,6 +189,7 @@ impl SampleStats {
         Self {
             lo_m: f64::INFINITY,
             hi_m: f64::NEG_INFINITY,
+            sea_floor_m: f64::INFINITY,
             peak_land_m: f64::NEG_INFINITY,
             ..Default::default()
         }
@@ -214,6 +225,8 @@ pub fn sample_terrain(
         let mut tile_pad = 0u64;
         let mut tile_lo = f64::INFINITY;
         let mut tile_hi = f64::NEG_INFINITY;
+        let mut tile_sea_floor = f64::INFINITY;
+        let mut tile_submerged = 0u64;
         let mut tile_peak = f64::NEG_INFINITY;
         let mut tile_land_cells = 0u64;
         let mut tile_samples = 0u64;
@@ -283,6 +296,11 @@ pub fn sample_terrain(
             tile_samples += 1;
             tile_lo = tile_lo.min(h);
             tile_hi = tile_hi.max(h);
+            if d <= 0.0 {
+                tile_sea_floor = tile_sea_floor.min(h);
+            } else if h <= sea.level_m {
+                tile_submerged += 1;
+            }
             if h > sea.level_m {
                 tile_land_cells += 1;
                 tile_peak = tile_peak.max(h);
@@ -297,6 +315,8 @@ pub fn sample_terrain(
         st.pad += tile_pad;
         st.lo_m = st.lo_m.min(tile_lo);
         st.hi_m = st.hi_m.max(tile_hi);
+        st.sea_floor_m = st.sea_floor_m.min(tile_sea_floor);
+        st.submerged_land += tile_submerged;
         st.peak_land_m = st.peak_land_m.max(tile_peak);
         st.land_area_m2 += tile_land_cells as f64 * cell_area;
     }

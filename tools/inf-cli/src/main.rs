@@ -765,12 +765,7 @@ fn cmd_island_build(args: &[String], replan_roads: bool) -> ExitCode {
     // measures a road nobody has built yet — 8.11 % over the ceiling against the
     // 0.29 % the finished one holds.
     if replan_roads {
-        let plan_opts = inf_island::BuildOptions {
-            rederive_layers: true,
-            replan_roads: true,
-            dry_run: true,
-        };
-        match inf_island::build_island(&recipe, &plan_opts) {
+        match inf_island::build_island(&recipe, &inf_island::BuildOptions::planning_pass()) {
             Ok(b) => println!(
                 "[    route] planned {} links, {:.2} km; re-building against them",
                 b.routes.len(),

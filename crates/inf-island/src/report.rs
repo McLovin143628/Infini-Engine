@@ -81,8 +81,12 @@ pub struct IslandReport {
     pub coastline_km: f64,
     /// The highest point ON LAND, metres.
     pub peak_m: f64,
-    /// The lowest carved point, metres.
+    /// The lowest carved point anywhere, metres.
     pub floor_m: f64,
+    /// The lowest point **outside** the coastline — the sea floor proper.
+    pub sea_floor_m: f64,
+    /// Samples inside the coastline that are still under the waterline.
+    pub submerged_land: u64,
     /// Level-0 tiles, and the whole catalog including the pyramid.
     pub tiles_level0: u64,
     pub tiles_total: usize,
@@ -143,6 +147,12 @@ impl IslandReport {
             0.0
         };
         self.floor_m = if s.lo_m.is_finite() { s.lo_m } else { 0.0 };
+        self.sea_floor_m = if s.sea_floor_m.is_finite() {
+            s.sea_floor_m
+        } else {
+            0.0
+        };
+        self.submerged_land = s.submerged_land;
         self.nodata_samples = s.nodata;
         self
     }
@@ -188,8 +198,9 @@ impl IslandReport {
         );
         let _ = writeln!(
             s,
-            "  relief     peak {:.1} m on land, sea floor {:.1} m, coastline {:.2} km",
-            self.peak_m, self.floor_m, self.coastline_km
+            "  relief     peak {:.1} m on land, sea floor {:.1} m, lowest {:.1} m, \
+             {} submerged land samples, coastline {:.2} km",
+            self.peak_m, self.sea_floor_m, self.floor_m, self.submerged_land, self.coastline_km
         );
         let _ = writeln!(
             s,

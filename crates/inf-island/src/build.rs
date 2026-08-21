@@ -60,7 +60,18 @@ pub struct BuildOptions {
     /// Also off by default, and the same reason. This is the switch `inf island
     /// route` throws.
     pub replan_roads: bool,
-    /// Skip the terrain asset and the mesh — a fast pass for the report alone.
+    /// Skip the **heavy** halves — the terrain asset, its pyramid and the road
+    /// mesh. A fast pass for the report alone.
+    ///
+    /// # It does NOT suppress the layer write, and that distinction is load-bearing
+    ///
+    /// `inf island route` is two passes: the first plans the network against the
+    /// ground as it stands, the second reads that plan back and levels its
+    /// corridor into the terrain before auditing it. The first pass has no use
+    /// for a 342 MB terrain, so it is a dry run — and while `dry_run` also
+    /// suppressed the layer write, the second pass found no committed routes,
+    /// planned them again, and audited a road whose corridor had never been cut.
+    /// Measured on the fixture: **15.28 % over the ceiling instead of 0 %.**
     pub dry_run: bool,
 }
 
@@ -70,6 +81,18 @@ impl Default for BuildOptions {
             rederive_layers: false,
             replan_roads: false,
             dry_run: false,
+        }
+    }
+}
+
+impl BuildOptions {
+    /// The planning half of `inf island route`: derive the design, write it, and
+    /// build none of the heavy halves.
+    pub fn planning_pass() -> Self {
+        Self {
+            rederive_layers: true,
+            replan_roads: true,
+            dry_run: true,
         }
     }
 }
@@ -328,10 +351,10 @@ pub fn build_island(
     let stream_path = recipe.resolve(&recipe.streams);
     let lake_path = recipe.resolve(&recipe.lakes);
     let network = if opts.rederive_layers || !stream_path.exists() || !lake_path.exists() {
-        if !opts.dry_run {
-            layers::write_streams(&stream_path, &anchor, &derived.streams)?;
-            layers::write_lakes(&lake_path, &anchor, &derived.lakes)?;
-        }
+        // Written whatever `dry_run` says: the design is the light half and the
+        // second pass reads it. See `BuildOptions::dry_run`.
+        layers::write_streams(&stream_path, &anchor, &derived.streams)?;
+        layers::write_lakes(&lake_path, &anchor, &derived.lakes)?;
         derived.clone()
     } else {
         committed_network(&stream_path, &lake_path, &anchor, hp.waterfall_grade)?
@@ -441,9 +464,8 @@ pub fn build_island(
     let coarse_for_routing = CoarseHeights::of(&data, min, max, DERIVATION_PITCH_M);
     let routes = if opts.replan_roads || committed_routes.is_empty() {
         let planned = roads::plan_network(recipe, &coarse_for_routing)?;
-        if !opts.dry_run {
-            layers::write_roads(&road_path, &anchor, &planned)?;
-        }
+        // Written whatever `dry_run` says — see `BuildOptions::dry_run`.
+        layers::write_roads(&road_path, &anchor, &planned)?;
         planned
     } else {
         committed_routes
