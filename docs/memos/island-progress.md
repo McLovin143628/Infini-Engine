@@ -26,7 +26,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **IP** | the remainder of the performance list — the cook's PCG evaluation, IB-9's island ceiling, the VSM caster scatter | **carried** — see *What is still open after I4b* below |
 | **I5** | **player core** — the owner's binding table, the C key's four verbs, the in-game UI layer, the settings dialog + rebinding, the interaction core | **DONE + AUDITED** — battery 309 / **5 796** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, rustdoc 413, no schema moved. Two pre-existing ragdoll defects found and fixed by the wave; **five more found and fixed by the audit** (A1 the settings-dialog lockout, A2 the half-built Simulate pause mirror, A3 an unarmed determinism sort, A5 three silent dead sliders, A6 two false doc invariants) plus A4 an arm that could not fail and A7 a count that was one low. See below. *(This wave took the I5 slot; **IB-11's far half — LERC / BigTIFF / JPEG2000 / LAS, reprojection, the geoid — is NOT in it** and moves to a later wave.)* |
 | ~~I6 (old)~~ | ~~scale seams — IB-12~~ *(pulled into I4; IB-8 and IB-13 into I3)* | **absorbed** |
-| **I6** | **gameplay systems** — doors + locks + the kick + crash-through, inventory, weapons v1, health | **DONE — awaiting audit** — battery 312 / **5 867** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, rustdoc 447 of a 450 ceiling (measured cold — and the recorded 413 was stale by 34; the wave adds zero), **no schema moved**. `NOT_YET_CONSUMED` is empty. Six defects found by the wave's own world-level arms and five more by its gate; one energy door for the kick, the breach and the bullet; the city plans **19 790** doorways and the band makes **234** solid. See *Done — wave I6* below |
+| **I6** | **gameplay systems** — doors + locks + the kick + crash-through, inventory, weapons v1, health | **DONE + AUDITED** — battery 312 / **5 873** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, rustdoc **404** of a 450 ceiling (447 at the wave's head, re-measured cold; 39 cleared by the audit), **no schema moved**. `NOT_YET_CONSUMED` is empty. Six defects found by the wave's own world-level arms and five more by its gate; one energy door for the kick, the breach and the bullet (mutation-proved across two crates); the city plans **19 790** doorways and the band makes **234** solid. The audit found **five arms that could not fail** (two trace sections, the wheel verb, the corpse guard, the spent attack edge) and **three world defects** (a barged door lost its lock for ever, `door.is_open` walked all 19 790 doorways, a dead block claiming a swing it did not drive). See *Done — wave I6* and *The I6 audit* below |
 | I7 | content — the 50 km² Vancouver map itself | not started |
 
 Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
@@ -2164,7 +2164,10 @@ the room its wall serves, which is what `Wall::inside` means.
 | **doorways the band makes SOLID** | **234 — 1.18 %** |
 | door leaves the physics world actually holds | **234**, equal to the band's list |
 
-1.18 % against the walls' own 1.64 %: the same discipline, at the same radii,
+1.18 % against the walls' own **1.59 %** (6 213 of 390 258, printed by
+`the_banded_city_holds_the_streamed_step_budget`; the *1.64 %* this line first
+carried was I3's figure against a smaller solid count, and the I6 audit
+re-measured it): the same discipline, at the same radii,
 through one new door (`PhysicsBridge3D::sim_band`) so a level's doors and its
 walls cannot be solid at different distances. And the two hosts plan the same
 doors **byte for byte** — all 19 790 placements compared as raw bit patterns
@@ -2279,7 +2282,8 @@ function in `inf_ecs::door`, and an `[inf_physics::d3::pcg_structure_guid]` link
 in `inf_ecs::item` naming a crate that — by the facade rule — `inf-ecs` cannot
 and must not depend on.
 
-Five commits, `(I6)`-tagged, none pushed: the door core and the P22 energy rule's
+**Six** commits, `(I6)`-tagged, none pushed (the wave's own line said five and
+listed six — the I6 audit counted them): the door core and the P22 energy rule's
 one home; the gameplay engine half (doors, kicks, crashes, weapons, health); the
 grammar's doors, banded; the gate, the fixture, the Blueprint kit and the tuning
 door; the doorway-walk visitor; and the two doc links plus this ledger. *(A sha is only true of the
@@ -2327,10 +2331,174 @@ re-states the range rather than trusting a number copied out of this file.)*
   which ran.
 * **A corpse does not get up.** The ragdoll's get-up fires on settle, so a body
   the damage system handed over was re-handed on the next step. `Downed` is the
-  latch and `Health::dead` is the guard on the get-up.
+  latch and `Health::dead` is the guard on the get-up. *(The latch was armed; the
+  **guard** was not until the I6 audit — see below.)*
 * **The panel's verbs are VALUES the host applies**, never edits the panel makes.
   A UI that reached into the world would move a player's things on the frame
   clock instead of the fixed one.
+
+## Decisions (the I6 audit's, binding on later waves)
+
+* **A LOCK ONLY BREAKS IF IT WAS HOLDING.** `try_break` answers `broke` for a
+  door that was merely shut as well as for one that was locked — nothing was
+  holding it — and `apply_break` marked both as `lock_broken`. A broken lock
+  never re-engages, so one sprint through a house's own unlocked front door
+  retired that door's lock for the session, on every door the grammar emits,
+  which is every door in the city. Read the **state**, not the price: a lock an
+  author gave no area is engaged and costs zero, and should still break.
+* **A GATE THAT COMPARES TWO TRACES CANNOT SEE A SECTION MISSING FROM BOTH.**
+  Deleting `door_state_bytes` from `RuntimeSim::state_bytes` — and, separately,
+  `weapon_state_bytes` — left all sixty-nine `inf-player` test binaries green,
+  the PIE-versus-shipping gate included. Only a pin on the **fold itself** can
+  see it: `every_trace_section_is_folded_in_its_frozen_order` allowlists all
+  eight sections in order, which is P22's "a ban enumerates what you thought of,
+  an allowlist what is allowed" at a trace.
+* **A COVERAGE ROW MUST NAME A CHANGE, NOT A STATE.** "The wheel left the same
+  weapon equipped" is a claim a wheel wired to nothing satisfies perfectly. A
+  fixture with **one** of a thing cannot force a verb that cycles between them;
+  the fixture carries the second one, or the row is theatre.
+* **THE KEY THAT OPENS A SURFACE CLOSES IT**, and the close is decided against
+  the **live map**. An open panel takes every key (that is what makes it a
+  surface), so the press can never reach the host's own edge and the panel has
+  to answer it. A literal — the settings dialog's own `"Escape" | "Tab"` — works
+  until somebody rebinds it.
+* **A LOCAL RUSTDOC COUNT MEANS NOTHING WITHOUT `cargo clean --doc`.** I6 found
+  this and this audit re-measured it from cold to be sure: `cargo doc` re-emits
+  warnings only for the crates it re-documents, so a warm tree counts a fraction
+  of itself with total confidence. The number to write down is the one produced
+  by `cargo clean --doc && CARGO_TERM_COLOR=never cargo doc --no-deps
+  --workspace`, over the **45** documented crates CI counts. It is **404** at
+  this head, against a ceiling of 450.
+
+## The I6 audit (adversarial, `4155d30..7c0c997`)
+
+**Every number in the wave's energy table re-derives.** 300 MPa × 4 cm² × 1 mm
+= **120.000 J**; a kick is `0.5 × 15 × 4.5²` = **151.875 J**, 31.875 J to spare;
+a sprint is `0.5 × 80 × 6.5²` = **1 690 J**; the pure exit is
+`0.85 × sqrt(6.5² − 2·120/80)` = **5.325 m/s (81.9 %)**, and the gate's
+**5.406 m/s / 83.2 %** is that same breach after one step of the movement step's
+own friction and acceleration — two different quantities, each printed by the
+test that measures it. The city reproduces exactly: **100 blocks, 370 468
+solids, 19 790 doorways, 234 banded (1.18 %), 234 leaves**.
+
+**THE ONE DOOR SURVIVES ITS OWN MUTATION.** Multiplying
+`Destructible::bond_energy_j` by two fails **three** `inf_ecs::door` arms *and*
+**two** `inf-physics::fracture_3d` arms at once. A second pricing site anywhere
+in the tree would have left one of those two families green. There is none.
+
+**The `Without` sweep is clean.** All thirteen `try_query_filtered` call sites in
+the tree were enumerated: every one carries `With<…>` only. The single negative
+filter that ever existed is the one the wave found, and restoring it still costs
+the ragdoll its handoff (`0 handoffs where there should be 1`).
+`hierarchy.rs:60` uses the **infallible** `query_filtered`, which registers the
+component it names and is not subject to the law.
+
+**Mutation-measured gate blindness, five found and closed:**
+
+| mutation | before this audit | now |
+|---|---|---|
+| `door_state_bytes` deleted from `RuntimeSim::state_bytes` | **all 69 `inf-player` test binaries green** — two hosts that both stop folding a section agree about it perfectly | `every_trace_section_is_folded_in_its_frozen_order` (all eight sections, allowlisted in order) **and** the gate's own sections arm, which now opens a door and equips a rifle before it looks |
+| `weapon_state_bytes` deleted from the fold | **all 69 green** — and the arm *named* "…the magazine…" never looked at it | the same two |
+| `cycle_equipped`'s call deleted from `step_weapons` | **the whole gate green**: `ScrollSwitch` was forced by "the equipped id is unchanged", which a wheel wired to nothing satisfies | the fixture carries a **pistol**, and the station forces `rifle → pistol → rifle` |
+| the `!dead` guard removed from the ragdoll get-up | **all 9 `weapon_3d` arms green** — that fixture's target has no rig, so P29.4's "no rig is coming" branch answers before the settle path is ever reached | `a_dead_body_stays_limp_where_a_live_one_gets_up`, on the rigged `ragdoll_bridge_3d` fixture, with the live body as its control (103 steps to a get-up; 900 and still limp) |
+| `press_attack` never consumed in `step_weapons` | `door_3d`, `weapon_3d` and the gate all green — and `apply_intent`'s `\|=` latches the edge for the rest of the session | `an_attack_spent_at_an_unlocked_door_does_not_kick_it_when_it_is_locked_later` |
+
+**Three world-level defects, found by reading and closed:**
+
+* **A door you barged through could never be locked again.** `apply_break` set
+  `lock_broken` on *any* door that gave, and a shut-but-unlocked door gives for
+  free — so one sprint through a house's own front door retired its lock for the
+  session (both `set_locked` and the prompt refuse a broken one). Every grammar
+  door starts unlocked, so on the shipped city that was every door in it. Armed
+  by `a_sprint_through_an_unlocked_door_leaves_a_lock_that_still_works`, whose
+  control is the locked half still breaking and still refusing to re-engage.
+* **`door.is_open` walked the unbanded list.** The Blueprint kit's one read is a
+  node an author may put on `Tick`, and it collected all 19 790 of the shipped
+  city's doorways — a label `String` allocated per door, then a 19 790-element
+  sort — to answer a question about one. It band-checks by reach *before* it
+  builds a placement now, which is the wave's own visitor discipline applied to
+  the caller it missed; `placement_of` (the E key's and the breach's) took the
+  same walk and takes the visitor too. It had **no test at all**; it has one.
+* **Dead code with a false claim.** `try_breach` re-wrote `target_deg` to the
+  value `apply_break` had already written and called it "open it the rest of the
+  way **under power**", with `powered` false. Deleting it changed nothing under
+  mutation. It is gone, and the claim it stood in for — that the weakest possible
+  breach still reaches the frame — is now measured
+  (`a_breach_with_nothing_to_spare_still_swings_the_leaf_to_its_stop`: 182 deg/s
+  reaches the 95-degree stop in 46 steps, both signs).
+
+**Plus four smaller ones.** `I` opened the inventory and could not close it (an
+open panel takes every key, so the host's `just_pressed(INVENTORY)` edge could
+never fire again — the owner's table says *open/close*; the close is decided
+against the live map, so a rebound key works and the old one is just another key
+the panel eats). `doorway_bits` compared eight of `DoorwaySlot`'s ten fields, so
+a mirror that dropped `exterior` or `floor` was invisible — it destructures the
+struct now and a new field stops the file compiling. `GAMEPLAY_DOORS_TOML`
+carried **31 literal newlines** where the const beside it uses `\n` — the
+fifteenth `chr(92)` catch's own shape, content-identical only because
+`.gitattributes` forces `*.rs text eol=lf` — and its doc said "two" doors where
+the fixture hangs four. The wave's own ledger said "five commits" over a list of
+six, and quoted the walls' band as 1.64 % (I3's figure) where the test prints
+1.59 %.
+
+**THE RUSTDOC MARGIN, re-measured and then widened.** The wave's headline
+reproduces exactly, CI-style (`cargo clean --doc`, then
+`cargo doc --no-deps --workspace`): **447 warnings over 45 documented crates**,
+three under the 450 ceiling. Thirty-nine were then cleared by hand — 31
+`redundant explicit link target` and 8 `unclosed HTML tag` in four probe
+binaries whose key/value output blocks are now fenced — and four crates fell to
+zero and took their summary lines with them: **404 over 45 crates, and the
+headroom is 46.**
+
+*Accumulated laws gain a line: **a local rustdoc count means nothing without
+`cargo clean --doc`.** `cargo doc` re-emits warnings only for crates it
+re-documents, so a warm tree counts a fraction of itself with total confidence.*
+
+**Verdict per claim.** ONE energy door **HELD** (mutation-proved across two
+crates). The sparse `DoorField` **HELD** (dense fails two arms; entries persist
+once a door is *used*, which is state rather than a walk-past, and the field
+never shrinks — remainder 9). The leaf's axes **HELD**. The two kick paths
+**HELD**: the gate runs the **fuse** (a fuse of 1e9 s costs it the `KickIn`
+verb) and `door_3d` runs the notify with no double. The 19 790 placements
+**HELD and genuinely cross-host** — cooked pack against PIE payload — and the
+angle-swap hazard is covered better than the byte compare knows, because
+`biome_binding_mirror` pins both `population_of` blocks character for character.
+The joules arm **HELD** (dropping `attach_fractures` reds it). The persistence
+answer **HELD** (no `ReflectSerialize` in the tree, no writer on
+`props`/`registry`, the v26 + `EntityRecordV25` + payload-12 price is the real
+one). The two-cook replay **HELD**, and it is in-process exactly as
+`phase29_gate`'s own is. **CORRECTED**: the trace sections, the wheel verb, the
+corpse guard, the barged lock, `I = open/close`, the unbanded probe, the dead
+block, the eight-of-ten field pin.
+
+### Counts, at the head this audit certifies
+
+| | after I6 (as recorded) | **after the I6 audit** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 312 / 5 867 / 0 / 14 | **312 / 5 873 / 0 / 14** — six new arms, **no new test binary**, and the wave's own figure reproduces exactly |
+| frontend tests / files | 702 / 78 | **702 / 78**, `tsc --noEmit` and `eslint` clean (the audit touched no frontend file) |
+| goldens | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical**, re-run under `INF_GOLDEN_STRICT=1` over **101 arms** with no PNG rewritten — and no golden byte moved anywhere in `4155d30..` this tree |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** (local toolchain 1.97) |
+| rustdoc individual warnings (ceiling 450) | 447 over 45 crates | **404 over 45 crates** — 39 cleared by hand, headroom 3 → **46** |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — the audit moved no schema** |
+| committed samples | 21 levels | **21** — `samples/phase30-gameplay/Gameplay.inf_act` is regenerated (the pistol the wheel station needed); no other committed byte moved |
+
+Five audit commits, `(I6)`-tagged, none pushed: the trace fold's allowlist and
+the doorway's field pin; the wheel's second weapon and the inventory key's
+close; the barged lock, the corpse guard, the spent edge and the banded probe;
+the rustdoc clears; and this ledger. *(A sha is only true of the tree it was
+written in — the I3 audit's law — so the wave that closes this one re-states the
+range rather than trusting a number copied out of this file.)*
+
+**Six of the implementer's mutations were re-run** and every one still dies at
+the arm that names it: `Without<Downed>` (0 handoffs), the dense door field (2
+arms), the transposed leaf axes (the wedge arm and the pose arm), `BLOCK_SKIN_M`
+at zero (the wedge arm), the corpse's get-up (now armed), and a gate without
+`attach_fractures` (the joules arm). One did **not**: removing
+`!h.started_penetrating` from the blocking probe changes no test in the tree —
+the skin is what carries that fix, and the clause on top of it is defensive
+(remainder 10). **Twenty mutations in all**, six of them the implementer's and
+fourteen new, and every fix above is recorded with the one that kills it.
 
 ## What is still open after I6
 
@@ -2376,3 +2544,29 @@ re-states the range rather than trusting a number copied out of this file.)*
    builds starts locked, because a city whose every interior door was bolted is a
    city nobody can walk through and there is no authored intent to read one from.
    Locking is a verb a player or a Blueprint uses.
+9. **The door field never shrinks.** An entry is written when a door's state
+   changes and is never removed, so a door a player opened and shut again keeps
+   its 48 bytes in the trace for ever even though its state is exactly the one
+   `absent` would have produced. That is bounded by doors a player has **used**
+   rather than by doors they have walked past — which is the defect the wave
+   found and fixed — and it is stated rather than closed, because pruning would
+   need a canonical-form rule that `lock_broken` and `locked_at_spawn` both have
+   an opinion about.
+10. **`!started_penetrating` in the blocking probe is unarmed.** `BLOCK_SKIN_M`
+    is what actually keeps a leaf resting on the floor from reading as blocked —
+    setting it to zero fails `a_wedge_in_the_swing_stops_the_leaf_where_it_is` —
+    and removing the `started_penetrating` clause on top of it changes no test in
+    the tree. It is defensive rather than load-bearing today; a fixture whose
+    leaf is inside a solid is what would arm it, and what such a fixture *should*
+    assert is a design question rather than a measurement.
+11. **`DOOR_REACH_M`'s arithmetic is documented and not armed.** The constant
+    carries the derivation (2.4 m of reach is 2.16 m of floor at a leaf's
+    1.05 m mid-height) and it has exactly one use site; putting it back to 2.0
+    fails nothing, because the gate's script walks to 1.6 m of floor. The
+    argument for 2.4 is a player standing a comfortable pace away, which is a
+    claim about comfort and not one a trace can hold.
+12. **`gameplay::side_of` has no caller.** It is `pub`, documented as the seam
+    "the hosts' prompt" reads, and nothing in the tree calls it — the prompt goes
+    through `d3::door::candidates`, which decides the side itself. Kept because
+    the next host that wants one press's side outside the candidate walk will
+    want exactly this; named here so it is not mistaken for coverage.
