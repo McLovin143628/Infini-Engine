@@ -400,8 +400,7 @@ impl Inventory {
             _ => false,
         };
         if same {
-            let stack_max = self
-                .slots[from]
+            let stack_max = self.slots[from]
                 .as_ref()
                 .and_then(|s| defs.get(&s.id))
                 .map(|d| d.stack_max.max(1))
@@ -569,7 +568,11 @@ pub fn spawn_pickup(
     let entity = world.spawn_with_guid(guid, &label, None);
     let mut t = Transform::IDENTITY;
     t.translation = at;
-    t.scale = Vec3d::new(PICKUP_HALF_M * 2.0, PICKUP_HALF_M * 2.0, PICKUP_HALF_M * 2.0);
+    t.scale = Vec3d::new(
+        PICKUP_HALF_M * 2.0,
+        PICKUP_HALF_M * 2.0,
+        PICKUP_HALF_M * 2.0,
+    );
     world.world_mut().entity_mut(entity).insert((
         t,
         // A cube, because the engine has no item geometry and a pickup nobody
@@ -885,8 +888,16 @@ mod tests {
         });
         assert_eq!(inv.cycle_equipped(&d, 1, |_| true), Some(1));
         assert_eq!(inv.cycle_equipped(&d, 1, |_| true), Some(3));
-        assert_eq!(inv.cycle_equipped(&d, 1, |_| true), Some(1), "it did not wrap");
-        assert_eq!(inv.cycle_equipped(&d, -1, |_| true), Some(3), "it did not go back");
+        assert_eq!(
+            inv.cycle_equipped(&d, 1, |_| true),
+            Some(1),
+            "it did not wrap"
+        );
+        assert_eq!(
+            inv.cycle_equipped(&d, -1, |_| true),
+            Some(3),
+            "it did not go back"
+        );
         // A filter that admits nothing answers None rather than spinning.
         assert_eq!(inv.cycle_equipped(&d, 1, |_| false), None);
         assert_eq!(inv.equipped, Some(3), "a refused cycle moved the equip");
@@ -975,10 +986,7 @@ stack_max = 5
         );
         assert_eq!(pick_up(&mut w, hero, on_floor), PickUpVerdict::Taken(1));
         assert!(w.entity_of(on_floor).is_none(), "the floor still has it");
-        assert_eq!(
-            inventory_of(&w, hero).expect("a bag").count_of("rifle"),
-            1
-        );
+        assert_eq!(inventory_of(&w, hero).expect("a bag").count_of("rifle"), 1);
         // Back out: a new entity, at a deterministic guid, in front of the hero.
         let dropped = drop_slot(&mut w, hero, 0, 1).expect("it dropped");
         assert_eq!(dropped, dropped_item_guid(hero, 1));
@@ -990,7 +998,10 @@ stack_max = 5
             .expect("a transform")
             .translation;
         println!("the rifle came back out at {at:?}");
-        assert!((at.z - DROP_REACH_M).abs() < 1e-6, "it did not land in front");
+        assert!(
+            (at.z - DROP_REACH_M).abs() < 1e-6,
+            "it did not land in front"
+        );
         assert!((at.y - DROP_HEIGHT_M).abs() < 1e-12);
         // …and it can be picked up again.
         assert_eq!(pick_up(&mut w, hero, dropped), PickUpVerdict::Taken(1));
@@ -1026,10 +1037,7 @@ stack_max = 5
         spawn_pickup(&mut w2, pile, "bandage", 8, Vec3d::ZERO);
         assert_eq!(pick_up(&mut w2, hero, pile), PickUpVerdict::Partial(5));
         let pe = w2.entity_of(pile).expect("the remainder is still there");
-        assert_eq!(
-            w2.world().get::<ItemPickup>(pe).expect("a pickup").count,
-            3
-        );
+        assert_eq!(w2.world().get::<ItemPickup>(pe).expect("a pickup").count, 3);
         // …and a pickup of nothing is refused at the spawn.
         assert!(spawn_pickup(&mut w2, Uuid::from_u128(400), "rifle", 0, Vec3d::ZERO).is_none());
         assert!(spawn_pickup(&mut w2, Uuid::from_u128(401), "ghost", 1, Vec3d::ZERO).is_none());
@@ -1056,6 +1064,9 @@ stack_max = 5
             .add(&defs, "rifle", 1);
         let full = item_state_bytes(&w);
         assert_ne!(empty, full, "the trace did not see the rifle");
-        assert!(item_state_bytes(&w) == full, "the trace is not a function of state");
+        assert!(
+            item_state_bytes(&w) == full,
+            "the trace is not a function of state"
+        );
     }
 }

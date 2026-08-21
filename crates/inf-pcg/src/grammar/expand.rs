@@ -851,6 +851,18 @@ pub struct GrammarOutput {
     /// contributes no group and is banded box by box. Empty is the correct
     /// answer, not a missing one.
     pub groups: Vec<crate::building::StructureGroup>,
+    /// **Every door this output's buildings want** (I6).
+    ///
+    /// Emitted only by
+    /// [`evaluate_buildings_in`](crate::building::evaluate_buildings_in), which
+    /// is the one pass that has a `BuildingPlan` in hand — a `grammar.expand`
+    /// pass has no notion of a room, so a fence contributes none. Empty is the
+    /// correct answer, not a missing one.
+    ///
+    /// Unlike [`groups`](Self::groups) these carry **no index ranges**, so
+    /// concatenation needs no re-basing: a doorway is located in the world and
+    /// names nothing.
+    pub doorways: Vec<crate::building::PcgDoorway>,
 }
 
 impl GrammarOutput {
@@ -866,6 +878,7 @@ impl GrammarOutput {
         let (ci, ii) = (self.colliders.len() as u32, self.instances.len() as u32);
         self.instances.extend(other.instances);
         self.colliders.extend(other.colliders);
+        self.doorways.extend(other.doorways);
         self.groups.extend(other.groups.into_iter().map(|mut g| {
             g.start += ci;
             g.inst_start += ii;
@@ -938,6 +951,9 @@ pub fn expand_span(
         // A 1-D expansion has no notion of "one structure": a fence is a run of
         // modules, not a building, and is banded box by box.
         groups: Vec::new(),
+        // …and no notion of a room either, so it plans no doors (I6). Empty is
+        // the correct answer here, not a missing one.
+        doorways: Vec::new(),
     };
     for (i, slot) in lay.slots.iter().enumerate() {
         let Some(kind) = slot.module else { continue };

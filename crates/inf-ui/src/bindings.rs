@@ -609,8 +609,8 @@ mod tests {
             );
         }
         assert!(
-            rows.iter().all(|r| !inf_input::actions::NOT_YET_CONSUMED
-                .contains(&r.name)),
+            rows.iter()
+                .all(|r| !inf_input::actions::NOT_YET_CONSUMED.contains(&r.name)),
             "a row is still unwired"
         );
     }

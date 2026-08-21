@@ -95,7 +95,7 @@ pub fn candidates(
     // I6: doors. Excluded like anything else, so a door a character is somehow
     // already the subject of does not offer itself.
     out.extend(
-        super::door::candidates(world, feet)
+        super::door::candidates(world, &bridge.sim_band(world), feet)
             .into_iter()
             .filter(|c| !exclude.contains(&c.guid)),
     );
@@ -114,11 +114,7 @@ pub fn resolve(
     aim_yaw_deg: f64,
     exclude: &BTreeSet<Uuid>,
 ) -> Option<InteractHit> {
-    interact::resolve(
-        &candidates(world, bridge, feet, exclude),
-        feet,
-        aim_yaw_deg,
-    )
+    interact::resolve(&candidates(world, bridge, feet, exclude), feet, aim_yaw_deg)
 }
 
 /// The vehicle half on its own — what `vehicle::try_enter` answers.

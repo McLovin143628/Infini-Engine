@@ -681,8 +681,10 @@ fn step_one(
     //    is one comparison behind all three.
     {
         let feet = position - DVec3::Y * (cm.half_height_for(cm.mode) + radius);
+        let band = bridge.sim_band(world);
         if let Some(breach) = super::door::try_breach(
             world,
+            &band,
             feet,
             cm.runtime.velocity.to_dvec3(),
             cm.mode,

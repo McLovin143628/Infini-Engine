@@ -3205,6 +3205,38 @@ pub struct ScatteredSolid {
     pub rotation: DQuat,
 }
 
+/// **One doorway a `.inf_pcg` graph's building planned** (I6) — the hinge half
+/// of [`PcgVolume`]'s evaluation, beside [`ScatteredSolid`]'s solid half.
+///
+/// A dependency-light mirror of `inf_pcg::building::PcgDoorway`, on exactly the
+/// terms [`ScatteredSolid`] mirrors `inf_pcg::PcgCollider`. Not reflected, not
+/// serialized: derived state, recomputed wherever `evaluated` is, so it moves no
+/// schema.
+///
+/// **This is what makes a grammar-built building's doorway a DOOR.** P19.5 made
+/// a scattered wall solid so a doorway became a hole a character could walk
+/// through; the hole has never had anything in it. The physics bridge reads
+/// these and hangs one kinematic leaf on each.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DoorwaySlot {
+    /// The hinge, world metres, at the leaf's mid-height.
+    pub hinge: DVec3,
+    /// The compass yaw from the hinge toward the free edge when shut, degrees.
+    pub closed_yaw_deg: f64,
+    /// The leaf's width, metres.
+    pub width_m: f64,
+    /// The leaf's height, metres.
+    pub height_m: f64,
+    /// The leaf's thickness, metres.
+    pub thickness_m: f64,
+    /// The compass yaw of the inside face's outward normal, degrees.
+    pub inside_yaw_deg: f64,
+    /// Whether this is the building's one exterior door.
+    pub exterior: bool,
+    /// Which storey it is on.
+    pub floor: u32,
+}
+
 /// **Which run of a volume's derived lists is one building**, and what that
 /// building's shell box is (IB-2b).
 ///
@@ -3311,6 +3343,20 @@ pub struct PcgVolume {
     #[serde(skip)]
     #[reflect(ignore)]
     pub structures: Vec<ScatteredSolid>,
+    /// The same evaluation's **doorways** (I6) — every place the building
+    /// grammar planned a door, as a hinge a leaf can be hung on.
+    ///
+    /// `#[serde(skip)]` + `#[reflect(ignore)]` for exactly the reason
+    /// [`structures`](Self::structures) is: it is derived from the graph and the
+    /// terrain, both of which the loading host already has, so it reaches no
+    /// bytes and forces no schema move. Read by the physics bridge, which turns
+    /// each into one kinematic leaf under `door_leaf_guid`.
+    ///
+    /// Located in the world and naming no index, so nothing here has to be
+    /// re-based when populations are concatenated.
+    #[serde(skip)]
+    #[reflect(ignore)]
+    pub doorways: Vec<DoorwaySlot>,
     /// Bumped every time [`structures`](Self::structures) is replaced through
     /// [`set_structures`](Self::set_structures) — the **change stamp** the
     /// physics bridge reconciles against.
@@ -3359,6 +3405,7 @@ impl Default for PcgVolume {
             draw_distance: default_pcg_draw_distance(),
             evaluated: Vec::new(),
             structures: Vec::new(),
+            doorways: Vec::new(),
             structures_gen: 0,
             structure_groups: Vec::new(),
         }
@@ -3411,7 +3458,9 @@ impl PcgVolume {
         instances: Vec<ScatteredInstance>,
         solids: Vec<ScatteredSolid>,
         groups: Vec<StructureGroup>,
+        doorways: Vec<DoorwaySlot>,
     ) {
+        self.doorways = doorways;
         let (ns, ni) = (solids.len(), instances.len());
         self.evaluated = instances;
         self.structures = solids;
@@ -6065,6 +6114,7 @@ mod tests {
             extent: Vec2d::new(80.0, 40.0),
             seed: 7,
             draw_distance: 600.0,
+            doorways: Vec::new(),
             evaluated: vec![ScatteredInstance {
                 position: DVec3::new(1.0, 2.0, 3.0),
                 rotation: DQuat::IDENTITY,
@@ -6158,6 +6208,7 @@ mod tests {
                 group(0, 4, 0, 4), // one solid past the end
                 group(2, 1, 3, 2), // one instance past the end
             ],
+            Vec::new(),
         );
         assert_eq!(v.structure_groups.len(), 1, "{:?}", v.structure_groups);
         assert_eq!(v.structure_groups[0].range(), 0..3);
@@ -6165,7 +6216,12 @@ mod tests {
         assert_eq!(v.structures_gen, 1, "one write is one stamp");
 
         // The three-list write is one stamp, and re-writing bumps it once more.
-        v.set_population(vec![inst; 1], vec![solid; 1], vec![group(0, 1, 0, 1)]);
+        v.set_population(
+            vec![inst; 1],
+            vec![solid; 1],
+            vec![group(0, 1, 0, 1)],
+            Vec::new(),
+        );
         assert_eq!(v.structures_gen, 2);
         assert_eq!(v.evaluated.len(), 1);
 
@@ -6192,6 +6248,7 @@ mod tests {
                 group(2, 2, 2, 2), // kept — the first legal successor
                 group(0, 1, 0, 1), // backwards
             ],
+            Vec::new(),
         );
         assert_eq!(w.structure_groups.len(), 2, "{:?}", w.structure_groups);
         assert_eq!(w.structure_groups[0].range(), 0..2);

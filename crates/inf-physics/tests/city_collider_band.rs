@@ -178,7 +178,7 @@ fn city(at: DVec3) -> City {
             extent: Vec2d::new(BLOCK.x * 0.5, BLOCK.y * 0.5),
             ..Default::default()
         };
-        vol.set_population(inst, s, g);
+        vol.set_population(inst, s, g, Vec::new());
         assert_eq!(
             vol.structure_groups.len(),
             b,
@@ -447,7 +447,7 @@ fn a_solid_covered_by_no_group_is_banded_box_by_box() {
             .world_mut()
             .get_mut::<PcgVolume>(e)
             .expect("live");
-        vol.set_population(instances, solids, groups);
+        vol.set_population(instances, solids, groups, Vec::new());
         assert_eq!(
             vol.structures.len(),
             grouped + 2,

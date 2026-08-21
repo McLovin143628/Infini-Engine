@@ -188,7 +188,9 @@ impl WeaponDef {
     /// A table with **no `[…].weapon`** sub-table is not a weapon and answers
     /// `None`; a malformed one is an error, because a weapon whose damage was
     /// silently dropped would fire blanks and say nothing.
-    pub fn from_toml_table(t: &toml::map::Map<String, toml::Value>) -> Result<Option<Self>, String> {
+    pub fn from_toml_table(
+        t: &toml::map::Map<String, toml::Value>,
+    ) -> Result<Option<Self>, String> {
         let Some(w) = t.get("weapon") else {
             return Ok(None);
         };
@@ -442,12 +444,7 @@ fn shot_uniforms(seed: u64, shot: u64) -> (f64, f64) {
 /// uniform **over the cone's disc** (`theta = half · sqrt(u)`), not uniform in
 /// the angle, because the second concentrates shots at the middle in a way a
 /// player reads as the weapon being more accurate than its number says.
-pub fn shot_direction(
-    def: &WeaponDef,
-    yaw_deg: f64,
-    pitch_deg: f64,
-    shot: u64,
-) -> DVec3 {
+pub fn shot_direction(def: &WeaponDef, yaw_deg: f64, pitch_deg: f64, shot: u64) -> DVec3 {
     let yaw = if yaw_deg.is_finite() { yaw_deg } else { 0.0 };
     let pitch = if pitch_deg.is_finite() {
         pitch_deg.clamp(-89.9, 89.9)
@@ -583,26 +580,68 @@ pub fn give_health(world: &mut EcsWorld, guid: Uuid, capacity_j: f64) -> bool {
     true
 }
 
-/// **Every character that has stopped working and is not already a ragdoll**,
-/// in `Guid` order.
+/// **This body has been handed to the ragdoll** — a runtime marker, and the
+/// latch that makes the handoff happen exactly once.
+///
+/// A `bool` on [`Health`] would have done, and it would have been the wrong
+/// shape: "this body has stopped working" and "something has already dealt with
+/// that" are two facts, and the second one is the gameplay step's business
+/// rather than the damage model's.
+///
+/// **It is a latch and not a mode test, and the difference is measured.** The
+/// obvious rule — "dead and not currently a ragdoll" — re-fires on every step a
+/// ragdoll is not running, and a character with no skeleton never gets one: the
+/// rig arrives through a one-step command queue that the animation side answers,
+/// so a headless body, an NPC with no `.inf_skel` and every level committed
+/// before I6 would be handed over again, and again, for ever. Measured on the
+/// first fixture that killed something: **two handoffs in thirty steps** where
+/// there should be one, and it would have been thirty in three hundred.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Downed;
+
+/// **Every character that has stopped working and has not been handed over
+/// yet**, in `Guid` order.
 ///
 /// Here rather than at the gameplay step because this crate is the only one that
-/// may name `bevy_ecs` (the facade rule), and the query needs three components
-/// at once. `O(bodies)`, and `O(1)` on a level where nothing can be hurt.
+/// may name `bevy_ecs` (the facade rule). `O(bodies)`, and `O(1)` on a level
+/// where nothing can be hurt.
 pub fn newly_dead(world: &EcsWorld) -> Vec<Uuid> {
-    use crate::components::{CharacterMovement, MovementMode};
     let w = world.world();
-    let Some(mut q) = w.try_query_filtered::<(&Guid, &Health, &CharacterMovement), With<Health>>()
+    let Some(mut q) =
+        w.try_query_filtered::<(&Guid, &Health, bevy_ecs::prelude::Entity), With<Health>>()
     else {
         return Vec::new();
     };
+    // **The latch is read per entity, not as a `Without<Downed>` filter.**
+    // `try_query_filtered` answers `None` when any component it names has never
+    // been inserted in this world — which is the `O(1)` fast path the whole
+    // codebase relies on, and which for a *negative* filter is exactly backwards:
+    // a world where nobody has died yet has no `Downed` anywhere, so the query
+    // answered `None` and **nothing was ever handed to the ragdoll at all**.
+    // Measured: 0 handoffs where there should be 1.
     let mut out: Vec<Uuid> = q
         .iter(w)
-        .filter(|(_, h, cm)| h.dead && cm.mode != MovementMode::Ragdoll)
+        .filter(|(_, h, e)| h.dead && w.get::<Downed>(*e).is_none())
         .map(|(g, _, _)| g.0)
         .collect();
     out.sort_unstable();
     out
+}
+
+/// Latch the handoff. `false` for an entity that is not there.
+pub fn mark_downed(world: &mut EcsWorld, guid: Uuid) -> bool {
+    let Some(entity) = world.entity_of(guid) else {
+        return false;
+    };
+    world.world_mut().entity_mut(entity).insert(Downed);
+    true
+}
+
+/// Whether this body has already been handed over.
+pub fn is_downed(world: &EcsWorld, guid: Uuid) -> bool {
+    world
+        .entity_of(guid)
+        .is_some_and(|e| world.world().get::<Downed>(e).is_some())
 }
 
 /// Read one body's health.
@@ -734,7 +773,10 @@ mod tests {
             advance(&a, &mut t, DT);
         }
         println!("600 rpm held for one second fired {fired} rounds");
-        assert!((9..=11).contains(&fired), "{fired} rounds in a second at 600 rpm");
+        assert!(
+            (9..=11).contains(&fired),
+            "{fired} rounds in a second at 600 rpm"
+        );
     }
 
     /// **The reload has two finishers and both work** — the notify and the
@@ -807,8 +849,13 @@ mod tests {
             worst = worst.max(deg);
             best = best.min(deg);
         }
-        println!("500 shots of a 4.0 degree cone landed between {best} and {worst} degrees off centre");
-        assert!(worst <= 2.0 + 1e-3, "a shot left its own cone at {worst} degrees");
+        println!(
+            "500 shots of a 4.0 degree cone landed between {best} and {worst} degrees off centre"
+        );
+        assert!(
+            worst <= 2.0 + 1e-3,
+            "a shot left its own cone at {worst} degrees"
+        );
         assert!(worst > 1.8, "the cone is not being filled");
         assert!(best < 0.5, "no shot went near the middle");
         // A weapon with no spread fires down the aim, and two weapons with
@@ -844,7 +891,10 @@ mod tests {
         assert!((h.fraction() - 0.15).abs() < 1e-12);
         // The second one stops it, and absorbs only what was left.
         let r = damage(&mut h, 1700.0);
-        assert!((r.absorbed_j - 300.0).abs() < 1e-12, "a corpse over-absorbed");
+        assert!(
+            (r.absorbed_j - 300.0).abs() < 1e-12,
+            "a corpse over-absorbed"
+        );
         assert!(r.killed);
         assert!(h.dead && h.joules == 0.0);
         // A third absorbs nothing and does not kill it twice — the latch.
@@ -887,12 +937,13 @@ automatic = true
         assert!(def.automatic);
         // No sub-table is not a weapon.
         let plain: toml::Value = toml::from_str("[bandage]\nlabel = \"x\"\n").expect("a document");
-        assert!(WeaponDef::from_toml_table(plain["bandage"].as_table().expect("a table"))
-            .expect("no error")
-            .is_none());
+        assert!(
+            WeaponDef::from_toml_table(plain["bandage"].as_table().expect("a table"))
+                .expect("no error")
+                .is_none()
+        );
         // An unknown key and an unknown kind are errors, not silent blanks.
-        let bad: toml::Value =
-            toml::from_str("[x.weapon]\nwobble = 3\n").expect("a document");
+        let bad: toml::Value = toml::from_str("[x.weapon]\nwobble = 3\n").expect("a document");
         assert!(WeaponDef::from_toml_table(bad["x"].as_table().expect("a table")).is_err());
         let worse: toml::Value =
             toml::from_str("[x.weapon]\nkind = \"beam\"\n").expect("a document");

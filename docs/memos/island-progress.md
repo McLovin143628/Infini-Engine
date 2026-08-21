@@ -25,7 +25,8 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **I4b** | **performance** — the sim fixed step, the lighting stack, the scatter impostor, the pipelining | **DONE + AUDITED** — battery 306 / 5 710 / 0 / 14, frontend 702 / 78, goldens 54 strict, clippy 0, rustdoc 413, no schema moved. Step 12.7 → **1.25 ms**; lit p95 92.3 → **38.9–41.3**; unlit 1080p **inside the 60 fps budget at p50 on every run and at p95 on two of three** (the audit's correction). One defect fixed: the scatter caster cache was blind to the floating origin |
 | **IP** | the remainder of the performance list — the cook's PCG evaluation, IB-9's island ceiling, the VSM caster scatter | **carried** — see *What is still open after I4b* below |
 | **I5** | **player core** — the owner's binding table, the C key's four verbs, the in-game UI layer, the settings dialog + rebinding, the interaction core | **DONE + AUDITED** — battery 309 / **5 796** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, rustdoc 413, no schema moved. Two pre-existing ragdoll defects found and fixed by the wave; **five more found and fixed by the audit** (A1 the settings-dialog lockout, A2 the half-built Simulate pause mirror, A3 an unarmed determinism sort, A5 three silent dead sliders, A6 two false doc invariants) plus A4 an arm that could not fail and A7 a count that was one low. See below. *(This wave took the I5 slot; **IB-11's far half — LERC / BigTIFF / JPEG2000 / LAS, reprojection, the geoid — is NOT in it** and moves to a later wave.)* |
-| ~~I6~~ | ~~scale seams — IB-12~~ *(pulled into I4; IB-8 and IB-13 into I3)* | **absorbed** |
+| ~~I6 (old)~~ | ~~scale seams — IB-12~~ *(pulled into I4; IB-8 and IB-13 into I3)* | **absorbed** |
+| **I6** | **gameplay systems** — doors + locks + the kick + crash-through, inventory, weapons v1, health | **IN PROGRESS** — see *Done — wave I6* below |
 | I7 | content — the 50 km² Vancouver map itself | not started |
 
 Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
@@ -2030,3 +2031,118 @@ entry shift) in *What is still open*, below.
     *Nothing is currently wrong on disk*: `samples/phase29-locomotion/input.toml` is the only
     committed one and it is byte-identical to `default_map()`, which is why the phase-29 gate's
     editor-versus-player arm passes without noticing.
+
+---
+
+## Done — wave I6 (gameplay systems)
+
+**THE ENGINE HAD NO GAMEPLAY VERBS.** I5 bound the owner's whole control table and
+left four of its keys — `reload`, `attack`, `inventory`, `weapon_switch` — bound
+against consumers that did not exist, with the shipped player raising an honest
+"not wired up yet" toast when one was pressed. There were no doors (a doorway was
+a hole in a wall and nothing else), no inventory, no weapons, and **no health
+component anywhere in the workspace** — searched exhaustively before writing one:
+every `hp` in the tree was a CSV fixture column or a data-asset codegen test.
+
+`inf_input::actions::NOT_YET_CONSUMED` is now **empty**, and that is the wave's
+own summary.
+
+### ONE ENERGY DOOR, and what it cost to make it one
+
+A kick, a crash-through, a bullet and a collapsing wall all meet at
+`Destructible::bond_energy_j` — `strength × area × CRACK_OPENING_M`, the P22 rule.
+Making that true moved one constant: `CRACK_OPENING_M` left
+`inf_physics::d3::fracture` for `inf_ecs::components`, beside `Destructible`,
+where `bond_force_n`'s own doc already said the *contract* belongs. The old path
+is a `pub use`, so nothing that named it moved. `bond_energies` and
+`ground_bond_energies` — which each spelled the multiplication out — now call it,
+so the expression exists once.
+
+| quantity | how it is derived | value |
+|---|---|---|
+| a default lock | 300 MPa (structural steel) × 4 cm² bolt × 1 mm crack | **120.000 J** |
+| a kick | half of 15 kg times 4.5 m/s squared — a leg and a hip, not a body | **151.875 J** |
+| the kick's margin | one kick opens a house door; doubling the lock takes two | **31.875 J** |
+| the breach speed gate | above the run (3.75) and below the sprint (6.5) | **5.0 m/s** |
+| a sprint's energy | half of 80 kg times 6.5 m/s squared | **1 690 J** |
+| a sprint's exit speed | the lock's joules off exactly, then a 0.85 restitution | **5.325 m/s, 81.9 % kept** |
+| a rifle round | the muzzle energy of a real one | **1 700 J** |
+| a body | what it absorbs before it stops working | **2 000 J** (two rounds) |
+
+**Health is joules, not hit points**, and that is not a style choice:
+`docs/memos/p22-strength.md` §1 refuses damage numbers for walls, and a character
+is the one place a bullet, a kick, a fall and a collapsing wall all meet — so a
+conversion table there would be the same mistake with more consumers.
+
+### The door system
+
+`inf_ecs::door` is the pure half (a leaf on a hinge, the lock's price, the swing,
+the breach arithmetic); `inf_physics::d3::door` is where it meets the world (the
+leaf's collider, the blocking probe, the door half of I5's candidate list).
+
+* **The state is a sparse bevy resource** (`DoorField`), keyed by `Guid`, and
+  **absent means closed**. Three reasons in the module header, and the binding one
+  is that a grammar doorway has no entity to put a component on — a design that
+  gave authored doors their state on the component and derived doors theirs in a
+  map would be two authorities on "is this door open". It is P22's own split
+  (`Destructible` authored, `FractureState` mutable) and it moves no schema.
+* **The leaf is a SYNTHETIC kinematic body** under `door_leaf_guid`, for authored
+  and derived doors alike — the `pcg_structure_guid` pattern with its own salt.
+  A door entity's `Transform` is its **hinge** and is never written.
+* **The E key keeps I5's one resolution site.** `step_one`'s verb dispatch is a
+  `match` now, so a verb added later is a compile error rather than a silent
+  decline. `d3::interact::candidates` gained a `feet` argument for one reason: a
+  door's prompt says whether the *lock* verb is on offer, and that is a fact about
+  which face the character is standing on — deciding it at the press instead
+  would be two calls where I5 built one.
+* **The kick lands on the animation's notify**, never on the button, with a
+  0.35 s fuse for a character that has no rig to notify it. Both paths are armed.
+
+### What the world-level arms found (and they are the interesting part)
+
+Ten door arms and nine weapon arms against a real `PhysicsBridge3D`. Five real
+defects, every one of them invisible to the rule-level tests:
+
+| defect | what it did | how it was found |
+|---|---|---|
+| **the leaf's box axes were transposed** | `leaf_pose` returned `(width, height, thickness)` while the yaw is applied as `from_rotation_y` and yaw zero is `+Z` — so the box's long axis was its thickness. The blocking probe swept a 0.06 m box along the leaf's length and a 0.9 m box across it, and **a solid standing squarely in a door's arc was never hit** | the wedge arm: 0 blocked steps of 90 against a box the leaf passes through |
+| **every door was permanently blocked** | a leaf stands ON the floor and BETWEEN two wall boxes, so a sweep of its exact box begins penetrating and parry reports `toi == 0`. Read as "blocked", it meant **no door in the engine could ever open** | the first fixture that had a floor in it: 0 of 90 steps moved |
+| **the door field was not sparse** | `step_doors` called `field.entry` for every door every step, materialising an entry for every door in the world on its first step — so a level's trace bytes became a function of how many doors a player had walked past, and no pre-I6 trace would have stayed byte-identical | the arm that asserts the trace is empty after ten steps of a world with a door in it |
+| **a corpse got up** | the ragdoll's get-up fires on settle, so a body handed over by the damage system was re-handed on the next step: a corpse twitching upright and flopping, for ever | 2 handoffs in 30 steps where there should be 1 |
+| **`Without<Downed>` answered `None`** | `try_query_filtered` refuses when a component it names has never been inserted — which is the `O(1)` fast path everything relies on and is exactly backwards for a *negative* filter. A world where nobody had died yet had no `Downed` anywhere, so **nothing was ever handed to the ragdoll at all** | 0 handoffs where there should be 1 |
+
+The last one is a law: **`try_query_filtered`'s `None` fast path cannot carry a
+`Without`.** Read the latch per entity.
+
+And the **reach budget** was a sixth, found the same way: `interact::resolve`
+measures from the character's **feet** and a door's interaction point is at the
+leaf's mid-height, so a 2.0 m reach is 1.70 m of floor. It is 2.4 now, which is
+2.16 m of floor, and the arithmetic is on the constant.
+
+### THE PERSISTENCE ANSWER (the brief's STOP question, answered without a STOP)
+
+**A runtime `Inventory` needs no wire field**, and the accounting is written where
+the next reader will look (`inf_ecs::item`'s module header):
+
+* what a character picks up, carries, equips and drops during a session is
+  derived, mutated by gameplay and — like a broken wall, a carved cave and a
+  footprint — **not persisted**, because `.inf_lvl` is the author's document and
+  this engine has no save-game container;
+* an **authored per-entity starting inventory** *would* be a wire field, and the
+  exact one is `RuntimeEntityGen::inventory: Option<Inventory>` at the record's
+  tail — scene **v26**, its editor mirror, a frozen `EntityRecordV25`, a committed
+  downgrade fixture, and `SCENE_PAYLOAD_VERSION` **12** by the envelope's own
+  doctrine. I6 does not need it, so I6 does not take it.
+
+There is **no generic component-reflection save path** in this tree: `props` and
+`registry` exist for the Details panel and have no writer, and a repo-wide search
+for `ReflectSerialize` finds nothing.
+
+**Two catalogue homes were refused and priced.** A `.inf_item` asset needs a scene
+field to be named by an entity *and* a `ScenePayload` vector to reach PIE — two
+bumps. An `items.toml` beside the level reaches exactly **one** of the three boot
+paths (the I5 audit's own finding A6 about `input.toml`), so a catalogue there
+would be present in a dev run and absent in the build. What content authors
+instead is the **Blueprint kit**, which rides `.inf_act` bytes that a cooked pack
+and a PIE payload already both carry — the surface `destruct.*` and `voxel.*`
+already are.

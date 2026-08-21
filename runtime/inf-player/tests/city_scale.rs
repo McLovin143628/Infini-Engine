@@ -933,3 +933,125 @@ fn the_city_cooks_without_an_advisory() {
     );
     let _ = level::PACK_FILE;
 }
+
+/// **WHAT A CITY'S DOORS COST** (island wave I6) — measured on the shipped
+/// fixture, in the two units that decide whether the design is affordable: how
+/// many doorways a thousand buildings plan, and how many of them the band makes
+/// SOLID.
+///
+/// The second number is the one that matters. IB-2a's whole finding is that the
+/// cells decide what EXISTS and the band decides what is SOLID; a door system
+/// that ignored the band would put twenty thousand kinematic bodies in a rapier
+/// world sixty times a second. This prints both and asserts the ratio, so the
+/// day the band stops applying to doors it fails here with a number rather than
+/// as a frame-time mystery.
+#[test]
+fn the_citys_doorways_are_banded_like_its_walls() {
+    let built = pie_built();
+    let all: usize = volumes(&built).iter().map(|(_, v)| v.doorways.len()).sum();
+    let blocks = volumes(&built).len();
+    println!(
+        "the shipped city: {blocks} blocks, {} solids, {all} doorways ({:.1} per block)",
+        solids(&built).len(),
+        all as f64 / blocks.max(1) as f64
+    );
+    assert!(
+        all > 0,
+        "the city plans no doors at all - the grammar's doorway emission is not reaching the population"
+    );
+    // The band: a bridge synced against the city's own `StreamingSource` (the
+    // Driver), which is what the fixed step really does.
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync_from_world(&built.world);
+    let band = bridge.sim_band(&built.world);
+    let near = inf_physics::d3::door::placements_near(&built.world, &band).len();
+    println!(
+        "…of which {near} are inside the collider band - {:.2} % of {all}",
+        100.0 * near as f64 / all.max(1) as f64
+    );
+    assert!(near > 0, "the band admitted no door at all");
+    assert!(
+        near < all,
+        "every doorway in a 1.26 km city is solid - the band is not applying to doors"
+    );
+    // …and the same discipline the walls are held to: the admitted set is a
+    // small fraction, not "most of them".
+    assert!(
+        (near as f64) < 0.15 * all as f64,
+        "the band admitted {near} of {all} doorways, which is not a band"
+    );
+    // The leaves the bridge actually built match what the band admitted, so the
+    // number above is about the world rather than about a list.
+    let mut leaves = 0;
+    for (g, v) in volumes(&built) {
+        for i in 0..v.doorways.len() {
+            let leaf =
+                inf_physics::d3::door_leaf_guid(inf_physics::d3::door::pcg_doorway_guid(g, i));
+            if bridge.body_of(leaf).is_some() {
+                leaves += 1;
+            }
+        }
+    }
+    println!("the physics world holds {leaves} door leaves");
+    assert_eq!(
+        leaves, near,
+        "the band's list and the bridge's bodies disagree"
+    );
+}
+
+/// **The two hosts plan the same doors**, byte for byte — the cooked pack and
+/// the PIE payload, through the two hand-written `population_of` mirrors.
+///
+/// `start` and `inst_start` were the mirror's own named hazard; a doorway adds
+/// eight more fields to keep in step, and two of them (`closed_yaw_deg` and
+/// `inside_yaw_deg`) are both angles, so **swapping them compiles** and would
+/// hang every door in the city sideways.
+#[test]
+fn the_cooked_and_previewed_cities_plan_the_same_doors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pack = cook_city(tmp.path());
+    let shipped = pack_built(&pack);
+    let previewed = pie_built();
+    let a: Vec<[u64; 8]> = doorway_bits(&shipped);
+    let b: Vec<[u64; 8]> = doorway_bits(&previewed);
+    println!(
+        "the cooked city plans {} doorways and the previewed one {}",
+        a.len(),
+        b.len()
+    );
+    assert!(!a.is_empty(), "the cooked city plans no doors");
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "the two hosts plan different numbers of doors"
+    );
+    for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+        assert_eq!(x, y, "doorway {i} differs between the cook and the preview");
+    }
+}
+
+/// Every doorway's placement as raw bits, in volume order — the same discipline
+/// `shell_bits` uses, and for the same reason: two hosts agreeing about a count
+/// and disagreeing about an angle is exactly what a byte comparison is for.
+fn doorway_bits(built: &BuiltWorld) -> Vec<[u64; 8]> {
+    volumes(built)
+        .into_iter()
+        .flat_map(|(_, v)| {
+            v.doorways
+                .into_iter()
+                .map(|d| {
+                    [
+                        d.hinge.x.to_bits(),
+                        d.hinge.y.to_bits(),
+                        d.hinge.z.to_bits(),
+                        d.closed_yaw_deg.to_bits(),
+                        d.inside_yaw_deg.to_bits(),
+                        d.width_m.to_bits(),
+                        d.height_m.to_bits(),
+                        d.thickness_m.to_bits(),
+                    ]
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}

@@ -754,6 +754,7 @@ mod tests {
             }],
             colliders: vec![],
             groups: vec![],
+            doorways: vec![],
         };
         assert_eq!(
             parts_from_output(&out, &grammar),

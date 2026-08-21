@@ -238,7 +238,10 @@ fn step_weapons(
                 .map(|cm| cm.runtime.aim_yaw_deg)
                 .unwrap_or(0.0);
             match feet {
-                Some(feet) => try_kick(world, guid, feet, yaw),
+                Some(feet) => {
+                    let band = bridge.sim_band(world);
+                    try_kick(world, &band, guid, feet, yaw)
+                }
                 None => false,
             }
         } else {
@@ -399,7 +402,13 @@ fn apply_hit(world: &mut EcsWorld, hit: &WeaponHit, report: &mut GameplayReport)
 ///
 /// The attack button's door consumer. Returns whether a kick was armed, which is
 /// what stops the same press also firing a weapon at the door.
-pub fn try_kick(world: &mut EcsWorld, character: Uuid, feet: DVec3, aim_yaw_deg: f64) -> bool {
+pub fn try_kick(
+    world: &mut EcsWorld,
+    band: &inf_ecs::band::SimBand,
+    character: Uuid,
+    feet: DVec3,
+    aim_yaw_deg: f64,
+) -> bool {
     if world.entity_of(character).is_none() {
         return false;
     }
@@ -412,7 +421,7 @@ pub fn try_kick(world: &mut EcsWorld, character: Uuid, feet: DVec3, aim_yaw_deg:
     // is out of reach.
     let field = inf_ecs::door::door_field(world);
     let mut candidates: Vec<inf_ecs::interact::InteractCandidate> = Vec::new();
-    for p in super::door::placements(world) {
+    for p in super::door::placements_near(world, band) {
         let state = field
             .map(|f| f.get(p.guid, &p.spec))
             .unwrap_or_else(|| inf_ecs::door::DoorState::fresh(&p.spec));
@@ -467,6 +476,11 @@ fn step_kicks(world: &mut EcsWorld, dt: f64, report: &mut GameplayReport) {
 
 fn step_deaths(world: &mut EcsWorld, _bridge: &mut PhysicsBridge3D, report: &mut GameplayReport) {
     for guid in weapon::newly_dead(world) {
+        // **The latch goes down FIRST**, whether or not the ragdoll takes it.
+        // A body whose ragdoll is refused — no `CharacterMovement`, a mode the
+        // table will not leave — must not be offered again on the next step; see
+        // `weapon::Downed` for the measurement.
+        weapon::mark_downed(world, guid);
         // **The P29.4 door, unchanged.** `start_ragdoll`'s own doc has named "a
         // damage system" as its intended caller since P29.4; this is that
         // caller, and it does not reach past the door into the rig.

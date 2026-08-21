@@ -153,8 +153,19 @@ pub const BREACH_SWING_DPS: f64 = 520.0;
 /// How wide the prompt's cone is on a door, degrees — a door is a flat thing and
 /// you have to be facing it.
 pub const DOOR_VIEW_CONE_DEG: f64 = 120.0;
+
 /// How close you have to be to use a door, metres.
-pub const DOOR_REACH_M: f64 = 2.0;
+///
+/// **The reach budget includes the leaf's own height**, which is the same thing
+/// `ENTER_REACH_M`'s doc says of a vehicle seat, and it is arithmetic rather
+/// than generosity: [`crate::interact::resolve`] measures from the character's
+/// **feet**, and a door's interaction point is at the leaf's mid-height. A
+/// default leaf is 2.1 m tall, so its middle is 1.05 m up, and a character
+/// standing `d` metres from the threshold is `sqrt(d² + 1.05²)` from the point.
+/// At 2.4 that is **2.16 m of floor**, which is arm's length plus a step; at the
+/// 2.0 this was first written as it was 1.70 m, and a player standing a
+/// comfortable pace from a door got no prompt at all.
+pub const DOOR_REACH_M: f64 = 2.4;
 
 // ── the shapes ──────────────────────────────────────────────────────────────
 
@@ -458,19 +469,33 @@ fn yaw_dir(yaw_deg: f64) -> DVec3 {
 
 /// **Where the leaf is**: the centre of its box, its yaw, and its half extents.
 ///
-/// The box is `width × height × thickness` with the hinge on one end of the
-/// width axis, so the centre is half a width along the leaf's own direction from
-/// the hinge. Returned rather than written so the same function serves the
-/// collider sync, the interaction position and every test.
+/// The hinge is on one end of the leaf's length, so the centre is half a width
+/// along the leaf's own direction from it. Returned rather than written so the
+/// same function serves the collider sync, the interaction position and every
+/// test.
+///
+/// # The half extents are `(thickness, height, width)`, and the order matters
+///
+/// The yaw is applied as `DQuat::from_rotation_y`, and [`yaw_dir`] puts yaw
+/// **zero at `+Z`** (the engine's one compass convention). So the leaf's *length*
+/// runs along its own local `+Z` and its thickness along local `+X` — and a box
+/// written `(width, height, thickness)` would be a leaf lying across its own
+/// doorway at every angle.
+///
+/// It cost a real defect: the blocking probe swept a 0.9 m box along the
+/// **thin** axis and a 0.06 m box along the long one, so a solid standing
+/// squarely in a door's arc was never hit and the leaf swung straight through
+/// it. Measured before the fix at 0 blocked steps of 90 against a box the leaf
+/// passes through; after it, the leaf stops.
 pub fn leaf_pose(placement: &DoorPlacement, open_deg: f64) -> (DVec3, f64, DVec3) {
     let spec = &placement.spec;
     let yaw = wrap_deg(spec.closed_yaw_deg + open_deg);
     let dir = yaw_dir(yaw);
     let centre = placement.hinge + dir * (spec.width_m * 0.5);
     let half = DVec3::new(
-        spec.width_m * 0.5,
-        spec.height_m * 0.5,
         spec.thickness_m * 0.5,
+        spec.height_m * 0.5,
+        spec.width_m * 0.5,
     );
     (centre, yaw, half)
 }
@@ -661,7 +686,11 @@ pub fn apply_break(spec: &DoorSpec, state: &mut DoorState, verdict: &BreakVerdic
     let unit = spec.lock_energy_j().max(1.0);
     let scale = (verdict.remainder_j / unit).max(0.0).sqrt().min(4.0);
     let dps = (BREACH_SWING_DPS * scale.max(0.35)).min(DOOR_MAX_DPS);
-    state.vel_dps = if spec.open_limit_deg >= 0.0 { dps } else { -dps };
+    state.vel_dps = if spec.open_limit_deg >= 0.0 {
+        dps
+    } else {
+        -dps
+    };
 }
 
 /// **The speed a character keeps through a breach, m/s.**
@@ -768,6 +797,39 @@ pub fn doors_in_world(world: &EcsWorld) -> Vec<DoorPlacement> {
     // A bevy archetype walk's order is an implementation detail and must never
     // reach a result.
     out.sort_by_key(|p| p.guid);
+    out
+}
+
+/// **Every doorway the building grammar planned**, as
+/// `(volume guid, index, slot)` in `(volume, index)` order.
+///
+/// Here rather than in the physics bridge because this crate is the only one
+/// that may name `bevy_ecs` (the facade rule). The bridge turns each into a
+/// [`DoorPlacement`] under its own synthetic guid — the identity is the
+/// bridge's, because that is where every other synthetic guid in this engine is
+/// minted.
+///
+/// `O(doorways)`, and `O(1)` on a level with no `PcgVolume`.
+pub fn volume_doorways(world: &EcsWorld) -> Vec<(Uuid, usize, crate::components::DoorwaySlot)> {
+    let w = world.world();
+    let Some(mut q) = w.try_query_filtered::<
+        (&Guid, &crate::components::PcgVolume),
+        With<crate::components::PcgVolume>,
+    >() else {
+        return Vec::new();
+    };
+    let mut out: Vec<(Uuid, usize, crate::components::DoorwaySlot)> = q
+        .iter(w)
+        .flat_map(|(g, v)| {
+            v.doorways
+                .iter()
+                .enumerate()
+                .map(move |(i, d)| (g.0, i, *d))
+        })
+        .collect();
+    // A bevy archetype walk's order is an implementation detail and must never
+    // reach a result.
+    out.sort_by_key(|(g, i, _)| (*g, *i));
     out
 }
 
@@ -912,7 +974,10 @@ mod tests {
         // A lock a designer doubles takes more than one kick — the knob works.
         let mut stout = spec;
         stout.lock_strength_pa *= 2.0;
-        assert!(kick < stout.lock_energy_j(), "the strength knob does nothing");
+        assert!(
+            kick < stout.lock_energy_j(),
+            "the strength knob does nothing"
+        );
     }
 
     /// **The speed gate sits between the run and the sprint**, and the energies
@@ -934,8 +999,21 @@ mod tests {
         // gate is — and a stouter lock is what makes the energy gate bite.
         let mut vault = spec;
         vault.lock_strength_pa = 6.0e11;
-        assert!(vault.lock_energy_j() > sprint, "a vault must refuse a sprint");
-        assert!(!try_break(&vault, &DoorState { locked: true, ..DoorState::fresh(&vault) }, sprint).broke);
+        assert!(
+            vault.lock_energy_j() > sprint,
+            "a vault must refuse a sprint"
+        );
+        assert!(
+            !try_break(
+                &vault,
+                &DoorState {
+                    locked: true,
+                    ..DoorState::fresh(&vault)
+                },
+                sprint
+            )
+            .broke
+        );
     }
 
     /// **The momentum kept through a breach**, with the two terms separated.
@@ -944,7 +1022,14 @@ mod tests {
         let spec = DoorSpec::default();
         let m = DEFAULT_BODY_MASS_KG;
         let v = 6.5;
-        let verdict = try_break(&spec, &DoorState { locked: true, ..DoorState::fresh(&spec) }, breach_energy_j(m, v));
+        let verdict = try_break(
+            &spec,
+            &DoorState {
+                locked: true,
+                ..DoorState::fresh(&spec)
+            },
+            breach_energy_j(m, v),
+        );
         assert!(verdict.broke);
         assert!((verdict.absorbed_j - 120.0).abs() < 1e-9);
         let out = breach_exit_speed_mps(m, v, verdict.absorbed_j);
@@ -954,7 +1039,10 @@ mod tests {
             100.0 * out / v,
             verdict.remainder_j
         );
-        assert!(out > 0.8 * v, "the mode must continue with most of its speed");
+        assert!(
+            out > 0.8 * v,
+            "the mode must continue with most of its speed"
+        );
         assert!(out < v, "the lock must cost something");
         // The exact arithmetic, so a change to either term is visible.
         let want = BREACH_RESTITUTION * (v * v - 2.0 * 120.0 / m).sqrt();
@@ -977,7 +1065,10 @@ mod tests {
         assert_eq!(a.absorbed_j, 0.0, "a refused blow must absorb nothing");
         let b = try_break(&spec, &state, half);
         assert!(!b.broke, "the second half must not finish the first");
-        assert!(try_break(&spec, &state, spec.lock_energy_j()).broke, "exactly enough must do it");
+        assert!(
+            try_break(&spec, &state, spec.lock_energy_j()).broke,
+            "exactly enough must do it"
+        );
     }
 
     /// **The leaf swings, stops at its frame, and settles.**
@@ -991,10 +1082,16 @@ mod tests {
             advance(&p.spec, &mut s, DT, false);
             steps += 1;
         }
-        println!("a powered swing took {steps} steps to {} degrees", s.open_deg);
+        println!(
+            "a powered swing took {steps} steps to {} degrees",
+            s.open_deg
+        );
         assert!((s.open_deg - DEFAULT_OPEN_LIMIT_DEG).abs() < 1e-9);
         assert!(s.is_open(&p.spec));
-        assert!(steps > 1 && steps < 60, "a door is not teleported and not glacial");
+        assert!(
+            steps > 1 && steps < 60,
+            "a door is not teleported and not glacial"
+        );
         // A settled door does not move again, which is what keeps a trace from
         // changing for ever.
         assert!(!advance(&p.spec, &mut s, DT, false));
@@ -1034,7 +1131,11 @@ mod tests {
         };
         let mut s = DoorState::fresh(&spec);
         assert!(s.locked);
-        assert_eq!(toggle(&spec, &mut s), DoorVerdict::Locked, "a locked door opened");
+        assert_eq!(
+            toggle(&spec, &mut s),
+            DoorVerdict::Locked,
+            "a locked door opened"
+        );
         assert_eq!(s.open_deg, 0.0);
         let v = try_break(&spec, &s, kick_energy_j());
         assert!(v.broke);
@@ -1059,7 +1160,15 @@ mod tests {
         assert!(!s.locked);
         // And the door now toggles like any other.
         assert_eq!(toggle(&spec, &mut s), DoorVerdict::Closing);
-        let _ = p;
+        // …and the leaf really left the doorway: its centre moved a quarter of
+        // its own width, measured against where it started.
+        let shut = leaf_pose(&p, 0.0).0;
+        let open = leaf_pose(&p, s.open_deg).0;
+        println!(
+            "the kicked leaf's centre moved {} m",
+            (open - shut).length()
+        );
+        assert!((open - shut).length() > spec.width_m * 0.25);
     }
 
     /// **The lock verb has a side.**
@@ -1068,7 +1177,10 @@ mod tests {
         let spec = DoorSpec::default();
         let hinge = DVec3::ZERO;
         // `inside_yaw_deg` is 90 by default, i.e. the inside normal is `+X`.
-        assert_eq!(spec.side_of(hinge, DVec3::new(1.0, 0.0, 0.0)), DoorSide::Inside);
+        assert_eq!(
+            spec.side_of(hinge, DVec3::new(1.0, 0.0, 0.0)),
+            DoorSide::Inside
+        );
         assert_eq!(
             spec.side_of(hinge, DVec3::new(-1.0, 0.0, 0.0)),
             DoorSide::Outside
@@ -1113,9 +1225,27 @@ mod tests {
         let (c0, y0, half) = leaf_pose(&p, 0.0);
         let shut_err = (c0 - DVec3::new(10.0, 2.0, -4.0 + 0.45)).length();
         assert!((y0 - 0.0).abs() < 1e-12);
-        assert!((half.x - 0.45).abs() < 1e-12);
+        // **The long axis is local +Z**, because yaw zero is `+Z`. See
+        // `leaf_pose` for the defect that costs.
+        assert!((half.x - 0.03).abs() < 1e-12, "the thickness is not on x");
         assert!((half.y - 1.05).abs() < 1e-12);
-        assert!((half.z - 0.03).abs() < 1e-12);
+        assert!((half.z - 0.45).abs() < 1e-12, "the width is not on z");
+        // …and the box really does cover the leaf: rotating its local far corner
+        // by the leaf's own yaw lands on the free edge, which is what a box with
+        // its axes the other way round would not do.
+        let r = y0.to_radians();
+        let local_end = DVec3::new(0.0, 0.0, half.z);
+        let end = c0
+            + DVec3::new(
+                local_end.x * inf_math::pcos64(r) + local_end.z * inf_math::psin64(r),
+                0.0,
+                -local_end.x * inf_math::psin64(r) + local_end.z * inf_math::pcos64(r),
+            );
+        let free_edge = p.hinge + DVec3::new(0.0, 0.0, p.spec.width_m);
+        assert!(
+            (end - free_edge).length() < EPS_M,
+            "the box's far face is at {end:?}, the free edge at {free_edge:?}"
+        );
         // Ninety degrees round: the leaf points along +X.
         let (c1, y1, _) = leaf_pose(&p, 90.0);
         let open_err = (c1 - DVec3::new(10.45, 2.0, -4.0)).length();

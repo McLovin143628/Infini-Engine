@@ -80,14 +80,119 @@ pub fn door_label(placement: &DoorPlacement, state: &DoorState, from: DoorSide) 
     placement.label.clone()
 }
 
-/// **Every door in the world that a character could act on**, in `Guid` order.
+/// The salt that carves a PCG volume's doorways out of the scene's own GUID
+/// space. Its own constant, so a derived door can never alias a structure, a
+/// shell, a voxel chunk or a leaf.
+const PCG_DOORWAY_SALT: u128 = 0x6006_0300_5043_4744_4f4f_5257_4159_5321;
+
+/// The synthetic identity of doorway `index` inside the volume on entity
+/// `volume` — [`super::ecs::pcg_structure_guid`]'s rule with its own salt.
+pub fn pcg_doorway_guid(volume: Uuid, index: usize) -> Uuid {
+    let mut x = volume.as_u128() ^ PCG_DOORWAY_SALT;
+    x ^= (index as u128).wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5cec_c5c3);
+    x = x.rotate_left(37) ^ x.wrapping_mul(0xff51_afd7_ed55_8ccd_c4ce_b9fe_1a85_ec53);
+    Uuid::from_u128(x)
+}
+
+/// What a derived doorway's prompt calls it.
+pub const GRAMMAR_DOOR_LABEL: &str = "door";
+
+/// **Every door in the world that a character could act on**, in `Guid` order —
+/// authored [`Door`] entities **and** the building grammar's own doorways.
 ///
-/// Authored [`Door`] entities today; the building grammar's doorways join this
-/// list through the same function when a volume carries them.
+/// The two are flattened onto one [`DoorPlacement`] list for exactly the reason
+/// I5 flattened a vehicle seat and an authored item onto one
+/// `InteractCandidate`: what makes this ONE door is that both are swung, ranked
+/// and broken by one set of rules, not that they came from one place.
 ///
-/// `O(doors)`, and `O(1)` on a level with none.
+/// `O(doors + doorways)`, and `O(1)` on a level with neither.
+///
+/// # This is the UNBANDED list, and almost nothing should use it
+///
+/// A city plans on the order of twenty thousand doorways, and walking all of
+/// them per fixed step — twice, once to describe colliders and once to swing —
+/// is a cost a load-time budget never sees. Every per-step caller takes
+/// [`placements_near`] instead; this one exists for a **guid lookup**
+/// ([`placement_of`]), which is rare and must answer for a door wherever it is.
 pub fn placements(world: &EcsWorld) -> Vec<DoorPlacement> {
-    door::doors_in_world(world)
+    let mut out = door::doors_in_world(world);
+    out.extend(volume_doorways(world));
+    // One sorted walk: the resolver's tie-break is only deterministic over one,
+    // and an authored door and a grammar doorway at the same distance must
+    // resolve the same way in both hosts.
+    out.sort_by_key(|p| p.guid);
+    out
+}
+
+/// **Every door close enough to matter this step**, in `Guid` order.
+///
+/// The same band the structural colliders use — `PhysicsBridge3D::sim_band`,
+/// with the same radii — because a level whose doors and walls were solid at
+/// different distances would have doorways with leaves in buildings with no
+/// walls. It **fails open** exactly as the band does: no streaming source means
+/// no banding, which is every level committed before the island and every unit
+/// fixture.
+///
+/// The cost this buys is stated rather than implied: an unbanded door does not
+/// swing, so a leaf a player left moving four kilometres away freezes where it
+/// is until they come back. That is the same bargain a distant wall's collider
+/// makes, and it is the reason the band's own doc says the cells decide what
+/// EXISTS and the band decides what is SOLID.
+pub fn placements_near(world: &EcsWorld, band: &SimBand) -> Vec<DoorPlacement> {
+    let mut out = door::doors_in_world(world);
+    out.extend(volume_doorways(world));
+    out.retain(|p| {
+        let (centre, yaw, half) = door::leaf_pose(p, 0.0);
+        band.tier(centre, half, DQuat::from_rotation_y(yaw.to_radians()))
+            .is_near()
+    });
+    out.sort_by_key(|p| p.guid);
+    out
+}
+
+/// The grammar's half of the door list, in `Guid` order.
+///
+/// `O(doorways)`, and `O(1)` on a level with no `PcgVolume` — the
+/// `has_component` fast path every other derived walk in this bridge uses.
+fn volume_doorways(world: &EcsWorld) -> Vec<DoorPlacement> {
+    let mut out = Vec::new();
+    {
+        for (volume, i, d) in door::volume_doorways(world) {
+            let spec = door::DoorSpec {
+                closed_yaw_deg: d.closed_yaw_deg,
+                width_m: d.width_m,
+                height_m: d.height_m,
+                thickness_m: d.thickness_m,
+                // **A grammar door swings INTO the room its wall serves**, which
+                // is what the plan's own `Wall::inside` means — so the limit's
+                // sign follows the inside normal rather than being a constant.
+                // A door that opened the other way would open into the corridor
+                // it came from, and every interior door in a building would
+                // block the one opposite it.
+                open_limit_deg: -door::DEFAULT_OPEN_LIMIT_DEG,
+                inside_yaw_deg: d.inside_yaw_deg,
+                lock_strength_pa: door::DEFAULT_LOCK_STRENGTH_PA,
+                lock_area_m2: door::DEFAULT_LOCK_AREA_M2,
+                lock_side: door::DoorSide::Inside,
+                // **Nothing the grammar builds starts locked.** A city whose
+                // every interior door was bolted would be a city nobody can walk
+                // through, and there is no authored intent to read one from.
+                // Locking is a verb a player (or a Blueprint) uses.
+                locked_at_spawn: false,
+            };
+            if !spec.is_usable() {
+                continue;
+            }
+            out.push(DoorPlacement {
+                guid: pcg_doorway_guid(volume, i),
+                hinge: d.hinge,
+                spec,
+                label: GRAMMAR_DOOR_LABEL.to_string(),
+            });
+        }
+    }
+    out.sort_by_key(|p| p.guid);
+    out
 }
 
 /// **The door half of the interaction candidate list.**
@@ -99,9 +204,9 @@ pub fn placements(world: &EcsWorld) -> Vec<DoorPlacement> {
 ///
 /// `feet` decides which face the character is on and therefore whether the lock
 /// verb is in the label at all.
-pub fn candidates(world: &EcsWorld, feet: DVec3) -> Vec<InteractCandidate> {
+pub fn candidates(world: &EcsWorld, band: &SimBand, feet: DVec3) -> Vec<InteractCandidate> {
     let field = door::door_field(world);
-    let mut out: Vec<InteractCandidate> = placements(world)
+    let mut out: Vec<InteractCandidate> = placements_near(world, band)
         .into_iter()
         .map(|p| {
             let state = field
@@ -142,21 +247,44 @@ pub fn use_door(world: &mut EcsWorld, guid: Uuid, feet: DVec3) -> door::DoorVerd
         return door::DoorVerdict::Unusable;
     };
     let side = p.spec.side_of(p.hinge, feet);
+    with_state(world, &p, |spec, state| {
+        // The lock verb wins on its own face while the door is shut and locked:
+        // that is what "locked from the inside" has to mean for the person who
+        // locked it, or they could never get out. On the other face, or once the
+        // lock is broken, the same press is the ordinary open/close.
+        if side == spec.lock_side && !state.lock_broken {
+            if state.locked {
+                return door::set_locked(spec, state, side, false);
+            }
+            if !state.is_open(spec) {
+                return door::set_locked(spec, state, side, true);
+            }
+        }
+        door::toggle(spec, state)
+    })
+}
+
+/// Read a door's state, run `f` over it, and **write it back only if it
+/// changed**.
+///
+/// The one write door into [`door::DoorField`], and the reason it exists is
+/// the map's sparseness: absent means closed, so a *refused* verb — a locked
+/// door that would not open, a breach too slow to matter — must leave no entry
+/// behind. A first draft materialised on every press and made a level's trace
+/// bytes a function of how many doors a player had walked past.
+fn with_state<R>(
+    world: &mut EcsWorld,
+    p: &DoorPlacement,
+    f: impl FnOnce(&door::DoorSpec, &mut DoorState) -> R,
+) -> R {
     let field = door::door_field_mut(world);
-    let state = field.entry(guid, &p.spec);
-    // The lock verb wins on its own face while the door is shut and locked:
-    // that is what "locked from the inside" has to mean for the person who
-    // locked it, or they could never get out. On the other face, or once the
-    // lock is broken, the same press is the ordinary open/close.
-    if side == p.spec.lock_side && !state.lock_broken {
-        if state.locked {
-            return door::set_locked(&p.spec, state, side, false);
-        }
-        if !state.is_open(&p.spec) {
-            return door::set_locked(&p.spec, state, side, true);
-        }
+    let before = field.get(p.guid, &p.spec);
+    let mut state = before;
+    let out = f(&p.spec, &mut state);
+    if state != before {
+        *field.entry(p.guid, &p.spec) = state;
     }
-    door::toggle(&p.spec, state)
+    out
 }
 
 /// **A blow against a door** — the kick and the crash, through one function.
@@ -176,11 +304,11 @@ pub fn strike_door(world: &mut EcsWorld, guid: Uuid, energy_j: f64) -> door::Bre
             required_j: 0.0,
         };
     };
-    let field = door::door_field_mut(world);
-    let state = field.entry(guid, &p.spec);
-    let verdict = door::try_break(&p.spec, state, energy_j);
-    door::apply_break(&p.spec, state, &verdict);
-    verdict
+    with_state(world, &p, |spec, state| {
+        let verdict = door::try_break(spec, state, energy_j);
+        door::apply_break(spec, state, &verdict);
+        verdict
+    })
 }
 
 /// How close a body must be to a closed door to breach it, metres.
@@ -236,6 +364,7 @@ pub struct BreachOutcome {
 /// the leaf is a real collider and nothing here removed it.
 pub fn try_breach(
     world: &mut EcsWorld,
+    band: &SimBand,
     feet: DVec3,
     velocity: DVec3,
     mode: MovementMode,
@@ -261,7 +390,7 @@ pub fn try_breach(
     // other reach in this engine uses.
     let field = door::door_field(world);
     let mut best: Option<(f64, DoorPlacement)> = None;
-    for p in placements(world) {
+    for p in placements_near(world, band) {
         let state = field
             .map(|f| f.get(p.guid, &p.spec))
             .unwrap_or_else(|| DoorState::fresh(&p.spec));
@@ -340,6 +469,22 @@ const BLOCK_LOOKAHEAD: f64 = 1.35;
 /// stopped and a cast would be a query about nothing.
 const BLOCK_MIN_ARC_DEG: f64 = 0.05;
 
+/// How far the blocking probe's box is inset from the leaf's own, metres — a
+/// **skin**, the same thing `CharacterController3D::offset` is and for the same
+/// reason.
+///
+/// A leaf stands ON the floor and BETWEEN two wall boxes: its own geometry is in
+/// resting contact with three solids at all times. A sweep of the leaf's exact
+/// box therefore begins penetrating on the very first step, and parry reports
+/// that as a hit with `toi == 0` — which read as "blocked" and meant **no door
+/// in the engine could ever open**. Measured on the first fixture that had a
+/// floor in it: 0 of 90 steps moved, every one of them reported blocked.
+///
+/// Two centimetres, matching the character mover's own skin, and the cost is
+/// stated: a leaf can swing 2 cm into something before the probe sees it, which
+/// is under the leaf's own thickness.
+const BLOCK_SKIN_M: f64 = 0.02;
+
 /// **One fixed step of every door.**
 ///
 /// Runs after the character movement step (so a door the E key opened *this*
@@ -349,7 +494,8 @@ const BLOCK_MIN_ARC_DEG: f64 = 0.05;
 ///
 /// Inert on a level with no doors: one `try_query_filtered` that answers `None`.
 pub fn step_doors(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64) -> DoorReport {
-    let places = placements(world);
+    let band = bridge.sim_band(world);
+    let places = placements_near(world, &band);
     let mut report = DoorReport {
         doors: places.len() as u32,
         ..Default::default()
@@ -371,13 +517,26 @@ pub fn step_doors(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64) -
     }
     let mut poses: Vec<(Uuid, DVec3, DQuat)> = Vec::new();
     {
+        // **The field is only written for a door that CHANGED**, which is what
+        // keeps it sparse — and sparse is not an optimisation here, it is the
+        // claim that a level whose doors nobody has touched contributes nothing
+        // to `state_bytes` and therefore leaves every pre-I6 trace
+        // byte-identical. A first draft called `entry` unconditionally and
+        // materialised every door in the world on its first step; the arm that
+        // caught it asserts the trace bytes are empty after ten steps of a world
+        // that has a door in it.
         let field = door::door_field_mut(world);
         for (p, blocked) in places.iter().zip(blocked.iter().copied()) {
-            let state = field.entry(p.guid, &p.spec);
             if blocked {
                 report.blocked += 1;
             }
-            if door::advance(&p.spec, state, dt, blocked) {
+            let before = field.get(p.guid, &p.spec);
+            let mut state = before;
+            let moved = door::advance(&p.spec, &mut state, dt, blocked);
+            if state != before {
+                *field.entry(p.guid, &p.spec) = state;
+            }
+            if moved {
                 report.moved += 1;
                 let (centre, yaw, _) = door::leaf_pose(p, state.open_deg);
                 poses.push((
@@ -408,12 +567,7 @@ pub fn step_doors(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64) -
 /// is the direction the most of the leaf is going. Not an overlap test: a leaf
 /// that has already reached something is not the case that matters — the case
 /// that matters is a leaf about to.
-fn is_blocked(
-    bridge: &mut PhysicsBridge3D,
-    p: &DoorPlacement,
-    state: &DoorState,
-    dt: f64,
-) -> bool {
+fn is_blocked(bridge: &mut PhysicsBridge3D, p: &DoorPlacement, state: &DoorState, dt: f64) -> bool {
     if !p.spec.is_usable() || !dt.is_finite() || dt <= 0.0 {
         return false;
     }
@@ -435,7 +589,15 @@ fn is_blocked(
     let tangent = DVec3::new(along.z, 0.0, -along.x) * arc_deg.signum();
     // Arc length at the leaf's centre — half the width from the hinge.
     let reach = (arc_deg.abs().to_radians() * p.spec.width_m * 0.5) * BLOCK_LOOKAHEAD;
-    let shape = ColliderShape3D::Box { half_extents: half };
+    // The probe's box is the leaf's, inset by a skin — see `BLOCK_SKIN_M` for
+    // the measurement that made it necessary.
+    let shape = ColliderShape3D::Box {
+        half_extents: DVec3::new(
+            (half.x * 0.5).max(1e-3),
+            (half.y - BLOCK_SKIN_M).max(1e-3),
+            (half.z - BLOCK_SKIN_M).max(1e-3),
+        ),
+    };
     let rot = DQuat::from_rotation_y(r);
     let mut exclude: BTreeSet<ColliderId3D> = BTreeSet::new();
     if let Some(c) = bridge.collider_of(door_leaf_guid(p.guid)) {
@@ -446,10 +608,13 @@ fn is_blocked(
     if let Some(c) = bridge.collider_of(p.guid) {
         exclude.insert(c);
     }
+    // A sweep that **starts** penetrating is not a block: it is the leaf resting
+    // against its own frame or standing on the floor, which is where a door
+    // lives. What blocks a door is something it is about to *reach*.
     bridge
         .world_mut()
         .cast_shape(&shape, centre, rot, tangent, reach, &exclude)
-        .is_some()
+        .is_some_and(|h| !h.started_penetrating)
 }
 
 /// **Every door's leaf collider**, appended to the sync's snapshot.
@@ -468,20 +633,29 @@ pub fn gather_doors(
     snaps: &mut Vec<EntitySync3D>,
     retained: &mut BTreeSet<Uuid>,
 ) {
-    // The off path: no door in the world and none tracked is one compare.
-    if stamps.is_empty() && !world.has_component::<Door>() {
+    // The off path: no authored door, no volume that could carry a doorway, and
+    // nothing tracked is one compare.
+    //
+    // **`has_component::<Door>()` alone is not the off path**, and the arm that
+    // says so is the grammar house: a derived doorway is a `DoorwaySlot` on a
+    // `PcgVolume`, not a `Door` component, so a level whose only doors came from
+    // the grammar took the fast path and **got no leaf at all** - eight doors
+    // reported and zero colliders built.
+    if stamps.is_empty()
+        && !world.has_component::<Door>()
+        && !world.has_component::<inf_ecs::components::PcgVolume>()
+    {
         return;
     }
+    let places = placements_near(world, band);
     let field = door::door_field(world);
     let mut live: BTreeSet<Uuid> = BTreeSet::new();
-    for p in placements(world) {
+    for p in places {
         let state = field
             .map(|f| f.get(p.guid, &p.spec))
             .unwrap_or_else(|| DoorState::fresh(&p.spec));
         let (centre, yaw, half) = door::leaf_pose(&p, state.open_deg);
-        if !band.tier(centre, half, DQuat::IDENTITY).is_near() {
-            continue;
-        }
+        let rot = DQuat::from_rotation_y(yaw.to_radians());
         let leaf = door_leaf_guid(p.guid);
         live.insert(leaf);
         // The stamp is the leaf's own pose bits plus its size, so a door that is
@@ -508,7 +682,7 @@ pub fn gather_doors(
                 half_extents: half,
             })),
             translation: centre,
-            rotation: DQuat::from_rotation_y(yaw.to_radians()),
+            rotation: rot,
             joint: None,
         });
     }

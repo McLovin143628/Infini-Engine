@@ -41,7 +41,6 @@ mod world;
 pub use camera::step_locomotion_camera;
 pub use character::{AutoStep3D, CharacterMove3D, CharacterMover3D};
 pub use door::{door_leaf_guid, step_doors, DoorReport};
-pub use gameplay::{step_gameplay, GameplayReport, WeaponHit};
 pub use ecs::{
     pcg_shell_guid, pcg_structure_guid, terrain_tile_collider, terrain_tile_guid, voxel_chunk_guid,
     BodyDesc3D, EntitySync3D, JointSync3D, PhysicsBridge3D, PoseWriteback3D, TerrainColliderAudit,
@@ -53,6 +52,7 @@ pub use fracture::{
     DamageReport, DebrisBudget, DestroyedEvent, DestructOutcome, FractureAudit, FractureState,
     CRACK_OPENING_M, DEFAULT_DEBRIS_LIFETIME_S, DEFAULT_DEBRIS_MAX_LIVE,
 };
+pub use gameplay::{step_gameplay, GameplayReport, WeaponHit};
 pub use joint::{JointDesc3D, JointId3D, JointKind3D, JointMotor3D};
 pub use movement::{mover_for, step_character_movement, MoveOutcome};
 pub use query::{CastTargets, RayHit3D, ShapeHit3D};

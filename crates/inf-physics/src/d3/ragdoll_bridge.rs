@@ -454,8 +454,25 @@ pub fn step_ragdoll(
         cm.runtime.body_yaw_deg = cm.runtime.ragdoll.pelvis_yaw_deg;
         cm.runtime.target_yaw_deg = cm.runtime.body_yaw_deg;
 
-        // ── 3. Get up, when it has settled or when the player asks.
-        if settled || cm.runtime.press_jump {
+        // ── 3. Get up, when it has settled or when the player asks — **unless
+        //    the character is dead** (island wave I6).
+        //
+        //    A corpse that settles gets up, and a damage system that hands a
+        //    dead body to the ragdoll hands it over again on the next step. That
+        //    is not a report artefact: it is a body twitching upright and
+        //    flopping down, for ever, at the settle interval. Measured on the
+        //    first weapons fixture that killed something: **two handoffs in
+        //    thirty steps** where there should be one.
+        //
+        //    `Health` is the only thing in this engine that means "this body has
+        //    stopped working", and it is a runtime component, so a character
+        //    with no health component is unaffected — which is every character
+        //    committed before this wave.
+        let dead = world
+            .world()
+            .get::<inf_ecs::weapon::Health>(entity)
+            .is_some_and(|h| h.dead);
+        if !dead && (settled || cm.runtime.press_jump) {
             cm.runtime.press_jump = false;
             return finish(world, bridge, guid, cm, on_ground);
         }

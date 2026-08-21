@@ -618,6 +618,24 @@ impl PhysicsBridge3D {
         self.world.step(dt);
     }
 
+    /// **THE simulation band** — which of a level's derived content is close
+    /// enough to be solid this step (IB-2a).
+    ///
+    /// Derived from the world on demand, never handed in: a parameter would be a
+    /// thing a host could forget, and a host that forgot it would simulate a
+    /// different city than its twin while agreeing with itself perfectly (the
+    /// P21.4 law). It reads `StreamingSource` entities and nothing else, so it
+    /// is sim state by construction.
+    ///
+    /// **One function, because I6 gave it a second caller.** The structural
+    /// gather has always computed it inside `sync_from_world_sim`; the door
+    /// system needs the *same* band, with the *same* radii, or a level's doors
+    /// and its walls would be solid at different distances — a doorway with a
+    /// leaf in a building with no walls, or the other way round.
+    pub fn sim_band(&self, world: &EcsWorld) -> SimBand {
+        SimBand::from_world(world, self.band_radii.0, self.band_radii.1)
+    }
+
     /// Reconcile the physics world with the current ECS components: gather every
     /// entity carrying a [`RigidBody3D`] and/or [`Collider3D`] into an
     /// [`EntitySync3D`] snapshot (reading its `Transform` for the world pose —
@@ -827,7 +845,7 @@ impl PhysicsBridge3D {
         // while agreeing with itself perfectly (the P21.4 law). It reads
         // `StreamingSource` entities and nothing else, so it is sim state by
         // construction and there is no camera in scope to pass by accident.
-        let band = SimBand::from_world(world, self.band_radii.0, self.band_radii.1);
+        let band = self.sim_band(world);
         let mut retained = self.gather_structures(world, &band, &mut snaps);
         // P21.4: the sim's voxel chunks, on the same rule one level finer.
         self.gather_voxels(volumes, &mut snaps, &mut retained);

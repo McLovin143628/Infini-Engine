@@ -196,6 +196,7 @@ fn population_of(
     Vec<ScatteredInstance>,
     Vec<inf_ecs::components::ScatteredSolid>,
     Vec<inf_ecs::StructureGroup>,
+    Vec<inf_ecs::components::DoorwaySlot>,
 ) {
     // MIRROR-BEGIN population_of
     let instances = out
@@ -232,7 +233,21 @@ fn population_of(
             inst_len: g.inst_len,
         })
         .collect();
-    (instances, solids, groups)
+    let doorways = out
+        .doorways
+        .iter()
+        .map(|d| inf_ecs::components::DoorwaySlot {
+            hinge: d.hinge,
+            closed_yaw_deg: d.closed_yaw_deg,
+            width_m: d.width_m,
+            height_m: d.height_m,
+            thickness_m: d.thickness_m,
+            inside_yaw_deg: d.inside_yaw_deg,
+            exterior: d.exterior,
+            floor: d.floor,
+        })
+        .collect();
+    (instances, solids, groups, doorways)
     // MIRROR-END population_of
 }
 
@@ -918,13 +933,14 @@ pub async fn pcg_evaluate(
         // player's `evaluate_pcg_volumes_in` goes through — I3 made the ORDER
         // load-bearing (a `StructureGroup` carries index ranges into these very
         // lists), so it is stated once in Ring 0 rather than twice here.
-        let (baked, solid, groups) = population_of(inf_pcg::compose_volume(instances, generated));
+        let (baked, solid, groups, doorways) =
+            population_of(inf_pcg::compose_volume(instances, generated));
         let placed = baked.len() as u32;
 
         {
             let w = doc.world_mut().world_mut();
             if let Some(mut vol) = w.get_mut::<PcgVolume>(e) {
-                vol.set_population(baked, solid, groups);
+                vol.set_population(baked, solid, groups, doorways);
             }
         }
         doc.bump_version_for_runtime();

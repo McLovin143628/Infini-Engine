@@ -359,10 +359,16 @@ pub fn evaluate_buildings_in(
             }],
             None => Vec::new(),
         };
+        // I6: the doors this building wants, derived from the plan **here**,
+        // in the one pass that has one — `build_in` throws it away, so a
+        // doorway that was not taken now can never be taken at all.
+        let mut doorways = super::doorway::doorways_of(&out.plan);
+        super::doorway::place_doorways_in_frame(&mut doorways, job.frame);
         GrammarOutput {
             instances: out.instances,
             colliders: out.colliders,
             groups,
+            doorways,
         }
     });
     let mut out = GrammarOutput::default();

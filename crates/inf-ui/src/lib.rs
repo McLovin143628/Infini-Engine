@@ -36,12 +36,18 @@
 
 pub mod bindings;
 pub mod draw;
+// I6: the `I` key's surface - the settings dialog's state/reducer/projection
+// triple again, over a snapshot of what a character is carrying.
+pub mod inventory;
 pub mod menu;
 pub mod settings;
 pub mod toast;
 pub mod view;
 
 pub use draw::{Align, Color, Rect, UiDrawList};
+pub use inventory::{
+    InventoryInput, InventoryOutcome, InventorySlot, InventoryState, InventoryVerb, InventoryView,
+};
 pub use menu::{Capture, MenuInput, MenuOutcome, MenuState, Page, Row, RowId};
 pub use settings::GameSettings;
 pub use toast::Toasts;

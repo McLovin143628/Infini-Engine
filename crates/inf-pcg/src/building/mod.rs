@@ -65,6 +65,9 @@
 //!   project has one, with no code change (`module Panel = mesh <guid> …`).
 
 pub mod assemble;
+// I6: where a building's DOORS go - the openings the grammar already plans,
+// turned into hinges a door system can hang a leaf on.
+pub mod doorway;
 pub mod lod;
 pub mod palettes;
 pub mod partition;
@@ -78,6 +81,7 @@ use crate::grammar::span::positive;
 use crate::scatter::PcgCollider;
 
 pub use assemble::{assemble, assemble_in, build, build_in, BuildingOutput};
+pub use doorway::{doorways_of, place_doorways_in_frame, PcgDoorway};
 pub use lod::{StructureGroup, StructureTier, DEFAULT_STRUCTURE_LOD_M};
 pub use palettes::{
     archetype, archetypes, ArchetypeId, BuildingArchetype, FurnitureDef, RoomWeight,

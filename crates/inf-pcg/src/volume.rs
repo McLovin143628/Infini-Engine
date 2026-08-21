@@ -29,6 +29,9 @@ pub struct VolumeOutput {
     /// Which runs of the two lists above are one building, and each building's
     /// shell. Ranges are into **this** struct's lists.
     pub groups: Vec<StructureGroup>,
+    /// **Every door this volume's buildings want** (I6). Located in the world
+    /// and naming no index, so composition neither shifts nor re-bases them.
+    pub doorways: Vec<crate::building::PcgDoorway>,
 }
 
 /// Join a volume's scatter instances with its grammar/building output.
@@ -45,6 +48,7 @@ pub fn compose_volume(scatter: Vec<PcgInstance>, grammar: GrammarOutput) -> Volu
     VolumeOutput {
         instances,
         colliders: grammar.colliders,
+        doorways: grammar.doorways,
         groups: grammar
             .groups
             .into_iter()
@@ -94,6 +98,7 @@ mod tests {
                 inst_start: 0,
                 inst_len: 4,
             }],
+            doorways: Vec::new(),
         };
         let scatter: Vec<PcgInstance> = (0..7).map(inst).collect();
         let out = compose_volume(scatter, grammar);
