@@ -314,8 +314,10 @@ mod tests {
         assert!(std::fs::read_to_string(&path).unwrap().contains("99"));
 
         // …and a good file round-trips.
-        let mut s = GameSettings::default();
-        s.master_volume = 0.4;
+        let mut s = GameSettings {
+            master_volume: 0.4,
+            ..GameSettings::default()
+        };
         s.bindings.insert("crouch".into(), "KeyB".into());
         s.save(&dir).unwrap();
         assert_eq!(GameSettings::load_or_default(&dir).unwrap(), s);

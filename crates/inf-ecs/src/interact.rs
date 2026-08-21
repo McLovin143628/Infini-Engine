@@ -388,10 +388,10 @@ mod tests {
             (measured - 45.0).abs() <= VIEW_CONE_EPSILON_DEG,
             "the epsilon does not cover the approximation's error"
         );
-        assert!(
-            VIEW_CONE_EPSILON_DEG < 0.01,
-            "an epsilon this wide is a design tolerance pretending to be arithmetic"
-        );
+        // A compile-time assertion, because the value is a constant and clippy
+        // is right that a runtime one about one would never fail at runtime:
+        // this is a claim about the SOURCE, and the build is where it belongs.
+        const { assert!(VIEW_CONE_EPSILON_DEG < 0.01) };
         assert!(
             resolve(&[edge.clone()], feet, 0.0).is_some(),
             "45 degrees is inside a 90 degree cone"

@@ -254,7 +254,7 @@ pub fn conflicts(map: &InputMap, token: &str, except: &str) -> Vec<String> {
             continue;
         }
         // **Every** token the row answers to, not the one it displays.
-        if tokens_in(map, &row).iter().any(|t| *t == wanted) {
+        if tokens_in(map, &row).contains(&wanted) {
             out.push(row.id);
         }
     }

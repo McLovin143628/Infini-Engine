@@ -460,28 +460,26 @@ pub fn handle(
             return out;
         }
         Capture::Conflict { row, token, owners } => {
-            match input.key() {
-                Some("Enter") => {
-                    let table = bindings::rows();
-                    if let Some(target) = table.get(row) {
-                        // **The swap takes the KEY off the previous owners**, not
-                        // their whole binding. A key bound to two rows is a key
-                        // that fires two verbs, and the dialog just told the
-                        // player which rows it was about to take it from — but a
-                        // row with a second key keeps it, which is the honest
-                        // outcome: Move Forward is W *and* Up in the shipped
-                        // table, and taking W leaves Up.
-                        for id in &owners {
-                            if let Some(other) = table.iter().find(|r| &r.id == id) {
-                                out.bindings_changed |= bindings::unbind_token(map, other, &token);
-                            }
+            // **Only `Enter` confirms.** Anything else cancels — not just
+            // Escape: a player who has been shown a warning and presses a third
+            // key has not confirmed anything.
+            if input.key() == Some("Enter") {
+                let table = bindings::rows();
+                if let Some(target) = table.get(row) {
+                    // **The swap takes the KEY off the previous owners**, not
+                    // their whole binding. A key bound to two rows is a key that
+                    // fires two verbs, and the dialog just told the player which
+                    // rows it was about to take it from — but a row with a
+                    // second key keeps it, which is the honest outcome: Move
+                    // Forward is W *and* Up in the shipped table, and taking W
+                    // leaves Up.
+                    for id in &owners {
+                        if let Some(other) = table.iter().find(|r| &r.id == id) {
+                            out.bindings_changed |= bindings::unbind_token(map, other, &token);
                         }
-                        out.bindings_changed |= bindings::set_row(map, target, &token);
                     }
+                    out.bindings_changed |= bindings::set_row(map, target, &token);
                 }
-                // Anything else cancels, not just Escape: a player who has been
-                // shown a warning and presses a third key has not confirmed.
-                _ => {}
             }
             state.capture = Capture::Idle;
             return out;

@@ -370,7 +370,7 @@ mod tests {
         for (_, h) in crate::settings::RESOLUTIONS {
             let s = text_scale(h as f32);
             assert_eq!(s, s.floor(), "{h} gave a fractional scale of {s}");
-            assert!(s >= 1.0 && s <= 4.0, "{h} gave {s}");
+            assert!((1.0..=4.0).contains(&s), "{h} gave {s}");
         }
         assert_eq!(text_scale(f32::NAN), 2.0);
     }

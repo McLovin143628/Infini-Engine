@@ -24,7 +24,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **I4** | the fps instrument + budgets — IB-9, IB-16, IB-12, the shipping-resolution harness | **DONE + AUDITED** — see below |
 | **I4b** | **performance** — the sim fixed step, the lighting stack, the scatter impostor, the pipelining | **DONE + AUDITED** — battery 306 / 5 710 / 0 / 14, frontend 702 / 78, goldens 54 strict, clippy 0, rustdoc 413, no schema moved. Step 12.7 → **1.25 ms**; lit p95 92.3 → **38.9–41.3**; unlit 1080p **inside the 60 fps budget at p50 on every run and at p95 on two of three** (the audit's correction). One defect fixed: the scatter caster cache was blind to the floating origin |
 | **IP** | the remainder of the performance list — the cook's PCG evaluation, IB-9's island ceiling, the VSM caster scatter | **carried** — see *What is still open after I4b* below |
-| **I5** | **player core** — the owner's binding table, the C key's four verbs, the in-game UI layer, the settings dialog + rebinding, the interaction core | **DONE** — see below. *(This wave took the I5 slot; **IB-11's far half — LERC / BigTIFF / JPEG2000 / LAS, reprojection, the geoid — is NOT in it** and moves to a later wave.)* |
+| **I5** | **player core** — the owner's binding table, the C key's four verbs, the in-game UI layer, the settings dialog + rebinding, the interaction core | **DONE** — battery 309 / 5 788 / 0 / 14, frontend 702 / 78, goldens 54 strict, clippy 0, rustdoc 413, no schema moved. Two pre-existing ragdoll defects found and fixed. See below. *(This wave took the I5 slot; **IB-11's far half — LERC / BigTIFF / JPEG2000 / LAS, reprojection, the geoid — is NOT in it** and moves to a later wave.)* |
 | ~~I6~~ | ~~scale seams — IB-12~~ *(pulled into I4; IB-8 and IB-13 into I3)* | **absorbed** |
 | I7 | content — the 50 km² Vancouver map itself | not started |
 
@@ -1752,9 +1752,11 @@ over 1 600 steps**.
 
 | | after the I4b audit | **after I5** |
 |---|---|---|
-| battery blocks / passed / failed / ignored | 306 / 5 710 / 0 / 14 | see the closing run below |
+| battery blocks / passed / failed / ignored | 306 / 5 710 / 0 / 14 | **309 / 5 788 / 0 / 14** — three new test binaries (`inf-ui`'s lib and doctest roots, `player_core_gate`) and **78** new arms |
 | frontend tests / files | 702 / 78 | **702 / 78**, `tsc` and `eslint` clean |
 | goldens | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical** (101 arms), re-run after the UI node landed |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** (local toolchain 1.97) |
+| rustdoc individual warnings (ceiling 450) | 413 | **413** — 447 `^warning` lines − 34 summaries, **unmoved**. The one this wave added (a `[`Interactable`]` link from `inf-physics`, which cannot name `inf-ecs`'s item) was found and fixed |
 | schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved** |
 | committed samples | 20 levels | **20** — `samples/phase29-locomotion/input.toml` regenerated through its generator (see below), no level moved |
 

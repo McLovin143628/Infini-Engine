@@ -213,7 +213,7 @@ impl InputMap {
     /// so the table's cell and the map agree from the next read on.
     pub fn set_desk_source(&mut self, action: &str, source: ActionSource) -> Option<ActionSource> {
         let list = self.actions.entry(action.to_string()).or_default();
-        match list.iter().position(|s| Self::is_desk(s)) {
+        match list.iter().position(Self::is_desk) {
             Some(i) => Some(std::mem::replace(&mut list[i], source)),
             None => {
                 list.insert(0, source);
@@ -227,7 +227,7 @@ impl InputMap {
     /// the bindings table can still show the row.
     pub fn clear_desk_source(&mut self, action: &str) -> Option<ActionSource> {
         let list = self.actions.get_mut(action)?;
-        let i = list.iter().position(|s| Self::is_desk(s))?;
+        let i = list.iter().position(Self::is_desk)?;
         Some(list.remove(i))
     }
 

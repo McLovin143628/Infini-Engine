@@ -2353,7 +2353,7 @@ mod tests {
         // The reach is a real distance rather than a placeholder: at zero the
         // probe would sample the character's own feet and every jump over water
         // would already be in it.
-        assert!(DIVE_WATER_REACH_M > 1.0 && DIVE_WATER_REACH_M < 10.0);
+        const { assert!(DIVE_WATER_REACH_M > 1.0 && DIVE_WATER_REACH_M < 10.0) };
     }
 
     // -- P29.4: turn/rotate in place, aim offsets, mantle timing --------------

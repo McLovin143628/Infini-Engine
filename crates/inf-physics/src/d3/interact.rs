@@ -4,7 +4,7 @@
 //! # Why this is here and not in `inf-ecs`
 //!
 //! Two of the three things a candidate needs — where it is, and whether it is
-//! taken — come from different places. An authored [`Interactable`] is at its
+//! taken — come from different places. An authored `inf_ecs::interact::Interactable` is at its
 //! `GlobalTransform`; a **vehicle seat** is at the chassis's *physics* pose plus
 //! its rig's seat offset, and the physics pose is the live one rather than the
 //! one the last write-back left in the ECS. Migrating the seat onto the ECS

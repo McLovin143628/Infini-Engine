@@ -553,7 +553,7 @@ fn menu_keystroke(k: u32) -> Vec<&'static str> {
     let slot = (k / 2) as usize;
     if k == last - 2 {
         vec!["Escape"]
-    } else if k % 2 == 0 && slot < plan.len() {
+    } else if k.is_multiple_of(2) && slot < plan.len() {
         vec![plan[slot]]
     } else {
         Vec::new()
