@@ -654,7 +654,7 @@ fn fetch_tiles(
                     match fetch_one(url, *t, cache) {
                         Ok(()) => {
                             let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                            if !quiet && n % 25 == 0 {
+                            if !quiet && n.is_multiple_of(25) {
                                 println!("  {n} fetched");
                             }
                         }

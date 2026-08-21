@@ -134,7 +134,7 @@ const GRADE_COST_GAIN: f64 = 8.0;
 /// grade goes over.
 ///
 /// The margin is that gap, priced conservatively, and **it is not the hairpin**:
-/// the apex problem is a real one and it is fixed in [`smooth`], not paid for
+/// the apex problem is a real one and it is fixed in `smooth`, not paid for
 /// here. The two were confused in this wave's first draft, and the confusion is
 /// worth recording — a margin that stands in for a defect is a defect that never
 /// gets fixed. Measured: with the apex guard in place, a route planned *at* the
@@ -661,7 +661,7 @@ mod tests {
         // 0.2121 is why this comment exists.
         let ground = |p: DVec2| -> Option<f64> {
             (p.x >= h.min.x && p.x <= h.min.x + (h.nx - 1) as f64 * h.pitch)
-                .then(|| 10.0 + p.x * 0.15)
+                .then_some(10.0 + p.x * 0.15)
         };
         let audit = grade_audit(std::slice::from_ref(&r), 0.08, 8.0, ground);
         println!(
@@ -748,7 +748,7 @@ mod tests {
         let mut h = vec![-20.0f32; nx * nz];
         for j in 0..nz {
             for i in 0..nx {
-                if i < 20 || i > 60 {
+                if !(20..=60).contains(&i) {
                     h[j * nx + i] = 30.0;
                 }
             }

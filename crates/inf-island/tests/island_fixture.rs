@@ -482,9 +482,8 @@ fn two_builds_of_one_recipe_produce_the_same_terrain() {
     assert_eq!(r.origin().z, a.anchor.origin_northing_m);
     assert_eq!(r.tile_resolution(), a.recipe.grid.tile_resolution);
     assert_eq!(r.meters_per_sample(), a.recipe.grid.meters_per_sample);
-    assert_eq!(
+    assert!(
         u64::try_from(r.tile_count()).unwrap() > a.recipe.grid.tile_count(),
-        true,
         "the catalog must hold more than the level-0 tiles"
     );
     // And the derived asset ids are a function of the island's name.

@@ -503,7 +503,9 @@ impl IslandRecipe {
                     .to_string(),
             ));
         }
-        if !(self.roads.max_grade > 0.0) {
+        // Finiteness is already established above, so a plain comparison here
+        // cannot be tripped by a NaN.
+        if self.roads.max_grade <= 0.0 {
             return Err(IslandError::Settings(format!(
                 "[roads] max_grade is {} — a non-positive grade ceiling refuses \
                  every road including a level one",

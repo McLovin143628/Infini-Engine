@@ -598,7 +598,7 @@ mod tests {
         assert_eq!(m.sea_level_tiles().len(), 1);
         assert!(m.sea_level_tiles().contains(&(1, 1)));
         // The fraction counts SAMPLES, which is what an extent-level policy reads.
-        let px = tilemath::TILE_PX as usize;
+        let px = tilemath::TILE_PX;
         assert!(
             (m.sea_level_fraction() - 0.5).abs() < 0.01,
             "one flat tile of two is about half the samples, got {}",

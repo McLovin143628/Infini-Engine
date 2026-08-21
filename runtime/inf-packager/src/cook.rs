@@ -3066,6 +3066,20 @@ mod advisory_source_gate {
         "the_save_pushes_its_invalidation_unconditionally",
         // A report table whose columns are aligned deliberately.
         "the_composed_frame_stays_inside_the_frame_budget",
+        // I7: the island's report is a fixed-column table an author reads —
+        // `  map        7168 x 7168 m = 51.38 km2   land 40.65 km2`. Its
+        // alignment is runs of spaces INSIDE the literals, which is exactly the
+        // shape this sweep looks for, and it is a **collision** rather than a
+        // defect (the I4b audit's own third catch, met again).
+        //
+        // The entry is `island_summary_table` and not `summary`, which is what
+        // `IslandReport`'s door is actually called: this allowlist is keyed on
+        // the **enclosing function's name alone**, and there are twenty-four
+        // functions called `summary` in this workspace. Exempting the natural
+        // name would have exempted all of them — an over-broad exemption is the
+        // ban-list hazard turned around, and the fix is a uniquely named private
+        // helper rather than a wider hole.
+        "island_summary_table",
     ];
 
     /// The workspace roots the sweep walks, relative to this crate's manifest

@@ -25269,3 +25269,75 @@ its fifteen mutations is in `docs/memos/island-progress.md` under *The I5 audit*
   are carried by name.
 * **A7** — the wave's battery figure was **one low**: 5 788 recorded against 5 789 measured
   (the audit adds exactly seven arms and reads 5 796). The I3 audit's law, met again.
+
+## Wave I7 — the island data build (2026-08-21)
+
+**THE ISLAND EXISTS, AND ITS ELEVATION IS REAL.** Fifty-one square kilometres of the North
+Shore behind Vancouver, sampled out of the AWS terrain-tiles terrarium pyramid, carved into a
+landmass by a designed coastline, drained by streams the ground itself decides, crossed by a
+road network routed under a grade ceiling, and driven byte-for-byte identically by the shipped
+player and the editor. Built by **one command**:
+
+```sh
+inf island build --recipe samples/island/island.toml
+```
+
+| | |
+|---|---|
+| map / land | 7 168 × 7 168 m = **51.38 km²** / **40.65 km² (79.1 %)** |
+| peak on land / sea floor / coastline | **948.7 m** (real survey) / −60.0 m / **25.14 km** |
+| terrain | **784** level-0 tiles of 257², **1 064** in the catalog, **5 LOD levels**, **342.7 MB** |
+| source | **156** terrarium tiles at z15 = **3.11 m/px**, upsampled **3.11×** onto a 1 m grid |
+| water | **50 reaches / 26.32 km**, **2 lakes**, **33 waterfall sites** (biggest **29.5 m**) |
+| biomes | forest **38.5 %**, plain 20.8 %, meadow 13.5 %, alpine 8.6 %, beach 6.8 %, farmland 6.1 %, urban 5.8 % |
+| roads | **33.74 km**, 11 links, 7 junctions; worst grade 0.118 against 0.080, **7 of 2 442** over |
+| timing | fetch **156 tiles / 12 MB** · build **24.7 s** · cook **40.7 s** |
+
+**An island is a RECIPE.** The repository commits the *generator* — 284 KB of recipe,
+coastline, road network, derived water layers, masks and level — and the 375 MB it describes (plus a 12 MB tile cache)
+lives **outside the tree** at `<checkout>/../island-build/`. `samples/island-fixture` is
+2.36 km² of the same ground with **two real terrarium tiles committed beside it** (267 KB in all, 208 KB of it those tiles),
+running **every step of the recipe** and never reaching a network: the plan's tile list and the
+committed directory are compared **both ways**.
+
+**New crate `inf-island`** (Ring 0, host-only, **no new external dependency**), plus one
+addition outside it: `inf_gis::Transform::to_source`, the inverse of a door that only went
+forward — because a raster resample is destination-driven and the alternatives were a
+locally-fitted lattice with no stated error or naming `proj4rs` outside the facade.
+
+**PIE == shipping over a 900-step, 360 m island drive**, with the terrain paging and the
+partition activating underneath. The cooked island carries 7 assets including a `.inf_part`
+with a streamed cell; `inf-player --pack … --headless --run-frames 300` exits 0.
+
+**The island's own frame numbers** (RTX 4070 Ti, release, MIN of 3 × 120, 1080p, reported and
+never asserted because the budget ceilings are set from the composed city):
+
+| | p50 | p95 | p99 | GPU frame | pipelined |
+|---|---|---|---|---|---|
+| SHIPPED | **18.209** | 19.287 | 20.887 | 6.657 | **10.994 ms (91.0 fps)** |
+| LIT | **48.170** | 53.590 | 56.862 | 31.188 | 31.188 (32.1 fps) |
+
+**The lit island is 95 % VSM raster** (29.656 of 31.188 ms) on a world whose casters are a
+heightfield and one road mesh — IP item 2 at island scale.
+
+**Nine defects the wave's own arms found**, every one measured: a black pixel is **finite**
+(−32 768 m, invisible to every finiteness guard; 56 of them in the shipped source); an
+eight-neighbour router **cannot traverse a uniform slope** (D8 achieves `g` or `g/√2` and
+nothing else, so an 8 % ceiling on a 15 % hillside answered "no route"); a switchback's apex
+**must not be cut** (0.1500 — the full gradient — on 24 of 336 stretches); `--dry-run`
+suppressed the layer write the second pass reads (15.28 % over the ceiling against 0 %); a pad
+**does not build land**; **Jenks finds the gaps, an author says what grows in them** (a
+hard-coded ladder put 9.8 % of a rain-forest island under canopy); a threshold sized for a
+continent **finds one stream on an island**; a partitioned level's cooked `.inf_lvl` carries
+**no entities** (six records against fifteen, diverging at step 411); and the fps instrument's
+own fixture **never attached terrain streaming** (0 terrain tiles, 0 instances).
+
+**The largest honest remainder, with its figure:** the vegetation binding is real and wired —
+six biomes bind the cover graph, urban stays bare for wave I8 — and with the ground paged it
+produces **4 958 instances over 2.359 km²**. Through the shipped boot it produces **0**,
+because `evaluate_biome_bindings` evaluates over the terrain's *resident* `data.xz_bounds()`
+and a streamed terrain ships no tiles. That is the I4 audit's own carried item met at island
+scale; the arm asserts the zero so the day it is closed the arm goes red.
+
+The full ledger, the eleven decisions this wave adds and its sixteen carried remainders are in
+`docs/memos/island-progress.md` under *Done — wave I7*.

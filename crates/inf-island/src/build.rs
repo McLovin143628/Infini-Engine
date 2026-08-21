@@ -47,7 +47,7 @@ pub struct StepLog {
 }
 
 /// How a build is asked for.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct BuildOptions {
     /// Re-derive the streams and lakes and **overwrite** the committed layers.
     ///
@@ -73,16 +73,6 @@ pub struct BuildOptions {
     /// planned them again, and audited a road whose corridor had never been cut.
     /// Measured on the fixture: **15.28 % over the ceiling instead of 0 %.**
     pub dry_run: bool,
-}
-
-impl Default for BuildOptions {
-    fn default() -> Self {
-        Self {
-            rederive_layers: false,
-            replan_roads: false,
-            dry_run: false,
-        }
-    }
 }
 
 impl BuildOptions {

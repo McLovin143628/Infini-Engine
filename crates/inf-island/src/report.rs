@@ -180,6 +180,21 @@ impl IslandReport {
 
     /// The multi-line summary a build prints and a ledger quotes.
     pub fn summary(&self) -> String {
+        self.island_summary_table()
+    }
+
+    /// The table itself, under a name of its own.
+    ///
+    /// # Why this is not just the body of `summary`
+    ///
+    /// Its columns are aligned with **runs of spaces inside string literals**,
+    /// which is exactly the shape `inf_packager`'s eaten-continuation sweep
+    /// looks for — a collision, not a defect, and the sixteenth time that sweep
+    /// has fired. The sweep's `ALIGNED_ON_PURPOSE` allowlist is keyed on the
+    /// enclosing function's **name alone**, and there are twenty-four functions
+    /// called `summary` in this workspace; exempting that name would have
+    /// exempted every one of them. So the table gets a name nothing else has.
+    fn island_summary_table(&self) -> String {
         use std::fmt::Write;
         let mut s = String::new();
         let _ = writeln!(s, "=== {} ===", self.name);
@@ -395,11 +410,15 @@ mod tests {
         // The over-grade ceiling is a fraction of the network, not a count, and
         // the shipped island's own crossings sit under it — or every build of it
         // blocks and the exit code stops meaning anything again.
-        assert!(ROAD_OVER_GRADE_CEILING > 0.0 && ROAD_OVER_GRADE_CEILING < 0.05);
-        assert!(
-            7.0 / 2_442.0 < ROAD_OVER_GRADE_CEILING,
-            "the island measures 7 of 2 442 against a {ROAD_OVER_GRADE_CEILING} ceiling"
-        );
+        const { assert!(ROAD_OVER_GRADE_CEILING > 0.0 && ROAD_OVER_GRADE_CEILING < 0.05) };
+        const {
+            assert!(
+                7.0 / 2_442.0 < ROAD_OVER_GRADE_CEILING,
+                "the island measures 7 of 2 442 stretches over its own ceiling; \
+                 if that no longer fits under ROAD_OVER_GRADE_CEILING, every \
+                 build of the shipped island blocks"
+            )
+        };
     }
 
     #[test]

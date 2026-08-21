@@ -13,8 +13,9 @@ That is the whole command. It plans the source tiles, fetches the ones the cache
 lacks, samples real elevation onto the world grid, carves the coastline, derives
 the water and the biomes, drapes and audits the roads, builds the pyramid, and
 writes the heavy halves into a project at `<checkout>/../island-build/project`.
-About forty seconds on a warm cache, and about ten megabytes of tiles on a cold
-one.
+About forty seconds on a warm cache (24.7 s of build, and the cook after it is
+another 40.7 s), and **156 tiles / 12 MB** of elevation on a cold one. Run
+`inf island plan` first to see exactly what it will ask the network for.
 
 ## What is committed and what is not
 
@@ -31,7 +32,7 @@ one.
 | the `.inf_terrain` | 342.7 MB |
 | the road mesh | 517 086 vertices |
 | the `.inf_biomes` set | derived from the palette |
-| the tile cache | 10 MB of somebody else's bytes |
+| the tile cache | 12 MB of somebody else's bytes |
 
 Everything in the second table is rebuilt by the one command above and lives
 **outside the tree**, at `<checkout>/../island-build/`.

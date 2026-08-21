@@ -152,8 +152,8 @@ impl BiomeClassification {
         if total == 0 {
             return out;
         }
-        for i in 1..8 {
-            out[i] = self.cells[i] as f64 / total as f64;
+        for (o, c) in out.iter_mut().zip(self.cells.iter()).skip(1) {
+            *o = *c as f64 / total as f64;
         }
         out
     }
@@ -622,7 +622,7 @@ mod tests {
         // spend two of three classes on the gap between the lumps and leave one
         // EMPTY; natural breaks spend all three on ground that exists.
         assert!(
-            ce.iter().any(|n| *n == 0),
+            ce.contains(&0),
             "equal intervals left no class empty on a bimodal set ({ce:?}) — the \
              fixture is not lumpy and this test measures nothing"
         );

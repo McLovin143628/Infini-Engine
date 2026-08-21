@@ -324,7 +324,7 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
             wave_length_m: 34.0,
             wave_steepness: 0.42,
             wave_count: 5,
-            wave_seed: 0x1_5_1A_4D,
+            wave_seed: 0x0015_1A4D,
             // Body-local wind: a coastline's sea state must not depend on where
             // the weather blend happens to be when a trace is taken.
             wind_from_weather: false,

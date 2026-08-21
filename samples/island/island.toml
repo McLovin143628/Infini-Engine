@@ -72,7 +72,8 @@ tiles = 28
 # detail below 3 m is the design's, not the survey's.
 #
 # The cache lives OUTSIDE the repository (this path resolves to
-# `<checkout>/../island-build/cache`). 132 tiles, about 10 MB.
+# `<checkout>/../island-build/cache`). 156 tiles, about 12 MB — run
+# `inf island plan` to see the exact list before fetching it.
 [source]
 kind = "terrarium"
 zoom = 15

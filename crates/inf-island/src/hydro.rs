@@ -744,8 +744,10 @@ mod tests {
 
     #[test]
     fn a_pit_becomes_a_lake_with_its_own_level_and_extent() {
-        let mut p = HydroParams::default();
-        p.lake_area_m2 = 100.0;
+        let p = HydroParams {
+            lake_area_m2: 100.0,
+            ..HydroParams::default()
+        };
         let f = FlowField::derive(&cone(41, 41, 8.0, Some((12, 20, 25.0))), &p);
         let net = extract(&f, &p);
         assert_eq!(
@@ -772,12 +774,14 @@ mod tests {
 
     #[test]
     fn streams_come_out_as_reaches_with_widths_and_falls() {
-        let mut p = HydroParams::default();
         // A 41x41 cone at 8 m is 100 000 m2 total, so a 1 km2 threshold finds
         // nothing. Scale the threshold to the fixture, which is the honest way
         // round: the constant is sized against the ISLAND and this is not one.
-        p.stream_catchment_m2 = 3_000.0;
-        p.vertex_stride = 2;
+        let p = HydroParams {
+            stream_catchment_m2: 3_000.0,
+            vertex_stride: 2,
+            ..HydroParams::default()
+        };
         let f = FlowField::derive(&cone(61, 61, 8.0, None), &p);
         let net = extract(&f, &p);
         assert!(
@@ -828,9 +832,11 @@ mod tests {
     /// arm is that a cliff produces one and a gentle slope does not.
     #[test]
     fn a_steep_reach_reports_a_waterfall_and_a_gentle_one_does_not() {
-        let mut p = HydroParams::default();
-        p.stream_catchment_m2 = 3_000.0;
-        p.vertex_stride = 1;
+        let p = HydroParams {
+            stream_catchment_m2: 3_000.0,
+            vertex_stride: 1,
+            ..HydroParams::default()
+        };
         // A shallow valley draining along +Z with a step across it. The cross
         // gradient (0.5 m a cell) must EXCEED the down-valley one (0.2 m a cell)
         // or the steepest-descent rule sends every column straight down its own

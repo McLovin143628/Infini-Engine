@@ -27,7 +27,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **I5** | **player core** — the owner's binding table, the C key's four verbs, the in-game UI layer, the settings dialog + rebinding, the interaction core | **DONE + AUDITED** — battery 309 / **5 796** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, rustdoc 413, no schema moved. Two pre-existing ragdoll defects found and fixed by the wave; **five more found and fixed by the audit** (A1 the settings-dialog lockout, A2 the half-built Simulate pause mirror, A3 an unarmed determinism sort, A5 three silent dead sliders, A6 two false doc invariants) plus A4 an arm that could not fail and A7 a count that was one low. See below. *(This wave took the I5 slot; **IB-11's far half — LERC / BigTIFF / JPEG2000 / LAS, reprojection, the geoid — is NOT in it** and moves to a later wave.)* |
 | ~~I6 (old)~~ | ~~scale seams — IB-12~~ *(pulled into I4; IB-8 and IB-13 into I3)* | **absorbed** |
 | **I6** | **gameplay systems** — doors + locks + the kick + crash-through, inventory, weapons v1, health | **DONE + AUDITED** — battery 312 / **5 873** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, rustdoc **404** of a 450 ceiling (447 at the wave's head, re-measured cold; 39 cleared by the audit), **no schema moved**. `NOT_YET_CONSUMED` is empty. Six defects found by the wave's own world-level arms and five more by its gate; one energy door for the kick, the breach and the bullet (mutation-proved across two crates); the city plans **19 790** doorways and the band makes **234** solid. The audit found **five arms that could not fail** (two trace sections, the wheel verb, the corpse guard, the spent attack edge) and **three world defects** (a barged door lost its lock for ever, `door.is_open` walked all 19 790 doorways, a dead block claiming a swing it did not drive). See *Done — wave I6* and *The I6 audit* below |
-| I7 | content — the 50 km² Vancouver map itself | not started |
+| **I7** | **the island data build** — the recipe, real Vancouver elevation, the designed coastline, the derived water and biomes, the graded roads, the level | **DONE** — see *Done — wave I7* below. The island exists: **51.38 km² of map, 40.65 km² of land, a 948.7 m peak of real North Shore survey, 25.14 km of designed shore, 50 reaches / 26.32 km, 2 lakes, 33 waterfall sites, 33.74 km of graded road, 342.7 MB of terrain built by one command in 24.7 s.** PIE == shipping over a 900-step drive. Battery 318 / 5 946 / 0 / 16, frontend 702 / 78, goldens 54, clippy 0, rustdoc 404, **no schema moved** |
 
 Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
 IB-8 and IB-13 forward out of I6**: both are ceilings a thousand-building fixture walks into
@@ -2570,3 +2570,346 @@ fourteen new, and every fix above is recorded with the one that kills it.
     through `d3::door::candidates`, which decides the side itself. Kept because
     the next host that wants one press's side outside the candidate walk will
     want exactly this; named here so it is not mistaken for coverage.
+
+---
+
+## Done — wave I7 (the island data build)
+
+**THE ISLAND EXISTS, AND ITS ELEVATION IS REAL.** Fifty-one square kilometres of
+the North Shore behind Vancouver, sampled out of the AWS terrain-tiles terrarium
+pyramid, carved into a landmass by a designed coastline, drained by streams the
+ground itself decides, and crossed by a road network routed under a grade
+ceiling. Built by **one command** in 24.7 seconds:
+
+```sh
+inf island build --recipe samples/island/island.toml
+```
+
+### The island in numbers
+
+| | |
+|---|---|
+| map | 7 168 × 7 168 m = **51.38 km²** |
+| land | **40.65 km²** (79.1 %) |
+| peak on land | **948.7 m** — real survey |
+| sea floor | **−60.0 m** on a 500 m shelf |
+| coastline | **25.14 km**, 43 authored vertices |
+| terrain | **784** level-0 tiles of 257², **1 064** in the catalog, **5 LOD levels**, **342.7 MB** |
+| source | **156** terrarium tiles at z15 = **3.11 m/px**, upsampled **3.11×** onto a 1 m grid, **0 nodata** |
+| water | **50 reaches / 26.32 km**, **2 lakes / 0.0708 km²**, **33 waterfall sites** (biggest a **29.5 m** drop), max catchment **2.42 km²** |
+| biomes | forest **38.5 %**, plain 20.8 %, meadow 13.5 %, alpine 8.6 %, beach 6.8 %, farmland 6.1 %, urban 5.8 % |
+| roads | **33.74 km** over 11 links and 7 junctions; worst grade **0.118** against a 0.080 ceiling, **7 of 2 442** stretches over (0.29 %) |
+| build | fetch **156 tiles / 12 MB** · build **24.7 s** · cook **40.7 s** |
+
+**Where the gigabytes live.** Everything heavy is **outside the tree**, at
+`<checkout>/../island-build/` — 375 MB of terrain, road mesh and biome set, plus
+a 12 MB tile cache. `island-build/` and `samples/island/build/` are gitignored as
+belt-and-braces. **Committed: 307 KB** (`samples/island`) + **267 KB**
+(`samples/island-fixture`, of which 208 KB is two real terrarium tiles).
+
+### The recipe, and its nine steps
+
+`samples/island/island.toml` is the whole design: where on Earth (UTM 10N, world
+`(0,0,0)` at 49.343 N 123.102 W), how fine (28 × 28 tiles of 257² at 1 m), which
+source (terrarium z15, cache outside the tree), where the sea is, the grade
+ceiling, the hydrology thresholds, the Jenks classes and **what each class
+means**, and seven settlement sites. `BuildStep::ALL` is the frozen order:
+
+**plan → fetch → sample → carve → hydrology → biomes → roads → pyramid → write**
+
+* **plan** — which source tiles the extent needs. Pure. A projected square is not
+  a lat/lon rectangle, so the plan walks the **perimeter** rather than the four
+  corners; measured, the north edge's middle bows **6.5 m** past its corners at
+  51 km.
+* **fetch** — **the only step that touches a network, and it is not in Ring 0**.
+  `inf_island::plan_tiles` decides *which*, `cache_path`/`tile_url` decide *where
+  and what*, and the `inf` CLI does the transfer by shelling out to `curl` — the
+  Phase-5 `git` ruling, against linking an HTTPS stack whose root-certificate
+  crate is off this project's licence allow-list.
+* **sample** — **destination-driven**. Every output sample asks where it came
+  from, through `inf_gis::Transform::to_source` (this wave's one addition outside
+  the island crate: the inverse of a door that only went forward). Forward
+  mapping would scatter, leave holes, and write at a density that is a function
+  of latitude.
+* **carve** — the coastline, the sea shelf, the beaches and the site pads.
+* **hydrology** — priority-flood → D8 → accumulation → reaches; the fill's own
+  depth is where the lakes are, so one pass answers two questions.
+* **biomes** — Fisher-Jenks over the vegetated band, then the design masks.
+* **roads** — the committed network draped and **audited**.
+* **pyramid** and **write**.
+
+### What is committed and what is not
+
+| committed (307 KB) | not committed |
+|---|---|
+| `island.toml` — every decision | the `.inf_terrain` (342.7 MB) |
+| `layers/coast.geojson` — the designed shore | the road mesh (517 086 vertices) |
+| `layers/biomes.geojson` — the design masks | the `.inf_biomes` set |
+| `layers/roads.geojson` — routed once, committed as the design | the tile cache (12 MB) |
+| `layers/streams.geojson`, `layers/lakes.geojson` — derived, then committed | |
+| `VancouverIsland.inf_lvl` + `VancouverIslandCover.inf_pcg` | |
+
+The layers are **GeoJSON in the anchor's own CRS**, so they open in QGIS beside
+the survey and the import transform is an **identity** — reading a committed
+layer is an exact subtraction rather than a reprojection round trip.
+
+### The CI-scale fixture
+
+`samples/island-fixture` — 2.36 km² of the same ground with its **two real
+terrarium tiles committed beside it** (208 KB, z13, fetched 2026-08-21 from the
+public keyless endpoint). It runs **every step of the recipe** and never reaches
+a network: the plan's tile list and the committed directory are compared **both
+ways**, so a change that needed one more tile goes red here rather than reaching
+for `curl` on a runner, and a tile committed that the plan does not name fails
+too.
+
+Eight arms, of which the gates: every `BuildStep::ALL` matched by a **count** in
+the log in frozen order; the **world** asked where the ground is (dry at both
+sites, wet off all four edges, every coastline vertex within 2.5 m of the
+waterline, the far corner exactly on the shelf floor); streams, lakes and
+waterfalls present and read back out of their committed layers with a reach's bed
+measured below the ground it was found on; the road audit clean **after** the
+corridor is levelled in; every biome reachable, the masks beating the classifier,
+a city site reserved on the **terrain**; and two builds byte-identical.
+
+### PIE == shipping, on a drive
+
+`runtime/inf-player/tests/island_gate.rs`, on the CI-scale island: **900 steps of
+0.4 m = 360 m, 900 distinct states, byte-identical** between the cooked pack (with
+cell streaming) and the loose document (with cell streaming), with the terrain
+paging and the partition activating underneath. Coverage first — both hosts must
+hold the ground, the water and the hero — so two empty worlds cannot agree their
+way through.
+
+The cooked island carries **7 assets**: terrain, level, biome set, pcg, mesh,
+meshlet DAG and a `.inf_part` with 1 streamed cell. The shipped player runs it:
+`inf-player --pack … --headless --run-frames 300` exits 0.
+
+### The island's own frame numbers
+
+The I4 instrument's camera path is a **parameter** now, so the same frame loop
+measures two worlds. RTX 4070 Ti, release, MIN of 3 rounds × 120 frames, 1080p, a
+40 m-high flight east from Harbour City. **Reported, never asserted** — the
+ceilings in `inf_player::budget` are set from the composed city, and asserting
+them over a different world would re-pin a ratchet by accident.
+
+| | p50 | p95 | p99 | GPU frame | pipelined estimate |
+|---|---|---|---|---|---|
+| **SHIPPED** | **18.209** | 19.287 | 20.887 | 6.657 | **10.994 (91.0 fps)** |
+| **LIT** | **48.170** | 53.590 | 56.862 | 31.188 | 31.188 (32.1 fps) |
+
+CPU, shipped: sim step 0.077 · stream sync 0.032 · projection 0.011 ·
+**render (record) 10.874** · poll 7.348. GPU, lit, dearest first:
+**vsm-raster 29.656 (95.1 %)** · gi 0.777 · vgeom 0.309 · water 0.101 ·
+terrain 0.063. Content: 44 terrain tiles, 1 vgeom, **0 instances, 0 scatter
+batches** — see the vegetation finding below.
+
+**Distance from 60 fps: shipped p50 +1.609 / p95 +2.687 ms; lit p50 +31.570.**
+
+### What the wave's own arms found
+
+Nine defects, every one measured rather than reasoned about:
+
+| finding | the number |
+|---|---|
+| **A BLACK PIXEL IS FINITE.** The terrarium codec's floor is `(0,0,0)` → −32 768 m, which every finiteness guard in this engine waves through; inside a coastline it is a 32 km pit | the shipped island's source really contains **56** such samples; now nodata, which the carve already turns into ocean |
+| **An eight-neighbour router cannot traverse a uniform slope.** On gradient `g` a D8 step achieves `g` or `g/√2` and nothing else, so an 8 % ceiling on a 15 % hillside answered "no route" | `ROUTE_REACH_CELLS = 4` admits `(1,4)` chords at **0.243 g**; the arm measures both sides of the 8 % line |
+| **A switchback's apex must not be cut.** Chaikin averaging at a reversal moves the apex toward its neighbours' midpoint, which is straight up the fall line | **0.1500 — the full gradient — on 24 of 336 stretches**; guarded, and the alternative is re-run inside the arm |
+| **`--dry-run` suppressed the layer write the second pass reads.** `inf island route` is two passes and the first is a dry run; with the design unwritten the second audited a corridor never cut | **15.28 % of stretches over the ceiling; 0 % once the design is written whatever `dry_run` says** |
+| **A pad does not build land.** A city site's radius reaches past its own shore, and a pad flattening toward the site's datum out there hands the island a rectangular headland | fixed at the door: the pad only levels what the coastline already calls land |
+| **Jenks finds the gaps; an author says what grows in them.** A hard-coded "lowest is plain, top is forest" ladder | put **9.8 % of a rain-forest island under canopy** and called a third of it grassy plain; `class_biomes` is the recipe's now, and forest is **38.5 %** |
+| **A threshold sized for a continent finds one stream on an island.** The largest catchment here is 2.42 km² — nothing drains far before it reaches the sea | a 1 km² threshold found **ONE** reach; at twelve hectares, **50 reaches, 2 lakes, 33 waterfalls** |
+| **A partitioned level's cooked `.inf_lvl` carries no entities**, so a shipping sim without `attach_cell_streaming` holds only what `AlwaysLoaded` kept | **six records against fifteen**; the two agreed for 411 steps and then did not, which reads like a streaming defect and was a gate that forgot to boot the streamer |
+| **The instrument's own fixture never attached terrain streaming**, because the composed city did not need it | the island's first measurement was a frame of sky and water — **0 terrain tiles, 0 instances** — and the anti-vacuity assertion is what said so |
+
+And one gate that could not fail, caught by itself: `the_level_is_authored_from_
+committed_design_alone` scans `island.rs` for the names of the things the level
+must not read — and its own needle list is in that file, so a whole-file scan
+matched itself. It stops at `#[cfg(test)]` now, and asserts that it did.
+
+### THE SIXTEENTH AND SEVENTEENTH chr(92) CATCHES
+
+Both this wave's own, both found by `inf-packager`'s workspace sweep, and they are
+**different things wearing the same shape**:
+
+* **A collision.** `IslandReport`'s summary is a fixed-column table an author
+  reads, and its alignment is runs of spaces *inside* string literals — exactly
+  what the sweep looks for. The sanctioned remedy is the `ALIGNED_ON_PURPOSE`
+  allowlist, which is keyed on the **enclosing function's name alone** — and
+  there are **twenty-four** functions called `summary` in this workspace, so
+  exempting the natural name would have exempted all of them. The table moved
+  into a uniquely named private helper (`island_summary_table`) instead. *An
+  over-broad exemption is the ban-list hazard turned around.*
+* **A defect, and the P22 law met head-on.** A scripted edit written through a
+  Python heredoc put a `\`-continuation inside an `assert!` message; a lone `\`
+  before a newline in a non-raw Python string is a **Python** continuation, so it
+  ate the backslash and left eighteen spaces inside the literal. The sweep caught
+  it in the final battery. The repair went through the Edit tool, which is what
+  the law prescribes — and the law is now three waves old and has caught
+  something in every one of them.
+
+### Counts
+
+| | after the I6 audit | **after I7** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 312 / 5 873 / 0 / 14 | **318 / 5 946 / 0 / 16** — six new test binaries (`inf-island`'s lib and doctest roots, `island_fixture`, `portable_math_law`, `preview`, and `inf-player`'s `island_gate`) and **73** new arms. The two new `#[ignore]`s are the elevation preview probe and the island's own flythrough, both of which need a fetched cache CI does not have |
+| frontend tests / files | 702 / 78 | **702 / 78**, `tsc --noEmit` and `eslint` clean — no UI was touched |
+| goldens | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical** — nothing this wave touched draws a golden scene |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** (local toolchain 1.97). Fourteen findings were cleared on the way, all in this wave's own code |
+| rustdoc warnings (ceiling 450) | 404 over 45 crates | **404 over 46 crates** — measured CI-style (`cargo clean --doc` first, the I6 law), and **the wave adds zero**: the one link it introduced (a public constant naming a private `smooth`) was found and removed, which took the count 406 → 404 because a crate that falls to zero takes its summary line with it. Headroom **46** |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved**, checked as a diff over the range |
+| committed samples | 21 levels | **23** — `samples/island` and `samples/island-fixture`; `EXPECTED_LEVELS` moved in the same commit |
+| new crates | — | **`inf-island`**, host-only, **no new external dependency** |
+
+## Decisions (I7's, binding on later waves)
+
+* **An island is a RECIPE, not committed bytes.** Fifty square kilometres of
+  one-metre terrain is a quarter of a gigabyte before a pyramid. The repository
+  commits the *generator* — the recipe, the coastline, the road network, the
+  derived water layers, the masks and the level, 307 KB — and one command builds
+  the rest **outside the tree**. That is the samples law read at a scale it had
+  not been read at: where the output is too large to commit, the generator is
+  what is committed and a CI-scale fixture is what proves it works.
+* **The level is authored from the committed design ALONE.** Not from the
+  terrain: a level whose numbers came from a build artifact would be a committed
+  document only one machine could produce, and nothing could check it had not
+  drifted. `inf_island::read_design` opens five small committed files and no
+  elevation tile, and a source scan is what keeps it that way. The consequence
+  worth carrying: **the player start's elevation comes from the committed road
+  layer**, because the roads pass through every settlement and their vertices
+  carry the ground each was planned at.
+* **Ring 0 decides WHICH bytes; Ring 2 fetches them.** The engine makes no
+  network call. `plan_tiles` names the tiles, `cache_path`/`tile_url` name where
+  and what, and the CLI shells out to `curl` — so CI runs every other step
+  against committed bytes and `--offline` is a refusal rather than a different
+  code path. A response that is not a PNG is refused **before it reaches the
+  cache**, because the dataset answers `NoSuchKey` above z15 with a 299-byte XML
+  body a cache would happily keep.
+* **The sampling step is not bit-portable and everything after it is**, and both
+  halves are gated. `inf-island` is clean of `std` transcendentals with **no
+  exemption**; the derivations are additionally banned from naming a projection
+  door at all, and the lattice is asserted to name one so the ban is not vacuous.
+  The consequences are stated rather than papered over: the `.inf_terrain` is a
+  build artifact of one machine, and the committed derived layers are
+  **verified** rather than re-derived (`LayerDrift` prints the comparison every
+  run).
+* **`sqrt` is portable and the transcendentals are not**, which is why a stream's
+  width comes from a square root of an area ratio rather than `powf`, and a slope
+  from `inf_math::portable::patan2_64` rather than `.atan()`.
+* **An advisory and a blocking finding are two lists.** C4-40 says a report with
+  a *blocking* finding exits non-zero, and the word is load-bearing: three of
+  this pipeline's four standing advisories are facts about the survey no author
+  can act on (the source really is 3.11 m where the grid is 1 m; eight tiles
+  really are open ocean; 56 samples really are filled pixels), and a command that
+  exited non-zero for those would have an exit code that says nothing.
+* **A grade ceiling is audited on the ground the road SITS on, not the one it was
+  planned against.** The router works on an 8 m lattice and the audit measures
+  the 1 m terrain, which is why `PLAN_GRADE_MARGIN` exists — and it is *not* the
+  hairpin, which is a real defect fixed in `smooth`. A margin that stands in for
+  a defect is a defect that never gets fixed.
+* **`ROAD_OVER_GRADE_CEILING` is a fraction with a named mechanism.** Where two
+  designed routes cross at different elevations the corridor can honour only one,
+  because this generator builds no grade separation. Eleven routes with seven
+  crossings measure **7 of 2 442 stretches**; past 1 % the cause is no longer the
+  crossings.
+* **The vegetation binding lives on the `.inf_biomes` set**, which is the one
+  authority `inf_pcg::BiomeBinding::from_set` reads — so the set this crate
+  writes carries it rather than leaving a second place for it to be attached.
+  Urban is the one biome that binds nothing, and that is what reserving it is
+  *for*: wave I8's generator finds bare ground rather than a forest to clear.
+* **In TOML a bare key after a `[table]` header belongs to that table.**
+  `content = [...]` written below `[source]` became `source.content`, a key
+  nothing reads, and serde's default is to ignore it.
+  **`#[serde(deny_unknown_fields)]` on every recipe struct** turns that — and any
+  misspelling — into a message.
+* **A ScenePayload carries no partition**, so a `--pie` preview of a partitioned
+  world builds it whole. Pre-existing, measured rather than described, and it is
+  why the island's PIE == shipping arm compares the **loose document** against
+  the pack — the pair P16.5's own gate compares, for exactly this reason.
+
+## What is still open after I7
+
+1. **THE VEGETATION SCATTERS NOTHING ON A STREAMED ISLAND, and here is the
+   figure.** The wiring is real and measured: six biomes bind the cover graph,
+   and with the ground paged the binding produces **4 958 instances over
+   2.359 km²** (about **85 000** over the island's own land at the same density).
+   Through the shipped boot it produces **0**, because `evaluate_biome_bindings`
+   evaluates over the terrain's *resident* `data.xz_bounds()` and a streamed
+   terrain ships no tiles. That is the I4 audit's own carried item — *"a streamed
+   cell evaluates its `PcgVolume` and NOT its biome bindings"* — met at island
+   scale. The fix is `cell_stream::reconcile`'s missing biome twin, the mirror of
+   `evaluate_pcg_volumes_in`, in **both** hosts.
+   `the_biome_binding_scatters_when_its_ground_is_resident_and_not_before`
+   asserts the zero, so the day it is closed the arm goes red and gets rewritten.
+2. **The lit island is 95 % VSM raster** — 29.656 of a 31.188 ms GPU frame, on a
+   world whose casters are a heightfield and one road mesh. IP item 2 at island
+   scale, and a much starker reading than the city's.
+3. **The shipped frame's dearest stage is `render (record)` at 10.874 ms for a
+   scene with 0 instances.** Whatever it is, it is not the drawing: the GPU frame
+   is 6.657 ms. The other half of finding 2, and unattributed.
+4. **Seven of 2 442 road stretches exceed the 0.080 ceiling, at 0.118**, where
+   two routes cross at different elevations. This generator builds **no bridges
+   and no tunnels**: a link with no land route under the ceiling is refused by
+   name with both ends' positions rather than routed through the sea.
+5. **The source is 3.11 m/px and the grid is 1 m.** Everything below 3.11 m is
+   interpolation plus what the design puts there — the carve, the road corridors
+   and the stream channels. The build says so every run
+   (`[source.upsampled]`). z16 does not exist in this dataset; finer real data
+   would be a LiDAR DTM through the GeoTIFF door, which is a different source
+   and a different recipe `kind`.
+6. **The committed water layers drift from a fresh derivation on the authoring
+   machine**: streams 50 vs 51 (0.31 % of length), lakes 2 vs 2 (**16.47 % of
+   area**). Not a portability problem — it is the corridor: the layers were
+   derived on ground the road levelling has since changed, and the second build
+   re-derives on the corridored ground. Reported, and it converges; a third
+   `route` would commit the corridored derivation.
+7. **The stream channels are cut and the reaches are not re-derived after.** One
+   pass: derive → carve. A second derivation over the cut ground would find
+   slightly different channels, and the design artifact is the first one.
+8. **Only the ten largest reaches are `WaterBody::River` entities.** A
+   `RiverPath` holds `segments × 16` frames and `WaterSurface::height_at` walks
+   them, so binding all fifty would put tens of thousands of frames behind every
+   buoyancy query. The other forty keep their carved channels and are **dry
+   beds** — visible geometry with no water surface.
+9. **A waterfall is a steep stream segment and nothing else.** Thirty-three sites
+   are identified with their drops (the biggest **29.5 m**); what is missing is
+   the *look*: there is no particle system in this engine (P22's own carried
+   remainder), so a 29.5 m fall is a river surface on a steep bed with P20's foam
+   on it, not spray. No new VFX system was built and none is claimed.
+10. **`inf island build` cannot write a level**, because the `.inf_lvl` writer is
+    `SceneDoc` in Ring 1 and the CLI must not link wgpu — the same ruling I2 took
+    for `inf gis`. The level is written by the Ring-1 samples generator and
+    **copied** into the project by the build's `[content]` list, which is what
+    keeps it one command from an author's point of view.
+11. **The hero has no rig.** `AnimStateMachine { sm: None }` and no
+    `SkeletalMesh`: the island's character is a capsule that moves, because the
+    phase-29 rig is a different sample's asset and copying it into the island's
+    committed content would put a megabyte of skeleton in a folder whose whole
+    argument is that it is small.
+12. **The site pads are terraces, not settlements.** Seven sites, 2.34 km² of
+    levelled ground and 5.8 % of the land reserved urban — and nothing standing
+    on any of it. That is wave I8's, by the brief.
+13. **The derivations run at 8 m.** A channel narrower than the pitch cannot be
+    found, and the committed stream layer is a *design* artifact an author may
+    edit rather than an oracle.
+14. **`inf island` has no editor surface.** Everything is the CLI and the recipe;
+    there is no wizard, no preview panel and no in-editor re-route. The ASCII
+    elevation probe (`cargo test -p inf-island --test preview -- --ignored`) is
+    what stands in for one.
+15. **THE CIRCUIT IS DRAWN AND AUDITED, AND NOTHING DRIVES IT.** The brief asked
+    for "a drivable road circuit connecting the (empty) city/town sites" and what
+    ships is the road: 11 links, 33.74 km, 7 junctions, a surface mesh draped to
+    within a 2 cm lift, and a grade audit that says a car could climb it. The
+    level's own character is a **walking hero**, not a vehicle — P29.7's
+    `Vehicle` exists and the island does not spawn one, because a vehicle needs a
+    chassis mesh and a tuning block that would be the fourth committed asset in a
+    folder whose whole argument is that it is small. The drive trace moves the
+    streaming source at 24 m/s, which is the *streaming* claim; it is not a
+    vehicle simulation.
+16. **The road network's topology is asserted on a flat fixture, not on the
+    island.** `the_network_topology_joins_the_cities_and_strings_the_towns`
+    measures one highway, five town-to-city arterials and the closing circuit
+    over flat ground; on the real island the same planner produced 11 links and
+    7 junctions, which is consistent with it and is not the same as an assertion
+    that every site is reachable from every other. A connectivity walk over the
+    built `RoadGraph` is what would close it.
