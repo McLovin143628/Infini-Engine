@@ -1269,6 +1269,95 @@ fn the_seat_and_an_authored_interactable_share_one_door() {
     );
 }
 
+/// **THE MERGED CANDIDATE WALK IS ONE SORTED WALK, AND A TIE PROVES IT** (I5
+/// audit, A3).
+///
+/// `d3::interact::candidates` concatenates two lists that are each already in
+/// `Guid` order — the seats out of a `BTreeMap`, the interactables out of their
+/// own sorted walk — and then sorts the whole thing. The sort is the load-bearing
+/// line and its own comment says so ("a seat and an item at exactly the same
+/// distance must resolve the same way in both hosts"), and **deleting it killed
+/// nothing in this tree**: every other arm puts its candidates at different
+/// distances, where the tie-break never runs.
+///
+/// So this one manufactures the tie exactly, by putting the item **on the seat**.
+/// The item's `Guid` is lower than the chassis's, so the `Guid`-ordered walk with
+/// a strict `<` must answer with the item; without the merged sort the seats come
+/// first in the concatenation and the *seat* wins, which is the wrong answer and
+/// — worse — an answer that depends on which list was extended onto which.
+#[test]
+fn a_seat_and_an_item_at_the_same_distance_break_by_guid() {
+    use inf_ecs::interact::{InteractVerb, Interactable, NO_VIEW_TEST_DEG};
+    use std::collections::BTreeSet;
+
+    let mut crew = Crew::new();
+    let (seat, _, _) = inf_physics::d3::vehicle::seat_pose(&crew.rig.bridge, CHASSIS)
+        .expect("the fixture's car has a seat");
+    // **Lower than `CHASSIS`**, so "lowest guid wins the tie" and "whichever list
+    // came first wins the tie" give different answers.
+    let item = Uuid::from_u128(0x2907_0001);
+    assert!(
+        item < CHASSIS,
+        "the fixture cannot tell the two rules apart"
+    );
+    {
+        let e = crew.rig.world.spawn_with_guid(item, "Ticket", None);
+        let mut t = Transform::IDENTITY;
+        t.translation = Vec3d::new(seat.x, seat.y, seat.z);
+        crew.rig.world.world_mut().entity_mut(e).insert((
+            t,
+            Interactable {
+                verb: InteractVerb::PickUp,
+                label: "ticket".into(),
+                // The seat's own reach, so the two are admitted on equal terms.
+                range_m: inf_physics::d3::vehicle::ENTER_REACH_M,
+                enabled: true,
+                view_cone_deg: NO_VIEW_TEST_DEG,
+            },
+        ));
+        crew.rig.world.mark_dirty();
+        crew.rig.world.propagate();
+    }
+    let feet = crew.driver_pos() - DVec3::Y * (crew.driver().stand_half_height_m + HERO_RADIUS);
+
+    // The walk itself is sorted — the property the rule's tie-break rests on.
+    let cands =
+        inf_physics::d3::interact::candidates(&crew.rig.world, &crew.rig.bridge, &BTreeSet::new());
+    let mut sorted = cands.clone();
+    sorted.sort_by_key(|c| c.guid);
+    assert_eq!(
+        cands.iter().map(|c| c.guid).collect::<Vec<_>>(),
+        sorted.iter().map(|c| c.guid).collect::<Vec<_>>(),
+        "the merged candidate walk is not in `Guid` order, so the tie-break is \
+         a function of which list was extended onto which"
+    );
+
+    let hit = inf_physics::d3::interact::resolve(
+        &crew.rig.world,
+        &crew.rig.bridge,
+        feet,
+        0.0,
+        &BTreeSet::new(),
+    )
+    .expect("both are in reach");
+    let d_seat = (seat - feet).length();
+    println!(
+        "the seat and the item are both at {d_seat:.6} m; the door answered {} ({:?})",
+        hit.label, hit.verb
+    );
+    // The tie is EXACT rather than approximate — if it were not, this arm would
+    // be measuring "nearer wins" again and could not see the sort at all.
+    assert_eq!(
+        hit.distance_m, d_seat,
+        "the item is not at the seat, so there is no tie here to break"
+    );
+    assert_eq!(
+        hit.guid, item,
+        "the tie went to the seat, so the merged walk is not `Guid`-ordered"
+    );
+    assert_eq!(hit.verb, InteractVerb::PickUp);
+}
+
 /// Two characters cannot climb into one seat.
 #[test]
 fn two_characters_cannot_share_one_seat() {
