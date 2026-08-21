@@ -283,6 +283,9 @@ pub struct SimSession {
     /// The click/long-press threshold this session runs with, seconds (I5) —
     /// MIRROR of `RuntimeSim::press_threshold_s`.
     press_threshold_s: f64,
+    /// **Whether the fixed step is frozen** (I5) — MIRROR of
+    /// `RuntimeSim::sim_paused`, the in-game menu's pause.
+    sim_paused: bool,
     /// Wave 3 event dispatchers: `(source entity, event name) → {listener entity
     /// → handler custom-event name}`. Deterministic (`BTreeMap` throughout).
     bindings: BTreeMap<(i64, String), BTreeMap<i64, String>>,
@@ -527,6 +530,7 @@ impl SimSession {
             just_released: BTreeSet::new(),
             holds: inf_input::HoldClock::new(),
             press_threshold_s: inf_ecs::movement::DEFAULT_PRESS_THRESHOLD_S,
+            sim_paused: false,
             bindings: BTreeMap::new(),
             dispatch_queue: VecDeque::new(),
             drained_overlaps: Vec::new(),
@@ -611,7 +615,25 @@ impl SimSession {
     /// accumulator).
     pub fn step_once(&mut self, doc: &mut SceneDoc, input: SimInput) {
         self.set_input(input);
+        // **A paused sim takes the input and runs no step** (I5) — MIRROR of
+        // `RuntimeSim::step_once`, and it has to be a mirror or a trace that
+        // opens the in-game menu would advance in one host and not the other.
+        if self.sim_paused {
+            return;
+        }
         self.fixed_step(doc);
+    }
+
+    /// Whether the fixed step is frozen (I5) — MIRROR of
+    /// `RuntimeSim::sim_paused`.
+    pub fn sim_paused(&self) -> bool {
+        self.sim_paused
+    }
+
+    /// Freeze or resume it — MIRROR of `RuntimeSim::set_sim_paused`. The pause
+    /// lives on the session rather than on the host so it is on the trace.
+    pub fn set_sim_paused(&mut self, paused: bool) {
+        self.sim_paused = paused;
     }
 
     /// **Queue a tuning edit** (P29.5, pillar S4).

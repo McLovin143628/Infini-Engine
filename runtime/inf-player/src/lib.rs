@@ -48,6 +48,9 @@ pub mod skinned;
 pub mod step_profile;
 /// Camera-driven terrain streaming (P16.3b2) — the sim/render want split.
 pub mod terrain_stream;
+/// The in-game settings dialog, the toasts and the interaction prompt, wired to
+/// the window (island wave I5). The pure half is `inf-ui`.
+pub mod ui;
 pub mod vmesh;
 pub mod voxel;
 // The browser (wasm32) entry point + fetch/run glue (P14.2). Gated to wasm so

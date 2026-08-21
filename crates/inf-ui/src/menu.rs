@@ -492,9 +492,13 @@ pub fn handle(
     let list = rows(state, s, map);
     let len = list.len().max(1);
     state.focus = state.focus.min(len - 1);
+    // **AN OPEN DIALOG IS MODAL.** Everything from here down consumes the key,
+    // including the ones the dialog has no use for: a menu that let `Space`
+    // through would have the player jumping while they read the video page, and
+    // one that let the mouse buttons through would fire a weapon at whatever is
+    // behind it. "Consumed" is about who the input belongs to, not about whether
+    // anything happened.
     let Some(key) = input.key() else {
-        // A mouse button outside a capture is not a control this dialog has.
-        out.consumed = false;
         return out;
     };
     match key {
@@ -594,7 +598,9 @@ pub fn handle(
                 }
             }
         }
-        _ => out.consumed = false,
+        // A key the dialog has no control for is still the dialog's — see the
+        // modality note above.
+        _ => {}
     }
     out
 }
@@ -624,6 +630,32 @@ mod tests {
             assert!(!out.consumed, "a closed dialog ate `{k}`");
         }
         assert_eq!(s, GameSettings::default());
+    }
+
+    /// **An open dialog is modal**: it takes every key, including the ones it
+    /// has no control for.
+    ///
+    /// The mutation this kills: a `_ => consumed = false` fallthrough, which is
+    /// what this reducer shipped with for one afternoon. It reads as "the dialog
+    /// only claims what it uses" and it means the player jumps while reading the
+    /// video page and fires a weapon at whatever is behind the menu.
+    #[test]
+    fn an_open_dialog_takes_every_key_even_the_ones_it_has_no_use_for() {
+        let (mut st, mut s, mut m) = fixture();
+        for k in ["Space", "KeyC", "KeyR", "F1", "Digit9", "ShiftLeft"] {
+            let out = key(&mut st, &mut s, &mut m, k);
+            assert!(out.consumed, "an open dialog let `{k}` through to the game");
+            assert!(st.open, "`{k}` closed the dialog");
+        }
+        // …and a mouse button outside a capture too.
+        let out = handle(
+            &mut st,
+            &mut s,
+            &mut m,
+            &MenuInput::Mouse(MouseButton::Left),
+        );
+        assert!(out.consumed, "the dialog let a mouse button through");
+        assert!(!out.bindings_changed);
     }
 
     /// **The pause is a ruling, and it is about the SESSION.**

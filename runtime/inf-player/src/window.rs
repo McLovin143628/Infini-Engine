@@ -161,6 +161,11 @@ pub struct PlayerApp {
     pie: Option<PieLink>,
     /// PIE pause state (ignored when `pie` is `None`).
     paused: bool,
+    /// **The in-game UI session** (island wave I5): the settings dialog, the
+    /// toasts and the interaction prompt. Present in the shipped player **and**
+    /// in a windowed PIE preview, because a preview that could not open the menu
+    /// would be previewing a different game.
+    ui: crate::ui::PlayerUi,
     /// Cook-derived vmesh DAGs a `MeshRef.asset` resolves to (P13.4); attached to
     /// the render host so asset meshes render real geometry. Empty for
     /// primitive-only / PIE worlds.
@@ -217,16 +222,30 @@ impl PlayerApp {
         title: String,
         width: u32,
         height: u32,
-        sim: RuntimeSim,
+        mut sim: RuntimeSim,
         map: InputMap,
         vmeshes: Arc<VmeshRegistry>,
         render: inf_scene::RenderSettingsRecord,
     ) -> Self {
+        // **The player's own settings**, and the map they produce (island wave
+        // I5). The `map` argument is the LEVEL's table — `input.toml` beside a
+        // dev level, or the shipped default for a cooked pack — and the player's
+        // overrides are applied on top of it, so a rebinding survives a level
+        // change and a level that ships its own table still gets one.
+        let (ui, overridden) = crate::ui::PlayerUi::open(crate::ui::settings_dir());
+        if let Some(e) = &ui.load_error {
+            tracing::warn!("inf-player: {e}");
+        }
+        let mut map = map;
+        inf_ui::bindings::apply_overrides(&mut map, &ui.settings.bindings);
+        let _ = overridden;
+        sim.set_press_threshold_s(ui.settings.press_threshold_s());
         Self {
             title,
             width,
             height,
             sim,
+            ui,
             input_state: InputState::new(map),
             live: None,
             pie: None,
@@ -434,6 +453,65 @@ impl PlayerApp {
         }
     }
 
+    /// **What the E key is about right now, and where to draw it** (island wave
+    /// I5).
+    ///
+    /// Asked every frame through the **same** `inf_physics::d3::interact::resolve`
+    /// the `press_interact` edge is honoured by, so what the player is told and
+    /// what the press does cannot come apart. `None` on a level with no
+    /// character, with nothing in reach, or with the target behind the camera.
+    ///
+    /// `O(candidates)`, and `O(1)` on a level with no vehicles and no
+    /// interactables — which is every level committed before this wave.
+    fn interaction_prompt(
+        sim: &RuntimeSim,
+        view: &inf_render::RenderView,
+        input: &InputState,
+    ) -> Option<(glam::Vec2, String)> {
+        let world = sim.world();
+        let actor = inf_ecs::movement::camera_subject(world)?;
+        let entity = world.entity_of(actor)?;
+        let cm = world
+            .world()
+            .get::<inf_ecs::components::CharacterMovement>(entity)?;
+        let t = world
+            .world()
+            .get::<inf_ecs::components::Transform>(entity)?;
+        let radius = world
+            .world()
+            .get::<inf_ecs::components::Collider3D>(entity)
+            .map(|c| c.radius)
+            .unwrap_or(0.3);
+        let feet = t.translation.to_dvec3() - DVec3::Y * (cm.half_height_for(cm.mode) + radius);
+        let seated = cm
+            .runtime
+            .seat
+            .is_seated()
+            .then_some(cm.runtime.seat.vehicle);
+        let exclude = crate::ui::PlayerUi::exclude(actor, seated);
+        let hit = inf_physics::d3::interact::resolve(
+            world,
+            sim.bridge3d(),
+            feet,
+            cm.runtime.aim_yaw_deg,
+            &exclude,
+        )?;
+        // The key the prompt names is the one the player has BOUND, read out of
+        // the live map — so a rebinding changes the prompt on the next frame
+        // rather than leaving it advertising a key that no longer does it.
+        let key = match input
+            .map()
+            .desk_source(inf_ecs::movement::actions::INTERACT)
+        {
+            Some(inf_input::ActionSource::Key(c)) => c.clone(),
+            Some(other) => inf_ui::bindings::token_of(other),
+            None => String::new(),
+        };
+        let text = inf_ecs::interact::prompt_text(hit.verb, &hit.label, &key);
+        let at = crate::ui::project_to_screen(view, hit.position)?;
+        Some((at, text))
+    }
+
     /// One frame: fold input, advance the sim by the elapsed time, project, draw.
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
         // **The window-handle re-attempt** (round-2 finding B7). `resumed`
@@ -462,6 +540,21 @@ impl PlayerApp {
         // accumulated by `RuntimeSim` on its fixed step; see
         // `inf_input::HoldClock` for why the two must not be the same number.
         self.input_state.apply_dt(&events, dt);
+        // ── the in-game menu (island wave I5) ──
+        //
+        //    The `menu` action's edge is read HERE, from the resolved state,
+        //    rather than in the key handler: the key that opens it is a
+        //    *binding*, so a player who rebound the menu to F1 opens it with F1.
+        //    The handler's job is only to keep the keys away from the game once
+        //    it is open.
+        if self.input_state.just_pressed(inf_input::actions::MENU) {
+            self.ui.toggle();
+        }
+        //    Tab pauses the single-player simulation, and the pause is on the
+        //    SIM rather than on this host — see `inf_ui::menu`'s ruling and
+        //    `RuntimeSim::set_sim_paused`.
+        self.sim.set_sim_paused(self.ui.pauses_sim());
+        self.ui.report_unconsumed(&self.input_state);
         let held = input::held_actions(&self.input_state, dt);
         // PIE pause freezes the sim but keeps rendering the last frame.
         if !self.paused {
@@ -526,6 +619,26 @@ impl PlayerApp {
         if self.debug_cells {
             live.host.draw_cell_overlay(&self.sim);
         }
+        // ── the in-game UI (island wave I5) ──
+        //
+        //    BETWEEN the projection and the render, which is the only window in
+        //    which both halves of the frame exist: `project_scene_full` clears
+        //    and rebuilds every other field of the scene, and the UI is the one
+        //    the host owns.
+        //
+        //    Laid out for the SURFACE's configured size rather than the
+        //    window's: they differ for the frames a resize debounce is pending,
+        //    and a menu laid out for a size the swap chain does not have is
+        //    stretched by exactly that ratio.
+        let (sw, sh) = live.host.surface_size();
+        let viewport = glam::Vec2::new(sw.max(1) as f32, sh.max(1) as f32);
+        self.ui.build(dt, viewport, self.input_state.map());
+        if let Some(v) = view.as_ref() {
+            if let Some((at, text)) = Self::interaction_prompt(&self.sim, v, &self.input_state) {
+                self.ui.prompt(Some(at), &text);
+            }
+        }
+        live.host.set_ui(self.ui.list());
         if let Some(view) = view {
             live.host.render(&view);
         }
@@ -677,15 +790,36 @@ impl ApplicationHandler for PlayerApp {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
-                    if code == KeyCode::Escape && event.state == ElementState::Pressed {
+                    let pressed = event.state == ElementState::Pressed;
+                    // **Escape leaves the game — unless the dialog wants it**
+                    // (island wave I5). Escape is the dialog's cancel and its
+                    // close, and a build that quit on it would make the settings
+                    // screen unusable.
+                    if code == KeyCode::Escape && pressed && !self.ui.menu.open {
                         event_loop.exit();
                         return;
                     }
                     if let Some(name) = input::keycode_to_code(code) {
+                        // **The dialog gets it first, and what it takes never
+                        // reaches the game.** The same press that moves the
+                        // cursor would otherwise also fire a weapon — and a key
+                        // being *captured* for a rebinding would fire the verb it
+                        // is being taken from, which is the worst of the two.
+                        let mut map = self.input_state.map().clone();
+                        let verdict = self.ui.key(name, pressed, &mut map);
+                        if verdict.bindings_changed {
+                            // Re-seated on the live state, which keeps the raw
+                            // device state (a key held across a rebinding is
+                            // still held) and re-resolves against the new table.
+                            self.input_state.set_map(map);
+                        }
+                        if verdict.consumed {
+                            return;
+                        }
                         if let Some(live) = self.live.as_mut() {
                             live.pending.push(InputEvent::Key {
                                 code: name.to_string(),
-                                pressed: event.state == ElementState::Pressed,
+                                pressed,
                             });
                         }
                     }
@@ -696,13 +830,27 @@ impl ApplicationHandler for PlayerApp {
             //    delta stops at the edge of the screen, so it is taken from
             //    `device_event` below instead.
             WindowEvent::MouseInput { state, button, .. } => {
-                if let (Some(button), Some(live)) =
-                    (input::mouse_button(button), self.live.as_mut())
-                {
-                    live.pending.push(InputEvent::MouseButton {
-                        button,
-                        pressed: state == ElementState::Pressed,
-                    });
+                if let Some(button) = input::mouse_button(button) {
+                    let pressed = state == ElementState::Pressed;
+                    // A mouse button is a bindable source, so a running capture
+                    // takes it (island wave I5). Nothing else the dialog does
+                    // reads one, and a release is only interesting to the game.
+                    // A release is never consumed — see `PlayerUi::key` for the
+                    // stuck-key measurement that says why.
+                    if pressed {
+                        let mut map = self.input_state.map().clone();
+                        let verdict = self.ui.mouse(button, &mut map);
+                        if verdict.bindings_changed {
+                            self.input_state.set_map(map);
+                        }
+                        if verdict.consumed {
+                            return;
+                        }
+                    }
+                    if let Some(live) = self.live.as_mut() {
+                        live.pending
+                            .push(InputEvent::MouseButton { button, pressed });
+                    }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {

@@ -433,6 +433,34 @@ impl PlayerRenderHost {
     pub fn is_lost(&self) -> bool {
         self.gpu.is_lost()
     }
+
+    /// **Hand the frame's in-game UI to the renderer** (island wave I5).
+    ///
+    /// The one seam a screen-space overlay needs, and it is a *setter* rather
+    /// than a `scene_mut()`: everything else in `RenderScene` is projected from
+    /// the sim by `project_scene_full`, which clears and rebuilds it every
+    /// frame, and a UI built by the host would be wiped by the next projection.
+    /// A named door says which field the host owns and gives the projector no
+    /// reason to touch it.
+    ///
+    /// Called **between** `project` and `render`, which is the only window in
+    /// which both halves of the frame exist.
+    pub fn set_ui(&mut self, ui: &inf_ui::UiDrawList) {
+        // Cloned rather than moved: the host keeps its list across frames so a
+        // menu costs no allocation per frame, and the two buffers are a few
+        // hundred quads at the very most.
+        self.scene.ui.clone_from(ui);
+    }
+
+    /// The render surface's configured size in physical pixels — what the UI
+    /// lays itself out for.
+    ///
+    /// The **configured** size and not the window's: they differ for the frames
+    /// a resize debounce is pending, and a UI laid out for a size the swap chain
+    /// does not have would be stretched by exactly that ratio.
+    pub fn surface_size(&self) -> (u32, u32) {
+        self.chain.configured_size()
+    }
 }
 
 /// Half-height (metres) of a cell-overlay wireframe slab. Low enough to read the

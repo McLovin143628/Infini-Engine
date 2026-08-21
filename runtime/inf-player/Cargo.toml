@@ -62,6 +62,10 @@ inf-anim = { workspace = true }
 inf-input = { workspace = true }
 inf-math = { workspace = true }
 inf-render = { workspace = true }
+# The in-game UI layer (island wave I5): the settings dialog, the rebinding
+# table, the toasts and the shipped game's settings file. Pure CPU; the node
+# that draws it lives in `inf-render`, which this crate already takes.
+inf-ui = { workspace = true }
 # Virtualized geometry (P13.1b): the runtime resolves a mesh's cook-derived
 # `.inf_vmesh` (meshlet DAG) and hands it to the renderer's GPU meshlet path.
 inf-vgeom = { workspace = true }

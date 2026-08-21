@@ -277,6 +277,10 @@ pub struct RuntimeSim {
     /// a threshold arriving as a NaN would make every press classify as nothing
     /// at all.
     press_threshold_s: f64,
+    /// **Whether the fixed step is frozen** (I5) — the in-game menu's pause.
+    /// See [`set_sim_paused`](Self::set_sim_paused) for why it is here and not
+    /// on the host.
+    sim_paused: bool,
     /// Wave 3 event dispatchers (MIRROR of `SimSession::bindings`): `(source
     /// entity, event name) → {listener entity → handler custom-event name}`.
     bindings: BTreeMap<(i64, String), BTreeMap<i64, String>>,
@@ -513,6 +517,7 @@ impl RuntimeSim {
             just_released: BTreeSet::new(),
             holds: inf_input::HoldClock::new(),
             press_threshold_s: inf_ecs::movement::DEFAULT_PRESS_THRESHOLD_S,
+            sim_paused: false,
             bindings: BTreeMap::new(),
             dispatch_queue: VecDeque::new(),
             drained_overlaps: Vec::new(),
@@ -921,6 +926,18 @@ impl RuntimeSim {
     /// Returns how many fixed steps ran.
     pub fn run_frame(&mut self, frame_dt: f64, input: RuntimeInput) -> u32 {
         self.set_input(input);
+        // **A paused sim accumulates nothing** (I5), rather than accumulating
+        // and then declining to spend it: an accumulator that filled while a
+        // menu was open would empty itself in one burst the moment it closed,
+        // and the world would jump by however long the player took to read.
+        if self.sim_paused {
+            // Zero elapsed, and the answer is discarded because it is zero by
+            // construction — the call is here so a paused frame still passes
+            // through the accumulator's own clamp rather than leaving it in a
+            // state no frame ever produced.
+            let _ = self.stepper.accumulate(0.0);
+            return 0;
+        }
         let n = self.stepper.accumulate(frame_dt);
         for _ in 0..n {
             self.fixed_step();
@@ -930,14 +947,45 @@ impl RuntimeSim {
 
     /// Run exactly one fixed step with the given input — the deterministic entry
     /// point tests and the headless trace script against.
+    ///
+    /// **A paused sim takes the input and runs no step** (I5). The input is
+    /// still taken, so the edge sets stay in the shape they would have been in
+    /// — a step run immediately after the pause lifts must not see a stale
+    /// press — and the world does not move, which is what makes a trace that
+    /// opens the menu cost zero steps in both hosts.
     pub fn step_once(&mut self, input: RuntimeInput) {
         self.set_input(input);
+        if self.sim_paused {
+            return;
+        }
         self.fixed_step();
     }
 
     /// The click/long-press threshold this session runs with, seconds (I5).
     pub fn press_threshold_s(&self) -> f64 {
         self.press_threshold_s
+    }
+
+    /// **Whether the fixed step is frozen** (island wave I5).
+    ///
+    /// Set by a host when the in-game menu opens a single-player session — see
+    /// `inf_ui::menu`'s ruling for why Tab pauses at all, and
+    /// `MenuState::pauses_sim` for why it is a fact about the session rather
+    /// than about the window.
+    pub fn sim_paused(&self) -> bool {
+        self.sim_paused
+    }
+
+    /// Freeze or resume it.
+    ///
+    /// **The pause lives on the SIM, not on the host**, and that is the whole
+    /// point: a trace that opens the menu advances zero fixed steps, so the
+    /// frames a player spends reading a table cost the simulation nothing and
+    /// PIE stays byte-identical to shipping however long they take. A host-level
+    /// pause would be invisible to `step_once`, which is the door every trace in
+    /// this repository is scripted through.
+    pub fn set_sim_paused(&mut self, paused: bool) {
+        self.sim_paused = paused;
     }
 
     /// Set it — the controls settings' door into the sim (I5).
