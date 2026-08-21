@@ -287,13 +287,15 @@ pub fn rows(state: &MenuState, s: &GameSettings, map: &InputMap) -> Vec<Row> {
     }];
     match state.page {
         Page::Video => {
-            out.push(choice("Window Mode", &s.window_mode, RowId::WindowMode));
-            out.push(choice(
+            // **All three are STORED and not APPLIED, and the row says so** (I5
+            // audit, A5) — see [`STORED_NOT_APPLIED_NOTE`].
+            out.push(stored("Window Mode", &s.window_mode, RowId::WindowMode));
+            out.push(stored(
                 "Resolution",
                 &format!("{} x {}", s.resolution_w, s.resolution_h),
                 RowId::Resolution,
             ));
-            out.push(choice("Quality", &s.render_tier, RowId::RenderTier));
+            out.push(stored("Quality", &s.render_tier, RowId::RenderTier));
         }
         Page::Audio => {
             out.push(slider("Master", s.master_volume, RowId::MasterVolume));
@@ -347,6 +349,35 @@ fn choice(label: &str, value: &str, id: RowId) -> Row {
         value: value.into(),
         kind: RowKind::Choice,
         note: None,
+    }
+}
+
+/// What the video page's rows say about themselves (I5 audit, A5).
+///
+/// The three of them are written to the settings file and read back, and nothing
+/// resizes a window, reconfigures a swap chain or re-detects a tier yet — that is
+/// a winit/surface change on a path this repository's CI cannot run, and the
+/// wave's ledger carries it as an honest remainder.
+///
+/// **The ledger is not where a player reads it.** This wave's own rule for a
+/// control that is bound against a consumer that does not exist is to say so on
+/// the row it is on ([`not_yet_note`], and the toast beside it): *a dead key is
+/// indistinguishable from a broken one*. A slider that is stored and applied by
+/// nothing is the same thing one level up — the ledger says as much about the
+/// audio and controls pages, which were wired for exactly that reason — and these
+/// three were the ones left silent. A player who changes the resolution and sees
+/// nothing happen is owed the sentence.
+///
+/// **It does not promise a restart**, because a restart would not help either:
+/// nothing reads these three at boot any more than it does at runtime, and a note
+/// that sent a player to relaunch the game would be a second wrong answer on top
+/// of the first. ASCII only, like every string this 8x8 basic-Latin font draws.
+pub const STORED_NOT_APPLIED_NOTE: &str = "saved, and nothing applies it yet";
+
+fn stored(label: &str, value: &str, id: RowId) -> Row {
+    Row {
+        note: Some(STORED_NOT_APPLIED_NOTE.to_string()),
+        ..choice(label, value, id)
     }
 }
 
@@ -1125,6 +1156,51 @@ mod tests {
             rows(&st2, &s, &m),
             shown,
             "the projection is not a function of anything but its inputs"
+        );
+    }
+
+    /// **AND SO DOES A SETTING WITH NO CONSUMER** (I5 audit, A5).
+    ///
+    /// The video page's three rows are stored and applied by nothing, and until
+    /// this arm they said so only in a ledger. That is the wave's own dead-key
+    /// defect one level up: a player who changes the resolution and sees nothing
+    /// happen cannot tell a preference from a bug, and the wave fixed exactly
+    /// that for the audio and controls pages by WIRING them.
+    ///
+    /// The counter-claim is the half that matters: every row on the other three
+    /// pages **is** live, so the note must appear on three rows and no more. The
+    /// day the video half lands, this arm fails and the note comes off.
+    #[test]
+    fn a_setting_that_reaches_nothing_says_so_on_its_own_row() {
+        let (mut st, s, m) = fixture();
+        let mut noted: Vec<String> = Vec::new();
+        let mut live = 0usize;
+        for page in Page::ALL {
+            st.page = page;
+            for row in rows(&st, &s, &m) {
+                if row.note.as_deref() == Some(STORED_NOT_APPLIED_NOTE) {
+                    noted.push(format!("{page:?}/{}", row.label));
+                } else if !matches!(row.id, RowId::Page) {
+                    live += 1;
+                }
+            }
+        }
+        assert_eq!(
+            noted,
+            ["Video/Window Mode", "Video/Resolution", "Video/Quality"],
+            "the stored-not-applied note is on the wrong set of rows"
+        );
+        assert!(
+            live > 20,
+            "only {live} rows claim to be live, so the note above is not the exception it says it is"
+        );
+        // ASCII, because the built-in font is 0x20..0x7F and a note with a
+        // character outside it draws as a hole where a sentence should be.
+        assert!(
+            STORED_NOT_APPLIED_NOTE
+                .chars()
+                .all(|c| c.is_ascii_graphic() || c == ' '),
+            "the note has a character the built-in font cannot draw"
         );
     }
 }
