@@ -25023,6 +25023,30 @@ end of this block.
 | **A11** | **TWO CLAIMS THE WAVE'S OWN NUMBERS DO NOT SUPPORT.** `PassTime::cpu_ms` said the CPU segments "tile the record phase exactly as the GPU segments tile the frame" — they tile the **marked span**; `FrameTimer::begin` opens at the frame's first *command*, so the view matrices, the light and deform uniform writes and the encoder are inside `render (record)` and inside no segment, and so are `encoder.finish()` and the submit. And `ShadowNode::sync`'s content key is "the same order as the pack whose guess it replaces" only on a **miss**: `scene.version` was a `u64` compared *before* `pack_bucketed` ran, so the **cache hit went `O(1)` → `O(scene.instances)`**. | both stated as properties | both corrected where they are written; the record residue is **printed every run** beside the column it belongs to, with the one direction that must hold asserted (a part may not exceed its whole), and the hit's new order is priced with the alternative named and refused |
 | **A12** | **THREE DOCS STILL NAMED `query_dirty`**, the field this wave retired — and `inf_physics::d3::camera`'s was a **live claim** about why holding `&mut PhysicsBridge3D` is safe. | a rule that changed, still written down the old way in three places | all three corrected; the two historical ones say which field replaced it |
 
+### Observations carried, not fixed
+
+* **The `vsm-sync` segment holds two things and is named for one.** The mark that splits it out
+  of `vsm-raster` sits after `vsm_sync`, and the `VgeomNode::commit_cluster_pages` block is
+  inside the same interval — which the source comment says, and which is the wave's own law
+  ("a segment must be named for what is inside it") applied one level below where it was
+  written. It misdirects nothing today, because the remainder the ledger prescribes against is
+  `vsm-raster`'s 6.05 ms and not this segment's; **split it the day a reader needs the two
+  apart**, which costs one of the 29 spare marks (`MAX_FRAME_MARKS` is 64 against a needed 35)
+  and one line in `gpu_timing`'s expected list.
+* **The incremental query tree's crossover is unmeasured.** Its win is in proportion to how
+  much of the world stands still — 6 000 static colliders and one character on the city. The
+  other end of the scale is a world where nearly everything is awake, where `step` pays a sort
+  and a dedup over the awake set and then a `compute_aabb` + `set_aabb` per moved leaf against
+  a from-scratch build of the same leaves. Both paths answer identically (the equivalence gate
+  says so), so it is a cost note and not a correctness one; no arm in `inf-physics` stands at
+  it, because every fixture in `step_cost_3d.rs` has one dynamic body.
+* **The two `active_bodies()` extends are armed as a PAIR only.** Deleting either alone leaves
+  the equivalence gate green, because a body awake on both sides of a step is marked by
+  whichever half survives and the AABB is recomputed lazily from the collider's current pose.
+  Each half earns its place on a case the other misses — the before-half a body that fell
+  asleep *during* the step, the after-half one woken *by* it — and neither is expressible
+  without reaching into rapier's sleep state, which this facade does not expose.
+
 ### What the audit REFUSED, priced
 
 * **Hardening the eaten-continuation sweep against the `rustfmt` collision.** The wave's
