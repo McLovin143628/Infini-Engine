@@ -25019,6 +25019,32 @@ end of this block.
 | **A11** | **TWO CLAIMS THE WAVE'S OWN NUMBERS DO NOT SUPPORT.** `PassTime::cpu_ms` said the CPU segments "tile the record phase exactly as the GPU segments tile the frame" — they tile the **marked span**; `FrameTimer::begin` opens at the frame's first *command*, so the view matrices, the light and deform uniform writes and the encoder are inside `render (record)` and inside no segment, and so are `encoder.finish()` and the submit. And `ShadowNode::sync`'s content key is "the same order as the pack whose guess it replaces" only on a **miss**: `scene.version` was a `u64` compared *before* `pack_bucketed` ran, so the **cache hit went `O(1)` → `O(scene.instances)`**. | both stated as properties | both corrected where they are written; the record residue is **printed every run** beside the column it belongs to, with the one direction that must hold asserted (a part may not exceed its whole), and the hit's new order is priced with the alternative named and refused |
 | **A12** | **THREE DOCS STILL NAMED `query_dirty`**, the field this wave retired — and `inf_physics::d3::camera`'s was a **live claim** about why holding `&mut PhysicsBridge3D` is safe. | a rule that changed, still written down the old way in three places | all three corrected; the two historical ones say which field replaced it |
 
+### What the audit REFUSED, priced
+
+* **Hardening the eaten-continuation sweep against the `rustfmt` collision.** The wave's
+  fourteenth chr(92) catch came with an eighth hit that is a *collision* — `rustfmt` aligns
+  trailing comments into runs of spaces on lines carrying string literals, which is the shape
+  `interior_space_run` reads — and the wave worked around it by moving `STEP_PHASE_NAMES`'
+  index table onto the `phase` constants. The obvious hardening is to restrict the scan to
+  runs that lie **inside** a literal (a per-line quote-parity walk), which would retire that
+  shape permanently and, checked line by line, introduces no new blind spot: a line inside a
+  multi-line literal carries no quote and is *already* skipped by the `line.contains('"')`
+  filter. **Refused, and the price is the reason:** of the fourteen entries already on
+  `ALIGNED_ON_PURPOSE`, **thirteen are runs genuinely inside a literal** (the `inf-transpile`
+  hand-edit corpus, the source pins whose needle must equal the indented line it looks for),
+  which a parity walk cannot help — so the hardening buys exactly one shape and costs a
+  per-line scanner that has to know about escapes, raw strings, byte strings and char
+  literals, which is the same lexer this gate's own doc already refuses to build for the
+  bare-newline sibling. *One observation is worth carrying either way:* `ALIGNED_ON_PURPOSE`
+  is keyed on the **enclosing function**, so a module-level `const` cannot be excepted at all
+  — which is why the table had to move rather than be listed, and which the next author who
+  trips this will want to know.
+* **A `version` pre-filter in front of `ShadowNode::sync`'s content key** (see A11). It is
+  sound — a version that has not moved cannot hide a change — and it would restore the `O(1)`
+  cache hit the exact key gave up. Refused because it puts back the over-approximating
+  coupling the change exists to remove, and because nothing in the tree could arm it. Priced
+  in the doc instead.
+
 ### Laws the audit paid for
 
 * **A cached RENDER-LOCAL value is a function of its frame of reference, and the frame belongs

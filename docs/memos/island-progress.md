@@ -378,6 +378,21 @@ twice.
   written as "the MIRROR of the 3D one, which carries the full argument and the measurement" —
   which is two declarations agreeing with each other rather than with the world. The P24 law
   ("two hosts agreeing ≠ the world being right") reaches a *mirror comment* too.
+* **A PIPELINED ESTIMATE IS A LOWER BOUND, because the player also waits for the DISPLAY**
+  (I4b audit). `SurfaceChain::new` sets `PresentMode::AutoVsync`, so what makes the swap chain
+  run out of images is the panel as much as the GPU: the presented cadence is
+  `max(CPU without the wait, GPU frame, the refresh interval)` and the estimate is the first
+  two. That makes it a **lower bound on frame time and an upper bound on fps** — the direction
+  a "≥ 60 fps" claim needs, and the reason "the pipelined model IS the player" was a sentence
+  short. It also constrains the owed harness: a windowed one measuring `AutoVsync` measures
+  the *panel*.
+* **"No gameplay could read it" is a claim about every reader, so enumerate them** (I4b
+  audit). Dropping `FIXED_FIXED` for solids removes a *manifold*, and the ledger reasoned from
+  the solver — but `ActiveEvents::COLLISION_EVENTS` is on every collider this engine builds
+  and both hosts turn a `Started` contact into a Blueprint `Collision` event **whether or not
+  the pair is a sensor**. Two overlapping static solids fired one and no longer do. The
+  narrowing is still right and the sentence was one word too strong; the remedy an author has
+  is the mechanism the flags were widened for, which is to make one of them a sensor.
 * **A payload with a migrating rung must not be diagnosed as "too old".**
   `AssetPayload::migrates_from` exists so a v2 `.inf_sm` that fails for a *structural*
   reason reports that reason. Telling an author to re-create a machine whose problem is

@@ -257,15 +257,89 @@ mod tests {
         );
     }
 
+    /// The names and the indices are one table — **and the two the ledger's
+    /// headline attributions rest on are pinned by name** (the I4b audit).
+    ///
+    /// The wave's own table reads "solver 9.224 ms (72.5 %)" and "camera 2.258 ms
+    /// (17.8 %)". Those are *labels off this array*, so a `phase` constant that
+    /// drifted by one would have printed the same milliseconds against the wrong
+    /// name, and the whole attribution — and the two repairs it prescribed —
+    /// would have been aimed somewhere else. `SOLVER` and `CAMERA` were the two
+    /// nothing pinned.
     #[test]
     fn the_names_and_the_indices_are_one_table() {
         assert_eq!(STEP_PHASE_NAMES.len(), STEP_PHASES);
         assert_eq!(STEP_PHASE_NAMES[phase::PHYSICS3D_SYNC], "physics3d sync");
         assert_eq!(STEP_PHASE_NAMES[phase::PROPAGATE], "propagate");
+        assert_eq!(STEP_PHASE_NAMES[phase::SOLVER], "solver");
+        assert_eq!(STEP_PHASE_NAMES[phase::CAMERA], "camera");
         assert_eq!(
             STEP_PHASE_NAMES[phase::POSITION_CAPTURE],
             "position capture"
         );
+    }
+
+    /// **EVERY PHASE HAS A DISTINCT SLOT** (the I4b audit).
+    ///
+    /// `phase`'s constants are hand-written indices into a 22-slot array, and two
+    /// of them landing on one slot is the shape that reads as "this phase costs
+    /// nothing" while another reads double — the exact under-attribution this
+    /// module exists to remove, reintroduced one level down. `PROPAGATE` is the
+    /// one deliberate collision (three call sites, one row), and it collides with
+    /// itself rather than with a neighbour.
+    ///
+    /// It does restate the constant list, which is the thing this module moved
+    /// its index table *away* from — and it earns that because the list here
+    /// carries **no content**: Rust cannot enumerate a module's consts, so the
+    /// alternative is no check at all, and a phase added without a line here
+    /// fails the length assertion on the next run rather than drifting quietly.
+    /// A maintained list that goes red when it is not maintained is the
+    /// acceptable kind.
+    #[test]
+    fn the_phase_indices_are_a_permutation_of_the_slots() {
+        let all = [
+            phase::CELL_STREAM,
+            phase::TERRAIN_STREAM,
+            phase::SKY,
+            phase::PHYSICS2D_SYNC,
+            phase::PHYSICS3D_SYNC,
+            phase::WATER,
+            phase::INPUT_EVENTS,
+            phase::BLUEPRINT_TICK,
+            phase::CHARACTER_MOVE,
+            phase::SOLVER,
+            phase::COLLISION_DRAIN,
+            phase::WRITE_BACK,
+            phase::PROPAGATE,
+            phase::DEFORMATION,
+            phase::ANIMATION,
+            phase::ATTACHMENTS,
+            phase::CLOTH_HAIR,
+            phase::MODS,
+            phase::DESTRUCTION,
+            phase::AUDIO,
+            phase::CAMERA,
+            phase::POSITION_CAPTURE,
+        ];
+        assert_eq!(
+            all.len(),
+            STEP_PHASES,
+            "the constant list and the slot count disagree"
+        );
+        let mut seen = [false; STEP_PHASES];
+        for (i, p) in all.iter().enumerate() {
+            assert!(
+                *p < STEP_PHASES,
+                "`phase` constant {i} is {p}, past the {STEP_PHASES} slots"
+            );
+            assert!(
+                !seen[*p],
+                "two `phase` constants share slot {p} — one row of the breakdown \
+                 would read double and another would read zero, which is the \
+                 under-attribution this module exists to remove"
+            );
+            seen[*p] = true;
+        }
     }
 
     #[test]
