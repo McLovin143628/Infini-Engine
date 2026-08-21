@@ -797,9 +797,9 @@ impl PhysicsWorld3D {
     /// *step* regardless, by this path, and every rebuild after the first was the
     /// bridge's fault rather than the character's. *(Island wave I4b retired that
     /// flag: this path now marks the body it wrote, and only that body — see
-    /// [`ensure_query_pipeline`](Self::ensure_query_pipeline). The skip below is
-    /// what keeps the mark list empty on a town that has not moved, so both
-    /// halves still earn their place.)*
+    /// this type's `ensure_query_pipeline`, which is private, so this is a code
+    /// span and not a link. The skip below is what keeps the mark list empty on
+    /// a town that has not moved, so both halves still earn their place.)*
     ///
     /// The comparison reads the **body's own state** rather than a copy the
     /// bridge remembers writing. A remembered copy cannot see a body that
