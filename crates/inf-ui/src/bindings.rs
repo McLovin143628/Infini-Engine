@@ -233,6 +233,77 @@ pub fn unbind_token(map: &mut InputMap, row: &BindingRow, token: &str) -> bool {
     }
 }
 
+/// **The row a player may never be left without** — the way back into the
+/// settings dialog (I5 audit, A1).
+///
+/// Everything else on the table can be cleared, swapped away or bound to
+/// nonsense, and the player can undo it *from the dialog*. This row is the door
+/// to the dialog, so unbinding it is the one edit that cannot be undone: the
+/// bindings live in a settings file that outlives the process, so a cleared menu
+/// key is a game that can never be reconfigured again.
+pub const MENU_ROW_ID: &str = inf_input::actions::MENU;
+
+/// **Whether `map` leaves a keyboard player no way to open the settings dialog.**
+///
+/// Reads the *desk* sources only, which is the point: the shipped table also
+/// binds the menu to a gamepad button, and a pad the player may not own — with a
+/// dialog that has no gamepad navigation yet — is not a way back in.
+pub fn menu_is_unreachable(map: &InputMap) -> bool {
+    let table = rows();
+    let Some(row) = table.iter().find(|r| r.id == MENU_ROW_ID) else {
+        // No menu row means no dialog to be locked out of.
+        return false;
+    };
+    tokens_in(map, row).is_empty()
+}
+
+/// **Apply `edit`, and take it back if it locked the player out** (I5 audit, A1).
+///
+/// The one rule, so the in-game capture and the editor's preferences panel
+/// cannot disagree about it — the same discipline [`apply_row`] itself carries.
+/// A refusal is a **value**: nothing changes and the caller reports it, rather
+/// than the edit half-landing or the dialog closing on a map with no way back.
+///
+/// Returns whether the edit was applied *and* changed something. A refusal is a
+/// `false` with `map` exactly as it was, which is why the whole map is cloned
+/// first: an edit that touches several rows (a conflict swap takes a token off
+/// every owner before binding it) has to be undone as one.
+pub fn guarded(map: &mut InputMap, edit: impl FnOnce(&mut InputMap) -> bool) -> bool {
+    let before = map.clone();
+    let changed = edit(map);
+    if menu_is_unreachable(map) {
+        *map = before;
+        return false;
+    }
+    changed
+}
+
+/// **Give the menu its shipped key back when a map has none** (I5 audit, A1).
+///
+/// The edit doors refuse to *create* this state; this is what a host calls on
+/// the map it just built from a settings file, because a file is not only
+/// written by those doors — it survives a build that had no guard, it can be
+/// hand-edited, and it can name a control this build spells differently.
+/// Returns whether anything was restored, so a host can say so.
+///
+/// It restores rather than refusing to boot for the reason the whole settings
+/// door does: a preferences file is not a boot config, and a player whose
+/// bindings file is odd should get their game, told.
+pub fn restore_menu_if_unreachable(map: &mut InputMap) -> bool {
+    if !menu_is_unreachable(map) {
+        return false;
+    }
+    let table = rows();
+    let Some(row) = table.iter().find(|r| r.id == MENU_ROW_ID) else {
+        return false;
+    };
+    let shipped = token_in(&inf_input::default_map(), row);
+    if shipped.is_empty() {
+        return false;
+    }
+    set_row(map, row, &shipped)
+}
+
 /// **Who else already uses `token`**, as row ids, excluding `except`.
 ///
 /// The conflict a rebinding UI has to name before it takes a key. Every owner
@@ -428,16 +499,52 @@ pub fn apply_row(
             conflicts,
         };
     }
-    for id in &conflicts {
-        if let Some(other) = table.iter().find(|r| &r.id == id) {
-            unbind_token(&mut map, other, token);
+    // **Refused if it would lock the player out of the dialog** (I5 audit, A1),
+    // through the same [`guarded`] door the in-game capture uses. The refusal is
+    // reported as a conflict naming [`MENU_ROW_ID`], because that is exactly what
+    // it is — the menu row owns the key and this is the one owner a swap may not
+    // take it from.
+    let applied = guarded(&mut map, |m| {
+        for id in &conflicts {
+            if let Some(other) = table.iter().find(|r| &r.id == id) {
+                unbind_token(m, other, token);
+            }
         }
+        set_row(m, target, token)
+    });
+    if !applied && menu_would_be_orphaned(base, overrides, &conflicts, target, token) {
+        return ApplyOutcome {
+            overrides: overrides.clone(),
+            conflicts: vec![MENU_ROW_ID.to_string()],
+        };
     }
-    set_row(&mut map, target, token);
     ApplyOutcome {
         overrides: overrides_from(base, &map),
         conflicts: Vec::new(),
     }
+}
+
+/// Whether the edit [`apply_row`] just tried would have left the menu with no
+/// desk key — asked again on a throwaway map, because [`guarded`] answers
+/// "nothing changed" for a refusal and for a no-op alike and the caller has to
+/// tell them apart.
+fn menu_would_be_orphaned(
+    base: &InputMap,
+    overrides: &BTreeMap<String, String>,
+    conflicts: &[String],
+    target: &BindingRow,
+    token: &str,
+) -> bool {
+    let table = rows();
+    let mut probe = base.clone();
+    apply_overrides(&mut probe, overrides);
+    for id in conflicts {
+        if let Some(other) = table.iter().find(|r| &r.id == id) {
+            unbind_token(&mut probe, other, token);
+        }
+    }
+    set_row(&mut probe, target, token);
+    menu_is_unreachable(&probe)
 }
 
 #[cfg(test)]
@@ -598,9 +705,114 @@ mod tests {
             "W is still bound to two rows, so one press fires two verbs"
         );
 
+        // **The SECOND key, which is where the two candidate rules differ.**
+        // (I5 audit, A4.) The swap above takes `KeyW`, which is Move Forward's
+        // *first* key — and "remove the exact token" and "remove whichever desk
+        // source is first" are the same expression there, so that assertion's own
+        // failure message names a defect it could not see. Taking `ArrowUp`
+        // separates them: the exact rule leaves `KeyW`, the first-source rule
+        // takes it.
+        let out = apply_row(&base, &empty, "interact", "ArrowUp", true);
+        assert!(out.conflicts.is_empty());
+        let mut after = base.clone();
+        apply_overrides(&mut after, &out.overrides);
+        assert_eq!(token_in(&after, interact), "ArrowUp");
+        assert_eq!(
+            token_in(&after, forward),
+            "KeyW",
+            "the swap took Move Forward's FIRST key instead of the one it named: {:?}",
+            tokens_in(&after, forward)
+        );
+
         // A row id this build has never heard of is a no-op rather than a guess.
         let out = apply_row(&base, &empty, "grapple", "KeyG", true);
         assert_eq!(out.overrides, empty);
+    }
+
+    /// **THE EDITOR'S SURFACE CANNOT LOCK A PROJECT'S PLAYERS OUT EITHER** (I5
+    /// audit, A1).
+    ///
+    /// The in-game dialog's own refusal is measured in `menu`'s arms; this is the
+    /// half that says the rule lives in [`guarded`] rather than in the dialog. An
+    /// author setting a project's `game_bindings` from Editor Preferences reaches
+    /// the same edit through [`apply_row`], and a project shipped with no menu key
+    /// is a game *nobody* can open the settings of.
+    ///
+    /// The refusal is a **value**: the override set is unchanged and the blocking
+    /// row is named, which is the same shape a conflict takes.
+    #[test]
+    fn the_editors_surface_refuses_an_edit_that_orphans_the_menu() {
+        let base = inf_input::default_map();
+        let empty = BTreeMap::new();
+
+        // Taking Tab for Attack, with the swap confirmed.
+        let out = apply_row(&base, &empty, "attack", "Tab", true);
+        assert_eq!(
+            out.conflicts,
+            [MENU_ROW_ID],
+            "the swap was not refused: {out:?}"
+        );
+        assert_eq!(out.overrides, empty, "a refused edit changed the table");
+
+        // Clearing the menu row outright.
+        let out = apply_row(&base, &empty, MENU_ROW_ID, "", true);
+        assert_eq!(out.conflicts, [MENU_ROW_ID]);
+        assert_eq!(out.overrides, empty);
+
+        // **The control**: moving the menu is fine, and then Tab is takeable —
+        // so the rule is about the STATE, not about the key or the row.
+        let moved = apply_row(&base, &empty, MENU_ROW_ID, "KeyB", false);
+        assert!(moved.conflicts.is_empty());
+        assert_eq!(moved.overrides[MENU_ROW_ID], "KeyB");
+        let out = apply_row(&base, &moved.overrides, "attack", "Tab", true);
+        assert!(out.conflicts.is_empty(), "{out:?}");
+        let mut after = base.clone();
+        apply_overrides(&mut after, &out.overrides);
+        assert!(!menu_is_unreachable(&after));
+        let table = rows();
+        let attack = table.iter().find(|r| r.id == "attack").unwrap();
+        assert_eq!(token_in(&after, attack), "Tab");
+    }
+
+    /// **A settings FILE that already carries the lockout is healed on load**
+    /// (I5 audit, A1).
+    ///
+    /// The edit doors refuse to create the state; a file is the case they cannot
+    /// cover, because it outlives the build that wrote it. Restoring the shipped
+    /// key is the only answer that leaves the player somewhere to change their
+    /// mind, and it is the settings door's own doctrine — a *preferences* file
+    /// that is odd leaves the player playing, told.
+    #[test]
+    fn a_map_with_no_menu_key_is_given_the_shipped_one_back() {
+        let base = inf_input::default_map();
+        assert!(!menu_is_unreachable(&base), "the shipped table has no menu");
+        assert!(
+            !restore_menu_if_unreachable(&mut base.clone()),
+            "a healthy map was rewritten"
+        );
+
+        // The shape a hand-edited file takes: the row id with an empty token.
+        let mut overrides = BTreeMap::new();
+        overrides.insert(MENU_ROW_ID.to_string(), String::new());
+        let mut map = base.clone();
+        apply_overrides(&mut map, &overrides);
+        assert!(
+            menu_is_unreachable(&map),
+            "the fixture did not reproduce the lockout, so the heal below proves nothing"
+        );
+        assert!(restore_menu_if_unreachable(&mut map));
+        let table = rows();
+        let menu = table.iter().find(|r| r.id == MENU_ROW_ID).unwrap();
+        assert_eq!(token_in(&map, menu), "Tab");
+        // Idempotent, and it restores ONLY the menu — a player's other overrides
+        // are theirs.
+        assert!(!restore_menu_if_unreachable(&mut map));
+        let mut both = base.clone();
+        overrides.insert("crouch".to_string(), "KeyB".to_string());
+        apply_overrides(&mut both, &overrides);
+        restore_menu_if_unreachable(&mut both);
+        let crouch = table.iter().find(|r| r.id == "crouch").unwrap();
+        assert_eq!(token_in(&both, crouch), "KeyB");
     }
 
     /// **The look tuning multiplies what the project authored, and is

@@ -258,10 +258,19 @@ pub struct MenuOutcome {
 
 /// The keys that cannot be bound to anything, because the dialog needs them.
 ///
-/// A player who bound `Escape` to *Attack* would have no way to leave a capture,
-/// and one who bound the menu key to a game verb would have no way back into the
-/// settings that let them undo it. Refused at the capture, as a value, with the
-/// reason on the row.
+/// A player who bound `Escape` to *Attack* would have no way to leave a capture.
+/// Refused at the capture, as a value, with the capture left open so a real key
+/// still works.
+///
+/// **This list is about the two keys the dialog needs while it is OPEN, and it
+/// is not the rule that keeps the dialog reachable** (I5 audit, A1). The first
+/// draft's doc claimed both, and only the first was built: the menu key was a
+/// table row like any other, so a swap could take `Tab` for *Attack* and a left
+/// arrow on the *Menu* row could clear it, and either one is a settings file a
+/// keyboard player can never open the dialog to fix. That rule is
+/// [`bindings::guarded`] / [`bindings::menu_is_unreachable`], and it lives there
+/// rather than here because the editor's preferences panel is a **second
+/// surface** that can make the same edit and must be refused by the same rule.
 pub const RESERVED_KEYS: [&str; 2] = ["Escape", "Enter"];
 
 /// **The rows a page shows**, derived from the settings and the map.
@@ -452,6 +461,10 @@ pub fn handle(
             };
             let owners = bindings::conflicts(map, &token, &target.id);
             if owners.is_empty() {
+                // No guard is needed here and that is a fact rather than an
+                // omission: with no conflict, this only *replaces* one row's
+                // desk source, so no row — the menu's included — can be left
+                // with fewer keys than it had (I5 audit, A1).
                 out.bindings_changed = bindings::set_row(map, target, &token);
                 state.capture = Capture::Idle;
             } else {
@@ -473,12 +486,22 @@ pub fn handle(
                     // second key keeps it, which is the honest outcome: Move
                     // Forward is W *and* Up in the shipped table, and taking W
                     // leaves Up.
-                    for id in &owners {
-                        if let Some(other) = table.iter().find(|r| &r.id == id) {
-                            out.bindings_changed |= bindings::unbind_token(map, other, &token);
+                    //
+                    // **And the one owner a swap may not take it from is the
+                    // MENU** (I5 audit, A1): Tab is the only way back into this
+                    // dialog, so a swap that took it would be the one edit a
+                    // player can never undo. [`bindings::guarded`] applies the
+                    // whole swap or none of it, and a refusal is a value — the
+                    // dialog closes the capture and nothing moved.
+                    out.bindings_changed = bindings::guarded(map, |m| {
+                        let mut changed = false;
+                        for id in &owners {
+                            if let Some(other) = table.iter().find(|r| &r.id == id) {
+                                changed |= bindings::unbind_token(m, other, &token);
+                            }
                         }
-                    }
-                    out.bindings_changed |= bindings::set_row(map, target, &token);
+                        changed | bindings::set_row(m, target, &token)
+                    });
                 }
             }
             state.capture = Capture::Idle;
@@ -582,8 +605,15 @@ pub fn handle(
                         // Left CLEARS a binding, which is the only way to unbind
                         // one from a keyboard — a capture can never produce the
                         // empty token, because it is waiting for a key.
+                        //
+                        // **Except the menu's** (I5 audit, A1): clearing that
+                        // row is the one edit that cannot be undone, because the
+                        // control it clears is the door to the screen that would
+                        // undo it. [`bindings::guarded`] refuses it as a value
+                        // and the row keeps its key.
                         if let Some(target) = bindings::rows().get(*i) {
-                            out.bindings_changed = bindings::set_row(map, target, "");
+                            out.bindings_changed =
+                                bindings::guarded(map, |m| bindings::set_row(m, target, ""));
                         }
                     }
                 }
@@ -914,6 +944,96 @@ mod tests {
         assert_eq!(m, inf_input::default_map());
         // …and a second reset reports no change.
         assert!(!key(&mut st, &mut s, &mut m, "Enter").bindings_changed);
+    }
+
+    /// **A PLAYER CANNOT LOCK THEMSELVES OUT OF THE SETTINGS DIALOG** (I5 audit,
+    /// A1).
+    ///
+    /// Two doors reached it and both are refused now. A left arrow on the *Menu*
+    /// row cleared its key outright; and a capture on any other row could press
+    /// `Tab`, be told the menu owned it, press `Enter`, and take it. Either one
+    /// writes a settings file that outlives the process, so the dialog that
+    /// would undo it is the thing that was just unbound — the only edit on this
+    /// table with no way back.
+    ///
+    /// **The control is what makes this a rule and not a ban**: rebinding the
+    /// menu itself still works, and once it is on `KeyB`, `Tab` is an ordinary
+    /// key that *Attack* may take. What is refused is the state with no menu key
+    /// at all, not any particular edit.
+    #[test]
+    fn the_menu_key_cannot_be_cleared_or_swapped_away() {
+        let table = bindings::rows();
+        let menu = table.iter().position(|r| r.id == "menu").unwrap();
+        let attack = table.iter().position(|r| r.id == "attack").unwrap();
+
+        // ── the left arrow on the Menu row ──
+        let (mut st, mut s, mut m) = fixture();
+        st.page = Page::Bindings;
+        st.focus = rows(&st, &s, &m)
+            .iter()
+            .position(|r| r.id == RowId::Binding(menu))
+            .unwrap();
+        let out = key(&mut st, &mut s, &mut m, "ArrowLeft");
+        assert!(!out.bindings_changed, "the clear was not refused");
+        assert_eq!(
+            bindings::token_in(&m, &table[menu]),
+            "Tab",
+            "the menu row was cleared, so the dialog can never be opened again"
+        );
+        // …and the same key still clears an ordinary row, so the refusal is
+        // about the menu rather than about the control being broken.
+        st.focus = rows(&st, &s, &m)
+            .iter()
+            .position(|r| r.id == RowId::Binding(attack))
+            .unwrap();
+        assert!(key(&mut st, &mut s, &mut m, "ArrowLeft").bindings_changed);
+
+        // ── the conflict swap ──
+        let (mut st, mut s, mut m) = fixture();
+        st.page = Page::Bindings;
+        st.focus = rows(&st, &s, &m)
+            .iter()
+            .position(|r| r.id == RowId::Binding(attack))
+            .unwrap();
+        let before = m.clone();
+        key(&mut st, &mut s, &mut m, "Enter");
+        key(&mut st, &mut s, &mut m, "Tab");
+        let Capture::Conflict { owners, .. } = st.capture.clone() else {
+            panic!("Tab did not raise the menu as a conflict: {:?}", st.capture);
+        };
+        assert_eq!(owners, ["menu"]);
+        let out = key(&mut st, &mut s, &mut m, "Enter");
+        assert!(!out.bindings_changed, "the swap was not refused");
+        assert_eq!(m, before, "a refused swap changed the table");
+        assert!(
+            !bindings::menu_is_unreachable(&m),
+            "the menu is unreachable after a refused swap"
+        );
+
+        // ── the control: move the menu first, and Tab is then takeable ──
+        let (mut st, mut s, mut m) = fixture();
+        st.page = Page::Bindings;
+        st.focus = rows(&st, &s, &m)
+            .iter()
+            .position(|r| r.id == RowId::Binding(menu))
+            .unwrap();
+        key(&mut st, &mut s, &mut m, "Enter");
+        assert!(key(&mut st, &mut s, &mut m, "KeyB").bindings_changed);
+        assert_eq!(bindings::token_in(&m, &table[menu]), "KeyB");
+        st.focus = rows(&st, &s, &m)
+            .iter()
+            .position(|r| r.id == RowId::Binding(attack))
+            .unwrap();
+        key(&mut st, &mut s, &mut m, "Enter");
+        let out = key(&mut st, &mut s, &mut m, "Tab");
+        assert!(out.consumed);
+        assert!(
+            matches!(st.capture, Capture::Idle),
+            "Tab was still owned by the menu after the menu moved: {:?}",
+            st.capture
+        );
+        assert_eq!(bindings::token_in(&m, &table[attack]), "Tab");
+        assert_eq!(bindings::token_in(&m, &table[menu]), "KeyB");
     }
 
     /// **The two keys the dialog needs cannot be bound away.**

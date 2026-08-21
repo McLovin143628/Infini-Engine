@@ -144,6 +144,13 @@ impl PlayerUi {
         use inf_ecs::movement::actions as mv;
         let mut map = self.base.clone();
         inf_ui::bindings::apply_overrides(&mut map, &self.settings.bindings);
+        // **A settings file cannot lock the player out of the settings** (I5
+        // audit, A1). The edit doors refuse to produce this state; the file is
+        // the case they do not cover — it outlives the build that wrote it, it
+        // can be hand-edited, and a project's own `input.toml` may simply not
+        // bind the menu at all. Restoring the shipped key is the only answer
+        // that leaves the player a way to change their mind.
+        inf_ui::bindings::restore_menu_if_unreachable(&mut map);
         inf_ui::bindings::apply_look_tuning(
             &mut map,
             &self.base,
@@ -395,6 +402,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// **A SETTINGS FILE THAT UNBINDS THE MENU DOES NOT SHIP A GAME WITH NO
+    /// SETTINGS** (I5 audit, A1) — measured at the boot door rather than at the
+    /// rule.
+    ///
+    /// `inf_ui::bindings` refuses to *make* this state and has its own arms for
+    /// that; the thing this one holds is the **wiring**, which is the I1 law: a
+    /// gate that calls the rule measures the rule, and only a gate that goes
+    /// through the boot path measures the fix. Stubbing the call in
+    /// [`PlayerUi::tuned_map`] leaves every other arm in this tree green.
+    ///
+    /// The file is written by hand on purpose: it is the case the edit doors
+    /// cannot cover — a build that had no guard, a hand edit, a project whose own
+    /// `input.toml` simply never bound the menu.
+    #[test]
+    fn a_settings_file_with_no_menu_key_still_boots_a_game_with_a_menu() {
+        let dir = tmp();
+        let mut on_disk = GameSettings::default();
+        on_disk.bindings.insert("menu".into(), String::new());
+        on_disk.save(&dir).unwrap();
+        let (ui, map) = PlayerUi::open(dir.clone(), inf_input::default_map());
+        assert!(ui.load_error.is_none(), "{:?}", ui.load_error);
+        assert_eq!(
+            ui.settings.bindings.get("menu").map(String::as_str),
+            Some(""),
+            "the fixture did not reach the settings, so nothing below proves anything"
+        );
+        assert!(
+            !inf_ui::bindings::menu_is_unreachable(&map),
+            "the shipped player booted with no way to open its own settings dialog"
+        );
+        let table = inf_ui::bindings::rows();
+        let menu = table.iter().find(|r| r.id == "menu").unwrap();
+        assert_eq!(inf_ui::bindings::token_in(&map, menu), "Tab");
+        // …and the heal is the MENU's alone: an unrelated override survives it.
+        let dir = tmp();
+        let mut on_disk = GameSettings::default();
+        on_disk.bindings.insert("menu".into(), String::new());
+        on_disk.bindings.insert("crouch".into(), "KeyB".into());
+        on_disk.save(&dir).unwrap();
+        let (_, map) = PlayerUi::open(dir, inf_input::default_map());
+        let crouch = table.iter().find(|r| r.id == "crouch").unwrap();
+        assert_eq!(inf_ui::bindings::token_in(&map, crouch), "KeyB");
     }
 
     /// **THE REBINDING ROUND TRIP, THROUGH THE SHIPPED DOORS.**
