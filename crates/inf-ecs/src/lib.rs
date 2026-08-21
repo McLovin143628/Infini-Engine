@@ -30,6 +30,7 @@ pub mod deform;
 pub mod hair;
 pub mod hierarchy;
 pub mod hydro;
+pub mod interact;
 pub mod math;
 pub mod movement;
 pub mod pose;

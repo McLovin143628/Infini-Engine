@@ -1159,6 +1159,116 @@ fn leaving_a_parked_vehicle_is_a_stand() {
     );
 }
 
+/// **THE SEAT AND AN AUTHORED INTERACTABLE GO THROUGH ONE DOOR** (island wave
+/// I5).
+///
+/// P29.7's `try_enter` was the only interaction in the engine. It is now a call
+/// into `inf_physics::d3::interact`, which builds candidates out of *both* seats
+/// and `Interactable` components and ranks them with the one Ring-0 rule.
+///
+/// Three claims, and the third is the one that says the migration is real rather
+/// than a rename:
+///
+/// 1. the seat is still found, with the same reach and the same tie-break —
+///    which the twenty-one arms above already say, and this one says again
+///    through the *new* door;
+/// 2. an authored interactable is a candidate through the same door;
+/// 3. **a nearer interactable that is not an `Enter` does not put the character
+///    in the car** — the door answers with the nearest thing, and only the
+///    `Enter` verb has a consumer in the movement step. Without this, "one door"
+///    would mean "the vehicle path now fires on a lamp post".
+#[test]
+fn the_seat_and_an_authored_interactable_share_one_door() {
+    use inf_ecs::interact::{InteractVerb, Interactable, NO_VIEW_TEST_DEG};
+    use std::collections::BTreeSet;
+
+    // ── (1) the door finds the seat, from where P29.7's own fixture stands ──
+    let crew = Crew::new();
+    let feet = crew.driver_pos() - DVec3::Y * (crew.driver().stand_half_height_m + HERO_RADIUS);
+    let seat = inf_physics::d3::interact::nearest_seat(&crew.rig.bridge, feet, &BTreeSet::new());
+    assert_eq!(seat, Some(CHASSIS), "the one door lost the seat");
+    let hit = inf_physics::d3::interact::resolve(
+        &crew.rig.world,
+        &crew.rig.bridge,
+        feet,
+        0.0,
+        &BTreeSet::new(),
+    )
+    .expect("the full door finds it too");
+    assert_eq!(hit.guid, CHASSIS);
+    assert_eq!(hit.verb, InteractVerb::Enter);
+    assert_eq!(hit.label, inf_physics::d3::interact::VEHICLE_LABEL);
+
+    // ── (2) and (3): a NEARER interactable that is not a seat ──
+    let mut crew = Crew::new();
+    let lamp = Uuid::from_u128(0x2907_10AA);
+    {
+        let hero_pos = crew.driver_pos();
+        let e = crew.rig.world.spawn_with_guid(lamp, "Lamp", None);
+        let mut t = Transform::IDENTITY;
+        // Half a metre from the character — nearer than the seat by a long way.
+        t.translation = Vec3d::new(hero_pos.x + 0.5, 0.0, hero_pos.z);
+        crew.rig.world.world_mut().entity_mut(e).insert((
+            t,
+            Interactable {
+                verb: InteractVerb::Use,
+                label: "lamp".into(),
+                range_m: 3.0,
+                enabled: true,
+                view_cone_deg: NO_VIEW_TEST_DEG,
+            },
+        ));
+        crew.rig.world.mark_dirty();
+        crew.rig.world.propagate();
+    }
+    let feet = crew.driver_pos() - DVec3::Y * (crew.driver().stand_half_height_m + HERO_RADIUS);
+    let hit = inf_physics::d3::interact::resolve(
+        &crew.rig.world,
+        &crew.rig.bridge,
+        feet,
+        0.0,
+        &BTreeSet::new(),
+    )
+    .expect("something is in reach");
+    println!(
+        "the nearest candidate is {} ({:?}) at {:.3} m",
+        hit.label, hit.verb, hit.distance_m
+    );
+    assert_eq!(
+        hit.guid, lamp,
+        "the nearer authored interactable did not win"
+    );
+    assert_eq!(hit.verb, InteractVerb::Use);
+
+    // …and pressing E with the lamp nearest does **not** enter the car.
+    crew.step(&interact(), 1);
+    crew.step(&inf_ecs::movement::MovementIntent::default(), 4);
+    assert_ne!(
+        crew.driver().mode,
+        inf_ecs::components::MovementMode::Driving,
+        "a `Use` interactable put the character in the driving seat"
+    );
+
+    // The control: with the lamp DISABLED, the same press enters the car — so
+    // the assertion above is about the verb and not about a broken press.
+    let e = crew.rig.world.entity_of(lamp).unwrap();
+    crew.rig
+        .world
+        .world_mut()
+        .get_mut::<Interactable>(e)
+        .unwrap()
+        .enabled = false;
+    crew.rig.world.mark_dirty();
+    crew.rig.world.propagate();
+    crew.step(&interact(), 1);
+    crew.step(&inf_ecs::movement::MovementIntent::default(), 4);
+    assert_eq!(
+        crew.driver().mode,
+        inf_ecs::components::MovementMode::Driving,
+        "with nothing nearer, the same press must still enter the car"
+    );
+}
+
 /// Two characters cannot climb into one seat.
 #[test]
 fn two_characters_cannot_share_one_seat() {

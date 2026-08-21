@@ -257,24 +257,20 @@ pub fn seat_pose(bridge: &PhysicsBridge3D, chassis: Uuid) -> Option<(DVec3, glam
 ///
 /// A refusal is a value: no vehicle, none in reach, or one already occupied all
 /// answer `None`, and the character does whatever it was going to do instead.
+/// **Migrated onto the one interaction door** (island wave I5): this is now
+/// `super::interact::nearest_seat`, which builds seat candidates and ranks them
+/// with `inf_ecs::interact::resolve` — the same rule an authored
+/// `Interactable` is ranked by.
+///
+/// Every property above is preserved *exactly*: the reach is still
+/// [`ENTER_REACH_M`], the walk is still `Guid`-ordered with a strict `<`,
+/// occupied seats are still skipped, and there is still **no view test** (the
+/// seat candidate carries `NO_VIEW_TEST_DEG`, so the rule's view half is skipped
+/// for it). What changed is that there is one implementation of "nearest thing
+/// in reach" instead of two, so the day the reach or the tie-break moves, it
+/// moves for both.
 pub fn try_enter(bridge: &PhysicsBridge3D, feet: DVec3, occupied: &BTreeSet<Uuid>) -> Option<Uuid> {
-    let mut best: Option<(f64, Uuid)> = None;
-    for chassis in bridge.vehicle_guids() {
-        if occupied.contains(&chassis) {
-            continue;
-        }
-        let Some((seat, _, _)) = seat_pose(bridge, chassis) else {
-            continue;
-        };
-        let d = (seat - feet).length();
-        if d > ENTER_REACH_M {
-            continue;
-        }
-        if best.is_none_or(|(bd, _)| d < bd) {
-            best = Some((d, chassis));
-        }
-    }
-    best.map(|(_, g)| g)
+    super::interact::nearest_seat(bridge, feet, occupied)
 }
 
 /// Park (or restore) the character's own collider while it is in a seat.

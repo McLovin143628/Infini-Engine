@@ -19,6 +19,7 @@ mod character;
 mod ecs;
 mod events;
 pub mod fracture;
+pub mod interact;
 mod joint;
 pub mod movement;
 mod query;

@@ -559,8 +559,28 @@ fn step_one(
     };
     if want_enter && cm.mode.is_grounded_family() {
         let feet = position - DVec3::Y * (cm.half_height_for(cm.mode) + radius);
-        let occupied = occupied_seats(world, guid);
-        if let Some(vehicle) = super::vehicle::try_enter(bridge, feet, &occupied) {
+        // **The one interaction door** (island wave I5). The `press_interact`
+        // edge used to be a vehicle question and nothing else; it is now a
+        // question about every candidate in reach — seats and authored
+        // `Interactable`s together — ranked by one rule.
+        //
+        // The character itself is excluded, because a character carrying an
+        // `Interactable` (an item on a corpse, later) must not be able to
+        // interact with itself.
+        let mut taken = occupied_seats(world, guid);
+        taken.insert(guid);
+        let hit = super::interact::resolve(world, bridge, feet, cm.runtime.aim_yaw_deg, &taken);
+        // Only the ENTER verb has a consumer in this step. The rest are the
+        // items' and doors', and their consumers are gameplay's — an item that
+        // has no pick-up yet is a hit this step declines rather than a candidate
+        // the door refuses to see. The **prompt** is a separate question a host
+        // asks every frame through the same `resolve`, so what the player is
+        // told and what the press does cannot come apart.
+        let entered = hit
+            .as_ref()
+            .filter(|h| h.verb == inf_ecs::interact::InteractVerb::Enter)
+            .map(|h| h.guid);
+        if let Some(vehicle) = entered {
             let mut refusal = MovementRefusal::None;
             let probe = ClearanceProbe {
                 centre: position,
