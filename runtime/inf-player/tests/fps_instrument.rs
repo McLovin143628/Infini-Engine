@@ -390,6 +390,12 @@ fn measure(
     w: u32,
     h: u32,
     settings: inf_render::RenderSettings,
+    // I7: the camera path is a PARAMETER, because the instrument now measures
+    // two worlds — the composed city and the island — and a scripted flight over
+    // one is not a flight over the other. Passing it rather than branching on a
+    // flag inside `fly` keeps the frame loop identical for both, which is what
+    // makes the two sets of numbers comparable at all.
+    path: &dyn Fn(u64, u32, u32) -> RenderView,
 ) -> Measured {
     let target = HeadlessTarget::new(gpu, w, h);
     let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
@@ -409,7 +415,7 @@ fn measure(
                      fx: &mut Fixture,
                      step: u64|
      -> (Option<inf_render::FrameTimings>, [f64; CPU_STAGES]) {
-        let view = fly(step, w, h);
+        let view = path(step, w, h);
         // The CPU half, stage by stage. A frame that is CPU-bound and cannot say
         // WHERE is the same defect the certification found on the GPU side, one
         // processor over.
@@ -984,7 +990,7 @@ fn the_frame_at_shipping_resolution() {
     // is a difference between two runs of the SAME resolution.
     let mut shipped_1080 = (0.0f64, 0.0f64);
     for (w, h, label) in RESOLUTIONS {
-        let m = measure(&gpu, &mut fx, w, h, settings);
+        let m = measure(&gpu, &mut fx, w, h, settings, &fly);
         let r = m.round();
         if (w, h) == (RESOLUTIONS[0].0, RESOLUTIONS[0].1) {
             shipped_1080 = (r.p95, m.gpu_frame_ms);
@@ -1192,7 +1198,7 @@ fn the_frame_at_shipping_resolution() {
             );
         }
         if !clamped {
-            let m = measure(&gpu, &mut fx, w, h, lit);
+            let m = measure(&gpu, &mut fx, w, h, lit, &fly);
             let r = m.round();
             let (base_p95, base_gpu) = shipped_1080;
             println!(
@@ -1339,5 +1345,235 @@ fn the_frame_at_shipping_resolution() {
         "the 99th-percentile frame cost {worst_p99:.3} ms, over the \
          {SHIPPING_FRAME_P99_CEILING_MS} ms hitch ceiling on {} {RATCHET_NOTE}",
         info.name
+    );
+}
+
+// ── THE ISLAND (wave I7) ────────────────────────────────────────────────────
+
+/// How far the island camera advances per frame, metres.
+///
+/// 0.9 m at 60 Hz is 54 m/s — a fast car — so a 120-frame round covers 108 m and
+/// the four-pass run covers 432 m of a 7 168 m island. Every number below
+/// describes one stretch of one route, exactly as the city's does.
+const ISLAND_FLY_STEP_M: f64 = 0.9;
+
+/// The island's own flythrough: a low pass east from the first city.
+///
+/// Scripted, positional and moving, for the same three reasons the city's is —
+/// and low, at 40 m, because that is where a player is. A camera at two
+/// kilometres would measure the coarse end of the pyramid and nothing else.
+fn island_fly(step: u64, width: u32, height: u32, from: DVec3) -> RenderView {
+    let eye = DVec3::new(
+        from.x + step as f64 * ISLAND_FLY_STEP_M,
+        from.y + 40.0,
+        from.z,
+    );
+    RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: eye,
+        forward: Vec3::new(1.0, -0.22, 0.0).normalize(),
+        up: Vec3::Y,
+        fov_y: 70f32.to_radians(),
+        near: 0.05,
+        width,
+        height,
+        ortho: None,
+    }
+}
+
+/// Where the island's recipe lives.
+fn island_recipe() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../samples/island/island.toml")
+}
+
+/// Build and cook the **full** island — the 51.38 km² one.
+///
+/// `None` when the tile cache is not filled, which is every machine that has not
+/// run `inf island fetch`. That is why the arm below is `#[ignore]`d: this
+/// repository's CI never fetches, and an island built from nothing would be a
+/// number about an empty world.
+fn cook_island(tmp: &Path) -> Option<PathBuf> {
+    let recipe = inf_island::IslandRecipe::load(&island_recipe()).ok()?;
+    let plan = inf_island::plan_tiles(&recipe).ok()?;
+    let missing = plan.missing_in(&recipe.cache_dir());
+    if !missing.is_empty() {
+        println!(
+            "SKIP: {} of {} source tiles are missing from {} — run `inf island fetch`",
+            missing.len(),
+            plan.len(),
+            recipe.cache_dir().display()
+        );
+        return None;
+    }
+    let started = std::time::Instant::now();
+    let build = inf_island::build_island(&recipe, &inf_island::BuildOptions::default()).ok()?;
+    println!("ISLAND BUILD: {:.1} s", started.elapsed().as_secs_f64());
+    print!("{}", build.report.summary());
+    let proj = tmp.join("island");
+    inf_project::ProjectManifest::new(&recipe.name, "blank-3d")
+        .save(&proj)
+        .ok()?;
+    inf_island::write_content(&build, &proj.join("Content")).ok()?;
+    let out = tmp.join("island-out");
+    let started = std::time::Instant::now();
+    cook(&proj, &out, &CookOptions::default()).ok()?;
+    println!("ISLAND COOK: {:.1} s", started.elapsed().as_secs_f64());
+    Some(out)
+}
+
+/// **THE ISLAND'S OWN FRAME NUMBERS**, at shipping resolution, shipped settings
+/// and lit.
+///
+/// `#[ignore]`d because it needs the fetched elevation cache and a real adapter,
+/// and because building 51 km² of terrain is a minute of work no unit run should
+/// pay. Run it with:
+///
+/// ```text
+/// cargo test --release -p inf-player --test fps_instrument -- --ignored the_island --nocapture
+/// ```
+///
+/// **It REPORTS and never asserts.** The ceilings in `inf_player::budget` are set
+/// from the composed city — the scene every previous wave measured — and
+/// asserting them over a different world would re-pin a ratchet by accident.
+/// What this arm is for is the ledger: the island in the units the budget is
+/// written in, beside the city's own numbers, on the same machine.
+#[test]
+#[ignore = "needs the fetched island cache and a real GPU; builds 51 km2 of terrain"]
+fn the_island_at_shipping_resolution() {
+    let Ok(gpu) = GpuContext::headless() else {
+        println!("SKIP the_island_at_shipping_resolution: no GPU adapter");
+        return;
+    };
+    let info = gpu.adapter.get_info();
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let Some(pack) = cook_island(tmp.path()) else {
+        return;
+    };
+
+    // The island STREAMS: without the cell streamer the world holds only what
+    // `AlwaysLoaded` kept, which is a frame of a sun and a heightfield.
+    let mut fx = {
+        let source = PackLevelSource::open(&pack).expect("the island pack opens");
+        let mut built = inf_player::build_world_from_pack(&source).expect("the world builds");
+        let partition = built.take_partition();
+        let pcg = built.take_pcg_context();
+        let record = built.render;
+        let materials = std::sync::Arc::new(source.material_content());
+        let reader = std::sync::Arc::new(
+            PackReader::open(&pack.join(inf_player::level::PACK_FILE)).expect("the pack maps"),
+        );
+        let skinned = inf_player::skinned::SkinnedRegistry::from_pack(reader.clone());
+        let voxel_assets = inf_player::voxel::VoxelRegistry::from_pack(reader.clone());
+        let vmeshes = inf_player::vmesh::VmeshRegistry::from_pack(reader)
+            .expect("the island's meshlet DAGs index");
+        let mut sim = inf_player::sim_from_built(built);
+        // **Cells first, then the terrain** — `run_headless`'s own order, and it
+        // matters: terrain residency is derived from the sim's entities and a
+        // freshly-activated cell brings some of them in. The first draft of this
+        // arm attached neither and measured a frame of sky and water: **0 terrain
+        // tiles, 0 instances**, which the anti-vacuity assertion caught.
+        inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+        inf_player::attach_terrain_streaming(
+            &mut sim,
+            &inf_player::TerrainContent::Pack(
+                PackLevelSource::open(&pack).expect("the island pack re-opens"),
+            ),
+        );
+        Fixture {
+            sim,
+            vmeshes,
+            skinned,
+            voxel_assets,
+            record,
+            materials,
+        }
+    };
+
+    let recipe = inf_island::IslandRecipe::load(&island_recipe()).expect("the recipe loads");
+    let design = inf_island::read_design(&recipe).expect("the design reads");
+    let s = design.start(0.0);
+    let from = DVec3::new(s.x, s.y, s.z);
+    let path = move |step: u64, w: u32, h: u32| island_fly(step, w, h, from);
+
+    let (shipped, tier) = shipped_settings(&gpu, fx.record);
+    // The lit configuration is the SHIPPED one with the authorable half turned
+    // on, through the same door — never a hand-built settings block, which would
+    // be a price for a frame nobody ships.
+    let lit_record = inf_scene::RenderSettingsRecord {
+        bloom_enabled: true,
+        ssao_enabled: true,
+        taa: true,
+        shadows_enabled: true,
+        gi_enabled: true,
+        ..fx.record
+    };
+    let (mut lit, lit_tier) = shipped_settings(&gpu, lit_record);
+    lit.vsm.enabled = true;
+    let clamped = !(lit.shadows.enabled && lit.gi.enabled);
+    println!(
+        "=== THE ISLAND on {} ({:?}) — tier {tier:?}, {ROUNDS} rounds x {FRAMES} frames, MIN of rounds ===",
+        info.name, info.device_type
+    );
+    if clamped {
+        println!(
+            "the lighting stack is clamped off at tier {lit_tier:?} — the LIT rows below are the shipped ones"
+        );
+    }
+    println!(
+        "flythrough from ({:.0}, {:.0}, {:.0}) east at {ISLAND_FLY_STEP_M} m a frame, eye +40 m",
+        from.x, from.y, from.z
+    );
+
+    for (label, settings) in [("SHIPPED", shipped), ("LIT", lit)] {
+        let m = measure(&gpu, &mut fx, 1920, 1080, settings, &path);
+        let r = m.round();
+        let cpu_sum: f64 = m.cpu_ms.iter().sum();
+        println!(
+            "ISLAND 1080p {label}: p50 {:.3} p95 {:.3} p99 {:.3} worst {:.3} ms ({:.1} fps at p50)",
+            r.p50,
+            r.p95,
+            r.p99,
+            r.worst,
+            1000.0 / r.p50.max(1.0e-9)
+        );
+        println!(
+            "  content    {} instances, {} scatter batches, {} vgeom, {} skinned, {} terrain tiles, {} virtual textures",
+            m.instances,
+            m.scatter_batches,
+            m.vgeom_instances,
+            m.skinned,
+            m.terrain_tiles,
+            m.vt_textures
+        );
+        for (i, name) in CPU_STAGE_NAMES.iter().enumerate() {
+            println!("  cpu {name:>16}: {:.3} ms", m.cpu_ms[i]);
+        }
+        println!("  cpu {:>16}: {cpu_sum:.3} ms", "TOTAL");
+        println!("  gpu {:>16}: {:.3} ms", "frame", m.gpu_frame_ms);
+        let mut passes = m.passes.clone();
+        passes.sort_by(|a, b| b.1.total_cmp(&a.1));
+        for (name, ms, rec) in passes.iter().take(8) {
+            println!("  gpu {name:>16}: {ms:.3} ms   (record {rec:.3} ms)");
+        }
+        let submitted = cpu_sum - m.cpu_ms[4] - m.cpu_ms[5];
+        let pipelined = submitted.max(m.gpu_frame_ms);
+        println!(
+            "  PIPELINED ESTIMATE {pipelined:.3} ms ({:.1} fps) = max(CPU without the wait or the stopwatch {submitted:.3}, GPU frame {:.3})",
+            1000.0 / pipelined.max(1.0e-9),
+            m.gpu_frame_ms
+        );
+        println!(
+            "  DISTANCE FROM 60 fps: p50 {:+.3} ms, p95 {:+.3} ms against a {SHIPPING_FRAME_BUDGET_MS} ms frame",
+            r.p50 - SHIPPING_FRAME_BUDGET_MS,
+            r.p95 - SHIPPING_FRAME_BUDGET_MS
+        );
+        // Anti-vacuity: the frame drew the island, not an empty world.
+        assert!(
+            m.terrain_tiles > 0,
+            "{label}: the island's frame drew no terrain tile"
+        );
+    }
+    println!(
+        "Reported, never asserted: the ceilings in `inf_player::budget` are set from the composed city, and asserting them over a different world would re-pin a ratchet by accident."
     );
 }

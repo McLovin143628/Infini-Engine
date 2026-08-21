@@ -442,3 +442,136 @@ fn the_cooked_level_still_knows_where_on_earth_it_is() {
     assert_eq!(lat, geo.origin_latitude_deg);
     assert_eq!(lon, geo.origin_longitude_deg);
 }
+
+/// **THE VEGETATION IS BOUND AND IT SCATTERS NOTHING ON A STREAMED ISLAND**, and
+/// this arm is the number rather than the sentence.
+///
+/// # What is wired
+///
+/// The level names a `.inf_biomes` set; the set binds a `.inf_pcg` on every
+/// biome that scatters; `inf_pcg::BiomeBinding::from_set` is the one door both
+/// hosts resolve it through. All of that is real and the first half of this arm
+/// measures it: paged ground, the binding evaluated, **thousands of instances**.
+///
+/// # What is missing, exactly
+///
+/// `evaluate_biome_bindings` evaluates over the terrain's **resident**
+/// `data.xz_bounds()`, and a streamed terrain ships no tiles — so on the boot
+/// path the bounds are `None` and the population is empty. That is the I4 audit's
+/// own carried item (*"a streamed cell evaluates its `PcgVolume` and NOT its
+/// biome bindings"*), met at island scale with a figure: **{resident} instances
+/// with the ground paged, 0 through the shipped boot.**
+///
+/// The fix is `cell_stream::reconcile`'s missing biome twin — the mirror of
+/// `evaluate_pcg_volumes_in` — and it is a change to both hosts' streaming
+/// paths, which is why it is measured here and routed rather than smuggled into
+/// a content wave.
+#[test]
+fn the_biome_binding_scatters_when_its_ground_is_resident_and_not_before() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let proj = build_project(tmp.path());
+    let content = proj.join("Content");
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let slug = inf_island::slug(&recipe.name);
+
+    // The palette really binds a graph — the wire the whole thing hangs on.
+    let set_bytes = std::fs::read(content.join(format!("{slug}.inf_biomes")))
+        .expect("the biome set is written");
+    let set = inf_asset::decode::<inf_terrain::BiomeSet>(&set_bytes).expect("it decodes");
+    let bound: Vec<&str> = set
+        .biomes
+        .iter()
+        .filter(|b| b.pcg_graph.is_some())
+        .map(|b| b.name.as_str())
+        .collect();
+    println!("BOUND BIOMES: {bound:?}");
+    assert_eq!(
+        bound.len(),
+        6,
+        "every biome but urban binds cover: {bound:?}"
+    );
+    assert!(
+        !bound.contains(&"urban"),
+        "urban must stay bare for wave I8"
+    );
+
+    let pcg_bytes = std::fs::read(content.join(format!("{slug}Cover.inf_pcg")))
+        .expect("the cover graph is written");
+    let pcg = inf_pcg::PcgAssetPayload::decode(&pcg_bytes).expect("the cover graph decodes");
+    let binding = inf_pcg::BiomeBinding::from_set(&set, inf_pcg::DEFAULT_BIOME_FEATHER, |g| {
+        (g == inf_island::cover_pcg_guid(&recipe.name)).then(|| pcg.document.clone())
+    });
+    assert_eq!(
+        binding.graphs().len(),
+        6,
+        "the binding resolved {:?}",
+        binding.graphs().len()
+    );
+
+    // ── with the ground RESIDENT ──
+    let asset = inf_terrain::read_terrain_asset(&content.join(format!("{slug}.inf_terrain")))
+        .expect("the built terrain reads");
+    let reader = asset.reader();
+    let mut data =
+        inf_terrain::TerrainData::new(recipe.grid.tile_resolution, recipe.grid.meters_per_sample);
+    let (min, max) = inf_island::IslandGrid::of(&recipe).bounds();
+    let report = inf_terrain::residency::page_region(
+        &mut data,
+        &reader,
+        glam::DVec2::new(min.x, min.y),
+        glam::DVec2::new(max.x, max.y),
+    );
+    println!(
+        "PAGED: {} tiles loaded, {} missing",
+        report.loaded.len(),
+        report.missing.len()
+    );
+    assert!(!data.is_empty(), "the whole fixture terrain pages");
+
+    let fields = inf_pcg::OffsetTerrain::new(&data, glam::DVec3::ZERO);
+    let height = inf_pcg::FnHeight::new(|x, z| fields.height_at(x, z));
+    let bounds = data.xz_bounds().expect("resident ground has bounds");
+    let instances = binding.evaluate(
+        &height,
+        &fields,
+        inf_pcg::Region::from_xz(bounds.0.x, bounds.0.y, bounds.1.x, bounds.1.y),
+    );
+    println!(
+        "VEGETATION: {} instances over {:.3} km2 at {} /m2",
+        instances.len(),
+        (max.x - min.x) * (max.y - min.y) / 1.0e6,
+        inf_editor_core::island::ISLAND_SCATTER_DENSITY
+    );
+    assert!(
+        instances.len() > 500,
+        "the binding scattered only {} instances with the ground resident",
+        instances.len()
+    );
+    // Every instance is on the ground and inside the world.
+    for i in instances.iter().take(200) {
+        assert!(i.pos.x >= min.x - 1.0 && i.pos.x <= max.x + 1.0);
+        assert!(i.pos.z >= min.y - 1.0 && i.pos.z <= max.y + 1.0);
+        assert!(i.pos.y.is_finite());
+    }
+
+    // ── through the SHIPPED BOOT ──
+    let pack = cook(tmp.path());
+    let ship = pack_sim(&pack);
+    let world = ship.world().world();
+    let population: usize = world
+        .iter_entities()
+        .filter_map(|e| e.get::<inf_ecs::components::Terrain>())
+        .map(|t| t.biome_population.len())
+        .sum();
+    println!(
+        "SHIPPED BOOT: {population} instances — the terrain streams, so \
+         `data.xz_bounds()` is None at load and the binding evaluates over nothing"
+    );
+    assert_eq!(
+        population, 0,
+        "the streamed boot scattered {population} instances — if this is non-zero \
+         the gap this arm records has been closed, and the arm should become an \
+         assertion that it stays closed"
+    );
+}
