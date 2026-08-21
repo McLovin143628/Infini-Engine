@@ -292,12 +292,13 @@ impl PlayerUi {
             return;
         }
         for action in inf_input::actions::NOT_YET_CONSUMED {
-            let fired = if action == inf_input::actions::WEAPON_SWITCH {
-                // An axis has no edge; a wheel that moved at all is a press.
-                state.axis(action).abs() > f32::EPSILON
-            } else {
-                state.just_pressed(action)
-            };
+            // An axis has no edge, so a source that moved at all counts as a
+            // press — asked of every name rather than of one by identity,
+            // because the list is what says which controls are unwired and a
+            // second list of "which of them are axes" would be a second thing
+            // to keep in step. (It was one name until I6, when the last of the
+            // four gained a consumer and the list emptied.)
+            let fired = state.just_pressed(action) || state.axis(action).abs() > f32::EPSILON;
             if fired {
                 self.toasts.push_not_yet(action);
             }
@@ -547,32 +548,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The four unconsumed controls toast, and a wired one does not.
+    /// **Every control in the shipped table is wired now** (I6), so the honest
+    /// "not yet" toast has nothing left to say.
+    ///
+    /// The arm changed shape rather than being deleted, and the change is the
+    /// finding: it used to press `KeyR` and demand a toast, because `reload` was
+    /// one of the four the owner's table bound ahead of its consumer. All four —
+    /// reload, attack, inventory, the weapon wheel — have one as of this wave,
+    /// so pressing any of them must now be **silent**, and the mechanism is
+    /// exercised on its own rather than through a control that no longer needs
+    /// it. An arm that still expected a toast would be asserting that the wave
+    /// did not happen.
     #[test]
-    fn an_unconsumed_control_says_so_and_a_wired_one_stays_quiet() {
+    fn every_bound_control_is_wired_and_the_not_yet_toast_still_works() {
         let dir = tmp();
-        let (mut ui, map) = PlayerUi::open(dir.clone(), inf_input::default_map());
-        let mut state = InputState::new(map);
-        state.apply(&[inf_input::InputEvent::Key {
-            code: "KeyR".into(),
-            pressed: true,
-        }]);
-        ui.report_unconsumed(&state);
-        assert_eq!(ui.toasts.live().len(), 1, "{:?}", ui.toasts.live());
-        assert!(ui.toasts.live()[0].text.contains("reload"));
-
-        // A control with a consumer is silent.
-        let mut ui2 = PlayerUi::open(dir.clone(), inf_input::default_map()).0;
+        // Every key the four ex-unwired controls are bound to is silent.
+        for code in ["KeyR", "KeyI", "Space"] {
+            let mut ui = PlayerUi::open(dir.clone(), inf_input::default_map()).0;
+            let mut state = InputState::new(inf_input::default_map());
+            state.apply(&[inf_input::InputEvent::Key {
+                code: code.into(),
+                pressed: true,
+            }]);
+            ui.report_unconsumed(&state);
+            assert!(
+                ui.toasts.is_empty(),
+                "`{code}` still toasts as unwired: {:?}",
+                ui.toasts.live()
+            );
+        }
+        // …and so is the mouse wheel, which is the axis half of the same rule.
+        let mut ui = PlayerUi::open(dir.clone(), inf_input::default_map()).0;
         let mut state = InputState::new(inf_input::default_map());
-        state.apply(&[inf_input::InputEvent::Key {
-            code: "Space".into(),
-            pressed: true,
-        }]);
-        ui2.report_unconsumed(&state);
-        assert!(ui2.toasts.is_empty(), "{:?}", ui2.toasts.live());
+        state.apply(&[inf_input::InputEvent::MouseWheel { delta: [0.0, 1.0] }]);
+        ui.report_unconsumed(&state);
+        assert!(ui.toasts.is_empty(), "{:?}", ui.toasts.live());
+
+        // **The mechanism is not retired**, only unemployed: the day a later
+        // wave binds a control ahead of its consumer, this is the sentence a
+        // player reads. Exercised directly, because the list it walks is a
+        // const and is now empty — an arm driven through an empty list is an
+        // arm that cannot fail.
+        ui.toasts.push_not_yet("grapple");
+        assert_eq!(ui.toasts.live().len(), 1);
+        assert!(ui.toasts.live()[0].text.contains("grapple"));
 
         // …and an open menu reports nothing at all: the dialog is eating the
         // keys, so a toast would be about a press the game never saw.
+        let mut ui2 = PlayerUi::open(dir.clone(), inf_input::default_map()).0;
         ui2.toggle();
         let mut state = InputState::new(inf_input::default_map());
         state.apply(&[inf_input::InputEvent::Key {

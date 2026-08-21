@@ -394,6 +394,10 @@ pub struct RuntimeSim {
     /// This step's fracture audit — how many chunks the structural solve dropped,
     /// how many the budget reclaimed, how much debris is live. Read by gates.
     fracture_audit: FractureAudit,
+    /// This step's gameplay report (I6) — doors moved, rounds fired, locks
+    /// broken, bodies stopped. The `fracture_audit` shape one system along, and
+    /// read for the same reason: it is the thing a gate asserts on.
+    gameplay: inf_physics::d3::GameplayReport,
     /// Whether [`fixed_step`](Self::fixed_step) marks its phases (island wave
     /// I4b). `false` on every shipped run; see [`crate::step_profile`] for why a
     /// stopwatch here cannot move the simulation.
@@ -537,6 +541,7 @@ impl RuntimeSim {
             fractures: BTreeMap::new(),
             debris_budget: DebrisBudget::default(),
             fracture_audit: FractureAudit::default(),
+            gameplay: inf_physics::d3::GameplayReport::default(),
             voxels: BTreeMap::new(),
             profiling: false,
             step_profile: crate::step_profile::StepProfile::default(),
@@ -1078,7 +1083,32 @@ impl RuntimeSim {
         out.extend_from_slice(&inf_ecs::pose::pose_state_bytes(&self.world));
         out.extend_from_slice(&inf_ecs::cloth::cloth_state_bytes(&self.world));
         out.extend_from_slice(&inf_ecs::hair::hair_state_bytes(&self.world));
+        // I6 appends four sections on the same argument the four above rest on:
+        // a door's angle, a bag's contents, a magazine's count and a body's
+        // remaining joules are all **sim state**, so folding them here makes
+        // every gate the engine already has — the replay fold, `step_state_hash`
+        // and the PIE `Frame::state_hash` — cover gameplay at once.
+        //
+        // **The position is frozen**, exactly as cloth's is: these come after
+        // the hair bytes and nothing may be inserted before them, because every
+        // committed trace hash in the tree was taken over this concatenation in
+        // this order. A level with no door, no bag, no weapon and nothing that
+        // can be hurt produces four empty vecs, so every pre-I6 trace is
+        // byte-identical.
+        out.extend_from_slice(&inf_ecs::door::door_state_bytes(&self.world));
+        out.extend_from_slice(&inf_ecs::item::item_state_bytes(&self.world));
+        out.extend_from_slice(&inf_ecs::weapon::weapon_state_bytes(&self.world));
+        out.extend_from_slice(&inf_ecs::weapon::health_state_bytes(&self.world));
         out
+    }
+
+    /// **What the last fixed step's gameplay did** (I6) — doors moved, rounds
+    /// fired, locks broken, bodies stopped.
+    ///
+    /// A report rather than a log: it is the thing a gate asserts on, which is
+    /// `FractureAudit`'s own shape one system along.
+    pub fn gameplay(&self) -> &inf_physics::d3::GameplayReport {
+        &self.gameplay
     }
 
     /// The surface deformation field this sim has pressed into its terrain
@@ -1201,6 +1231,39 @@ impl RuntimeSim {
         inf_ecs::movement::apply_intent(&mut self.world, &intent);
         inf_physics::d3::step_character_movement(&mut self.world, &mut self.bridge3d, dt);
         clk.mark(phase::CHARACTER_MOVE);
+        // ── I6 gameplay ── doors swing, weapons cycle, health latches. HERE,
+        //    between the character step and the solver, for two reasons that are
+        //    both about one beat of latency:
+        //
+        //    * a door the E key opened THIS step starts moving this step, because
+        //      `step_character_movement` is where the press is consumed; and
+        //    * the leaf's collider is pushed into the bridge before
+        //      `bridge3d.step`, so the solver this step runs sees the door where
+        //      the state says it is rather than where it was last step.
+        //
+        //    Inert on a level with no door, no weapon and no inventory: three
+        //    `try_query_filtered`s that answer `None`. (MIRROR of
+        //    `SimSession::fixed_step`.)
+        //
+        //    **What it does NOT do is route damage at a destructible.** A shot
+        //    that hits a wall comes back in `GameplayReport::destruct`, and the
+        //    host spends it through its own `runtime_destruct_damage` — the same
+        //    wrapper the `destruct.apply_damage` node uses, so the permission
+        //    gate and the near-miss log are on every path into that door rather
+        //    than on the Blueprint one only.
+        let report = inf_physics::d3::step_gameplay(&mut self.world, &mut self.bridge3d, dt);
+        for (entity, energy_j) in &report.destruct {
+            runtime_destruct_damage(
+                &mut self.bridge3d,
+                &mut self.fractures,
+                &self.world,
+                &mut self.logs,
+                *entity,
+                *energy_j,
+            );
+        }
+        self.gameplay = report;
+        clk.mark(phase::GAMEPLAY);
         // 3. Solver.
         self.bridge.step(dt);
         self.bridge3d.step(dt); // ── P11.3 3D bridge: step ──

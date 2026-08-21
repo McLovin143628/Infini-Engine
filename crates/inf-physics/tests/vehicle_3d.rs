@@ -1321,8 +1321,12 @@ fn a_seat_and_an_item_at_the_same_distance_break_by_guid() {
     let feet = crew.driver_pos() - DVec3::Y * (crew.driver().stand_half_height_m + HERO_RADIUS);
 
     // The walk itself is sorted — the property the rule's tie-break rests on.
-    let cands =
-        inf_physics::d3::interact::candidates(&crew.rig.world, &crew.rig.bridge, &BTreeSet::new());
+    let cands = inf_physics::d3::interact::candidates(
+        &crew.rig.world,
+        &crew.rig.bridge,
+        feet,
+        &BTreeSet::new(),
+    );
     let mut sorted = cands.clone();
     sorted.sort_by_key(|c| c.guid);
     assert_eq!(

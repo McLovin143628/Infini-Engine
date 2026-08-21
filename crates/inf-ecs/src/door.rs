@@ -771,6 +771,56 @@ pub fn doors_in_world(world: &EcsWorld) -> Vec<DoorPlacement> {
     out
 }
 
+/// **A kick in flight** — a runtime component on the character, armed by the
+/// attack button against a locked door and disarmed by the animation's own
+/// notify (or by its fuse).
+///
+/// It lives in `inf-ecs` rather than beside the gameplay step because this crate
+/// is the only one that may name `bevy_ecs` — the facade rule — and a kick has
+/// to be a component so that it survives the steps between the press and the
+/// impact without a host holding a list.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct PendingKick {
+    /// The door it is aimed at.
+    pub door: Uuid,
+    /// Seconds left before it lands anyway.
+    pub fuse_s: f64,
+}
+
+/// Every kick in flight, in `Guid` order. `O(kicks)`, and `O(1)` when nobody is
+/// kicking anything.
+pub fn pending_kicks(world: &EcsWorld) -> Vec<(Uuid, PendingKick)> {
+    let w = world.world();
+    let Some(mut q) = w.try_query_filtered::<(&Guid, &PendingKick), With<PendingKick>>() else {
+        return Vec::new();
+    };
+    let mut out: Vec<(Uuid, PendingKick)> = q.iter(w).map(|(g, k)| (g.0, *k)).collect();
+    out.sort_by_key(|(g, _)| *g);
+    out
+}
+
+/// This character's kick in flight, if it has one.
+pub fn pending_kick(world: &EcsWorld, character: Uuid) -> Option<PendingKick> {
+    let entity = world.entity_of(character)?;
+    world.world().get::<PendingKick>(entity).copied()
+}
+
+/// Arm (or re-arm) a kick.
+pub fn set_pending_kick(world: &mut EcsWorld, character: Uuid, kick: PendingKick) -> bool {
+    let Some(entity) = world.entity_of(character) else {
+        return false;
+    };
+    world.world_mut().entity_mut(entity).insert(kick);
+    true
+}
+
+/// Disarm a kick.
+pub fn clear_pending_kick(world: &mut EcsWorld, character: Uuid) {
+    if let Some(entity) = world.entity_of(character) {
+        world.world_mut().entity_mut(entity).remove::<PendingKick>();
+    }
+}
+
 /// The door field, if this world has one.
 pub fn door_field(world: &EcsWorld) -> Option<&DoorField> {
     world.world().get_resource::<DoorField>()

@@ -193,6 +193,12 @@ pub struct PhysicsBridge3D {
     /// floor (I3 audit — the first draft of this doc said "not by the city"
     /// without the exception).
     structure_admitted: BTreeMap<Uuid, Vec<Uuid>>,
+    /// Per **door leaf** change stamp (I6): `leaf guid → its pose fold`. The
+    /// [`structure_stamps`](Self::structure_stamps) pattern once more, with the
+    /// moving case as the exception — a level of shut doors is retained whole,
+    /// and only a leaf that swung is re-described. Empty on every level with no
+    /// door, which is every level committed before this wave.
+    door_stamps: BTreeMap<Uuid, u64>,
     /// The band's `(near, far)` radii in metres. Defaults to the engine
     /// constants; `set_collider_band_radii` retunes them.
     band_radii: (f64, f64),
@@ -376,6 +382,7 @@ impl PhysicsBridge3D {
             entities: BTreeMap::new(),
             structure_stamps: BTreeMap::new(),
             structure_admitted: BTreeMap::new(),
+            door_stamps: BTreeMap::new(),
             band_radii: (
                 inf_ecs::DEFAULT_COLLIDER_NEAR_M,
                 inf_ecs::DEFAULT_COLLIDER_FAR_M,
@@ -831,6 +838,18 @@ impl PhysicsBridge3D {
         self.gather_terrain(world, &mut snaps, &mut retained);
         // P22.3: the sim's fracture chunks, on the same rule a fourth time.
         self.gather_fracture(fractures, &mut snaps, &mut retained);
+        // I6: the doors' swinging leaves, on the same rule a fifth time —
+        // banded like the walls they sit in, because a door a kilometre away is
+        // not a thing a character can walk into. `step_doors` owns the pose from
+        // creation onward and writes it through the same `leaf_pose` this reads,
+        // so the two cannot describe one leaf differently.
+        super::door::gather_doors(
+            world,
+            &band,
+            &mut self.door_stamps,
+            &mut snaps,
+            &mut retained,
+        );
         // `sync` sorts by Guid internally, so the gather order here is irrelevant.
         self.sync_retaining(&snaps, &retained);
         snaps.clear();

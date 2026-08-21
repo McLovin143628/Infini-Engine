@@ -72,18 +72,33 @@ pub fn vehicle_candidates(
     out
 }
 
-/// **Every candidate**, seats and authored interactables together, in `Guid`
-/// order.
+/// **Every candidate**, seats, doors and authored interactables together, in
+/// `Guid` order.
 ///
 /// `exclude` is what the character must not interact with — the vehicle it is
 /// already driving, and itself.
+///
+/// `feet` is where the character is standing, and it is here for **one** reason:
+/// a door's prompt says whether the lock verb is on offer, and that is a fact
+/// about which face the character is on. Every other candidate ignores it. The
+/// alternative — building door candidates without a side and deciding at the
+/// press — is the thing I5 built one resolution site to prevent: what the player
+/// is told and what the press does would be two calls.
 pub fn candidates(
     world: &EcsWorld,
     bridge: &PhysicsBridge3D,
+    feet: DVec3,
     exclude: &BTreeSet<Uuid>,
 ) -> Vec<InteractCandidate> {
     let mut out = vehicle_candidates(bridge, exclude);
     out.extend(interact::candidates_in_world(world, exclude));
+    // I6: doors. Excluded like anything else, so a door a character is somehow
+    // already the subject of does not offer itself.
+    out.extend(
+        super::door::candidates(world, feet)
+            .into_iter()
+            .filter(|c| !exclude.contains(&c.guid)),
+    );
     // One sorted walk, because the rule's tie-break is only deterministic over
     // one: a seat and an item at exactly the same distance must resolve the same
     // way in both hosts.
@@ -99,7 +114,11 @@ pub fn resolve(
     aim_yaw_deg: f64,
     exclude: &BTreeSet<Uuid>,
 ) -> Option<InteractHit> {
-    interact::resolve(&candidates(world, bridge, exclude), feet, aim_yaw_deg)
+    interact::resolve(
+        &candidates(world, bridge, feet, exclude),
+        feet,
+        aim_yaw_deg,
+    )
 }
 
 /// The vehicle half on its own — what `vehicle::try_enter` answers.

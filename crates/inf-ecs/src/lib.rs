@@ -34,6 +34,9 @@ pub mod hair;
 pub mod hierarchy;
 pub mod hydro;
 pub mod interact;
+// I6: items, the name-keyed catalogue and the slotted inventory a character
+// carries. The persistence accounting lives in the module header.
+pub mod item;
 pub mod math;
 pub mod movement;
 pub mod pose;
@@ -47,6 +50,10 @@ pub mod transform;
 // P29.7: the raycast vehicle model — the `movement` of vehicles, with the
 // fixed-step door in `inf_physics::d3::vehicle`.
 pub mod vehicle;
+// I6: weapons and the health they spend. Both measured in JOULES — see the
+// module header for why a hit-point would put back the conversion table
+// `docs/memos/p22-strength.md` exists to refuse.
+pub mod weapon;
 pub mod world;
 
 pub use attach::update_attachments;

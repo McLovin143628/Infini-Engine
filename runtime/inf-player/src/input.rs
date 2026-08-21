@@ -316,14 +316,15 @@ mod tests {
             mv::INTERACT,
             mv::FLY,
             mv::HANDBRAKE,
+            // I6: attack, reload and the weapon wheel MOVED here, because they
+            // became intents the moment they had consumers in the fixed step.
+            mv::ATTACK,
+            mv::RELOAD,
+            mv::WEAPON_SWITCH,
         ];
-        let game = [
-            inf_input::actions::MENU,
-            inf_input::actions::RELOAD,
-            inf_input::actions::ATTACK,
-            inf_input::actions::INVENTORY,
-            inf_input::actions::WEAPON_SWITCH,
-        ];
+        // What is left in the game half is what a HOST reads: a menu and a
+        // panel, neither of which is a fact about a character.
+        let game = [inf_input::actions::MENU, inf_input::actions::INVENTORY];
         for g in game {
             assert!(
                 !movement.contains(&g),
@@ -335,15 +336,33 @@ mod tests {
                 "`{g}` is named by the game vocabulary and bound to nothing"
             );
         }
-        // …and the four with no consumer are exactly the four the list names,
-        // extracted rather than restated so the list cannot rot.
+        // **…and the not-yet list is EMPTY as of I6.** It was minted for four
+        // controls the owner's table bound ahead of their consumers — reload,
+        // attack, inventory and the weapon wheel — and all four have one now.
+        // The assertion is on the length rather than on `is_empty` so the number
+        // has to be looked at when it moves; a later wave that binds a control
+        // early puts it back and changes this line deliberately.
+        println!(
+            "controls bound with no consumer: {:?}",
+            inf_input::actions::NOT_YET_CONSUMED
+        );
         assert_eq!(
             inf_input::actions::NOT_YET_CONSUMED.len(),
-            4,
+            0,
             "the not-yet list changed size without this arm noticing"
         );
         for a in inf_input::actions::NOT_YET_CONSUMED {
             assert!(game.contains(&a), "`{a}` is not in the game vocabulary");
+        }
+        // The three that moved are bound and named by the MOVEMENT half now, and
+        // the movement half is where their constants live. A name that stayed in
+        // both would be the second spelling this arm exists to refuse.
+        for a in [mv::ATTACK, mv::RELOAD, mv::WEAPON_SWITCH] {
+            let m = default_map();
+            assert!(
+                m.action_names().any(|n| n == a) || m.axis_names().any(|n| n == a),
+                "`{a}` moved to the movement vocabulary and is bound to nothing"
+            );
         }
     }
 
@@ -386,7 +405,7 @@ mod tests {
             .filter(|n| n.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
             .collect();
         assert!(
-            read.len() >= 16,
+            read.len() >= 19,
             "only {} action constants were extracted from `from_actions` — the \
              extraction broke, and an arm that greps nothing passes everything: \
              {read:?}",
@@ -413,6 +432,9 @@ mod tests {
                 "INTERACT" => a::INTERACT,
                 "FLY" => a::FLY,
                 "HANDBRAKE" => a::HANDBRAKE,
+                "ATTACK" => a::ATTACK,
+                "RELOAD" => a::RELOAD,
+                "WEAPON_SWITCH" => a::WEAPON_SWITCH,
                 other => panic!(
                     "`MovementIntent::from_actions` reads `actions::{other}`, which \
                      this arm has never heard of — add it to `default_map` and to \
@@ -432,7 +454,17 @@ mod tests {
         // The five analog ones are AXES and the eleven discrete ones are ACTIONS:
         // a `jump` bound as an axis would satisfy the sweep above and never
         // reach `pressed`.
-        for axis in [a::MOVE_X, a::MOVE_Y, a::LOOK_X, a::LOOK_Y, a::MOVE_UP] {
+        for axis in [
+            a::MOVE_X,
+            a::MOVE_Y,
+            a::LOOK_X,
+            a::LOOK_Y,
+            a::MOVE_UP,
+            // I6: the wheel is an AXIS, because a wheel has a sign and no
+            // button. Bound as an action it would satisfy the sweep above and
+            // never reach `axis`.
+            a::WEAPON_SWITCH,
+        ] {
             assert!(
                 m.axis_names().any(|n| n == axis),
                 "the `{axis}` axis is unbound — the control does nothing and \
@@ -451,6 +483,8 @@ mod tests {
             a::INTERACT,
             a::FLY,
             a::HANDBRAKE,
+            a::ATTACK,
+            a::RELOAD,
         ] {
             assert!(
                 m.action_names().any(|n| n == action),

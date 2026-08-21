@@ -41,7 +41,7 @@
 use std::time::Instant;
 
 /// How many phases one fixed step is split into.
-pub const STEP_PHASES: usize = 22;
+pub const STEP_PHASES: usize = 23;
 
 /// The phases, in the order [`RuntimeSim::fixed_step`] runs them.
 ///
@@ -70,6 +70,7 @@ pub const STEP_PHASE_NAMES: [&str; STEP_PHASES] = [
     "input events",
     "blueprint tick",
     "character move",
+    "gameplay",
     "solver",
     "collision drain",
     "write-back",
@@ -108,33 +109,36 @@ pub(crate) mod phase {
     pub const BLUEPRINT_TICK: usize = 7;
     /// P29.3 — the one Ring-0 movement step, plus the intent that feeds it.
     pub const CHARACTER_MOVE: usize = 8;
+    /// I6 — doors, weapons and the health they spend, plus the host's own drain
+    /// of the energy they owe the P22 damage door.
+    pub const GAMEPLAY: usize = 9;
     /// rapier2d + rapier3d.
-    pub const SOLVER: usize = 9;
+    pub const SOLVER: usize = 10;
     /// Wave 3 contacts and overlaps, and the dispatches they queue.
-    pub const COLLISION_DRAIN: usize = 10;
+    pub const COLLISION_DRAIN: usize = 11;
     /// rapier → ECS.
-    pub const WRITE_BACK: usize = 11;
+    pub const WRITE_BACK: usize = 12;
     /// The transform + visibility DFS. **Three call sites, gathered.**
-    pub const PROPAGATE: usize = 12;
+    pub const PROPAGATE: usize = 13;
     /// P22.1 — the ground remembers what stood on it.
-    pub const DEFORMATION: usize = 13;
+    pub const DEFORMATION: usize = 14;
     /// Play-heads, state machines and root motion.
-    pub const ANIMATION: usize = 14;
+    pub const ANIMATION: usize = 15;
     /// P11.3 sockets.
-    pub const ATTACHMENTS: usize = 15;
+    pub const ATTACHMENTS: usize = 16;
     /// P24.4 garments and hair.
-    pub const CLOTH_HAIR: usize = 16;
+    pub const CLOTH_HAIR: usize = 17;
     /// P14.5 WASM mods — which propagate internally, so their propagate is here
     /// rather than in [`PROPAGATE`].
-    pub const MODS: usize = 17;
+    pub const MODS: usize = 18;
     /// P22.3 fracture write-back, the structural solve and the debris budget.
-    pub const DESTRUCTION: usize = 18;
+    pub const DESTRUCTION: usize = 19;
     /// P12.3 — the audio command queue.
-    pub const AUDIO: usize = 19;
+    pub const AUDIO: usize = 20;
     /// P29.6 — the locomotion camera.
-    pub const CAMERA: usize = 20;
+    pub const CAMERA: usize = 21;
     /// The interpolation history roll and the rising-edge clear.
-    pub const POSITION_CAPTURE: usize = 21;
+    pub const POSITION_CAPTURE: usize = 22;
 }
 
 /// One fixed step's phase milliseconds — or, after
@@ -307,6 +311,7 @@ mod tests {
             phase::INPUT_EVENTS,
             phase::BLUEPRINT_TICK,
             phase::CHARACTER_MOVE,
+            phase::GAMEPLAY,
             phase::SOLVER,
             phase::COLLISION_DRAIN,
             phase::WRITE_BACK,

@@ -431,25 +431,32 @@ pub mod actions {
     /// Open / close the in-game menu. Tab. Read by the host, not by the sim's
     /// movement step — see `inf_ui::menu`.
     pub const MENU: &str = "menu";
-    /// Reload the held weapon. Bound now; its consumer is the weapons work.
-    pub const RELOAD: &str = "reload";
-    /// Primary fire. Bound now; its consumer is the weapons work.
-    pub const ATTACK: &str = "attack";
-    /// Open the inventory. Bound now; its consumer is the inventory work.
+    /// Open the inventory panel. Read by the **host**, like [`MENU`] and for the
+    /// same reason: a panel is a decision about the session's surface rather
+    /// than about the character. Its consumer is `inf_ui::inventory` (I6).
     pub const INVENTORY: &str = "inventory";
-    /// Change weapon. An **axis**, because a wheel has a sign and no button:
-    /// its consumer reads the sign. Bound now; its consumer is the weapons
-    /// work.
-    pub const WEAPON_SWITCH: &str = "weapon_switch";
 
-    /// The four whose consumers do not exist yet, in one place, so a host can
-    /// answer "is this control wired to anything" without a second list.
+    /// The controls whose consumers do not exist yet, in one place, so a host
+    /// can answer "is this control wired to anything" without a second list.
     ///
     /// **A bound key with no consumer is a dead key**, and a dead key is
     /// indistinguishable from a broken one. The shipped player says so out
     /// loud instead (`inf_ui::Toasts`), which is the refusals-are-values law
     /// applied to a control scheme.
-    pub const NOT_YET_CONSUMED: [&str; 4] = [RELOAD, ATTACK, INVENTORY, WEAPON_SWITCH];
+    ///
+    /// **It is EMPTY as of island wave I6**, and that is the whole point of the
+    /// mechanism: `reload`, `attack`, `inventory` and `weapon_switch` were the
+    /// four it was minted for, all four now have consumers, and the way a
+    /// control stops toasting is by leaving this list. It is kept rather than
+    /// deleted because the next control bound ahead of its consumer belongs
+    /// here, and because `wired` — which a rebinding row shows a player — is
+    /// derived from it.
+    ///
+    /// The three that left are not gone: `attack`, `reload` and `weapon_switch`
+    /// moved to `inf_ecs::movement::actions`, because they became **intents**.
+    /// See that module for the split and for why `default_map` binds them by
+    /// literal.
+    pub const NOT_YET_CONSUMED: [&str; 0] = [];
 }
 
 /// **The engine's default bindings** (P29.6 — moved here from the shipped
@@ -586,24 +593,28 @@ pub fn default_map() -> InputMap {
         .bind_button("aim", GamepadButton::LeftTrigger)
         // ── I5: the owner's table, the rest of it ──
         //
-        // `menu` is read by the HOST, not by the movement intent: it opens the
-        // in-game settings dialog and pauses a single-player sim, and both of
-        // those are decisions about the session rather than about the
-        // character. The other four are bound against consumers that arrive
-        // with the weapons and inventory work — see [`actions::NOT_YET_CONSUMED`]
-        // and the toast the player raises for them, which is the difference
-        // between a control that is not built yet and a control that is broken.
+        // `menu` and `inventory` are read by the HOST, not by the movement
+        // intent: they open a surface and one of them pauses a single-player
+        // sim, and both are decisions about the session rather than about the
+        // character. They are the two names this module still owns.
         .bind_key(actions::MENU, "Tab")
         .bind_button(actions::MENU, GamepadButton::Start)
-        .bind_key(actions::RELOAD, "KeyR")
-        .bind_mouse(actions::ATTACK, MouseButton::Left)
-        .bind_button(actions::ATTACK, GamepadButton::RightTrigger)
         .bind_key(actions::INVENTORY, "KeyI")
         .bind_button(actions::INVENTORY, GamepadButton::Select)
+        // ── I6: attack, reload and the wheel, bound by LITERAL ──
+        //
+        // Their names live in `inf_ecs::movement::actions` now, because they are
+        // read by the movement intent — and this crate must not depend on the
+        // world model, so it spells them exactly as it already spells
+        // `interact`, `crouch` and `sprint`. `inf-player`'s own arm is what
+        // holds the two spellings together; a comment could not.
+        .bind_key("reload", "KeyR")
+        .bind_mouse("attack", MouseButton::Left)
+        .bind_button("attack", GamepadButton::RightTrigger)
         // The wheel is a DELTA source, so this axis is unclamped and reaches a
         // consumer as a RATE (see `InputState::axis_snapshot`). Its consumer
         // reads the sign; a notch count would need the wheel to be a button,
         // which it is not on any platform this engine speaks to.
-        .bind_axis_mouse(actions::WEAPON_SWITCH, MouseAxis::WheelY, 1.0);
+        .bind_axis_mouse("weapon_switch", MouseAxis::WheelY, 1.0);
     m
 }

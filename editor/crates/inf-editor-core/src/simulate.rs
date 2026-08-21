@@ -356,6 +356,9 @@ pub struct SimSession {
     /// This step's fracture audit — how many chunks the structural solve dropped,
     /// how many the budget reclaimed, how much debris is live. Read by gates.
     fracture_audit: FractureAudit,
+    /// This step's gameplay report (I6) — doors moved, rounds fired, locks
+    /// broken, bodies stopped. MIRROR of `RuntimeSim::gameplay`.
+    gameplay: inf_physics::d3::GameplayReport,
     /// The **simulation's own** voxel volumes, keyed by entity `Guid` (P21.2).
     ///
     /// Read by the `terrain.height_at` host seam so a character can stand on a
@@ -547,6 +550,7 @@ impl SimSession {
             fractures: BTreeMap::new(),
             debris_budget: DebrisBudget::default(),
             fracture_audit: FractureAudit::default(),
+            gameplay: inf_physics::d3::GameplayReport::default(),
             voxels: BTreeMap::new(),
         };
 
@@ -1076,6 +1080,26 @@ impl SimSession {
         );
         inf_ecs::movement::apply_intent(doc.world_mut(), &intent);
         inf_physics::d3::step_character_movement(doc.world_mut(), &mut self.bridge3d, dt);
+        // ── I6 gameplay ── doors swing, weapons cycle, health latches. HERE,
+        //    between the character step and the solver: a door the E key opened
+        //    THIS step starts moving this step (the press is consumed in the
+        //    step above), and the leaf's collider is pushed into the bridge
+        //    before `bridge3d.step`, so the solver sees the door where the state
+        //    says it is rather than where it was last step. Inert on a level
+        //    with no door, no weapon and no inventory.
+        //    (MIRROR of `RuntimeSim::fixed_step`.)
+        let report = inf_physics::d3::step_gameplay(doc.world_mut(), &mut self.bridge3d, dt);
+        for (entity, energy_j) in &report.destruct {
+            runtime_destruct_damage(
+                &mut self.bridge3d,
+                &mut self.fractures,
+                doc.world(),
+                &mut self.logs,
+                *entity,
+                *energy_j,
+            );
+        }
+        self.gameplay = report;
         // 3. Solver.
         self.bridge.step(dt);
         self.bridge3d.step(dt); // ── P11.3 3D bridge: step ──

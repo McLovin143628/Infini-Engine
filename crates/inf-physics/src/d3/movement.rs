@@ -570,16 +570,35 @@ fn step_one(
         let mut taken = occupied_seats(world, guid);
         taken.insert(guid);
         let hit = super::interact::resolve(world, bridge, feet, cm.runtime.aim_yaw_deg, &taken);
-        // Only the ENTER verb has a consumer in this step. The rest are the
-        // items' and doors', and their consumers are gameplay's — an item that
-        // has no pick-up yet is a hit this step declines rather than a candidate
-        // the door refuses to see. The **prompt** is a separate question a host
-        // asks every frame through the same `resolve`, so what the player is
-        // told and what the press does cannot come apart.
-        let entered = hit
-            .as_ref()
-            .filter(|h| h.verb == inf_ecs::interact::InteractVerb::Enter)
-            .map(|h| h.guid);
+        // **ENTER, USE and PICK UP have consumers in this step** (ENTER since
+        // P29.7; the other two since island wave I6). The rest are gameplay's —
+        // a hit this step declines rather than a candidate the door refuses to
+        // see. The **prompt** is a separate question a host asks every frame
+        // through the same `resolve`, so what the player is told and what the
+        // press does cannot come apart.
+        //
+        // The order is a `match` on the verb and not a chain of `if`s, so a verb
+        // added later is a compile error here rather than a silent decline.
+        let entered = match hit.as_ref().map(|h| (h.verb, h.guid)) {
+            Some((inf_ecs::interact::InteractVerb::Enter, target)) => Some(target),
+            Some((inf_ecs::interact::InteractVerb::Use, target)) => {
+                // A `Use` hit is a door if the world has one under that guid,
+                // and nothing at all otherwise — which is the correct answer for
+                // a switch or a terminal somebody authored an `Interactable` for
+                // and has not written a consumer for yet.
+                super::door::use_door(world, target, feet);
+                None
+            }
+            Some((inf_ecs::interact::InteractVerb::PickUp, target)) => {
+                inf_ecs::item::pick_up(world, guid, target);
+                None
+            }
+            Some((
+                inf_ecs::interact::InteractVerb::Grab | inf_ecs::interact::InteractVerb::Talk,
+                _,
+            ))
+            | None => None,
+        };
         if let Some(vehicle) = entered {
             let mut refusal = MovementRefusal::None;
             let probe = ClearanceProbe {
@@ -644,6 +663,41 @@ fn step_one(
         return step_flight(
             world, bridge, guid, cm, dt, position, fly_half, radius, is_capsule, overlays,
         );
+    }
+
+    // ── 0f. **THE CRASH-THROUGH** (island wave I6). A body arriving at a shut
+    //    door above the breach speed goes through it, and the movement mode
+    //    CONTINUES — a slide stays a slide.
+    //
+    //    Here, before the integration, so the speed the breach prices is the one
+    //    the body arrived with, and the speed it leaves with is what this step
+    //    then integrates. And *after* the vehicle and flight blocks, because
+    //    neither a car nor a wingsuit is a shoulder.
+    //
+    //    **The same energy door as the kick.** `try_breach` computes `1/2 m v2`
+    //    and hands it to `door::strike_door`, which is the function
+    //    `gameplay::step_kicks` calls with a kick's own joules. The lock's price
+    //    is `Destructible::bond_energy_j`, which is the fracture solve's. There
+    //    is one comparison behind all three.
+    {
+        let feet = position - DVec3::Y * (cm.half_height_for(cm.mode) + radius);
+        if let Some(breach) = super::door::try_breach(
+            world,
+            feet,
+            cm.runtime.velocity.to_dvec3(),
+            cm.mode,
+            inf_ecs::door::DEFAULT_BODY_MASS_KG,
+        ) {
+            if breach.broke && breach.speed_in_mps > 0.0 {
+                // Momentum is scaled rather than re-aimed: the direction is the
+                // body's own and the lock took energy, not heading. Scaling the
+                // whole velocity (not just its planar part) keeps a dive's
+                // vertical component in proportion, which is what makes a dive
+                // through a door still a dive on the other side.
+                let k = breach.speed_out_mps / breach.speed_in_mps;
+                cm.runtime.velocity = Vec3d::from_dvec3(cm.runtime.velocity.to_dvec3() * k);
+            }
+        }
     }
 
     // ── 1. Aim. The look intent is a RATE (degrees per second), so integrating
@@ -2199,6 +2253,13 @@ fn clear_edges(cm: &mut CharacterMovement) {
     cm.runtime.press_prone = false;
     cm.runtime.press_roll = false;
     cm.runtime.press_dive = false;
+    // I6. A driver has no weapon and no door to kick, so an attack or a reload
+    // pressed at the wheel must not fire the moment they get out — the P29.7 A1
+    // class exactly, extended to the two edges this wave added. The wheel's sign
+    // goes with them for the same reason.
+    cm.runtime.press_attack = false;
+    cm.runtime.press_reload = false;
+    cm.runtime.weapon_switch = 0;
 }
 
 /// Leave the seat: restore the collider, place the character, keep the velocity.

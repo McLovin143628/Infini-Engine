@@ -100,8 +100,14 @@ pub fn rows() -> Vec<BindingRow> {
         BindingRow::action("Dive (direct)", "dive"),
         BindingRow::action("Interact", "interact"),
         BindingRow::action("Aim", "aim"),
-        BindingRow::action("Attack", game::ATTACK),
-        BindingRow::action("Reload", game::RELOAD),
+        // Literals, like every other movement name in this list: `attack` and
+        // `reload` became **intents** in I6 and their constants moved to
+        // `inf_ecs::movement::actions`, which this crate cannot name (it does
+        // not depend on the world model, deliberately — a UI is not a
+        // simulation). `inf-player`'s vocabulary arm holds the spellings
+        // together.
+        BindingRow::action("Attack", "attack"),
+        BindingRow::action("Reload", "reload"),
         BindingRow::action("Inventory", game::INVENTORY),
         BindingRow::action("Fly", "fly"),
         BindingRow::action("Menu", game::MENU),
@@ -584,15 +590,29 @@ mod tests {
                 row.label
             );
         }
-        // …and the four the owner's table binds against consumers that do not
-        // exist yet are all rows, because a control a player cannot rebind is
-        // one they cannot get out of the way either.
-        for a in inf_input::actions::NOT_YET_CONSUMED {
+        // …and **every row is wired**, which is what island wave I6 bought: the
+        // four controls the owner's table bound against consumers that did not
+        // exist — reload, attack, inventory and the weapon wheel — all have
+        // one now, so `NOT_YET_CONSUMED` is empty and no row carries the note.
+        //
+        // The arm is written as a **count against the rows**, not as
+        // `is_empty()`: the day a later wave binds a control ahead of its
+        // consumer, that control has to be a row too (a control a player cannot
+        // rebind is one they cannot get out of the way either), and this is what
+        // says so.
+        let unwired: Vec<&str> = inf_input::actions::NOT_YET_CONSUMED.to_vec();
+        println!("controls bound with no consumer: {unwired:?}");
+        for a in unwired {
             assert!(
-                a == inf_input::actions::WEAPON_SWITCH || rows.iter().any(|r| r.name == a),
-                "`{a}` is bound and has no row"
+                rows.iter().any(|r| r.name == a),
+                "`{a}` is bound, has no consumer, and has no row either"
             );
         }
+        assert!(
+            rows.iter().all(|r| !inf_input::actions::NOT_YET_CONSUMED
+                .contains(&r.name)),
+            "a row is still unwired"
+        );
     }
 
     /// **The round trip a rebinding actually takes**: edit the map, derive the
@@ -890,9 +910,25 @@ mod tests {
         let jump = t.iter().find(|r| r.id == "jump").unwrap();
         assert_eq!(jump.token, "Space");
         assert!(!jump.overridden, "an untouched row claims to be overridden");
-        // …and the four with no consumer say so.
+        // **…and every row is wired as of island wave I6.** The four the owner's
+        // table bound ahead of their consumers — attack, reload, inventory and
+        // the weapon wheel — all have one now, so `wired` is true everywhere and
+        // the flag reads what it means rather than what it was minted for.
+        let unwired: Vec<&str> = t
+            .iter()
+            .filter(|r| !r.wired)
+            .map(|r| r.id.as_str())
+            .collect();
+        println!("rows still claiming no consumer: {unwired:?}");
+        assert!(unwired.is_empty(), "{unwired:?}");
+        // The flag is still DERIVED and not hard-coded: it reads
+        // `NOT_YET_CONSUMED`, so a control put back on that list shows up here
+        // without this arm being touched.
         let attack = t.iter().find(|r| r.id == "attack").unwrap();
-        assert!(!attack.wired, "attack claims a consumer it does not have");
+        assert_eq!(
+            attack.wired,
+            !inf_input::actions::NOT_YET_CONSUMED.contains(&"attack")
+        );
     }
 
     /// Tokens are names, and the two directions agree for every source a desk

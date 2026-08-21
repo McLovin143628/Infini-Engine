@@ -83,6 +83,24 @@ pub mod actions {
     pub const FLY: &str = "fly";
     /// Held: the handbrake, while driving (P29.7).
     pub const HANDBRAKE: &str = "handbrake";
+    /// Held **and** edged: attack — fire the equipped weapon, or kick a locked
+    /// door in (I6).
+    ///
+    /// **It moved here from `inf_input::actions` in I6**, and the move is what
+    /// the split between the two vocabularies means: that module holds the names
+    /// a *host* reads (the menu, the inventory panel) and this one holds the
+    /// names the *intent* reads. Attack, reload and the weapon wheel became
+    /// intents the moment they had consumers in the fixed step, so this is where
+    /// they belong. `inf-input` binds them by literal exactly as it binds
+    /// `interact` and `crouch`, and `inf-player`'s own arm is what holds the two
+    /// spellings together — it cannot be an import, because `inf-input` must not
+    /// depend on the world model.
+    pub const ATTACK: &str = "attack";
+    /// Edge: reload the equipped weapon (I6).
+    pub const RELOAD: &str = "reload";
+    /// Analog axis: change weapon (I6). A **rate**, because the wheel is a delta
+    /// source; the intent reads its sign.
+    pub const WEAPON_SWITCH: &str = "weapon_switch";
 }
 
 /// ALS's `RollDoubleTapTimeout`: two crouch presses inside this window roll.
@@ -1140,6 +1158,14 @@ pub struct MovementIntent {
     pub fly: bool,
     /// Held: handbrake (P29.7).
     pub handbrake: bool,
+    /// Held: attack (I6). An automatic weapon reads this.
+    pub attack: bool,
+    /// Edge: attack (I6). A door kick reads this.
+    pub attack_pressed: bool,
+    /// Edge: reload (I6).
+    pub reload: bool,
+    /// The wheel's sign this step, `-1`, `0` or `+1` (I6).
+    pub weapon_switch: i32,
 }
 
 impl MovementIntent {
@@ -1226,6 +1252,30 @@ impl MovementIntent {
             interact: pressed(actions::INTERACT),
             fly: pressed(actions::FLY),
             handbrake: held(actions::HANDBRAKE),
+            // ── I6: the four the owner's table bound and I5 left unconsumed ──
+            //
+            // `attack` is read **twice**, as a level and as an edge, because one
+            // button has two consumers with different needs: an automatic weapon
+            // fires while it is down, and a door kick fires when it goes down.
+            // Deriving either from the other at the consumer is the P29.7 A1
+            // defect (an edge honoured by a path that could not use it).
+            attack: held(actions::ATTACK),
+            attack_pressed: pressed(actions::ATTACK),
+            reload: pressed(actions::RELOAD),
+            // The wheel is a RATE, so what crosses into the sim is its SIGN —
+            // see `MovementRuntime::weapon_switch`. The threshold is `0.0`
+            // rather than an epsilon because `axis_snapshot` produces exactly
+            // zero when the wheel did not move.
+            weapon_switch: {
+                let v = ax(actions::WEAPON_SWITCH);
+                if v > 0.0 {
+                    1
+                } else if v < 0.0 {
+                    -1
+                } else {
+                    0
+                }
+            },
         }
     }
 
@@ -1275,6 +1325,17 @@ pub fn apply_intent(world: &mut EcsWorld, intent: &MovementIntent) {
         rt.press_dive |= intent.dive;
         rt.press_interact |= intent.interact;
         rt.press_fly |= intent.fly;
+        // I6. `want_attack` is a LEVEL and is assigned; the other three are
+        // edges and are ORed, for the reason the block above gives — a frame
+        // that runs two fixed steps must not erase an edge that arrived in the
+        // first. The wheel's sign is an edge in the same sense: it is a
+        // *notch*, and a notch that arrived between two steps is one notch.
+        rt.want_attack = intent.attack;
+        rt.press_attack |= intent.attack_pressed;
+        rt.press_reload |= intent.reload;
+        if intent.weapon_switch != 0 {
+            rt.weapon_switch = intent.weapon_switch;
+        }
     }
 }
 

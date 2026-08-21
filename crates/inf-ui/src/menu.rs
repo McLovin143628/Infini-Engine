@@ -1134,9 +1134,16 @@ mod tests {
         );
     }
 
-    /// The four controls with no consumer say so on their own row.
+    /// **No binding row claims to be dead any more** (I6), and the note is
+    /// still derived rather than deleted.
+    ///
+    /// The arm changed direction rather than being retired, and the change is
+    /// the finding: it used to demand the note on Attack, Reload and Inventory,
+    /// because those three were bound ahead of their consumers. They have one
+    /// now, so the note must be **absent everywhere** — an arm that still
+    /// demanded it would be asserting that this wave did not happen.
     #[test]
-    fn a_control_with_no_consumer_says_so_where_the_player_can_see_it() {
+    fn no_binding_row_claims_to_be_dead_and_the_note_is_still_derived() {
         let (mut st, s, m) = fixture();
         let mut st2 = st.clone();
         st2.page = Page::Bindings;
@@ -1147,11 +1154,14 @@ mod tests {
             .filter(|r| r.note.as_deref() == Some("not wired to anything yet"))
             .map(|r| r.label.as_str())
             .collect();
-        assert!(noted.contains(&"Attack"), "{noted:?}");
-        assert!(noted.contains(&"Reload"), "{noted:?}");
-        assert!(noted.contains(&"Inventory"), "{noted:?}");
-        // …and a control that IS wired does not claim to be dead.
-        assert!(!noted.contains(&"Jump"), "{noted:?}");
+        println!("binding rows still noted as unwired: {noted:?}");
+        assert!(noted.is_empty(), "{noted:?}");
+        // The note is DERIVED from `NOT_YET_CONSUMED` and not deleted: a control
+        // put back on that list gets it again with nothing here touched. Asked
+        // of the helper directly, because the list is empty and a loop over it
+        // could not fail.
+        assert_eq!(not_yet_note("grapple"), None);
+        assert!(inf_input::actions::NOT_YET_CONSUMED.is_empty());
         assert_eq!(
             rows(&st2, &s, &m),
             shown,

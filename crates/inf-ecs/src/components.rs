@@ -1905,6 +1905,29 @@ pub struct MovementRuntime {
     pub press_fly: bool,
     /// Held: the handbrake, routed to the vehicle being driven.
     pub want_handbrake: bool,
+
+    // ── weapons and the verbs that share their buttons (I6) ──
+    /// **Held**: the attack control. An automatic weapon reads the level, which
+    /// is why this is not only an edge.
+    pub want_attack: bool,
+    /// **Edge**: the attack control went down. What arms a door kick — a kick is
+    /// a press, never a hold — and what a semi-automatic weapon's own
+    /// `trigger_held` rule is checked against.
+    ///
+    /// Two fields for one button on purpose: an automatic weapon needs the level
+    /// and a kick needs the edge, and deriving one from the other at the consumer
+    /// is how a press made in one mode fires in another (the P29.7 A1 class).
+    pub press_attack: bool,
+    /// **Edge**: reload.
+    pub press_reload: bool,
+    /// **The wheel's SIGN this step**, `-1`, `0` or `+1`.
+    ///
+    /// A sign and not a count, because `weapon_switch` reaches the engine as a
+    /// **rate** — the wheel is a delta source and `axis_snapshot` divides it by
+    /// the frame time (the I5 remainder) — so a notch count is a number this
+    /// engine does not have. One slot per step in whichever direction the wheel
+    /// turned is what a player reads as one notch.
+    pub weapon_switch: i32,
     /// The seat this character is in (or climbing into).
     pub seat: SeatState,
     /// **Bank angle while flying**, degrees — roll into the turn, derived from

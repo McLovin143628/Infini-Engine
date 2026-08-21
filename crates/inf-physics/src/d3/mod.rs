@@ -16,9 +16,15 @@ use rapier3d_f64::prelude::{ColliderHandle, RigidBodyHandle};
 // `cast_shape`'s third consumer (Ruling 3).
 pub mod camera;
 mod character;
+// I6 doors: the leaf's collider, the swing's blocking probe, and the door half
+// of the interaction candidate list. The rules are `inf_ecs::door`.
+pub mod door;
 mod ecs;
 mod events;
 pub mod fracture;
+// I6 gameplay: the one fixed-step pass both hosts run for doors, weapons and
+// the health they spend.
+pub mod gameplay;
 pub mod interact;
 mod joint;
 pub mod movement;
@@ -34,6 +40,8 @@ mod world;
 
 pub use camera::step_locomotion_camera;
 pub use character::{AutoStep3D, CharacterMove3D, CharacterMover3D};
+pub use door::{door_leaf_guid, step_doors, DoorReport};
+pub use gameplay::{step_gameplay, GameplayReport, WeaponHit};
 pub use ecs::{
     pcg_shell_guid, pcg_structure_guid, terrain_tile_collider, terrain_tile_guid, voxel_chunk_guid,
     BodyDesc3D, EntitySync3D, JointSync3D, PhysicsBridge3D, PoseWriteback3D, TerrainColliderAudit,
