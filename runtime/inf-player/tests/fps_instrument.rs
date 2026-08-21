@@ -616,11 +616,12 @@ fn the_instrument_scene_carries_the_city_the_ground_and_the_character() {
 /// measuring `AutoVsync` measures the panel, so it has to configure `Immediate`
 /// or `Mailbox` to measure the engine — and then say which one it measured.
 ///
-/// This arm is a **source scope**, not a substring ban: it extracts
-/// `PlayerRenderHost::render`'s body and the windowed loop's own frame block, and
-/// requires that neither waits. A ban over the whole file would have been
-/// satisfied by a poll moved one function away, which is the shape the P23 byte
-/// pin failed at.
+/// This arm is a **source scope** *and* a module ban, because neither alone is
+/// enough. The scopes extract `PlayerRenderHost::render`'s body and
+/// `PlayerApp::frame`'s, so a wait somewhere else in the crate cannot satisfy
+/// them by moving; the module ban sweeps both whole files, because a scope that
+/// bans a *substring* is defeated by a one-line helper whose call site contains
+/// no `poll(` at all — the P23 byte-pin lesson, met again (the I4b audit).
 #[test]
 fn the_shipped_players_frame_path_does_not_wait_for_the_gpu() {
     let render_rs = include_str!("../src/render.rs");
@@ -686,6 +687,36 @@ fn the_shipped_players_frame_path_does_not_wait_for_the_gpu() {
         !loop_body.contains("poll("),
         "the windowed loop now polls the device around its frame:\n{loop_body}"
     );
+
+    // **AND THE BAN IS OVER THE MODULE, NOT INSIDE THE SCOPE** (the I4b audit).
+    //
+    // A substring ban inside a function body is defeated by a one-line helper:
+    // `fn wait_for_gpu(&self) { self.gpu.device.poll(..) }` on `PlayerRenderHost`,
+    // called from either body, puts no `poll(` at either call site. That is the
+    // P23 byte-pin lesson word for word — **read a scope, ban the MODULE** — so
+    // the two scopes above are what say "this is the right function", and the
+    // sweep below is what says "and nothing they call waits either", over the two
+    // files that own the player's frame.
+    //
+    // Three needles, because `poll(` is not the only spelling of a wait: a
+    // `pollster::block_on` over a `map_async` serializes exactly as hard, and
+    // `wait_for_submission_index` is wgpu's own name for the same thing. All
+    // three are absent from both files today, which is what makes this a
+    // tripwire rather than an allowlist.
+    for (name, src) in [("render.rs", render_rs), ("window.rs", window_rs)] {
+        for needle in [".poll(", "block_on", "wait_for_submission"] {
+            assert!(
+                !src.contains(needle),
+                "`inf_player::{name}` contains `{needle}`, so something on the \
+                 player's frame path waits for the device — even if the call site \
+                 inside `render` or `frame` reads clean. A wait serializes the CPU \
+                 and GPU halves, which is what this harness does on purpose and \
+                 what a presenter must not do, and it would make every PIPELINED \
+                 ESTIMATE this file prints a description of a frame the player no \
+                 longer draws."
+            );
+        }
+    }
 }
 
 /// **THE FIXED STEP'S OWN BREAKDOWN** (island wave I4b) — the table wave I4
