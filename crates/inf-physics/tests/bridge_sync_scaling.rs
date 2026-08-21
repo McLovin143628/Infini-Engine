@@ -23,7 +23,7 @@
 //!   single `contains` sweep, when the input is already sorted by guid — plus
 //!   the `snaps`/`live` vectors themselves, allocated fresh each pass.
 //!
-//! This file is the instrument and the protection. Two arms:
+//! This file is the instrument and the protection. Three arms:
 //!
 //! * **The world is what the snapshot says it is.** Skipping a pose write is
 //!   only sound if the pose was already right — so the arm reads the poses back
@@ -32,13 +32,16 @@
 //!   The last case is why the skip compares against **rapier's own state**
 //!   rather than a remembered copy: a remembered copy cannot see a body someone
 //!   else moved.
+//! * **The skip fires**, said without a clock (island wave I4b): a steady-state
+//!   sync must not mark one body as moved, and a moved wall must mark one. Added
+//!   because this wave measured what the ceiling below no longer catches on its
+//!   own — see that arm's docs.
 //! * **The cost does not grow the way it used to.** In P26.5's budget classes:
 //!   **WORLD** — a per-entity *scaling ratio* across world sizes, divided by the
-//!   scaling of a bare `BTreeMap` descent measured over the SAME two populations
-//!   in the SAME process (the `ground_seam_scaling` reasoning: no GPU in it, CPU
-//!   work over CPU data); and **CLOCK** — the absolute per-entity ceiling,
-//!   asserted only where that same micro-calibration says the machine is in the
-//!   class the number was measured on.
+//!   scaling of [`calibration_ns`] measured over the SAME two populations in the
+//!   SAME process (the `ground_seam_scaling` reasoning: no GPU in it, CPU work
+//!   over CPU data); and **CLOCK** — the absolute per-entity ceiling, converted
+//!   into this machine's nanoseconds by that same control.
 //!
 //!   Both halves are that shape because both of the first two drafts were red on
 //!   a runner with nothing wrong with the code: the ceiling unconditionally, at
@@ -47,6 +50,29 @@
 //!   `O(log n)` and its working set leaves cache between the two populations, so
 //!   the growth is machine-sensitive too — dividing by the calibration's own
 //!   growth is what cancels both.
+//!
+//!   **And a third red, which is why the control looks the way it does now**
+//!   (island wave I4b). At `fc34632` the ubuntu runner read 318.8 / 412.8 /
+//!   430.2 ns/entity against 57.6 / 82.1 / 97.8 here, on a `sync` path that the
+//!   whole wave had not touched by one byte. The control could not see it: it
+//!   read **98.6** ns/entry, 1.37x its reference, and normalized 430.2 to 314.1.
+//!   The reason it could not see it is that the control and its subject did not
+//!   live in the same part of the memory hierarchy — a `BTreeMap<Uuid, [f64; 4]>`
+//!   at 13 000 entries is ~0.9 MB and stays in cache, while the reconcile's own
+//!   working set (its tracked records, rapier's two arenas, the snapshot vector)
+//!   is ~15 MB and does not. Measured here, with four threads streaming 64 MB
+//!   each in the background: the subject inflates **2.6–3.1x** and that control
+//!   **1.00–1.15x**. A control that barely moves while its subject triples is not a
+//!   control, and the CI history says so in the sharpest possible way — between
+//!   the two ubuntu readings the control got **faster** (108.7 -> 98.6 ns/entry
+//!   at 13 000; 112.6 -> 67.1 at 1 000) and the whole battery got faster (204 s
+//!   for 2 958 tests -> 163 s for 3 037) while the subject doubled.
+//!
+//!   [`calibration_ns`] therefore descends a map whose entries are the size of
+//!   the records the reconcile descends, comparing the fields the skip compares.
+//!   Over that same background load it inflates **2.9–4.1x** where the subject
+//!   inflates 2.6–3.1x — the two now move together, which is the only property a
+//!   divisor has to have.
 //!
 //! Measured on the Wave G machine, steady-state sync, 60 iterations, dev
 //! profile (which is what the battery runs), **before any repair**:
@@ -181,6 +207,59 @@ fn the_world_is_exactly_what_the_snapshot_says() {
     );
 }
 
+/// **The skip fires** — as a fact about the world, not a number on a clock
+/// (island wave I4b).
+///
+/// The CLOCK half below is a ratchet on the reconcile's *total* per-entity cost,
+/// and this wave measured what it no longer catches: with the skip forced open,
+/// a steady-state sync at 13 000 entities costs **108.9** ns/entity against
+/// 92.3 repaired, because the two other costs the 467.3 figure contained
+/// (`reconcile_joint` per entity, a `BTreeSet` of every guid per step) were
+/// repaired in the same wave and the `query_dirty = true` that used to ride
+/// along was retired in this one. A defect the ratchet would have caught by a
+/// factor of five now moves it by 18 %, which is inside the headroom the
+/// ceiling was given for a loaded runner.
+///
+/// So the skip gets an arm that has no clock in it at all.
+/// `set_body_pose_if_moved` returns before it touches the body list behind
+/// `PhysicsWorld3D::pending_query_marks`, and every static pose write goes
+/// through it — so on a town that has not moved, that list must not grow by one
+/// entry, and on a town where one wall moved, it must. Measured against the
+/// mutation: 2 048 marks with the skip forced open (256 bodies x 4 syncs x the
+/// two writes a pose is), against 0.
+#[test]
+fn a_steady_state_sync_marks_no_body_as_moved() {
+    const N: u32 = 256;
+    let mut snaps = town(N);
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync(&snaps);
+    // Whatever the spawn pass left pending is the baseline; nothing here drains
+    // it, because nothing here makes a query.
+    let base = bridge.world().pending_query_marks().0;
+
+    for _ in 0..4 {
+        bridge.sync(&snaps);
+    }
+    assert_eq!(
+        bridge.world().pending_query_marks().0,
+        base,
+        "a steady-state sync over {N} static bodies marked a body as moved — the \
+         pose-write skip is not firing, and every one of those marks is a \
+         `RigidBodySet::get_mut`, a wake and a stale query leaf paid sixty times \
+         a second for a town that has not moved"
+    );
+
+    // ANTI-VACUITY: the same counter has to move when a wall really moves, or
+    // the assertion above is satisfied by a counter that is simply dead.
+    snaps[7].translation = DVec3::new(-17.5, 3.25, 8.125);
+    bridge.sync(&snaps);
+    assert!(
+        bridge.world().pending_query_marks().0 > base,
+        "a static body that moved in the snapshot left the query tree's mark list \
+         untouched — the counter this arm reads is not the one the write path writes"
+    );
+}
+
 /// **The reference workload both halves below are calibrated against**, at a
 /// population of `n`.
 ///
@@ -188,56 +267,81 @@ fn the_world_is_exactly_what_the_snapshot_says() {
 /// **this** machine, moments before the arm that uses it.
 ///
 /// It is deliberately the steady-state sync's own dominant term and nothing
-/// else: an ordered descent through a `BTreeMap` keyed by `Uuid`, comparing a
-/// few `f64`s per entry. That is what the reconcile does per tracked entity
-/// once every skip has fired — so a machine that runs this at the calibrating
-/// machine's speed runs the reconcile at it too, and a machine that does not is
-/// not a machine the absolute ceiling was measured on.
+/// else: for each entry of a snapshot already in `guid` order, one descent
+/// through a `BTreeMap` keyed by `Uuid` to the record the bridge kept, and then
+/// the comparisons the skip is made of — pose against pose, collider descriptor
+/// against collider descriptor, every one of them answering *equal*, which is
+/// what a town that has not moved answers. That is what the reconcile does per
+/// tracked entity once every skip has fired, so this converts a nanosecond on
+/// the machine running it into a nanosecond on the machine the ceiling was
+/// minted on.
+///
+/// # The value type is the whole point (island wave I4b)
+///
+/// This used to descend a `BTreeMap<Uuid, [f64; 4]>` — the right *shape* and
+/// the wrong *footprint*. At 13 000 entries that tree is ~0.9 MB and stays in
+/// cache on anything; the reconcile's own working set at the same population is
+/// ~15 MB (its `BodyRecord`s, rapier's body and collider arenas, the snapshot
+/// vector) and stays in cache on nothing. A divisor that lives one level of the
+/// memory hierarchy above its subject cancels the machine's clock and none of
+/// its memory system, so a runner whose cores are *faster* and whose memory is
+/// slower or busier reads the control low and the subject high — which is
+/// exactly the red that sent this file back for a third time. See the module
+/// docs for the two ubuntu readings that state it in numbers.
+///
+/// So the entries here are [`EntitySync3D`] — 416 bytes, the size of what the
+/// bridge really keys by guid — and the incoming side is the same `town` vector
+/// the arm itself syncs. Same bytes per entry, same order, same compares. On
+/// the calibrating machine, under four background threads streaming 64 MB each,
+/// the subject's per-entity cost at 13 000 inflates 2.6–3.1x and this control's
+/// 2.9–4.1x; the control it replaces inflated 1.00–1.15x.
 ///
 /// **It is parameterised on `n` because the WORLD half needs its GROWTH**, not
 /// just its speed — see the arm below. A `BTreeMap` descent is `O(log n)` per
 /// lookup and its working set at 13 000 entries does not fit the caches that
 /// hold it at 1 000, so this function's own cost per entry rises with `n` by
-/// exactly the amount the reconcile's does, on whatever machine is running it.
+/// close to the amount the reconcile's does, on whatever machine is running it.
+///
+/// # Best of three, and which direction that errs in
+///
+/// The first pass is discarded (it faults the tree in) and the smallest of the
+/// three that follow is returned. A microbenchmark that is preempted reads
+/// **high**, and a divisor that reads high deflates the normalized cost and
+/// *manufactures slack* — the failure mode this file has already been burned by
+/// once, and named. Taking the minimum can only make the divisor smaller, so it
+/// can only make both claims below stricter. It costs ~3 ms at 13 000 entries.
 ///
 /// `black_box` on both ends: the whole loop is dead code otherwise.
 fn calibration_ns(n: u32) -> f64 {
     use std::collections::BTreeMap;
     use std::hint::black_box;
 
-    let map: BTreeMap<Uuid, [f64; 4]> = (0..n)
-        .map(|i| {
-            (
-                Uuid::from_u128(BASE + u128::from(i)),
-                [f64::from(i), 1.0, 2.0, 3.0],
-            )
-        })
-        .collect();
-    let keys: Vec<Uuid> = (0..n)
-        .map(|i| Uuid::from_u128(BASE + u128::from(i)))
-        .collect();
+    // The two sides the reconcile has: a snapshot in guid order, and the
+    // records the bridge kept, keyed by guid.
+    let want = town(n);
+    let have: BTreeMap<Uuid, EntitySync3D> = want.iter().map(|s| (s.guid, s.clone())).collect();
 
-    // One warm pass, then the measured one — the same shape as the arm itself.
-    let mut acc = 0.0f64;
-    for k in &keys {
-        if let Some(v) = map.get(black_box(k)) {
-            acc += v[0];
-        }
-    }
-    black_box(acc);
-
-    let t0 = Instant::now();
-    let mut acc = 0.0f64;
-    for k in &keys {
-        if let Some(v) = map.get(black_box(k)) {
-            // The comparisons the skip is made of.
-            if v[1] != v[2] || v[2] != v[3] {
-                acc += v[0];
+    let mut best = f64::INFINITY;
+    for pass in 0..4 {
+        let t0 = Instant::now();
+        let mut moved = 0u32;
+        for s in &want {
+            if let Some(rec) = have.get(black_box(&s.guid)) {
+                if rec.translation != s.translation
+                    || rec.rotation != s.rotation
+                    || rec.collider != s.collider
+                {
+                    moved += 1;
+                }
             }
         }
+        let ns = t0.elapsed().as_secs_f64() * 1e9 / f64::from(n);
+        black_box(moved);
+        if pass > 0 {
+            best = best.min(ns);
+        }
     }
-    black_box(acc);
-    t0.elapsed().as_secs_f64() * 1e9 / f64::from(n)
+    best
 }
 
 /// The steady-state cost, measured as a **scaling ratio** (WORLD — asserted
@@ -283,18 +387,44 @@ fn calibration_ns(n: u32) -> f64 {
 ///   would make it do, without bound.
 /// * **CLOCK** — the 200 ns/entity ratchet. Real, and still the honest number
 ///   for the class of machine it was measured on, so it is kept rather than
-///   loosened to fit the slowest runner (which would retire it). It asserts
-///   only when [`calibration_ns`] — the same `BTreeMap` descent plus `f64`
-///   compare the reconcile is *made of*, run in this process moments earlier —
-///   puts this machine within `CALIBRATION_TOLERANCE` of the calibrating one.
+///   loosened to fit the slowest runner (which would retire it). It is asserted
+///   after [`calibration_ns`] — the same descent plus the same compares the
+///   reconcile is *made of*, over entries the same size, run in this process
+///   moments earlier — has converted this machine's nanoseconds into that
+///   machine's. `CALIBRATION_TOLERANCE` is no longer the class gate it was: the
+///   conversion is what admits a slower machine, and the tolerance is only the
+///   point past which a control reading is a *preemption* rather than a
+///   measurement.
 ///
 /// # Measured, dev profile (what the battery runs)
 ///
-/// | entities | before the Wave G repair | after |
-/// |---|---|---|
-/// | 1 000 | 313.8 ns/entity | 60.6 |
-/// | 5 000 | 417.6 | 78.5 |
-/// | 13 000 | **467.3** | **94.7** |
+/// | entities | before the Wave G repair | after | island I4b |
+/// |---|---|---|---|
+/// | 1 000 | 313.8 ns/entity | 60.6 | 58.8 |
+/// | 5 000 | 417.6 | 78.5 | 80.7 |
+/// | 13 000 | **467.3** | **94.7** | **94.3** |
+///
+/// The third column is the same machine at `fc34632`, the tree the third red
+/// was raised against — flat against Wave G's repair, which is half the reason
+/// that red was read as a broken control rather than as a regression. (The
+/// other half is that the ubuntu runner's own control got *faster* between the
+/// two readings.)
+///
+/// # What the ceiling catches, measured rather than assumed
+///
+/// Two defects this file names, each restored on its own on the calibrating
+/// machine at 13 000 entities: the P32 `BTreeSet` of every seen guid, rebuilt
+/// per step for one `contains` sweep — **182.7** ns/entity; the pose-write skip
+/// forced open — **108.9**; both at once — **193.7**. Against a repaired 94.3
+/// and a ceiling of 200, only the first is close, and none of them is over.
+///
+/// That is stated rather than left implied because it is the honest reading of
+/// this ratchet's reach: it is a bound on the reconcile's **total** per-entity
+/// cost, worth roughly a doubling, and the individual repairs it was minted
+/// beside are each guarded by an arm of their own —
+/// `a_steady_state_sync_marks_no_body_as_moved` for the skip, the despawn
+/// sweep's own arms for the merge. The ceiling is not the place to learn that
+/// one of them came undone; it is the place to learn that the sum did.
 ///
 /// Note what the ratio does and does not say: 13k/1k is **1.49 unrepaired** and
 /// **1.56 repaired**, so the ratio is *not* the ratchet and never was — the
@@ -310,6 +440,22 @@ fn calibration_ns(n: u32) -> f64 {
 /// cache" are both properties of the machine the numbers were taken on, and a
 /// slower machine with a smaller cache pays more for both. `GROWTH_MARGIN`
 /// divides them out.
+///
+/// # …and why the divisor has to be made of the same bytes (island wave I4b)
+///
+/// The sentence above is the whole finding of the third red, read one clause
+/// too shallow. "A slower machine with a smaller cache pays more for both" is
+/// only a thing a divisor can cancel **if the divisor's own working set is in
+/// the same part of the memory hierarchy as its subject's**. It was not: a
+/// `BTreeMap<Uuid, [f64; 4]>` at 13 000 entries is ~0.9 MB against the
+/// reconcile's ~15 MB, so on a runner with fast cores and a busy memory system
+/// the control read *low* while the subject read *high*, and the normalization
+/// pointed the wrong way. [`calibration_ns`] now keys entries the size of the
+/// records the reconcile keys. Measured on the calibrating machine over fifteen
+/// runs, `subject / control` at 13 000 entities is **1.12–1.40** quiet and
+/// **0.75–1.24** under a four-thread memory hog; the control it replaces read
+/// **1.32–1.65** quiet and **4.10–5.07** loaded. The repair is that second
+/// column collapsing onto the first.
 #[test]
 fn the_steady_state_sync_does_not_scale_like_the_world() {
     const ITERS: u32 = 60;
@@ -319,32 +465,61 @@ fn the_steady_state_sync_does_not_scale_like_the_world() {
     /// repaired it. The headroom is for a loaded machine, and 200 is still less
     /// than half the cost this arm was born measuring.
     ///
-    /// **CLOCK**: asserted only on a machine in the calibrated class.
+    /// **CLOCK**: asserted after the control has converted this machine's
+    /// nanoseconds into the calibrating machine's.
+    ///
+    /// **NOT raised by the I4b repair, deliberately.** The third red was a
+    /// broken divisor, and a ceiling raised to cover a broken divisor is a
+    /// retired ratchet wearing a number.
     const CEILING_NS_PER_ENTITY: f64 = 200.0;
-    /// [`calibration_ns`] on the calibrating machine (dev profile), measured
-    /// over four runs: **66.9, 71.0, 73.4, 76.7** ns/entry. The reference is
-    /// the middle of that, so run-to-run noise on the calibrating machine is
-    /// well inside the tolerance below (its worst reading is 1.07x).
-    const CALIBRATION_REF_NS: f64 = 72.0;
-    /// How much slower than `CALIBRATION_REF_NS` a machine may be and still
-    /// have the absolute ceiling asserted against it. Comfortably inside the
-    /// ~3x the shared CI runner measured, and comfortably outside run-to-run
-    /// noise on a desktop.
-    const CALIBRATION_TOLERANCE: f64 = 1.6;
+    /// [`calibration_ns`] on the calibrating machine (dev profile), measured at
+    /// 13 000 entries over **fifteen** runs: 71.4, 72.8, 73.1, 73.6, 73.7,
+    /// 73.7, 73.8, 73.8, 74.0, 75.4, 76.4, 76.7, 77.4, 81.3, 87.0 ns/entry.
+    /// The reference is the middle of that; the worst reading is 1.16x, which
+    /// is a seventh of the tolerance below.
+    ///
+    /// Re-minted in the I4b repair because the control it names changed — the
+    /// old **72** was the same descent over 32-byte values, and 72 of those
+    /// nanoseconds were never the same quantity as 72 of these.
+    const CALIBRATION_REF_NS: f64 = 75.0;
+    /// How far from `CALIBRATION_REF_NS` a control reading may land and still
+    /// be treated as a measurement of this machine rather than as a leg that
+    /// was preempted.
+    ///
+    /// **It is not a machine-class gate any more** (island wave I4b). It was
+    /// 1.6, and it was doing two jobs: admitting only machines near the
+    /// calibrating one, *and* rejecting garbage. The first job is the
+    /// normalization's, and it is only honest to hand it over now that the
+    /// control shares its subject's footprint — a control that inflates with
+    /// the subject is exactly what makes `raw / ratio` mean something on a
+    /// machine three times slower. Left at 1.6, the new control would SKIP the
+    /// CLOCK half on every runner that has ever reddened it (the loaded
+    /// readings are 3.4–5.1x), which is a gate that cannot fail — the very
+    /// thing the "gates must falsify" law forbids.
+    ///
+    /// 8.0 is the second job alone: past it, a control that is *made of* the
+    /// subject's own bytes has read something the 60-iteration subject leg
+    /// beside it cannot have escaped, so the reading is the scheduler's and not
+    /// the machine's. Measured worst case on real hardware to date: 5.07x, with
+    /// four threads streaming 64 MB each in the background.
+    const CALIBRATION_TOLERANCE: f64 = 8.0;
     /// **WORLD**: how much faster than the CALIBRATION's own per-entity growth
     /// the reconcile's may grow, over the same two populations in the same
     /// process. See the function docs for why this is a ratio of ratios and not
     /// a constant.
     ///
-    /// Measured on the calibrating machine over **fourteen** runs
-    /// (`measured / calibration`): 0.69, 1.11, 1.12, 1.19, 1.22, 1.24, 1.27,
-    /// 1.33, 1.35, 1.36, 1.36, 1.39, 1.42, **1.45**. `3.0` is a little over
-    /// twice the worst of those, which is the headroom a shared runner under
-    /// load needs — and it is still far below what the defect looks like: a
-    /// term linear in the population inside the per-entity step makes the
-    /// measured growth ~13x while the calibration's stays at its `log n`-plus-
-    /// cache figure of ~1.3–1.6x, so the slack lands near **9x**, three times
-    /// clear of the margin in the other direction.
+    /// Measured on the calibrating machine over **fifteen** runs of the I4b
+    /// control (`measured / calibration`): 1.06, 1.16, 1.17, 1.18, 1.22, 1.25,
+    /// 1.26, 1.30, 1.32, 1.33, 1.34, 1.35, 1.36, 1.38, **1.41** — and 0.71,
+    /// 1.18, 1.29 with the memory hog running. (The control this replaces
+    /// measured 0.69–1.45 over fourteen; the band is the same width and better
+    /// centred, because the divisor now leaves cache where the subject does.)
+    /// `3.0` is a little over twice the worst of those, which is the headroom a
+    /// shared runner under load needs — and it is still far below what the
+    /// defect looks like: a term linear in the population inside the per-entity
+    /// step makes the measured growth ~13x while the calibration's stays at its
+    /// `log n`-plus-cache figure of ~1.3–1.7x, so the slack lands near **8x**,
+    /// well clear of the margin in the other direction.
     ///
     /// Both readings below 1.0 are the divisor being noisy upward (one run saw
     /// a 2.43x calibration growth), which only *passes* a regression. Noise in
@@ -381,7 +556,13 @@ fn the_steady_state_sync_does_not_scale_like_the_world() {
         return;
     }
 
-    let mut report: Vec<(u32, f64)> = Vec::new();
+    // `(entities, ms/sync, control ns/entry)`. The control leg is taken
+    // **inside** this loop, next to the subject leg it divides (island wave
+    // I4b): a shared runner's memory system is busy in bursts, and two numbers
+    // meant to cancel each other have to be taken in the same burst. The old
+    // arrangement took all three subject legs and then both control legs, so
+    // ~400 ms of scheduling could sit between a figure and its divisor.
+    let mut report: Vec<(u32, f64, f64)> = Vec::new();
     for n in [GROWTH_SMALL, 5_000, GROWTH_LARGE] {
         let snaps = town(n);
         let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
@@ -394,8 +575,9 @@ fn the_steady_state_sync_does_not_scale_like_the_world() {
         }
         let elapsed = t0.elapsed().as_secs_f64();
         let ms = elapsed * 1e3 / f64::from(ITERS);
+        let calib = calibration_ns(n);
         eprintln!(
-            "sync @ {n:>6} entities: {ms:.4} ms  ({:.1} ns/entity)",
+            "sync @ {n:>6} entities: {ms:.4} ms  ({:.1} ns/entity), control {calib:.1} ns/entry",
             ms * 1e6 / f64::from(n)
         );
         // ANTI-VACUITY, per leg: a ratio between two numbers that are really
@@ -407,21 +589,18 @@ fn the_steady_state_sync_does_not_scale_like_the_world() {
             "the {n}-entity leg measured {elapsed:e} s over {ITERS} syncs — that is \
              timer resolution, not a cost, and every claim below would be noise"
         );
-        report.push((n, ms));
+        report.push((n, ms, calib));
     }
 
-    let (small_n, small_ms) = report[0];
-    let (n, ms) = *report.last().expect("three sizes");
+    let (small_n, small_ms, calib_small) = report[0];
+    let (n, ms, calib_large) = *report.last().expect("three sizes");
     let ns_per_entity = ms * 1e6 / f64::from(n);
     let small_ns_per_entity = small_ms * 1e6 / f64::from(small_n);
 
     // ── WORLD: the scaling shape, against this machine's own ────────────────
     //
-    // Both calibration legs are taken here, back to back with the measurement
-    // above and with each other, so the ratio of ratios is a single machine's
-    // answer under a single load.
-    let calib_small = calibration_ns(GROWTH_SMALL);
-    let calib_large = calibration_ns(GROWTH_LARGE);
+    // Each control leg was taken beside its own subject leg above, so the ratio
+    // of ratios is a single machine's answer under a single load.
     assert!(
         calib_small > 0.0
             && calib_small.is_finite()
@@ -457,9 +636,9 @@ fn the_steady_state_sync_does_not_scale_like_the_world() {
         assert!(
             slack < GROWTH_MARGIN,
             "per-entity steady-state sync cost grew {growth:.2}x from {small_n} to {n} \
-             entities ({small_ns_per_entity:.1} -> {ns_per_entity:.1} ns/entity) while a \
-             bare BTreeMap descent over the same two populations, on this machine, in \
-             this process, grew {calib_growth:.2}x — {slack:.2}x more than it should, \
+             entities ({small_ns_per_entity:.1} -> {ns_per_entity:.1} ns/entity) while the \
+             same descent over records the same size, over the same two populations, on \
+             this machine, in this process, grew {calib_growth:.2}x — {slack:.2}x more than it should, \
              against a margin of {GROWTH_MARGIN}x. Work proportional to the POPULATION \
              has been re-introduced inside the per-entity step: a `contains` over the \
              seen set, a scan per contact, a rebuild of the reverse map. (A slower \
@@ -467,7 +646,7 @@ fn the_steady_state_sync_does_not_scale_like_the_world() {
         );
     }
 
-    // ── CLOCK: the absolute ratchet, only where it was measured ─────────────
+    // ── CLOCK: the absolute ratchet, in the calibrating machine's ns ────────
     let calib = calib_large;
     let ratio = calib / CALIBRATION_REF_NS;
     let calibrated = calib <= CALIBRATION_REF_NS * CALIBRATION_TOLERANCE;
@@ -478,10 +657,11 @@ fn the_steady_state_sync_does_not_scale_like_the_world() {
     );
     if !calibrated {
         eprintln!(
-            "SKIP the CLOCK half: this machine runs the reconcile's own dominant term \
-             {ratio:.2}x slower than the one {CEILING_NS_PER_ENTITY} was measured on, \
-             so a nanosecond here is not the nanosecond that number means. Measured \
-             {ns_per_entity:.1} ns/entity at {n} entities."
+            "SKIP the CLOCK half: the control read {ratio:.2}x its reference — past the \
+             point where a workload made of the subject's own bytes, run beside a \
+             60-iteration subject leg that did not read {ratio:.2}x, is measuring this \
+             machine rather than the scheduler. Measured {ns_per_entity:.1} ns/entity \
+             at {n} entities."
         );
         return;
     }
@@ -493,6 +673,14 @@ fn the_steady_state_sync_does_not_scale_like_the_world() {
     // machine FASTER than the reference divides by 1.0, never by its own speed,
     // so a fast runner cannot manufacture slack; a genuine 2x regression on the
     // 1.51x machine still normalizes to ~265 and fails.
+    //
+    // **And this line is only sound because the divisor is made of the same
+    // bytes** (island wave I4b). With a control that stayed in cache while the
+    // subject left it, `ratio` measured the machine's clock and `ns_per_entity`
+    // measured its clock AND its memory system, so the division cancelled half
+    // a quantity: 430.2 raw on a runner the control called 1.37x normalized to
+    // 314.1 and reddened a green tree. The control's footprint is the fix, not
+    // the arithmetic here, which is unchanged.
     let normalized = ns_per_entity / ratio.max(1.0);
     assert!(
         normalized < CEILING_NS_PER_ENTITY,
