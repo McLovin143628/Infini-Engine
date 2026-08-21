@@ -25089,3 +25089,41 @@ end of this block.
 * **An exact cache key costs what it measures, and the HIT is where the cost lands.**
 * **A mirror comment needs its own arm** — the P24 "two hosts agreeing is not the world being
   right", one level down, at a *declaration* that says it mirrors another.
+
+### The mutations
+
+**Twenty-one**, six of the implementer's and fifteen new. After the repairs each dies at exactly
+the arm that names it and at no other.
+
+| mutation | before the audit | now |
+|---|---|---|
+| the origin term leaves `scatter_caster_key` | *(the defect as shipped)* | `the_scatter_caster_key_moves_when_the_pack_it_caches_would` |
+| any one of `ScatterBatch`'s eight fields stops being folded | **nothing at all** | `the_scatter_caster_fold_moves_for_every_field_of_a_batch` |
+| both `active_bodies()` extends deleted from `step` | **540 answers, all green** | the two-world equivalence gate |
+| the pre-step extend alone / the post-step extend alone | green | *(still green — a coverage bound, recorded above)* |
+| `set_body_translation` drops its mark | **the whole `inf-physics` crate green** | `a_teleported_body_answers_where_it_landed_and_not_where_it_was` |
+| `set_body_rotation` drops its mark | **the whole crate green** | the same arm, second half |
+| `remove_body` / `remove_collider` drop their rebuild | **the whole crate green** | *(unfalsifiable — recorded, and the claim corrected)* |
+| `PrimMesh`'s `Cube` and `Sphere` are swapped | `structure_lod_pop`'s `> 4×` / `> 50 %` bounds are loose enough not to notice | the crate stops compiling |
+| every VSM group-mask bit forced clear | — | **18 of `vsm_raster.rs`'s 34 arms** |
+| every caster attributed to group 0 | — | **6** of them |
+| `read_draw_counts` stops expanding through `last_slots` | — | `the_per_page_cull_drops_the_casters_the_page_cannot_see` |
+| `FIXED_FIXED` back on for 3D solids | — | `two_static_solids_that_overlap_compute_no_manifold` |
+| 3D sensors take the narrow set | — | `a_static_sensor_over_static_scenery_still_reports_its_overlap` |
+| 2D sensors narrow / 2D solids widen | **no 2D arm existed** | `a_static_solid_pair_reports_nothing_and_a_static_sensor_pair_still_does`, both directions |
+| `StepClock::mark` assigns instead of adding | — | `a_phase_marked_twice_sums_rather_than_replaces` |
+| a `phase` constant collides with its neighbour | `SOLVER` and `CAMERA` — the two the ledger's headline attributions are *labels off* — were unpinned | two named pins + a permutation check |
+| `set_step_profiling` is a no-op | — | `the_profile_does_not_move_the_simulation`'s zero-step clause |
+| `StepProfile::total_ms` sums the first eleven slots | **green at the 10 % tolerance** (5.39 % of the step lost) | the tiling clause at 2 % |
+| a device poll inside `PlayerRenderHost::render` | — | `the_shipped_players_frame_path_does_not_wait_for_the_gpu` |
+| a poll inside a **helper** on `PlayerRenderHost`, called from `PlayerApp::frame` | **both source scopes green** — neither call site contains `poll(` | the same arm's **module** ban |
+
+### The audit's commits
+
+In order: the origin-blind caster cache · three arms the incremental query tree did not have ·
+the VSM mask's group id · the pipelining arm's second scope and the `PrimMesh` pin · what the
+CPU column tiles and what the exact key costs · the caster fold field-by-field and the 2D
+mirror's arm · the findings and the laws · the player's vsync · the phase table's pins, two
+laws and a priced refusal · the wave's commit range re-stated · three carried observations ·
+A11's bound · the module-wide poll ban · the tiling tolerance · the audit's own instrument runs
+and the corrected distance row · this ledger.
