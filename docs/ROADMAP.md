@@ -25127,3 +25127,55 @@ mirror's arm · the findings and the laws · the player's vsync · the phase tab
 laws and a priced refusal · the wave's commit range re-stated · three carried observations ·
 A11's bound · the module-wide poll ban · the tiling tolerance · the audit's own instrument runs
 and the corrected distance row · this ledger.
+
+### Counts
+
+| | after I4b | **after the audit** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 306 / 5 704 / 0 / 14 | **306 / 5 710 / 0 / 14** — **exactly six** new arms and **no test binary**: two in `passes::shadow`, two in `step_cost_3d`, one in `d2`, one in `step_profile` |
+| frontend tests / files | 702 / 78 | **702 / 78**, `tsc` and `eslint` clean |
+| goldens | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical** (100 arms), re-run on the audit's head; not one golden byte moved across the whole range |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| rustdoc individual warnings (cold, 41 roots touched) | 413 | **413** — 447 − 34, cross-checked against the summaries' own sum; the audit fixed the one warning it had added and adds none |
+| schema versions | unchanged | **unchanged**, verified as a diff over every `.rs` in the range rather than assumed |
+
+### Certification
+
+Wave I4b is **certified** at this tree. Its four clauses stand as follows.
+
+**Clause 1 — the fixed step — HELD, and re-measured phase for phase.** `physics3d sync` 0.796,
+`solver` 0.322, `character move` 0.062, `camera` 0.003, everything else under 0.02, and the
+wall clock and the sum of the phases both **1.250 ms** against a 6.0 ms ceiling. The
+`FIXED_FIXED` finding is confirmed **on the instrument's own scene** and not only on a fixture:
+7 443 bodies, 7 346 admitted structure colliders, **20 806 contact pairs tracked and zero
+touching**. The I3 "2.2 ms is the band" line really was `banded × 0.363 µs`, i.e. arithmetic,
+and the retirement is correct. Two corrections attach: the narrowing does drop one reader (a
+Blueprint `Collision` event on a static solid pair), and the incremental query tree's own gate
+could not fail — repaired, with two of its doors armed for the first time.
+
+**Clause 2 — the lighting stack — HELD.** `vsm-raster` records **6.021 ms** and `shadow`
+**0.153**; the group mask skips **8 416** draws per rastering frame against **387** issued; the
+invalidation scatter is **206 399 touches per frame**, to the unit. One defect (the caster
+cache's blindness to the origin) and one hardening (the group id read from `ids.x`, the field
+the cull reads) attach to it.
+
+**Clause 3 — the impostor — HELD exactly.** 26 792 px, **9.2×** the mesh's 2 903, **91.6 %**
+moving, over a **zero** noise floor, with the geometry reading the refusal rests on unmoved at
+**63 of 2 903 px, worst channel 18/255**. The conditional refusal was re-taken correctly.
+
+**Clause 4 — the pipelining — HELD, and now armed at the strength it claimed.** The player's
+frame path does not wait, at both scopes and over both modules. The estimate is
+`max(CPU without the wait or the stopwatch, GPU frame)` and it is a **lower bound**, because
+the player presents with `AutoVsync`.
+
+**The blocker the audit does raise is a labelling one, not an engineering one**, and it is
+fixed in place: "the shipped-default 1080p frame is inside the 60 fps budget at p50 and p95"
+is true at p50 on every run and true at p95 on two of three. Everything else the wave claims
+reproduces inside its own stated ranges.
+
+**No blocker for IP.** The three owed items are routed by name with their conditions attached:
+the **present-to-present harness** (which must configure `Immediate` or `Mailbox`, because a
+windowed harness under `AutoVsync` measures the panel), the **VSM caster-pack cache** (whose
+key must carry the floating origin and be pinned field-by-field — A1 and A9, learned the hard
+way one cache earlier), and the **P19 `kind_index` → real mesh project**, named as a
+phase-sized item rather than as a clause of the cook item it blocks.

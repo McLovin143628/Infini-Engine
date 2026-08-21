@@ -22,7 +22,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **I2** | the GIS door — IB-3, IB-4, IB-5, IB-6, IB-14, IB-11's near half | **DONE + AUDITED** — battery 296 / 5 618 / 0 / 13, frontend 702 / 78, goldens 54, clippy 0, rustdoc 443 |
 | **I3** | city scale — IB-2a/b/c, IB-8, IB-13, the city fixture | **DONE + AUDITED** — see below |
 | **I4** | the fps instrument + budgets — IB-9, IB-16, IB-12, the shipping-resolution harness | **DONE + AUDITED** — see below |
-| **I4b** | **performance** — the sim fixed step, the lighting stack, the scatter impostor, the pipelining | **DONE** (audit pending) — battery 306 / 5 704 / 0 / 14, frontend 702 / 78, goldens 54 strict, clippy 0, rustdoc 413. Step 12.7 → 1.2 ms; lit p95 92.3 → 38–42; unlit 1080p now **inside** the 60 fps budget |
+| **I4b** | **performance** — the sim fixed step, the lighting stack, the scatter impostor, the pipelining | **DONE + AUDITED** — battery 306 / 5 710 / 0 / 14, frontend 702 / 78, goldens 54 strict, clippy 0, rustdoc 413, no schema moved. Step 12.7 → **1.25 ms**; lit p95 92.3 → **38.9–41.3**; unlit 1080p **inside the 60 fps budget at p50 on every run and at p95 on two of three** (the audit's correction). One defect fixed: the scatter caster cache was blind to the floating origin |
 | **IP** | the remainder of the performance list — the cook's PCG evaluation, IB-9's island ceiling, the VSM caster scatter | **carried** — see *What is still open after I4b* below |
 | I5 | source data — IB-11 (DEM ingest reality, CRS, LiDAR) | not started |
 | ~~I6~~ | ~~scale seams — IB-12~~ *(pulled into I4; IB-8 and IB-13 into I3)* | **absorbed** |
@@ -1483,6 +1483,19 @@ removal paths is unfalsifiable through the type's own surface, and the increment
 crossover on a mostly-awake world is unmeasured. One hardening was **refused and priced** (a
 quote-parity reader for the eaten-continuation sweep: thirteen of its fourteen accumulated
 exceptions are runs genuinely *inside* a literal, which parity cannot help).
+
+### Counts, after the audit
+
+| | after I4b | **after the I4b audit** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 306 / 5 704 / 0 / 14 | **306 / 5 710 / 0 / 14** — the audit adds **exactly six** arms and **no test binary**: two in `passes::shadow`, two in `step_cost_3d`, one in `d2`, one in `step_profile` |
+| frontend tests / files | 702 / 78 | **702 / 78**, `tsc` and `eslint` clean — no UI was touched by either |
+| goldens | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical under `INF_GOLDEN_STRICT=1`** (100 arms), re-run on the audit's head after the caster-key fix and the VSM group-id change; **not one golden byte moved across the whole range** `3c9d87b..` this tree |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** (local toolchain 1.97) |
+| rustdoc individual warnings (cold, all 41 roots touched) | 413 | **413** — 447 `^warning` lines − 34 summaries, cross-checked against the sum of the summaries' own counts. The audit found and fixed the **one** warning it had itself added (a public item linking a private one) and adds none; the wave's `+1` over I4's 412 stays unattributed, and the per-crate distribution is recorded so the next measure can localize it |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — not one schema constant moved across the wave OR the audit**, checked as a diff over every `.rs` in the range rather than assumed |
+| ratchets | three, all down | unchanged — the audit minted none and raised none |
+| committed samples | 20 levels | **20**, byte-unmoved |
 
 ## What is still open after I4b
 
