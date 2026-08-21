@@ -10684,6 +10684,7 @@ mod tests {
             write_phase29_locomotion().expect("regenerate phase29 locomotion");
             write_city().expect("regenerate the island city");
             write_gameplay().expect("regenerate the island gameplay fixture");
+            crate::island::write_island_levels().expect("regenerate the island levels");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }
@@ -11294,6 +11295,51 @@ mod tests {
                 std::fs::read_to_string(citydir.join("README.md")).unwrap(),
                 CITY_README,
                 "committed city README drifted from the generator"
+            );
+        }
+
+        // The island levels (I7). The `.inf_lvl` and the `.inf_pcg` are locked
+        // together for the city's own reason: the level says nothing about what
+        // the biome binding GROWS, so a drifted cover document would not fail
+        // here as a byte diff -- it would fail in the gate as "the island has a
+        // different population", which is a much worse place to learn it.
+        //
+        // A recipe whose derived layers have not been written yet is SKIPPED
+        // rather than failed, exactly as the platformer sample above is: a fresh
+        // checkout that has not run `inf island route` has no design to author a
+        // level from.
+        for rel in crate::island::ISLAND_RECIPES {
+            let Some(design) = crate::island::committed_design(rel) else {
+                eprintln!("SKIP: no committed island design at {rel}");
+                continue;
+            };
+            let dir = crate::island::repo_root()
+                .join(rel)
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            let slug = inf_island::slug(&design.recipe.name);
+            let lvl = dir.join(format!("{slug}.inf_lvl"));
+            if !lvl.exists() {
+                eprintln!("SKIP: {} has not been blessed yet", lvl.display());
+                continue;
+            }
+            assert_eq!(
+                std::fs::read(&lvl).unwrap(),
+                crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(
+                    &crate::island::island_scene(&design)
+                ))
+                .unwrap(),
+                "committed {} drifted from the island generator",
+                lvl.display()
+            );
+            assert_eq!(
+                std::fs::read(dir.join(format!("{slug}Cover.inf_pcg"))).unwrap(),
+                inf_asset::encode(&crate::island::island_cover_payload(
+                    design.recipe.seed_for("cover")
+                ))
+                .unwrap(),
+                "committed {slug}Cover.inf_pcg drifted from the generator"
             );
         }
     }

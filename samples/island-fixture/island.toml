@@ -22,6 +22,16 @@ coast = "layers/coast.geojson"
 streams = "layers/streams.geojson"
 lakes = "layers/lakes.geojson"
 
+# The committed halves a build copies into the project's Content. Must stay above
+# the first `[table]` header — see the full island's recipe for what happens when
+# it does not.
+content = [
+  "IslandFixture.inf_lvl",
+  "IslandFixture.inf_lvl.toml",
+  "IslandFixtureCover.inf_pcg",
+  "IslandFixtureCover.inf_pcg.toml",
+]
+
 # The same UTM zone and the same ground as the full island, offset to sit over
 # the corner with the most relief per square kilometre — a fixture on flat ground
 # would certify the hydrology against a puddle.

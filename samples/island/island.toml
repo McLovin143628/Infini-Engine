@@ -27,6 +27,23 @@ coast = "layers/coast.geojson"
 streams = "layers/streams.geojson"
 lakes = "layers/lakes.geojson"
 
+# The committed halves a build copies into the project's Content, so ONE command
+# produces something that cooks. The level and the `.inf_pcg` its biome set binds
+# are written by the Ring-1 generator
+# (`INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`) from the design in
+# this folder — no elevation is read to author them.
+#
+# **This key must stay above the first `[table]` header.** In TOML a bare key
+# after one belongs to it, so `content` written below `[source]` becomes
+# `source.content` — a key nothing reads, silently. It did, and the copy step
+# quietly did nothing until `deny_unknown_fields` made it say so.
+content = [
+  "VancouverIsland.inf_lvl",
+  "VancouverIsland.inf_lvl.toml",
+  "VancouverIslandCover.inf_pcg",
+  "VancouverIslandCover.inf_pcg.toml",
+]
+
 # ─── where on Earth ────────────────────────────────────────────────────────────
 # UTM zone 10N. World (0, 0, 0) is 49.34 N, 123.10 W — the ground behind
 # Ambleside, with Grouse and Hollyburn to the north and the inlet to the south.

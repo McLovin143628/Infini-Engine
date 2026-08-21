@@ -183,19 +183,42 @@ fn inf_island_is_not_linked_by_the_cook_or_the_runtime() {
         let path = root.join(rel);
         let src = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let dep_lines: Vec<&str> = src
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.starts_with('#'))
-            .collect();
+        // **Only the SHIPPING sections.** A `[dev-dependencies]` entry is not
+        // linked by the shipped player — `island_gate` builds the island through
+        // `inf island build`'s own door and drives it on both hosts, which is
+        // exactly the kind of test that has to name this crate. What must stay
+        // clean is what a cooked or shipped binary links.
+        let mut section = "";
+        let mut dep_lines: Vec<&str> = Vec::new();
+        for raw in src.lines() {
+            let l = raw.trim();
+            if l.starts_with('[') {
+                section = l;
+                continue;
+            }
+            if l.starts_with('#') {
+                continue;
+            }
+            if section.contains("dev-dependencies") || section.contains("build-dependencies") {
+                continue;
+            }
+            if section.contains("dependencies") {
+                dep_lines.push(l);
+            }
+        }
+        assert!(
+            !dep_lines.is_empty(),
+            "{rel} parsed to no dependency lines — this scan is reading nothing"
+        );
         for banned in ["inf-island", "inf-gis"] {
             assert!(
                 !dep_lines.iter().any(|l| l.starts_with(banned)),
-                "{rel} names `{banned}` as a dependency. `inf-island` depends on \
-                 `inf-gis`, whose projection modules are exempt from the \
-                 portability gate on the grounds that nothing which cooks or ships \
-                 re-derives a coordinate through them. Linking either retires that \
-                 exemption."
+                "{rel} names `{banned}` as a SHIPPING dependency. `inf-island` \
+                 depends on `inf-gis`, whose projection modules are exempt from \
+                 the portability gate on the grounds that nothing which cooks or \
+                 ships re-derives a coordinate through them. Linking either \
+                 retires that exemption. (A `[dev-dependencies]` entry is fine \
+                 and is how `island_gate` reaches the island.)"
             );
         }
     }

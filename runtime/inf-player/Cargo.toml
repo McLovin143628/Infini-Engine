@@ -153,6 +153,13 @@ winit = { workspace = true, features = ["android-native-activity"] }
 
 [dev-dependencies]
 inf-editor-core = { workspace = true }
+# I7: `island_gate` builds the CI-scale island through `inf island build`'s own
+# door and drives it on both hosts. **Dev-only, and the portability gate in
+# `inf-island/tests/portable_math_law.rs` asserts it stays that way**: linking
+# `inf-island` into the shipped player would link `inf-gis`, whose projection
+# modules are exempt from the libm ban on the grounds that nothing which cooks or
+# ships re-derives a coordinate through them. A dev-dependency does not.
+inf-island = { workspace = true }
 # `grammar_bake` re-opens the baked `.inf_mesh` through the DCC kernel's own
 # reader, because "can this be edited again" is a question only that reader can
 # answer — inferring it from `ExportReport::coincident_vertices` would be the

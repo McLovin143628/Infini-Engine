@@ -21,7 +21,7 @@ use std::path::Path;
 use glam::{DVec2, DVec3};
 
 use crate::biome::{biome_set, classify_biomes, BiomeClassification, IslandBiome};
-use crate::hydro::{self, FlowField, HydroParams, StreamNetwork};
+use crate::hydro::{self, FlowField, HydroParams, Stream, StreamNetwork};
 use crate::layers;
 use crate::recipe::IslandRecipe;
 use crate::report::{IslandReport, LayerDrift};
@@ -139,6 +139,113 @@ impl IslandBuild {
     pub fn step_count(&self, s: BuildStep) -> usize {
         self.log.iter().filter(|l| l.step == s).count()
     }
+}
+
+/// The island's **committed design**, read without building anything.
+///
+/// # Why this exists, and why the level is authored from it
+///
+/// A level is committed; a terrain is not. If the level's author needed the
+/// built terrain it would be a committed document only one machine could
+/// produce, and CI could neither regenerate it nor check that it had not
+/// drifted.
+///
+/// So: everything a level needs — where on Earth the world is, how big it is,
+/// where the water is, where the roads go, what the biome palette binds, where
+/// the settlements are — is **committed data**, and this is the door onto it. It
+/// opens five small files and no elevation tile.
+#[derive(Debug)]
+pub struct IslandDesign {
+    pub recipe: IslandRecipe,
+    pub anchor: inf_math::geo::GeoAnchor,
+    pub grid: IslandGrid,
+    /// The derived water, read back from its committed layers.
+    pub network: StreamNetwork,
+    /// The designed road network, read back from its committed layer.
+    pub routes: Vec<Route>,
+    /// The designed shore's rings, world XZ.
+    pub coast: Vec<Vec<DVec2>>,
+    /// The palette, with its vegetation bound.
+    pub biome_set: inf_terrain::BiomeSet,
+}
+
+impl IslandDesign {
+    /// The world position a player starts at — see [`player_start`].
+    pub fn start(&self, lift_m: f64) -> DVec3 {
+        player_start(&self.recipe, &self.routes, lift_m)
+    }
+
+    /// The shore's length in metres.
+    pub fn coastline_m(&self) -> f64 {
+        self.coast
+            .iter()
+            .flat_map(|r| (0..r.len()).map(move |i| (r[(i + 1) % r.len()] - r[i]).length()))
+            .sum()
+    }
+
+    /// The reaches worth a `WaterBody`, largest catchment first.
+    ///
+    /// **Not all of them, and the bound is a measurement rather than a taste.**
+    /// `WaterSurface::height_at` is `O(frames)` for a river and a `RiverPath`
+    /// holds `segments × samples_per_segment` of them; the island's fifty reaches
+    /// are about 3 000 segments, so binding every one would put ~48 000 frames
+    /// behind every buoyancy query in the world. The rest are still *there* — the
+    /// carve cut their channels into the ground — they are dry beds rather than
+    /// water bodies, and that is stated rather than hidden.
+    pub fn rivers(&self, max: usize) -> Vec<&Stream> {
+        let mut v: Vec<&Stream> = self.network.streams.iter().collect();
+        v.sort_by(|a, b| {
+            b.catchment_m2
+                .total_cmp(&a.catchment_m2)
+                .then(a.points[0].x.total_cmp(&b.points[0].x))
+                .then(a.points[0].z.total_cmp(&b.points[0].z))
+        });
+        v.truncate(max);
+        v
+    }
+}
+
+/// Read the committed design. No tile is opened and no terrain is built.
+pub fn read_design(recipe: &IslandRecipe) -> Result<IslandDesign, IslandError> {
+    let anchor = recipe.anchor()?;
+    let grid = IslandGrid::of(recipe);
+    let hp = HydroParams {
+        sea_level_m: recipe.sea.level_m,
+        waterfall_grade: recipe.hydro.waterfall_grade,
+        ..Default::default()
+    };
+    let network = committed_network(
+        &recipe.resolve(&recipe.streams),
+        &recipe.resolve(&recipe.lakes),
+        &anchor,
+        hp.waterfall_grade,
+    )?;
+    let road_layer = layers::read_layer(
+        &recipe.resolve(&recipe.roads.layer),
+        inf_gis::LayerKind::Roads,
+        &anchor,
+    )?;
+    let coast_layer = layers::read_layer(
+        &recipe.resolve(&recipe.coast),
+        inf_gis::LayerKind::Generic,
+        &anchor,
+    )?;
+    Ok(IslandDesign {
+        routes: layers::routes_of(&road_layer),
+        coast: layers::rings_of(&coast_layer),
+        biome_set: {
+            let mut s = biome_set(
+                &recipe.name,
+                Some(inf_asset::AssetId(cover_pcg_guid(&recipe.name))),
+            );
+            s.name = format!("{} Biomes", recipe.name);
+            s
+        },
+        recipe: recipe.clone(),
+        anchor,
+        grid,
+        network,
+    })
 }
 
 /// Run the recipe.
@@ -443,7 +550,10 @@ pub fn build_island(
         }
         classifier.at(p, f64::from(coarse.at(i, j)), coarse.slope_deg(i, j))
     });
-    let mut set = biome_set(&recipe.name);
+    let mut set = biome_set(
+        &recipe.name,
+        Some(inf_asset::AssetId(cover_pcg_guid(&recipe.name))),
+    );
     set.name = format!("{} Biomes", recipe.name);
     say(
         BuildStep::Biomes,
@@ -756,7 +866,58 @@ pub fn write_content(build: &IslandBuild, content: &Path) -> Result<Vec<String>,
     .save(&p)
     .map_err(|e| IslandError::Io(e.to_string()))?;
     written.push(p.display().to_string());
+
+    // The committed halves the recipe names — the level, its assets, the
+    // `.inf_pcg` the biome set binds. Copied so that one command produces a
+    // project that cooks.
+    for rel in &build.recipe.content {
+        let src = build.recipe.resolve(rel);
+        let name = std::path::Path::new(rel)
+            .file_name()
+            .ok_or_else(|| IslandError::Settings(format!("[content] {rel:?} names no file")))?;
+        let dst = content.join(name);
+        std::fs::copy(&src, &dst).map_err(|e| {
+            IslandError::Io(format!(
+                "copying {} into the project: {e} — `[content]` names files that \
+                 live beside the recipe",
+                src.display()
+            ))
+        })?;
+        written.push(dst.display().to_string());
+    }
     Ok(written)
+}
+
+/// The world position a level's player start belongs at, from the **committed
+/// road layer**.
+///
+/// # Why the roads and not the terrain
+///
+/// The level is committed and the terrain is not, so a start whose elevation came
+/// from the terrain would be a committed number that only one machine could
+/// produce. The road network *is* committed, it passes through every settlement
+/// by construction, and its vertices carry the ground each was planned at — so
+/// the nearest road vertex to the first city is a ground height in the design
+/// rather than in a build artifact.
+///
+/// `lift_m` is added on top, because a character spawned exactly on the ground
+/// is a character the first ground snap has to resolve out of the floor.
+pub fn player_start(recipe: &IslandRecipe, routes: &[Route], lift_m: f64) -> DVec3 {
+    let site = recipe
+        .sites_of(crate::recipe::SiteKind::City)
+        .next()
+        .or_else(|| recipe.sites.first());
+    let p = site.map(|s| DVec2::new(s.x, s.z)).unwrap_or(DVec2::ZERO);
+    let mut best: Option<(f64, f64)> = None;
+    for r in routes {
+        for v in &r.points {
+            let d = (DVec2::new(v.x, v.z) - p).length_squared();
+            if best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, v.y));
+            }
+        }
+    }
+    DVec3::new(p.x, best.map(|(_, y)| y).unwrap_or(0.0) + lift_m, p.y)
 }
 
 /// A file-name slug from an island's name.

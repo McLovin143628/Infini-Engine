@@ -38,6 +38,7 @@ inf-math = { workspace = true }
 # The Wave-G GIS readers + CRS transforms. Ring 1 -> Ring 0, host-only: this
 # crate is the editor, and nothing in the shipped player links it.
 inf-gis = { workspace = true }
+inf-island = { workspace = true }
 inf-asset = { workspace = true }
 # The embedded DCC's half-edge mesh kernel (P23.3/P23.4): the Model Editor edits
 # a `MeshSession` and previews it through `crate::dcc`. Ring 1 -> Ring 0.

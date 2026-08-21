@@ -326,16 +326,32 @@ pub fn classify_biomes(
     )
 }
 
-/// The `.inf_biomes` set this palette describes.
+/// The `.inf_biomes` set this palette describes, **with its vegetation bound**.
 ///
-/// Each biome's `pcg_graph` is filled by the caller that knows which `.inf_pcg`
-/// asset the level ships — the binding is stored on the set, not here, because
-/// the set is the one authority `inf_pcg::BiomeBinding::from_set` reads.
-pub fn biome_set(name: &str) -> inf_terrain::BiomeSet {
+/// # The binding lives on the set, and that is not this crate's choice
+///
+/// `inf_pcg::BiomeBinding::from_set` reads `BiomeDef::pcg_graph` — the set is the
+/// one authority on "what grows in this biome", and both hosts resolve it
+/// through the same door. So the set this crate writes carries the binding
+/// rather than leaving a second place for it to be attached later.
+///
+/// `cover` is the `.inf_pcg` asset every **scattering** biome points at. Urban is
+/// the one that does not, and that is the whole point of reserving it: I8's
+/// settlement generator finds bare ground rather than a forest to clear.
+pub fn biome_set(name: &str, cover: Option<inf_asset::AssetId>) -> inf_terrain::BiomeSet {
     let mut set = inf_terrain::BiomeSet::new(name);
     for b in IslandBiome::ALL {
         let mut def = inf_terrain::BiomeDef::new(b.id(), b.label());
         def.color = b.color();
+        if b.scatters() {
+            def.pcg_graph = cover.map(|a| a.0);
+        }
+        // The water hint the P20 hydrology tools read when an author drops a lake
+        // on painted ground. Only the shore has one: everything else is dry, and
+        // a hint on forest would put a lake wherever somebody clicked in a wood.
+        if matches!(b, IslandBiome::Beach) {
+            def.water_hint = Some(0.0);
+        }
         set.biomes.push(def);
     }
     set
@@ -442,7 +458,8 @@ mod tests {
 
     #[test]
     fn the_set_names_every_biome_and_validates() {
-        let set = biome_set("Island");
+        let cover = inf_asset::AssetId(crate::build::cover_pcg_guid("Island"));
+        let set = biome_set("Island", Some(cover));
         assert_eq!(set.biomes.len(), 7);
         set.validate()
             .expect("the island palette is a valid biome set");
@@ -450,7 +467,36 @@ mod tests {
             let d = set.get(b.id()).expect("every id is present");
             assert_eq!(d.name, b.label());
             assert_eq!(d.color, b.color());
+            // **The vegetation binding is on the SET**, which is the one authority
+            // `inf_pcg::BiomeBinding::from_set` reads — and urban is the one that
+            // does not scatter, which is what reserving it is for.
+            assert_eq!(
+                d.pcg_graph.is_some(),
+                b.scatters(),
+                "{} binds a cover graph? {:?}",
+                b.label(),
+                d.pcg_graph
+            );
+            if b.scatters() {
+                assert_eq!(d.pcg_graph, Some(cover.0));
+            }
         }
+        // The set's dependency closure names the cover asset exactly once, which
+        // is what puts it in the level's sidecar.
+        let deps = set.dependencies();
+        assert_eq!(deps, vec![cover], "the set's dependencies are {deps:?}");
+        // Only the shore carries a water hint; a hint on forest would put a lake
+        // wherever an author clicked in a wood.
+        let hinted: Vec<&str> = IslandBiome::ALL
+            .iter()
+            .filter(|b| set.get(b.id()).unwrap().water_hint.is_some())
+            .map(|b| b.label())
+            .collect();
+        assert_eq!(hinted, vec!["beach"]);
+        // With no cover asset the set is still valid and binds nothing.
+        let bare = biome_set("Island", None);
+        assert!(bare.biomes.iter().all(|d| d.pcg_graph.is_none()));
+        assert!(bare.dependencies().is_empty());
     }
 
     /// The priority order is the claim, so each level of it is measured against a

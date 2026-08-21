@@ -51,6 +51,7 @@ pub mod gisbuild;
 pub mod gisroad;
 pub mod hydro;
 pub mod ipc;
+pub mod island;
 pub mod layouts;
 pub mod mods;
 /// The P25.3 finish pipeline: a dense photogrammetric reconstruction in, a

@@ -74,11 +74,18 @@ fn committed_levels() -> Vec<PathBuf> {
 /// (`templates/blank-3d/Blank.inf_lvl`, `templates/2d-platformer/Platformer.inf_lvl`),
 /// **plus wave I3's thousand-building city** (`samples/phase30-city/City.inf_lvl`)
 /// **and wave I6's gameplay fixture**
-/// (`samples/phase30-gameplay/Gameplay.inf_lvl`).
+/// (`samples/phase30-gameplay/Gameplay.inf_lvl`), **and wave I7's two islands**
+/// (`samples/island/VancouverIsland.inf_lvl`,
+/// `samples/island-fixture/IslandFixture.inf_lvl`).
+///
+/// The islands are levels whose **terrain is not committed** — 342.7 MB and
+/// 4.6 MB respectively, built by `inf island build` from the recipe beside each.
+/// The level itself is authored from the committed design alone, which is
+/// exactly what lets it be counted here.
 ///
 /// Exact, not `>= 1`: this arm's whole subject is *shipped content*, and a walk
 /// that quietly found one file would pass every assertion below.
-const EXPECTED_LEVELS: usize = 21;
+const EXPECTED_LEVELS: usize = 23;
 
 #[test]
 fn every_committed_level_sidecar_declares_its_bindings() {

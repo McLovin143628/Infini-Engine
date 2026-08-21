@@ -80,8 +80,9 @@ pub mod terrain;
 
 pub use biome::{biome_set, classify_biomes, BiomeClassification, BiomeMask, IslandBiome};
 pub use build::{
-    biome_set_guid, build_island, cover_pcg_guid, level_guid, road_mesh_guid, slug, terrain_guid,
-    write_content, BuildOptions, IslandBuild, StepLog, DERIVATION_PITCH_M,
+    biome_set_guid, build_island, cover_pcg_guid, level_guid, player_start, read_design,
+    road_mesh_guid, slug, terrain_guid, write_content, BuildOptions, IslandBuild, IslandDesign,
+    StepLog, DERIVATION_PITCH_M,
 };
 pub use hydro::{FlowField, HydroParams, Lake, Stream, StreamNetwork, Waterfall};
 pub use recipe::{

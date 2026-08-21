@@ -33,6 +33,7 @@ pub const RECIPE_SCHEMA_VERSION: u32 = 1;
 /// inflated 1.53× at Vancouver's latitude, which would build the island half
 /// again too large with no symptom other than everything being wrong).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnchorSpec {
     /// An authority code (`"EPSG:32610"`) or a full proj4 string.
     pub crs: String,
@@ -61,6 +62,7 @@ fn default_vertical_datum() -> String {
 /// a 50 km² world hung off one corner spends its whole east half at seven
 /// kilometres of f32 exponent before the first rebase.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GridSpec {
     /// Samples per tile edge. A tile's last row **is** its neighbour's first.
     pub tile_resolution: u32,
@@ -100,6 +102,7 @@ impl GridSpec {
 
 /// The elevation source.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceSpec {
     /// Only `"terrarium"` today — the keyless, worldwide XYZ DEM Wave G ported
     /// the codec for. Named rather than assumed so a second source is a new
@@ -130,6 +133,7 @@ fn default_tile_margin() -> u32 {
 ///
 /// These four numbers are what turn a piece of the North Shore into an island.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SeaSpec {
     /// Sea level in world metres.
     pub level_m: f64,
@@ -153,6 +157,7 @@ fn default_beach_rise() -> f64 {
 
 /// A settlement site — a place the roads connect and I8's generator fills.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Site {
     pub name: String,
     pub kind: SiteKind,
@@ -195,6 +200,7 @@ impl SiteKind {
 
 /// The road network's design rules.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoadSpec {
     /// The committed GeoJSON, relative to the recipe.
     pub layer: String,
@@ -223,6 +229,7 @@ fn default_road_shoulder() -> f64 {
 
 /// The biome classifier's design.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BiomeSpec {
     /// The committed design-mask GeoJSON, relative to the recipe. Each feature
     /// is a polygon carrying a `biome` attribute naming one of
@@ -272,6 +279,7 @@ fn default_class_biomes() -> Vec<String> {
 /// and one sized for a hillside finds a hundred rivulets that are really the
 /// source's own noise.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HydroSpec {
     /// The catchment a cell needs before it is called a stream, square metres.
     #[serde(default = "default_catchment")]
@@ -320,6 +328,7 @@ impl Default for HydroSpec {
 
 /// The recipe.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IslandRecipe {
     /// This document's schema version.
     pub schema_version: u32,
@@ -346,6 +355,19 @@ pub struct IslandRecipe {
     /// The settlement sites.
     #[serde(default)]
     pub sites: Vec<Site>,
+    /// Committed files beside the recipe that a build copies into the project's
+    /// `Content` verbatim — the level, its blueprint assets, the `.inf_pcg` the
+    /// biome set binds.
+    ///
+    /// # Why the build copies rather than the author
+    ///
+    /// `inf island build` is *the one documented command*. A command that
+    /// produced a terrain and then required a human to copy two more files
+    /// beside it before anything could be cooked would be a command whose
+    /// documentation is longer than itself — and the file that gets forgotten is
+    /// always the small one.
+    #[serde(default)]
+    pub content: Vec<String>,
     /// The directory of the recipe file itself. Filled by [`IslandRecipe::load`]
     /// and **not** serialized — a recipe that recorded its own location would
     /// stop being true the moment it moved.
@@ -697,6 +719,34 @@ beach_m = 25.0
         assert!(bad(&|r| r.source.kind = "geotiff".into()).contains("terrain wizard"));
         assert!(bad(&|r| r.source.zoom = 30).contains("tile math admits"));
         assert!(bad(&|r| r.biomes.classes = 0).contains("no class"));
+
+        // **A KEY NOTHING READS IS A LOUD ERROR.** In TOML a bare key written
+        // after a `[table]` header belongs to that table, so `content = [...]`
+        // placed below `[source]` becomes `source.content` — a key the recipe
+        // does not have, which serde's default is to ignore. It did, and the
+        // copy step quietly did nothing for a build. `deny_unknown_fields` is
+        // what turns that into a message.
+        let misplaced = tiny_recipe_text().replace(
+            "[source]\nkind = \"terrarium\"",
+            "[source]\ncontent = [\"Level.inf_lvl\"]\nkind = \"terrarium\"",
+        );
+        let e = IslandRecipe::parse(&misplaced, base)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("content"), "{e}");
+        // …and at the top level the same key parses.
+        let ok = tiny_recipe_text().replace(
+            "lakes = \"layers/lakes.geojson\"",
+            "lakes = \"layers/lakes.geojson\"\ncontent = [\"Level.inf_lvl\"]",
+        );
+        let r = IslandRecipe::parse(&ok, base).expect("a top-level `content` parses");
+        assert_eq!(r.content, vec!["Level.inf_lvl".to_string()]);
+        // A misspelled key anywhere is refused, not silently defaulted.
+        let typo = tiny_recipe_text().replace("beach_width_m", "beach_wdith_m");
+        assert!(IslandRecipe::parse(&typo, base)
+            .unwrap_err()
+            .to_string()
+            .contains("beach_wdith_m"));
 
         // A site outside the world is refused with the world's own half extent.
         let outside = bad(&|r| {
