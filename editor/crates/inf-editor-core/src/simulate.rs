@@ -604,6 +604,17 @@ impl SimSession {
     /// the current held-key state.
     pub fn tick(&mut self, doc: &mut SceneDoc, frame_dt: f64, input: SimInput) {
         self.set_input(input);
+        // **A paused session accumulates nothing** (I5 audit, A2) — MIRROR of
+        // `RuntimeSim::run_frame`, and it has to be one or the mirror is only
+        // half built: `step_once` froze and this did not, so a host driving
+        // Simulate by elapsed time would advance a session `sim_paused` says is
+        // stopped, and then empty a full accumulator in one burst the moment it
+        // resumed. That is the defect the pause ruling exists to prevent,
+        // reached through the door the ruling did not name.
+        if self.sim_paused {
+            let _ = self.stepper.accumulate(0.0);
+            return;
+        }
         let n = self.stepper.accumulate(frame_dt);
         for _ in 0..n {
             self.fixed_step(doc);
@@ -3643,6 +3654,71 @@ mod debug_tests {
         assert!(
             session.take_debug_events().is_empty(),
             "take_debug_events drains"
+        );
+    }
+
+    /// **THE EDITOR'S HALF OF THE PAUSE, MEASURED** (I5 audit, A2).
+    ///
+    /// `sim_paused` shipped on `SimSession` as a declared MIRROR of
+    /// `RuntimeSim`'s, and the mirror was half built and wholly unarmed: deleting
+    /// the check in `step_once` left every test in this tree green, and `tick` —
+    /// the *other* door, the one a host drives by elapsed time — never had the
+    /// check at all. The I4b law: a mirror needs its own arm, or it is two
+    /// declarations agreeing with each other rather than with the world.
+    ///
+    /// Both doors, and the **control** beside each: an unpaused session moves.
+    #[test]
+    fn a_paused_session_runs_no_fixed_step_through_either_door() {
+        let mut doc = platformer_scene();
+        let actors = platformer_actors();
+        let mut session = SimSession::enter(&mut doc, actors, DVec2::ZERO, SIM_HZ);
+        // Settle, so the control below is a body that is genuinely moving.
+        for _ in 0..10 {
+            session.step_once(&mut doc, SimInput::with_down(["right"]));
+        }
+        let of = |d: &SceneDoc| -> Vec<[f64; 3]> {
+            let mut out: Vec<[f64; 3]> = d
+                .world()
+                .world()
+                .iter_entities()
+                .filter_map(|e| e.get::<inf_ecs::components::Transform>())
+                .map(|t| [t.translation.x, t.translation.y, t.translation.z])
+                .collect();
+            out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            out
+        };
+
+        // ── `step_once` ──
+        session.set_sim_paused(true);
+        assert!(session.sim_paused());
+        let before = of(&doc);
+        for _ in 0..20 {
+            session.step_once(&mut doc, SimInput::with_down(["right"]));
+        }
+        assert_eq!(before, of(&doc), "a paused `step_once` moved the world");
+
+        // ── `tick`, the elapsed-time door ──
+        for _ in 0..20 {
+            session.tick(&mut doc, 1.0 / 60.0, SimInput::with_down(["right"]));
+        }
+        assert_eq!(before, of(&doc), "a paused `tick` moved the world");
+        // …and the accumulator did not BANK the time: resuming must not empty
+        // twenty frames of it in one burst. One tick of one frame is at most one
+        // fixed step at this rate.
+        session.set_sim_paused(false);
+        session.tick(&mut doc, 1.0 / 60.0, SimInput::with_down(["right"]));
+        let after_one = of(&doc);
+        assert_ne!(before, after_one, "the control: an unpaused tick moves");
+        let mut fresh_doc = platformer_scene();
+        let mut fresh = SimSession::enter(&mut fresh_doc, platformer_actors(), DVec2::ZERO, SIM_HZ);
+        for _ in 0..10 {
+            fresh.step_once(&mut fresh_doc, SimInput::with_down(["right"]));
+        }
+        fresh.step_once(&mut fresh_doc, SimInput::with_down(["right"]));
+        assert_eq!(
+            after_one,
+            of(&fresh_doc),
+            "the paused session banked the frames it skipped and spent them on resume"
         );
     }
 
