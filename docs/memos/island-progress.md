@@ -1311,13 +1311,18 @@ wave's clause 2 began with — so 24.4 was measured **mid-wave**, after the fixe
 and before the record's. It is the right comparison for clauses 2 onward and must not be
 quoted as I4's.*
 
-**The shipped-default 1080p frame is inside the 60 fps budget at p50 and p95.** The **lit**
-frame is at the line on the *pipelined* measure (16.4–16.9 against 16.6) and not on the
-serialized one (32.8–33.4) — and the serialized number is the one the instrument asserts,
-because a present-to-present harness needs a window this battery does not have. That gap is
-the wave's honest remainder and it is a **measurement question, not an engine one**: the
-shipped player's frame path is four calls with no device poll, and there is now an arm that
-says so.
+**The shipped-default 1080p frame is inside the 60 fps budget at p50 — and at p95 on two runs
+of three.** *(Corrected by the I4b audit, which is this file's own range law applied to the
+wave that wrote it. The distance row above quotes the **best** end of each range as though it
+were the whole: the audit's three independent release runs measure the 1080p unlit p95 at
+**13.6 / 19.6 / 16.3 ms**, so the distance from the 16.6 ms budget is **−3.0 to +3.0 ms** and
+not "−2.4". The p50 is inside on all three — 11.2 / 15.3 / 11.3, distance −5.4 to −1.3. Quote
+the shape.)* The **lit** frame is at the line on the *pipelined* measure (16.3–16.7 against
+16.6) and not on the serialized one (32.8–33.2) — and the serialized number is the one the
+instrument asserts, because a present-to-present harness needs a window this battery does not
+have. That gap is the wave's honest remainder and it is a **measurement question, not an
+engine one**: the shipped player's frame path is four calls with no device poll, and there is
+now an arm that says so — at both scopes and over both modules since the audit.
 
 **The fixed step, phase by phase** — the table wave I4 could not print. Two of the three
 answers were surprises:
@@ -1399,6 +1404,85 @@ ceiling; 1080p unlit p50 **12.076** / p95 **15.095** — **−4.524 and −1.505
 | ratchets | — | three, all **down** |
 
 ---
+
+## The I4b audit (adversarial, `3c9d87b..4e6e04c`)
+
+**Every mechanism the wave built HELD on re-measurement, and every headline number
+reproduced.** What the audit found was one cache that was wrong, one gate that could not
+fail, two doors with no arm at all, and seven claims stated more strongly than their own
+evidence.
+
+**THE ONE DEFECT THAT WOULD HAVE SHOWN ON SCREEN.** The new scatter-caster cache holds
+**render-local** bytes — `pack_fallback` turns world positions into model matrices through
+the `FloatingOrigin` — and its key carried the eye bucket, the bands, the caster stamp and the
+content fold, but not the origin. `REBASE_DISTANCE` is **1 024 m**; the eye bucket quantizes
+the *world* eye onto **8 m**; the two lattices do not line up, so the frame a rebase fires in
+is overwhelmingly one where the bucket did not tick. The whole-pack key noticed the rebase,
+re-uploaded — and re-uploaded a merge of the **stale** half. Every scatter shadow caster a
+kilometre out of place until the camera left its bucket, which on a 50 km² island is every
+1 024 m of travel. The arm asserts the bucket is *identical* across the rebase, so it cannot
+pass on the case the defect does not occur in.
+
+**AND THE GATE THAT WAS MEANT TO CATCH THAT CLASS.** The incremental query tree's equivalence
+gate — "540 answers, 360 of them hits, all identical" — stepped **one** world and forced a
+rebuild between the two halves of every iteration, so its "incremental" tree was the control's
+tree from one step earlier: centimetres of drift against a body's own half-metre leaf.
+Measured: deleting the marking **entirely** left it green on all 540. It is two worlds now,
+the incremental one never rebuilt across 180 steps (**720 answers, 540 hits**), and its fourth
+question is a **point query at the moving body's own centre** — because a leaf decides only
+what the narrow phase is *offered*, and a 40 m ray reaches a stale leaf as happily as a fresh
+one. Two doors of the same marking had no arm at all: `set_body_translation` /
+`set_body_rotation` — where `set_body_pose_if_moved` puts **every static and kinematic pose
+write both hosts make** — and `remove_body`.
+
+**Seven claims corrected**, each where it is written down:
+
+| the claim | what it is |
+|---|---|
+| "without `query_rebuild` the tree would answer with a collider that no longer exists" | `BroadPhaseBvh` keys a leaf by the **raw index**, generation discarded, and `QueryPipeline` resolves through `get_unknown_gen` — a stale leaf is a wasted traversal. The flag buys an invariant **unfalsifiable through this type's surface**, and deleting it kills no arm |
+| "no gameplay could ever read [a fixed-fixed solid manifold] as an overlap" | `ActiveEvents::COLLISION_EVENTS` is on every collider and both hosts fire a Blueprint `Collision` event for a **non-sensor** pair too: two overlapping static solids fired one and no longer do |
+| "the pipelined model IS the player" | the player presents with `PresentMode::AutoVsync`, so its cadence is `max(CPU, GPU, **the refresh interval**)`. The estimate is a **lower bound on frame time and an upper bound on fps** |
+| "the CPU segments tile the record phase" | they tile the **marked span**. Measured: the per-pass record column sums to **0.92–0.98 ms of a 2.93–3.26 ms `render (record)` stage** — **two thirds of it is outside**, in the setup before `FrameTimer::begin` and the finish/submit after the last mark. Printed every run now |
+| "[the content key] costs the same order as the pack whose guess it replaces" | on a **miss**. The cache **hit** went `O(1)` → `O(scene.instances)` — bounded by `sync` only running with shadows on, and by the city's casters all being scatter |
+| the arm "extracts `render`'s body **and the windowed loop's own frame block**" | it extracted one. `PlayerApp::frame` is the second scope, and the `poll(` ban is over both **modules**, because a one-line helper defeats a substring ban inside a scope (the P23 lesson, mutation-confirmed) |
+| "the phases tile the step" at a **10 %** tolerance | the residue measures **0.000** — the two numbers print equal to three decimals. A tenth of a 1.25 ms step is more than nineteen of the twenty-two phases put together. **2 %** now, with the residue printed |
+
+**The audit's own three release runs** (RTX 4070 Ti, MIN of rounds, at the head it certifies):
+
+| | run 1 | run 2 | run 3 | the range |
+|---|---|---|---|---|
+| the fixed step | 1.250 | — | — | **1.250** (rounds 1.250–1.258) against a 6.0 ms ceiling |
+| 1080p unlit p50 / p95 | 11.177 / 13.646 | 15.259 / 19.598 | 11.309 / 16.349 | **11.2–15.3 / 13.6–19.6** |
+| 1080p unlit GPU frame | 2.469 | 4.758 | 2.828 | 2.5–4.8 |
+| 1440p unlit p50 / p95 | 18.276 / 19.883 | 18.483 / 21.541 | 18.700 / 26.052 | **18.3–18.7 / 19.9–26.1** |
+| 1080p **lit** p50 / p95 | 32.832 / 38.904 | 33.231 / 39.242 | 33.069 / 41.287 | **32.8–33.2 / 38.9–41.3** |
+| 1080p lit GPU frame | 16.012 | 16.353 | 16.445 | **16.0–16.4** |
+| 1080p lit **pipelined estimate** | 16.327 | 16.528 | 16.697 | **16.3–16.7 (59.9–61.2 fps)** |
+| distance from 60 fps, 1080p unlit | p50 −5.42, p95 −2.95 | p50 −1.34, **p95 +3.00** | p50 −5.29, p95 −0.25 | **p50 −5.4…−1.3, p95 −3.0…+3.0** |
+
+Every one of the wave's ranges contains the audit's, and the **step's own table reproduces
+phase for phase**: `physics3d sync` 0.796 (63.7 %), `solver` **0.322**, `character move`
+0.062, `camera` **0.003**, everything else under 0.02 — and the wall clock and the sum of the
+phases both print **1.250 ms**. On the instrument's real scene the physics world holds **7 443
+bodies, 7 346 admitted structure colliders, 20 806 contact pairs tracked and 0 touching**,
+which is the `FIXED_FIXED` claim measured where it matters rather than on a fixture. The
+VSM numbers reproduce exactly — **387 draws and 8 416 skipped per rastering frame**, **206 399
+invalidation touches per frame**, `vsm-raster` record **6.021 ms**, `shadow` record
+**0.153 ms** — and so does the impostor: **26 792 px, 9.2× the mesh's 2 903, 91.6 % of it
+moving**, with the geometry reading the refusal rests on **unmoved at 63 of 2 903 px, worst
+channel 18/255**, over a **zero** noise floor. *(One arithmetic aside: "exactly `0.866 × 30`
+against `0.5 × |(20, 30, 7.4)|`, squared" predicts **1.99×** and the pixels measure **2.09×**,
+because `silhouette` counts the **union of ~425 impostor cards** — the parts' and the shell's
+— and not the shell's card alone. The direction and the magnitude stand; "exactly" does not.)*
+
+**Twenty-one mutations were run** — six of the implementer's and fifteen new — and after the
+repairs each dies at exactly the arm that names it and at no other. Three are recorded as
+**coverage bounds** rather than defects, in `docs/ROADMAP.md`'s audit block: the two
+`active_bodies()` extends are armed as a *pair* and not individually, `query_rebuild` on the
+removal paths is unfalsifiable through the type's own surface, and the incremental refit's
+crossover on a mostly-awake world is unmeasured. One hardening was **refused and priced** (a
+quote-parity reader for the eaten-continuation sweep: thirteen of its fourteen accumulated
+exceptions are runs genuinely *inside* a literal, which parity cannot help).
 
 ## What is still open after I4b
 

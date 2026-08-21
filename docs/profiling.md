@@ -94,10 +94,13 @@ Notes:
   GPU timings** from `inf_render::timing` (one `QuerySet` written between encoder
   commands; off by default, and `timing_changes_no_pixel` proves attaching it
   moves no pixel). Measured on an RTX 4070 Ti, release, MIN of rounds, **after
-  island wave I4b**: **p50 10.8–16.6 ms (60–93 fps) at 1080p**, **18.2–18.9 ms at
-  1440p**, i.e. **1.5–2.4 ms INSIDE the 16.6 ms frame at 1080p p95** where wave I4
-  measured 28.5 ms outside it. Quote the shape and treat any single millisecond
-  as ±20 %.
+  island wave I4b** and re-measured by its audit over three independent runs:
+  **p50 11.2–15.3 ms (65–89 fps) at 1080p**, **18.3–18.7 ms at 1440p**, and the
+  1080p **p95 at 13.6–19.6 ms** — i.e. **3.0 ms inside the 16.6 ms frame on the
+  best run and 3.0 ms outside it on the worst**, where wave I4 measured 28.5 ms
+  outside. *(The wave's ledger said "1.5–2.4 ms INSIDE at p95", which quotes the
+  favourable end of its own range; the p50 is inside on every run and the p95 is
+  not.)* Quote the shape and treat any single millisecond as ±20 %.
 
   *Wave I4's own reading, for the record: p50 37.8–41.0 at 1080p, CPU-bound, with
   the sim fixed step alone at 13.0–14.9 ms. I4b attributed that step and took it
