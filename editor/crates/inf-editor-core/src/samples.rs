@@ -11583,12 +11583,17 @@ mod tests {
     /// * it builds at all from the wizard's *default* spec, on the 161-bone
     ///   mannequin -- which is the rig `build_locomotion` addresses by name, so
     ///   this is the arm that goes red the day a bone is renamed;
-    /// * it builds with **no warnings**. The wizard reports advisories (vertices
-    ///   that could not see a bone, joints outside the mesh, a cycle that could
-    ///   not be measured) and a committed starter asset carrying one is a
-    ///   warning nobody will ever read. `starter_character_into` refuses on a
-    ///   non-empty list; this is what makes the refusal visible as a test rather
-    ///   than as a bless that mysteriously fails;
+    /// * it builds with **exactly one advisory, and it is a known one**. The
+    ///   wizard reports what it could not do perfectly (vertices that could not
+    ///   see a bone, joints outside the mesh, a cycle that could not be
+    ///   measured), and the build hands the list back rather than swallowing it
+    ///   or refusing on it: refusing would make the folder unbuildable for a
+    ///   bound the engine already carries by name, and swallowing would make a
+    ///   *new* advisory invisible. So the list is pinned by CONTENT — a count of
+    ///   one says nothing about which one. *(The SK1c audit corrected this
+    ///   bullet: it used to claim the build had no warnings and that
+    ///   `starter_character_into` refused on a non-empty list. Neither was true
+    ///   of the code below it, which has always asserted exactly one.)*;
     /// * it is **reproducible**. The whole committed folder rests on the build
     ///   being a pure function of the spec and the ids -- a heat solve, a
     ///   derivation and a proposal all in the middle of it -- and nothing else
@@ -11644,6 +11649,62 @@ mod tests {
             assert!(
                 text.contains(&want),
                 "{file} does not carry the fixed GUID {want}:\n{text}"
+            );
+        }
+    }
+
+    /// **Both islands' recipes name the WHOLE starter character** (SK1c audit,
+    /// M3).
+    ///
+    /// The character reaches a built island project through the recipe's
+    /// `[content]` list — seventeen `../starter-character/…` lines in each of
+    /// `samples/island/island.toml` and `samples/island-fixture/island.toml`.
+    /// That is a **third** place the character's identity is written down, after
+    /// the folder itself and `inf_project::STARTER_CHARACTER`, and the wave's own
+    /// ruling about `pie_sim`'s resolver ("a table of file names here would be a
+    /// second place the character's identity is written down") is the argument
+    /// against having one at all.
+    ///
+    /// It cannot be removed — a recipe is a committed authoring document and
+    /// `include_bytes!` is not available to it — so it is *checked*. The island
+    /// gate covers five of the seventeen by consequence (the payload's rig,
+    /// machine, three clips and class); the skin material and the machine's text
+    /// face are covered by nothing, and a dropped sidecar is a project whose rig
+    /// resolves and whose clips do not.
+    ///
+    /// Read off disk on both sides, so the two cannot drift.
+    #[test]
+    fn both_island_recipes_name_the_whole_starter_character() {
+        const SKIPPED: [&str; 3] = ["README.md", "camera.toml", "input.toml"];
+        let dir = starter_character_dir();
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("no {}: {e}", dir.display()))
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !SKIPPED.contains(&n.as_str()))
+            .collect();
+        on_disk.sort();
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples");
+        for recipe in ["island/island.toml", "island-fixture/island.toml"] {
+            let path = root.join(recipe);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("no {}: {e}", path.display()));
+            let mut named: Vec<String> = text
+                .lines()
+                .filter_map(|l| {
+                    let l = l.trim().trim_start_matches('"').trim_end_matches(',');
+                    let l = l.trim_end_matches('"');
+                    l.strip_prefix("../starter-character/").map(str::to_string)
+                })
+                .collect();
+            named.sort();
+            assert_eq!(
+                named, on_disk,
+                "{recipe}'s `[content]` list is not the starter character — a \
+                 missing entry is an island that boots a hero whose rig resolves \
+                 and whose clips do not"
             );
         }
     }

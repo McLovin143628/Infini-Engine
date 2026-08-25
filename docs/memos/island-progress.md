@@ -4910,7 +4910,7 @@ per-hand aperture cannot.
 | | after the SK1a audit | **after SK1b** |
 |---|---|---|
 | battery blocks / passed / failed / ignored | 319 / 6 015 / 0 / 16 | **320 / 6 048 / 0 / 16** — **+1 block** (`grip_gate`, the wave's only new test file) and **+33 arms** |
-| goldens | 54, byte-identical | **54, byte-identical** under `INF_GOLDEN_STRICT=1` over **101 arms**, no PNG rewritten over **101 arms**, no PNG rewritten. Nothing here touches a render path |
+| goldens | 54, byte-identical | **54, byte-identical** under `INF_GOLDEN_STRICT=1` over **101 arms**, no PNG rewritten. Nothing here touches a render path |
 | `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
 | rustdoc warnings (ceiling 450) | 374 individual over 30 crates | **374 individual over 30 crates** after `cargo clean --doc`. **The wave adds zero**: it introduced **9** — four `[`clamp_to_limit`]` links to a private fn, two unresolved `IkError`/`IkReport` links in a new module, `starter_body`'s link to a private `skinned_copy`, `MUZZLE_HEIGHT_M`'s to a private `muzzle_of`, and one a *new public item* re-attributed out of a private doc that had been linking privately all along — and all nine were found and removed |
 | `cargo fmt --all --check` | clean | clean |
@@ -5288,10 +5288,17 @@ Different pose bytes on **every one of eight steps**, while the transform itself
 agreed to the bit — a divergence entirely inside the pose, which is exactly where
 a `RootMotion` component looks inert.
 
-**Nothing found it because no gate fixture in the tree carries `RootMotion` at
-all**, and the one committed sample that does has no `AnimPlayer`, so
-`apply_root_motion` returns at its first line and the two hosts perform an
-identical no-op in two different places.
+**Nothing found it because no fixture in the tree carried `RootMotion` *and* a
+pose.** *(Corrected by the SK1c audit — the sentence originally read "no gate
+fixture in the tree carries `RootMotion` at all", and three do:
+`runtime/inf-player/tests/runtime_character3d.rs:52` and `:141` and
+`editor/crates/inf-editor-core/tests/simulate_character3d.rs:160`. All three are
+single-host arms about where a character ends up, and none of them carries an
+`AnimStateMachine` or a skeleton — so `advance_state_machines` does nothing on
+them and the order is invisible whichever way round it runs.)* The one committed
+*sample* that carries the component, `samples/character-demo`, has no
+`AnimPlayer`, so `apply_root_motion` returns at its first line and the two hosts
+perform an identical no-op in two different places.
 
 Unified on the editor's order, so the **shipped player moves**: root motion is
 *movement*, and every other movement in this engine happens before the pose —
@@ -5628,9 +5635,17 @@ it takes all of them at once.
 * **`camera.toml` and `input.toml` are not scaffolded** into a new project by
   `starter_content`: both are project tables with no home under `Content/`. An
   author who wants to tune either copies them out of the sample.
-* **The starter character is 155 KB in every binary that links `inf-project`**,
-  which includes the shipped player. Measured, not argued: `Starter_Body.inf_mesh`
-  is 95 932 B of it. A feature-gate is the obvious lever and was not pulled.
+* **The starter character is ~152 KB of `include_bytes!` in `inf-project`.**
+  *(Corrected by the SK1c audit — the sentence read "155 KB in every binary that
+  links `inf-project`, which includes the shipped player. Measured, not argued",
+  and it was argued. Searched for: `inf.exe` carries all 95 932 body bytes,
+  **`inf-player.exe` carries none of them** — the player never reaches
+  `starter_content`, so the constant is never materialised. A scaffolded 3D
+  project's cooked pack is **6 480 B**, not 152 KB, because its boot level spawns
+  no character and the closure never reaches the body or its material. The cost
+  is real for the CLI and the editor and zero for the shipped player; the table
+  is at `STARTER_CHARACTER`'s own doc.)* A feature-gate is still the obvious
+  lever for the CLI and was not pulled.
 * **35 of 795 body vertices are still unreachable by the visibility oracle** —
   SK1b's carried item, now pinned by content as the starter character's one
   advisory rather than left as a number in a memo.

@@ -25859,11 +25859,15 @@ space, and `model_to_world` feeds the foot pass, the hand pass and the published
 decides which step's placement all of those are computed in. On a fixture carrying `RootMotion` +
 `AnimPlayer` + `AnimStateMachine` + an authored world-space `IkTarget` (none of them exotic;
 `samples/character-demo` already carries the first) the two hosts wrote **different pose bytes on
-every one of eight steps**, worst component **0.060** at step 2, while the transform itself agreed
-to the bit — a divergence entirely inside the pose, which is exactly where a `RootMotion` component
-looks inert. Nothing found it because **no gate fixture in the tree carries `RootMotion` at all**,
-and the one committed sample that does has no `AnimPlayer`, so both hosts perform an identical
-no-op in two different places. Unified on the editor's order, so the shipped player moves: root
+every one of eight steps**, worst LOCAL component **0.060** at step 2 (the worst model-space joint
+offset is a flat 0.0163–0.0183 m, the one fixed step of travel — two quantities, both re-measured by
+the audit), while the transform itself agreed to the bit — a divergence entirely inside the pose,
+which is exactly where a `RootMotion` component looks inert. Nothing found it because **no fixture
+in the tree carried `RootMotion` *and* a pose** (three carry the component — two in
+`runtime_character3d`, one in `simulate_character3d` — and all three are single-host arms with no
+state machine and no skeleton, so the order is invisible whichever way round it runs; the audit
+corrected "no gate fixture carries `RootMotion` at all"), and the one committed sample that does has
+no `AnimPlayer`, so both hosts perform an identical no-op in two different places. Unified on the editor's order, so the shipped player moves: root
 motion is MOVEMENT, and every other movement in this engine happens before the pose. The propagate
 between them is not decoration — without it the pose still reads last step's transform and the two
 hosts agree only by both being wrong. `both_fixed_steps_move_the_root_before_the_pose` pins the

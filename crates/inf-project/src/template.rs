@@ -204,8 +204,26 @@ impl ProjectTemplate {
 /// sample's README says.
 ///
 /// The list is spelled out rather than globbed because `include_bytes!` needs a
-/// literal, and `every_3d_template_ships_the_starter_character` asserts it is
+/// literal, and `every_3d_template_ships_the_whole_starter_character` asserts it is
 /// the whole set rather than whatever somebody remembered to add.
+///
+/// # What these bytes cost, measured (SK1c audit, M4)
+///
+/// **152 408 B** over seventeen files, of which `Starter_Body.inf_mesh` is
+/// 95 932. Where that lands:
+///
+/// | | |
+/// |---|---|
+/// | a new 3D project's `Content/Characters/` | **152 408 B on disk** |
+/// | its cooked `content.inf_pack` | **6 480 B** (against 1 606 for the 2D platformer) — the boot level spawns no character, so the closure reaches the rig, the three clips and the machine through the controller (a root kind) and never reaches the **body or its material** |
+/// | `inf.exe` (the CLI, which scaffolds) | carries all 95 932 body bytes — searched for and found |
+/// | `inf-player.exe` (**the shipped player**) | **does not carry them.** Searched for the same 64-byte probe: absent. The player links this crate and never reaches `starter_content`, so the constant is never materialised |
+///
+/// The SK1c ledger said "155 KB in every binary that links `inf-project`, which
+/// includes the shipped player" and called it measured. It was not: a player
+/// build was searched for the body's own bytes and does not contain them. The
+/// cost is real for the CLI and the editor, and zero for the thing that ships to
+/// a player.
 pub const STARTER_CHARACTER: &[(&str, &[u8])] = &[
     (
         "Characters/Starter.inf_skel",
