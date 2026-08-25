@@ -3866,3 +3866,323 @@ are exact IEEE operations on `f64`. `FnHeight::new`'s literal now reads
 
 **Five audit commits**, `(I7b) audit:`-tagged — four fixes and the ledger, counted
 rather than summarised.
+
+## Done — wave SK1a (the 161-bone skeleton substrate)
+
+Base `9790ff8e`. Five clauses. The wave's headline is a **correction**: the source
+document this wave was briefed from is wrong about its own subject, and the right
+answer was sitting on this machine.
+
+### THE SOURCE DOCUMENT IS WRONG, AND THE ASSET IS NOT
+
+`character-skeleton-rig-outline.md` (the briefing document, which lives outside
+the repository with the rest of the reference material) prints a hierarchy under
+the heading
+*"the complete hierarchy for the **161 bones** of the full UE5 mannequin"*. Parsed
+and counted, that tree is **89 bones** — which is exactly the figure the same
+document's own table two sections earlier gives for `SKM_Manny_**Simple**`. It
+also states parents the shipped asset does not have.
+
+So the table this wave emits was **measured**, not transcribed. The UE5
+reference project named in the anim/island mandate memo ships
+`Characters/Mannequins/Meshes/SK_Mannequin.uasset`, whose `FReferenceSkeleton`
+was parsed straight out of the package body: a count field of **161**, then 161 records of
+`(FName name, int32 parent, FString exportName)`. One root, every parent preceding
+its child, no duplicate names. Six disagreements with the document, all printed in
+`crates/inf-anim/src/manny.rs`'s module docs rather than quietly resolved:
+
+| | the document | the asset |
+|---|---|---|
+| bone count of the printed tree | claimed 161 | **89** |
+| neck | `neck_01` → `head` | `neck_01` → **`neck_02`** → `head` |
+| IK subtree parent | `spine_03` | **`root`** |
+| `ik_hand_l` / `ik_hand_r` parent | `ik_hand_root` | **`ik_hand_gun`** |
+| `ik_head`, `ik_pelvis`, `ik_spine` | present | **absent** |
+| corrective / helper bones | absent | **72**, plus `weapon_l/r`, `interaction`, `center_of_mass` |
+
+**What is Epic's and what is ours.** Names, parent links and emission order are
+the interchange contract and are reproduced verbatim — they are the whole point,
+since `thigh_l` / `spine_03` / `ik_foot_root` are what every Mixamo clip, every
+MetaHuman body and every ALS blueprint addresses. The **bind pose is not copied**:
+every offset is derived from `BodyParams` by this module's own rules, so the rig
+is proportionally whatever height it was asked for. Two *structural* facts were
+read off the asset and kept because they are rules and not geometry, and both are
+load-bearing: the twist bones sit at **exactly one third and two thirds** of their
+segment, and `_01` is always the one nearest the joint that drives it
+(`upperarm_twist_01_l` at 1/3 from the shoulder; `lowerarm_twist_01_l` at 2/3 from
+the elbow, i.e. 1/3 from the wrist).
+
+The census, asserted: **63 deform + 16 twists + 7 IK handles + 74 helpers + 1
+root = 161**.
+
+### Clause 1 — `BodyPlan::Biped` is the mannequin (`878d3169`)
+
+`BodyPlan::BipedCanonical` is the twenty-joint rig `Biped` used to be, and it is
+kept *generable* for three reasons that are one reason: it emits exactly
+`humanoid_joint_names()`, so it is the rig the canonical vocabulary is defined by;
+every committed clip in this repository is index-bound to it; and a small rig is
+the right fixture for a test about something other than bone count. Every existing
+fixture that pinned the old vocabulary moved to it, one line each.
+
+* The count arm asserts 161 **with** the invariants that make the number mean
+  something: one root, every parent preceding its child, no duplicate name, one
+  role row per joint.
+* Emission order puts every deform bone ahead of every `ik_*` handle, asserted —
+  the belt beside the role table's suspenders, because the last site in the engine
+  that matches `contains("foot")` and takes the first hit finds `foot_l` before
+  `ik_foot_l` *because of this ordering*.
+* The bind pose is a **T-pose of pure translations**: identity rotation and unit
+  scale on every joint, so an inverse bind is an exact negated translation and no
+  `sin`/`cos` appears (the P14 law). That forces the arms out along ±X rather than
+  into the shipped mannequin's A-pose — an A-pose is rotation, and rotation in a
+  bind pose is what this generator does not do. The consequence is small and good:
+  every limb axis is an exact unit basis vector, which is what makes the drive
+  pass's twist axes exact.
+* Sockets: **both families**. The engine's own six (`hand_l`, `hand_r`, `foot_l`,
+  `foot_r`, `head`, `back`) and the ALS six (`hand_l_socket`, `hand_r_socket`,
+  `FX_Foot_L`, `FX_Foot_R`, `head_socket`, `root_socket`). Publishing one and not
+  the other would make every ALS port a rename.
+* The 74 helper bones are emitted **at their parent's origin** and carry
+  `BoneRoleKind::Helper`. They exist so an externally authored clip or a retarget
+  finds every bone it names; nothing in this engine drives them, and a bone at its
+  parent's origin is a bone with no influence.
+
+### Clause 2 — `.inf_skel` v2 → v3, the wave's one bump (`878d3169`)
+
+Spent once, carrying every tail append together: `roles`, `twists`, `ik_follow`,
+`grips` (empty on every rig this wave makes — present so the hand solver does not
+need a second bump), and `JointLimit::cone`, which that type's own docs had
+already named as *"an append behind another bump"*.
+
+**v2 is migrated, not refused**, and the difference from the v1 rung is what makes
+that honest: v1 stopped short of a table whose contents could not be invented,
+while a v2 file's four empty tables are exactly what a v2 rig *meant*. The frozen
+v2 shadow is spelled ladder-locally and independently twice, because a shape
+derived from the live encoder pins nothing.
+
+Measured, arithmetic-verified:
+
+| | before | after | delta |
+|---|---|---|---|
+| `character-demo/Character.inf_skel` (0 limits) | 684 B | 688 B | **+4** = four empty `Vec` prefixes |
+| `phase29-locomotion/Hero.inf_skel` (4 limits) | 2 687 B | 2 695 B | **+8** = the same four, plus one `Option<ConeLimit>` tag per limit |
+
+The stamp byte goes 2 → 3 and every other byte is identical. Sidecars carry only
+their content hash. **No `.inf_anim`, no `.inf_sm`, no `.inf_act`, no `.inf_lvl`
+moved** — `phase29_spec` is pinned to `BipedCanonical` so that course keeps the rig
+its clips are index-bound to.
+
+A side table naming a joint the rig does not have is **refused at the door, by
+name**. Not a panic anywhere (every reader bounds-checks), which is exactly why it
+needs catching: the failure it produces downstream is a twist that never drives
+and a role lookup that finds nothing, both silent.
+
+### Clause 3 — the procedural drive pass (`878d3169`, `9d22d1b7`)
+
+`inf_anim::drive` is one Ring-0 rule for the two families of bone no clip authors.
+
+**The law, one sentence, both signs:** *the roll along a limb segment is linear in
+the position along it.* A twist bone is a child of the segment, so it already
+inherits the whole roll. An **upper** segment is rolled by its own joint at the
+proximal end, so a bone at fraction `p` gives **back** `1 − p` — a negative
+fraction whose source is the segment itself. A **lower** segment is rolled by the
+joint at its distal end, which is a child, so a bone at `p` **adds** `p` of that
+child's roll. Both are the same mechanism with a sign, and both fall out of the
+measured placement.
+
+Portable by construction: swing-twist by projection (arithmetic and one `sqrt`)
+then `pslerp` from the identity. **No `sin`, no `cos`, no `atan2`, no `acos`** on
+the `f32` path. The `portable_pose` source gate grew `drive.rs`, `manny.rs` and
+`roles.rs` and now covers **28** files.
+
+The IK handles follow in **ascending joint order**, recomputing one global column
+at a time, because `ik_hand_l` hangs off `ik_hand_gun` which is itself a follow: a
+pass that snapshots the globals once puts the child against its parent's *bind*
+frame, a whole arm from where the parent just moved to. Armed, with the pairs fed
+in deliberately out of order.
+
+**Where it sits, and the bound that costs.** Called from `step_pose_evaluation`
+immediately after the layer stack and before every pass that corrects the result,
+because this is pose *construction* and those are corrections. It joins
+`sample_clip` / `blend_poses` / `apply_layers` / `solve_chain` / `apply_foot_ik` /
+the pelvis drop / the ragdoll blend as a pose writer at a fixed place in that
+list, since the I6 law makes the ORDER part of the trace. The cost, stated rather
+than hidden: **a twist reflects the pose the animation authored, not the pose foot
+IK goes on to correct** — a foot IK solve that rolls an ankle 20° leaves
+`calf_twist_01_l` showing the pre-solve roll for that frame. Fixing it means
+running the pass twice or having each solver re-drive its own chain's twists;
+**routed by name to SK1b**, where hand IK gives it a real consumer and a number.
+
+**Absent costs nothing.** A rig with no drive tables takes two early returns and
+poses the bytes it posed before this existed — proved end to end by a PIE ==
+shipping arm on the canonical biped, which carries no side tables at all.
+
+### Clause 4 — the role table takes the five name-guessing jobs (`878d3169`, `9d22d1b7`)
+
+| site | was | is |
+|---|---|---|
+| `inf_physics::ragdoll::classify` | a keyword table | the role table; the classifier is the fallback |
+| `inf_ecs::pose::foot_joints` | `contains("foot")`, first match | `BoneRoleKind::Foot` by side |
+| `inf_ecs::pose::pelvis_joint` | `eq_ignore_ascii_case("pelvis")` else the root | `BoneRoleKind::Pelvis` |
+| `inf_anim::derive::foot_joints` | `starts_with("foot_")` | `BoneRoleKind::Foot` |
+| `inf_anim::derive::leg_name_of` | `starts_with("upper_leg_")` | `BoneRoleKind::Thigh` |
+
+plus `inf_dcc::autofit`'s ground-plant rule, which was the sixth and was not on the
+list.
+
+**A MANNEQUIN RAGDOLLS INTO A CONNECTED BODY.** Measured in one arm against the
+same rig with its table stripped, through the real door (the pose step publishes
+the rig, the physics side assembles it):
+
+| | role path | name classifier, same rig |
+|---|---|---|
+| parts | **17** | 14 |
+| free capsules | **1** — the pelvis, which is the root | **4** |
+| a chest | yes | **never** |
+| every part reaches the root, walked | yes | no |
+| forearm capsule span | **1.000** of the forearm | built from a twist bone |
+
+The way the classifier fails is the quiet one: `spine_01` … `spine_05` all match
+its `spine` keyword and *none* matches its `spine1`/`spine2` chest keywords — the
+underscore — so **no `Chest` is ever produced**, and `Chest` is the parent role of
+both upper arms and of the head. Those parts name a parent that is not in the index
+and spawn with no joint at all.
+
+Two mechanisms made the role path work, and both are worth naming:
+
+* **`build_ragdoll` chains by INDEX**, not by role, when the rig carries a table.
+  That is what lets a five-segment spine be five parts in a row instead of a
+  collision of labels. Labels remain (a consumer reads `role == Hips`), and are
+  documentation.
+* **`rig_bones` takes its tail from the first child the table calls a deform
+  bone**, not the first child. On the mannequin's own index order the first child
+  of `lowerarm_l` is `lowerarm_twist_02_l`, a third of the way to the wrist.
+
+`capsule_part` is now one function both ragdoll paths call, so they cannot
+disagree about what a limb weighs — and it guards the zero-length case, because
+`from_rotation_arc` on a near-zero direction is a NaN quaternion a solver
+propagates into every body jointed to it, and a rig with 74 helper bones at their
+parent's origin has plenty of those.
+
+**The retarget map ships, and the silence ends.** `RetargetMap::canonical_to_manny`
+(and its reverse, built from one table so they cannot drift). Measured: the
+identity map on a mannequin target writes **5 joints of 161** — the two
+vocabularies overlap at `head`, `hand_l`, `hand_r`, `foot_l`, `foot_r` — and says
+nothing about the other 14 pairs; the pairing writes **19** and
+`RetargetReport` names every joint that kept bind. Five is not zero, and that is
+the trap: a nearly-vacuous retarget looks like a correct retarget of a still
+character.
+
+Two structural choices, stated: canonical `spine` pairs with `spine_01` and
+`chest` with `spine_05` — the bottom and the top of the five-segment chain, so a
+torso twist arrives at both ends of the back rather than being spent on one
+vertebra.
+
+### Clause 5 — the wizard end to end, and three numbers (`187166bb`)
+
+**PIE == shipping on a 161-bone pose trace**, twice from two processes, with the
+severed-machine anti-vacuity arm intact. The trace, re-priced and now asserted
+(36 B header + 40 B per joint per character per step):
+
+| rig | per character per step |
+|---|---|
+| canonical biped, 20 joints | **836 B** |
+| quadruped, 19 joints | 796 B |
+| mannequin, 161 joints | **6 476 B** |
+
+**7.75×, not 8×** — the header does not grow. What is *streamed* between hosts is
+a `u64` per step and does not grow at all; what grows is the memcpy and the hash.
+
+**The heat solve, measured before anything was done about it** (release, 386
+vertices, min of three): 24 → 249 bone segments is **10.4×**, and the solve went
+**31.9 → 75.9 ms**, which is **2.4×**. The per-bone work is real and is not what
+dominates at this size — the Laplacian assembly and the per-vertex top-4 gather
+are bone-independent and are most of the clock. A finding, not a licence: `field`
+is B × V × 8 bytes, so 161 bones over 50 000 vertices is ~64 MB resident and the
+balance tips. The arm asserts the **upper** bound, which is the half that guards
+something.
+
+**The preview drag, measured** (release, min of five): a cold mannequin preview is
+**0.105 ms** against 0.035 ms for the twenty-joint rig; warm, 0.026 against 0.004.
+Against one 60 Hz frame. **No cache and no coarser mannequin is owed**, and the
+reason is structural rather than lucky: the weight solver is not on this path at
+all, because a block mannequin is rigidly bound by construction.
+
+**Two real defects found on the way, neither of them cosmetic:**
+
+* **`fit_template` dropped the side tables.** The fit MOVES joints and never adds,
+  removes or reorders one, so every index-keyed table is still true of the result —
+  but it rebuilt the asset without them. A fitted mannequin therefore arrived
+  role-less, `build_locomotion` fell back to its name rule, and the wizard refused
+  the rig it had just generated with a message about `upper_leg_l`.
+* **`a_changed_proportion_changes_the_generated_rig` compared joint 0**, which on
+  the mannequin is `root` and sits at the origin at every height. Two identical
+  zeros, calling the generator broken. It compares the hip girdle by role now.
+
+`block_body_mesh` emits a box only for a segment the table calls a deform bone.
+The zero-length guard was already dropping most correctives — *silently*, which is
+the problem: "happens to be degenerate" and "is not part of the body" are
+different facts and only one of them is stable.
+
+`phase29_gate` stays green on its own rig, untouched, because `phase29_spec` is
+pinned to `BipedCanonical`.
+
+### Decisions (SK1a's, binding on later waves)
+
+1. **The asset beats the document.** Where a briefing doc and a shipped asset on
+   this machine disagree about a fact the asset contains, the asset wins and the
+   disagreement is printed in the code that carries it.
+2. **Names, parents and order are an interface; a bind pose is content.** The
+   mannequin's vocabulary and topology are reproduced; its geometry is derived
+   from `BodyParams`. Anything read off the asset must be a *rule* (thirds; `_01`
+   nearest the driver), not a number.
+3. **The role table is the first answer and a name rule is the fallback**, at
+   every site that asks what a bone is. A rig with no table behaves exactly as it
+   did.
+4. **A role kind or side is a wire enum**: append-only, discriminants frozen,
+   pinned by an arm.
+5. **The drive pass sits between construction and correction**, and its position
+   is part of the trace, not an implementation detail.
+6. **A ragdoll chains by index and labels by role.** Twelve fixed roles cannot
+   describe a five-segment spine; an index can.
+
+### What is open after SK1a (for SK1b and its successors)
+
+* **The twist/IK ordering bound** — a twist reflects the pre-IK pose. Routed to
+  SK1b with the measurement it needs (run the pass twice, or re-drive per chain).
+* **The corrective bones are inert.** 74 of 161 sit at their parent's origin and
+  nothing drives them. They exist so a retarget finds every name; making them
+  *correct* anything needs a driver kind this schema does not have (a pose-space
+  driver keyed on a parent's angle) and therefore another bump. Not owed until
+  something reads them.
+* **`grips` is empty.** The type ships; SK1b's finger solver is its first
+  consumer, and `JointLimit::cone` is there for it.
+* **4 influences per vertex still stands**, and the 16-attribute wall in the
+  skinned pipeline is full. A hand with metacarpals and three phalanges per finger
+  is where the top-4 truncation starts to bite; state it in SK1b's ledger and
+  measure before packing two attributes into one `u32x4`.
+* **`Skeleton::index_of` is still a linear scan**, and the engine now hands it
+  161-name rigs. Nothing on the fixed step measured badly (the drive pass and the
+  role lookups are index-keyed on purpose, and `ik_follow` is a persisted table
+  precisely so no per-step name scan exists) — but the *editor* paths still scan,
+  and `autofit::symmetrize` does it inside a loop, which is O(J²) per refine
+  iteration: 4 × 25 921 string compares on the mannequin against 4 × 400 before.
+  Not measured as a problem; named so the next person measures rather than
+  discovers.
+* **The mannequin's arms are a T-pose**, not the A-pose the shipped rig stands in,
+  because a bind pose here carries no rotation. A retarget from an A-pose source
+  is bind-relative and unaffected; a *mesh* authored against Epic's A-pose is not,
+  and that is SK1b's problem when it builds a real body.
+* **The default `arm_length_ratio` is too long, and the T-pose is what made it
+  visible.** `BodyParams::default()` carries 0.42 — shoulder to wrist as a
+  fraction of height — which on a 1.75 m rig is 0.735 m and gives a **2.24 m
+  wingspan** (a real one is about the height). Measured against the same asset the
+  hierarchy came from: `upperarm` 27.771 + `lowerarm` 27.251 = 55.0 cm on a rig
+  whose pelvis sits at 95.9 cm, which is a ratio of **0.31**, so the default is
+  ~37 % long. It always was; arms hanging down put the wrist at mid-thigh and
+  nobody looked. **Not changed here**: it is a shared default, `phase29`'s
+  committed clips are generated from it, and a proportion change is not a delta
+  anyone can verify arithmetically. Routed to SK1b, which builds a real body mesh
+  and will care.
+* **No `.inf_retarget`.** The maps are code, not assets; nothing persists a
+  pairing an author edits.

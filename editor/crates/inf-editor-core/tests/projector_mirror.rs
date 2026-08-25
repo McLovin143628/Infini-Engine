@@ -2077,6 +2077,81 @@ fn both_fixed_steps_run_the_cloth_slot() {
     }
 }
 
+/// **Every pose writer runs, in a frozen order** (SK1a) — the twin of the trace
+/// law below, one level down.
+///
+/// That law pins which SECTIONS the trace folds. This pins the order of the
+/// writers *inside* the section, and it needs its own arm for the same reason:
+/// the pose is a sequence of passes that each overwrite part of what the one
+/// before wrote, so moving one changes every committed hash — and two hosts that
+/// both moved it agree perfectly, which is what makes a trace comparison blind to
+/// it. SK1a inserted a pass into the middle of this list, which is exactly the
+/// edit that needed a pin to exist before it, so the pin is written here now.
+///
+/// An **allowlist over the whole sequence**, not a check that the new one is
+/// present: naming only the newest writer says nothing about the six that were
+/// already there, which is the mistake the I6 audit caught in the trace law.
+#[test]
+fn every_pose_writer_runs_in_its_frozen_order() {
+    let src = read("crates/inf-ecs/src/pose.rs").replace("\r\n", "\n");
+    let start = src
+        .find("pub fn step_pose_evaluation<")
+        .expect("the fixed step's one pose door");
+    let body = &src[start..];
+    let end = body.find("\n/// The **foot joints**").expect("the fn ends");
+    let body = &body[..end];
+    // The sequence, in the order each pass writes into the pose. A pass deleted
+    // fails at its own `expect`; a pass MOVED fails the ordering assertion.
+    const WRITERS: [(&str, &str); 6] = [
+        (
+            "pending_pose = Some(pose);",
+            "the machine + the layer stack + the inertializer produce the pose",
+        ),
+        (
+            "inf_anim::drive_pose(",
+            "SK1a: the twist chains and the IK handles — pose CONSTRUCTION, which              is why it is here and not below the corrections",
+        ),
+        (
+            "pelvis_joint(asset)",
+            "P29.5: the pelvis drop, before the legs solve from a hip that has              already come down",
+        ),
+        (
+            "inf_anim::solve_chain(",
+            "P24.2: the authored and runtime IK goals",
+        ),
+        (
+            "apply_foot_ik(asset,",
+            "P29.4: foot IK, over the same solver",
+        ),
+        (
+            "foot_states(asset,",
+            "P29.4: the feet published for the NEXT step, read off the final pose",
+        ),
+    ];
+    let at: Vec<usize> = WRITERS
+        .iter()
+        .map(|(needle, why)| {
+            body.find(needle).unwrap_or_else(|| {
+                panic!(
+                    "`{needle}` does not run in `step_pose_evaluation` at all —                      {why}; a pass missing from BOTH hosts is invisible to every                      trace comparison in this repository"
+                )
+            })
+        })
+        .collect();
+    println!(
+        "the fixed step runs {} pose writers at {at:?}",
+        WRITERS.len()
+    );
+    for (i, w) in at.windows(2).enumerate() {
+        assert!(
+            w[0] < w[1],
+            "the pose writers moved: `{}` must run before `{}` — every committed              pose hash was taken with them in this order",
+            WRITERS[i].0,
+            WRITERS[i + 1].0
+        );
+    }
+}
+
 /// **Every trace section is folded, in a frozen order** — the whole list, not
 /// the newest one.
 ///

@@ -516,6 +516,22 @@ mod tests {
     use super::*;
     use crate::bvh::Tri;
 
+    /// **The fixture's plan is the twenty-joint rig, and the production default is
+    /// not** (SK1a).
+    ///
+    /// `FitOptions::default()` is the mannequin, because the wizard's default is,
+    /// and that is the right production answer. It is the wrong *fixture*: the
+    /// tube man below is 40 cm across, and a 161-bone rig in a T-pose puts both
+    /// forearms, both hands, every finger and both `ik_hand_*` handles outside it
+    /// before the fit has done anything at all. A containment test on that
+    /// measures the tube, not the fit.
+    fn fixture_opts() -> FitOptions {
+        FitOptions {
+            plan: BodyPlan::BipedCanonical,
+            ..FitOptions::default()
+        }
+    }
+
     /// **A tube man**: a torso, a head, two arms and two legs, as overlapping
     /// boxes.
     ///
@@ -567,7 +583,7 @@ mod tests {
     #[test]
     fn a_fitted_biped_lands_entirely_inside_the_mesh() {
         let bvh = tube_man();
-        let (asset, report) = fit_template(&bvh, &FitOptions::default()).expect("the fit succeeds");
+        let (asset, report) = fit_template(&bvh, &fixture_opts()).expect("the fit succeeds");
 
         assert!(
             (report.height_m - 1.80).abs() < 1e-9,
@@ -640,7 +656,7 @@ mod tests {
     #[test]
     fn a_mis_scaled_fit_fails_the_containment_check() {
         let bvh = tube_man();
-        let (good, _) = fit_template(&bvh, &FitOptions::default()).unwrap();
+        let (good, _) = fit_template(&bvh, &fixture_opts()).unwrap();
         let good_outside = globals_of(&good)
             .iter()
             .filter(|g| !bvh.contains(**g))
@@ -653,7 +669,7 @@ mod tests {
             height_m: 2.6,
             ..Default::default()
         };
-        let tall = build_template(BodyPlan::Biped, &params).unwrap();
+        let tall = build_template(BodyPlan::BipedCanonical, &params).unwrap();
         let outside = globals_of(&tall)
             .iter()
             .filter(|g| !bvh.contains(**g))
@@ -674,6 +690,7 @@ mod tests {
         let mut inside = Vec::new();
         for iterations in [0u32, 1, 2, 4, 8] {
             let opts = FitOptions {
+                plan: BodyPlan::BipedCanonical,
                 refine_iterations: iterations,
                 ..Default::default()
             };
@@ -713,6 +730,7 @@ mod tests {
         let short_armed = Bvh::new(tris);
 
         let raw = FitOptions {
+            plan: BodyPlan::BipedCanonical,
             refine_iterations: 0,
             ..Default::default()
         };
@@ -721,7 +739,7 @@ mod tests {
             unrefined.joints_inside < unrefined.joints,
             "the fixture must start with a joint outside, or this proves nothing"
         );
-        let (_, refined) = fit_template(&short_armed, &FitOptions::default()).expect("fits");
+        let (_, refined) = fit_template(&short_armed, &fixture_opts()).expect("fits");
         assert_eq!(
             refined.joints_inside, refined.joints,
             "refinement must pull the overhanging joints in (was \
@@ -733,8 +751,8 @@ mod tests {
     #[test]
     fn two_fits_are_identical() {
         let bvh = tube_man();
-        let a = fit_template(&bvh, &FitOptions::default()).unwrap();
-        let b = fit_template(&bvh, &FitOptions::default()).unwrap();
+        let a = fit_template(&bvh, &fixture_opts()).unwrap();
+        let b = fit_template(&bvh, &fixture_opts()).unwrap();
         assert_eq!(a.0, b.0, "the skeleton must be reproducible");
         assert_eq!(a.1, b.1, "and so must the report");
         assert_eq!(
@@ -760,14 +778,14 @@ mod tests {
             },
         ]);
         assert!(matches!(
-            fit_template(&flat, &FitOptions::default()),
+            fit_template(&flat, &fixture_opts()),
             Err(FitError::Degenerate {
                 what: "the height",
                 ..
             })
         ));
         assert!(matches!(
-            fit_template(&Bvh::new(Vec::new()), &FitOptions::default()),
+            fit_template(&Bvh::new(Vec::new()), &fixture_opts()),
             Err(FitError::Degenerate { .. })
         ));
     }
@@ -786,7 +804,7 @@ mod tests {
             DVec3::new(1.6, 1.5, 0.1),
         ));
         let lopsided = Bvh::new(tris);
-        match fit_template(&lopsided, &FitOptions::default()) {
+        match fit_template(&lopsided, &fixture_opts()) {
             Err(FitError::NoSymmetryPlane { best, tolerance }) => {
                 assert!(best > tolerance, "{best} vs {tolerance}");
             }
@@ -805,7 +823,7 @@ mod tests {
         }
         let symmetric = Bvh::new(tris);
         assert!(
-            fit_template(&symmetric, &FitOptions::default()).is_ok(),
+            fit_template(&symmetric, &fixture_opts()).is_ok(),
             "the symmetric control must fit, or the refusal above is the fixture"
         );
     }

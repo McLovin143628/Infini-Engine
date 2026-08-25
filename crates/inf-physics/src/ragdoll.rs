@@ -389,8 +389,7 @@ pub fn build_ragdoll(skeleton: &[RagdollBone], config: RagdollConfig) -> Vec<Rag
 /// part's parent always precedes it, and the only part with no joint is the one
 /// whose ancestor chain reaches the rig's root without meeting another part.
 fn build_from_roles(skeleton: &[RagdollBone], config: RagdollConfig) -> Vec<RagdollPart> {
-    let is_part =
-        |b: &RagdollBone| -> bool { b.role.map(|r| r.kind.is_ragdoll_limb()).unwrap_or(false) };
+    let is_part = |b: &RagdollBone| -> bool { b.role.is_some_and(|r| r.kind.is_ragdoll_limb()) };
     // Input index -> output index, for the bones that became parts.
     let mut part_of: Vec<Option<usize>> = vec![None; skeleton.len()];
     let mut parts: Vec<RagdollPart> = Vec::new();

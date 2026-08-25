@@ -10,13 +10,16 @@
 //!
 //! # Where this list came from — and the correction it carries
 //!
-//! **Measured, not transcribed.** `docs/character-skeleton-rig-outline.md` prints a
-//! tree under the heading "the complete hierarchy for the 161 bones"; that tree is
+//! **Measured, not transcribed.** The briefing document this table was asked for
+//! (`character-skeleton-rig-outline.md`, which lives outside the repository with
+//! the rest of the reference material) prints a tree under the heading "the
+//! complete hierarchy for the 161 bones"; that tree is
 //! **89 bones** — exactly the figure the same document's own table gives for
 //! `SKM_Manny_Simple` — and it also states parents the shipped asset does not have
 //! (it hangs the IK subtrees under `spine_03` and invents `ik_head`, `ik_pelvis`
-//! and `ik_spine`). The table below was read out of the reference project's own
-//! `SK_Mannequin.uasset` reference skeleton: 161 bones, one root, every parent
+//! and `ik_spine`). The table below was read instead out of the
+//! `FReferenceSkeleton` in a shipped `SK_Mannequin.uasset`: 161 bones, one root,
+//! every parent
 //! preceding its child. Where the document and the asset disagree, the asset wins,
 //! and the disagreements are named here rather than quietly resolved:
 //!
