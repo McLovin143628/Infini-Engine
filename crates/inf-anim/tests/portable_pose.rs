@@ -46,7 +46,28 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 34] = [
+const SIM_PATH: [(&str, &str, &str); 35] = [
+    // ── the fixed step that PUBLISHES the pose (SK1b audit) ──
+    //
+    // The most surprising absence on this list. `crates/inf-ecs/src/pose.rs` is
+    // the door every writer above reaches `pose_state_bytes` through — it runs
+    // the machine, the layer stack, the drive pass, the chain solves, the foot
+    // IK, SK1b's hand pass and the correction re-drive, and then folds the
+    // result into the bytes both hosts compare. Two of its own crate's files
+    // (`camera.rs`, `movement.rs`) were added by the P29.6 audit for exactly
+    // this reason and this one was not, so SK1b's `apply_hand_ik` and
+    // `solve_arm` landed on an uncovered path.
+    //
+    // It could not be noticed by `every_source_file_in_this_crate_is_covered_or_
+    // ledgered` either: that arm enumerates `crates/inf-anim/src` and this file
+    // is in another crate, which is the SK1a-audit lesson (a hand-maintained
+    // list needs an arm that enumerates its domain) meeting a domain with two
+    // halves.
+    (
+        "inf_ecs::pose",
+        include_str!("../../inf-ecs/src/pose.rs"),
+        "step_pose_evaluation is the door every pose writer reaches `pose_state_bytes` through, and both hosts compare those bytes",
+    ),
     // ── SK1b's hand solver ──
     //
     // A curled finger is a pose. It reaches `pose_state_bytes` through the same
