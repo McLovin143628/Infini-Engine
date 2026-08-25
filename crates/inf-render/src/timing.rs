@@ -118,6 +118,182 @@ impl FrameTimings {
     }
 }
 
+/// **THE RECORD PATH'S OWN BREAKDOWN** (island wave I7b) — where the CPU
+/// milliseconds inside `EngineRenderer::render` go.
+///
+/// # Why this exists beside [`PassTime::cpu_ms`]
+///
+/// The per-segment record column above tiles the **marked span**, and the marked
+/// span is not the record stage: [`FrameTimer::begin`] opens at the frame's first
+/// *command*, so the view matrices, the uniform writes, the encoder, the cluster
+/// plan and the submit are all inside a caller's `render (record)` clock and
+/// inside no segment. The I4b audit measured that residue at **two thirds of a
+/// 3.0 ms stage** on the composed city and printed it as one unattributed
+/// number; wave I7's island measured the same stage at **10.874 ms against a
+/// 6.657 ms GPU frame**, which is a diagnostic saying "look on the CPU" and then
+/// declining to say where.
+///
+/// So the record path gets what the fixed step got in wave I4b: named phases
+/// that **tile it by construction**, each mark charging the time since the
+/// previous one. The phases here cover the whole of `render`, including the
+/// parts no GPU segment can reach.
+///
+/// Off unless the GPU timer is armed — the two are read together, and neither is
+/// on in a shipped build.
+pub const RECORD_PHASES: usize = 15;
+
+/// The record phases, in the order `EngineRenderer::render` runs them.
+///
+/// What each covers is documented on its constant in [`record`], deliberately
+/// and not as a trailing comment here: `rustfmt` aligns trailing comments into
+/// runs of spaces on lines carrying a string literal, and `inf_packager`'s
+/// workspace-wide eaten-continuation sweep reads such a run as a mangled `\`.
+pub const RECORD_PHASE_NAMES: [&str; RECORD_PHASES] = [
+    "targets + luts",
+    "view uniforms",
+    "encoder",
+    "cluster plan",
+    "cluster wants",
+    "vt stream",
+    "cluster commit",
+    "vsm sync",
+    "vsm raster",
+    "frame data",
+    "graph",
+    "vt feedback",
+    "vsm mark",
+    "submit",
+    "epilogue",
+];
+
+/// Record-phase indices, named so a mark cannot drift from its meaning.
+pub mod record {
+    /// Surface-size checks, target rebuilds, the atmosphere and GI LUT rebuilds.
+    pub const TARGETS: usize = 0;
+    /// The view matrices, the TAA jitter, and the view / wetness / deform
+    /// uniform writes — the three per-frame `write_buffer`s before any command.
+    pub const VIEW_UNIFORMS: usize = 1;
+    /// `create_command_encoder` and the timer's own `begin`.
+    pub const ENCODER: usize = 2;
+    /// P28.2 cluster page-in planning (`VgeomNode::plan_cluster_pages`).
+    pub const CLUSTER_PLAN: usize = 3;
+    /// The VT tile wants derived from the plan (`cluster_tile_wants`) — a
+    /// separate row from the plan itself because island wave I7b found the
+    /// island's whole record stage inside one of the two and could not have
+    /// said which from a single number.
+    pub const CLUSTER_WANTS: usize = 4;
+    /// P26 virtual-texture streaming.
+    pub const VT_STREAM: usize = 5;
+    /// Committing the cluster page pairs/retractions planned above.
+    pub const CLUSTER_COMMIT: usize = 6;
+    /// P27 VSM residency + the receiver slot table.
+    pub const VSM_SYNC: usize = 7;
+    /// P27 VSM caster packing, invalidation and the page raster.
+    pub const VSM_RASTER: usize = 8;
+    /// Assembling the `FrameData` the graph borrows.
+    pub const FRAME_DATA: usize = 9;
+    /// The render graph's nodes — the half [`super::PassTime::cpu_ms`] breaks
+    /// down further.
+    pub const GRAPH: usize = 10;
+    /// The VT feedback ring's readback finish.
+    pub const VT_FEEDBACK: usize = 11;
+    /// The VSM marking pass and the timer's resolve/copy.
+    pub const VSM_MARK: usize = 12;
+    /// `encoder.finish()` and `queue.submit`.
+    pub const SUBMIT: usize = 13;
+    /// Everything after the submit: the previous-VP snapshot and the counters.
+    pub const EPILOGUE: usize = 14;
+}
+
+/// One frame's record-path phase milliseconds.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RecordProfile {
+    /// Milliseconds per phase, indexed by [`RECORD_PHASE_NAMES`].
+    pub ms: [f64; RECORD_PHASES],
+}
+
+impl RecordProfile {
+    /// The whole record path — the sum of its phases, which is what "the phases
+    /// tile the record" means arithmetically.
+    pub fn total_ms(&self) -> f64 {
+        self.ms.iter().sum()
+    }
+
+    /// `(name, milliseconds)` in record order.
+    pub fn rows(&self) -> impl Iterator<Item = (&'static str, f64)> + '_ {
+        RECORD_PHASE_NAMES.iter().copied().zip(self.ms)
+    }
+
+    /// The phases sorted dearest-first.
+    pub fn dearest_first(&self) -> Vec<(&'static str, f64)> {
+        let mut v: Vec<(&'static str, f64)> = self.rows().collect();
+        v.sort_by(|a, b| b.1.total_cmp(&a.1));
+        v
+    }
+
+    /// Fold `other` in (for a mean over many frames).
+    pub fn accumulate(&mut self, other: &RecordProfile) {
+        for (a, b) in self.ms.iter_mut().zip(other.ms) {
+            *a += b;
+        }
+    }
+
+    /// Scale every phase by `k`.
+    pub fn scale(&mut self, k: f64) {
+        for a in self.ms.iter_mut() {
+            *a *= k;
+        }
+    }
+}
+
+/// The stopwatch `EngineRenderer::render` marks its phases into.
+///
+/// Deliberately the same shape as `inf_player::step_profile::StepClock`, down to
+/// the [`mark_at`](RecordClock::mark_at) seam that takes the clock reading as an
+/// argument: the I7 CI-red was a structural property (a phase marked twice
+/// **sums**) that could only be reached through a wall clock, and a shared
+/// runner answered. Every arm below drives the arithmetic through `mark_at` and
+/// reads no clock at all.
+pub struct RecordClock {
+    at: Option<std::time::Instant>,
+    ms: [f64; RECORD_PHASES],
+}
+
+impl RecordClock {
+    /// Start a clock, or a no-op one when `on` is false.
+    pub fn start(on: bool) -> Self {
+        Self {
+            at: on.then(std::time::Instant::now),
+            ms: [0.0; RECORD_PHASES],
+        }
+    }
+
+    /// Charge everything since the previous mark to `phase`. One predictable
+    /// branch when the clock is off.
+    #[inline]
+    pub fn mark(&mut self, phase: usize) {
+        if self.at.is_some() {
+            self.mark_at(phase, std::time::Instant::now());
+        }
+    }
+
+    /// [`mark`](Self::mark) with the clock read **supplied rather than taken** —
+    /// the seam that holds the whole of the arithmetic, so an arm can drive the
+    /// shipped code with decided timestamps.
+    #[inline]
+    fn mark_at(&mut self, phase: usize, now: std::time::Instant) {
+        if let Some(at) = self.at.as_mut() {
+            self.ms[phase] += now.duration_since(*at).as_secs_f64() * 1000.0;
+            *at = now;
+        }
+    }
+
+    /// The finished profile, or `None` when the clock was never running.
+    pub fn finish(self) -> Option<RecordProfile> {
+        self.at.map(|_| RecordProfile { ms: self.ms })
+    }
+}
+
 /// How many timestamps one frame may write.
 ///
 /// The graph is 29 nodes and the renderer brackets five more segments around it,
@@ -330,6 +506,108 @@ impl FrameTimer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The record phases SUM rather than replace**, and the arithmetic is
+    /// driven with decided timestamps and no clock at all.
+    ///
+    /// That is the I7 CI-red's own lesson, applied to this module the day it was
+    /// written rather than after a shared runner found it: the property is
+    /// arithmetic, so an arm that reaches it through `sleep` is measuring the
+    /// machine. Three unequal stretches, so "sums" is distinguishable from
+    /// "keeps the largest".
+    #[test]
+    fn a_record_phase_marked_twice_sums_rather_than_replaces() {
+        use std::time::Duration;
+        let base = std::time::Instant::now();
+        let mut c = RecordClock {
+            at: Some(base),
+            ms: [0.0; RECORD_PHASES],
+        };
+        c.mark_at(record::GRAPH, base + Duration::from_millis(2));
+        c.mark_at(record::SUBMIT, base + Duration::from_millis(8));
+        c.mark_at(record::GRAPH, base + Duration::from_millis(12));
+        let p = c.finish().expect("the clock was running");
+        // 2 ms, then 6, then 4 — the graph row carries the first and the third.
+        assert!((p.ms[record::GRAPH] - 6.0).abs() < 1.0e-9, "{:?}", p.ms);
+        assert!((p.ms[record::SUBMIT] - 6.0).abs() < 1.0e-9, "{:?}", p.ms);
+        assert!((p.total_ms() - 12.0).abs() < 1.0e-9, "a mark spilled");
+        // …and no other phase moved.
+        assert_eq!(
+            p.ms.iter().filter(|m| **m != 0.0).count(),
+            2,
+            "a third phase was charged: {:?}",
+            p.ms
+        );
+    }
+
+    /// A clock that was never armed measures nothing and answers `None`, so a
+    /// shipped frame pays one branch per phase and reports no numbers at all.
+    #[test]
+    fn a_disarmed_record_clock_measures_nothing() {
+        let mut c = RecordClock::start(false);
+        c.mark(record::GRAPH);
+        c.mark(record::SUBMIT);
+        assert!(c.finish().is_none());
+    }
+
+    /// The names and the indices are one table — a constant that drifted by one
+    /// would print the right milliseconds against the wrong phase, which is the
+    /// failure this module exists to remove reintroduced one level down.
+    #[test]
+    fn the_record_names_and_indices_are_one_table() {
+        assert_eq!(RECORD_PHASE_NAMES.len(), RECORD_PHASES);
+        assert_eq!(RECORD_PHASE_NAMES[record::TARGETS], "targets + luts");
+        assert_eq!(RECORD_PHASE_NAMES[record::CLUSTER_WANTS], "cluster wants");
+        assert_eq!(RECORD_PHASE_NAMES[record::VSM_RASTER], "vsm raster");
+        assert_eq!(RECORD_PHASE_NAMES[record::GRAPH], "graph");
+        assert_eq!(RECORD_PHASE_NAMES[record::SUBMIT], "submit");
+        assert_eq!(RECORD_PHASE_NAMES[record::EPILOGUE], "epilogue");
+        let all = [
+            record::TARGETS,
+            record::VIEW_UNIFORMS,
+            record::ENCODER,
+            record::CLUSTER_PLAN,
+            record::CLUSTER_WANTS,
+            record::VT_STREAM,
+            record::CLUSTER_COMMIT,
+            record::VSM_SYNC,
+            record::VSM_RASTER,
+            record::FRAME_DATA,
+            record::GRAPH,
+            record::VT_FEEDBACK,
+            record::VSM_MARK,
+            record::SUBMIT,
+            record::EPILOGUE,
+        ];
+        assert_eq!(all.len(), RECORD_PHASES);
+        let mut seen = [false; RECORD_PHASES];
+        for (i, p) in all.iter().enumerate() {
+            assert!(*p < RECORD_PHASES, "constant {i} is {p}, past the slots");
+            assert!(!seen[*p], "two record phases share slot {p}");
+            seen[*p] = true;
+        }
+    }
+
+    /// `dearest_first` is a sort, `accumulate`/`scale` are a mean — none of them
+    /// loses or invents a phase.
+    #[test]
+    fn the_record_profile_folds_without_losing_a_phase() {
+        let mut a = RecordProfile::default();
+        a.ms[record::GRAPH] = 4.0;
+        a.ms[record::SUBMIT] = 1.0;
+        let mut b = RecordProfile::default();
+        b.ms[record::GRAPH] = 2.0;
+        b.ms[record::VSM_RASTER] = 3.0;
+        a.accumulate(&b);
+        assert_eq!(a.total_ms(), 10.0);
+        a.scale(0.5);
+        assert_eq!(a.total_ms(), 5.0);
+        let d = a.dearest_first();
+        assert_eq!(d.len(), RECORD_PHASES);
+        assert_eq!(d[0], ("graph", 3.0));
+        assert_eq!(d[1], ("vsm raster", 1.5));
+        assert_eq!(a.rows().count(), RECORD_PHASES);
+    }
 
     /// `by_cost` is a sort and not a re-derivation — the same names, the same
     /// milliseconds, dearest first, ties in submission order.

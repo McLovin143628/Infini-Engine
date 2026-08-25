@@ -524,6 +524,27 @@ pub struct VsmRasterStats {
     /// Resident pages whose stamp *had* moved, summed over frames — before the
     /// frame's cap. `pages` is what survived it.
     pub dirty_pages: u64,
+
+    // ── island wave I7b: WHY a page was dirty ────────────────────────────────
+    //
+    // The island measured `vsm-raster` at **29.9 ms of a 33.5 ms lit GPU frame**
+    // with **256 pages rastered and 677 deferred every frame** — a cache that
+    // never converges. "The cache is thrashing" is not a diagnosis, and
+    // `dirty_pages` alone cannot say whether the world moved under the pages or
+    // the pages moved under the world. These three split it, and they sum to
+    // `dirty_pages` exactly.
+    /// Dirty because the **slot changed occupant** — the atlas re-assigned this
+    /// slot to a different `(light, page)` since it was last written, so its
+    /// texels describe somewhere else. Residency churn, not content.
+    pub dirty_slot: u64,
+    /// Dirty because the page's own **geometry stamp** moved: its matrix is a
+    /// different one. A clipmap level re-centring, an origin rebase, the sun
+    /// crossing its quantum — the page is looking somewhere new.
+    pub dirty_geometry: u64,
+    /// Dirty because the **casters** under an unmoved page changed: something
+    /// inside its footprint moved, arrived, or left. The number this phase's
+    /// invalidation scatter exists to keep small.
+    pub dirty_casters: u64,
     /// Page rectangles cleared, summed over frames. Equal to `pages` in every
     /// frame that opens the pass, because a page that is re-rasterized is cleared
     /// first — and *unequal* to the atlas's slot count, which is the whole change
@@ -544,8 +565,9 @@ impl VsmRasterStats {
         format!(
             "vsm raster: {} frames, {} pages, {} draws, {} casters ({} scattered, \
              {} meshlet-asset, {} skinned, {} terrain), {} pages deferred, \
-             {} casters dropped, {} groups refused, {} pages cached / {} dirty / \
-             {} cleared, {} invalidation touches, {} cut flushes",
+             {} casters dropped, {} groups refused, {} pages cached / {} dirty \
+             ({} re-slotted, {} moved, {} re-cast) / {} cleared, {} invalidation \
+             touches, {} cut flushes",
             self.frames,
             self.pages,
             self.draws,
@@ -559,6 +581,9 @@ impl VsmRasterStats {
             self.dropped_groups,
             self.cached_pages,
             self.dirty_pages,
+            self.dirty_slot,
+            self.dirty_geometry,
+            self.dirty_casters,
             self.cleared_pages,
             self.invalidation_touches,
             self.cut_flushes,
@@ -649,7 +674,11 @@ pub struct VsmRaster {
     skinned_version: Option<u64>,
 
     /// **The page cache** (P27.3), indexed by atlas slot: what that slot's texels
-    /// currently hold, as `(light, page, content stamp)`.
+    /// currently hold, as `(light, page, content stamp, geometry stamp)`.
+    ///
+    /// The fourth member is a **diagnostic and never a key** (island wave I7b):
+    /// the hit test is the first three, and `geo_key` is carried only so a miss
+    /// can say *why* — see [`VsmRasterStats::dirty_geometry`].
     ///
     /// All three, and the reason is **not** the one the first write-up gave
     /// (P27.3 audit). That reason was "a slot that is evicted, filled by another
@@ -675,7 +704,7 @@ pub struct VsmRaster {
     /// shared across two lights or two levels would make the fold's `light` and
     /// `level` terms inert and a stamp-only key unsound, and on that day the arm
     /// fails and this paragraph is rewritten rather than the members removed.
-    cache: Vec<Option<(u32, VsmPage, u64)>>,
+    cache: Vec<Option<(u32, VsmPage, u64, u64)>>,
     /// Last frame's view, for the [`is_camera_cut`] trigger.
     ///
     /// [`is_camera_cut`]: crate::passes::vgeom::is_camera_cut
@@ -1209,9 +1238,34 @@ impl VsmRaster {
         // touched at all — no viewport, no clear, no draw, and it is not even in
         // the pages buffer the cull walks.
         let resident = pages.len();
-        pages.retain(|p| self.cache[p.slot as usize] != Some((p.light, p.page, p.key)));
+        let (mut d_slot, mut d_geo, mut d_cast) = (0u64, 0u64, 0u64);
+        pages.retain(|p| {
+            match self.cache[p.slot as usize] {
+                Some((l, pg, k, _)) if l == p.light && pg == p.page && k == p.key => false,
+                // The slot still holds this page's label, so the stamp moved
+                // under it: either the page is looking somewhere new (its own
+                // matrix) or something under it did (the caster fold).
+                Some((l, pg, _, g)) if l == p.light && pg == p.page => {
+                    if g == p.geo_key {
+                        d_cast += 1;
+                    } else {
+                        d_geo += 1;
+                    }
+                    true
+                }
+                // A slot with a different occupant (or none) describes somewhere
+                // else entirely — residency churn rather than content.
+                _ => {
+                    d_slot += 1;
+                    true
+                }
+            }
+        });
         self.stats.cached_pages += (resident - pages.len()) as u64;
         self.stats.dirty_pages += pages.len() as u64;
+        self.stats.dirty_slot += d_slot;
+        self.stats.dirty_geometry += d_geo;
+        self.stats.dirty_casters += d_cast;
         if pages.is_empty() {
             // **The steady state.** Nothing is recorded, which is the claim: the
             // encoder is not touched, `frames` does not move, and `pages` stays
@@ -1502,7 +1556,7 @@ impl VsmRaster {
 
         // ── 5. the cache now holds what the pass just wrote.
         for p in pages.iter() {
-            self.cache[p.slot as usize] = Some((p.light, p.page, p.key));
+            self.cache[p.slot as usize] = Some((p.light, p.page, p.key, p.geo_key));
         }
 
         self.last_pages = pages
@@ -3167,6 +3221,9 @@ mod tests {
             dropped_groups: 1,
             cached_pages: 23,
             dirty_pages: 29,
+            dirty_slot: 43,
+            dirty_geometry: 47,
+            dirty_casters: 53,
             cleared_pages: 31,
             invalidation_touches: 37,
             cut_flushes: 41,
@@ -3180,7 +3237,8 @@ mod tests {
         // another field's digits — which is what "2" and "1" above rely on the
         // reader not to worry about.
         for n in [
-            "3", "17", "51", "9", "2", "1", "4", "6", "23", "29", "31", "37", "41",
+            "3", "17", "51", "9", "2", "1", "4", "6", "23", "29", "31", "37", "41", "43", "47",
+            "53",
         ] {
             assert!(s.contains(n), "{n} is missing from {s:?}");
         }

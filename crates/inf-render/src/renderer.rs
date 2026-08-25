@@ -522,6 +522,12 @@ pub struct EngineRenderer {
     /// every frame nobody asked to measure. See
     /// [`EngineRenderer::set_gpu_timing`] and [`crate::timing`].
     frame_timer: Option<crate::timing::FrameTimer>,
+    /// The last frame's **record-path** phase breakdown (island wave I7b),
+    /// zeroed unless `frame_timer` is armed. See [`crate::timing::RecordProfile`]
+    /// — the per-pass record column tiles the marked span, and this tiles the
+    /// whole of [`EngineRenderer::render`], including everything before the
+    /// frame's first command and everything after its last.
+    record_profile: crate::timing::RecordProfile,
     /// Shared atmosphere LUTs + uniform (P17.2). Unlike `shadow`/`gi` these are
     /// **recreated** when [`crate::atmosphere::AtmosphereQuality`] changes, which
     /// is why they carry a generation the env bind-group cache keys on.
@@ -822,6 +828,7 @@ impl EngineRenderer {
             vis_report,
             scatter_audit: passes::scatter::ScatterAuditResources::new(gpu),
             frame_timer: None,
+            record_profile: crate::timing::RecordProfile::default(),
             atmosphere,
             next_atmosphere_generation: 2,
             wetness: WetnessResources::new(gpu),
@@ -1439,6 +1446,16 @@ impl EngineRenderer {
         self.frame_timer.as_mut()?.take(gpu)
     }
 
+    /// The **last recorded** frame's record-path phase breakdown (island wave
+    /// I7b) — CPU only, so unlike [`gpu_timings`](Self::gpu_timings) it needs no
+    /// poll and blocks on nothing.
+    ///
+    /// All zeros until [`set_gpu_timing`](Self::set_gpu_timing) is on, which is
+    /// every shipped frame.
+    pub fn record_profile(&self) -> crate::timing::RecordProfile {
+        self.record_profile
+    }
+
     /// Every graph node's name in run order (I4) — the list a per-pass report is
     /// checked against, so a pass that is renamed or dropped is a red arm rather
     /// than a line quietly missing from a diagnostic.
@@ -1773,6 +1790,11 @@ impl EngineRenderer {
         // `tracing`; the Tracy layer (behind the apps' `tracy` feature) records
         // it, and the per-pass spans in `RenderGraph::run` nest inside it.
         let _frame_span = tracing::info_span!("render_frame", frame = self.frame_index).entered();
+        // **THE RECORD PATH'S OWN CLOCK** (island wave I7b). Armed with the GPU
+        // timer and off in every shipped frame; see `crate::timing::RecordClock`
+        // for why the record stage needed phases of its own when the per-pass
+        // record column already existed.
+        let mut rec = crate::timing::RecordClock::start(self.frame_timer.is_some());
         let scene_size = (view.width.max(1), view.height.max(1));
         let resized = self.targets.as_ref().is_none_or(|t| t.size != scene_size);
         if resized {
@@ -1806,6 +1828,8 @@ impl EngineRenderer {
             self.gi = GiResources::new(gpu, self.settings.gi.quality, self.next_gi_generation);
             self.next_gi_generation += 1;
         }
+
+        rec.mark(crate::timing::record::TARGETS);
 
         // Camera sub-pixel jitter (TAA only), applied to the projection.
         let base_vp = view.view_proj();
@@ -1882,6 +1906,8 @@ impl EngineRenderer {
         gpu.queue
             .write_buffer(&self.deform.uniform, 0, bytemuck::bytes_of(&deform_uniform));
 
+        rec.mark(crate::timing::record::VIEW_UNIFORMS);
+
         let history_valid = self.settings.taa && !resized && self.prev_view_proj.is_some();
         let prev_vp = self.prev_view_proj.unwrap_or_else(|| jvp.to_cols_array());
         let cur = (self.frame_index & 1) as usize;
@@ -1899,6 +1925,8 @@ impl EngineRenderer {
         if let Some(t) = self.frame_timer.as_mut() {
             t.begin(&mut encoder);
         }
+
+        rec.mark(crate::timing::record::ENCODER);
 
         // **THE CLUSTER PAGE-IN** (P28.2), in three steps around one virtual-
         // texture transaction, because a page-in that feeds two consumers cannot
@@ -1921,6 +1949,7 @@ impl EngineRenderer {
             match node {
                 Some(n) => {
                     n.plan_cluster_pages(scene, view, &vsettings);
+                    rec.mark(crate::timing::record::CLUSTER_PLAN);
                     let lib = self.vt_textures.as_ref();
                     // Registered AND addressable. `handle` alone was the P28.2
                     // filter and it let a **stale** address through — a pairing
@@ -1954,6 +1983,8 @@ impl EngineRenderer {
             }
         };
 
+        rec.mark(crate::timing::record::CLUSTER_WANTS);
+
         // **THE VIRTUAL-TEXTURE SYNC POINT** (P26.4). Before any pass samples
         // the atlas, and inside the frame's own encoder, so the ordering
         // contract in `crate::vt`'s module docs holds unchanged: a transaction
@@ -1963,6 +1994,7 @@ impl EngineRenderer {
         if let Some(t) = self.frame_timer.as_mut() {
             t.mark(&mut encoder, "vt-stream");
         }
+        rec.mark(crate::timing::record::VT_STREAM);
 
         {
             let lib = self.vt_textures.as_ref();
@@ -1975,6 +2007,8 @@ impl EngineRenderer {
                 });
             }
         }
+
+        rec.mark(crate::timing::record::CLUSTER_COMMIT);
 
         // **THE SHADOW-PAGE SYNC POINT** (P27.1), for the same reason and at the
         // same place: frame F − 2's needed-page mask becomes this frame's
@@ -1990,6 +2024,7 @@ impl EngineRenderer {
         if let Some(t) = self.frame_timer.as_mut() {
             t.mark(&mut encoder, "vsm-sync");
         }
+        rec.mark(crate::timing::record::VSM_SYNC);
 
         // **THE CASTER PASS** (P27.2), recorded here and deliberately BEFORE the
         // graph: it produces the depth P27.4's receivers sample from inside the
@@ -2005,6 +2040,7 @@ impl EngineRenderer {
         if let Some(t) = self.frame_timer.as_mut() {
             t.mark(&mut encoder, "vsm-raster");
         }
+        rec.mark(crate::timing::record::VSM_RASTER);
 
         let targets = self.targets.as_ref().unwrap();
         let post_hdr = if self.settings.taa {
@@ -2058,8 +2094,10 @@ impl EngineRenderer {
             },
         };
         let vis_frames_before = self.vis_audit().frames;
+        rec.mark(crate::timing::record::FRAME_DATA);
         self.graph
             .run(gpu, &mut encoder, &frame, self.frame_timer.as_mut());
+        rec.mark(crate::timing::record::GRAPH);
         // No `drop(frame)`: `FrameData` implements no `Drop`, so NLL ends its
         // borrow of `self` at the last use above — the line above — and clippy's
         // `drop_non_drop` is right that spelling it out buys nothing.
@@ -2084,6 +2122,7 @@ impl EngineRenderer {
         if let Some(t) = self.frame_timer.as_mut() {
             t.mark(&mut encoder, "vt-feedback");
         }
+        rec.mark(crate::timing::record::VT_FEEDBACK);
 
         // **The shadow-page marking pass** (P27.1), recorded here and nowhere
         // else: it consumes the scene depth, so it has to follow every pass that
@@ -2124,8 +2163,10 @@ impl EngineRenderer {
             t.mark(&mut encoder, "vsm-mark");
             t.end(&mut encoder);
         }
+        rec.mark(crate::timing::record::VSM_MARK);
 
         gpu.queue.submit([encoder.finish()]);
+        rec.mark(crate::timing::record::SUBMIT);
 
         // Next frame reprojects against the matrix we actually rendered with.
         self.prev_view_proj = Some(jvp.to_cols_array());
@@ -2140,6 +2181,10 @@ impl EngineRenderer {
         // place: the atlas was bound to the lit passes of a frame that went out.
         if self.vsm.is_some() {
             self.vsm_receiver_frames += 1;
+        }
+        rec.mark(crate::timing::record::EPILOGUE);
+        if let Some(p) = rec.finish() {
+            self.record_profile = p;
         }
     }
 }

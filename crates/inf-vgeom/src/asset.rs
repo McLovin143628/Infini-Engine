@@ -1855,6 +1855,43 @@ impl VgeomSource {
         Some(f(s))
     }
 
+    /// [`with_page_sections`](Self::with_page_sections) over **many** pages,
+    /// through **one** parse. Returns `false` when the payload is unavailable or
+    /// will not parse, in which case `f` is never called.
+    ///
+    /// # Why this exists, with the number that bought it
+    ///
+    /// `with_page_sections` parses the payload on every call — the header, the
+    /// bounds checks and the **whole page directory**, which is `O(pages)` plus
+    /// one `Vec` allocation. That is the right shape for one page and the wrong
+    /// one for a loop over a resident set, where it is `O(pages²)` per frame.
+    ///
+    /// Island wave I7b measured it: the shipped island's `render (record)` stage
+    /// was **11.151 ms of a 24.080 ms frame** and **10.051 ms of it (90.1 %) was
+    /// the cluster-page plan**, on a world holding **one** virtualized mesh. The
+    /// cost was `cluster_tile_wants` asking this type for one page's sections at
+    /// a time, so a mesh with a few hundred resident pages re-parsed its own
+    /// directory a few hundred times a frame to read a section it had already
+    /// walked past.
+    pub fn for_each_page_sections(
+        &self,
+        pages: impl IntoIterator<Item = usize>,
+        mut f: impl FnMut(usize, VgeomPageSections<'_>),
+    ) -> bool {
+        let Some(payload) = self.payload() else {
+            return false;
+        };
+        let Ok(r) = VgeomAssetReader::new(payload.as_ref()) else {
+            return false;
+        };
+        for index in pages {
+            if let Some(s) = r.page_sections(index) {
+                f(index, s);
+            }
+        }
+        true
+    }
+
     /// Materialize the whole mesh — the classic discrete-LOD fallback's door.
     pub fn to_mesh(&self) -> std::result::Result<VgeomMesh, String> {
         let payload = self

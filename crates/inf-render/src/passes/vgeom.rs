@@ -1811,9 +1811,19 @@ impl VgeomNode {
             let Some(src) = source_of.get(&asset) else {
                 continue;
             };
-            for page in 0..res.resident_pages() {
+            // **ONE parse for the whole resident set** (island wave I7b).
+            // `with_page_sections` parses the payload — header, bounds checks and
+            // the whole page directory — on every call, so asking it page by page
+            // is `O(pages²)` a frame. Measured on the shipped island: **10.051 ms
+            // of an 11.151 ms `render (record)` stage**, on a world holding one
+            // virtualized mesh. `for_each_page_sections` parses once and walks.
+            let mut coupled: Vec<(usize, Vec<(u128, inf_vt::TileCoord)>)> =
+                Vec::with_capacity(res.resident_pages());
+            let mut stale = 0u64;
+            let mut newly_mismatched: Vec<u128> = Vec::new();
+            src.for_each_page_sections(0..res.resident_pages(), |page, s| {
                 let mut here: Vec<(u128, inf_vt::TileCoord)> = Vec::new();
-                src.with_page_sections(page, |s| {
+                {
                     for t in s.tile_refs() {
                         let guid = t.texture().uuid().as_u128();
                         // **A texture this level does not bind is not part of the
@@ -1834,17 +1844,27 @@ impl VgeomNode {
                         // fact than a missing address, and it is the one that
                         // explains every missing address that follows.
                         if !grid_matches(guid, t) {
-                            if mismatched.insert(guid) {
-                                self.mismatched_textures += 1;
-                            }
-                            self.stale_tiles += 1;
+                            newly_mismatched.push(guid);
+                            stale += 1;
                         } else if addressable(guid, t.coord()) {
                             here.push((guid, t.coord()));
                         } else {
-                            self.stale_tiles += 1;
+                            stale += 1;
                         }
                     }
-                });
+                }
+                coupled.push((page, here));
+            });
+            // Applied out here rather than inside the walk, because the walk holds
+            // a borrow of `src` and these are `self`'s. The counters are the same
+            // additions in the same order.
+            for guid in newly_mismatched {
+                if mismatched.insert(guid) {
+                    self.mismatched_textures += 1;
+                }
+            }
+            self.stale_tiles += stale;
+            for (page, here) in coupled {
                 self.coupling.couple((asset, page), here);
             }
         }

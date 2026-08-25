@@ -369,6 +369,10 @@ struct Measured {
     /// I4b) — `pages x groups` is what the pass RECORDS, and the record column
     /// is meaningless without them.
     vsm: Option<inf_render::VsmRasterStats>,
+    /// **The record stage's own breakdown** (island wave I7b), meaned over the
+    /// best round. The per-pass record column tiles only the marked span, and on
+    /// the island two thirds of a 10.874 ms stage was outside it.
+    record: inf_render::RecordProfile,
 }
 
 impl Measured {
@@ -414,7 +418,11 @@ fn measure(
                      renderer: &mut EngineRenderer,
                      fx: &mut Fixture,
                      step: u64|
-     -> (Option<inf_render::FrameTimings>, [f64; CPU_STAGES]) {
+     -> (
+        Option<inf_render::FrameTimings>,
+        [f64; CPU_STAGES],
+        inf_render::RecordProfile,
+    ) {
         let view = path(step, w, h);
         // The CPU half, stage by stage. A frame that is CPU-bound and cannot say
         // WHERE is the same defect the certification found on the GPU side, one
@@ -443,6 +451,9 @@ fn measure(
         let t = std::time::Instant::now();
         renderer.render(gpu, scene, &view, &target.view, (w, h));
         cpu[3] = t.elapsed().as_secs_f64() * 1000.0;
+        // The record path's own phases, taken from inside the call that just
+        // returned. CPU only, so it blocks on nothing and is not a stage.
+        let rec = renderer.record_profile();
         let t = std::time::Instant::now();
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         cpu[4] = t.elapsed().as_secs_f64() * 1000.0;
@@ -453,7 +464,7 @@ fn measure(
         let t = std::time::Instant::now();
         let timings = renderer.gpu_timings(gpu);
         cpu[5] = t.elapsed().as_secs_f64() * 1000.0;
-        (timings, cpu)
+        (timings, cpu, rec)
     };
 
     // The discarded pass: pipelines compile, the terrain's render cut converges
@@ -470,21 +481,24 @@ fn measure(
     let mut best_passes: Vec<(&'static str, f64, f64)> = Vec::new();
     let mut best_gpu = 0.0;
     let mut best_cpu = [0.0f64; CPU_STAGES];
+    let mut best_record = inf_render::RecordProfile::default();
     let mut best = 0usize;
     for r in 0..ROUNDS {
         let mut ms = Vec::with_capacity(FRAMES);
         let mut sums: Vec<(&'static str, f64, f64)> = Vec::new();
         let mut gpu_total = 0.0;
         let mut cpu_total = [0.0f64; CPU_STAGES];
+        let mut rec_total = inf_render::RecordProfile::default();
         step = 0;
         for _ in 0..FRAMES {
             let t0 = std::time::Instant::now();
-            let (timings, cpu) = frame(&mut scene, &mut renderer, fx, step);
+            let (timings, cpu, rec) = frame(&mut scene, &mut renderer, fx, step);
             ms.push(t0.elapsed().as_secs_f64() * 1000.0);
             step += 1;
             for (slot, v) in cpu_total.iter_mut().zip(cpu) {
                 *slot += v;
             }
+            rec_total.accumulate(&rec);
             if let Some(t) = timings {
                 gpu_total += t.total_ms;
                 if sums.is_empty() {
@@ -502,6 +516,8 @@ fn measure(
             best = r;
             best_gpu = gpu_total / FRAMES as f64;
             best_cpu = cpu_total.map(|v| v / FRAMES as f64);
+            best_record = rec_total;
+            best_record.scale(1.0 / FRAMES as f64);
             best_passes = sums
                 .into_iter()
                 .map(|(n, gpu, cpu)| (n, gpu / FRAMES as f64, cpu / FRAMES as f64))
@@ -526,7 +542,41 @@ fn measure(
         terrain_tiles: scene.terrains.iter().map(|t| t.tiles.len()).sum(),
         vt_textures,
         vsm: renderer.vsm_raster_stats(),
+        record: best_record,
     }
+}
+
+/// Print the record stage's phases, dearest first, and **assert they tile it**.
+///
+/// The one direction that must hold: the phases are the whole of
+/// `EngineRenderer::render`, and `cpu[3]` is the wall clock around exactly that
+/// call, so the two are the same span measured twice. The slop is a tenth of a
+/// millisecond over a sum of fourteen `Instant` reads.
+fn print_record_profile(label: &str, m: &Measured) {
+    let total = m.record.total_ms();
+    if total <= 0.0 {
+        println!("  {label} record profile: not armed (no GPU timing)");
+        return;
+    }
+    println!(
+        "  {label} record (record) {:.3} ms, phases sum {total:.3} ms:",
+        m.cpu_ms[3]
+    );
+    for (name, ms) in m.record.dearest_first() {
+        if ms <= 0.0005 {
+            continue;
+        }
+        println!(
+            "    {name:<16} {ms:7.3} ms ({:5.1} % of the record stage)",
+            100.0 * ms / m.cpu_ms[3].max(1.0e-9)
+        );
+    }
+    assert!(
+        (total - m.cpu_ms[3]).abs() < 0.1 + 0.02 * m.cpu_ms[3],
+        "{label}: the record phases sum to {total:.3} ms beside a {:.3} ms record \
+         stage — they are the same call measured twice and must tile it",
+        m.cpu_ms[3]
+    );
 }
 
 // ── the arms ────────────────────────────────────────────────────────────────
@@ -1037,6 +1087,7 @@ fn the_frame_at_shipping_resolution() {
                 ms / cpu_sum.max(1.0e-9) * 100.0
             );
         }
+        print_record_profile(label, &m);
         // **THE STAGES TILE THE FRAME** — the CPU twin of the GPU segments'
         // tiling assertion below, and the arm that would have caught the residue
         // the I4 audit found: the timestamp readback sat inside the wall clock the
@@ -1260,6 +1311,7 @@ fn the_frame_at_shipping_resolution() {
                     ms / lit_cpu.max(1.0e-9) * 100.0
                 );
             }
+            print_record_profile(label, &m);
             if !m.passes.is_empty() {
                 let mut by_cost = m.passes.clone();
                 by_cost.sort_by(|a, b| (b.1 + b.2).total_cmp(&(a.1 + a.2)));
@@ -1509,6 +1561,25 @@ fn the_island_at_shipping_resolution() {
     };
     let (mut lit, lit_tier) = shipped_settings(&gpu, lit_record);
     lit.vsm.enabled = true;
+    // **THE ALTERNATIVE, PRICED** (island wave I7b). The lit island's whole GPU
+    // frame is `vsm-raster`, and the reason is not the world: the dirty split
+    // below reads **0 pages re-cast** every frame — nothing under a page ever
+    // moves — against ~530 "moved" and ~400 "re-slotted", which is the clipmap
+    // grid shifting under a camera that travels 0.9 m a frame against a level-0
+    // page **1.0 m** wide (`2 x first_level_extent_m / clipmap_pages_per_side`,
+    // 2 x 32 / 64). A page 1 m across is 128 texels over 1 m — 7.8 mm a texel,
+    // four to eight times finer than any pixel this camera can show.
+    //
+    // So the third configuration is the shipped lit one with the first clipmap
+    // level widened 4x, which quarters every level's snap rate. It is
+    // **reported, never shipped**: `first_level_extent_m` is a product decision
+    // about shadow sharpness, and the wave that measures an alternative is not
+    // the wave that gets to pick it. The number is what the routing needed —
+    // the I7 lesson that an unmeasured prescription can be backwards, met on a
+    // prescription that WAS backwards (the routed caster-pack cache aims at the
+    // 0.9 ms of CPU record, not at the 30 ms of GPU).
+    let mut lit_coarse = lit;
+    lit_coarse.vsm.first_level_extent_m = lit.vsm.first_level_extent_m * 4.0;
     let clamped = !(lit.shadows.enabled && lit.gi.enabled);
     println!(
         "=== THE ISLAND on {} ({:?}) — tier {tier:?}, {ROUNDS} rounds x {FRAMES} frames, MIN of rounds ===",
@@ -1524,7 +1595,11 @@ fn the_island_at_shipping_resolution() {
         from.x, from.y, from.z
     );
 
-    for (label, settings) in [("SHIPPED", shipped), ("LIT", lit)] {
+    for (label, settings) in [
+        ("SHIPPED", shipped),
+        ("LIT", lit),
+        ("LIT-COARSE-CLIPMAP", lit_coarse),
+    ] {
         let m = measure(&gpu, &mut fx, 1920, 1080, settings, &path);
         let r = m.round();
         let cpu_sum: f64 = m.cpu_ms.iter().sum();
@@ -1549,11 +1624,45 @@ fn the_island_at_shipping_resolution() {
             println!("  cpu {name:>16}: {:.3} ms", m.cpu_ms[i]);
         }
         println!("  cpu {:>16}: {cpu_sum:.3} ms", "TOTAL");
+        print_record_profile(label, &m);
         println!("  gpu {:>16}: {:.3} ms", "frame", m.gpu_frame_ms);
         let mut passes = m.passes.clone();
         passes.sort_by(|a, b| b.1.total_cmp(&a.1));
         for (name, ms, rec) in passes.iter().take(8) {
             println!("  gpu {name:>16}: {ms:.3} ms   (record {rec:.3} ms)");
+        }
+        // **What the shadow pass actually DID** (island wave I7b). `vsm-raster`
+        // was 95.1 % of wave I7's lit GPU frame on a world whose casters are a
+        // heightfield and one road mesh, and a millisecond count with no page,
+        // draw or caster beside it cannot say whether the cost is the drawing or
+        // the asking. One line, and it is the pass's own counters.
+        if let Some(v) = m.vsm.as_ref() {
+            println!("  {label} {}", v.summary());
+            if v.frames > 0 {
+                println!(
+                    "  {label} per rastering frame: {:.1} pages, {:.0} draws, \
+                     {:.0} casters, {:.0} invalidation touches, {:.1} cached \
+                     pages, {:.1} deferred",
+                    v.pages as f64 / v.frames as f64,
+                    v.draws as f64 / v.frames as f64,
+                    v.casters as f64 / v.frames as f64,
+                    v.invalidation_touches as f64 / v.frames as f64,
+                    v.cached_pages as f64 / v.frames as f64,
+                    v.deferred_pages as f64 / v.frames as f64,
+                );
+                // **WHY they were dirty** (island wave I7b). "The cache is
+                // thrashing" is not a diagnosis; these three sum to
+                // `dirty_pages` and say whether the pages moved under the world
+                // or the world moved under the pages.
+                println!(
+                    "  {label} dirty per rastering frame: {:.1} re-slotted, \
+                     {:.1} moved (the page's own matrix), {:.1} re-cast \
+                     (something under it)",
+                    v.dirty_slot as f64 / v.frames as f64,
+                    v.dirty_geometry as f64 / v.frames as f64,
+                    v.dirty_casters as f64 / v.frames as f64,
+                );
+            }
         }
         let submitted = cpu_sum - m.cpu_ms[4] - m.cpu_ms[5];
         let pipelined = submitted.max(m.gpu_frame_ms);

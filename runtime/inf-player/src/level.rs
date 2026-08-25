@@ -1637,25 +1637,30 @@ pub fn refresh_biome_bindings(
         return 0;
     }
 
-    // Deterministic Guid-sorted terrain list, exactly as the volume pass sorts.
+    // Deterministic `Guid`-sorted terrain list.
+    //
+    // **Filtered before it is sorted**, unlike the volume pass beside it, and
+    // that is a cost rather than a style: the volume pass runs at load and on a
+    // cell activation, this one runs at 60 Hz, and sorting every entity in a
+    // world that holds seven thousand of them to reach the one that carries a
+    // heightfield is a sort per step. Filtering first is the same answer —
+    // sorting a filtered list by `Guid` is filtering a `Guid`-sorted one.
     let terrains: Vec<(inf_ecs::Entity, Uuid, Uuid, DVec3)> = {
         let w = world.world();
-        let mut v: Vec<(Uuid, inf_ecs::Entity)> = w
+        let mut v: Vec<(inf_ecs::Entity, Uuid, Uuid, DVec3)> = w
             .iter_entities()
-            .filter_map(|e| e.get::<Guid>().map(|g| (g.0, e.id())))
-            .collect();
-        v.sort_by_key(|(g, _)| *g);
-        v.into_iter()
-            .filter_map(|(guid, e)| {
-                let t = w.get::<Terrain>(e)?;
-                let set = t.biome_set?;
-                let origin = w
-                    .get::<GlobalTransform>(e)
+            .filter_map(|e| {
+                let set = e.get::<Terrain>()?.biome_set?;
+                let guid = e.get::<Guid>()?.0;
+                let origin = e
+                    .get::<GlobalTransform>()
                     .map(|g| g.translation())
                     .unwrap_or(DVec3::ZERO);
-                Some((e, guid, set, origin))
+                Some((e.id(), guid, set, origin))
             })
-            .collect()
+            .collect();
+        v.sort_by_key(|(_, g, _, _)| *g);
+        v
     };
     // A terrain that is gone takes its memo with it — the pin-with-no-release
     // law (P21.4), applied to a per-entity cache.
