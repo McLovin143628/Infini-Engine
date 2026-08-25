@@ -67,6 +67,10 @@ pub fn vehicle_candidates(
             // beside a car, and changing that would be a semantic change to a
             // gate this wave is not allowed to move.
             view_cone_deg: NO_VIEW_TEST_DEG,
+            // Getting into a car is a whole-body choreography (`SeatState`), not
+            // a hand on a door handle. When a vehicle grows a door leaf this is
+            // where its grip goes.
+            grip: None,
         });
     }
     out

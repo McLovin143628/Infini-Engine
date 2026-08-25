@@ -875,6 +875,21 @@ impl SimSession {
         &self.fractures
     }
 
+    /// **This step's gameplay report** — the MIRROR of
+    /// [`RuntimeSim::gameplay`](inf_player_docs).
+    ///
+    /// The field has been kept since I6 and had no reader outside this file,
+    /// which meant a two-host gate could compare doors, shots and (since SK1c)
+    /// hand requests on the shipped player and had nothing to compare them
+    /// against on this one. Its engagement counters are the half a byte
+    /// comparison is blind to: two hosts that both asked for nothing agree
+    /// perfectly.
+    ///
+    /// [inf_player_docs]: https://docs.rs/inf-player
+    pub fn gameplay(&self) -> &inf_physics::d3::GameplayReport {
+        &self.gameplay
+    }
+
     /// Set the level's debris limits (P22.3).
     ///
     /// **Nothing calls this yet**, and saying so is the point: the budget is data

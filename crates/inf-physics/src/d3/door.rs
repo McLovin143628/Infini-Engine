@@ -256,6 +256,13 @@ pub fn candidates(world: &EcsWorld, band: &SimBand, feet: DVec3) -> Vec<Interact
                 position: door::prompt_position(&p),
                 range_m: door::DOOR_REACH_M,
                 view_cone_deg: door::DOOR_VIEW_CONE_DEG,
+                // **A door is opened by its handle** (SK1c). The generator that
+                // writes a rig's grip catalogue names this one `handle`, and it
+                // is what makes the near hand close on a door leaf instead of
+                // opening it by telekinesis. A rig with no such affordance --
+                // the canonical twenty-joint biped, which has no fingers -- just
+                // does not close a hand, which is the honest answer.
+                grip: Some(inf_anim::GRIP_HANDLE.to_string()),
             }
         })
         .collect();

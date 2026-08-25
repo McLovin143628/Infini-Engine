@@ -142,6 +142,11 @@ pub struct GameplayReport {
     /// Energy owed to the P22 damage door: `(destructible entity, joules)`.
     /// **The host spends this**, through its own wrapper. See the module header.
     pub destruct: Vec<(Uuid, f64)>,
+    /// **What the hand pass asked for** this step, `(weapon holds, grabs)`
+    /// (SK1c) — engagement counters, because "the hand step ran" and "a hand was
+    /// asked to do something" are different facts and a gate that cannot tell
+    /// them apart certifies a no-op.
+    pub hands: (u32, u32),
     /// **Shots this step that fell back to [`MUZZLE_HEIGHT_M`] although the
     /// shooter publishes a pose** (SK1b audit) — the tripwire on the muzzle's
     /// silent half.
@@ -188,6 +193,12 @@ pub fn step_gameplay(
     //     After the weapon step, because that is where a scroll wheel changes
     //     what is equipped.
     step_equipped_weapons(world);
+    // 3c. **The hands** (SK1c) — one request per character, composed from what
+    //     it is holding and what it just pressed E on. After the weapon entity
+    //     exists (so a hold and a spawn cannot disagree about the same step) and
+    //     before the pose step reads it, which is the ordering the
+    //     gameplay < pose < attachments pin already covers.
+    report.hands = step_hand_ik(world, dt);
     // 4. Every body that stopped working goes to the ragdoll — the P29.4
     //    bridge's own door, whose doc has named "a damage system" as its
     //    intended caller since it was written.
@@ -346,6 +357,151 @@ fn step_equipped_weapons(world: &mut EcsWorld) {
             }
         }
     }
+}
+
+/// **Where a two-handed weapon's fore-grip is**, metres along the barrel from
+/// the holding hand.
+///
+/// A fraction of the weapon's own length rather than a constant: a pistol has no
+/// fore-grip to reach and a rifle's is most of the way down it. Two thirds is
+/// where a hand sits on a rifle's handguard, and clamping the result keeps a
+/// 5 cm weapon from asking the off hand to occupy the same space as the on hand.
+fn fore_grip_m(def: &WeaponDef) -> f32 {
+    let len = def
+        .muzzle_forward_m
+        .clamp(0.05, weapon::MAX_MUZZLE_FORWARD_M);
+    (len * 0.66).clamp(0.12, 0.60) as f32
+}
+
+/// How far in front of the character's chest an AIMED weapon is brought,
+/// metres.
+pub const AIM_REACH_M: f64 = 0.42;
+
+/// The fraction of a character's height its shoulder line sits at.
+///
+/// The same proportion `inf_anim::BodyParams` uses for a default biped, spelled
+/// here because this step has a capsule and not a rig: it reads the movement
+/// component's own stand height, which is what a character IS to the mover.
+const SHOULDER_OF_HEIGHT: f64 = 0.82;
+
+/// **THE HAND PASS** (SK1c) — one `HandIk` per character, from everything this
+/// step knows.
+///
+/// # Why one producer and not two
+///
+/// A weapon wants both hands and a grab wants one, and both write into the same
+/// two-slot array. Two producers would race for the same slot every step and the
+/// winner would be whichever ran last — so they are composed here, once, and the
+/// rule between them is written down rather than emergent: **the weapon owns the
+/// hand it is in, and a grab takes the other one.** A character reaching for a
+/// door handle with a rifle in its right hand reaches with its left, which is
+/// what a person does.
+///
+/// # What each half asks for
+///
+/// * **A weapon** puts a [`GunGrip`] hold on the rig — the `ik_hand_gun` path,
+///   whose whole purpose is that the off hand is carried *by the weapon* rather
+///   than aimed at a point in space — and closes both hands on their own
+///   affordances (`rifle` in the holding hand, `rifle_fore` in the other; the
+///   trigger finger is left straight by the catalogue, not by this code).
+/// * **Aiming** adds a reach for the holding hand, and only then. A weapon at
+///   rest hangs where the animation puts it; RMB brings it up to a point on the
+///   aim line at shoulder height, which is the difference between carrying a
+///   rifle and pointing one.
+/// * **A grab** reaches the free hand to the interaction's own point and closes
+///   it on the affordance the interactable named.
+///
+/// Everything is absent unless asked for, so a level nobody has armed and nobody
+/// has pressed E in publishes no resource and poses exactly the bytes it did
+/// before this wave.
+fn step_hand_ik(world: &mut EcsWorld, dt: f64) -> (u32, u32) {
+    use inf_ecs::pose::{GunGrip, HandGrip, HandIk, HandReach};
+
+    // Age the grabs first: a grab that ended this step must not also be asked
+    // for this step, or a released hand would be one step late in one host and
+    // not the other if the two ever aged it in different places.
+    inf_ecs::interact::step_grabs(world, dt);
+
+    let mut holds = 0u32;
+    let mut grabs = 0u32;
+    for guid in gunners(world) {
+        let mut req = HandIk::default();
+
+        // -- the weapon --
+        let armed = equipped_weapon(world, guid);
+        if let Some((_, def)) = armed.as_ref() {
+            let holding = inf_anim::BoneSide::Right;
+            req.gun = Some(GunGrip {
+                holding,
+                off_hand_offset: [0.0, 0.0, fore_grip_m(def)],
+                weight: 1.0,
+            });
+            req.grip[1] = Some(HandGrip {
+                name: inf_anim::GRIP_RIFLE.to_string(),
+                amount: 1.0,
+            });
+            req.grip[0] = Some(HandGrip {
+                name: inf_anim::GRIP_RIFLE_FORE.to_string(),
+                amount: 1.0,
+            });
+            holds += 1;
+            // -- and the aim, which is what MOVES it --
+            if let Some(target) = aim_hold_point(world, guid) {
+                req.reach[1] = Some(HandReach {
+                    target: inf_ecs::math::Vec3d::new(target.x, target.y, target.z),
+                    weight: 1.0,
+                });
+            }
+        }
+
+        // -- the grab, in whichever hand is free --
+        if let Some(grab) = inf_ecs::interact::hand_grab(world, guid) {
+            let amount = grab.amount();
+            let at = grab.at;
+            let grip = grab.grip.clone();
+            if amount > 0.0 {
+                // The weapon is in the right hand, so a grab goes to the left;
+                // an unarmed character reaches with its right, which is the hand
+                // every affordance in a default catalogue but `rifle_fore` is on.
+                let side = usize::from(armed.is_none());
+                req.reach[side] = Some(HandReach {
+                    target: at,
+                    weight: amount,
+                });
+                req.grip[side] = Some(HandGrip { name: grip, amount });
+                grabs += 1;
+            }
+        }
+
+        inf_ecs::pose::set_hand_ik(world, guid, req);
+    }
+    (holds, grabs)
+}
+
+/// **Where an aiming character holds its weapon**, world metres — a point on the
+/// aim line at shoulder height, in front of the chest.
+///
+/// `None` when the character is not aiming, which is what leaves the weapon
+/// wherever the animation is carrying it.
+///
+/// The direction goes through [`weapon::aim_forward`], which is the door the
+/// shot's own direction takes — a second copy of that arithmetic would be a hand
+/// that points somewhere the bullet does not. Portable for the shot's own
+/// reason: this number is folded into `pose_state_bytes` and compared between
+/// two machines (the P14 law).
+fn aim_hold_point(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
+    let entity = world.entity_of(guid)?;
+    let cm = world.world().get::<CharacterMovement>(entity)?;
+    if cm.rotation_mode != inf_ecs::components::RotationMode::Aiming {
+        return None;
+    }
+    let feet = feet_of(world, guid)?;
+    // The stand height is what the capsule was built from, so this tracks a
+    // 1.2 m character and a 2.4 m one without a second opinion about either.
+    let height = (cm.stand_half_height_m * 2.0).max(0.4);
+    let dir = weapon::aim_forward(cm.runtime.aim_yaw_deg, cm.runtime.aim_pitch_deg);
+    let at = feet + DVec3::Y * (height * SHOULDER_OF_HEIGHT) + dir * AIM_REACH_M;
+    at.is_finite().then_some(at)
 }
 
 /// The equipped weapon's definition, if the character has one equipped and the
@@ -630,6 +786,8 @@ pub fn try_kick(
             position: inf_ecs::door::prompt_position(&p),
             range_m: inf_ecs::door::KICK_REACH_M,
             view_cone_deg: inf_ecs::door::KICK_CONE_DEG,
+            // A kick is a leg, not a hand.
+            grip: None,
         });
     }
     candidates.sort_by_key(|c| c.guid);

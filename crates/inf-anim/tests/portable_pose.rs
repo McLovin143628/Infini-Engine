@@ -46,7 +46,7 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 35] = [
+const SIM_PATH: [(&str, &str, &str); 36] = [
     // ── the fixed step that PUBLISHES the pose (SK1b audit) ──
     //
     // The most surprising absence on this list. `crates/inf-ecs/src/pose.rs` is
@@ -283,6 +283,25 @@ const SIM_PATH: [(&str, &str, &str); 35] = [
         "inf_ecs::movement",
         include_str!("../../inf-ecs/src/movement.rs"),
         "the movement MODEL: `rotate_into_frame`, the quadrant hysteresis and the gait ladder — every one of them folded into `state_bytes` by the fixed step above, and the camera's lag rotates through the first of them",
+    ),
+    // ── SK1c: the hand pass's PRODUCER ──
+    //
+    // `inf_physics::d3::gameplay` composes every character's `HandIk` request
+    // and computes the point an aiming character brings its weapon up to. That
+    // point is converted into model space inside `apply_hand_ik` and lands in
+    // the solved pose, so it is folded into `pose_state_bytes` and compared
+    // between two hosts and — through the replay and net paths — two machines.
+    //
+    // The SK1b audit added `inf_ecs::pose` for exactly this reason and recorded
+    // the shape as a law: a completeness arm covers the directory it
+    // enumerates, so a new file on the pose path in a *third* crate has to be
+    // named here or nothing walks it. The direction itself goes through
+    // `inf_ecs::weapon::aim_forward`, which is `psin64`/`pcos64`; this entry is
+    // what stops the next edit inlining a `sin`.
+    (
+        "inf_physics::d3::gameplay",
+        include_str!("../../inf-physics/src/d3/gameplay.rs"),
+        "step_hand_ik composes the HandIk request every posed character's hands are solved against, and those bones are folded into pose_state_bytes",
     ),
 ];
 

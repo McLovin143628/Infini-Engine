@@ -590,6 +590,11 @@ pub fn spawn_pickup(
         Interactable {
             verb: InteractVerb::PickUp,
             label,
+            // **A dropped thing is picked up with a hand** (SK1c). `prop` is the
+            // widest grip a rig's catalogue carries -- a 9 cm ball, every finger
+            // on it -- which is right for a cube-shaped pickup and is the same
+            // affordance the grip gate measures a thrown prop with.
+            grip: Some(inf_anim::GRIP_PROP.to_string()),
             ..Default::default()
         },
     ));

@@ -459,6 +459,38 @@ fn shot_uniforms(seed: u64, shot: u64) -> (f64, f64) {
     (to_unit(a), to_unit(b))
 }
 
+/// **Which way a character is pointing**, as a unit vector — the aim line
+/// itself, before any spread is folded in (SK1c).
+///
+/// One door, because two things read it now: the shot leaves along it, and an
+/// aiming character's hands are brought up onto it
+/// (`inf_physics::d3::gameplay::aim_hold_point`). A second copy of these four
+/// trig calls would be a hand that points somewhere the bullet does not.
+///
+/// `psin64`/`pcos64`, not `f64::sin`/`cos`: this reaches `pose_state_bytes`
+/// through the hand pass and the replay trace through the shot, and std trig is
+/// not bit-portable (the P14 law).
+///
+/// Non-finite inputs answer `+Z`, and pitch is clamped just short of vertical so
+/// the horizontal component never collapses.
+pub fn aim_forward(yaw_deg: f64, pitch_deg: f64) -> DVec3 {
+    let yaw = if yaw_deg.is_finite() { yaw_deg } else { 0.0 };
+    let pitch = if pitch_deg.is_finite() {
+        pitch_deg.clamp(-89.9, 89.9)
+    } else {
+        0.0
+    };
+    let (sy, cy) = {
+        let r = yaw.to_radians();
+        (inf_math::psin64(r), inf_math::pcos64(r))
+    };
+    let (sp, cp) = {
+        let r = pitch.to_radians();
+        (inf_math::psin64(r), inf_math::pcos64(r))
+    };
+    DVec3::new(sy * cp, sp, cy * cp)
+}
+
 /// **Where a shot goes**, from an aim and a shot index.
 ///
 /// `yaw_deg` is the compass yaw (`+Z` at zero, `+X` at `+90`) and `pitch_deg` is
@@ -477,11 +509,7 @@ pub fn shot_direction(def: &WeaponDef, yaw_deg: f64, pitch_deg: f64, shot: u64) 
         let r = yaw.to_radians();
         (inf_math::psin64(r), inf_math::pcos64(r))
     };
-    let (sp, cp) = {
-        let r = pitch.to_radians();
-        (inf_math::psin64(r), inf_math::pcos64(r))
-    };
-    let forward = DVec3::new(sy * cp, sp, cy * cp);
+    let forward = aim_forward(yaw, pitch);
     let half = if def.spread_deg.is_finite() {
         (def.spread_deg * 0.5).clamp(0.0, MAX_SPREAD_DEG)
     } else {

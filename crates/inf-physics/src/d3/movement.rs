@@ -579,6 +579,24 @@ fn step_one(
         //
         // The order is a `match` on the verb and not a chain of `if`s, so a verb
         // added later is a compile error here rather than a silent decline.
+        // **The hand goes on it, whatever the verb does** (SK1c). An
+        // interactable that names a grip gets one: a door handle is turned, a
+        // pickup is taken off the floor, and a switch nobody has written a
+        // consumer for is still *reached for*. Recorded before the verb match
+        // because it is orthogonal to it -- the hand is about the gesture and the
+        // match is about the consequence -- and because `Grab`, the one verb this
+        // engine has and does not consume, then stops being a verb that does
+        // nothing at all.
+        //
+        // `hit.position` and not the target's transform: the interaction's own
+        // point is what the prompt is measured from (a door's is the middle of
+        // its closed opening, not its hinge), so the hand reaches where the
+        // player was told the thing is.
+        if let Some(h) = hit.as_ref() {
+            if let Some(grip) = h.grip.as_deref() {
+                inf_ecs::interact::begin_grab(world, guid, h.guid, grip, h.position);
+            }
+        }
         let entered = match hit.as_ref().map(|h| (h.verb, h.guid)) {
             Some((inf_ecs::interact::InteractVerb::Enter, target)) => Some(target),
             Some((inf_ecs::interact::InteractVerb::Use, target)) => {

@@ -31,7 +31,7 @@
 //! `O(1)` answer for every level that has none. Same law as
 //! [`crate::movement::movement_targets`].
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bevy_ecs::prelude::{Component, With};
 use glam::DVec3;
@@ -130,6 +130,20 @@ pub struct Interactable {
     /// The total cone, in degrees, the character must be facing it within.
     /// [`NO_VIEW_TEST_DEG`] means "from any direction".
     pub view_cone_deg: f64,
+    /// **Which grip a hand takes this with** (SK1c) — the name of a
+    /// `GripAffordance` on the *character's own* rig, or `None` for something
+    /// nobody has to touch.
+    ///
+    /// The name and not the shape, because an affordance is a property of the
+    /// HAND: an aperture is how wide the fingers open and a curl set is how far
+    /// each one closes, and neither is a property of the door. A prop says which
+    /// of its character's grips it wants; a rig with no such grip simply does not
+    /// close a hand, which is what a rig with no fingers means.
+    ///
+    /// Free of schema cost for this component's own reason (see the module
+    /// header): an `Interactable` is runtime, never serialized, never in the
+    /// scene record.
+    pub grip: Option<String>,
 }
 
 impl Default for Interactable {
@@ -140,6 +154,7 @@ impl Default for Interactable {
             range_m: DEFAULT_REACH_M,
             enabled: true,
             view_cone_deg: DEFAULT_VIEW_CONE_DEG,
+            grip: None,
         }
     }
 }
@@ -162,6 +177,8 @@ pub struct InteractCandidate {
     pub range_m: f64,
     /// Its cone, degrees.
     pub view_cone_deg: f64,
+    /// The grip a hand takes it with, if any (SK1c).
+    pub grip: Option<String>,
 }
 
 /// What the resolver picked.
@@ -177,6 +194,10 @@ pub struct InteractHit {
     pub position: DVec3,
     /// How far the feet were from it, metres.
     pub distance_m: f64,
+    /// The grip a hand takes it with, if any (SK1c) — carried through so the
+    /// fixed step that acts on a hit does not have to look the entity up again
+    /// to find out how to hold it.
+    pub grip: Option<String>,
 }
 
 /// **THE interaction rule**: the nearest candidate in range and in view.
@@ -246,6 +267,7 @@ pub fn resolve(
         label: c.label.clone(),
         position: c.position,
         distance_m: d,
+        grip: c.grip.clone(),
     })
 }
 
@@ -271,6 +293,7 @@ pub fn candidates_in_world(world: &EcsWorld, exclude: &BTreeSet<Uuid>) -> Vec<In
             position: t.translation(),
             range_m: i.range_m,
             view_cone_deg: i.view_cone_deg,
+            grip: i.grip.clone(),
         })
         .collect();
     // A bevy archetype walk's order is an implementation detail and must never
@@ -278,6 +301,147 @@ pub fn candidates_in_world(world: &EcsWorld, exclude: &BTreeSet<Uuid>) -> Vec<In
     // walk.
     out.sort_by_key(|c| c.guid);
     out
+}
+
+// -- the hand a press puts on a thing (SK1c) ---------------------------------
+
+/// How long a reach-and-close takes, seconds.
+///
+/// A press is an instant and a hand is not. Fast enough that the gesture is over
+/// before a player has moved on, slow enough that the trace carries a *changing*
+/// pose rather than one step of a new constant -- which is what makes a gate able
+/// to tell an ease from a snap.
+pub const GRAB_EASE_S: f64 = 0.25;
+
+/// How long the hand stays on the thing once it has closed, seconds.
+///
+/// A press is a gesture, not a state: the engine has no "carry" mode and
+/// inventing one here would be a mode nothing can leave. So the hand reaches, it
+/// closes, it holds for a moment and it opens again -- and because `apply_grip`
+/// sets a pose rather than accumulating a delta, the open hand at the end is
+/// byte-identical to the one before the press.
+pub const GRAB_HOLD_S: f64 = 0.5;
+
+/// **A hand on a thing** — one character's current grab.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HandGrab {
+    /// The [`Interactable`] it is on.
+    pub target: Uuid,
+    /// The `GripAffordance` name, off the interactable.
+    pub grip: String,
+    /// Where the hand reaches, world metres — the interaction's own position,
+    /// captured at the press so a door swinging away does not drag the arm.
+    pub at: crate::math::Vec3d,
+    /// Seconds since the press.
+    pub age_s: f64,
+}
+
+impl HandGrab {
+    /// How far into the grip the hand is, `0..=1` — in, hold, out.
+    ///
+    /// Piecewise linear, deliberately: an ease curve here would be a second
+    /// opinion about timing on a path whose whole point is that both hosts run
+    /// the same arithmetic, and a ramp is already enough for the pose to differ
+    /// on consecutive steps.
+    pub fn amount(&self) -> f32 {
+        if self.age_s <= 0.0 {
+            return 0.0;
+        }
+        if self.age_s < GRAB_EASE_S {
+            return (self.age_s / GRAB_EASE_S) as f32;
+        }
+        if self.age_s < GRAB_EASE_S + GRAB_HOLD_S {
+            return 1.0;
+        }
+        let out = self.age_s - GRAB_EASE_S - GRAB_HOLD_S;
+        if out >= GRAB_EASE_S {
+            0.0
+        } else {
+            (1.0 - out / GRAB_EASE_S) as f32
+        }
+    }
+
+    /// Whether this grab has finished and should be forgotten.
+    pub fn is_done(&self) -> bool {
+        self.age_s >= GRAB_EASE_S * 2.0 + GRAB_HOLD_S
+    }
+}
+
+/// **Every character's current grab**, by [`Guid`].
+///
+/// A bevy resource, for [`crate::pose::HandIkRes`]'s reasons and by its rules:
+/// written only from the fixed step's inputs, never saved, absent until
+/// something presses a key. **No schema moves** — what a character is reaching
+/// for this step is not a property of the author's document.
+#[derive(bevy_ecs::prelude::Resource, Default, Debug, Clone, PartialEq)]
+pub struct HandGrabRes(pub BTreeMap<Uuid, HandGrab>);
+
+/// **Start a grab.** Replaces whatever the character had.
+///
+/// A press on something with no grip name is not a grab, so it is not recorded:
+/// "nothing to hold" and "holding nothing" have one representation, which is
+/// `set_hand_ik`'s own rule one crate over.
+pub fn begin_grab(world: &mut EcsWorld, guid: Uuid, target: Uuid, grip: &str, at: DVec3) {
+    if grip.trim().is_empty() || !at.is_finite() {
+        return;
+    }
+    let w = world.world_mut();
+    if !w.contains_resource::<HandGrabRes>() {
+        w.insert_resource(HandGrabRes::default());
+    }
+    w.resource_mut::<HandGrabRes>().0.insert(
+        guid,
+        HandGrab {
+            target,
+            grip: grip.to_string(),
+            at: crate::math::Vec3d::new(at.x, at.y, at.z),
+            age_s: 0.0,
+        },
+    );
+}
+
+/// The grab `guid` is in the middle of, if any.
+pub fn hand_grab(world: &EcsWorld, guid: Uuid) -> Option<&HandGrab> {
+    world
+        .world()
+        .get_resource::<HandGrabRes>()
+        .and_then(|r| r.0.get(&guid))
+}
+
+/// **Age every grab by `dt` and forget the finished ones**, returning how many
+/// are still live.
+///
+/// Called from the one Ring-0 gameplay rule both hosts step, so the two cannot
+/// age a hand differently. Removing the resource when the last grab ends is
+/// deliberate: a level nobody has pressed E in poses exactly the bytes it did
+/// before this wave.
+pub fn step_grabs(world: &mut EcsWorld, dt: f64) -> usize {
+    if !dt.is_finite() || dt <= 0.0 {
+        return world
+            .world()
+            .get_resource::<HandGrabRes>()
+            .map(|r| r.0.len())
+            .unwrap_or(0);
+    }
+    let w = world.world_mut();
+    let Some(mut res) = w.get_resource_mut::<HandGrabRes>() else {
+        return 0;
+    };
+    for g in res.0.values_mut() {
+        g.age_s += dt;
+    }
+    res.0.retain(|_, g| !g.is_done());
+    let live = res.0.len();
+    if live == 0 {
+        w.remove_resource::<HandGrabRes>();
+    }
+    live
+}
+
+/// **Forget every grab.** The twin of `clear_hand_ik`, and for its reason: a
+/// hold is session state.
+pub fn clear_grabs(world: &mut EcsWorld) {
+    world.world_mut().remove_resource::<HandGrabRes>();
 }
 
 /// **The prompt a player reads**, e.g. `[E] Enter vehicle`.
@@ -310,6 +474,7 @@ mod tests {
             position: DVec3::new(x, 0.0, z),
             range_m: 3.0,
             view_cone_deg: NO_VIEW_TEST_DEG,
+            grip: None,
         }
     }
 

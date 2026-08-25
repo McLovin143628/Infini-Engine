@@ -1216,6 +1216,7 @@ fn the_seat_and_an_authored_interactable_share_one_door() {
                 range_m: 3.0,
                 enabled: true,
                 view_cone_deg: NO_VIEW_TEST_DEG,
+                grip: None,
             },
         ));
         crew.rig.world.mark_dirty();
@@ -1313,6 +1314,7 @@ fn a_seat_and_an_item_at_the_same_distance_break_by_guid() {
                 range_m: inf_physics::d3::vehicle::ENTER_REACH_M,
                 enabled: true,
                 view_cone_deg: NO_VIEW_TEST_DEG,
+                grip: None,
             },
         ));
         crew.rig.world.mark_dirty();
