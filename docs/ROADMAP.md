@@ -25545,7 +25545,13 @@ difference from the v1 rung. The bless is arithmetic-verified — `character-dem
 (+4 = four empty `Vec` prefixes) and `phase29 Hero` 2 687 → **2 695 B** (+8 = the same four plus
 one `Option` tag per limit), stamp byte 2 → 3, every other byte identical. A side table naming a
 joint the rig does not have is **refused at the door by name**, because that failure is silent
-downstream.
+downstream — as is a role or IK-follow table that is **not strictly ascending by joint**, a check
+that exists because of a defect this wave introduced and then removed: `RoleIndex` owned its rows,
+making `role_index()` a 161-row clone and a sort that `foot_states`, `apply_foot_ik` and the
+pelvis drop each wanted **per posed character per fixed step** — a per-frame rebuild keyed on
+nothing, which is the shape wave I7b spent a clause removing from the render path. The index
+borrows now, a borrowed index cannot sort what it is handed, and so the invariant moved to the
+door.
 
 **The procedural drive pass** (`inf_anim::drive`) is one Ring-0 rule with one law — *the roll
 along a limb segment is linear in the position along it* — which produces both signs from one

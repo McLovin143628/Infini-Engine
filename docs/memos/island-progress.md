@@ -3977,6 +3977,16 @@ name**. Not a panic anywhere (every reader bounds-checks), which is exactly why 
 needs catching: the failure it produces downstream is a twist that never drives
 and a role lookup that finds nothing, both silent.
 
+The same door refuses a role or IK-follow table that is **not strictly ascending
+by joint**, and that check exists because of a defect this wave introduced and
+then removed: `RoleIndex` originally *owned* its rows, which made `role_index()` a
+161-row clone and a sort — and `foot_states`, `apply_foot_ik` and the pelvis drop
+each want one per posed character per fixed step. A per-frame rebuild keyed on
+nothing, which is the exact shape wave I7b spent a clause removing from the render
+path. The index borrows now; a borrowed index cannot sort what it is handed; so
+the invariant moved to the door, where an out-of-order table is a named refusal
+rather than a binary search answering `None` for a row that is really there.
+
 ### Clause 3 — the procedural drive pass (`878d3169`, `9d22d1b7`)
 
 `inf_anim::drive` is one Ring-0 rule for the two families of bone no clip authors.

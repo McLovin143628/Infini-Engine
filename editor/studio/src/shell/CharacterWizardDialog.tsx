@@ -100,7 +100,11 @@ export default function CharacterWizardDialog() {
     useCharacterWizardStore.getState().refreshSoon();
   };
 
-  const multiGirdle = spec.plan !== "biped";
+  // Both bipeds have one girdle and a vertical torso, so neither reads
+  // `bodyLengthM` or `headForwardM` (`build_template` refuses a zero in those
+  // only where they are READ). Showing the fields would offer an author two
+  // numbers the generator throws away.
+  const multiGirdle = spec.plan !== "biped" && spec.plan !== "biped-canonical";
 
   return (
     <div
