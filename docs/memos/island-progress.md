@@ -4546,3 +4546,358 @@ own table follows, and the same trap — it said ten against eleven):
 | `0e38c084` | what came off the asset was three things, not two |
 | `f6d33c24` | how to re-derive the table, and two rustdoc links that were not |
 | `27ba1ea3` | the ledger, and the six numbers in it that were not measured |
+
+## Wave SK1b (hands, grips and the starter character)
+
+Base `be85c213`. Five clauses; **four landed, one carried** — clause 5 is not
+done and the reason is structural rather than a matter of time (below).
+
+The wave's headline is that giving a rig a *hand* is what finds the things
+nobody had looked at. Every one of the four defects below is in code older than
+this wave, and every one of them was invisible because nothing in the engine had
+ever solved an arm, closed a finger, or generated a mesh in `f64`.
+
+### Clause 1 — hand IK, the finger solver, and the cone (`923b1a31`, `74495241`)
+
+**The cone is enforced.** SK1a spent a schema bump on `ConeLimit` and its audit
+recorded honestly that nothing read it. `ik::clamp_to_cone` reads it — swing-twist
+about the cone's own axis, the swing *rescaled* to the half-angle in the direction
+it was asked for rather than discarded, the twist folded into `(-π, π]` and
+clamped, all of it `patan2_64`/`psin64`/`pcos64` in `f64`. `ik::apply_joint_limit`
+is the one door every limit now goes through, and **a cone outranks the per-axis
+box**: two descriptions of one joint's freedom cannot be made to agree (a 90° cone
+and a three-axis box disagree at every diagonal), so the more specific one wins.
+That is also what lets `JointLimit::cone_only` author a finger without spelling a
+box that `clamp_to_limit` would read as *fully locked*.
+
+`build_manny` authors a cone on **all 38 digit bones**, which gives the type its
+first producer as well as its first consumer. Half a degree of margin over the
+solver's own maximum, deliberately: a clamp applied exactly at the boundary is a
+quaternion rebuild whose result is not bit-identical to its input, so
+`GripReport::clamped` would count every fully-closed finger and stop meaning
+anything.
+
+**`inf_anim::grip` reads a hand off its own bind pose**, and nothing about it is
+authored:
+
+* `along` — the farthest fingertip;
+* `spread` — the knuckle line, taken between the two finger roots farthest
+  apart and **signed away from the thumb**;
+* `palm_in` — where the thumb root sits once `along` and `spread` are projected
+  out of it (a thumb is on the palm side of a hand; that is what a thumb *is*,
+  and it is the only bone that says which side the palm is on);
+* `curl_axis` — `along × palm_in`, **per digit**, so a thumb opposes instead of
+  flexing sideways.
+
+Sorted along `spread` the four fingers *are* index, middle, ring, pinky — on the
+mannequin, on both hands, with **no string compare**, asserted against the rig's
+own vocabulary.
+
+**The measurements:**
+
+| | |
+|---|---|
+| a closed fist, middle fingertip to wrist | **18.4 cm → 8.1 cm** |
+| the palm-inward projection of the same curl | **not monotone** — 0.047 / 0.073 / 0.071 / 0.051 at quarter, half, three-quarter, full |
+| halving every cone | pulls back **15 of 19** bones on that hand |
+| aperture, fingertip to wrist | open 18.4 cm, 9 cm ball 11.3, 4.5 cm bar 9.6, 3.2 cm grip 9.1 |
+
+The non-monotone projection is the finding the arm was rewritten around: *a real
+fist takes the fingertip past the palm and back up toward the knuckles*, so
+direction is measured on `palm_in` and **amount** is measured from the wrist,
+which is the quantity that stays monotone all the way to a closed hand.
+
+**THE ELBOW WAS NEVER A HINGE.** A hinge's axis is the axis a joint turns
+*about*, in its parent's frame, and the mannequin's arms lie along `±X`
+(SK1a's law that a bind pose here carries no rotation) — so P24.1's `hinge_x` on
+`lowerarm_*` names the forearm's own **roll** axis and permits nothing but roll.
+Measured, an arm reaching a point 55 cm in front of the shoulder:
+
+| | reach error |
+|---|---|
+| no limits at all | **3e-8 m** |
+| P24.1's `hinge_x` elbow | **0.484 m**, elbow local rotation pinned to the identity |
+| a correct `hinge_y` elbow through `solve_chain` | **0.083 m**, and iterating the pole is a fixed point |
+| a correct `hinge_y` elbow through `grip::reach` | **0.00000 m** |
+
+It had been that way since P24.1 and nothing found it because nothing solved an
+arm chain. **The canonical biped is untouched** — its arms hang *down* along
+`−Y`, so `hinge_x` is a correct elbow there; the same line is right in one
+generator and wrong in the other, which is why the fix is a bind-pose property
+and not a rename.
+
+**And `clamp_to_limit` did not count the swing it discarded.** The comment said
+the discarded swing "is zero for the hinge poses the solver produces" — a claim
+about the *solver*, in a function that cannot see one, and false the first time
+an arm went through it: the entire 86.7° bend was discarded as swing, the twist
+about X was zero before and after, and `IkReport::clamped` reported **0** while
+the limit moved that wrist half a metre.
+
+`grip::reach` is the solver an arm wants. A hinge takes the freedom away, so the
+answer is closed form: the elbow angle follows from the distance
+(`cos θ = (l₁² + l₂² − d²)/2l₁l₂`, and the half-angle identities give the
+quaternion from the cosine with **two square roots and no angle ever formed** —
+no `acos`, no `sin`, no `cos`), and aiming a rigid two-bone assembly whose end is
+already at the right distance puts the end exactly on the target.
+
+**Hand IK runs from the fixed step through a resource**, `HandIkRes` — the
+runtime half of the pair `IkTargetsRes` already had, so **no schema moves** and
+both hosts inherit it with no host-side change. It carries a reach per hand, a
+`GunGrip` two-handed hold, and which grip each hand is closed on. Absent until
+asked for; an empty request is the same as no request.
+
+**The twist/IK ordering bound is closed** — SK1a routed it here by name. A twist
+bone is a statement about the pose that is *finally published*, so it is computed
+from the corrected one: `drive_pose` runs at construction as before, and a second
+`redrive` runs after every correction, **gated on a correction having happened**
+so a character nothing touched poses byte-identical bytes. Re-driving per chain
+was the alternative and is worse in the way that matters — it would put the
+knowledge of which twists belong to which limb inside every solver, in three
+places, which is the shape the role table exists to retire. `redrive` is a named
+function precisely so `every_pose_writer_runs_in_its_frozen_order` can see it: a
+second `inf_anim::drive_pose(` would be the same needle as the first. The pin is
+**8 writers** now, and `apply_hand_ik` sits after the feet because a stance is
+decided by the ground and a hand solves against the body that stance produced.
+
+One more ordering finding inside the hand pass: **`ik_hand_gun` is driven at pose
+construction**, so reading it for the off-hand target after the holding arm has
+just moved reads where the *animation* left the weapon. Measured 0.42 m between
+the hands on a weapon 0.30 m long; the handles are re-driven between the reach
+and the gun solve, and the two hands are **0.3000 m apart** on a 0.30 m weapon.
+
+### Clause 2 — the weapon is an entity, and the muzzle is its own (`ab68f71c`)
+
+An equipped weapon was an inventory slot index: nothing drew it, nothing could
+attach to it, and its shot started 1.4 m above the character's feet because
+somebody had to pick a number (the scout's risk 14, whole). It is an entity now —
+spawned from `step_gameplay`, the one Ring-0 rule both hosts call, under a
+content-derived guid (`equipped_weapon_guid`, the P22 idiom) so two hosts spawn
+the same one, attached to the `hand_r` socket via `AttachedTo`, and despawned the
+moment nothing is equipped. **No schema moves**: `AttachedTo` is already a scene
+component and this one is never saved, and `WeaponDef` carries no `Serialize` at
+all, so `muzzle_forward_m` costs nothing.
+
+`MUZZLE_HEIGHT_M` stops being *the* muzzle and becomes the **named fallback** for
+a character with no rig to hang a weapon on — which is every level committed
+before this wave, the whole `phase30-gameplay` fixture, and every test rig that
+steps gameplay without stepping the pose. The control asserts the two agree to
+**1e-12** on the legacy capsule hero, on `hit.from`, which nothing in
+`weapon_3d.rs` had ever looked at. Mutation: drop the `evaluated_pose` guard in
+`weapon_muzzle` and an unposed character reads its weapon entity's origin, which
+is its capsule **centre**, 20 cm low.
+
+**Stated rather than hidden**: `step_gameplay` runs before `step_pose_evaluation`
+and `update_attachments` in both hosts, so a weapon-derived muzzle is one fixed
+step (16.7 ms) behind the hand. Identical in both hosts, so no trace can see it;
+moving the gameplay step below the pose would fix it and would move every
+committed trace in the tree, so it is named here rather than done quietly.
+
+**`Mask_AimOffset` exists.** `layers.rs` has described an upper-body overlay mask
+since P29.2 and the scout found none anywhere in the tree — designed, not built.
+`JointMask::upper_body` derives one from the role table's first spine bone;
+`BlendProfile::from_mask` is the missing direction of a conversion that could only
+read; the wizard authors it onto every generated machine. Measured: **104 of 161
+joints** — spine, neck, head, both clavicles, both arms, every finger **in**;
+root, pelvis, both legs, both feet and every `ik_*` handle **out**. The arm
+asserts the legs are out, not only that the arms are in: a mask covering every
+joint satisfies "the hand is masked in" perfectly and confines nothing.
+
+### Clause 3 — the starter character (`943a0028`), and what is not done
+
+`inf_dcc::body_mesh` generates a humanoid from its own rig: limbs are **welded
+tapered tubes** swept along a whole chain (shoulder, elbow and wrist are one
+surface with a continuous silhouette, not three boxes), hands are a **palm slab
+and five tapered digits** following their own metacarpals and phalanges, and the
+head is a **cranium with a jaw, a nose and two ears**. Every radius is a fraction
+of the rig's *measured* height and every centre is a joint the rig already
+placed.
+
+| | |
+|---|---|
+| kernel | **795 vertices / 727 faces**, 23 welded shells |
+| exported | **1247 vertices / 1498 triangles**, one submesh, one `Skin` slot |
+| signed volume | **0.0687 m³** — what a 1.75 m human displaces |
+| height | **1.749 m on a 1.75 m rig** (1.199 at 1.2, 2.399 at 2.4), sole on the ground the ankle stands on to 0.8 mm |
+| generate | **0.57 ms** (debug) |
+| generate + bind + masked heat solve | **439.91 ms** (debug), over **63 deform bones of 161** |
+| weights | **760 assigned, 35 unreached**, worst residual 0.0000; **1247 skin rows, 0** on a bone that deforms nothing |
+
+**The honest bound: shells, not one skin.** Each chain is welded along its own
+length and is a closed manifold shell; the shells **interpenetrate** at the
+girdles rather than being stitched into one surface, because stitching them is a
+boolean union and this kernel does not have one. A silhouette reads correctly; a
+cross-section at the shoulder would show two surfaces.
+
+Three defects found on the way, two of them in code older than this wave:
+
+* **The sweep frame had no semantic axes.** `Ring` names its two radii *width*
+  and *depth*, and a frame seeded from "whichever cardinal the direction leans on
+  least" put the width along the body's **depth** — a torso 30 cm deep and 22 cm
+  across. Seeded from `X` now, except for a shell sweeping along `X`.
+* **The foot swept backwards from the ankle**, so its rings tilted with the
+  direction and the heel dipped **1.8 cm through the floor** on a 1.2 m
+  character. It sweeps heel-to-toe now with every ring centred its own half-depth
+  above the sole.
+* **The heat solve's visibility oracle was built from `f32`-narrowed geometry
+  while its rays start at `f64` kernel positions.** A ray from an exact vertex
+  starts an ulp outside the surface the oracle knows and hits its own face:
+  **349 of 795** vertices unreached against **35** through `inf_dcc::mesh_soup`,
+  which is the same triangles in `f64`. An *imported* mesh is unaffected — its
+  kernel positions are widened `f32` and the round trip is exact — which is why
+  it took the first mesh this engine generated in `f64` to surface it.
+* **A heat solve considers every joint, and a rig is not all deform bones.** The
+  nearest visible bone to a palm vertex really is `weapon_r`.
+  `solve_heat_weights_for` takes an eligibility mask and the wizard passes the
+  role table's deform set — filtered at the *bone* set rather than at the
+  assignment, because a bone that wins a vertex and is then dropped leaves that
+  vertex with no source at all.
+
+And the generator now reports **which bone made each vertex**, applied as a rigid
+prior *before* the solve — because `solve_heat_weights` is documented as
+"additive evidence rather than a reset", and without a prior the 35 unreachable
+vertices keep `VertWeights::RIGID`, which is all of joint 0, the rig's **root**,
+and stay behind when the character walks away.
+
+Also: **the cone axes are normalized in `f64` and narrowed once**. In `f32`,
+`-x/sqrt(x*x)` is `-1.0` for some `x` and `-0.99999994` for others, so two rigs
+of *different heights* carried axes that differed by an ulp —
+`a_fitted_mannequin_keeps_every_table_it_arrived_with` caught exactly that.
+
+**The wizard defaults to it**: `build_character` with no supplied mesh now writes
+the generated body, heat-weighted, and `CharacterBuild::mannequin` stays honest —
+`true` only when the fallback actually ran, which is a rig with **no role table**
+(`BipedCanonical`, and every `.inf_skel` older than v3). That fallback has its own
+arm, because the default spec no longer exercises it.
+
+**NOT DONE, and named:** the clause also asks for **PBR materials** on the
+starter body and for it to be **shipped as committed engine starter content**.
+The mesh carries a `Skin` material slot and nothing binds a `.inf_mat` to it, and
+no `samples/starter-character/` exists. See *What SK1b did not do*.
+
+### Clause 4 — the grip gate (`24f2fec2`)
+
+`runtime/inf-player/tests/grip_gate.rs`. A character grips a handle, a rifle
+two-handed through `ik_hand_gun`, and a thrown prop, and **PIE == shipping byte
+for byte** over the whole sequence: 24 steps, **12 distinct poses**, **6476 bytes
+a step** — exactly the 161-bone trace SK1a priced (36 B header + 40 B per joint).
+
+The anti-vacuity is most of the gate. The idle pose is settled before anything is
+asked for; taking hold moves it; tightening moves it **again** (an eased grip
+that snapped to its end state would satisfy "the pose changed" and would not be
+an ease); a two-handed hold solves **two** arms and writes more finger bones than
+one; a 9 cm ball poses a different hand from a 4.5 cm bar at the same reach. The
+**release** is asserted byte-identical to the pose before the hand ever closed —
+the claim `apply_grip`'s "a curl is a pose, not a delta" rests on. The engagement
+counters are compared between the hosts as well as the bytes, so "both hosts did
+nothing identically" is not a pass.
+
+The conformance arm measures the hand in metres rather than inferring it from two
+poses differing, and the rifle's **trigger finger is authored straight** and comes
+back bit-identical to rest — the one thing a per-finger curl target says that a
+per-hand aperture cannot.
+
+### Decisions (SK1b's, binding on later waves)
+
+1. **A hinge's axis is a property of the bind pose, not of the joint's name.** An
+   elbow is `hinge_y` on a T-posed rig and `hinge_x` on one whose arms hang down,
+   and the same line is correct in one generator and wrong in the other.
+2. **A constrained chain gets a solver that knows the constraint.** A pole picks
+   a bend plane freely and a clamp then discards whatever is not in the hinge's;
+   `grip::reach` sets the constrained joint from the distance and aims the rest.
+   Measured 0.083 m against 0.00000 m.
+3. **A twist bone is computed from the pose that is finally published**, so the
+   drive pass runs at construction and again after every correction — gated on a
+   correction having happened, so absent still costs nothing.
+4. **A hand's frame is derived from its own bones, never authored.** A grip says
+   what to do (aperture, curl); the rig says where the palm is.
+5. **A visibility oracle must be built in the space its rays are cast in.** A
+   narrowed copy of the geometry is a different surface.
+6. **A weight solve needs to be told which bones may carry weight.** A rig is not
+   all deform bones, and the nearest visible bone to a palm vertex is a weapon
+   marker.
+7. **A generated mesh carries a rigid prior**, because the generator is the one
+   thing in the world that knows the right answer before the solver runs.
+
+### What SK1b did not do (for its audit and its successor)
+
+* **CLAUSE 5 IS NOT DONE.** The island hero is still `island.rs:429-484`'s
+  hand-rolled capsule with `AnimStateMachine { sm: None }` and no `SkeletalMesh`.
+  It was stopped deliberately rather than half-done, because the last thing this
+  wave should do is leave a 900-step gate red. **The route is scouted, and it is
+  narrower than it looks** — writing it down here is most of what the successor
+  needs:
+
+  1. **The assets reach the cook through the recipe, not through Ring 0.**
+     `island_gate` builds its project with `inf_island::write_content`
+     (`crates/inf-island/src/build.rs:852`), which knows nothing of `inf-anim` or
+     `inf-dcc` — but its last loop copies **`build.recipe.content`**
+     (`:895-909`), a `[content]` list of files that "live beside the recipe". So
+     `samples/starter-character/` + six `[content]` entries in both
+     `samples/island/island.toml` and `samples/island-fixture/island.toml` puts
+     the character on the path the cook walks, with **no new crate edge** and no
+     Ring-0 change. That is also exactly the brief's "the assets live with the
+     engine samples and the island references them".
+  2. **`edit_create_character` mints its own `Uuid::new_v4()`**
+     (`scene/doc.rs:1961`) and the island needs `hero_guid(name)` — asserted at
+     `island.rs:831`. It needs a guid-accepting variant (three call sites).
+  3. **`StreamingSource { radius_m: 256 }` and `AlwaysLoaded` are not part of
+     that door** and must be re-inserted after it; both are load-bearing (the
+     partition activation anchor and the I3 collider band read the first).
+  4. `island.rs:616-626`'s allowlist of `inf_island::` names grows, the level's
+     dependency closure at `:867` grows, `INF_BLESS_SAMPLES=1` re-writes two
+     `.inf_lvl` files, and the 900-step trace has to be re-priced — a skinned
+     hero adds 6 476 B per step to `pose_state_bytes` where the capsule adds 0.
+  5. The equivalence gate to copy is `samples.rs:11510`
+     `the_showcase_character_matches_the_wizard_door`, field by field.
+* **The starter body has no material and is not committed.** Clause 3's other
+  half: `samples/starter-character/` does not exist, no `.inf_mat` is bound to
+  the mesh's `Skin` slot, and `ProjectTemplate::starter_content` — the committed
+  hook — is untouched.
+* **A pole-driven `solve_chain` on a hinged chain still loses 8.3 cm.**
+  `grip::reach` routes around it for arms; `apply_foot_ik` passes `&[]` and so
+  never hits it; an authored `IkTarget` over a chain with a hinge in the middle
+  does. The general fix is to solve the parent's roll into the constrained
+  joint's hinge plane, inside `solve_chain`.
+* **35 of 795 body vertices are unreachable by the visibility oracle** (caps
+  buried inside a neighbouring shell). They carry their seed bone, which is
+  right; nothing has looked at whether a smarter shell layout would reduce it.
+* **The weapon entity is a placeholder cube.** `ItemDef` has no mesh field —
+  `item.rs:579` has named it as the next field since I6 — so an equipped weapon
+  draws as a scaled primitive.
+* **The muzzle is one fixed step behind the hand** (above).
+* **The grip catalogue is a test fixture.** `grip_gate.rs` authors its four
+  affordances by hand; no generator produces a `GripAffordance` and nothing in
+  the editor edits one, so `SkeletonAsset::grips` is still empty on every rig the
+  engine writes.
+* **`HandIkRes` has no producer outside a test.** Nothing in the movement step,
+  the weapon step or the `anim.*` node kit sets a hand request, so hand IK is
+  reachable and unreached in the product — the same shape the SK1a audit recorded
+  for the retarget map.
+* **The aim mask has no consumer either.** It is authored onto the machine and no
+  transition names it, because no aim or reload clip exists to name it from.
+* **4 influences per vertex still stands** (the 16-attribute wall in the skinned
+  pipeline is full). The generated hand puts a metacarpal and three phalanges
+  near a palm slab, which is where the top-4 truncation would first bite; nothing
+  measured it.
+* **The two hands' `palm_in` mirrors in `x`** by a small amount, which is correct
+  and was worth an arm: the first version of that assertion demanded they be
+  equal and was wrong about its own subject.
+
+### Counts
+
+| | after the SK1a audit | **after SK1b** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 319 / 6 015 / 0 / 16 | *(see the wave's closing run)* |
+| goldens | 54, byte-identical | *(unchanged — nothing here touches a render path)* |
+| schema | `.inf_skel` v3, `.inf_anim` v2, `.inf_sm` v3, `.inf_mesh` v2, scene v25, `ScenePayload` v11 | **nothing moved** — the wave's whole point |
+| committed sample bytes | — | **unmoved** |
+
+### Commits
+
+| | |
+|---|---|
+| `923b1a31` | the cone is enforced, and the hand reads its own geometry |
+| `74495241` | hands reach through the fixed step, and the elbow was never a hinge |
+| `943a0028` | a body, not a pile of boxes |
+| `ab68f71c` | the weapon is an entity, the muzzle is its own, and the aim mask exists |
+| `24f2fec2` | the grip gate: three things held, one of them let go of |
