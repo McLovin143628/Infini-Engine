@@ -4885,7 +4885,7 @@ per-hand aperture cannot.
   right; nothing has looked at whether a smarter shell layout would reduce it.
 * **The weapon entity is a placeholder cube.** `ItemDef` has no mesh field —
   `item.rs:579` has named it as the next field since I6 — so an equipped weapon
-  draws as a scaled primitive.
+  draws as a scaled primitive. *(SK1b audit: it was not scaled. See H1 below.)*
 * **The muzzle is one fixed step behind the hand** (above).
 * **The grip catalogue is a test fixture.** `grip_gate.rs` authors its four
   affordances by hand; no generator produces a `GripAffordance` and nothing in
@@ -4941,3 +4941,308 @@ Python string, in patches that added a wave about measuring things honestly. The
 workspace gate named all three on the first full battery, which is the gate doing
 exactly its job for the twenty-first time. Twenty were ledgered across three
 waves before it.
+
+## The SK1b audit (2026-08-25)
+
+Adversarial, `be85c213..30e93bcd`, fresh reader, nothing pushed. **Every headline
+number this wave prints reproduced**, and the two it asks to be taken on trust
+were re-derived rather than read. What the audit found is **one HIGH** — a
+one-metre cube welded to every armed character in the tree — and six MED of two
+shapes. One is the SK1a audit's: *an arm looser than the sentence it is written
+under* (the aim mask's confinement, which was one inequality written twice). The
+other is this wave's own, four times over: **a true claim, or a real law, with
+nothing arming it** — the muzzle's two answers, the oracle's two spaces, the
+portable ban's second crate, and the ROADMAP block that was never written. Two
+further claims were true and unasserted and were **armed rather than fixed**: the
+two hosts' step order, and the grip gate's distinct-pose count.
+
+One HIGH and six MED, all fixed and all mutation-verified; thirteen LOW carried
+by name.
+
+### What reproduced, measured here rather than read
+
+| the wave's figure | mine |
+|---|---|
+| battery 320 / 6 048 / 0 / 16 | **exact** |
+| goldens 54, byte-identical, 101 arms | **54 / 101** under `INF_GOLDEN_STRICT=1`, no PNG rewritten |
+| rustdoc 374 individual over 30 crates | **374 / 30** after `cargo clean --doc` |
+| 9 commits in range, 8 named | **9**, and the ninth is the ledger's own count |
+| +1 block, +33 arms | **exact** against the SK1a audited head |
+| body: 795 kernel verts / 727 faces / 23 shells to 1 247 / 1 498 | **exact** |
+| 1.749 m on a 1.75 m rig, sole to 0.8 mm, 0.0687 m3 | **1.749 / 0.0008 / 0.06874**; 1.199 at 1.2 and 2.399 at 2.4 |
+| 760 assigned, 35 unreached, 1 247 skin rows, 0 non-deforming | **exact** |
+| generate 0.62 ms, generate + bind + heat 433 ms (debug), 63 deform bones of 161 | **exact** |
+| `Mask_AimOffset` 104 of 161 | **104** |
+| grip gate 24 steps / 12 distinct poses / 6 476 B | **exact** |
+| aperture ordering open > prop > handle > rifle | held, and the report's per-digit closure with it |
+| the 38 digit cones are exactly the digit set | held, asserted as an identity |
+| no schema moved; samples byte-unmoved; frontend untouched | **held** — `git status` empty on `samples/` and `tests/goldens/`, and no file under `editor/studio` is in the range |
+
+Two the audit re-derived rather than trusted:
+
+* **349 unreached through the narrowed oracle.** Measured here, exactly 349
+  against 35, and now asserted in the crate that owns both halves (M2).
+* **The digit derivation with no string compare.** Re-run on **both hands** of
+  rigs at 1.2 m and 2.4 m and with non-default `arm_length_ratio` (0.31),
+  `upper_limb_ratio` (0.40), `shoulder_width_m` (0.20) and `hip_width_m` (0.40):
+  every joint of every chain is the bone the rig names, on all three. The
+  spread-sort is a property of the derivation and not of the default proportions.
+
+Also checked and held, because the brief asked: **the elbow-hinge fix on the
+OTHER arm** (`a_hinged_arm_reaches_exactly_where_a_pole_solve_misses` runs both
+sides, and the sign is asserted per side), and **the legacy 20-joint rig still
+solves** — `grip::reach` on `BodyPlan::BipedCanonical`, whose elbow is still
+`hinge_x` and whose arms hang down -Y, reaches a point 25 cm below and 35 cm in
+front of the shoulder at **0.000000 m** on both arms, through the *name* rule,
+with nothing clamped.
+
+### HIGH
+
+**H1 — the equipped weapon drew as a 1 m cube in the character's hand.**
+`step_equipped_weapons` sets its placeholder primitive's `Transform::scale` to
+the weapon's own barrel — 0.06 x 0.06 x 0.45 — and `inf_ecs::update_attachments`
+overwrote it one pass later with the composed affine's scale, which is the
+*target's*: `AttachedTo` carries an offset translation and an offset rotation and
+**no scale at all**, so there was nothing of the follower's own in the number it
+wrote. Every step, for ever.
+
+It had been that way since P11.3 and nothing found it because until this wave the
+engine had **no production `AttachedTo`** — every one in the tree is a test
+fixture on a unit-scale target, where the destroyed value and the written value
+are the same. The first real one is this weapon, and it put a metre cube on every
+armed character in the tree, including the whole `phase30-gameplay` course, where
+nothing was drawn at all before SK1b. The source comment said "scaled to the
+weapon's own length" and no arm looked.
+
+An attachment **places** a follower; it does not resize it. The pass writes
+translation and rotation and leaves `scale` alone, with the bound stated at the
+site: a follower on a *scaled* target does not inherit that scale — its
+*placement* still does, because `socket_local` is model-space and `target_global`
+scales it — and making the size follow needs a scale on `AttachedTo`, which is a
+scene schema move. Destroying the follower's own size is not a substitute for
+one.
+
+Two arms, because "the scale survived" is satisfied perfectly by a pass that
+wrote nothing: `an_attachment_places_a_follower_without_resizing_it` asserts the
+barrel size on the local **and** the global **and** that the follower still landed
+on the animated socket, and the weapon gate asserts the placeholder is the length
+of the barrel it stands in for. Mutation: restore the `t.scale` write and the
+first goes red at `(1.0000001, 1.0000001, 1.0)` — not even a clean unit, because
+the socket matrix is `f32`.
+
+### MED (all fixed)
+
+| | |
+|---|---|
+| **M1** | the aim mask's confinement assertion was `masked.len() * 3 < rig.skeleton.len() * 3 && masked.len() < rig.skeleton.len()` — one inequality written twice, so the sentence above it ("more than a third of the rig is out") was asserted by nothing and a mask covering **160 of 161** joints passed. Pinned as the number: **104 of 161** |
+| **M2** | **`mesh_soup` had no test at all.** The wave's fifth decision — *a visibility oracle must be built in the space its rays are cast in* — landed as a one-line change at one call site; the 349/35 pair lived in this memo, and the narrowing door `inf_editor_core::dcc::triangle_soup` carried no warning, so the next caller that hands a generated mesh to a BVH re-introduces it silently. Armed in the crate that owns both halves, and the door now names the hazard (below) |
+| **M3** | the muzzle's fallback had **no tripwire**: a *rigged* hero whose skeleton stops publishing `hand_r` silently returns to 1.4 m, and the only muzzle arm in the tree ran on a rig-less capsule. `GameplayReport::muzzles_without_a_socket` counts a fallback taken by a character that **does** publish a pose, and an arm runs both branches on one mannequin (below) |
+| **M4** | the **preview drag** went **0.126 to 4.70 ms cold, 37x**, when the wave put the full body generator on a path SK1a had measured and reasoned from — unremarked, under a 250 ms ceiling that is 53x the new number (below) |
+| **M5** | **the portable-math gate does not cover `crates/inf-ecs/src/pose.rs`** — the door every pose writer reaches `pose_state_bytes` through, and where SK1b put `apply_hand_ik` and `solve_arm`. Two of that crate's files (`camera.rs`, `movement.rs`) were added by the P29.6 audit for exactly this reason and this one was not; the SK1a audit's completeness arm could not see the gap, because it enumerates `crates/inf-anim/src` and the file is in another crate. Added (**35** entries), and the file is clean under the ban — the only banned constructors in it are in `#[cfg(test)]` fixtures the stripper already removes. Mutation: a `.sin()` in `redrive` reddens the gate, naming the line |
+| **M6** | **the wave wrote no ROADMAP block.** Every wave since P16 carries one in section 12 and SK1a's sits at line 25514; SK1b's diff touches `docs/memos/island-progress.md` and nothing else under `docs/`. Written, with the audit's own block beside it |
+
+Two claims the audit **armed rather than fixed**, because they were true and
+unasserted:
+
+* **`both_fixed_steps_settle_the_weapon_after_the_pose`.** The wave states that
+  the muzzle is one fixed step behind the hand and that this is acceptable because
+  it is *"identical in both hosts, so no trace can see it"* — which is a claim
+  about the order of three calls in two files, and a PIE == shipping gate is
+  structurally blind to exactly what both hosts do the same way. Pinned on the
+  `both_fixed_steps_run_the_cloth_slot` precedent: gameplay < pose < attachments,
+  in both `fixed_step`s. Mutation: move `update_attachments` above `step_gameplay`
+  in the editor Simulate and it goes red naming the three offsets.
+* **The grip gate's "12 distinct poses"** was printed and not asserted, so a
+  solver that collapsed every grip onto one pose could keep the handful of
+  `assert_ne!` pairs apart and pass. Pinned at 12 of 24, and the byte length with
+  it — 6 476 is the 161-bone trace SK1a priced, so a rig that silently lost its
+  side tables would otherwise look like a quieter grip.
+
+### M2 — the oracle seam, measured in the crate that owns it
+
+`the_narrowed_oracle_cannot_see_a_third_of_a_generated_body` builds the same
+generated body's oracle twice — from `mesh_soup`, and from the exporter's
+triangles read back at `f32` and widened, which is precisely the soup
+`triangle_soup` hands over — and runs the same masked heat solve against each:
+
+| oracle | unreached, of 795 |
+|---|---|
+| `mesh_soup` (f64 kernel triangles) | **35** |
+| the f32 round trip | **349** |
+
+Asserted as a triple with the ratio beside it, so an arm that stopped
+demonstrating the seam fails rather than passing quietly. The only cover before
+was an `unreached < 60` bound two crates away — which does catch the regression,
+verified by mutation (routing `starter_body` back through the narrowed soup fails
+`a_build_writes_six_assets_and_wires_them_together` at 349) — but says nothing
+about why. `triangle_soup`'s docs now carry the mechanism, the measurement and
+the rule: an author's imported model, yes; anything `body_mesh` or a grammar bake
+produced, `mesh_soup`.
+
+### M3 — the muzzle's silent half
+
+`a_rigged_hero_shoots_from_its_weapon_and_says_so_when_it_cannot` runs both
+branches on one mannequin, differing only in what the skeleton publishes:
+
+| the rig's right-hand socket | where the shot left | counter |
+|---|---|---|
+| `hand_r` | **0.957 m** from where the capsule rule would put it | 0 |
+| `hand_of_glory` | the capsule rule, to 1e-12 | **1** |
+
+Its fixture also gives `weapon_3d.rs` its first **rigged** hero — the pose slot
+and `update_attachments` in the hosts' own order, inert for every other arm in
+that file — which is what makes the one-fixed-step latency observable at all: the
+shot is taken on the second step, because the first one is what places the
+weapon.
+
+A character with **no pose at all** is the legitimate capsule case and is not
+counted, so every level committed before this wave still reports zero.
+
+### M4 — a measurement the wave replaced without taking
+
+`body_for` called `block_body_mesh` and calls `inf_dcc::body_mesh` +
+`to_mesh_asset` now, so the counts the wizard's preview reports are the counts
+the build writes. That is right, and it is 37x the path SK1a measured:
+
+| | SK1a | SK1b |
+|---|---|---|
+| cold, 20 joints | 0.023 ms | 0.037 ms |
+| cold, 161 joints | 0.126 ms | **4.70 ms** |
+| warm, 161 joints | 0.022 ms | 0.024 ms |
+
+(4.66 / 4.69 / 4.71 over three unloaded runs; **8.4 ms** with the rest of the
+battery running beside it.) **Nothing is owed** — the sliders debounce at 250 ms,
+so 4.7 ms is under 2 % of the interval between two previews and the warm path did
+not move — but SK1a's stated *reason* ("the weight solver is not on this path at
+all") stopped being the whole of it, and the ceiling was 53x the new number.
+It is 100 ms now: about 21x the measurement, about 4x a runner five times slower
+than this machine, and 12x the loaded reading. The counters stay the real
+assertion.
+
+### The mutations the audit ran itself
+
+| mutation | expected | result |
+|---|---|---|
+| `swing_deg: 0.0` on every finger cone | the curl arm catches it | **red**, and so do the cone arm, the census arm and **both** grip-gate arms |
+| swap `redrive` above `apply_hand_ik` | the pose-writer pin goes red | **red** |
+| disable the `redrive` call | the twist arm goes red | **red** — "the twists were driven from the pose before the IK corrected it" |
+| flip the sign of `spread` in `hand_of` | the digit derivation catches it | **red**, and the pinky/aperture arm with it |
+| drop the generator's rigid prior | the skin-stream arm goes red | **red** — **62** vertices on a bone that deforms nothing, against 0 |
+| route `starter_body` back through the narrowed soup | the weights arm goes red | **red** at **349** unreached |
+| restore `t.scale` in `update_attachments` | H1's arm goes red | **red** at `(1.0000001, 1.0000001, 1.0)` |
+| move `update_attachments` above `step_gameplay` in Simulate | the new host-order pin goes red | **red**, naming the three offsets |
+| a `.sin()` in `inf_ecs::pose::redrive` | the portable gate goes red | **red** once `inf_ecs::pose` is on `SIM_PATH`; **green** before, which is the finding |
+| truncate a `Pose` below its skeleton and call `grip::reach` | a refusal, or a panic | **panic** — "len is 10 but the index is 58" (LOW, and `solve_chain`'s own convention) |
+
+### LOW, carried by name
+
+* **`HandIkRes` has no producer outside a test**, and the ledger says so loudly.
+  Verified by sweep: `set_hand_ik` appears only in `grip_gate.rs` and `pose.rs`'s
+  own tests; nothing in the movement step, the weapon step or the `anim.*` node
+  kit sets a hand request. Hand IK is reachable and unreached in the product —
+  the same shape the SK1a audit recorded for the retarget map, one wave later.
+  Neither `phase29_gate` nor `phase30_gameplay_gate` implies otherwise; the only
+  gate that exercises it is the one this wave wrote.
+* **The aim mask has no consumer either.** `AIM_MASK` appears at its definition,
+  at the wizard's authoring call and in tests. Nothing reads it.
+* **The two hosts run `apply_root_motion` and `advance_state_machines` in
+  OPPOSITE order**, and the editor propagates between them where the player does
+  not. Pre-existing (not SK1b's), and **unmeasured** — the P29 traces are green,
+  so either it does not reach the traced state or those courses do not exercise
+  root motion off an `AnimPlayer`. Found while writing the host-order pin, which
+  deliberately does not cover it: extending a pin to a divergence nobody has
+  measured is how a gate goes red for a reason nobody can name.
+* **A despawned character orphans its weapon entity.** `step_equipped_weapons`
+  iterates `movement_targets`, so a character that leaves the world takes its
+  owner row with it and the weapon stays, attached to a guid
+  `update_attachments` skips — frozen in place, visible, and in the trace.
+  Unequipping is covered; dying is not (a ragdolled character keeps
+  `CharacterMovement` and so keeps its weapon, which is right).
+* **The re-drive doubles a cost SK1a had already carried as unmeasured.** The
+  SK1a audit's list says *"the fixed-step cost of the drive pass is argued, not
+  measured"* — `drive_ik_follow` adds a full `global_transforms` pass and a
+  161-entry allocation per posed character per step. `redrive` runs the whole
+  pass a second time, and its gate (`corrected`) opens for **any** correction,
+  not only a hand one: a mannequin with foot IK or a pelvis drop pays it every
+  step whether or not anything touched its hands. The wave measured what a
+  *gripping hand* costs (3.2 / 3.3 / 6.2 µs) and did not measure this. Correct,
+  and still a number that does not exist.
+* **`grip::reach` indexes `pose.locals` without a bounds check** and panics on a
+  pose shorter than its skeleton (measured: "len is 10 but the index is 58").
+  `solve_chain` does the same, so this is the crate's convention rather than a
+  new hazard — but `apply_grip` guards, and three doors in one module do not
+  agree.
+* **`drive_ik_follow` inside `apply_hand_ik` is a pose writer the frozen-order
+  pin cannot see** (the pin reads `step_pose_evaluation`'s own body). Its
+  position between the reach and the gun solve is load-bearing and *is* covered
+  behaviourally — `the_off_hand_follows_the_weapon...` asserts 0.30 +/- 0.06 and
+  the un-re-driven answer is 0.42 — so this is a note about the pin's reach, not
+  an uncovered writer.
+* **`clamp_to_cone` does not check `twist_deg` for finiteness** where it checks
+  the axis and `swing_deg`. Safe by accident: a NaN twist range produces a NaN
+  quaternion that the closing `is_finite` guard turns into "leave the joint
+  alone". Safe, and not by the argument the function's own docs give.
+* **`apply_hand_ik` uses the `ik_hand_gun` frame only when the holding hand is
+  the RIGHT one** (the handle follows `hand_r`, so this is correct), and the
+  function's doc says "the `ik_hand_gun` handle's frame when the rig publishes
+  one" without the side condition.
+* **`step_equipped_weapons` re-inserts four components on the weapon entity every
+  fixed step**, so change detection fires for it on every step of every armed
+  character. Inert-looking and not measured.
+* **`the_new_muzzle_agrees_with_the_old_one_on_a_capsule_hero`'s named mutation
+  is imprecise**: it says dropping the `evaluated_pose` guard makes an unposed
+  character read "its capsule **centre**, 20 cm low", but that fixture never runs
+  `update_attachments`, so the weapon entity is at the **world origin**. The
+  mutation still reddens the arm; the number in the sentence is not the one it
+  would print.
+* **The grip gate's two hosts are two host IMPLEMENTATIONS in one process**, not
+  two processes. `player_trace` builds a `RuntimeSim` and `editor_trace` a
+  `SimSession`, both in the test binary; the module doc says "across two
+  processes' worth of hosts", which is a hedge doing some work. The claim it
+  makes — PIE == shipping — is honest and is what the phrase means; what is
+  absent is the *real `--pie` subprocess* arm phase21 and phase22 both carry, and
+  which is what catches a host that only agrees because a `OnceLock` was already
+  warm. No such state is on this path today.
+* **The preview body cache is keyed on the whole `BodyParams`**, so a proportion
+  drag misses on counts that (on the mannequin) do not depend on any dimension —
+  `the_body_follows_its_rig_and_is_reproducible` asserts exactly that invariance.
+  A topology-shaped key would make the drag warm. Named, not taken: "correct for
+  both generators" is a claim that needs its own arm.
+
+### Decisions (the SK1b audit's, binding on later waves)
+
+1. **An attachment places a follower; it does not resize it.** A door that
+   composes a transform onto something else's must write only the parts it
+   actually knows about — `AttachedTo` knows a position and a rotation, so those
+   are what it writes.
+2. **A defect that only a production caller can show is a defect that waits.**
+   `update_attachments` had six arms and every one of them attached a unit-scale
+   fixture to a unit-scale target, where the bug is the identity.
+3. **A law is not enforced by the call site that obeys it.** SK1b's oracle
+   decision was implemented at one caller and left the narrowing door silent; a
+   decision needs an arm in the crate that owns it and a warning at the door that
+   breaks it.
+4. **A claim about two hosts' source order cannot be checked by comparing two
+   hosts.** A PIE == shipping gate is blind by construction to whatever both
+   hosts do identically, which is precisely the class "identical in both hosts,
+   so no trace can see it" belongs to.
+5. **Re-measure the number your predecessor reasoned from.** SK1a's preview
+   conclusion rested on *which code was on the path*; SK1b changed the path and
+   kept the conclusion.
+6. **A completeness arm covers the directory it enumerates, and no more.** The
+   portable-math gate's domain is two crates and its enumeration is one, so the
+   half it does not walk is the half a new file lands in unnoticed.
+
+### Counts
+
+| | after the SK1b wave | **after the audit** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 320 / 6 048 / 0 / 16 | **320 / 6 052 / 0 / 16** — **four** arms, **no new block**: one in `inf-ecs`'s `attach`, one in `inf-physics`'s `weapon_3d`, one in `inf-dcc`'s `body`, one in the `projector_mirror` host mirror |
+| goldens | 54, byte-identical, 101 arms | **54, byte-identical under `INF_GOLDEN_STRICT=1`** over 101 arms, no PNG rewritten. Nothing here touches a render path |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| rustdoc warnings (ceiling 450) | 374 individual over 30 crates | **374 individual over 30 crates** after `cargo clean --doc`. **The audit adds zero** |
+| `cargo fmt --all --check` | clean | clean |
+| frontend tests / files | untouched | **untouched** — nothing under `editor/studio` moved here either |
+| schema | `.inf_skel` v3, scene v25, `ScenePayload` v11 | **unmoved** |
+| committed sample bytes | unmoved | **unmoved**; `git status` on `samples/` and `tests/goldens/` empty |
+| chr(92) | the twenty-first was the wave's own | **no twenty-second** — the wave's added lines and the audit's own were swept for both shapes (interior space runs at and below the gate's own 8-space threshold, and bare newlines inside non-raw literals): zero, and the workspace gate is green |
