@@ -25668,6 +25668,6 @@ on neither list). Twelve LOW carried by name — the retarget map still has no p
 Counts at the audited head: battery **319 / 6 015 / 0 / 16** (+6 arms, no new block), goldens
 **54** byte-identical under `INF_GOLDEN_STRICT=1` over 101 arms, frontend **702 / 78**, clippy
 **0**, rustdoc **374 over 30 crates** after `cargo clean --doc` (the audit adds zero), fmt clean,
-**no schema and no committed sample byte moved**, and **no twenty-first chr(92) catch**. Eight
+**no schema and no committed sample byte moved**, and **no twenty-first chr(92) catch**. Ten
 audit commits, `(SK1a) audit:`-tagged; the full ledger is in `docs/memos/island-progress.md` under
 *The SK1a audit*.

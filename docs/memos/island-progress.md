@@ -4530,4 +4530,19 @@ and the `RawRefBonePose` array the thirds and the hand ratios came out of.
 | committed sample bytes | — | **unmoved**; `git status` on `samples/` and `tests/goldens/` empty |
 | chr(92) | the twentieth was the wave's own | **no twenty-first** — the wave's added lines and the audit's own were swept for both shapes (interior space runs, and bare newlines inside non-raw literals): zero, and the workspace gate is green |
 
-Eight audit commits, `(SK1a) audit:`-tagged.
+**Ten** audit commits in `498bc92a..`, `(SK1a) audit:`-tagged. Nine carry a
+change and are named here; the tenth is the correction to this count, and a
+ledger row cannot name the commit that writes it (the same convention the wave’s
+own table follows, and the same trap — it said ten against eleven):
+
+| | |
+|---|---|
+| `637bf93b` | the merge door drops what the fit door stopped dropping |
+| `ab6514b7` | three gates that could not see what they claimed |
+| `0f226ad3` | the door that checks itself twice, and the cheap door that was not |
+| `4b1c97ab` | the fit's carry had no arm, and the cache's arm had no teeth |
+| `96c105cd` | the badge, the cone, the two spinners, and a cost model that named the wrong cause |
+| `2cbf3a8f` | the drawer had no door to the rig every committed clip is bound to |
+| `0e38c084` | what came off the asset was three things, not two |
+| `f6d33c24` | how to re-derive the table, and two rustdoc links that were not |
+| `27ba1ea3` | the ledger, and the six numbers in it that were not measured |
