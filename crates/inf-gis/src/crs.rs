@@ -570,6 +570,33 @@ pub fn datum_advisory_for(source_crs: &str, target_crs: &str) -> Option<Advisory
     ))
 }
 
+/// Check that `crs` names a CRS this engine can resolve **and that it is
+/// projected**, transforming nothing.
+///
+/// # Why this is a door of its own (the I7 CI-red)
+///
+/// [`anchor_at`] answers two different questions at once: *is this CRS legal as
+/// a world frame* (a decision about a string) and *where on Earth is this
+/// easting/northing* (an inverse projection, which runs through the platform's
+/// libm and is therefore entitled to differ in the last ulp between two
+/// machines). A caller that only needs the first question — because it already
+/// carries the geodetic origin as a **stated** number — must be able to ask it
+/// without paying for the second, or a committed byte becomes a fact about the
+/// host. `inf_island::IslandRecipe::anchor` is that caller.
+///
+/// Every check here is a comparison against a table and a `bool` off the parsed
+/// projection; nothing that reaches a caller is a float.
+pub fn require_projected_crs(crs: &str) -> Result<(), GisError> {
+    let proj = build_proj(crs, "anchor")?;
+    if proj.is_latlong() {
+        return Err(GisError::Crs(format!(
+            "{crs:?} is a geographic CRS (degrees) and cannot be a world anchor — \
+             see the units doctrine. Pick a projected metric CRS."
+        )));
+    }
+    Ok(())
+}
+
 /// Build a complete [`GeoAnchor`] from a chosen CRS and an origin **in that
 /// CRS**, deriving the geodetic latitude/longitude and the grid convergence.
 ///
@@ -577,6 +604,13 @@ pub fn datum_advisory_for(source_crs: &str, target_crs: &str) -> Option<Advisory
 /// derivation here — rather than storing only the easting/northing and inverting
 /// later — is what lets `inf-scene`, `inf-ecs` and the sky know where on Earth
 /// the world is **without any of them linking a projection library**.
+///
+/// **What it must not be used for** (the I7 CI-red): the three degrees it
+/// derives come out of `proj4rs`, which is `sin`/`cos`/`atan2` over a series —
+/// so they are a fact about the host's libm to the last ulp, and macOS and
+/// Windows measurably disagreed about one of them. A value that lands in a
+/// **committed file** may not come from here; state it and check it with
+/// [`require_projected_crs`] plus a tolerance instead.
 pub fn anchor_at(
     crs: &str,
     easting: f64,
@@ -589,13 +623,11 @@ pub fn anchor_at(
             "the anchor origin ({easting}, {northing}, {height}) is not finite"
         )));
     }
+    // One rule, one place: the string-shaped half of "can this be a world
+    // frame" is `require_projected_crs`, and this door asks it rather than
+    // carrying a second copy of the same refusal.
+    require_projected_crs(crs)?;
     let proj = build_proj(crs, "anchor")?;
-    if proj.is_latlong() {
-        return Err(GisError::Crs(format!(
-            "{crs:?} is a geographic CRS (degrees) and cannot be a world anchor — \
-             see the units doctrine. Pick a projected metric CRS."
-        )));
-    }
     let wgs84 = Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs")
         .map_err(|e| GisError::Crs(format!("could not build WGS 84: {e}")))?;
 

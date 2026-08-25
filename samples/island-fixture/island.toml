@@ -14,7 +14,7 @@
 # is the point — a fixture with a made-up DEM would certify a decoder against
 # itself.
 
-schema_version = 1
+schema_version = 2
 name = "Island Fixture"
 seed = 7
 
@@ -35,11 +35,20 @@ content = [
 # The same UTM zone and the same ground as the full island, offset to sit over
 # the corner with the most relief per square kilometre — a fixture on flat ground
 # would certify the hydrology against a puddle.
+#
+# The degrees are stated rather than inverted; see the full island's recipe for
+# the byte that bought that rule. This fixture CARRIED the same hazard and was
+# never seen to fail — the samples arm compares the full island first and stops
+# there, so on the red run the fixture's own bytes were never reached. "It
+# passed" would have been a reading of an assertion that did not run.
 [anchor]
 crs = "EPSG:32610"
 easting_m = 492600.0
 northing_m = 5467400.0
 height_m = 0.0
+latitude_deg = 49.359266718
+longitude_deg = -123.101907316
+convergence_deg = 0.077333377
 vertical_datum = "EGM2008"
 
 # 6 x 6 level-0 tiles of 129 samples at 2 m = 1 536 m square = 2.36 km2.

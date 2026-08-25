@@ -9,6 +9,25 @@
 //! that carried a derived number would be a second authority on it, and the
 //! first thing that changes about a generator is the derivation.
 //!
+//! # The one restatement, and what it cost to learn it belongs here
+//!
+//! [`AnchorSpec`] states the origin **twice**: once as an easting/northing in a
+//! projected CRS, and once as a latitude/longitude/convergence in degrees. That
+//! is a restatement rather than a derivation, and it is here because the
+//! alternative shipped a red CI on two platforms. The degrees used to be
+//! inverted out of the easting/northing by `inf_gis::anchor_at` every time a
+//! design was read — and that inversion is `proj4rs`, which is a series over
+//! `sin`/`cos`/`atan2` and therefore a fact about the host's libm. The island's
+//! `.inf_lvl` **commits** the anchor, so macOS produced
+//! `origin_latitude_deg = 49.34307562364772` where Windows had blessed
+//! `…773`: one ulp, one byte, one red gate.
+//!
+//! A restatement needs a check, and it has one:
+//! `crates/inf-island/tests/stated_anchor.rs` inverts each committed recipe's
+//! easting/northing through `proj4rs` and asserts the stated degrees agree
+//! within [`ANCHOR_AGREEMENT_DEG`]. That is the crate's own "the derived layers
+//! are **verified**, never re-derived" rule, applied to three numbers.
+//!
 //! # The seed rule
 //!
 //! Every stochastic step reads [`IslandRecipe::seed`] through a **named salt**
@@ -24,14 +43,31 @@ use crate::IslandError;
 
 /// The recipe's own schema version. Bumping it is a recipe change, not an engine
 /// schema change — nothing on disk in a cooked pack carries this number.
-pub const RECIPE_SCHEMA_VERSION: u32 = 1;
+///
+/// **v2** (the I7 CI-red): `[anchor]` states its geodetic origin. See the module
+/// docs for the byte that made it necessary.
+pub const RECIPE_SCHEMA_VERSION: u32 = 2;
+
+/// How far a stated geodetic origin may sit from the projection's own answer,
+/// in degrees, before `stated_anchor.rs` calls it wrong.
+///
+/// **1e-8° is 1.1 mm of latitude**, and the two numbers it separates are six
+/// orders of magnitude apart: a recipe states its degrees to 1e-9° (0.11 mm,
+/// which is already finer than any consumer — the sun, the zone suggestion, the
+/// wizard readout — can tell), so the rounding residual is at most 5e-10°, while
+/// the last-ulp disagreement two libms are entitled to have at this latitude is
+/// ~7e-15°. The tolerance is therefore loose enough that no platform can trip it
+/// and tight enough that a transposed digit, a wrong hemisphere or a wrong zone
+/// is a mile outside it.
+pub const ANCHOR_AGREEMENT_DEG: f64 = 1e-8;
 
 /// Where on Earth world `(0, 0, 0)` is.
 ///
-/// A projected, metric CRS only. `inf_gis::anchor_at` is the door that refuses a
-/// geographic one (degrees are not metres) and Web Mercator (whose "metres" are
-/// inflated 1.53× at Vancouver's latitude, which would build the island half
-/// again too large with no symptom other than everything being wrong).
+/// A projected, metric CRS only. `inf_gis::require_projected_crs` is the door
+/// that refuses a geographic one (degrees are not metres) and Web Mercator
+/// (whose "metres" are inflated 1.53× at Vancouver's latitude, which would build
+/// the island half again too large with no symptom other than everything being
+/// wrong).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnchorSpec {
@@ -44,6 +80,20 @@ pub struct AnchorSpec {
     /// The elevation world `Y = 0` means.
     #[serde(default)]
     pub height_m: f64,
+    /// The origin's geodetic latitude, degrees, `+` north.
+    ///
+    /// **Stated, not inverted** — see the module docs. Required, with no serde
+    /// default, because a default would be a silent zero: an island whose
+    /// recipe forgot this line would sit at the equator, its sun would be wrong
+    /// all year, and nothing would say so.
+    pub latitude_deg: f64,
+    /// The origin's geodetic longitude, degrees, `+` east.
+    pub longitude_deg: f64,
+    /// Grid convergence at the origin, degrees from grid north to true north.
+    ///
+    /// Zero on the CRS's central meridian and growing toward a zone edge. Stated
+    /// for the same reason as the two above: it comes out of the same inversion.
+    pub convergence_deg: f64,
     /// Recorded for the author; this engine applies no geoid model.
     #[serde(default = "default_vertical_datum")]
     pub vertical_datum: String,
@@ -439,15 +489,32 @@ impl IslandRecipe {
         h
     }
 
-    /// The geo-anchor this recipe describes.
+    /// The geo-anchor this recipe describes — **assembled from stated numbers,
+    /// never inverted.**
+    ///
+    /// The CRS is still checked (a geographic one is refused by name), because
+    /// that check reads a string and a table and returns a `bool`. What it does
+    /// *not* do is ask `proj4rs` where the easting/northing is: that answer goes
+    /// into a committed `.inf_lvl` and would make one of its bytes a fact about
+    /// the machine that blessed it. See the module docs, and
+    /// `tests/stated_anchor.rs` for the arm that keeps the stated degrees true.
     pub fn anchor(&self) -> Result<inf_math::geo::GeoAnchor, IslandError> {
-        Ok(inf_gis::anchor_at(
-            &self.anchor.crs,
-            self.anchor.easting_m,
-            self.anchor.northing_m,
-            self.anchor.height_m,
-            &self.anchor.vertical_datum,
-        )?)
+        inf_gis::require_projected_crs(&self.anchor.crs)?;
+        let anchor = inf_math::geo::GeoAnchor {
+            enabled: true,
+            crs: self.anchor.crs.trim().to_string(),
+            origin_easting_m: self.anchor.easting_m,
+            origin_northing_m: self.anchor.northing_m,
+            origin_height_m: self.anchor.height_m,
+            origin_latitude_deg: self.anchor.latitude_deg,
+            origin_longitude_deg: self.anchor.longitude_deg,
+            grid_convergence_deg: self.anchor.convergence_deg,
+            vertical_datum: self.anchor.vertical_datum.trim().to_string(),
+        };
+        anchor.validate().map_err(|e| {
+            IslandError::Settings(format!("[anchor] cannot be used as a world frame: {e}"))
+        })?;
+        Ok(anchor)
     }
 
     /// Check every value the build would otherwise discover the hard way.
@@ -489,6 +556,9 @@ impl IslandRecipe {
             ("[anchor] easting_m", self.anchor.easting_m),
             ("[anchor] northing_m", self.anchor.northing_m),
             ("[anchor] height_m", self.anchor.height_m),
+            ("[anchor] latitude_deg", self.anchor.latitude_deg),
+            ("[anchor] longitude_deg", self.anchor.longitude_deg),
+            ("[anchor] convergence_deg", self.anchor.convergence_deg),
         ] {
             if !v.is_finite() {
                 return Err(IslandError::Settings(format!(
@@ -613,7 +683,7 @@ pub(crate) mod tests {
     /// A minimal well-formed recipe, used by every test in the crate.
     pub(crate) fn tiny_recipe_text() -> String {
         r#"
-schema_version = 1
+schema_version = 2
 name = "Tiny"
 seed = 7
 coast = "layers/coast.geojson"
@@ -624,6 +694,9 @@ lakes = "layers/lakes.geojson"
 crs = "EPSG:32610"
 easting_m = 492600.0
 northing_m = 5465600.0
+latitude_deg = 49.343075624
+longitude_deg = -123.101873876
+convergence_deg = 0.077289249
 
 [grid]
 tile_resolution = 129
@@ -677,6 +750,14 @@ beach_m = 25.0
             a.origin_latitude_deg
         );
         assert!((a.origin_longitude_deg + 123.10).abs() < 0.05);
+        // …and the degrees are the recipe's OWN numbers, carried across bit for
+        // bit rather than inverted out of the easting/northing. This is the
+        // assertion the I7 CI-red bought: a door that re-derived them would land
+        // within the tolerance above on any machine and still write a different
+        // byte on each.
+        assert_eq!(a.origin_latitude_deg, r.anchor.latitude_deg);
+        assert_eq!(a.origin_longitude_deg, r.anchor.longitude_deg);
+        assert_eq!(a.grid_convergence_deg, r.anchor.convergence_deg);
 
         // Re-serializing and re-parsing preserves every decision.
         let text = toml::to_string(&r).unwrap();

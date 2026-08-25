@@ -86,7 +86,7 @@ pub use buildings::{
     footprint_attrs, AttrCoverage, FloorSource, FootprintAttrs, FootprintDefaults,
 };
 pub use classify::{class_of, classify_breaks, classify_to_ids, ClassifyMethod};
-pub use crs::{anchor_at, Transform, MAX_LATITUDE_DEG};
+pub use crs::{anchor_at, require_projected_crs, Transform, MAX_LATITUDE_DEG};
 pub use epsg::{proj4_for, suggested_utm_epsg, utm_zone_for, EPSG_TABLE};
 pub use feature::{Attr, GeoFeature, GeoGeometry, GeoLayer, LayerKind};
 pub use import::{

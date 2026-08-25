@@ -366,8 +366,27 @@ mod tests {
     use super::*;
     use glam::DVec3;
 
+    /// The full island's own frame, **stated** exactly as its recipe states it.
+    ///
+    /// Built as a literal rather than through `inf_gis::anchor_at`, for the same
+    /// reason the recipe stopped calling it (the I7 CI-red): the anchor door
+    /// inverts through `proj4rs`, and this crate's portability gate now bans
+    /// that door outright so no future author can put its answer in a committed
+    /// file by accident. Nothing in this module reads the three degrees — the
+    /// layer writer projects through `Transform`, which uses the easting,
+    /// northing and CRS — they are here because a `GeoAnchor` has them.
     fn anchor() -> inf_math::geo::GeoAnchor {
-        inf_gis::anchor_at("EPSG:32610", 492_600.0, 5_465_600.0, 0.0, "EGM2008").unwrap()
+        inf_math::geo::GeoAnchor {
+            enabled: true,
+            crs: "EPSG:32610".to_string(),
+            origin_easting_m: 492_600.0,
+            origin_northing_m: 5_465_600.0,
+            origin_height_m: 0.0,
+            origin_latitude_deg: 49.343075624,
+            origin_longitude_deg: -123.101873876,
+            grid_convergence_deg: 0.077289249,
+            vertical_datum: "EGM2008".to_string(),
+        }
     }
 
     /// **The round trip that keeps the writer and the door honest.** Everything
@@ -587,8 +606,20 @@ mod tests {
 
         // And a real write against a zone-33 anchor says so in the file.
         let dir = tempfile::tempdir().unwrap();
-        let a33 = inf_gis::anchor_at("EPSG:32633", 500_000.0, 5_000_000.0, 0.0, "EGM2008")
-            .expect("a zone-33 anchor");
+        // A zone-33 frame, stated the same way (see `anchor` above). 500 000 E is
+        // the zone's central meridian, so its convergence is zero by definition;
+        // the latitude is the one this northing lands on, to 1e-9.
+        let a33 = inf_math::geo::GeoAnchor {
+            enabled: true,
+            crs: "EPSG:32633".to_string(),
+            origin_easting_m: 500_000.0,
+            origin_northing_m: 5_000_000.0,
+            origin_height_m: 0.0,
+            origin_latitude_deg: 45.153477183,
+            origin_longitude_deg: 15.0,
+            grid_convergence_deg: 0.0,
+            vertical_datum: "EGM2008".to_string(),
+        };
         let p = dir.path().join("coast33.geojson");
         write_coast(
             &p,

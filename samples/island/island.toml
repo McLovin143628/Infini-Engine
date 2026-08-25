@@ -15,7 +15,7 @@
 # settlement sites, and the road network routed between them under a grade
 # ceiling.
 
-schema_version = 1
+schema_version = 2
 name = "Vancouver Island"
 
 # Every stochastic step salts this through a name of its own; see
@@ -48,11 +48,21 @@ content = [
 # UTM zone 10N. World (0, 0, 0) is 49.34 N, 123.10 W — the ground behind
 # Ambleside, with Grouse and Hollyburn to the north and the inlet to the south.
 # Remember the frame: +X east, +Y up, **-Z north**.
+#
+# The origin is stated TWICE — in the CRS and in degrees — and that is
+# deliberate. Inverting the easting/northing into degrees is a proj4rs series
+# over sin/cos/atan2, so its last ulp is a fact about the host's libm; this level
+# is COMMITTED, so a re-derived latitude made macOS and Windows write different
+# bytes for the same island. The degrees below are stated to 1e-9 (0.11 mm) and
+# `cargo test -p inf-island --test stated_anchor` is what proves they are true.
 [anchor]
 crs = "EPSG:32610"
 easting_m = 492600.0
 northing_m = 5465600.0
 height_m = 0.0
+latitude_deg = 49.343075624
+longitude_deg = -123.101873876
+convergence_deg = 0.077289249
 vertical_datum = "EGM2008"
 
 # ─── the world grid ───────────────────────────────────────────────────────────

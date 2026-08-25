@@ -17,6 +17,24 @@
 //! **Nothing here reads an elevation.** `the_level_is_authored_from_committed_
 //! design_alone` is what says so.
 //!
+//! # "From the recipe" was not the same as "from a committed number"
+//!
+//! That sentence was true of every *file* and false of three numbers, and the
+//! I7 CI-red is what taught the difference. `read_design` used to build the
+//! geo-anchor by inverting the recipe's easting/northing through
+//! `inf_gis::anchor_at` — i.e. `proj4rs`, i.e. the platform's libm — and the
+//! three degrees that came back were serialized straight into this committed
+//! `.inf_lvl`. macOS computed `origin_latitude_deg = 49.34307562364772` where
+//! Windows had blessed `…773`: one ulp, one byte at offset 14 788, and
+//! `committed_sample_matches_generators` red on one platform of three.
+//!
+//! The recipe now **states** its geodetic origin and `read_design` carries it
+//! across untouched, so every byte of the anchor traces to a decimal in a
+//! committed TOML. `crates/inf-island/tests/stated_anchor.rs` checks the stated
+//! degrees against the projection, and
+//! `crates/inf-island/tests/portable_math_law.rs` bans the anchor door from the
+//! whole crate so it cannot come back.
+//!
 //! # One generator, two islands
 //!
 //! The full island and the CI-scale fixture are the same recipe format and the
@@ -731,6 +749,24 @@ mod tests {
         // and every future import are read from.
         assert!(doc.geo().enabled);
         assert_eq!(doc.geo().crs, "EPSG:32610");
+
+        // **And every number in it is the recipe's own, carried bit for bit.**
+        // This is the I7 CI-red, as an arm: the three degrees used to be
+        // inverted out of the easting/northing through `proj4rs`, which is the
+        // platform's libm, so the committed level's `origin_latitude_deg` read
+        // 49.34307562364773 where it was blessed and 49.34307562364772 on macOS
+        // — one ulp, one byte, one red platform of three. A committed byte has
+        // to trace to a committed decimal, and `assert_eq!` on an f64 is the
+        // only comparison that says so.
+        let g = doc.geo();
+        let a = &d.recipe.anchor;
+        assert_eq!(g.origin_easting_m, a.easting_m);
+        assert_eq!(g.origin_northing_m, a.northing_m);
+        assert_eq!(g.origin_height_m, a.height_m);
+        assert_eq!(g.origin_latitude_deg, a.latitude_deg);
+        assert_eq!(g.origin_longitude_deg, a.longitude_deg);
+        assert_eq!(g.grid_convergence_deg, a.convergence_deg);
+        assert_eq!(g.vertical_datum, a.vertical_datum);
 
         // The partition is on, at the terrain's own tile lattice.
         let s = doc.settings();

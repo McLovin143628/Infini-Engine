@@ -10,9 +10,23 @@
 //! So: **every module in this crate is clean of `std` transcendentals, with no
 //! exemption.** The non-portable half is not in here at all; it is
 //! `inf_gis::crs` and `inf_gis::tilemath`, which that crate's own gate exempts by
-//! name, and this crate reaches them through two call sites it cannot help
-//! (`Transform::to_source` and `lonlat_to_mercator`, both inside
-//! [`inf_island::ProjectionLattice::build`]).
+//! name, and this crate reaches them only from the sampling step — the
+//! projection lattice and the tile plan, both named in `PROJECTION_ALLOWED`.
+//!
+//! # The hole this file had, and what it cost (the I7 CI-red)
+//!
+//! Being clean of transcendentals was never the whole claim. A crate can call no
+//! `sin` of its own and still put one in a committed file by asking a library to
+//! do it — and that is exactly what happened. `IslandRecipe::anchor` called
+//! `inf_gis::anchor_at`, which inverts an easting/northing through `proj4rs`;
+//! the three degrees it returns are serialized into the island's committed
+//! `.inf_lvl`; macOS and Windows disagreed about the last ulp of one of them and
+//! CI went red on one platform of three.
+//!
+//! The arm that should have caught it enumerated four modules and three needles.
+//! `recipe.rs` was not one of the four and `anchor_at(` was not one of the three.
+//! Both halves are now the other way up: an **allowlist** of modules with
+//! reasons, and a separate ban on the anchor door across every module.
 //!
 //! Everything this crate computes *itself* — the carve, the priority flood, the
 //! D8 routing, the accumulation, the Jenks dispatch, the grade audit, the segment
@@ -127,29 +141,67 @@ fn the_scan_finds_what_it_is_looking_for_when_it_is_there() {
     assert!(inf_math::libm_ban::ALL.len() > 40);
 }
 
-/// **The one non-portable thing this crate touches is named, and it is the
-/// projection.**
+/// The coordinate doors of `inf-gis`'s exempt modules — the calls that hand this
+/// crate a number `proj4rs` computed.
+const PROJECTION_DOORS: [&str; 4] = [
+    "to_source(",
+    "to_world(",
+    "lonlat_to_mercator(",
+    "mercator_to_lonlat(",
+];
+
+/// The modules allowed to name one, **and why**.
+///
+/// An allowlist, not a ban list — the I7 CI-red is the fourth time this house
+/// has paid for the difference. The arm this replaces enumerated four modules
+/// (`hydro`, `roads`, `biome`, `shape`) and three needles, and seven modules
+/// plus the door that actually mattered walked past it: `recipe.rs` called
+/// `inf_gis::anchor_at`, whose answer went into a **committed** `.inf_lvl` and
+/// differed between macOS and Windows in its last ulp.
+const PROJECTION_ALLOWED: [(&str, &str); 3] = [
+    (
+        "terrain.rs",
+        "the projection lattice — the sampling step itself, which this crate's \
+         header names as the non-portable half",
+    ),
+    (
+        "source.rs",
+        "the tile plan: which XYZ tiles the sampling step must fetch is a \
+         question in the source's own frame, and it is answered before any \
+         sample exists",
+    ),
+    (
+        "recipe.rs",
+        "one test, which reports the longitude of the world's east and west \
+         edges so a site outside them is refused by name. It reaches no writer: \
+         `anchor_at` is banned in this module by the arm below, which is the \
+         door whose output was reaching a committed file",
+    ),
+];
+
+/// **The projection is reached from the sampling step and nowhere else.**
 ///
 /// `inf-gis`'s exemption covers `crs.rs` and `tilemath.rs`. This crate reaches
-/// them, and it must do so from exactly one place — the projection lattice —
-/// because that is the boundary the header's claim is drawn at.
+/// them, and the modules that may are named above with their reason; every other
+/// module in the table is banned, so a module added tomorrow is banned by
+/// default rather than unlisted by accident.
 #[test]
-fn the_projection_is_reached_from_the_lattice_and_nowhere_that_derives() {
-    // The modules that DERIVE — everything downstream of the sample walk. None of
-    // them may name a projection door, or a stream vertex would become a fact
-    // about libm.
+fn the_projection_is_reached_from_the_sampling_step_and_nowhere_that_derives() {
     for (name, src) in SOURCES {
-        if !matches!(*name, "hydro.rs" | "roads.rs" | "biome.rs" | "shape.rs") {
+        if let Some((_, why)) = PROJECTION_ALLOWED.iter().find(|(n, _)| n == name) {
+            assert!(!why.is_empty());
             continue;
         }
-        for needle in ["to_source(", "lonlat_to_mercator(", "mercator_to_lonlat("] {
+        for needle in PROJECTION_DOORS {
             let hits = code_hits(src, needle);
             assert!(
                 hits.is_empty(),
-                "inf-island/src/{name} calls `{needle}`. The derivations run on \
-                 the CARVED HEIGHTS, and a projection call in one of them would \
-                 make a committed stream vertex a fact about the host's libm. \
-                 Hits: {hits:?}"
+                "inf-island/src/{name} calls `{needle}`, and it is not on this \
+                 gate's allowlist. The derivations run on the CARVED HEIGHTS, and \
+                 a projection call in one of them would make a committed stream \
+                 vertex a fact about the host's libm. If the call is genuinely \
+                 part of the sampling step, add the module to \
+                 `PROJECTION_ALLOWED` **with its reason**. Hits: {hits:?}"
             );
         }
     }
@@ -165,6 +217,67 @@ fn the_projection_is_reached_from_the_lattice_and_nowhere_that_derives() {
          bans nothing"
     );
     assert!(!code_hits(terrain, "lonlat_to_mercator(").is_empty());
+    // …and every allowlisted module is a module that exists, so an entry cannot
+    // rot into a licence for nothing.
+    for (name, _) in PROJECTION_ALLOWED {
+        assert!(
+            SOURCES.iter().any(|(n, _)| *n == name),
+            "`{name}` is allowlisted here and is not in this crate's source table"
+        );
+    }
+}
+
+/// **THE ANCHOR IS STATED, NEVER INVERTED** — the I7 CI-red, as a law.
+///
+/// `inf_gis::anchor_at` derives a latitude, a longitude and a grid convergence
+/// by inverting an easting/northing through `proj4rs`: a series over
+/// `sin`/`cos`/`atan2`, i.e. the platform's libm. Those three numbers are
+/// serialized into `.inf_lvl`, and `.inf_lvl` is **committed**, so the door is a
+/// direct route from one machine's libm into a byte three platforms compare.
+/// It took one: `origin_latitude_deg` read 49.34307562364773 on Windows and
+/// 49.34307562364772 on macOS — one ulp, one byte at offset 14 788, one red CI.
+///
+/// So the recipe **states** its geodetic origin (`[anchor] latitude_deg`, …) and
+/// `tests/stated_anchor.rs` checks the statement against the projection with a
+/// tolerance. Nothing in `inf-island/src` may call the anchor door — including
+/// a test helper, because a helper is the shortest path back.
+#[test]
+fn no_module_inverts_an_anchor_out_of_a_projection() {
+    for (name, src) in SOURCES {
+        let hits = code_hits(src, "anchor_at(");
+        assert!(
+            hits.is_empty(),
+            "inf-island/src/{name} calls `anchor_at(`. That door inverts through \
+             `proj4rs` and its three degrees are written into a COMMITTED \
+             `.inf_lvl`, where macOS and Windows have already been measured to \
+             disagree in the last ulp. State the origin in the recipe \
+             (`[anchor] latitude_deg` / `longitude_deg` / `convergence_deg`) and \
+             let `tests/stated_anchor.rs` check it. Hits: {hits:?}"
+        );
+    }
+    // The replacement door is really the one in use, or the ban above is a ban on
+    // a crate that stopped anchoring at all.
+    let recipe = SOURCES
+        .iter()
+        .find(|(n, _)| *n == "recipe.rs")
+        .expect("recipe.rs is tabled")
+        .1;
+    assert!(
+        !code_hits(recipe, "require_projected_crs(").is_empty(),
+        "recipe.rs no longer checks its CRS at all — the anchor ban must not be \
+         satisfied by dropping the door instead of replacing it"
+    );
+    assert!(
+        !code_hits(recipe, "latitude_deg").is_empty()
+            && !code_hits(recipe, "convergence_deg").is_empty(),
+        "the recipe does not carry a stated geodetic origin, so the ban above \
+         leaves the anchor with nowhere to come from"
+    );
+    // …and the scan can see the spelling it bans, on a sample that has it.
+    assert_eq!(
+        code_hits("let a = inf_gis::anchor_at(x);", "anchor_at(").len(),
+        1
+    );
 }
 
 /// **The exemption's release condition, at one remove.**

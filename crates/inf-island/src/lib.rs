@@ -87,7 +87,7 @@ pub use build::{
 pub use hydro::{FlowField, HydroParams, Lake, Stream, StreamNetwork, Waterfall};
 pub use recipe::{
     AnchorSpec, BiomeSpec, GridSpec, HydroSpec, IslandRecipe, RoadSpec, SeaSpec, Site, SiteKind,
-    SourceSpec, RECIPE_SCHEMA_VERSION,
+    SourceSpec, ANCHOR_AGREEMENT_DEG, RECIPE_SCHEMA_VERSION,
 };
 pub use report::{IslandReport, LayerDrift};
 pub use roads::{grade_audit, plan_network, GradeAudit, RoadReport, Route};
