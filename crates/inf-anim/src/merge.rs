@@ -54,6 +54,7 @@
 //! which" property.
 
 use crate::asset::SkeletonAsset;
+use crate::roles::{BoneRole, GripAffordance, IkFollow, TwistDriver};
 use crate::skeleton::{Joint, Skeleton, SkeletonError};
 use crate::template::JointLimit;
 
@@ -100,7 +101,8 @@ pub enum SkeletonMergeError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkeletonMerge {
     /// The assembled rig: base joints at their original indices, incoming joints
-    /// appended, sockets unioned, limits carried from both sides.
+    /// appended, sockets unioned, limits and the v3 side tables carried from both
+    /// sides with the incoming half shifted.
     pub asset: SkeletonAsset,
     /// What to add to an **incoming** joint index to get its index in
     /// [`SkeletonMerge::asset`]. Equal to the base skeleton's joint count.
@@ -114,10 +116,12 @@ pub struct SkeletonMerge {
 ///
 /// See the module docs for the two rules. In summary:
 ///
-/// * base joints, sockets and limits keep their indices **exactly**;
+/// * base joints, sockets, limits and side tables keep their indices **exactly**;
 /// * incoming joints land at `base.len() + i`, with their parents shifted by the
 ///   same amount and their *roots* reparented to `attach`;
-/// * incoming sockets and limits are shifted by the same offset;
+/// * incoming sockets, limits and side tables (`roles`, `twists`, `ik_follow`,
+///   `grips`) are shifted by the same offset — **every** index-keyed table on the
+///   asset, which is what stops a merged rig quietly forgetting what it is;
 /// * a socket- or joint-name collision refuses.
 ///
 /// The result is topologically ordered by construction: `attach` is a base index
@@ -183,12 +187,50 @@ pub fn merge_skeletons(
     let mut limits = base.limits.clone();
     limits.extend(incoming.limits.iter().map(|l| JointLimit {
         joint: l.joint + offset,
-        ..*l
+        ..l.clone()
+    }));
+
+    // **The v3 side tables shift exactly as the limits do** (SK1a audit).
+    //
+    // They were dropped here when the schema grew them, which is the same defect
+    // the fit door had and a quieter one: a merged mannequin came back with an
+    // empty role table, so `build_locomotion` refused the rig the modular rigger
+    // had just assembled, the drive pass drove nothing, and every site this wave
+    // moved onto the table fell back to guessing at names. Nothing failed; the
+    // rig simply stopped saying what it was.
+    //
+    // Concatenation keeps the ascending-joint invariant the decode door checks:
+    // every base row is below `offset` and every shifted incoming row is at or
+    // above it, so base-then-incoming is already sorted.
+    let mut roles = base.roles.clone();
+    roles.extend(incoming.roles.iter().map(|r| BoneRole {
+        joint: r.joint + offset,
+        ..*r
+    }));
+    let mut twists = base.twists.clone();
+    twists.extend(incoming.twists.iter().map(|t| TwistDriver {
+        joint: t.joint + offset,
+        source: t.source + offset,
+        ..*t
+    }));
+    let mut ik_follow = base.ik_follow.clone();
+    ik_follow.extend(incoming.ik_follow.iter().map(|f| IkFollow {
+        joint: f.joint + offset,
+        source: f.source + offset,
+    }));
+    let mut grips = base.grips.clone();
+    grips.extend(incoming.grips.iter().map(|g| GripAffordance {
+        hand: g.hand + offset,
+        ..g.clone()
     }));
 
     let skeleton = Skeleton::new(joints)?;
     let mut asset = SkeletonAsset::with_sockets(skeleton, sockets);
     asset.limits = limits;
+    asset.roles = roles;
+    asset.twists = twists;
+    asset.ik_follow = ik_follow;
+    asset.grips = grips;
     Ok(SkeletonMerge {
         asset,
         joint_offset: offset,
@@ -593,6 +635,129 @@ mod tests {
                 "mirroring twice is not the identity"
             );
         }
+    }
+
+    /// **…and on the rig the wizard now makes by default** (SK1a audit).
+    ///
+    /// The arm above moved to `BipedCanonical` when `Biped` became the
+    /// mannequin, which left `mirror_joint_map` — the thing `Op::Mirror` and
+    /// every weight swap rest on — with no coverage at all on the 161-bone
+    /// hierarchy those operations will actually meet. The scout's reading was
+    /// that `mirrored_joint_name` "survives Manny"; this is that reading turned
+    /// into an arm.
+    #[test]
+    fn the_mirror_map_pairs_the_mannequin_too() {
+        let sk = build_template(BodyPlan::Biped, &BodyParams::default()).unwrap();
+        assert_eq!(
+            unmatched_sided_joints(&sk.skeleton),
+            Vec::<String>::new(),
+            "a mannequin bone names a side its twin does not answer to"
+        );
+        let map = mirror_joint_map(&sk.skeleton);
+        let index = |n: &str| sk.skeleton.index_of(n).unwrap_or_else(|| panic!("{n}"));
+        // The families the canonical vocabulary has no word for: a twist, a
+        // metacarpal, a corrective and an IK handle.
+        for (a, b) in [
+            ("upperarm_twist_01_l", "upperarm_twist_01_r"),
+            ("index_metacarpal_l", "index_metacarpal_r"),
+            ("thigh_bck_lwr_l", "thigh_bck_lwr_r"),
+            ("ik_foot_l", "ik_foot_r"),
+        ] {
+            let (ia, ib) = (index(a), index(b));
+            assert_eq!(map[ia as usize], ib, "{a} did not pair with {b}");
+            assert_eq!(map[ib as usize], ia, "the pairing is not symmetric");
+        }
+        // The side-less bones map to themselves, `ik_hand_gun` among them — it
+        // ends in no side letter and must not be dragged onto a hand.
+        for n in ["root", "pelvis", "spine_03", "head", "ik_hand_gun"] {
+            let i = index(n);
+            assert_eq!(map[i as usize], i, "`{n}` is not a sided joint");
+        }
+        for i in 0..sk.skeleton.len() {
+            assert_eq!(
+                map[map[i] as usize] as usize, i,
+                "mirroring twice is not the identity"
+            );
+        }
+    }
+
+    /// **A merged rig keeps saying what it is** (SK1a audit).
+    ///
+    /// `merge_skeletons` shifted sockets and limits and dropped `roles`,
+    /// `twists`, `ik_follow` and `grips` on the floor — the same defect the fit
+    /// door had, and a quieter one, because nothing fails: a merged mannequin
+    /// simply comes back with no opinion about its own anatomy, `build_locomotion`
+    /// refuses it by name, and every site this wave moved onto the table falls
+    /// back to guessing.
+    #[test]
+    fn a_merge_carries_both_sides_side_tables_shifted() {
+        use crate::roles::{BoneRoleKind, BoneSide};
+        let base = build_template(BodyPlan::Biped, &BodyParams::default()).unwrap();
+        let base_len = base.skeleton.len();
+        // A part with its own tables, so BOTH halves have something to lose.
+        let mut part = SkeletonAsset::with_sockets(
+            Skeleton::new(vec![
+                joint("tail_01", None, Vec3::new(0.0, 0.0, -0.2)),
+                joint("tail_02", Some(0), Vec3::new(0.0, 0.0, -0.2)),
+            ])
+            .unwrap(),
+            vec![Socket::new("tail_tip", 1)],
+        );
+        part.roles = vec![
+            BoneRole::new(0, BoneRoleKind::Spine, BoneSide::Center),
+            BoneRole::new(1, BoneRoleKind::Spine, BoneSide::Center),
+        ];
+        part.twists = vec![TwistDriver::new(1, 0, [0.0, 0.0, 1.0], 0.5)];
+        part.ik_follow = vec![IkFollow::new(1, 0)];
+        part.grips = vec![GripAffordance::new("tail", 1, 0.03)];
+
+        let attach = base.skeleton.index_of("spine_05").unwrap();
+        let merged = merge_skeletons(&base, &part, attach).unwrap();
+        let a = &merged.asset;
+        assert_eq!(merged.joint_offset as usize, base_len);
+
+        // Both halves, and the incoming half shifted by exactly the offset.
+        assert_eq!(a.roles.len(), base.roles.len() + 2);
+        assert_eq!(a.twists.len(), base.twists.len() + 1);
+        assert_eq!(a.ik_follow.len(), base.ik_follow.len() + 1);
+        assert_eq!(a.grips.len(), 1);
+        assert_eq!(a.grips[0].hand as usize, base_len + 1);
+        let last_twist = *a.twists.last().unwrap();
+        assert_eq!(last_twist.joint as usize, base_len + 1);
+        assert_eq!(last_twist.source as usize, base_len);
+        let last_follow = *a.ik_follow.last().unwrap();
+        assert_eq!(last_follow.joint as usize, base_len + 1);
+        assert_eq!(last_follow.source as usize, base_len);
+
+        // The base's own rows did not move, and the table still ANSWERS — which
+        // is the claim that matters, because a shifted-but-unsorted table
+        // indexes to `None` for rows that are really there.
+        let idx = a.role_index();
+        for name in ["pelvis", "thigh_l", "foot_r", "hand_l"] {
+            let (before, after) = (
+                base.skeleton.index_of(name).unwrap(),
+                a.skeleton.index_of(name).unwrap(),
+            );
+            assert_eq!(before, after, "`{name}` moved");
+            assert_eq!(idx.kind_of(after), base.role_index().kind_of(before));
+        }
+        assert_eq!(
+            idx.first(BoneRoleKind::Foot, BoneSide::Left),
+            base.role_index().first(BoneRoleKind::Foot, BoneSide::Left)
+        );
+        // Ascending, strictly — the invariant `SkeletonAsset`'s decode door
+        // refuses a violation of, so a merge that produced one would write a
+        // `.inf_skel` its own reader rejects.
+        assert!(a.roles.windows(2).all(|w| w[0].joint < w[1].joint));
+        assert!(a.ik_follow.windows(2).all(|w| w[0].joint < w[1].joint));
+        // …and the merged rig still generates a walk, which is the failure the
+        // dropped table actually produced.
+        crate::locomotion::build_locomotion(
+            BodyPlan::Biped,
+            a,
+            &crate::locomotion::GaitParams::default(),
+        )
+        .expect("a merged mannequin still has legs");
     }
 
     /// A rig with one side of a pair missing REPORTS it rather than silently
