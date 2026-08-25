@@ -308,8 +308,6 @@ pub fn fit_template(bvh: &Bvh, opts: &FitOptions) -> Result<(SkeletonAsset, FitR
     // author's editor — `build_template` makes the same call for the same
     // reason, and this reuses its variant rather than inventing a second.
     let skeleton = Skeleton::new(fitted).map_err(TemplateError::Invalid)?;
-    let mut out = SkeletonAsset::with_sockets(skeleton, asset.sockets.clone());
-    out.limits = asset.limits.clone();
     // **The side tables ride through the fit** (SK1a). The fit MOVES joints and
     // never adds, removes or reorders one — `emit_joints` maps the input list
     // one-to-one — so every table keyed on a joint index is still true of the
@@ -317,10 +315,14 @@ pub fn fit_template(bvh: &Bvh, opts: &FitOptions) -> Result<(SkeletonAsset, FitR
     // arrived with no role table, `build_locomotion` fell back to its name rule,
     // and the wizard refused the rig it had just generated with a message about
     // `upper_leg_l`.
-    out.roles = asset.roles.clone();
-    out.twists = asset.twists.clone();
-    out.ik_follow = asset.ik_follow.clone();
-    out.grips = asset.grips.clone();
+    //
+    // **Exhaustive by construction** (SK1a audit): the fitted asset is the
+    // generated one with its skeleton replaced, rather than a field-by-field
+    // rebuild. A rebuild is what dropped the four tables in the first place and
+    // is what would drop the fifth the day `SkeletonAsset` grows one; a move
+    // cannot forget a field that does not exist yet. It also drops six clones.
+    let mut out = asset;
+    out.skeleton = skeleton;
 
     Ok((
         out,
@@ -576,6 +578,73 @@ mod tests {
             out.push(base + l);
         }
         out
+    }
+
+    /// **A FITTED MANNEQUIN STILL SAYS WHAT IT IS** (SK1a audit).
+    ///
+    /// The wave's own headline fix — `fit_template` was dropping the four v3
+    /// side tables — had no arm in the crate that owns it. Every fixture here
+    /// moved to `BipedCanonical` in the same wave, and a `BipedCanonical` rig
+    /// carries **empty** tables, so both new code paths (the role-first foot
+    /// rule and the carry itself) were exercised by nothing: the carry copied
+    /// four empty vectors and the role branch was never taken. The only cover
+    /// left was indirect and two crates away, through the wizard's default spec.
+    ///
+    /// This is that claim, on the rig that has something to lose. It deliberately
+    /// asserts nothing about containment — the tube man is 40 cm across and a
+    /// T-posed mannequin's hands are outside it, which is why the other fixtures
+    /// are canonical.
+    #[test]
+    fn a_fitted_mannequin_keeps_every_table_it_arrived_with() {
+        let bvh = tube_man();
+        let opts = FitOptions {
+            plan: BodyPlan::Biped,
+            ..FitOptions::default()
+        };
+        let source = build_template(BodyPlan::Biped, &opts.params).expect("the mannequin builds");
+        let (fitted, report) = fit_template(&bvh, &opts).expect("the fit succeeds");
+
+        // The fit MOVES joints and never adds, removes or reorders one — the
+        // premise every index-keyed table below rests on.
+        assert_eq!(report.joints, inf_anim::MANNY_JOINT_COUNT);
+        assert_eq!(fitted.skeleton.len(), source.skeleton.len());
+        for (a, b) in fitted
+            .skeleton
+            .joints()
+            .iter()
+            .zip(source.skeleton.joints())
+        {
+            assert_eq!(a.name, b.name, "a joint was renamed or reordered");
+            assert_eq!(a.parent, b.parent, "`{}`'s parent moved", a.name);
+        }
+        // …and every table arrived, unshifted, with the rig's own answers.
+        assert_eq!(fitted.roles, source.roles);
+        assert_eq!(fitted.twists, source.twists);
+        assert_eq!(fitted.ik_follow, source.ik_follow);
+        assert_eq!(fitted.grips, source.grips);
+        assert_eq!(fitted.limits, source.limits);
+        assert_eq!(fitted.sockets, source.sockets);
+        assert_eq!(fitted.schema_version, source.schema_version);
+        assert_eq!(fitted.roles.len(), inf_anim::MANNY_JOINT_COUNT);
+        assert_eq!(fitted.twists.len(), 16);
+        assert_eq!(fitted.ik_follow.len(), 5);
+        // The consequence the dropped tables actually produced: the wizard
+        // refusing the rig it had just generated.
+        inf_anim::build_locomotion(BodyPlan::Biped, &fitted, &Default::default())
+            .expect("a fitted mannequin still has legs");
+
+        // **The role-first ground rule ran**, and it planted the ankles rather
+        // than the markers: `ik_foot_*` is emitted AT the ankle by
+        // `Place::Mirrors`, so a rule that planted the handle instead would move
+        // it here and leave the ankle where the refinement put it.
+        let globals = globals_of(&fitted);
+        let at = |n: &str| globals[fitted.skeleton.index_of(n).unwrap() as usize];
+        let ground = at("foot_l").y;
+        assert!((at("foot_r").y - ground).abs() < 1e-9, "the feet disagree");
+        assert!(
+            ground < at("calf_l").y,
+            "the ankle is not below the knee: {ground}"
+        );
     }
 
     /// **THE GATE.** Every joint of a fitted biped is inside the mesh, the feet

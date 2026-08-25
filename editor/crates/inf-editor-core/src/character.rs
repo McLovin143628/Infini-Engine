@@ -1390,6 +1390,7 @@ pub fn block_body_mesh(rig: &SkeletonAsset) -> MeshAsset {
             continue;
         };
         // The role table's cut, and only when there is one — see the fn docs.
+        // The role table's cut, and only when there is one — see the fn docs.
         if !roles.is_empty() && !roles.is_deform(index as u16) {
             continue;
         }
@@ -1757,15 +1758,21 @@ mod tests {
     /// 2.4x the heat solve costs at 161 bones is paid only by an author who
     /// supplies their own mesh, once, at build time.
     ///
-    /// Run with `--nocapture` for the numbers. Asserted as a **budget with a real
-    /// origin**: a drag is felt at a frame, and the debounce is 250 ms, so a
-    /// preview that fits inside one 60 Hz frame cannot be what makes a slider
-    /// stutter. That is a bound with slack in it on purpose — the alternative is a
-    /// wall-clock ceiling tight enough to flake on a shared runner.
+    /// Run with `--nocapture` for the numbers. What is **asserted** is the
+    /// counter, not the clock (SK1a audit): the first cut ended
+    /// `assert!(warm161 <= cold161 * 1.5 + 0.5, "the cache did not help")`, which
+    /// with the recorded 0.105 ms cold is a 0.66 ms bound — six times the cold
+    /// path — so deleting the memoization outright leaves `warm == cold` and the
+    /// arm green at every optimization level. It could only fire if the cache
+    /// made the path dramatically *slower*, which is the opposite of what its
+    /// message claims. This crate already owns the honest instrument
+    /// ([`PreviewBuilds`], whose own docs say "a cache that silently stopped
+    /// hitting would keep every number in the preview correct"), so the arm reads
+    /// that and the wall clock stays a `println!`.
     #[test]
     fn the_preview_drag_still_fits_inside_a_frame_at_a_hundred_and_sixty_one_bones() {
         use std::time::Instant;
-        let run = |plan: inf_anim::BodyPlan| -> (usize, f64, f64) {
+        let run = |plan: inf_anim::BodyPlan| -> (usize, f64, f64, PreviewBuilds) {
             let spec = CharacterSpec {
                 plan,
                 ..CharacterSpec::default()
@@ -1781,6 +1788,8 @@ mod tests {
                 session.preview(&spec, None).expect("previews");
                 warm = warm.min(t.elapsed().as_secs_f64() * 1000.0);
             }
+            // Six previews of one spec have now gone through this session.
+            let builds = session.builds();
             let mut cold = f64::INFINITY;
             for _ in 0..5 {
                 let mut fresh = CharacterPreviewSession::default();
@@ -1788,10 +1797,10 @@ mod tests {
                 fresh.preview(&spec, None).expect("previews");
                 cold = cold.min(t.elapsed().as_secs_f64() * 1000.0);
             }
-            (joints, cold, warm)
+            (joints, cold, warm, builds)
         };
-        let (j20, cold20, warm20) = run(inf_anim::BodyPlan::BipedCanonical);
-        let (j161, cold161, warm161) = run(inf_anim::BodyPlan::Biped);
+        let (j20, cold20, warm20, b20) = run(inf_anim::BodyPlan::BipedCanonical);
+        let (j161, cold161, warm161, b161) = run(inf_anim::BodyPlan::Biped);
         println!(
             "preview: {j20} joints cold {cold20:.3} ms / warm {warm20:.3} ms; \
              {j161} joints cold {cold161:.3} ms / warm {warm161:.3} ms \
@@ -1799,9 +1808,23 @@ mod tests {
             cold161 / cold20.max(1.0e-9)
         );
         assert_eq!((j20, j161), (20, inf_anim::MANNY_JOINT_COUNT));
+        // **The cache hit, counted.** Six previews of one spec generated the
+        // locomotion set once and the body mesh once, on both rigs. A session
+        // that stopped memoizing answers all six correctly and reports six.
+        for (plan, b) in [("canonical", b20), ("mannequin", b161)] {
+            assert_eq!(b.previews, 6, "{plan}: the session answered {b:?}");
+            assert_eq!(
+                (b.locomotion, b.body),
+                (1, 1),
+                "{plan}: the warm previews rebuilt what the cold one already had — {b:?}"
+            );
+            assert_eq!(b.bvh, 0, "{plan}: there is no author mesh on this path");
+        }
         // One 60 Hz frame. In DEBUG this test runs unoptimized, so the ceiling is
         // the debounce rather than the frame — a preview that beats the interval
-        // between two previews can never queue behind itself.
+        // between two previews can never queue behind itself. Slack on purpose:
+        // a wall-clock ceiling tight enough to be interesting is a flake on a
+        // shared runner, which is why the counter above is the real assertion.
         let ceiling = if cfg!(debug_assertions) { 250.0 } else { 16.6 };
         assert!(
             cold161 < ceiling,
@@ -1809,7 +1832,6 @@ mod tests {
              ceiling — the drag would stutter and a cache or a coarser mannequin \
              is owed"
         );
-        assert!(warm161 <= cold161 * 1.5 + 0.5, "the cache did not help");
     }
 
     /// **The previewed height is the JOINT SPAN, and it is not what was asked
@@ -1892,6 +1914,34 @@ mod tests {
             used.len(),
             rig.skeleton.len()
         );
+        // **The deform-only cut, asserted** (SK1a audit). `block_body_mesh` skips
+        // a joint the role table does not call a deform bone, and until this arm
+        // existed deleting that line failed nothing: `used.len() > 8` is happier
+        // with more boxes, not fewer. On the mannequin the difference is 63 boxes
+        // against 160 — every twist bone would get one inside its parent's, every
+        // helper a degenerate one at its parent's origin, and every `ik_*` handle
+        // a box on a marker.
+        // A box rides its joint's PARENT — that is the bone that moves it — so
+        // the skinned set is the parents of the deform bones, which includes the
+        // rig's root (it is `pelvis`'s parent) and nothing driven, helper or
+        // marker.
+        let roles = rig.role_index();
+        for j in &used {
+            let kind = roles.kind_of(*j);
+            assert!(
+                kind.is_some_and(|k| k.is_deform() || k == inf_anim::BoneRoleKind::Root),
+                "`{}` is a {kind:?} and carries skin weights",
+                rig.skeleton.joints()[*j as usize].name
+            );
+        }
+        // …and the set is exactly that, as an identity rather than a literal, so
+        // a rig change moves both sides together.
+        let want: std::collections::BTreeSet<u16> = (0..rig.skeleton.len() as u16)
+            .filter(|i| roles.is_deform(*i))
+            .filter_map(|i| rig.skeleton.joints()[i as usize].parent)
+            .collect();
+        assert_eq!(used, want, "the boxes and the deform bones disagree");
+        assert_eq!(used.len(), 51, "the mannequin's skinned-bone census");
         // No zero-area triangle: a box built on a degenerate frame would still
         // count vertices and draw nothing.
         for tri in sub.indices.chunks_exact(3) {
