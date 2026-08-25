@@ -33,12 +33,12 @@
 
 use std::collections::BTreeMap;
 
-use glam::{DVec2, DVec3, Mat4};
+use glam::{DVec2, DVec3};
 use uuid::Uuid;
 
 use inf_anim::{
-    AnimClip, Interpolation, Joint, JointTrack, JointTransform, QuatTrack, Skeleton, SkeletonAsset,
-    SmState, SmTransition, StateMachine,
+    AnimClip, Interpolation, JointTrack, QuatTrack, SkeletonAsset, SmState, SmTransition,
+    StateMachine,
 };
 use inf_ecs::components::{
     AnimStateMachine, BodyKind3D, CharacterController3D, CharacterMovement, Collider3D,
@@ -585,11 +585,4 @@ fn the_fixture_rig_can_actually_be_solved() {
              grip that resolves to nothing and writes no bone"
         );
     }
-    let _ = Mat4::IDENTITY;
-    let _ = Skeleton::new(vec![Joint {
-        name: "root".into(),
-        parent: None,
-        inverse_bind: Mat4::IDENTITY.to_cols_array(),
-        local_bind: JointTransform::IDENTITY,
-    }]);
 }
