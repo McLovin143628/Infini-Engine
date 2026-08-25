@@ -1463,28 +1463,29 @@ fn twist_rule(name: &str) -> Option<(String, [f32; 3], f32)> {
     } else {
         return None;
     };
-    let (stem, axis, fraction) = if let Some(s) = name.strip_suffix(&format!("_twist_01_{side}")) {
-        match s {
-            // Driven by its own joint, at the proximal end: counter 1 − 1/3.
-            "upperarm" => ("upperarm", X, -2.0 / 3.0),
-            "thigh" => ("thigh", Y, -2.0 / 3.0),
-            // Driven by the distal child: add 2/3 of the wrist's / ankle's roll.
-            "lowerarm" => ("hand", X, 2.0 / 3.0),
-            "calf" => ("foot", Y, 2.0 / 3.0),
-            _ => return None,
-        }
-    } else if let Some(s) = name.strip_suffix(&format!("_twist_02_{side}")) {
-        match s {
-            "upperarm" => ("upperarm", X, -1.0 / 3.0),
-            "thigh" => ("thigh", Y, -1.0 / 3.0),
-            "lowerarm" => ("hand", X, 1.0 / 3.0),
-            "calf" => ("foot", Y, 1.0 / 3.0),
-            _ => return None,
-        }
-    } else {
-        return None;
+    // `_01` is the bone nearest the joint that drives it and `_02` the far one;
+    // which END of the segment that is depends on the segment, which is what the
+    // source table below says.
+    let (stem, near) = match name.strip_suffix(&format!("_twist_01_{side}")) {
+        Some(s) => (s, true),
+        None => (name.strip_suffix(&format!("_twist_02_{side}"))?, false),
     };
-    Some((format!("{stem}_{side}"), axis, fraction))
+    let (source, axis) = match stem {
+        "upperarm" => ("upperarm", X),
+        "thigh" => ("thigh", Y),
+        "lowerarm" => ("hand", X),
+        "calf" => ("foot", Y),
+        _ => return None,
+    };
+    // The bone nearest the driver carries two thirds and the far one a third,
+    // which is exactly its own position along the segment. An UPPER segment is
+    // rolled by its own joint and its twists must give that roll back, so their
+    // fraction is negative; a LOWER segment is rolled by its distal child and its
+    // twists add. See `TwistDriver` for the one sentence both fall out of.
+    let magnitude = if near { 2.0 / 3.0 } else { 1.0 / 3.0 };
+    let counters = matches!(stem, "upperarm" | "thigh");
+    let fraction = if counters { -magnitude } else { magnitude };
+    Some((format!("{source}_{side}"), axis, fraction))
 }
 
 /// **Build the mannequin rig** at `params`' proportions.

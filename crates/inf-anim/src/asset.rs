@@ -1136,7 +1136,7 @@ mod tests {
         plain.limits = vec![JointLimit::hinge_x(1, -150.0, 0.0)];
         let v3 = encode(&plain).unwrap();
         let v2 = bincode::serde::encode_to_vec(
-            &super::skel_v2::SkeletonAsset::from_current(&plain),
+            super::skel_v2::SkeletonAsset::from_current(&plain),
             inf_asset::bincode_config(),
         )
         .unwrap();
@@ -1232,6 +1232,9 @@ mod tests {
         assert!(msg.contains("IK follow table"), "{msg}");
     }
 
+    /// One way of breaking a side table, for the sweep below.
+    type Mutate = Box<dyn Fn(&mut SkeletonAsset)>;
+
     /// **A side table naming a joint the rig does not have is refused at the
     /// door**, by name.
     ///
@@ -1241,7 +1244,7 @@ mod tests {
     #[test]
     fn a_side_table_naming_a_joint_the_rig_lacks_is_refused() {
         use crate::roles::{BoneRole, BoneRoleKind, BoneSide, IkFollow, TwistDriver};
-        let cases: Vec<(&str, Box<dyn Fn(&mut SkeletonAsset)>)> = vec![
+        let cases: Vec<(&str, Mutate)> = vec![
             (
                 "a bone role",
                 Box::new(|a: &mut SkeletonAsset| {

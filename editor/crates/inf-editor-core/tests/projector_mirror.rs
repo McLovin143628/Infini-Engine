@@ -2109,11 +2109,11 @@ fn every_pose_writer_runs_in_its_frozen_order() {
         ),
         (
             "inf_anim::drive_pose(",
-            "SK1a: the twist chains and the IK handles — pose CONSTRUCTION, which              is why it is here and not below the corrections",
+            "SK1a: the twist chains and the IK handles, which is pose CONSTRUCTION and not a correction",
         ),
         (
             "pelvis_joint(asset)",
-            "P29.5: the pelvis drop, before the legs solve from a hip that has              already come down",
+            "P29.5: the pelvis drop, before the legs solve from a lowered hip",
         ),
         (
             "inf_anim::solve_chain(",
@@ -2133,7 +2133,7 @@ fn every_pose_writer_runs_in_its_frozen_order() {
         .map(|(needle, why)| {
             body.find(needle).unwrap_or_else(|| {
                 panic!(
-                    "`{needle}` does not run in `step_pose_evaluation` at all —                      {why}; a pass missing from BOTH hosts is invisible to every                      trace comparison in this repository"
+                    "`{needle}` does not run in `step_pose_evaluation` at all — {why}; a pass missing from BOTH hosts is invisible to every trace comparison in this repository"
                 )
             })
         })
@@ -2145,7 +2145,7 @@ fn every_pose_writer_runs_in_its_frozen_order() {
     for (i, w) in at.windows(2).enumerate() {
         assert!(
             w[0] < w[1],
-            "the pose writers moved: `{}` must run before `{}` — every committed              pose hash was taken with them in this order",
+            "the pose writers moved: `{}` must run before `{}` — every committed pose hash was taken with them in this order",
             WRITERS[i].0,
             WRITERS[i + 1].0
         );
