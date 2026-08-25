@@ -1253,4 +1253,90 @@ mod tests {
             );
         }
     }
+
+    /// **A VISIBILITY ORACLE MUST BE BUILT IN THE SPACE ITS RAYS ARE CAST IN** —
+    /// SK1b's fifth decision, measured in the crate that owns both halves (SK1b
+    /// audit).
+    ///
+    /// The wave found this and fixed it at one call site: `starter_body` builds
+    /// its BVH from [`crate::mesh_soup`] — the kernel's own `f64` triangles —
+    /// rather than from the tessellated, `f32`-narrowed ones. The evidence for it
+    /// was two numbers in a ledger and an `unreached < 60` bound two crates away.
+    /// Numbers in a ledger are numbers a test prints (SK1a audit, decision 2), so
+    /// both are printed and both are asserted here, on the mesh that surfaced it.
+    ///
+    /// The mechanism: a ray cast from an **exact kernel vertex** starts up to an
+    /// ulp outside the surface a narrowed copy describes, and hits its own face
+    /// at `t ~ 0`. An *imported* mesh is immune — its kernel positions are widened
+    /// `f32` and the round trip is exact — so this could not appear until the
+    /// engine generated a mesh in `f64`, which is what this module is.
+    #[test]
+    fn the_narrowed_oracle_cannot_see_a_third_of_a_generated_body() {
+        let rig = manny();
+        let (mesh, _) = body_mesh(&rig, &BodyOptions::default()).expect("a body");
+        let verts = mesh.vert_ids().count();
+
+        // The exporter's triangles, read back at `f32` and widened again — which
+        // is exactly the soup `inf_editor_core::dcc::triangle_soup` hands the
+        // BVH, and what this call site used to be given.
+        let (asset, _) = crate::export::to_mesh_asset(&mesh, &crate::ExportOptions::default());
+        let mut narrowed: Vec<crate::Tri> = Vec::new();
+        for sub in &asset.submeshes {
+            for t in sub.indices.chunks_exact(3) {
+                let p = |i: u32| {
+                    let v = sub.vertices[i as usize].position;
+                    DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64)
+                };
+                narrowed.push(crate::Tri {
+                    a: p(t[0]),
+                    b: p(t[1]),
+                    c: p(t[2]),
+                });
+            }
+        }
+        // Bind once; the two solves differ only in the oracle they are given.
+        let mut bound = mesh.clone();
+        crate::ops::apply(
+            &mut bound,
+            &crate::Op::BindSkin {
+                skeleton: None,
+                joints: rig.skeleton.len() as u32,
+            },
+        )
+        .expect("a generated body binds");
+        let roles = rig.role_index();
+        let deform: Vec<bool> = (0..rig.skeleton.len() as u16)
+            .map(|j| roles.is_deform(j))
+            .collect();
+        let unreached = |tris: Vec<crate::Tri>| -> usize {
+            crate::heat::solve_heat_weights_for(
+                &bound,
+                &crate::Bvh::new(tris),
+                &rig.skeleton,
+                Some(&deform),
+            )
+            .expect("a solve")
+            .1
+            .unreached
+        };
+        let exact = unreached(crate::mesh_soup(&mesh));
+        let rounded = unreached(narrowed);
+        println!(
+            "the visibility oracle over {verts} generated vertices: {exact} unreached in f64, \
+             {rounded} through an f32 round trip"
+        );
+        assert_eq!(
+            (exact, rounded, verts),
+            (35, 349, 795),
+            "the f32/f64 oracle seam moved — if that is deliberate, the numbers in \
+             `docs/memos/island-progress.md` move with it"
+        );
+        // The claim is the RATIO, not the two numbers: a narrowed oracle cannot
+        // see ten times as much of a generated body as an exact one.
+        assert!(
+            rounded > exact * 5,
+            "the narrowed oracle lost {rounded} against {exact} — this arm no longer \
+             demonstrates the seam it is named for"
+        );
+    }
 }

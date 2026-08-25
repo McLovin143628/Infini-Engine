@@ -3236,6 +3236,27 @@ fn drag_step(xform: &VertTransform) -> usize {
 /// whose length is not a multiple of three is a malformed mesh, and inventing a
 /// vertex for it would put a triangle in the hierarchy that the mesh does not
 /// have. `chunks_exact` says exactly that.
+///
+/// # NOT for a mesh this engine GENERATED (SK1b, and its audit)
+///
+/// The widening above is exact for a mesh that **arrived** as an asset: its
+/// kernel positions are widened `f32` and the round trip through `tessellate`
+/// gives the same bits back. It is not exact for a mesh `inf_dcc` *generated*,
+/// whose kernel positions are `f64` — and a visibility ray cast from an exact
+/// kernel vertex then starts up to an ulp **outside** the surface this soup
+/// describes and hits its own face at `t ~ 0`.
+///
+/// Measured on the SK1b starter body, 795 generated vertices: **349** unreached
+/// through this soup against **35** through [`inf_dcc::mesh_soup`], which is the
+/// same triangles in `f64`. Ten times as much of a character the weight solver
+/// believes it cannot see, from a rounding step in the oracle.
+/// `inf_dcc`'s `the_narrowed_oracle_cannot_see_a_third_of_a_generated_body` is
+/// the arm, and SK1b's fifth decision is the sentence: *a visibility oracle must
+/// be built in the space its rays are cast in.*
+///
+/// So: an author's imported model, yes ([`fit_bvh`](crate::character::fit_bvh),
+/// `skinned_copy`). Anything `inf_dcc::body_mesh` or a grammar bake produced,
+/// [`inf_dcc::mesh_soup`].
 pub fn triangle_soup(geo: &EditGeometry) -> Vec<inf_dcc::Tri> {
     geo.indices
         .chunks_exact(3)
