@@ -1527,8 +1527,7 @@ fn the_committed_controller_is_the_same_program_interpreted_and_compiled() {
             .skeletons
             .into_values()
             .next()
-            .expect("the rig is seeded")
-            .skeleton,
+            .expect("the rig is seeded"),
     )
     .event_markers
     .into_iter()

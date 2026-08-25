@@ -85,7 +85,7 @@ pub fn derive_in_place(
             "clip `{name}` is bound to no skeleton, so its root joint is unknown and nothing was derived"
         ));
     };
-    match inf_anim::derive_clip(clip, &rig.skeleton, opts) {
+    match inf_anim::derive_clip(clip, rig, opts) {
         Ok((out, report)) => {
             *clip = out;
             ClipDerivation::Derived(Box::new(report))

@@ -779,7 +779,7 @@ fn traversal_clip(rise: f32) -> inf_anim::AnimClip {
     clip.duration = 1.0;
     inf_anim::derive_clip(
         &clip,
-        &arc_rig().skeleton,
+        &arc_rig(),
         &inf_anim::DeriveOptions::traversal(),
     )
     .expect("a traversal clip derives")

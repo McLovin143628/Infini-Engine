@@ -891,6 +891,7 @@ mod tests {
                         joint: 0,
                         min_deg: [f32::NAN, 0.0, 0.0],
                         max_deg: [0.0; 3],
+                        cone: None,
                     }),
                 )
                 .is_err()

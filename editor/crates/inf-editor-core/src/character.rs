@@ -698,7 +698,7 @@ pub fn build_character(
         ("walk", &mut set.walk),
         ("run", &mut set.run),
     ] {
-        match inf_anim::derive_clip(clip, &rig.skeleton, &derive_opts) {
+        match inf_anim::derive_clip(clip, &rig, &derive_opts) {
             Ok((derived, _report)) => *clip = derived,
             Err(e) => derive_warnings.push(format!(
                 "the {label} cycle could not be measured ({e}), so its curves \
@@ -857,7 +857,7 @@ pub fn build_character(
     // one fact. What it does is the half only a game can do: consume the
     // footstep notifies the derivation authored and keep the character's own
     // counters.
-    let footsteps: Vec<String> = inf_anim::DerivedNames::of_skeleton(&rig.skeleton)
+    let footsteps: Vec<String> = inf_anim::DerivedNames::of_skeleton(&rig)
         .event_markers
         .into_iter()
         .collect();

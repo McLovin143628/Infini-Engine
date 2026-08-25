@@ -174,7 +174,7 @@ pub async fn anim_clip_info(
     // vocabulary question, which is all a clip bound to no skeleton can be asked.
     let owned = rig
         .as_ref()
-        .map(|r| inf_anim::DerivedNames::of_skeleton(&r.skeleton));
+        .map(|r| inf_anim::DerivedNames::of_skeleton(&r));
     let derived_name = |n: &str| match &owned {
         Some(o) => o.curves.contains(n),
         None => inf_anim::derive::is_derived_curve(n),

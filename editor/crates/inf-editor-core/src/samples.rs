@@ -8522,7 +8522,14 @@ pub fn phase29_spec() -> (
     inf_anim::locomotion::GaitParams,
 ) {
     (
-        inf_anim::BodyPlan::Biped,
+        // **Pinned to the canonical-vocabulary biped** (SK1a). This sample's
+        // committed bytes are its whole point — `.inf_skel`, three `.inf_anim`
+        // clips index-bound to it, an `.inf_sm`, a controller counting footstep
+        // markers by name and a `.inf_lvl` — and `BodyPlan::Biped` became the
+        // 161-bone mannequin. Following that here would re-bless every one of
+        // them for a wave whose subject is the substrate, not this course. The
+        // mannequin gets its own end-to-end arm in `phase24_wizard`.
+        inf_anim::BodyPlan::BipedCanonical,
         inf_anim::BodyParams {
             height_m: PHASE29_HEIGHT_M,
             ..inf_anim::BodyParams::default()
@@ -8569,7 +8576,7 @@ pub fn phase29_clips() -> (inf_anim::LocomotionSet, [f32; 3]) {
     };
     for clip in [&mut set.idle, &mut set.walk, &mut set.run] {
         let (derived, _) =
-            inf_anim::derive_clip(clip, &rig.skeleton, &opts).expect("a generated cycle measures");
+            inf_anim::derive_clip(clip, &rig, &opts).expect("a generated cycle measures");
         *clip = derived;
     }
     (set, ladder)
@@ -8597,7 +8604,7 @@ pub fn phase29_machine() -> inf_anim::StateMachine {
 
 /// The character's controller — the wizard's own, with this sample's id.
 pub fn phase29_controller() -> BlueprintClass {
-    let footsteps: Vec<String> = inf_anim::DerivedNames::of_skeleton(&phase29_skeleton().skeleton)
+    let footsteps: Vec<String> = inf_anim::DerivedNames::of_skeleton(&phase29_skeleton())
         .event_markers
         .into_iter()
         .collect();

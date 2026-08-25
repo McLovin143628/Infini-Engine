@@ -965,7 +965,7 @@ mod tests {
             .expect("the bound rig");
         let (again, _) = inf_anim::derive_clip(
             &asset.clip,
-            &rig.skeleton,
+            &rig,
             &inf_anim::DeriveOptions::default(),
         )
         .expect("a re-derive");

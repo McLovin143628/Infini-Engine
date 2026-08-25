@@ -53,13 +53,14 @@ const SKELETON_FOLDER: &str = "Skeletons";
 fn parse_plan(plan: &str, legs: Option<u16>) -> Result<BodyPlan, String> {
     match plan {
         "biped" => Ok(BodyPlan::Biped),
+        "biped-canonical" => Ok(BodyPlan::BipedCanonical),
         "quadruped" => Ok(BodyPlan::Quadruped),
         "hexapod" => Ok(BodyPlan::Hexapod),
         "npedal" => Ok(BodyPlan::Npedal {
             legs: legs.ok_or("an `npedal` template needs a leg count")?,
         }),
         other => Err(format!(
-            "unknown body plan `{other}` (expected biped, quadruped, hexapod or npedal)"
+            "unknown body plan `{other}` (expected biped, biped-canonical, quadruped, hexapod or npedal)"
         )),
     }
 }
@@ -67,7 +68,8 @@ fn parse_plan(plan: &str, legs: Option<u16>) -> Result<BodyPlan, String> {
 /// The default name for a generated rig.
 fn default_name(plan: BodyPlan) -> String {
     match plan {
-        BodyPlan::Biped => "Biped Rig".into(),
+        BodyPlan::Biped => "Mannequin Rig".into(),
+        BodyPlan::BipedCanonical => "Biped Rig".into(),
         BodyPlan::Quadruped => "Quadruped Rig".into(),
         BodyPlan::Hexapod => "Hexapod Rig".into(),
         BodyPlan::Npedal { legs } => format!("{legs}-Legged Rig"),
@@ -420,6 +422,7 @@ pub async fn skel_set_limit(
     edit(&app, &id, &state, &assets, |s| {
         let limit = match (min_deg, max_deg) {
             (Some(min_deg), Some(max_deg)) => Some(JointLimit {
+                cone: None,
                 joint,
                 min_deg,
                 max_deg,

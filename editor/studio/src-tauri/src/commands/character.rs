@@ -76,13 +76,14 @@ struct Warm {
 fn parse_plan(plan: &str, legs: Option<u16>) -> Result<BodyPlan, String> {
     match plan {
         "biped" => Ok(BodyPlan::Biped),
+        "biped-canonical" => Ok(BodyPlan::BipedCanonical),
         "quadruped" => Ok(BodyPlan::Quadruped),
         "hexapod" => Ok(BodyPlan::Hexapod),
         "npedal" => Ok(BodyPlan::Npedal {
             legs: legs.ok_or("an `npedal` character needs a leg count")?,
         }),
         other => Err(format!(
-            "unknown body plan `{other}` (expected biped, quadruped, hexapod or npedal)"
+            "unknown body plan `{other}` (expected biped, biped-canonical, quadruped, hexapod or npedal)"
         )),
     }
 }
