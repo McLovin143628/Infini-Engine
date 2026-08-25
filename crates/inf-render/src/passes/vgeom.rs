@@ -1817,8 +1817,19 @@ impl VgeomNode {
             // is `O(pages²)` a frame. Measured on the shipped island: **10.051 ms
             // of an 11.151 ms `render (record)` stage**, on a world holding one
             // virtualized mesh. `for_each_page_sections` parses once and walks.
-            let mut coupled: Vec<(usize, Vec<(u128, inf_vt::TileCoord)>)> =
-                Vec::with_capacity(res.resident_pages());
+            //
+            // **Every resident page is coupled, whether or not its sections
+            // parse** (the I7b audit). The per-page loop this replaced declared
+            // the group *outside* the `with_page_sections` call, so a page whose
+            // sections did not come back — an unavailable payload, a directory
+            // that will not parse — was still declared with an EMPTY member list,
+            // which is a legal state that streams as it did before P28.2. A page
+            // with no group at all is a different fact: `commit_cluster_pages`
+            // refuses it (`has_group` exists precisely because "one `&[]` cannot
+            // say both"), and refusing every page of an asset retracts it for
+            // ever. So the groups are seeded here and the walk fills them in.
+            let mut coupled: Vec<Vec<(u128, inf_vt::TileCoord)>> =
+                vec![Vec::new(); res.resident_pages()];
             let mut stale = 0u64;
             let mut newly_mismatched: Vec<u128> = Vec::new();
             src.for_each_page_sections(0..res.resident_pages(), |page, s| {
@@ -1853,7 +1864,9 @@ impl VgeomNode {
                         }
                     }
                 }
-                coupled.push((page, here));
+                if let Some(slot) = coupled.get_mut(page) {
+                    *slot = here;
+                }
             });
             // Applied out here rather than inside the walk, because the walk holds
             // a borrow of `src` and these are `self`'s. The counters are the same
@@ -1864,7 +1877,7 @@ impl VgeomNode {
                 }
             }
             self.stale_tiles += stale;
-            for (page, here) in coupled {
+            for (page, here) in coupled.into_iter().enumerate() {
                 self.coupling.couple((asset, page), here);
             }
         }

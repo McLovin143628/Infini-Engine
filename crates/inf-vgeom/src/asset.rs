@@ -2611,6 +2611,74 @@ mod tests {
         }
     }
 
+    /// **THE PLURAL PAGE WALK IS THE SINGULAR ONE IN A LOOP** — same pages, in
+    /// the same order, carrying the same sections (the I7b audit).
+    ///
+    /// [`VgeomSource::for_each_page_sections`] exists only to move the parse out
+    /// of the loop; it is a performance rewrite of a hot call site, and a
+    /// performance rewrite that changes *what is read* is a content change
+    /// wearing a millisecond count. So the two doors are compared through the
+    /// thing the call site actually consumes — the tile references, guid and
+    /// coordinate, page by page.
+    ///
+    /// The second half is the difference the two doors legitimately have, pinned
+    /// so a caller cannot assume it away: `for_each_page_sections` **skips** a
+    /// page whose sections do not come back rather than calling `f` with nothing,
+    /// exactly as `with_page_sections` answers `None`. That is why
+    /// `VgeomNode::cluster_tile_wants` seeds one empty group per resident page
+    /// *before* the walk — a page the walk skips must still be coupled, because a
+    /// group with no members and a group that was never declared are different
+    /// facts to `commit_cluster_pages` and only one of them streams.
+    #[test]
+    fn the_plural_page_walk_reads_exactly_what_the_singular_one_does() {
+        let mesh = crate::test_support::dense_mesh(16);
+        let desc = inf_vt::full_pyramid(2048, 2048, 128, 4, true);
+        let set = ClusterTextureSet {
+            textures: vec![ClusterTexture::from_desc(
+                AssetId(uuid::Uuid::from_u128(0x7b00_0001)),
+                &desc,
+            )],
+        };
+        let src = VgeomSource::from_mesh_paired(&mesh, &set).expect("build the paired image");
+        let n = src.pages().len();
+        assert!(n > 1, "the fixture must hold several pages, not {n}");
+
+        let refs_of = |s: VgeomPageSections<'_>| -> Vec<(u128, inf_vt::TileCoord)> {
+            s.tile_refs()
+                .iter()
+                .map(|t| (t.texture().uuid().as_u128(), t.coord()))
+                .collect()
+        };
+        let one: Vec<(usize, Vec<(u128, inf_vt::TileCoord)>)> = (0..n)
+            .map(|p| {
+                (
+                    p,
+                    src.with_page_sections(p, refs_of).expect("the page parses"),
+                )
+            })
+            .collect();
+        let mut many: Vec<(usize, Vec<(u128, inf_vt::TileCoord)>)> = Vec::new();
+        assert!(
+            src.for_each_page_sections(0..n, |p, s| many.push((p, refs_of(s)))),
+            "the payload is available and parses"
+        );
+        assert_eq!(
+            one, many,
+            "the one-parse walk read different sections from the per-page door"
+        );
+        assert!(
+            one.iter().any(|(_, r)| !r.is_empty()),
+            "every page paired nothing, so comparing the two doors proves nothing"
+        );
+
+        // …and a page the reader will not serve is skipped, not handed over
+        // empty. Both doors agree about that too.
+        let mut past = 0usize;
+        assert!(src.for_each_page_sections(n..n + 3, |_, _| past += 1));
+        assert_eq!(past, 0, "a page past the directory was walked");
+        assert!(src.with_page_sections(n, |_| ()).is_none());
+    }
+
     /// **THE MIP RULE, DERIVED — not restated** (P28.2 audit).
     ///
     /// The memo argues for `mip = lod / 2` by measuring ONE rival and refusing
