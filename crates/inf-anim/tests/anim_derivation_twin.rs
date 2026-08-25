@@ -53,9 +53,8 @@ fn source() -> inf_anim::AnimClip {
 /// The derived clip's bytes, as hex — the whole payload, not a summary, so a
 /// single moved float in a single curve key is a different string.
 fn derived_hex(clip: &inf_anim::AnimClip) -> String {
-    let (out, _) =
-        inf_anim::derive_clip(clip, &rig().skeleton, &inf_anim::DeriveOptions::default())
-            .expect("the fixture derives");
+    let (out, _) = inf_anim::derive_clip(clip, &rig(), &inf_anim::DeriveOptions::default())
+        .expect("the fixture derives");
     let bytes = bincode::serde::encode_to_vec(&out, inf_asset::bincode_config()).unwrap();
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

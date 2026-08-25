@@ -92,6 +92,100 @@ impl RetargetMap {
         self.pairs.push((source.into(), target.into()));
         self
     }
+
+    /// **The canonical vocabulary onto the mannequin's** — the pairing that makes
+    /// a 20-joint clip drive a 161-bone rig (SK1a).
+    ///
+    /// Without it `humanoid_identity` is a *silent no-op* on a Manny rig: the two
+    /// vocabularies overlap at exactly five names (`head`, `hand_l`, `hand_r`,
+    /// `foot_l`, `foot_r`), so fourteen of nineteen pairs name a target that is
+    /// not there,
+    /// [`retarget_pose`] skips them without a word, and the result is a rig
+    /// standing in its bind pose that looks like a retarget that "did nothing
+    /// visible".
+    ///
+    /// The two structural choices, stated rather than buried: a canonical `spine`
+    /// pairs with **`spine_01`** and a canonical `chest` with **`spine_05`** — the
+    /// bottom and the top of the mannequin's five-segment chain, so a torso twist
+    /// arrives at both ends of the back rather than being spent on one vertebra;
+    /// the three spine segments between them keep their bind, which is exactly
+    /// what "this source rig has no opinion about them" means.
+    pub fn canonical_to_manny() -> Self {
+        Self::from_pairs(CANONICAL_MANNY_PAIRS.iter().map(|(c, m)| (*c, *m)))
+    }
+
+    /// The reverse: a mannequin-authored clip onto a canonical-vocabulary rig.
+    pub fn manny_to_canonical() -> Self {
+        Self::from_pairs(CANONICAL_MANNY_PAIRS.iter().map(|(c, m)| (*m, *c)))
+    }
+}
+
+/// `(canonical, mannequin)` — the pairing both mannequin maps are built from, so
+/// the two directions cannot drift apart.
+static CANONICAL_MANNY_PAIRS: [(&str, &str); 19] = [
+    ("hips", "pelvis"),
+    ("spine", "spine_01"),
+    ("chest", "spine_05"),
+    ("neck", "neck_01"),
+    ("head", "head"),
+    ("shoulder_l", "clavicle_l"),
+    ("upper_arm_l", "upperarm_l"),
+    ("lower_arm_l", "lowerarm_l"),
+    ("hand_l", "hand_l"),
+    ("shoulder_r", "clavicle_r"),
+    ("upper_arm_r", "upperarm_r"),
+    ("lower_arm_r", "lowerarm_r"),
+    ("hand_r", "hand_r"),
+    ("upper_leg_l", "thigh_l"),
+    ("lower_leg_l", "calf_l"),
+    ("foot_l", "foot_l"),
+    ("upper_leg_r", "thigh_r"),
+    ("lower_leg_r", "calf_r"),
+    ("foot_r", "foot_r"),
+];
+
+/// **What a retarget actually moved** (SK1a).
+///
+/// Retarget v1 skips a pair naming a joint either skeleton lacks, and says
+/// nothing. That silence is the defect this type exists to end: a map whose every
+/// pair misses produces a perfectly valid bind pose, and the only way to tell it
+/// from a correct retarget of a still character is to be told.
+///
+/// Every list is sorted and deduplicated, so the report is a property of the
+/// `(source, target, map)` triple and not of the order the pairs were written in.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RetargetReport {
+    /// Target joints that were written, by name.
+    pub copied: Vec<String>,
+    /// Target joints that kept their bind because no pair named them.
+    pub unmapped_target: Vec<String>,
+    /// Pairs whose **source** name is not in the source skeleton.
+    pub missing_source: Vec<String>,
+    /// Pairs whose **target** name is not in the target skeleton.
+    pub missing_target: Vec<String>,
+}
+
+impl RetargetReport {
+    /// How many target joints the retarget wrote.
+    pub fn copied_count(&self) -> usize {
+        self.copied.len()
+    }
+
+    /// Whether the retarget moved **nothing** — the silent failure, named.
+    pub fn is_vacuous(&self) -> bool {
+        self.copied.is_empty()
+    }
+
+    /// A one-line summary for a log or a wizard warning.
+    pub fn summary(&self) -> String {
+        format!(
+            "retargeted {} joints; {} kept bind, {} pairs missed the source rig, {} missed the target",
+            self.copied.len(),
+            self.unmapped_target.len(),
+            self.missing_source.len(),
+            self.missing_target.len()
+        )
+    }
 }
 
 /// The canonical humanoid joint names retarget v1 recognizes (hips → head, arms
@@ -133,17 +227,43 @@ pub fn retarget_pose(
     dst_skel: &Skeleton,
     map: &RetargetMap,
 ) -> Pose {
+    retarget_pose_reported(src_skel, src_pose, dst_skel, map).0
+}
+
+/// [`retarget_pose`], **and what it moved** (SK1a) — see [`RetargetReport`] for
+/// why the silence this replaces was worth a type.
+///
+/// The pose is identical to `retarget_pose`'s, bit for bit: the report is
+/// accumulated alongside and costs a `Vec<String>` that a caller who does not want
+/// it never allocates, because `retarget_pose` is still the door for that caller.
+pub fn retarget_pose_reported(
+    src_skel: &Skeleton,
+    src_pose: &Pose,
+    dst_skel: &Skeleton,
+    map: &RetargetMap,
+) -> (Pose, RetargetReport) {
     let mut out = Pose::rest(dst_skel);
+    let mut report = RetargetReport::default();
+    let mut written = vec![false; dst_skel.len()];
 
     for (src_name, dst_name) in &map.pairs {
-        let (Some(si), Some(di)) = (src_skel.index_of(src_name), dst_skel.index_of(dst_name))
-        else {
+        let (src_at, dst_at) = (src_skel.index_of(src_name), dst_skel.index_of(dst_name));
+        if src_at.is_none() {
+            report.missing_source.push(src_name.clone());
+        }
+        if dst_at.is_none() {
+            report.missing_target.push(dst_name.clone());
+        }
+        let (Some(si), Some(di)) = (src_at, dst_at) else {
             continue;
         };
         let (si, di) = (si as usize, di as usize);
         let Some(src_anim) = src_pose.locals.get(si) else {
             continue;
         };
+        if let Some(w) = written.get_mut(di) {
+            *w = true;
+        }
         let src_joint = &src_skel.joints()[si];
         let dst_joint = &dst_skel.joints()[di];
 
@@ -162,7 +282,26 @@ pub fn retarget_pose(
         }
     }
 
-    out
+    for (i, j) in dst_skel.joints().iter().enumerate() {
+        if written.get(i).copied().unwrap_or(false) {
+            report.copied.push(j.name.clone());
+        } else {
+            report.unmapped_target.push(j.name.clone());
+        }
+    }
+    // Sorted and deduplicated so the report is a property of the triple and not of
+    // the order the pairs happen to be written in — the same reason
+    // `socket_transforms` sorts.
+    for list in [
+        &mut report.copied,
+        &mut report.unmapped_target,
+        &mut report.missing_source,
+        &mut report.missing_target,
+    ] {
+        list.sort();
+        list.dedup();
+    }
+    (out, report)
 }
 
 #[cfg(test)]
@@ -284,5 +423,124 @@ mod tests {
         let out = retarget_pose(&src, &pose, &dst, &map);
         let expected = dst_bind * Quat::from_rotation_z(30f32.to_radians());
         assert!(quats_close(out.locals[1].rotation, expected.to_array()));
+    }
+
+    /// **The silent no-op, measured and then closed** (SK1a).
+    ///
+    /// The canonical vocabulary and the mannequin's overlap at exactly five
+    /// names, so `humanoid_identity` on a mannequin target writes five joints out
+    /// of 161 and says nothing about the other fourteen pairs. The pairing writes
+    /// nineteen. Both halves are asserted, because the second number only means
+    /// something beside the first.
+    #[test]
+    fn the_canonical_map_is_nearly_a_no_op_on_a_mannequin_and_the_pairing_is_not() {
+        use crate::template::{build_template, BodyParams, BodyPlan};
+        let src = build_template(BodyPlan::BipedCanonical, &BodyParams::default()).unwrap();
+        let dst = build_template(BodyPlan::Biped, &BodyParams::default()).unwrap();
+        let mut pose = Pose::rest(&src.skeleton);
+        for name in ["upper_arm_l", "lower_leg_r", "chest", "hips"] {
+            let i = src.skeleton.index_of(name).unwrap() as usize;
+            pose.locals[i].rotation = Quat::from_rotation_x(0.5).to_array();
+        }
+
+        let (_, blind) = retarget_pose_reported(
+            &src.skeleton,
+            &pose,
+            &dst.skeleton,
+            &RetargetMap::humanoid_identity(),
+        );
+        assert_eq!(
+            blind.copied,
+            ["foot_l", "foot_r", "hand_l", "hand_r", "head"],
+            "the identity map's whole overlap with the mannequin"
+        );
+        assert_eq!(blind.missing_target.len(), 14, "{:?}", blind.missing_target);
+        assert!(blind.missing_target.contains(&"upper_leg_l".to_string()));
+        assert!(
+            !blind.is_vacuous(),
+            "five is not zero, and that is the trap"
+        );
+
+        let (out, report) = retarget_pose_reported(
+            &src.skeleton,
+            &pose,
+            &dst.skeleton,
+            &RetargetMap::canonical_to_manny(),
+        );
+        assert_eq!(report.copied_count(), 19, "{:?}", report.copied);
+        assert!(
+            report.missing_target.is_empty(),
+            "{:?}",
+            report.missing_target
+        );
+        assert!(
+            report.missing_source.is_empty(),
+            "{:?}",
+            report.missing_source
+        );
+        assert_eq!(
+            report.unmapped_target.len(),
+            dst.skeleton.len() - 19,
+            "everything else kept bind, and the report says so"
+        );
+        // …and the bones really moved: the source's bent elbow arrives on
+        // `upperarm_l`, its bent knee on `calf_r`, its chest on `spine_05`.
+        for name in ["upperarm_l", "calf_r", "spine_05", "pelvis"] {
+            let i = dst.skeleton.index_of(name).unwrap() as usize;
+            let q = Quat::from_array(out.locals[i].rotation);
+            assert!(
+                (1.0 - q.dot(Quat::from_rotation_x(0.5)).abs()) < 1.0e-6,
+                "`{name}` did not receive the rotation: {q:?}"
+            );
+        }
+        // A joint with nothing paired onto it is at bind, not at zero.
+        let twist = dst.skeleton.index_of("upperarm_twist_01_l").unwrap() as usize;
+        assert_eq!(
+            out.locals[twist],
+            dst.skeleton.joints()[twist].local_bind,
+            "an unmapped joint must keep its bind"
+        );
+        assert!(
+            report.summary().contains("retargeted 19 joints"),
+            "{}",
+            report.summary()
+        );
+    }
+
+    /// The two directions are one table, so they cannot drift.
+    #[test]
+    fn the_mannequin_pairing_reverses_exactly() {
+        let fwd = RetargetMap::canonical_to_manny();
+        let back = RetargetMap::manny_to_canonical();
+        assert_eq!(fwd.pairs.len(), humanoid_joint_names().len());
+        assert_eq!(back.pairs.len(), fwd.pairs.len());
+        for ((a, b), (c, d)) in fwd.pairs.iter().zip(back.pairs.iter()) {
+            assert_eq!((a, b), (d, c));
+        }
+        // Every canonical name is spoken for — that is what makes the map a map
+        // of the vocabulary rather than of whichever joints somebody remembered.
+        let mut left: Vec<&str> = fwd.pairs.iter().map(|(a, _)| a.as_str()).collect();
+        left.sort_unstable();
+        let mut want: Vec<&str> = humanoid_joint_names().to_vec();
+        want.sort_unstable();
+        assert_eq!(left, want);
+    }
+
+    /// A **vacuous** retarget is named as one — the report's whole reason to exist.
+    #[test]
+    fn a_map_that_hits_nothing_reports_itself_as_vacuous() {
+        let src = rig(["hips", "spine", "head"]);
+        let dst = rig(["a", "b", "c"]);
+        let (_, r) = retarget_pose_reported(
+            &src,
+            &Pose::rest(&src),
+            &dst,
+            &RetargetMap::humanoid_identity(),
+        );
+        assert!(r.is_vacuous());
+        assert_eq!(r.copied_count(), 0);
+        assert_eq!(r.unmapped_target, ["a", "b", "c"]);
+        assert_eq!(r.missing_target.len(), 19);
+        assert_eq!(r.missing_source.len(), 16, "hips/spine/head are there");
     }
 }

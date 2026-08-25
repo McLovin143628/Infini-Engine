@@ -57,9 +57,11 @@
 
 use glam::{Quat, Vec3};
 
+use crate::asset::SkeletonAsset;
 use crate::channels::{als, AnimMarker, CurveChannel, DistanceTrack, RootMotionTrack};
 use crate::clip::{AnimClip, Interpolation, QuatTrack, Vec3Track};
 use crate::pose::{global_transforms, sample_clip};
+use crate::roles::{BoneRoleKind, RoleIndex};
 use crate::root_motion::root_joint_index;
 use crate::skeleton::Skeleton;
 
@@ -299,9 +301,11 @@ pub enum DeriveError {
 /// bytes — see the module docs.
 pub fn derive_clip(
     clip: &AnimClip,
-    skeleton: &Skeleton,
+    rig: &SkeletonAsset,
     opts: &DeriveOptions,
 ) -> Result<(AnimClip, DeriveReport), DeriveError> {
+    let skeleton = &rig.skeleton;
+    let roles = rig.role_index();
     if !crate::positive(opts.fps) {
         return Err(DeriveError::BadRate { fps: opts.fps });
     }
@@ -336,10 +340,18 @@ pub fn derive_clip(
     //    will actually play, so the channels describe what will be sampled; and a
     //    stride is a foot's excursion *under the body*, which is only a stable
     //    quantity once the body's own travel has been taken out.
-    let feet = foot_joints(skeleton);
+    let feet = foot_joints(rig);
     let foot_times = uniform_times(clip.duration, opts.fps);
     let traces = foot_traces(&out, skeleton, &feet, &foot_times);
-    let plants = foot_plants(skeleton, &feet, &foot_times, &traces, clip.duration, opts);
+    let plants = foot_plants(
+        skeleton,
+        &roles,
+        &feet,
+        &foot_times,
+        &traces,
+        clip.duration,
+        opts,
+    );
 
     // 6. Assemble. Everything this module owns is replaced; anything an author
     //    wrote that this rig's derivation would not itself write survives —
@@ -402,7 +414,7 @@ pub fn derive_clip(
 
     // 6b. Replace exactly the names this rig implies — see [`DerivedNames`] for
     //     why the boundary is the rig's own and not a prefix.
-    let owned = DerivedNames::of(skeleton, &feet);
+    let owned = DerivedNames::of(skeleton, &roles, &feet);
     out.curves.retain(|c| !owned.curves.contains(&c.name));
     out.curves.append(&mut curves);
     out.markers.retain(|m| !owned.owns_marker(m));
@@ -464,7 +476,7 @@ pub struct DerivedNames {
 impl DerivedNames {
     /// The names a derivation over `skeleton` with `feet` ([`foot_joints`])
     /// writes.
-    pub fn of(skeleton: &Skeleton, feet: &[u16]) -> Self {
+    pub fn of(skeleton: &Skeleton, roles: &RoleIndex, feet: &[u16]) -> Self {
         let mut out = Self {
             curves: [MOVE_DATA_SPEED.to_string(), als::W_GAIT.to_string()]
                 .into_iter()
@@ -475,7 +487,7 @@ impl DerivedNames {
             let suffix = foot_suffix(skeleton, foot);
             out.curves.insert(format!("{FOOT_SPEED_PREFIX}{suffix}"));
             out.curves.insert(format!("{FOOT_LOCK_PREFIX}{suffix}"));
-            let leg = leg_name_of(skeleton, foot);
+            let leg = leg_name_of(skeleton, roles, foot);
             out.sync_markers.insert(plant_marker(&leg));
             out.event_markers.insert(footstep_marker(&leg));
         }
@@ -486,8 +498,8 @@ impl DerivedNames {
     /// the feet — the door the asset panel's `anim_clip_info` reads to badge a
     /// channel as derived, so the badge and the re-derive button agree about
     /// which channels the button will replace.
-    pub fn of_skeleton(skeleton: &Skeleton) -> Self {
-        Self::of(skeleton, &foot_joints(skeleton))
+    pub fn of_skeleton(rig: &SkeletonAsset) -> Self {
+        Self::of(&rig.skeleton, &rig.role_index(), &foot_joints(rig))
     }
 
     /// Whether `marker` is one this module writes. **The group is part of the
@@ -750,13 +762,32 @@ fn remove_root_residual(clip: &mut AnimClip, root: u16, track: &RootMotionTrack)
 
 /// **The rig's feet**, in joint order.
 ///
-/// By name, because a foot is a role and not a position: `foot_l`, `foot_r`,
-/// `foot_l0` … are what [`crate::template`] emits and what the retarget
-/// vocabulary uses. An imported rig that spells them `ik_foot_l` or `LeftFoot`
-/// is caught by the second pass, which is a `contains` rather than a prefix — and
-/// only runs when the first found nothing, so a rig with both does not report
-/// four feet.
-pub fn foot_joints(skeleton: &Skeleton) -> Vec<u16> {
+/// The **role table first** (SK1a): a rig that says which of its bones are
+/// [`BoneRoleKind::Foot`] is answered from what it says, and no spelling can move
+/// the answer. `foot_joints_by_name` below is the fallback for everything else,
+/// and it is the rule that was the whole answer before this.
+pub fn foot_joints(rig: &SkeletonAsset) -> Vec<u16> {
+    let roles = rig.role_index();
+    let by_role: Vec<u16> = roles
+        .rows()
+        .iter()
+        .filter(|r| r.kind == BoneRoleKind::Foot)
+        .map(|r| r.joint)
+        .collect();
+    if !by_role.is_empty() {
+        return by_role;
+    }
+    foot_joints_by_name(&rig.skeleton)
+}
+
+/// The **legacy** foot rule: by name, for a rig that carries no role table.
+///
+/// `foot_l`, `foot_r`, `foot_l0` … are what [`crate::template`] emits and what
+/// the retarget vocabulary uses. An imported rig that spells them `ik_foot_l` or
+/// `LeftFoot` is caught by the second pass, which is a `contains` rather than a
+/// prefix — and only runs when the first found nothing, so a rig with both does
+/// not report four feet.
+pub fn foot_joints_by_name(skeleton: &Skeleton) -> Vec<u16> {
     let strict: Vec<u16> = skeleton
         .joints()
         .iter()
@@ -784,7 +815,7 @@ pub fn foot_joints(skeleton: &Skeleton) -> Vec<u16> {
 /// same marker and a blend between them aligns by name rather than by falling
 /// back to the ordinal. A rig with no such ancestor is named after its foot,
 /// which is the honest answer when there is no leg to name.
-fn leg_name_of(skeleton: &Skeleton, foot: u16) -> String {
+fn leg_name_of(skeleton: &Skeleton, roles: &RoleIndex, foot: u16) -> String {
     let joints = skeleton.joints();
     let mut cur = Some(foot);
     let mut hops = 0usize;
@@ -792,7 +823,14 @@ fn leg_name_of(skeleton: &Skeleton, foot: u16) -> String {
         let Some(j) = joints.get(i as usize) else {
             break;
         };
-        if j.name.starts_with("upper_leg_") {
+        // **The role table first** (SK1a): the leg a foot belongs to is the
+        // `Thigh` above it, whatever the rig calls it — `upper_leg_l` on this
+        // engine's canonical vocabulary, `thigh_l` on the mannequin's. The prefix
+        // below is the fallback, and it is what made a mannequin rig name its
+        // markers after its ankle: no ancestor of `foot_l` starts with
+        // `upper_leg_`, so the walk fell through in silence and a derived run and
+        // a generated walk stopped agreeing about a marker they both write.
+        if roles.kind_of(i) == Some(BoneRoleKind::Thigh) || j.name.starts_with("upper_leg_") {
             return j.name.clone();
         }
         // Bounded: a malformed chain must not spin. `Skeleton::new` already
@@ -937,6 +975,7 @@ fn stride_and_speed(
 /// Contact windows, foot by foot, off a grid and traces the caller already has.
 fn foot_plants(
     skeleton: &Skeleton,
+    roles: &RoleIndex,
     feet: &[u16],
     times: &[f32],
     traces: &[Vec<FootSample>],
@@ -968,7 +1007,7 @@ fn foot_plants(
         if down.iter().all(|d| *d) {
             continue;
         }
-        let name = leg_name_of(skeleton, joint);
+        let name = leg_name_of(skeleton, roles, joint);
         for (start, end) in contact_runs(&down, opts.looping) {
             let t0 = times[start];
             let t1 = if end >= times.len() {
@@ -1210,18 +1249,23 @@ mod tests {
     use crate::template::{build_template, BodyParams, BodyPlan};
     use glam::Mat4;
 
-    fn one_joint() -> Skeleton {
-        Skeleton::new(vec![Joint {
-            name: "hips".into(),
-            parent: None,
-            inverse_bind: Mat4::IDENTITY.to_cols_array(),
-            local_bind: JointTransform::IDENTITY,
-        }])
-        .unwrap()
+    /// A one-joint rig, as a `SkeletonAsset` with no side tables — which is what
+    /// every rig older than the role schema looks like, so these arms exercise
+    /// the name fallback as well as the derivation.
+    fn one_joint() -> crate::asset::SkeletonAsset {
+        crate::asset::SkeletonAsset::new(
+            Skeleton::new(vec![Joint {
+                name: "hips".into(),
+                parent: None,
+                inverse_bind: Mat4::IDENTITY.to_cols_array(),
+                local_bind: JointTransform::IDENTITY,
+            }])
+            .unwrap(),
+        )
     }
 
     fn biped() -> crate::asset::SkeletonAsset {
-        build_template(BodyPlan::Biped, &BodyParams::default()).unwrap()
+        build_template(BodyPlan::BipedCanonical, &BodyParams::default()).unwrap()
     }
 
     fn bytes(clip: &AnimClip) -> Vec<u8> {
@@ -1236,18 +1280,18 @@ mod tests {
         let sk = one_joint();
         let clip = crate::root_motion::straight_line_clip("walk", Vec3::Z, 2.0, 1.0);
         // Before: the root joint really does move.
-        let before = sample_clip(&sk, &clip, 1.0, false).locals[0].translation;
+        let before = sample_clip(&sk.skeleton, &clip, 1.0, false).locals[0].translation;
         assert!((before[2] - 2.0).abs() < 1e-5, "{before:?}");
 
         let (out, report) = derive_clip(&clip, &sk, &DeriveOptions::default()).unwrap();
 
         // After: it does not.
-        let after = sample_clip(&sk, &out, 1.0, false).locals[0].translation;
+        let after = sample_clip(&sk.skeleton, &out, 1.0, false).locals[0].translation;
         assert!(
             after[2].abs() < 1e-5,
             "the residual was not removed: {after:?}"
         );
-        assert!(sample_clip(&sk, &out, 0.5, false).locals[0].translation[2].abs() < 1e-5);
+        assert!(sample_clip(&sk.skeleton, &out, 0.5, false).locals[0].translation[2].abs() < 1e-5);
 
         // The travel is on the track, and the distance track agrees with it.
         let track = out.root_motion.as_ref().expect("a baked track");
@@ -1259,14 +1303,14 @@ mod tests {
 
         // …and the consumer that matters reads the track, so a derived clip
         // drives a character exactly as far as the clip it came from.
-        let d = crate::root_delta_3d(&out, &sk, 0.0, 1.0, false);
+        let d = crate::root_delta_3d(&out, &sk.skeleton, 0.0, 1.0, false);
         assert!((d.translation.z - 2.0).abs() < 1e-5, "{d:?}");
         assert!((d.distance_m - 2.0).abs() < 1e-4, "{d:?}");
 
         // The two halves add back up: un-baking recovers the import.
         let mut restored = out.clone();
         unbake_root_motion(&mut restored, 0);
-        let back = sample_clip(&sk, &restored, 0.5, false).locals[0].translation;
+        let back = sample_clip(&sk.skeleton, &restored, 0.5, false).locals[0].translation;
         assert!(
             (back[2] - 1.0).abs() < 1e-5,
             "un-bake did not restore: {back:?}"
@@ -1302,13 +1346,13 @@ mod tests {
             (report.yaw_rad - std::f32::consts::FRAC_PI_4).abs() < 1e-4,
             "{report:?}"
         );
-        let posed = sample_clip(&sk, &out, 1.0, false).locals[0].rotation_quat();
+        let posed = sample_clip(&sk.skeleton, &out, 1.0, false).locals[0].rotation_quat();
         assert!(
             inf_math::pyaw(posed).abs() < 1e-4,
             "the yaw residual was left in the pose: {}",
             inf_math::pyaw(posed)
         );
-        let d = crate::root_delta_3d(&out, &sk, 0.0, 1.0, false);
+        let d = crate::root_delta_3d(&out, &sk.skeleton, 0.0, 1.0, false);
         assert!((d.yaw - std::f32::consts::FRAC_PI_4).abs() < 1e-4, "{d:?}");
     }
 
@@ -1355,7 +1399,7 @@ mod tests {
         let before: Vec<_> = (0..=20)
             .map(|k| {
                 let t = k as f32 / 20.0;
-                let p = sample_clip(&sk, &clip, t, false).locals[0];
+                let p = sample_clip(&sk.skeleton, &clip, t, false).locals[0];
                 (t, p.translation, p.rotation)
             })
             .collect();
@@ -1365,7 +1409,7 @@ mod tests {
         // 1. THE RESIDUAL. Not "a track exists" — the root itself no longer
         //    moves or turns, at every sample and not only at the keys.
         for (t, _, _) in &before {
-            let p = sample_clip(&sk, &out, *t, false).locals[0];
+            let p = sample_clip(&sk.skeleton, &out, *t, false).locals[0];
             assert!(
                 p.translation_vec().length() < 1e-5,
                 "the root still travels at t={t}: {:?}",
@@ -1388,7 +1432,7 @@ mod tests {
         let mut restored = out.clone();
         unbake_root_motion(&mut restored, 0);
         for (t, translation, rotation) in &before {
-            let p = sample_clip(&sk, &restored, *t, false).locals[0];
+            let p = sample_clip(&sk.skeleton, &restored, *t, false).locals[0];
             let d = p.translation_vec() - Vec3::from_array(*translation);
             assert!(
                 d.length() < 1e-5,
@@ -1427,10 +1471,10 @@ mod tests {
     #[test]
     fn two_derivations_of_the_same_input_are_byte_equal() {
         let sk = biped();
-        let set = build_locomotion(BodyPlan::Biped, &sk, &GaitParams::default()).unwrap();
-        let a = derive_clip(&set.walk, &sk.skeleton, &DeriveOptions::default()).unwrap();
-        let set2 = build_locomotion(BodyPlan::Biped, &sk, &GaitParams::default()).unwrap();
-        let b = derive_clip(&set2.walk, &sk.skeleton, &DeriveOptions::default()).unwrap();
+        let set = build_locomotion(BodyPlan::BipedCanonical, &sk, &GaitParams::default()).unwrap();
+        let a = derive_clip(&set.walk, &sk, &DeriveOptions::default()).unwrap();
+        let set2 = build_locomotion(BodyPlan::BipedCanonical, &sk, &GaitParams::default()).unwrap();
+        let b = derive_clip(&set2.walk, &sk, &DeriveOptions::default()).unwrap();
         assert_eq!(bytes(&a.0), bytes(&b.0));
         assert_eq!(a.1, b.1);
     }
@@ -1458,7 +1502,8 @@ mod tests {
             "a net-zero bob must not reach the track"
         );
         assert!(
-            (sample_clip(&sk, &net, 0.5, false).locals[0].translation[1] - 0.1).abs() < 1e-6,
+            (sample_clip(&sk.skeleton, &net, 0.5, false).locals[0].translation[1] - 0.1).abs()
+                < 1e-6,
             "the bob must stay in the pose"
         );
 
@@ -1477,7 +1522,7 @@ mod tests {
             "Full must put the whole vertical on the track"
         );
         assert!(
-            sample_clip(&sk, &full, 0.5, false).locals[0].translation[1].abs() < 1e-6,
+            sample_clip(&sk.skeleton, &full, 0.5, false).locals[0].translation[1].abs() < 1e-6,
             "…and take it out of the pose"
         );
     }
@@ -1491,9 +1536,8 @@ mod tests {
     #[test]
     fn a_generated_walk_gets_one_plant_per_foot_named_after_its_leg() {
         let sk = biped();
-        let set = build_locomotion(BodyPlan::Biped, &sk, &GaitParams::default()).unwrap();
-        let (out, report) =
-            derive_clip(&set.walk, &sk.skeleton, &DeriveOptions::default()).unwrap();
+        let set = build_locomotion(BodyPlan::BipedCanonical, &sk, &GaitParams::default()).unwrap();
+        let (out, report) = derive_clip(&set.walk, &sk, &DeriveOptions::default()).unwrap();
         assert_eq!(
             report.plants.len(),
             2,
@@ -1541,9 +1585,8 @@ mod tests {
     #[test]
     fn an_idle_clip_gets_no_footsteps() {
         let sk = biped();
-        let set = build_locomotion(BodyPlan::Biped, &sk, &GaitParams::default()).unwrap();
-        let (out, report) =
-            derive_clip(&set.idle, &sk.skeleton, &DeriveOptions::default()).unwrap();
+        let set = build_locomotion(BodyPlan::BipedCanonical, &sk, &GaitParams::default()).unwrap();
+        let (out, report) = derive_clip(&set.idle, &sk, &DeriveOptions::default()).unwrap();
         assert!(report.plants.is_empty(), "{:?}", report.plants);
         assert!(out
             .markers
@@ -1560,9 +1603,8 @@ mod tests {
     #[test]
     fn the_lock_channel_is_high_exactly_during_its_own_plant() {
         let sk = biped();
-        let set = build_locomotion(BodyPlan::Biped, &sk, &GaitParams::default()).unwrap();
-        let (out, report) =
-            derive_clip(&set.walk, &sk.skeleton, &DeriveOptions::default()).unwrap();
+        let set = build_locomotion(BodyPlan::BipedCanonical, &sk, &GaitParams::default()).unwrap();
+        let (out, report) = derive_clip(&set.walk, &sk, &DeriveOptions::default()).unwrap();
         let plant = report.plants.first().expect("a plant");
         let suffix = foot_suffix(&sk.skeleton, plant.joint);
         let name = format!("{FOOT_LOCK_PREFIX}{suffix}");
@@ -1597,12 +1639,12 @@ mod tests {
     #[test]
     fn an_in_place_cycle_reports_the_speed_its_planted_feet_slide_at() {
         let sk = biped();
-        let set = build_locomotion(BodyPlan::Biped, &sk, &GaitParams::default()).unwrap();
+        let set = build_locomotion(BodyPlan::BipedCanonical, &sk, &GaitParams::default()).unwrap();
         for (clip, depicted, what) in [
             (&set.walk, set.walk_speed_m_s as f32, "walk"),
             (&set.run, set.run_speed_m_s as f32, "run"),
         ] {
-            let (_, r) = derive_clip(clip, &sk.skeleton, &DeriveOptions::default()).unwrap();
+            let (_, r) = derive_clip(clip, &sk, &DeriveOptions::default()).unwrap();
             assert_eq!(
                 r.travel_speed_mps, 0.0,
                 "a generated cycle is in place, so nothing travels ({what})"
@@ -1628,10 +1670,10 @@ mod tests {
             // a proposal clusters on.
             assert!(r.stride_m > 0.0, "{what}: an in-place stride is not zero");
         }
-        let walk = derive_clip(&set.walk, &sk.skeleton, &DeriveOptions::default())
+        let walk = derive_clip(&set.walk, &sk, &DeriveOptions::default())
             .unwrap()
             .1;
-        let run = derive_clip(&set.run, &sk.skeleton, &DeriveOptions::default())
+        let run = derive_clip(&set.run, &sk, &DeriveOptions::default())
             .unwrap()
             .1;
         assert!(
@@ -1732,7 +1774,7 @@ mod tests {
         let track = out.root_motion.as_ref().unwrap();
         assert!((track.sample(0.5).unwrap().0[1] - 0.75).abs() < 1e-6);
         assert!(
-            sample_clip(&sk, &out, 0.5, false).locals[0]
+            sample_clip(&sk.skeleton, &out, 0.5, false).locals[0]
                 .translation_vec()
                 .length()
                 < 1e-6,
@@ -1816,7 +1858,7 @@ mod tests {
     #[test]
     fn a_re_derive_keeps_authored_markers_it_did_not_write() {
         let sk = biped();
-        let set = build_locomotion(BodyPlan::Biped, &sk, &GaitParams::default()).unwrap();
+        let set = build_locomotion(BodyPlan::BipedCanonical, &sk, &GaitParams::default()).unwrap();
         let authored = set
             .walk
             .clone()
@@ -1827,8 +1869,7 @@ mod tests {
             .with_curves(vec![CurveChannel::constant("FootLock_Weapon", 0.5)]);
         // The generator already put its own `plant_*` markers on: keep them
         // beside the authored ones, or the assertion below is about an empty set.
-        let (out, report) =
-            derive_clip(&authored, &sk.skeleton, &DeriveOptions::default()).unwrap();
+        let (out, report) = derive_clip(&authored, &sk, &DeriveOptions::default()).unwrap();
 
         assert!(
             out.markers.iter().any(|m| m.name == "footstep_land"),
@@ -1849,7 +1890,7 @@ mod tests {
 
         // …and what it DOES own is still replaced rather than duplicated: the
         // derived plants appear once each, and the report counts only its own.
-        let names = DerivedNames::of_skeleton(&sk.skeleton);
+        let names = DerivedNames::of_skeleton(&sk);
         for n in &names.sync_markers {
             assert_eq!(
                 out.markers
@@ -1866,7 +1907,7 @@ mod tests {
         );
 
         // Re-deriving is still byte-identical with the authored data present.
-        let (again, _) = derive_clip(&out, &sk.skeleton, &DeriveOptions::default()).unwrap();
+        let (again, _) = derive_clip(&out, &sk, &DeriveOptions::default()).unwrap();
         assert_eq!(bytes(&out), bytes(&again));
     }
 
@@ -1876,8 +1917,8 @@ mod tests {
     #[test]
     fn a_re_derive_that_finds_no_plants_clears_the_last_ones() {
         let sk = biped();
-        let set = build_locomotion(BodyPlan::Biped, &sk, &GaitParams::default()).unwrap();
-        let (with, r1) = derive_clip(&set.walk, &sk.skeleton, &DeriveOptions::default()).unwrap();
+        let set = build_locomotion(BodyPlan::BipedCanonical, &sk, &GaitParams::default()).unwrap();
+        let (with, r1) = derive_clip(&set.walk, &sk, &DeriveOptions::default()).unwrap();
         assert_eq!(r1.plants.len(), 2);
 
         // A contact window nothing can meet: every plant disappears.
@@ -1885,7 +1926,7 @@ mod tests {
             min_contact_s: 1e6,
             ..DeriveOptions::default()
         };
-        let (without, r2) = derive_clip(&with, &sk.skeleton, &strict).unwrap();
+        let (without, r2) = derive_clip(&with, &sk, &strict).unwrap();
         assert!(r2.plants.is_empty(), "{:?}", r2.plants);
         assert_eq!(
             without

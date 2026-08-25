@@ -6,16 +6,24 @@
 //! topological order, inverse binds, standard sockets, and (P24.2's input) joint
 //! limits for the hinges.
 //!
-//! # Humanoid names are the retarget contract
+//! # Two bipeds, and which one is the default
 //!
-//! A [`BodyPlan::Biped`] emits **exactly** the nineteen names
+//! [`BodyPlan::Biped`] is the **161-bone UE5 mannequin hierarchy** and lives in
+//! [`crate::manny`]; this module dispatches to it and refuses the same degenerate
+//! parameters first, so both generators refuse identically.
+//!
+//! Everything below is the **N-pedal** generator, and among its plans
+//! [`BodyPlan::BipedCanonical`] emits **exactly** the nineteen names
 //! [`crate::retarget::humanoid_joint_names`] lists, in that vocabulary, so
 //! retarget v1 works between two generated bipeds — and between a generated biped
 //! and any imported rig that follows the convention — with
 //! [`RetargetMap::humanoid_identity`](crate::retarget::RetargetMap::humanoid_identity)
 //! and no manual pairing. `biped_retargets_onto_itself` is what keeps that true;
 //! it is a *contract* test, not a smoke test, because renaming one joint here
-//! silently breaks every retarget the convention was for.
+//! silently breaks every retarget the convention was for. The Manny rig reaches
+//! the same vocabulary through a *pairing* instead
+//! ([`RetargetMap::manny_to_canonical`](crate::retarget::RetargetMap::manny_to_canonical)),
+//! which is what a lingua franca costs when you speak two of them.
 //!
 //! Extra spine or neck segments are *inserted* into the chain
 //! (`spine → spine_1 → … → chest`), never renamed over the canonical five, so a
@@ -52,9 +60,24 @@ use crate::sockets::Socket;
 /// Which body plan a template generates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BodyPlan {
-    /// Two legs + two arms + a head: the humanoid, named with the canonical
-    /// nineteen (see the module docs).
+    /// **The 161-bone UE5 mannequin hierarchy** ([`crate::manny`]) — the default
+    /// humanoid, and what the New Character wizard offers first.
+    ///
+    /// It became this in SK1a. Before that it was the twenty-joint rig
+    /// [`BipedCanonical`](Self::BipedCanonical) still generates, and the reason for
+    /// the swap is that those twenty names are this engine's own invention while
+    /// `thigh_l` / `spine_03` / `ik_foot_root` are what every clip, every retarget
+    /// chain and every MetaHuman body in the world is written against.
     Biped,
+    /// The **twenty-joint canonical-vocabulary biped** — `hips`, `spine`, `chest`,
+    /// `shoulder_l`, `upper_leg_r`, … — that [`BodyPlan::Biped`] used to be.
+    ///
+    /// Kept, and kept *generable*, for three reasons that are all the same reason:
+    /// it emits exactly [`crate::retarget::humanoid_joint_names`], so it is the
+    /// rig the canonical vocabulary is defined by; every clip already committed in
+    /// this repository is index-bound to it; and a small rig is the right fixture
+    /// for a test about something other than bone count.
+    BipedCanonical,
     /// Four legs on two girdles, no arms.
     Quadruped,
     /// Six legs on three girdles, no arms.
@@ -72,15 +95,21 @@ impl BodyPlan {
     /// Total leg count for this plan.
     pub fn legs(self) -> u16 {
         match self {
-            BodyPlan::Biped => 2,
+            BodyPlan::Biped | BodyPlan::BipedCanonical => 2,
             BodyPlan::Quadruped => 4,
             BodyPlan::Hexapod => 6,
             BodyPlan::Npedal { legs } => legs,
         }
     }
 
-    /// Whether this plan grows arms (only the biped does).
+    /// Whether this plan grows arms (only the bipeds do).
     pub fn has_arms(self) -> bool {
+        matches!(self, BodyPlan::Biped | BodyPlan::BipedCanonical)
+    }
+
+    /// Whether this plan is the mannequin hierarchy, whose joints are named and
+    /// parented by [`crate::manny`] rather than derived by the N-pedal builder.
+    pub fn is_manny(self) -> bool {
         matches!(self, BodyPlan::Biped)
     }
 }
@@ -208,6 +237,34 @@ pub struct JointLimit {
     pub min_deg: [f32; 3],
     /// Maximum rotation about local X / Y / Z, degrees.
     pub max_deg: [f32; 3],
+    /// A **swing-twist cone** (SK1a, `.inf_skel` v3), for the joints a per-axis
+    /// box cannot describe. `None` — every joint this engine authors today — means
+    /// the three-axis form above is the whole limit.
+    ///
+    /// The append this field is was named years ago in this type's own docs as
+    /// "an append behind another bump"; it rides SK1a's one bump so that the
+    /// finger solver that needs it does not have to spend a second.
+    pub cone: Option<ConeLimit>,
+}
+
+/// A **swing-twist cone limit** (SK1a).
+///
+/// The shape a ball joint actually has: a finger, a shoulder or a thumb can swing
+/// anywhere inside a cone about its own bone axis and roll only a little about it.
+/// Writing that as three independent per-axis ranges either forbids legal poses at
+/// the corners or admits illegal ones at the diagonals, which is why the per-axis
+/// box was never enough for a hand.
+///
+/// **Frozen once shipped**, like the fields above it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConeLimit {
+    /// The joint's local twist axis (the bone direction), unit length.
+    pub axis: [f32; 3],
+    /// The cone's half-angle: how far the bone may swing away from `axis`,
+    /// degrees.
+    pub swing_deg: f32,
+    /// The permitted roll about `axis`, `[min, max]` degrees.
+    pub twist_deg: [f32; 2],
 }
 
 impl JointLimit {
@@ -218,7 +275,14 @@ impl JointLimit {
             joint,
             min_deg: [min_deg, 0.0, 0.0],
             max_deg: [max_deg, 0.0, 0.0],
+            cone: None,
         }
+    }
+
+    /// This limit with a swing-twist [`ConeLimit`] attached.
+    pub fn with_cone(mut self, cone: ConeLimit) -> Self {
+        self.cone = Some(cone);
+        self
     }
 
     /// Whether this limit permits any rotation at all about `axis` (0 = X).
@@ -244,6 +308,13 @@ const ELBOW_RANGE_DEG: (f32, f32) = (0.0, 150.0);
 /// plan, `head`, `back`) and hinge limits on the knees and elbows.
 pub fn build_template(plan: BodyPlan, params: &BodyParams) -> Result<SkeletonAsset, TemplateError> {
     validate(plan, params)?;
+    // The mannequin is a NAMED hierarchy, not a derived one: its 161 bones, their
+    // parents and their emission order come from the shipped asset rather than
+    // from a leg count. The parameters still shape it — the refusals above are
+    // asked first, and asked once, so both generators refuse identically.
+    if plan.is_manny() {
+        return crate::manny::build_manny(params);
+    }
     let mut b = Builder::default();
 
     let h = params.height_m;
@@ -554,7 +625,7 @@ mod tests {
     use crate::retarget::{humanoid_joint_names, retarget_pose, RetargetMap};
 
     fn biped() -> SkeletonAsset {
-        build_template(BodyPlan::Biped, &BodyParams::default()).expect("a biped generates")
+        build_template(BodyPlan::BipedCanonical, &BodyParams::default()).expect("a biped generates")
     }
 
     /// **Every template validates.** `Skeleton::new` is the contract: joints in
@@ -563,6 +634,7 @@ mod tests {
     fn every_plan_generates_a_valid_skeleton() {
         for plan in [
             BodyPlan::Biped,
+            BodyPlan::BipedCanonical,
             BodyPlan::Quadruped,
             BodyPlan::Hexapod,
             BodyPlan::Npedal { legs: 8 },
@@ -709,6 +781,7 @@ mod tests {
     fn every_plan_stands_its_feet_on_the_ground() {
         for plan in [
             BodyPlan::Biped,
+            BodyPlan::BipedCanonical,
             BodyPlan::Quadruped,
             BodyPlan::Hexapod,
             BodyPlan::Npedal { legs: 10 },
@@ -774,7 +847,7 @@ mod tests {
     /// through the asset codec.
     #[test]
     fn the_same_params_generate_the_same_bytes() {
-        for plan in [BodyPlan::Biped, BodyPlan::Hexapod] {
+        for plan in [BodyPlan::BipedCanonical, BodyPlan::Hexapod] {
             let a = build_template(plan, &BodyParams::default()).unwrap();
             let b = build_template(plan, &BodyParams::default()).unwrap();
             assert_eq!(a, b);
@@ -795,7 +868,7 @@ mod tests {
             ..BodyParams::default()
         };
         assert_ne!(
-            inf_asset::encode(&build_template(BodyPlan::Biped, &tall).unwrap()).unwrap(),
+            inf_asset::encode(&build_template(BodyPlan::BipedCanonical, &tall).unwrap()).unwrap(),
             inf_asset::encode(&biped()).unwrap()
         );
     }
@@ -926,7 +999,7 @@ mod tests {
     #[test]
     fn extra_segments_keep_the_canonical_names() {
         let asset = build_template(
-            BodyPlan::Biped,
+            BodyPlan::BipedCanonical,
             &BodyParams {
                 spine_segments: 5,
                 neck_segments: 3,

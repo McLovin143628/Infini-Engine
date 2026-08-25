@@ -68,6 +68,7 @@ use inf_math::{pcos64, psin64};
 use crate::asset::SkeletonAsset;
 use crate::blend_space::ClipRef;
 use crate::clip::{AnimClip, Interpolation, JointTrack, QuatTrack, Vec3Track};
+use crate::roles::{BoneRoleKind, BoneSide, RoleIndex};
 use crate::skeleton::Skeleton;
 use crate::state_machine::{BlendCurve, CmpOp, SmParam, SmState, SmTransition, StateMachine};
 use crate::template::{leg_suffix, BodyPlan};
@@ -244,10 +245,22 @@ pub fn build_locomotion(
     let skeleton = &rig.skeleton;
     let globals = bind_globals(skeleton);
     let legs = legs_of(plan, rig, &globals)?;
-    let arms = arms_of(plan, skeleton)?;
+    let roles = rig.role_index();
+    let arms = arms_of(plan, skeleton, &roles)?;
 
-    let hips = joint(skeleton, "hips", plan)?;
-    let chest = joint(skeleton, "chest", plan)?;
+    // The pelvis and the top of the spine chain — the two joints the idle's breath
+    // and both bobs are written onto. From the role table when the rig has one
+    // (`pelvis` and `spine_05` on the mannequin), from the canonical names when it
+    // does not. "The top of the spine chain" is what `chest` always meant; a rig
+    // with five spine segments has one, it is just not called that.
+    let hips = match roles.first(BoneRoleKind::Pelvis, BoneSide::Center) {
+        Some(j) => j,
+        None => joint(skeleton, "hips", plan)?,
+    };
+    let chest = match roles.last(BoneRoleKind::Spine, BoneSide::Center) {
+        Some(j) => j,
+        None => joint(skeleton, "chest", plan)?,
+    };
     let hips_bind = skeleton.joints()[hips as usize].local_bind.translation;
     // The hips' bind height is what both bobs are a fraction of. A rig whose hips
     // sit at the origin (a fitted rig centred on its mesh, say) gets its scale
@@ -402,7 +415,8 @@ struct Arm {
 
 fn plan_label(plan: BodyPlan) -> &'static str {
     match plan {
-        BodyPlan::Biped => "biped",
+        BodyPlan::Biped => "mannequin",
+        BodyPlan::BipedCanonical => "biped",
         BodyPlan::Quadruped => "quadruped",
         BodyPlan::Hexapod => "hexapod",
         BodyPlan::Npedal { .. } => "n-pedal",
@@ -461,23 +475,43 @@ fn legs_of(
     globals: &[glam::Vec3],
 ) -> Result<Vec<Leg>, LocomotionError> {
     let skeleton = &rig.skeleton;
+    let roles = rig.role_index();
     let girdles = (plan.legs() / 2) as usize;
     let mut out = Vec::with_capacity(plan.legs() as usize);
     for g in 0..girdles {
         for (side, tag) in ["l", "r"].iter().enumerate() {
             let suffix = leg_suffix(tag, g, girdles);
-            let upper = joint(skeleton, &format!("upper_leg_{suffix}"), plan)?;
-            let lower = joint(skeleton, &format!("lower_leg_{suffix}"), plan)?;
-            let foot = joint(skeleton, &format!("foot_{suffix}"), plan)?;
+            // **The role table first, the naming convention second** (SK1a). A
+            // single-girdle rig that says what its bones ARE is answered from the
+            // table; every other rig — an import, a `.inf_skel` older than the
+            // role schema, a hexapod — falls through to the names this generator's
+            // own N-pedal builder emits, and refuses by those names, so
+            // `LocomotionError::MissingJoint` still says `upper_leg_l` to the rigs
+            // it always said it to.
+            let by_role = (girdles == 1)
+                .then(|| leg_by_role(&roles, side_of(side)))
+                .flatten();
+            let (upper, lower, foot) = match by_role {
+                Some(t) => t,
+                None => (
+                    joint(skeleton, &format!("upper_leg_{suffix}"), plan)?,
+                    joint(skeleton, &format!("lower_leg_{suffix}"), plan)?,
+                    joint(skeleton, &format!("foot_{suffix}"), plan)?,
+                ),
+            };
+            // Named after the joint that is really there, so the plant markers a
+            // derived clip writes (`derive::leg_name_of`, which reads the same
+            // table) and the ones this generator writes are the same string.
+            let name = skeleton
+                .joint(upper as usize)
+                .map(|j| j.name.clone())
+                .unwrap_or_else(|| format!("upper_leg_{suffix}"));
             let length_m = (globals[foot as usize] - globals[upper as usize]).length() as f64;
             if !(length_m.is_finite() && length_m > 1.0e-4) {
-                return Err(LocomotionError::DegenerateLeg {
-                    name: format!("upper_leg_{suffix}"),
-                    length_m,
-                });
+                return Err(LocomotionError::DegenerateLeg { name, length_m });
             }
             out.push(Leg {
-                name: format!("upper_leg_{suffix}"),
+                name,
                 upper,
                 lower,
                 length_m,
@@ -489,18 +523,47 @@ fn legs_of(
     Ok(out)
 }
 
+/// `0` is the character's left, `1` its right — the order `legs_of`/`arms_of`
+/// iterate, spelled once.
+fn side_of(side: usize) -> BoneSide {
+    if side == 0 {
+        BoneSide::Left
+    } else {
+        BoneSide::Right
+    }
+}
+
+/// A leg out of the role table: `(thigh, calf, foot)`, or `None` if the table
+/// does not describe one on this side.
+///
+/// All three or nothing. A half-answered leg would take the thigh from the table
+/// and the shin from a name, which is the sort of hybrid that works on the rig it
+/// was written against and on nothing else.
+fn leg_by_role(roles: &RoleIndex, side: BoneSide) -> Option<(u16, u16, u16)> {
+    Some((
+        roles.first(BoneRoleKind::Thigh, side)?,
+        roles.first(BoneRoleKind::Calf, side)?,
+        roles.first(BoneRoleKind::Foot, side)?,
+    ))
+}
+
 /// Resolve the biped's two arms. Every other plan has none, and asking for them
 /// would be a refusal on a rig that is exactly right.
-fn arms_of(plan: BodyPlan, skeleton: &Skeleton) -> Result<Vec<Arm>, LocomotionError> {
+fn arms_of(
+    plan: BodyPlan,
+    skeleton: &Skeleton,
+    roles: &RoleIndex,
+) -> Result<Vec<Arm>, LocomotionError> {
     if !plan.has_arms() {
         return Ok(Vec::new());
     }
     let mut out = Vec::with_capacity(2);
     for (side, tag) in ["l", "r"].iter().enumerate() {
-        out.push(Arm {
-            upper: joint(skeleton, &format!("upper_arm_{tag}"), plan)?,
-            side,
-        });
+        let upper = match roles.first(BoneRoleKind::UpperArm, side_of(side)) {
+            Some(j) => j,
+            None => joint(skeleton, &format!("upper_arm_{tag}"), plan)?,
+        };
+        out.push(Arm { upper, side });
     }
     Ok(out)
 }
@@ -823,8 +886,93 @@ mod tests {
     use crate::template::{build_template, BodyParams};
 
     fn biped() -> SkeletonAsset {
+        build_template(BodyPlan::BipedCanonical, &BodyParams::default()).unwrap()
+    }
+    fn manny() -> SkeletonAsset {
         build_template(BodyPlan::Biped, &BodyParams::default()).unwrap()
     }
+
+    /// **The generator learned the mannequin's bones from the rig, not from a
+    /// second table of names** (SK1a).
+    ///
+    /// Before the role table this refused outright: `upper_leg_l` is the first
+    /// name it asks for and a mannequin has never had one, so the wizard stopped
+    /// at clip generation with `MissingJoint`. What makes this an arm rather than
+    /// a smoke test is the marker name — the legs are named after the joints that
+    /// are really there, so a *derived* clip (`derive::leg_name_of`, reading the
+    /// same table) and this *generated* one both write `plant_thigh_l` and blend
+    /// by name instead of falling back to the ordinal.
+    #[test]
+    fn the_mannequin_walks_on_the_bones_its_own_table_names() {
+        let rig = manny();
+        let set = build_locomotion(BodyPlan::Biped, &rig, &GaitParams::default())
+            .expect("the mannequin has legs");
+        let names: Vec<&str> = set.legs.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["thigh_l", "thigh_r"], "the legs it found");
+        assert!(set.legs[0].length_m > 0.5, "{:?}", set.legs[0]);
+        assert!((set.legs[0].phase - 0.0).abs() < 1e-12 && (set.legs[1].phase - 0.5).abs() < 1e-12);
+        assert!(set.walk_speed_m_s > 0.0 && set.run_speed_m_s > set.walk_speed_m_s);
+
+        let sk = &rig.skeleton;
+        assert_eq!(
+            set.walk.tracks.len(),
+            1 + 4 + 2,
+            "hips + 2x(thigh, calf) + 2 arms"
+        );
+        let driven: Vec<&str> = set
+            .walk
+            .tracks
+            .iter()
+            .map(|t| sk.joints()[t.joint as usize].name.as_str())
+            .collect();
+        for want in [
+            "pelvis",
+            "thigh_l",
+            "calf_l",
+            "thigh_r",
+            "calf_r",
+            "upperarm_l",
+            "upperarm_r",
+        ] {
+            assert!(driven.contains(&want), "`{want}` is not driven: {driven:?}");
+        }
+        // The idle breathes on the TOP of the five-segment spine, which is what
+        // `chest` always meant on a rig that happens to have a bone called that.
+        let idle: Vec<&str> = set
+            .idle
+            .tracks
+            .iter()
+            .map(|t| sk.joints()[t.joint as usize].name.as_str())
+            .collect();
+        assert!(idle.contains(&"spine_05"), "{idle:?}");
+        let plants: Vec<&str> = set
+            .walk
+            .markers
+            .iter()
+            .filter(|m| m.is_sync())
+            .map(|m| m.name.as_str())
+            .collect();
+        assert_eq!(plants.len(), 2, "{plants:?}");
+        assert!(plants.contains(&"plant_thigh_l"), "{plants:?}");
+    }
+
+    /// The **fallback still refuses by the names it always refused by**: a rig
+    /// with no role table and no canonical legs is told about `upper_leg_l`.
+    ///
+    /// Mutation-relevant in both directions — a role path that answered `Some`
+    /// for a table-less rig would take this refusal away silently, and a role
+    /// path that never ran would take the arm above away.
+    #[test]
+    fn a_rig_with_no_table_and_no_legs_still_refuses_by_the_canonical_name() {
+        let mut rig = manny();
+        // Strip the table: what an imported glTF of the same hierarchy looks like.
+        rig.roles.clear();
+        match build_locomotion(BodyPlan::Biped, &rig, &GaitParams::default()) {
+            Err(LocomotionError::MissingJoint { name, .. }) => assert_eq!(name, "upper_leg_l"),
+            other => panic!("expected a named refusal, got {other:?}"),
+        }
+    }
+
     fn quadruped() -> SkeletonAsset {
         build_template(BodyPlan::Quadruped, &BodyParams::default()).unwrap()
     }
@@ -832,7 +980,7 @@ mod tests {
     #[test]
     fn a_biped_gets_two_antiphase_legs_and_counter_swinging_arms() {
         let rig = biped();
-        let set = build_locomotion(BodyPlan::Biped, &rig, &GaitParams::default()).unwrap();
+        let set = build_locomotion(BodyPlan::BipedCanonical, &rig, &GaitParams::default()).unwrap();
         assert_eq!(set.legs.len(), 2);
         assert_eq!(set.legs[0].phase, 0.0);
         assert_eq!(set.legs[1].phase, 0.5);
@@ -882,12 +1030,12 @@ mod tests {
             knee_flex_deg: 400.0,
             ..GaitParams::default()
         };
-        let set = build_locomotion(BodyPlan::Biped, &rig, &gait).unwrap();
+        let set = build_locomotion(BodyPlan::BipedCanonical, &rig, &gait).unwrap();
         let knee = rig.skeleton.index_of("lower_leg_l").unwrap();
         let track = set.walk.tracks.iter().find(|t| t.joint == knee).unwrap();
         let ceiling = knee_flex_ceiling(
             &rig,
-            &legs_of(BodyPlan::Biped, &rig, &bind_globals(&rig.skeleton)).unwrap(),
+            &legs_of(BodyPlan::BipedCanonical, &rig, &bind_globals(&rig.skeleton)).unwrap(),
         );
         assert_eq!(ceiling, Some(150.0), "the template's own hinge");
         for v in &track.rotation.as_ref().unwrap().values {
@@ -931,7 +1079,7 @@ mod tests {
                 *limit = crate::template::JointLimit::hinge_x(limit.joint, 0.0, 150.0);
             }
         }
-        let set = build_locomotion(BodyPlan::Biped, &rig, &GaitParams::default()).unwrap();
+        let set = build_locomotion(BodyPlan::BipedCanonical, &rig, &GaitParams::default()).unwrap();
         for knee in knees {
             let track = set.walk.tracks.iter().find(|t| t.joint == knee).unwrap();
             let rot = track.rotation.as_ref().unwrap();
@@ -978,8 +1126,8 @@ mod tests {
     #[test]
     fn the_same_rig_generates_the_same_clips() {
         let rig = biped();
-        let a = build_locomotion(BodyPlan::Biped, &rig, &GaitParams::default()).unwrap();
-        let b = build_locomotion(BodyPlan::Biped, &rig, &GaitParams::default()).unwrap();
+        let a = build_locomotion(BodyPlan::BipedCanonical, &rig, &GaitParams::default()).unwrap();
+        let b = build_locomotion(BodyPlan::BipedCanonical, &rig, &GaitParams::default()).unwrap();
         assert_eq!(a, b);
 
         let bytes = |set: &LocomotionSet| -> Vec<Vec<u8>> {
@@ -997,14 +1145,14 @@ mod tests {
         // rig writes different bytes. Without this the assertion above would pass
         // for a generator that emitted the same three clips for everything.
         let tall = build_template(
-            BodyPlan::Biped,
+            BodyPlan::BipedCanonical,
             &BodyParams {
                 height_m: 2.4,
                 ..BodyParams::default()
             },
         )
         .unwrap();
-        let c = build_locomotion(BodyPlan::Biped, &tall, &GaitParams::default()).unwrap();
+        let c = build_locomotion(BodyPlan::BipedCanonical, &tall, &GaitParams::default()).unwrap();
         assert_ne!(bytes(&a), bytes(&c));
 
         // **And the two comparisons really are different checks.** Written out
@@ -1038,7 +1186,7 @@ mod tests {
     #[test]
     fn a_taller_creature_walks_faster_and_animates_differently() {
         let short = build_template(
-            BodyPlan::Biped,
+            BodyPlan::BipedCanonical,
             &BodyParams {
                 height_m: 1.2,
                 ..BodyParams::default()
@@ -1046,15 +1194,15 @@ mod tests {
         )
         .unwrap();
         let tall = build_template(
-            BodyPlan::Biped,
+            BodyPlan::BipedCanonical,
             &BodyParams {
                 height_m: 2.4,
                 ..BodyParams::default()
             },
         )
         .unwrap();
-        let a = build_locomotion(BodyPlan::Biped, &short, &GaitParams::default()).unwrap();
-        let b = build_locomotion(BodyPlan::Biped, &tall, &GaitParams::default()).unwrap();
+        let a = build_locomotion(BodyPlan::BipedCanonical, &short, &GaitParams::default()).unwrap();
+        let b = build_locomotion(BodyPlan::BipedCanonical, &tall, &GaitParams::default()).unwrap();
         assert!(
             b.walk_speed_m_s > a.walk_speed_m_s * 1.5,
             "twice the height must not walk at the same speed: {} vs {}",
@@ -1068,7 +1216,7 @@ mod tests {
     #[test]
     fn every_cycle_closes_on_its_own_first_key() {
         let rig = biped();
-        let set = build_locomotion(BodyPlan::Biped, &rig, &GaitParams::default()).unwrap();
+        let set = build_locomotion(BodyPlan::BipedCanonical, &rig, &GaitParams::default()).unwrap();
         for clip in [&set.idle, &set.walk, &set.run] {
             for track in &clip.tracks {
                 if let Some(r) = &track.rotation {
@@ -1090,7 +1238,7 @@ mod tests {
     #[test]
     fn the_machine_is_wired_to_one_speed_variable() {
         let rig = biped();
-        let set = build_locomotion(BodyPlan::Biped, &rig, &GaitParams::default()).unwrap();
+        let set = build_locomotion(BodyPlan::BipedCanonical, &rig, &GaitParams::default()).unwrap();
         let sm = locomotion_machine(&set, [1; 16], [2; 16], [3; 16]);
         assert_eq!(sm.entry, 0);
         assert_eq!(sm.states.len(), 3);
@@ -1119,7 +1267,7 @@ mod tests {
     #[test]
     fn the_generated_machine_climbs_and_falls_with_speed() {
         let rig = biped();
-        let set = build_locomotion(BodyPlan::Biped, &rig, &GaitParams::default()).unwrap();
+        let set = build_locomotion(BodyPlan::BipedCanonical, &rig, &GaitParams::default()).unwrap();
         let sm = locomotion_machine(&set, [1; 16], [2; 16], [3; 16]);
         let mut rt = crate::state_machine::SmRuntime::default();
         let dt = 1.0 / 60.0;
@@ -1154,7 +1302,7 @@ mod tests {
             }])
             .unwrap(),
         );
-        match build_locomotion(BodyPlan::Biped, &lonely, &GaitParams::default()) {
+        match build_locomotion(BodyPlan::BipedCanonical, &lonely, &GaitParams::default()) {
             Err(LocomotionError::MissingJoint { name, plan }) => {
                 assert_eq!(name, "upper_leg_l");
                 assert_eq!(plan, "biped");
@@ -1196,7 +1344,7 @@ mod tests {
                 },
             ),
         ] {
-            match build_locomotion(BodyPlan::Biped, &rig, &gait) {
+            match build_locomotion(BodyPlan::BipedCanonical, &rig, &gait) {
                 Err(LocomotionError::BadParam { param: got, .. }) => assert_eq!(got, param),
                 other => panic!("{param} was not refused: {other:?}"),
             }
@@ -1216,7 +1364,7 @@ mod tests {
     fn the_generated_gait_clips_sync_on_their_foot_plants() {
         let rig = biped();
         let gait = GaitParams::default();
-        let set = build_locomotion(BodyPlan::Biped, &rig, &gait).unwrap();
+        let set = build_locomotion(BodyPlan::BipedCanonical, &rig, &gait).unwrap();
 
         let walk_period = 1.0 / gait.walk_cadence_hz;
         let run_period = 1.0 / gait.run_cadence_hz;

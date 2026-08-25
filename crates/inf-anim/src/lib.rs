@@ -54,6 +54,9 @@ pub mod hair;
 // P29.4 foot IK + foot locking: the pure half of the ground contact, and the
 // lock whose slide the wave's gate measures in metres.
 pub mod foot;
+// SK1a the procedural drive pass: the bones a clip never authors — twist
+// extraction and the IK handles' FK follow.
+pub mod drive;
 // P24.2 inverse kinematics: the post-pass over an evaluated pose.
 pub mod ik;
 // P29.2 inertialization: the quintic decay of a pose deviation, and the blender
@@ -63,6 +66,8 @@ pub mod inertialize;
 pub mod layers;
 // P24.5 the default locomotion set: clips and a machine derived from a body plan.
 pub mod locomotion;
+// SK1a the 161-bone UE5 mannequin hierarchy — `BodyPlan::Biped`'s rig.
+pub mod manny;
 // P24.3 modular rigging: assembling one skeleton out of parts.
 pub mod merge;
 pub mod pose;
@@ -74,6 +79,8 @@ pub mod pose_match;
 // P29.4 the ragdoll bridge's animation half: the motor drive, the face-up read
 // and the blend weight that is a pure function of sim state.
 pub mod ragdoll;
+// SK1a the rig's side tables: what each bone IS, what drives it, where it grips.
+pub mod roles;
 pub mod skeleton;
 pub mod state_machine;
 // P29.2 sync groups: marker-phase warping so a walk↔run blend keeps its feet.
@@ -108,6 +115,7 @@ pub use derive::{
     derive_clip, foot_joints, gait_of, speed_of_gait, unbake_root_motion, DeriveError,
     DeriveOptions, DeriveReport, DerivedNames, FootPlant, VerticalPolicy, FOOTSTEP_PREFIX,
 };
+pub use drive::{drive_ik_follow, drive_pose, drive_twists, twist_about};
 pub use foot::{
     ground_offset, interp_to, pelvis_offset, FootLock, GroundOffset, FOOT_HEIGHT_M, TRACE_ABOVE_M,
     TRACE_BELOW_M,
@@ -129,6 +137,7 @@ pub use locomotion::{
     build_locomotion, locomotion_machine, GaitParams, LegSummary, LocomotionError, LocomotionSet,
     FOOT_SYNC_GROUP, MAX_KEYS_PER_CYCLE, SPEED_VAR, STATE_NAMES,
 };
+pub use manny::{build_manny, MANNY_JOINT_COUNT};
 pub use merge::{
     merge_skeletons, mirror_joint_map, mirrored_joint_name, unmatched_sided_joints, SkeletonMerge,
     SkeletonMergeError,
@@ -147,7 +156,12 @@ pub use ragdoll::{
     blend_weight as ragdoll_blend_weight, face_up_from_pelvis_roll, motor_stiffness, GetUp,
     RagdollPhase,
 };
-pub use retarget::{humanoid_joint_names, retarget_pose, RetargetMap};
+pub use retarget::{
+    humanoid_joint_names, retarget_pose, retarget_pose_reported, RetargetMap, RetargetReport,
+};
+pub use roles::{
+    BoneRole, BoneRoleKind, BoneSide, GripAffordance, IkFollow, RoleIndex, TwistDriver,
+};
 pub use root_motion::{
     bake_root_motion, root_delta, root_delta_3d, root_delta_world, root_delta_world_3d,
     root_joint_index, RootMotion3D, RootMotionDelta,
@@ -162,8 +176,8 @@ pub use state_machine::{
 };
 pub use sync::{common_group, leader_index, warped_times, SyncPhase, SyncTrack};
 pub use template::{
-    build_template, girdle_name, leg_suffix, BodyParams, BodyPlan, JointLimit, TemplateError,
-    MAX_LEGS,
+    build_template, girdle_name, leg_suffix, BodyParams, BodyPlan, ConeLimit, JointLimit,
+    TemplateError, MAX_LEGS,
 };
 pub use text::{cond_text, from_toml, parse_cond, to_toml, TextError};
 pub use warp::{

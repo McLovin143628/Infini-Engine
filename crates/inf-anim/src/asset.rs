@@ -10,6 +10,7 @@ use inf_asset::{AssetKind, AssetPayload};
 use serde::{Deserialize, Serialize};
 
 use crate::clip::AnimClip;
+use crate::roles::{BoneRole, GripAffordance, IkFollow, RoleIndex, TwistDriver};
 use crate::skeleton::Skeleton;
 use crate::sockets::Socket;
 use crate::state_machine::StateMachine;
@@ -34,8 +35,37 @@ use crate::template::JointLimit;
 /// The one committed v1 `.inf_skel` in the tree (`samples/character-demo`) is
 /// regenerated from its generator under `INF_BLESS_SAMPLES=1`.
 ///
-/// **[`JointLimit`]'s fields are frozen** now that this has shipped — a later
-/// limit *kind* is an append behind another bump, not an edit.
+/// # The v3 ladder — the bump this wave spends once
+///
+/// v3 (SK1a) appends **four side tables** and one field inside [`JointLimit`], all
+/// together, because a `.inf_skel` bump is not free: it costs a frozen shadow
+/// shape, a migration rung and a downgrade-bless of every committed rig, and it
+/// costs those things once whether it carries one table or five. The ruling for
+/// this wave was to spend it once, carrying everything the 161-bone rig and the
+/// waves after it need:
+///
+/// * `roles` — what each bone **is** ([`BoneRole`]), which retires the keyword
+///   guessing at five separate sites (see [`crate::roles`]);
+/// * `twists` — the procedural twist drive ([`TwistDriver`]);
+/// * `ik_follow` — which FK joint each IK handle tracks ([`IkFollow`]);
+/// * `grips` — [`GripAffordance`], **empty on every rig this wave generates**, for
+///   the hand solver that follows;
+/// * [`JointLimit::cone`] — swing-twist cone limits, which a finger solver needs
+///   and which `JointLimit`'s own docs had already named as "an append behind
+///   another bump". This *is* that bump; taking it now is what stops it being a
+///   second one.
+///
+/// **v2 is migrated, not refused**, and the difference from the v1 rung is what
+/// makes that honest. v1 stopped short of a table whose contents could not be
+/// invented. A v2 file's four empty tables are **exactly what a v2 rig meant** —
+/// no roles authored, nothing driven, no grips — so lifting one loses nothing and
+/// behaves identically. (The ladder's shape is [`StateMachineAsset`]'s v2 → v3,
+/// wholesale.)
+///
+/// bincode is positional, so a v2 payload is *not* a prefix of a v3 one — four
+/// `Vec` length prefixes are missing, and `JointLimit` grew inside a `Vec` in the
+/// middle of the stream — and `#[serde(default)]` cannot rescue a short read. The
+/// frozen [`skel_v2::SkeletonAsset`] shape below is what reads those bytes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkeletonAsset {
     pub schema_version: u32,
@@ -49,35 +79,60 @@ pub struct SkeletonAsset {
     /// full-range row, is the meaningful default. Serde-clean, at the tail.
     #[serde(default)]
     pub limits: Vec<JointLimit>,
+    /// What each bone **is** (SK1a, schema v3). Empty = "this rig says nothing",
+    /// and every reader falls back to its own name heuristic — which is exactly
+    /// what a pre-v3 rig meant.
+    #[serde(default)]
+    pub roles: Vec<BoneRole>,
+    /// The twist bones' drive rules (SK1a, schema v3).
+    #[serde(default)]
+    pub twists: Vec<TwistDriver>,
+    /// Which FK joint each IK handle follows (SK1a, schema v3).
+    #[serde(default)]
+    pub ik_follow: Vec<IkFollow>,
+    /// Authored hand grips (SK1a, schema v3). Empty on every generated rig — see
+    /// the type docs for why it ships anyway.
+    #[serde(default)]
+    pub grips: Vec<GripAffordance>,
 }
 
 impl SkeletonAsset {
-    /// v2 (P24.1) — `limits`. See the type's docs for the ladder.
-    pub const CURRENT_VERSION: u32 = 2;
+    /// v3 (SK1a) — `roles` / `twists` / `ik_follow` / `grips`, plus
+    /// [`JointLimit::cone`]. See the type's docs for the ladder.
+    pub const CURRENT_VERSION: u32 = 3;
 
-    /// Wrap a skeleton as a current-schema asset (no sockets, no limits).
+    /// Wrap a skeleton as a current-schema asset (no sockets, no side tables).
     pub fn new(skeleton: Skeleton) -> Self {
         Self {
             schema_version: Self::CURRENT_VERSION,
             skeleton,
             sockets: Vec::new(),
             limits: Vec::new(),
+            roles: Vec::new(),
+            twists: Vec::new(),
+            ik_follow: Vec::new(),
+            grips: Vec::new(),
         }
     }
 
     /// Wrap a skeleton and its authored sockets.
     pub fn with_sockets(skeleton: Skeleton, sockets: Vec<Socket>) -> Self {
         Self {
-            schema_version: Self::CURRENT_VERSION,
-            skeleton,
             sockets,
-            limits: Vec::new(),
+            ..Self::new(skeleton)
         }
     }
 
     /// The rotation limit on `joint`, if one is authored.
     pub fn limit(&self, joint: u16) -> Option<&JointLimit> {
         self.limits.iter().find(|l| l.joint == joint)
+    }
+
+    /// The rig's role lookup — [`RoleIndex::empty`]-equivalent for a rig that
+    /// carries no table, so a caller writes the role path once and the fallback
+    /// once rather than branching on whether a table exists.
+    pub fn role_index(&self) -> RoleIndex {
+        RoleIndex::new(&self.roles)
     }
 }
 
@@ -106,7 +161,7 @@ impl AssetPayload for SkeletonAsset {
     /// asset whose in-range-but-wrong case is silent — a non-topological
     /// parent reads the identity slot ahead of it and produces a pose that is
     /// wrong rather than missing.
-    fn migrate(self) -> inf_asset::Result<Self> {
+    fn migrate(mut self) -> inf_asset::Result<Self> {
         let found = self.schema_version;
         if found > Self::SCHEMA_VERSION {
             return Err(inf_asset::AssetError::SchemaTooNew {
@@ -115,10 +170,148 @@ impl AssetPayload for SkeletonAsset {
                 current: Self::SCHEMA_VERSION,
             });
         }
+        // A v2 payload arrives here already lifted by `decode_wire` (the shape
+        // door); the stamp is what says so. Restamped here rather than there, so
+        // `decode_wire` stays about BYTES and this stays about the value.
+        self.schema_version = Self::SCHEMA_VERSION;
         self.skeleton
             .validate()
             .map_err(|e| inf_asset::AssetError::Decode(format!("invalid skeleton: {e}")))?;
+        // The side tables index joints. A row naming a joint this rig does not
+        // have is not a panic anywhere — every reader bounds-checks — but it is a
+        // rig that says something false about itself, and the failure it produces
+        // downstream (a twist that never drives, a role lookup that finds nothing)
+        // is silent. Refused at the door, by name, like the parent index above.
+        let len = self.skeleton.len();
+        let check = |what: &str, joint: u16| -> inf_asset::Result<()> {
+            if (joint as usize) < len {
+                return Ok(());
+            }
+            Err(inf_asset::AssetError::Decode(format!(
+                "{what} names joint {joint}, which this {len}-joint skeleton does not have"
+            )))
+        };
+        for r in &self.roles {
+            check("a bone role", r.joint)?;
+        }
+        for d in &self.twists {
+            check("a twist driver", d.joint)?;
+            check("a twist driver's source", d.source)?;
+        }
+        for f in &self.ik_follow {
+            check("an IK follow", f.joint)?;
+            check("an IK follow's source", f.source)?;
+        }
+        for g in &self.grips {
+            check("a grip affordance", g.hand)?;
+        }
         Ok(self)
+    }
+
+    /// **The v2 → v3 rung.** See the type's docs: the four appended tables mean
+    /// on a v2 rig exactly what "empty" means, so this is a pure default-fill and
+    /// an honest migration rather than a guess.
+    ///
+    /// v1 is deliberately absent. It falls through to the current shape, fails, and
+    /// `decode` turns that into `SchemaTooOld` with this type's own remedy — the
+    /// behaviour P24.1 chose, which this rung does not change.
+    fn migrates_from(v: u32) -> bool {
+        v == 2
+    }
+
+    fn decode_wire(bytes: &[u8], found: Option<u32>) -> inf_asset::Result<Self> {
+        if found == Some(2) {
+            let old: skel_v2::SkeletonAsset = inf_asset::decode_shape(bytes)
+                .map_err(|e| inf_asset::AssetError::Decode(format!("v2 skeleton: {e}")))?;
+            return Ok(old.into_current());
+        }
+        inf_asset::decode_shape(bytes)
+    }
+}
+
+/// **The frozen schema-v2 `.inf_skel` record** — the shape before SK1a appended
+/// the role, twist, IK-follow and grip tables and grew [`JointLimit`] a cone.
+///
+/// Ladder-local and declared field-for-field rather than derived from the live
+/// types, which is the whole point: a shape built by asking today's encoder what it
+/// emits reproduces the right bytes and pins nothing, because it moves whenever the
+/// encoder does. This says what v2 *was*, so the day someone appends a fifth table
+/// without a bump, the arms below stop matching real bytes.
+pub(crate) mod skel_v2 {
+    use serde::{Deserialize, Serialize};
+
+    use crate::skeleton::Skeleton;
+    use crate::sockets::Socket;
+
+    /// v2's `JointLimit`: three fields, no cone.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct JointLimit {
+        pub joint: u16,
+        pub min_deg: [f32; 3],
+        pub max_deg: [f32; 3],
+    }
+
+    impl JointLimit {
+        fn into_current(self) -> crate::template::JointLimit {
+            crate::template::JointLimit {
+                joint: self.joint,
+                min_deg: self.min_deg,
+                max_deg: self.max_deg,
+                cone: None,
+            }
+        }
+
+        /// The v2 projection of a current limit — the encoder half, so the arms
+        /// below can write v2 bytes from a v3 value.
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub fn from_current(l: &crate::template::JointLimit) -> Self {
+            Self {
+                joint: l.joint,
+                min_deg: l.min_deg,
+                max_deg: l.max_deg,
+            }
+        }
+    }
+
+    /// v2's payload: four fields.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct SkeletonAsset {
+        pub schema_version: u32,
+        pub skeleton: Skeleton,
+        pub sockets: Vec<Socket>,
+        pub limits: Vec<JointLimit>,
+    }
+
+    impl SkeletonAsset {
+        /// Lift to the current shape: the four tables a v2 rig did not have are
+        /// empty, which is what a v2 rig meant.
+        pub fn into_current(self) -> super::SkeletonAsset {
+            super::SkeletonAsset {
+                schema_version: super::SkeletonAsset::CURRENT_VERSION,
+                skeleton: self.skeleton,
+                sockets: self.sockets,
+                limits: self
+                    .limits
+                    .into_iter()
+                    .map(JointLimit::into_current)
+                    .collect(),
+                roles: Vec::new(),
+                twists: Vec::new(),
+                ik_follow: Vec::new(),
+                grips: Vec::new(),
+            }
+        }
+
+        /// The v2 projection of a current asset.
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub fn from_current(a: &super::SkeletonAsset) -> Self {
+            Self {
+                schema_version: 2,
+                skeleton: a.skeleton.clone(),
+                sockets: a.sockets.clone(),
+                limits: a.limits.iter().map(JointLimit::from_current).collect(),
+            }
+        }
     }
 }
 
@@ -598,7 +791,7 @@ mod tests {
     use crate::skeleton::{Joint, JointTransform};
     use glam::{Mat4, Quat};
     use inf_asset::{decode, encode};
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
 
     fn skel() -> Skeleton {
         Skeleton::new(vec![
@@ -634,7 +827,7 @@ mod tests {
     fn skeleton_asset_limits_round_trip() {
         use crate::template::JointLimit;
         let mut a = SkeletonAsset::new(skel());
-        assert_eq!(a.schema_version, 2);
+        assert_eq!(a.schema_version, 3);
         assert!(a.limits.is_empty(), "an unlimited rig lists nothing");
         a.limits = vec![JointLimit::hinge_x(1, -150.0, 0.0)];
         let e1 = encode(&a).unwrap();
@@ -658,15 +851,19 @@ mod tests {
         sockets: Vec<Socket>,
     }
 
-    /// The **v2 wire shape**, positionally — the twin
+    /// The **v3 wire shape**, positionally — the twin
     /// `the_wire_shape_is_pinned_field_for_field` decodes a real encoding
     /// through.
     #[derive(Deserialize)]
-    struct SkeletonAssetV2Wire {
+    struct SkeletonAssetV3Wire {
         schema_version: u32,
         skeleton: Skeleton,
         sockets: Vec<Socket>,
         limits: Vec<JointLimit>,
+        roles: Vec<crate::roles::BoneRole>,
+        twists: Vec<crate::roles::TwistDriver>,
+        ik_follow: Vec<crate::roles::IkFollow>,
+        grips: Vec<crate::roles::GripAffordance>,
     }
 
     fn v1_bytes() -> Vec<u8> {
@@ -751,17 +948,18 @@ mod tests {
     ///    see, because it was built by asking the encoder what it emitted.
     #[test]
     fn the_wire_shape_is_pinned_field_for_field() {
-        let mut want = SkeletonAsset::with_sockets(skel(), vec![Socket::new("hand_r", 1)]);
-        want.limits = vec![JointLimit::hinge_x(1, -150.0, 0.0)];
+        let mut want = v3_asset();
+        want.grips = vec![crate::roles::GripAffordance::new("rifle", 1, 0.04)];
+
         let bytes = encode(&want).unwrap();
 
-        let (wire, consumed): (SkeletonAssetV2Wire, usize) =
+        let (wire, consumed): (SkeletonAssetV3Wire, usize) =
             bincode::serde::decode_from_slice(&bytes, inf_asset::bincode_config())
-                .expect("the v2 shape decodes the v2 wire");
+                .expect("the v3 shape decodes the v3 wire");
         assert_eq!(
             consumed,
             bytes.len(),
-            "the encoding carries bytes the pinned four-field shape does not \
+            "the encoding carries bytes the pinned eight-field shape does not \
              account for — a field was appended to `SkeletonAsset` without \
              bumping `CURRENT_VERSION`"
         );
@@ -769,6 +967,208 @@ mod tests {
         assert_eq!(wire.skeleton, want.skeleton);
         assert_eq!(wire.sockets, want.sockets);
         assert_eq!(wire.limits, want.limits);
+        assert_eq!(wire.roles, want.roles);
+        assert_eq!(wire.twists, want.twists);
+        assert_eq!(wire.ik_follow, want.ik_follow);
+        assert_eq!(wire.grips, want.grips);
+    }
+
+    /// A v3 asset carrying **something in every table**, so a rung that dropped
+    /// one has a value to lose.
+    fn v3_asset() -> SkeletonAsset {
+        use crate::roles::{BoneRole, BoneRoleKind, BoneSide, IkFollow, TwistDriver};
+        let mut a = SkeletonAsset::with_sockets(skel(), vec![Socket::new("hand_r", 1)]);
+        a.limits = vec![
+            JointLimit::hinge_x(1, -150.0, 0.0).with_cone(crate::ConeLimit {
+                axis: [0.0, 1.0, 0.0],
+                swing_deg: 35.0,
+                twist_deg: [-10.0, 10.0],
+            }),
+        ];
+        a.roles = vec![
+            BoneRole::new(0, BoneRoleKind::Root, BoneSide::Center),
+            BoneRole::new(1, BoneRoleKind::Hand, BoneSide::Right),
+        ];
+        a.twists = vec![TwistDriver::new(1, 0, [1.0, 0.0, 0.0], -2.0 / 3.0)];
+        a.ik_follow = vec![IkFollow::new(1, 0)];
+        a
+    }
+
+    /// **The schema-v2 wire shape**, spelled out ladder-locally — the shadow the
+    /// v2 → v3 rung decodes through.
+    #[derive(Serialize, Deserialize)]
+    struct SkeletonAssetV2Wire {
+        schema_version: u32,
+        skeleton: Skeleton,
+        sockets: Vec<Socket>,
+        limits: Vec<JointLimitV2Wire>,
+    }
+
+    /// v2's `JointLimit`: three fields, no cone.
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct JointLimitV2Wire {
+        joint: u16,
+        min_deg: [f32; 3],
+        max_deg: [f32; 3],
+    }
+
+    fn v2_bytes() -> Vec<u8> {
+        bincode::serde::encode_to_vec(
+            &SkeletonAssetV2Wire {
+                schema_version: 2,
+                skeleton: skel(),
+                sockets: vec![Socket::new("hand_r", 1)],
+                limits: vec![JointLimitV2Wire {
+                    joint: 1,
+                    min_deg: [-150.0, 0.0, 0.0],
+                    max_deg: [0.0, 0.0, 0.0],
+                }],
+            },
+            inf_asset::bincode_config(),
+        )
+        .unwrap()
+    }
+
+    /// **The v2 → v3 rung**: a v2 rig decodes, keeps everything it had, and gains
+    /// four empty tables and an absent cone — which is what a v2 rig meant.
+    #[test]
+    fn a_v2_skeleton_migrates_and_its_tables_arrive_empty() {
+        let lifted: SkeletonAsset = decode(&v2_bytes()).expect("v2 migrates to v3");
+        assert_eq!(lifted.schema_version, 3, "the stamp is lifted too");
+        assert_eq!(lifted.skeleton, skel());
+        assert_eq!(lifted.sockets, vec![Socket::new("hand_r", 1)]);
+        assert_eq!(lifted.limits.len(), 1);
+        assert_eq!(lifted.limits[0].min_deg, [-150.0, 0.0, 0.0]);
+        assert!(lifted.limits[0].cone.is_none(), "v2 authored no cone");
+        assert!(lifted.roles.is_empty());
+        assert!(lifted.twists.is_empty());
+        assert!(lifted.ik_follow.is_empty());
+        assert!(lifted.grips.is_empty());
+        // …and the lifted value behaves as a v3 one: `role_index` answers nothing,
+        // which is the fallback signal every reader keys on.
+        assert!(lifted.role_index().is_empty());
+    }
+
+    /// **The frozen v2 record is the shape v2 actually wrote.**
+    ///
+    /// The rung's shadow struct (`asset::skel_v2`) and this test's independent
+    /// spelling of the same shape must agree byte for byte. Two spellings, because
+    /// a shadow derived from the live encoder pins nothing.
+    #[test]
+    fn the_frozen_v2_skeleton_record_is_the_shape_v2_actually_wrote() {
+        let current = v3_asset();
+        let projected = super::skel_v2::SkeletonAsset::from_current(&current);
+        let a = bincode::serde::encode_to_vec(&projected, inf_asset::bincode_config()).unwrap();
+        let b = bincode::serde::encode_to_vec(
+            &SkeletonAssetV2Wire {
+                schema_version: 2,
+                skeleton: current.skeleton.clone(),
+                sockets: current.sockets.clone(),
+                limits: current
+                    .limits
+                    .iter()
+                    .map(|l| JointLimitV2Wire {
+                        joint: l.joint,
+                        min_deg: l.min_deg,
+                        max_deg: l.max_deg,
+                    })
+                    .collect(),
+            },
+            inf_asset::bincode_config(),
+        )
+        .unwrap();
+        assert_eq!(a, b, "the ladder's v2 shadow is not the v2 wire");
+        // The cone really is what v3 added inside `JointLimit`: a v2 encoding of a
+        // rig WITH a cone is strictly shorter than the v3 one.
+        let v3 = encode(&current).unwrap();
+        assert!(a.len() < v3.len());
+    }
+
+    /// **v3 costs a byte per limit even with no cone authored**, so the rung is
+    /// not free and a "v2 is a prefix of v3" shortcut cannot be taken.
+    #[test]
+    fn the_cone_costs_a_discriminant_on_every_limit() {
+        let mut plain = SkeletonAsset::new(skel());
+        plain.limits = vec![JointLimit::hinge_x(1, -150.0, 0.0)];
+        let v3 = encode(&plain).unwrap();
+        let v2 = bincode::serde::encode_to_vec(
+            &super::skel_v2::SkeletonAsset::from_current(&plain),
+            inf_asset::bincode_config(),
+        )
+        .unwrap();
+        // One `Option` tag on the limit, plus four empty `Vec` length prefixes.
+        assert_eq!(
+            v3.len(),
+            v2.len() + 5,
+            "v3 = {} v2 = {}",
+            v3.len(),
+            v2.len()
+        );
+        // And the v2 bytes do NOT decode as v3 without the rung — which is the
+        // whole reason `decode_wire` exists.
+        assert!(
+            bincode::serde::decode_from_slice::<SkeletonAssetV3Wire, _>(
+                &v2,
+                inf_asset::bincode_config()
+            )
+            .is_err(),
+            "a v2 payload decoded straight into the v3 shape"
+        );
+    }
+
+    /// **A side table naming a joint the rig does not have is refused at the
+    /// door**, by name.
+    ///
+    /// Not a panic anywhere — every reader bounds-checks — which is exactly why it
+    /// needs catching here: the failure it produces downstream is a twist that
+    /// never drives and a role lookup that finds nothing, both silent.
+    #[test]
+    fn a_side_table_naming_a_joint_the_rig_lacks_is_refused() {
+        use crate::roles::{BoneRole, BoneRoleKind, BoneSide, IkFollow, TwistDriver};
+        let cases: Vec<(&str, Box<dyn Fn(&mut SkeletonAsset)>)> = vec![
+            (
+                "a bone role",
+                Box::new(|a: &mut SkeletonAsset| {
+                    a.roles = vec![BoneRole::new(9, BoneRoleKind::Head, BoneSide::Center)]
+                }),
+            ),
+            (
+                "a twist driver",
+                Box::new(|a: &mut SkeletonAsset| {
+                    a.twists = vec![TwistDriver::new(9, 0, [1.0, 0.0, 0.0], 0.5)]
+                }),
+            ),
+            (
+                "a twist driver's source",
+                Box::new(|a: &mut SkeletonAsset| {
+                    a.twists = vec![TwistDriver::new(1, 9, [1.0, 0.0, 0.0], 0.5)]
+                }),
+            ),
+            (
+                "an IK follow",
+                Box::new(|a: &mut SkeletonAsset| a.ik_follow = vec![IkFollow::new(9, 0)]),
+            ),
+            (
+                "a grip affordance",
+                Box::new(|a: &mut SkeletonAsset| {
+                    a.grips = vec![crate::roles::GripAffordance::new("g", 9, 0.04)]
+                }),
+            ),
+        ];
+        for (what, mutate) in cases {
+            let mut a = SkeletonAsset::new(skel());
+            mutate(&mut a);
+            let err = decode::<SkeletonAsset>(&encode(&a).unwrap())
+                .expect_err("a row past the end of the rig must be refused");
+            let msg = err.to_string();
+            assert!(msg.contains(what), "{what}: {msg}");
+            assert!(msg.contains("2-joint skeleton"), "{what}: {msg}");
+        }
+        // …and the in-range twin decodes, so the arm above is not just "any table
+        // is refused".
+        let mut ok = SkeletonAsset::new(skel());
+        ok.roles = vec![BoneRole::new(1, BoneRoleKind::Head, BoneSide::Center)];
+        assert!(decode::<SkeletonAsset>(&encode(&ok).unwrap()).is_ok());
     }
 
     #[test]

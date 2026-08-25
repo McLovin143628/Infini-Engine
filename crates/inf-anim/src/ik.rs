@@ -1071,6 +1071,7 @@ mod tests {
             joint,
             min_deg: [0.0, 0.0, min_deg],
             max_deg: [0.0, 0.0, max_deg],
+            cone: None,
         }
     }
 
@@ -1190,6 +1191,7 @@ mod tests {
             joint: 1,
             min_deg: [0.0; 3],
             max_deg: [0.0; 3],
+            cone: None,
         };
         solve_chain(
             &sk,
@@ -1223,6 +1225,7 @@ mod tests {
             joint: 1,
             min_deg: [0.0, -10.0, 0.0],
             max_deg: [150.0, 10.0, 0.0],
+            cone: None,
         };
         let mut free = Pose::rest(&sk);
         solve_chain(&sk, &mut free, &[0, 1, 2], target, pole, &[]).unwrap();
@@ -1258,6 +1261,7 @@ mod tests {
             joint: 1,
             min_deg: [30.0, 0.0, 0.0],
             max_deg: [-30.0, 0.0, 0.0],
+            cone: None,
         };
         let r = solve_chain(&sk, &mut b, &[0, 1, 2], target, None, &[backwards]).unwrap();
         assert!(b

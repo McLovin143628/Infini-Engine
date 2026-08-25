@@ -722,22 +722,19 @@ mod tests {
     fn the_facts_come_off_the_derived_clip() {
         let tiers = ProposalOptions::default().gait_speeds_mps;
         let sk = crate::template::build_template(
-            crate::template::BodyPlan::Biped,
+            crate::template::BodyPlan::BipedCanonical,
             &crate::template::BodyParams::default(),
         )
         .unwrap();
         let set = crate::locomotion::build_locomotion(
-            crate::template::BodyPlan::Biped,
+            crate::template::BodyPlan::BipedCanonical,
             &sk,
             &crate::locomotion::GaitParams::default(),
         )
         .unwrap();
-        let (walk, report) = crate::derive::derive_clip(
-            &set.walk,
-            &sk.skeleton,
-            &crate::derive::DeriveOptions::default(),
-        )
-        .unwrap();
+        let (walk, report) =
+            crate::derive::derive_clip(&set.walk, &sk, &crate::derive::DeriveOptions::default())
+                .unwrap();
         let f = facts_of("Walk", [1u8; 16], &walk, tiers);
         assert_eq!(f.plants, report.plants.len());
         assert!(f.is_cycle(), "a generated walk cycles: {f:?}");
@@ -767,7 +764,7 @@ mod tests {
             gait_speeds_mps: [0.6, 1.4, 2.4],
             ..crate::derive::DeriveOptions::default()
         };
-        let (scaled, _) = crate::derive::derive_clip(&set.walk, &sk.skeleton, &slow).unwrap();
+        let (scaled, _) = crate::derive::derive_clip(&set.walk, &sk, &slow).unwrap();
         assert!(
             facts_of("Walk", [1u8; 16], &scaled, slow.gait_speeds_mps).tier() >= 1,
             "against a ladder this creature's size it is a walk"

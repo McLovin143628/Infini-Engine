@@ -46,7 +46,7 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 25] = [
+const SIM_PATH: [(&str, &str, &str); 28] = [
     // ── P29.6's text form, for the same reason the two below it are here ──
     //
     // It is not on the *runtime* path at all — it is an authoring door — and it
@@ -174,6 +174,21 @@ const SIM_PATH: [(&str, &str, &str); 25] = [
         "locomotion.rs",
         include_str!("../src/locomotion.rs"),
         "the P24.5 generator writes the KEYFRAMES of a committed `.inf_anim`, which is a strictly stronger claim than the rest of this list: everything above produces values that ride state_bytes for one session, and this produces bytes that go on disk, into a cook, into a pack, and are compared by a golden. `Quat::from_rotation_x` is `f32::sin_cos`, so the whole clip is written out through the half-angle identity by hand",
+    ),
+    (
+        "drive.rs",
+        include_str!("../src/drive.rs"),
+        "SK1a's procedural drive writes twist and IK-handle transforms straight into the pose the layer stack produced, one call above the IK this list already certifies, and every one of them is folded into pose_state_bytes and compared between the editor's PIE and the shipped player",
+    ),
+    (
+        "manny.rs",
+        include_str!("../src/manny.rs"),
+        "the 161-bone generator writes the BIND POSE of a committed `.inf_skel` — locomotion.rs's stronger claim, applied to the rig those keyframes are indexed against, and the reason its arms are a T-pose of pure axis offsets rather than the A-pose the shipped mannequin stands in",
+    ),
+    (
+        "roles.rs",
+        include_str!("../src/roles.rs"),
+        "the role table decides which joints the drive, the ragdoll and the weight solver touch at all, so a transcendental here would move which bones move",
     ),
     (
         "inf_player::runtime_sim",

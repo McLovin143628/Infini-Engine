@@ -554,7 +554,7 @@ mod tests {
     /// spine alone — the property a weight swap rests on.
     #[test]
     fn the_mirror_map_pairs_a_real_biped() {
-        let sk = build_template(BodyPlan::Biped, &BodyParams::default()).unwrap();
+        let sk = build_template(BodyPlan::BipedCanonical, &BodyParams::default()).unwrap();
         let map = mirror_joint_map(&sk.skeleton);
         assert!(unmatched_sided_joints(&sk.skeleton).is_empty());
 
