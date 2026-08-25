@@ -530,3 +530,128 @@ fn the_island_is_anchored_in_utm_zone_10n_with_north_at_minus_z() {
         a.vertical_datum
     );
 }
+
+/// A **scratch copy** of the fixture: the recipe and its layers in a temp
+/// directory, with `[source] cache` pointed back at the committed tiles.
+///
+/// Any arm that exercises a build option which *writes* has to run here, because
+/// the committed fixture is source: an arm that ran `planning_pass()` against
+/// `samples/island-fixture` would rewrite the repository's own committed design
+/// as a side effect of `cargo test`.
+fn scratch_fixture(tmp: &Path) -> PathBuf {
+    let src = fixture_dir();
+    std::fs::create_dir_all(tmp.join("layers")).expect("the scratch layers directory");
+    for f in [
+        "coast.geojson",
+        "roads.geojson",
+        "streams.geojson",
+        "lakes.geojson",
+        "biomes.geojson",
+    ] {
+        std::fs::copy(src.join("layers").join(f), tmp.join("layers").join(f))
+            .unwrap_or_else(|e| panic!("copy layers/{f}: {e}"));
+    }
+    let cache = src.join("tiles");
+    let text = std::fs::read_to_string(src.join("island.toml"))
+        .expect("the fixture recipe reads")
+        .replace(
+            "cache = \"tiles\"",
+            &format!("cache = {:?}", cache.display().to_string()),
+        );
+    let path = tmp.join("island.toml");
+    std::fs::write(&path, text).expect("the scratch recipe writes");
+    path
+}
+
+/// **A ROAD RE-PLAN LEAVES THE COMMITTED WATER DESIGN ALONE.**
+///
+/// `inf island route` runs [`BuildOptions::planning_pass`], and that pass carried
+/// `rederive_layers: true` — so a verb whose subject is the road network
+/// overwrote the committed **stream and lake** layers as well, silently. An
+/// author who moved a reach and then re-routed the roads lost the reach. That is
+/// the hazard `BuildOptions::rederive_layers`'s own doc names.
+///
+/// Both halves are here, because the fix must not cost the first run: an island
+/// with no derived water yet still gets it written.
+#[test]
+fn a_road_replan_leaves_the_committed_water_design_alone() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let path = scratch_fixture(tmp.path());
+    let r = IslandRecipe::load(&path).expect("the scratch recipe loads");
+    let streams = tmp.path().join("layers/streams.geojson");
+    let lakes = tmp.path().join("layers/lakes.geojson");
+
+    // The author's edit: a reach they renamed by hand. Anything in the file
+    // would do — the point is that it is not what a derivation would produce.
+    let edited = std::fs::read_to_string(&streams)
+        .expect("the scratch streams read")
+        .replacen("\"Reach 0\"", "\"The Author's Own Reach\"", 1);
+    assert!(
+        edited.contains("The Author's Own Reach"),
+        "the fixture's stream layer has no `Reach 0` to edit — this arm is \
+         measuring nothing"
+    );
+    std::fs::write(&streams, &edited).expect("the edit writes");
+    let lakes_before = std::fs::read(&lakes).expect("the scratch lakes read");
+
+    let b = inf_island::build_island(&r, &BuildOptions::planning_pass())
+        .expect("the planning pass runs");
+    assert!(!b.routes.is_empty(), "the planning pass planned no road");
+    println!(
+        "REPLAN: {} route(s) planned, {} reach(es) read back",
+        b.routes.len(),
+        b.network.streams.len()
+    );
+
+    // Compared as booleans rather than with `assert_eq!`: these layers are tens
+    // of kilobytes and a failure that dumps both copies buries its own message.
+    let after = std::fs::read_to_string(&streams).expect("re-read");
+    assert!(
+        after == edited,
+        "`inf island route` rewrote the committed stream layer — an author's \
+         edit lasted exactly until the next re-route. The renamed reach is {} \
+         after the pass ({} bytes before, {} after)",
+        if after.contains("The Author's Own Reach") {
+            "still named, but the bytes moved"
+        } else {
+            "GONE"
+        },
+        edited.len(),
+        after.len()
+    );
+    assert!(
+        std::fs::read(&lakes).expect("re-read") == lakes_before,
+        "`inf island route` rewrote the committed lake layer ({} bytes before)",
+        lakes_before.len()
+    );
+    // …and the road layer, which IS this verb's subject, was written.
+    let roads = std::fs::read_to_string(tmp.path().join("layers/roads.geojson"))
+        .expect("the roads layer reads");
+    assert!(
+        roads.contains("Fixture Town"),
+        "{}",
+        &roads[..80.min(roads.len())]
+    );
+
+    // **The first run still derives.** With no committed water at all the same
+    // pass writes both layers, so the fix costs a new island nothing.
+    std::fs::remove_file(&streams).expect("remove the streams");
+    std::fs::remove_file(&lakes).expect("remove the lakes");
+    let b2 = inf_island::build_island(&r, &BuildOptions::planning_pass())
+        .expect("the planning pass runs on a fresh island");
+    assert!(
+        streams.exists() && lakes.exists(),
+        "a fresh island got no water"
+    );
+    assert!(
+        !b2.network.streams.is_empty() && !b2.network.lakes.is_empty(),
+        "a fresh island derived {} reach(es) and {} lake(s)",
+        b2.network.streams.len(),
+        b2.network.lakes.len()
+    );
+    println!(
+        "FRESH: {} reach(es) / {} lake(s) derived and written",
+        b2.network.streams.len(),
+        b2.network.lakes.len()
+    );
+}

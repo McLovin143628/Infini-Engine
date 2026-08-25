@@ -76,11 +76,29 @@ pub struct BuildOptions {
 }
 
 impl BuildOptions {
-    /// The planning half of `inf island route`: derive the design, write it, and
-    /// build none of the heavy halves.
+    /// The planning half of `inf island route`: plan the ROAD network, write its
+    /// layer, and build none of the heavy halves.
+    ///
+    /// # `rederive_layers` is off, and it was not
+    ///
+    /// It was `true`, which made `inf island route` — a verb whose whole subject
+    /// is the road network — silently overwrite the committed **stream and lake**
+    /// layers as well. That is exactly the hazard [`BuildOptions::rederive_layers`]
+    /// names two fields up: *"a build that silently rewrote them every run would
+    /// make an author's edit last exactly until the next build"*. An author who
+    /// moved a reach and then re-routed the roads lost the reach, with nothing
+    /// said.
+    ///
+    /// Nothing is given up by turning it off. The write in
+    /// [`build_island`] fires on `rederive_layers || !streams.exists() ||
+    /// !lakes.exists()`, so a first run on an island that has no derived water
+    /// yet still writes it; a later run reads what is committed — which is the
+    /// same water the *second* pass will read, so the two passes now plan and
+    /// audit against one ground instead of two.
+    /// Re-deriving on purpose is `rederive_layers: true` spelled out.
     pub fn planning_pass() -> Self {
         Self {
-            rederive_layers: true,
+            rederive_layers: false,
             replan_roads: true,
             dry_run: true,
         }
