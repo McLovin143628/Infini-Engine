@@ -776,7 +776,7 @@ pub fn build_character(
                 if let Some(s) = summary.as_ref() {
                     if s.unreached > 0 {
                         warnings.push(format!(
-                            "{} of the generated body's vertices could not see a deform                              bone and kept the root's weights",
+                            "{} of the generated body's vertices could not see a deform bone and kept the root's weights",
                             s.unreached
                         ));
                     }
@@ -789,13 +789,36 @@ pub fn build_character(
             }
         },
     };
+    // ── the skin (SK1b) ────────────────────────────────────────────────────
+    //
+    // Written **before** the body and named as one of its dependencies, which is
+    // the engine's own material binding for a mesh: the glTF importer resolves a
+    // material and records its GUID in the mesh asset's sidecar the same way
+    // (`AssetProject::write_asset`'s `dependencies`). The mesh's own
+    // `material_slots` carries the slot name `body_mesh` authored, so the two
+    // halves — which slot, and which material — are both on disk.
+    //
+    // **Honest bound**: `SkeletalMesh` carries a mesh and a skeleton and no
+    // material, so nothing in the skinned draw path reads this yet. It is here
+    // because a character whose body has no material at all is a character an
+    // author has to make one for before they can change its colour, and because
+    // the binding it *would* need is a component field and not this file's to add.
+    let material = write_one(
+        project,
+        &mut written,
+        &dir,
+        &format!("{name} Skin"),
+        &starter_skin_material(),
+        Vec::new(),
+        None,
+    )?;
     let mesh = write_one(
         project,
         &mut written,
         &dir,
         &format!("{name} Body"),
         &body,
-        vec![skeleton],
+        vec![skeleton, material],
         // **Not the body.** Its skin stream is index-aligned to the rig's joints
         // and it is the same staleness class — but `skeleton_binding` scans
         // `AnimClip | StateMachine` only, so recording a hash here would write a
@@ -873,7 +896,7 @@ pub fn build_character(
     // this use since P29.2 and nothing had built it.
     if author_aim_mask(&mut machine_model, &rig) {
         proposal_notes.push(format!(
-            "an upper-body blend profile `{AIM_MASK}` was authored over {} joints,              so an aim offset or a reload can play on the upper body alone",
+            "an upper-body blend profile `{AIM_MASK}` was authored over {} joints, so an aim offset or a reload can play on the upper body alone",
             machine_model
                 .profiles
                 .last()
@@ -1059,6 +1082,22 @@ fn export_advisories(r: &inf_dcc::ExportReport) -> Vec<String> {
 ///
 /// The [`inf_dcc::ExportReport`] comes back with it rather than being dropped:
 /// see [`export_advisories`].
+/// **The starter character's skin material** (SK1b).
+///
+/// A neutral matte dielectric — the shade a grey-box mannequin is, deliberately,
+/// because a starter body is a thing you *replace* and a saturated one reads as a
+/// decision somebody made. Metallic zero and roughness 0.62: skin is not metal
+/// and is not a mirror, and the two numbers are what make it shade like a surface
+/// rather than like a flat colour.
+pub fn starter_skin_material() -> inf_material::MaterialAsset {
+    inf_material::MaterialAsset {
+        base_color: [0.62, 0.58, 0.55, 1.0],
+        metallic: 0.0,
+        roughness: 0.62,
+        ..Default::default()
+    }
+}
+
 /// The name of the upper-body mask every generated character carries (SK1b).
 ///
 /// ALS's own spelling, because that is what every ported animation graph names.
@@ -2206,6 +2245,31 @@ mod tests {
             }
         }
         println!("{skinned} skinned vertices, {on_root} on a bone that deforms nothing");
+        // **The skin material** (SK1b): a real `.inf_mat` beside the body and
+        // named as one of its dependencies, which is the engine's own material
+        // binding for a mesh — the glTF importer records a resolved material's
+        // GUID in the mesh's sidecar exactly this way.
+        let deps = p
+            .db()
+            .references_of(out.mesh)
+            .expect("the body has a sidecar")
+            .to_vec();
+        let material = deps
+            .iter()
+            .find(|d| p.db().get(**d).map(|e| e.kind()) == Some(AssetKind::Material))
+            .copied()
+            .expect("the body names a material");
+        assert!(
+            deps.contains(&out.skeleton),
+            "the body lost its rig dependency"
+        );
+        let mat: inf_material::MaterialAsset = p.load_payload(material).expect("it loads");
+        assert_eq!(mat, starter_skin_material());
+        assert_eq!(
+            body.material_slots,
+            vec!["Skin".to_string()],
+            "the body carries no named slot for it"
+        );
         assert!(skinned > 1_000, "the body carries only {skinned} skin rows");
         assert_eq!(
             on_root, 0,
@@ -2691,9 +2755,11 @@ mod tests {
             },
         )
         .expect("the second build succeeds");
-        // **Seven**, not six: P29.6 added the `.inf_act` controller §13's gap
-        // list said the wizard emitted none of.
-        assert_eq!(p.db().len(), 7);
+        // **Eight**, not seven: P29.6 added the `.inf_act` controller §13's gap
+        // list said the wizard emitted none of, and SK1b added the body's own
+        // `.inf_mat` — a character whose skin has no material at all is one an
+        // author has to make one for before they can change its colour.
+        assert_eq!(p.db().len(), 8);
         let sm: StateMachineAsset = p.load_payload(out.machine).unwrap();
         assert_eq!(sm.machine.states.len(), 3);
         // …and the three text files are beside them, which is the whole of the
@@ -2951,7 +3017,7 @@ mod tests {
             all_ms = all_ms.min(t.elapsed().as_secs_f64() * 1000.0);
         }
         println!(
-            "starter body: {} vertices / {} triangles; generate {gen_ms:.2} ms,              generate + bind + heat-solve {all_ms:.2} ms over {} deform bones of {}",
+            "starter body: {} vertices / {} triangles; generate {gen_ms:.2} ms, generate + bind + heat-solve {all_ms:.2} ms over {} deform bones of {}",
             counts.0,
             counts.1,
             deform,

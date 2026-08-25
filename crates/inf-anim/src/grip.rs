@@ -1518,4 +1518,77 @@ mod tests {
             }
         }
     }
+
+    /// **What a gripping hand costs on the fixed step**, measured rather than
+    /// argued — the SK1a audit's own finding about the drive pass, which was
+    /// "argued, not measured", not repeated here.
+    ///
+    /// `hand_of` is the part that could be a problem: it walks the skeleton once
+    /// per digit chain and this engine now hands it 161-joint rigs, and it runs
+    /// **per gripping hand per posed character per fixed step** because nothing
+    /// caches it. So the number is taken and printed, and the assertion is a
+    /// ceiling against one 60 Hz frame with its slack named.
+    #[test]
+    fn a_gripping_hand_is_priced_against_a_frame() {
+        use std::time::Instant;
+        let asset = manny();
+        let sk = &asset.skeleton;
+        let roles = asset.role_index();
+        let wrist = roles
+            .first(BoneRoleKind::Hand, BoneSide::Right)
+            .expect("a hand");
+
+        let mut derive_us = f64::MAX;
+        let mut curl_us = f64::MAX;
+        let mut reach_us = f64::MAX;
+        let hand = hand_of(sk, roles, wrist).expect("a hand");
+        let grip = GripAffordance {
+            name: "g".into(),
+            hand: wrist,
+            palm: crate::JointTransform::IDENTITY,
+            aperture_m: 0.035,
+            curl: [1.0; 5],
+        };
+        let chain = arm_chain(sk, roles, BoneSide::Right).expect("an arm");
+        for _ in 0..5 {
+            let t = Instant::now();
+            let h = hand_of(sk, roles, wrist).expect("a hand");
+            derive_us = derive_us.min(t.elapsed().as_secs_f64() * 1.0e6);
+            assert_eq!(h.digit_count(), 5);
+
+            let mut pose = Pose::rest(sk);
+            let t = Instant::now();
+            apply_grip(sk, &mut pose, &hand, &asset.limits, &grip, 1.0);
+            curl_us = curl_us.min(t.elapsed().as_secs_f64() * 1.0e6);
+
+            let mut pose = Pose::rest(sk);
+            let t = Instant::now();
+            reach(
+                sk,
+                &mut pose,
+                chain,
+                Vec3::new(0.2, 1.2, 0.4),
+                &asset.limits,
+            )
+            .expect("solved");
+            reach_us = reach_us.min(t.elapsed().as_secs_f64() * 1.0e6);
+        }
+        println!(
+            "one gripping hand on a 161-bone rig: derive {derive_us:.1} us, curl {curl_us:.1} us, \
+             arm reach {reach_us:.1} us — against a 16 667 us frame"
+        );
+        // A ceiling, not a performance claim: a debug CI runner is an order of
+        // magnitude slower than this, and 1 ms is still a sixteenth of a frame
+        // for ONE hand. It is a tripwire against an accidental O(J^2).
+        for (what, us) in [
+            ("the hand derivation", derive_us),
+            ("the curl", curl_us),
+            ("the arm reach", reach_us),
+        ] {
+            assert!(
+                us < 1_000.0,
+                "{what} took {us} us per hand per step, which is not a fixed-step cost"
+            );
+        }
+    }
 }

@@ -196,7 +196,7 @@ pub fn body_mesh(rig: &SkeletonAsset, opts: &BodyOptions) -> Result<(Mesh, BodyR
         shells: 0,
     };
 
-    torso(&mut mesh, &mut b, skeleton, roles, &at, h, opts)?;
+    torso(&mut mesh, &mut b, roles, &at, h, opts)?;
     head(&mut mesh, &mut b, roles, &at, h, opts)?;
     for side in [BoneSide::Left, BoneSide::Right] {
         arm(&mut mesh, &mut b, roles, &at, h, side, opts)?;
@@ -293,7 +293,6 @@ fn chain_of(roles: RoleIndex<'_>, kind: BoneRoleKind, side: BoneSide) -> Vec<u16
 fn torso(
     mesh: &mut Mesh,
     b: &mut Build,
-    skeleton: &Skeleton,
     roles: RoleIndex<'_>,
     at: &[DVec3],
     h: f64,
@@ -370,7 +369,6 @@ fn torso(
             joint: last,
         });
     }
-    let _ = skeleton;
     sweep(mesh, b, &rings, opts.torso_segments, Cap::Flat, Cap::Flat)
 }
 
@@ -552,12 +550,6 @@ fn hand(
         // is the honest answer rather than a guessed-at mitten.
         return Ok(());
     };
-    let palm_in = DVec3::new(
-        geometry.palm_in[0] as f64,
-        geometry.palm_in[1] as f64,
-        geometry.palm_in[2] as f64,
-    );
-
     // The palm: from the wrist to the far end of the metacarpals, flattened
     // along the palm normal. The knuckle line's own extent decides its width,
     // so a broad hand gets a broad palm.
@@ -672,7 +664,6 @@ fn hand(
             Cap::Flat,
             Cap::Point(tip),
         )?;
-        let _ = palm_in;
     }
     Ok(())
 }
