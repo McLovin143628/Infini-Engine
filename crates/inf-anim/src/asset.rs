@@ -65,7 +65,9 @@ use crate::template::JointLimit;
 /// bincode is positional, so a v2 payload is *not* a prefix of a v3 one — four
 /// `Vec` length prefixes are missing, and `JointLimit` grew inside a `Vec` in the
 /// middle of the stream — and `#[serde(default)]` cannot rescue a short read. The
-/// frozen [`skel_v2::SkeletonAsset`] shape below is what reads those bytes.
+/// frozen `skel_v2::SkeletonAsset` shape below is what reads those bytes (not a
+/// link: the module is private, and a public doc that links into it is a rustdoc
+/// warning this wave declined to add).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkeletonAsset {
     pub schema_version: u32,

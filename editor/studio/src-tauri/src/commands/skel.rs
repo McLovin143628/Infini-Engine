@@ -695,8 +695,14 @@ pub async fn skel_fit_to_mesh(
 mod tests {
     use super::*;
 
+    /// The twenty-joint canonical-vocabulary rig (SK1a). These arms are about
+    /// the DTO's `canonical` and `sided_without_twin` flags, which are defined
+    /// against `humanoid_joint_names()` — so the fixture has to be the rig that
+    /// vocabulary is defined by. `BodyPlan::Biped` is the mannequin now, and on
+    /// it every one of 161 bones is non-canonical, which would make these
+    /// assertions measure the badge rather than the joint.
     fn biped() -> SkeletonAsset {
-        build_template(BodyPlan::Biped, &BodyParams::default()).unwrap()
+        build_template(BodyPlan::BipedCanonical, &BodyParams::default()).unwrap()
     }
 
     /// **A refusal through the funnel restores the session** (G2).

@@ -172,9 +172,7 @@ pub async fn anim_clip_info(
     // not** (P29.5 audit, A2). `DerivedNames` is what a re-derive would actually
     // replace, so the badge and the button agree; `is_derived_curve` is the
     // vocabulary question, which is all a clip bound to no skeleton can be asked.
-    let owned = rig
-        .as_ref()
-        .map(|r| inf_anim::DerivedNames::of_skeleton(&r));
+    let owned = rig.as_ref().map(inf_anim::DerivedNames::of_skeleton);
     let derived_name = |n: &str| match &owned {
         Some(o) => o.curves.contains(n),
         None => inf_anim::derive::is_derived_curve(n),
