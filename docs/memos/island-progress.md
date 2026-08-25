@@ -4929,6 +4929,11 @@ per-hand aperture cannot.
 | `24f2fec2` | the grip gate: three things held, one of them let go of |
 | `69016b88` | the ledger, and the route clause 5 did not take |
 | `7eb912dc` | the twenty-first chr(92) catch, and it was mine |
+| `e014b9b3` | the gates the wave has to pass, and the nine doc links it added |
+
+**Nine** commits, not the eight this table names: a ledger row cannot name the
+commit that writes it, which is the convention SK1a's own table follows and the
+trap it fell into first time.
 
 **The twenty-first chr(92) catch, and it was this wave's own.** Three `format!`
 literals in `character.rs` carried eaten continuations — written from a non-raw
