@@ -83,7 +83,16 @@ impl GridSpec {
         f64::from(self.tiles) * self.tile_span_m()
     }
 
-    /// Half the world square's edge — the coordinate of its east and south edges.
+    /// Half the world square's edge.
+    ///
+    /// **Not the coordinate of its east and south edges when `tiles` is odd.**
+    /// The world is laid out on integer level-0 tile coordinates starting at
+    /// `IslandGrid::tile0 = -(tiles / 2)`, and an odd count cannot be centred on
+    /// an integer boundary — so the world's real corners are
+    /// [`IslandGrid::bounds`](crate::IslandGrid::bounds), which sit half a tile
+    /// span east and south of `±half_extent_m`. Everything that decides *where
+    /// the world is* — the site check, the source plan, the carve — reads
+    /// `bounds()`; this is the plain arithmetic, for a report.
     pub fn half_extent_m(&self) -> f64 {
         self.extent_m() * 0.5
     }
@@ -566,6 +575,12 @@ impl IslandRecipe {
                 )));
             }
         }
+        // **The world's REAL corners**, not `±half_extent_m`. The two differ by
+        // half a tile span whenever `tiles` is odd, because the grid is laid out
+        // on integer tile coordinates from `-(tiles / 2)` — so a recipe with an
+        // odd tile count admitted sites on ground the build never makes, and the
+        // source plan asked for tiles the world does not reach.
+        let (lo, hi) = crate::IslandGrid::of(self).bounds();
         for s in &self.sites {
             if !(s.x.is_finite() && s.z.is_finite() && s.radius_m.is_finite()) {
                 return Err(IslandError::Settings(format!(
@@ -573,13 +588,12 @@ impl IslandRecipe {
                     s.name
                 )));
             }
-            let half = self.grid.half_extent_m();
-            if s.x.abs() > half || s.z.abs() > half {
+            if s.x < lo.x || s.x > hi.x || s.z < lo.y || s.z > hi.y {
                 return Err(IslandError::Settings(format!(
                     "site {:?} is at ({:.1}, {:.1}) which is outside the world's \
-                     own ±{half:.1} m — a road to it would leave the terrain and \
+                     own [{:.1}, {:.1}] — a road to it would leave the terrain and \
                      the drape would take the centreline's own elevation",
-                    s.name, s.x, s.z
+                    s.name, s.x, s.z, lo.x, hi.x
                 )));
             }
         }
@@ -750,7 +764,7 @@ beach_m = 25.0
             .to_string()
             .contains("beach_wdith_m"));
 
-        // A site outside the world is refused with the world's own half extent.
+        // A site outside the world is refused with the world's own corners.
         let outside = bad(&|r| {
             r.sites.push(Site {
                 name: "Nowhere".into(),
@@ -763,6 +777,80 @@ beach_m = 25.0
         assert!(
             outside.contains("256.0") && outside.contains("Nowhere"),
             "{outside}"
+        );
+    }
+
+    /// **AN ODD TILE COUNT IS NOT CENTRED, AND THE DOORS THAT DECIDE WHERE THE
+    /// WORLD IS NOW SAY SO.**
+    ///
+    /// `IslandGrid` lays the world out on integer level-0 tile coordinates from
+    /// `-(tiles / 2)`, which cannot be centred when `tiles` is odd — the world
+    /// sits half a tile span east and south of `±half_extent_m`. The site check
+    /// and the source plan both measured the *centred* square, so an odd recipe
+    /// admitted sites on ground the build never makes and asked the provider for
+    /// tiles the world does not reach.
+    ///
+    /// Un-fix mutation: put `self.grid.half_extent_m()` back in `validate` and
+    /// the west site below is admitted; put it back in `plan_tiles` and the
+    /// planned longitude band no longer reaches the world's own east edge.
+    #[test]
+    fn an_odd_tile_count_is_measured_where_the_world_actually_is() {
+        let base = Path::new("/tmp/x");
+        let mut r = IslandRecipe::parse(&tiny_recipe_text(), base).unwrap();
+        r.grid.tiles = 5; // 5 x 256 m; tile0 = -2, so the world is [-512, 768]
+        let (lo, hi) = crate::IslandGrid::of(&r).bounds();
+        assert_eq!((lo.x, hi.x), (-512.0, 768.0));
+        assert_eq!(
+            r.grid.half_extent_m(),
+            640.0,
+            "the plain arithmetic is still the plain arithmetic"
+        );
+
+        // West of the world's own edge, INSIDE the centred square: admitted
+        // before, refused now, and the message names the real interval.
+        let mut west = r.clone();
+        west.sites.push(Site {
+            name: "West".into(),
+            kind: SiteKind::Town,
+            x: -600.0,
+            z: 0.0,
+            radius_m: 10.0,
+        });
+        let e = west.validate().unwrap_err().to_string();
+        assert!(
+            e.contains("West") && e.contains("-512.0") && e.contains("768.0"),
+            "{e}"
+        );
+        // East of the centred square but inside the world: refused before,
+        // admitted now.
+        let mut east = r.clone();
+        east.sites.push(Site {
+            name: "East".into(),
+            kind: SiteKind::Town,
+            x: 700.0,
+            z: 0.0,
+            radius_m: 10.0,
+        });
+        east.validate().expect("700 m east is inside [-512, 768]");
+
+        // …and the source plan covers the world rather than the centred square:
+        // the east edge's own longitude is inside the planned band.
+        let plan = crate::plan_tiles(&r).expect("an odd recipe plans");
+        let anchor = r.anchor().unwrap();
+        let tf = inf_gis::Transform::new("EPSG:4326", &anchor).unwrap();
+        let (east_lon, _, _) = tf.to_source(glam::DVec3::new(hi.x, 0.0, 0.0)).unwrap();
+        let (west_lon, _, _) = tf.to_source(glam::DVec3::new(lo.x, 0.0, 0.0)).unwrap();
+        println!(
+            "ODD GRID: world [{:.0}, {:.0}], plan lon {:.6}..{:.6}, edges \
+             {west_lon:.6} / {east_lon:.6}",
+            lo.x, hi.x, plan.lon.0, plan.lon.1
+        );
+        assert!(
+            plan.lon.0 <= west_lon && plan.lon.1 >= east_lon,
+            "the plan's longitude band {:.6}..{:.6} does not reach the world's \
+             own edges {west_lon:.6}..{east_lon:.6}",
+            plan.lon.0,
+            plan.lon.1
         );
     }
 

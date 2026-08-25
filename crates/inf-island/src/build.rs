@@ -124,17 +124,31 @@ pub struct IslandBuild {
 }
 
 impl IslandBuild {
-    /// The world position the report calls the player start: the first city
-    /// site, lifted onto its own ground.
+    /// The world position the report calls the player start.
+    ///
+    /// # ONE DOOR
+    ///
+    /// This used to take the elevation from the **built terrain** while the level
+    /// took it from the **committed road layer** ([`player_start`]) — two answers
+    /// to one question, and `inf island build` printed the one nothing spawns at.
+    /// The terrain's answer is not available to the level by construction (the
+    /// level is authored from committed design alone, and the terrain is a build
+    /// artifact of one machine), so the road door is the one that survives and
+    /// this delegates to it. `the_reported_start_is_the_one_the_level_spawns_at`
+    /// keeps them the same answer and prints the gap the two used to have.
     pub fn player_start(&self) -> DVec3 {
-        let s = self
-            .recipe
-            .sites_of(crate::recipe::SiteKind::City)
-            .next()
-            .or_else(|| self.recipe.sites.first());
-        let p = s.map(|s| DVec2::new(s.x, s.z)).unwrap_or(DVec2::ZERO);
-        let y = self.terrain.height_at(p).unwrap_or(0.0);
-        DVec3::new(p.x, y, p.y)
+        player_start(&self.recipe, &self.routes, 0.0)
+    }
+
+    /// The elevation the **terrain** carries under the reported start.
+    ///
+    /// Not the start — see [`IslandBuild::player_start`] — but the number worth
+    /// printing beside it, because a large gap between the road layer's planned
+    /// ground and the built terrain's is the corridor levelling or the channel
+    /// carve having moved the ground since the route was planned.
+    pub fn ground_under_start(&self) -> Option<f64> {
+        let s = self.player_start();
+        self.terrain.height_at(DVec2::new(s.x, s.z))
     }
 
     /// Which steps ran, in order.

@@ -655,3 +655,68 @@ fn a_road_replan_leaves_the_committed_water_design_alone() {
         b2.network.lakes.len()
     );
 }
+
+/// **THE REPORTED START IS THE ONE THE LEVEL SPAWNS AT.**
+///
+/// `inf island build` prints a `start` line. It came from
+/// `IslandBuild::player_start`, which read the **built terrain**; the level's own
+/// hero comes from `IslandDesign::start`, which reads the **committed road
+/// layer**. Two doors onto one question, and the command printed the one nothing
+/// spawns at.
+///
+/// The road door is the one that survives: the level is authored from committed
+/// design alone, so the terrain's answer is not available to it by construction.
+/// This asserts the two doors are now the same answer, and prints the gap they
+/// used to have — which is also a useful number in its own right, because it is
+/// the corridor levelling and the channel carve having moved the ground under a
+/// route since it was planned.
+#[test]
+fn the_reported_start_is_the_one_the_level_spawns_at() {
+    let b = build();
+    let reported = b.player_start();
+    let design = inf_island::read_design(&b.recipe).expect("the committed design reads");
+    let level = design.start(0.0);
+    println!(
+        "START: report ({:.3}, {:.3}, {:.3}), level ({:.3}, {:.3}, {:.3}); the \
+         terrain under it is {:?}",
+        reported.x,
+        reported.y,
+        reported.z,
+        level.x,
+        level.y,
+        level.z,
+        b.ground_under_start()
+            .map(|h| (h * 1000.0).round() / 1000.0)
+    );
+    assert_eq!(
+        reported, level,
+        "the build reports one start and the level spawns at another"
+    );
+    // …and the gap the old door had, as a number rather than a claim.
+    let ground = b
+        .ground_under_start()
+        .expect("the reported start is on the terrain");
+    println!(
+        "START GAP: the road layer plans {:.3} m and the built terrain carries \
+         {:.3} m — {:.3} m apart",
+        level.y,
+        ground,
+        (ground - level.y).abs()
+    );
+    // A sanity bound rather than a pin: past a few metres the corridor levelling
+    // has moved the ground out from under its own route.
+    assert!(
+        (ground - level.y).abs() < 5.0,
+        "the committed road vertex nearest the start is {:.3} m from the ground \
+         the build put there",
+        (ground - level.y).abs()
+    );
+    assert!(
+        level.y > b.recipe.sea.level_m,
+        "the start is under the waterline"
+    );
+    // The lift is added on top, and it is the only difference the level makes.
+    let lifted = design.start(2.5);
+    assert_eq!(lifted.y - level.y, 2.5);
+    assert_eq!((lifted.x, lifted.z), (level.x, level.z));
+}

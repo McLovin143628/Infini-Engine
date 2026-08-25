@@ -161,18 +161,24 @@ const PERIMETER_SAMPLES: u32 = 64;
 pub fn plan_tiles(recipe: &IslandRecipe) -> Result<TilePlan, IslandError> {
     let anchor = recipe.anchor()?;
     let tf = inf_gis::Transform::new("EPSG:4326", &anchor)?;
-    let half = recipe.grid.half_extent_m();
+    // **The grid's own corners**, not `±half_extent_m`: the two differ by half a
+    // tile span when `tiles` is odd (the world sits on integer tile coordinates
+    // from `-(tiles / 2)`), and a plan drawn round the wrong square leaves a
+    // strip of the world with no source — which the carve turns into ocean, with
+    // nothing said beyond a nodata count.
+    let (lo, hi) = crate::IslandGrid::of(recipe).bounds();
 
     let (mut lon0, mut lon1) = (f64::INFINITY, f64::NEG_INFINITY);
     let (mut lat0, mut lat1) = (f64::INFINITY, f64::NEG_INFINITY);
     for i in 0..=PERIMETER_SAMPLES {
         let f = f64::from(i) / f64::from(PERIMETER_SAMPLES);
-        let t = -half + 2.0 * half * f;
+        let tx = lo.x + (hi.x - lo.x) * f;
+        let tz = lo.y + (hi.y - lo.y) * f;
         for p in [
-            glam::DVec3::new(t, 0.0, -half),
-            glam::DVec3::new(t, 0.0, half),
-            glam::DVec3::new(-half, 0.0, t),
-            glam::DVec3::new(half, 0.0, t),
+            glam::DVec3::new(tx, 0.0, lo.y),
+            glam::DVec3::new(tx, 0.0, hi.y),
+            glam::DVec3::new(lo.x, 0.0, tz),
+            glam::DVec3::new(hi.x, 0.0, tz),
         ] {
             let (lon, lat, _) = tf.to_source(p)?;
             lon0 = lon0.min(lon);
