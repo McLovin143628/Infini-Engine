@@ -41,11 +41,14 @@ inf export --project samples/<name> --out /tmp/<name>-dist
 | [`phase19-town`](phase19-town/) | **P19 (the phase gate)** | The composed town: a **biome-painted** terrain, a **spline road** with a solid grammar fence, twelve streamed street lamps on a 128 m partition, and **seven fully enterable, furnished, three-storey buildings — one per archetype** (office, apartment, industrial, house, estate, hotel, shop). |
 | [`phase20-coastal`](phase20-coastal/) | **P20 (the phase gate)** | The composed coast: an **ocean** with swell, a **head lake** in a dug basin 33.6 m up, a **spline river** running the valley between them, eight buoyant crates at ascending densities, and a swimmer that surfaces. |
 | [`phase21-cavern`](phase21-cavern/) | **P21 (the phase gate)** | The composed workings: a **carved cave system** whose mouth is a real hole in an **asset-backed** heightfield, an **excavated foundation pit** with its exactly-conserved **spoil heap**, an **underground room** under the pit, and a Blueprint **borer** that keeps digging at runtime. |
+| [`starter-character`](starter-character/) | SK1c | **The engine's starter character** — the eight assets the New Character wizard writes for its own defaults, on the 161-bone mannequin. Scaffolded into every 3D project by `ProjectTemplate::starter_content`, and the island's hero. Not a level: it is content. |
 
 ## Project templates
 
 The New Project gallery (and `inf new --template <slug>`) scaffolds from four templates:
-`blank-3d`, `2d-platformer`, `first-person`, and `hybrid-2.5d`. The `hybrid-2.5d` starter scene
+`blank-3d`, `2d-platformer`, `first-person`, and `hybrid-2.5d`. The three 3D templates also
+scaffold [`starter-character`](starter-character/) into `Content/Characters/`, so a new project
+has a rigged, animated character in it before its author has opened a wizard. The `hybrid-2.5d` starter scene
 is committed under [`../templates/hybrid-2.5d/`](../templates/hybrid-2.5d/); the others scaffold a
 clean cargo crate + `inf.toml` + empty `Content`/`Levels`.
 

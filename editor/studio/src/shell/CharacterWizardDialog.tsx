@@ -139,6 +139,18 @@ export default function CharacterWizardDialog() {
           {/* ── 1. plan ─────────────────────────────────────────────────── */}
           {step === "plan" && (
             <div className="grid grid-cols-2 gap-2">
+              {/* SK1c: the engine SHIPS a character now, and the first thing an
+                  author needs to know here is that they may not need this
+                  dialog at all. `Characters/Starter` is this wizard's own output
+                  for the Biped defaults — `samples/starter-character`, scaffolded
+                  into every 3D project by `ProjectTemplate::starter_content` and
+                  byte-locked against `build_character`. */}
+              <div className="col-span-2 rounded border border-(--ink-border) bg-(--ink-bg-0) px-3 py-2 text-(--ink-text-dim)">
+                Every 3D project already ships{" "}
+                <span className="text-(--ink-text)">Characters/Starter</span> — this
+                wizard&apos;s own Biped output at its defaults. Use this dialog for a{" "}
+                <em>different</em> character.
+              </div>
               {PLANS.map((p) => (
                 <button
                   key={p.id}

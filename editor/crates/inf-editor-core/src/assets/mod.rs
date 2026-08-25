@@ -174,9 +174,49 @@ impl AssetProject {
         dependencies: Vec<AssetId>,
         import: Option<toml::Table>,
     ) -> Result<AssetId> {
+        self.write_asset_with_id(dir, name, payload, None, source, dependencies, import)
+    }
+
+    /// [`write_asset`](Self::write_asset), with the **GUID supplied** (SK1c).
+    ///
+    /// # What this is for, and what it is not
+    ///
+    /// It is for a generator whose output is **committed to the repository**. The
+    /// New Character wizard writes eight assets that name each other by GUID —
+    /// the mesh's skin binding, every clip's `skeleton` field, the machine's clip
+    /// references — so a character built twice with minted ids is two different
+    /// files, and a committed one could never be byte-locked against the door
+    /// that produced it. `samples/starter-character` is built through the wizard's
+    /// own `build_character_with_ids` for exactly that reason: one generator, and
+    /// a re-bless that reproduces the bytes.
+    ///
+    /// It is **not** a general-purpose id door. Every interactive path mints, and
+    /// must: two assets sharing a GUID is a database whose reverse edges lie, and
+    /// nothing here checks for a collision because the only legitimate caller is
+    /// one that owns its whole content root.
+    ///
+    /// `None` is exactly [`write_asset`](Self::write_asset).
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_asset_with_id<T: AssetPayload>(
+        &mut self,
+        dir: &Path,
+        name: &str,
+        payload: &T,
+        id: Option<AssetId>,
+        source: Option<String>,
+        dependencies: Vec<AssetId>,
+        import: Option<toml::Table>,
+    ) -> Result<AssetId> {
         let bytes = inf_asset::encode(payload)?;
         let hash = ContentHash::of(&bytes);
-        let id = AssetId::new();
+        // Spelled as a `match` for `register_written_asset`'s reason: `AssetId`'s
+        // `default()` is the NIL "no asset" sentinel and `new()` mints a v4, so
+        // `unwrap_or_default()` — which is what clippy rewrites the closure form
+        // into — silently writes every asset under the nil GUID.
+        let id = match id {
+            Some(fixed) => fixed,
+            None => AssetId::new(),
+        };
         let ext = T::KIND.extension().expect("payload kinds have extensions");
         let path = unique_path(dir, name, ext)?;
         // Atomic (C4-27): a crash between a plain payload write and its sidecar

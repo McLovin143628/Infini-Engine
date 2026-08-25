@@ -1,0 +1,9 @@
+schema_version = 1
+guid = "00000000-0000-0000-0000-00005c1000a3"
+kind = "anim_clip"
+content_hash = "b3e78e7253aa3fa745fcb0d822b4d365"
+dependencies = ["00000000-0000-0000-0000-00005c1000a0"]
+tags = []
+
+[import]
+skeleton_content_hash = "8d06c1ee52aefc4a17b3208621463dc2"

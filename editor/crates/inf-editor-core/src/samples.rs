@@ -10322,6 +10322,188 @@ pub fn write_gameplay() -> Result<(), String> {
     Ok(())
 }
 
+// -- the starter character (SK1c) -------------------------------------------
+
+/// The repo-root `samples/starter-character/` directory.
+pub fn starter_character_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/starter-character")
+}
+
+/// What the committed starter character is called -- the prefix on every one of
+/// its files, and the name a level that spawns it shows in the Outliner.
+pub const STARTER_CHARACTER_NAME: &str = "Starter";
+
+/// **The starter character's eight asset GUIDs**, fixed so the committed bytes
+/// are reproducible.
+///
+/// A character's assets name each other by GUID, so a build with minted ids is a
+/// different set of files every time and nothing committed could be locked
+/// against the door that wrote it. See
+/// [`crate::character::build_character_with_ids`].
+pub fn starter_character_ids() -> crate::character::CharacterIds {
+    let id = |n: u128| Some(inf_asset::AssetId(Uuid::from_u128(0x5C10_00a0 + n)));
+    crate::character::CharacterIds {
+        skeleton: id(0),
+        material: id(1),
+        mesh: id(2),
+        idle: id(3),
+        walk: id(4),
+        run: id(5),
+        machine: id(6),
+        actor: id(7),
+    }
+}
+
+/// **The spec the New Character wizard opens with**, and therefore what ships.
+///
+/// `CharacterSpec::default()` with a name on it, and that is the whole point:
+/// the committed starter character is not a shape tuned to look good in a
+/// screenshot, it is *what an author gets by pressing the button*. If the
+/// wizard's defaults move, this moves with them and the bless re-writes the
+/// folder -- which is the loud version of a starter asset going stale.
+///
+/// `BodyPlan::Biped` has been the 161-bone mannequin since SK1a, so this is a
+/// full rig with hands, twist bones, IK handles, a role table and (since SK1c) a
+/// grip catalogue.
+pub fn starter_character_spec() -> crate::character::CharacterSpec {
+    crate::character::CharacterSpec {
+        name: STARTER_CHARACTER_NAME.to_string(),
+        ..Default::default()
+    }
+}
+
+/// **Build the starter character and hand back every file it wrote**, as
+/// `(file name, bytes)` sorted by name, **with the advisories the wizard
+/// reported**.
+///
+/// # One generator, and this is it
+///
+/// Every other sample in this file is written by a pure generator that mirrors
+/// what a tool would produce, with `the_showcase_character_matches_the_wizard_door`
+/// standing between the mirror and the tool. A character is too big for a mirror
+/// -- eight assets, a heat solve, a derivation and a proposal -- so this one does
+/// not mirror anything: it runs the **wizard's own door** into a scratch project
+/// and copies the result out. The committed bytes are literally
+/// `build_character`'s output, and the byte lock is therefore a lock on the
+/// wizard rather than on a copy of it.
+///
+/// # The advisories come back with it
+///
+/// The wizard reports what it could not do perfectly, and this build reports
+/// one: 35 of the generated body's vertices cannot see a deform bone (SK1b's
+/// measurement -- caps buried inside a neighbouring shell) and keep their seed
+/// bone through the generator's rigid prior, which is the right answer.
+/// Swallowing it here would make a *new* advisory invisible, and refusing on it
+/// would make the folder unbuildable for a bound the engine already carries by
+/// name -- so it is handed back, and
+/// `the_starter_character_builds_clean_and_reproducibly` pins the whole list by
+/// content.
+///
+/// The scratch directory is removed on the way out, including on failure.
+#[allow(clippy::type_complexity)]
+pub fn starter_character_files() -> Result<(Vec<(String, Vec<u8>)>, Vec<String>), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let scratch = std::env::temp_dir().join(format!(
+        "inf-starter-character-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    // A stale directory from a killed run would put `unique_path` on
+    // `Starter (1).inf_skel` and quietly produce a different file set.
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch dir: {e}"))?;
+    let out = starter_character_into(&scratch);
+    let _ = std::fs::remove_dir_all(&scratch);
+    out
+}
+
+/// The half of [`starter_character_files`] that can fail, so the scratch
+/// directory is removed on both paths.
+#[allow(clippy::type_complexity)]
+fn starter_character_into(
+    scratch: &std::path::Path,
+) -> Result<(Vec<(String, Vec<u8>)>, Vec<String>), String> {
+    let mut project =
+        crate::assets::AssetProject::open(scratch).map_err(|e| format!("scratch project: {e}"))?;
+    let build = crate::character::build_character_with_ids(
+        &mut project,
+        &starter_character_spec(),
+        &starter_character_ids(),
+    )
+    .map_err(|e| format!("the starter character does not build: {e}"))?;
+    let dir = scratch.join(crate::character::CHARACTER_FOLDER);
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| format!("read scratch: {e}"))? {
+        let entry = entry.map_err(|e| format!("read scratch: {e}"))?;
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let bytes = std::fs::read(entry.path()).map_err(|e| format!("read {name}: {e}"))?;
+        files.push((name, bytes));
+    }
+    // `read_dir` order is the filesystem's, and on NTFS that is not the sort
+    // order (the P26 finding). The committed set is compared name by name, so it
+    // is sorted here rather than at every reader.
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok((files, build.warnings))
+}
+
+/// Write the committed starter character.
+pub fn write_starter_character() -> Result<(), String> {
+    let dir = starter_character_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    let (files, _advisories) = starter_character_files()?;
+    // Anything the generator no longer writes goes, so a renamed asset does not
+    // leave its predecessor behind for the sidecar scan to promote.
+    for entry in std::fs::read_dir(&dir).map_err(|e| format!("read samples dir: {e}"))? {
+        let entry = entry.map_err(|e| format!("read samples dir: {e}"))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "README.md" || files.iter().any(|(n, _)| *n == name) {
+            continue;
+        }
+        if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            std::fs::remove_file(entry.path()).map_err(|e| format!("remove {name}: {e}"))?;
+        }
+    }
+    for (name, bytes) in &files {
+        std::fs::write(dir.join(name), bytes).map_err(|e| format!("write {name}: {e}"))?;
+    }
+    std::fs::write(dir.join("README.md"), STARTER_CHARACTER_README)
+        .map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
+const STARTER_CHARACTER_README: &str = concat!(
+    "# Starter character\n",
+    "\n",
+    "**The engine's committed starter character** - the exact eight assets the\n",
+    "New Character wizard writes for its own default spec, on the 161-bone\n",
+    "mannequin (`BodyPlan::Biped`).\n",
+    "\n",
+    "| file | what it is |\n",
+    "|---|---|\n",
+    "| `Starter.inf_skel` | the rig: 161 bones, role table, twist drivers, IK handles, hand cones and the grip catalogue |\n",
+    "| `Starter Body.inf_mesh` | the generated body, heat-weighted onto the rig |\n",
+    "| `Starter Skin.inf_mat` | a neutral matte dielectric, named as the body's material dependency |\n",
+    "| `Starter Idle/Walk/Run.inf_anim` | the generated, **derived** cycles |\n",
+    "| `Starter Locomotion.inf_sm` | the machine proposed from what the derivation measured, with the `Mask_AimOffset` upper-body profile on it |\n",
+    "| `Starter Locomotion.inf_sm.txt` | its reviewable text face |\n",
+    "| `Starter Controller.inf_act` | the Blueprint class the character binds |\n",
+    "| `camera.toml` / `input.toml` | the camera table and the bindings |\n",
+    "\n",
+    "Two things ship it: `ProjectTemplate::starter_content` scaffolds it into\n",
+    "every new 3D project, and `samples/island*/island.toml` names it under\n",
+    "`[content]` so the island's hero is this character rather than a capsule.\n",
+    "\n",
+    "Generated - do not hand-edit. Regenerate with:\n",
+    "\n",
+    "```sh\n",
+    "INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples\n",
+    "```\n",
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10689,6 +10871,9 @@ mod tests {
             write_phase22_playground().expect("regenerate phase22 playground");
             write_phase23_workshop().expect("regenerate phase23 workshop");
             write_phase29_locomotion().expect("regenerate phase29 locomotion");
+            // Before the island: the island's hero IS this character, and its
+            // levels name these eight GUIDs.
+            write_starter_character().expect("regenerate the starter character");
             write_city().expect("regenerate the island city");
             write_gameplay().expect("regenerate the island gameplay fixture");
             crate::island::write_island_levels().expect("regenerate the island levels");
@@ -11349,6 +11534,237 @@ mod tests {
                 "committed {slug}Cover.inf_pcg drifted from the generator"
             );
         }
+
+        // The starter character (SK1c). Every file, not a representative one --
+        // phase29's rule, and here it is load-bearing twice over: eight assets
+        // name each other by GUID, so a drift in one sidecar is a dangling
+        // reference in another file rather than a diff you can read; and the
+        // island's hero binds three of these GUIDs, so a silent regeneration is
+        // a level that boots with no rig.
+        let scdir = starter_character_dir();
+        if scdir.join("Starter.inf_skel").exists() {
+            let (want, _) = starter_character_files().expect("the starter character builds");
+            let mut have: Vec<String> = std::fs::read_dir(&scdir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n != "README.md")
+                .collect();
+            have.sort();
+            let names: Vec<String> = want.iter().map(|(n, _)| n.clone()).collect();
+            assert_eq!(
+                have, names,
+                "the committed starter character is not the file SET the wizard \
+                 writes -- an extra file here is one the asset scan promotes \
+                 under a minted GUID, and a missing one is a dangling reference"
+            );
+            for (name, bytes) in &want {
+                assert_eq!(
+                    &std::fs::read(scdir.join(name)).unwrap(),
+                    bytes,
+                    "committed starter-character {name} drifted from the wizard"
+                );
+            }
+            assert_eq!(
+                std::fs::read_to_string(scdir.join("README.md")).unwrap(),
+                STARTER_CHARACTER_README,
+                "committed starter-character README drifted from the generator"
+            );
+        } else {
+            eprintln!("SKIP: the starter character has not been blessed yet");
+        }
+    }
+
+    /// **The starter character builds, builds CLEAN, and builds the same twice.**
+    ///
+    /// Three claims the byte lock above cannot make on its own:
+    ///
+    /// * it builds at all from the wizard's *default* spec, on the 161-bone
+    ///   mannequin -- which is the rig `build_locomotion` addresses by name, so
+    ///   this is the arm that goes red the day a bone is renamed;
+    /// * it builds with **no warnings**. The wizard reports advisories (vertices
+    ///   that could not see a bone, joints outside the mesh, a cycle that could
+    ///   not be measured) and a committed starter asset carrying one is a
+    ///   warning nobody will ever read. `starter_character_into` refuses on a
+    ///   non-empty list; this is what makes the refusal visible as a test rather
+    ///   than as a bless that mysteriously fails;
+    /// * it is **reproducible**. The whole committed folder rests on the build
+    ///   being a pure function of the spec and the ids -- a heat solve, a
+    ///   derivation and a proposal all in the middle of it -- and nothing else
+    ///   in the tree checks that. Two builds, compared file by file.
+    #[test]
+    fn the_starter_character_builds_clean_and_reproducibly() {
+        let (a, warnings) = starter_character_files().expect("the starter character builds");
+        let (b, _) = starter_character_files().expect("the starter character builds twice");
+        // **The advisory list, pinned by content.** Exactly one, and it is
+        // SK1b's carried bound rather than something new: 35 of the generated
+        // body's 795 kernel vertices are caps buried inside a neighbouring
+        // shell, so the visibility oracle cannot reach them and they keep the
+        // bone the generator seeded them with -- which is right. Pinned by
+        // CONTENT and not by count, because a count of one says nothing about
+        // which one, and asserted rather than allowed-to-be-empty, because "no
+        // warnings" could only be bought by silencing this one.
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("35 of the generated body's vertices"),
+            "the starter character's advisory changed: {warnings:?}"
+        );
+        assert_eq!(
+            a.len(),
+            19,
+            "expected eight payloads, eight sidecars and three text files, got {:?}",
+            a.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            a, b,
+            "two builds of the same spec under the same ids produced different \
+             bytes -- the committed folder cannot be re-blessed"
+        );
+        // The eight GUIDs really landed: a sidecar is TOML, so the id is
+        // readable, and a build that quietly minted its own would still produce
+        // two identical runs only by luck.
+        let ids = starter_character_ids();
+        for (slot, file) in [
+            (ids.skeleton, "Starter.inf_skel.toml"),
+            (ids.material, "Starter_Skin.inf_mat.toml"),
+            (ids.mesh, "Starter_Body.inf_mesh.toml"),
+            (ids.idle, "Starter_Idle.inf_anim.toml"),
+            (ids.walk, "Starter_Walk.inf_anim.toml"),
+            (ids.run, "Starter_Run.inf_anim.toml"),
+            (ids.machine, "Starter_Locomotion.inf_sm.toml"),
+            (ids.actor, "Starter_Controller.inf_act.toml"),
+        ] {
+            let want = slot.expect("every starter id is fixed").0.to_string();
+            let text = a
+                .iter()
+                .find(|(n, _)| n == file)
+                .map(|(_, b)| String::from_utf8_lossy(b).into_owned())
+                .unwrap_or_else(|| panic!("no sidecar {file}"));
+            assert!(
+                text.contains(&want),
+                "{file} does not carry the fixed GUID {want}:\n{text}"
+            );
+        }
+    }
+
+    /// **The committed starter character IS what the wizard opens with.**
+    ///
+    /// The sentence the whole folder rests on, and the one a byte lock cannot
+    /// make: `samples/starter-character` is not a curated shape, it is the
+    /// output of pressing New Character and accepting every default. So the
+    /// spec it is built from is asserted to be `CharacterSpec::default()` field
+    /// by field, with the name as the single deliberate difference.
+    ///
+    /// When the wizard's defaults move, this stays green and the byte lock goes
+    /// red — which is the right pair: the folder is re-blessed, and the diff is
+    /// the new default character rather than a silent staleness.
+    #[test]
+    fn the_starter_character_is_what_the_wizard_opens_with() {
+        let spec = starter_character_spec();
+        let d = crate::character::CharacterSpec::default();
+        assert_eq!(
+            spec.plan, d.plan,
+            "the starter character is not the default body plan"
+        );
+        assert_eq!(
+            spec.params, d.params,
+            "the starter proportions are not the defaults"
+        );
+        assert_eq!(spec.gait, d.gait, "the starter gait is not the default");
+        assert_eq!(
+            spec.mesh, d.mesh,
+            "the starter character fits a supplied mesh"
+        );
+        assert_eq!(
+            spec.plan,
+            inf_anim::BodyPlan::Biped,
+            "the wizard's default plan is no longer the mannequin, so the \
+             committed starter character is not a 161-bone rig"
+        );
+        assert_ne!(
+            spec.name, d.name,
+            "the only difference from the default spec should be the name"
+        );
+        assert_eq!(spec.name, STARTER_CHARACTER_NAME);
+    }
+
+    /// **The starter character is a RIG, not a puppet** -- the properties the
+    /// island's hero and the New Character wizard both depend on.
+    ///
+    /// A byte lock says the bytes did not move. It says nothing about whether
+    /// they were ever right, and this folder ships as the answer to "what does a
+    /// character in this engine look like", so the answer is asserted.
+    #[test]
+    fn the_starter_character_is_the_mannequin_with_everything_on_it() {
+        let (files, _) = starter_character_files().expect("the starter character builds");
+        let payload = |name: &str| {
+            files
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, b)| b.clone())
+                .unwrap_or_else(|| panic!("no {name}"))
+        };
+        let rig: inf_anim::SkeletonAsset =
+            inf_asset::decode(&payload("Starter.inf_skel")).expect("the committed rig decodes");
+        assert_eq!(
+            rig.skeleton.len(),
+            161,
+            "the starter rig is not the mannequin"
+        );
+        assert_eq!(rig.roles.len(), 161, "a rig with no role table guesses");
+        assert!(!rig.twists.is_empty(), "no twist drivers");
+        assert!(!rig.ik_follow.is_empty(), "no IK handles to follow");
+        assert!(
+            !rig.grips.is_empty(),
+            "the starter rig carries no grip catalogue, so nothing it picks up \
+             can close a hand on it"
+        );
+        // The hand solver's two prerequisites, asserted where the asset is
+        // rather than three passes downstream where the symptom is "the fingers
+        // did not move".
+        let roles = rig.role_index();
+        for side in [inf_anim::BoneSide::Left, inf_anim::BoneSide::Right] {
+            let hand = roles
+                .first(inf_anim::BoneRoleKind::Hand, side)
+                .unwrap_or_else(|| panic!("no {side:?} hand role"));
+            assert!(
+                inf_anim::hand_of(&rig.skeleton, roles, hand).is_some(),
+                "the {side:?} hand has no derivable digits"
+            );
+            assert!(
+                inf_anim::arm_chain(&rig.skeleton, roles, side).is_some(),
+                "the {side:?} arm has no solvable chain"
+            );
+        }
+
+        let body: inf_mesh::MeshAsset = inf_asset::decode(&payload("Starter_Body.inf_mesh"))
+            .expect("the committed body decodes");
+        assert!(
+            body.submeshes.iter().all(|m| m.is_skinned()),
+            "a submesh of the starter body carries no skin stream, so it does              not deform"
+        );
+        assert!(
+            !body.material_slots.is_empty(),
+            "the starter body names no material slot"
+        );
+
+        let machine: inf_anim::StateMachineAsset =
+            inf_asset::decode(&payload("Starter_Locomotion.inf_sm"))
+                .expect("the committed machine decodes");
+        assert!(
+            machine.machine.states.len() >= 3,
+            "a locomotion machine with fewer than three states is not one"
+        );
+        assert!(
+            machine
+                .machine
+                .profiles
+                .iter()
+                .any(|p| p.name == crate::character::AIM_MASK),
+            "the starter machine carries no `{}` profile",
+            crate::character::AIM_MASK
+        );
     }
 
     /// **The city's graph really cuts blocks into lots** (IB-2c), checked at the

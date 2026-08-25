@@ -197,6 +197,42 @@ pub struct WeightSummary {
     pub worst_residual: f64,
 }
 
+/// **The GUIDs a character's assets are written under**, when a caller needs
+/// them fixed (SK1c).
+///
+/// `None` mints, which is what every interactive path wants;
+/// [`CharacterIds::MINTED`] is all-`None` and is what [`build_character`] passes.
+/// See [`build_character_with_ids`] for why the fixed case exists — in one
+/// sentence: a character's eight assets name each other by GUID, so a committed
+/// one has to be reproducible.
+///
+/// The field order is the write order, which is the dependency order.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CharacterIds {
+    pub skeleton: Option<AssetId>,
+    pub material: Option<AssetId>,
+    pub mesh: Option<AssetId>,
+    pub idle: Option<AssetId>,
+    pub walk: Option<AssetId>,
+    pub run: Option<AssetId>,
+    pub machine: Option<AssetId>,
+    pub actor: Option<AssetId>,
+}
+
+impl CharacterIds {
+    /// Every id minted — [`build_character`]'s behaviour, and the default.
+    pub const MINTED: Self = Self {
+        skeleton: None,
+        material: None,
+        mesh: None,
+        idle: None,
+        walk: None,
+        run: None,
+        machine: None,
+        actor: None,
+    };
+}
+
 /// The assets a build produced, and what happened on the way.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CharacterBuild {
@@ -623,16 +659,18 @@ fn roll_back(project: &mut AssetProject, written: &[AssetId]) {
 /// invisible to it. The rig is re-writable in place (`write_asset` on the same
 /// path routes to `rewrite_payload`, which keeps the GUID), so the staleness is
 /// a live path and not a hypothetical one.
+#[allow(clippy::too_many_arguments)]
 fn write_one<T: AssetPayload>(
     project: &mut AssetProject,
     written: &mut Vec<AssetId>,
     dir: &Path,
     name: &str,
     payload: &T,
+    id: Option<AssetId>,
     dependencies: Vec<AssetId>,
     import: Option<toml::Table>,
 ) -> Result<AssetId, CharacterError> {
-    match project.write_asset(dir, name, payload, None, dependencies, import) {
+    match project.write_asset_with_id(dir, name, payload, id, None, dependencies, import) {
         Ok(id) => {
             written.push(id);
             Ok(id)
@@ -657,6 +695,32 @@ fn write_one<T: AssetPayload>(
 pub fn build_character(
     project: &mut AssetProject,
     spec: &CharacterSpec,
+) -> Result<CharacterBuild, CharacterError> {
+    build_character_with_ids(project, spec, &CharacterIds::MINTED)
+}
+
+/// **The wizard's door, with the eight GUIDs supplied** (SK1c).
+///
+/// # Why this exists at all
+///
+/// A character's eight assets name each other by GUID: the body's skin binding
+/// names the rig, every clip carries the rig's id, the machine names three clips
+/// and the rig, and the controller names the machine. So the same spec built
+/// twice with minted ids produces eight *different* files, and a character
+/// committed to the repository could never be byte-locked against the door that
+/// wrote it — which is the whole point of a committed sample.
+///
+/// `samples/starter-character` goes through here. Everything interactive goes
+/// through [`build_character`], which is this function with
+/// [`CharacterIds::MINTED`], and mints — because two assets sharing a GUID is a
+/// database whose reverse edges lie.
+///
+/// A `None` slot mints; the mixed case is legal and is what makes this one
+/// function rather than two.
+pub fn build_character_with_ids(
+    project: &mut AssetProject,
+    spec: &CharacterSpec,
+    ids: &CharacterIds,
 ) -> Result<CharacterBuild, CharacterError> {
     let name = spec.name.trim();
     if name.is_empty() {
@@ -736,7 +800,16 @@ pub fn build_character(
     let mut written: Vec<AssetId> = Vec::new();
 
     // ── the rig ────────────────────────────────────────────────────────────
-    let skeleton = write_one(project, &mut written, &dir, name, &rig, vec![], None)?;
+    let skeleton = write_one(
+        project,
+        &mut written,
+        &dir,
+        name,
+        &rig,
+        ids.skeleton,
+        vec![],
+        None,
+    )?;
     // The rig is on disk now, so its content hash exists to be recorded. Every
     // asset below whose track indices are POSITIONS in that rig's joint list
     // records it (round 3).
@@ -809,6 +882,7 @@ pub fn build_character(
         &dir,
         &format!("{name} Skin"),
         &starter_skin_material(),
+        ids.material,
         Vec::new(),
         None,
     )?;
@@ -818,6 +892,7 @@ pub fn build_character(
         &dir,
         &format!("{name} Body"),
         &body,
+        ids.mesh,
         vec![skeleton, material],
         // **Not the body.** Its skin stream is index-aligned to the rig's joints
         // and it is the same staleness class — but `skeleton_binding` scans
@@ -832,7 +907,8 @@ pub fn build_character(
     let clip = |project: &mut AssetProject,
                 written: &mut Vec<AssetId>,
                 suffix: &str,
-                clip: &inf_anim::AnimClip|
+                clip: &inf_anim::AnimClip,
+                id: Option<AssetId>|
      -> Result<AssetId, CharacterError> {
         let payload = AnimClipAsset::new(clip.clone(), Some(skel_bytes));
         write_one(
@@ -841,13 +917,14 @@ pub fn build_character(
             &dir,
             &format!("{name} {suffix}"),
             &payload,
+            id,
             vec![skeleton],
             bound.clone(),
         )
     };
-    let idle = clip(project, &mut written, "Idle", &set.idle)?;
-    let walk = clip(project, &mut written, "Walk", &set.walk)?;
-    let run = clip(project, &mut written, "Run", &set.run)?;
+    let idle = clip(project, &mut written, "Idle", &set.idle, ids.idle)?;
+    let walk = clip(project, &mut written, "Walk", &set.walk, ids.walk)?;
+    let run = clip(project, &mut written, "Run", &set.run, ids.run)?;
 
     // ── the machine, PROPOSED from what the derivation measured (P29.6) ────
     //
@@ -911,6 +988,7 @@ pub fn build_character(
         &dir,
         &format!("{name} Locomotion"),
         &machine_asset,
+        ids.machine,
         vec![skeleton, idle, walk, run],
         bound,
     )?;
@@ -930,7 +1008,15 @@ pub fn build_character(
         .into_iter()
         .collect();
     let motion_state = motion_state_of(&machine_model);
-    let actor = match write_controller(project, &dir, name, machine, &footsteps, &motion_state) {
+    let actor = match write_controller(
+        project,
+        &dir,
+        name,
+        machine,
+        ids.actor,
+        &footsteps,
+        &motion_state,
+    ) {
         Ok(id) => {
             written.push(id);
             id
@@ -965,7 +1051,21 @@ pub fn build_character(
     }
     // The machine, as text: the reviewable face of the `.inf_sm` beside it, and
     // the thing pillar S1's whole argument is about.
-    let sm_payload = dir.join(format!("{name} Locomotion.inf_sm"));
+    //
+    // **The path is the one the asset actually landed at** (SK1c), asked of the
+    // database rather than rebuilt from the name. It used to be
+    // `dir.join(format!("{name} Locomotion.inf_sm"))`, and
+    // `AssetProject::write_asset` runs every display name through `sanitize` —
+    // so a character called "My Hero" wrote `My_Hero_Locomotion.inf_sm` and put
+    // its text face at `My Hero Locomotion.inf_sm.txt`, next to nothing. The
+    // convention `sm_text` is built on is `<payload>.txt`, so `read_text` on the
+    // real payload answered `None` and the reviewable face pillar S1 promises
+    // was silently not there. Every wizard-default name has a space in it.
+    let sm_payload = project
+        .db()
+        .get(machine)
+        .map(|e| e.path.clone())
+        .unwrap_or_else(|| dir.join(format!("{name} Locomotion.inf_sm")));
     or_roll_back!(crate::sm_text::write_text(&sm_payload, &machine_model));
     text.push(crate::sm_text::text_path(&sm_payload));
     // The camera table and the input bindings — neither has a home in the scene
@@ -1288,17 +1388,26 @@ const SPRINT_OF_RUN: f64 = 1.75;
 /// `write_asset`'s payload path; the bytes and the sidecar are written here and
 /// registered through the same `register_written_asset` door every other
 /// hand-encoded asset in this crate uses.
+#[allow(clippy::too_many_arguments)]
 fn write_controller(
     project: &mut AssetProject,
     dir: &Path,
     name: &str,
     machine: AssetId,
+    id: Option<AssetId>,
     footsteps: &[String],
     motion_state: &str,
 ) -> Result<AssetId, CharacterError> {
     let class = controller_class(name, footsteps, motion_state);
     let bytes = crate::samples::encode_actor(&class).map_err(CharacterError::Write)?;
-    let path = dir.join(format!("{name} Controller.inf_act"));
+    // Through the project's own path door (SK1c), so this file is named the way
+    // its seven siblings are. It used to be `dir.join(format!("{name}
+    // Controller.inf_act"))`, and `write_asset` sanitizes — so a character
+    // called "My Hero" got six `My_Hero_*` assets and one `My Hero Controller`,
+    // which is a content folder that looks like two authors were in it.
+    let path = project
+        .unique_asset_path(dir, &format!("{name} Controller"), "inf_act")
+        .map_err(|e| CharacterError::Write(e.to_string()))?;
     inf_asset::write_atomically(&path, &bytes).map_err(|e| CharacterError::Write(e.to_string()))?;
     let id = project
         .register_written_asset(
@@ -1307,7 +1416,7 @@ fn write_controller(
             inf_asset::ContentHash::of(&bytes),
             None,
             None,
-            None,
+            id,
         )
         .map_err(|e| CharacterError::Write(e.to_string()))?;
     // The dependency edge is written straight onto the sidecar: a `.inf_act` is
@@ -3179,5 +3288,84 @@ mod tests {
         let mask =
             inf_anim::JointMask::upper_body(AIM_MASK, &rig.skeleton, rig.role_index()).unwrap();
         assert_eq!(back.rows(), mask.rows(), "the round trip lost rows");
+    }
+
+    /// **The text face sits beside its payload, and the whole family is named
+    /// the same way** (SK1c).
+    ///
+    /// `AssetProject::write_asset` runs a display name through `sanitize`, which
+    /// turns a space into `_`. Two writes in this file did not: the machine's
+    /// text face was placed at a path rebuilt from the *display* name, and the
+    /// controller wrote its own file with `dir.join(format!(...))`.
+    ///
+    /// So a character called "My Hero" produced six `My_Hero_*` assets, one
+    /// `My Hero Controller.inf_act`, and a `My Hero Locomotion.inf_sm.txt` next
+    /// to nothing at all — and `sm_text`'s whole convention is `<payload>.txt`,
+    /// so `read_text` on the real `.inf_sm` answered `None` and the reviewable
+    /// face pillar S1 argues for was silently absent. Every wizard-default name
+    /// has a space in it.
+    ///
+    /// The name here is chosen to have one: a fixture called "Hero" would pass
+    /// this test with the defect in place.
+    #[test]
+    fn every_file_the_wizard_writes_is_named_the_same_way() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut project = AssetProject::open(tmp.path()).unwrap();
+        let spec = CharacterSpec {
+            name: "My Hero".into(),
+            plan: inf_anim::BodyPlan::BipedCanonical,
+            ..Default::default()
+        };
+        let built = build_character(&mut project, &spec).expect("a character");
+
+        // The machine's text face is beside the machine's REAL path.
+        let sm = project
+            .db()
+            .get(built.machine)
+            .expect("the machine is registered")
+            .path
+            .clone();
+        assert!(
+            crate::sm_text::read_text(&sm).is_some(),
+            "no text face beside {} — the wizard wrote one somewhere else",
+            sm.display()
+        );
+
+        // …and every asset it wrote shares one stem convention, so a content
+        // folder does not look like two authors were in it.
+        for id in [
+            built.skeleton,
+            built.mesh,
+            built.idle,
+            built.walk,
+            built.run,
+            built.machine,
+            built.actor,
+        ] {
+            let path = project.db().get(id).expect("registered").path.clone();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(
+                name.starts_with("My_Hero"),
+                "{name} is not named like its siblings"
+            );
+            assert!(
+                !name.contains(' '),
+                "{name} carries a space the rest of the family had sanitised out"
+            );
+        }
+        // The three text files are the ones that legitimately are not prefixed.
+        let text: Vec<String> = built
+            .text
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            text.iter().any(|n| n == "camera.toml") && text.iter().any(|n| n == "input.toml"),
+            "{text:?}"
+        );
+        assert!(
+            built.text.iter().all(|p| p.exists()),
+            "the build reported a text file that is not on disk: {text:?}"
+        );
     }
 }
