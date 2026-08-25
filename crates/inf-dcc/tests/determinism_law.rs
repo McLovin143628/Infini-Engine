@@ -42,7 +42,7 @@
 /// not cover it, and a new module is exactly where the next `.sin()` or `HashMap`
 /// would land. `every_source_file_is_covered` reads the directory and fails if
 /// this list has fallen behind, so the coverage cannot rot silently.
-const SOURCES: [(&str, &str); 17] = [
+const SOURCES: [(&str, &str); 18] = [
     ("lib.rs", include_str!("../src/lib.rs")),
     ("topo.rs", include_str!("../src/topo.rs")),
     ("validate.rs", include_str!("../src/validate.rs")),
@@ -63,6 +63,12 @@ const SOURCES: [(&str, &str); 17] = [
     // to it twice over: a `HashMap` or an `f32` on this path would make two
     // machines re-derive a re-parameterized model differently.
     ("amend.rs", include_str!("../src/amend.rs")),
+    // SK1b. The starter body is COMMITTED CONTENT — its bytes are in the
+    // repository and a gate compares them against this generator — so a value
+    // that came out differently on two targets would fork the file rather than
+    // the frame, and every determinism gate downstream would compare each
+    // machine with itself and pass. The `derive.rs` argument, one crate over.
+    ("body.rs", include_str!("../src/body.rs")),
 ];
 
 const JOURNAL: &str = include_str!("../src/journal.rs");

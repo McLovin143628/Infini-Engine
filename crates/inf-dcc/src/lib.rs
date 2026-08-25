@@ -78,6 +78,9 @@
 
 pub mod amend;
 pub mod autofit;
+// SK1b the procedural body mesh: a humanoid generated from its own rig, a tier
+// above the block mannequin.
+pub mod body;
 pub mod build;
 pub mod bvh;
 pub mod export;
@@ -99,16 +102,17 @@ pub use amend::{
     with_scalar, AmendError, Amendability, OpStructure, Topology,
 };
 pub use autofit::{fit_template, FitError, FitOptions, FitReport};
+pub use body::{body_mesh, BodyError, BodyOptions};
 pub use build::{
     cube, cylinder, from_mesh_asset, plane, torus, DetachSeverity, ImportError, ImportReport,
     MeshImport, WELD_TOLERANCE,
 };
-pub use bvh::{Bvh, ClosestHit, RayHit, Tri};
+pub use bvh::{mesh_soup, Bvh, ClosestHit, RayHit, Tri};
 pub use export::{
     corner_normal, to_mesh_asset, to_mesh_asset_sourced, ExportOptions, ExportReport, NormalPolicy,
     TANGENT_FALLBACK,
 };
-pub use heat::{solve_heat_weights, BoneReport, HeatError, HeatReport};
+pub use heat::{solve_heat_weights, solve_heat_weights_for, BoneReport, HeatError, HeatReport};
 pub use journal::{MeshSession, SessionError, SessionSave, CHECKPOINT_INTERVAL, MAX_CHECKPOINTS};
 pub use model::{KnifePoint, MergeTarget, MirrorAxis, MAX_BEVEL_SEGMENTS, MAX_LOOP_CUTS};
 pub use ops::{Op, OpError, OpOutcome};

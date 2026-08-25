@@ -154,6 +154,39 @@ pub fn solve_heat_weights(
     bvh: &Bvh,
     skeleton: &Skeleton,
 ) -> Result<(Option<Op>, HeatReport), HeatError> {
+    solve_heat_weights_for(mesh, bvh, skeleton, None)
+}
+
+/// [`solve_heat_weights`], restricted to the joints `eligible` says may carry
+/// weight (SK1b).
+///
+/// # Why a mask, and why it is not the default
+///
+/// A production rig is not all deform bones. The 161-bone mannequin carries 7 IK
+/// handles, a `weapon_r` marker and 74 correctives, most of them sitting **at
+/// their parent's origin** — and a solve that considers all of them will happily
+/// decide that the nearest visible bone to a palm vertex is `weapon_r`, because
+/// it is. The mesh then deforms correctly on every frame that nothing drives that
+/// marker, and comes apart on the first frame something does. It is the P24
+/// finding `block_body_mesh`'s deform-only cut exists for, at the weight solver
+/// instead of the geometry generator.
+///
+/// It is not the default because a mask is a **claim about a rig** and this
+/// function has no way to check one: `None` considers every joint, which is what
+/// every caller before this wave meant and what an imported rig with no role
+/// table can honestly say. `inf_anim::RoleIndex::is_deform` is the answer for a
+/// rig that carries a table.
+///
+/// A joint outside the mask can still be *reached* — a vertex whose only visible
+/// bone is masked out keeps [`crate::VertWeights::RIGID`] and is counted in
+/// [`HeatReport::unreached`], which is the honest report of "this geometry is not
+/// near anything that may move it".
+pub fn solve_heat_weights_for(
+    mesh: &Mesh,
+    bvh: &Bvh,
+    skeleton: &Skeleton,
+    eligible: Option<&[bool]>,
+) -> Result<(Option<Op>, HeatReport), HeatError> {
     let Some(binding) = mesh.skin_binding() else {
         return Err(HeatError::NotSkinned);
     };
@@ -180,7 +213,23 @@ pub fn solve_heat_weights(
         .collect();
 
     // ── the bones ──────────────────────────────────────────────────────────
-    let bones = bone_segments(skeleton);
+    //
+    // Filtered here rather than at the end, so a masked-out joint is invisible to
+    // the nearest-bone search as well as to the assignment — a bone that wins a
+    // vertex and is then dropped leaves that vertex with no source at all, which
+    // is a worse answer than the second-nearest bone.
+    let bones: Vec<Bone> = match eligible {
+        Some(mask) => bone_segments(skeleton)
+            .into_iter()
+            .filter(|b| mask.get(b.joint as usize).copied().unwrap_or(false))
+            .collect(),
+        None => bone_segments(skeleton),
+    };
+    if bones.is_empty() {
+        return Err(HeatError::Empty {
+            what: "the eligible bone set",
+        });
+    }
 
     // ── nearest VISIBLE bone per vertex ────────────────────────────────────
     let mut nearest: Vec<Option<(usize, f64)>> = vec![None; n];

@@ -579,7 +579,15 @@ impl CharacterPreviewSession {
             }
         }
         self.builds.body += 1;
-        let m = block_body_mesh(rig);
+        // **The same geometry the build writes** (SK1b) — the generated body, or
+        // the block mannequin for a rig with no role table. Without the heat
+        // solve, deliberately: weights do not change a vertex count, and the
+        // solve is the expensive half of the door on a path the wizard runs on
+        // every drag of a proportion slider.
+        let m = match inf_dcc::body_mesh(rig, &inf_dcc::BodyOptions::default()) {
+            Ok((mesh, _)) => inf_dcc::to_mesh_asset(&mesh, &inf_dcc::ExportOptions::default()).0,
+            Err(_) => block_body_mesh(rig),
+        };
         let verts: usize = m.submeshes.iter().map(|s| s.vertices.len()).sum();
         let tris: usize = m.submeshes.iter().map(|s| s.triangle_count()).sum();
         self.body = Some((key, (verts, tris)));
@@ -759,7 +767,27 @@ pub fn build_character(
                 return Err(e);
             }
         },
-        None => (block_body_mesh(&rig), None, true),
+        // **SK1b: the starter body**, generated through our own pipeline and
+        // heat-weighted onto the rig, rather than one box per bone. The
+        // `mannequin` flag stays honest — it is `true` only when the fallback
+        // actually ran, which is a rig with no role table.
+        None => match starter_body(&rig, Some(skeleton)) {
+            Ok((asset, summary, mannequin)) => {
+                if let Some(s) = summary.as_ref() {
+                    if s.unreached > 0 {
+                        warnings.push(format!(
+                            "{} of the generated body's vertices could not see a deform                              bone and kept the root's weights",
+                            s.unreached
+                        ));
+                    }
+                }
+                (asset, summary, mannequin)
+            }
+            Err(e) => {
+                roll_back(project, &written);
+                return Err(e);
+            }
+        },
     };
     let mesh = write_one(
         project,
@@ -1015,6 +1043,109 @@ fn export_advisories(r: &inf_dcc::ExportReport) -> Vec<String> {
 ///
 /// The [`inf_dcc::ExportReport`] comes back with it rather than being dropped:
 /// see [`export_advisories`].
+/// **The starter body** (SK1b) — the humanoid a new character gets when no mesh
+/// was brought.
+///
+/// `inf_dcc::body_mesh` generates it from the rig's own bind pose and role table
+/// (welded tapered limbs, five-fingered hands, a head with a jaw, a nose and
+/// ears), and then it is **heat-weighted onto the rig it was generated from**,
+/// through the same three-call sequence [`skinned_copy`] uses for an imported
+/// mesh — bind, solve, apply. A generator could have written rigid per-part
+/// weights for free, since it knows exactly which bone made each vertex; solving
+/// them is what makes an elbow bend like an elbow instead of shearing at one
+/// ring, and it is the same solve an author's own mesh gets.
+///
+/// **The solve is masked to the rig's deform bones.** The mannequin carries seven
+/// IK handles, two `weapon_*` markers and 74 correctives, most of them sitting at
+/// their parent's origin — and the nearest visible bone to a palm vertex really
+/// is `weapon_r`. See `inf_dcc::solve_heat_weights_for`.
+///
+/// Falls back to [`block_body_mesh`] for a rig with **no role table** — the
+/// twenty-joint canonical biped, and any rig older than `.inf_skel` v3 — because
+/// the generator refuses those by name rather than guessing which chain is a
+/// torso, and a blocky mannequin is a better answer than none.
+pub fn starter_body(
+    rig: &SkeletonAsset,
+    skeleton: Option<AssetId>,
+) -> Result<(MeshAsset, Option<WeightSummary>, bool), CharacterError> {
+    let (generated, made_by) = match inf_dcc::body_mesh(rig, &inf_dcc::BodyOptions::default()) {
+        Ok(pair) => pair,
+        // A rig this generator cannot describe. Not an error: the block mannequin
+        // is what this engine shipped before SK1b and it is still the right answer
+        // for a rig that says nothing about its own anatomy.
+        Err(inf_dcc::BodyError::NoRoles) => return Ok((block_body_mesh(rig), None, true)),
+        // (the other refusals fall through to the error arm below)
+        Err(e) => return Err(CharacterError::Mesh(e.to_string())),
+    };
+    let mut mesh = generated;
+    // **The kernel's own `f64` triangles**, not the tessellated ones. The
+    // tessellation narrows every position to `f32`, and a visibility ray cast
+    // from an exact kernel vertex then starts an ulp outside the surface the
+    // oracle is built from and hits its own face: measured **349 of 795**
+    // vertices unreached through the narrowed soup against **35** through this
+    // one. An imported mesh is unaffected — its kernel positions are widened
+    // `f32` and the round trip is exact — which is why this only showed up on the
+    // first mesh this engine generated in `f64`.
+    let bvh = inf_dcc::Bvh::new(inf_dcc::mesh_soup(&mesh));
+    inf_dcc::ops::apply(
+        &mut mesh,
+        &inf_dcc::Op::BindSkin {
+            skeleton: skeleton.map(|s| *s.0.as_bytes()),
+            joints: rig.skeleton.len() as u32,
+        },
+    )
+    .map_err(|e| CharacterError::Weights(e.to_string()))?;
+    // **The prior, before the solve.** `solve_heat_weights` is documented as
+    // "additive evidence rather than a reset — a vertex no bone can see keeps its
+    // current weights", and a generated body is the one mesh in the world where
+    // the right answer is known before the solve runs: the generator recorded
+    // which bone made every vertex. Measured on the 795-vertex starter body, 35
+    // vertices are unreachable by the visibility oracle (caps buried inside a
+    // neighbouring shell, mostly), and without this they would keep
+    // `VertWeights::RIGID` — all of joint 0, the rig's **root** — and stay behind
+    // when the character walks away.
+    if !made_by.seed.is_empty() {
+        inf_dcc::ops::apply(
+            &mut mesh,
+            &inf_dcc::Op::AssignWeights {
+                weights: made_by
+                    .seed
+                    .iter()
+                    .map(|&(v, j)| {
+                        (
+                            v,
+                            inf_dcc::VertWeights {
+                                joints: [j, 0, 0, 0],
+                                weights: [1.0, 0.0, 0.0, 0.0],
+                            },
+                        )
+                    })
+                    .collect(),
+            },
+        )
+        .map_err(|e| CharacterError::Weights(e.to_string()))?;
+    }
+    let roles = rig.role_index();
+    let deform: Vec<bool> = (0..rig.skeleton.len() as u16)
+        .map(|j| roles.is_deform(j))
+        .collect();
+    let (op, report) = inf_dcc::solve_heat_weights_for(&mesh, &bvh, &rig.skeleton, Some(&deform))
+        .map_err(|e| CharacterError::Weights(e.to_string()))?;
+    if let Some(op) = op {
+        inf_dcc::ops::apply(&mut mesh, &op).map_err(|e| CharacterError::Weights(e.to_string()))?;
+    }
+    let (asset, _) = inf_dcc::to_mesh_asset(&mesh, &inf_dcc::ExportOptions::default());
+    Ok((
+        asset,
+        Some(WeightSummary {
+            assigned: report.assigned,
+            unreached: report.unreached,
+            worst_residual: report.worst_residual,
+        }),
+        false,
+    ))
+}
+
 fn skinned_copy(
     payload: &MeshAsset,
     rig: &SkeletonAsset,
@@ -1984,8 +2115,57 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut p = project(tmp.path());
         let out = build_character(&mut p, &CharacterSpec::default()).expect("builds");
-        assert!(out.mannequin);
-        assert!(out.fit.is_none() && out.weights.is_none());
+        // **SK1b**: the default is the generated body, heat-weighted onto its own
+        // rig — not the block mannequin, and not an imported mesh either, so the
+        // fit is still absent while the weights are not.
+        assert!(
+            !out.mannequin,
+            "the default character is a modelled body now"
+        );
+        assert!(out.fit.is_none());
+        let w = out.weights.expect("the generated body is weighted");
+        println!(
+            "starter body weights: {} assigned, {} unreached, worst residual {:.4}",
+            w.assigned, w.unreached, w.worst_residual
+        );
+        assert!(
+            w.assigned > 500,
+            "only {} vertices were weighted",
+            w.assigned
+        );
+        // `unreached` is a **reading**, not a failure: 35 of 795 vertices are
+        // caps buried inside a neighbouring shell, and no ray reaches them. What
+        // matters is that they still carry a real bone, which is what the
+        // generator's seed is for — so the claim is asserted on the SKIN STREAM
+        // rather than on the report. Mutation: drop the seed and 35 vertices
+        // land on joint 0, the rig's root, which deforms nothing.
+        assert!(w.unreached < 60, "{} unreached", w.unreached);
+        let rig = inf_anim::build_template(BodyPlan::Biped, &BodyParams::default()).unwrap();
+        let roles = rig.role_index();
+        let body = load_mesh(&p, out.mesh).expect("the body loads");
+        let mut on_root = 0usize;
+        let mut skinned = 0usize;
+        for sub in &body.submeshes {
+            for s in &sub.skin {
+                skinned += 1;
+                let dominant = s
+                    .joints
+                    .iter()
+                    .zip(s.weights.iter())
+                    .max_by(|a, b| a.1.total_cmp(b.1))
+                    .map(|(j, _)| *j)
+                    .unwrap_or(0);
+                if !roles.is_deform(dominant) {
+                    on_root += 1;
+                }
+            }
+        }
+        println!("{skinned} skinned vertices, {on_root} on a bone that deforms nothing");
+        assert!(skinned > 1_000, "the body carries only {skinned} skin rows");
+        assert_eq!(
+            on_root, 0,
+            "{on_root} of the body's vertices are weighted to a bone that deforms nothing"
+        );
 
         // Every id resolves, at the kind it claims.
         for (id, kind) in [
@@ -2686,5 +2866,88 @@ mod tests {
         .expect_err("a zero cadence is refused");
         assert!(matches!(err, CharacterError::Locomotion(_)), "{err:?}");
         assert_eq!(p.db().len(), 0);
+    }
+
+    /// **What the starter body costs**, measured — the wave's own number, and the
+    /// two halves it is made of.
+    ///
+    /// The generation is geometry and is trivially fast; the **heat solve** is the
+    /// part that scales, because it is one BVH ray per (vertex, bone segment) and
+    /// the mannequin has 161 joints. The masked solve is what keeps it honest:
+    /// the mask cuts the segment set to the deform bones, which is both the
+    /// correctness fix and most of the speed.
+    ///
+    /// The clock is **printed** and the assertion is a ceiling with its slack
+    /// named — the SK1a audit's second decision, at a measurement a debug CI
+    /// runner takes an order of magnitude longer over than a release build does.
+    #[test]
+    fn the_starter_body_and_its_weights_are_measured() {
+        use std::time::Instant;
+        let rig = inf_anim::build_template(BodyPlan::Biped, &BodyParams::default()).unwrap();
+        let roles = rig.role_index();
+        let deform = (0..rig.skeleton.len() as u16)
+            .filter(|j| roles.is_deform(*j))
+            .count();
+
+        let mut gen_ms = f64::MAX;
+        let mut all_ms = f64::MAX;
+        let mut counts = (0usize, 0usize);
+        for _ in 0..3 {
+            let t = Instant::now();
+            let (mesh, _) = inf_dcc::body_mesh(&rig, &inf_dcc::BodyOptions::default()).unwrap();
+            gen_ms = gen_ms.min(t.elapsed().as_secs_f64() * 1000.0);
+            let (asset, _) = inf_dcc::to_mesh_asset(&mesh, &inf_dcc::ExportOptions::default());
+            counts = (
+                asset.submeshes.iter().map(|s| s.vertices.len()).sum(),
+                asset.submeshes.iter().map(|s| s.triangle_count()).sum(),
+            );
+            let t = Instant::now();
+            starter_body(&rig, None).expect("a weighted body");
+            all_ms = all_ms.min(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        println!(
+            "starter body: {} vertices / {} triangles; generate {gen_ms:.2} ms,              generate + bind + heat-solve {all_ms:.2} ms over {} deform bones of {}",
+            counts.0,
+            counts.1,
+            deform,
+            rig.skeleton.len()
+        );
+        assert!(counts.0 > 1_000 && counts.1 > 1_000);
+        // A ceiling with 20x of slack over the release measurement, because this
+        // runs in debug in CI. It is a tripwire against an accidental O(V*B^2),
+        // not a performance claim.
+        assert!(
+            all_ms < 20_000.0,
+            "the starter body took {all_ms} ms, which is not a generator anyone would wait for"
+        );
+    }
+
+    /// **The canonical biped still gets the block mannequin**, and says so — the
+    /// fallback arm, which the default spec no longer exercises.
+    #[test]
+    fn a_rig_with_no_role_table_still_gets_the_block_mannequin() {
+        let rig =
+            inf_anim::build_template(BodyPlan::BipedCanonical, &BodyParams::default()).unwrap();
+        assert!(rig.roles.is_empty(), "the fixture must be table-less");
+        let (asset, weights, mannequin) = starter_body(&rig, None).expect("a body");
+        assert!(mannequin, "a table-less rig must take the block path");
+        assert!(weights.is_none(), "the block mannequin is rigidly bound");
+        assert_eq!(
+            asset,
+            block_body_mesh(&rig),
+            "it is the same block mannequin"
+        );
+        // …and the whole wizard still builds on it, end to end.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = project(tmp.path());
+        let out = build_character(
+            &mut p,
+            &CharacterSpec {
+                plan: BodyPlan::BipedCanonical,
+                ..CharacterSpec::default()
+            },
+        )
+        .expect("builds");
+        assert!(out.mannequin);
     }
 }

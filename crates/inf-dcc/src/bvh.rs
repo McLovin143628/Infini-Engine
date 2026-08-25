@@ -141,6 +141,48 @@ pub struct Bvh {
     source: Vec<u32>,
 }
 
+/// **The kernel mesh's own triangles**, in `f64` (SK1b).
+///
+/// # Why this exists beside `inf_editor_core::dcc::triangle_soup`
+///
+/// That door tessellates through [`crate::to_mesh_asset`], which narrows every
+/// position to `f32`. For a mesh that *arrived* as an asset the round trip is
+/// exact and the two soups are the same triangles. For a mesh this crate
+/// **generated** they are not: the kernel's positions are `f64` and the narrowed
+/// ones are up to an ulp away, so a visibility ray cast from an exact kernel
+/// vertex starts a hair *outside* the surface the oracle is built from and hits
+/// its own face at `t ≈ 0`.
+///
+/// Measured on SK1b's generated body, 795 vertices: **349 unreached** through the
+/// narrowed soup against **35** through this one. A ten-fold difference in how
+/// much of a character the weight solver believes it cannot see, from a rounding
+/// step in the oracle.
+///
+/// Faces are fanned from their first vertex, which is exact for the convex
+/// polygons this kernel's generators produce and for every triangle an import
+/// produces. It is a *visibility* oracle: a concave n-gon fanned this way covers
+/// the same plane and differs only in which side of a reflex corner a grazing ray
+/// lands on.
+pub fn mesh_soup(mesh: &crate::topo::Mesh) -> Vec<Tri> {
+    let mut out = Vec::new();
+    for f in mesh.face_ids() {
+        let vs: Vec<DVec3> = mesh
+            .face_verts(f)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|v| mesh.position(*v))
+            .collect();
+        for i in 1..vs.len().saturating_sub(1) {
+            out.push(Tri {
+                a: vs[0],
+                b: vs[i],
+                c: vs[i + 1],
+            });
+        }
+    }
+    out
+}
+
 impl Bvh {
     /// Build from a triangle list. An empty list gives an empty hierarchy whose
     /// queries all answer "nothing" rather than panicking.

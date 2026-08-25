@@ -1685,9 +1685,20 @@ pub fn build_manny(params: &BodyParams) -> Result<SkeletonAsset, TemplateError> 
             Some(c) => joints[c].local_bind.translation_vec(),
             None => joints[i].local_bind.translation_vec(),
         };
-        let Some(axis) = dir.try_normalize() else {
+        // **Normalized in `f64` and narrowed once**, not normalized in `f32`.
+        // A bone that runs along one axis has direction `(-x, 0, 0)`, and
+        // `-x / sqrt(x*x)` in `f32` is `-1.0` for some `x` and `-0.99999994` for
+        // others — so two rigs of *different heights* would carry cone axes that
+        // differ by an ulp, and `a_fitted_mannequin_keeps_every_table_it_arrived_with`
+        // caught exactly that. In `f64` the same quotient rounds to `-1.0` on the
+        // narrowing cast for every length a hand bone has.
+        let dir = glam::DVec3::new(dir.x as f64, dir.y as f64, dir.z as f64);
+        let len2 = dir.length_squared();
+        if len2 <= 1.0e-24 {
             continue;
-        };
+        }
+        let d = dir / len2.sqrt();
+        let axis = Vec3::new(d.x as f32, d.y as f32, d.z as f32);
         limits.push(JointLimit::cone_only(
             i as u16,
             ConeLimit {
