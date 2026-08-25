@@ -202,28 +202,6 @@ impl AssetPayload for SkeletonAsset {
         // out-of-order table is not unsound — it answers `None` for a row that is
         // really there — which is exactly the kind of wrong answer this door
         // exists to turn into a named refusal.
-        let ordered = |what: &str, joints: Vec<u16>| -> inf_asset::Result<()> {
-            if joints.windows(2).all(|w| w[0] < w[1]) {
-                return Ok(());
-            }
-            Err(inf_asset::AssetError::Decode(format!(
-                "{what} is not in ascending joint order, which is what makes it indexable"
-            )))
-        };
-        ordered(
-            "the bone role table",
-            self.roles.iter().map(|r| r.joint).collect(),
-        )?;
-        ordered(
-            "the IK follow table",
-            self.ik_follow.iter().map(|f| f.joint).collect(),
-        )?;
-        // **Ascending, strictly.** Both tables are read on the fixed step, by an
-        // index that BORROWS them so a posed character costs no allocation
-        // (`RoleIndex`), and a borrowed index cannot sort what it is handed. An
-        // out-of-order table is not unsound — it answers `None` for a row that is
-        // really there — which is exactly the kind of wrong answer this door
-        // exists to turn into a named refusal.
         let ordered = |what: &str, joints: &[u16]| -> inf_asset::Result<()> {
             if joints.windows(2).all(|w| w[0] < w[1]) {
                 return Ok(());

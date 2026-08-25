@@ -227,32 +227,58 @@ pub fn retarget_pose(
     dst_skel: &Skeleton,
     map: &RetargetMap,
 ) -> Pose {
-    retarget_pose_reported(src_skel, src_pose, dst_skel, map).0
+    retarget_inner(src_skel, src_pose, dst_skel, map, false).0
 }
 
 /// [`retarget_pose`], **and what it moved** (SK1a) — see [`RetargetReport`] for
 /// why the silence this replaces was worth a type.
 ///
 /// The pose is identical to `retarget_pose`'s, bit for bit: the report is
-/// accumulated alongside and costs a `Vec<String>` that a caller who does not want
-/// it never allocates, because `retarget_pose` is still the door for that caller.
+/// accumulated alongside and costs a `Vec<String>` per category — plus one
+/// `String` clone per target joint — that a caller who does not want it never
+/// pays for, because `retarget_pose` goes through the same body with the
+/// accumulation switched **off**. (SK1a audit: this sentence was true of the
+/// intent and false of the code, which delegated here and paid 161 clones and
+/// four sorts on a mannequin target.)
 pub fn retarget_pose_reported(
     src_skel: &Skeleton,
     src_pose: &Pose,
     dst_skel: &Skeleton,
     map: &RetargetMap,
 ) -> (Pose, RetargetReport) {
+    retarget_inner(src_skel, src_pose, dst_skel, map, true)
+}
+
+/// The one body both doors run, with the report accumulation as a flag.
+///
+/// One body rather than two, for the reason the mannequin pairing is one table:
+/// a second copy of the copy rule is a second answer waiting to disagree.
+fn retarget_inner(
+    src_skel: &Skeleton,
+    src_pose: &Pose,
+    dst_skel: &Skeleton,
+    map: &RetargetMap,
+    want_report: bool,
+) -> (Pose, RetargetReport) {
     let mut out = Pose::rest(dst_skel);
     let mut report = RetargetReport::default();
-    let mut written = vec![false; dst_skel.len()];
+    // Only the report reads this, so a caller that does not want one does not
+    // allocate it either.
+    let mut written = if want_report {
+        vec![false; dst_skel.len()]
+    } else {
+        Vec::new()
+    };
 
     for (src_name, dst_name) in &map.pairs {
         let (src_at, dst_at) = (src_skel.index_of(src_name), dst_skel.index_of(dst_name));
-        if src_at.is_none() {
-            report.missing_source.push(src_name.clone());
-        }
-        if dst_at.is_none() {
-            report.missing_target.push(dst_name.clone());
+        if want_report {
+            if src_at.is_none() {
+                report.missing_source.push(src_name.clone());
+            }
+            if dst_at.is_none() {
+                report.missing_target.push(dst_name.clone());
+            }
         }
         let (Some(si), Some(di)) = (src_at, dst_at) else {
             continue;
@@ -282,24 +308,26 @@ pub fn retarget_pose_reported(
         }
     }
 
-    for (i, j) in dst_skel.joints().iter().enumerate() {
-        if written.get(i).copied().unwrap_or(false) {
-            report.copied.push(j.name.clone());
-        } else {
-            report.unmapped_target.push(j.name.clone());
+    if want_report {
+        for (i, j) in dst_skel.joints().iter().enumerate() {
+            if written.get(i).copied().unwrap_or(false) {
+                report.copied.push(j.name.clone());
+            } else {
+                report.unmapped_target.push(j.name.clone());
+            }
         }
-    }
-    // Sorted and deduplicated so the report is a property of the triple and not of
-    // the order the pairs happen to be written in — the same reason
-    // `socket_transforms` sorts.
-    for list in [
-        &mut report.copied,
-        &mut report.unmapped_target,
-        &mut report.missing_source,
-        &mut report.missing_target,
-    ] {
-        list.sort();
-        list.dedup();
+        // Sorted and deduplicated so the report is a property of the triple and
+        // not of the order the pairs happen to be written in — the same reason
+        // `socket_transforms` sorts.
+        for list in [
+            &mut report.copied,
+            &mut report.unmapped_target,
+            &mut report.missing_source,
+            &mut report.missing_target,
+        ] {
+            list.sort();
+            list.dedup();
+        }
     }
     (out, report)
 }
@@ -505,6 +533,54 @@ mod tests {
             "{}",
             report.summary()
         );
+    }
+
+    /// **The reported door and the cheap door write the same pose, bit for
+    /// bit** (SK1a audit).
+    ///
+    /// They used to be the same function, which made this true and made the
+    /// cheap door pay for a report it threw away. Now they are one body and a
+    /// flag, and this is what stops the flag becoming two behaviours.
+    #[test]
+    fn the_two_retarget_doors_write_the_same_pose() {
+        let src = crate::template::build_template(
+            crate::template::BodyPlan::BipedCanonical,
+            &crate::template::BodyParams::default(),
+        )
+        .unwrap();
+        let dst = crate::template::build_template(
+            crate::template::BodyPlan::Biped,
+            &crate::template::BodyParams::default(),
+        )
+        .unwrap();
+        let mut pose = Pose::rest(&src.skeleton);
+        for (i, local) in pose.locals.iter_mut().enumerate() {
+            local.rotation = Quat::from_xyzw(0.0, 0.0, (i as f32 * 0.07).sin(), 1.0)
+                .normalize()
+                .to_array();
+        }
+        let map = RetargetMap::canonical_to_manny();
+        let cheap = retarget_pose(&src.skeleton, &pose, &dst.skeleton, &map);
+        let (reported, report) = retarget_pose_reported(&src.skeleton, &pose, &dst.skeleton, &map);
+        assert_eq!(cheap.locals.len(), reported.locals.len());
+        for (i, (a, b)) in cheap.locals.iter().zip(reported.locals.iter()).enumerate() {
+            for (u, v) in a
+                .translation
+                .iter()
+                .chain(a.rotation.iter())
+                .chain(a.scale.iter())
+                .zip(
+                    b.translation
+                        .iter()
+                        .chain(b.rotation.iter())
+                        .chain(b.scale.iter()),
+                )
+            {
+                assert_eq!(u.to_bits(), v.to_bits(), "joint {i} differs between doors");
+            }
+        }
+        // …and only the reported door built a report.
+        assert_eq!(report.copied.len(), 19);
     }
 
     /// The two directions are one table, so they cannot drift.
