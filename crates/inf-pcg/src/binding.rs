@@ -193,7 +193,7 @@ impl BiomeBinding {
     /// Evaluate every bound biome over `region` and concatenate the results in
     /// ascending biome-id order.
     ///
-    /// `fields` supplies the painted ids (an [`OffsetTerrain`](crate::fields::OffsetTerrain)
+    /// `fields` supplies the painted ids (an [`OffsetTerrain`]
     /// at the terrain entity's world origin, in practice); `height` supplies the
     /// ground the instances land on. With no ids anywhere the masks all score `0`
     /// and the result is empty — a terrain nobody painted grows nothing.
@@ -406,7 +406,10 @@ pub fn scatter_reach_m(spacing: f64) -> f64 {
 /// smaller than the reach, which is a test fixture rather than content.
 pub fn neighbour_rings(data: &TerrainData) -> i32 {
     let span = data.tile_span();
-    if !(span > 0.0) {
+    // `!is_finite() || <= 0.0` rather than `!(span > 0.0)`: the two agree on
+    // every value including NaN, and only one of them is a negated comparison on
+    // a partially-ordered type.
+    if !span.is_finite() || span <= 0.0 {
         return 1;
     }
     let rings = (scatter_reach_m(data.meters_per_sample()) / span).ceil();

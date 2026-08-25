@@ -249,7 +249,7 @@ impl RecordProfile {
 /// The stopwatch `EngineRenderer::render` marks its phases into.
 ///
 /// Deliberately the same shape as `inf_player::step_profile::StepClock`, down to
-/// the [`mark_at`](RecordClock::mark_at) seam that takes the clock reading as an
+/// the private `mark_at` seam that takes the clock reading as an
 /// argument: the I7 CI-red was a structural property (a phase marked twice
 /// **sums**) that could only be reached through a wall clock, and a shared
 /// runner answered. Every arm below drives the arithmetic through `mark_at` and

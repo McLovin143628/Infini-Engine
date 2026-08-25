@@ -25390,3 +25390,80 @@ after `cargo clean --doc` — the audit adds zero; `cargo fmt --all --check` cle
 moved**; committed levels **23**. **Six** audit commits, `(I7) audit:`-tagged — five fixes and
 the ledger, counted rather than summarised; the full ledger is in
 `docs/memos/island-progress.md` under *The I7 audit*.
+
+## Wave I7b — the island lives at 60 (2026-08-25)
+
+**THE ISLAND GROWS, AND IT RUNS.** Three clauses, each measured before and after on the real
+51 km² island (RTX 4070 Ti, release, MIN of 3 rounds × 120 frames, 1080p, the same flight).
+
+**1. The vegetation scatters through the shipped boot.** Wave I7's figure was **4 958
+instances with the ground paged by hand and 0 through the boot**, because
+`evaluate_biome_bindings` ran once, at load, over `TerrainData::xz_bounds()` — the bounding
+box of whatever is resident — and a streamed terrain ships no tiles. Paging is not a
+load-time event, so neither is this any more: **`BiomeBinding::refresh_resident`** walks the
+**resident level-0 tiles** in ascending order, memoized per tile, and the **fixed step** calls
+it as phase 2 of 24, straight after cell and terrain streaming. It is *exact* rather than an
+approximation — the scatter lattice is world-anchored and its region clip is half-open, so
+the union of two abutting boxes is the population of their union, instance for instance
+(measured: the per-tile walk over the fully-paged island grows the same 4 958). **The memo
+key carries the tile's NEIGHBOURS**, because a candidate near an edge reads across it (up to
+`MAX_FEATHER_SAMPLES` rings of biome mask, one central-difference step of slope) — key on the
+tile alone and you memoize the residency it first arrived under, and a player driving east
+grows a different forest from one driving west. Measured on the CI-scale island: **0 → 2 339
+instances** through the shipped boot, **2 339..3 119 over a 900-step drive out and back**,
+PIE == shipping on the **forest** as well as the state fold (`biome_population` is
+`#[serde(skip)]`, so it reaches no fold and the gate folds it itself), **0 of 2 339 stray**
+against the fully-paged reading, and **225 against 225** inside a fully-resident tile. The
+full island's frame now carries **2 681 scattered instances** against I7's *"0 scatter
+batches"*.
+
+**2 and 3 are one instrument and one `O(N²)`.** `inf_render::timing::RecordProfile` gives the
+record path what wave I4b gave the fixed step — fifteen phases that tile the whole of
+`EngineRenderer::render`, including everything before the frame's first command and after its
+last, which no GPU segment can reach. On the first run it named I7's unattributed 10.874 ms:
+**`cluster plan` at 10.051 ms of an 11.151 ms stage (90.1 %)**, on a world holding **one**
+virtualized mesh. The mechanism was `VgeomSource::with_page_sections` — which parses the
+payload, header, bounds checks and the **whole page directory**, on every call — asked one
+page at a time. `for_each_page_sections` parses once and walks.
+
+| shipped island, 1080p | at this wave's head | after |
+|---|---|---|
+| p50 / p95 / p99 | 24.080 / 26.827 / 27.634 ms | **3.56–3.62 / 3.83–7.25 / 4.13–7.51** |
+| fps at p50 | 41.5 | **~277** |
+| `render (record)` | 11.151 ms | **2.03 ms** |
+| GPU frame | 12.182 ms | **1.07–1.43 ms** |
+| pipelined estimate | 12.182 (82.1 fps) | **2.26–2.35 ms (427–443 fps)** |
+| distance from 60 fps | p50 **+7.480 ms** | p50 **−13.0 ms** |
+
+The GPU column moved with it, and that is the **I4b power-state law** rather than a second
+fix: a frame whose CPU took 11 ms left the card idle two thirds of the time and an idle card
+downclocks.
+
+**The lit configuration's whole cost is one measured mechanism, and it retired the routed
+prescription.** I4b routed a content-keyed **caster-pack cache**; the island's caster pack is
+**0.93 ms of CPU record** and `vsm-raster` is **30 ms of GPU**. Three new counters split
+`dirty_pages` exactly, and per rastering frame they read **400.8 re-slotted, 532.0 moved (the
+page's own matrix), 0.0 re-cast** — *nothing under a shadow page on this island ever changes*,
+so the content that cache would key on invalidates **zero** pages. The cost is the clipmap
+grid shifting under a camera travelling 0.9 m a frame against a level-0 page **1.0 m** wide
+(`2 × first_level_extent_m / clipmap_pages_per_side`); the cache never converges — 256 pages
+rastered (the ceiling) and **677 deferred**, every frame. **The alternative is priced in the
+instrument** as a third configuration rather than argued in prose: widening the first clipmap
+level 4× takes `vsm-raster` **30.018 → 15.923 ms**, the GPU frame **33.571 → 19.693**, p50
+**44.5 → 25.2 ms**, dirty pages **933 → 237** and cached **91 → 503**. Reported, never
+shipped — `first_level_extent_m` is a product decision about shadow sharpness. **Routed by
+name:** the **clipmap scroll** (`vsm_raster.rs`'s own cache doc records that a grid shift
+re-labels a page whose matrix is *bit-identical*; a level keeps 63 of its 64 columns, so ~98 %
+of the "moved" pages hold depth the atlas already has in a slot answering to another label) —
+it needs residency to keep the slot with the **world cell**, which is `inf_vsm`'s to own.
+
+**The nineteenth chr(92) catch is this wave's own**, third wave running and second time by the
+same mechanism: a Python heredoc ate a `\`-continuation and left ten spaces inside an
+`assert!` message. Repaired through the Edit tool.
+
+Counts: battery **319 / 5 968 / 0 / 16** (+11 arms attributable to this wave, the +1 block
+flagged rather than claimed); goldens **54, byte-identical under `INF_GOLDEN_STRICT=1`** over
+101 arms with no PNG rewritten; `cargo fmt --all --check` clean; **no schema moved**; no new
+crate and no new external dependency; committed samples **23**, byte-unmoved. The full ledger,
+the eight decisions and the six routed remainders are in `docs/memos/island-progress.md` under
+*Done — wave I7b*.
