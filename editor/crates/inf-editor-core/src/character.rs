@@ -1967,12 +1967,34 @@ mod tests {
     ///
     /// The wizard's proportion sliders re-preview on every change (debounced at
     /// 250 ms in `characterWizardStore`), and a preview on the mannequin path is
-    /// `build_template` + `build_locomotion` + `block_body_mesh` — three O(joints)
-    /// passes and one O(joints) mesh build. The weight solver, which is the
-    /// expensive thing in this crate, is **not on this path at all**: a block
-    /// mannequin is rigidly bound by construction (see `block_body_mesh`), so the
-    /// 2.4x the heat solve costs at 161 bones is paid only by an author who
-    /// supplies their own mesh, once, at build time.
+    /// `build_template` + `build_locomotion` + the body counts. The weight
+    /// solver, which is the expensive thing in this crate, is **not on this path
+    /// at all**, so the 2.4x the heat solve costs at 161 bones is paid only at
+    /// build time.
+    ///
+    /// # SK1b put a real generator on this path, and the number moved (SK1b audit)
+    ///
+    /// `body_for` used to call `block_body_mesh` — one box per deform bone. It
+    /// calls `inf_dcc::body_mesh` + `to_mesh_asset` now, so that the counts it
+    /// reports are the counts the build actually writes. That is right, and it is
+    /// **37x** the cold path SK1a measured:
+    ///
+    /// | | SK1a | SK1b |
+    /// |---|---|---|
+    /// | cold, 20 joints | 0.023 ms | 0.039 ms |
+    /// | cold, 161 joints | 0.126 ms | **4.70 ms** |
+    /// | warm, 161 joints | 0.022 ms | 0.024 ms |
+    ///
+    /// (4.66 / 4.69 / 4.71 over three unloaded runs; 8.4 with the rest of the
+    /// battery running beside it, which is the number the ceiling is sized for.)
+    ///
+    /// Nothing is owed, and the reason is a number rather than a structural
+    /// argument this time: the sliders are **debounced at 250 ms**, so 4.7 ms is
+    /// under 2 % of the interval between two previews, and the warm path — which
+    /// is what a re-preview of an *unchanged* spec takes — did not move at all.
+    /// What did happen is that SK1a's stated reason ("the expensive half is not
+    /// on this path") stopped being the whole of it, so the ceiling below is
+    /// re-sized to something that can still see the next regression.
     ///
     /// Run with `--nocapture` for the numbers. What is **asserted** is the
     /// counter, not the clock (SK1a audit): the first cut ended
@@ -2036,12 +2058,15 @@ mod tests {
             );
             assert_eq!(b.bvh, 0, "{plan}: there is no author mesh on this path");
         }
-        // One 60 Hz frame. In DEBUG this test runs unoptimized, so the ceiling is
-        // the debounce rather than the frame — a preview that beats the interval
-        // between two previews can never queue behind itself. Slack on purpose:
-        // a wall-clock ceiling tight enough to be interesting is a flake on a
-        // shared runner, which is why the counter above is the real assertion.
-        let ceiling = if cfg!(debug_assertions) { 250.0 } else { 16.6 };
+        // One 60 Hz frame. In DEBUG the ceiling is the **debounce** rather than
+        // the frame — a preview that beats the interval between two previews can
+        // never queue behind itself — but not the whole debounce: at the 4.68 ms
+        // this measures (SK1b audit), 250 ms is 53x slack and would not notice
+        // the generator getting an order of magnitude slower. 100 ms is ~21x the
+        // measurement and ~4x a runner five times slower than this machine, which
+        // is enough headroom not to flake and little enough to still fire. The
+        // counter above remains the real assertion.
+        let ceiling = if cfg!(debug_assertions) { 100.0 } else { 16.6 };
         assert!(
             cold161 < ceiling,
             "a cold mannequin preview took {cold161:.3} ms against a {ceiling} ms \
@@ -3135,10 +3160,18 @@ mod tests {
         ] {
             assert!(!inside(name), "{name} IS in the upper-body mask");
         }
-        // …and it is a real confinement: more than a third of the rig is out.
-        assert!(
-            masked.len() * 3 < rig.skeleton.len() * 3 && masked.len() < rig.skeleton.len(),
-            "the mask covers the whole rig"
+        // …and it is a real confinement, asserted as the **number** rather than
+        // as an inequality (SK1b audit). What stood here was
+        // `masked.len() * 3 < rig.skeleton.len() * 3`, which is `masked.len() <
+        // rig.skeleton.len()` written twice — so the sentence above it ("more
+        // than a third of the rig is out") was unasserted and a mask covering
+        // 160 of 161 joints passed. The count is a fact about a frozen rig and a
+        // frozen role table, so it is pinned: **104 of 161**, which is 57 out.
+        assert_eq!(
+            (masked.len(), rig.skeleton.len()),
+            (104, 161),
+            "the upper-body mask's coverage moved — if that is deliberate, the \
+             number in `docs/memos/island-progress.md` moves with it"
         );
         // The two forms agree — a profile written from a mask reads back as the
         // same mask, which is what makes `.inf_sm` the persisted form of one.
