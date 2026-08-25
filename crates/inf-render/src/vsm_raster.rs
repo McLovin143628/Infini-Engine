@@ -1239,26 +1239,19 @@ impl VsmRaster {
         // the pages buffer the cull walks.
         let resident = pages.len();
         let (mut d_slot, mut d_geo, mut d_cast) = (0u64, 0u64, 0u64);
-        pages.retain(|p| {
-            match self.cache[p.slot as usize] {
-                Some((l, pg, k, _)) if l == p.light && pg == p.page && k == p.key => false,
-                // The slot still holds this page's label, so the stamp moved
-                // under it: either the page is looking somewhere new (its own
-                // matrix) or something under it did (the caster fold).
-                Some((l, pg, _, g)) if l == p.light && pg == p.page => {
-                    if g == p.geo_key {
-                        d_cast += 1;
-                    } else {
-                        d_geo += 1;
-                    }
-                    true
-                }
-                // A slot with a different occupant (or none) describes somewhere
-                // else entirely — residency churn rather than content.
-                _ => {
-                    d_slot += 1;
-                    true
-                }
+        pages.retain(|p| match classify_page(self.cache[p.slot as usize], p) {
+            None => false,
+            Some(DirtyReason::Slot) => {
+                d_slot += 1;
+                true
+            }
+            Some(DirtyReason::Geometry) => {
+                d_geo += 1;
+                true
+            }
+            Some(DirtyReason::Casters) => {
+                d_cast += 1;
+                true
             }
         });
         self.stats.cached_pages += (resident - pages.len()) as u64;
@@ -1266,6 +1259,11 @@ impl VsmRaster {
         self.stats.dirty_slot += d_slot;
         self.stats.dirty_geometry += d_geo;
         self.stats.dirty_casters += d_cast;
+        debug_assert_eq!(
+            d_slot + d_geo + d_cast,
+            pages.len() as u64,
+            "the dirty split must tile the dirty set"
+        );
         if pages.is_empty() {
             // **The steady state.** Nothing is recorded, which is the claim: the
             // encoder is not touched, `frames` does not move, and `pages` stays
@@ -2248,6 +2246,51 @@ struct PageDraw {
     key: u64,
 }
 
+/// **Why a resident page was dirty** (island wave I7b) — the three-way split
+/// [`VsmRasterStats::dirty_slot`] / `dirty_geometry` / `dirty_casters` counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirtyReason {
+    /// The slot changed occupant: its texels describe another `(light, page)`.
+    Slot,
+    /// The page's own matrix moved — a clipmap re-centre, an origin rebase.
+    Geometry,
+    /// The page did not move and something under it did.
+    Casters,
+}
+
+/// Classify one resident page against what its atlas slot currently holds:
+/// `None` for a cache hit, `Some(reason)` for a miss.
+///
+/// **Lifted out of the `retain` closure so it can be falsified** (the I7b audit).
+/// The split is what retired I4b's routed caster-pack cache — *"re-cast reads
+/// **0.0** every frame, so the content that cache would key on invalidates
+/// nothing"* — and it landed with no arm at all: nothing in the tree drove a
+/// re-cast, so a `Casters` arm that was structurally unreachable would have
+/// printed the same zero and read as a measurement. It is the shipped
+/// classifier, called from the shipped `retain`, and
+/// `the_dirty_split_names_all_three_reasons_and_tiles_the_dirty_set` drives
+/// every branch of it.
+///
+/// The order of the tests is load-bearing: `key` folds `geo_key` *and* the caster
+/// fold *and* the caster count, so "same label, same `geo_key`, different `key`"
+/// is exactly and only "the casters under an unmoved page changed".
+fn classify_page(slot: Option<(u32, VsmPage, u64, u64)>, p: &PageDraw) -> Option<DirtyReason> {
+    match slot {
+        Some((l, pg, k, _)) if l == p.light && pg == p.page && k == p.key => None,
+        // The slot still holds this page's label, so the stamp moved under it:
+        // either the page is looking somewhere new (its own matrix) or something
+        // under it did (the caster fold).
+        Some((l, pg, _, g)) if l == p.light && pg == p.page => Some(if g == p.geo_key {
+            DirtyReason::Casters
+        } else {
+            DirtyReason::Geometry
+        }),
+        // A slot with a different occupant (or none) describes somewhere else
+        // entirely — residency churn rather than content.
+        _ => Some(DirtyReason::Slot),
+    }
+}
+
 /// **Whether the caster quad at `(i, j)` sits over a carved hole** (P27.3).
 ///
 /// The terrain raster's poison rule — *any* holed sample of the bilinear cell
@@ -3193,6 +3236,101 @@ mod tests {
                 "the hoisted prefix disagrees with the definition at group {g}"
             );
         }
+    }
+
+    /// **THE DIRTY SPLIT NAMES ALL THREE REASONS, AND IT TILES THE DIRTY SET**
+    /// (the I7b audit).
+    ///
+    /// Island wave I7b split `dirty_pages` into re-slotted / moved / re-cast and
+    /// used the result to **retire** wave I4b's routed caster-pack cache: the lit
+    /// island reads *"0.0 re-cast, every frame"*, so nothing under a shadow page
+    /// ever changes and a content-keyed cache has no content to key on. That is a
+    /// load-bearing zero, and it landed with **no arm at all** — a `Casters`
+    /// branch that was unreachable by construction would print the identical
+    /// zero. Inference dressed as measurement is worse than no measurement
+    /// (P22's law), so the branch is driven here.
+    ///
+    /// [`classify_page`] is the shipped classifier — `record`'s own `retain`
+    /// calls it — so this drives the world and not a restatement of it. Four
+    /// cache states against one page, and the fourth is the one the routing hung
+    /// on: same slot, same label, **same `geo_key`**, a different whole `key`,
+    /// which can only mean the casters under an unmoved page moved.
+    #[test]
+    fn the_dirty_split_names_all_three_reasons_and_tiles_the_dirty_set() {
+        let page = VsmPage::flat(2, 3, 4);
+        let p = PageDraw {
+            view_proj: Mat4::IDENTITY,
+            rect: (0, 0, 128),
+            slot: 7,
+            light: 1,
+            page,
+            geo_key: 0x6E0_6E0,
+            caster_fold: 0x5151,
+            casters: 2,
+            group_mask: [0; VSM_GROUP_MASK_WORDS],
+            key: 0xC0FFEE,
+        };
+
+        // 1. the slot holds exactly this page's label and this content: a hit.
+        assert_eq!(
+            classify_page(Some((p.light, p.page, p.key, p.geo_key)), &p),
+            None,
+            "an unchanged page was re-rastered"
+        );
+        // 2. the slot is empty, or holds somebody else: residency churn.
+        assert_eq!(classify_page(None, &p), Some(DirtyReason::Slot));
+        assert_eq!(
+            classify_page(Some((p.light + 1, p.page, p.key, p.geo_key)), &p),
+            Some(DirtyReason::Slot),
+            "another light's page in this slot is not this page's content"
+        );
+        assert_eq!(
+            classify_page(
+                Some((p.light, VsmPage::flat(2, 9, 4), p.key, p.geo_key)),
+                &p
+            ),
+            Some(DirtyReason::Slot)
+        );
+        // 3. same label, and the page's own matrix moved: the grid shifted.
+        assert_eq!(
+            classify_page(Some((p.light, p.page, p.key ^ 1, p.geo_key ^ 1)), &p),
+            Some(DirtyReason::Geometry),
+            "a page whose geometry stamp moved was charged to the casters"
+        );
+        // 4. **the re-cast**: same label, same geometry stamp, different content.
+        assert_eq!(
+            classify_page(Some((p.light, p.page, p.key ^ 1, p.geo_key)), &p),
+            Some(DirtyReason::Casters),
+            "a page that did not move and whose casters did is not reachable, so \
+             the island's `0.0 re-cast` is a property of this classifier rather \
+             than of the island"
+        );
+
+        // …and the three tile the dirty set: every miss is exactly one of them.
+        let states = [
+            Some((p.light, p.page, p.key, p.geo_key)),
+            None,
+            Some((p.light + 1, p.page, p.key, p.geo_key)),
+            Some((p.light, p.page, p.key ^ 1, p.geo_key ^ 1)),
+            Some((p.light, p.page, p.key ^ 1, p.geo_key)),
+        ];
+        let (mut hits, mut slot, mut geo, mut cast) = (0u64, 0u64, 0u64, 0u64);
+        for s in states {
+            match classify_page(s, &p) {
+                None => hits += 1,
+                Some(DirtyReason::Slot) => slot += 1,
+                Some(DirtyReason::Geometry) => geo += 1,
+                Some(DirtyReason::Casters) => cast += 1,
+            }
+        }
+        assert_eq!(hits, 1);
+        assert_eq!(
+            slot + geo + cast,
+            states.len() as u64 - hits,
+            "the split must sum to the dirty set exactly — the whole claim the \
+             three counters make about `dirty_pages`"
+        );
+        assert!(slot > 0 && geo > 0 && cast > 0, "a reason went unexercised");
     }
 
     /// **The one line a host reads is one line** (P27.2 audit).
