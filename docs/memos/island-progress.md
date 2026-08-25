@@ -4910,7 +4910,7 @@ per-hand aperture cannot.
 | | after the SK1a audit | **after SK1b** |
 |---|---|---|
 | battery blocks / passed / failed / ignored | 319 / 6 015 / 0 / 16 | **320 / 6 048 / 0 / 16** — **+1 block** (`grip_gate`, the wave's only new test file) and **+33 arms** |
-| goldens | 54, byte-identical | **54, byte-identical** under `INF_GOLDEN_STRICT=1` over **101 arms**, no PNG rewritten. Nothing here touches a render path |
+| goldens | 54, byte-identical | **54, byte-identical** under `INF_GOLDEN_STRICT=1` over **101 arms**, no PNG rewritten over **101 arms**, no PNG rewritten. Nothing here touches a render path |
 | `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
 | rustdoc warnings (ceiling 450) | 374 individual over 30 crates | **374 individual over 30 crates** after `cargo clean --doc`. **The wave adds zero**: it introduced **9** — four `[`clamp_to_limit`]` links to a private fn, two unresolved `IkError`/`IkReport` links in a new module, `starter_body`'s link to a private `skinned_copy`, `MUZZLE_HEIGHT_M`'s to a private `muzzle_of`, and one a *new public item* re-attributed out of a private doc that had been linking privately all along — and all nine were found and removed |
 | `cargo fmt --all --check` | clean | clean |
@@ -5647,12 +5647,29 @@ it takes all of them at once.
 
 | | after the SK1b audit | **after SK1c** |
 |---|---|---|
-| battery blocks / passed / failed / ignored | 320 / 6 052 / 0 / 16 | **see the closing run** |
+| battery blocks / passed / failed / ignored | 320 / 6 052 / 0 / 16 | **321 / 6 067 / 0 / 16** — **+1 block** (`weapon_hands_gate`, the wave's only new test file) and **+15 arms** |
 | goldens | 54, byte-identical | **54, byte-identical** under `INF_GOLDEN_STRICT=1` — no render path is touched, and no golden can see the hero: `inf-render` names neither `inf-island` nor `inf-editor-core`, and its only `inf_anim` use is a hand-built three-joint cylinder |
 | `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
-| rustdoc warnings (ceiling 450) | 374 over 30 crates | **see the closing run** |
+| rustdoc warnings (ceiling 450) | 374 over 30 crates | **374 over 30 crates** after `cargo clean --doc`. **The wave adds zero**: it introduced **one** — an intra-doc link from `SimSession::gameplay` to `RuntimeSim::gameplay`, which is downstream of this crate and therefore unlinkable — and it was found and named instead |
 | `cargo fmt --all --check` | clean | clean |
 | frontend tests / files | 702 / 78 | **702 / 78**, unchanged — one dialog line added, `tsc` and `eslint` clean |
 | schema | `.inf_skel` v3, `.inf_anim` v2, `.inf_sm` v3, `.inf_mesh` v2, scene v25, `ScenePayload` v11 | **nothing moved.** `Interactable`, `HandGrabRes` and `HandIkRes` are runtime; `ItemDef`/`WeaponDef` carry no `Serialize`; the starter character is content |
 | committed sample bytes | unmoved | **two `.inf_lvl` +70 B each** (arithmetic above) and **19 new files** under `samples/starter-character/`. Nothing else moved |
 | `EXPECTED_LEVELS` | 23 | **23** — the new folder is content, not a level |
+| chr(92) | the twenty-first was the wave's own | **the twenty-SECOND and twenty-THIRD, and both were mine** — two eaten continuations in `island.rs` and `samples.rs`, written from a *raw* Python string where a single backslash is what a Rust continuation needs and a doubled one is what a raw string preserves: the mirror image of the mistake the law was written about. Caught by the workspace gate on the first full battery. Every `.rs` file this wave touched was then swept for both shapes: one hit, pre-existing, in a literal that spells its own indentation on purpose |
+
+### Commits
+
+| | |
+|---|---|
+| `d6f57f49` | the two hosts did not commute, and it took a trace to say so |
+| `0b10fc4c` | the grip catalogue is generated, not authored in a test |
+| `315d01c8` | the engine ships a character, and it is the wizard's own |
+| `19cf44be` | the island's hero stops being a capsule |
+| `86e0bfec` | hand IK gets its producers, and the hands go on the weapon |
+| `f0613bb3` | the gate's imports, without the hack that silenced them |
+| `516d4e4b` | a grab is session state too |
+
+**Nine** commits, not the seven this table names: the ledger commit cannot name
+itself, and neither can the one that closes the counts after it — SK1b's own
+convention, and the trap SK1a fell into first time.

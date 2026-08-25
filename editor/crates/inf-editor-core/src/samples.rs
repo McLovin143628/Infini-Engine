@@ -10341,7 +10341,7 @@ pub const STARTER_CHARACTER_NAME: &str = "Starter";
 /// against the door that wrote it. See
 /// [`crate::character::build_character_with_ids`].
 pub fn starter_character_ids() -> crate::character::CharacterIds {
-    let id = |n: u128| Some(inf_asset::AssetId(Uuid::from_u128(0x5C10_00a0 + n)));
+    let id = |n: u128| Some(inf_asset::AssetId(Uuid::from_u128(0x5C10_00A0 + n)));
     crate::character::CharacterIds {
         skeleton: id(0),
         material: id(1),

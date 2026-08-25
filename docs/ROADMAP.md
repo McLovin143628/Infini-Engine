@@ -25942,9 +25942,18 @@ threshold is one triangle), which is the worst shape a defect can have and is wh
 shipped bytes for every sample in the tree, and it is carried with all four blockers so the wave
 that takes it takes them at once.
 
-Schema **unmoved** (`Interactable`, `HandGrabRes` and `HandIkRes` are runtime; the starter character
-is content). Goldens **54**, byte-identical — no render path is touched and no golden can see the
-hero, since `inf-render` names neither `inf-island` nor `inf-editor-core` and its only `inf_anim`
-use is a hand-built three-joint cylinder. `EXPECTED_LEVELS` stays **23**. Six commits,
-`(SK1c)`-tagged. The full ledger, with the per-clause numbers and the carried list, is in
-`docs/memos/island-progress.md` under *Wave SK1c*.
+Counts at the closing head: battery **321 / 6 067 / 0 / 16** (+1 block, `weapon_hands_gate`; +15
+arms), goldens **54** byte-identical under `INF_GOLDEN_STRICT=1` over 101 arms with no PNG
+rewritten — no render path is touched and no golden can see the hero, since `inf-render` names
+neither `inf-island` nor `inf-editor-core` and its only `inf_anim` use is a hand-built three-joint
+cylinder — clippy **0** with `-D warnings`, rustdoc **374 over 30 crates** after `cargo clean --doc`
+(the wave adds zero: it introduced one unlinkable intra-doc link and it was found and named), fmt
+clean, frontend **702 / 78** with `tsc` and `eslint` clean, schema **unmoved** (`Interactable`,
+`HandGrabRes` and `HandIkRes` are runtime; the starter character is content), `EXPECTED_LEVELS`
+still **23**, and the only committed bytes that moved are the two island `.inf_lvl` files at +70 B
+each plus the nineteen new files under `samples/starter-character/`. **The twenty-second and
+twenty-third chr(92) catches were this wave's own** — two eaten continuations written from a *raw*
+Python string, where a single backslash is what a Rust continuation needs and a doubled one is what
+a raw string preserves: the mirror image of the mistake the law was written about, caught by the
+workspace gate on the first full battery. Nine commits, `(SK1c)`-tagged. The full ledger, with the
+per-clause numbers and the carried list, is in `docs/memos/island-progress.md` under *Wave SK1c*.

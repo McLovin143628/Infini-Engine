@@ -875,8 +875,8 @@ impl SimSession {
         &self.fractures
     }
 
-    /// **This step's gameplay report** — the MIRROR of
-    /// [`RuntimeSim::gameplay`](inf_player_docs).
+    /// **This step's gameplay report** — the MIRROR of `RuntimeSim::gameplay`
+    /// (named rather than linked: `inf-player` is downstream of this crate).
     ///
     /// The field has been kept since I6 and had no reader outside this file,
     /// which meant a two-host gate could compare doors, shots and (since SK1c)
@@ -884,8 +884,6 @@ impl SimSession {
     /// against on this one. Its engagement counters are the half a byte
     /// comparison is blind to: two hosts that both asked for nothing agree
     /// perfectly.
-    ///
-    /// [inf_player_docs]: https://docs.rs/inf-player
     pub fn gameplay(&self) -> &inf_physics::d3::GameplayReport {
         &self.gameplay
     }
