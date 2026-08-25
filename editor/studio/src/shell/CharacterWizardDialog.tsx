@@ -29,9 +29,18 @@ import { useDockLayout } from "../panels/dock/dockLayoutStore";
 import { useShellStore } from "../stores/shellStore";
 import { projectRig, useCharacterWizardStore } from "../stores/characterWizardStore";
 
-/** The four plans, with the one line each that says what it is for. */
+/** The five plans, with the one line each that says what it is for. */
 const PLANS: { id: BodyPlanName; label: string; blurb: string }[] = [
-  { id: "biped", label: "Biped", blurb: "Two legs, two arms, the canonical humanoid names." },
+  {
+    id: "biped",
+    label: "Biped",
+    blurb: "The 161-bone mannequin hierarchy: twists, fingers and IK handles.",
+  },
+  {
+    id: "biped-canonical",
+    label: "Biped (simple)",
+    blurb: "Twenty joints in this engine's canonical retarget vocabulary.",
+  },
   { id: "quadruped", label: "Quadruped", blurb: "Four legs on two girdles, lateral-sequence walk." },
   { id: "hexapod", label: "Hexapod", blurb: "Six legs on three girdles, metachronal wave." },
   { id: "npedal", label: "N-pedal", blurb: "Any even number of legs, up to 64." },

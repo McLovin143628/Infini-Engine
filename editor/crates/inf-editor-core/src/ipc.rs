@@ -4640,7 +4640,7 @@ mod character_wire_tests {
                 .expect("the default spec previews");
         let dto = CharacterRigDto::from_preview(&preview);
         assert_eq!(dto.joints.len(), preview.joints.len());
-        assert_eq!(dto.joints[0].name, "hips");
+        assert_eq!(dto.joints[0].name, "root");
         assert_eq!(dto.legs.len(), 2);
         assert!(dto.limits >= 4);
         assert!(dto.body_vertices.is_some_and(|v| v > 0));

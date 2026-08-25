@@ -611,7 +611,8 @@ export default function SkeletonEditor({
             onChange={(e) => setPlan(e.target.value as BodyPlanName)}
             className="rounded border border-(--ink-border) bg-(--ink-bg-2) px-1.5 py-0.5 outline-none"
           >
-            <option value="biped">Biped</option>
+            <option value="biped">Biped (mannequin)</option>
+            <option value="biped-canonical">Biped (simple)</option>
             <option value="quadruped">Quadruped</option>
             <option value="hexapod">Hexapod</option>
           </select>

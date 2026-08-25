@@ -988,4 +988,81 @@ mod tests {
              report is not measuring what it claims"
         );
     }
+
+    /// **WHAT 161 BONES COST THE WEIGHT SOLVER** (SK1a) — measured before
+    /// anything is done about it, because a mitigation chosen without a number is
+    /// a guess, and this repository has paid for one of those already (the caster
+    /// pack whose routed cache could not have touched a GPU pass).
+    ///
+    /// The shape of the cost, from the code rather than from a hunch:
+    /// `bone_segments` turns J joints into B segments, and both the visibility
+    /// pass (one BVH ray per vertex per bone) and the diffusion (one conjugate
+    /// gradient solve per bone) are linear in B. So the prediction is
+    /// **B(161)/B(20)**, and what this arm measures is whether the constant
+    /// factors keep that promise.
+    ///
+    /// Run it with `--nocapture` to read the numbers. What is *asserted* is the
+    /// ratio against its own prediction, not a wall-clock budget: a machine-time
+    /// ceiling in a unit test is a flake with a date on it, while "the solve grew
+    /// the way its own structure says it should" is a property.
+    #[test]
+    fn the_weight_solve_costs_what_its_bone_count_says_it_should() {
+        use std::time::Instant;
+        let params = BodyParams {
+            height_m: 1.8,
+            ..Default::default()
+        };
+        let run = |plan: BodyPlan| -> (usize, usize, f64) {
+            let rig = build_template(plan, &params).unwrap();
+            let segments = bone_segments(&rig.skeleton).len();
+            let mut m = tube_mesh();
+            let bvh = Bvh::from_mesh(&m);
+            bind(&mut m, rig.skeleton.len() as u32);
+            // Three rounds, and the MIN — the instrument's own convention: the
+            // fastest run is the one least polluted by whatever else the machine
+            // was doing.
+            let mut best = f64::INFINITY;
+            for _ in 0..3 {
+                let t = Instant::now();
+                let (op, _) = solve_heat_weights(&m, &bvh, &rig.skeleton).expect("solves");
+                assert!(op.is_some(), "{plan:?} weighted nothing");
+                best = best.min(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            (rig.skeleton.len(), segments, best)
+        };
+        let (j20, b20, ms20) = run(BodyPlan::BipedCanonical);
+        let (j161, b161, ms161) = run(BodyPlan::Biped);
+        let verts = tube_mesh().vert_count();
+        let predicted = b161 as f64 / b20 as f64;
+        let measured = ms161 / ms20;
+        println!(
+            "heat solve over {verts} vertices: {j20} joints / {b20} segments = \
+             {ms20:.3} ms; {j161} joints / {b161} segments = {ms161:.3} ms; \
+             {measured:.2}x measured against {predicted:.2}x predicted"
+        );
+        assert_eq!((j20, j161), (20, inf_anim::MANNY_JOINT_COUNT));
+        // **The measurement, on this machine, in release**: 386 vertices,
+        // 24 -> 249 segments (10.4x), and the solve went 32.4 -> 78.3 ms —
+        // **2.4x**, not 10.4x. The per-bone work is real and is not what dominates
+        // at this mesh size: the Laplacian assembly, the neighbourhood walk and
+        // the per-vertex top-4 gather are bone-independent and are most of the
+        // clock. That is a finding, not a licence — the balance tips the other way
+        // on a mesh with tens of thousands of vertices, where `field` alone is
+        // B x V x 8 bytes (161 bones over 50 000 vertices is ~64 MB resident).
+        //
+        // So the ASSERTION is the upper bound, which is the one that guards
+        // something: growing no faster than the bone count means nothing here
+        // scales with its square. The lower bound only says the arm is measuring a
+        // solve at all.
+        assert!(
+            measured < predicted,
+            "the solve grew {measured:.2}x for {predicted:.2}x the bones, which is \
+             worse than linear: something scales with the SQUARE of the bone count"
+        );
+        assert!(
+            measured > 1.0,
+            "the solve did not grow at all ({measured:.2}x) — this arm is not \
+             measuring per-bone work"
+        );
+    }
 }

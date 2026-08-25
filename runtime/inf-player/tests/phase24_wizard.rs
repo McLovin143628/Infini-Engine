@@ -125,6 +125,17 @@ fn biped_spec() -> CharacterSpec {
     }
 }
 
+/// The twenty-joint canonical-vocabulary rig, which `BodyPlan::Biped` was until
+/// SK1a — kept as its own arm so the rig every committed clip in this repository
+/// is index-bound to still has a gate on it.
+fn canonical_biped_spec() -> CharacterSpec {
+    CharacterSpec {
+        name: "Canon".into(),
+        plan: BodyPlan::BipedCanonical,
+        ..CharacterSpec::default()
+    }
+}
+
 fn quadruped_spec() -> CharacterSpec {
     CharacterSpec {
         name: "Beast".into(),
@@ -263,6 +274,23 @@ fn shipping_trace(payload: &ScenePayload, joints: usize) -> Vec<u64> {
         counted, joints,
         "the posed skeleton has {counted} joints and the generated rig has {joints}"
     );
+    // **The trace, re-priced** (SK1a). The layout above is the price: a posed
+    // character costs 36 bytes of header plus 40 per joint per step, so the
+    // default biped went from 836 B to 6 476 B when it became the mannequin —
+    // 7.75x, not the 8x a bone count alone would suggest, because the header does
+    // not grow. What is *streamed* between the two hosts is a `u64` hash per step
+    // and does not grow at all; what grows is the memcpy and the hash over it, per
+    // posed character per fixed step. Asserted rather than described so the number
+    // cannot drift out of the ledger.
+    assert_eq!(
+        pose.len(),
+        16 + 16 + 4 + joints * 40,
+        "the pose trace is not the shape its own price is quoted from"
+    );
+    println!(
+        "pose trace: {joints} joints = {} B per character per step",
+        pose.len()
+    );
 
     let trace = inf_player::scene_trace(payload, STEPS as u64).expect("shipping trace");
     assert!(
@@ -364,9 +392,21 @@ fn a_changed_proportion_changes_the_generated_rig_and_its_walk() {
         b.skeleton.len(),
         "only the height changed; the joint COUNT must not"
     );
+    // **The hips, by NAME and not by index** (SK1a). Joint 0 of the mannequin is
+    // `root`, which sits at the origin at every height by construction, so an
+    // index-0 comparison here reads two identical zeros and calls the generator
+    // broken. The girdle is what carries `hip_height_ratio` on both rigs.
+    let hips = |sk: &SkeletonAsset| {
+        let i = sk
+            .role_index()
+            .first(inf_anim::BoneRoleKind::Pelvis, inf_anim::BoneSide::Center)
+            .or_else(|| sk.skeleton.index_of("hips"))
+            .expect("a biped has a hip girdle") as usize;
+        sk.skeleton.joints()[i].local_bind
+    };
     assert_ne!(
-        a.skeleton.joints()[0].local_bind,
-        b.skeleton.joints()[0].local_bind,
+        hips(&a),
+        hips(&b),
         "a 1.75 m and a 2.6 m biped have the same hips — the proportion never \
          reached the generator"
     );
@@ -410,6 +450,20 @@ fn the_real_pie_subprocess_runs_the_generated_biped() {
     let made = make(&biped_spec());
     let joints = {
         let skel: SkeletonAsset = inf_asset::decode(&made.bytes[&made.build.skeleton.0]).unwrap();
+        // **The default biped is the 161-bone mannequin** (SK1a), so this gate is
+        // the wave's PIE == shipping arm on a mannequin pose trace: a rig with
+        // twist chains and IK handles that the drive pass writes every step, and a
+        // locomotion set derived from `thigh_l` / `calf_l` rather than from a name
+        // this engine invented. Pinned, so a plan that quietly reverted would fail
+        // here rather than pass a smaller gate.
+        assert_eq!(skel.skeleton.len(), inf_anim::MANNY_JOINT_COUNT);
+        assert_eq!(
+            skel.roles.len(),
+            inf_anim::MANNY_JOINT_COUNT,
+            "the roles shipped"
+        );
+        assert_eq!(skel.twists.len(), 16, "the twist drivers shipped");
+        assert_eq!(skel.ik_follow.len(), 5, "the IK follow table shipped");
         skel.skeleton.len()
     };
     let (mut doc, guid) = doc_with(&made);
@@ -547,5 +601,37 @@ fn the_generated_thresholds_move_the_shipped_player_between_states() {
         "at twice the run threshold the character is in state {} ({}), not `run`",
         state,
         inf_anim::STATE_NAMES.get(state).copied().unwrap_or("?")
+    );
+}
+
+/// The same gate for the **canonical-vocabulary biped** — the twenty-joint rig
+/// `BodyPlan::Biped` was before SK1a.
+///
+/// Not redundant with the mannequin arm above: it is the rig every committed
+/// `.inf_anim` in this repository is index-bound to, it carries **no** side
+/// tables, and it is therefore the arm that proves the drive pass's "absent costs
+/// nothing" claim end to end — a payload with no twists and no handles folds a
+/// trace the shipping build folds too.
+#[test]
+fn the_real_pie_subprocess_runs_the_canonical_biped_with_no_side_tables() {
+    let made = make(&canonical_biped_spec());
+    let joints = {
+        let skel: SkeletonAsset = inf_asset::decode(&made.bytes[&made.build.skeleton.0]).unwrap();
+        assert_eq!(skel.skeleton.len(), 20);
+        assert!(
+            skel.roles.is_empty() && skel.twists.is_empty() && skel.ik_follow.is_empty(),
+            "this rig is supposed to carry no side tables, and the claim above \
+             about what a rig without them costs rests on it"
+        );
+        skel.skeleton.len()
+    };
+    let (doc, _) = doc_with(&made);
+    let live = payload(&doc, &made, 0.0);
+    let want = shipping_trace(&live, joints);
+    assert_eq!(
+        pie_trace(&live),
+        want,
+        "the REAL --pie subprocess folded a different trace from the shipping \
+         build over a rig with no drive tables at all"
     );
 }

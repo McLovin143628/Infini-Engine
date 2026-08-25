@@ -963,12 +963,9 @@ mod tests {
         // pass over what was written moves nothing.
         let rig = crate::assets::anim_derive::skeleton_for(&proj, clip_id, &asset)
             .expect("the bound rig");
-        let (again, _) = inf_anim::derive_clip(
-            &asset.clip,
-            &rig,
-            &inf_anim::DeriveOptions::default(),
-        )
-        .expect("a re-derive");
+        let (again, _) =
+            inf_anim::derive_clip(&asset.clip, &rig, &inf_anim::DeriveOptions::default())
+                .expect("a re-derive");
         assert_eq!(
             again, asset.clip,
             "re-deriving what the importer wrote changed it"

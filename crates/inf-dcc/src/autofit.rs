@@ -259,10 +259,19 @@ pub fn fit_template(bvh: &Bvh, opts: &FitOptions) -> Result<(SkeletonAsset, FitR
 
     // ── 4. medial refinement ───────────────────────────────────────────────
     let ground = min.y + FOOT_CLEARANCE * ext.y;
+    // Which joints are planted on the ground. **The role table first** (SK1a):
+    // the mannequin's `foot_*` is an ankle and its `ik_foot_*` is a marker, and
+    // the prefix rule cannot tell a `Foot` from a `Ball` on any rig that has both.
+    // The prefix stays as the fallback for a rig with no table.
+    let roles = asset.role_index();
     let is_foot: Vec<bool> = skeleton
         .joints()
         .iter()
-        .map(|j| j.name.starts_with("foot_"))
+        .enumerate()
+        .map(|(i, j)| match roles.kind_of(i as u16) {
+            Some(k) => k == inf_anim::BoneRoleKind::Foot,
+            None => j.name.starts_with("foot_"),
+        })
         .collect();
     // Feet are planted before refinement so the chord they are refined against is
     // the one through the ankle rather than through the floor.
@@ -301,6 +310,17 @@ pub fn fit_template(bvh: &Bvh, opts: &FitOptions) -> Result<(SkeletonAsset, FitR
     let skeleton = Skeleton::new(fitted).map_err(TemplateError::Invalid)?;
     let mut out = SkeletonAsset::with_sockets(skeleton, asset.sockets.clone());
     out.limits = asset.limits.clone();
+    // **The side tables ride through the fit** (SK1a). The fit MOVES joints and
+    // never adds, removes or reorders one — `emit_joints` maps the input list
+    // one-to-one — so every table keyed on a joint index is still true of the
+    // result. Dropping them was the shape of a real defect: a fitted mannequin
+    // arrived with no role table, `build_locomotion` fell back to its name rule,
+    // and the wizard refused the rig it had just generated with a message about
+    // `upper_leg_l`.
+    out.roles = asset.roles.clone();
+    out.twists = asset.twists.clone();
+    out.ik_follow = asset.ik_follow.clone();
+    out.grips = asset.grips.clone();
 
     Ok((
         out,

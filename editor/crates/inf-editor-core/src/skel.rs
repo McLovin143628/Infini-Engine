@@ -464,7 +464,7 @@ mod tests {
     use super::*;
 
     fn biped() -> SkeletonAsset {
-        inf_anim::build_template(BodyPlan::Biped, &BodyParams::default()).unwrap()
+        inf_anim::build_template(BodyPlan::BipedCanonical, &BodyParams::default()).unwrap()
     }
 
     #[test]

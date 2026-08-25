@@ -1491,7 +1491,12 @@ export const skel = {
  * part of this API expected to grow, and a name it does not know fails loudly
  * with the list of what it does.
  */
-export type BodyPlanName = "biped" | "quadruped" | "hexapod" | "npedal";
+export type BodyPlanName =
+  | "biped"
+  | "biped-canonical"
+  | "quadruped"
+  | "hexapod"
+  | "npedal";
 
 /**
  * **New Character from Template** (P24.5) — the wizard's two doors.

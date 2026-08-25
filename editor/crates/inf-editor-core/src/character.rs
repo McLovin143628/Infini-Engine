@@ -1345,8 +1345,24 @@ fn controller_class(
 /// and the only non-arithmetic operation is `sqrt` (inside `normalize`), which
 /// IEEE-754 specifies exactly. No trigonometry: the box's frame is built from a
 /// cross product against a reference axis chosen by comparison, not by an angle.
+///
+/// # Only deform bones get a box (SK1a)
+///
+/// One box per bone was a fair description of a twenty-joint rig, where every
+/// joint was a limb. It is not a description of a 161-bone one: 74 of those bones
+/// are correctives sitting at their parent's origin, 16 are twist bones a third of
+/// the way along a segment their parent's box already covers, and 7 are IK
+/// handles that are not on the body at all. Boxed, they are boxes inside boxes and
+/// a box on a marker.
+///
+/// So the rule is the **role table**: a box is emitted for a segment whose lower
+/// end the rig calls a deform bone. The zero-length guard below already dropped
+/// most of the correctives silently — silently being the problem, because "it
+/// happens to be degenerate" and "it is not part of the body" are different facts
+/// and only one of them is stable. A rig with no table keeps every box it had.
 pub fn block_body_mesh(rig: &SkeletonAsset) -> MeshAsset {
     let joints = rig.skeleton.joints();
+    let roles = rig.role_index();
     // Bind-pose globals, composed down the chain (the joint list is topological
     // by `Skeleton::new`'s own invariant).
     let mut mats: Vec<glam::Mat4> = Vec::with_capacity(joints.len());
@@ -1373,6 +1389,10 @@ pub fn block_body_mesh(rig: &SkeletonAsset) -> MeshAsset {
         let Some(parent) = joint.parent else {
             continue;
         };
+        // The role table's cut, and only when there is one — see the fn docs.
+        if !roles.is_empty() && !roles.is_deform(index as u16) {
+            continue;
+        }
         let a = globals[parent as usize];
         let b = globals[index];
         let axis = b - a;
@@ -1708,13 +1728,88 @@ mod tests {
     fn a_preview_describes_the_rig_the_build_would_make() {
         let spec = CharacterSpec::default();
         let p = preview_character(&spec, None).unwrap();
+        // The default plan is the mannequin (SK1a), so the rig the wizard
+        // describes is the 161-bone one and its first joint is `root`.
         assert_eq!(p.joints.len(), biped().skeleton.len());
-        assert_eq!(p.joints[0].name, "hips");
+        assert_eq!(p.joints.len(), inf_anim::MANNY_JOINT_COUNT);
+        assert_eq!(p.joints[0].name, "root");
         assert_eq!(p.legs.len(), 2);
+        assert_eq!(
+            p.legs.iter().map(|l| l.0.as_str()).collect::<Vec<_>>(),
+            ["thigh_l", "thigh_r"],
+            "the wizard derived locomotion from the bones the rig really has"
+        );
         assert!(p.limits >= 4, "knees and elbows carry hinges");
         assert!(p.walk_threshold_m_s < p.run_threshold_m_s);
         let (verts, tris) = p.body.expect("a mannequin is previewed");
         assert!(verts > 100 && tris > 50, "{verts} verts / {tris} tris");
+    }
+
+    /// **WHAT 161 BONES COST THE PREVIEW DRAG** (SK1a), measured on the path an
+    /// author actually holds down the mouse button on.
+    ///
+    /// The wizard's proportion sliders re-preview on every change (debounced at
+    /// 250 ms in `characterWizardStore`), and a preview on the mannequin path is
+    /// `build_template` + `build_locomotion` + `block_body_mesh` — three O(joints)
+    /// passes and one O(joints) mesh build. The weight solver, which is the
+    /// expensive thing in this crate, is **not on this path at all**: a block
+    /// mannequin is rigidly bound by construction (see `block_body_mesh`), so the
+    /// 2.4x the heat solve costs at 161 bones is paid only by an author who
+    /// supplies their own mesh, once, at build time.
+    ///
+    /// Run with `--nocapture` for the numbers. Asserted as a **budget with a real
+    /// origin**: a drag is felt at a frame, and the debounce is 250 ms, so a
+    /// preview that fits inside one 60 Hz frame cannot be what makes a slider
+    /// stutter. That is a bound with slack in it on purpose — the alternative is a
+    /// wall-clock ceiling tight enough to flake on a shared runner.
+    #[test]
+    fn the_preview_drag_still_fits_inside_a_frame_at_a_hundred_and_sixty_one_bones() {
+        use std::time::Instant;
+        let run = |plan: inf_anim::BodyPlan| -> (usize, f64, f64) {
+            let spec = CharacterSpec {
+                plan,
+                ..CharacterSpec::default()
+            };
+            let mut session = CharacterPreviewSession::default();
+            // Warm it, then measure the drag: the same spec re-previewed, which is
+            // what the cache is for.
+            let p = session.preview(&spec, None).expect("previews");
+            let joints = p.joints.len();
+            let mut warm = f64::INFINITY;
+            for _ in 0..5 {
+                let t = Instant::now();
+                session.preview(&spec, None).expect("previews");
+                warm = warm.min(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            let mut cold = f64::INFINITY;
+            for _ in 0..5 {
+                let mut fresh = CharacterPreviewSession::default();
+                let t = Instant::now();
+                fresh.preview(&spec, None).expect("previews");
+                cold = cold.min(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            (joints, cold, warm)
+        };
+        let (j20, cold20, warm20) = run(inf_anim::BodyPlan::BipedCanonical);
+        let (j161, cold161, warm161) = run(inf_anim::BodyPlan::Biped);
+        println!(
+            "preview: {j20} joints cold {cold20:.3} ms / warm {warm20:.3} ms; \
+             {j161} joints cold {cold161:.3} ms / warm {warm161:.3} ms \
+             ({:.2}x cold)",
+            cold161 / cold20.max(1.0e-9)
+        );
+        assert_eq!((j20, j161), (20, inf_anim::MANNY_JOINT_COUNT));
+        // One 60 Hz frame. In DEBUG this test runs unoptimized, so the ceiling is
+        // the debounce rather than the frame — a preview that beats the interval
+        // between two previews can never queue behind itself.
+        let ceiling = if cfg!(debug_assertions) { 250.0 } else { 16.6 };
+        assert!(
+            cold161 < ceiling,
+            "a cold mannequin preview took {cold161:.3} ms against a {ceiling} ms \
+             ceiling — the drag would stutter and a cache or a coarser mannequin \
+             is owed"
+        );
+        assert!(warm161 <= cold161 * 1.5 + 0.5, "the cache did not help");
     }
 
     /// **The previewed height is the JOINT SPAN, and it is not what was asked
