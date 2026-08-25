@@ -344,7 +344,16 @@ fn the_committed_water_layers_carry_the_derivation() {
         "the bed at {on} m is not below the {} m the derivation found",
         mid.y
     );
-    let _ = off;
+    // …**and the channel is a channel rather than the whole island going down.**
+    // `off` was measured and then discarded (`let _ = off;`), which left the arm
+    // satisfied by a carve that lowered every sample on the map by 1.25 m. Thirty
+    // metres away is many multiples of the widest reach's own channel, so it must
+    // still be above the bed.
+    assert!(
+        off > on,
+        "the ground {off} m thirty metres from the centreline is not above the \
+         {on} m bed — the carve is not local to the reach"
+    );
 
     // The committed layer files are small enough to be design documents.
     for f in [
@@ -430,8 +439,28 @@ fn the_biome_map_covers_the_land_and_the_design_wins_where_it_speaks() {
             x.label()
         );
     }
-    assert!(b.biomes.masked > 0, "the farmland mask stamped nothing");
+    assert!(b.biomes.masked > 0, "the design masks stamped nothing");
     assert!(b.biomes.reserved > 0, "the sites reserved nothing");
+
+    // **`masked` COUNTS THE MASKS, NOT ONE BIOME.** It was `id == Farmland`, and
+    // both committed mask layers name meadow as well — so the report and the
+    // build log under-stated what the design overrode by every meadow the author
+    // had painted, and a meadow the classifier chose looked exactly like one an
+    // author drew. Farmland is design-only (the classifier never produces it), so
+    // its cell count is exactly the farmland masks' contribution, and the meadow
+    // masks are what the difference is.
+    let farmland = b.biomes.cells[IslandBiome::Farmland.id() as usize];
+    println!(
+        "MASKS: {} cell(s) decided by a design mask, of which {farmland} are \
+         farmland — the rest are the meadow masks the old count could not see",
+        b.biomes.masked
+    );
+    assert!(
+        b.biomes.masked > farmland,
+        "the mask count ({}) is exactly the farmland count ({farmland}), so it is \
+         still counting one biome rather than the masks",
+        b.biomes.masked
+    );
 
     // The terrain really carries the ids: ask it at a site (urban) and inside the
     // farmland mask.

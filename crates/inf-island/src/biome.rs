@@ -132,7 +132,13 @@ pub struct BiomeClassification {
     pub breaks: Vec<f64>,
     /// How many coarse cells fell to each biome, in id order.
     pub cells: [u64; 8],
-    /// Cells the masks overrode.
+    /// Cells a **design mask** decided, whatever biome it named.
+    ///
+    /// It counted only `Farmland` — which is one of the two biomes the committed
+    /// masks name, so the report and the build log under-stated what the design
+    /// overrode by every meadow the author had painted, and there was no way to
+    /// tell a meadow the classifier chose from one an author drew. Cells a *site*
+    /// reservation took first are `reserved`, not this.
     pub masked: u64,
     /// Cells the recipe's own sites reserved.
     pub reserved: u64,
@@ -189,15 +195,11 @@ impl Classifier {
         if height_m <= self.sea_level_m {
             return inf_terrain::UNASSIGNED_BIOME;
         }
-        for (c, r) in &self.reserved {
-            if (p - *c).length() <= *r {
-                return IslandBiome::Urban.id();
-            }
+        if self.reserved_at(p) {
+            return IslandBiome::Urban.id();
         }
-        for m in &self.masks {
-            if point_in_ring(p, &m.exterior) && !m.holes.iter().any(|h| point_in_ring(p, h)) {
-                return m.biome.id();
-            }
+        if let Some(b) = self.mask_at(p) {
+            return b.id();
         }
         if height_m - self.sea_level_m <= self.spec.beach_m {
             return IslandBiome::Beach.id();
@@ -211,6 +213,23 @@ impl Classifier {
         let k = inf_gis::class_of(height_m, &self.breaks).unwrap_or(usize::MAX);
         let last = self.ladder.len() - 1;
         self.ladder[k.min(last)].id()
+    }
+
+    /// The design mask covering `p`, if any.
+    ///
+    /// **The one place the mask test lives**, so the classifier's answer and the
+    /// report's count cannot disagree about what a mask decided — which they did:
+    /// the count was `id == Farmland`, and the committed masks name meadow too.
+    pub fn mask_at(&self, p: DVec2) -> Option<IslandBiome> {
+        self.masks
+            .iter()
+            .find(|m| point_in_ring(p, &m.exterior) && !m.holes.iter().any(|h| point_in_ring(p, h)))
+            .map(|m| m.biome)
+    }
+
+    /// `true` where a settlement site reserves the ground. Outranks a mask.
+    pub fn reserved_at(&self, p: DVec2) -> bool {
+        self.reserved.iter().any(|(c, r)| (p - *c).length() <= *r)
     }
 
     /// The fenceposts, for the report.
@@ -302,9 +321,14 @@ pub fn classify_biomes(
             let p = heights.position(i, j);
             let id = c.at(p, f64::from(heights.h[k]), heights.slope_deg(i, j));
             cells[usize::from(id).min(7)] += 1;
-            if id == IslandBiome::Urban.id() {
+            // Through the classifier's own doors, in its own priority order — a
+            // second copy of the mask test here is how the count came to mean
+            // "farmland" while the classifier meant "a mask decided this".
+            if id == inf_terrain::UNASSIGNED_BIOME {
+                // Under water: no design reached it, whatever covers it.
+            } else if id == IslandBiome::Urban.id() && c.reserved_at(p) {
                 reserved_n += 1;
-            } else if id == IslandBiome::Farmland.id() {
+            } else if c.mask_at(p).is_some() {
                 masked += 1;
             }
         }
