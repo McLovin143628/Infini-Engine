@@ -257,10 +257,15 @@ fn pie_sim(proj: &Path) -> RuntimeSim {
     let m_guid = inf_island::road_mesh_guid(&recipe.name);
 
     // **The character's assets** (SK1c). The hero is `samples/starter-character`
-    // now, so the payload has to carry the rig, the machine and the clips or PIE
-    // poses nothing while the shipping side poses 161 bones — which is exactly
-    // what happened the first time this ran, and the state comparison below said
-    // so at step 0.
+    // now, so the payload has to carry the rig, the machine and the clips or a
+    // `--pie` preview poses nothing while the shipped build poses 161 bones.
+    //
+    // **Nothing drives this host** (SK1c audit, M1). The first draft of this
+    // comment said "the state comparison below said so at step 0"; it did not
+    // and could not — that comparison is `pack_sim` against `loose_sim`, and the
+    // sim this function returns is only ever *counted*. The counts below are the
+    // whole of this seam's cover, which is why the class is counted with the
+    // rest.
     //
     // Read off the SIDECARS rather than from a hard-coded name table, which is
     // how the editor's own asset database finds them: the recipe's `[content]`
@@ -316,10 +321,18 @@ fn pie_sim(proj: &Path) -> RuntimeSim {
     );
     assert_eq!(payload.pcgs.len(), 1, "the cover graph must ride the wire");
     // **And the hero's rig rides it too** (SK1c). Without this the PIE side
-    // publishes no pose at all, the shipping side publishes 6 476 bytes of one,
-    // and the step-0 comparison below is the only thing that notices — which is
-    // a long way from the cause. One skeleton, one machine, and the machine's
-    // three clips reached through the transitive hop.
+    // publishes no pose at all where the shipping side publishes 6 476 bytes of
+    // one. One skeleton, one machine, the machine's three clips reached through
+    // the transitive hop, **and the controller class**.
+    //
+    // **These four assertions are the ONLY cover this payload's character has**
+    // (SK1c audit, M1). The first draft of this comment said the step-0 state
+    // comparison would notice — it would not, and cannot: the drive gate builds
+    // its two hosts from `pack_sim` and `loose_sim`, and `pie_sim` is used here
+    // and nowhere else, which the arm below this function says in as many words.
+    // A payload seam nothing drives is a payload seam whose only witness is what
+    // is counted right here, so the class is counted too: reverting the
+    // blueprint resolver alone left all six arms green.
     println!(
         "PAYLOAD CHARACTER: {} skeleton(s), {} machine(s), {} clip(s), {} class(es)",
         payload.skeletons.len(),
@@ -341,6 +354,13 @@ fn pie_sim(proj: &Path) -> RuntimeSim {
         payload.clips.len(),
         3,
         "the machine's clips must ride the wire, or PIE poses every state at rest"
+    );
+    assert_eq!(
+        payload.classes.len(),
+        1,
+        "the hero's controller class must ride the wire — it is the `.inf_act` \
+         the recipe's `[content]` list copies and the one thing in the character \
+         that `level_dependencies` does NOT reach, so nothing else would notice"
     );
 
     inf_player::sim_from_payload(&payload)

@@ -1647,10 +1647,18 @@ fn editor_root_motion_trace(steps: u32) -> Vec<(Vec<u8>, f64)> {
 /// whether no committed course had ever exercised both.
 ///
 /// They do not commute. Measured on this fixture at the SK1b head, the two hosts
-/// disagreed from **step 1** and stayed apart: the editor converted the authored
+/// disagreed from **step 0** and stayed apart: the editor converted the authored
 /// world-space goal through the transform root motion had *already* moved this
 /// step, and the player through last step's. One fixed step of skew, 1.667 cm at
 /// 1 m/s, straight into `pose_state_bytes`.
+///
+/// Two numbers, because they are two different quantities and the ledger prints
+/// the first (SK1c audit): the worst **local** component (a quaternion or a
+/// translation, so a bare number) runs 0.027 / 0.035 / **0.060** / 0.055 / 0.049
+/// / 0.043 / 0.037 / 0.031 over the eight steps, and the worst **model-space**
+/// joint offset is a flat **0.0163–0.0183 m** — the one fixed step of travel
+/// above. The entity's own transform agrees to the bit on every step, which is
+/// what makes this a divergence entirely inside the pose.
 ///
 /// The order is unified — root motion moves the entity, a propagate settles it,
 /// and the pose is then evaluated against where the character actually is — and

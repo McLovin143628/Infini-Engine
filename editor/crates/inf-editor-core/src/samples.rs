@@ -10485,12 +10485,12 @@ const STARTER_CHARACTER_README: &str = concat!(
     "| file | what it is |\n",
     "|---|---|\n",
     "| `Starter.inf_skel` | the rig: 161 bones, role table, twist drivers, IK handles, hand cones and the grip catalogue |\n",
-    "| `Starter Body.inf_mesh` | the generated body, heat-weighted onto the rig |\n",
-    "| `Starter Skin.inf_mat` | a neutral matte dielectric, named as the body's material dependency |\n",
-    "| `Starter Idle/Walk/Run.inf_anim` | the generated, **derived** cycles |\n",
-    "| `Starter Locomotion.inf_sm` | the machine proposed from what the derivation measured, with the `Mask_AimOffset` upper-body profile on it |\n",
-    "| `Starter Locomotion.inf_sm.txt` | its reviewable text face |\n",
-    "| `Starter Controller.inf_act` | the Blueprint class the character binds |\n",
+    "| `Starter_Body.inf_mesh` | the generated body, heat-weighted onto the rig |\n",
+    "| `Starter_Skin.inf_mat` | a neutral matte dielectric, named as the body's material dependency |\n",
+    "| `Starter_Idle.inf_anim`, `Starter_Walk.inf_anim`, `Starter_Run.inf_anim` | the generated, **derived** cycles |\n",
+    "| `Starter_Locomotion.inf_sm` | the machine proposed from what the derivation measured, with the `Mask_AimOffset` upper-body profile on it |\n",
+    "| `Starter_Locomotion.inf_sm.txt` | its reviewable text face |\n",
+    "| `Starter_Controller.inf_act` | the Blueprint class the character binds |\n",
     "| `camera.toml` / `input.toml` | the camera table and the bindings |\n",
     "\n",
     "Two things ship it: `ProjectTemplate::starter_content` scaffolds it into\n",
@@ -11646,6 +11646,55 @@ mod tests {
                 "{file} does not carry the fixed GUID {want}:\n{text}"
             );
         }
+    }
+
+    /// **The README names files that are actually there** (SK1c audit, M2).
+    ///
+    /// The wave's own headline defect was a text face written at a path rebuilt
+    /// from a *display* name, beside a payload `sanitize` had renamed — and the
+    /// README it shipped alongside the fix made the same mistake one layer up:
+    /// six of its eight rows named `Starter Body.inf_mesh`, `Starter Skin.inf_mat`
+    /// and four more with **spaces**, and the folder contains `Starter_Body.inf_mesh`
+    /// and friends. Nothing noticed, because the README is byte-locked against
+    /// the constant that produces it and a byte lock cannot see a wrong name.
+    ///
+    /// So every file the README's table names in its first column is asserted to
+    /// be one the wizard actually wrote. The table is the readable face of a
+    /// generated folder; a face that names a file nobody can open is worse than
+    /// no face, which is the argument the wave made about `sm_text`.
+    #[test]
+    fn the_starter_character_readme_names_files_that_exist() {
+        let (files, _) = starter_character_files().expect("the starter character builds");
+        let have: std::collections::BTreeSet<&str> =
+            files.iter().map(|(n, _)| n.as_str()).collect();
+        let mut named = 0usize;
+        for line in STARTER_CHARACTER_README.lines() {
+            if !line.starts_with("| `") {
+                continue;
+            }
+            // The first column only: the second is prose, and prose is allowed
+            // to name a type or a function in backticks.
+            let cell = line[1..].split('|').next().unwrap_or("");
+            for (i, span) in cell.split('`').enumerate() {
+                if i % 2 == 0 {
+                    continue;
+                }
+                named += 1;
+                assert!(
+                    have.contains(span),
+                    "the README names `{span}`, which the wizard does not write. \
+                     It writes: {:?}",
+                    have
+                );
+            }
+        }
+        // …and it names most of them, so a table somebody emptied fails here
+        // rather than passing on nothing.
+        assert!(
+            named >= have.len() / 2,
+            "the README's table names only {named} of the {} files in the folder",
+            have.len()
+        );
     }
 
     /// **The committed starter character IS what the wizard opens with.**
