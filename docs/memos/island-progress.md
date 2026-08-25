@@ -3898,7 +3898,7 @@ its child, no duplicate names. Six disagreements with the document, all printed 
 | IK subtree parent | `spine_03` | **`root`** |
 | `ik_hand_l` / `ik_hand_r` parent | `ik_hand_root` | **`ik_hand_gun`** |
 | `ik_head`, `ik_pelvis`, `ik_spine` | present | **absent** |
-| corrective / helper bones | absent | **72**, plus `weapon_l/r`, `interaction`, `center_of_mass` |
+| corrective / helper bones | absent | **74**, `weapon_l/r`, `interaction` and `center_of_mass` among them |
 
 **What is Epic's and what is ours.** Names, parent links and emission order are
 the interchange contract and are reproduced verbatim — they are the whole point,
@@ -4194,5 +4194,11 @@ pinned to `BipedCanonical`.
   committed clips are generated from it, and a proportion change is not a delta
   anyone can verify arithmetically. Routed to SK1b, which builds a real body mesh
   and will care.
+* **A driven bone is overwritten, not blended.** Nothing else writes a twist bone
+  on a rig this engine generates, so the pass sets it outright. An *imported* clip
+  that bakes its own twist values onto a rig that carries a driver table would
+  have them replaced. Nothing in the tree does that today (an imported rig arrives
+  table-less); the day one does, the answer is a per-driver "authored wins" flag,
+  not a guess.
 * **No `.inf_retarget`.** The maps are code, not assets; nothing persists a
   pairing an author edits.

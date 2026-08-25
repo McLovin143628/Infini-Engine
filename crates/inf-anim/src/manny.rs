@@ -30,9 +30,8 @@
 //! | IK subtree parent | `spine_03` | **`root`** |
 //! | `ik_hand_l` / `ik_hand_r` parent | `ik_hand_root` | **`ik_hand_gun`** |
 //! | `ik_head`, `ik_pelvis`, `ik_spine` | present | **absent** |
-//! | corrective / helper bones | absent | **72 of them** |
-//! | census | — | 63 deform + 16 twists + 7 handles + 74 helpers + 1 root |
-//! | `weapon_l` / `weapon_r`, `interaction`, `center_of_mass` | absent | **present** |
+//! | corrective / helper bones | absent | **74**, `weapon_l/r`, `interaction` and `center_of_mass` among them |
+//! | census | — | 63 deform + 16 twists + 7 handles + 74 helpers + 1 root = **161** |
 //!
 //! # What is Epic's and what is ours
 //!

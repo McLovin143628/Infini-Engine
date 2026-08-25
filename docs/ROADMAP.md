@@ -25523,8 +25523,8 @@ parsed out of a shipped `SK_Mannequin.uasset` (a count field of 161, then 161
 `(FName, parent, exportName)` records; one root, every parent preceding its child, no duplicate
 names). Six disagreements are printed in the module's own docs rather than quietly resolved:
 `neck_02` exists, the IK subtrees hang off `root` and not `spine_03`, `ik_hand_l`/`_r` hang off
-`ik_hand_gun`, `ik_head`/`ik_pelvis`/`ik_spine` do not exist, and 72 corrective bones plus
-`weapon_l/r`, `interaction` and `center_of_mass` do. **Names, parents and emission order are the
+`ik_hand_gun`, `ik_head`/`ik_pelvis`/`ik_spine` do not exist, and 74 corrective and helper bones
+do (`weapon_l/r`, `interaction` and `center_of_mass` among them). **Names, parents and emission order are the
 interchange contract and are reproduced; the bind pose is derived from `BodyParams` and is not
 copied.** Two structural facts were kept because they are rules and not geometry, and both are
 load-bearing: twist bones sit at exactly **one third and two thirds** of their segment, and `_01`

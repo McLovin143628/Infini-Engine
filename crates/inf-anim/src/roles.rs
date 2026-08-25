@@ -198,6 +198,17 @@ impl BoneRole {
 /// followed by [`inf_math::pslerp`] from the identity — **no `sin`, no `cos`, no
 /// `atan2`**, so nothing here can trip the P14 law about `f32` transcendentals not
 /// being bit-portable. The result is folded into `pose_state_bytes`.
+///
+/// # A driven bone is OVERWRITTEN, not blended
+///
+/// The pass sets the twist bone's local rotation outright, because on every rig
+/// this engine generates nothing else writes one: the locomotion generator does
+/// not author twist tracks, and a rig that carries no driver table is not driven
+/// at all. The bound that follows is worth stating: an **imported** clip that
+/// bakes its own twist values onto a rig that *does* carry a table would have
+/// them replaced by this rule. Nothing in the tree does that today (an imported
+/// rig arrives table-less), and the day one does, the answer is a per-driver
+/// "authored wins" flag rather than a guess here.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TwistDriver {
     /// The driven bone (a [`BoneRoleKind::Twist`] joint).
