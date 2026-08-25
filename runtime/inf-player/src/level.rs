@@ -1623,8 +1623,18 @@ impl BiomeScatter {
 /// One `Guid`-sorted walk of the terrains, and per terrain one comparison of
 /// the resident tiles' stamps against the memo's
 /// ([`BiomeBinding::refresh_resident`](inf_pcg::BiomeBinding::refresh_resident)).
-/// No allocation, no scatter, no component write. The work is O(tiles that
-/// arrived), which is the standing O(subjects) rule.
+/// **No scatter and no population rewrite** — the work is O(tiles that arrived),
+/// which is the standing O(subjects) rule.
+///
+/// It is *not* allocation-free, and the first write-up said it was (the I7b
+/// audit). A step that pages nothing still builds the terrain list, the live-Guid
+/// set, the sorted resident-coordinate list and one `(2r+1)²` stamp vector per
+/// resident tile, and it moves `Terrain.data` out of the component and back —
+/// two `get_mut`s, so the component reads as changed. All of it is O(resident
+/// tiles) of small vectors rather than O(instances) of scatter, and the whole
+/// 24-phase fixed step measures **0.162 ms** on the shipped island with this pass
+/// in it. The sentence is corrected rather than the code: the number says the
+/// shape is right, and the prose was simply larger than the claim.
 ///
 /// Returns how many terrains had their population rewritten.
 pub fn refresh_biome_bindings(

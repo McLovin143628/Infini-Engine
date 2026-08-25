@@ -18,12 +18,21 @@
 //!
 //! It is enough because of *how* the parity was built: everything from a biome-set
 //! GUID onward — which biomes dispatch, in what order, under which feather, over
-//! what region, against which layer source — is a handful of named Ring-0 seams
-//! (`BiomeBinding::from_set`, `DEFAULT_BIOME_FEATHER`, `TerrainData::xz_bounds`,
-//! `OffsetTerrain`), shared verbatim. What each side owns is only the *fetch* (a
-//! content root vs. a pack). So asserting that both sides reach for the same
-//! seams is asserting that neither has grown a second opinion — and a side that
-//! re-derived one of them locally would stop naming it and fail here.
+//! **which ground** — is a handful of named Ring-0 seams
+//! (`BiomeBinding::from_set`, `DEFAULT_BIOME_FEATHER`, and since island wave I7b
+//! `BiomeBinding::refresh_resident` / `evaluate_resident`), shared verbatim. What
+//! each side owns is only the *fetch* (a content root vs. a pack). So asserting
+//! that both sides reach for the same seams is asserting that neither has grown a
+//! second opinion — and a side that re-derived one of them locally would stop
+//! naming it and fail here.
+//!
+//! **`TerrainData::xz_bounds` and `OffsetTerrain` used to be on that list and are
+//! now BANNED from it** (the I7b audit corrects this paragraph, which the wave
+//! left describing the design it replaced). The region was three seams each side
+//! had to spell identically, over a bounding box that is the right answer only
+//! for a terrain entirely in memory — and `None` on the shipped boot, which is
+//! how a 51 km² island grew nothing for a whole wave. The resident-tile walk is
+//! `inf_pcg`'s now, so there is one name and nothing left to spell differently.
 
 use std::path::{Path, PathBuf};
 
