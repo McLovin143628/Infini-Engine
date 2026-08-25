@@ -20,7 +20,7 @@ recipe reads — and runs the whole pipeline over them.
 |---|---|
 | map | 1 536 × 1 536 m = 2.36 km² |
 | land | 1.54 km² (65.3 %) |
-| source | **2 tiles at z13, 208 KB committed**, 12.45 m/px |
+| source | **2 tiles at z13, 209 258 bytes (204 KB) committed**, 12.45 m/px |
 | terrain | 36 level-0 tiles of 129², 56 in the catalog, 3 LOD levels, 4.6 MB |
 | water | 9 reaches / 1.25 km, 1 lake, **4 waterfall sites** |
 | roads | 1.37 km, worst grade 0.099 against a 0.100 ceiling, **0 stretches over** |

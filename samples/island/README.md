@@ -3,7 +3,8 @@
 **Fifty square kilometres of real North Shore elevation, carved into an island.**
 This folder is the *generator*, not the world: the recipe, the designed
 coastline, the biome masks, the road network and the derived water layers —
-about 260 KB. The world it describes is 342.7 MB of terrain and is not committed.
+**287 679 bytes** (281 KB) over eleven tracked files. The world it describes is
+342.7 MB of terrain and is not committed.
 
 ```sh
 inf island build --recipe samples/island/island.toml

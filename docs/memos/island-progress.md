@@ -2913,3 +2913,249 @@ Both this wave's own, both found by `inf-packager`'s workspace sweep, and they a
     7 junctions, which is consistent with it and is not the same as an assertion
     that every site is reachable from every other. A connectivity walk over the
     built `RoadGraph` is what would close it.
+
+---
+
+## The I7 audit (2026-08-25)
+
+Fresh auditor, `7d2d7ba..7790155` read commit by commit, five `(I7) audit:`
+commits on top. **Two HIGHs and they are one story**; six MEDs; nine LOWs
+carried by name.
+
+### THE ISLAND STOOD HALF A WORLD FROM ITS OWN GROUND
+
+Every other terrain in this repository is built with level-0 tile coordinates
+starting at `(0, 0)`, and its entity is translated to `-span/2` to centre the
+grid on the world origin — `island_frame_terrain_origin` is the pattern the
+composed city uses. **`IslandGrid` does not work that way.** `tile0 =
+-(tiles / 2)`, so the `.inf_terrain`'s own tile indices are already centred and
+its sample frame **is** the world frame — which is what the entire build assumes:
+`CoarseHeights::of(&data, min, max, …)`, the grade audit's `data.height_at(p)`,
+the channel carve, the biome stamp and every arm in `island_fixture`.
+
+`island_scene` translated the entity as well. The centring was applied **twice**.
+Measured through the shipped host's own `terrain.height_at` seam — the exact
+function a Blueprint node, the character's ground snap and the physics
+heightfield all dispatch to:
+
+| world position | the simulation | the recipe |
+|---|---|---|
+| the design's player start, (−420, 380) | **0.000 m** | **129.916 m** |
+| the world origin | 80.000 m (a page 768 m away) | 172.801 m |
+| (200, −200) | 0.000 m | 191.109 m |
+| the second settlement, (430, −300) | 0.000 m | 212.179 m |
+
+Three of the four read the **unauthored default**, because the displaced want set
+asked for tiles the asset does not have. On the fixture the displacement is 768 m
+on each axis; on the shipped 51 km² island it is **3 584 m**, which puts half the
+terrain outside the world. Fixed at `Transform::IDENTITY`, with both committed
+levels re-blessed through the generator (`INF_BLESS_SAMPLES=1`) — **no other
+sample byte moved**.
+
+### AND THE GATE THAT NEVER STREAMED IS WHY NOBODY KNEW
+
+`island_gate`'s `pack_sim` and `loose_sim` attached `attach_cell_streaming` and
+stopped. `run_headless` — which `pack_sim`'s own doc says it is "exactly" — calls
+`attach_terrain_streaming` on the next line. So the island's 4.6 MB of pages
+never moved: the `Terrain` component kept the empty working set a streamed level
+ships, and every height query in all 900 steps answered off nothing. **Two hosts
+standing on no ground agree perfectly**, which is how a gate whose subject is
+streaming survived a terrain that was 768 m out of place.
+
+**Mutation-measured, and it is the wave's own D8 finding from the other side:**
+
+| mutation | the wave's gate | now |
+|---|---|---|
+| `attach_cell_streaming` off **one** host | red at the byte compare (D8 found this) | red |
+| `attach_cell_streaming` off **both** | **all five arms green** — the coverage check reads `AlwaysLoaded` entities, and the 900 distinct states come from the drive moving the hero itself | `shipping activated 0 cell(s) over 360 m` |
+| `attach_terrain_streaming` off both | not attached in the first place | two arms red |
+| the double-centring put back on the entity | invisible | red at the first probe |
+
+Three things make it falsify now:
+
+* **Both streamers on both hosts**, and `loose_sim` built the way
+  `build_world`'s own `--level` arm builds it — with the PCG payloads, the biome
+  sets and the terrain resolver the pack side always had. Two hosts compared for
+  byte equality must be given the same world to disagree about; the first draft
+  compared one real reading against one impoverished one.
+* **`streaming_counters`**, asserted non-zero on both hosts, **equal between
+  them**, and taken before and after the drive: **1 cell activation, 20
+  sim-resident level-0 pages, 16 page loads at the start and 20 after 360 m** —
+  against 0 tiles and 0 loads before.
+* **`the_ground_the_simulation_stands_on_is_the_ground_the_recipe_built`** —
+  host against the **RECIPE**, at both settlement sites and two points between
+  them, with an anti-vacuity arm (61 m of relief across the probes, every one
+  above the waterline) so a displaced terrain cannot match them by being flat.
+
+*The wave found this defect one file over and fixed it there.* D9 is *"the
+instrument's own fixture never attached terrain streaming"* — corrected in
+`fps_instrument.rs` and left standing in the gate beside it. **A fix applied
+where it was found is not a fix applied where it belongs.**
+
+### Six MEDs
+
+* **`inf island route` rewrote the water an author had edited.**
+  `BuildOptions::planning_pass()` carried `rederive_layers: true`, so a verb
+  whose entire subject is the road network silently re-derived and overwrote the
+  committed **stream and lake** layers. That is the hazard `rederive_layers`'s
+  own doc names two fields up — *"a build that silently rewrote them every run
+  would make an author's edit last exactly until the next build"*. The wave's D4
+  finding fixed the opposite half (`dry_run` suppressing a write the second pass
+  needed) and reached one field too far. Off costs a fresh island nothing: the
+  write fires on `rederive_layers || !streams.exists() || !lakes.exists()`, and
+  the arm asserts both halves — a renamed reach survives the pass byte for byte,
+  and an island with no water gets **9 reaches and 1 lake** written.
+* **Two doors onto the player start.** `inf island build` printed
+  `IslandBuild::player_start`, which read the **built terrain**; the level's hero
+  comes from `IslandDesign::start`, which reads the **committed road layer**. The
+  command printed the one nothing spawns at. The road door is the one that
+  survives (the level is authored from committed design alone), the build's
+  delegates to it, and the terrain's reading is a second function named for what
+  it is. The gap, measured: **129.924 m planned against 129.916 m built, 0.008 m
+  apart** — structural rather than visible, and closed before it stops being.
+* **An odd tile count is not centred, and two doors measured the wrong square.**
+  `IslandRecipe::validate` and `plan_tiles` both read `±half_extent_m`; the world
+  is `IslandGrid::bounds()`, and the two differ by half a tile span whenever
+  `tiles` is odd (`tiles = 5` at 256 m is `[-512, 768]`, not `±640`). So an odd
+  recipe admitted a site at `x = −600` on ground the build never makes, refused
+  one at `x = 700` that is inside the world, and planned a source band stopping
+  128 m short of the east and south edges — a strip with no elevation, which the
+  carve turns into ocean with nothing said beyond a nodata count. Both halves
+  mutation-verified separately. **No committed byte moves**: both islands have an
+  even tile count.
+* **The committed-design scan was a ban list.** I7's own headline decision is
+  that the level is authored from committed design alone, and
+  `the_level_is_authored_from_committed_design_alone` banned five names.
+  `inf_island::sample_terrain`, `inf_island::IslandBuild`,
+  `inf_terrain::read_terrain_asset` and `TerrainData::height_at` all walked
+  through it. Inverted to an **allowlist of nine** `inf_island` doors plus a ban
+  on the terrain crate entirely; mutation-verified with a `pub fn` taking an
+  `&inf_island::IslandBuild`, which the old needles did not contain. It also had
+  **no anti-vacuity arm**, which its sibling
+  (`inf-island/tests/portable_math_law.rs`) does have; it has one now.
+* **A layer stated a CRS it might not be in.** Every file `layers.rs` writes
+  carried the literal `urn:ogc:def:crs:EPSG::32610` — true of the two committed
+  islands and of nothing else, because the recipe takes any projected metric CRS.
+  An island anchored in another zone wrote layers that told QGIS the wrong one,
+  and the symptom is a coastline hundreds of kilometres from the survey it was
+  traced off with no error anywhere. Derived from the anchor now; a proj4 string
+  is written verbatim rather than given an invented URN. No committed byte moves.
+* **The mask count counted one biome.** `BiomeClassification::masked` is printed
+  by the report and the build log as "cells the masks overrode" and was computed
+  as `id == Farmland` — and **both** committed mask layers name meadow as well.
+  Measured on the fixture: **2 460 cells decided by a design mask, of which 1 350
+  are farmland**; the figure was 82 % low, and a meadow the classifier chose was
+  indistinguishable from one an author drew. The cause is the one-door shape: the
+  counting loop carried a second copy of the mask test. `Classifier::mask_at` and
+  `Classifier::reserved_at` are the one place each predicate lives now.
+
+Plus two smaller ones in the same commits: **a probe the arm measured and threw
+away** (`let _ = off;` after sampling the ground thirty metres off a reach, so
+the bed assertion was satisfied by a carve that lowered the whole island — it is
+the assertion it was standing next to now), and **the eighteenth chr(92) catch,
+which is this audit's own**: a Python heredoc ate two backslash-continuations and
+left fourteen spaces inside two literals, one wave after the seventeenth. The
+sweep's threshold is eight, so the battery would have caught both; they were
+repaired through the Edit tool, which is what the law prescribes and what the
+heredoc had bypassed.
+
+### Verdict per claim
+
+The recipe's **nine steps** and their frozen order **HELD** (counted, not
+matched). The fixture's **network-free both-ways tile comparison HELD** and is
+genuinely both ways. **Two builds byte-identical HELD.** The **committed-design
+source scan** was a ban list and is now an allowlist. The **portability law
+HELD**: `inf-island` really is clean of `std` transcendentals with no exemption,
+the derivations really are banned from naming a projection door, the lattice
+really does name one (so the ban is not vacuous), and the "not linked by the cook
+or the runtime" arm parses only the shipping sections and refuses to read an
+empty dependency list. The **`ROUTE_REACH_CELLS = 4` chord admission HELD** —
+the grade audit measures the drape against the 1 m terrain at 20 m steps, so it
+is independent of the router's own lattice and of the chord averaging. The
+**apex guard HELD** (the alternative is re-run inside the arm). **CORRECTED**:
+the terrain's placement, the gate's streaming, the route verb's write, the start
+door, the odd-grid square, the design scan, the layer CRS, the mask count, the
+discarded probe.
+
+### The three routed items, and whether they have a tripwire
+
+* **The vegetation resident-bounds gap (I7b).**
+  `the_biome_binding_scatters_when_its_ground_is_resident_and_not_before` is a
+  real zero-assertion arm: it measures **4 958 instances with the ground paged**
+  and asserts **0 through the shipped boot**, so the day the twin lands the arm
+  goes red and gets rewritten. Verified present and firing.
+* **VSM caster-pack caching** and **`render (record)` at 10.874 ms** have **no
+  tripwire and cannot have one at the instrument's own ruling**: both numbers
+  come from `the_island_at_shipping_resolution`, which is `#[ignore]`d (it needs
+  a fetched cache and a real GPU) and **reports, never asserts**, because the
+  `inf_player::budget` ceilings are set from the composed city and asserting them
+  over a different world would re-pin a ratchet by accident. They are routed
+  prose, not armed prose, and this ledger says so rather than implying otherwise.
+
+### Carried LOWs, by name
+
+1. **A lake is a D8 sink.** The priority flood has no epsilon gradient, so every
+   cell in a filled depression sits at one level, `drop <= 0.0` for all eight
+   neighbours and `down == NO_DOWN`. Flow that enters a lake's interior stops
+   there, and a reach below a lake carries only its own local drainage. Bounded
+   here by two lakes of 0.0708 km² total; it is a real hydrological
+   simplification and it is not stated anywhere in the wave's own remainders.
+2. **One channel width for every reach.** `carve_channels` is called with
+   `widest` — the largest `width_m()` over the network, floored at 2.0 — as the
+   **half**-width, for every reach. A 1.5 m rivulet gets the same trench as the
+   biggest river. On the island the largest catchment is 2.42 km², so `widest` is
+   about 3.1 m and the trench is ~6 m; the shape is coarse rather than wrong.
+3. **The chord land-check truncates toward zero.** `route()`'s intermediate-cell
+   walk uses `(dx * t) / span` in integer arithmetic, so a step and its mirror
+   sample different cells. The symmetry the step set is asserted to have does not
+   reach this walk.
+4. **Public doors with no production caller**: `inf_island::terrain::flat_tile`,
+   `hydro::lakes_by_id`, `biome::urban_reservations`, `biome::reserves`,
+   `build::scattering_biomes`, `layers::write_masks`, `layers::write_coast`, and
+   `inf_editor_core::island::cover_volume_guid` (the level binds vegetation
+   through the biome set and has no `PcgVolume`, so the guid names something the
+   level does not contain). Named so they are not mistaken for coverage.
+5. **`slug()`'s `.replace(' ', "")` is dead** — the `is_ascii_alphanumeric`
+   filter has already dropped every space.
+6. **`cmd_island_plan` parses its arguments and discards them** (`let _ = a;`):
+   `--out`, `--offline` and `--dry-run` are accepted and ignored by the plan verb
+   rather than refused.
+7. **Two recipe fields are unvalidated.** `[roads] shoulder_mult` and
+   `[hydro] vertex_stride` skip the finiteness sweep every other number takes: a
+   NaN shoulder silently disables the road corridor (`corridor_half > 0.0` is
+   false) and a zero stride is saturated to 1 rather than refused.
+8. **The wave's committed-size figures were measured with the wrong ruler.**
+   307 KB and 267 KB are `du` block totals; the tracked bytes are **287 679**
+   (281 KB, eleven files) and **245 966** (240 KB, thirteen files, of which
+   **209 258** are the two tiles rather than "208 KB"). The README said "about
+   260 KB" and the ROADMAP said 284 KB — three figures for one number. All three
+   corrected to the byte counts.
+9. **`the_network_topology_joins_the_cities_and_strings_the_towns` is still on
+   flat ground** — the wave's own carried remainder 16, re-read and agreed with:
+   a connectivity walk over the built `RoadGraph` is what would close it, and
+   nothing in this audit changes that.
+
+### Counts, at the head this audit certifies
+
+| | after I7 (as recorded) | **after the I7 audit** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 318 / 5 946 / 0 / 16 | **318 / 5 952 / 0 / 16** — six new arms, **no new test binary**, and the wave's own figure reproduces exactly |
+| frontend tests / files | 702 / 78 | **702 / 78, not re-run** — the audit touched no file under `editor/studio` |
+| goldens | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical**, re-run under `INF_GOLDEN_STRICT=1` over **101 arms** with no PNG rewritten |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** (local toolchain 1.97, run LAST per the rmeta law) |
+| rustdoc individual warnings (ceiling 450) | 404 over 46 crates | **404 over 46 crates** — measured CI-style after `cargo clean --doc`; the audit adds zero. Headroom **46** |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — the audit moved no schema** |
+| committed samples | 23 levels | **23** — `VancouverIsland.inf_lvl` and `IslandFixture.inf_lvl` (and their sidecars) regenerated through the generator; no other committed byte moved |
+
+**Six** audit commits, `(I7)`-tagged, none pushed: the terrain's placement and
+the gate that never streamed; the route verb's write; the start door and the odd
+grid; the design allowlist and the layer CRS; the mask count and the discarded
+probe; and this ledger. *(Counted rather than summarised — the I6 audit's own
+catch was a wave whose ledger said "five commits" over a list of six. A sha is
+only true of the tree it was written in, the I3 audit's law, so the wave that
+closes this one re-states the range rather than trusting a number copied out of
+this file.)*
+
+**Eight mutations run in all** — the wave's own D8 removal met from the
+both-hosts side, and seven new — and every fix above is recorded with the one
+that kills it.

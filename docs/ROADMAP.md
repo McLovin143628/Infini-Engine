@@ -25293,10 +25293,10 @@ inf island build --recipe samples/island/island.toml
 | roads | **33.74 km**, 11 links, 7 junctions; worst grade 0.118 against 0.080, **7 of 2 442** over |
 | timing | fetch **156 tiles / 12 MB** · build **24.7 s** · cook **40.7 s** |
 
-**An island is a RECIPE.** The repository commits the *generator* — 284 KB of recipe,
+**An island is a RECIPE.** The repository commits the *generator* — **287 679 bytes** of recipe,
 coastline, road network, derived water layers, masks and level — and the 375 MB it describes (plus a 12 MB tile cache)
 lives **outside the tree** at `<checkout>/../island-build/`. `samples/island-fixture` is
-2.36 km² of the same ground with **two real terrarium tiles committed beside it** (267 KB in all, 208 KB of it those tiles),
+2.36 km² of the same ground with **two real terrarium tiles committed beside it** (245 966 bytes in all, 209 258 of it those tiles),
 running **every step of the recipe** and never reaching a network: the plan's tile list and the
 committed directory are compared **both ways**.
 
@@ -25341,3 +25341,52 @@ scale; the arm asserts the zero so the day it is closed the arm goes red.
 
 The full ledger, the eleven decisions this wave adds and its sixteen carried remainders are in
 `docs/memos/island-progress.md` under *Done — wave I7*.
+
+### The I7 audit (2026-08-25)
+
+**THE ISLAND STOOD HALF A WORLD FROM ITS OWN GROUND, AND THE GATE THAT NEVER STREAMED IS WHY
+NOBODY KNEW.** Two HIGHs, and they are one story.
+
+* `island_scene` translated the `Terrain` entity by `IslandGrid::bounds().0` on top of an
+  `.inf_terrain` whose tile indices are **already centred** (`tile0 = -(tiles / 2)`) — the
+  centring applied twice. Measured through the shipped host's own `terrain.height_at` seam:
+  the design's player start read **0.000 m of unauthored ground where the recipe built
+  129.916 m**, and the world origin read 80.000 m off a page 768 m away. On the shipped island
+  the displacement is **3 584 m on each axis**. `Transform::IDENTITY`; both committed levels
+  re-blessed through the generator, no other sample byte moved.
+* `island_gate` attached `attach_cell_streaming` and stopped — `run_headless` attaches
+  `attach_terrain_streaming` on the next line — so the simulation's working set was empty for
+  all 900 steps and every height query answered off nothing. **Mutation-measured**: removing
+  the cell streamer from ONE host reds the byte compare (the wave's own D8); removing it from
+  **both** left every arm green, because the coverage check reads `AlwaysLoaded` entities and
+  the trace's 900 distinct states come from the drive moving the hero itself. The gate now
+  asserts both streamers ran, that the two hosts' counters are **equal**, and that the drive
+  paged what the boot had not (**16 loads at the start, 20 after 360 m**, where it measured
+  0 before) — and `the_ground_the_simulation_stands_on_is_the_ground_the_recipe_built`
+  compares the host against the **recipe** rather than host against host.
+
+The wave's own D9 finding was this defect one file over — *"the instrument's own fixture never
+attached terrain streaming"* — fixed in the instrument and left standing in the gate beside it.
+
+**Six MEDs, all fixed.** `inf island route` rewrote the committed stream and lake layers an
+author had edited (`planning_pass` carried `rederive_layers: true`, which is the hazard that
+field's own doc names); two doors onto the player start, with the CLI printing the one nothing
+spawns at; `validate` and `plan_tiles` measured `±half_extent_m` where the world is
+`IslandGrid::bounds()` (they differ by half a tile span for an odd `tiles`, admitting sites on
+ground the build never makes); the committed-design source scan was a **five-name ban list**
+with no anti-vacuity arm, now an allowlist of nine `inf_island` doors and a positive control;
+every written layer stated `urn:ogc:def:crs:EPSG::32610` whatever the anchor was; and
+`BiomeClassification::masked` counted `id == Farmland` where both mask layers name meadow too
+— **2 460 cells against the 1 350 it reported, 82 % low**.
+
+**The eighteenth chr(92) catch is the audit's own**, one wave after the seventeenth: a Python
+heredoc ate two `\`-continuations and left fourteen spaces in two literals. Repaired through
+the Edit tool.
+
+Counts at the audited head: battery **318 / 5 952 / 0 / 16** (six new arms, no new binary);
+goldens **54, byte-identical under `INF_GOLDEN_STRICT=1`** over 101 arms with no PNG rewritten;
+`clippy --workspace --all-targets -D warnings` **0**; rustdoc **404 over 46 crates** measured
+after `cargo clean --doc` — the audit adds zero; `cargo fmt --all --check` clean; **no schema
+moved**; committed levels **23**. **Six** audit commits, `(I7) audit:`-tagged — five fixes and
+the ledger, counted rather than summarised; the full ledger is in
+`docs/memos/island-progress.md` under *The I7 audit*.
