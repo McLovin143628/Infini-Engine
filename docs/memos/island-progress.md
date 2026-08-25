@@ -5246,6 +5246,7 @@ assertion.
 | schema | `.inf_skel` v3, scene v25, `ScenePayload` v11 | **unmoved** |
 | committed sample bytes | unmoved | **unmoved**; `git status` on `samples/` and `tests/goldens/` empty |
 | chr(92) | the twenty-first was the wave's own | **no twenty-second** — the wave's added lines and the audit's own were swept for both shapes (interior space runs at and below the gate's own 8-space threshold, and bare newlines inside non-raw literals): zero, and the workspace gate is green |
+
 ## Wave SK1c (the hero is a character, and the hands have a reason)
 
 Base `2452ce20`. Five clauses; **four landed and the fifth is priced and

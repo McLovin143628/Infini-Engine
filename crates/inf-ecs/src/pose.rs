@@ -919,6 +919,11 @@ pub fn clear_poses(world: &mut EcsWorld) {
     // session, and a stopped one's last grip must not close the next one's first
     // frame.
     clear_hand_ik(world);
+    // …and the grabs (SK1c), for the reason directly above and one more: a grab
+    // is what PRODUCES a grip request, so clearing the request and leaving the
+    // grab would have the next session's first fixed step put the hand straight
+    // back on a thing nobody has pressed E on.
+    crate::interact::clear_grabs(world);
 }
 
 /// The evaluated poses' canonical bytes, or an empty vec when nothing is posed —
