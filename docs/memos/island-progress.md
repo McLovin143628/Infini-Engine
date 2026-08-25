@@ -4202,3 +4202,38 @@ pinned to `BipedCanonical`.
   not a guess.
 * **No `.inf_retarget`.** The maps are code, not assets; nothing persists a
   pairing an author edits.
+
+### Counts
+
+| | after I7b | **after SK1a** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 319 / 5 968 / 0 / 16 | **319 / 6 009 / 0 / 16** — **+41 arms and no new block**, which is right: every arm this wave wrote went into a file that already existed |
+| goldens | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical**, re-run under `INF_GOLDEN_STRICT=1` over **101 arms** with **no PNG rewritten** (`git status` on `tests/goldens/` empty). Nothing in this wave touches a render path |
+| frontend tests / files | 702 / 78 | **702 / 78**, re-run — the wizard, the Skeleton Editor and `BodyPlanName` all moved; `tsc` and `eslint --max-warnings 0` clean |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0**. Four findings were cleared on the way and all four were this wave's own: a `?`-able `else if let` chain in `twist_rule`, a needless borrow in the ladder's arms, a boxed-closure type that wanted a `type` alias, and a needless borrow at the Ring-2 anim door |
+| rustdoc warnings (ceiling 450) | 374 individual over 30 crates | **374 individual over 30 crates**, measured after `cargo clean --doc`. **The wave adds zero**: it introduced exactly one (a public doc linking the private `skel_v2::SkeletonAsset`) and it was found and removed |
+| `cargo fmt --all --check` | clean | clean |
+| schema | `.inf_skel` v2, `.inf_anim` v2, `.inf_sm` v3, `.inf_mesh` v2, scene v24, `ScenePayload` v11 | **`.inf_skel` v2 → v3, and NOTHING else moved** |
+| committed sample bytes | — | two `.inf_skel` files and their sidecars: **+4 B** and **+8 B**, arithmetic-verified |
+
+**The twentieth chr(92) catch, and it was this wave's own.** The pose-writer pin's
+panic literals carried two eaten `\` continuations — written by a non-raw Python
+string, in the commit that added a gate about frozen orders, the same afternoon.
+Nineteen previous catches are ledgered across two phases;
+`no_string_literal_in_the_workspace_carries_an_eaten_continuation` found the
+twentieth on the first full battery, which is the gate doing exactly its job.
+
+### Commits
+
+| | |
+|---|---|
+| `878d3169` | the rig is the mannequin's, bone for bone, measured off the asset |
+| `13c5647d` | the downgrade-bless, and the two doors that name a plan by string |
+| `9d22d1b7` | the drive pass joins the pose writers, and the name guessing loses its job |
+| `187166bb` | the wizard on the new rig, and the three numbers that decide nothing needs mitigating |
+| `04a53e0c` | the pose writers get an allowlist, and the fixtures that were about the fit |
+| `81d93683` | the index borrows, and the door pays for it |
+| `bba02bfc` | the two proportion fields the simple biped never reads |
+| `c702c32d` | a driven bone is overwritten, and the census says 74 |
+| `5c3bb736` | the twentieth chr(92) catch, and it was mine |
+| `e7389fd8` | the last three the gates found |

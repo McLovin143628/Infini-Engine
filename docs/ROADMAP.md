@@ -25607,5 +25607,19 @@ and the 16-attribute wall is full, which is where a hand with metacarpals starts
 measured 0.31 on the reference skeleton**, an error the hanging-arm bind hid and the T-pose does
 not (not changed — it is a shared default `phase29`'s committed clips are generated from); the
 mannequin's arms are a **T-pose** rather than the shipped A-pose, because a bind pose here carries
-no rotation; no `.inf_retarget`. The full ledger is in `docs/memos/island-progress.md` under
-*Done — wave SK1a*.
+no rotation; and a driven bone is **overwritten, not blended**, so an imported clip that bakes its
+own twist values onto a rig that carries a table would lose them (nothing in the tree does that —
+an imported rig arrives table-less); no `.inf_retarget`.
+
+Counts: battery **319 / 6 009 / 0 / 16** — **+41 arms and no new block**, which is right, because
+every arm this wave wrote went into a file that already existed. Goldens **54, byte-identical
+under `INF_GOLDEN_STRICT=1`** over 101 arms with no PNG rewritten (nothing here touches a render
+path); frontend **702 / 78** re-run with `tsc` and `eslint --max-warnings 0` clean;
+`clippy --workspace --all-targets -D warnings` **0** after clearing four findings that were all
+this wave's own; rustdoc **374 individual over 30 crates** after `cargo clean --doc` — **the wave
+adds zero**, having introduced exactly one (a public doc linking a private ladder shape) and
+removed it; `cargo fmt --all --check` clean. **`.inf_skel` v2 → v3 and nothing else moved.** Ten
+commits, `(SK1a)`-tagged. **The twentieth chr(92) catch was this wave's own** — the pose-writer
+pin's panic literals, eaten by a non-raw Python string, in the commit that added a gate about
+frozen orders; the gate found them on the first full battery. The full ledger is in
+`docs/memos/island-progress.md` under *Done — wave SK1a*.
