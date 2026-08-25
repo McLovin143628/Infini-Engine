@@ -206,10 +206,36 @@ impl StepClock {
     }
 
     /// Charge everything since the previous mark to `phase`.
+    ///
+    /// One line of body, because the arithmetic lives in
+    /// [`mark_at`](Self::mark_at) — see there for why the split exists.
     #[inline]
     pub(crate) fn mark(&mut self, phase: usize) {
+        if self.at.is_some() {
+            self.mark_at(phase, Instant::now());
+        }
+    }
+
+    /// [`mark`](Self::mark) with the clock read **supplied rather than taken**.
+    ///
+    /// # Why a stopwatch has a seam (the I7 CI-red)
+    ///
+    /// `mark` does two separable things: it reads a clock, and it charges an
+    /// interval to a phase — adding, so `propagate`'s three call sites share one
+    /// row. Only the second is a *property*, and it was tested by sleeping for
+    /// two milliseconds twice and asserting the second reading was more than
+    /// 1.5× the first. On a shared ubuntu runner the first "2 ms" stretch
+    /// measured **4.990 ms** and the pair **6.991 ms**, the ratio came out at
+    /// 1.40, and CI went red with nothing wrong: the arm was measuring the
+    /// runner's scheduler, not this function.
+    ///
+    /// Splitting the clock read out makes the property testable without one.
+    /// The arithmetic below is the *whole* of what `mark` does once it has a
+    /// timestamp, so an arm that drives this drives the shipped code — there is
+    /// no second copy to drift.
+    #[inline]
+    fn mark_at(&mut self, phase: usize, now: Instant) {
         if let Some(at) = self.at.as_mut() {
-            let now = Instant::now();
             self.ms[phase] += now.duration_since(*at).as_secs_f64() * 1000.0;
             *at = now;
         }
@@ -224,6 +250,32 @@ impl StepClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    /// Slop allowed when comparing charged milliseconds, in milliseconds.
+    ///
+    /// **Not a noise budget — there is no noise here.** Nothing below reads a
+    /// clock, so the only inexactness is the decimal→binary rounding in
+    /// `Duration::as_secs_f64`'s divide by 1e9 and the multiply back up by 1e3,
+    /// both of which are correctly-rounded IEEE operations and therefore the same
+    /// on every target. A picosecond of slop against millisecond-scale stretches
+    /// is nine orders of headroom over that and still eleven orders below the
+    /// difference a replacing `mark` would make.
+    const EXACT_MS: f64 = 1e-9;
+
+    /// A clock started at a chosen instant, so an arm can charge intervals it
+    /// *decides* rather than intervals it *measures*.
+    ///
+    /// The `tests` module is a child of `step_profile`, so it may build a
+    /// `StepClock` from its private fields — which is why this seam costs the
+    /// shipped clock nothing at all (no `#[cfg(test)]` constructor, no unused
+    /// `pub(crate)` fn for the lib target's dead-code pass to find).
+    fn clock_at(base: Instant) -> StepClock {
+        StepClock {
+            at: Some(base),
+            ms: [0.0; STEP_PHASES],
+        }
+    }
 
     #[test]
     fn a_disabled_clock_measures_nothing_and_answers_none() {
@@ -238,27 +290,102 @@ mod tests {
     /// with a mutation in mind: an assigning `mark` would report the last of the
     /// three propagations rather than all three, which is exactly the shape of
     /// under-attribution this module exists to remove.
+    ///
+    /// # This arm used to sleep, and that is why CI went red (the I7 CI-red)
+    ///
+    /// "A mark adds rather than assigns" is a statement about arithmetic, and
+    /// the first cut of it asked a wall clock: spin 2 ms, mark, spin 2 ms, mark,
+    /// assert the pair reads more than 1.5× the first. On a shared
+    /// `ubuntu-latest` runner the first stretch measured **4.990 ms** and the
+    /// pair **6.991 ms** — the sleep overshot by 2.5×, the ratio fell to 1.40,
+    /// and a green tree went red with nothing changed but the machine it ran on.
+    /// The I4b clock law, one processor over: **a control must hold what its
+    /// subject holds**, and a structural property must not be asked of a clock.
+    ///
+    /// So the intervals below are *decided*: three exact stretches handed to
+    /// [`StepClock::mark_at`], which is the whole of `mark`'s body after the
+    /// timestamp. It can still fail — mutate `+=` to `=` and it reads 4 ms
+    /// instead of 12 — and it can never redden from a scheduler.
     #[test]
     fn a_phase_marked_twice_sums_rather_than_replaces() {
-        let mut c = StepClock::start(true);
-        // Two separately-marked stretches charged to one phase.
-        let spin = |us: u64| {
-            let t = Instant::now();
-            while t.elapsed().as_micros() < us as u128 {
-                std::hint::spin_loop();
-            }
-        };
-        spin(2_000);
-        c.mark(phase::PROPAGATE);
-        let first = c.ms[phase::PROPAGATE];
-        spin(2_000);
-        c.mark(phase::PROPAGATE);
-        let both = c.ms[phase::PROPAGATE];
+        let base = Instant::now();
+        let mut c = clock_at(base);
+
+        // Three stretches, because `propagate` really is marked three times in
+        // one step: 2 ms, then 6 ms, then 4 ms. Unequal on purpose — three equal
+        // ones cannot tell "sums" from "reports the largest".
+        let mut at = 0u64;
+        let mut charged = Vec::new();
+        for ms in [2u64, 6, 4] {
+            at += ms;
+            c.mark_at(phase::PROPAGATE, base + Duration::from_millis(at));
+            charged.push(c.ms[phase::PROPAGATE]);
+        }
+
         assert!(
-            both > first * 1.5,
-            "two 2 ms stretches charged to one phase read {both:.3} ms against \
-             {first:.3} for the first alone — the mark is replacing, not summing"
+            (charged[0] - 2.0).abs() < EXACT_MS,
+            "one 2 ms stretch charged {} ms",
+            charged[0]
         );
+        assert!(
+            (charged[1] - 8.0).abs() < EXACT_MS,
+            "2 ms + 6 ms charged to one phase read {} ms — a mark that assigned \
+             would read 6, and one that kept the largest would read 6 too",
+            charged[1]
+        );
+        assert!(
+            (charged[2] - 12.0).abs() < EXACT_MS,
+            "2 ms + 6 ms + 4 ms charged to one phase read {} ms — a mark that \
+             assigned would read 4, and one that kept the largest would read 6. \
+             The mark is not summing, so `propagate`'s three call sites do not \
+             share one row and the breakdown under-attributes exactly the phase \
+             this module exists to attribute",
+            charged[2]
+        );
+
+        // …and only that phase moved: a mark must not spill into its neighbours.
+        let p = c.finish().expect("an armed clock has a profile");
+        assert!((p.ms[phase::PROPAGATE] - 12.0).abs() < EXACT_MS);
+        assert!(
+            (p.total_ms() - 12.0).abs() < EXACT_MS,
+            "the whole profile reads {} ms against 12 charged to one phase",
+            p.total_ms()
+        );
+    }
+
+    /// **The shipped `mark` really is the seam above with a clock attached.**
+    ///
+    /// The arm before this one drives `mark_at`, so on its own it would leave
+    /// open the reading that `mark` does something else — the house law that a
+    /// gate must aim at the thing it names. This aims at `mark`, and it does so
+    /// with assertions no runner can move: an elapsed interval is non-negative
+    /// and finite whatever the scheduler does, the clock must advance, and the
+    /// charge must land on the phase that was named and nowhere else.
+    #[test]
+    fn the_live_mark_charges_the_phase_it_names_and_advances_the_clock() {
+        let mut c = StepClock::start(true);
+        let before = c.at.expect("an armed clock holds an instant");
+        c.mark(phase::SOLVER);
+        let after = c.at.expect("still armed");
+        assert!(after >= before, "the mark must carry the clock forward");
+
+        let charged = c.ms[phase::SOLVER];
+        assert!(
+            charged.is_finite() && charged >= 0.0,
+            "a phase was charged {charged} ms"
+        );
+        for (i, v) in c.ms.iter().enumerate() {
+            assert!(
+                i == phase::SOLVER || *v == 0.0,
+                "marking `solver` also charged {} ({v} ms)",
+                STEP_PHASE_NAMES[i]
+            );
+        }
+
+        // A second mark of the same phase can only ever raise it — the summing
+        // property again, stated the one way a wall clock is allowed to state it.
+        c.mark(phase::SOLVER);
+        assert!(c.ms[phase::SOLVER] >= charged);
     }
 
     /// The names and the indices are one table — **and the two the ledger's

@@ -27,7 +27,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **I5** | **player core** — the owner's binding table, the C key's four verbs, the in-game UI layer, the settings dialog + rebinding, the interaction core | **DONE + AUDITED** — battery 309 / **5 796** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, rustdoc 413, no schema moved. Two pre-existing ragdoll defects found and fixed by the wave; **five more found and fixed by the audit** (A1 the settings-dialog lockout, A2 the half-built Simulate pause mirror, A3 an unarmed determinism sort, A5 three silent dead sliders, A6 two false doc invariants) plus A4 an arm that could not fail and A7 a count that was one low. See below. *(This wave took the I5 slot; **IB-11's far half — LERC / BigTIFF / JPEG2000 / LAS, reprojection, the geoid — is NOT in it** and moves to a later wave.)* |
 | ~~I6 (old)~~ | ~~scale seams — IB-12~~ *(pulled into I4; IB-8 and IB-13 into I3)* | **absorbed** |
 | **I6** | **gameplay systems** — doors + locks + the kick + crash-through, inventory, weapons v1, health | **DONE + AUDITED** — battery 312 / **5 873** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, rustdoc **404** of a 450 ceiling (447 at the wave's head, re-measured cold; 39 cleared by the audit), **no schema moved**. `NOT_YET_CONSUMED` is empty. Six defects found by the wave's own world-level arms and five more by its gate; one energy door for the kick, the breach and the bullet (mutation-proved across two crates); the city plans **19 790** doorways and the band makes **234** solid. The audit found **five arms that could not fail** (two trace sections, the wheel verb, the corpse guard, the spent attack edge) and **three world defects** (a barged door lost its lock for ever, `door.is_open` walked all 19 790 doorways, a dead block claiming a swing it did not drive). See *Done — wave I6* and *The I6 audit* below |
-| **I7** | **the island data build** — the recipe, real Vancouver elevation, the designed coastline, the derived water and biomes, the graded roads, the level | **DONE** — see *Done — wave I7* below. The island exists: **51.38 km² of map, 40.65 km² of land, a 948.7 m peak of real North Shore survey, 25.14 km of designed shore, 50 reaches / 26.32 km, 2 lakes, 33 waterfall sites, 33.74 km of graded road, 342.7 MB of terrain built by one command in 24.7 s.** PIE == shipping over a 900-step drive. Battery 318 / 5 946 / 0 / 16, frontend 702 / 78, goldens 54, clippy 0, rustdoc 404, **no schema moved** |
+| **I7** | **the island data build** — the recipe, real Vancouver elevation, the designed coastline, the derived water and biomes, the graded roads, the level | **DONE** — see *Done — wave I7* below. The island exists: **51.38 km² of map, 40.65 km² of land, a 948.7 m peak of real North Shore survey, 25.14 km of designed shore, 50 reaches / 26.32 km, 2 lakes, 33 waterfall sites, 33.74 km of graded road, 342.7 MB of terrain built by one command in 24.7 s.** PIE == shipping over a 900-step drive. Battery 318 / 5 946 / 0 / 16, frontend 702 / 78, goldens 54, clippy 0, rustdoc 404, **no schema moved**. **Then CI went red on macOS and ubuntu** — one ulp of proj4rs latitude in a committed level, and a 2 ms sleep that took 5 on a shared runner; both fixed, recipe schema **1 → 2** (the recipe now *states* its geodetic origin), engine schemas still unmoved. See *The I7 CI-red* at the end of this file |
 
 Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
 IB-8 and IB-13 forward out of I6**: both are ceilings a thousand-building fixture walks into
@@ -3159,3 +3159,150 @@ this file.)*
 **Eight mutations run in all** — the wave's own D8 removal met from the
 both-hosts side, and seven new — and every fix above is recorded with the one
 that kills it.
+
+## The I7 CI-red (run 32822072658, `7d2d7ba..7059031`)
+
+The wave and its audit went to `main` green on this machine and came back **red on two
+platforms of three**. `windows-latest` — the platform every byte in the wave was blessed
+on — passed. That asymmetry is the whole story of both failures: each was a claim about
+the *machine that ran it* wearing the clothes of a claim about the engine.
+
+### RED 1 — one ulp of latitude, on macOS
+
+`samples::tests::committed_sample_matches_generators` reported
+`samples/island/VancouverIsland.inf_lvl` drifted from the island generator. The panic
+prints both arrays, so the drift is measurable rather than guessable: **14 820 bytes on
+each side, one byte different, at offset 14 788.**
+
+That offset is inside the `GeoAnchor` settings block at the tail of the level, and the
+field is `origin_latitude_deg`:
+
+| | value | the f64 |
+|---|---|---|
+| committed (blessed on Windows) | 49.34307562364773 | `0x4048ABE9E6EBCF97` |
+| generated on macOS | 49.34307562364772 | `0x4048ABE9E6EBCF96` |
+
+**One ulp.** The longitude (-123.10187387613468) and the convergence (0.07728924942362428)
+sat immediately after it and happened to agree; they came through the same door and were
+equally exposed.
+
+The door: `IslandRecipe::anchor` called `inf_gis::anchor_at`, which inverts the recipe's
+easting/northing through `proj4rs` — a series over `sin`/`cos`/`atan2`, i.e. the platform's
+libm. `read_design` calls it on every read, `island_scene` writes what it returns into the
+committed `.inf_lvl`, and the P14 law says a value two machines re-derive independently may
+not depend on one. `samples.rs`'s own `terrain_demo_height` carries the same lesson in its
+doc comment — *"green where it was blessed and a latent red on any target whose libm rounds
+differently"* — written for `sin`, waves before a projection library did it instead.
+
+**The fix is the I7 ruling applied literally: a value that cannot be made portable does not
+go in a committed file.** The recipe now **states** its geodetic origin
+(`[anchor] latitude_deg` / `longitude_deg` / `convergence_deg`, to 1e-9 deg = 0.11 mm) and
+`IslandRecipe::anchor` assembles a `GeoAnchor` out of stated numbers, checking only that the
+CRS is projected — a new non-inverting door, `inf_gis::require_projected_crs`, which reads a
+string and a table and returns no float. A decimal in a committed TOML is parsed by
+`f64::from_str`, which is correctly rounded and therefore the same on every target: the byte
+now traces to source. Recipe schema **1 -> 2**.
+
+Rounding the inversion at the door was considered and refused: it would have made the byte
+*usually* stable and never *provably* stable, because a value an ulp from a rounding tie
+rounds two ways, and "unlikely" is not a property a gate can rest on.
+
+A restatement owes a check, and it has three:
+
+* `crates/inf-island/tests/stated_anchor.rs` inverts each committed recipe through `proj4rs`
+  and asserts the stated degrees agree within `ANCHOR_AGREEMENT_DEG` (**1e-8 deg = 1.1 mm**).
+  Measured residuals: **3.5e-10 / 1.3e-10 / 4.2e-10** on the island and
+  **6.6e-11 / 8.1e-11 / 2.9e-10** on the fixture — twenty-plus times inside the tolerance,
+  and six orders of magnitude above the ~7e-15 deg two libms are entitled to differ by. The
+  file also carries the anti-vacuity arm (a hundred-metre error is outside it, and the real
+  residual has better than 10x headroom) and one that a recipe *missing* the stated origin
+  is refused by name — the three fields have no serde default on purpose, because a default
+  is a silent equator.
+* `crates/inf-island/tests/portable_math_law.rs` bans `anchor_at(` across **every** module
+  of the crate, with a vacuity guard that `recipe.rs` still checks its CRS through the
+  replacement door and still carries stated degrees.
+* `island.rs`'s fixture arm now compares the level's whole anchor against the recipe's
+  fields with `assert_eq!` on f64 — a committed byte has to trace to a committed decimal,
+  and exact equality is the only comparison that says so.
+
+**The gate that should have caught it, and why it did not.** `portable_math_law.rs` already
+claimed "every module in this crate is clean of `std` transcendentals, with no exemption",
+and it was *true* — the leak was a crate calling a library that calls a `sin`. Its second
+arm, which bans the projection doors, enumerated **four modules** (`hydro`, `roads`,
+`biome`, `shape`) and **three needles** (`to_source(`, `lonlat_to_mercator(`,
+`mercator_to_lonlat(`). `recipe.rs` was not one of the four and `anchor_at(` was not one of
+the three. Both halves are now the other way up: an **allowlist** of the modules permitted
+to name a coordinate door, each with its reason (`terrain.rs` the lattice, `source.rs` the
+tile plan, `recipe.rs` one longitude-reporting test), so a module added tomorrow is banned
+by default rather than unlisted by accident. *A ban enumerates what you thought of; an
+allowlist enumerates what is allowed* — met again, and the first time on a door rather than
+a spelling.
+
+**The fixture carried the same hazard and was never seen to fail.** `island-fixture`'s
+level is compared in the same loop, *after* the full island's, so on the red run the
+assertion over its bytes never ran. "It passed on macOS" would have been a reading of an
+assertion that did not execute; whether its northing (5 467 400) inverts to the same f64 on
+both platforms is **unknown and now moot** — its recipe states its degrees too.
+
+**Byte arithmetic of the re-bless**, through the generator, both levels:
+
+| level | length | bytes changed | where |
+|---|---|---|---|
+| `VancouverIsland.inf_lvl` | 14 820 -> **14 820** | **9** | latitude @14 788 (3), longitude @14 796 (2), convergence @14 804 (4) |
+| `IslandFixture.inf_lvl` | 8 134 -> **8 134** | **8** | latitude @8 102 (2), longitude @8 110 (2), convergence @8 118 (4) |
+
+Nothing else in either file moved — 14 811 and 8 126 bytes byte-identical — which is itself
+the measurement that says the rest of the level-authoring path (the coast, the roads, the
+streams, the biome masks, the GUIDs, the player start the audit had just rewritten) was
+already portable, and that macOS agreed with Windows about all of it. The two `.inf_lvl.toml`
+sidecars carry the new content hashes; the two `.inf_pcg` covers are untouched.
+
+### RED 2 — a two-millisecond sleep that took five, on ubuntu
+
+`step_profile::tests::a_phase_marked_twice_sums_rather_than_replaces` asserted that two
+2 ms stretches charged to one phase read more than 1.5x the first alone. On the runner the
+first stretch measured **4.990 ms** and the pair **6.991 ms**: the ratio came out at 1.40
+and a green tree went red with nothing changed but the machine.
+
+The property under test — **a phase marked twice SUMS rather than REPLACES** — is
+arithmetic. It has no clock in it. `StepClock::mark` did two separable things (read a clock,
+charge an interval), and the arm could only reach the second through the first.
+
+`mark` is now three lines over a private `mark_at(phase, now)` that takes the timestamp as
+an argument and holds *the whole of the arithmetic*; `mark` is `mark_at(phase,
+Instant::now())` and nothing else, so an arm that drives the seam drives the shipped code
+and there is no second copy to drift. The rewritten arm charges **three decided stretches**
+— 2 ms, 6 ms, 4 ms, unequal on purpose so "sums" is distinguishable from "keeps the
+largest" — and asserts 2 / 8 / 12 ms with a **1e-9 ms** slop that is not a noise budget
+(there is no noise) but nine orders of headroom over the one correctly-rounded divide in
+`Duration::as_secs_f64`. It also asserts the profile *total* is 12, so a mark that spilled
+into a neighbour fails too.
+
+A second arm, `the_live_mark_charges_the_phase_it_names_and_advances_the_clock`, aims at the
+real `mark` with the only assertions a wall clock can make that a runner cannot move: the
+charge is finite and non-negative, the clock advances, no other phase moved, and a second
+mark can only raise the row. *A gate must aim at the thing it names* — the seam arm proves
+the arithmetic, this one proves `mark` is the seam.
+
+Swept: `step_profile` had exactly one real-clock arm and it is the one rewritten;
+`a_disabled_clock_measures_nothing_and_answers_none`, the two table arms and the mean arm
+are pure. The only remaining `Instant`/`sleep` in `inf-player/src` are `main.rs`'s frame
+pacing and `window.rs`'s frame timer, both production.
+
+### Mutations run
+
+| mutation | arms that die |
+|---|---|
+| `IslandRecipe::anchor` restored to `inf_gis::anchor_at` | `no_module_inverts_an_anchor_out_of_a_projection` (names the file and the line), `every_committed_recipe_states_a_true_geodetic_origin`, `a_recipe_round_trips_and_derives_its_own_geometry` — three arms in two binaries |
+| a stated latitude moved by 1e-6 deg (11 cm) | `every_committed_recipe_states_a_true_geodetic_origin` prints "1.0003522703527779e-6 degrees apart, past the 1e-8", and the headroom arm goes with it |
+| `StepClock::mark_at` charges with `=` instead of `+=` | `a_phase_marked_twice_sums_rather_than_replaces`, at the 8 ms assertion, reading 6 |
+
+### What could not be verified from here
+
+This is a Windows machine and the two reds are on macOS and ubuntu. RED 1's fix is
+verifiable *by construction* rather than by re-running the platform: the committed byte is
+now a decimal parsed by a correctly-rounded parser, and no libm sits between the recipe and
+the file — which is a stronger statement than "it passed on the third runner". RED 2's fix
+reads no clock at all. What remains unverified on those platforms is only that the tree
+compiles and the rest of the battery is unmoved, which `cargo check --workspace
+--all-targets` and the touched crates' suites cover here.
