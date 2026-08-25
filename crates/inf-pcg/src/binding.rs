@@ -813,9 +813,15 @@ mod tests {
     /// slope-limited, so the numerical normal — the second half of the reach —
     /// is exercised rather than assumed.
     fn paged_terrain() -> TerrainData {
+        grid_terrain(3, 3)
+    }
+
+    /// `nx` x `nz` tiles of the same painted slope — [`paged_terrain`]'s shape,
+    /// taken as a parameter so an arm can build a strip longer than the reach.
+    fn grid_terrain(nx: i32, nz: i32) -> TerrainData {
         let mut t = TerrainData::new(9, 1.0);
-        for tz in 0..3 {
-            for tx in 0..3 {
+        for tz in 0..nz {
+            for tx in 0..nx {
                 t.author_tile((tx, tz), |x, z| 0.05 * x + 0.02 * z);
             }
         }
@@ -859,6 +865,18 @@ mod tests {
     }
 
     /// A slope-limited cover document, the shape `island_cover_document` builds.
+    ///
+    /// **The cell size deliberately does not divide the tile span** (3 m against
+    /// 8 m), and that is the whole point of the fixture (the I7b audit). The
+    /// per-tile walk is exact *because* the scatter lattice is world-anchored and
+    /// its region clip is half-open — a claim about cells that **straddle a tile
+    /// edge**. With a cell size that tiles the span (8 m here, and 32 m against
+    /// the shipped island's 256 m) every cell falls whole inside one tile, the
+    /// straddle never happens, and the arm below passes for a reason that has
+    /// nothing to do with the property it names: measured, a **region-anchored**
+    /// lattice — which breaks unionality outright — survived every arm in this
+    /// crate at 8 m and fails `a_per_tile_walk_places_exactly_what_one_region_places`
+    /// at 3 m.
     fn cover(seed: u64) -> PcgDocument {
         PcgDocument::single_layer(
             "cover",
@@ -871,7 +889,7 @@ mod tests {
                 },
                 scatter: ScatterParams {
                     seed,
-                    cell_size: 8.0,
+                    cell_size: 3.0,
                     base_density: 1.0,
                     jitter: 1.0,
                     align_to_normal: false,
@@ -1098,6 +1116,52 @@ mod tests {
                 .count(),
             8,
             "a non-resident neighbour must contribute a 0, not nothing"
+        );
+    }
+
+    /// **THE KEY IS THE WHOLE [`neighbour_rings`] NEIGHBOURHOOD, NOT JUST THE
+    /// TOUCHING TILES** (the I7b audit).
+    ///
+    /// `an_arrival_order_cannot_change_what_grows` falsifies `rings = 0` — a key
+    /// carrying nothing but the tile's own stamp — and **measured, it falsifies
+    /// nothing else**: `rings = 1`, on a fixture whose own [`neighbour_rings`] is
+    /// **9**, passes it and every other arm in this crate. An *under-sized*
+    /// neighbourhood is the likelier defect (a `ceil` that became a `floor`, a
+    /// reach read off the wrong spacing, a cap that shrank) and it reintroduces
+    /// first-sight silently, so it needs an arm of its own.
+    ///
+    /// This one drives the shipped door and reads its **engagement counter**: a
+    /// tile arriving at Chebyshev distance exactly `neighbour_rings` must re-key
+    /// — and therefore re-evaluate — the tile it is that far from. Counting the
+    /// evaluations rather than comparing populations is deliberate: whether the
+    /// two tiles' *instances* differ is a fact about this fixture's terrain,
+    /// while "did the key move" is the property.
+    #[test]
+    fn a_tile_a_whole_reach_away_re_keys_the_tile_it_can_be_read_from() {
+        let probe = TerrainData::new(9, 1.0);
+        let rings = neighbour_rings(&probe);
+        assert_eq!(rings, 9, "the fixture's own reach, in tiles");
+        // A strip long enough to hold two tiles a full neighbourhood apart.
+        let full = grid_terrain(rings + 1, 1);
+        let b = cover_binding();
+
+        let mut data = TerrainData::new(full.tile_resolution(), full.meters_per_sample());
+        let mut c = BiomeScatterCache::default();
+        page_in(&mut data, &full, (0, 0));
+        assert!(b.refresh_resident(&data, DVec3::ZERO, &mut c));
+        assert_eq!(c.tiles_evaluated(), 1, "one tile resident, one evaluated");
+
+        // …and now a tile exactly `rings` away arrives. It is evaluated, and so
+        // is the tile whose neighbourhood it has just entered.
+        page_in(&mut data, &full, (rings, 0));
+        assert!(b.refresh_resident(&data, DVec3::ZERO, &mut c));
+        assert_eq!(
+            c.tiles_evaluated(),
+            3,
+            "a tile {rings} tiles away arrived and the tile it can be read from \
+             did not re-evaluate — the memo keys on a neighbourhood smaller than \
+             the reach `scatter_reach_m` bounds, which is first sight wearing a \
+             ring count"
         );
     }
 

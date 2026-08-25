@@ -109,9 +109,20 @@ impl<F> FnHeight<F>
 where
     F: Fn(f64, f64) -> Option<f64> + Send + Sync,
 {
-    /// Wrap `f` with the default 0.1-unit normal step.
+    /// Wrap `f` with the default [`FN_HEIGHT_NORMAL_EPS`] normal step.
+    ///
+    /// **The constant rather than the literal** (the I7b audit).
+    /// [`scatter_reach_m`](crate::scatter_reach_m) adds `FN_HEIGHT_NORMAL_EPS` to
+    /// the reach it bounds a per-tile evaluation by, and it was bounding a
+    /// literal it did not share: editing this `0.1` would have widened how far a
+    /// slope query reads without widening the neighbourhood the memo keys on,
+    /// which is first sight reintroduced by a number nobody would connect to it.
+    /// One door.
     pub fn new(f: F) -> Self {
-        Self { f, eps: 0.1 }
+        Self {
+            f,
+            eps: FN_HEIGHT_NORMAL_EPS,
+        }
     }
 
     /// Wrap `f` with a custom central-difference step.
