@@ -2077,6 +2077,60 @@ fn both_fixed_steps_run_the_cloth_slot() {
     }
 }
 
+// ── the weapon's muzzle (SK1b) ──────────────────────────────────────────────
+
+/// **Both fixed steps settle the weapon AFTER the pose** — the arm behind SK1b's
+/// stated muzzle latency (SK1b audit).
+///
+/// `inf_physics::d3::gameplay::muzzle_of` reads a shot's origin off the weapon
+/// entity's `GlobalTransform`, and that entity is placed by `update_attachments`,
+/// which runs *after* `step_gameplay`. So a weapon-derived muzzle is **one fixed
+/// step behind the hand**, and the wave wrote down why that is acceptable:
+/// *"identical in both hosts, so no trace can see it."*
+///
+/// That is a claim about two files and it was prose. A trace comparison cannot
+/// check it — a PIE==shipping gate compares two hosts, so it is blind to exactly
+/// the thing both hosts do the same way, which is the whole point of this file.
+/// If one host ever moved its gameplay step below the pose, its muzzle would lead
+/// the other's by 16.7 ms and every shot would start somewhere else.
+///
+/// So the ORDER is pinned in both, on the `both_fixed_steps_run_the_cloth_slot`
+/// precedent: gameplay, then the pose, then the attachments.
+#[test]
+fn both_fixed_steps_settle_the_weapon_after_the_pose() {
+    const RUNTIME_SIM: &str = "runtime/inf-player/src/runtime_sim.rs";
+    const SIMULATE: &str = "editor/crates/inf-editor-core/src/simulate.rs";
+    for (label, path) in [
+        ("shipped player", RUNTIME_SIM),
+        ("editor Simulate", SIMULATE),
+    ] {
+        let whole = read(path).replace("\r\n", "\n");
+        let start = whole
+            .find("fn fixed_step(")
+            .expect("both hosts have a `fixed_step`");
+        let src = whole[start..].to_string();
+        let at = |needle: &str| -> usize {
+            src.find(needle)
+                .unwrap_or_else(|| panic!("the {label} fixed step does not call `{needle}`"))
+        };
+        let gameplay = at("step_gameplay(");
+        let pose = at("advance_state_machines(");
+        let attach = at("update_attachments(");
+        assert!(
+            gameplay < pose && pose < attach,
+            "the {label} runs gameplay/pose/attachments out of order \
+             ({gameplay}/{pose}/{attach}) — the muzzle's one-step lag would differ \
+             between the two hosts and every shot would start somewhere else"
+        );
+        // …and the pose really is the ONE Ring-0 door, so "after the pose" is
+        // after the thing that publishes the socket a weapon hangs from.
+        assert!(
+            whole.contains("inf_ecs::pose::step_pose_evaluation("),
+            "the {label} does not reach the Ring-0 pose rule"
+        );
+    }
+}
+
 /// **Every pose writer runs, in a frozen order** (SK1a) — the twin of the trace
 /// law below, one level down.
 ///

@@ -311,6 +311,24 @@ fn editor_trace() -> Vec<Step> {
 fn assert_not_vacuous(t: &[Step]) {
     assert_eq!(t.len() as u32, STEPS);
     assert!(!t[0].pose.is_empty(), "step 0 published no pose at all");
+    // **The course really is a course** (SK1b audit). The distinct-pose count is
+    // the headline number this gate prints, and printing it is not asserting it:
+    // a solver that collapsed every grip onto one pose would still satisfy the
+    // handful of `assert_ne!` pairs below if it happened to keep those apart.
+    // Twelve of twenty-four, pinned, and the byte length with it — 6476 is the
+    // 161-bone trace SK1a priced (36 B header + 40 B per joint), so a rig that
+    // silently lost its side tables would be caught here rather than looking
+    // like a quieter grip.
+    let mut distinct: Vec<&Vec<u8>> = t.iter().map(|s| &s.pose).collect();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(
+        (distinct.len(), t[0].pose.len()),
+        (12, 6476),
+        "the grip course posed {} distinct poses of {} bytes",
+        distinct.len(),
+        t[0].pose.len()
+    );
     // Nothing is asked for over 0..=3, so those steps are one settled pose.
     assert_eq!(t[0].pose, t[3].pose, "the idle pose is not settled");
     assert_eq!(t[0].engagement, (0, 0, 0, 0), "{:?}", t[0].engagement);
