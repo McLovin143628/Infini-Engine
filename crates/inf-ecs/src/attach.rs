@@ -27,6 +27,10 @@
 //! follower_world = target.GlobalTransform · socket_model · offset
 //! ```
 //!
+//! …of which the **translation and the rotation** are written onto the follower.
+//! Its `scale` is its own and is never touched — see [`update_attachments`], and
+//! the SK1b-audit measurement that made the difference visible.
+//!
 //! # The origin fallback survives, deliberately
 //!
 //! Three cases keep the pre-P24.1 behaviour, and each is a real authoring state
@@ -109,11 +113,31 @@ pub fn update_attachments(world: &mut EcsWorld) {
             crate::pose::model_to_world(world, target)
         };
         let world_affine = target_global * socket_local * offset;
-        let (scale, rot, trans) = world_affine.to_scale_rotation_translation();
+        let (_, rot, trans) = world_affine.to_scale_rotation_translation();
         if let Some(mut t) = world.world_mut().get_mut::<Transform>(follower) {
             t.translation = Vec3d::from_dvec3(trans);
             t.set_quat(rot);
-            t.scale = Vec3d::from_dvec3(scale);
+            // **The follower's own SCALE is left alone** (SK1b audit). This used
+            // to write the composed affine's scale, which is the *target's*: an
+            // attachment cannot carry a scale of its own ([`AttachedTo`] has an
+            // offset translation and an offset rotation and nothing else), so
+            // writing it destroyed whatever size the follower had authored, on
+            // every step, for ever.
+            //
+            // Measured on the first production `AttachedTo` this engine ever had:
+            // SK1b's equipped weapon sets its placeholder to `0.06 × 0.06 × 0.45`
+            // — a barrel — and this line turned it into a **1 m cube** in the
+            // character's hand one pass later, silently, on every armed character
+            // in the tree. `an_attachment_places_a_follower_without_resizing_it`
+            // is the arm.
+            //
+            // The bound, stated: a follower on a **scaled** target does not
+            // inherit that scale. Its *placement* still does — `socket_local` is
+            // a model-space transform and `target_global` scales it, so a socket
+            // on a 2x character is where a 2x character's hand is. Making the
+            // size follow too needs a scale on `AttachedTo`, which is a scene
+            // schema move; destroying the follower's own size is not a substitute
+            // for it.
             changed = true;
         }
     }
@@ -399,6 +423,70 @@ mod tests {
         assert!(
             (swung - DVec3::new(-1.0, 1.0, 0.0)).length() < 1e-4,
             "{swung:?}"
+        );
+    }
+
+    /// **An attachment PLACES a follower; it does not resize it** (SK1b audit).
+    ///
+    /// This pass used to write the composed affine's scale onto the follower,
+    /// which is the *target's* scale — [`AttachedTo`] carries an offset
+    /// translation and an offset rotation and no scale at all, so there was
+    /// nothing of the follower's own in that number. The effect was to erase
+    /// whatever size the follower had been given, on every step, for ever.
+    ///
+    /// It was invisible until the engine grew its first *production* attachment:
+    /// SK1b's equipped weapon sets its placeholder primitive to
+    /// `0.06 × 0.06 × 0.45` — a barrel — and this pass turned it into a **1 m
+    /// cube** in the character's hand one pass later.
+    ///
+    /// Both halves are asserted, because "the scale survived" is satisfied
+    /// perfectly by a pass that wrote nothing at all: the follower still lands on
+    /// the animated socket.
+    #[test]
+    fn an_attachment_places_a_follower_without_resizing_it() {
+        let rig = chain_rig();
+        let clips = BTreeMap::from([(REST, hold(0.0)), (SWING, hold(90.0))]);
+        let (mut world, follower) = world_with_attachment("hand_r", DVec3::ZERO);
+        // A barrel: the shape SK1b's weapon placeholder is, and nothing like the
+        // target's own unit scale.
+        let barrel = Vec3d::new(0.06, 0.06, 0.45);
+        world
+            .world_mut()
+            .get_mut::<Transform>(follower)
+            .expect("a follower")
+            .scale = barrel;
+
+        pose_step(&mut world, &rig, &clips);
+        update_attachments(&mut world);
+        world.propagate();
+
+        let t = *world
+            .world()
+            .get::<Transform>(follower)
+            .expect("a follower");
+        assert_eq!(
+            t.scale, barrel,
+            "the attachment pass resized its follower to {:?}",
+            t.scale
+        );
+        // …and it is not simply an inert pass: the follower rode the socket.
+        assert!(
+            (t.translation.to_dvec3() - DVec3::new(-1.0, 1.0, 0.0)).length() < 1e-4,
+            "the follower did not land on the animated socket ({:?})",
+            t.translation
+        );
+        // The global carries the follower's own size too, which is what a
+        // renderer reads.
+        let g = world
+            .world()
+            .get::<GlobalTransform>(follower)
+            .expect("a follower")
+            .0
+            .to_scale_rotation_translation()
+            .0;
+        assert!(
+            (g - barrel.to_dvec3()).length() < 1e-9,
+            "the drawn size is {g:?}, not the {barrel:?} it was given"
         );
     }
 

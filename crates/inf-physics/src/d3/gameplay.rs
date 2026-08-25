@@ -298,6 +298,14 @@ fn step_equipped_weapons(world: &mut EcsWorld) {
                 // the `item::spawn_pickup` precedent, and the same honest bound:
                 // an `ItemDef` that names a mesh asset is the next field and is
                 // not in this wave.
+                //
+                // **The size survives the attachment pass** (SK1b audit), and it
+                // did not when this was written: `update_attachments` composed
+                // the *target's* scale onto its follower, which erased this line
+                // one pass later and drew a **1 m cube** in the character's hand.
+                // That pass leaves a follower's own size alone now. The two arms
+                // are `an_attachment_places_a_follower_without_resizing_it` and
+                // `the_equipped_weapon_is_an_entity_attached_to_the_hand_socket`.
                 let mut t = w.get_mut::<Transform>(e).map(|t| *t).unwrap_or_default();
                 let len = forward.clamp(0.05, weapon::MAX_MUZZLE_FORWARD_M);
                 t.scale = inf_ecs::math::Vec3d::new(0.06, 0.06, len);

@@ -784,6 +784,34 @@ fn the_equipped_weapon_is_an_entity_attached_to_the_hand_socket() {
         rig.world.world().get::<MeshRef>(e).is_some(),
         "nothing would draw it"
     );
+    // **…at the size of the weapon, not at the size of the unit cube** (SK1b
+    // audit). This scale used to be written here and overwritten by
+    // `inf_ecs::update_attachments` one pass later — that pass composed the
+    // target's scale onto its follower — so the placeholder drew as a **1 m
+    // cube** in the character's hand on every armed character in the tree, and
+    // nothing looked. The attachment pass leaves a follower's size alone now
+    // (`an_attachment_places_a_follower_without_resizing_it`); this is the half
+    // that says the size it is left with is the barrel's.
+    let t = *rig
+        .world
+        .world()
+        .get::<inf_ecs::components::Transform>(e)
+        .expect("a weapon has a transform");
+    let barrel = defs()
+        .get("rifle")
+        .and_then(|d| d.weapon)
+        .expect("the fixture's rifle")
+        .muzzle_forward_m;
+    assert!(
+        (t.scale.z - barrel).abs() < 1e-9,
+        "the placeholder is {:?} long against a {barrel} m barrel",
+        t.scale.z
+    );
+    assert!(
+        t.scale.x < 0.1 && t.scale.y < 0.1,
+        "the placeholder is {:?} across, which is a crate and not a rifle",
+        t.scale
+    );
     // The guid is a pure function of the owner, so two hosts spawn the same
     // entity — the P22 content-derived rule, which is what makes this legal
     // inside a fixed step at all.
