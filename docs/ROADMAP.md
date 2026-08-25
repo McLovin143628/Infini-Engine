@@ -25467,3 +25467,46 @@ flagged rather than claimed); goldens **54, byte-identical under `INF_GOLDEN_STR
 crate and no new external dependency; committed samples **23**, byte-unmoved. The full ledger,
 the eight decisions and the six routed remainders are in `docs/memos/island-progress.md` under
 *Done — wave I7b*.
+
+**The I7b audit (2026-08-25), adversarial and fresh. NO HIGH.** Every figure above reproduced
+on the same machine: the shipped island at **p50 3.464 ms / 1.110 ms GPU** with its record
+phases summing to the stage exactly, the lit island at **45.245 / 33.461**, `vsm-raster` at
+**29.911 ms**, the dirty split at **400.8 / 532.0 / 0.0** summing to `dirty_pages`
+(191 562 + 254 296 + 0 = 445 858), **2 681** scattered instances in the frame, and
+`island_gate`'s **0 → 2 339 on 16 tiles, 2 339..3 119 over the drive, 0 stray, 225 against
+225**. The ×4 clipmap configuration really is unreachable from any shipping path —
+`first_level_extent_m` has exactly **one** assignment in the whole tree and it is the
+instrument's local — and the 256-page raster ceiling is **loud in the shipped path**, not only
+in the instrument (`tracing::warn!` on every deferral).
+
+**Four MEDs, all one shape: a claim that is true and a gate that cannot tell.** (1) The
+union-is-the-whole arm **never split a scatter cell** — the fixture's `cell_size` equalled its
+tile span, and a *region-anchored lattice*, which breaks unionality outright, passed all 227
+arms of `inf-pcg`; at 3 m it fails. (2) The memo's neighbours key was armed against `rings = 0`
+and **nothing else**: `rings = 1` on a fixture whose own `neighbour_rings` is 9 passed every arm
+in the tree, and an under-sized neighbourhood is first sight put back silently; the new arm
+reads the engagement counter (**1 → 3** evaluations, not 1 → 2). (3) The `O(N²)` fix
+**un-declared a coupling group** — the loop it replaced coupled every resident page whether or
+not its sections parsed, and `Coupling::has_group` exists to say why that is not the same as
+coupling none; `commit_cluster_pages` refuses an undeclared page, which is the P28.2 failure
+whose measured value is *zero pages, the mesh vanished*. (4) The dirty split that **retired
+I4b's routed caster-pack cache** had no arm at all — nothing ever drove the `Casters` branch
+whose `0.0` is the whole argument, and a branch unreachable by construction prints the same
+zero. All four fixed, each with an arm, each mutation-verified.
+
+**Ten LOWs carried by name** in the memo, including one worth a routing: the lit record stage's
+dearest phase is **`vsm sync` at 3.681 ms (36.3 %)**, ahead of `cluster wants`, and no routing
+names it — it is the *same* mechanism clause 2 measures (dirty pages 932.8 → 236.7 takes it
+3.681 → 0.871 ms), so the clipmap scroll costs **~4.6 ms of CPU record on top of 29.9 ms of
+GPU** and the routed fix would take both. **No twentieth chr(92) catch.**
+
+Counts at the audited head: battery **319 / 5 971 / 0 / 16** — the wave's 5 968 plus the
+audit's three arms, and since **no test file was added** across `545614f..48b4f6e6` the block
+count cannot have moved, so the wave's flagged "+1 block" is a wrong *baseline* and its refusal
+to claim it away was right. Goldens **54, byte-identical under `INF_GOLDEN_STRICT=1`** over 101
+arms with no PNG rewritten; `clippy --workspace --all-targets -D warnings` **0**; rustdoc
+**374 individual over 30 crates** after `cargo clean --doc` — the audit adds zero, proved as a
+*set* diff against the wave's own cold log rather than as a count; `cargo fmt --all --check`
+clean; **no schema moved**; samples byte-unmoved. **Five** audit commits, `(I7b) audit:`-tagged
+— four fixes and the ledger; the full ledger is in `docs/memos/island-progress.md` under
+*The I7b audit*.

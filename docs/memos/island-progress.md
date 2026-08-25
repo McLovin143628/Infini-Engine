@@ -28,8 +28,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | ~~I6 (old)~~ | ~~scale seams — IB-12~~ *(pulled into I4; IB-8 and IB-13 into I3)* | **absorbed** |
 | **I6** | **gameplay systems** — doors + locks + the kick + crash-through, inventory, weapons v1, health | **DONE + AUDITED** — battery 312 / **5 873** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, rustdoc **404** of a 450 ceiling (447 at the wave's head, re-measured cold; 39 cleared by the audit), **no schema moved**. `NOT_YET_CONSUMED` is empty. Six defects found by the wave's own world-level arms and five more by its gate; one energy door for the kick, the breach and the bullet (mutation-proved across two crates); the city plans **19 790** doorways and the band makes **234** solid. The audit found **five arms that could not fail** (two trace sections, the wheel verb, the corpse guard, the spent attack edge) and **three world defects** (a barged door lost its lock for ever, `door.is_open` walked all 19 790 doorways, a dead block claiming a swing it did not drive). See *Done — wave I6* and *The I6 audit* below |
 | **I7** | **the island data build** — the recipe, real Vancouver elevation, the designed coastline, the derived water and biomes, the graded roads, the level | **DONE** — see *Done — wave I7* below. The island exists: **51.38 km² of map, 40.65 km² of land, a 948.7 m peak of real North Shore survey, 25.14 km of designed shore, 50 reaches / 26.32 km, 2 lakes, 33 waterfall sites, 33.74 km of graded road, 342.7 MB of terrain built by one command in 24.7 s.** PIE == shipping over a 900-step drive. Battery 318 / 5 946 / 0 / 16, frontend 702 / 78, goldens 54, clippy 0, rustdoc 404, **no schema moved**. **Then CI went red on macOS and ubuntu** — one ulp of proj4rs latitude in a committed level, and a 2 ms sleep that took 5 on a shared runner; both fixed, recipe schema **1 → 2** (the recipe now *states* its geodetic origin), engine schemas still unmoved. See *The I7 CI-red* at the end of this file |
-
-| **I7b** | **the island lives at 60** — the vegetation through the shipped boot, the VSM caster pack, `render (record)` attributed | **DONE** — see *Done — wave I7b* at the end of this file. The shipped island frame goes **41.5 → ~277 fps** (p50 24.080 → 3.56–3.62 ms, **13 ms inside** the 60 fps budget where it opened 7.5 ms outside) and grows **2 681 instances** of vegetation where it grew none; PIE == shipping on the forest as well as the state fold. Battery 319 / 5 968 / 0 / 16, goldens 54 strict, clippy 0, rustdoc unmoved, **no schema moved**, no new crate or dependency. Clause 2's routed prescription was **measured and retired** and the real fix routed by name |
+| **I7b** | **the island lives at 60** — the vegetation through the shipped boot, the VSM caster pack, `render (record)` attributed | **DONE + AUDITED** — see *Done — wave I7b* and *The I7b audit* at the end of this file. The shipped island frame goes **41.5 → ~277 fps** (p50 24.080 → 3.56–3.62 ms, **13 ms inside** the 60 fps budget where it opened 7.5 ms outside) and grows **2 681 instances** of vegetation where it grew none; PIE == shipping on the forest as well as the state fold. Battery 319 / **5 971** / 0 / 16 at the audited head, goldens 54 strict, clippy 0, rustdoc 374 unmoved, **no schema moved**, no new crate or dependency. Clause 2's routed prescription was **measured and retired** and the real fix routed by name. The audit reproduced every headline number on the same machine and found **no HIGH** — four MEDs, all the same shape: *a claim that is true and a gate that cannot tell* |
 
 Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
 IB-8 and IB-13 forward out of I6**: both are ceilings a thousand-building fixture walks into
@@ -3515,7 +3514,7 @@ ledger records that getting this pairing wrong *retracts an asset for ever*, and
 | | after the I7 audit | **after I7b** |
 |---|---|---|
 | battery blocks / passed / failed / ignored | 318 / 5 952 / 0 / 16 | **319 / 5 968 / 0 / 16** — **+11 arms are this wave's** (7 in `inf-pcg`'s binding, 4 in `inf-render`'s timing) and **no test file or crate was added**, so the +1 block and the other +5 arms cannot be. Recorded as measured and flagged rather than claimed away — the I4b `+1 rustdoc` precedent. The likeliest cause is the recorded 318 having been read off a truncated log, which is a mistake this wave made once itself before re-running for the whole thing |
-| frontend tests / files | 702 / 78 | **702 / 78, not re-run** — no file under `editor/studio` was touched |
+| frontend tests / files | 702 / 78 | **702 / 78, not re-run** — no file under `editor/studio/src` was touched *(the I7b audit corrects this row: the wave wrote `editor/studio`, and it did touch `editor/studio/src-tauri/src/commands/pcg.rs`. That is Ring-2 **Rust**, which the battery covers; the frontend is what was not re-run, and it is what was not touched)* |
 | goldens | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical**, re-run under `INF_GOLDEN_STRICT=1` over **101 arms** with **no PNG rewritten** (`git status` on `tests/goldens/` is empty) |
 | `clippy --workspace --all-targets` `-D warnings` | 0 | **0** (local toolchain, run LAST per the rmeta law). One finding was cleared on the way and it was this wave's own: `!(span > 0.0)` is a negated comparison on a partially-ordered type |
 | rustdoc warnings (ceiling 450) | 404 over 46 crates | **404 `^warning` lines − 30 summaries = 374 individual over 30 crates**, measured after `cargo clean --doc`. **The wave adds zero**: it introduced exactly two (a public doc linking the private `RecordClock::mark_at`, and a `[`OffsetTerrain`](crate::fields::OffsetTerrain)` that became a *redundant* explicit target the moment this wave imported the type into scope — a warning caused by an `use` line, which is worth knowing about) and both were found and removed. The only warnings left pointing at a file this wave touched are `binding.rs`'s four P19.3 **module**-doc links, which predate it. *The recorded 404 and this 404 are the same number by coincidence of method: this measure's `^warning` line count is 404 and its individual count is 374, so whichever convention the earlier figure used, the delta is zero* |
@@ -3648,3 +3647,222 @@ candidate density, which is what sim residency bounds it to (see below).
   — so an editor Simulate of a streamed island stands on no ground and grows nothing.
   Pre-existing and unchanged by this wave; it is why `island_gate`'s "editor side" is the
   loose document through `RuntimeSim`, which is the pair P16.5's own gate compares.
+
+## The I7b audit (2026-08-25)
+
+Adversarial, `545614f..48b4f6e6`, fresh reader, nothing pushed. **No HIGH.** Every
+headline number in the wave's ledger reproduced on this machine — including the two
+that retire a routing and the one that closes a wave-old zero — and the mutations
+the wave claims all reproduce as claimed.
+
+What the audit found instead is a single shape, four times: **a claim that is true
+and a gate that cannot tell.** Three of clause 1's and clause 2's load-bearing
+properties were unfalsifiable as shipped — the union-is-the-whole argument, the size
+of the memo's neighbourhood, and the `0.0 re-cast` that retires I4b's prescription —
+and the fourth is a behaviour the `O(N²)` fix changed while its commit message said
+*"nothing else moved"*. All four are fixed; nine LOWs are carried by name.
+
+### What reproduced, measured here rather than read
+
+`island_gate`, this tree, `cargo test -p inf-player --test island_gate -- --nocapture`:
+
+| the wave's figure | mine |
+|---|---|
+| fully paged, by hand | **4 958** instances over 2.359 km² |
+| shipped boot | **0 → 2 339** on 16 sim tiles |
+| the 900-step drive | **2 339..3 119** on **16..20** sim tiles |
+| stray against the fully-paged reading | **0 of 2 339** |
+| a fully-resident interior tile | **225 against 225** |
+| PIE == shipping | 900 of 900 steps, states **and** forests |
+| the drive really streamed | 1 activation / 1 deactivation, 16 → 20 page loads |
+
+`the_island_at_shipping_resolution`, RTX 4070 Ti, release, 3 × 120 frames:
+
+| | the wave | mine |
+|---|---|---|
+| SHIPPED p50 / GPU frame | 3.56–3.62 / 1.07–1.43 ms | **3.464 / 1.110 ms** |
+| SHIPPED `render (record)` | 2.026–2.037 ms | **1.980 ms** (phases sum 1.980) |
+| LIT p50 / GPU frame | 44.48–45.70 / 33.56–33.58 ms | **45.245 / 33.461 ms** |
+| LIT `vsm-raster` GPU | 30.001 ms | **29.911 ms** |
+| LIT dirty per rastering frame | 400.8 / 532.0 / **0.0** | **400.8 / 532.0 / 0.0** |
+| LIT pages rastered / deferred / cached | 256.0 / 676.8 / 91.2 | **256.0 / 676.8 / 91.2** |
+| scattered instances in the frame | 2 681 | **2 681** |
+| LIT-COARSE p50 / GPU / `vsm-raster` | 25.09 / 19.69 / 15.931 ms | **21.995 / 19.714 / 15.925 ms** |
+
+Two rows land **below** their quoted range and both do so on the favourable side:
+SHIPPED p50 **3.464** against 3.56–3.62, and LIT-COARSE p50 **21.995** against
+25.09–25.16. Both of those configurations' GPU columns are inside their ranges, so
+what moved is CPU scheduling on a fourth run rather than anything about the tree —
+which is also the honest reading of the wave's own ranges: they are the spread of
+*those three* runs, not a bound. The dirty split sums exactly:
+`191 562 + 254 296 + 0 = 445 858 = dirty_pages`.
+
+**And the retirement is honest.** The routed caster-pack cache is retired in the
+ledger *and* in the ROADMAP, and the item does not vanish — it becomes the named
+clipmap-scroll item with its own price. The ×4 clipmap configuration really is
+unreachable from any shipping path: `first_level_extent_m` has exactly **one**
+assignment in the whole tree and it is `fps_instrument.rs`'s local; `settings.rs`'s
+`32.0` default is untouched by the range. The 256-page raster ceiling is **loud in
+the shipped path**, not only in the instrument — `tracing::warn!` fires on every
+deferral, 677 of them a frame.
+
+### MED 1 — the union-is-the-whole arm never split a scatter cell (fixed, `59f3d70`)
+
+`a_per_tile_walk_places_exactly_what_one_region_places` carries the whole exactness
+argument, and that argument is about cells that **straddle a tile edge**. The
+fixture's cover document used `cell_size` 8 m against a tile span of 8 m, so every
+cell fell whole inside one tile and no straddle ever happened. Mutation-measured: a
+**region-anchored** lattice (`cell_x += region.min.x.rem_euclid(cs)`), which breaks
+unionality outright, passed **all 227** arms of `inf-pcg`. At 3 m it fails the arm
+and nothing else. The shipped island is aligned the same way — 32 m scatter cells
+inside a 256 m tile span — so the property the crate has to keep is the one an
+author reaches the moment they type any other cell size.
+
+### MED 2 — the neighbours key was armed against `rings = 0` and nothing else (fixed, `59f3d70`)
+
+The wave's own mutation reproduces exactly: `rings = 0` kills
+`an_arrival_order_cannot_change_what_grows` and nothing else, in this crate or in
+`island_gate`. But `rings = 1`, on a fixture whose own `neighbour_rings` is **9**,
+passed every arm in the tree — and an *under-sized* neighbourhood is the likelier
+defect (a `ceil` that became a `floor`, a reach read off the wrong spacing, a cap
+that shrank), and it puts first sight back silently.
+`a_tile_a_whole_reach_away_re_keys_the_tile_it_can_be_read_from` drives the shipped
+door over a strip and reads its **engagement counter**: a tile arriving at Chebyshev
+distance exactly `neighbour_rings` must re-key the tile it is that far from, so
+`tiles_evaluated` goes **1 → 3** and not 1 → 2. Mutation-verified as the only arm
+`rings = 1` fails.
+
+*The reach bound itself is sound and was checked rather than taken:*
+`BiomeMask::nearest_unlike` is the **only** offset reader among the samplers
+(`AltitudeFilter`, `DataMapMask`, `Mask`, `Noise` are point reads) and its radius is
+capped at `MAX_FEATHER_SAMPLES` *whatever feather an author writes*, so a feather
+wider than a tile cannot escape it; the other reader is `FnHeight`'s central
+difference. `ceil(reach / span)` is exactly the Chebyshev radius a candidate at a
+tile's far edge can reach, corners included, because the neighbourhood is a **square**
+and not a cross.
+
+### MED 3 — the `O(N²)` fix un-declared a coupling group (fixed, `4a4b50c`)
+
+The loop `for_each_page_sections` replaced declared the coupling group **outside**
+the `with_page_sections` call, so a page whose sections did not come back was still
+coupled with an **empty** member list. The rewrite skips such a page, and declares
+nothing at all when the payload itself is unavailable. `inf_stream::Coupling`'s own
+`has_group` doc says why that matters in as many words — *"a group with no members
+is a legal state … while a group that was never declared is a page the want pass
+never saw, which a consumer must refuse"* — and `commit_cluster_pages` refuses,
+which is the P28.2 failure whose measured value is **zero pages, the mesh vanished**.
+The guard's comment calls itself MEASURED unreachable *because* `cluster_tile_wants`
+couples `0..resident_pages()`; after the rewrite it coupled however many pages
+parsed, so the sentence had stopped being true by construction. Groups are seeded
+before the walk now. Reachability is narrow (a corrupt pack entry), which is why
+this is MED and not HIGH — but the invariant is documented, and it was gone.
+
+`the_plural_page_walk_reads_exactly_what_the_singular_one_does` is the
+byte-equivalence arm the rewrite went in without: same pages, same order, same tile
+references through both doors on a real paired source, plus the skip that makes the
+seeding load-bearing. Mutation-verified (reading page `index − 1` fails it).
+
+### MED 4 — the split that retired a routing had no arm (fixed, `79e9792`)
+
+Three counters, zero tests. Nothing in the tree ever drove the `Casters` branch —
+the one whose `0.0` is the whole argument for retiring I4b's content-keyed
+caster-pack cache. A branch unreachable by construction prints the identical zero,
+and inference dressed as measurement is worse than no measurement (P22).
+`classify_page` is now the shipped classifier lifted where an arm can reach it, and
+`the_dirty_split_names_all_three_reasons_and_tiles_the_dirty_set` drives all four
+cache states including the one the routing hangs on — same slot, same label, **same
+`geo_key`, a different whole `key`** — plus the sum identity, which `record` also
+keeps as a `debug_assert_eq!` over the live split. Mutation-verified: making
+`Casters` unreachable fails the new arm and nothing else, which is the state the
+counters shipped in.
+
+### The mutations run, and what each killed
+
+| mutation | what went red |
+|---|---|
+| `rings = 0` in `refresh_resident_in` | `an_arrival_order_cannot_change_what_grows` — **and nothing else, in `inf-pcg` or in `island_gate`** (the wave's claim, reproduced) |
+| `rings = 1` (an under-sized neighbourhood) | nothing, before; the new reach arm, after |
+| a region-anchored scatter lattice | nothing (227/227 green), before; the union arm, after the fixture's cell size stopped dividing the tile span |
+| a closed (`>`) region clip instead of half-open | **nothing, either way** — a jittered candidate landing exactly on a boundary is measure-zero in f64, so the half-open rule is a correctness statement no fixture can reach. Recorded, not armed |
+| `for_each_page_sections` reading page `index − 1` | the new plural-walk arm |
+| the `Casters` branch made unreachable | nothing, before; the new dirty-split arm, after |
+| the `submit` + `epilogue` record marks deleted | `print_record_profile` — *"the record phases sum to 1.610 ms beside a 2.016 ms record stage"* |
+| `refresh_biome_scatter()` deleted from `fixed_step` | `pie_equals_shipping_on_an_island_drive` — *"one forest for the whole drive"* (the boot still seeds through `set_terrain_streaming`, so the load half stays green, which is the right division) |
+| the drive made one-way at the same distance (`out = step / 2`) | the shrink arm — *"SIM TILES: grew true, shrank false"*. **The wave's justification for the turn stands**: a one-way drive at *twice* the distance passes it, so the turn is what makes the ground page out at **this** drive length |
+
+### Carried LOWs, by name
+
+1. **`island_gate`'s drive samples two distinct forests and four page loads.** 900
+   steps × 0.4 m out and back is 180 m each way against the fixture's **256 m** tile
+   span, so the hero crosses one tile edge and comes back. The mechanism is proven;
+   the sample is thin. Deepening it re-numbers every figure in this wave's ledger, so
+   it is named rather than changed.
+2. **`island_gate` does not arm the neighbours key at all.** `rings = 0` — the
+   first-sight defect the design exists for — passes all six arms, because both hosts
+   page in the same order and the boot pages its 16 tiles in one batch. Gate-level
+   first-sight coverage is nil and rests entirely on the `inf-pcg` unit arm.
+3. **`VgeomNode::cluster_tile_wants` has no end-to-end arm of any kind** (pre-existing).
+   `cluster_pages.rs` re-derives the coupling by hand rather than calling it. The
+   seeding above is by construction and the skip is armed; the call itself is recorded
+   as unarmed rather than counted as covered.
+4. **The lit record stage's dearest phase is `vsm sync`, and no routing names it.**
+   Measured here: **3.681 ms (36.3 %)**, ahead of `cluster wants` at 3.523 ms — and the
+   ledger's routing paragraph quotes only the latter. It is the same mechanism clause 2
+   measures, and the third configuration proves it: dirty pages 932.8 → 236.7 (3.94×)
+   takes `vsm sync` 3.681 → 0.871 ms (4.23×). So the clipmap scroll costs **~4.6 ms of
+   CPU record on top of 29.9 ms of GPU**, and the routed fix would take both.
+5. **The editor's Simulate host is not one of the three callers.** Pre-existing, named
+   in the wave's own *Open / next*; `island_gate`'s "editor side" is the loose document
+   through `RuntimeSim`, which is the pair P16.5's gate compares. The "both hosts"
+   claim is about two `RuntimeSim` boot paths and should be read that way.
+6. **`EngineRenderer::record_profile()` keeps the last armed frame's values** after
+   `set_gpu_timing(false)` rather than zeroing. Harmless in every shipped frame, where
+   it is never armed at all.
+7. **The mirror gate's new requirement is `>= 1` occurrence of a spelling**, so a doc
+   comment naming `refresh_resident(` would satisfy it. The load-bearing half is the
+   `.xz_bounds()` ban, which is a real ban; the positive half is a byte pin that cannot
+   see semantics (P23's law).
+8. **The counts table's "no file under `editor/studio` was touched" is false** —
+   `editor/studio/src-tauri/src/commands/pcg.rs` was. The *intent* (no frontend file,
+   so no `npm` run) is right, and is corrected in the row below.
+9. **The phase-state table's I7b row was orphaned from the table** by a stray blank
+   line, so it rendered as a second one-row table. Repaired.
+10. **"Committed samples 23" derives from nothing.** `samples/` holds **19**
+    `.inf_lvl` files and **20** project directories, and no arm anywhere counts
+    either. The figure has been carried unchanged since at least I6 and nobody has
+    re-derived it. The load-bearing half *is* verified: `git diff` over `samples/`
+    across `545614f..48b4f6e6` **and** across the audit's own commits is empty, so
+    "byte-unmoved" is true whatever 23 counts.
+
+### The chr(92) sweep
+
+**No twentieth catch.** Every run of four or more interior spaces on an added line in
+`545614f..48b4f6e6` is deliberate: the `//     I7b)` comment block matching the
+existing `// 0a.` / `// 0b.` indentation, `print_record_profile`'s four-space row
+indent, and the `"  content    "` column alignment that predates the wave. The
+workspace sweep
+(`no_string_literal_in_the_workspace_carries_an_eaten_continuation`) is green.
+
+### One-platform hazards
+
+None introduced. The range adds no trigonometry, no `libm` route and no `f32`
+committed content; `neighbour_rings`'s `ceil` and `scatter_reach_m`'s multiply-add
+are exact IEEE operations on `f64`. `FnHeight::new`'s literal now reads
+`FN_HEIGHT_NORMAL_EPS`, which is the same `0.1` and therefore moves nothing.
+
+### Counts, at the head this audit certifies
+
+| | after I7b | **after the I7b audit** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 319 / 5 968 / 0 / 16 | **319 / 5 971 / 0 / 16** — `cargo test --workspace -j 3`, tallied over all 319 blocks. **The wave's 5 968 is exactly right**: the audit adds three arms and 5 968 + 3 = 5 971, and the block count is unchanged because no test file was added. That settles the wave's flagged "+1 block and +5 arms" the only way it can be settled without re-running the base: **no test file or crate was added between `545614f` and `48b4f6e6`** (checked with `git diff --diff-filter=A`), so the block count *cannot* have moved, and the recorded 318 / 5 952 baseline is what is wrong. The wave's instinct — record it as measured and flag it rather than claim it away — was right, and this run is the confirmation |
+| frontend tests / files | 702 / 78 | **702 / 78, not re-run** — the audit touched no file under `editor/studio/src` |
+| goldens | 54, byte-identical | **54, byte-identical** — re-run under `INF_GOLDEN_STRICT=1`, **101 arms, 0 failed, no PNG rewritten** (`git status` on `tests/goldens/` empty) |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** (local toolchain, run LAST per the rmeta law). Stated precisely: the run re-checked the **13** crates the audit's seven files reach and answered the rest from clippy's own cache, whose sources are byte-identical to the ones the wave checked green at this head |
+| rustdoc warnings (ceiling 450) | 404 `^warning` lines − 30 summaries = 374 individual over 30 crates | **404 − 30 = 374 over 30 crates**, measured after `cargo clean --doc`. **The audit adds zero, proved as a set and not as a count**: diffed line by line against the wave's own cold log, the only differences are the two warnings the wave itself removed and one line-number shift from the audit's `level.rs` doc correction. The warnings still pointing at a file the audit touched are `binding.rs`'s four P19.3 module-doc links, which predate both |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved** |
+| committed samples | 23 | **byte-unmoved** across the wave *and* the audit; see carried LOW 10 for what 23 counts |
+| new crates / new external deps | none | **none** |
+
+**Five audit commits**, `(I7b) audit:`-tagged — four fixes and the ledger, counted
+rather than summarised.
