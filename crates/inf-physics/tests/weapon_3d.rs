@@ -163,9 +163,16 @@ fn spawn_wall(w: &mut EcsWorld, z: f64) {
     ));
 }
 
+/// The guids the **rigged** hero's registries answer to (SK1b audit).
+const SM: Uuid = Uuid::from_u128(0x1601_0010);
+const SKEL: Uuid = Uuid::from_u128(0x1601_0011);
+
 struct Rig {
     world: EcsWorld,
     bridge: PhysicsBridge3D,
+    /// The hero's skeleton, when this fixture gave it one. `None` is the bare
+    /// capsule every arm in this file but two runs on.
+    skeleton: Option<inf_anim::SkeletonAsset>,
 }
 
 impl Rig {
@@ -179,9 +186,72 @@ impl Rig {
         let mut rig = Self {
             world,
             bridge: PhysicsBridge3D::new(GRAVITY),
+            skeleton: None,
         };
         rig.bridge.sync_from_world(&rig.world);
         rig
+    }
+
+    /// **Give the hero a rig**, so its weapon hangs off a hand instead of a
+    /// height (SK1b audit). `socket` is what the skeleton publishes for its right
+    /// hand — pass something the rig does *not* have to exercise the fallback.
+    fn rig_the_hero(&mut self, socket: &str) {
+        let mut asset =
+            inf_anim::build_manny(&inf_anim::BodyParams::default()).expect("a mannequin");
+        // Republish the hand socket under the name this fixture wants, and drop
+        // every other spelling of it, so "the rig authors `hand_r`" is a property
+        // of this fixture rather than of the generator's socket list.
+        let hand = asset
+            .skeleton
+            .index_of("hand_r")
+            .expect("the mannequin has a right hand");
+        asset
+            .sockets
+            .retain(|s| s.name != d3::gameplay::WEAPON_SOCKET && s.name != socket);
+        asset.sockets.push(inf_anim::Socket::new(socket, hand));
+        let e = self.world.entity_of(HERO).expect("the hero");
+        self.world.world_mut().entity_mut(e).insert((
+            inf_ecs::components::AnimStateMachine {
+                sm: Some(SM),
+                ..Default::default()
+            },
+            inf_ecs::components::SkeletalMesh {
+                mesh: None,
+                skeleton: Some(SKEL),
+            },
+        ));
+        self.world.reindex_guids();
+        self.world.mark_dirty();
+        self.skeleton = Some(asset);
+    }
+
+    /// The pose + attachment half of a host's fixed step, in the hosts' own
+    /// order: gameplay, then the pose, then the attachments. Inert with no rig.
+    fn step_pose_and_attachments(&mut self) {
+        let Some(rig) = self.skeleton.clone() else {
+            return;
+        };
+        let machine = inf_anim::StateMachine {
+            states: vec![inf_anim::SmState::clip("idle", [0u8; 16])],
+            transitions: Vec::new(),
+            entry: 0,
+            ..Default::default()
+        };
+        let machines = |g: Uuid| (g == SM).then_some(&machine);
+        let skeletons = |g: Uuid| (g == SKEL).then_some(&rig);
+        let clips = |_: inf_anim::ClipRef| None;
+        let vars = |_: Uuid| std::collections::BTreeMap::new();
+        inf_ecs::pose::step_pose_evaluation(
+            &mut self.world,
+            DT,
+            &machines,
+            &skeletons,
+            &clips,
+            &vars,
+        );
+        self.world.propagate();
+        inf_ecs::update_attachments(&mut self.world);
+        self.world.propagate();
     }
 
     fn arm(&mut self, id: &str) {
@@ -210,6 +280,7 @@ impl Rig {
         self.bridge.step(DT);
         self.bridge.write_back_into(&mut self.world);
         self.world.propagate();
+        self.step_pose_and_attachments();
         report
     }
 
@@ -834,4 +905,65 @@ fn the_equipped_weapon_is_an_entity_attached_to_the_hand_socket() {
         rig.world.entity_of(weapon).is_none(),
         "the weapon outlived its equip"
     );
+}
+
+/// **THE TRIPWIRE ON THE MUZZLE'S SILENT HALF** (SK1b audit).
+///
+/// `muzzle_of` has two answers and only one of them is a measurement. A rig-less
+/// hero gets [`d3::gameplay::MUZZLE_HEIGHT_M`], which is right and is what
+/// `the_new_muzzle_agrees_with_the_old_one_on_a_capsule_hero` pins. A **rigged**
+/// hero whose skeleton stops publishing `hand_r` gets the same 1.4 m, silently —
+/// and that is not right, it is a regression wearing the fallback's clothes.
+/// Nothing in the wave could tell the two apart: the only muzzle arm in the tree
+/// ran on a capsule.
+///
+/// Both branches, on the same rig, differing only in what the skeleton publishes:
+///
+/// * with `hand_r`, the shot leaves the weapon's own muzzle — **not** 1.4 m — and
+///   `muzzles_without_a_socket` is zero;
+/// * without it, the shot is back at 1.4 m and the counter names it.
+#[test]
+fn a_rigged_hero_shoots_from_its_weapon_and_says_so_when_it_cannot() {
+    for (socket, from_weapon) in [
+        (d3::gameplay::WEAPON_SOCKET, true),
+        ("hand_of_glory", false),
+    ] {
+        let mut rig = Rig::new();
+        rig.rig_the_hero(socket);
+        rig.arm("rifle");
+        // Two steps: `step_gameplay` runs BEFORE the pose and the attachments in
+        // both hosts, so the transform a muzzle is read off is the one the
+        // previous step settled. That one-step latency is the wave's own stated
+        // bound; here it is the reason the shot is taken on the second step.
+        rig.step(&idle());
+        let r = rig.step(&hold_trigger());
+        assert_eq!(r.shots, 1, "{socket}: the rifle did not fire");
+        let feet = d3::gameplay::feet_of(&rig.world, HERO).expect("the hero stands somewhere");
+        let capsule = feet + glam::DVec3::Y * d3::gameplay::MUZZLE_HEIGHT_M;
+        let off = (r.hits[0].from - capsule).length();
+        println!("socket `{socket}`: the shot left {off:.4} m from the capsule rule");
+        assert!(
+            inf_ecs::pose::evaluated_pose(&rig.world, HERO).is_some(),
+            "{socket}: this arm is about a RIGGED hero and this one has no pose"
+        );
+        if from_weapon {
+            assert!(
+                off > 0.2,
+                "the rigged hero still shot from the capsule rule ({off} m away)"
+            );
+            assert_eq!(
+                r.muzzles_without_a_socket, 0,
+                "a rig that publishes `{socket}` was counted as missing it"
+            );
+        } else {
+            assert!(
+                off < 1e-12,
+                "a rig with no weapon socket did not fall back ({off} m away)"
+            );
+            assert_eq!(
+                r.muzzles_without_a_socket, 1,
+                "a rigged hero fell back to 1.4 m and nothing counted it"
+            );
+        }
+    }
 }

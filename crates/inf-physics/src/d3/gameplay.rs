@@ -142,6 +142,23 @@ pub struct GameplayReport {
     /// Energy owed to the P22 damage door: `(destructible entity, joules)`.
     /// **The host spends this**, through its own wrapper. See the module header.
     pub destruct: Vec<(Uuid, f64)>,
+    /// **Shots this step that fell back to [`MUZZLE_HEIGHT_M`] although the
+    /// shooter publishes a pose** (SK1b audit) — the tripwire on the muzzle's
+    /// silent half.
+    ///
+    /// `muzzle_of` has two answers: the weapon entity's own muzzle, and a height
+    /// above the character's feet. The second is right for a **rig-less** hero —
+    /// every level committed before SK1b, the whole `phase30-gameplay` fixture —
+    /// and those are not counted, because they have no pose at all.
+    ///
+    /// What *is* counted is a character that has a rig and still took the capsule
+    /// rule: its skeleton does not author [`WEAPON_SOCKET`], or its weapon entity
+    /// has not been placed. Both put every shot back at 1.4 m above the feet
+    /// **in silence**, which is a half-metre error on a crouched character and a
+    /// shot through the floor on a prone one. A rigged course asserts this is
+    /// zero; nothing else could tell the difference between the fallback working
+    /// as designed and a rig that quietly lost its hand.
+    pub muzzles_without_a_socket: u32,
 }
 
 /// **The gameplay fixed step.** Both hosts call it, between the character step
@@ -219,15 +236,19 @@ pub fn feet_of(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
 /// hosts — so PIE == shipping is unaffected and the trace cannot see it. Moving
 /// the gameplay step below the pose would fix it and would move every committed
 /// trace in the tree; it is named here rather than done quietly.
-fn muzzle_of(world: &EcsWorld, guid: Uuid) -> Option<(DVec3, f64, f64)> {
+/// The fourth element is **which of the two answers this is**: `true` for the
+/// weapon's own muzzle, `false` for the capsule rule. The caller counts the
+/// second one when it happens to a *posed* character — see
+/// [`GameplayReport::muzzles_without_a_socket`].
+fn muzzle_of(world: &EcsWorld, guid: Uuid) -> Option<(DVec3, f64, f64, bool)> {
     let entity = world.entity_of(guid)?;
     let cm = world.world().get::<CharacterMovement>(entity)?;
     let (yaw, pitch) = (cm.runtime.aim_yaw_deg, cm.runtime.aim_pitch_deg);
     if let Some(from) = weapon_muzzle(world, guid) {
-        return Some((from, yaw, pitch));
+        return Some((from, yaw, pitch, true));
     }
     let feet = feet_of(world, guid)?;
-    Some((feet + DVec3::Y * MUZZLE_HEIGHT_M, yaw, pitch))
+    Some((feet + DVec3::Y * MUZZLE_HEIGHT_M, yaw, pitch, false))
 }
 
 /// The muzzle of `guid`'s **weapon entity**, if there is one and it is attached
@@ -477,9 +498,18 @@ fn step_weapons(
         }
         inf_ecs::anim_bridge::set_anim_trigger(world, guid, weapon::FIRE_TRIGGER);
         report.shots += 1;
-        let Some((from, yaw, pitch)) = aim else {
+        let Some((from, yaw, pitch, from_weapon)) = aim else {
             continue;
         };
+        // **The fallback, counted** (SK1b audit). A character with no pose at all
+        // is the legitimate capsule case — every level committed before SK1b —
+        // and is not counted. A character that *is* posed and still took the
+        // capsule rule is a rig that does not publish `WEAPON_SOCKET`, or a
+        // weapon entity that has not been placed yet, and it puts every shot back
+        // at 1.4 m in silence. See `GameplayReport::muzzles_without_a_socket`.
+        if !from_weapon && inf_ecs::pose::evaluated_pose(world, guid).is_some() {
+            report.muzzles_without_a_socket += 1;
+        }
         let dir = weapon::shot_direction(&def, yaw, pitch, shot_index);
         let hit = resolve_shot(world, bridge, guid, &def, from, dir);
         apply_hit(world, &hit, report);
