@@ -57,14 +57,6 @@ fn both_evaluation_paths_go_through_the_same_binding_seams() {
         // The blend width. A side that hard-coded a number instead would not
         // name the constant — which is exactly the drift this catches.
         "DEFAULT_BIOME_FEATHER",
-        // The region: the terrain's own authored extent, computed once in
-        // `inf-terrain` rather than re-derived from tile counts on either side.
-        ".xz_bounds()",
-        // The layer source + the world-offset rule ("the terrain is at origin").
-        "OffsetTerrain::new(",
-        // The height seam is built from that same wrapper, so the two cannot
-        // disagree about which space a query is in.
-        "FnHeight::new(",
         // The population lands in the derived cache, never anywhere else.
         "biome_population",
     ] {
@@ -75,6 +67,27 @@ fn both_evaluation_paths_go_through_the_same_binding_seams() {
         assert!(
             player.contains(needle),
             "the player pass no longer uses `{needle}`"
+        );
+    }
+    // **The REGION is one door too** (island wave I7b). It used to be a region
+    // built on each side from `xz_bounds()` + `OffsetTerrain` + `FnHeight` —
+    // three seams each side had to spell identically, and a bounding box that is
+    // only the right answer for a terrain that is entirely in memory. The walk
+    // over the resident tiles is now `inf_pcg`'s, so the two sides name one
+    // function and there is nothing left to spell differently.
+    for (label, src) in [("editor", &editor), ("player", &player)] {
+        let refresh = src.matches("refresh_resident(").count();
+        let one_shot = src.matches("evaluate_resident(").count();
+        assert!(
+            refresh + one_shot >= 1,
+            "{label} no longer evaluates a biome binding over the RESIDENT \
+             ground — it has grown its own region again"
+        );
+        assert!(
+            !src.contains(".xz_bounds()"),
+            "{label} is back to scattering over the bounding box of whatever is \
+             paged; a streamed terrain's bounds are a moving target and were \
+             `None` on the shipped boot for the whole of wave I7"
         );
     }
 }

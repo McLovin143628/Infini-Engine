@@ -1215,6 +1215,7 @@ mod tests {
         )
         .with_pcg(crate::level::PcgContext {
             pcgs,
+            biome_sets: Default::default(),
             terrain: None,
         });
         (world, s)

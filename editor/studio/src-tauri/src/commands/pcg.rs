@@ -973,8 +973,8 @@ pub async fn pcg_evaluate(
 /// the player's `evaluate_biome_bindings` verbatim — the same
 /// [`BiomeBinding::from_set`](inf_pcg::BiomeBinding::from_set), the same
 /// [`DEFAULT_BIOME_FEATHER`](inf_pcg::DEFAULT_BIOME_FEATHER), the same
-/// [`OffsetTerrain`](inf_pcg::OffsetTerrain) region off
-/// [`xz_bounds`](inf_terrain::TerrainData::xz_bounds) — so all this command owns
+/// [`evaluate_resident`](inf_pcg::BiomeBinding::evaluate_resident) walk over the
+/// terrain's own resident tiles — so all this command owns
 /// is the *fetch* (an [`AssetState`] lookup here, a pack entry there). The one
 /// deliberate difference is [`AssetMasks`]: the editor can resolve a
 /// `mask.image` texture and the load-time pass (which has no asset database)
@@ -1072,21 +1072,17 @@ pub async fn pcg_evaluate_biomes(
                     set.name
                 ),
             }
+        } else if data.is_empty() {
+            return Err("the terrain has no resident tiles to populate".into());
         } else {
-            // The terrain's own authored extent, in world space, is the region.
-            let (min, max) = data
-                .xz_bounds()
-                .ok_or("the terrain has no authored tiles to populate")?;
-            let region = Region::from_xz(
-                min.x + origin.x,
-                min.y + origin.z,
-                max.x + origin.x,
-                max.y + origin.z,
-            );
-            let fields = inf_pcg::OffsetTerrain::new(&data, origin);
-            let provider = FnHeight::new(|x, z| fields.height_at(x, z));
+            // **The RESIDENT ground, tile by tile** — one Ring-0 door, shared
+            // verbatim with the player (island wave I7b). It used to be one
+            // region off `xz_bounds()`, which is the bounding box of whatever
+            // happens to be paged; the door below walks the tiles themselves, so
+            // an author evaluating a streamed terrain populates the ground under
+            // the camera instead of scattering over the box that contains it.
             let baked: Vec<ScatteredInstance> = binding
-                .evaluate(&provider, &fields, region)
+                .evaluate_resident(&data, origin)
                 .iter()
                 .map(|i| ScatteredInstance {
                     position: i.pos,

@@ -1456,7 +1456,7 @@ fn the_island_at_shipping_resolution() {
         let source = PackLevelSource::open(&pack).expect("the island pack opens");
         let mut built = inf_player::build_world_from_pack(&source).expect("the world builds");
         let partition = built.take_partition();
-        let pcg = built.take_pcg_context();
+        let pcg = built.pcg_context();
         let record = built.render;
         let materials = std::sync::Arc::new(source.material_content());
         let reader = std::sync::Arc::new(

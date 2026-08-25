@@ -131,7 +131,7 @@ fn pack_sim(pack_dir: &Path) -> RuntimeSim {
     let source = PackLevelSource::open(pack_dir).expect("pack opens");
     let mut built = inf_player::build_world_from_pack(&source).expect("pack level builds");
     let partition = built.take_partition();
-    let pcg_ctx = built.take_pcg_context();
+    let pcg_ctx = built.pcg_context();
     let mut sim = inf_player::sim_from_built(built);
     inf_player::attach_cell_streaming(&mut sim, &partition, pcg_ctx);
     inf_player::attach_terrain_streaming(&mut sim, &TerrainContent::Pack(source));
@@ -145,7 +145,7 @@ fn loose_sim(content: &Path) -> RuntimeSim {
     let builder = InfSceneWorldBuilder::with_defaults(Vec::new());
     let mut built = level::load(&source, &builder).expect("loose level builds");
     let partition = built.take_partition();
-    let pcg_ctx = built.take_pcg_context();
+    let pcg_ctx = built.pcg_context();
     let mut sim = inf_player::sim_from_built(built);
     inf_player::attach_cell_streaming(&mut sim, &partition, pcg_ctx);
     let index = level::terrain_paths_by_guid_from_dir(content);

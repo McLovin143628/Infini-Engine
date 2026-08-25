@@ -382,7 +382,7 @@ pub fn run_headless(args: &Args) -> ExitCode {
     };
     let partition = built.take_partition();
     // IB-1: the graphs + terrain resolver a streamed cell's PcgVolumes need.
-    let pcg_ctx = built.take_pcg_context();
+    let pcg_ctx = built.pcg_context();
     let label = built.label.clone();
     let frames = args.run_frames;
     let panic_after = args.panic_after;
@@ -428,7 +428,7 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     };
     let partition = built.take_partition();
     // IB-1: the graphs + terrain resolver a streamed cell's PcgVolumes need.
-    let pcg_ctx = built.take_pcg_context();
+    let pcg_ctx = built.pcg_context();
     let map = match &args.world {
         WorldChoice::Level(path) => input::load_map_beside(path),
         WorldChoice::Demo | WorldChoice::Pack(_) => input::default_map(),
@@ -675,9 +675,16 @@ pub fn sim_from_built(built: BuiltWorld) -> RuntimeSim {
         audio_clips,
         cloths,
         hairs,
+        pcg,
         ..
     } = built;
     let mut sim = RuntimeSim::with_gravity(world, actors, gravity, hz);
+    // I7b: the palette + the graphs the **fixed step** refreshes the biome-bound
+    // population from as the ground pages. Seeded HERE for the same reason every
+    // line below it is — this is the one function every sim call site goes
+    // through, and a boot path that forgets an attachment does not crash, it
+    // agrees with itself (the P21.4 law).
+    sim.set_pcg_context(pcg);
     sim.set_state_machines(state_machines);
     for (guid, skel, clip) in root_clips {
         sim.register_root_motion_clip(guid, skel, clip);
@@ -1186,7 +1193,7 @@ pub fn sim_from_payload(payload: &ScenePayload) -> Result<PayloadSim, String> {
     // PIE == shipping.
     let partition = built.take_partition();
     // IB-1: the graphs + terrain resolver a streamed cell's PcgVolumes need.
-    let pcg_ctx = built.take_pcg_context();
+    let pcg_ctx = built.pcg_context();
     let mut sim = sim_from_built(built);
     // Cells first: a freshly-activated cell can bring in a `VoxelVolume` entity,
     // and the voxel resolution below walks the world as it stands.

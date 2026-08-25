@@ -17,6 +17,12 @@
 //! has: if the terrain streamer, the cell activation or the biome-bound
 //! population were a function of anything but sim state, the two would diverge.
 //!
+//! **And the same forest** (island wave I7b). `Terrain::biome_population` is
+//! `#[serde(skip)]`, so it reaches no state fold and two hosts growing different
+//! vegetation would have compared equal at every step for ever. The drive folds
+//! it separately, out and back, so the ground — and the vegetation on it —
+//! pages in **and** out under the comparison.
+//!
 //! # Why the drive is scripted through the sim and not through a camera
 //!
 //! The collider band, the cell activation and the terrain's sim residency all
@@ -95,7 +101,7 @@ fn pack_sim(pack: &Path) -> RuntimeSim {
     let source = inf_player::level::PackLevelSource::open(pack).expect("the pack opens");
     let mut built = inf_player::build_world_from_pack(&source).expect("the world builds");
     let partition = built.take_partition();
-    let pcg = built.take_pcg_context();
+    let pcg = built.pcg_context();
     let mut sim = inf_player::sim_from_built(built);
     inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
     // …**and the TERRAIN streamer**, which `run_headless` attaches on the next
@@ -141,15 +147,15 @@ fn loose_sim(content: &Path, slug: &str) -> RuntimeSim {
     }));
     let mut built = inf_player::level::load(&source, &builder).expect("the loose level builds");
     let partition = built.take_partition();
-    let pcg = built.take_pcg_context();
+    let pcg = built.pcg_context();
     let mut sim = inf_player::sim_from_built(built);
     inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
     inf_player::attach_terrain_streaming(&mut sim, &inf_player::TerrainContent::Dir(terrains));
     sim
 }
 
-/// What a host's two streamers actually did: `(cell activations, cells resident,
-/// sim-resident level-0 pages, page loads)`.
+/// What a host's two streamers actually did: `(cell activations, cell
+/// deactivations, cells resident, sim-resident level-0 pages, page loads)`.
 ///
 /// # Why the gate needs this and could not do without it
 ///
@@ -161,11 +167,15 @@ fn loose_sim(content: &Path, slug: &str) -> RuntimeSim {
 /// (the drive moves the hero itself), and two hosts that both refuse to stream
 /// agree perfectly. A gate whose subject is streaming has to assert that
 /// streaming *happened*, not merely that two readings of it match.
-fn streaming_counters(sim: &RuntimeSim) -> (u64, usize, usize, u64) {
+fn streaming_counters(sim: &RuntimeSim) -> (u64, u64, usize, usize, u64) {
     let c = sim.cell_streaming().stats();
     let t = sim.terrain_streaming().stats();
     (
         c.activations,
+        // …and the DEactivations, since island wave I7b: the drive turns round,
+        // so a cell that streamed in streams back out, and "1 resident at the
+        // end" stopped being the reading that says the partition worked.
+        c.deactivations,
         c.cells_resident,
         t.sim_resident_level0,
         t.loads,
@@ -238,21 +248,109 @@ fn pie_sim(proj: &Path) -> RuntimeSim {
         .sim
 }
 
-/// The drive: a straight run east, sampled every step.
+/// One host's reading of the drive: the state fold per step, **and** the
+/// vegetation the ground grew under it.
+///
+/// The two are separate because `Terrain::biome_population` is `#[serde(skip)]`
+/// — it is what the projector draws, never what the sim reads back — so it does
+/// not reach `state_bytes` and no amount of comparing state folds would notice
+/// two hosts growing different forests. It is folded here instead, which is
+/// where the claim belongs: **the vegetation is a function of the resident
+/// ground, and the resident ground is sim state.**
+struct Trace {
+    states: Vec<Vec<u8>>,
+    /// Per step: a digest of every instance's position bits and kind.
+    veg: Vec<u128>,
+    /// Per step: how many instances stood.
+    veg_len: Vec<usize>,
+    /// Per step: how many level-0 tiles the simulation held.
+    tiles: Vec<usize>,
+}
+
+/// Fold a terrain's population into a comparable digest — **positions, not a
+/// count** (the I1 law): two forests of the same size in different places must
+/// not compare equal.
+fn veg_digest(sim: &RuntimeSim) -> (u128, usize) {
+    let mut h = xxhash_rust::xxh3::Xxh3::new();
+    let mut n = 0usize;
+    let world = sim.world().world();
+    let mut per_terrain: Vec<(uuid::Uuid, Vec<u8>)> = Vec::new();
+    for e in world.iter_entities() {
+        let (Some(g), Some(t)) = (
+            e.get::<inf_ecs::Guid>(),
+            e.get::<inf_ecs::components::Terrain>(),
+        ) else {
+            continue;
+        };
+        let mut bytes = Vec::with_capacity(t.biome_population.len() * 28);
+        for i in &t.biome_population {
+            bytes.extend_from_slice(&i.position.x.to_bits().to_le_bytes());
+            bytes.extend_from_slice(&i.position.y.to_bits().to_le_bytes());
+            bytes.extend_from_slice(&i.position.z.to_bits().to_le_bytes());
+            bytes.extend_from_slice(&i.kind.to_le_bytes());
+        }
+        n += t.biome_population.len();
+        per_terrain.push((g.0, bytes));
+    }
+    per_terrain.sort_by_key(|(g, _)| *g);
+    for (g, bytes) in per_terrain {
+        h.update(g.as_bytes());
+        h.update(&bytes);
+    }
+    (h.digest128(), n)
+}
+
+/// How many level-0 terrain tiles the **simulation** holds right now.
+fn sim_tiles(sim: &RuntimeSim) -> usize {
+    sim.world()
+        .world()
+        .iter_entities()
+        .filter_map(|e| e.get::<inf_ecs::components::Terrain>())
+        .map(|t| t.data.tile_count())
+        .sum()
+}
+
+/// The drive: a run east and back again, sampled every step.
 ///
 /// Deterministic and positional — a *place*, not a time, which is P29's own
 /// lesson. Every step the streaming source is moved and the sim advanced, and
 /// the sim's own residency sync is what pages the ground.
-fn drive(sim: &mut RuntimeSim, from: glam::DVec3) -> Vec<Vec<u8>> {
+///
+/// **It turns round half way** (island wave I7b), and that is not decoration:
+/// out and back is what makes the ground page **in and out**, and what makes the
+/// second half of the drive re-enter tiles the first half already visited. A
+/// population that depended on the order its ground arrived in — P21's
+/// first-sight hazard, which the per-tile memo is keyed against — would read
+/// differently on the way home.
+fn drive(sim: &mut RuntimeSim, from: glam::DVec3) -> Trace {
     let hero = hero_entity(sim).expect("the island has a player-controlled hero");
-    let mut trace = Vec::with_capacity(STEPS as usize);
+    let mut t = Trace {
+        states: Vec::with_capacity(STEPS as usize),
+        veg: Vec::with_capacity(STEPS as usize),
+        veg_len: Vec::with_capacity(STEPS as usize),
+        tiles: Vec::with_capacity(STEPS as usize),
+    };
     for step in 0..STEPS {
-        let p = glam::DVec3::new(from.x + step as f64 * STEP_M, from.y, from.z);
+        // Out along +x and back — twice the step so the turn is still 360 m out
+        // — with a slow drift along +z so **no two steps stand in the same
+        // place**. Without the drift the way home would repeat the way out and
+        // the "900 distinct states" anti-vacuity arm would be measuring a
+        // palindrome rather than a world.
+        let out = step.min(STEPS - step);
+        let p = glam::DVec3::new(
+            from.x + out as f64 * 2.0 * STEP_M,
+            from.y,
+            from.z + step as f64 * 0.05,
+        );
         set_hero(sim, hero, p);
         sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
-        trace.push(sim.state_bytes());
+        t.states.push(sim.state_bytes());
+        let (d, n) = veg_digest(sim);
+        t.veg.push(d);
+        t.veg_len.push(n);
+        t.tiles.push(sim_tiles(sim));
     }
-    trace
+    t
 }
 
 fn hero_entity(sim: &RuntimeSim) -> Option<inf_ecs::Entity> {
@@ -336,18 +434,19 @@ fn pie_equals_shipping_on_an_island_drive() {
 
     let a = drive(&mut ship, from);
     let b = drive(&mut pie, from);
-    assert_eq!(a.len(), STEPS as usize);
-    assert_eq!(b.len(), STEPS as usize);
+    assert_eq!(a.states.len(), STEPS as usize);
+    assert_eq!(b.states.len(), STEPS as usize);
 
     // …and the trace is not a constant, or the comparison below is between two
     // recordings of nothing happening.
-    let distinct: std::collections::BTreeSet<&Vec<u8>> = a.iter().collect();
+    let distinct: std::collections::BTreeSet<&Vec<u8>> = a.states.iter().collect();
     println!(
-        "DRIVE: {} steps of {STEP_M} m = {:.0} m, {} distinct states, {} bytes a state",
+        "DRIVE: {} steps of {STEP_M} m out and back = {:.0} m, {} distinct \
+         states, {} bytes a state",
         STEPS,
         STEPS as f64 * STEP_M,
         distinct.len(),
-        a[0].len()
+        a.states[0].len()
     );
     assert!(
         distinct.len() > STEPS as usize / 2,
@@ -355,7 +454,7 @@ fn pie_equals_shipping_on_an_island_drive() {
         distinct.len()
     );
 
-    for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+    for (i, (x, y)) in a.states.iter().zip(&b.states).enumerate() {
         assert_eq!(
             x, y,
             "PIE and shipping diverged at step {i} of {STEPS} — the island's \
@@ -365,59 +464,111 @@ fn pie_equals_shipping_on_an_island_drive() {
     }
     println!("PIE == SHIPPING over {STEPS} steps of an island drive");
 
+    // **AND THE FOREST AGREES TOO** (island wave I7b). `biome_population` is
+    // `#[serde(skip)]`, so it reaches no state fold — two hosts growing
+    // different vegetation would have compared equal above, every step, for
+    // ever. This is the comparison that says they do not.
+    let (vmin, vmax) = (
+        *a.veg_len.iter().min().expect("900 steps"),
+        *a.veg_len.iter().max().expect("900 steps"),
+    );
+    let (tmin, tmax) = (
+        *a.tiles.iter().min().expect("900 steps"),
+        *a.tiles.iter().max().expect("900 steps"),
+    );
+    let shapes: std::collections::BTreeSet<u128> = a.veg.iter().copied().collect();
+    println!(
+        "VEGETATION over the drive: {vmin}..{vmax} instances on {tmin}..{tmax} \
+         sim tiles, {} distinct forests",
+        shapes.len()
+    );
+    assert!(
+        vmin > 0,
+        "the drive stood on bare ground at some step — the biome binding is \
+         not evaluating over the streamed island"
+    );
+    assert!(
+        tmax > tmin,
+        "the simulation held {tmin} terrain tile(s) the whole way, so nothing \
+         streamed and this arm cannot see a population stream with it"
+    );
+    assert!(
+        shapes.len() > 1,
+        "one forest for the whole drive — the population is not following the \
+         ground that pages under it"
+    );
+    for (i, (x, y)) in a.veg.iter().zip(&b.veg).enumerate() {
+        assert_eq!(
+            x, y,
+            "PIE and shipping grew DIFFERENT vegetation at step {i} of {STEPS} \
+             ({} instances against {}) — the biome-bound population is a \
+             function of something other than the resident ground",
+            a.veg_len[i], b.veg_len[i]
+        );
+    }
+    // …and the ground really paged **out** as well as in, which is the half a
+    // one-way drive cannot show: the way home re-enters tiles the way out left.
+    let shrank = a.tiles.windows(2).any(|w| w[1] < w[0]);
+    let grew = a.tiles.windows(2).any(|w| w[1] > w[0]);
+    println!("SIM TILES: grew {grew}, shrank {shrank}");
+    assert!(
+        grew && shrank,
+        "the simulation's tile set only ever {} over the drive — vegetation \
+         streaming OUT is not covered by this trace",
+        if grew { "grew" } else { "held" }
+    );
+
     // **…AND THE DRIVE REALLY STREAMED**, on both hosts, by the same numbers.
     // See `streaming_counters`: without this the whole file survives having the
     // streamers taken off *both* sides, which is the one mutation the byte
     // compare cannot see.
     let sc = streaming_counters(&ship);
     let pc = streaming_counters(&pie);
-    println!(
-        "STREAMED shipping: {} cell activation(s), {} cell(s) resident, {} sim L0 \
-         page(s), {} page load(s)",
-        sc.0, sc.1, sc.2, sc.3
-    );
-    println!(
-        "STREAMED document: {} cell activation(s), {} cell(s) resident, {} sim L0 \
-         page(s), {} page load(s)",
-        pc.0, pc.1, pc.2, pc.3
-    );
     for (who, c) in [("shipping", sc), ("document", pc)] {
+        println!(
+            "STREAMED {who}: {} cell activation(s), {} deactivation(s), {} \
+             cell(s) resident, {} sim L0 page(s), {} page load(s)",
+            c.0, c.1, c.2, c.3, c.4
+        );
         assert!(
-            c.0 > 0 && c.1 > 0,
-            "{who} activated {} cell(s) over {:.0} m of driving — the partition \
-             is not streaming and this gate is comparing two static worlds",
+            c.0 > 0 && (c.1 > 0 || c.2 > 0),
+            "{who} activated {} cell(s) and deactivated {} over {:.0} m of \
+             driving — the partition is not streaming and this gate is \
+             comparing two static worlds",
             c.0,
+            c.1,
             STEPS as f64 * STEP_M
         );
         assert!(
-            c.2 > 0 && c.3 > 0,
+            c.3 > 0 && c.4 > 0,
             "{who} paged {} terrain tile(s) ({} sim-resident) — the ground is not \
              streaming, so `height_at` answered off an empty working set the \
              whole way",
-            c.3,
-            c.2
+            c.4,
+            c.3
         );
     }
     assert_eq!(
         sc, pc,
         "the two hosts streamed DIFFERENTLY over the same drive — the counters \
-         are (cell activations, cells resident, sim L0 pages, page loads)"
+         are (cell activations, deactivations, cells resident, sim L0 pages, \
+         page loads)"
     );
     // …and the ground paged **under the wheels** rather than only at the boot:
     // the drive itself loaded pages the start position had not asked for.
     println!(
-        "PAGED BY THE DRIVE: {} load(s) at the start, {} after {:.0} m",
-        ship0.3,
-        sc.3,
+        "PAGED BY THE DRIVE: {} load(s) at the start, {} after {:.0} m out and back",
+        ship0.4,
+        sc.4,
         STEPS as f64 * STEP_M
     );
     assert!(
-        sc.3 > ship0.3 && pc.3 > pie0.3,
+        sc.4 > ship0.4 && pc.4 > pie0.4,
         "the drive paged nothing the boot had not already: {} loads at the start, \
          {} at the end. The hero moves {:.0} m across a {}-metre tile span, so a \
          streamer that is working has to fetch something on the way",
-        ship0.3,
-        sc.3,
+        ship0.4,
+        sc.4,
         STEPS as f64 * STEP_M,
         recipe.grid.tile_span_m()
     );
@@ -557,29 +708,29 @@ fn the_cooked_level_still_knows_where_on_earth_it_is() {
     assert_eq!(lon, geo.origin_longitude_deg);
 }
 
-/// **THE VEGETATION IS BOUND AND IT SCATTERS NOTHING ON A STREAMED ISLAND**, and
-/// this arm is the number rather than the sentence.
+/// **THE VEGETATION SCATTERS ON THE GROUND THAT IS RESIDENT, AND NOT BEFORE.**
 ///
-/// # What is wired
+/// # What this arm used to say
 ///
-/// The level names a `.inf_biomes` set; the set binds a `.inf_pcg` on every
-/// biome that scatters; `inf_pcg::BiomeBinding::from_set` is the one door both
-/// hosts resolve it through. All of that is real and the first half of this arm
-/// measures it: paged ground, the binding evaluated, **thousands of instances**.
+/// Wave I7 measured the gap and asserted it: **4 958 instances with the ground
+/// paged by hand and 0 through the shipped boot**, because
+/// `evaluate_biome_bindings` ran once at load over `TerrainData::xz_bounds()`
+/// and a streamed terrain ships no tiles. Wave I7b closed it — the fixed step
+/// refreshes the population from the ground the terrain streamer just paged —
+/// so the arm went red as designed and this is its rewrite.
 ///
-/// # What is missing, exactly
+/// # What it says now, and why each half is here
 ///
-/// `evaluate_biome_bindings` evaluates over the terrain's **resident**
-/// `data.xz_bounds()`, and a streamed terrain ships no tiles — so on the boot
-/// path the bounds are `None` and the population is empty. That is the I4 audit's
-/// own carried item (*"a streamed cell evaluates its `PcgVolume` and NOT its
-/// biome bindings"*), met at island scale with a figure: **{resident} instances
-/// with the ground paged, 0 through the shipped boot.**
-///
-/// The fix is `cell_stream::reconcile`'s missing biome twin — the mirror of
-/// `evaluate_pcg_volumes_in` — and it is a change to both hosts' streaming
-/// paths, which is why it is measured here and routed rather than smuggled into
-/// a content wave.
+/// * **not before** — a world built with no terrain streamer attached holds no
+///   tiles, so it grows nothing. The population is a function of resident
+///   ground and there is none.
+/// * **and after** — the shipped boot, with the streamer attached, grows
+///   thousands of instances on the pages the hero stands on.
+/// * **and it is the SAME forest the author would preview.** Not a count: every
+///   instance the streamed world grows is one the fully-paged reading grows, at
+///   the same position, and over a tile whose neighbours are all resident the
+///   two agree **exactly**. That is the claim "the shipped island grows what
+///   the preview shows" reduced to a comparison, and a count could not make it.
 #[test]
 fn the_biome_binding_scatters_when_its_ground_is_resident_and_not_before() {
     let tmp = tempfile::tempdir().expect("a temp dir");
@@ -643,14 +794,9 @@ fn the_biome_binding_scatters_when_its_ground_is_resident_and_not_before() {
     );
     assert!(!data.is_empty(), "the whole fixture terrain pages");
 
-    let fields = inf_pcg::OffsetTerrain::new(&data, glam::DVec3::ZERO);
-    let height = inf_pcg::FnHeight::new(|x, z| fields.height_at(x, z));
-    let bounds = data.xz_bounds().expect("resident ground has bounds");
-    let instances = binding.evaluate(
-        &height,
-        &fields,
-        inf_pcg::Region::from_xz(bounds.0.x, bounds.0.y, bounds.1.x, bounds.1.y),
-    );
+    // The author's reading: every tile of the island in memory at once, through
+    // the same Ring-0 door the shipped step calls tile by tile.
+    let instances = binding.evaluate_resident(&data, glam::DVec3::ZERO);
     println!(
         "VEGETATION: {} instances over {:.3} km2 at {} /m2",
         instances.len(),
@@ -669,24 +815,123 @@ fn the_biome_binding_scatters_when_its_ground_is_resident_and_not_before() {
         assert!(i.pos.y.is_finite());
     }
 
-    // ── through the SHIPPED BOOT ──
+    // ── NOT BEFORE: a world with no ground paged ──
     let pack = cook(tmp.path());
-    let ship = pack_sim(&pack);
-    let world = ship.world().world();
-    let population: usize = world
-        .iter_entities()
-        .filter_map(|e| e.get::<inf_ecs::components::Terrain>())
-        .map(|t| t.biome_population.len())
-        .sum();
+    let source = inf_player::level::PackLevelSource::open(&pack).expect("the pack opens");
+    let mut bare = {
+        let mut built = inf_player::build_world_from_pack(&source).expect("the world builds");
+        let partition = built.take_partition();
+        let pcg = built.pcg_context();
+        let mut sim = inf_player::sim_from_built(built);
+        inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+        sim // …and deliberately NO terrain streamer.
+    };
+    bare.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    let (_, bare_pop) = veg_digest(&bare);
     println!(
-        "SHIPPED BOOT: {population} instances — the terrain streams, so \
-         `data.xz_bounds()` is None at load and the binding evaluates over nothing"
+        "NO GROUND PAGED: {} sim tile(s), {bare_pop} instances",
+        sim_tiles(&bare)
+    );
+    assert_eq!(sim_tiles(&bare), 0, "a streamed level ships no tiles");
+    assert_eq!(
+        bare_pop, 0,
+        "the binding grew {bare_pop} instances over ground that is not there"
+    );
+
+    // ── AND AFTER: the shipped boot, streamer attached ──
+    let mut ship = pack_sim(&pack);
+    ship.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    let (_, population) = veg_digest(&ship);
+    let tiles = sim_tiles(&ship);
+    println!("SHIPPED BOOT: {population} instances on {tiles} sim tile(s)");
+    assert!(tiles > 0, "the shipped boot paged no ground");
+    assert!(
+        population > 500,
+        "the streamed boot grew only {population} instances on {tiles} paged \
+         tile(s) — the refresh is not reaching the resident ground"
+    );
+
+    // ── AND IT IS THE SAME FOREST ──
+    let author: std::collections::BTreeSet<(u64, u64, u64)> = instances
+        .iter()
+        .map(|i| (i.pos.x.to_bits(), i.pos.y.to_bits(), i.pos.z.to_bits()))
+        .collect();
+    let (shipped, resident): (Vec<_>, Vec<(i32, i32)>) = {
+        let w = ship.world().world();
+        let t = w
+            .iter_entities()
+            .find_map(|e| e.get::<inf_ecs::components::Terrain>())
+            .expect("the island has ground");
+        (
+            t.biome_population.clone(),
+            t.data.tiles().map(|(&c, _)| c).collect(),
+        )
+    };
+    let stray = shipped
+        .iter()
+        .filter(|i| {
+            !author.contains(&(
+                i.position.x.to_bits(),
+                i.position.y.to_bits(),
+                i.position.z.to_bits(),
+            ))
+        })
+        .count();
+    println!(
+        "SAME FOREST: {} of {} shipped instances are places the fully-paged \
+         reading also grows ({stray} stray)",
+        shipped.len() - stray,
+        shipped.len()
     );
     assert_eq!(
-        population, 0,
-        "the streamed boot scattered {population} instances — if this is non-zero \
-         the gap this arm records has been closed, and the arm should become an \
-         assertion that it stays closed"
+        stray, 0,
+        "the streamed island grew {stray} instance(s) the author's fully-paged \
+         reading does not — a streamed forest must be a SUBSET of the whole one, \
+         place for place"
+    );
+
+    // …and over a tile whose whole neighbourhood is resident, the two are not
+    // merely a subset of one another: they are equal. That is the interior of
+    // the streamed world reading exactly as the author's does.
+    let set: std::collections::BTreeSet<(i32, i32)> = resident.iter().copied().collect();
+    let span = recipe.grid.tile_span_m();
+    let interior = set
+        .iter()
+        .copied()
+        .find(|c| (-1..=1).all(|dz| (-1..=1).all(|dx| set.contains(&(c.0 + dx, c.1 + dz)))))
+        .expect("the sim's resident set has an interior tile");
+    let (x0, z0) = (interior.0 as f64 * span, interior.1 as f64 * span);
+    let inside = |x: f64, z: f64| (x0..x0 + span).contains(&x) && (z0..z0 + span).contains(&z);
+    let mine: std::collections::BTreeSet<(u64, u64, u64)> = shipped
+        .iter()
+        .filter(|i| inside(i.position.x, i.position.z))
+        .map(|i| {
+            (
+                i.position.x.to_bits(),
+                i.position.y.to_bits(),
+                i.position.z.to_bits(),
+            )
+        })
+        .collect();
+    let theirs: std::collections::BTreeSet<(u64, u64, u64)> = instances
+        .iter()
+        .filter(|i| inside(i.pos.x, i.pos.z))
+        .map(|i| (i.pos.x.to_bits(), i.pos.y.to_bits(), i.pos.z.to_bits()))
+        .collect();
+    println!(
+        "INTERIOR TILE {interior:?}: {} shipped against {} authored",
+        mine.len(),
+        theirs.len()
+    );
+    assert!(
+        !theirs.is_empty(),
+        "the interior tile {interior:?} grows nothing in either reading, so \
+         comparing them proves nothing"
+    );
+    assert_eq!(
+        mine, theirs,
+        "inside a fully-resident tile the streamed island and the fully-paged \
+         reading must place the SAME instances"
     );
 }
 

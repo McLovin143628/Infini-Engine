@@ -60,7 +60,10 @@ pub mod scatter;
 pub mod volume;
 
 pub use asset::{PcgAssetPayload, PcgError};
-pub use binding::{bind_document, biome_seed, BiomeBinding, BiomeGraph, DEFAULT_BIOME_FEATHER};
+pub use binding::{
+    bind_document, biome_seed, neighbour_rings, scatter_reach_m, BiomeBinding, BiomeGraph,
+    BiomeScatterCache, DEFAULT_BIOME_FEATHER,
+};
 pub use building::{
     archetype, archetypes, evaluate_buildings, evaluate_buildings_in, plans_of, subdivide_block,
     ArchetypeId, BlockLot, BlockSubdivision, BuildingArchetype, BuildingOutput, BuildingParams,
@@ -76,12 +79,12 @@ pub use grammar::{
 pub use graph::{
     grammar_mesh_refs, lower_graph, pcg_registry, LoweredPcg, PcgGraphIssue, PcgSeverity,
 };
-pub use height::{FnHeight, HeightProvider};
+pub use height::{FnHeight, HeightProvider, FN_HEIGHT_NORMAL_EPS};
 pub use noise::ValueNoise;
 pub use rules::{evaluate, evaluate_with, PcgDocument, PcgKind, PcgLayer, PcgRule, SamplerDef};
 pub use sampler::{
     AltitudeFilter, BiomeMask, Constant, DataMapMask, DensityField, Invert, MaskImage, Max, Min,
-    Multiply, Noise, SlopeFilter,
+    Multiply, Noise, SlopeFilter, MAX_FEATHER_SAMPLES,
 };
 pub use scatter::{
     scatter_region, scatter_region_in, PcgCollider, PcgInstance, Region, RotationMode,

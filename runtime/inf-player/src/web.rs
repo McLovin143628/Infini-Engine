@@ -63,7 +63,7 @@ async fn run(canvas_id: String, pack_url: String) -> Result<(), String> {
     let mut built = crate::build_world_from_pack(&source)?;
     let partition = built.take_partition();
     // IB-1: the graphs + terrain resolver a streamed cell's PcgVolumes need.
-    let pcg_ctx = built.take_pcg_context();
+    let pcg_ctx = built.pcg_context();
     let title = format!("Infinity Engine (Web) — {}", built.label);
     let mut sim = crate::sim_from_built(built);
     // P16.5 cell streaming works here too: the in-memory `PackReader` hands

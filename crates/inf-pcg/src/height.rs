@@ -87,6 +87,15 @@ impl<T: inf_terrain::HeightSource + Send + Sync> HeightProvider for TerrainHeigh
     }
 }
 
+/// The default central-difference step [`FnHeight::new`] computes its numerical
+/// normal with, in **world metres**.
+///
+/// Named rather than written as a literal because it is a *reach*: a slope query
+/// at `(x, z)` reads the terrain at `x ± eps` and `z ± eps`, so anything that
+/// evaluates a region tile by tile has to know how far past a tile's own box the
+/// evaluation can look. See [`BiomeBinding::refresh_resident`](crate::BiomeBinding::refresh_resident).
+pub const FN_HEIGHT_NORMAL_EPS: f64 = 0.1;
+
 /// An analytic height field defined by a closure `(x, z) -> Option<f64>`, with
 /// the normal computed by central differences. Handy for tests, previews, and
 /// any purely procedural terrain. The closure must be `Send + Sync`.

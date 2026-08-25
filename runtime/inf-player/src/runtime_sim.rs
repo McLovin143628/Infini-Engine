@@ -359,6 +359,23 @@ pub struct RuntimeSim {
     /// entities are present before anything — including terrain's own observer
     /// scan — can look for them. See [`crate::cell_stream`].
     cells: crate::cell_stream::CellStreaming,
+    /// The `.inf_pcg` graphs and the `.inf_biomes` palettes this level binds
+    /// (island wave I7b), seeded by [`sim_from_built`](crate::sim_from_built).
+    ///
+    /// Read by the biome-scatter refresh below and by nothing else in the step.
+    /// Empty for a level that binds no vegetation, in which case the refresh is
+    /// one comparison and the step is bit-identical to its pre-I7b self.
+    pcg: crate::level::PcgContext,
+    /// The per-terrain memo the biome-scatter refresh keeps between steps
+    /// (island wave I7b) — see [`crate::level::BiomeScatter`].
+    ///
+    /// **Not sim state that anything reads back.** `Terrain::biome_population`
+    /// is `#[serde(skip)]` and reaches no state fold, no replay hash and no
+    /// collider; it is what the projector draws. What makes it legal to compute
+    /// inside the fixed step is that it is a pure function of the *resident*
+    /// tiles, which are themselves sim state — so both hosts compute the same
+    /// forest from the same drive, which is exactly what `island_gate` measures.
+    biome_scatter: crate::level::BiomeScatter,
     /// The **simulation's own** voxel volumes, keyed by entity `Guid` (P21.2).
     ///
     /// Read by the `terrain.height_at` host seam so a character can stand on a
@@ -538,6 +555,8 @@ impl RuntimeSim {
             mods: None,
             terrain: crate::terrain_stream::TerrainStreaming::default(),
             cells: crate::cell_stream::CellStreaming::default(),
+            pcg: crate::level::PcgContext::default(),
+            biome_scatter: crate::level::BiomeScatter::default(),
             fractures: BTreeMap::new(),
             debris_budget: DebrisBudget::default(),
             fracture_audit: FractureAudit::default(),
@@ -769,6 +788,40 @@ impl RuntimeSim {
     pub fn set_terrain_streaming(&mut self, streaming: crate::terrain_stream::TerrainStreaming) {
         self.terrain = streaming;
         self.terrain.sync_sim(&mut self.world);
+        // The tiles that just became resident have vegetation on them, and the
+        // attach happens after `RuntimeSim::new` — so without this the world is
+        // queryable for a height and bare for a frame. Same reason the line
+        // above exists.
+        self.refresh_biome_scatter();
+    }
+
+    // ── the biome-bound population (island wave I7b) ──────────────────────
+
+    /// Seed the graphs + palettes the biome-scatter refresh reads. Called by
+    /// [`sim_from_built`](crate::sim_from_built), which every boot path goes
+    /// through.
+    pub fn set_pcg_context(&mut self, pcg: crate::level::PcgContext) {
+        self.pcg = pcg;
+    }
+
+    /// The per-terrain biome-scatter memo — its counters are what a gate reads
+    /// to tell "the refresh ran" from "the refresh was never wired".
+    pub fn biome_scatter(&self) -> &crate::level::BiomeScatter {
+        &self.biome_scatter
+    }
+
+    /// Re-derive every terrain's biome-bound population from the ground that is
+    /// resident **now**. One comparison per terrain when nothing paged.
+    fn refresh_biome_scatter(&mut self) -> usize {
+        if self.pcg.binds_no_biome() {
+            return 0;
+        }
+        crate::level::refresh_biome_bindings(
+            &mut self.world,
+            &self.pcg.biome_sets,
+            &self.pcg.pcgs,
+            &mut self.biome_scatter,
+        )
     }
 
     /// The streamed terrains (render-resident data + counters). Read by the
@@ -1208,6 +1261,16 @@ impl RuntimeSim {
         //    `crate::terrain_stream` for why that separation is structural.
         self.terrain.sync_sim(&mut self.world);
         clk.mark(phase::TERRAIN_STREAM);
+        // 0c. **The vegetation on the ground that just arrived** (island wave
+        //     I7b). After 0a and 0b, because its subject is exactly what those
+        //     two made resident: a cell can bring a terrain entity, and the
+        //     terrain streamer brings that terrain's tiles. A pure function of
+        //     the resident set — never of arrival order or of who looked first
+        //     (P21's law) — so both hosts grow the same forest from the same
+        //     drive. One comparison per terrain on every step that paged
+        //     nothing, which is almost all of them.
+        self.refresh_biome_scatter();
+        clk.mark(phase::BIOME_SCATTER);
         // ── P17.1 time of day ── advance the level clock ONCE per fixed step,
         //    before anything reads it, so blueprints, the projected sun, shadows,
         //    GI and audio all observe one consistent clock for the step. Pure IEEE

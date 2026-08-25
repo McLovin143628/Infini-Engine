@@ -145,10 +145,18 @@ impl BuiltWorld {
         std::mem::replace(&mut self.partition, PartitionContent::None)
     }
 
-    /// Take the PCG context out of the built world — it goes to the same place
-    /// the partition does, for the same reason (island phase, IB-1).
-    pub fn take_pcg_context(&mut self) -> PcgContext {
-        std::mem::take(&mut self.pcg)
+    /// The PCG context, **cloned** — it goes to the same place the partition
+    /// does (island phase, IB-1), and it also stays on the built world so
+    /// [`sim_from_built`](crate::sim_from_built) can hand it to the simulation.
+    ///
+    /// It used to *take*. Wave I7b gave the fixed step a reader too — the
+    /// biome-bound population is refreshed as the ground pages, which needs the
+    /// same graphs and the same palette — and a context the first caller moved
+    /// out would have left every boot path to remember a second attach. A boot
+    /// path that forgets an attachment does not crash, it agrees with itself
+    /// (P21.4's law), so there is one door and it copies.
+    pub fn pcg_context(&self) -> PcgContext {
+        self.pcg.clone()
     }
 }
 
@@ -167,6 +175,14 @@ impl BuiltWorld {
 pub struct PcgContext {
     /// `.inf_pcg` graph payloads keyed by asset GUID.
     pub pcgs: HashMap<Uuid, PcgAssetPayload>,
+    /// `.inf_biomes` palettes keyed by asset GUID — what a `Terrain.biome_set`
+    /// resolves to (island wave I7b).
+    ///
+    /// Here rather than only on the builder because the **fixed step** reads it
+    /// now: a streamed terrain's biome-bound population is refreshed as its
+    /// ground pages, and the palette is half of what that needs. Session state,
+    /// nothing serialized, no schema moved.
+    pub biome_sets: HashMap<Uuid, inf_terrain::BiomeSet>,
     /// Resolve a `Terrain.asset` GUID to its tile source — see
     /// [`page_terrains_for_pcg`].
     #[allow(clippy::type_complexity)]
@@ -178,6 +194,13 @@ impl PcgContext {
     /// resolve, so a streaming reconcile skips the whole pass).
     pub fn is_empty(&self) -> bool {
         self.pcgs.is_empty()
+    }
+
+    /// Whether a **biome binding** could resolve: a palette and a graph to bind.
+    /// Both are needed, so a level with painted biomes and no `.inf_pcg` skips
+    /// the pass exactly as one with graphs and no palette does.
+    pub fn binds_no_biome(&self) -> bool {
+        self.pcgs.is_empty() || self.biome_sets.is_empty()
     }
 }
 
@@ -710,6 +733,7 @@ impl WorldBuilder for InfSceneWorldBuilder {
             // streamed cell is evaluated the same way rather than not at all.
             pcg: PcgContext {
                 pcgs: self.pcgs.clone(),
+                biome_sets: self.biome_sets.clone(),
                 terrain: self.terrain_resolver.clone(),
             },
         })
@@ -1514,19 +1538,107 @@ pub fn collect_spline_paths(
 /// P19.3 parity gate.
 ///
 /// Everything downstream of a GUID — which biomes dispatch, in what order, under
-/// which feather — is [`inf_pcg::BiomeBinding::from_set`], shared verbatim with
-/// the editor. All this function owns is the fetch.
+/// which feather, **over which ground** — is
+/// [`inf_pcg::BiomeBinding::from_set`] and
+/// [`refresh_resident`](inf_pcg::BiomeBinding::refresh_resident), shared verbatim
+/// with the editor. All this function owns is the fetch.
+///
+/// Since island wave I7b this is the **one-shot** form: it evaluates the ground
+/// that is resident right now and keeps no memo, which is exactly right for a
+/// load. The ground that pages in afterwards is [`refresh_biome_bindings`]'s,
+/// and it is the same computation with the memo kept.
 pub fn evaluate_biome_bindings(
     world: &mut EcsWorld,
     biome_sets: &HashMap<Uuid, inf_terrain::BiomeSet>,
     pcgs: &HashMap<Uuid, PcgAssetPayload>,
 ) {
+    refresh_biome_bindings(world, biome_sets, pcgs, &mut BiomeScatter::default());
+}
+
+/// **The per-terrain memo the streaming refresh keeps between fixed steps**
+/// (island wave I7b).
+///
+/// Two maps, both keyed by the terrain entity's stable `Guid`: the bound
+/// palette (so a `.inf_pcg` graph is lowered once per session and not once per
+/// step), and [`inf_pcg::BiomeScatterCache`] (so a tile is scattered once per
+/// residency and not once per step).
+///
+/// Session state. Nothing here is serialized, nothing here reaches the state
+/// fold, and what comes out of it is a pure function of the resident ground —
+/// which is what lets the fixed step read it at all.
+#[derive(Default)]
+pub struct BiomeScatter {
+    bound: HashMap<Uuid, (Uuid, inf_pcg::BiomeBinding)>,
+    caches: HashMap<Uuid, inf_pcg::BiomeScatterCache>,
+    refreshes: u64,
+}
+
+impl BiomeScatter {
+    /// How many terrains have had their population rewritten since this state
+    /// was created — the engagement counter that tells "the pass ran and found
+    /// nothing to do" from "the pass never ran".
+    pub fn refreshes(&self) -> u64 {
+        self.refreshes
+    }
+
+    /// Total tile evaluations across every terrain — the O(what arrived) claim,
+    /// made countable.
+    pub fn tiles_evaluated(&self) -> u64 {
+        self.caches.values().map(|c| c.tiles_evaluated()).sum()
+    }
+
+    /// The resident population of one terrain, as the refresh last computed it.
+    pub fn population_of(&self, terrain: Uuid) -> &[inf_pcg::PcgInstance] {
+        self.caches
+            .get(&terrain)
+            .map(|c| c.population())
+            .unwrap_or(&[])
+    }
+}
+
+/// [`evaluate_biome_bindings`], **memoized against terrain residency** — the
+/// door the fixed step calls every step and the load path calls once.
+///
+/// # The gap this closed
+///
+/// `evaluate_biome_bindings` ran exactly once, at load, over
+/// `TerrainData::xz_bounds()`. A streamed terrain ships **no tiles**, so on the
+/// shipped boot the bounds were `None` and the whole pass was a no-op: the
+/// island's six bound biomes produced **4 958 instances with the ground paged
+/// by hand and 0 through the boot** (wave I7's own figure). Paging is not a
+/// load-time event, so neither is this.
+///
+/// # Where it runs, and why residency and not cell activation
+///
+/// At the top of the fixed step, straight after
+/// [`TerrainStreaming::sync_sim`](crate::terrain_stream::TerrainStreaming::sync_sim)
+/// — because the *subject* is the terrain's resident tile set, and that is what
+/// the terrain streamer moves. A partition cell activating can bring a terrain
+/// entity with it, which the same pass picks up on the next step; but keying the
+/// refresh on cell activation alone would have populated the island once, at the
+/// residency of the one cell it activates, and never again.
+///
+/// # What it costs when nothing moved
+///
+/// One `Guid`-sorted walk of the terrains, and per terrain one comparison of
+/// the resident tiles' stamps against the memo's
+/// ([`BiomeBinding::refresh_resident`](inf_pcg::BiomeBinding::refresh_resident)).
+/// No allocation, no scatter, no component write. The work is O(tiles that
+/// arrived), which is the standing O(subjects) rule.
+///
+/// Returns how many terrains had their population rewritten.
+pub fn refresh_biome_bindings(
+    world: &mut EcsWorld,
+    biome_sets: &HashMap<Uuid, inf_terrain::BiomeSet>,
+    pcgs: &HashMap<Uuid, PcgAssetPayload>,
+    state: &mut BiomeScatter,
+) -> usize {
     if biome_sets.is_empty() || pcgs.is_empty() {
-        return;
+        return 0;
     }
 
     // Deterministic Guid-sorted terrain list, exactly as the volume pass sorts.
-    let terrains: Vec<(inf_ecs::Entity, Uuid, DVec3)> = {
+    let terrains: Vec<(inf_ecs::Entity, Uuid, Uuid, DVec3)> = {
         let w = world.world();
         let mut v: Vec<(Uuid, inf_ecs::Entity)> = w
             .iter_entities()
@@ -1534,67 +1646,109 @@ pub fn evaluate_biome_bindings(
             .collect();
         v.sort_by_key(|(g, _)| *g);
         v.into_iter()
-            .filter_map(|(_, e)| {
+            .filter_map(|(guid, e)| {
                 let t = w.get::<Terrain>(e)?;
                 let set = t.biome_set?;
-                if t.data.is_empty() {
-                    return None;
-                }
                 let origin = w
                     .get::<GlobalTransform>(e)
                     .map(|g| g.translation())
                     .unwrap_or(DVec3::ZERO);
-                Some((e, set, origin))
+                Some((e, guid, set, origin))
             })
             .collect()
     };
+    // A terrain that is gone takes its memo with it — the pin-with-no-release
+    // law (P21.4), applied to a per-entity cache.
+    let live: std::collections::BTreeSet<Uuid> = terrains.iter().map(|(_, g, _, _)| *g).collect();
+    let BiomeScatter {
+        bound,
+        caches,
+        refreshes,
+    } = state;
+    bound.retain(|g, _| live.contains(g));
+    caches.retain(|g, _| live.contains(g));
 
-    for (entity, set_guid, origin) in terrains {
+    let mut rewritten = 0usize;
+    for (entity, guid, set_guid, origin) in terrains {
         let Some(set) = biome_sets.get(&set_guid) else {
             // A dangling biome-set reference is the cook's advisory, not a load
             // failure: the level is valid, its ids just resolve to nothing.
             continue;
         };
-        let binding =
-            inf_pcg::BiomeBinding::from_set(set, inf_pcg::DEFAULT_BIOME_FEATHER, |guid| {
-                lowered_document(pcgs.get(&guid)?)
+        // Bind once per (terrain, palette). `from_set` re-lowers every bound
+        // `.inf_pcg` graph, which is a per-session cost and never a per-step one
+        // — the P22.4 "once per break was once per GENERATION" lesson, met on a
+        // pass that now runs sixty times a second.
+        let stale_binding = !matches!(bound.get(&guid), Some((s, _)) if *s == set_guid);
+        if stale_binding {
+            let b = inf_pcg::BiomeBinding::from_set(set, inf_pcg::DEFAULT_BIOME_FEATHER, |g| {
+                lowered_document(pcgs.get(&g)?)
             });
+            bound.insert(guid, (set_guid, b));
+            // A palette change invalidates every tile's slice: the memo is keyed
+            // on the ground, and the ground is not what moved.
+            caches.remove(&guid);
+        }
+        let binding = &bound[&guid].1;
         if binding.is_empty() {
             continue;
         }
-        // The terrain's own authored extent, in world space, is the region.
-        let data = {
+        // **The tiles are borrowed, not copied.** This runs every fixed step and
+        // a `TerrainData` clone is a quarter of a megabyte per resident tile, so
+        // the working set is moved out of the component, read, and moved back —
+        // with nothing running in between that could observe the gap.
+        let empty = {
             let w = world.world();
             match w.get::<Terrain>(entity) {
-                Some(t) => t.data.clone(),
+                Some(t) => inf_terrain::TerrainData::new(
+                    t.data.tile_resolution(),
+                    t.data.meters_per_sample(),
+                ),
                 None => continue,
             }
         };
-        let Some((min, max)) = data.xz_bounds() else {
-            continue;
+        let data = {
+            let w = world.world_mut();
+            match w.get_mut::<Terrain>(entity) {
+                Some(mut t) => std::mem::replace(&mut t.data, empty),
+                None => continue,
+            }
         };
-        let region = Region::from_xz(
-            min.x + origin.x,
-            min.y + origin.z,
-            max.x + origin.x,
-            max.y + origin.z,
-        );
-        let fields = inf_pcg::OffsetTerrain::new(&data, origin);
-        let provider = FnHeight::new(|x, z| fields.height_at(x, z));
-        let baked: Vec<ScatteredInstance> = binding
-            .evaluate(&provider, &fields, region)
-            .iter()
-            .map(|i| ScatteredInstance {
-                position: i.pos,
-                rotation: i.rotation,
-                scale: i.scale,
-                kind: i.kind_index,
-            })
-            .collect();
+        // The refresh reads the terrain's own resident tiles: no `xz_bounds`,
+        // because the bounds of a streamed terrain are a moving target and the
+        // tiles are not.
+        let cache = caches.entry(guid).or_default();
+        let baked: Option<Vec<ScatteredInstance>> = binding
+            .refresh_resident(&data, origin, cache)
+            .then(|| population_from(cache.population()));
         if let Some(mut t) = world.world_mut().get_mut::<Terrain>(entity) {
-            t.biome_population = baked;
+            t.data = data;
+            if let Some(b) = baked {
+                t.biome_population = b;
+                rewritten += 1;
+            }
         }
     }
+    *refreshes += rewritten as u64;
+    rewritten
+}
+
+/// The biome pass's half of the `inf_pcg` → ECS mirror: a placed instance
+/// becomes a [`ScatteredInstance`].
+///
+/// Stated once so the load pass, the streaming refresh and any future reader
+/// cannot each grow their own copy of four field assignments — the exact shape
+/// `population_of` is fenced for on the volume side.
+fn population_from(instances: &[inf_pcg::PcgInstance]) -> Vec<ScatteredInstance> {
+    instances
+        .iter()
+        .map(|i| ScatteredInstance {
+            position: i.pos,
+            rotation: i.rotation,
+            scale: i.scale,
+            kind: i.kind_index,
+        })
+        .collect()
 }
 
 /// The runtime document a `.inf_pcg` payload evaluates as: the stored authored
