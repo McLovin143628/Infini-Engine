@@ -5246,3 +5246,412 @@ assertion.
 | schema | `.inf_skel` v3, scene v25, `ScenePayload` v11 | **unmoved** |
 | committed sample bytes | unmoved | **unmoved**; `git status` on `samples/` and `tests/goldens/` empty |
 | chr(92) | the twenty-first was the wave's own | **no twenty-second** — the wave's added lines and the audit's own were swept for both shapes (interior space runs at and below the gate's own 8-space threshold, and bare newlines inside non-raw literals): zero, and the workspace gate is green |
+## Wave SK1c (the hero is a character, and the hands have a reason)
+
+Base `2452ce20`. Five clauses; **four landed and the fifth is priced and
+stopped**, which is what its own brief asked for.
+
+The wave's headline is that SK1b's two loudest carried items — *`HandIkRes` has
+no producer outside a test* and *the grip catalogue is a test fixture* — are
+closed together, because they are one item: a catalogue with no producer and a
+consumer with no caller are the same feature missing its two ends. The second
+headline is a **measurement**: the two hosts' opposite pass order, which SK1b's
+audit deliberately left unmeasured rather than pinning, does not commute, and it
+took ten minutes to build the trace that says so.
+
+### Clause 4 — the opposite-order landmine, measured (`d6f57f49`)
+
+The SK1b audit recorded, as a LOW it would not pin, that the shipped player runs
+`advance_state_machines` then `apply_root_motion` while the editor Simulate runs
+them the other way round — and that the two agreed on every committed trace,
+which says nothing about whether the passes *commute*.
+
+**They do not.** `step_pose_evaluation` reads the entity's `GlobalTransform`
+twice — `authored_ik_goals` inverts it to bring a world-space goal into model
+space (`pose.rs:592`, `:610`), and `model_to_world` feeds the foot pass, the hand
+pass and the feet it publishes (`pose.rs:1479`) — so the order decides which
+step's placement all of those are computed in.
+
+The fixture is three things, none of them exotic: `RootMotion` +
+`AnimPlayer` (the only shape `apply_root_motion` acts on at all, and
+`samples/character-demo` already carries the component), an `AnimStateMachine`
+(so the pose pass does work), and an authored world-space `IkTarget` (so the pose
+depends on where the entity *is*). Measured at the SK1b head:
+
+| step | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|---|
+| bytes equal | no | no | no | no | no | no | no | no |
+| worst pose component | 0.027 | 0.035 | **0.060** | 0.055 | 0.049 | 0.043 | 0.037 | 0.031 |
+
+Different pose bytes on **every one of eight steps**, while the transform itself
+agreed to the bit — a divergence entirely inside the pose, which is exactly where
+a `RootMotion` component looks inert.
+
+**Nothing found it because no gate fixture in the tree carries `RootMotion` at
+all**, and the one committed sample that does has no `AnimPlayer`, so
+`apply_root_motion` returns at its first line and the two hosts perform an
+identical no-op in two different places.
+
+Unified on the editor's order, so the **shipped player moves**: root motion is
+*movement*, and every other movement in this engine happens before the pose —
+`step_character_movement`, `step_gameplay`, and the one-step latency
+`anim_bridge`'s own doc rests on. The propagate between them is not decoration:
+`apply_root_motion` writes `Transform` and the pose reads `GlobalTransform`, so
+without it the reorder is inert and the two hosts agree only by both being wrong.
+
+Two arms, because a source pin and a trace catch different things:
+`both_fixed_steps_move_the_root_before_the_pose` asserts play-heads < root motion
+< pose **and a propagate between the middle two**, in both files; and
+`both_hosts_pose_a_root_motion_driven_character_the_same_way` is the trace, with
+its travel asserted so an unregistered clip cannot make it vacuous. **The
+mutation is the measurement**: at the SK1b head the trace arm is red on step 0.
+
+### Clause 3c — the grip catalogue is generated (`0b10fc4c`)
+
+`SkeletonAsset::grips` shipped in SK1a empty on every rig, got its runtime
+consumer in SK1b, and still had no producer: the only two catalogues in the tree
+were a fixture in `grip_gate.rs` and a second, differently-named one in
+`pose.rs`'s own tests — two hand-written tables for one idea, with different names
+and different apertures.
+
+`inf_anim::grip::grip_catalogue` writes it, and the reason it *can* be generated
+is the type's own doctrine: **a `GripAffordance` is a property of the hand**. An
+aperture is how wide the fingers open and a curl set is how far each closes;
+neither is a property of the door. So the only rig-dependent thing in the table is
+which joint is a hand, and that comes off the role table rather than off a name.
+
+Four names, exported as consts so the three sites that spell them cannot
+disagree: `handle` (4.5 cm bar, thumb wrapped), `rifle` (0.032, **trigger finger
+straight**), `rifle_fore` (the *off* hand — both on one wrist and a two-handed
+hold closes the same fingers twice), `prop` (a 9 cm ball).
+
+The four numbers moved **unchanged**, and that is asserted rather than asserted by
+me: the whole grip gate is byte-green on the generated table, and
+`a_generated_rig_is_the_catalogue_this_gate_takes` pins each aperture — because
+the gate's aperture arm asserts an *order* and its PIE == shipping arm compares
+two hosts, and both would survive a generator that moved every number together.
+
+**No committed byte moved**: the two `.inf_skel` files in the tree are a
+`BipedCanonical` rig and a six-joint placeholder, neither of which goes through
+`build_manny`.
+
+### Clause 1 — the engine ships a character (`315d01c8`)
+
+`samples/starter-character/` exists: **nineteen files**, the exact output of
+pressing New Character and accepting every default, on the 161-bone mannequin.
+
+| | |
+|---|---|
+| the rig | `Starter.inf_skel`, **23 026 B** — 161 bones, role table, twists, IK follows, hand cones, grip catalogue |
+| the body | `Starter_Body.inf_mesh`, **95 932 B** — generated and heat-weighted |
+| the skin | `Starter_Skin.inf_mat`, 50 B |
+| the cycles | `Starter_Idle/Walk/Run.inf_anim`, 8 810 / 4 387 / 3 366 B — **derived** |
+| the machine | `Starter_Locomotion.inf_sm` 837 B + its 4 654 B text face |
+| the controller | `Starter_Controller.inf_act`, 9 359 B |
+| the tables | `camera.toml` 3 486 B, `input.toml` 2 423 B |
+| total committed | **~155 KB** over 19 files + a README |
+
+**It is generated by the wizard's own door, not by a mirror of it.** Every other
+sample in `samples.rs` is a pure generator with an equivalence arm standing
+between it and the tool; a character is eight assets, a heat solve, a derivation
+and a proposal, and mirroring that is how two generators end up disagreeing.
+`starter_character_files` runs `build_character_with_ids` into a scratch project
+and copies the result out, so the committed bytes **are** `build_character`'s
+output and the byte lock is a lock on the wizard.
+
+That needed one new thing. A character's eight assets name each other by GUID —
+the body's skin binding names the rig, every clip carries the rig's id, the
+machine names three clips, the controller names the machine — so a build with
+minted ids is a different file set every time and nothing committed could ever be
+re-blessed. `AssetProject::write_asset_with_id` and `CharacterIds` supply them,
+and every interactive path still mints, because two assets sharing a GUID is a
+database whose reverse edges lie.
+
+**Two defects the committed output found**, both older than this wave and both
+invisible until something wrote the wizard's files down and looked at them:
+
+* **The machine's text face sat next to nothing.** `AssetProject::write_asset`
+  runs a display name through `sanitize`, so "My Hero" writes
+  `My_Hero_Locomotion.inf_sm` — and the wizard placed its `.txt` at a path
+  rebuilt from the *display* name. `sm_text`'s whole convention is
+  `<payload>.txt`, so `read_text` on the real payload answered `None` and the
+  reviewable face pillar S1 argues for was silently absent. **Every
+  wizard-default name has a space in it.**
+* **The controller wrote its own file with a raw `dir.join`**, so a character came
+  out as six `My_Hero_*` assets and one `My Hero Controller.inf_act` — a content
+  folder that looks like two authors were in it.
+
+`every_file_the_wizard_writes_is_named_the_same_way` is the regression arm, and
+its fixture is called "My Hero" deliberately: one called "Hero" passes with the
+defect in place.
+
+The advisory the build reports is **handed back rather than swallowed or refused
+on** — exactly one, SK1b's carried 35-of-795 unreachable cap vertices — and pinned
+by content, because "no warnings" could only be bought by silencing it and a count
+of one says nothing about which one.
+
+`ProjectTemplate::starter_content` scaffolds **seventeen** of the nineteen into
+every 3D project's `Content/Characters/` (`camera.toml` and `input.toml` are
+project tables with no home under `Content/`). The 2D platformer keeps Coyote: a
+161-bone biped in a side-scroller is 155 KB an author has to notice in order to
+delete. `every_3d_template_ships_the_whole_starter_character` reads the sample
+folder **off disk** and asserts the `include_bytes!` table is the whole of it,
+because a character missing one sidecar is a project whose rig resolves and whose
+clips do not.
+
+The wizard references it three ways: the plan step says so in the dialog, the
+templates scaffold it, and `the_starter_character_is_what_the_wizard_opens_with`
+asserts the spec is `CharacterSpec::default()` field by field with the name as the
+single deliberate difference — so a moved default keeps that arm green and turns
+the byte lock red, which is the right pair.
+
+**`EXPECTED_LEVELS` is untouched**: this folder is content, not a level.
+
+### Clause 2 — the island hero is that character (`19cf44be`)
+
+`island.rs` spawned forty lines of hand-rolled components ending in
+`AnimStateMachine { sm: None }` and no `SkeletalMesh` — a hero that walked, drew
+nothing and posed nothing — because the one door that knows how to build a
+character minted its own entity GUID and the island derives every one of its own.
+`edit_create_character_with_guid` takes one.
+
+The scouted route held **exactly**, and was narrower than the scout thought: the
+assets reach a built project through the recipe's `[content]` list, which
+`write_content` already copies, so there is no new crate edge, no Ring-0 change
+and — the one place the scout over-estimated — **the `island.rs:616` allowlist did
+not have to grow at all**, because this file names GUIDs rather than
+`inf_island::` items.
+
+`HERO_HEIGHT_M` is gone. It was 1.8 while there was nothing inside the capsule;
+the wizard's default is 1.75, and a 1.75 m body in a 1.8 m capsule floats 5 cm off
+the ground it stands on. The height is read from the starter character's own spec.
+
+**The bless, arithmetic-verified:**
+
+| | before | after | delta |
+|---|---|---|---|
+| `samples/island/VancouverIsland.inf_lvl` | 14 820 B | 14 890 B | **+70** |
+| `samples/island-fixture/IslandFixture.inf_lvl` | 8 134 B | 8 204 B | **+70** |
+| both `.inf_lvl.toml` dependency lists | 3 | 6 | +3 |
+
+**+70 is four GUIDs and two Option tags.** bincode writes a `Uuid` as a
+length-prefixed 16-byte string (17 B); the rig, the body, the machine and the
+controller are 4 × 17 = 68, and `SkeletalMesh`'s two inner `Option` tags go from
+absent-inside-a-`None` to present, +2. 68 + 2 = 70, twice, one hero each. The
+`.inf_act` is deliberately **not** in the dependency list: `level_dependencies`
+walks asset references on components and `ActorClass` is not one, which is why
+`samples/phase29-locomotion`'s own sidecar lists three and not four. Asserted in
+both directions, so the day it changes the comment fails rather than rots.
+
+**The 900-step trace, re-priced honestly:**
+
+| | before | after |
+|---|---|---|
+| bytes a state | **403** | **6 879** |
+| the hero's pose section | 0 | **6 476** |
+| distinct states of 900 | 900 | 900 |
+| PIE == shipping | green | **green** |
+
++6 476 a step, exactly the figure the brief carried, and exactly SK1a's
+arithmetic for a 161-bone rig (36 B header + 40 B a joint). A **17×** growth in
+what the gate compares. Pinned as the number and not as `> 0`: a byte equality is
+blind to two hosts posing nothing identically, which is what this gate did for its
+whole life until now.
+
+**Two gate-side gaps the swap found**, both the same shape — a fixture host poorer
+than the one it is compared against:
+
+* `loose_sim` never called `with_anim_assets`, so the editor-side host had no
+  skeletons, no clips and no machines where the cooked host had all three. Its own
+  doc already carried the rule — *two hosts compared for byte equality must be
+  given the same world to disagree about, or the equality is between one real
+  reading and one impoverished one* — and the anim index was the third thing it
+  was missing. Invisible while the hero had nothing to pose; **step 0 red** the
+  moment it did.
+* `pie_sim` passed `|_| None` for the blueprint-class and anim resolvers. It reads
+  the **sidecars** in the content root now — the same index `AssetDb`'s own scan
+  reads — rather than a name table, which would be a second place the character's
+  identity is written down. Asserted: **1 skeleton, 1 machine, 3 clips** (through
+  the transitive machine→clip hop), **1 class**.
+
+### Clause 3a/3b — hand IK gets its producers (`86e0bfec`)
+
+**One producer**, in `step_gameplay`, which is the one Ring-0 rule both hosts call
+and already sits before the pose by a pinned order. One and not two: a weapon
+wants both hands and a grab wants one, and two producers writing into the same
+two-slot array would race every step with the winner decided by call order. The
+rule between them is written down rather than emergent — **the weapon owns the
+hand it is in and a grab takes the other one** — so a character reaching for a
+door handle with a rifle in its right hand reaches with its left.
+
+* **EQUIP** puts the `GunGrip` two-handed hold on the rig (`ik_hand_gun`) and
+  closes each hand on its own affordance. The fore-grip offset is two thirds of
+  the weapon's own length, clamped to `0.12..=0.60` m, so a pistol does not ask
+  the off hand to occupy the on hand's space.
+* **AIM** drives the reach, and only aiming does. A carried weapon hangs where the
+  animation puts it; RMB brings it to a point on the aim line at 0.82 of the
+  character's own stand height, 0.42 m in front. That line is
+  `inf_ecs::weapon::aim_forward`, **factored out of `shot_direction`** so the hand
+  and the bullet cannot point in different directions.
+* **E-GRAB**: `Interactable` carries a grip *name*, `InteractCandidate` and
+  `InteractHit` carry it through, and the press latches
+  `interact::HandGrabRes` — 0.25 s in, 0.5 s held, 0.25 s out. Recorded **before**
+  the verb match, because the hand is orthogonal to the consequence — which is
+  also how `InteractVerb::Grab`, the one verb this engine has and does not
+  consume, stops doing literally nothing.
+
+Two producers of grip *names*, so the catalogue has consumers as well as a
+generator: a door's `Interactable` names `handle` (`d3/door.rs:254`), a dropped
+item's names `prop` (`item.rs:591`). A kick names none (a kick is a leg); a
+vehicle seat names none (a seat is a whole-body choreography).
+
+**The gate**: `runtime/inf-player/tests/weapon_hands_gate.rs` — equip → aim →
+fire → reload → unequip → E-grab on a **rigged** hero.
+
+| | |
+|---|---|
+| steps | **140** (a grab is a whole second at 60 Hz, and the point is that it opens again) |
+| distinct poses | **18**, pinned as the number |
+| bytes a step | **6 476** |
+| PIE == shipping | on the pose **and** on `(holds, grabs, shots, reloads)` |
+| shots / reloads over the course | 1 / 1, magazine 5 → 4 → 5 |
+
+Its anti-vacuity is most of it. **Carrying and aiming are separate bands**,
+because "the pose changed since idle" is satisfied by the equip alone — the aim
+arm compares two settled bands and the settling of each is asserted. The grab is
+asserted to **ease** (closing further moves the pose again) rather than snap. And
+the release is asserted **byte-identical** to the pose before anything was picked
+up — the claim `apply_grip`'s "a curl is a pose, not a delta" rests on, which a
+drifting solver would fail after passing every `assert_ne!` above.
+`the_hand_pass_costs_an_unarmed_character_nothing` runs two worlds identical but
+for a rifle in the bag, with the armed one asserted to diverge so the loop is not
+a statement about the fixture.
+
+**The ground in that fixture is load-bearing and says so.**
+`RotationMode::Aiming` is set on the *grounded* movement branch, so a hero
+standing on nothing never aims and the aim half of the course would have been
+measuring an unpressed button. The first run did exactly that.
+
+`inf_physics::d3::gameplay` joins the portable-math ban list (**36** entries): it
+computes a point that lands in the solved pose and therefore in
+`pose_state_bytes`. The SK1b audit added `inf_ecs::pose` for this reason and made
+it a law; this is the same law meeting a **third** crate. Mutation: a `.sin()` in
+`aim_hold_point` reddens it, naming the line.
+
+`SimSession::gameplay()` is the mirror of `RuntimeSim::gameplay()` — the field had
+been kept since I6 with no reader outside its own file, so a two-host gate could
+read the shipped player's counters and had nothing to compare them against.
+
+**The gates that watched the capsule hero are untouched and still green**:
+`phase30_gameplay_gate` (3), `weapon_3d` (12), `door_3d` (13), `grip_gate` (3),
+`phase29_gate` (6). The rigged course is a *new* gate beside them, which is the
+reading this wave took of "must still pass on a rigged hero": the capsule fixtures
+keep certifying the capsule path — which is every level committed before SK1b —
+and the rigged one certifies the hands.
+
+### Clause 5 — the weapon's visible mesh: PRICED, and STOPPED
+
+The brief's condition was "take it **only** if it rides an existing mechanism with
+no schema move". It does not. The schema half is free and every other half is not.
+
+**What is free.** `ItemDef` and `WeaponDef` carry no `Serialize`, ride no wire and
+are built from TOML, so a `mesh: Option<Uuid>` field costs **no schema bump** —
+the same slot `muzzle_forward_m` used in SK1b. `MeshRef` already carries
+`asset: Option<Uuid>`. Setting it on the spawned weapon entity is four lines.
+
+**What is not.** Four blockers, none of them inside this wave's boundary:
+
+| # | the blocker | evidence |
+|---|---|---|
+| 1 | `RenderScene` has **one** door for non-primitive geometry — virtualized geometry — so a mesh with no derived `.inf_vmesh` draws as a placeholder cube | `assets/vmesh.rs:63-75` |
+| 2 | the **cook** derives one only above `VgeomCookOptions::min_triangles` = **2048**; a rifle is one or two hundred | `cook.rs:126,135`; the advisory at `cook.rs:1604` says the words "renders it as a PLACEHOLDER CUBE" |
+| 3 | **PIE streams no vmesh assets at all**, so a rigid `MeshRef.asset` is a cube in PIE whatever the cook did | `window.rs:1029-1032` |
+| 4 | the cook's `asset_deps` walks Level, Material, StateMachine, AnimClip, BiomeSet and Pcg — **not Blueprint** — and an item catalogue is authored in a `.inf_act`, so a mesh the catalogue names would never enter the closure and would not be packed at all | `cook.rs:1849-1998` |
+
+So taking it would ship: a cube in PIE (3), a cube in the shipped build (1+2), and
+most likely **no asset in the pack** (4) — three cubes and a dangling reference,
+for four lines that look like a feature. The editor viewport would draw the rifle
+correctly (its own threshold is 1 triangle, `vmesh.rs:75`), which is the worst
+shape a defect can have and is precisely what `sub_threshold_advisory` was written
+to shout about.
+
+**The honest one-line fix is `min_triangles`**, and it is not this wave's: it
+changes shipped bytes for every sample in the tree, it is a cook default with a
+stated cost rationale, and the P18.3 audit already ledgered lowering it as a
+follow-up. Carried by name, with the four blockers above, so the wave that takes
+it takes all of them at once.
+
+### Decisions (SK1c's, binding on later waves)
+
+1. **Two passes that agree on every trace have not been shown to commute.** They
+   have been shown that no trace exercises both. Build the trace before pinning
+   the order — and if it diverges, the order is a fact, not a preference.
+2. **Root motion is movement.** It happens before the pose, with a propagate
+   between, in both hosts. A pose is a statement about where the character *is*.
+3. **A committed generator output must be reproducible, which means its GUIDs are
+   an input.** An asset set that names itself by GUID cannot be byte-locked
+   against the door that wrote it otherwise.
+4. **A generated catalogue beats a fixture, and the fixture's numbers are what it
+   generates.** Moving the numbers and the producer in one step is how the
+   measurements survive the move.
+5. **One producer per resource slot.** Two writers into one two-slot array is a
+   race whose winner is call order; compose them once and write the precedence
+   down.
+6. **The interaction and its consequence are separate.** A hand goes on a thing
+   whatever the verb then does with it, which is what gives a verb with no
+   consumer something real to do.
+7. **A fixture host must be as rich as the host it is compared against.** The
+   island gate's loose side was missing its anim index for as long as the hero had
+   nothing to pose, and no arm could have said so.
+
+### What SK1c did not do (for its audit and its successor)
+
+* **The weapon is still a placeholder cube.** Priced above, four blockers, none of
+  them a schema move and none of them in this wave's boundary.
+* **The aim mask still has no consumer.** `Mask_AimOffset` is authored onto every
+  generated machine (including the committed starter character's) and no
+  transition names it, because no aim or reload clip exists to name it from.
+  Carried by name for the weapons wave, as SK1b's brief said.
+* **The grab is a gesture, not a carry.** The hand reaches, closes, holds and
+  opens; the engine has no "carrying" mode and inventing one here would be a mode
+  nothing can leave. A `PickUp` still moves the item into the bag on the press —
+  the hand and the inventory are two things that happen, not one.
+* **`GripAffordance::palm` is still read by nothing.** `apply_hand_ik` uses
+  `name`, `hand`, `aperture_m` and `curl`; the palm frame would refine where the
+  weapon entity sits relative to the socket, which is `AttachedTo`'s offset and
+  needs the rig at a step that does not have it.
+* **The island hero has no locomotion clips bound to *its* rig.** The starter
+  character's three cycles are generated for the mannequin and committed, and the
+  island's machine plays them — but nothing in the 900-step drive checks that the
+  hero's feet match its motion, because the drive writes the transform directly.
+* **`camera.toml` and `input.toml` are not scaffolded** into a new project by
+  `starter_content`: both are project tables with no home under `Content/`. An
+  author who wants to tune either copies them out of the sample.
+* **The starter character is 155 KB in every binary that links `inf-project`**,
+  which includes the shipped player. Measured, not argued: `Starter_Body.inf_mesh`
+  is 95 932 B of it. A feature-gate is the obvious lever and was not pulled.
+* **35 of 795 body vertices are still unreachable by the visibility oracle** —
+  SK1b's carried item, now pinned by content as the starter character's one
+  advisory rather than left as a number in a memo.
+* **`Interactable::grip` is authored by two generators and by no editor.** A door
+  and a pickup name a grip; an author placing an `Interactable` by hand gets
+  `None`, and there is no Details field for it (the component is runtime, so there
+  could not be one without a schema move).
+* **The E-grab reaches the interaction's own point, not a handle.** A door's is
+  the middle of its closed opening at mid-height (`door::prompt_position`), which
+  is where the prompt is measured from and is not where a handle is. The engine
+  has no handle: a door is a hinge and a spec box.
+
+### Counts
+
+| | after the SK1b audit | **after SK1c** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 320 / 6 052 / 0 / 16 | **see the closing run** |
+| goldens | 54, byte-identical | **54, byte-identical** under `INF_GOLDEN_STRICT=1` — no render path is touched, and no golden can see the hero: `inf-render` names neither `inf-island` nor `inf-editor-core`, and its only `inf_anim` use is a hand-built three-joint cylinder |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| rustdoc warnings (ceiling 450) | 374 over 30 crates | **see the closing run** |
+| `cargo fmt --all --check` | clean | clean |
+| frontend tests / files | 702 / 78 | **702 / 78**, unchanged — one dialog line added, `tsc` and `eslint` clean |
+| schema | `.inf_skel` v3, `.inf_anim` v2, `.inf_sm` v3, `.inf_mesh` v2, scene v25, `ScenePayload` v11 | **nothing moved.** `Interactable`, `HandGrabRes` and `HandIkRes` are runtime; `ItemDef`/`WeaponDef` carry no `Serialize`; the starter character is content |
+| committed sample bytes | unmoved | **two `.inf_lvl` +70 B each** (arithmetic above) and **19 new files** under `samples/starter-character/`. Nothing else moved |
+| `EXPECTED_LEVELS` | 23 | **23** — the new folder is content, not a level |

@@ -884,7 +884,8 @@ mod tests {
         // somebody reading this loop will wonder.
         assert!(
             !deps.contains(&ids.actor.unwrap().0),
-            "an `ActorClass` has started entering the level's asset closure —              good, but the recipe's `[content]` list and this comment both              assume it does not"
+            "an `ActorClass` has started entering the level's asset closure — good, \
+             but the recipe's `[content]` list and this comment both assume it does not"
         );
     }
 

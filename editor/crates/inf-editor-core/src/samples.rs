@@ -11742,7 +11742,7 @@ mod tests {
             .expect("the committed body decodes");
         assert!(
             body.submeshes.iter().all(|m| m.is_skinned()),
-            "a submesh of the starter body carries no skin stream, so it does              not deform"
+            "a submesh of the starter body carries no skin stream, so it does not deform"
         );
         assert!(
             !body.material_slots.is_empty(),
