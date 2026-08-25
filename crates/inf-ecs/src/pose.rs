@@ -3995,18 +3995,16 @@ mod tests {
         world
     }
 
-    /// The mannequin, with a rifle grip authored on each hand — the affordance
-    /// table SK1a shipped empty and this wave fills.
+    /// The mannequin, **with the catalogue it generates for itself** (SK1c).
+    ///
+    /// This fixture used to author `rifle_l` / `rifle_r` here, which made two
+    /// hand-written catalogues in the tree — this one and the grip gate's — with
+    /// different names and different apertures for the same idea. The generator
+    /// is the single door now; the arms below name `inf_anim::GRIP_RIFLE` and
+    /// `GRIP_RIFLE_FORE`, which is the *left* hand's affordance, so the two-hand
+    /// coverage the old pair gave is kept.
     fn mannequin_rig() -> SkeletonAsset {
-        let mut asset =
-            inf_anim::build_manny(&inf_anim::BodyParams::default()).expect("the mannequin builds");
-        for (name, hand) in [("rifle_l", "hand_l"), ("rifle_r", "hand_r")] {
-            let j = asset.skeleton.index_of(hand).expect("a hand");
-            let mut grip = inf_anim::GripAffordance::new(name, j, 0.035);
-            grip.curl = [0.9, 1.0, 1.0, 1.0, 1.0];
-            asset.grips.push(grip);
-        }
-        asset
+        inf_anim::build_manny(&inf_anim::BodyParams::default()).expect("the mannequin builds")
     }
 
     /// Step a mannequin character through the one fixed-step pose door.
@@ -4302,7 +4300,7 @@ mod tests {
                     grip: [
                         None,
                         Some(HandGrip {
-                            name: "rifle_r".into(),
+                            name: inf_anim::GRIP_RIFLE.into(),
                             amount,
                         }),
                     ],

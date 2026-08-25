@@ -118,6 +118,68 @@ pub const THUMB_FLEX_DEG: [f32; 4] = [45.0, 55.0, 75.0, 75.0];
 /// curl composed with a retarget cannot spin a fingertip.
 pub const FINGER_TWIST_DEG: f32 = 10.0;
 
+// ── the catalogue (SK1c) ─────────────────────────────────────────────────────
+
+/// A bar in the hand: a door handle, a ladder rung, a railing. 4.5 cm.
+pub const GRIP_HANDLE: &str = "handle";
+
+/// A rifle's **pistol grip**, in the holding hand. Thinner than a handle, and
+/// the trigger finger is deliberately left straight — the one thing a per-finger
+/// curl target says that a per-hand aperture cannot.
+pub const GRIP_RIFLE: &str = "rifle";
+
+/// A rifle's **fore-grip**, in the other hand. The off hand of a
+/// [`crate::BoneSide::Right`]-handed [`GunGrip`](../../inf_ecs/pose/struct.GunGrip.html)
+/// hold closes on this one.
+pub const GRIP_RIFLE_FORE: &str = "rifle_fore";
+
+/// A carried prop: a 9 cm ball, every finger on it.
+pub const GRIP_PROP: &str = "prop";
+
+/// **The catalogue every rig with hands carries**, derived from the rig's own
+/// bones (SK1c).
+///
+/// # Why this is a generator and not authoring
+///
+/// SK1b shipped the finger solver and `runtime/inf-player/tests/grip_gate.rs`
+/// authored four affordances by hand to exercise it, with a note saying the wave
+/// that ships a catalogue is not that one. This is that wave, and the reason the
+/// catalogue can be *generated* at all is that a `GripAffordance` is a property
+/// of the **hand**: an aperture is how wide the fingers open, a curl set is how
+/// far each one closes, and neither is a property of the door or the rifle. The
+/// prop names the affordance it wants; the rig says what its hand can do.
+///
+/// So the only rig-dependent thing in the table is *which joint is the hand*,
+/// and that comes off the role table rather than off a name. A rig with no hand
+/// role on a side gets no affordance for that side, and a rig with no digits
+/// gets a table that `apply_grip` writes nothing from — which is honest: the
+/// canonical twenty-joint biped has no fingers, and a catalogue on it would be a
+/// promise the rig cannot keep.
+///
+/// The four names and their numbers are the grip gate's own, moved here
+/// unchanged so the gate's committed measurements do not move with them.
+pub fn grip_catalogue(roles: RoleIndex<'_>) -> Vec<GripAffordance> {
+    let hand = |side| roles.first(BoneRoleKind::Hand, side);
+    let mut out = Vec::new();
+    let mut push = |name: &str, joint: Option<u16>, aperture: f32, curl: [f32; 5]| {
+        if let Some(joint) = joint {
+            let mut g = GripAffordance::new(name, joint, aperture);
+            g.curl = curl;
+            out.push(g);
+        }
+    };
+    let (l, r) = (hand(BoneSide::Left), hand(BoneSide::Right));
+    // A door handle / a ladder rung: a 4.5 cm bar, thumb wrapped.
+    push(GRIP_HANDLE, r, 0.045, [0.9, 1.0, 1.0, 1.0, 1.0]);
+    // A rifle's pistol grip: thinner, and the trigger finger is NOT closed.
+    push(GRIP_RIFLE, r, 0.032, [0.85, 0.0, 1.0, 1.0, 1.0]);
+    // Its fore-grip, in the other hand.
+    push(GRIP_RIFLE_FORE, l, 0.045, [0.8, 1.0, 1.0, 1.0, 1.0]);
+    // A carried prop: a 9 cm ball, every finger on it.
+    push(GRIP_PROP, r, 0.09, [1.0, 1.0, 1.0, 1.0, 1.0]);
+    out
+}
+
 /// One digit of one hand: its bones, root first.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FingerChain {
@@ -1590,5 +1652,92 @@ mod tests {
                 "{what} took {us} us per hand per step, which is not a fixed-step cost"
             );
         }
+    }
+
+    /// **The catalogue is generated, and it is generated off the RIG** (SK1c).
+    ///
+    /// Four affordances, each on the hand its purpose implies, each naming a
+    /// joint the rig really has — and the pair that must be on *different* hands
+    /// really are, because a two-handed hold whose two grips landed on one wrist
+    /// would close one hand twice and pose the other from the animation.
+    ///
+    /// It is asserted against `hand_of`, not against a bone index, so a rig whose
+    /// hands moved in the emission order keeps this true and a rig whose role
+    /// table lost a hand fails here rather than three passes downstream.
+    #[test]
+    fn a_mannequin_arrives_with_a_grip_catalogue_on_its_own_hands() {
+        let rig = crate::build_manny(&crate::BodyParams::default()).expect("a mannequin");
+        let roles = rig.role_index();
+        let l = roles
+            .first(BoneRoleKind::Hand, BoneSide::Left)
+            .expect("a left hand");
+        let r = roles
+            .first(BoneRoleKind::Hand, BoneSide::Right)
+            .expect("a right hand");
+        assert_ne!(l, r, "the two hands are the same joint");
+
+        let by = |name: &str| {
+            rig.grips
+                .iter()
+                .find(|g| g.name == name)
+                .unwrap_or_else(|| panic!("no `{name}` affordance on a generated mannequin"))
+                .clone()
+        };
+        assert_eq!(rig.grips.len(), 4, "{:?}", rig.grips);
+        assert_eq!(by(GRIP_HANDLE).hand, r);
+        assert_eq!(by(GRIP_RIFLE).hand, r);
+        assert_eq!(by(GRIP_PROP).hand, r);
+        assert_eq!(
+            by(GRIP_RIFLE_FORE).hand,
+            l,
+            "a rifle's fore-grip is in the OFF hand — both on one wrist and a \
+             two-handed hold closes the same fingers twice"
+        );
+
+        // The apertures are ordered, and the order is the physical claim: a ball
+        // is wider than a bar is wider than a pistol grip. An arm that only
+        // checked "there are four" would pass on four copies of one number.
+        assert!(
+            by(GRIP_PROP).aperture_m > by(GRIP_HANDLE).aperture_m
+                && by(GRIP_HANDLE).aperture_m > by(GRIP_RIFLE).aperture_m,
+            "the apertures are not ordered ball > bar > pistol grip"
+        );
+        // The trigger finger is straight, and it is the ONLY straight one — the
+        // per-finger half of the table, which an aperture cannot express.
+        let rifle = by(GRIP_RIFLE);
+        assert_eq!(rifle.curl[Digit::Index.slot()], 0.0);
+        assert!(
+            rifle
+                .curl
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != Digit::Index.slot())
+                .all(|(_, &c)| c > 0.5),
+            "the rifle grip closes nothing but leaves the trigger finger out: {:?}",
+            rifle.curl
+        );
+
+        // …and every affordance names a hand this rig can actually derive, which
+        // is what `apply_hand_ik` needs before it can write a single bone.
+        for g in &rig.grips {
+            assert!(
+                hand_of(&rig.skeleton, roles, g.hand).is_some(),
+                "`{}` names joint {} which is not a derivable hand",
+                g.name,
+                g.hand
+            );
+        }
+    }
+
+    /// **A rig with no hands gets no catalogue** — the honest half.
+    ///
+    /// The canonical twenty-joint biped has a `hand_l` and a `hand_r` and no
+    /// digits at all, so it *does* get a table and `apply_grip` writes nothing
+    /// from it. A rig with no hand ROLE gets nothing, and neither is a failure:
+    /// a promise a rig cannot keep is worse than an empty table, and this arm is
+    /// what stops `grip_catalogue` from inventing a joint index.
+    #[test]
+    fn a_rig_with_no_hand_role_gets_an_empty_catalogue() {
+        assert!(grip_catalogue(RoleIndex::empty()).is_empty());
     }
 }

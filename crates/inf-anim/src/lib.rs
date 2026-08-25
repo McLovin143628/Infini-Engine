@@ -124,8 +124,9 @@ pub use foot::{
     TRACE_BELOW_M,
 };
 pub use grip::{
-    apply_grip, arm_chain, digit_closure, elbow_pole, hand_of, hands_of, knee_pole, reach, Digit,
-    FingerChain, GripReport, Hand, FINGER_FLEX_DEG, FINGER_TWIST_DEG, THUMB_FLEX_DEG,
+    apply_grip, arm_chain, digit_closure, elbow_pole, grip_catalogue, hand_of, hands_of, knee_pole,
+    reach, Digit, FingerChain, GripReport, Hand, FINGER_FLEX_DEG, FINGER_TWIST_DEG, GRIP_HANDLE,
+    GRIP_PROP, GRIP_RIFLE, GRIP_RIFLE_FORE, THUMB_FLEX_DEG,
 };
 pub use hair::{
     render_mesh, ribbon_mesh, roots_for, step_hair, HairAsset, HairDetail, HairGroom, HairMaterial,

@@ -1733,6 +1733,14 @@ pub fn build_manny(params: &BodyParams) -> Result<SkeletonAsset, TemplateError> 
     asset.roles = roles;
     asset.twists = twists;
     asset.ik_follow = ik_follow;
+    // **The grip catalogue** (SK1c). SK1a shipped `SkeletonAsset::grips` empty on
+    // every rig and said so; SK1b's finger solver read it and the only table in
+    // the tree was a test fixture. It is generated now, off this rig's own hand
+    // roles — see `crate::grip::grip_catalogue` for why a catalogue is a property
+    // of the hand and can therefore be derived at all.
+    //
+    // After `roles` is set, because the catalogue is built from the role index.
+    asset.grips = crate::grip::grip_catalogue(asset.role_index());
     Ok(asset)
 }
 

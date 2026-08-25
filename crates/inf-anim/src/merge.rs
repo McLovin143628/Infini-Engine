@@ -720,8 +720,15 @@ mod tests {
         assert_eq!(a.roles.len(), base.roles.len() + 2);
         assert_eq!(a.twists.len(), base.twists.len() + 1);
         assert_eq!(a.ik_follow.len(), base.ik_follow.len() + 1);
-        assert_eq!(a.grips.len(), 1);
-        assert_eq!(a.grips[0].hand as usize, base_len + 1);
+        // SK1c: the base is a mannequin and a mannequin now arrives with a grip
+        // catalogue, so this reads like its three siblings above rather than
+        // pinning the literal `1` an empty base used to give it.
+        assert_eq!(a.grips.len(), base.grips.len() + 1);
+        assert_eq!(a.grips.last().unwrap().hand as usize, base_len + 1);
+        assert_eq!(a.grips.last().unwrap().name, "tail");
+        // …and the base's own rows really are still there, unshifted, which the
+        // old literal could not have noticed either way.
+        assert_eq!(a.grips[..base.grips.len()], base.grips[..]);
         let last_twist = *a.twists.last().unwrap();
         assert_eq!(last_twist.joint as usize, base_len + 1);
         assert_eq!(last_twist.source as usize, base_len);

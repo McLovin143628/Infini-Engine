@@ -1537,8 +1537,14 @@ const RM_METRES: f32 = 1.0;
 ///   **is**: `authored_ik_goals` converts a world-space goal into model space
 ///   through the entity's own `GlobalTransform`, so one fixed step of skew in
 ///   that transform is one fixed step of skew in the solved pose.
-fn root_motion_character(
-) -> (AnimStateMachine, SkeletalMesh, AnimPlayer, RootMotion, IkTarget, Transform) {
+fn root_motion_character() -> (
+    AnimStateMachine,
+    SkeletalMesh,
+    AnimPlayer,
+    RootMotion,
+    IkTarget,
+    Transform,
+) {
     (
         AnimStateMachine {
             sm: Some(SM),
@@ -1666,7 +1672,8 @@ fn both_hosts_pose_a_root_motion_driven_character_the_same_way() {
         "step 0 published no pose — the fixture never reached a skeleton"
     );
     assert_ne!(
-        a[0].0, a[STEPS as usize - 1].0,
+        a[0].0,
+        a[STEPS as usize - 1].0,
         "the pose never changed over the whole trace"
     );
     let travelled = a[STEPS as usize - 1].1 - a[0].1;
@@ -1692,4 +1699,3 @@ fn both_hosts_pose_a_root_motion_driven_character_the_same_way() {
         );
     }
 }
-

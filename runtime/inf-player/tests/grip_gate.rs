@@ -34,8 +34,8 @@ use glam::DVec2;
 use uuid::Uuid;
 
 use inf_anim::{
-    AnimClip, BoneSide, GripAffordance, Interpolation, JointTrack, QuatTrack, SkeletonAsset,
-    SmState, SmTransition, StateMachine,
+    AnimClip, BoneSide, Interpolation, JointTrack, QuatTrack, SkeletonAsset, SmState, SmTransition,
+    StateMachine,
 };
 use inf_ecs::components::{AnimStateMachine, SkeletalMesh};
 use inf_ecs::math::Vec3d;
@@ -57,38 +57,18 @@ const IDLE: Uuid = Uuid::from_u128(0x5B10_0000_0000_0000_0000_0000_0000_0010);
 
 // ── the fixture ─────────────────────────────────────────────────────────────
 
-/// The 161-bone mannequin, with the three grips this gate takes.
+/// The 161-bone mannequin, **with the catalogue it now generates for itself**.
 ///
-/// Authored here rather than by a generator because a *grip catalogue* is
-/// content: what a rifle's fore-grip aperture is on a given character is an
-/// authoring decision, and the wave that ships one is not this one. The
-/// affordances are what a rig would carry.
+/// SK1b authored the four affordances here by hand and said why: a grip
+/// catalogue is content, and the wave that ships one was not that one. SK1c is,
+/// and the four numbers moved into `inf_anim::grip::grip_catalogue` unchanged —
+/// so every measurement this gate committed is the same measurement, and the
+/// thing that changed is who wrote the table. That is the point: the arms below
+/// now run against what a rig arrives with rather than against a fixture, and
+/// `a_generated_rig_is_the_catalogue_this_gate_takes` is what keeps the two the
+/// same.
 fn rig() -> SkeletonAsset {
-    let mut asset = inf_anim::build_manny(&inf_anim::BodyParams::default()).expect("a mannequin");
-    let hand = |side| {
-        asset
-            .role_index()
-            .first(inf_anim::BoneRoleKind::Hand, side)
-            .expect("a hand")
-    };
-    let (l, r) = (hand(BoneSide::Left), hand(BoneSide::Right));
-    let mut grips = Vec::new();
-    for (name, joint, aperture, curl) in [
-        // A door handle / a ladder rung: a 4.5 cm bar, thumb wrapped.
-        ("handle", r, 0.045, [0.9, 1.0, 1.0, 1.0, 1.0]),
-        // A rifle's pistol grip: thinner, and the trigger finger is NOT closed.
-        ("rifle", r, 0.032, [0.85, 0.0, 1.0, 1.0, 1.0]),
-        // Its fore-grip, in the other hand.
-        ("rifle_fore", l, 0.045, [0.8, 1.0, 1.0, 1.0, 1.0]),
-        // A thrown prop: a 9 cm ball, every finger on it.
-        ("prop", r, 0.09, [1.0, 1.0, 1.0, 1.0, 1.0]),
-    ] {
-        let mut g = GripAffordance::new(name, joint, aperture);
-        g.curl = curl;
-        grips.push(g);
-    }
-    asset.grips = grips;
-    asset
+    inf_anim::build_manny(&inf_anim::BodyParams::default()).expect("a mannequin")
 }
 
 /// A clip that holds one spine joint at a constant angle, so the machine poses
@@ -484,6 +464,60 @@ fn each_grip_closes_the_hand_by_its_own_aperture() {
             pose.locals[j as usize].rotation,
             inf_anim::Pose::rest(sk).locals[j as usize].rotation,
             "the trigger finger was curled by a grip that asks for zero curl on it"
+        );
+    }
+}
+
+/// **The catalogue this gate exercises is the one a rig arrives with** (SK1c).
+///
+/// The four affordances used to be authored in this file. They are generated
+/// now, and every measurement above is unchanged — which is a claim worth an arm
+/// rather than a sentence: if `grip_catalogue` ever moved an aperture, the
+/// aperture-ordering test would still pass (it asserts an *order*) and
+/// `pie_equals_shipping_over_a_grip_and_release` would still pass (it compares
+/// two hosts, and both would move together). The numbers are what the gate's
+/// committed readings rest on, so the numbers are pinned.
+#[test]
+fn a_generated_rig_is_the_catalogue_this_gate_takes() {
+    let rig = rig();
+    let roles = rig.role_index();
+    let hand = |side| {
+        roles
+            .first(inf_anim::BoneRoleKind::Hand, side)
+            .expect("a hand")
+    };
+    let want = [
+        (inf_anim::GRIP_HANDLE, hand(BoneSide::Right), 0.045f32),
+        (inf_anim::GRIP_RIFLE, hand(BoneSide::Right), 0.032),
+        (inf_anim::GRIP_RIFLE_FORE, hand(BoneSide::Left), 0.045),
+        (inf_anim::GRIP_PROP, hand(BoneSide::Right), 0.09),
+    ];
+    assert_eq!(rig.grips.len(), want.len(), "{:?}", rig.grips);
+    for (name, joint, aperture) in want {
+        let g = rig
+            .grips
+            .iter()
+            .find(|g| g.name == name)
+            .unwrap_or_else(|| panic!("the generated rig has no `{name}`"));
+        assert_eq!(g.hand, joint, "`{name}` is on the wrong hand");
+        assert_eq!(
+            g.aperture_m, aperture,
+            "`{name}`'s aperture moved — every closure this file prints was \
+             measured against the old one"
+        );
+    }
+    // …and the affordance every name in `plan` reaches really resolves, which is
+    // the silent failure `apply_hand_ik` has: a `HandGrip` naming a grip the rig
+    // does not carry writes nothing and reports nothing.
+    for name in [
+        inf_anim::GRIP_HANDLE,
+        inf_anim::GRIP_RIFLE,
+        inf_anim::GRIP_RIFLE_FORE,
+        inf_anim::GRIP_PROP,
+    ] {
+        assert!(
+            rig.grips.iter().any(|g| g.name == name),
+            "the plan names `{name}` and the rig does not carry it"
         );
     }
 }
