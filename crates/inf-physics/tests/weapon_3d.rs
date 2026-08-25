@@ -167,6 +167,11 @@ fn spawn_wall(w: &mut EcsWorld, z: f64) {
 const SM: Uuid = Uuid::from_u128(0x1601_0010);
 const SKEL: Uuid = Uuid::from_u128(0x1601_0011);
 
+/// The thing with a handle on it (SK1c audit), and where it is — in front of
+/// the hero, at about the height a door handle sits.
+const HANDLE: Uuid = Uuid::from_u128(0x1601_0012);
+const HANDLE_AT: DVec3 = DVec3::new(0.0, 1.1, 0.9);
+
 struct Rig {
     world: EcsWorld,
     bridge: PhysicsBridge3D,
@@ -333,6 +338,57 @@ impl Rig {
             .expect("a movement component")
             .mode
     }
+
+    /// **Put a thing with a handle on it in front of the hero** (SK1c audit).
+    ///
+    /// `InteractVerb::Grab` deliberately: it is the one verb `step_one` does not
+    /// consume, so what this fixture measures is the *hand*, with no door
+    /// swinging and no item leaving the floor to confuse it.
+    fn handle(&mut self) {
+        let e = self.world.spawn_with_guid(HANDLE, "Handle", None);
+        self.world.world_mut().entity_mut(e).insert((
+            Transform::from_translation(HANDLE_AT),
+            inf_ecs::interact::Interactable {
+                verb: inf_ecs::interact::InteractVerb::Grab,
+                label: "handle".into(),
+                grip: Some(inf_anim::GRIP_HANDLE.to_string()),
+                ..Default::default()
+            },
+        ));
+        self.world.reindex_guids();
+        self.world.mark_dirty();
+        self.world.propagate();
+    }
+
+    /// Fingertip-to-wrist span for `[left, right]`, metres — the aperture a
+    /// closed hand shortens, measured off the pose the fixed step published.
+    fn spans(&self) -> [f64; 2] {
+        let asset = self.skeleton.as_ref().expect("a rigged hero");
+        let ep = inf_ecs::pose::evaluated_pose(&self.world, HERO).expect("a pose");
+        let g = inf_anim::global_transforms(&asset.skeleton, &ep.pose);
+        let at = |n: &str| {
+            let i = asset.skeleton.index_of(n).expect(n) as usize;
+            let p = g[i].to_scale_rotation_translation().2;
+            DVec3::new(p.x as f64, p.y as f64, p.z as f64)
+        };
+        [
+            (at("middle_03_l") - at("hand_l")).length(),
+            (at("middle_03_r") - at("hand_r")).length(),
+        ]
+    }
+
+    /// Where `[left, right]` wrist is, world metres.
+    fn wrists(&self) -> [DVec3; 2] {
+        let asset = self.skeleton.as_ref().expect("a rigged hero");
+        let ep = inf_ecs::pose::evaluated_pose(&self.world, HERO).expect("a pose");
+        let g = inf_anim::global_transforms(&asset.skeleton, &ep.pose);
+        let at = |n: &str| {
+            let i = asset.skeleton.index_of(n).expect(n) as usize;
+            let p = g[i].to_scale_rotation_translation().2;
+            DVec3::new(p.x as f64, p.y as f64, p.z as f64)
+        };
+        [at("hand_l"), at("hand_r")]
+    }
 }
 
 fn idle() -> MovementIntent {
@@ -364,6 +420,13 @@ fn aim() -> MovementIntent {
 fn press_reload() -> MovementIntent {
     MovementIntent {
         reload: true,
+        ..Default::default()
+    }
+}
+
+fn press_interact() -> MovementIntent {
+    MovementIntent {
+        interact: true,
         ..Default::default()
     }
 }
@@ -966,4 +1029,130 @@ fn a_rigged_hero_shoots_from_its_weapon_and_says_so_when_it_cannot() {
             );
         }
     }
+}
+
+/// **AN ARMED CHARACTER GRABS WITH ITS FREE HAND — and that hand is the one
+/// whose fingers close** (SK1c audit, H1).
+///
+/// # The sentence this arm exists to make true
+///
+/// SK1c's hand pass writes down one precedence rule — *the weapon owns the hand
+/// it is in and a grab takes the other one*, so "a character reaching for a door
+/// handle with a rifle in its right hand reaches with its left". Neither half of
+/// that happened, and no arm in the tree ran the two together: `weapon_hands_gate`
+/// unequips ten steps before it presses E, so its grab is always an unarmed one.
+///
+/// Two independent defects, both measured on this fixture before the fix:
+///
+/// * `apply_hand_ik` resolved a grip to the hand the **affordance** names, and
+///   `grip_catalogue` authors `handle` on the RIGHT hand — so the left slot's
+///   `handle` closed the right hand, which the `rifle` grip in slot 1 then
+///   overwrote. The reaching hand's fingers never moved (fingertip-to-wrist
+///   **0.1839 m**, a fully open hand) and the off hand sprang open out of its
+///   fore-grip (**0.0957 → 0.1839 m**);
+/// * the `GunGrip` off-hand solve runs *after* the reaches inside
+///   `apply_hand_ik`, and ran unconditionally — so it overwrote the grab's reach
+///   every step and the left wrist stayed exactly where the fore-grip put it,
+///   to the bit.
+///
+/// So the only observable effect of pressing E while armed was the support hand
+/// letting go of the weapon, while `GameplayReport::hands.1` counted a grab.
+///
+/// # What is asserted
+///
+/// The armed grab is measured against the **unarmed** one, because "the left
+/// hand closed" says nothing on its own: the claim is that the free hand does
+/// what the unarmed hand does, and that the holding hand is undisturbed.
+#[test]
+fn an_armed_character_grabs_with_its_free_hand() {
+    // -- the control: unarmed, so the grab is in the RIGHT hand --
+    let mut bare = Rig::new();
+    bare.rig_the_hero(d3::gameplay::WEAPON_SOCKET);
+    bare.handle();
+    bare.steps(&idle(), 2);
+    let r = bare.step(&press_interact());
+    assert_eq!(r.hands, (0, 1), "an unarmed press asked for no grab");
+    bare.steps(&idle(), 8);
+    let unarmed = bare.spans();
+    assert!(
+        unarmed[1] < unarmed[0] * 0.9,
+        "the unarmed hero's right hand did not close on the handle: {unarmed:?}"
+    );
+
+    // -- armed: the rifle stays in the right hand and the LEFT one grabs --
+    let mut rig = Rig::new();
+    rig.rig_the_hero(d3::gameplay::WEAPON_SOCKET);
+    rig.handle();
+    rig.arm("rifle");
+    rig.steps(&idle(), 2);
+    let held = rig.spans();
+    let held_wrist = rig.wrists();
+    assert!(
+        held[0] < 0.9 * unarmed[0] && held[1] < 0.9 * unarmed[1],
+        "an armed hero should hold the weapon with BOTH hands: {held:?}"
+    );
+
+    let r = rig.step(&press_interact());
+    assert_eq!(
+        r.hands,
+        (1, 1),
+        "an armed press should be counted as a hold AND a grab"
+    );
+    rig.steps(&idle(), 8);
+    let grabbing = rig.spans();
+    let grabbing_wrist = rig.wrists();
+    println!(
+        "ARMED GRAB: spans held {held:?} -> grabbing {grabbing:?} (unarmed {unarmed:?}); \
+         left wrist {held_wrist:?} -> {grabbing_wrist:?}, handle at {HANDLE_AT:?}"
+    );
+
+    // 1. THE LEFT ARM MOVED, and it moved TOWARDS the handle. Measured against
+    //    where the fore-grip had it, so a pass that simply did nothing fails.
+    let was = (held_wrist[0] - HANDLE_AT).length();
+    let now = (grabbing_wrist[0] - HANDLE_AT).length();
+    assert!(
+        now < was - 0.1,
+        "the left wrist did not reach for the handle: {was:.4} m away, then \
+         {now:.4} m — the gun solve is overwriting the grab's reach"
+    );
+
+    // 2. THE LEFT HAND CLOSED ON THE HANDLE, to the same aperture the unarmed
+    //    hero's hand closes to. A right-handed affordance in the left slot used
+    //    to leave this hand fully open.
+    assert!(
+        (grabbing[0] - unarmed[1]).abs() < 1.0e-6,
+        "the free hand did not take the handle the way an unarmed one does: \
+         {:.4} against {:.4}",
+        grabbing[0],
+        unarmed[1]
+    );
+
+    // 3. THE RIGHT HAND IS UNDISTURBED — still on the rifle, to the bit. The
+    //    grab must not reach into the hand the weapon owns.
+    assert!(
+        (grabbing[1] - held[1]).abs() < 1.0e-12,
+        "the grab moved the hand holding the weapon: {:.6} against {:.6}",
+        grabbing[1],
+        held[1]
+    );
+    assert!(
+        (grabbing_wrist[1] - held_wrist[1]).length() < 1.0e-12,
+        "the grab moved the weapon hand's wrist"
+    );
+
+    // 4. …and it LETS GO: once the grab has aged out, the off hand is back on
+    //    the fore-grip, byte-identical to where it was before the press. The
+    //    claim `apply_grip`'s "a curl is a pose, not a delta" rests on, met at
+    //    the composition level rather than at the solver's.
+    rig.steps(&idle(), 70);
+    assert!(
+        inf_ecs::interact::hand_grab(&rig.world, HERO).is_none(),
+        "the grab never aged out"
+    );
+    let after = rig.spans();
+    assert!(
+        (after[0] - held[0]).abs() < 1.0e-12 && (after[1] - held[1]).abs() < 1.0e-12,
+        "the hands did not go back on the weapon after the grab: {after:?} \
+         against {held:?}"
+    );
 }

@@ -397,13 +397,22 @@ const SHOULDER_OF_HEIGHT: f64 = 0.82;
 /// door handle with a rifle in its right hand reaches with its left, which is
 /// what a person does.
 ///
+/// **The off hand is on loan** (SK1c audit, H1). The weapon owns the hand it is
+/// *in*; the other one is supporting it, and a grab takes it back — so while a
+/// grab is live the `GunGrip` hold is weighted by its complement and the
+/// `rifle_fore` grip is not asked for at all. Without that the gun solve, which
+/// runs *after* the reaches inside `apply_hand_ik`, overwrote the grab's reach
+/// every step: an armed character's E-press moved neither wrist and the only
+/// thing it did was spring the support hand open.
+///
 /// # What each half asks for
 ///
 /// * **A weapon** puts a [`GunGrip`] hold on the rig — the `ik_hand_gun` path,
 ///   whose whole purpose is that the off hand is carried *by the weapon* rather
 ///   than aimed at a point in space — and closes both hands on their own
-///   affordances (`rifle` in the holding hand, `rifle_fore` in the other; the
-///   trigger finger is left straight by the catalogue, not by this code).
+///   affordances (`rifle` in the holding hand, `rifle_fore` in the other unless a
+///   grab has taken it; the trigger finger is left straight by the catalogue, not
+///   by this code).
 /// * **Aiming** adds a reach for the holding hand, and only then. A weapon at
 ///   rest hangs where the animation puts it; RMB brings it up to a point on the
 ///   aim line at shoulder height, which is the difference between carrying a
@@ -427,24 +436,48 @@ fn step_hand_ik(world: &mut EcsWorld, dt: f64) -> (u32, u32) {
     for guid in gunners(world) {
         let mut req = HandIk::default();
 
+        // **The grab is read FIRST**, because it decides whether the off hand is
+        // still on the weapon (SK1c audit, H1). A live grab is one with a
+        // non-zero amount; a finished one is removed by `step_grabs` above.
+        let grab = inf_ecs::interact::hand_grab(world, guid)
+            .map(|g| (g.amount(), g.at, g.grip.clone()))
+            .filter(|(amount, _, _)| *amount > 0.0);
+
         // -- the weapon --
         let armed = equipped_weapon(world, guid);
         if let Some((_, def)) = armed.as_ref() {
-            let holding = inf_anim::BoneSide::Right;
-            req.gun = Some(GunGrip {
-                holding,
-                off_hand_offset: [0.0, 0.0, fore_grip_m(def)],
-                weight: 1.0,
-            });
             req.grip[1] = Some(HandGrip {
                 name: inf_anim::GRIP_RIFLE.to_string(),
                 amount: 1.0,
             });
-            req.grip[0] = Some(HandGrip {
-                name: inf_anim::GRIP_RIFLE_FORE.to_string(),
-                amount: 1.0,
-            });
             holds += 1;
+            // **The off hand is on LOAN from the weapon, and a grab takes it
+            // back.** The weapon owns the hand it is *in* — the right one, the
+            // one `WEAPON_SOCKET` hangs off — and the other is merely supporting
+            // it, which is the hand a person takes off a rifle to open a door.
+            //
+            // The gun hold's weight is the complement of the grab's, so the arm
+            // crosses over continuously instead of snapping between the
+            // fore-grip and the handle on the step the grab starts and the step
+            // it ends. At `amount == 1` the hold is weightless and
+            // `apply_hand_ik` skips the off-hand solve entirely.
+            //
+            // Before this, the `GunGrip` solve ran unconditionally and — because
+            // it runs AFTER the reaches inside `apply_hand_ik` — overwrote the
+            // grab's reach every step: an armed character's E-press moved
+            // neither wrist by a single millimetre while `hands.1` counted it.
+            let amount = grab.as_ref().map(|(a, _, _)| *a).unwrap_or(0.0);
+            req.gun = Some(GunGrip {
+                holding: inf_anim::BoneSide::Right,
+                off_hand_offset: [0.0, 0.0, fore_grip_m(def)],
+                weight: 1.0 - amount,
+            });
+            if grab.is_none() {
+                req.grip[0] = Some(HandGrip {
+                    name: inf_anim::GRIP_RIFLE_FORE.to_string(),
+                    amount: 1.0,
+                });
+            }
             // -- and the aim, which is what MOVES it --
             if let Some(target) = aim_hold_point(world, guid) {
                 req.reach[1] = Some(HandReach {
@@ -455,22 +488,26 @@ fn step_hand_ik(world: &mut EcsWorld, dt: f64) -> (u32, u32) {
         }
 
         // -- the grab, in whichever hand is free --
-        if let Some(grab) = inf_ecs::interact::hand_grab(world, guid) {
-            let amount = grab.amount();
-            let at = grab.at;
-            let grip = grab.grip.clone();
-            if amount > 0.0 {
-                // The weapon is in the right hand, so a grab goes to the left;
-                // an unarmed character reaches with its right, which is the hand
-                // every affordance in a default catalogue but `rifle_fore` is on.
-                let side = usize::from(armed.is_none());
-                req.reach[side] = Some(HandReach {
-                    target: at,
-                    weight: amount,
-                });
-                req.grip[side] = Some(HandGrip { name: grip, amount });
-                grabs += 1;
-            }
+        if let Some((amount, at, grip)) = grab {
+            // The weapon is in the right hand, so a grab goes to the left; an
+            // unarmed character reaches with its right, which is the hand every
+            // affordance in a default catalogue but `rifle_fore` is on. The
+            // *slot* is what decides which hand closes — `apply_hand_ik` reads
+            // it, and the affordance supplies the aperture and the curl set.
+            //
+            // **Honest bound**: the off hand's fingers do not cross-fade. They
+            // let go of the fore-grip on the step the grab begins and close on
+            // the new affordance over its ease, because one slot carries one
+            // grip. A hand releasing a weapon before it takes hold of something
+            // else is the right picture; doing it in one fixed step is the
+            // approximation.
+            let side = usize::from(armed.is_none());
+            req.reach[side] = Some(HandReach {
+                target: at,
+                weight: amount,
+            });
+            req.grip[side] = Some(HandGrip { name: grip, amount });
+            grabs += 1;
         }
 
         inf_ecs::pose::set_hand_ik(world, guid, req);

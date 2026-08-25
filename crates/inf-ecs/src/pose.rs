@@ -1916,10 +1916,32 @@ fn apply_hand_ik(
         let Some(affordance) = rig.grips.iter().find(|g| g.name == grip.name) else {
             continue;
         };
-        // The hand the affordance names, not the hand the array index implies: a
-        // rig authors one affordance per hand, and the affordance's own `hand`
-        // field is the authoritative answer to which one this is.
-        let Some(hand) = inf_anim::hand_of(skeleton, roles, affordance.hand) else {
+        // **The hand the REQUEST'S SLOT names** (SK1c audit, H1), with the
+        // affordance's own `hand` as the fallback for a rig that has no hand on
+        // that side.
+        //
+        // It used to be the affordance's `hand` unconditionally, on the reading
+        // that "a rig authors one affordance per hand, so the affordance is the
+        // authoritative answer". That reading is true of the *catalogue* and
+        // false of the *request*: `grip_catalogue` authors `handle`, `rifle` and
+        // `prop` on the RIGHT hand and only `rifle_fore` on the left, so an
+        // armed character reaching for a door handle with its free LEFT hand
+        // asked for `handle` in slot 0 and closed its RIGHT hand — the one
+        // already holding the rifle — and then had that overwritten by the
+        // `rifle` grip in slot 1. Measured: the reaching hand's fingers never
+        // moved, and the off hand sprang open (fingertip-to-wrist 0.0957 m to
+        // 0.1839 m, which is a fully open hand).
+        //
+        // The array index IS the request's statement about which hand this is;
+        // the affordance supplies the aperture and the curl set, which is what
+        // "a `GripAffordance` is a property of the hand" actually means. Every
+        // request in the tree pairs the two (rifle/right, rifle_fore/left,
+        // handle and prop in the free hand), so this moves no committed byte —
+        // `grip_gate` and `weapon_hands_gate` are byte-green across it.
+        let joint = roles
+            .first(inf_anim::BoneRoleKind::Hand, sides[side])
+            .unwrap_or(affordance.hand);
+        let Some(hand) = inf_anim::hand_of(skeleton, roles, joint) else {
             continue;
         };
         report.grip[side] =
@@ -4341,6 +4363,97 @@ mod tests {
         assert_eq!(
             released.pose.locals, open.pose.locals,
             "a released hand did not return to the open pose"
+        );
+    }
+
+    /// **A grip closes the hand its SLOT names, not the hand its affordance
+    /// was authored on** (SK1c audit, H1).
+    ///
+    /// `grip_catalogue` authors `handle`, `rifle` and `prop` on the right hand
+    /// and only `rifle_fore` on the left — because a catalogue says what a hand
+    /// *can do* and a default rig has one of each. So the first production
+    /// caller that put a right-handed affordance in the **left** slot (an armed
+    /// character reaching for a door handle with its free hand) closed the wrong
+    /// hand: the one already holding the rifle, which then had that overwritten
+    /// by the `rifle` grip in slot 1, so the reaching hand's fingers never moved
+    /// at all.
+    ///
+    /// The array index is the request's statement about which hand this is; the
+    /// affordance supplies the aperture and the curl set. Asserted **both ways
+    /// round on the same affordance**, because "the left hand closed" is
+    /// satisfied by a rule that always closes the left one.
+    #[test]
+    fn a_grip_closes_the_hand_its_slot_names() {
+        let guid = Uuid::from_u128(0x5B_000A);
+        let rig = mannequin_rig();
+        let tips = [
+            rig.skeleton.index_of("middle_03_l").expect("a fingertip"),
+            rig.skeleton.index_of("middle_03_r").expect("a fingertip"),
+        ];
+        let wrists = [
+            rig.skeleton.index_of("hand_l").expect("a wrist"),
+            rig.skeleton.index_of("hand_r").expect("a wrist"),
+        ];
+
+        // The affordance is `handle`, which the catalogue puts on the RIGHT hand
+        // — asserted here rather than assumed, because the whole point of this
+        // arm is that the slot disagrees with it.
+        let handle = rig
+            .grips
+            .iter()
+            .find(|g| g.name == inf_anim::GRIP_HANDLE)
+            .expect("a generated catalogue carries `handle`");
+        assert_eq!(
+            handle.hand, wrists[1],
+            "`handle` is no longer a right-hand affordance, so this arm no \
+             longer exercises the disagreement it exists for"
+        );
+
+        let mut open_span = [0.0f32; 2];
+        for slot in [0usize, 1] {
+            let mut world = world_with_mannequin(guid);
+            step_mannequin(&mut world, &rig, 0.1);
+            let open = evaluated_pose(&world, guid).expect("a pose").clone();
+            let span = |p: &EvaluatedPose, s: usize| {
+                (joint_at(p, &rig, tips[s]) - joint_at(p, &rig, wrists[s])).length()
+            };
+            open_span = [span(&open, 0), span(&open, 1)];
+
+            let mut req = HandIk::default();
+            req.grip[slot] = Some(HandGrip {
+                name: inf_anim::GRIP_HANDLE.into(),
+                amount: 1.0,
+            });
+            set_hand_ik(&mut world, guid, req);
+            step_mannequin(&mut world, &rig, 0.1);
+            let closed = evaluated_pose(&world, guid).expect("a pose").clone();
+            let now = [span(&closed, 0), span(&closed, 1)];
+            let other = 1 - slot;
+            println!(
+                "slot {slot}: L {:.4} -> {:.4}, R {:.4} -> {:.4}",
+                open_span[0], now[0], open_span[1], now[1]
+            );
+            assert!(
+                now[slot] < open_span[slot] * 0.9,
+                "the hand the request named did not close: {:.4} against {:.4}",
+                now[slot],
+                open_span[slot]
+            );
+            assert!(
+                (now[other] - open_span[other]).abs() < 1e-6,
+                "the OTHER hand moved — a right-handed affordance in the left \
+                 slot is closing the right hand"
+            );
+            let report = hand_ik_report(&world, guid).expect("a verdict");
+            assert!(report.grip[slot].joints >= 15, "{:?}", report.grip[slot]);
+            assert_eq!(report.grip[other].joints, 0);
+        }
+        // ANTI-VACUITY: a mannequin's two hands really are mirror images, so
+        // "the left closed" and "the right closed" are the same measurement made
+        // on two different bones rather than one bone measured twice.
+        assert!(
+            (open_span[0] - open_span[1]).abs() < 1e-6,
+            "the two hands do not start the same shape: {open_span:?}"
         );
     }
 
