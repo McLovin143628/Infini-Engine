@@ -124,7 +124,7 @@ pub use foot::{
     TRACE_BELOW_M,
 };
 pub use grip::{
-    apply_grip, arm_chain, digit_closure, elbow_pole, hand_of, hands_of, knee_pole, Digit,
+    apply_grip, arm_chain, digit_closure, elbow_pole, hand_of, hands_of, knee_pole, reach, Digit,
     FingerChain, GripReport, Hand, FINGER_FLEX_DEG, FINGER_TWIST_DEG, THUMB_FLEX_DEG,
 };
 pub use hair::{

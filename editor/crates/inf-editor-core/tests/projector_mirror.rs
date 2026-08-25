@@ -2102,7 +2102,7 @@ fn every_pose_writer_runs_in_its_frozen_order() {
     let body = &body[..end];
     // The sequence, in the order each pass writes into the pose. A pass deleted
     // fails at its own `expect`; a pass MOVED fails the ordering assertion.
-    const WRITERS: [(&str, &str); 6] = [
+    const WRITERS: [(&str, &str); 8] = [
         (
             "pending_pose = Some(pose);",
             "the machine + the layer stack + the inertializer produce the pose",
@@ -2122,6 +2122,14 @@ fn every_pose_writer_runs_in_its_frozen_order() {
         (
             "apply_foot_ik(asset,",
             "P29.4: foot IK, over the same solver",
+        ),
+        (
+            "apply_hand_ik(asset,",
+            "SK1b: the arms that reach, the off hand the weapon carries, and the fingers that close — after the feet, because a stance is decided by the ground and a hand solves against the body that stance produced",
+        ),
+        (
+            "redrive(asset,",
+            "SK1b: the CORRECTION re-drive, which closes SK1a's stated ordering bound — a twist bone is a statement about the pose that is finally published, so it is computed from the corrected one and not from the authored one. It is a named fn precisely so this pin can see it: a second `inf_anim::drive_pose(` would be the same needle as the first",
         ),
         (
             "foot_states(asset,",

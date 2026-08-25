@@ -310,7 +310,8 @@ fn clamp_to_limit(local: Quat, bind: Quat, limit: &JointLimit) -> (Quat, bool) {
             axis_idx = Some(a);
         }
     }
-    let mut axis = glam::DVec3::ZERO;
+    use glam::DVec3;
+    let mut axis = DVec3::ZERO;
     // A fully locked limit (no free axis) pins the joint to its bind pose, which
     // is the coherent reading of "this joint may not rotate": the twist below is
     // then clamped to the empty range [0, 0] about an arbitrary axis and the
@@ -319,7 +320,7 @@ fn clamp_to_limit(local: Quat, bind: Quat, limit: &JointLimit) -> (Quat, bool) {
     axis[a] = 1.0;
 
     let delta = (bind.inverse() * local).normalize();
-    let d = glam::DVec3::new(delta.x as f64, delta.y as f64, delta.z as f64);
+    let d = DVec3::new(delta.x as f64, delta.y as f64, delta.z as f64);
     let along = d.dot(axis);
     // Signed twist about `axis`: q = (axis·sin(θ/2), cos(θ/2)), so
     // θ = 2·atan2(q.xyz·axis, q.w) — and `patan2_64` handles the (0, 0) case as
@@ -352,9 +353,24 @@ fn clamp_to_limit(local: Quat, bind: Quat, limit: &JointLimit) -> (Quat, bool) {
     .normalize();
     let out = (bind * twist).normalize();
     // "Moved" is measured on the ANGLE, not on the quaternion: the rebuild is not
-    // bit-exact even for an in-range joint (see `CLAMP_EPSILON_RAD`), and the
-    // swing this discards is zero for the hinge poses the solver produces.
-    let moved = (clamped_angle - angle).abs() > CLAMP_EPSILON_RAD;
+    // bit-exact even for an in-range joint (see `CLAMP_EPSILON_RAD`).
+    //
+    // **And on the swing this discards** (SK1b). The sentence that used to stand
+    // here said the discarded swing "is zero for the hinge poses the solver
+    // produces" — a claim about the solver rather than about this function, and
+    // measured false the first time an arm was solved through it: a mannequin
+    // elbow carrying P24.1's `hinge_x` had its ENTIRE 86.7 deg bend discarded as
+    // swing, the twist about X was zero before and after, and `IkReport::clamped`
+    // reported **0** while the limit moved that wrist 0.484 m. A clamp that
+    // erases a joint's rotation and does not count it is the exact shape the SK1a
+    // audit's first decision is about.
+    let swing = DVec3::new(
+        d.x - along * axis.x,
+        d.y - along * axis.y,
+        d.z - along * axis.z,
+    );
+    let moved =
+        (clamped_angle - angle).abs() > CLAMP_EPSILON_RAD || swing.length() > CLAMP_EPSILON_RAD;
     (out, moved)
 }
 

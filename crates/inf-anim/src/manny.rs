@@ -1622,14 +1622,23 @@ pub fn build_manny(params: &BodyParams) -> Result<SkeletonAsset, TemplateError> 
         .filter_map(|(name, joint)| index_of(joint).map(|j| Socket::new(*name, j)))
         .collect();
     let mut limits: Vec<JointLimit> = Vec::with_capacity(4);
+    // **The elbows hinge about Y and the knees about X**, and the difference is
+    // this rig's own bind pose: a leg runs down `−Y` so its bend axis is `X`, and
+    // a T-posed arm runs out along `±X` so its bend axis is `Y`. See
+    // `JointLimit::hinge_y` for the measurement that found it, and for how long an
+    // elbow "hinge" about the forearm's own roll axis had been straightening arms
+    // rather than limiting them. The elbow ranges are mirrored; a knee's are not.
     for (name, range) in [
-        ("lowerarm_l", ELBOW_RANGE_DEG),
-        ("lowerarm_r", ELBOW_RANGE_DEG),
-        ("calf_l", KNEE_RANGE_DEG),
-        ("calf_r", KNEE_RANGE_DEG),
+        ("lowerarm_l", (ELBOW_RANGE_DEG.0, ELBOW_RANGE_DEG.1)),
+        ("lowerarm_r", (-ELBOW_RANGE_DEG.1, -ELBOW_RANGE_DEG.0)),
     ] {
         if let Some(j) = index_of(name) {
-            limits.push(JointLimit::hinge_x(j, range.0, range.1));
+            limits.push(JointLimit::hinge_y(j, range.0, range.1));
+        }
+    }
+    for name in ["calf_l", "calf_r"] {
+        if let Some(j) = index_of(name) {
+            limits.push(JointLimit::hinge_x(j, KNEE_RANGE_DEG.0, KNEE_RANGE_DEG.1));
         }
     }
     // ── SK1b: a swing-twist cone on every finger bone ──
@@ -2213,10 +2222,37 @@ mod tests {
             ["lowerarm_l", "lowerarm_r", "calf_l", "calf_r"],
             "the hinge set moved"
         );
-        let elbow = sk.index_of("lowerarm_r").unwrap();
-        let l = asset.limits.iter().find(|l| l.joint == elbow).unwrap();
-        assert!(l.is_free(0) && !l.is_free(1) && !l.is_free(2));
-        assert!(l.cone.is_none(), "no cone is authored on a hinge");
+        // **The elbows hinge about Y and the knees about X** — the SK1b
+        // correction. An elbow hinged about X on a T-posed arm names the
+        // forearm's own roll axis and straightens the arm instead of limiting it
+        // (0.484 m of missed reach, measured); the knees are unaffected, because
+        // a leg runs down `-Y`.
+        for (name, free, mirrored) in [
+            ("lowerarm_l", 1usize, false),
+            ("lowerarm_r", 1, true),
+            ("calf_l", 0, true),
+            ("calf_r", 0, true),
+        ] {
+            let j = sk.index_of(name).unwrap();
+            let l = asset.limits.iter().find(|l| l.joint == j).unwrap();
+            for a in 0..3 {
+                assert_eq!(
+                    l.is_free(a),
+                    a == free,
+                    "{name}: axis {a} freedom is wrong — a hinge has exactly one"
+                );
+            }
+            // Which SIDE of zero the range sits on decides which way the joint
+            // folds, and an elbow's is mirrored while a knee's is not.
+            assert_eq!(
+                l.min_deg[free] < 0.0,
+                mirrored,
+                "{name}: the range is on the wrong side of zero ({:?}..{:?})",
+                l.min_deg[free],
+                l.max_deg[free]
+            );
+            assert!(l.cone.is_none(), "{name}: no cone is authored on a hinge");
+        }
 
         // The cones are EXACTLY the digit bones — every one of them, and nothing
         // else. Mutation: dropping the `Kind::Thumb` arm of the emitter leaves

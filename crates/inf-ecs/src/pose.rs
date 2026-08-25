@@ -362,6 +362,186 @@ pub fn ik_reach_error(world: &EcsWorld, guid: Uuid) -> f32 {
         .unwrap_or(0.0)
 }
 
+// ── SK1b: hands ─────────────────────────────────────────────────────────────
+
+/// **Where one hand must go**, world metres.
+///
+/// World and not model space, unlike [`IkGoal`], and the difference is what the
+/// two are for: an authored `IkTarget` is a statement about a character's own
+/// body, and a *hand* reaches for something in the level — a ladder rung, a door
+/// handle, the fore-grip of the rifle it is holding. The conversion happens once,
+/// inside the step, through the same `model_to_world` door the feet go through,
+/// so a character standing on a rotated platform reaches correctly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HandReach {
+    /// Where the wrist must land (world metres).
+    pub target: Vec3d,
+    /// How much of the solve to apply, `0..=1`. Zero writes nothing at all.
+    pub weight: f32,
+}
+
+/// **A two-handed weapon's hold** (SK1b) — the `ik_hand_gun` convention.
+///
+/// One hand holds the weapon; the other is *carried by* the weapon and must land
+/// on its fore-grip wherever the first hand puts it. UE's rig publishes exactly
+/// one bone for that job — `ik_hand_gun`, which [`inf_anim::manny`] follows the
+/// right hand with — and every ALS animation is authored against it.
+///
+/// The offset is in the holding hand's frame, so it describes the *weapon*: a
+/// rifle's fore-grip is 30 cm along the barrel from the pistol grip whichever way
+/// the character is facing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GunGrip {
+    /// Which hand holds the weapon. The other one follows.
+    pub holding: inf_anim::BoneSide,
+    /// Where the off hand sits, in the holding hand's own frame, metres.
+    pub off_hand_offset: [f32; 3],
+    /// How much of the off-hand solve to apply, `0..=1`.
+    pub weight: f32,
+}
+
+/// **Which grip a hand is closed on**, and how far into it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandGrip {
+    /// The [`inf_anim::GripAffordance`] this hand is conforming to, by name.
+    pub name: String,
+    /// `0` is an open hand and `1` is the grip fully taken. A release is this
+    /// number falling, and at zero the fingers pose exactly the bytes an
+    /// ungripped hand does.
+    pub amount: f32,
+}
+
+/// **One character's hand request** for this fixed step, `[left, right]`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HandIk {
+    /// Where each hand must reach. `None` leaves that arm to the animation.
+    pub reach: [Option<HandReach>; 2],
+    /// A two-handed hold, if there is one — see [`GunGrip`].
+    pub gun: Option<GunGrip>,
+    /// What each hand is gripping.
+    pub grip: [Option<HandGrip>; 2],
+}
+
+impl HandIk {
+    /// Whether this request asks for anything at all. A request that does not is
+    /// the same as no request, and both cost nothing.
+    pub fn is_empty(&self) -> bool {
+        self.reach.iter().all(Option::is_none)
+            && self.gun.is_none()
+            && self.grip.iter().all(Option::is_none)
+    }
+
+    /// `[left, right]` index for a side — the array order every field here uses.
+    pub fn side_index(side: inf_anim::BoneSide) -> Option<usize> {
+        match side {
+            inf_anim::BoneSide::Left => Some(0),
+            inf_anim::BoneSide::Right => Some(1),
+            inf_anim::BoneSide::Center => None,
+        }
+    }
+}
+
+/// What one step's hand pass did — the engagement counters a gate reads.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HandIkReport {
+    /// Each arm's solve verdict, `[left, right]`.
+    pub reach: [Option<IkOutcome>; 2],
+    /// The off hand's solve verdict, when a [`GunGrip`] was asked for.
+    pub gun: Option<IkOutcome>,
+    /// Each hand's curl, `[left, right]`.
+    pub grip: [inf_anim::GripReport; 2],
+    /// Bones the **correction re-drive** rewrote after the solves — see
+    /// [`step_pose_evaluation`]'s writer list for why it runs at all.
+    pub redriven: usize,
+}
+
+impl HandIkReport {
+    /// Whether this pass **wrote a pose**, as opposed to merely running.
+    ///
+    /// A refusal is a value here, so "the request was there" and "a bone moved"
+    /// are different facts, and the correction re-drive is gated on the second
+    /// one — the SK1a audit's first decision, at the pass that inherits it.
+    pub fn wrote(&self) -> bool {
+        self.reach
+            .iter()
+            .chain(std::iter::once(&self.gun))
+            .any(|o| matches!(o, Some(IkOutcome::Solved(_))))
+            || self.grip.iter().any(|g| g.joints > 0)
+    }
+}
+
+/// **Every character's hand request**, keyed by [`Guid`] — a bevy resource, for
+/// exactly [`IkTargetsRes`]'s reasons.
+///
+/// **No schema moves.** SK1a's ruling for this wave was one `.inf_skel` bump and
+/// nothing else, and a hand request is session state by nature: what a character
+/// is holding this step is not a property of the author's document, the way an
+/// `IkTarget` gizmo is. It is the [`crate::deform::DeformFieldRes`] doctrine —
+/// written only from the fixed step's inputs, never saved — and it means both
+/// hosts inherit hand IK with no host-side change at all, because
+/// [`step_pose_evaluation`] is the only thing that reads it.
+///
+/// **Absent until something asks.** A level that grips nothing has no resource,
+/// takes one map probe per posed character, and poses exactly the bytes SK1a did.
+#[derive(Resource, Default, Debug, Clone, PartialEq)]
+pub struct HandIkRes {
+    /// The requests, by entity.
+    pub hands: BTreeMap<Uuid, HandIk>,
+    /// What the last fixed step's hand pass did, by entity. Rebuilt from scratch
+    /// each step, so a stale verdict cannot outlive the request that produced it.
+    pub last: BTreeMap<Uuid, HandIkReport>,
+}
+
+/// **The write door.** Set (or replace) a character's hand request.
+///
+/// An empty request removes the entry and emptying the last one removes the
+/// resource, so "no hands" has exactly one representation — [`set_ik_goals`]'s
+/// rule, for its reason.
+pub fn set_hand_ik(world: &mut EcsWorld, guid: Uuid, hands: HandIk) {
+    let w = world.world_mut();
+    if hands.is_empty() {
+        let empty = match w.get_resource_mut::<HandIkRes>() {
+            Some(mut res) => {
+                res.hands.remove(&guid);
+                res.last.remove(&guid);
+                res.hands.is_empty()
+            }
+            None => return,
+        };
+        if empty {
+            w.remove_resource::<HandIkRes>();
+        }
+        return;
+    }
+    if !w.contains_resource::<HandIkRes>() {
+        w.insert_resource(HandIkRes::default());
+    }
+    w.resource_mut::<HandIkRes>().hands.insert(guid, hands);
+}
+
+/// The hand request set for `guid`, if any.
+pub fn hand_ik(world: &EcsWorld, guid: Uuid) -> Option<&HandIk> {
+    world
+        .world()
+        .get_resource::<HandIkRes>()
+        .and_then(|r| r.hands.get(&guid))
+}
+
+/// **What the last fixed step's hand pass did** for `guid` — the observable end
+/// of the report slot, and what the grip gate asserts.
+pub fn hand_ik_report(world: &EcsWorld, guid: Uuid) -> Option<&HandIkReport> {
+    world
+        .world()
+        .get_resource::<HandIkRes>()
+        .and_then(|r| r.last.get(&guid))
+}
+
+/// **Forget every hand request.** Called by [`clear_poses`], like
+/// [`clear_ik_goals`], and for the same reason: a hold is session state.
+pub fn clear_hand_ik(world: &mut EcsWorld) {
+    world.world_mut().remove_resource::<HandIkRes>();
+}
+
 /// **Forget every IK goal.** The twin of [`clear_poses`], and called by it.
 ///
 /// Clears the **runtime** goals only — the authored [`IkTarget`] components are
@@ -735,6 +915,10 @@ pub fn clear_poses(world: &mut EcsWorld) {
     // that belongs to the get-up that made it.
     crate::anim_bridge::clear_anim_bridge(world);
     clear_ik_goals(world);
+    // …and the hands (SK1b): what a character was holding is a statement about a
+    // session, and a stopped one's last grip must not close the next one's first
+    // frame.
+    clear_hand_ik(world);
 }
 
 /// The evaluated poses' canonical bytes, or an empty vec when nothing is posed —
@@ -903,6 +1087,15 @@ pub fn step_pose_evaluation<'c>(
     for (guid, list) in runtime {
         goals.entry(guid).or_default().extend(list);
     }
+    // The hand requests, lifted out for the same borrow reason and cloned for
+    // the same size reason (SK1b). There is no authored half: a hold is session
+    // state by nature — see [`HandIkRes`].
+    let hand_requests: BTreeMap<Uuid, HandIk> = world
+        .world()
+        .get_resource::<HandIkRes>()
+        .map(|r| r.hands.clone())
+        .unwrap_or_default();
+    let mut hand_reports: BTreeMap<Uuid, HandIkReport> = BTreeMap::new();
     let mut posed: BTreeMap<Uuid, EvaluatedPose> = BTreeMap::new();
     let mut verdicts: BTreeMap<Uuid, Vec<IkOutcome>> = BTreeMap::new();
     let mut fired_events: BTreeMap<Uuid, Vec<String>> = BTreeMap::new();
@@ -1183,11 +1376,19 @@ pub fn step_pose_evaluation<'c>(
                         // ±50/45 cm envelope and ground under them at different
                         // heights. Every level that has none of that poses
                         // exactly the bytes P29.4 did.
+                        // **Did anything below CORRECT this pose** — the gate on
+                        // the SK1b re-drive at the bottom of this block. A
+                        // counter and not a guess: "the pass ran" and "the pass
+                        // wrote" are different claims, and a re-drive keyed on
+                        // the first would pay a whole `global_transforms` per
+                        // posed character per step for a pose nothing moved.
+                        let mut corrected = false;
                         let drop = pelvis_drop(world, entity);
                         if drop != 0.0 {
                             if let Some(j) = pelvis_joint(asset) {
                                 if let Some(local) = pose.locals.get_mut(j) {
                                     local.translation[1] += drop;
+                                    corrected = true;
                                 }
                             }
                         }
@@ -1244,6 +1445,9 @@ pub fn step_pose_evaluation<'c>(
                             // be arithmetic on two equal values — and, on the
                             // arm where the snapshot is `None`, would be a
                             // silent no-op that hid the refusal's own rule.
+                            if matches!(outcome, IkOutcome::Solved(_)) {
+                                corrected = true;
+                            }
                             if let (Some(prev), IkOutcome::Solved(_)) = (&before, &outcome) {
                                 for &(j, rot) in prev {
                                     let a = glam::Quat::from_array(rot);
@@ -1274,7 +1478,56 @@ pub fn step_pose_evaluation<'c>(
                         //    for anything that is not a character.
                         let to_world = model_to_world(world, entity);
                         if let Some(goals) = bridge.foot_ik.get(&guid).copied() {
-                            apply_foot_ik(asset, &mut pose, &goals, to_world);
+                            corrected |= apply_foot_ik(asset, &mut pose, &goals, to_world);
+                        }
+                        // ── SK1b: **hands** — the arms that reach and the
+                        //    fingers that close ──
+                        //
+                        // After the feet because a hand is the freer end: a
+                        // character's stance is decided by the ground it is on,
+                        // and the hand solves against the body that stance
+                        // produced. Before the re-drive below, because it is a
+                        // correction and that is not.
+                        let hands = hand_requests.get(&guid);
+                        if let Some(request) = hands {
+                            let report = apply_hand_ik(asset, &mut pose, request, to_world);
+                            corrected |= report.wrote();
+                            hand_reports.insert(guid, report);
+                        }
+                        // ── SK1b: **the correction re-drive**, and the ordering
+                        //    bound SK1a routed here by name ──
+                        //
+                        // SK1a's drive pass runs at pose CONSTRUCTION, above,
+                        // and its own docs state the cost: *"a twist reflects the
+                        // pose the animation authored, not the pose the IK below
+                        // goes on to correct"* — a foot IK solve that rolls an
+                        // ankle 20 degrees left `calf_twist_01_l` showing the
+                        // pre-solve roll. That was routed to this wave "with the
+                        // measurement it needs (run the pass twice, or re-drive
+                        // per chain)".
+                        //
+                        // **It runs twice**, and the decision is that a twist
+                        // bone is a statement about the pose that is FINALLY
+                        // published, so it must be the last thing computed from
+                        // it — the same reading `foot_states` already has one
+                        // line below. Re-driving per chain was the alternative
+                        // and is worse in the way that matters: it puts the
+                        // knowledge of which twists belong to which limb inside
+                        // every solver, in three places, which is the shape the
+                        // role table exists to retire.
+                        //
+                        // **Gated on a correction having happened**, so a
+                        // character the passes above did not touch pays nothing
+                        // and poses byte-identical bytes — and a rig with no
+                        // drive tables (every `.inf_skel` older than v3, every
+                        // canonical biped, every imported glTF) takes the same
+                        // two early returns it always did whether the gate opens
+                        // or not.
+                        if corrected {
+                            let n = redrive(asset, &mut pose);
+                            if let Some(r) = hand_reports.get_mut(&guid) {
+                                r.redriven = n;
+                            }
                         }
                         let feet = foot_states(asset, &pose, to_world);
                         if feet.iter().any(Option::is_some) {
@@ -1336,6 +1589,14 @@ pub fn step_pose_evaluation<'c>(
             }
         } else {
             w.insert_resource(PoseBlendRes(blenders));
+        }
+    }
+    {
+        // The hand verdicts, under rule 4: rebuilt from scratch, and never
+        // created for a level that asked for nothing (SK1b).
+        let w = world.world_mut();
+        if let Some(mut res) = w.get_resource_mut::<HandIkRes>() {
+            res.last = hand_reports;
         }
     }
     {
@@ -1480,12 +1741,17 @@ fn foot_states(
 ///
 /// A refusal is a **value**: a chain that is not a chain, a degenerate bone or a
 /// non-finite target leaves the pose untouched and costs its own foot.
+///
+/// Returns whether it **wrote a pose** (SK1b) — the engagement counter the
+/// correction re-drive is gated on, and the answer to "was this character's pose
+/// corrected at all", which nothing could ask before.
 fn apply_foot_ik(
     rig: &inf_anim::SkeletonAsset,
     pose: &mut Pose,
     goals: &[Option<crate::anim_bridge::FootGoal>; 2],
     model_to_world: glam::DAffine3,
-) {
+) -> bool {
+    let mut wrote = false;
     let skeleton = &rig.skeleton;
     let joints = foot_joints(rig);
     let to_model = model_to_world.inverse();
@@ -1515,15 +1781,196 @@ fn apply_foot_ik(
             .map(|j| (j, pose.locals[j].rotation))
             .collect();
         let chain = [thigh, shin, foot];
-        if inf_anim::solve_chain(skeleton, pose, &chain, target, None, &[]).is_ok()
-            && goal.weight < 1.0
-        {
-            for (j, rot) in before {
-                let a = glam::Quat::from_array(rot);
-                let b = glam::Quat::from_array(pose.locals[j].rotation);
-                pose.locals[j].rotation = inf_math::pslerp(a, b, goal.weight).to_array();
+        if inf_anim::solve_chain(skeleton, pose, &chain, target, None, &[]).is_ok() {
+            wrote = true;
+            if goal.weight < 1.0 {
+                for (j, rot) in before {
+                    let a = glam::Quat::from_array(rot);
+                    let b = glam::Quat::from_array(pose.locals[j].rotation);
+                    pose.locals[j].rotation = inf_math::pslerp(a, b, goal.weight).to_array();
+                }
             }
         }
+    }
+    wrote
+}
+
+/// **Re-run the drive pass over a corrected pose** (SK1b) — the second half of
+/// the twist/IK ordering bound SK1a routed to this wave.
+///
+/// A named function rather than a second inline call, and the reason is the pin:
+/// `every_pose_writer_runs_in_its_frozen_order` searches the step's body for each
+/// writer's spelling and asserts their order, and two identical
+/// `inf_anim::drive_pose(` occurrences are one needle that finds the first of
+/// them. A writer a gate cannot name is a writer a gate cannot see move.
+fn redrive(rig: &inf_anim::SkeletonAsset, pose: &mut Pose) -> usize {
+    inf_anim::drive_pose(&rig.skeleton, pose, &rig.twists, &rig.ik_follow)
+}
+
+/// **The hand pass** (SK1b): the arms reach, the off hand follows the weapon, and
+/// the fingers close.
+///
+/// Three things in one function because they are one *ordering*, and the order is
+/// the content:
+///
+/// 1. **Each reaching hand solves** over the three-joint arm chain the role table
+///    names, with a real pole — an elbow has no opinion of its own about which
+///    way to fold, because the mannequin's bind pose is a T-pose of pure
+///    translations and shoulder, elbow and wrist are exactly collinear in it.
+/// 2. **The off hand follows the weapon**, second, because where the weapon *is*
+///    is decided by the hand that holds it and that hand may have just moved. The
+///    frame is `ik_hand_gun`'s when the rig publishes one — the UE convention,
+///    which is the whole reason [`inf_anim::manny`] carries the bone — and the
+///    holding hand's own global when it does not, so a rig without the marker
+///    still holds a rifle with two hands.
+/// 3. **The fingers close**, last, because a curl is expressed in each finger's
+///    own bind frame and is therefore unaffected by where the arm ended up —
+///    running it first would work, and would be a claim about the solver's
+///    internals rather than about anatomy.
+///
+/// A refusal is a **value** throughout, and it costs its own hand.
+fn apply_hand_ik(
+    rig: &inf_anim::SkeletonAsset,
+    pose: &mut Pose,
+    request: &HandIk,
+    model_to_world: glam::DAffine3,
+) -> HandIkReport {
+    use inf_anim::BoneSide;
+
+    let mut report = HandIkReport::default();
+    if request.is_empty() {
+        return report;
+    }
+    let skeleton = &rig.skeleton;
+    let roles = rig.role_index();
+    let to_model = model_to_world.inverse();
+    let sides = [BoneSide::Left, BoneSide::Right];
+    // The arm chains, once. `None` for a side this rig has no arm on, which is
+    // every quadruped and every rig whose hand is called something nobody
+    // guessed — and which costs that side and nothing else.
+    let chains = sides.map(|s| inf_anim::arm_chain(skeleton, roles, s));
+
+    // Model space from world, checked rather than trusted: a target that is not
+    // finite would reach `solve_chain`, which refuses it by name — but refusing
+    // it here keeps the refusal about the REQUEST rather than about the chain.
+    let into_model = |t: Vec3d| -> Option<glam::Vec3> {
+        let p = to_model.transform_point3(t.to_dvec3());
+        let v = glam::Vec3::new(p.x as f32, p.y as f32, p.z as f32);
+        v.is_finite().then_some(v)
+    };
+
+    // 1. the reaches
+    for (side, reach) in request.reach.iter().enumerate() {
+        let (Some(reach), Some(chain)) = (reach, chains[side]) else {
+            continue;
+        };
+        if !reach.weight.is_finite() || reach.weight <= 0.0 {
+            continue;
+        }
+        let Some(target) = into_model(reach.target) else {
+            continue;
+        };
+        report.reach[side] = Some(solve_arm(rig, pose, chain, target, reach.weight));
+    }
+
+    // 2. the off hand, carried by the weapon
+    if let Some(gun) = request.gun {
+        // **The handle first.** `ik_hand_gun` FOLLOWS `hand_r` (SK1a's
+        // `IkFollow` table), and the drive pass that puts it there ran at pose
+        // construction — before the reach above moved the hand it follows. Read
+        // without this, the weapon's frame is where the animation left it and the
+        // off hand lands a hand-span away from the fore-grip: measured 0.42 m
+        // apart on a weapon that is 0.30 m long. Re-driving the handles here is
+        // one global pass and it is what makes the marker mean anything.
+        inf_anim::drive_ik_follow(skeleton, pose, &rig.ik_follow);
+        let holding = HandIk::side_index(gun.holding);
+        let off = holding.map(|h| 1 - h);
+        if let (Some(holding), Some(off)) = (holding, off) {
+            // Where the weapon's fore-grip is: the `ik_hand_gun` handle's frame
+            // when the rig has one, else the holding hand's own.
+            let handle = skeleton
+                .index_of("ik_hand_gun")
+                .filter(|_| gun.holding == BoneSide::Right)
+                .or_else(|| chains[holding].map(|c| c[2]));
+            if let (Some(handle), Some(chain)) = (handle, chains[off]) {
+                let globals = inf_anim::global_transforms(skeleton, pose);
+                if let Some(frame) = globals.get(handle as usize) {
+                    let target =
+                        frame.transform_point3(glam::Vec3::from_array(gun.off_hand_offset));
+                    if target.is_finite() && gun.weight.is_finite() && gun.weight > 0.0 {
+                        report.gun = Some(solve_arm(rig, pose, chain, target, gun.weight));
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. the fingers
+    for (side, grip) in request.grip.iter().enumerate() {
+        let Some(grip) = grip else { continue };
+        let Some(affordance) = rig.grips.iter().find(|g| g.name == grip.name) else {
+            continue;
+        };
+        // The hand the affordance names, not the hand the array index implies: a
+        // rig authors one affordance per hand, and the affordance's own `hand`
+        // field is the authoritative answer to which one this is.
+        let Some(hand) = inf_anim::hand_of(skeleton, roles, affordance.hand) else {
+            continue;
+        };
+        report.grip[side] =
+            inf_anim::apply_grip(skeleton, pose, &hand, &rig.limits, affordance, grip.amount);
+    }
+    report
+}
+
+/// One arm's solve — the half [`apply_hand_ik`] does twice.
+///
+/// Through [`inf_anim::reach`] rather than `solve_chain`, and the difference is
+/// measured rather than stylistic: an elbow is a **hinge**, a pole-driven solve
+/// picks a bend plane that is not the hinge's, and the clamp then throws away
+/// whatever part of the bend does not lie in it. On the mannequin that cost
+/// 8.3 cm of reach and iterating the pole was a fixed point. `reach` sets the
+/// elbow from the distance and aims the assembly, which is exact.
+///
+/// The weight blend is `apply_foot_ik`'s, spelled the same way for the same
+/// reason: at full weight nothing is captured and nothing is blended, so a caller
+/// that never lowers it produces exactly the bytes an unweighted solve would.
+fn solve_arm(
+    rig: &inf_anim::SkeletonAsset,
+    pose: &mut Pose,
+    chain: [u16; 3],
+    target: glam::Vec3,
+    weight: f32,
+) -> IkOutcome {
+    let skeleton = &rig.skeleton;
+    let before: Option<Vec<(usize, [f32; 4])>> = (weight < 1.0).then(|| {
+        chain
+            .iter()
+            .map(|&j| j as usize)
+            .filter(|&j| j < pose.locals.len())
+            .map(|j| (j, pose.locals[j].rotation))
+            .collect()
+    });
+    match inf_anim::reach(
+        skeleton,
+        pose,
+        chain,
+        target,
+        // The authored limits, so an elbow cannot bend backwards to reach — and,
+        // since SK1b, so a cone on any joint of the chain is applied too.
+        &rig.limits,
+    ) {
+        Ok(r) => {
+            if let Some(prev) = before {
+                for (j, rot) in prev {
+                    let a = glam::Quat::from_array(rot);
+                    let b = glam::Quat::from_array(pose.locals[j].rotation);
+                    pose.locals[j].rotation = inf_math::pslerp(a, b, weight).to_array();
+                }
+            }
+            IkOutcome::Solved(r)
+        }
+        Err(e) => IkOutcome::Refused(e),
     }
 }
 
@@ -3523,6 +3970,437 @@ mod tests {
         assert!(
             (door - (raw + offset)).length() < 1e-12,
             "the offset {offset:?} does not compose to the door's {door:?}"
+        );
+    }
+
+    // ── SK1b: hands ─────────────────────────────────────────────────────────
+
+    /// A world with one mannequin-rigged character at the origin.
+    fn world_with_mannequin(guid: Uuid) -> EcsWorld {
+        let mut world = EcsWorld::new();
+        world.world_mut().spawn((
+            Guid(guid),
+            Transform::default(),
+            GlobalTransform(glam::DAffine3::IDENTITY),
+            AnimStateMachine {
+                sm: Some(SM),
+                ..Default::default()
+            },
+            SkeletalMesh {
+                mesh: Some(Uuid::from_u128(9)),
+                skeleton: Some(SKEL),
+            },
+        ));
+        world.reindex_guids();
+        world
+    }
+
+    /// The mannequin, with a rifle grip authored on each hand — the affordance
+    /// table SK1a shipped empty and this wave fills.
+    fn mannequin_rig() -> SkeletonAsset {
+        let mut asset =
+            inf_anim::build_manny(&inf_anim::BodyParams::default()).expect("the mannequin builds");
+        for (name, hand) in [("rifle_l", "hand_l"), ("rifle_r", "hand_r")] {
+            let j = asset.skeleton.index_of(hand).expect("a hand");
+            let mut grip = inf_anim::GripAffordance::new(name, j, 0.035);
+            grip.curl = [0.9, 1.0, 1.0, 1.0, 1.0];
+            asset.grips.push(grip);
+        }
+        asset
+    }
+
+    /// Step a mannequin character through the one fixed-step pose door.
+    fn step_mannequin(world: &mut EcsWorld, rig: &SkeletonAsset, dt: f64) {
+        let m = machine();
+        let clip = wave_clip();
+        let machines = |g: Uuid| (g == SM).then_some(&m);
+        let skeletons = |g: Uuid| (g == SKEL).then_some(rig);
+        let clips = |c: ClipRef| (c == WAVE).then_some(&clip);
+        let vars = |_: Uuid| BTreeMap::new();
+        step_pose_evaluation(world, dt, &machines, &skeletons, &clips, &vars);
+    }
+
+    /// Where a joint ended up, in model space.
+    fn joint_at(posed: &EvaluatedPose, rig: &SkeletonAsset, joint: u16) -> glam::Vec3 {
+        inf_anim::global_transforms(&rig.skeleton, &posed.pose)[joint as usize]
+            .transform_point3(glam::Vec3::ZERO)
+    }
+
+    /// **The headline for the reaching half**: a hand set on a point in the world
+    /// lands on it, through the same one door both hosts call, with no schema
+    /// move and no component.
+    ///
+    /// The elbow's *pole* is the part that needs asserting beside the reach,
+    /// because a T-pose bind has shoulder, elbow and wrist exactly collinear and
+    /// a solve with no pole bends whichever way rounding decides. Backward is
+    /// `-Z`, so the elbow must end up behind the line from shoulder to wrist.
+    #[test]
+    fn a_hand_reaches_a_point_in_the_world_and_the_elbow_bends_backwards() {
+        let guid = Uuid::from_u128(0x5B_0001);
+        let rig = mannequin_rig();
+        let mut world = world_with_mannequin(guid);
+        step_mannequin(&mut world, &rig, 0.1);
+        let rest = evaluated_pose(&world, guid).expect("a pose").clone();
+
+        let (upper, lower, hand) = {
+            let c = inf_anim::arm_chain(&rig.skeleton, rig.role_index(), inf_anim::BoneSide::Right)
+                .expect("a right arm");
+            (c[0], c[1], c[2])
+        };
+        // In front of the chest and a little low — reachable, and nowhere near
+        // where a T-pose puts a wrist.
+        let target = Vec3d::new(0.25, 1.15, 0.45);
+        set_hand_ik(
+            &mut world,
+            guid,
+            HandIk {
+                reach: [
+                    None,
+                    Some(HandReach {
+                        target,
+                        weight: 1.0,
+                    }),
+                ],
+                ..Default::default()
+            },
+        );
+        step_mannequin(&mut world, &rig, 0.1);
+        let posed = evaluated_pose(&world, guid).expect("a pose");
+        let wrist = joint_at(posed, &rig, hand);
+        let miss = (wrist - glam::Vec3::new(0.25, 1.15, 0.45)).length();
+        println!("the wrist landed {miss:.5} m from its target");
+        assert!(miss < 0.01, "the hand missed its target by {miss} m");
+        // …and it MOVED to get there, which the assertion above would also be
+        // happy about if a T-pose wrist happened to be sitting on the target.
+        let was = joint_at(&rest, &rig, hand);
+        assert!(
+            (was - wrist).length() > 0.3,
+            "the wrist was already there ({was:?}) — the arm proves nothing"
+        );
+        // The elbow is behind the shoulder-to-wrist line, which is what the pole
+        // is for. Mutation: pass `None` for the pole and this goes red.
+        let (s, e) = (joint_at(posed, &rig, upper), joint_at(posed, &rig, lower));
+        let along = (wrist - s).normalize();
+        let off = (e - s) - along * (e - s).dot(along);
+        println!(
+            "the elbow sits {:.4} m off the arm line, z = {:.4}",
+            off.length(),
+            off.z
+        );
+        assert!(
+            off.z < -0.02,
+            "the elbow bent to {off:?}, which is not backwards"
+        );
+        // …and the verdict is readable, which is what a gate asserts.
+        let report = hand_ik_report(&world, guid).expect("a hand verdict");
+        assert!(
+            matches!(report.reach[1], Some(IkOutcome::Solved(_))),
+            "{:?}",
+            report.reach
+        );
+        assert!(report.reach[0].is_none(), "the left arm was not asked");
+        assert!(report.wrote());
+    }
+
+    /// **Two hands on one weapon**: the off hand lands on the fore-grip wherever
+    /// the holding hand puts it — the `ik_hand_gun` convention, built.
+    #[test]
+    fn the_off_hand_follows_the_weapon_the_holding_hand_carries() {
+        let guid = Uuid::from_u128(0x5B_0002);
+        let rig = mannequin_rig();
+        let left = inf_anim::arm_chain(&rig.skeleton, rig.role_index(), inf_anim::BoneSide::Left)
+            .expect("a left arm")[2];
+        let right = inf_anim::arm_chain(&rig.skeleton, rig.role_index(), inf_anim::BoneSide::Right)
+            .expect("a right arm")[2];
+
+        let hold = |world: &mut EcsWorld, at: Vec3d| {
+            set_hand_ik(
+                world,
+                *world
+                    .world()
+                    .get_resource::<HandIkRes>()
+                    .and_then(|r| r.hands.keys().next())
+                    .unwrap_or(&guid),
+                HandIk {
+                    reach: [
+                        None,
+                        Some(HandReach {
+                            target: at,
+                            weight: 1.0,
+                        }),
+                    ],
+                    gun: Some(GunGrip {
+                        holding: inf_anim::BoneSide::Right,
+                        // 30 cm along the barrel — a rifle's fore-grip.
+                        off_hand_offset: [0.0, 0.0, 0.30],
+                        weight: 1.0,
+                    }),
+                    grip: [None, None],
+                },
+            );
+        };
+
+        let mut world = world_with_mannequin(guid);
+        hold(&mut world, Vec3d::new(0.2, 1.2, 0.35));
+        step_mannequin(&mut world, &rig, 0.1);
+        let a = evaluated_pose(&world, guid).expect("a pose").clone();
+        let (al, ar) = (joint_at(&a, &rig, left), joint_at(&a, &rig, right));
+        let apart = (al - ar).length();
+        println!("the hands are {apart:.4} m apart on the weapon");
+        assert!(
+            (apart - 0.30).abs() < 0.06,
+            "the two hands are {apart} m apart, not the 0.30 m the weapon is"
+        );
+        let report = hand_ik_report(&world, guid).expect("a verdict");
+        assert!(
+            matches!(report.gun, Some(IkOutcome::Solved(_))),
+            "{report:?}"
+        );
+
+        // Move the weapon and the off hand goes with it — the claim that makes
+        // this a HOLD rather than two independent reaches.
+        hold(&mut world, Vec3d::new(-0.15, 1.45, 0.30));
+        step_mannequin(&mut world, &rig, 0.1);
+        let b = evaluated_pose(&world, guid).expect("a pose").clone();
+        let (bl, br) = (joint_at(&b, &rig, left), joint_at(&b, &rig, right));
+        assert!(
+            (ar - br).length() > 0.15,
+            "the holding hand did not move, so the off hand proves nothing"
+        );
+        assert!(
+            (al - bl).length() > 0.10,
+            "the holding hand moved {:.3} m and the off hand moved {:.3} m",
+            (ar - br).length(),
+            (al - bl).length()
+        );
+        let apart = (bl - br).length();
+        assert!(
+            (apart - 0.30).abs() < 0.06,
+            "the hands came {apart} m apart once the weapon moved"
+        );
+    }
+
+    /// **The twist/IK ordering bound, closed** — SK1a's carried item, asserted.
+    ///
+    /// SK1a's drive pass runs at pose construction and its docs said so: *"a
+    /// twist reflects the pose the animation authored, not the pose the IK below
+    /// goes on to correct."* The claim now is the opposite one, and it is
+    /// checkable without a second pipeline: **re-running the drive over the
+    /// published pose changes nothing**, which is true exactly when the twists
+    /// already reflect the corrected arm.
+    ///
+    /// Two anti-vacuity halves, because the assertion above is also satisfied by
+    /// a rig with no twists and by an IK solve that did nothing: the same
+    /// character posed WITHOUT the reach must produce different twist bones, and
+    /// the twist bones must not be the identity.
+    #[test]
+    fn a_twist_bone_reflects_the_arm_the_hand_ik_solved_not_the_one_the_clip_authored() {
+        let guid = Uuid::from_u128(0x5B_0003);
+        let rig = mannequin_rig();
+        // The UPPER arm's twist, deliberately: a lower segment's twist reads
+        // its distal child's roll (`lowerarm_twist_01_r` reads `hand_r`), and an
+        // arm IK solve writes the shoulder and the elbow — never the wrist,
+        // which is the chain's tip. So a forearm twist is invariant under this
+        // correction and would make the anti-vacuity half of this arm vacuous.
+        let twist = rig
+            .skeleton
+            .index_of("upperarm_twist_01_r")
+            .expect("the upper-arm twist") as usize;
+
+        let mut plain = world_with_mannequin(guid);
+        step_mannequin(&mut plain, &rig, 0.1);
+        let uncorrected = evaluated_pose(&plain, guid).expect("a pose").clone();
+
+        let mut world = world_with_mannequin(guid);
+        set_hand_ik(
+            &mut world,
+            guid,
+            HandIk {
+                reach: [
+                    None,
+                    Some(HandReach {
+                        target: Vec3d::new(0.15, 1.30, 0.40),
+                        weight: 1.0,
+                    }),
+                ],
+                ..Default::default()
+            },
+        );
+        step_mannequin(&mut world, &rig, 0.1);
+        let posed = evaluated_pose(&world, guid).expect("a pose").clone();
+
+        // **The claim**: the published twists are already a function of the
+        // published pose. Mutation: delete the `redrive` call and this fails.
+        let mut again = posed.pose.clone();
+        let drove = inf_anim::drive_twists(&rig.skeleton, &mut again, &rig.twists);
+        assert_eq!(
+            drove,
+            rig.twists.len(),
+            "the rig has 16 twist bones to drive"
+        );
+        for (i, (a, b)) in posed
+            .pose
+            .locals
+            .iter()
+            .zip(again.locals.iter())
+            .enumerate()
+        {
+            for (u, v) in a.rotation.iter().zip(b.rotation.iter()) {
+                assert_eq!(
+                    u.to_bits(),
+                    v.to_bits(),
+                    "joint {i} `{}` is not what the FINAL pose implies — the twists \
+                     were driven from the pose before the IK corrected it",
+                    rig.skeleton.joints()[i].name
+                );
+            }
+        }
+
+        // Anti-vacuity 1: the solve really moved this twist.
+        let before = uncorrected.pose.locals[twist].rotation;
+        let after = posed.pose.locals[twist].rotation;
+        let delta = glam::Quat::from_array(before)
+            .dot(glam::Quat::from_array(after))
+            .abs();
+        println!("the forearm twist moved: |dot| = {delta:.6}");
+        assert!(
+            delta < 0.9999,
+            "`lowerarm_twist_01_r` is identical with and without the reach, so the \
+             re-drive is untested here"
+        );
+        // Anti-vacuity 2: it is a real roll, not the identity.
+        assert!(
+            glam::Quat::from_array(after)
+                .dot(glam::Quat::IDENTITY)
+                .abs()
+                < 0.9999,
+            "the twist bone is the identity, so nothing was driven"
+        );
+        // …and the report counts what the re-drive rewrote.
+        let report = hand_ik_report(&world, guid).expect("a verdict");
+        assert_eq!(
+            report.redriven,
+            rig.twists.len() + rig.ik_follow.len(),
+            "the re-drive should touch every twist and every handle"
+        );
+    }
+
+    /// **A grip closes the fingers through the fixed step**, and a release opens
+    /// them again — the `GripAffordance` table's first runtime consumer.
+    #[test]
+    fn a_grip_closes_the_fingers_through_the_fixed_step_and_a_release_opens_them() {
+        let guid = Uuid::from_u128(0x5B_0004);
+        let rig = mannequin_rig();
+        let tip = rig.skeleton.index_of("middle_03_r").expect("a fingertip");
+        let wrist = rig.skeleton.index_of("hand_r").expect("a wrist");
+
+        let grip = |world: &mut EcsWorld, amount: f32| {
+            set_hand_ik(
+                world,
+                guid,
+                HandIk {
+                    grip: [
+                        None,
+                        Some(HandGrip {
+                            name: "rifle_r".into(),
+                            amount,
+                        }),
+                    ],
+                    ..Default::default()
+                },
+            );
+        };
+
+        let mut world = world_with_mannequin(guid);
+        step_mannequin(&mut world, &rig, 0.1);
+        let open = evaluated_pose(&world, guid).expect("a pose").clone();
+        let span = |p: &EvaluatedPose| (joint_at(p, &rig, tip) - joint_at(p, &rig, wrist)).length();
+        let straight = span(&open);
+
+        grip(&mut world, 1.0);
+        step_mannequin(&mut world, &rig, 0.1);
+        let closed = evaluated_pose(&world, guid).expect("a pose").clone();
+        let held = span(&closed);
+        println!("fingertip to wrist: {straight:.4} m open, {held:.4} m closed");
+        assert!(
+            held < straight * 0.75,
+            "the hand did not close: {held} m against {straight} m"
+        );
+        let report = hand_ik_report(&world, guid).expect("a verdict");
+        assert!(report.grip[1].joints >= 15, "{:?}", report.grip[1]);
+        assert_eq!(report.grip[0].joints, 0, "the left hand was not asked");
+
+        // A release returns the hand EXACTLY to where an ungripped one poses —
+        // the claim `apply_grip`'s "a curl is a pose, not a delta" rests on.
+        grip(&mut world, 0.0);
+        step_mannequin(&mut world, &rig, 0.1);
+        let released = evaluated_pose(&world, guid).expect("a pose").clone();
+        assert_eq!(
+            released.pose.locals, open.pose.locals,
+            "a released hand did not return to the open pose"
+        );
+    }
+
+    /// **Absent costs nothing**: a character nobody asked anything of poses the
+    /// bytes it posed before this wave, and the resource does not appear.
+    #[test]
+    fn a_character_with_no_hand_request_poses_exactly_what_it_did_before() {
+        let guid = Uuid::from_u128(0x5B_0005);
+        let rig = mannequin_rig();
+        let mut plain = world_with_mannequin(guid);
+        step_mannequin(&mut plain, &rig, 0.1);
+        let bytes = pose_state_bytes(&plain);
+        assert!(!bytes.is_empty(), "the fixture posed nothing");
+        assert!(
+            plain.world().get_resource::<HandIkRes>().is_none(),
+            "a level that asked for no hands grew a resource"
+        );
+
+        // Setting an EMPTY request is the same as setting none — one
+        // representation, so a level that stops gripping stops paying.
+        let mut same = world_with_mannequin(guid);
+        set_hand_ik(&mut same, guid, HandIk::default());
+        step_mannequin(&mut same, &rig, 0.1);
+        assert!(same.world().get_resource::<HandIkRes>().is_none());
+        assert_eq!(pose_state_bytes(&same), bytes);
+
+        // …and a request whose every part is refusable leaves the pose alone.
+        let mut refused = world_with_mannequin(guid);
+        set_hand_ik(
+            &mut refused,
+            guid,
+            HandIk {
+                reach: [
+                    Some(HandReach {
+                        target: Vec3d::new(f64::NAN, 0.0, 0.0),
+                        weight: 1.0,
+                    }),
+                    Some(HandReach {
+                        target: Vec3d::ZERO,
+                        weight: 0.0,
+                    }),
+                ],
+                gun: None,
+                grip: [
+                    Some(HandGrip {
+                        name: "no such grip".into(),
+                        amount: 1.0,
+                    }),
+                    None,
+                ],
+            },
+        );
+        step_mannequin(&mut refused, &rig, 0.1);
+        assert_eq!(
+            pose_state_bytes(&refused),
+            bytes,
+            "a refusable request moved the pose"
+        );
+        let report = hand_ik_report(&refused, guid).expect("a verdict");
+        assert!(!report.wrote(), "{report:?}");
+        assert_eq!(
+            report.redriven, 0,
+            "the re-drive ran for a pose nothing corrected"
         );
     }
 }

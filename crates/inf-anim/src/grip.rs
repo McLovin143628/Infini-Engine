@@ -684,6 +684,250 @@ pub fn apply_grip(
     report
 }
 
+/// **Reach a three-joint limb whose middle joint is a HINGE** — exactly (SK1b).
+///
+/// # Why this exists beside [`crate::ik::solve_chain`]
+///
+/// `solve_chain` places the joints first (law of cosines, positional form) and
+/// turns the positions into rotations second, clamping each as it writes it. That
+/// is the right shape for a chain of *unconstrained* joints, and it is measurably
+/// the wrong shape for an arm: the elbow position it chooses comes from a **pole**,
+/// the pole picks a bend plane freely, and the clamp then discards whatever
+/// component of the bend does not lie in the hinge's own plane. Measured on the
+/// mannequin, reaching a point 55 cm in front of and 29 cm below the shoulder:
+///
+/// | | reach error |
+/// |---|---|
+/// | no limits at all | **3e-8 m** |
+/// | P24.1's `hinge_x` elbow | **0.484 m** — the elbow pinned straight |
+/// | a correct `hinge_y` elbow through `solve_chain` | **0.083 m**, and iterating the pole is a fixed point |
+/// | a correct `hinge_y` elbow through **this** | **exact** |
+///
+/// # How, and why there is no transcendental in it
+///
+/// A hinge takes the freedom away, so the answer is closed-form and there is
+/// nothing to search for:
+///
+/// 1. **The elbow angle is determined by the distance alone.** The interior angle
+///    `θ` at the elbow has `cos θ = (l₁² + l₂² − d²) / 2·l₁·l₂`, and the bend away
+///    from straight is `π − θ`. A quaternion needs the *half* angle, and the
+///    half-angle identities give it from the cosine with two square roots —
+///    `sin(φ/2) = √((1 + cos θ)/2)`, `cos(φ/2) = √((1 − cos θ)/2)` — so **no
+///    `acos`, no `sin`, no `cos`** appears. (`psin64`/`pcos64` are used only on the
+///    path where the authored range actually clamps the bend, which is a rebuild
+///    from a known angle rather than a measurement.)
+/// 2. **The elbow is set about its own hinge axis**, in the sign the authored
+///    range permits. With the elbow set, the shoulder-to-wrist distance is now
+///    exactly `d` by construction.
+/// 3. **The shoulder aims the assembly**, one `rotation_between`. Aiming a rigid
+///    two-bone assembly whose end is already at the right distance puts the end
+///    exactly on the target — which is why this is exact rather than iterated.
+///
+/// The bend plane is left where the pose already had it (the aim is the minimal
+/// rotation, which adds no roll), so an arm keeps whatever orientation the
+/// animation gave it and does not snap into a canonical plane.
+///
+/// # Refusals, and what is not one
+///
+/// Returns [`IkError`] for a chain that is not a chain, a joint that does not
+/// exist, a degenerate bone or a non-finite target — [`crate::ik::solve_chain`]'s
+/// list, because it is the same list. A target **out of reach** is not a refusal:
+/// the arm extends toward it, exactly as a real one does, and
+/// [`IkReport::reached`] says which happened. A middle joint that is **not** a
+/// single-axis hinge is not a refusal either: the solve delegates to
+/// `solve_chain` with a derived pole, so a caller writes one call rather than a
+/// branch.
+pub fn reach(
+    skeleton: &Skeleton,
+    pose: &mut Pose,
+    chain: [u16; 3],
+    target: Vec3,
+    limits: &[JointLimit],
+) -> Result<crate::ik::IkReport, crate::ik::IkError> {
+    use crate::ik::{rotation_between, IkError, IkReport, MIN_BONE_LENGTH_M, REACH_TOLERANCE_M};
+    use crate::pose::global_transforms;
+
+    let joints = skeleton.joints();
+    for &j in &chain {
+        if skeleton.joint(j as usize).is_none() {
+            return Err(IkError::NoSuchJoint {
+                joint: j,
+                joints: skeleton.len(),
+            });
+        }
+    }
+    for w in chain.windows(2) {
+        if joints[w[1] as usize].parent != Some(w[0]) {
+            return Err(IkError::NotAChain {
+                parent: w[0],
+                child: w[1],
+            });
+        }
+    }
+    if !target.is_finite() {
+        return Err(IkError::NonFinite {
+            what: "an arm IK target",
+            value: target.to_array(),
+        });
+    }
+
+    // The hinge, read off the authored table. Exactly one free axis is a hinge;
+    // anything else has a bend plane this cannot know, so it goes the other way.
+    let elbow_limit = limits.iter().find(|l| l.joint == chain[1]);
+    let hinge = elbow_limit.and_then(|l| {
+        if l.cone.is_some() {
+            return None;
+        }
+        let mut found = None;
+        for a in 0..3 {
+            if l.is_free(a) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(a);
+            }
+        }
+        found.map(|a| (a, l.min_deg[a], l.max_deg[a]))
+    });
+    let Some((axis_idx, lo_deg, hi_deg)) = hinge else {
+        let g = global_transforms(skeleton, pose);
+        let at = |j: u16| g[j as usize].transform_point3(Vec3::ZERO);
+        let span = (at(chain[1]) - at(chain[0])).length() + (at(chain[2]) - at(chain[1])).length();
+        let pole = elbow_pole(at(chain[0]), target, span);
+        return crate::ik::solve_chain(skeleton, pose, &chain, target, Some(pole), limits);
+    };
+
+    let globals = global_transforms(skeleton, pose);
+    let at = |j: u16| globals[j as usize].transform_point3(Vec3::ZERO);
+    let (shoulder, elbow, wrist) = (at(chain[0]), at(chain[1]), at(chain[2]));
+    if !shoulder.is_finite() || !elbow.is_finite() || !wrist.is_finite() {
+        return Err(IkError::NonFinite {
+            what: "an arm chain joint's model-space position",
+            value: shoulder.to_array(),
+        });
+    }
+    let l1 = (elbow - shoulder).length();
+    let l2 = (wrist - elbow).length();
+    for (parent, child, len) in [(chain[0], chain[1], l1), (chain[1], chain[2], l2)] {
+        if !(len.is_finite() && len >= MIN_BONE_LENGTH_M) {
+            return Err(IkError::DegenerateBone {
+                parent,
+                child,
+                length: len,
+            });
+        }
+    }
+    let chain_length = l1 + l2;
+
+    // ── 1. the elbow angle the distance implies ──
+    //
+    // Clamped into the range the two bones can actually span, so an unreachable
+    // target becomes full extension (or a full fold) rather than a NaN — the
+    // `two_bone_positions` contract, restated.
+    let to_target = target - shoulder;
+    let d = to_target.length().clamp((l1 - l2).abs(), chain_length);
+    let cos_theta = (((l1 * l1 + l2 * l2 - d * d) / (2.0 * l1 * l2)) as f64).clamp(-1.0, 1.0);
+    // The bend AWAY from straight is `π − θ`, so its half-angle sine is θ's
+    // half-angle cosine and vice versa. Two square roots and no angle is ever
+    // formed.
+    let mut half_sin = ((1.0 + cos_theta) * 0.5).sqrt();
+    let mut half_cos = ((1.0 - cos_theta) * 0.5).sqrt();
+
+    // ── the authored range ──
+    //
+    // Which way the hinge folds is the SIGN of the range: a knee's is negative and
+    // a right elbow's is negative, a left elbow's is positive. A range that
+    // straddles zero takes the wider side, because an elbow that may fold either
+    // way is one this rig did not mean to constrain.
+    let sign = if hi_deg.abs() >= lo_deg.abs() {
+        1.0
+    } else {
+        -1.0
+    };
+    let max_bend_rad = (hi_deg.abs().max(lo_deg.abs()) as f64).to_radians();
+    let mut clamped = 0u32;
+    // `2·atan2(sin, cos)` is the bend this is about to write; comparing it against
+    // the range is the only place an angle is formed at all, and it is formed to
+    // be *compared*, not to be built from.
+    let bend = 2.0 * inf_math::patan2_64(half_sin, half_cos);
+    if bend > max_bend_rad {
+        clamped = 1;
+        let half = max_bend_rad * 0.5;
+        half_sin = inf_math::psin64(half);
+        half_cos = inf_math::pcos64(half);
+    }
+
+    let mut axis = Vec3::ZERO;
+    axis[axis_idx] = sign;
+    let bind = joints[chain[1] as usize].local_bind.rotation_quat();
+    let flex = Quat::from_xyzw(
+        (axis.x as f64 * half_sin) as f32,
+        (axis.y as f64 * half_sin) as f32,
+        (axis.z as f64 * half_sin) as f32,
+        half_cos as f32,
+    )
+    .normalize();
+    let elbow_local = (flex * bind).normalize();
+    if !elbow_local.is_finite() {
+        return Err(IkError::NonFinite {
+            what: "an arm IK elbow rotation",
+            value: [half_sin as f32, half_cos as f32, sign],
+        });
+    }
+    pose.locals[chain[1] as usize].rotation = elbow_local.to_array();
+
+    // ── 3. aim the assembly ──
+    let globals = global_transforms(skeleton, pose);
+    let at = |j: u16| globals[j as usize].transform_point3(Vec3::ZERO);
+    let (shoulder, wrist) = (at(chain[0]), at(chain[2]));
+    let (Some(from), Some(to)) = (unit(wrist - shoulder), unit(to_target)) else {
+        // The wrist is ON the shoulder, or the target is. Nothing to aim; the
+        // elbow above is still the honest answer for the distance.
+        let end = crate::pose::global_transforms(skeleton, pose)[chain[2] as usize]
+            .transform_point3(Vec3::ZERO);
+        let reach_error = (end - target).length();
+        return Ok(IkReport {
+            reach_error,
+            reached: reach_error <= REACH_TOLERANCE_M,
+            chain_length,
+            clamped,
+        });
+    };
+    let delta = rotation_between(from, to);
+    let parent_rot = match joints[chain[0] as usize].parent {
+        Some(p) => rotation_of(&globals[p as usize]),
+        None => Quat::IDENTITY,
+    };
+    let global_rot = rotation_of(&globals[chain[0] as usize]);
+    let mut local = (parent_rot.inverse() * (delta * global_rot)).normalize();
+    if let Some(limit) = limits.iter().find(|l| l.joint == chain[0]) {
+        let bind = joints[chain[0] as usize].local_bind.rotation_quat();
+        let (fixed, moved) = apply_joint_limit(local, bind, limit);
+        local = fixed;
+        if moved {
+            clamped += 1;
+        }
+    }
+    if local.is_finite() {
+        pose.locals[chain[0] as usize].rotation = local.to_array();
+    }
+
+    let end = global_transforms(skeleton, pose)[chain[2] as usize].transform_point3(Vec3::ZERO);
+    let reach_error = (end - target).length();
+    Ok(IkReport {
+        reach_error,
+        reached: reach_error <= REACH_TOLERANCE_M,
+        chain_length,
+        clamped,
+    })
+}
+
+/// The rotation part of an affine matrix, normalized — `ik`'s helper, which is
+/// private there.
+fn rotation_of(m: &glam::Mat4) -> Quat {
+    Quat::from_mat4(m).normalize()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1092,5 +1336,186 @@ mod tests {
         let root = 0u16;
         assert!(hand_of(sk, asset.role_index(), root).is_none());
         assert!(hand_of(sk, asset.role_index(), 9999).is_none());
+    }
+
+    /// **The hinged solve is exact where the pole solve is not** — the table in
+    /// [`reach`]'s docs, asserted, so the numbers in it are numbers a test prints.
+    ///
+    /// This is the arm that justifies `reach` existing beside `solve_chain` at
+    /// all. Mutation: route `reach` straight to `solve_chain` and the first
+    /// assertion goes red at 0.083 m.
+    #[test]
+    fn a_hinged_arm_reaches_exactly_where_a_pole_solve_misses() {
+        use crate::pose::global_transforms;
+        let asset = manny();
+        let sk = &asset.skeleton;
+        for side in [BoneSide::Left, BoneSide::Right] {
+            let chain = arm_chain(sk, asset.role_index(), side).expect("an arm");
+            let sx: f32 = if side == BoneSide::Left { -1.0 } else { 1.0 };
+            // In front of the chest and below the shoulder — a point no bend
+            // plane through a straight `-Z` pole contains.
+            let target = Vec3::new(sx * 0.25, 1.15, 0.45);
+
+            let mut hinged = Pose::rest(sk);
+            let r = reach(sk, &mut hinged, chain, target, &asset.limits).expect("a solve");
+            println!("{side:?} hinged reach error {:.7} m", r.reach_error);
+            assert!(
+                r.reached && r.reach_error < 1.0e-4,
+                "{side:?}: the hinged solve missed by {} m",
+                r.reach_error
+            );
+
+            // The same target, the same limits, through the pole solver.
+            let mut poled = Pose::rest(sk);
+            let g = global_transforms(sk, &poled);
+            let at = |j: u16| g[j as usize].transform_point3(Vec3::ZERO);
+            let span =
+                (at(chain[1]) - at(chain[0])).length() + (at(chain[2]) - at(chain[1])).length();
+            let pole = elbow_pole(at(chain[0]), target, span);
+            let p =
+                crate::ik::solve_chain(sk, &mut poled, &chain, target, Some(pole), &asset.limits)
+                    .expect("a solve");
+            println!("{side:?} pole reach error {:.5} m", p.reach_error);
+            assert!(
+                p.reach_error > 0.05,
+                "{side:?}: the pole solve managed {} m, so this comparison proves nothing",
+                p.reach_error
+            );
+
+            // …and the elbow really did bend about its authored hinge axis and
+            // nothing else, which is what makes it exact.
+            let elbow = Quat::from_array(hinged.locals[chain[1] as usize].rotation);
+            let v = Vec3::new(elbow.x, elbow.y, elbow.z);
+            assert!(
+                v.length() > 1.0e-3 && v.normalize().y.abs() > 0.9999,
+                "{side:?}: the elbow turned about {v:?}, which is not its hinge"
+            );
+            // The sign is the side's: a left forearm flexes about +Y, a right
+            // one about -Y.
+            assert!(
+                v.y * sx < 0.0,
+                "{side:?}: the elbow folded the wrong way ({v:?})"
+            );
+        }
+    }
+
+    /// An **unreachable** target is not a refusal — the arm extends toward it and
+    /// says it did not get there. And a target the arm cannot fold tightly enough
+    /// to touch is the same shape at the other end.
+    #[test]
+    fn an_out_of_reach_target_extends_the_arm_and_reports_the_miss() {
+        let asset = manny();
+        let sk = &asset.skeleton;
+        let chain = arm_chain(sk, asset.role_index(), BoneSide::Right).expect("an arm");
+        let mut pose = Pose::rest(sk);
+        let far = Vec3::new(0.0, 1.4, 40.0);
+        let r = reach(sk, &mut pose, chain, far, &asset.limits).expect("a solve");
+        assert!(!r.reached, "40 m away is not reached");
+        println!(
+            "out of reach: error {:.3} m over a {:.3} m arm",
+            r.reach_error, r.chain_length
+        );
+        // The arm is STRAIGHT and pointing at it — which is what a real one does.
+        let g = crate::pose::global_transforms(sk, &pose);
+        let at = |j: u16| g[j as usize].transform_point3(Vec3::ZERO);
+        let (s, e, w) = (at(chain[0]), at(chain[1]), at(chain[2]));
+        assert!(
+            ((w - s).length() - r.chain_length).abs() < 1.0e-3,
+            "the arm is not fully extended"
+        );
+        assert!(
+            (e - s).normalize().dot((far - s).normalize()) > 0.999,
+            "the extended arm is not pointing at the target"
+        );
+        assert!(pose
+            .locals
+            .iter()
+            .all(|l| l.rotation.iter().all(|c| c.is_finite())));
+    }
+
+    /// Every refusal is a **value**, and a middle joint that is not a hinge is
+    /// not one of them — it delegates.
+    #[test]
+    fn a_reach_refuses_by_name_and_falls_back_when_there_is_no_hinge() {
+        use crate::ik::IkError;
+        let asset = manny();
+        let sk = &asset.skeleton;
+        let chain = arm_chain(sk, asset.role_index(), BoneSide::Right).expect("an arm");
+        let mut pose = Pose::rest(sk);
+        let before = pose.clone();
+
+        assert!(matches!(
+            reach(sk, &mut pose, [chain[0], chain[1], 9999], Vec3::ZERO, &[]),
+            Err(IkError::NoSuchJoint { joint: 9999, .. })
+        ));
+        // Not a parent walk: the hand's grandparent is not its parent.
+        assert!(matches!(
+            reach(
+                sk,
+                &mut pose,
+                [chain[0], chain[0], chain[2]],
+                Vec3::ZERO,
+                &[]
+            ),
+            Err(IkError::NotAChain { .. })
+        ));
+        assert!(matches!(
+            reach(
+                sk,
+                &mut pose,
+                chain,
+                Vec3::new(f32::NAN, 0.0, 0.0),
+                &asset.limits
+            ),
+            Err(IkError::NonFinite { .. })
+        ));
+        assert_eq!(pose.locals, before.locals, "a refusal wrote a pose");
+
+        // No limit at all on the elbow: it delegates to the pole solver and
+        // still lands somewhere sensible, rather than refusing.
+        let r = reach(sk, &mut pose, chain, Vec3::new(0.25, 1.15, 0.45), &[]).expect("a solve");
+        assert!(
+            r.reached,
+            "the unlimited fallback missed by {}",
+            r.reach_error
+        );
+        // A CONE on the elbow is also not a hinge, and also delegates.
+        let coned = [crate::template::JointLimit::cone_only(
+            chain[1],
+            crate::template::ConeLimit {
+                axis: [1.0, 0.0, 0.0],
+                swing_deg: 150.0,
+                twist_deg: [-10.0, 10.0],
+            },
+        )];
+        let mut pose = Pose::rest(sk);
+        assert!(reach(sk, &mut pose, chain, Vec3::new(0.25, 1.15, 0.45), &coned).is_ok());
+    }
+
+    /// Two solves, same bits — the claim the determinism trace rests on, for the
+    /// solver this wave added.
+    #[test]
+    fn a_reach_is_bit_identical_across_runs() {
+        let asset = manny();
+        let sk = &asset.skeleton;
+        let chain = arm_chain(sk, asset.role_index(), BoneSide::Left).expect("an arm");
+        let run = || {
+            let mut pose = Pose::rest(sk);
+            reach(
+                sk,
+                &mut pose,
+                chain,
+                Vec3::new(-0.2, 1.2, 0.4),
+                &asset.limits,
+            )
+            .expect("solved");
+            pose
+        };
+        let (a, b) = (run(), run());
+        for (i, (x, y)) in a.locals.iter().zip(b.locals.iter()).enumerate() {
+            for (u, v) in x.rotation.iter().zip(y.rotation.iter()) {
+                assert_eq!(u.to_bits(), v.to_bits(), "joint {i} is not bit-stable");
+            }
+        }
     }
 }

@@ -302,6 +302,36 @@ impl JointLimit {
         }
     }
 
+    /// A **hinge about local Y** — the mannequin's elbow (SK1b).
+    ///
+    /// # Why an elbow is sometimes not `hinge_x`, and how long it was
+    ///
+    /// A hinge's axis is the axis the joint turns **about**, in its parent's
+    /// frame, so the right axis is a property of the *bind pose* and not of the
+    /// joint's name. This template's arms hang **down** along `−Y`, so `hinge_x`
+    /// is a correct elbow for them. [`crate::manny`]'s arms are a **T-pose along
+    /// `±X`** — SK1a's law that a bind pose here carries no rotation — and on that
+    /// rig `hinge_x` names the forearm's own *roll* axis and permits nothing but
+    /// roll.
+    ///
+    /// Measured on the mannequin the first time SK1b's hand IK ran through it: an
+    /// arm reaching a point 55 cm in front of the shoulder solved **exactly**
+    /// (3e-8 m) unlimited and missed by **0.484 m** limited, with the elbow's
+    /// local rotation pinned to the identity. A limit that does not restrain an
+    /// elbow — it *straightens* it. It had been that way since P24.1 and nothing
+    /// found it, because nothing solved an arm chain until this wave.
+    ///
+    /// The ranges are **mirrored**, unlike a knee's: a left forearm flexes
+    /// forward about `+Y` and a right one about `−Y`.
+    pub fn hinge_y(joint: u16, min_deg: f32, max_deg: f32) -> Self {
+        Self {
+            joint,
+            min_deg: [0.0, min_deg, 0.0],
+            max_deg: [0.0, max_deg, 0.0],
+            cone: None,
+        }
+    }
+
     /// This limit with a swing-twist [`ConeLimit`] attached.
     pub fn with_cone(mut self, cone: ConeLimit) -> Self {
         self.cone = Some(cone);
@@ -335,7 +365,8 @@ impl JointLimit {
 
 /// A knee's flexion range, degrees — the hinge a leg IK chain bends on.
 const KNEE_RANGE_DEG: (f32, f32) = (-150.0, 0.0);
-/// An elbow's flexion range, degrees.
+/// An elbow's flexion range about its own hinge axis, degrees. Which axis that
+/// is depends on the rig's bind pose — see [`JointLimit::hinge_y`].
 const ELBOW_RANGE_DEG: (f32, f32) = (0.0, 150.0);
 
 /// Build a validated [`SkeletonAsset`] for `plan` with `params`.
