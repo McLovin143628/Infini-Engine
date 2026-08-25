@@ -1920,24 +1920,58 @@ mod tests {
         assert_eq!(side("ik_hand_gun"), BoneSide::Center);
         assert_eq!(side("thigh_bck_lwr_l"), BoneSide::Left);
         assert_eq!(side("upperarm_twist_01_r"), BoneSide::Right);
-        // The census: 89 deform-or-driven bones and 72 helpers is what the asset
-        // has, and a table that quietly re-labelled a family would move it.
+        // The census: **87** deform-or-driven bones and **74** helpers is what
+        // the asset has, and a table that quietly re-labelled a family moves it.
         let helpers = (0..sk.len() as u16)
             .filter(|i| idx.kind_of(*i) == Some(BoneRoleKind::Helper))
             .count();
         assert_eq!(helpers, 74, "the corrective/helper census");
         let deform = (0..sk.len() as u16).filter(|i| idx.is_deform(*i)).count();
         assert_eq!(deform, 63, "the deform census");
-        // The whole census, so a family cannot be re-labelled without moving a
-        // number here: 63 deform + 16 twists + 7 handles + 74 helpers + 1 root.
+        // **The WHOLE census, kind by kind** (SK1a audit). This comment already
+        // claimed "a family cannot be re-labelled without moving a number here",
+        // and three kinds were pinned. Measured: re-labelling `thigh_l` from
+        // `Thigh` to `Spine` left every assertion in this arm green — the deform
+        // total does not move (both kinds deform), the helper total does not
+        // move, and neither `Thigh` nor `Spine` was counted. It was caught two
+        // crates away, by `build_locomotion` failing to find a leg, which is a
+        // long way from the table that lied. Every kind is counted now, and the
+        // sum is asserted against the count so a row cannot be added to one
+        // family and taken from another.
         let count = |k: BoneRoleKind| {
             (0..sk.len() as u16)
                 .filter(|i| idx.kind_of(*i) == Some(k))
                 .count()
         };
-        assert_eq!(count(BoneRoleKind::Twist), 16);
-        assert_eq!(count(BoneRoleKind::IkTarget), 7);
-        assert_eq!(count(BoneRoleKind::Root), 1);
+        use BoneRoleKind::*;
+        let census: [(BoneRoleKind, usize); 18] = [
+            (Root, 1),
+            (Pelvis, 1),
+            (Spine, 5),
+            (Neck, 2),
+            (Head, 1),
+            (Clavicle, 2),
+            (UpperArm, 2),
+            (LowerArm, 2),
+            (Hand, 2),
+            (Finger, 32),
+            (Thumb, 6),
+            (Thigh, 2),
+            (Calf, 2),
+            (Foot, 2),
+            (Ball, 2),
+            (Twist, 16),
+            (IkTarget, 7),
+            (Helper, 74),
+        ];
+        for (kind, want) in census {
+            assert_eq!(count(kind), want, "the {kind:?} census");
+        }
+        assert_eq!(
+            census.iter().map(|(_, n)| n).sum::<usize>(),
+            MANNY_JOINT_COUNT,
+            "the census does not add up to the rig"
+        );
         assert_eq!(63 + 16 + 7 + 74 + 1, MANNY_JOINT_COUNT);
     }
 

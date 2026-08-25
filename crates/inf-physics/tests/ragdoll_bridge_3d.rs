@@ -967,9 +967,17 @@ fn a_mannequin_ragdolls_into_one_connected_body_and_a_table_less_one_does_not() 
         .filter(|p| p.joint.is_none())
         .map(|p| p.name.as_str())
         .collect();
-    assert!(
-        free.len() > 1,
-        "the name classifier is supposed to fail on this rig, and it did not: {free:?}"
+    // **The contrast is a NUMBER** (SK1a audit). This arm asserted `> 1`, which
+    // is satisfied by two loose capsules and by two hundred — and the ledger it
+    // fed said "14 parts, 4 free". Measured through this door, the classifier
+    // makes **92** parts out of 161 bones and leaves **31** of them floating:
+    // every `upperarm_*` corrective and twist claims `UpperArmL`/`UpperArmR` and
+    // every one of them wants a `Chest` that is never produced. Pinned, so the
+    // number in the ledger is the number the code makes.
+    assert_eq!(
+        (legacy.len(), free.len()),
+        (92, 31),
+        "the classifier's shape on a mannequin moved: {free:?}"
     );
     assert!(
         legacy

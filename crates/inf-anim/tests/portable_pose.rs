@@ -46,7 +46,7 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 28] = [
+const SIM_PATH: [(&str, &str, &str); 33] = [
     // ── P29.6's text form, for the same reason the two below it are here ──
     //
     // It is not on the *runtime* path at all — it is an authoring door — and it
@@ -189,6 +189,36 @@ const SIM_PATH: [(&str, &str, &str); 28] = [
         "roles.rs",
         include_str!("../src/roles.rs"),
         "the role table decides which joints the drive, the ragdoll and the weight solver touch at all, so a transcendental here would move which bones move",
+    ),
+    // ── SK1a audit: the five files in this crate's own `src` that were on no
+    //    list at all ──
+    //
+    // The completeness arm below is what found them; each writes a pose or a
+    // bind pose and each was one edit away from a silent escape.
+    (
+        "template.rs",
+        include_str!("../src/template.rs"),
+        "the generator writes the BIND POSE of every committed `.inf_skel` this engine makes, manny.rs's claim applied to the other four body plans — and it is where the pure-translation law that keeps an inverse bind an exact negation is actually spelled",
+    ),
+    (
+        "merge.rs",
+        include_str!("../src/merge.rs"),
+        "modular rigging writes the bind pose of the ASSEMBLED rig, which is what a weight table and an IK chain are then indexed against; the merged asset is committed content exactly as its parts were",
+    ),
+    (
+        "retarget.rs",
+        include_str!("../src/retarget.rs"),
+        "the retarget writes local rotations into a destination pose bind-relatively — a pose that is folded into state_bytes like any other, and the one path in the crate where two DIFFERENT rigs' binds are composed",
+    ),
+    (
+        "skeleton.rs",
+        include_str!("../src/skeleton.rs"),
+        "`JointTransform` and the inverse-bind arithmetic every pose in the crate is built out of; a transcendental at this level would be under all of the above at once",
+    ),
+    (
+        "sockets.rs",
+        include_str!("../src/sockets.rs"),
+        "`socket_transforms` composes a socket's world frame out of the posed globals, and an attachment's transform rides state_bytes through `inf_ecs::attach`",
     ),
     (
         "inf_player::runtime_sim",
@@ -374,19 +404,92 @@ fn production_code(src: &str) -> String {
 /// this repository actually compares), and **cross-platform trace portability
 /// would require revisiting the euler-conversion doctrine wholesale**. Written
 /// down in ROADMAP section 12's P24 block so it is a decision rather than a gap.
-const LEDGERED_EXCLUSIONS: [(&str, &str); 1] = [(
-    "inf_ecs::components (GlobalTransform propagation)",
-    "the Phase-3 euler-degrees Transform doctrine; see ROADMAP section 12",
-)];
+const LEDGERED_EXCLUSIONS: [(&str, &str); 3] = [
+    (
+        "inf_ecs::components (GlobalTransform propagation)",
+        "the Phase-3 euler-degrees Transform doctrine; see ROADMAP section 12",
+    ),
+    // ── SK1a audit: the two files in this crate's own `src` that really are
+    //    not on the pose path, named rather than merely absent ──
+    (
+        "lib.rs",
+        "a module list and a re-export list; it contains no arithmetic at all, and the completeness arm below would otherwise be satisfied by adding it to the pose path, which is a worse lie than an honest exclusion",
+    ),
+    (
+        "asset.rs",
+        "the bincode payload ladder: schema stamps, migration rungs and index bounds checks. It moves no value a pose is made of, and the numbers it does touch are u16 joint indices",
+    ),
+];
 
 #[test]
 fn the_ledgered_exclusions_are_named_rather_than_forgotten() {
     // A list this gate is *allowed* not to cover has to be short and reasoned; an
     // empty one would mean the gate claims total coverage, which it does not.
-    assert_eq!(LEDGERED_EXCLUSIONS.len(), 1);
+    //
+    // **`>=`, not `==`** (SK1a audit): the arm pinned the length at 1, so the
+    // only way to record a newly-found gap honestly was to make this red. A
+    // ledger nobody can add to is a ledger that stops being written.
+    assert!(
+        (1..=8).contains(&LEDGERED_EXCLUSIONS.len()),
+        "a list of things a gate does not cover has to stay short enough to read"
+    );
     for (what, why) in LEDGERED_EXCLUSIONS {
         assert!(!what.is_empty() && why.len() > 20, "{what}: {why}");
     }
+}
+
+/// **The gate can see its own directory** (SK1a audit).
+///
+/// `SIM_PATH` is a hand-maintained enumeration, so until this arm existed a new
+/// file in `crates/inf-anim/src` joined nothing: it was covered by no ban, named
+/// on no ledger, and no arm could tell the difference between "deliberately out
+/// of scope" and "nobody thought of it". Measured when this was written: **seven**
+/// of the crate's thirty-one source files were on neither list, and three of them
+/// (`retarget.rs`, `template.rs`, `merge.rs`) write poses or bind poses. None was
+/// a live escape — which is exactly the shape `inf_math::libm_ban`'s own header
+/// warns about, a list that enumerates what somebody thought of and passes for
+/// years.
+///
+/// This is the P22 law at a gate: **a ban enumerates what you thought of, an
+/// allowlist what is allowed.** Every `.rs` under this crate's `src` must be on
+/// one list or the other, by name.
+#[test]
+fn every_source_file_in_this_crate_is_covered_or_ledgered() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files: Vec<String> = std::fs::read_dir(&src)
+        .expect("this crate has a src directory")
+        .filter_map(|e| {
+            let p = e.expect("dir entry").path();
+            (p.extension().and_then(|x| x.to_str()) == Some("rs"))
+                .then(|| p.file_name()?.to_str().map(str::to_string))
+                .flatten()
+        })
+        .collect();
+    files.sort();
+    assert!(
+        files.len() >= 25,
+        "the sweep found {} files under {}; it is not looking where it thinks it is",
+        files.len(),
+        src.display()
+    );
+    let covered: Vec<&str> = SIM_PATH.iter().map(|(n, _, _)| *n).collect();
+    let ledgered: Vec<&str> = LEDGERED_EXCLUSIONS.iter().map(|(n, _)| *n).collect();
+    let missing: Vec<&String> = files
+        .iter()
+        .filter(|f| !covered.contains(&f.as_str()) && !ledgered.contains(&f.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "{missing:?} are on neither `SIM_PATH` nor `LEDGERED_EXCLUSIONS` — a file \
+         in this crate is either on the pose path and banned from `std` \
+         transcendentals, or it is not and says why. Add it to one of the two."
+    );
+    println!(
+        "{} source files: {} on the pose path, {} ledgered out",
+        files.len(),
+        files.len() - ledgered.len(),
+        ledgered.len()
+    );
 }
 
 #[test]
