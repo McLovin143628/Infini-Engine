@@ -137,6 +137,40 @@ impl JointMask {
         Self::new(name, rows, outside)
     }
 
+    /// **The upper body** (SK1b) — the mask an aim offset and a reload live on
+    /// while the legs keep walking.
+    ///
+    /// The joint it is rooted at is the **first bone of the spine**, asked of the
+    /// role table rather than of a name: everything above the hips is in — the
+    /// whole spine chain, both clavicles, both arms, every finger, the neck and
+    /// the head — and the pelvis, the legs, the feet and every `ik_*` handle are
+    /// out, because on any rig this engine generates those hang off the pelvis or
+    /// the root and not off the spine.
+    ///
+    /// # This is the thing this type's docs have described since P29.2
+    ///
+    /// [`from_subtree`](Self::from_subtree)'s own docs name `Layering_Spine`,
+    /// `Layering_Arm_L` and `Layering_Head` as "the authoring primitive the
+    /// overlay vocabulary actually wants", and the scout for this wave recorded
+    /// that no `Mask_AimOffset` existed anywhere in the tree — designed, and not
+    /// built. This is it, derived once from the rig so an author does not
+    /// hand-list 130 joint indices that shift the moment a rig is regenerated.
+    ///
+    /// `None` for a rig whose table names no spine, which is every rig older than
+    /// `.inf_skel` v3 and every non-humanoid: a mask that guessed would confine
+    /// an overlay to whatever the guess picked, silently.
+    pub fn upper_body(
+        name: impl Into<String>,
+        skeleton: &Skeleton,
+        roles: crate::roles::RoleIndex<'_>,
+    ) -> Option<Self> {
+        let spine = roles.first(
+            crate::roles::BoneRoleKind::Spine,
+            crate::roles::BoneSide::Center,
+        )?;
+        Some(Self::from_subtree(name, skeleton, spine, 1.0, 0.0))
+    }
+
     /// Read an authored [`BlendProfile`] as a mask.
     ///
     /// The conversion is where the two meanings meet, so it takes `default` from

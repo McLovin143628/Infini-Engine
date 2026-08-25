@@ -60,6 +60,10 @@ pub const MAX_SPREAD_DEG: f64 = 45.0;
 /// The furthest a hitscan shot may reach, metres.
 pub const MAX_RANGE_M: f64 = 20_000.0;
 
+/// How far a muzzle may sit from a weapon's own origin, metres — the bound on
+/// [`WeaponDef::muzzle_forward_m`]. A barrel longer than this is a vehicle.
+pub const MAX_MUZZLE_FORWARD_M: f64 = 3.0;
+
 /// How a shot travels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ShotKind {
@@ -100,6 +104,20 @@ pub struct WeaponDef {
     /// The seed the deterministic spread is folded against, so two weapons
     /// firing their first shot do not scatter identically.
     pub spread_seed: u64,
+    /// **How far the muzzle is from the weapon's own origin**, metres, along its
+    /// barrel (the weapon's local `+Z` — model space faces `+Z` in this engine).
+    ///
+    /// This is the weapon's *muzzle socket*, expressed as the one number a
+    /// straight barrel needs. It is what a shot's origin is read off once the
+    /// weapon is a real entity attached to a hand — see
+    /// `inf_physics::d3::gameplay::muzzle_of`, which falls back to a height above
+    /// the character's feet for a character that has no rig to hang a weapon on.
+    ///
+    /// This type carries **no** `Serialize`, rides no wire and is built from TOML
+    /// by `from_toml_table`, so adding a field costs no schema bump — the one
+    /// place in this arc where that is true, and the reason the muzzle is
+    /// described here rather than in a new component.
+    pub muzzle_forward_m: f64,
 }
 
 impl Default for WeaponDef {
@@ -117,6 +135,8 @@ impl Default for WeaponDef {
             range_m: 400.0,
             muzzle_speed_mps: 900.0,
             spread_seed: 0,
+            // A rifle: the muzzle is 45 cm along the barrel from the grip.
+            muzzle_forward_m: 0.45,
         }
     }
 }
@@ -142,6 +162,7 @@ impl WeaponDef {
             "reload_s" => self.reload_s = value.clamp(0.05, 60.0),
             "range_m" => self.range_m = value.clamp(0.1, MAX_RANGE_M),
             "muzzle_speed_mps" => self.muzzle_speed_mps = value.clamp(1.0, 10_000.0),
+            "muzzle_forward_m" => self.muzzle_forward_m = value.clamp(0.0, MAX_MUZZLE_FORWARD_M),
             // Booleans and the kind come across the same door as numbers,
             // because the door is one `(name, f64)` pair and a second door for
             // three flags would be a second thing to keep in step.
@@ -165,6 +186,7 @@ impl WeaponDef {
             "automatic",
             "damage_j",
             "magazine",
+            "muzzle_forward_m",
             "muzzle_speed_mps",
             "projectile",
             "range_m",

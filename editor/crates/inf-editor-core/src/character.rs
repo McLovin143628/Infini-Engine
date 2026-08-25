@@ -849,7 +849,7 @@ pub fn build_character(
         gait_speeds_mps: ladder,
         ..Default::default()
     };
-    let (machine_model, proposal_notes) =
+    let (mut machine_model, mut proposal_notes) =
         match inf_anim::propose::propose_machine(&facts, &propose_opts) {
             Ok(p) => (p.machine, p.notes),
             Err(e) => (
@@ -865,6 +865,22 @@ pub fn build_character(
                 )],
             ),
         };
+    // ── SK1b: the upper-body aim mask, authored ──
+    //
+    // A `BlendProfile` on the machine, derived once from the rig's role table, so
+    // an aim offset or a reload named on a transition plays on the spine, the
+    // arms and the head while the legs keep walking. `layers.rs` has described
+    // this use since P29.2 and nothing had built it.
+    if author_aim_mask(&mut machine_model, &rig) {
+        proposal_notes.push(format!(
+            "an upper-body blend profile `{AIM_MASK}` was authored over {} joints,              so an aim offset or a reload can play on the upper body alone",
+            machine_model
+                .profiles
+                .last()
+                .map(|p| p.weights.len())
+                .unwrap_or(0)
+        ));
+    }
     let machine_asset = StateMachineAsset::new(machine_model.clone(), Some(skel_bytes));
     let machine = write_one(
         project,
@@ -1043,6 +1059,35 @@ fn export_advisories(r: &inf_dcc::ExportReport) -> Vec<String> {
 ///
 /// The [`inf_dcc::ExportReport`] comes back with it rather than being dropped:
 /// see [`export_advisories`].
+/// The name of the upper-body mask every generated character carries (SK1b).
+///
+/// ALS's own spelling, because that is what every ported animation graph names.
+pub const AIM_MASK: &str = "Mask_AimOffset";
+
+/// **Author the upper-body aim mask onto a generated machine** (SK1b).
+///
+/// The mask is a [`inf_anim::JointMask`] derived from the rig's role table and
+/// stored as the machine's own [`inf_anim::BlendProfile`], which is the
+/// `.inf_sm`-persisted form — so an aim offset or a reload named on a transition
+/// plays on the upper body while the legs keep walking. That is the use
+/// `layers.rs` has described since P29.2 and nothing had ever built.
+///
+/// A rig whose table names no spine gets no profile rather than a guessed one,
+/// and the machine is unchanged.
+fn author_aim_mask(machine: &mut inf_anim::StateMachine, rig: &SkeletonAsset) -> bool {
+    if machine.profiles.iter().any(|p| p.name == AIM_MASK) {
+        return false;
+    }
+    let Some(mask) = inf_anim::JointMask::upper_body(AIM_MASK, &rig.skeleton, rig.role_index())
+    else {
+        return false;
+    };
+    machine
+        .profiles
+        .push(inf_anim::BlendProfile::from_mask(&mask));
+    true
+}
+
 /// **The starter body** (SK1b) — the humanoid a new character gets when no mesh
 /// was brought.
 ///
@@ -2949,5 +2994,91 @@ mod tests {
         )
         .expect("builds");
         assert!(out.mannequin);
+    }
+
+    /// **The aim mask is on the upper body, and the legs are not in it.**
+    ///
+    /// The scout for this wave recorded that no `Mask_AimOffset` existed anywhere
+    /// in the tree — `layers.rs` describes the use and nothing built it. This is
+    /// the arm that says what the built one covers, and it asserts the **legs are
+    /// out** rather than only that the arms are in: a mask that covered every
+    /// joint would satisfy "the hand is masked in" perfectly and would confine
+    /// nothing.
+    #[test]
+    fn the_generated_machine_carries_an_upper_body_aim_mask() {
+        let rig = inf_anim::build_template(BodyPlan::Biped, &BodyParams::default()).unwrap();
+        let mut machine = inf_anim::locomotion_machine(
+            &inf_anim::build_locomotion(BodyPlan::Biped, &rig, &GaitParams::default())
+                .expect("a walk"),
+            [1; 16],
+            [2; 16],
+            [3; 16],
+        );
+        assert!(
+            author_aim_mask(&mut machine, &rig),
+            "no profile was authored"
+        );
+        assert!(
+            !author_aim_mask(&mut machine, &rig),
+            "it authored a second one"
+        );
+        let profile = machine
+            .profiles
+            .iter()
+            .find(|p| p.name == AIM_MASK)
+            .expect("the mask is on the machine");
+        let masked: std::collections::BTreeMap<u16, f32> = profile
+            .weights
+            .iter()
+            .map(|w| (w.joint, w.weight))
+            .collect();
+        println!(
+            "{AIM_MASK} covers {} of {} joints",
+            masked.len(),
+            rig.skeleton.len()
+        );
+        let inside = |name: &str| {
+            let j = rig
+                .skeleton
+                .index_of(name)
+                .unwrap_or_else(|| panic!("{name}"));
+            masked.get(&j).copied().unwrap_or(0.0) > 0.5
+        };
+        for name in [
+            "spine_01",
+            "spine_05",
+            "neck_01",
+            "head",
+            "clavicle_l",
+            "upperarm_r",
+            "hand_l",
+            "index_03_r",
+            "thumb_01_l",
+        ] {
+            assert!(inside(name), "{name} is not in the upper-body mask");
+        }
+        for name in [
+            "root",
+            "pelvis",
+            "thigh_l",
+            "calf_r",
+            "foot_l",
+            "ball_r",
+            "ik_foot_l",
+            "ik_hand_gun",
+        ] {
+            assert!(!inside(name), "{name} IS in the upper-body mask");
+        }
+        // …and it is a real confinement: more than a third of the rig is out.
+        assert!(
+            masked.len() * 3 < rig.skeleton.len() * 3 && masked.len() < rig.skeleton.len(),
+            "the mask covers the whole rig"
+        );
+        // The two forms agree — a profile written from a mask reads back as the
+        // same mask, which is what makes `.inf_sm` the persisted form of one.
+        let back = inf_anim::JointMask::from_profile(profile, 0.0);
+        let mask =
+            inf_anim::JointMask::upper_body(AIM_MASK, &rig.skeleton, rig.role_index()).unwrap();
+        assert_eq!(back.rows(), mask.rows(), "the round trip lost rows");
     }
 }

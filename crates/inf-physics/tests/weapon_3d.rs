@@ -717,3 +717,93 @@ fn a_character_with_no_weapon_has_no_ammunition_clock() {
         "a holstered weapon left its magazine behind"
     );
 }
+
+/// **THE CONTROL for SK1b's muzzle change: the old number and the new path agree
+/// on a capsule hero, exactly.**
+///
+/// The wave replaced "a shot leaves the character 1.4 m above its feet" with
+/// "a shot leaves the weapon's own muzzle", and every level committed before it
+/// — every fixture in this file, the whole `phase30-gameplay` course — has a hero
+/// with no rig. `muzzle_of` sends those to the capsule rule, and this is the arm
+/// that says the capsule rule is still the same rule. Asserted on `hit.from`,
+/// which nothing in this file had ever looked at.
+///
+/// Mutation: change `MUZZLE_HEIGHT_M`, or drop the `evaluated_pose` guard in
+/// `weapon_muzzle` so an unposed character reads its weapon entity's origin
+/// (which is its capsule CENTRE, 0.2 m low), and this goes red.
+#[test]
+fn the_new_muzzle_agrees_with_the_old_one_on_a_capsule_hero() {
+    let mut rig = Rig::new();
+    rig.arm("rifle");
+    rig.step(&idle());
+    let r = rig.step(&hold_trigger());
+    assert_eq!(r.shots, 1);
+    let from = r.hits[0].from;
+    let feet = d3::gameplay::feet_of(&rig.world, HERO).expect("the hero stands somewhere");
+    let old = feet + glam::DVec3::Y * d3::gameplay::MUZZLE_HEIGHT_M;
+    println!("the shot left {from:?}; the pre-SK1b rule says {old:?}");
+    assert!(
+        (from - old).length() < 1e-12,
+        "the muzzle moved: {from:?} against {old:?}"
+    );
+    // …and the hero really has no pose to read a socket off, which is the
+    // premise this control rests on.
+    assert!(
+        inf_ecs::pose::evaluated_pose(&rig.world, HERO).is_none(),
+        "this fixture is supposed to be a bare capsule"
+    );
+}
+
+/// **An equipped weapon is a real entity, attached to the hand** (SK1b), and it
+/// leaves the world when nothing is equipped.
+#[test]
+fn the_equipped_weapon_is_an_entity_attached_to_the_hand_socket() {
+    use inf_ecs::components::{AttachedTo, MeshRef};
+    let mut rig = Rig::new();
+    let weapon = d3::gameplay::equipped_weapon_guid(HERO);
+    rig.step(&idle());
+    assert!(
+        rig.world.entity_of(weapon).is_none(),
+        "an unarmed character carries a weapon entity"
+    );
+
+    rig.arm("rifle");
+    rig.step(&idle());
+    let e = rig
+        .world
+        .entity_of(weapon)
+        .expect("an equipped weapon is an entity");
+    let a = rig
+        .world
+        .world()
+        .get::<AttachedTo>(e)
+        .expect("it is attached");
+    assert_eq!(a.target, HERO);
+    assert_eq!(a.socket, d3::gameplay::WEAPON_SOCKET);
+    assert!(
+        rig.world.world().get::<MeshRef>(e).is_some(),
+        "nothing would draw it"
+    );
+    // The guid is a pure function of the owner, so two hosts spawn the same
+    // entity — the P22 content-derived rule, which is what makes this legal
+    // inside a fixed step at all.
+    assert_eq!(weapon, d3::gameplay::equipped_weapon_guid(HERO));
+    assert_ne!(weapon, d3::gameplay::equipped_weapon_guid(TARGET));
+
+    // Unequip and it goes: a holstered character is a character with no weapon
+    // entity, not one with an invisible weapon still in the trace.
+    {
+        let h = rig.world.entity_of(HERO).expect("the hero");
+        let mut inv = rig
+            .world
+            .world_mut()
+            .get_mut::<item::Inventory>(h)
+            .expect("a bag");
+        inv.unequip();
+    }
+    rig.step(&idle());
+    assert!(
+        rig.world.entity_of(weapon).is_none(),
+        "the weapon outlived its equip"
+    );
+}

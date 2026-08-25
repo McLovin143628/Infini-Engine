@@ -636,6 +636,28 @@ pub struct BlendProfile {
 
 impl BlendProfile {
     /// A profile that scales the named joints and leaves the rest alone.
+    /// **An authored profile from a derived mask** (SK1b).
+    ///
+    /// The two types say the same thing at two different layers — a
+    /// [`crate::JointMask`] is a *runtime* per-joint weight and a profile is the
+    /// **authored, persisted** one that rides `.inf_sm` — and this is the one
+    /// direction that was missing. `JointMask::from_profile` has read profiles
+    /// as masks since P29.2; nothing could write one.
+    ///
+    /// Only the joints the mask actually *mentions* become rows, because a
+    /// profile's silence means "at the transition's alpha" and a row per joint on
+    /// a 161-bone rig would be 161 rows to say what 130 say.
+    pub fn from_mask(mask: &crate::layers::JointMask) -> Self {
+        Self {
+            name: mask.name.clone(),
+            weights: mask
+                .rows()
+                .iter()
+                .map(|&(joint, weight)| JointBlendWeight { joint, weight })
+                .collect(),
+        }
+    }
+
     pub fn new(name: impl Into<String>, weights: Vec<JointBlendWeight>) -> Self {
         Self {
             name: name.into(),

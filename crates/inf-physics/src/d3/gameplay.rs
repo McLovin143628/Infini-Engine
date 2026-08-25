@@ -57,11 +57,52 @@ pub const KICK_FUSE_S: f64 = 0.35;
 /// the bound on `WeaponDef::range_m`, applied at the cast.
 pub const SHOT_MAX_RANGE_M: f64 = weapon::MAX_RANGE_M;
 
-/// Where a shot leaves the character, metres above its feet.
+/// Where a shot leaves a character **that has no weapon to read a muzzle off**,
+/// metres above its feet.
 ///
-/// Chest height on a default capsule, so a shot fired along the aim does not
-/// begin inside the ground on a downward pitch.
+/// # It used to be *the* muzzle, and SK1b is when it stopped being
+///
+/// Until this wave an equipped weapon was an inventory slot id and nothing else:
+/// no entity, no transform, nothing in the world at all, so a shot had to start
+/// at a height somebody picked. Chest height on a default capsule, so a shot
+/// fired along the aim does not begin inside the ground on a downward pitch.
+///
+/// A character with a **rig** and an equipped weapon now carries that weapon as a
+/// real entity attached to its `hand_r` socket, and [`muzzle_of`] reads the shot's
+/// origin off the weapon's own muzzle. This is what is left: the answer for a
+/// bare capsule — every level committed before this wave, the whole
+/// `phase30-gameplay` fixture, and every test rig that steps gameplay without
+/// stepping the pose. `the_new_muzzle_agrees_with_the_old_one_on_a_capsule_hero`
+/// is the control that pins the two together, because "no gameplay regression"
+/// is a claim about a number and not a feeling.
 pub const MUZZLE_HEIGHT_M: f64 = 1.4;
+
+/// The socket an equipped weapon hangs from.
+///
+/// The engine's own name for the right hand, published by every rig this engine
+/// generates — [`inf_anim::manny`]'s twelve sockets include it under both the
+/// engine spelling and ALS's `hand_r_socket`, and the twenty-joint template has
+/// carried it since P24.1. A rig that does not publish it gets an attachment at
+/// its entity origin (`inf_ecs::attach`'s documented fallback) and a muzzle from
+/// the capsule rule, which is the same answer it got before this wave.
+pub const WEAPON_SOCKET: &str = "hand_r";
+
+/// The salt that carves equipped weapons' GUID space out of the scene's own —
+/// `item::dropped_item_guid`'s shape, with its own constant.
+const EQUIPPED_WEAPON_SALT: u128 = 0x5745_4150_4f4e_5f45_5155_4950_5045_4421;
+
+/// **The guid of the entity that IS a character's equipped weapon.**
+///
+/// Content-derived from the owner, the P22 idiom: a fixed step may not mint a
+/// random guid, because two hosts stepping the same sim have to produce the same
+/// entity or the trace forks on the first frame anything is equipped. One weapon
+/// entity per character, re-used as the character switches weapons — a rifle and
+/// a pistol are the same slot in the same hand.
+pub fn equipped_weapon_guid(owner: Uuid) -> Uuid {
+    let mut x = owner.as_u128() ^ EQUIPPED_WEAPON_SALT;
+    x = x.rotate_left(37) ^ x.wrapping_mul(0xff51_afd7_ed55_8ccd_c4ce_b9fe_1a85_ec53);
+    Uuid::from_u128(x)
+}
 
 /// **One shot that landed** — the record a gate and the tracer both read.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -125,6 +166,11 @@ pub fn step_gameplay(
     step_weapons(world, bridge, dt, &mut report);
     // 3. Every pending kick: the notify, or the fuse.
     step_kicks(world, dt, &mut report);
+    // 3b. **The equipped weapon is an entity** (SK1b) — spawned, moved by the
+    //     attachment pass below the pose, despawned when nothing is equipped.
+    //     After the weapon step, because that is where a scroll wheel changes
+    //     what is equipped.
+    step_equipped_weapons(world);
     // 4. Every body that stopped working goes to the ragdoll — the P29.4
     //    bridge's own door, whose doc has named "a damage system" as its
     //    intended caller since it was written.
@@ -150,16 +196,127 @@ pub fn feet_of(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
     Some(t.translation.to_dvec3() - DVec3::Y * (cm.half_height_for(cm.mode) + radius))
 }
 
-/// The character's muzzle, world metres, and where it is looking.
+/// **The character's muzzle**, world metres, and where it is looking.
+///
+/// # Two answers, and which one applies
+///
+/// 1. **The weapon's own muzzle.** A character with a rig carries its equipped
+///    weapon as an entity attached to [`WEAPON_SOCKET`]; the shot leaves that
+///    entity's barrel, [`WeaponDef::muzzle_forward_m`] along its local `+Z`. The
+///    weapon's placement is required to be *finite and settled* — it is only
+///    settled once `update_attachments` has run, which is why the pose is asked
+///    for as well: a character that publishes no pose has an attachment sitting
+///    at its entity origin, which is its capsule centre, and a muzzle there would
+///    be a silent half-metre regression on every unrigged level in the tree.
+/// 2. **A height above the feet**, [`MUZZLE_HEIGHT_M`] — everything else.
+///
+/// # The one-step latency, stated
+///
+/// `step_gameplay` runs **before** `step_pose_evaluation` and
+/// `update_attachments` in both hosts, so the weapon transform this reads is the
+/// one the previous fixed step settled. At 60 Hz that is 16.7 ms of lag between
+/// where the hand is and where the shot starts, and it is the same lag in both
+/// hosts — so PIE == shipping is unaffected and the trace cannot see it. Moving
+/// the gameplay step below the pose would fix it and would move every committed
+/// trace in the tree; it is named here rather than done quietly.
 fn muzzle_of(world: &EcsWorld, guid: Uuid) -> Option<(DVec3, f64, f64)> {
-    let feet = feet_of(world, guid)?;
     let entity = world.entity_of(guid)?;
     let cm = world.world().get::<CharacterMovement>(entity)?;
-    Some((
-        feet + DVec3::Y * MUZZLE_HEIGHT_M,
-        cm.runtime.aim_yaw_deg,
-        cm.runtime.aim_pitch_deg,
-    ))
+    let (yaw, pitch) = (cm.runtime.aim_yaw_deg, cm.runtime.aim_pitch_deg);
+    if let Some(from) = weapon_muzzle(world, guid) {
+        return Some((from, yaw, pitch));
+    }
+    let feet = feet_of(world, guid)?;
+    Some((feet + DVec3::Y * MUZZLE_HEIGHT_M, yaw, pitch))
+}
+
+/// The muzzle of `guid`'s **weapon entity**, if there is one and it is attached
+/// to a real socket. `None` sends [`muzzle_of`] to the capsule rule.
+fn weapon_muzzle(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
+    use inf_ecs::components::GlobalTransform;
+    // The socket has to exist on the rig AND have been resolved, or the
+    // attachment is sitting at the character's own origin.
+    inf_ecs::pose::evaluated_pose(world, guid)?.socket(WEAPON_SOCKET)?;
+    let (_, def) = equipped_weapon(world, guid)?;
+    let e = world.entity_of(equipped_weapon_guid(guid))?;
+    let g = world.world().get::<GlobalTransform>(e)?.0;
+    let forward = def
+        .muzzle_forward_m
+        .clamp(0.0, weapon::MAX_MUZZLE_FORWARD_M);
+    let at = g.transform_point3(DVec3::new(0.0, 0.0, forward));
+    at.is_finite().then_some(at)
+}
+
+/// **Keep every character's equipped weapon a real entity in the world**
+/// (SK1b) — spawned when something is equipped, moved by the attachment pass,
+/// despawned when nothing is.
+///
+/// # Why a whole entity
+///
+/// Before this an "equipped weapon" was a slot index. Nothing drew it, nothing
+/// could be attached to it, and the shot it fired started at a hard-coded height
+/// above the character's feet — the scout's risk 14, whole. An entity is what a
+/// socket can carry, what a projector can draw and what a muzzle can be read off,
+/// and it costs no schema: `AttachedTo` is already a scene component and this one
+/// is never saved.
+///
+/// # Deterministic by construction
+///
+/// The guid is [`equipped_weapon_guid`], derived from the owner, so both hosts
+/// spawn the same entity on the same step. The entity **appears in the trace** as
+/// a transform row, which is the honest cost and is why it is spawned from the
+/// one Ring-0 rule both hosts call rather than from either of them.
+fn step_equipped_weapons(world: &mut EcsWorld) {
+    use inf_ecs::components::{AttachedTo, MeshRef, Name, Primitive, Transform, Visibility};
+
+    for guid in gunners(world) {
+        let want = equipped_weapon(world, guid).map(|(id, def)| (id, def.muzzle_forward_m));
+        let weapon_guid = equipped_weapon_guid(guid);
+        let existing = world.entity_of(weapon_guid);
+        match (want, existing) {
+            (None, Some(e)) => {
+                // Nothing equipped: the weapon leaves the world, so a holstered
+                // character is byte-identical to one that never had a weapon.
+                world.despawn(e);
+            }
+            (None, None) => {}
+            (Some((id, forward)), existing) => {
+                let e = match existing {
+                    Some(e) => e,
+                    None => world.spawn_with_guid(weapon_guid, &format!("Weapon: {id}"), None),
+                };
+                let w = world.world_mut();
+                // The name follows the equipped item, so switching weapons is
+                // visible in the Outliner rather than silently the same row.
+                if let Some(mut n) = w.get_mut::<Name>(e) {
+                    let label = format!("Weapon: {id}");
+                    if n.0 != label {
+                        n.0 = label;
+                    }
+                }
+                // A placeholder primitive, scaled to the weapon's own length —
+                // the `item::spawn_pickup` precedent, and the same honest bound:
+                // an `ItemDef` that names a mesh asset is the next field and is
+                // not in this wave.
+                let mut t = w.get_mut::<Transform>(e).map(|t| *t).unwrap_or_default();
+                let len = forward.clamp(0.05, weapon::MAX_MUZZLE_FORWARD_M);
+                t.scale = inf_ecs::math::Vec3d::new(0.06, 0.06, len);
+                w.entity_mut(e).insert((
+                    t,
+                    MeshRef {
+                        primitive: Primitive::Cube,
+                        asset: None,
+                    },
+                    Visibility::default(),
+                    // Zero offset: the weapon sits AT the hand socket, which is
+                    // where a grip's palm frame is. A `GripAffordance`'s palm
+                    // transform is the refinement, and it needs the rig — which
+                    // this step does not have and the pose step does.
+                    AttachedTo::new(guid, WEAPON_SOCKET, inf_ecs::math::Vec3d::ZERO),
+                ));
+            }
+        }
+    }
 }
 
 /// The equipped weapon's definition, if the character has one equipped and the
