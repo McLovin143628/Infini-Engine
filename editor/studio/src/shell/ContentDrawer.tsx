@@ -256,8 +256,13 @@ export default function ContentDrawer() {
                   ["table", "Data Table"],
                   ["biomeset", "Biome Set"],
                   // P24.1 template body plans: a generated, socketed,
-                  // limit-carrying rig rather than an empty document.
-                  ["skel:biped", "Skeleton — Biped"],
+                  // limit-carrying rig rather than an empty document. Since SK1a
+                  // `skel:biped` is the 161-bone UE5 mannequin (the backend calls
+                  // it "Mannequin Rig"), and the twenty-joint canonical rig every
+                  // committed clip in this repository is index-bound to has its
+                  // own entry — without it there was no door to it at all.
+                  ["skel:biped", "Skeleton — Mannequin (161 bones)"],
+                  ["skel:biped-canonical", "Skeleton — Biped (20 bones)"],
                   ["skel:quadruped", "Skeleton — Quadruped"],
                   ["skel:hexapod", "Skeleton — Hexapod"],
                 ] as const
