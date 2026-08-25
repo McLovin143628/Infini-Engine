@@ -187,7 +187,7 @@ pub fn merge_skeletons(
     let mut limits = base.limits.clone();
     limits.extend(incoming.limits.iter().map(|l| JointLimit {
         joint: l.joint + offset,
-        ..l.clone()
+        ..*l
     }));
 
     // **The v3 side tables shift exactly as the limits do** (SK1a audit).

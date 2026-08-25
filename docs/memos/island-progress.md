@@ -3903,14 +3903,32 @@ its child, no duplicate names. Six disagreements with the document, all printed 
 **What is Epic's and what is ours.** Names, parent links and emission order are
 the interchange contract and are reproduced verbatim — they are the whole point,
 since `thigh_l` / `spine_03` / `ik_foot_root` are what every Mixamo clip, every
-MetaHuman body and every ALS blueprint addresses. The **bind pose is not copied**:
-every offset is derived from `BodyParams` by this module's own rules, so the rig
-is proportionally whatever height it was asked for. Two *structural* facts were
-read off the asset and kept because they are rules and not geometry, and both are
-load-bearing: the twist bones sit at **exactly one third and two thirds** of their
-segment, and `_01` is always the one nearest the joint that drives it
-(`upperarm_twist_01_l` at 1/3 from the shoulder; `lowerarm_twist_01_l` at 2/3 from
-the elbow, i.e. 1/3 from the wrist).
+MetaHuman body and every ALS blueprint addresses. **Every offset is a proportion
+multiplied by a `BodyParams` length** — no absolute dimension is copied, so the
+rig is proportionally whatever height it was asked for. *Where those proportions
+come from is three answers, and the SK1a audit's correction is that this ledger
+originally gave two:*
+
+1. **Invented** — the torso, the limbs, the girdles, the hand's overall size.
+   These are this engine's own numbers, shared with `template.rs`, and they do
+   *not* reproduce the shipped rig's: the asset's hand is 0.096 of its height and
+   `HAND_OF_HEIGHT` is 0.105.
+2. **Rules read off the asset** — the twist bones sit at **exactly one third and
+   two thirds** of their segment, and `_01` is always the one nearest the joint
+   that drives it (`upperarm_twist_01_l` at 1/3 from the shoulder;
+   `lowerarm_twist_01_l` at 2/3 from the elbow, i.e. 1/3 from the wrist). Both are
+   load-bearing for the drive law.
+3. **Measured proportions** — the nineteen bones of the **hand**. Their offsets
+   are the reference skeleton's own local bind translations, normalized so the
+   middle-finger chain sums to 1.0 of hand length (verified: `middle_metacarpal`
+   is 3.375833 cm over a 17.117 cm chain = the committed 0.1972). Fifty-seven
+   numbers, per-bone rather than per-class. Kept, because there is no *rule* for
+   where a pinky metacarpal sits relative to a ring one — it is anatomy, and
+   inventing it makes a hand nobody's glove fits — and because a ratio of a length
+   this module chooses carries no dimension. Named here rather than left reading
+   as though it were derived; `manny.rs`'s module docs carry the same split, and
+   `the_two_hands_are_an_exact_mirror_of_each_other` is the arm those 57
+   hand-maintained numbers did not have.
 
 The census, asserted: **63 deform + 16 twists + 7 IK handles + 74 helpers + 1
 root = 161**.
@@ -3967,7 +3985,12 @@ Measured, arithmetic-verified:
 | `character-demo/Character.inf_skel` (0 limits) | 684 B | 688 B | **+4** = four empty `Vec` prefixes |
 | `phase29-locomotion/Hero.inf_skel` (4 limits) | 2 687 B | 2 695 B | **+8** = the same four, plus one `Option<ConeLimit>` tag per limit |
 
-The stamp byte goes 2 → 3 and every other byte is identical. Sidecars carry only
+The stamp byte goes 2 → 3. On `character-demo`, which authors no limit, **every
+other byte is identical** and the four new prefixes are a pure tail append; on
+`Hero` the four `Option` tags are inserted *inside* the limits `Vec`, which is
+mid-stream, so the 75 bytes after it shift — the delta is still exactly +8 and no
+rig content moved, but "every other byte identical" is true of one file and not
+of the other (SK1a audit). Sidecars carry only
 their content hash. **No `.inf_anim`, no `.inf_sm`, no `.inf_act`, no `.inf_lvl`
 moved** — `phase29_spec` is pinned to `BipedCanonical` so that course keeps the rig
 its clips are index-bound to.
@@ -4046,11 +4069,17 @@ the rig, the physics side assembles it):
 
 | | role path | name classifier, same rig |
 |---|---|---|
-| parts | **17** | 14 |
-| free capsules | **1** — the pelvis, which is the root | **4** |
+| parts | **17** | **92** |
+| free capsules | **1** — the pelvis, which is the root | **31** |
 | a chest | yes | **never** |
 | every part reaches the root, walked | yes | no |
-| forearm capsule span | **1.000** of the forearm | built from a twist bone |
+| forearm capsule span | **1.000** of the forearm | built from a twist bone (in *production*; the arm feeds both paths the role-derived spans, so it does not measure this half) |
+
+*(The classifier column read "14" and "4" until the SK1a audit measured it: the
+arm asserted only `free.len() > 1`, which two loose capsules and two hundred both
+satisfy. Every `upperarm_*` corrective and twist classifies to `UpperArmL` or
+`UpperArmR` and every one of them wants a `Chest` that is never produced. Both
+numbers are pinned now.)*
 
 The way the classifier fails is the quiet one: `spine_01` … `spine_05` all match
 its `spine` keyword and *none* matches its `spine1`/`spine2` chest keywords — the
@@ -4104,13 +4133,25 @@ severed-machine anti-vacuity arm intact. The trace, re-priced and now asserted
 a `u64` per step and does not grow at all; what grows is the memcpy and the hash.
 
 **The heat solve, measured before anything was done about it** (release, 386
-vertices, min of three): 24 → 249 bone segments is **10.4×**, and the solve went
-**31.9 → 75.9 ms**, which is **2.4×**. The per-bone work is real and is not what
-dominates at this size — the Laplacian assembly and the per-vertex top-4 gather
-are bone-independent and are most of the clock. A finding, not a licence: `field`
-is B × V × 8 bytes, so 161 bones over 50 000 vertices is ~64 MB resident and the
-balance tips. The arm asserts the **upper** bound, which is the half that guards
-something.
+vertices, min of three): 24 → 249 bone segments is **10.4×**, and the solve grew
+about **2.4×**. The per-bone work is real and is not what dominates at this size.
+
+*The SK1a audit corrected the stated cause, and the correction is the interesting
+part.* The first write-up said the Laplacian assembly **and the per-vertex top-4
+gather** are bone-independent, and that the diffusion is one CG solve per bone.
+Both halves are wrong: the gather walks every bone's field for every vertex, which
+is O(V·B) and is the part that *does* scale; and a bone that wins no vertex has
+`sources == 0` and **skips the solve entirely**. Measured with the count now
+reported by the arm: **15 of 24 segments actually solve on the canonical rig and
+19 of 249 on the mannequin** — 1.3× the solves for 10.4× the bones, which is the
+real explanation of the ratio. (89 of those 249 are also zero-length leaf markers
+rather than bones, against 5 of 24 on the small rig, so the segment ratio partly
+measures leaf density.) A finding, not a licence: `field` is B × V × 8 bytes, so
+161 bones over 50 000 vertices is ~64 MB resident and the balance tips. The arm
+asserts the **upper** bound on the clock ratio and the solve count beside it — the
+millisecond pair is printed rather than written down, because the wave's code
+comment (32.4 → 78.3) and this ledger (31.9 → 75.9) had already drifted into two
+readings of one measurement.
 
 **The preview drag, measured** (release, min of five): a cold mannequin preview is
 **0.105 ms** against 0.035 ms for the twenty-joint rig; warm, 0.026 against 0.004.
@@ -4143,9 +4184,14 @@ pinned to `BipedCanonical`.
    this machine disagree about a fact the asset contains, the asset wins and the
    disagreement is printed in the code that carries it.
 2. **Names, parents and order are an interface; a bind pose is content.** The
-   mannequin's vocabulary and topology are reproduced; its geometry is derived
-   from `BodyParams`. Anything read off the asset must be a *rule* (thirds; `_01`
-   nearest the driver), not a number.
+   mannequin's vocabulary and topology are reproduced; every offset is a
+   proportion of a `BodyParams` length and no absolute dimension is copied.
+   *Amended by the SK1a audit*: anything read off the asset must be a **rule**
+   (thirds; `_01` nearest the driver) **or a dimensionless proportion that is
+   named as measured** — the hand table is nineteen bones of the second kind, and
+   the original wording ("not a number") was already false of it when it was
+   written. A number read off an asset and presented as derived is the thing this
+   decision is actually against.
 3. **The role table is the first answer and a name rule is the fallback**, at
    every site that asks what a bone is. A rig with no table behaves exactly as it
    did.
@@ -4207,13 +4253,13 @@ pinned to `BipedCanonical`.
 
 | | after I7b | **after SK1a** |
 |---|---|---|
-| battery blocks / passed / failed / ignored | 319 / 5 968 / 0 / 16 | **319 / 6 009 / 0 / 16** — **+41 arms and no new block**, which is right: every arm this wave wrote went into a file that already existed |
+| battery blocks / passed / failed / ignored | 319 / **5 971** / 0 / 16 | **319 / 6 009 / 0 / 16** — **+38 arms and no new block**. The 6 009 reproduces exactly; the *delta* did not, because the baseline was taken from I7b's **wave** figure (5 968) and not from its **audited head** (5 971, the wave's 5 968 plus that audit's three arms — I7b's own ROADMAP block says so). +38 is also the count of `#[test]` items the wave's diff adds, and it removes none. "No new block" is right for the reason given: every arm went into a file that already existed |
 | goldens | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical**, re-run under `INF_GOLDEN_STRICT=1` over **101 arms** with **no PNG rewritten** (`git status` on `tests/goldens/` empty). Nothing in this wave touches a render path |
 | frontend tests / files | 702 / 78 | **702 / 78**, re-run — the wizard, the Skeleton Editor and `BodyPlanName` all moved; `tsc` and `eslint --max-warnings 0` clean |
 | `clippy --workspace --all-targets` `-D warnings` | 0 | **0**. Four findings were cleared on the way and all four were this wave's own: a `?`-able `else if let` chain in `twist_rule`, a needless borrow in the ladder's arms, a boxed-closure type that wanted a `type` alias, and a needless borrow at the Ring-2 anim door |
 | rustdoc warnings (ceiling 450) | 374 individual over 30 crates | **374 individual over 30 crates**, measured after `cargo clean --doc`. **The wave adds zero**: it introduced exactly one (a public doc linking the private `skel_v2::SkeletonAsset`) and it was found and removed |
 | `cargo fmt --all --check` | clean | clean |
-| schema | `.inf_skel` v2, `.inf_anim` v2, `.inf_sm` v3, `.inf_mesh` v2, scene v24, `ScenePayload` v11 | **`.inf_skel` v2 → v3, and NOTHING else moved** |
+| schema | `.inf_skel` v2, `.inf_anim` v2, `.inf_sm` v3, `.inf_mesh` v2, scene **v25**, `ScenePayload` v11 | **`.inf_skel` v2 → v3, and NOTHING else moved** |
 | committed sample bytes | — | two `.inf_skel` files and their sidecars: **+4 B** and **+8 B**, arithmetic-verified |
 
 **The twentieth chr(92) catch, and it was this wave's own.** The pose-writer pin's
@@ -4237,3 +4283,251 @@ twentieth on the first full battery, which is the gate doing exactly its job.
 | `c702c32d` | a driven bone is overwritten, and the census says 74 |
 | `5c3bb736` | the twentieth chr(92) catch, and it was mine |
 | `e7389fd8` | the last three the gates found |
+| `498bc92a` | the ledger's counts, measured rather than carried forward — **eleven**, not the ten this table could name, because a ledger commit cannot list itself |
+
+## The SK1a audit (2026-08-25)
+
+Adversarial, `9790ff8e..498bc92a`, fresh reader, nothing pushed. **The wave's
+headline is true and it was re-derived here independently**: the briefing
+document's printed tree parses to exactly **89** unique bone names, with `neck_02`
+absent and `ik_head`/`ik_pelvis`/`ik_spine` present; the shipped
+`SK_Mannequin.uasset` contains exactly one 161-record `FReferenceSkeleton`, and
+all 161 `(name, parent)` pairs are byte-for-byte what `manny.rs` emits, in the
+same order. The twist bones really do sit at 1/3 and 2/3, and `_01` really is the
+one nearest the driver. **No Unreal asset bytes are committed anywhere in the
+range** — two `.inf_skel` files and three new `.rs` files, nothing else binary.
+
+What the audit found is one shape and one correction. The shape: **an arm looser
+than the sentence it is written under**, six times — a cache assertion six times
+its own baseline, a contrast asserted as `> 1` that fed a number seven times wrong
+into this ledger, a census that pinned three of eighteen families while claiming
+to pin all of them, a deform-only filter no arm could see the removal of, the
+wave's own headline fix asserted nowhere in the crate that owns it, and a source
+gate that could not enumerate its own directory. The correction: **what came off
+the asset was three kinds of thing, not two.**
+
+Three HIGH and sixteen MED, all fixed; twelve LOW carried by name. Every fix is
+mutation-verified.
+
+### What reproduced, measured here rather than read
+
+| the wave's figure | mine |
+|---|---|
+| the document's printed tree is 89, not 161 | **89** unique names, parsed |
+| 161 bones, one root, parent < index, no duplicate name | **all four**, against the asset itself |
+| census 63 deform + 16 twists + 7 handles + 74 helpers + 1 root | **exactly**, counted off the table |
+| twist bones at 1/3 and 2/3, `_01` nearest the driver | **0.3333 / 0.6667** on all four segments, both sides |
+| trace 36 B + 40 B/joint, so 836 / 6 476 B, **7.75x** | arithmetic exact |
+| `character-demo` 684 to 688 B (+4), `Hero` 2 687 to 2 695 (+8) | **exact**, and byte 0 is 2 to 3 |
+| preview drag: mannequin cold well above canonical, both far inside a frame | **0.126 ms vs 0.023 ms** cold, **0.022 vs 0.004** warm |
+| goldens 54, byte-identical, 101 arms | **54 / 101**, `INF_GOLDEN_STRICT=1`, no PNG rewritten |
+| PIE == shipping on a 161-bone trace | green in the battery, both arms |
+| a v2 rig migrates; a v1 rig is refused; a v3 file refuses a v2 reader by stamp | held |
+
+Two the audit re-measured and **corrected** (below): the classifier's shape on a
+table-less mannequin, and the cause of the heat solve's 2.4x.
+
+### HIGH
+
+**H1 — `merge_skeletons` dropped all four v3 side tables.** It shifts sockets and
+limits by `joint_offset` and left `roles`, `twists`, `ik_follow` and `grips` at
+`Vec::new()`: the *same* defect the wave found and fixed in `fit_template`, in the
+other door that rebuilds a `SkeletonAsset` field by field, on a shipping path (the
+Skeleton Editor's merge, P24.3 modular rigging). Quieter, because nothing fails —
+a merged mannequin comes back with no opinion about its own anatomy,
+`build_locomotion` refuses it by name for a bone it has, the drive pass drives
+nothing, and all five role-first sites fall back to guessing. Fixed with the
+shift, and `a_merge_carries_both_sides_side_tables_shifted` asserts both halves,
+the offset, the base rows still *answering*, strict ascending order, and that the
+merged rig still generates a walk. Mutation: deleting `asset.roles = roles` fails
+it at **0 against 163**.
+
+**H2 — the preview cache's arm could not fail.**
+`assert!(warm161 <= cold161 * 1.5 + 0.5, "the cache did not help")` is, at the
+recorded 0.105 ms cold, a **0.66 ms** bound — six times the cold path — so
+deleting `CharacterPreviewSession`'s memoization outright leaves `warm == cold`
+and the arm green at every optimization level. It fires only if the cache makes
+the path dramatically *slower*, which is the opposite of what its message claims.
+The crate already owned the honest instrument (`PreviewBuilds`, whose own docs say
+a silently-missing cache "would keep every number in the preview correct"), so the
+arm reads counters — six previews, **one** locomotion build, **one** body build,
+zero BVHs, on both rigs — and the wall clock is a `println!`. The 250 ms debug
+ceiling stays, with its slack named: in the build CI runs it is about 2 400x the
+measurement, which is why it is not the assertion.
+
+**H3 — the wave's headline fix was asserted nowhere in the crate that owns it.**
+`fit_template`'s side-table carry and its new role-first ground rule had no arm:
+every `autofit` fixture moved to `BipedCanonical` *in the same wave*, and a
+`BipedCanonical` rig carries **empty** tables, so the carry copied four empty
+vectors and the role branch was never taken. The only cover was indirect and two
+crates away. `a_fitted_mannequin_keeps_every_table_it_arrived_with` fits
+`BodyPlan::Biped` and asserts all four tables, the limits, the sockets, the stamp,
+that no joint was renamed or reordered (the premise the carry rests on), that the
+ankles and not the `ik_foot_*` markers were planted, and that the fitted rig still
+generates a walk. Mutation: restoring the field-by-field rebuild fails it at `[]`
+against 161 rows. The rebuild is also gone — `fit_template` moves the generated
+asset and replaces its skeleton, so the ninth table rides through without an edit
+here, which is the structural half of the fix.
+
+### MED (all fixed)
+
+| | |
+|---|---|
+| **M1** | `SkeletonAsset::migrate` defined its `ordered` closure **twice**, repeated the six-line doc verbatim, and ran both checks on both tables — a bad scripted merge in the one function the schema bump rests on |
+| **M2** | the census comment said "89 deform-or-driven bones and 72 helpers"; the asserted truth is **87 and 74** |
+| **M3** | the census arm said "a family cannot be re-labelled without moving a number here" and pinned **three of eighteen** kinds. Mutation: `thigh_l` to `Spine` left the whole arm green and was caught two crates away by `build_locomotion`. All eighteen are pinned now, plus the sum; the same mutation fails at "the Spine census, 6 against 5" |
+| **M4** | the ragdoll contrast asserted `free.len() > 1` and fed "14 parts, 4 free" into this ledger. Measured through the same door: **92 parts, 31 free**. Pinned as a pair |
+| **M5** | `portable_pose` could not enumerate its own directory: **7 of 31** files in `crates/inf-anim/src` were on neither list, three of them (`retarget.rs`, `template.rs`, `merge.rs`) writing poses or bind poses. `LEDGERED_EXCLUSIONS.len() == 1` was asserted, so recording a gap honestly would have been red. Five files joined the ban (all clean), two are ledgered by name, and a completeness arm now requires every `.rs` under `src` to be on one list or the other |
+| **M6** | `retarget_pose`'s doc said the cheap door "never allocates" the report; it delegated and paid four `Vec`s, **161 `String` clones** and four sorts per call. One body with the accumulation as a flag, plus an arm that the two doors write bit-identical poses |
+| **M7** | `block_body_mesh`'s deform-only cut was unasserted (`used.len() > 8` is happier with *more* boxes). The skinned set is pinned as an identity — the parents of the deform bones, **51** of them, all deform or root. Mutation: without the cut, `ik_hand_root` carries skin weights |
+| **M8** | `skel_set_limit` wrote `cone: None` unconditionally, **erasing an authored cone** on every hinge edit with no way back, since `SkelJointDto` carries no cone. Read-modify-write |
+| **M9** | `SkelJointDto::canonical` and `RenameVerdict::left_humanoid_set` asked only the canonical nineteen, so on the engine's own default rig **156 of 161 bones badged as unknown**, renaming `thigh_l` broke `manny_to_canonical` in silence, and renaming `foot_l` warned. `inf_anim::is_interchange_joint_name` is the union both sites read now |
+| **M10** | the wizard offered `spineSegments`/`neckSegments` for the mannequin, which reads neither — the `bba02bfc` class, unfinished. Hidden for `biped` only, since `BipedCanonical` does derive its chain from them |
+| **M11** | the heat arm's cost model named two causes it does not have (below) |
+| **M12** | "the bind pose is not copied" was true of 142 bones and false of nineteen (below) |
+| **M13** | the Content Drawer had **no door** to `BipedCanonical` — the rig every committed `.inf_anim` is index-bound to, and the one `SkeletonAsset::UPGRADE_REMEDY` sends a stale project to that very menu to make — and labelled the 161-bone mannequin "Biped" |
+| **M14** | `CharacterSpecDto::plan`'s doc omitted `biped-canonical`, on the field the wave widened, in a doc whose own argument is that a stale name list is the hazard |
+| **M15** | `phase24_wizard`'s canonical arm is documented as "the same gate" and is one arm of it: one comparison, no second process, no severed-machine control |
+| **M16** | this ledger's own arithmetic: baseline, delta, scene version, commit count, byte-identity (see *Counts*) |
+
+### M11 — the heat solve's 2.4x had the wrong explanation
+
+The write-up said the Laplacian assembly **and the per-vertex top-4 gather** are
+bone-independent, and that the diffusion is one CG solve per bone. Both halves are
+wrong: the gather walks every bone's field for every vertex (**O(V·B)**, and it is
+the part that does scale), and a bone that wins no vertex has `sources == 0` and
+**skips the solve entirely**. The arm reports the real count now, and it is the
+answer: **15 of 24 segments solve on the canonical rig and 19 of 249 on the
+mannequin** — 1.3x the actual solves for 10.4x the bones. It asserts that count
+beside the clock-ratio upper bound, and the millisecond pair is printed rather
+than written down, because the wave's code comment (32.4 to 78.3) and this ledger
+(31.9 to 75.9) had already drifted into two readings of one measurement.
+
+Carried: **89 of those 249 segments are zero-length leaf markers** rather than
+bones (36 %, against 5 of 24 = 21 % on the small rig), so the 10.4x partly
+measures leaf density.
+
+### M12 — three sources, not two
+
+Verified numerically against the asset: the nineteen hand bones' offsets in
+`Place::Hand` are the reference skeleton's own local bind translations, normalized
+so the middle-finger chain sums to 1.0 of hand length (`middle_metacarpal` is
+3.375833 cm over a 17.117 cm chain, which is the committed **0.1972**).
+Fifty-seven per-bone numbers, under a `Place` doc that said "a rule per *class* of
+bone rather than a number per bone" and a decision that said anything read off the
+asset must be "a rule, not a number".
+
+**Nothing was removed**, and the reason is the finding: there is no *rule* for
+where a pinky metacarpal sits relative to a ring one — it is anatomy, and
+inventing it makes a hand nobody's glove fits — and a ratio of a length this
+module chooses carries no dimension (the hand's overall size is authored and does
+**not** match the reference rig: 0.105 of height against a measured 0.096). What
+was wrong was the sentence. The docs and this ledger now split the three sources
+by name, and `the_two_hands_are_an_exact_mirror_of_each_other` is the arm those
+fifty-seven hand-maintained numbers never had: nineteen bones per side, `x`
+negated and `y`/`z` equal to the bit, plus the normalization itself.
+
+Also on this: "measured off the asset" is a claim a successor cannot check, so
+`manny.rs` now carries the recipe — the package path, that it is a **non-cooked**
+editor package (which is why `ExportName` is present and the names are ASCII), the
+`RawRefBoneInfo` record layout, the acceptance rule that makes the offset unique,
+and the `RawRefBonePose` array the thirds and the hand ratios came out of.
+
+### The mutations the audit ran itself
+
+| mutation | expected | result |
+|---|---|---|
+| move `drive_pose` below the pelvis drop | the pose-writer pin goes red | **red**, naming both passes |
+| delete the `drive_pose` call | the fixed-step arm goes red | **red** — "twist_01 took 0 of a full 0.565" |
+| `thigh_l` to `Kind::Spine` | the ragdoll connectivity arm catches it | **it does not** — 17 parts, one free capsule, fully connected. Caught by `build_locomotion` two crates away; the census arm now catches it at the table |
+| `build_manny` ignores `height_m` for the pelvis | the proportion arm goes red | **red**, with its own message |
+| drop `asset.roles` from the merge | H1's arm goes red | **red**, 0 against 163 |
+| restore the field-by-field rebuild in `fit_template` | H3's arm goes red | **red**, `[]` against 161 rows |
+| delete `block_body_mesh`'s deform cut | M7's arm goes red | **red** — `ik_hand_root` carries skin weights |
+| rename one `SIM_PATH` entry | the completeness arm names the orphan | **red**, naming it |
+
+### LOW, carried by name
+
+* **The retarget map has no consumer outside its own tests.** `canonical_to_manny`,
+  `manny_to_canonical`, `retarget_pose_reported` and `RetargetReport` appear only
+  in `retarget.rs`'s tests and `lib.rs`'s re-exports; `retarget_pose` itself is
+  called only from a `template.rs` test. "The silence ends" is true of the library
+  and not of the product — nothing in the editor, the wizard, the importer or the
+  player retargets anything, and `RetargetReport::summary`'s "for a log or a
+  wizard warning" has neither.
+* **Role-or-name is decided per *question*, not per limb pair.**
+  `locomotion::arms_of` takes the left arm from the table and the right from a
+  name if the table happens to name only one; `pose::foot_joints` accepts the role
+  answer if *either* side is `Some`; `build_ragdoll` routes to the role path if
+  *any* bone carries a role. `leg_by_role`'s own doc says all-or-nothing is the
+  rule, for exactly this reason.
+* **`derive::foot_joints`' role path is "any `Foot` row wins"**, with no side
+  keying, and it returns the *table's* order — right-then-left on the mannequin
+  against left-then-right on the canonical rig, so `DeriveReport::plants.first()`
+  means a different foot depending on the plan. Deterministic per rig; surprising
+  across two.
+* **`ConeLimit` is authored and enforced by nothing.** `solve_chain` clamps
+  `min_deg`/`max_deg` only, the ragdoll reads neither, no generator produces one —
+  so `with_cone` accepts a constraint nothing applies. Documented as such now;
+  SK1b's finger solver is the first consumer.
+* **A fitted rig no longer satisfies the invariants its side tables were derived
+  from.** `ik_foot_*` was emitted *at* the ankle by `Place::Mirrors` and the fit
+  moves the ankle without it; a twist bone is refined independently of its segment
+  while its `TwistDriver::fraction` still says 1/3. Both are masked at runtime by
+  the drive pass overwriting them, which is why nothing is red — and both mean a
+  fitted rig's *bind* pose is no longer the pose the tables describe.
+* **The fixed-step cost of the drive pass is argued, not measured.** The wave's
+  open list says "nothing on the fixed step measured badly" and then gives a
+  structural argument; `drive_ik_follow` adds one full `global_transforms` pass and
+  a 161-entry allocation per posed character per step. The reasoning is sound and
+  the number does not exist. (P22's law: inference dressed as measurement.)
+* **`a_changed_proportion_changes_the_generated_rig_and_its_walk` varies only
+  `height_m`**, so a generator that ignored `arm_length_ratio` — the wave's own
+  carried finding — is invisible to it, and its `.or_else(index_of("hips"))`
+  fallback never executes.
+* **The Skeleton Editor's tree has no role column**, so a mannequin arrives as 161
+  undifferentiated rows and the rig's own answer about what each bone *is* stops
+  at the Ring-2 boundary.
+* **89 of the heat solve's 249 "bone segments" are zero-length leaf markers.**
+* **`Skeleton::index_of` is still a linear scan** and `autofit::symmetrize` still
+  calls it inside a loop (the wave carried this; it is unchanged).
+* **The `BodyPlan` enum gained `BipedCanonical` at index 1**, shifting
+  `Quadruped`/`Hexapod`/`Npedal`. Safe today — the wire is the kebab-case *string*
+  at both Ring-2 doors and no bincode payload carries a `BodyPlan` — and worth
+  knowing before one does.
+* **`ik_hand_root` and `ik_foot_root` never move.** They are deliberately absent
+  from `IK_FOLLOW` (an anchor that chases a hand is not an anchor), which is right,
+  and it means the handle subtree's *root* stays at the rig origin while the
+  character walks away. Nothing reads them yet.
+
+### Decisions (the SK1a audit's, binding on later waves)
+
+1. **A gate's bound must be tighter than the thing it is measuring.** Three of
+   this wave's arms were satisfied by the defect they were written against. Where
+   a counter exists, assert the counter and print the clock.
+2. **A number in a ledger must be a number a test prints.** "14 parts, 4 free" was
+   seven times wrong and nothing could see it, because the arm asserted `> 1`.
+3. **A hand-maintained list needs an arm that enumerates its domain.** A ban list
+   over an enumeration is a ban on what somebody thought of.
+4. **A door that rebuilds a struct field by field will drop the next field.** Move
+   the value and replace what changed; `fit_template` and `merge_skeletons` were
+   the same defect twice in one wave.
+5. **A vocabulary question asked of one vocabulary is the wrong question once
+   there are two.** The badge, the rename warning and the retarget all ask
+   `is_interchange_joint_name` now.
+
+### Counts
+
+| | after the SK1a wave | **after the audit** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 319 / 6 009 / 0 / 16 | **319 / 6 015 / 0 / 16** — **six** arms, **no new block**: two in `inf-anim`'s `merge`, one in `retarget`, one in `manny`, one in `inf-dcc`'s `autofit`, one in the `portable_pose` gate |
+| goldens | 54, 101 arms | **54, byte-identical under `INF_GOLDEN_STRICT=1`** over 101 arms, no PNG rewritten. Nothing here touches a render path |
+| frontend tests / files | 702 / 78 | **702 / 78**, re-run; `tsc` and `eslint --max-warnings 0` clean (the drawer, the wizard dialog, the Skeleton Editor and `assetStore` all moved) |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** — one finding cleared, a `clone` on a `Copy` `JointLimit` in the audit's own merge fix |
+| rustdoc warnings (ceiling 450) | 374 individual over 30 crates | **374 individual over 30 crates** after `cargo clean --doc`. **The audit adds zero**: it introduced two (public docs linking the private `Place::Hand` and `template::validate`) and removed both |
+| `cargo fmt --all --check` | clean | clean |
+| schema | `.inf_skel` v3 | **unmoved** |
+| committed sample bytes | — | **unmoved**; `git status` on `samples/` and `tests/goldens/` empty |
+| chr(92) | the twentieth was the wave's own | **no twenty-first** — the wave's added lines and the audit's own were swept for both shapes (interior space runs, and bare newlines inside non-raw literals): zero, and the workspace gate is green |
+
+Eight audit commits, `(SK1a) audit:`-tagged.
