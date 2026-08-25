@@ -23,22 +23,40 @@ use crate::d3::{
 /// bone segment (`head` = joint end nearest the root, `tail` = far end).
 #[derive(Clone, Debug, PartialEq)]
 pub struct RagdollBone {
-    /// Bone name; classified case-insensitively (see [`classify`]).
+    /// Bone name; classified case-insensitively (see [`classify`]) when this bone
+    /// carries no [`role`](Self::role).
     pub name: String,
     /// World-space start of the bone (the parent-facing joint).
     pub head: DVec3,
     /// World-space end of the bone.
     pub tail: DVec3,
+    /// Index of this bone's parent **in the same slice** (SK1a), or `None` for the
+    /// rig's root. The slice is one entry per joint in joint order.
+    pub parent: Option<u16>,
+    /// What the rig says this bone **is** (SK1a). `None` on every bone of a rig
+    /// that carries no role table, which is what routes [`build_ragdoll`] to its
+    /// name classifier.
+    pub role: Option<inf_anim::BoneRole>,
 }
 
 impl RagdollBone {
-    /// Convenience constructor.
+    /// A bone with no hierarchy and no role — the shape every caller built before
+    /// SK1a, and the one the name classifier reads.
     pub fn new(name: impl Into<String>, head: DVec3, tail: DVec3) -> Self {
         Self {
             name: name.into(),
             head,
             tail,
+            parent: None,
+            role: None,
         }
+    }
+
+    /// This bone with its place in the rig and what the rig says it is.
+    pub fn with_role(mut self, parent: Option<u16>, role: Option<inf_anim::BoneRole>) -> Self {
+        self.parent = parent;
+        self.role = role;
+        self
     }
 }
 
@@ -271,6 +289,16 @@ pub struct RagdollJoint {
 /// produce a rootless (free) body rather than being dropped, so nothing silently
 /// disappears.
 pub fn build_ragdoll(skeleton: &[RagdollBone], config: RagdollConfig) -> Vec<RagdollPart> {
+    // **The role table first** (SK1a). A rig that says what its bones ARE is
+    // assembled from what it says, and the hierarchy comes with it — which is the
+    // whole difference, because the classifier below cannot express a body whose
+    // parts do not map one-to-one onto twelve fixed roles. Measured on the
+    // mannequin: five spine segments all classify to one `Spine`, no `Chest` is
+    // ever produced, and the arms and the head therefore name a parent that is not
+    // there and spawn as free bodies.
+    if skeleton.iter().any(|b| b.role.is_some()) {
+        return build_from_roles(skeleton, config);
+    }
     // 1. Classify + build the per-bone bodies, in a deterministic parents-first
     //    order (topologically by hierarchy depth, tie-broken by role order).
     let mut classified: Vec<(BoneRole, &RagdollBone)> = skeleton
@@ -285,36 +313,7 @@ pub fn build_ragdoll(skeleton: &[RagdollBone], config: RagdollConfig) -> Vec<Rag
 
     let mut parts: Vec<RagdollPart> = Vec::with_capacity(classified.len());
     for (role, bone) in &classified {
-        let seg = bone.tail - bone.head;
-        let length = seg.length().max(1e-6);
-        let dir = seg / length;
-        let centre = (bone.head + bone.tail) * 0.5;
-        let rotation = DQuat::from_rotation_arc(DVec3::Y, dir);
-        let radius = (config.thickness * length).max(config.min_radius);
-        // Capsule half-height is the segment half-length minus the radius caps
-        // (clamped so a stubby bone still yields a valid capsule).
-        let half_height = (length * 0.5 - radius).max(radius * 0.25);
-
-        let body = BodyDesc3D {
-            kind: BodyKind3D::Dynamic,
-            ..Default::default()
-        };
-        let collider = ColliderDesc3D::new(ColliderShape3D::Capsule {
-            half_height,
-            radius,
-        })
-        .density(config.density)
-        .layers(ragdoll_layers());
-
-        parts.push(RagdollPart {
-            role: *role,
-            name: bone.name.clone(),
-            body,
-            collider,
-            position: centre,
-            rotation,
-            joint: None,
-        });
+        parts.push(capsule_part(*role, bone, config));
         index_of.insert(role_key(*role), parts.len() - 1);
     }
 
@@ -374,6 +373,179 @@ pub fn build_ragdoll(skeleton: &[RagdollBone], config: RagdollConfig) -> Vec<Rag
     }
 
     parts
+}
+
+/// **Build a ragdoll from the rig's own role table** (SK1a).
+///
+/// The parts are the bones the table calls limb bones
+/// ([`inf_anim::BoneRoleKind::is_ragdoll_limb`]); each one's ragdoll parent is
+/// the nearest such ancestor **by index**, not by role, which is the difference
+/// that makes a five-segment spine or a second neck bone a body rather than a
+/// collision of labels. Everything else — twist bones, fingers, clavicles, IK
+/// handles, correctives — is simply not a part, and folds into whichever capsule
+/// spans the segment it lives on.
+///
+/// The result is **connected by construction**: the input is in joint order, so a
+/// part's parent always precedes it, and the only part with no joint is the one
+/// whose ancestor chain reaches the rig's root without meeting another part.
+fn build_from_roles(skeleton: &[RagdollBone], config: RagdollConfig) -> Vec<RagdollPart> {
+    let is_part =
+        |b: &RagdollBone| -> bool { b.role.map(|r| r.kind.is_ragdoll_limb()).unwrap_or(false) };
+    // Input index -> output index, for the bones that became parts.
+    let mut part_of: Vec<Option<usize>> = vec![None; skeleton.len()];
+    let mut parts: Vec<RagdollPart> = Vec::new();
+    let mut heads: Vec<DVec3> = Vec::new();
+    let mut parents: Vec<Option<usize>> = Vec::new();
+    // The topmost spine segment is the chest, so a chest-parented arm reads as one
+    // in the report even though the LINK is an index. Labels are documentation
+    // here; the hierarchy below is not.
+    let last_spine = skeleton
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.role.map(|r| r.kind) == Some(inf_anim::BoneRoleKind::Spine))
+        .map(|(i, _)| i)
+        .next_back();
+
+    for (i, bone) in skeleton.iter().enumerate() {
+        if !is_part(bone) {
+            continue;
+        }
+        let Some(role) = bone.role else { continue };
+        // The nearest ANCESTOR that is a part — bounded by the chain's own length
+        // so a malformed parent list cannot spin.
+        let mut cur = bone.parent;
+        let mut hops = 0usize;
+        let mut parent_part = None;
+        while let Some(p) = cur {
+            let p = p as usize;
+            if p >= skeleton.len() || hops > skeleton.len() {
+                break;
+            }
+            if let Some(x) = part_of[p] {
+                parent_part = Some(x);
+                break;
+            }
+            cur = skeleton[p].parent;
+            hops += 1;
+        }
+        let label = label_of(role, Some(i) == last_spine);
+        parts.push(capsule_part(label, bone, config));
+        heads.push(bone.head);
+        parents.push(parent_part);
+        part_of[i] = Some(parts.len() - 1);
+    }
+
+    for i in 0..parts.len() {
+        let Some(parent_idx) = parents[i] else {
+            continue;
+        };
+        let child_head = heads[i];
+        let child_anchor = world_to_local(parts[i].rotation, parts[i].position, child_head);
+        let parent_anchor = world_to_local(
+            parts[parent_idx].rotation,
+            parts[parent_idx].position,
+            child_head,
+        );
+        let kind = if parts[i].role.is_hinge() {
+            JointKind3D::Revolute {
+                axis: DVec3::X,
+                limits: Some(parts[i].role.hinge_limits()),
+                motor: None,
+            }
+        } else {
+            JointKind3D::Spherical
+        };
+        let desc = JointDesc3D::new(kind)
+            .without_contacts()
+            .local_anchor1(parent_anchor)
+            .local_anchor2(child_anchor);
+        parts[i].joint = Some(RagdollJoint {
+            parent: parent_idx,
+            desc,
+        });
+    }
+    parts
+}
+
+/// The twelve-role label a rig role wears in the report. Documentation, not
+/// linkage: the role-driven builder chains by index, so two parts sharing a label
+/// is a legal and common state (five spine segments, two neck bones).
+fn label_of(role: inf_anim::BoneRole, is_top_of_spine: bool) -> BoneRole {
+    use inf_anim::BoneRoleKind as K;
+    use inf_anim::BoneSide as S;
+    let left = role.side != S::Right;
+    match role.kind {
+        K::Pelvis => BoneRole::Hips,
+        K::Spine if is_top_of_spine => BoneRole::Chest,
+        K::Spine => BoneRole::Spine,
+        K::Neck | K::Head => BoneRole::Head,
+        K::UpperArm => {
+            if left {
+                BoneRole::UpperArmL
+            } else {
+                BoneRole::UpperArmR
+            }
+        }
+        K::LowerArm => {
+            if left {
+                BoneRole::LowerArmL
+            } else {
+                BoneRole::LowerArmR
+            }
+        }
+        K::Thigh => {
+            if left {
+                BoneRole::ThighL
+            } else {
+                BoneRole::ThighR
+            }
+        }
+        K::Calf => {
+            if left {
+                BoneRole::ShinL
+            } else {
+                BoneRole::ShinR
+            }
+        }
+        _ => BoneRole::Spine,
+    }
+}
+
+/// The body + capsule spanning one bone. Shared by both builders, so the two
+/// paths cannot disagree about what a limb weighs or how thick it is.
+fn capsule_part(role: BoneRole, bone: &RagdollBone, config: RagdollConfig) -> RagdollPart {
+    let seg = bone.tail - bone.head;
+    let raw = seg.length();
+    let length = raw.max(1.0e-6);
+    // **A zero-length bone has no direction**, and `from_rotation_arc` on a
+    // near-zero vector is a NaN quaternion that a solver propagates into every
+    // body it is jointed to. A rig with helper bones at their parent's origin has
+    // plenty of these; none of them is a part, but a caller may hand us one.
+    let rotation = if raw > 1.0e-6 && seg.is_finite() {
+        DQuat::from_rotation_arc(DVec3::Y, seg / length)
+    } else {
+        DQuat::IDENTITY
+    };
+    let centre = (bone.head + bone.tail) * 0.5;
+    let radius = (config.thickness * length).max(config.min_radius);
+    let half_height = (length * 0.5 - radius).max(radius * 0.25);
+    RagdollPart {
+        role,
+        name: bone.name.clone(),
+        body: BodyDesc3D {
+            kind: BodyKind3D::Dynamic,
+            ..Default::default()
+        },
+        collider: ColliderDesc3D::new(ColliderShape3D::Capsule {
+            half_height,
+            radius,
+        })
+        .density(config.density)
+        .layers(ragdoll_layers()),
+        position: centre,
+        rotation,
+        joint: None,
+    }
 }
 
 /// The head (world) of the bone that classified to `role`, if present.

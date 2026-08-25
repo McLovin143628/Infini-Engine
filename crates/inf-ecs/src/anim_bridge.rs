@@ -58,12 +58,29 @@ use crate::world::EcsWorld;
 /// own descriptor in one line.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RigBone {
-    /// The joint's name — what `inf_physics::ragdoll::classify` reads.
+    /// The joint's name — what `inf_physics::ragdoll::classify` reads when this
+    /// bone carries no [`role`](Self::role).
     pub name: String,
     /// The parent-facing end of the segment, world metres.
     pub head: Vec3d,
     /// The far end.
     pub tail: Vec3d,
+    /// Index of this bone's parent **in the same slice** (SK1a), or `None` for the
+    /// rig's root. The slice is one entry per joint in joint order, so this is the
+    /// skeleton's own parent index and the ragdoll builder does not have to
+    /// reconstruct a hierarchy out of names.
+    pub parent: Option<u16>,
+    /// What the rig says this bone **is** (SK1a), when it says anything.
+    ///
+    /// `inf_anim`'s type and not `inf_physics`', for the reason the whole seam
+    /// exists: `inf-ecs` does not depend on `inf-physics` (the direction is the
+    /// other way round) and both sides already depend on `inf-anim`, so the role
+    /// crosses without either side naming the other.
+    ///
+    /// `None` means the rig carries no role table, and the physics side falls back
+    /// to reading [`name`](Self::name) — which is what it did for every rig before
+    /// this field existed.
+    pub role: Option<inf_anim::BoneRole>,
 }
 
 /// One foot, as the pose left it (P29.4, clause 5).

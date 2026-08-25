@@ -1133,6 +1133,36 @@ pub fn step_pose_evaluation<'c>(
                         let mut pose = pending_pose
                             .take()
                             .unwrap_or_else(|| Pose::rest(&asset.skeleton));
+                        // ── SK1a: THE PROCEDURAL DRIVE PASS ──
+                        //
+                        // The bones no clip authors: twist chains take their
+                        // fraction of a neighbour's roll, and the `ik_*` handles
+                        // follow their FK sources. See `inf_anim::drive` for the
+                        // law, and for the bound this position costs (a twist
+                        // reflects the pose the ANIMATION authored, not the pose
+                        // the IK below goes on to correct).
+                        //
+                        // Here, immediately after the layer stack and before
+                        // every pass that corrects the result, because this is
+                        // pose CONSTRUCTION and those are pose corrections. It
+                        // joins `sample_clip` / `blend_poses` / `apply_layers` /
+                        // `solve_chain` / `apply_foot_ik` / the pelvis drop / the
+                        // ragdoll blend as a pose writer, at a fixed place in
+                        // that list, because the I6 law
+                        // `every_trace_section_is_folded_in_its_frozen_order`
+                        // makes the ORDER part of the trace rather than an
+                        // implementation detail.
+                        //
+                        // **Absent costs nothing**: a rig with no drive tables --
+                        // every `.inf_skel` older than schema v3, every imported
+                        // glTF -- takes two early returns and poses the bytes it
+                        // posed before this existed.
+                        inf_anim::drive_pose(
+                            &asset.skeleton,
+                            &mut pose,
+                            &asset.twists,
+                            &asset.ik_follow,
+                        );
                         // ── P29.5: the pelvis IK offset, APPLIED ──
                         //
                         // P29.4 computed it and wrote it down (`SetPelvisIKOffset`
@@ -1155,7 +1185,7 @@ pub fn step_pose_evaluation<'c>(
                         // exactly the bytes P29.4 did.
                         let drop = pelvis_drop(world, entity);
                         if drop != 0.0 {
-                            if let Some(j) = pelvis_joint(&asset.skeleton) {
+                            if let Some(j) = pelvis_joint(asset) {
                                 if let Some(local) = pose.locals.get_mut(j) {
                                     local.translation[1] += drop;
                                 }
@@ -1244,9 +1274,9 @@ pub fn step_pose_evaluation<'c>(
                         //    for anything that is not a character.
                         let to_world = model_to_world(world, entity);
                         if let Some(goals) = bridge.foot_ik.get(&guid).copied() {
-                            apply_foot_ik(&asset.skeleton, &mut pose, &goals, to_world);
+                            apply_foot_ik(asset, &mut pose, &goals, to_world);
                         }
-                        let feet = foot_states(&asset.skeleton, &pose, to_world);
+                        let feet = foot_states(asset, &pose, to_world);
                         if feet.iter().any(Option::is_some) {
                             bridge.feet.insert(guid, feet);
                         }
@@ -1259,7 +1289,7 @@ pub fn step_pose_evaluation<'c>(
                             // The same character-space lift the feet take — a
                             // ragdoll that spawned half a capsule above its own
                             // body would be the A12 seam wearing a different hat.
-                            if let Some(bones) = rig_bones(&asset.skeleton, &pose, to_world) {
+                            if let Some(bones) = rig_bones(asset, &pose, to_world) {
                                 bridge.ragdoll_rig.insert(guid, bones);
                             }
                         }
@@ -1363,7 +1393,31 @@ pub fn step_pose_evaluation<'c>(
 /// "foot", and takes the side from a trailing `l`/`r` or a leading `left`/`right`
 /// — and the FIRST match wins, so a rig with a toe joint named `foot_l_end` does
 /// not displace `foot_l`.
-fn foot_joints(skeleton: &inf_anim::Skeleton) -> [Option<u16>; 2] {
+fn foot_joints(rig: &inf_anim::SkeletonAsset) -> [Option<u16>; 2] {
+    // **The role table first** (SK1a). A rig that says which of its bones are
+    // `BoneRoleKind::Foot` is answered from what it says, and no spelling can
+    // move the answer -- which matters here more than anywhere else, because this
+    // is the function that decides which joint foot IK drives, and the UE
+    // convention ships a rig carrying BOTH `foot_l` and `ik_foot_l`. Read off the
+    // name, the wrong one of those solves perfectly: the chain derived from
+    // `ik_foot_l` is `[root, ik_foot_root, ik_foot_l]`, which is not a leg, and
+    // the character walks with the marker instead of the limb.
+    let roles = rig.role_index();
+    if !roles.is_empty() {
+        let by_role = [
+            roles.first(inf_anim::BoneRoleKind::Foot, inf_anim::BoneSide::Left),
+            roles.first(inf_anim::BoneRoleKind::Foot, inf_anim::BoneSide::Right),
+        ];
+        if by_role.iter().any(Option::is_some) {
+            return by_role;
+        }
+    }
+    foot_joints_by_name(&rig.skeleton)
+}
+
+/// The **legacy** foot rule, for a rig that carries no role table -- see
+/// [`foot_joints`], its one caller, for what changed and why.
+fn foot_joints_by_name(skeleton: &inf_anim::Skeleton) -> [Option<u16>; 2] {
     let mut out: [Option<u16>; 2] = [None, None];
     for (i, j) in skeleton.joints().iter().enumerate() {
         if i > u16::MAX as usize {
@@ -1389,11 +1443,12 @@ fn foot_joints(skeleton: &inf_anim::Skeleton) -> [Option<u16>; 2] {
 
 /// Where the pose put each foot, in world space.
 fn foot_states(
-    skeleton: &inf_anim::Skeleton,
+    rig: &inf_anim::SkeletonAsset,
     pose: &Pose,
     model_to_world: glam::DAffine3,
 ) -> [Option<crate::anim_bridge::FootState>; 2] {
-    let joints = foot_joints(skeleton);
+    let skeleton = &rig.skeleton;
+    let joints = foot_joints(rig);
     if joints.iter().all(Option::is_none) {
         return [None, None];
     }
@@ -1426,12 +1481,13 @@ fn foot_states(
 /// A refusal is a **value**: a chain that is not a chain, a degenerate bone or a
 /// non-finite target leaves the pose untouched and costs its own foot.
 fn apply_foot_ik(
-    skeleton: &inf_anim::Skeleton,
+    rig: &inf_anim::SkeletonAsset,
     pose: &mut Pose,
     goals: &[Option<crate::anim_bridge::FootGoal>; 2],
     model_to_world: glam::DAffine3,
 ) {
-    let joints = foot_joints(skeleton);
+    let skeleton = &rig.skeleton;
+    let joints = foot_joints(rig);
     let to_model = model_to_world.inverse();
     for (side, goal) in goals.iter().enumerate() {
         let (Some(goal), Some(foot)) = (goal, joints[side]) else {
@@ -1482,10 +1538,12 @@ fn apply_foot_ik(
 /// still a `Some`: which names are bones is `inf_physics::ragdoll::classify`'s
 /// question, and this side does not get to answer it.
 fn rig_bones(
-    skeleton: &inf_anim::Skeleton,
+    rig: &inf_anim::SkeletonAsset,
     pose: &Pose,
     model_to_world: glam::DAffine3,
 ) -> Option<Vec<crate::anim_bridge::RigBone>> {
+    let skeleton = &rig.skeleton;
+    let roles = rig.role_index();
     let joints = skeleton.joints();
     if joints.is_empty() {
         return None;
@@ -1500,6 +1558,16 @@ fn rig_bones(
             model_to_world.transform_point3(glam::DVec3::new(m.x as f64, m.y as f64, m.z as f64));
         Vec3d::new(w.x, w.y, w.z)
     };
+    // **The anatomical successor, not the first child** (SK1a).
+    //
+    // A bone spans from itself to the next bone DOWN THE LIMB, and on a rig that
+    // interleaves driven bones with deform ones those are different joints: the
+    // first child of `lowerarm_l` in the mannequin's own index order is
+    // `lowerarm_twist_02_l`, a driven bone one third of the way to the wrist, and
+    // a forearm capsule built from it covers a third of the forearm and leaves the
+    // rest of the arm bare. With a role table the tail is the first child the
+    // table calls a deform bone; without one it is the first child, exactly as
+    // before.
     let mut first_child: Vec<Option<usize>> = vec![None; joints.len()];
     for (i, j) in joints.iter().enumerate() {
         if let Some(p) = j.parent {
@@ -1509,10 +1577,18 @@ fn rig_bones(
             }
         }
     }
+    let mut successor: Vec<Option<usize>> = first_child.clone();
+    if !roles.is_empty() {
+        for (i, slot) in successor.iter_mut().enumerate() {
+            if let Some(c) = roles.deform_child(skeleton, i as u16) {
+                *slot = Some(c as usize);
+            }
+        }
+    }
     let mut out = Vec::with_capacity(joints.len());
     for (i, j) in joints.iter().enumerate() {
         let head = pos(i);
-        let tail = match first_child[i] {
+        let tail = match successor[i] {
             Some(c) => pos(c),
             // A leaf: a stub along the direction it came from, so the body has a
             // length. A zero-length capsule is not a capsule.
@@ -1532,6 +1608,8 @@ fn rig_bones(
             name: j.name.clone(),
             head,
             tail,
+            parent: j.parent,
+            role: roles.role_of(i as u16),
         });
     }
     Some(out)
@@ -1595,7 +1673,17 @@ fn pelvis_drop(world: &EcsWorld, entity: bevy_ecs::entity::Entity) -> f32 {
 /// bone above its own pelvis would tilt the drop; that bound is written down
 /// rather than guarded, because guarding it needs a global-transform pass this
 /// post-pass deliberately does not run.
-fn pelvis_joint(skeleton: &inf_anim::Skeleton) -> Option<usize> {
+fn pelvis_joint(rig: &inf_anim::SkeletonAsset) -> Option<usize> {
+    // The role table first (SK1a): a rig that names its own pelvis is not asked
+    // what that bone is called. The two name rules stay as the fallback, in the
+    // order they were already in.
+    if let Some(j) = rig
+        .role_index()
+        .first(inf_anim::BoneRoleKind::Pelvis, inf_anim::BoneSide::Center)
+    {
+        return Some(j as usize);
+    }
+    let skeleton = &rig.skeleton;
     skeleton
         .joints()
         .iter()
@@ -3151,7 +3239,9 @@ mod tests {
     /// refuses the ones that are not a side.
     #[test]
     fn the_foot_matcher_reads_every_spelling_a_rig_arrives_with() {
-        fn skel(names: &[&str]) -> inf_anim::Skeleton {
+        // A rig with NO role table, which is what every rig older than
+        // `.inf_skel` v3 is and what these spellings are the whole answer for.
+        fn skel(names: &[&str]) -> inf_anim::SkeletonAsset {
             let joints = names
                 .iter()
                 .enumerate()
@@ -3162,7 +3252,7 @@ mod tests {
                     local_bind: JointTransform::IDENTITY,
                 })
                 .collect();
-            inf_anim::Skeleton::new(joints).unwrap()
+            inf_anim::SkeletonAsset::new(inf_anim::Skeleton::new(joints).unwrap())
         }
         // This engine's own template, ALS's, and the Mixamo/UE spellings.
         for (names, want) in [
@@ -3182,6 +3272,193 @@ mod tests {
             foot_joints(&skel(&["a", "foot_l", "foot_l_toe"])),
             [Some(1), None]
         );
+    }
+
+    /// **THE DRIVE PASS RUNS INSIDE THE FIXED STEP** (SK1a), on a real mannequin,
+    /// and what it produces reaches the pose store and the determinism trace.
+    ///
+    /// Two claims, and the second is the load-bearing one. The twist bones move
+    /// when the joint that drives them does — an engagement counter in bones, not
+    /// a "the function was called". And the IK handles land **on** the joints they
+    /// mark after the whole rig has moved, which they only can if the pass ran
+    /// after the layer stack rather than at authoring time.
+    ///
+    /// Mutation-relevant: deleting the `drive_pose` call leaves every twist bone
+    /// at its bind (the first half fails) and every handle at the pose the clip
+    /// left it in, which for `ik_hand_l` is a whole arm away (the second).
+    #[test]
+    fn the_drive_pass_runs_in_the_fixed_step_and_reaches_the_pose_store() {
+        let guid = Uuid::from_u128(0x5_1a_d1);
+        let rig =
+            inf_anim::build_template(inf_anim::BodyPlan::Biped, &inf_anim::BodyParams::default())
+                .unwrap();
+        let sk = &rig.skeleton;
+        let at = |name: &str| sk.index_of(name).unwrap();
+
+        // A clip that rolls the LEFT WRIST — the joint `lowerarm_twist_*_l` reads —
+        // and swings the whole arm at the shoulder, so the handle has somewhere to
+        // travel to.
+        let mut clip = inf_anim::AnimClip::new("roll", Vec::new());
+        clip.duration = 1.0;
+        for (joint, q) in [
+            (at("hand_l"), glam::Quat::from_rotation_x(1.2)),
+            (at("upperarm_l"), glam::Quat::from_rotation_z(0.7)),
+        ] {
+            let mut track = inf_anim::JointTrack::new(joint);
+            track.rotation = Some(inf_anim::QuatTrack::new(
+                vec![0.0, 1.0],
+                vec![q.to_array(), q.to_array()],
+                inf_anim::Interpolation::Linear,
+            ));
+            clip.tracks.push(track);
+        }
+        const C: ClipRef = [77u8; 16];
+        let machine = StateMachine {
+            states: vec![SmState::clip("roll", C)],
+            transitions: Vec::new(),
+            entry: 0,
+            ..Default::default()
+        };
+
+        let mut world = world_with_character(guid);
+        let machines = |g: Uuid| (g == SM).then_some(&machine);
+        let skeletons = |g: Uuid| (g == SKEL).then_some(&rig);
+        let clips = |c: ClipRef| (c == C).then_some(&clip);
+        let vars = |_: Uuid| BTreeMap::new();
+        step_pose_evaluation(&mut world, 1.0 / 60.0, &machines, &skeletons, &clips, &vars);
+
+        let posed = evaluated_pose(&world, guid).expect("the character posed");
+        assert_eq!(posed.pose.locals.len(), inf_anim::MANNY_JOINT_COUNT);
+
+        // (1) The twists moved, by the fractions the rig authored: the bone two
+        // thirds of the way to the wrist takes two thirds of the wrist's roll.
+        let roll_of = |name: &str| -> f32 {
+            let q = glam::Quat::from_array(posed.pose.locals[at(name) as usize].rotation);
+            // The half-angle about X, read off the quaternion rather than through
+            // an `acos` — this is a test of a value, not of an angle library.
+            q.x.abs()
+        };
+        let full = glam::Quat::from_rotation_x(1.2).x;
+        let two_thirds = glam::Quat::from_rotation_x(1.2 * 2.0 / 3.0).x;
+        let one_third = glam::Quat::from_rotation_x(1.2 / 3.0).x;
+        assert!(
+            (roll_of("lowerarm_twist_01_l") - two_thirds).abs() < 1.0e-4,
+            "twist_01 took {} of a full {full}",
+            roll_of("lowerarm_twist_01_l")
+        );
+        assert!((roll_of("lowerarm_twist_02_l") - one_third).abs() < 1.0e-4);
+        // The right arm did not move, so its twists are still at bind — the
+        // control that stops "everything rotated" passing this.
+        assert!(roll_of("lowerarm_twist_01_r") < 1.0e-6);
+
+        // (2) The handles landed on their sources, in MODEL space, after the arm
+        // swung. `ik_hand_l` hangs off `ik_hand_gun` off `ik_hand_root` off the
+        // root — nowhere near the hand until something drives it.
+        let globals = inf_anim::global_transforms(sk, &posed.pose);
+        let at_p = |name: &str| globals[at(name) as usize].transform_point3(glam::Vec3::ZERO);
+        for (handle, source) in [
+            ("ik_hand_l", "hand_l"),
+            ("ik_hand_r", "hand_r"),
+            ("ik_foot_l", "foot_l"),
+            ("ik_hand_gun", "hand_r"),
+        ] {
+            let d = (at_p(handle) - at_p(source)).length();
+            assert!(d < 1.0e-4, "`{handle}` is {d} m from `{source}`");
+        }
+        // …and the hand really did travel, so the arm above is not "both at bind".
+        let rest = inf_anim::global_transforms(sk, &inf_anim::Pose::rest(sk));
+        let moved = (at_p("hand_l")
+            - rest[at("hand_l") as usize].transform_point3(glam::Vec3::ZERO))
+        .length();
+        assert!(
+            moved > 0.1,
+            "the shoulder swing moved the hand only {moved} m"
+        );
+
+        // (3) It is in the trace: the bytes are a function of the driven pose.
+        let bytes = pose_state_bytes(&world);
+        assert_eq!(
+            bytes.len(),
+            16 + 16 + 4 + inf_anim::MANNY_JOINT_COUNT * 40,
+            "36 bytes of header plus 40 per joint"
+        );
+    }
+
+    /// **The role table beats the name, and the name is what it beats** (SK1a).
+    ///
+    /// The mannequin ships `foot_l` AND `ik_foot_l`, so the two rules can
+    /// disagree, and this is the one place in the engine where being wrong about
+    /// it still solves perfectly: a chain derived from `ik_foot_l` is
+    /// `[root, ik_foot_root, ik_foot_l]`, three real joints that IK will happily
+    /// converge on, and the leg never moves.
+    ///
+    /// Built so the two answers CANNOT coincide: the handles are emitted first, so
+    /// the name rule's first match is the handle and the table's answer is the
+    /// ankle. On the real mannequin the emission order makes them agree — that is
+    /// the belt, and this is the suspenders.
+    #[test]
+    fn the_role_table_outranks_the_name_where_the_two_disagree() {
+        let names = ["root", "ik_foot_l", "ik_foot_r", "foot_l", "foot_r"];
+        let joints = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| Joint {
+                name: (*n).into(),
+                parent: (i > 0).then_some(0u16),
+                inverse_bind: Mat4::IDENTITY.to_cols_array(),
+                local_bind: JointTransform::IDENTITY,
+            })
+            .collect();
+        let mut rig = inf_anim::SkeletonAsset::new(inf_anim::Skeleton::new(joints).unwrap());
+        // No table: the name rule answers, and it answers with the HANDLES.
+        assert_eq!(foot_joints(&rig), [Some(1), Some(2)]);
+        // With a table: the ankles, and nothing about the spelling changed.
+        use inf_anim::{BoneRole, BoneRoleKind, BoneSide};
+        rig.roles = vec![
+            BoneRole::new(1, BoneRoleKind::IkTarget, BoneSide::Left),
+            BoneRole::new(2, BoneRoleKind::IkTarget, BoneSide::Right),
+            BoneRole::new(3, BoneRoleKind::Foot, BoneSide::Left),
+            BoneRole::new(4, BoneRoleKind::Foot, BoneSide::Right),
+        ];
+        assert_eq!(foot_joints(&rig), [Some(3), Some(4)]);
+        // A table that describes something else entirely does not silently take
+        // the feet away: a rig whose table has no `Foot` row falls back.
+        rig.roles = vec![BoneRole::new(0, BoneRoleKind::Root, BoneSide::Center)];
+        assert_eq!(foot_joints(&rig), [Some(1), Some(2)]);
+    }
+
+    /// **The pelvis, from the table.** The old rule found a bone spelled
+    /// `pelvis` and otherwise the root; the mannequin has one, so the arm that
+    /// matters is the rig where the two disagree.
+    #[test]
+    fn the_pelvis_comes_from_the_table_before_the_spelling() {
+        let joints = ["root", "hips", "pelvis"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| Joint {
+                name: (*n).into(),
+                parent: (i > 0).then(|| (i - 1) as u16),
+                inverse_bind: Mat4::IDENTITY.to_cols_array(),
+                local_bind: JointTransform::IDENTITY,
+            })
+            .collect();
+        let mut rig = inf_anim::SkeletonAsset::new(inf_anim::Skeleton::new(joints).unwrap());
+        assert_eq!(pelvis_joint(&rig), Some(2), "the spelling, as before");
+        use inf_anim::{BoneRole, BoneRoleKind, BoneSide};
+        rig.roles = vec![BoneRole::new(1, BoneRoleKind::Pelvis, BoneSide::Center)];
+        assert_eq!(pelvis_joint(&rig), Some(1), "the table");
+        // …and a rig with neither still answers its root rather than nothing.
+        rig.roles.clear();
+        let bare = inf_anim::SkeletonAsset::new(
+            inf_anim::Skeleton::new(vec![Joint {
+                name: "b0".into(),
+                parent: None,
+                inverse_bind: Mat4::IDENTITY.to_cols_array(),
+                local_bind: JointTransform::IDENTITY,
+            }])
+            .unwrap(),
+        );
+        assert_eq!(pelvis_joint(&bare), Some(0));
     }
 
     /// **The garment lift** (P29.7): the offset a projector adds to a

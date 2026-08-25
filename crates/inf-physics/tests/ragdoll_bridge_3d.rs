@@ -67,6 +67,19 @@ fn humanoid() -> SkeletonAsset {
     SkeletonAsset::new(sk)
 }
 
+/// **The mannequin**, straight out of the generator — 161 bones, a role table,
+/// twist chains, fingers and IK handles.
+fn mannequin() -> SkeletonAsset {
+    inf_anim::build_template(
+        inf_anim::BodyPlan::Biped,
+        &inf_anim::BodyParams {
+            height_m: 1.8,
+            ..Default::default()
+        },
+    )
+    .expect("the mannequin builds")
+}
+
 /// idle → get_up, on the trigger the ragdoll bridge arms, with the supine and
 /// prone halves picked by the parameter it sets.
 fn machine() -> StateMachine {
@@ -124,6 +137,12 @@ struct Sim {
 
 impl Sim {
     fn new(feet_y: f64) -> Self {
+        Self::with_rig(feet_y, humanoid())
+    }
+
+    /// The same world with a caller-chosen rig — the seam the SK1a arms need,
+    /// because the whole question is what the *rig* says about itself.
+    fn with_rig(feet_y: f64, rig: SkeletonAsset) -> Self {
         let mut world = EcsWorld::new();
         // The floor.
         let e = world.spawn_with_guid(GROUND, "Ground", None);
@@ -177,7 +196,7 @@ impl Sim {
         Self {
             world,
             bridge: PhysicsBridge3D::new(GRAVITY),
-            skeleton: humanoid(),
+            skeleton: rig,
             machine: machine(),
             clip: AnimClip::new("pose", Vec::new()),
         }
@@ -811,4 +830,158 @@ fn a_dead_body_stays_limp_where_a_live_one_gets_up() {
          damage system handed over stands up at the settle interval for ever"
     );
     assert_eq!(corpse_steps, 900, "the corpse left the ragdoll early");
+}
+
+/// **A MANNEQUIN RAGDOLLS INTO A CONNECTED BODY** (SK1a) — and the same rig with
+/// its role table stripped falls apart, in the same arm, so the number means
+/// something.
+///
+/// The name classifier cannot describe this rig, and the way it fails is the
+/// quiet one. `spine_01` … `spine_05` all match its `spine` keyword and none of
+/// them matches its `spine1`/`spine2` chest keywords (the underscore), so **no
+/// `Chest` is ever produced** — and `Chest` is the parent role of both upper arms
+/// and of the head. Those three parts therefore name a parent that is not in the
+/// index and are spawned with **no joint at all**: three capsules falling through
+/// the world beside a body. `upperarm_l` and `upperarm_twist_01_l` both claim
+/// `UpperArmL`, so the second overwrites the first in the role index. Every
+/// finger, both clavicles, both feet, both toes and all seven IK handles classify
+/// to nothing.
+///
+/// The role path chains by INDEX, so a five-segment spine is five parts in a row
+/// and the arms hang off the top of it.
+#[test]
+fn a_mannequin_ragdolls_into_one_connected_body_and_a_table_less_one_does_not() {
+    use inf_physics::ragdoll::{build_ragdoll, RagdollConfig};
+
+    // The rig the pose step publishes, through the real door: bones in world
+    // space with their parents and their roles.
+    let mut sim = Sim::with_rig(0.0, mannequin());
+    assert!(ragdoll_bridge::start_ragdoll(&mut sim.world, HERO));
+    sim.step(&MovementIntent::default());
+    let rig = inf_ecs::anim_bridge::ragdoll_rig(&sim.world, HERO)
+        .expect("the pose step publishes a rig")
+        .to_vec();
+    assert_eq!(rig.len(), inf_anim::MANNY_JOINT_COUNT, "one bone per joint");
+    assert!(rig.iter().any(|b| b.role.is_some()), "the roles crossed");
+
+    let bones: Vec<inf_physics::ragdoll::RagdollBone> = rig
+        .iter()
+        .map(|b| {
+            inf_physics::ragdoll::RagdollBone::new(
+                b.name.clone(),
+                b.head.to_dvec3(),
+                b.tail.to_dvec3(),
+            )
+            .with_role(b.parent, b.role)
+        })
+        .collect();
+
+    // ── the role path ──
+    let parts = build_ragdoll(&bones, RagdollConfig::default());
+    // pelvis + 5 spine + neck_01 + neck_02 + head + 2x(upperarm, lowerarm)
+    // + 2x(thigh, calf) = 17.
+    assert_eq!(
+        parts.len(),
+        17,
+        "{:?}",
+        parts.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
+    let rootless: Vec<&str> = parts
+        .iter()
+        .filter(|p| p.joint.is_none())
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(
+        rootless,
+        ["pelvis"],
+        "exactly one free body, and it is the pelvis"
+    );
+    // Every part reaches the root by following its joints — connectivity, not
+    // just "a joint exists".
+    for (i, part) in parts.iter().enumerate() {
+        let mut cur = i;
+        let mut hops = 0;
+        while let Some(j) = parts[cur].joint {
+            assert!(
+                j.parent < cur,
+                "`{}` names a parent that follows it",
+                part.name
+            );
+            cur = j.parent;
+            hops += 1;
+            assert!(hops <= parts.len(), "`{}` is in a cycle", part.name);
+        }
+        assert_eq!(cur, 0, "`{}` does not reach the pelvis", part.name);
+    }
+    // The capsules span real bones — the deform-successor rule. A forearm built
+    // from its FIRST child would span to `lowerarm_twist_02_l`, a third of the way
+    // to the wrist.
+    let named = |n: &str| parts.iter().find(|p| p.name == n).expect(n);
+    let forearm = named("lowerarm_l");
+    let wrist = rig
+        .iter()
+        .find(|b| b.name == "hand_l")
+        .expect("hand_l")
+        .head
+        .to_dvec3();
+    let elbow = rig
+        .iter()
+        .find(|b| b.name == "lowerarm_l")
+        .expect("lowerarm_l")
+        .head
+        .to_dvec3();
+    let spanned = ((forearm.position - elbow).length() * 2.0) / (wrist - elbow).length();
+    assert!(
+        (spanned - 1.0).abs() < 1.0e-6,
+        "the forearm capsule spans {spanned:.3} of the forearm"
+    );
+    // Nothing driven, nothing helper, nothing finger, nothing IK became a body.
+    for p in &parts {
+        assert!(
+            !p.name.contains("twist")
+                && !p.name.starts_with("ik_")
+                && !p.name.contains("thumb")
+                && !p.name.contains("metacarpal"),
+            "`{}` should not be a rigid body",
+            p.name
+        );
+    }
+    // …and every capsule has a real length and a finite pose.
+    for p in &parts {
+        assert!(
+            p.position.is_finite() && p.rotation.is_finite(),
+            "`{}`",
+            p.name
+        );
+    }
+
+    // ── the same rig, table stripped: the measured contrast ──
+    let bare: Vec<inf_physics::ragdoll::RagdollBone> = bones
+        .iter()
+        .cloned()
+        .map(|b| b.with_role(None, None))
+        .collect();
+    let legacy = build_ragdoll(&bare, RagdollConfig::default());
+    let free: Vec<&str> = legacy
+        .iter()
+        .filter(|p| p.joint.is_none())
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(
+        free.len() > 1,
+        "the name classifier is supposed to fail on this rig, and it did not: {free:?}"
+    );
+    assert!(
+        legacy
+            .iter()
+            .all(|p| p.role != inf_physics::ragdoll::BoneRole::Chest),
+        "the classifier is not supposed to find a chest on a `spine_0N` rig"
+    );
+    // The three it drops on the floor: both upper arms and the head.
+    for want in ["upperarm_l", "upperarm_r"] {
+        assert!(
+            legacy.iter().any(|p| p.name == want && p.joint.is_none()),
+            "`{want}` should be a free capsule under the classifier: {free:?}"
+        );
+    }
 }

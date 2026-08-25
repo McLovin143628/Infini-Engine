@@ -777,13 +777,9 @@ fn traversal_clip(rise: f32) -> inf_anim::AnimClip {
         vec![[0.0, 0.0, 0.0], [0.0, rise * 0.75, 0.05], [0.0, rise, 0.8]],
     );
     clip.duration = 1.0;
-    inf_anim::derive_clip(
-        &clip,
-        &arc_rig(),
-        &inf_anim::DeriveOptions::traversal(),
-    )
-    .expect("a traversal clip derives")
-    .0
+    inf_anim::derive_clip(&clip, &arc_rig(), &inf_anim::DeriveOptions::traversal())
+        .expect("a traversal clip derives")
+        .0
 }
 
 /// A machine with one **non-looping** state playing the traversal clip — which

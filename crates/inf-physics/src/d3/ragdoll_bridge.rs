@@ -149,7 +149,13 @@ pub fn spawn(
 ) -> Option<SpawnedRagdoll> {
     let bones: Vec<RagdollBone> = rig
         .iter()
-        .map(|b| RagdollBone::new(b.name.clone(), b.head.to_dvec3(), b.tail.to_dvec3()))
+        .map(|b| {
+            // The role and the parent ride across (SK1a) — `build_ragdoll` picks
+            // its own path from whether any bone carries one, so a rig with no
+            // table reaches exactly the classifier it always reached.
+            RagdollBone::new(b.name.clone(), b.head.to_dvec3(), b.tail.to_dvec3())
+                .with_role(b.parent, b.role)
+        })
         .collect();
     let parts = build_ragdoll(&bones, RagdollConfig::default());
     if parts.is_empty() {
