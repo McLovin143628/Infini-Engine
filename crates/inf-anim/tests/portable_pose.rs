@@ -46,7 +46,17 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 33] = [
+const SIM_PATH: [(&str, &str, &str); 34] = [
+    // ── SK1b's hand solver ──
+    //
+    // A curled finger is a pose. It reaches `pose_state_bytes` through the same
+    // fixed step every other writer here does, and the wave's own grip gate
+    // compares it between two processes.
+    (
+        "grip.rs",
+        include_str!("../src/grip.rs"),
+        "a finger curl is a pose, folded into pose_state_bytes and compared between the editor's PIE and the shipped player",
+    ),
     // ── P29.6's text form, for the same reason the two below it are here ──
     //
     // It is not on the *runtime* path at all — it is an authoring door — and it

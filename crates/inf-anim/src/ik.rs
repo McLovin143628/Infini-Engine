@@ -53,7 +53,7 @@ use glam::{Mat4, Quat, Vec3};
 
 use crate::pose::{global_transforms, Pose};
 use crate::skeleton::Skeleton;
-use crate::template::JointLimit;
+use crate::template::{ConeLimit, JointLimit};
 
 /// How many forward/backward sweeps [`solve_fabrik`] runs.
 ///
@@ -358,6 +358,173 @@ fn clamp_to_limit(local: Quat, bind: Quat, limit: &JointLimit) -> (Quat, bool) {
     (out, moved)
 }
 
+/// **Clamp one local rotation into a swing-twist [`ConeLimit`]** (SK1b).
+///
+/// Returns the clamped rotation and whether it actually moved.
+///
+/// # The gap this closes
+///
+/// [`ConeLimit`] shipped on SK1a's one `.inf_skel` bump and the SK1a audit
+/// recorded what that left behind: *"`ConeLimit` is authored and enforced by
+/// nothing"* — [`clamp_to_limit`] reads `min_deg`/`max_deg` only, the ragdoll
+/// builder reads neither, and no generator produced one. This is the first
+/// consumer, and [`crate::grip`]'s finger curl is what needed it: three
+/// independent per-axis ranges either forbid a legal finger pose at the corners
+/// or admit an illegal one at the diagonals, which is exactly why a hand cannot
+/// be described by a box.
+///
+/// # The decomposition, and the two clamps
+///
+/// The delta from bind is split as `swing · twist` about the cone's own axis
+/// ([`crate::drive::twist_about`] is the same projection, and this is the other
+/// half of it). The **swing** — how far the bone leans off the axis — is clamped
+/// to `swing_deg` by rebuilding it at the cone's half-angle about the same swing
+/// axis, which is a *rescale* and not a discard: a finger asked to curl 150°
+/// through a 90° cone comes back curled 90° in the direction it was asked, not
+/// straight. The **twist** — the roll about the axis — is clamped into
+/// `twist_deg`, folded into `(-π, π]` first for [`clamp_to_limit`]'s reason.
+///
+/// # Portable arithmetic
+///
+/// `patan2_64` / `psin64` / `pcos64` in `f64`, converting once at the wire —
+/// the P14 law, for the same reason [`clamp_to_limit`] obeys it: this edits a
+/// pose that is folded into `state_bytes` and compared between the editor's
+/// Simulate and the shipped player.
+pub fn clamp_to_cone(local: Quat, bind: Quat, cone: &ConeLimit) -> (Quat, bool) {
+    use glam::{DQuat, DVec3};
+
+    let axis = DVec3::new(
+        cone.axis[0] as f64,
+        cone.axis[1] as f64,
+        cone.axis[2] as f64,
+    );
+    let len2 = axis.length_squared();
+    // A degenerate or non-finite axis describes no cone. Left alone rather than
+    // guessed at — the `drive_twists` discipline, at the other end of the same
+    // decomposition.
+    if !axis.is_finite() || len2 <= 1.0e-12 || !cone.swing_deg.is_finite() {
+        return (local, false);
+    }
+    let axis = axis / len2.sqrt();
+
+    let d = DQuat::from_xyzw(
+        local.x as f64,
+        local.y as f64,
+        local.z as f64,
+        local.w as f64,
+    );
+    let b = DQuat::from_xyzw(bind.x as f64, bind.y as f64, bind.z as f64, bind.w as f64);
+    if !d.is_finite() || !b.is_finite() {
+        return (local, false);
+    }
+    let delta = (b.inverse() * d).normalize();
+    if !delta.is_finite() {
+        return (local, false);
+    }
+
+    // ── the twist half: the component about `axis` ──
+    let v = DVec3::new(delta.x, delta.y, delta.z);
+    let proj = axis * v.dot(axis);
+    let tw_len2 = proj.length_squared() + delta.w * delta.w;
+    // A half turn about a perpendicular axis has no twist to speak of; the
+    // identity is the only answer that is not a division by zero (the
+    // `twist_about` degenerate case, restated in f64).
+    let twist = if tw_len2 <= 1.0e-12 {
+        DQuat::IDENTITY
+    } else {
+        let inv = 1.0 / tw_len2.sqrt();
+        DQuat::from_xyzw(proj.x * inv, proj.y * inv, proj.z * inv, delta.w * inv)
+    };
+    let swing = (delta * twist.inverse()).normalize();
+
+    // ── the swing clamp ──
+    //
+    // Canonicalized to the `w >= 0` hemisphere first, so the angle below lands
+    // in `[0, π]` and "how far off the axis" is a magnitude rather than a
+    // quantity that flips sign with the quaternion's double cover.
+    let swing = if swing.w < 0.0 {
+        DQuat::from_xyzw(-swing.x, -swing.y, -swing.z, -swing.w)
+    } else {
+        swing
+    };
+    let sv = DVec3::new(swing.x, swing.y, swing.z);
+    let sv_len = sv.length();
+    let swing_angle = 2.0 * inf_math::patan2_64(sv_len, swing.w);
+    let swing_max = (cone.swing_deg.max(0.0) as f64).to_radians();
+    let mut moved = false;
+    let swing = if swing_angle > swing_max && sv_len > 1.0e-9 {
+        moved = true;
+        let half = swing_max * 0.5;
+        let dir = sv / sv_len;
+        let s = inf_math::psin64(half);
+        DQuat::from_xyzw(dir.x * s, dir.y * s, dir.z * s, inf_math::pcos64(half)).normalize()
+    } else {
+        swing
+    };
+
+    // ── the twist clamp ──
+    let along = DVec3::new(twist.x, twist.y, twist.z).dot(axis);
+    let mut twist_angle = 2.0 * inf_math::patan2_64(along, twist.w);
+    if twist_angle > std::f64::consts::PI {
+        twist_angle -= std::f64::consts::TAU;
+    } else if twist_angle < -std::f64::consts::PI {
+        twist_angle += std::f64::consts::TAU;
+    }
+    let lo = (cone.twist_deg[0] as f64).to_radians();
+    let hi = (cone.twist_deg[1] as f64).to_radians();
+    // A range authored backwards is the degenerate empty one at `min`, not a
+    // panic in a fixed step — `clamp_to_limit`'s rule, verbatim.
+    let clamped_twist = if lo <= hi {
+        twist_angle.clamp(lo, hi)
+    } else {
+        lo
+    };
+    if (clamped_twist - twist_angle).abs() > CLAMP_EPSILON_RAD {
+        moved = true;
+    }
+    let half = clamped_twist * 0.5;
+    let s = inf_math::psin64(half);
+    let tv = axis * s;
+    let twist = DQuat::from_xyzw(tv.x, tv.y, tv.z, inf_math::pcos64(half)).normalize();
+
+    if !moved {
+        // Nothing was out of range, so the rebuild is not spent: returning the
+        // input unchanged keeps an in-range joint **bit**-identical, which a
+        // round trip through `psin64`/`pcos64` would not (`CLAMP_EPSILON_RAD`'s
+        // own reason, one level up).
+        return (local, false);
+    }
+    let out = (b * (swing * twist)).normalize();
+    if !out.is_finite() {
+        return (local, false);
+    }
+    (
+        Quat::from_xyzw(out.x as f32, out.y as f32, out.z as f32, out.w as f32).normalize(),
+        true,
+    )
+}
+
+/// **Apply one authored [`JointLimit`] to a local rotation** — the door both the
+/// chain solver and [`crate::grip`]'s finger curl go through.
+///
+/// # A cone wins over the box
+///
+/// A limit that carries a [`ConeLimit`] is described **by the cone**, and the
+/// per-axis `min_deg`/`max_deg` box is not read. Two descriptions of one joint's
+/// freedom would have to agree, and nothing can make them: a 90° cone and a
+/// three-axis box disagree at every diagonal by construction. The cone is the
+/// more specific statement, so it is the one that applies — and it is what lets
+/// [`JointLimit::cone_only`] author a finger without spelling a box that would
+/// otherwise read as *fully locked* ([`clamp_to_limit`] pins a joint with no free
+/// axis to its bind pose, which is the coherent reading of an all-zero box and
+/// exactly the wrong answer for a finger).
+pub fn apply_joint_limit(local: Quat, bind: Quat, limit: &JointLimit) -> (Quat, bool) {
+    match &limit.cone {
+        Some(cone) => clamp_to_cone(local, bind, cone),
+        None => clamp_to_limit(local, bind, limit),
+    }
+}
+
 /// **Apply an IK chain to a pose**, in model space.
 ///
 /// `chain` is joint indices from the chain's root to its tip, each the parent of
@@ -508,7 +675,7 @@ pub fn solve_chain(
         let global_rot = rotation_of(&globals[chain[i] as usize]);
         let new_global = (delta * global_rot).normalize();
         let mut local = (parent_rot.inverse() * new_global).normalize();
-        // ── P24.3: the authored range, applied HERE ──
+        // ── P24.3: the authored range, applied HERE (SK1b: cones too) ──
         //
         // Inside the loop and not after it, for the reason `solve_chain`'s doc
         // gives: the next iteration recomputes `global_transforms` from this
@@ -521,7 +688,7 @@ pub fn solve_chain(
                 .joint(chain[i] as usize)
                 .map(|j| Quat::from_array(j.local_bind.rotation).normalize())
                 .unwrap_or(Quat::IDENTITY);
-            let (fixed, moved) = clamp_to_limit(local, bind, limit);
+            let (fixed, moved) = apply_joint_limit(local, bind, limit);
             local = fixed;
             if moved {
                 clamped += 1;
@@ -1293,5 +1460,157 @@ mod tests {
             .unwrap();
         }
         assert_eq!(a, b);
+    }
+
+    /// **The cone is a cone**: a swing past its half-angle comes back AT the
+    /// half-angle, in the direction it was asked for, and a swing inside it is
+    /// returned bit-for-bit unchanged.
+    ///
+    /// The second half is the one that matters for the trace: a clamp that
+    /// rebuilt every in-range rotation through `psin64`/`pcos64` would move a
+    /// finger by an ulp on every step of every grip, and every determinism gate
+    /// would still pass because both hosts would move it identically.
+    #[test]
+    fn a_cone_clamps_a_swing_and_leaves_an_in_range_one_alone() {
+        use crate::template::ConeLimit;
+        let cone = ConeLimit {
+            axis: [1.0, 0.0, 0.0],
+            swing_deg: 40.0,
+            twist_deg: [-10.0, 10.0],
+        };
+        let bind = Quat::IDENTITY;
+        // A swing about Z (perpendicular to the axis) of 20 deg: inside.
+        let inside = about_z(20f32.to_radians());
+        let (out, moved) = clamp_to_cone(inside, bind, &cone);
+        assert!(!moved, "an in-range swing was reported as clamped");
+        assert_eq!(
+            out.to_array().map(f32::to_bits),
+            inside.to_array().map(f32::to_bits),
+            "an in-range rotation was rebuilt rather than returned"
+        );
+        // 90 deg: outside, and it comes back at 40 in the same plane.
+        let outside = about_z(90f32.to_radians());
+        let (out, moved) = clamp_to_cone(outside, bind, &cone);
+        assert!(
+            moved,
+            "a 90 deg swing through a 40 deg cone was not clamped"
+        );
+        let angle = swing_deg_of(out, Vec3::X);
+        assert!(
+            (angle - 40.0).abs() < 0.05,
+            "clamped to {angle} deg rather than 40"
+        );
+        // …in the direction it was asked for, not some canonical one.
+        let v = Vec3::new(out.x, out.y, out.z);
+        assert!(v.z > 0.0 && v.x.abs() < 1e-5 && v.y.abs() < 1e-5, "{out:?}");
+        // The same swing the other way round comes back the other way round.
+        let (back, _) = clamp_to_cone(about_z(-90f32.to_radians()), bind, &cone);
+        assert!(Vec3::new(back.x, back.y, back.z).z < 0.0);
+
+        // A ROLL about the axis is twist, and is clamped by `twist_deg`.
+        let rolled = about_x(60f32.to_radians());
+        let (out, moved) = clamp_to_cone(rolled, bind, &cone);
+        assert!(moved);
+        let twist = 2.0 * inf_math::patan2_64(out.x as f64, out.w as f64);
+        assert!(
+            (twist.to_degrees() - 10.0).abs() < 0.05,
+            "a 60 deg roll clamped to {} deg rather than 10",
+            twist.to_degrees()
+        );
+    }
+
+    /// A cone that describes nothing leaves the joint alone, and a limit that
+    /// carries one is described BY it — the `apply_joint_limit` precedence rule,
+    /// which is what lets `JointLimit::cone_only` write an all-zero box.
+    #[test]
+    fn a_degenerate_cone_is_inert_and_a_cone_outranks_its_box() {
+        use crate::template::{ConeLimit, JointLimit};
+        let q = about_z(1.2);
+        for bad in [
+            ConeLimit {
+                axis: [0.0; 3],
+                swing_deg: 10.0,
+                twist_deg: [-5.0, 5.0],
+            },
+            ConeLimit {
+                axis: [f32::NAN, 0.0, 0.0],
+                swing_deg: 10.0,
+                twist_deg: [-5.0, 5.0],
+            },
+            ConeLimit {
+                axis: [1.0, 0.0, 0.0],
+                swing_deg: f32::NAN,
+                twist_deg: [-5.0, 5.0],
+            },
+        ] {
+            let (out, moved) = clamp_to_cone(q, Quat::IDENTITY, &bad);
+            assert!(!moved && out == q, "{bad:?} moved a joint");
+        }
+        // A backwards twist range is the degenerate empty one at `min`, not a
+        // panic in a fixed step.
+        let backwards = ConeLimit {
+            axis: [1.0, 0.0, 0.0],
+            swing_deg: 180.0,
+            twist_deg: [10.0, -10.0],
+        };
+        let (out, moved) = clamp_to_cone(about_x(1.0), Quat::IDENTITY, &backwards);
+        assert!(moved && out.is_finite());
+
+        // The precedence: an all-zero box would PIN this joint to bind if the box
+        // were read, and the cone lets it swing 40 deg.
+        let limit = JointLimit::cone_only(
+            0,
+            ConeLimit {
+                axis: [1.0, 0.0, 0.0],
+                swing_deg: 40.0,
+                twist_deg: [-10.0, 10.0],
+            },
+        );
+        let (out, _) = apply_joint_limit(about_z(20f32.to_radians()), Quat::IDENTITY, &limit);
+        assert!(
+            swing_deg_of(out, Vec3::X) > 19.0,
+            "the box won over the cone and pinned the joint to bind"
+        );
+        // …and a limit with NO cone still goes to the hinge clamp.
+        let hinge = JointLimit::hinge_x(0, 0.0, 30.0);
+        let (out, moved) = apply_joint_limit(about_x(90f32.to_radians()), Quat::IDENTITY, &hinge);
+        assert!(
+            moved && (2.0 * inf_math::patan2_64(out.x as f64, out.w as f64)).to_degrees() < 30.5
+        );
+    }
+
+    /// Portable rotation builders for the two arms above — the crate bans
+    /// `Quat::from_rotation_x` on the pose path and a test fixture that used it
+    /// would be checking the code under test with the thing the code under test
+    /// is not allowed to use.
+    fn about_x(angle: f32) -> Quat {
+        let h = angle as f64 * 0.5;
+        Quat::from_xyzw(
+            inf_math::psin64(h) as f32,
+            0.0,
+            0.0,
+            inf_math::pcos64(h) as f32,
+        )
+        .normalize()
+    }
+
+    fn about_z(angle: f32) -> Quat {
+        let h = angle as f64 * 0.5;
+        Quat::from_xyzw(
+            0.0,
+            0.0,
+            inf_math::psin64(h) as f32,
+            inf_math::pcos64(h) as f32,
+        )
+        .normalize()
+    }
+
+    /// How far `q` swings away from `axis`, degrees.
+    fn swing_deg_of(q: Quat, axis: Vec3) -> f64 {
+        let tw = crate::drive::twist_about(q, axis);
+        let swing = (q * tw.inverse()).normalize();
+        let swing = if swing.w < 0.0 { -swing } else { swing };
+        let v = Vec3::new(swing.x, swing.y, swing.z).length() as f64;
+        (2.0 * inf_math::patan2_64(v, swing.w as f64)).to_degrees()
     }
 }

@@ -105,7 +105,7 @@ use crate::asset::SkeletonAsset;
 use crate::roles::{BoneRole, BoneRoleKind, BoneSide, IkFollow, TwistDriver};
 use crate::skeleton::{Joint, JointTransform, Skeleton};
 use crate::sockets::Socket;
-use crate::template::{BodyParams, JointLimit, TemplateError};
+use crate::template::{BodyParams, ConeLimit, JointLimit, TemplateError};
 
 /// How many bones the mannequin hierarchy has. Asserted against the emitted rig by
 /// `the_manny_rig_is_one_hundred_and_sixty_one_bones`, which is the arm that would
@@ -130,6 +130,9 @@ const BALL_OF_HEIGHT: f64 = 0.085;
 const KNEE_RANGE_DEG: (f32, f32) = (-150.0, 0.0);
 /// An elbow's flexion range, degrees.
 const ELBOW_RANGE_DEG: (f32, f32) = (0.0, 150.0);
+/// How much wider than the solver's own maximum a finger's cone is authored,
+/// degrees — see the cone loop in [`build_manny`] for why it is not zero.
+const CONE_MARGIN_DEG: f32 = 0.5;
 
 /// How a bone's bind offset is derived from [`BodyParams`].
 ///
@@ -1629,6 +1632,71 @@ pub fn build_manny(params: &BodyParams) -> Result<SkeletonAsset, TemplateError> 
             limits.push(JointLimit::hinge_x(j, range.0, range.1));
         }
     }
+    // ── SK1b: a swing-twist cone on every finger bone ──
+    //
+    // The first *producer* of `ConeLimit`, whose slot SK1a spent a bump on and
+    // which the SK1a audit then recorded as "authored and enforced by nothing".
+    // A hand is the reason the type exists: three independent per-axis ranges
+    // either forbid a legal finger pose at the corners or admit an illegal one at
+    // the diagonals, and a box cannot say "this knuckle bends ninety degrees, in
+    // one plane, and rolls almost not at all".
+    //
+    // The axis is the **bone's own direction**, so a curl — which is about an axis
+    // perpendicular to the bone — registers as pure *swing* and is clamped by
+    // `swing_deg`, while a roll registers as *twist* and is clamped to almost
+    // nothing. See `crate::grip` for where the ranges come from.
+    for (i, bone) in BONES.iter().enumerate() {
+        if !matches!(bone.kind, Kind::Finger | Kind::Thumb) {
+            continue;
+        }
+        // How far down its own digit this bone sits: metacarpal 0, knuckle 1, and
+        // so on. Walked rather than parsed out of the name, because `_01` is a
+        // spelling and the hierarchy is a fact.
+        let mut depth = 0usize;
+        let mut up = bone.parent;
+        while let Some(p) = up {
+            let parent = &BONES[p as usize];
+            if !matches!(parent.kind, Kind::Finger | Kind::Thumb) {
+                break;
+            }
+            depth += 1;
+            up = parent.parent;
+        }
+        let flex = if bone.kind == Kind::Thumb {
+            crate::grip::THUMB_FLEX_DEG
+        } else {
+            crate::grip::FINGER_FLEX_DEG
+        };
+        // The direction to this bone's own child, or — for a fingertip, which has
+        // none — the direction that carried it here. Both are the bone's axis.
+        let child = BONES.iter().position(|b| {
+            b.parent == Some(i as u16) && matches!(b.kind, Kind::Finger | Kind::Thumb)
+        });
+        let dir = match child {
+            Some(c) => joints[c].local_bind.translation_vec(),
+            None => joints[i].local_bind.translation_vec(),
+        };
+        let Some(axis) = dir.try_normalize() else {
+            continue;
+        };
+        limits.push(JointLimit::cone_only(
+            i as u16,
+            ConeLimit {
+                axis: axis.to_array(),
+                // **Half a degree of margin**, deliberately: the solver's own
+                // maximum is this same number, and a clamp applied exactly at the
+                // boundary is a quaternion rebuild whose result is not bit-identical
+                // to its input — so `GripReport::clamped` would count every fully
+                // closed finger and stop meaning anything.
+                swing_deg: flex[depth.min(flex.len() - 1)] + CONE_MARGIN_DEG,
+                twist_deg: [
+                    -crate::grip::FINGER_TWIST_DEG,
+                    crate::grip::FINGER_TWIST_DEG,
+                ],
+            },
+        ));
+    }
+
     let mut ik_follow: Vec<IkFollow> = IK_FOLLOW
         .iter()
         .filter_map(|(handle, source)| Some(IkFollow::new(index_of(handle)?, index_of(source)?)))
@@ -2121,24 +2189,95 @@ mod tests {
         );
     }
 
-    /// Knees and elbows carry hinges; nothing else does.
+    /// **Two families of limit and nothing else**: hinges on the four joints that
+    /// are hinges, cones on every finger bone (SK1b), and no third kind.
+    ///
+    /// The census is asserted as an identity rather than a count, because a count
+    /// is satisfied by the wrong forty-two rows as happily as by the right ones —
+    /// the M3 lesson, on the table this wave grew.
     #[test]
-    fn the_hinges_are_the_elbows_and_the_knees() {
+    fn the_hinges_are_the_elbows_and_the_knees_and_the_cones_are_the_fingers() {
         let asset = manny();
         let sk = &asset.skeleton;
-        let limited: Vec<&str> = asset
+        let roles = asset.role_index();
+        let name = |j: u16| sk.joints()[j as usize].name.as_str();
+
+        let hinges: Vec<&str> = asset
             .limits
             .iter()
-            .map(|l| sk.joints()[l.joint as usize].name.as_str())
+            .filter(|l| l.cone.is_none())
+            .map(|l| name(l.joint))
             .collect();
-        assert_eq!(limited.len(), 4, "{limited:?}");
-        for want in ["lowerarm_l", "lowerarm_r", "calf_l", "calf_r"] {
-            assert!(limited.contains(&want), "{want} unlimited: {limited:?}");
-        }
+        assert_eq!(
+            hinges,
+            ["lowerarm_l", "lowerarm_r", "calf_l", "calf_r"],
+            "the hinge set moved"
+        );
         let elbow = sk.index_of("lowerarm_r").unwrap();
         let l = asset.limits.iter().find(|l| l.joint == elbow).unwrap();
         assert!(l.is_free(0) && !l.is_free(1) && !l.is_free(2));
         assert!(l.cone.is_none(), "no cone is authored on a hinge");
+
+        // The cones are EXACTLY the digit bones — every one of them, and nothing
+        // else. Mutation: dropping the `Kind::Thumb` arm of the emitter leaves
+        // six names on the left that are not on the right.
+        let coned: Vec<u16> = asset
+            .limits
+            .iter()
+            .filter(|l| l.cone.is_some())
+            .map(|l| l.joint)
+            .collect();
+        let digits: Vec<u16> = (0..sk.len() as u16)
+            .filter(|j| {
+                matches!(
+                    roles.kind_of(*j),
+                    Some(BoneRoleKind::Finger | BoneRoleKind::Thumb)
+                )
+            })
+            .collect();
+        let mut sorted = coned.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            digits,
+            "the cone set is not the digit set: {:?} against {:?}",
+            coned.iter().map(|j| name(*j)).collect::<Vec<_>>(),
+            digits.iter().map(|j| name(*j)).collect::<Vec<_>>()
+        );
+        assert_eq!(digits.len(), 38, "nineteen digit bones per hand");
+
+        // A cone's axis is the BONE's direction, which is what makes a curl read
+        // as swing and a roll read as twist. Asserted where it is checkable: the
+        // knuckle's cone axis points at its own child.
+        let knuckle = sk.index_of("middle_01_r").unwrap();
+        let phalanx = sk.index_of("middle_02_r").unwrap();
+        let cone = asset
+            .limits
+            .iter()
+            .find(|l| l.joint == knuckle)
+            .and_then(|l| l.cone)
+            .expect("a knuckle carries a cone");
+        let want = sk.joints()[phalanx as usize]
+            .local_bind
+            .translation_vec()
+            .normalize();
+        assert!(
+            (Vec3::from_array(cone.axis) - want).length() < 1.0e-5,
+            "the cone axis is {:?}, the bone points {want:?}",
+            cone.axis
+        );
+        assert!(
+            (cone.swing_deg - (crate::grip::FINGER_FLEX_DEG[1] + CONE_MARGIN_DEG)).abs() < 1.0e-4,
+            "a knuckle's cone is {} deg",
+            cone.swing_deg
+        );
+        assert_eq!(
+            cone.twist_deg,
+            [
+                -crate::grip::FINGER_TWIST_DEG,
+                crate::grip::FINGER_TWIST_DEG
+            ]
+        );
     }
 
     /// Deterministic, and a function of its input: same params, same bytes;

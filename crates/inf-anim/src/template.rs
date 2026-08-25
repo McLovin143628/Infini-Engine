@@ -263,16 +263,20 @@ pub struct JointLimit {
 /// the corners or admits illegal ones at the diagonals, which is why the per-axis
 /// box was never enough for a hand.
 ///
-/// # Authored, not yet enforced (SK1a audit)
+/// # Enforced since SK1b
 ///
-/// The type and its wire slot ship; **no solver reads it**. `ik::solve_chain`
-/// clamps `min_deg`/`max_deg` only, the ragdoll builder reads neither, and no
-/// generator in the engine produces a cone — so
-/// [`with_cone`](JointLimit::with_cone) today accepts a constraint that nothing
-/// applies. That is deliberate and is the point of spending one bump rather than
-/// two (see `SkeletonAsset`'s ladder docs), and it is stated here so a reader
-/// does not take the description above for a description of enforced behaviour.
-/// SK1b's finger solver is the first consumer.
+/// The type and its wire slot shipped on SK1a's one bump, and the SK1a audit
+/// recorded honestly that **no solver read it**. `inf_anim::ik::clamp_to_cone` is
+/// the solver, `inf_anim::ik::apply_joint_limit` is the door every limit now goes
+/// through, and `inf_anim::grip`'s finger curl is the first producer *and*
+/// consumer: [`crate::manny`] authors a cone on all thirty finger bones of both
+/// hands, so a curl asked for more than a knuckle can give comes back at the
+/// knuckle's limit rather than through it.
+///
+/// **A cone wins over the box.** A limit carrying a cone is described by the
+/// cone and its `min_deg`/`max_deg` are not read — see `apply_joint_limit` for
+/// why two descriptions of one joint's freedom cannot be made to agree, and
+/// [`cone_only`](JointLimit::cone_only) for the constructor that spells it.
 ///
 /// **Frozen once shipped**, like the fields above it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -302,6 +306,24 @@ impl JointLimit {
     pub fn with_cone(mut self, cone: ConeLimit) -> Self {
         self.cone = Some(cone);
         self
+    }
+
+    /// A joint described **only** by a swing-twist cone (SK1b) — a finger, a
+    /// thumb, a shoulder.
+    ///
+    /// The per-axis box is written as the degenerate all-zero range and is never
+    /// read, because `inf_anim::ik::apply_joint_limit` gives the cone precedence
+    /// over the box on any limit that carries one. Spelling it here rather than
+    /// at each call site is what stops the box being mistaken for a *statement*:
+    /// read as a box, `[0, 0]` on all three axes means "this joint may not
+    /// rotate", which is the opposite of what a cone-limited finger is.
+    pub fn cone_only(joint: u16, cone: ConeLimit) -> Self {
+        Self {
+            joint,
+            min_deg: [0.0; 3],
+            max_deg: [0.0; 3],
+            cone: Some(cone),
+        }
     }
 
     /// Whether this limit permits any rotation at all about `axis` (0 = X).

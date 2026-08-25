@@ -57,6 +57,9 @@ pub mod foot;
 // SK1a the procedural drive pass: the bones a clip never authors — twist
 // extraction and the IK handles' FK follow.
 pub mod drive;
+// SK1b hands: the derived hand frame, the finger curl onto a `GripAffordance`,
+// and the arm chain an IK reach runs over.
+pub mod grip;
 // P24.2 inverse kinematics: the post-pass over an evaluated pose.
 pub mod ik;
 // P29.2 inertialization: the quintic decay of a pose deviation, and the blender
@@ -120,13 +123,17 @@ pub use foot::{
     ground_offset, interp_to, pelvis_offset, FootLock, GroundOffset, FOOT_HEIGHT_M, TRACE_ABOVE_M,
     TRACE_BELOW_M,
 };
+pub use grip::{
+    apply_grip, arm_chain, digit_closure, elbow_pole, hand_of, hands_of, knee_pole, Digit,
+    FingerChain, GripReport, Hand, FINGER_FLEX_DEG, FINGER_TWIST_DEG, THUMB_FLEX_DEG,
+};
 pub use hair::{
     render_mesh, ribbon_mesh, roots_for, step_hair, HairAsset, HairDetail, HairGroom, HairMaterial,
     HairRoot, HairState, HairStrand,
 };
 pub use ik::{
-    fabrik, rotation_between, solve_chain, two_bone_positions, IkError, IkReport,
-    FABRIK_ITERATIONS, MIN_BONE_LENGTH_M, REACH_TOLERANCE_M,
+    apply_joint_limit, clamp_to_cone, fabrik, rotation_between, solve_chain, two_bone_positions,
+    IkError, IkReport, FABRIK_ITERATIONS, MIN_BONE_LENGTH_M, REACH_TOLERANCE_M,
 };
 pub use inertialize::{quintic_decay, Inertializer, PoseBlender, SmBlendMode, TransitionEntry};
 pub use layers::{
