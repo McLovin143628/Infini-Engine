@@ -36,14 +36,31 @@
 //! # What is Epic's and what is ours
 //!
 //! The **names, the parent links and the emission order** are the interchange
-//! contract and are reproduced. The **bind pose is not copied**: every offset below
-//! is derived from [`BodyParams`] by this module's own rules, exactly the way
-//! [`crate::template`] derives the canonical biped's, so the rig is proportionally
-//! *whatever height it was asked for* rather than a scaled copy of somebody's
-//! mannequin. Two structural facts were read off the asset and kept because they
-//! are rules rather than geometry: the twist bones sit at **exactly one third and
-//! two thirds** of their segment, and `_01` is always the one nearest the joint
-//! that drives it. Both are load-bearing for [`crate::drive`]'s law.
+//! contract and are reproduced. **Every offset is a proportion multiplied by a
+//! [`BodyParams`] length** — nothing here is a copied absolute — so the rig is
+//! proportionally *whatever height it was asked for* rather than a scaled copy of
+//! somebody's mannequin. Where those proportions come from is three different
+//! answers, and the SK1a audit's correction is that the first write-up gave only
+//! the first two:
+//!
+//! 1. **Invented** — the torso, the limbs and the girdles. `CLAVICLE_OF_SPAN`,
+//!    `SHOULDER_OF_SPAN`, `HAND_OF_HEIGHT`, `BALL_OF_HEIGHT` and every ratio on
+//!    [`BodyParams`] are this engine's own numbers, shared with
+//!    [`crate::template`], and they do **not** reproduce the shipped rig's
+//!    measurements (the asset's hand is 0.096 of its height; this module's is
+//!    0.105).
+//! 2. **Rules read off the asset** — the twist bones sit at *exactly one third
+//!    and two thirds* of their segment and `_01` is always the one nearest the
+//!    joint that drives it. Both are load-bearing for [`crate::drive`]'s law, and
+//!    both are structure rather than geometry.
+//! 3. **Measured proportions** — the nineteen bones of the hand. Their offsets in
+//!    [`Place::Hand`] are the reference skeleton's own local bind translations
+//!    **normalized so the middle-finger chain sums to 1.0 of hand length**, so
+//!    they are ratios of a length this module chooses and carry no absolute
+//!    dimension. There is no *rule* for where a pinky metacarpal sits relative to
+//!    a ring one; it is anatomy, and inventing it would make a hand nobody's
+//!    glove fits. Fifty-seven numbers, named here rather than left to read as
+//!    though they were derived.
 //!
 //! # The bind pose is a T-pose of pure translations
 //!
@@ -86,6 +103,11 @@ const CLAVICLE_OF_SPAN: f32 = 0.15;
 const SHOULDER_OF_SPAN: f32 = 0.35;
 /// Hand length — wrist to the tip of the middle finger — as a fraction of height.
 /// The whole finger table below is expressed in units of this.
+///
+/// This engine's own number, not the reference rig's: the shipped mannequin's
+/// middle-finger chain is 17.1 cm on a rig ~178 cm tall, which is **0.096**. The
+/// *proportions inside* the hand are measured; its overall size is authored, so
+/// changing this scales every finger together and breaks nothing.
 const HAND_OF_HEIGHT: f64 = 0.105;
 /// How far forward of the ankle the ball of the foot sits, as a fraction of height.
 const BALL_OF_HEIGHT: f64 = 0.085;
@@ -96,8 +118,9 @@ const ELBOW_RANGE_DEG: (f32, f32) = (0.0, 150.0);
 
 /// How a bone's bind offset is derived from [`BodyParams`].
 ///
-/// A rule per *class* of bone rather than a number per bone: the numbers are the
-/// author's proportions and the classes are the anatomy.
+/// A rule per *class* of bone rather than a number per bone — with one honest
+/// exception, [`Place::Hand`], whose numbers are per-bone measured proportions.
+/// See the module docs' three-way split.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Place {
     /// At its parent's origin — the helpers, the corrective roots, the IK anchors.
@@ -124,6 +147,12 @@ enum Place {
     Ball,
     /// A hand bone, in units of hand length: `along` the arm axis, `across` the
     /// palm (+Z), `up` its normal (+Y).
+    ///
+    /// **These are measured, not derived** — the reference skeleton's own local
+    /// bind translations, normalized so the middle-finger chain's `along`
+    /// components sum to exactly 1.0. The two sides are an exact mirror (`along`
+    /// takes the side's sign; `across` and `up` do not, because a mirror about
+    /// the X plane leaves Y and Z alone). See the module docs.
     Hand { along: f32, across: f32, up: f32 },
     /// Wherever the named joint's **global** bind is — an IK handle's placement,
     /// resolved against this bone's own parent.
@@ -1788,6 +1817,57 @@ mod tests {
         for m in crate::pose::skinning_matrices(sk, &Pose::rest(sk)) {
             assert!(m.abs_diff_eq(glam::Mat4::IDENTITY, 1e-5), "{m:?}");
         }
+    }
+
+    /// **The hand table is an exact mirror** (SK1a audit).
+    ///
+    /// Fifty-seven hand-maintained numbers — measured proportions, per the module
+    /// docs, and the one place in this generator where a row is a number rather
+    /// than a rule. A typo in one of them makes one hand subtly wrong and nothing
+    /// else, which is precisely the defect no other arm here can see. The mirror
+    /// is about the X plane, so `x` flips sign and `y`/`z` do not.
+    #[test]
+    fn the_two_hands_are_an_exact_mirror_of_each_other() {
+        let asset = manny();
+        let sk = &asset.skeleton;
+        let local = |name: &str| sk.joints()[sk.index_of(name).unwrap() as usize].local_bind;
+        let mut checked = 0usize;
+        for j in sk.joints() {
+            let Some(stem) = j.name.strip_suffix("_l") else {
+                continue;
+            };
+            let Some(kind) = RoleIndex::new(&asset.roles).kind_of(sk.index_of(&j.name).unwrap())
+            else {
+                continue;
+            };
+            if !matches!(kind, BoneRoleKind::Finger | BoneRoleKind::Thumb) {
+                continue;
+            }
+            let r = local(&format!("{stem}_r"));
+            let l = j.local_bind;
+            assert_eq!(l.translation[0], -r.translation[0], "`{}` x", j.name);
+            assert_eq!(l.translation[1], r.translation[1], "`{}` y", j.name);
+            assert_eq!(l.translation[2], r.translation[2], "`{}` z", j.name);
+            checked += 1;
+        }
+        assert_eq!(checked, 19, "the hand has nineteen bones per side");
+        // …and the middle chain really is one hand length, which is the
+        // normalization the whole table is expressed against.
+        let p = BodyParams::default();
+        let chain: f32 = [
+            "middle_metacarpal_l",
+            "middle_01_l",
+            "middle_02_l",
+            "middle_03_l",
+        ]
+        .iter()
+        .map(|n| local(n).translation[0].abs())
+        .sum();
+        let hand_len = (p.height_m * HAND_OF_HEIGHT) as f32;
+        assert!(
+            (chain - hand_len).abs() < 1.0e-5,
+            "the middle finger spans {chain} against a hand length of {hand_len}"
+        );
     }
 
     /// **The twist bones sit at thirds and are driven from the right end**, which
