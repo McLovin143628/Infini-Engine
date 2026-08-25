@@ -141,7 +141,7 @@ pub struct BodyParams {
     ///
     /// **Ignored by [`BodyPlan::Biped`]** (SK1a audit): the mannequin's torso is
     /// a named hierarchy — `spine_01`…`spine_05` — not a derived chain, so
-    /// `manny::build_manny` never reads this. [`validate`] still refuses a value
+    /// `manny::build_manny` never reads this. `validate` still refuses a value
     /// below 2 for every plan, which is the shape `body_length_m` has.
     pub spine_segments: u16,
     /// Number of joints between the shoulders and the head, inclusive of `neck`.

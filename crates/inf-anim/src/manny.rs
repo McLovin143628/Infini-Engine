@@ -23,6 +23,20 @@
 //! preceding its child. Where the document and the asset disagree, the asset wins,
 //! and the disagreements are named here rather than quietly resolved:
 //!
+//! **How to re-derive it** (SK1a audit — the first write-up said "measured off
+//! the asset" without saying how, which is a claim a successor cannot check). The
+//! package is `Content/.../Characters/Mannequins/Meshes/SK_Mannequin.uasset` in
+//! the UE5 reference project named in the anim/island mandate memo — a
+//! **non-cooked** editor package, so `FMeshBoneInfo::ExportName` is present and
+//! the names are plain ASCII in the file. Scan the package body for an `i32`
+//! equal to 161 followed by 161 records of
+//! `(i32 name-index, i32 name-number, i32 parent, i32 length, ASCII+NUL)`, and
+//! accept only the offset where the first parent is `-1` and every later one is
+//! in `0..i`. There is exactly one such offset. `RawRefBonePose` follows
+//! immediately: another `i32` count of 161, then 161 `FTransform`s of ten `f64`
+//! (quat *xyzw*, translation, scale). The twist thirds and the hand proportions
+//! below come from that second array.
+//!
 //! | | the document | the asset |
 //! |---|---|---|
 //! | bone count of the printed tree | claimed 161 | **89** |
@@ -54,7 +68,8 @@
 //!    joint that drives it. Both are load-bearing for [`crate::drive`]'s law, and
 //!    both are structure rather than geometry.
 //! 3. **Measured proportions** — the nineteen bones of the hand. Their offsets in
-//!    [`Place::Hand`] are the reference skeleton's own local bind translations
+//!    `Place::Hand` (not a link: the type is private) are the reference
+//!    skeleton's own local bind translations,
 //!    **normalized so the middle-finger chain sums to 1.0 of hand length**, so
 //!    they are ratios of a length this module chooses and carry no absolute
 //!    dimension. There is no *rule* for where a pinky metacarpal sits relative to
