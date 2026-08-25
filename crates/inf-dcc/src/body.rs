@@ -122,6 +122,18 @@ const CROWN_ABOVE_HEAD: f64 = 0.070;
 /// adult, which is what one is.
 const CHIN_BELOW_HEAD: f64 = 0.045;
 
+/// `v > 0.0`, written once so the **NaN-rejecting** form reads as intent rather
+/// than as a negated comparison.
+///
+/// `inf_anim::positive`'s discipline, and its reason: `v <= 0.0` is **false** for
+/// a NaN and would let one through to arithmetic that manufactures a body of
+/// NaNs, and `!(v > 0.0)` is the only spelling that rejects it — which clippy
+/// distrusts for exactly the reason it is right here.
+#[inline]
+fn positive(v: f64) -> bool {
+    v > 0.0
+}
+
 /// A cross-section of a swept shell: where it is, and how wide and deep.
 ///
 /// Two radii rather than one, because nothing on a body is round: a torso is
@@ -180,7 +192,7 @@ pub fn body_mesh(rig: &SkeletonAsset, opts: &BodyOptions) -> Result<(Mesh, BodyR
     let skeleton = &rig.skeleton;
     let at = bind_globals(skeleton);
     let h = reference_height(&at, roles);
-    if !(h > 0.0) {
+    if !positive(h) {
         return Err(BodyError::MissingPart("a body with any height at all"));
     }
 
@@ -196,13 +208,20 @@ pub fn body_mesh(rig: &SkeletonAsset, opts: &BodyOptions) -> Result<(Mesh, BodyR
         shells: 0,
     };
 
-    torso(&mut mesh, &mut b, roles, &at, h, opts)?;
-    head(&mut mesh, &mut b, roles, &at, h, opts)?;
+    let shape = Shape {
+        skeleton,
+        roles,
+        at: &at,
+        h,
+        opts,
+    };
+    torso(&mut mesh, &mut b, &shape)?;
+    head(&mut mesh, &mut b, &shape)?;
     for side in [BoneSide::Left, BoneSide::Right] {
-        arm(&mut mesh, &mut b, roles, &at, h, side, opts)?;
-        hand(&mut mesh, &mut b, skeleton, roles, &at, h, side, opts)?;
-        leg(&mut mesh, &mut b, roles, &at, h, side, opts)?;
-        foot(&mut mesh, &mut b, roles, &at, h, side, opts)?;
+        arm(&mut mesh, &mut b, &shape, side)?;
+        hand(&mut mesh, &mut b, &shape, side)?;
+        leg(&mut mesh, &mut b, &shape, side)?;
+        foot(&mut mesh, &mut b, &shape, side)?;
     }
     b.seed.sort_unstable();
     Ok((
@@ -212,6 +231,23 @@ pub fn body_mesh(rig: &SkeletonAsset, opts: &BodyOptions) -> Result<(Mesh, BodyR
             shells: b.shells,
         },
     ))
+}
+
+/// **What every part of the body is built against** — the rig, read once.
+///
+/// A struct rather than five parameters threaded through eight functions, and
+/// not only because clippy counts: `roles`, `at` and `h` are three readings of
+/// one rig and passing them separately is what lets a caller pass two rigs'
+/// worth by accident.
+struct Shape<'a> {
+    skeleton: &'a Skeleton,
+    roles: RoleIndex<'a>,
+    /// Every joint's bind-pose position, in model space.
+    at: &'a [DVec3],
+    /// The rig's measured standing height — every proportion below is a fraction
+    /// of it.
+    h: f64,
+    opts: &'a BodyOptions,
 }
 
 /// The state a body build carries between its parts.
@@ -290,14 +326,8 @@ fn chain_of(roles: RoleIndex<'_>, kind: BoneRoleKind, side: BoneSide) -> Vec<u16
 }
 
 /// Pelvis → the whole spine → the neck: one welded tube.
-fn torso(
-    mesh: &mut Mesh,
-    b: &mut Build,
-    roles: RoleIndex<'_>,
-    at: &[DVec3],
-    h: f64,
-    opts: &BodyOptions,
-) -> Result<(), BodyError> {
+fn torso(mesh: &mut Mesh, b: &mut Build, s: &Shape<'_>) -> Result<(), BodyError> {
+    let (roles, at, h, opts) = (s.roles, s.at, s.h, s.opts);
     let pelvis = roles
         .first(BoneRoleKind::Pelvis, BoneSide::Center)
         .ok_or(BodyError::MissingPart("a pelvis"))?;
@@ -373,14 +403,8 @@ fn torso(
 }
 
 /// The head: a tapered cranium, a nose, two ears.
-fn head(
-    mesh: &mut Mesh,
-    b: &mut Build,
-    roles: RoleIndex<'_>,
-    at: &[DVec3],
-    h: f64,
-    opts: &BodyOptions,
-) -> Result<(), BodyError> {
+fn head(mesh: &mut Mesh, b: &mut Build, s: &Shape<'_>) -> Result<(), BodyError> {
+    let (roles, at, h, opts) = (s.roles, s.at, s.h, s.opts);
     let head = roles
         .first(BoneRoleKind::Head, BoneSide::Center)
         .ok_or(BodyError::MissingPart("a head"))?;
@@ -482,15 +506,8 @@ fn head(
 }
 
 /// Shoulder → elbow → wrist, one welded tube.
-fn arm(
-    mesh: &mut Mesh,
-    b: &mut Build,
-    roles: RoleIndex<'_>,
-    at: &[DVec3],
-    h: f64,
-    side: BoneSide,
-    opts: &BodyOptions,
-) -> Result<(), BodyError> {
+fn arm(mesh: &mut Mesh, b: &mut Build, s: &Shape<'_>, side: BoneSide) -> Result<(), BodyError> {
+    let (roles, at, h, opts) = (s.roles, s.at, s.h, s.opts);
     let (Some(upper), Some(lower), Some(hand)) = (
         roles.first(BoneRoleKind::UpperArm, side),
         roles.first(BoneRoleKind::LowerArm, side),
@@ -532,16 +549,8 @@ fn arm(
 }
 
 /// A palm slab and five tapered digits.
-fn hand(
-    mesh: &mut Mesh,
-    b: &mut Build,
-    skeleton: &Skeleton,
-    roles: RoleIndex<'_>,
-    at: &[DVec3],
-    h: f64,
-    side: BoneSide,
-    opts: &BodyOptions,
-) -> Result<(), BodyError> {
+fn hand(mesh: &mut Mesh, b: &mut Build, s: &Shape<'_>, side: BoneSide) -> Result<(), BodyError> {
+    let (skeleton, roles, at, h, opts) = (s.skeleton, s.roles, s.at, s.h, s.opts);
     let wrist = roles
         .first(BoneRoleKind::Hand, side)
         .ok_or(BodyError::MissingPart("a hand"))?;
@@ -669,15 +678,8 @@ fn hand(
 }
 
 /// Hip → knee → ankle, one welded tube.
-fn leg(
-    mesh: &mut Mesh,
-    b: &mut Build,
-    roles: RoleIndex<'_>,
-    at: &[DVec3],
-    h: f64,
-    side: BoneSide,
-    opts: &BodyOptions,
-) -> Result<(), BodyError> {
+fn leg(mesh: &mut Mesh, b: &mut Build, s: &Shape<'_>, side: BoneSide) -> Result<(), BodyError> {
+    let (roles, at, h, opts) = (s.roles, s.at, s.h, s.opts);
     let (Some(thigh), Some(calf), Some(foot)) = (
         roles.first(BoneRoleKind::Thigh, side),
         roles.first(BoneRoleKind::Calf, side),
@@ -719,15 +721,8 @@ fn leg(
 }
 
 /// The foot: a flattened slab from the ankle forward over the ball to the toe.
-fn foot(
-    mesh: &mut Mesh,
-    b: &mut Build,
-    roles: RoleIndex<'_>,
-    at: &[DVec3],
-    h: f64,
-    side: BoneSide,
-    opts: &BodyOptions,
-) -> Result<(), BodyError> {
+fn foot(mesh: &mut Mesh, b: &mut Build, s: &Shape<'_>, side: BoneSide) -> Result<(), BodyError> {
+    let (roles, at, h, opts) = (s.roles, s.at, s.h, s.opts);
     let ankle = roles
         .first(BoneRoleKind::Foot, side)
         .ok_or(BodyError::MissingPart("a foot"))?;

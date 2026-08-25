@@ -1081,7 +1081,7 @@ fn export_advisories(r: &inf_dcc::ExportReport) -> Vec<String> {
 /// mesh — the author's asset is untouched.
 ///
 /// The [`inf_dcc::ExportReport`] comes back with it rather than being dropped:
-/// see [`export_advisories`].
+/// see `export_advisories`.
 /// **The starter character's skin material** (SK1b).
 ///
 /// A neutral matte dielectric — the shade a grey-box mannequin is, deliberately,
@@ -1133,7 +1133,7 @@ fn author_aim_mask(machine: &mut inf_anim::StateMachine, rig: &SkeletonAsset) ->
 /// `inf_dcc::body_mesh` generates it from the rig's own bind pose and role table
 /// (welded tapered limbs, five-fingered hands, a head with a jaw, a nose and
 /// ears), and then it is **heat-weighted onto the rig it was generated from**,
-/// through the same three-call sequence [`skinned_copy`] uses for an imported
+/// through the same three-call sequence `skinned_copy` uses for an imported
 /// mesh — bind, solve, apply. A generator could have written rigid per-part
 /// weights for free, since it knows exactly which bone made each vertex; solving
 /// them is what makes an elbow bend like an elbow instead of shearing at one

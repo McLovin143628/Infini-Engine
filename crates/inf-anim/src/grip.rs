@@ -729,11 +729,11 @@ pub fn apply_grip(
 ///
 /// # Refusals, and what is not one
 ///
-/// Returns [`IkError`] for a chain that is not a chain, a joint that does not
+/// Returns [`crate::ik::IkError`] for a chain that is not a chain, a joint that does not
 /// exist, a degenerate bone or a non-finite target — [`crate::ik::solve_chain`]'s
 /// list, because it is the same list. A target **out of reach** is not a refusal:
 /// the arm extends toward it, exactly as a real one does, and
-/// [`IkReport::reached`] says which happened. A middle joint that is **not** a
+/// [`crate::ik::IkReport::reached`] says which happened. A middle joint that is **not** a
 /// single-axis hinge is not a refusal either: the solve delegates to
 /// `solve_chain` with a derived pole, so a caller writes one call rather than a
 /// branch.

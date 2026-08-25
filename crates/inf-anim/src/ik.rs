@@ -382,7 +382,7 @@ fn clamp_to_limit(local: Quat, bind: Quat, limit: &JointLimit) -> (Quat, bool) {
 ///
 /// [`ConeLimit`] shipped on SK1a's one `.inf_skel` bump and the SK1a audit
 /// recorded what that left behind: *"`ConeLimit` is authored and enforced by
-/// nothing"* — [`clamp_to_limit`] reads `min_deg`/`max_deg` only, the ragdoll
+/// nothing"* — `clamp_to_limit` reads `min_deg`/`max_deg` only, the ragdoll
 /// builder reads neither, and no generator produced one. This is the first
 /// consumer, and [`crate::grip`]'s finger curl is what needed it: three
 /// independent per-axis ranges either forbid a legal finger pose at the corners
@@ -398,12 +398,12 @@ fn clamp_to_limit(local: Quat, bind: Quat, limit: &JointLimit) -> (Quat, bool) {
 /// axis, which is a *rescale* and not a discard: a finger asked to curl 150°
 /// through a 90° cone comes back curled 90° in the direction it was asked, not
 /// straight. The **twist** — the roll about the axis — is clamped into
-/// `twist_deg`, folded into `(-π, π]` first for [`clamp_to_limit`]'s reason.
+/// `twist_deg`, folded into `(-π, π]` first for `clamp_to_limit`'s reason.
 ///
 /// # Portable arithmetic
 ///
 /// `patan2_64` / `psin64` / `pcos64` in `f64`, converting once at the wire —
-/// the P14 law, for the same reason [`clamp_to_limit`] obeys it: this edits a
+/// the P14 law, for the same reason `clamp_to_limit` obeys it: this edits a
 /// pose that is folded into `state_bytes` and compared between the editor's
 /// Simulate and the shipped player.
 pub fn clamp_to_cone(local: Quat, bind: Quat, cone: &ConeLimit) -> (Quat, bool) {
@@ -531,7 +531,7 @@ pub fn clamp_to_cone(local: Quat, bind: Quat, cone: &ConeLimit) -> (Quat, bool) 
 /// three-axis box disagree at every diagonal by construction. The cone is the
 /// more specific statement, so it is the one that applies — and it is what lets
 /// [`JointLimit::cone_only`] author a finger without spelling a box that would
-/// otherwise read as *fully locked* ([`clamp_to_limit`] pins a joint with no free
+/// otherwise read as *fully locked* (`clamp_to_limit` pins a joint with no free
 /// axis to its bind pose, which is the coherent reading of an all-zero box and
 /// exactly the wrong answer for a finger).
 pub fn apply_joint_limit(local: Quat, bind: Quat, limit: &JointLimit) -> (Quat, bool) {

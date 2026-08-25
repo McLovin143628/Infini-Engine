@@ -68,7 +68,7 @@ pub const SHOT_MAX_RANGE_M: f64 = weapon::MAX_RANGE_M;
 /// fired along the aim does not begin inside the ground on a downward pitch.
 ///
 /// A character with a **rig** and an equipped weapon now carries that weapon as a
-/// real entity attached to its `hand_r` socket, and [`muzzle_of`] reads the shot's
+/// real entity attached to its `hand_r` socket, and `muzzle_of` reads the shot's
 /// origin off the weapon's own muzzle. This is what is left: the answer for a
 /// bare capsule — every level committed before this wave, the whole
 /// `phase30-gameplay` fixture, and every test rig that steps gameplay without
@@ -231,7 +231,7 @@ fn muzzle_of(world: &EcsWorld, guid: Uuid) -> Option<(DVec3, f64, f64)> {
 }
 
 /// The muzzle of `guid`'s **weapon entity**, if there is one and it is attached
-/// to a real socket. `None` sends [`muzzle_of`] to the capsule rule.
+/// to a real socket. `None` sends `muzzle_of` to the capsule rule.
 fn weapon_muzzle(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
     use inf_ecs::components::GlobalTransform;
     // The socket has to exist on the rig AND have been resolved, or the

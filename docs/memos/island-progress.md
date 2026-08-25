@@ -4640,6 +4640,14 @@ quaternion from the cosine with **two square roots and no angle ever formed** �
 no `acos`, no `sin`, no `cos`), and aiming a rigid two-bone assembly whose end is
 already at the right distance puts the end exactly on the target.
 
+**What a gripping hand costs, measured** (release, min of five, on the 161-bone
+rig, per hand per fixed step): derive the hand **3.2 µs**, curl it **3.3 µs**,
+solve the arm **6.2 µs** — against a 16 667 µs frame. `hand_of` is the one that
+could have been a problem: it walks the skeleton once per digit chain and nothing
+caches it. The number is taken rather than argued, because *"the fixed-step cost
+of the drive pass is argued, not measured"* is on the SK1a audit's carried list
+and this wave was not going to add a second.
+
 **Hand IK runs from the fixed step through a resource**, `HandIkRes` — the
 runtime half of the pair `IkTargetsRes` already had, so **no schema moves** and
 both hosts inherit it with no host-side change. It carries a reach per hand, a
@@ -4769,10 +4777,19 @@ the generated body, heat-weighted, and `CharacterBuild::mannequin` stays honest 
 (`BipedCanonical`, and every `.inf_skel` older than v3). That fallback has its own
 arm, because the default spec no longer exercises it.
 
-**NOT DONE, and named:** the clause also asks for **PBR materials** on the
-starter body and for it to be **shipped as committed engine starter content**.
-The mesh carries a `Skin` material slot and nothing binds a `.inf_mat` to it, and
-no `samples/starter-character/` exists. See *What SK1b did not do*.
+**The skin material ships.** A neutral matte dielectric (`0.62, 0.58, 0.55`,
+metallic 0, roughness 0.62) written beside the body and named as one of its
+**dependencies**, which is the engine's own material binding for a mesh — the
+glTF importer records a resolved material's GUID in the mesh's sidecar the same
+way, and the mesh's own `material_slots` carries the slot name. The wizard writes
+**eight** assets now, not seven. **Honest bound, stated at the write site**:
+`SkeletalMesh` carries a mesh and a skeleton and *no material*, so nothing in the
+skinned draw path reads it yet; the binding it would need is a component field.
+
+**NOT DONE, and named:** the clause also asks for the character to be **shipped
+as committed engine starter content**. No `samples/starter-character/` exists and
+`ProjectTemplate::starter_content` — the committed hook — is untouched. See
+*What SK1b did not do*.
 
 ### Clause 4 — the grip gate (`24f2fec2`)
 
@@ -4849,10 +4866,15 @@ per-hand aperture cannot.
      hero adds 6 476 B per step to `pose_state_bytes` where the capsule adds 0.
   5. The equivalence gate to copy is `samples.rs:11510`
      `the_showcase_character_matches_the_wizard_door`, field by field.
-* **The starter body has no material and is not committed.** Clause 3's other
-  half: `samples/starter-character/` does not exist, no `.inf_mat` is bound to
-  the mesh's `Skin` slot, and `ProjectTemplate::starter_content` — the committed
-  hook — is untouched.
+* **The starter character is not committed content.** Clause 3's other half:
+  `samples/starter-character/` does not exist and
+  `ProjectTemplate::starter_content` — the committed hook — is untouched. The
+  wizard writes a complete character into any project on demand; nothing ships
+  one in the repository. It is also clause 5's prerequisite (above).
+* **Nothing binds a material to a skeletal mesh.** The body's `.inf_mat` is a
+  sidecar dependency and a named slot, and `SkeletalMesh` has no material field,
+  so the skinned draw path renders it with the projector's default. A component
+  field is a scene-schema move and this wave's ruling was that none happen.
 * **A pole-driven `solve_chain` on a hinged chain still loses 8.3 cm.**
   `grip::reach` routes around it for arms; `apply_foot_ik` passes `&[]` and so
   never hits it; an authored `IkTarget` over a chain with a hinge in the middle
@@ -4887,10 +4909,14 @@ per-hand aperture cannot.
 
 | | after the SK1a audit | **after SK1b** |
 |---|---|---|
-| battery blocks / passed / failed / ignored | 319 / 6 015 / 0 / 16 | *(see the wave's closing run)* |
-| goldens | 54, byte-identical | *(unchanged — nothing here touches a render path)* |
-| schema | `.inf_skel` v3, `.inf_anim` v2, `.inf_sm` v3, `.inf_mesh` v2, scene v25, `ScenePayload` v11 | **nothing moved** — the wave's whole point |
-| committed sample bytes | — | **unmoved** |
+| battery blocks / passed / failed / ignored | 319 / 6 015 / 0 / 16 | **320 / 6 048 / 0 / 16** — **+1 block** (`grip_gate`, the wave's only new test file) and **+33 arms** |
+| goldens | 54, byte-identical | **54, byte-identical** under `INF_GOLDEN_STRICT=1` over **101 arms**, no PNG rewritten. Nothing here touches a render path |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| rustdoc warnings (ceiling 450) | 374 individual over 30 crates | **374 individual over 30 crates** after `cargo clean --doc`. **The wave adds zero**: it introduced **9** — four `[`clamp_to_limit`]` links to a private fn, two unresolved `IkError`/`IkReport` links in a new module, `starter_body`'s link to a private `skinned_copy`, `MUZZLE_HEIGHT_M`'s to a private `muzzle_of`, and one a *new public item* re-attributed out of a private doc that had been linking privately all along — and all nine were found and removed |
+| `cargo fmt --all --check` | clean | clean |
+| frontend tests / files | 702 / 78 | **untouched** — nothing under `editor/studio` moved. `LiveTuning.tsx`'s weapon-tunable gate is one-directional (panel → door), so the door's new `muzzle_forward_m` does not reach it |
+| schema | `.inf_skel` v3, `.inf_anim` v2, `.inf_sm` v3, `.inf_mesh` v2, scene v25, `ScenePayload` v11 | **nothing moved** — the wave's whole point. Hand IK rides a resource, a weapon rides `AttachedTo` (already a scene component), and `WeaponDef` carries no `Serialize` at all |
+| committed sample bytes | — | **unmoved**; `git status` on `samples/` and `tests/goldens/` empty |
 
 ### Commits
 
@@ -4901,3 +4927,12 @@ per-hand aperture cannot.
 | `943a0028` | a body, not a pile of boxes |
 | `ab68f71c` | the weapon is an entity, the muzzle is its own, and the aim mask exists |
 | `24f2fec2` | the grip gate: three things held, one of them let go of |
+| `69016b88` | the ledger, and the route clause 5 did not take |
+| `7eb912dc` | the twenty-first chr(92) catch, and it was mine |
+
+**The twenty-first chr(92) catch, and it was this wave's own.** Three `format!`
+literals in `character.rs` carried eaten continuations — written from a non-raw
+Python string, in patches that added a wave about measuring things honestly. The
+workspace gate named all three on the first full battery, which is the gate doing
+exactly its job for the twenty-first time. Twenty were ledgered across three
+waves before it.
