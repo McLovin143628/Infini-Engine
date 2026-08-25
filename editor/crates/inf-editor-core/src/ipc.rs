@@ -3198,8 +3198,11 @@ pub struct SkelJointDto {
     pub translation: [f32; 3],
     pub rotation: [f32; 4],
     pub scale: [f32; 3],
-    /// One of the canonical humanoid nineteen. The panel marks these because
-    /// renaming one costs `RetargetMap::humanoid_identity` a pairing.
+    /// An **interchange** joint name: one of the canonical humanoid nineteen, or
+    /// the mannequin spelling `RetargetMap::canonical_to_manny` pairs it with.
+    /// The panel marks these because renaming one costs a retarget pairing —
+    /// and the union is the right question since `BodyPlan::Biped` became the
+    /// 161-bone mannequin, whose names overlap the canonical set at five bones.
     pub canonical: bool,
     /// This joint's left/right twin, when the rig has one.
     pub mirror: Option<u16>,
@@ -3321,11 +3324,13 @@ pub struct GaitParamsDto {
 #[serde(rename_all = "camelCase")]
 pub struct CharacterSpecDto {
     pub name: String,
-    /// `"biped"` | `"quadruped"` | `"hexapod"` | `"npedal"`. A **string** for
-    /// `skel_create_template`'s stated reason: the plan set is the part of this
-    /// API most likely to grow, and a name that fails loudly with the list of
-    /// what it does know is kinder to a stale frontend than a generated union
-    /// that silently loses a variant.
+    /// `"biped"` | `"biped-canonical"` | `"quadruped"` | `"hexapod"` |
+    /// `"npedal"`. A **string** for `skel_create_template`'s stated reason: the
+    /// plan set is the part of this API most likely to grow, and a name that
+    /// fails loudly with the list of what it does know is kinder to a stale
+    /// frontend than a generated union that silently loses a variant. (SK1a
+    /// widened the set and this list did not follow, which is the doc making
+    /// exactly the mistake it argues against.)
     pub plan: String,
     /// Leg count for `"npedal"`; ignored by the named plans.
     pub legs: Option<u16>,

@@ -259,10 +259,16 @@ pub fn fit_template(bvh: &Bvh, opts: &FitOptions) -> Result<(SkeletonAsset, FitR
 
     // ── 4. medial refinement ───────────────────────────────────────────────
     let ground = min.y + FOOT_CLEARANCE * ext.y;
-    // Which joints are planted on the ground. **The role table first** (SK1a):
-    // the mannequin's `foot_*` is an ankle and its `ik_foot_*` is a marker, and
-    // the prefix rule cannot tell a `Foot` from a `Ball` on any rig that has both.
-    // The prefix stays as the fallback for a rig with no table.
+    // Which joints are planted on the ground. **The role table first** (SK1a),
+    // and the prefix stays as the fallback for a rig with no table.
+    //
+    // On the mannequin the two rules happen to AGREE — `ball_*` and `ik_foot_*`
+    // do not start with `foot_`, so the prefix already matched exactly the two
+    // ankles (SK1a audit: the first write-up claimed the prefix "cannot tell a
+    // `Foot` from a `Ball`", which is not true of any rig in this tree). The
+    // change is future-proofing against a rig that spells its toe `foot_ball_l`
+    // or its marker `foot_target_l`, and on every plan this engine generates it
+    // is a behavioural no-op — which is worth saying rather than dressing up.
     let roles = asset.role_index();
     let is_foot: Vec<bool> = skeleton
         .joints()

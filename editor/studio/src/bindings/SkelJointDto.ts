@@ -19,8 +19,11 @@ parent: number | null,
  */
 translation: [number, number, number], rotation: [number, number, number, number], scale: [number, number, number], 
 /**
- * One of the canonical humanoid nineteen. The panel marks these because
- * renaming one costs `RetargetMap::humanoid_identity` a pairing.
+ * An **interchange** joint name: one of the canonical humanoid nineteen, or
+ * the mannequin spelling `RetargetMap::canonical_to_manny` pairs it with.
+ * The panel marks these because renaming one costs a retarget pairing —
+ * and the union is the right question since `BodyPlan::Biped` became the
+ * 161-bone mannequin, whose names overlap the canonical set at five bones.
  */
 canonical: boolean, 
 /**

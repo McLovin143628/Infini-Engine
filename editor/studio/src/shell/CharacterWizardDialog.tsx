@@ -105,6 +105,11 @@ export default function CharacterWizardDialog() {
   // only where they are READ). Showing the fields would offer an author two
   // numbers the generator throws away.
   const multiGirdle = spec.plan !== "biped" && spec.plan !== "biped-canonical";
+  // The mannequin's torso is a NAMED hierarchy — `spine_01`..`spine_05` and
+  // `neck_01`/`neck_02` come from the shipped asset, not from a segment count —
+  // so `build_manny` reads neither field while `validate` still refuses a zero
+  // in them. Two more numbers the generator throws away, the pair above's twin.
+  const chainSegments = spec.plan !== "biped";
 
   return (
     <div
@@ -306,22 +311,26 @@ export default function CharacterWizardDialog() {
                     step={0.01}
                     onChange={(v) => bump("armLengthRatio", v)}
                   />
-                  <NumberRow
-                    label="Spine segments"
-                    value={spec.params.spineSegments}
-                    step={1}
-                    min={2}
-                    integer
-                    onChange={(v) => bump("spineSegments", v)}
-                  />
-                  <NumberRow
-                    label="Neck segments"
-                    value={spec.params.neckSegments}
-                    step={1}
-                    min={1}
-                    integer
-                    onChange={(v) => bump("neckSegments", v)}
-                  />
+                  {chainSegments && (
+                    <>
+                      <NumberRow
+                        label="Spine segments"
+                        value={spec.params.spineSegments}
+                        step={1}
+                        min={2}
+                        integer
+                        onChange={(v) => bump("spineSegments", v)}
+                      />
+                      <NumberRow
+                        label="Neck segments"
+                        value={spec.params.neckSegments}
+                        step={1}
+                        min={1}
+                        integer
+                        onChange={(v) => bump("neckSegments", v)}
+                      />
+                    </>
+                  )}
                   {multiGirdle && (
                     <>
                       <NumberRow

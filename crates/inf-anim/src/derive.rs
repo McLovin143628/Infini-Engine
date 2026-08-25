@@ -809,7 +809,8 @@ pub fn foot_joints_by_name(skeleton: &Skeleton) -> Vec<u16> {
 
 /// The name a foot's markers are spelled with.
 ///
-/// Walks **up the rig** for the leg the foot belongs to (`upper_leg_*`), because
+/// Walks **up the rig** for the leg the foot belongs to — the `Thigh` the role
+/// table names, or a `upper_leg_*` ancestor on a rig with no table — because
 /// that is the name [`crate::locomotion::FOOT_SYNC_GROUP`]'s generated markers
 /// already carry — so a derived run and a generated walk on the same rig name the
 /// same marker and a blend between them aligns by name rather than by falling

@@ -995,11 +995,23 @@ mod tests {
     /// pack whose routed cache could not have touched a GPU pass).
     ///
     /// The shape of the cost, from the code rather than from a hunch:
-    /// `bone_segments` turns J joints into B segments, and both the visibility
-    /// pass (one BVH ray per vertex per bone) and the diffusion (one conjugate
-    /// gradient solve per bone) are linear in B. So the prediction is
-    /// **B(161)/B(20)**, and what this arm measures is whether the constant
-    /// factors keep that promise.
+    /// `bone_segments` turns J joints into B segments, the visibility pass is one
+    /// BVH ray per vertex per bone, and the gather walks every bone's field for
+    /// every vertex — both linear in B. So the prediction is **B(161)/B(20)**,
+    /// and what this arm measures is whether the constant factors keep that
+    /// promise.
+    ///
+    /// **Two corrections to the first write-up** (SK1a audit), because between
+    /// them they are the explanation of the answer:
+    ///
+    /// * the diffusion is **not** one solve per bone. A bone that wins no vertex
+    ///   has `sources == 0` and pushes a zero field without solving at all, so on
+    ///   a 386-vertex tube the solve count saturates far below B. The arm reports
+    ///   both numbers now, and the gap between them is most of why 10.4× the
+    ///   bones is nowhere near 10.4× the clock.
+    /// * the per-vertex top-4 gather is **not** bone-independent — it is O(V·B)
+    ///   and is the part that does scale. What is bone-independent is the
+    ///   Laplacian assembly and the neighbourhood walk.
     ///
     /// Run it with `--nocapture` to read the numbers. What is *asserted* is the
     /// ratio against its own prediction, not a wall-clock budget: a machine-time
@@ -1012,7 +1024,7 @@ mod tests {
             height_m: 1.8,
             ..Default::default()
         };
-        let run = |plan: BodyPlan| -> (usize, usize, f64) {
+        let run = |plan: BodyPlan| -> (usize, usize, usize, f64) {
             let rig = build_template(plan, &params).unwrap();
             let segments = bone_segments(&rig.skeleton).len();
             let mut m = tube_mesh();
@@ -1022,47 +1034,62 @@ mod tests {
             // fastest run is the one least polluted by whatever else the machine
             // was doing.
             let mut best = f64::INFINITY;
+            let mut solved = 0usize;
             for _ in 0..3 {
                 let t = Instant::now();
-                let (op, _) = solve_heat_weights(&m, &bvh, &rig.skeleton).expect("solves");
+                let (op, report) = solve_heat_weights(&m, &bvh, &rig.skeleton).expect("solves");
                 assert!(op.is_some(), "{plan:?} weighted nothing");
                 best = best.min(t.elapsed().as_secs_f64() * 1000.0);
+                // The bones that actually ran a CG solve, rather than the bones
+                // that exist — see the corrections in this arm's docs.
+                solved = report.bones.iter().filter(|b| b.sources > 0).count();
             }
-            (rig.skeleton.len(), segments, best)
+            (rig.skeleton.len(), segments, solved, best)
         };
-        let (j20, b20, ms20) = run(BodyPlan::BipedCanonical);
-        let (j161, b161, ms161) = run(BodyPlan::Biped);
+        let (j20, b20, s20, ms20) = run(BodyPlan::BipedCanonical);
+        let (j161, b161, s161, ms161) = run(BodyPlan::Biped);
         let verts = tube_mesh().vert_count();
         let predicted = b161 as f64 / b20 as f64;
         let measured = ms161 / ms20;
         println!(
-            "heat solve over {verts} vertices: {j20} joints / {b20} segments = \
-             {ms20:.3} ms; {j161} joints / {b161} segments = {ms161:.3} ms; \
-             {measured:.2}x measured against {predicted:.2}x predicted"
+            "heat solve over {verts} vertices: {j20} joints / {b20} segments \
+             ({s20} solved) = {ms20:.3} ms; {j161} joints / {b161} segments \
+             ({s161} solved) = {ms161:.3} ms; {measured:.2}x measured against \
+             {predicted:.2}x predicted"
         );
         assert_eq!((j20, j161), (20, inf_anim::MANNY_JOINT_COUNT));
         // **The measurement, on this machine, in release**: 386 vertices,
-        // 24 -> 249 segments (10.4x), and the solve went 32.4 -> 78.3 ms —
-        // **2.4x**, not 10.4x. The per-bone work is real and is not what dominates
-        // at this mesh size: the Laplacian assembly, the neighbourhood walk and
-        // the per-vertex top-4 gather are bone-independent and are most of the
-        // clock. That is a finding, not a licence — the balance tips the other way
-        // on a mesh with tens of thousands of vertices, where `field` alone is
-        // B x V x 8 bytes (161 bones over 50 000 vertices is ~64 MB resident).
+        // 24 -> 249 segments, which is **10.4x** the bones and only **2.4x** the
+        // clock. The per-bone work is real and is not what dominates at this mesh
+        // size, and the reason is the pair of corrections in this arm's docs:
+        // most of those 249 segments win no vertex on a 386-vertex tube and never
+        // run a solve at all, and the Laplacian assembly and the neighbourhood
+        // walk are bone-independent and are most of the remaining clock. That is a
+        // finding, not a licence — the balance tips the other way on a mesh with
+        // tens of thousands of vertices, where `field` alone is B x V x 8 bytes
+        // (161 bones over 50 000 vertices is ~64 MB resident).
         //
-        // So the ASSERTION is the upper bound, which is the one that guards
-        // something: growing no faster than the bone count means nothing here
-        // scales with its square. The lower bound only says the arm is measuring a
-        // solve at all.
+        // The exact millisecond pair is deliberately NOT written down here: it is
+        // a wall clock on one machine, the `println!` above reports it on every
+        // run, and two hand-copied readings in two files is how a ledger ends up
+        // citing a number nothing produced.
+        //
+        // The assertions: the upper bound on the clock ratio, which is the half
+        // that guards something (growing no faster than the bone count means
+        // nothing here scales with its square), and the SOLVE COUNT, which is a
+        // property rather than a race between two clocks.
         assert!(
             measured < predicted,
-            "the solve grew {measured:.2}x for {predicted:.2}x the bones, which is \
-             worse than linear: something scales with the SQUARE of the bone count"
+            "the solve grew {measured:.2}x for {predicted:.2}x the bones — at or \
+             past linear in the bone count, which is the bound this arm exists to \
+             hold"
         );
         assert!(
-            measured > 1.0,
-            "the solve did not grow at all ({measured:.2}x) — this arm is not \
-             measuring per-bone work"
+            s161 > s20 && s161 < b161,
+            "the mannequin ran {s161} solves of {b161} segments against the \
+             canonical rig's {s20} of {b20} — more bones must win more vertices \
+             (or this arm is not measuring per-bone work), and some must win none \
+             (or the early-out this arm's docs rest on is gone)"
         );
     }
 }

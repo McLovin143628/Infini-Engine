@@ -604,14 +604,21 @@ fn the_generated_thresholds_move_the_shipped_player_between_states() {
     );
 }
 
-/// The same gate for the **canonical-vocabulary biped** — the twenty-joint rig
-/// `BodyPlan::Biped` was before SK1a.
+/// **One arm of** the gate above, for the **canonical-vocabulary biped** — the
+/// twenty-joint rig `BodyPlan::Biped` was before SK1a.
 ///
-/// Not redundant with the mannequin arm above: it is the rig every committed
+/// Not redundant with the mannequin arm: it is the rig every committed
 /// `.inf_anim` in this repository is index-bound to, it carries **no** side
 /// tables, and it is therefore the arm that proves the drive pass's "absent costs
 /// nothing" claim end to end — a payload with no twists and no handles folds a
 /// trace the shipping build folds too.
+///
+/// **What it does not do** (SK1a audit; the first write-up said "the same gate",
+/// which it is not): it runs the PIE-versus-shipping comparison **once**, from
+/// one subprocess. It does not repeat it from a second process and it carries no
+/// severed-machine `assert_ne!`. Both of those live on the mannequin arm, where
+/// they guard the same two hazards for both rigs — a per-process trace and a
+/// vacuous comparison are properties of the harness, not of the bone count.
 #[test]
 fn the_real_pie_subprocess_runs_the_canonical_biped_with_no_side_tables() {
     let made = make(&canonical_biped_spec());

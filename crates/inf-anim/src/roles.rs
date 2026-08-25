@@ -324,7 +324,8 @@ impl GripAffordance {
 /// fallback once, rather than branching on whether a table exists.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RoleIndex<'a> {
-    /// `(kind, side) -> joints`, ascending, in the table's own order.
+    /// The rig's rows, **ascending by joint**. A flat slice and not a map: the
+    /// whole point of this type is that it borrows what it is handed.
     rows: &'a [BoneRole],
 }
 

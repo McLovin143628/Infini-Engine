@@ -9,11 +9,13 @@ import type { GaitParamsDto } from "./GaitParamsDto";
  */
 export type CharacterSpecDto = { name: string, 
 /**
- * `"biped"` | `"quadruped"` | `"hexapod"` | `"npedal"`. A **string** for
- * `skel_create_template`'s stated reason: the plan set is the part of this
- * API most likely to grow, and a name that fails loudly with the list of
- * what it does know is kinder to a stale frontend than a generated union
- * that silently loses a variant.
+ * `"biped"` | `"biped-canonical"` | `"quadruped"` | `"hexapod"` |
+ * `"npedal"`. A **string** for `skel_create_template`'s stated reason: the
+ * plan set is the part of this API most likely to grow, and a name that
+ * fails loudly with the list of what it does know is kinder to a stale
+ * frontend than a generated union that silently loses a variant. (SK1a
+ * widened the set and this list did not follow, which is the doc making
+ * exactly the mistake it argues against.)
  */
 plan: string, 
 /**

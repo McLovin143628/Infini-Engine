@@ -144,6 +144,25 @@ static CANONICAL_MANNY_PAIRS: [(&str, &str); 19] = [
     ("foot_r", "foot_r"),
 ];
 
+/// Whether `name` is a joint name **some retarget map in this engine can pair**
+/// — the canonical vocabulary [`humanoid_joint_names`] *or* the mannequin
+/// spelling of one (SK1a audit).
+///
+/// # Why it is not just the canonical list
+///
+/// The Skeleton Editor badges a joint "canonical" and its rename door warns when
+/// a rename leaves the humanoid set, and both asked `humanoid_joint_names()`
+/// alone. The moment `BodyPlan::Biped` became the mannequin that stopped being
+/// the right question about the engine's own default rig: the two vocabularies
+/// overlap at five names, so **156 of 161 bones badge as unknown**, renaming
+/// `thigh_l` silently breaks [`RetargetMap::manny_to_canonical`] with no warning,
+/// and renaming `foot_l` warns. The interchange vocabulary is the union — it is
+/// the set of names a map in this crate knows how to pair, which is exactly what
+/// a badge and a rename warning are about.
+pub fn is_interchange_joint_name(name: &str) -> bool {
+    humanoid_joint_names().contains(&name) || CANONICAL_MANNY_PAIRS.iter().any(|(_, m)| *m == name)
+}
+
 /// **What a retarget actually moved** (SK1a).
 ///
 /// Retarget v1 skips a pair naming a joint either skeleton lacks, and says

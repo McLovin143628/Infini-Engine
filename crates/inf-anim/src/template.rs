@@ -138,8 +138,15 @@ pub struct BodyParams {
     pub head_height_ratio: f64,
     /// Number of joints between the hips and the shoulders, inclusive of `chest`.
     /// `2` is the canonical `spine → chest`; more inserts `spine_1 …` between.
+    ///
+    /// **Ignored by [`BodyPlan::Biped`]** (SK1a audit): the mannequin's torso is
+    /// a named hierarchy — `spine_01`…`spine_05` — not a derived chain, so
+    /// `manny::build_manny` never reads this. [`validate`] still refuses a value
+    /// below 2 for every plan, which is the shape `body_length_m` has.
     pub spine_segments: u16,
     /// Number of joints between the shoulders and the head, inclusive of `neck`.
+    ///
+    /// **Ignored by [`BodyPlan::Biped`]**, whose neck is `neck_01`/`neck_02`.
     pub neck_segments: u16,
     /// Distance between the two shoulder joints (m). Also the arm girdle's width.
     pub shoulder_width_m: f64,
@@ -151,10 +158,10 @@ pub struct BodyParams {
     /// Arm length shoulder-to-wrist, as a fraction of `height_m`.
     pub arm_length_ratio: f64,
     /// Body length from the rearmost girdle to the shoulder girdle (m).
-    /// Ignored by [`BodyPlan::Biped`], whose torso is vertical.
+    /// Ignored by **both** bipeds, whose torsos are vertical.
     pub body_length_m: f64,
-    /// How far the head sits **forward** of the shoulders (m). Ignored by the
-    /// biped, whose neck is vertical.
+    /// How far the head sits **forward** of the shoulders (m). Ignored by both
+    /// bipeds, whose necks are vertical.
     pub head_forward_m: f64,
 }
 
@@ -225,10 +232,11 @@ pub enum TemplateError {
 /// unlimited rig while costing a row per joint, and a solver reading it could not
 /// tell "no limit was authored" from "a full-range limit was authored".
 ///
-/// **Frozen once shipped**: `SkeletonAsset` is bincode-positional, so these three
-/// fields are the shape for good. A later limit *kind* (a swing-twist cone, a
-/// preferred axis) is an append at the tail of this struct behind a schema bump,
-/// not an edit of what is here.
+/// **Frozen once shipped**: `SkeletonAsset` is bincode-positional, so these
+/// **four** fields are the shape for good. A later limit *kind* (a preferred
+/// axis, a soft range) is an append at the tail of this struct behind a schema
+/// bump, not an edit of what is here — which is exactly how `cone` arrived, on
+/// SK1a's `.inf_skel` v2 → v3.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct JointLimit {
     /// Index of the limited joint (into the skeleton's `joints`).
@@ -254,6 +262,17 @@ pub struct JointLimit {
 /// Writing that as three independent per-axis ranges either forbids legal poses at
 /// the corners or admits illegal ones at the diagonals, which is why the per-axis
 /// box was never enough for a hand.
+///
+/// # Authored, not yet enforced (SK1a audit)
+///
+/// The type and its wire slot ship; **no solver reads it**. `ik::solve_chain`
+/// clamps `min_deg`/`max_deg` only, the ragdoll builder reads neither, and no
+/// generator in the engine produces a cone — so
+/// [`with_cone`](JointLimit::with_cone) today accepts a constraint that nothing
+/// applies. That is deliberate and is the point of spending one bump rather than
+/// two (see `SkeletonAsset`'s ladder docs), and it is stated here so a reader
+/// does not take the description above for a description of enforced behaviour.
+/// SK1b's finger solver is the first consumer.
 ///
 /// **Frozen once shipped**, like the fields above it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

@@ -168,7 +168,12 @@ fn joint_dto(asset: &SkeletonAsset, index: usize) -> SkelJointDto {
         translation: j.local_bind.translation,
         rotation: j.local_bind.rotation,
         scale: j.local_bind.scale,
-        canonical: inf_anim::humanoid_joint_names().contains(&j.name.as_str()),
+        // The **interchange** vocabulary, not just the canonical twenty (SK1a
+        // audit): on the engine's own default rig the canonical list matches
+        // five bones of 161, so the badge said "unknown" about `thigh_l` and
+        // `spine_03` — names every retarget chain in the world addresses and
+        // `RetargetMap::canonical_to_manny` pairs by hand.
+        canonical: inf_anim::is_interchange_joint_name(&j.name),
         mirror,
         sided_without_twin: twin.is_some() && mirror.is_none(),
         limit_min_deg: limit.map(|l| l.min_deg),
@@ -205,8 +210,8 @@ fn rename_warning(v: &RenameVerdict) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if v.left_humanoid_set {
         parts.push(format!(
-            "`{}` was one of the canonical humanoid joints — retargeting onto \
-             another rig will no longer pair it",
+            "`{}` was an interchange joint name — retargeting onto another rig \
+             will no longer pair it",
             v.previous
         ));
     }
@@ -408,6 +413,17 @@ pub async fn skel_set_joint_transform(
 /// Set or clear a joint's rotation limit. Passing either bound as `null`
 /// **clears the row** — absent means unlimited, and a full-range row is a
 /// different (authored) statement.
+///
+/// # The cone is preserved, not overwritten (SK1a audit)
+///
+/// Schema v3 gave [`JointLimit`] a `cone`, and this door spelled `cone: None`
+/// unconditionally — so editing a joint's hinge range through the Skeleton
+/// Editor **erased** any authored swing-twist cone, silently and with no way
+/// back, because `SkelJointDto` carries no cone for the panel to show or return.
+/// A row that already exists keeps its cone; a row being created has none, which
+/// is what "no cone authored" means. (Latent today — nothing produces a cone and
+/// no solver reads one — which is exactly when a data-loss door is cheapest to
+/// close.)
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn skel_set_limit(
@@ -422,7 +438,9 @@ pub async fn skel_set_limit(
     edit(&app, &id, &state, &assets, |s| {
         let limit = match (min_deg, max_deg) {
             (Some(min_deg), Some(max_deg)) => Some(JointLimit {
-                cone: None,
+                // Read-modify-write: the panel cannot see a cone, so it must not
+                // be able to destroy one.
+                cone: s.asset().limit(joint).and_then(|l| l.cone),
                 joint,
                 min_deg,
                 max_deg,
@@ -797,9 +815,31 @@ mod tests {
         assert_eq!(knee.limit_min_deg.map(|d| d[0]), Some(-150.0));
         assert_eq!(knee.limit_max_deg.map(|d| d[0]), Some(0.0));
 
-        // `pelvis` is deliberately NOT one of the nineteen (template.rs says so).
-        assert!(!by("pelvis").canonical);
+        // `pelvis` is not one of the nineteen (template.rs says so) — and it IS
+        // the mannequin's spelling of `hips`, so since the SK1a audit the badge
+        // reads the **interchange** vocabulary and says yes. `girdle_0` on a
+        // multi-girdle rig is the name that is in neither.
+        assert!(by("pelvis").canonical, "the mannequin's hip girdle");
         assert!(!by("pelvis").sided_without_twin, "it names no side");
+        // The mannequin's own spellings badge as interchange names, which is the
+        // whole point: the engine's default rig is 161 bones and five of them
+        // are canonical.
+        let manny = build_template(BodyPlan::Biped, &BodyParams::default()).unwrap();
+        for (name, want) in [
+            ("thigh_l", true),
+            ("spine_03", false),
+            ("clavicle_r", true),
+            ("upperarm_twist_01_l", false),
+            ("ik_hand_gun", false),
+            ("foot_l", true),
+        ] {
+            let i = manny.skeleton.index_of(name).unwrap();
+            assert_eq!(
+                joint_dto(&manny, i as usize).canonical,
+                want,
+                "`{name}`'s interchange badge"
+            );
+        }
 
         // …and the rest transform really is the joint's, not a default.
         assert_eq!(

@@ -33,8 +33,11 @@
 //! # Canonical names are WARNINGS, not refusals
 //!
 //! Renaming `upper_arm_l` to `arm1` is legal — it is the author's rig — and it
-//! silently breaks two things: `RetargetMap::humanoid_identity`, which pairs by
-//! the nineteen canonical names, and `inf_anim::mirror_joint_map`, which pairs by
+//! silently breaks two things: the retarget maps, which pair by name
+//! (`inf_anim::is_interchange_joint_name` — the nineteen canonical names **or**
+//! the mannequin spellings `RetargetMap::canonical_to_manny` pairs them with,
+//! since SK1a made the mannequin the default rig), and
+//! `inf_anim::mirror_joint_map`, which pairs by
 //! the `_l`/`_r` suffix. Refusing would make the editor unable to author a
 //! non-humanoid; saying nothing would make the breakage discoverable only much
 //! later, in a retarget that quietly does nothing. So a rename returns a
@@ -99,9 +102,10 @@ impl From<SkeletonMergeError> for SkelError {
 /// why neither is a refusal.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RenameVerdict {
-    /// The joint left the canonical humanoid vocabulary
-    /// (`inf_anim::humanoid_joint_names`), so `RetargetMap::humanoid_identity`
-    /// will no longer pair it with anything.
+    /// The joint left the **interchange** vocabulary
+    /// (`inf_anim::is_interchange_joint_name` — the canonical twenty *or* the
+    /// mannequin spelling of one), so no retarget map this engine ships will
+    /// pair it with anything.
     pub left_humanoid_set: bool,
     /// The joint had a left/right twin and the new name does not pair with one,
     /// so `mirror_joint_map` will now map it to itself — a mirror across this
@@ -238,8 +242,13 @@ impl SkelSession {
             }
         }
         let previous = self.asset.skeleton.joints()[index as usize].name.clone();
-        let was_canonical = inf_anim::humanoid_joint_names().contains(&previous.as_str());
-        let is_canonical = inf_anim::humanoid_joint_names().contains(&name);
+        // The **interchange** vocabulary (SK1a audit): the canonical twenty
+        // *and* the mannequin spellings `RetargetMap::canonical_to_manny` pairs
+        // them with. Asked of the canonical list alone, this warned about
+        // renaming `foot_l` on the engine's default rig and said nothing about
+        // renaming `thigh_l`, which breaks the same map just as completely.
+        let was_canonical = inf_anim::is_interchange_joint_name(&previous);
+        let is_canonical = inf_anim::is_interchange_joint_name(name);
         // "Had a twin" is measured on the SKELETON, not on the name: a `hand_l`
         // in a rig with no `hand_r` was already unpaired, and renaming it breaks
         // nothing.
@@ -580,16 +589,27 @@ mod tests {
     #[test]
     fn a_harmless_rename_warns_about_nothing() {
         let mut s = SkelSession::new(biped());
-        // `pelvis` is deliberately NOT one of the canonical nineteen (see
-        // `template::girdle_name`), so renaming it leaves nothing.
+        // `pelvis` is not one of the canonical nineteen (see
+        // `template::girdle_name`) — but it IS the mannequin's spelling of
+        // `hips`, so since SK1a it is part of the **interchange** vocabulary and
+        // leaving it is a warning. Renaming it twice is what makes this arm
+        // about the second rename: `hip_anchor` is in neither vocabulary, so
+        // going from it to `girdle` costs nothing.
         let i = s.asset().skeleton.index_of("pelvis").unwrap();
-        let v = s.rename_joint(i, "hip_anchor").expect("renames");
+        assert!(
+            s.rename_joint(i, "hip_anchor")
+                .expect("renames")
+                .left_humanoid_set,
+            "`pelvis` is the mannequin's hip girdle; leaving that name leaves the \
+             vocabulary every retarget map in the engine pairs"
+        );
+        let v = s.rename_joint(i, "girdle").expect("renames");
         assert_eq!(
             v,
             RenameVerdict {
                 left_humanoid_set: false,
                 broke_mirror_pair: false,
-                previous: "pelvis".into(),
+                previous: "hip_anchor".into(),
             }
         );
     }

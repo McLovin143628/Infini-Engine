@@ -269,8 +269,8 @@ export default function SkeletonEditor({
               onClick={() => select(assetId, j.index)}
               title={
                 j.canonical
-                  ? "A canonical humanoid joint — renaming it costs a retarget pairing"
-                  : "Not one of the canonical humanoid joints"
+                  ? "An interchange joint name — renaming it costs a retarget pairing"
+                  : "Not a name any retarget map in the engine pairs"
               }
             >
               <span className="truncate">{j.name}</span>

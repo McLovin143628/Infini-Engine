@@ -368,7 +368,8 @@ pub fn preview_character(
 ///
 /// # What was actually slow, and it was not the fit
 ///
-/// The panel re-previews on **every edit** and nothing debounces it, so before
+/// The panel re-previews on **every edit** (debounced at 250 ms in
+/// `characterWizardStore`, which bounds the RATE and not the cost), so before
 /// this a single keystroke on the fitted path was: a `read` plus a full decode of
 /// the author's model (Ring 2), a half-edge kernel build, a tessellation, a BVH
 /// **build**, the fit, and then all three locomotion clips generated from

@@ -157,7 +157,8 @@ pub use ragdoll::{
     RagdollPhase,
 };
 pub use retarget::{
-    humanoid_joint_names, retarget_pose, retarget_pose_reported, RetargetMap, RetargetReport,
+    humanoid_joint_names, is_interchange_joint_name, retarget_pose, retarget_pose_reported,
+    RetargetMap, RetargetReport,
 };
 pub use roles::{
     BoneRole, BoneRoleKind, BoneSide, GripAffordance, IkFollow, RoleIndex, TwistDriver,
