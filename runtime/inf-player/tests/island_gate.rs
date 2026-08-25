@@ -32,6 +32,8 @@
 
 use std::path::{Path, PathBuf};
 
+use uuid::Uuid;
+
 use inf_player::runtime_sim::RuntimeSim;
 use inf_project::ProjectManifest;
 
@@ -135,6 +137,7 @@ fn loose_sim(content: &Path, slug: &str) -> RuntimeSim {
     let source = inf_player::level::DevDirLevelSource::new(content.join(format!("{slug}.inf_lvl")));
     let terrains = inf_player::level::terrain_paths_by_guid_from_dir(content);
     let pcg_terrains = terrains.clone();
+    let (skeletons, clips, machines) = inf_player::level::load_anim_assets_from_dir(content);
     let builder = inf_player::level::InfSceneWorldBuilder::with_defaults(
         inf_player::level::load_actor_classes_from_dir(content),
     )
@@ -142,6 +145,15 @@ fn loose_sim(content: &Path, slug: &str) -> RuntimeSim {
         content,
     ))
     .with_biome_sets(inf_player::level::load_biome_sets_by_guid_from_dir(content))
+    // **The hero's rig, its machine and its clips** (SK1c). This function's own
+    // doc already carried the rule -- *two hosts compared for byte equality must
+    // be given the same world to disagree about, or the equality is between one
+    // real reading and one impoverished one* -- and the anim index was the third
+    // thing it was missing, invisible for as long as the island's hero was a
+    // capsule with `AnimStateMachine { sm: None }` and nothing to pose. The pack
+    // host gets these from the cook's own index; this one reads the same content
+    // root the recipe's `[content]` list filled.
+    .with_anim_assets(skeletons, clips, machines)
     .with_terrain_resolver(std::sync::Arc::new(move |g| {
         inf_player::level::terrain_source_from_file(pcg_terrains.get(&g)?).ok()
     }));
@@ -182,6 +194,44 @@ fn streaming_counters(sim: &RuntimeSim) -> (u64, u64, usize, usize, u64) {
     )
 }
 
+/// **Every asset in a built project's content root, by GUID.**
+///
+/// The sidecars are the index — a `.toml` beside every payload naming its GUID —
+/// which is exactly what `AssetDb`'s own scan reads. A name table here would be
+/// a second place the starter character's identity is written down, and the two
+/// would disagree the first time a file was renamed.
+fn content_assets(content: &Path) -> std::collections::BTreeMap<Uuid, PathBuf> {
+    let mut out = std::collections::BTreeMap::new();
+    let Ok(dir) = std::fs::read_dir(content) else {
+        return out;
+    };
+    for entry in dir.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(table) = text.parse::<toml::Table>() else {
+            continue;
+        };
+        let Some(guid) = table
+            .get("guid")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+        else {
+            continue;
+        };
+        // `Foo.inf_skel.toml` -> `Foo.inf_skel`, which is the payload it indexes.
+        let payload = path.with_extension("");
+        if payload.exists() {
+            out.insert(guid, payload);
+        }
+    }
+    out
+}
+
 /// **The PIE side**: the payload the editor really builds, through
 /// `sim_from_payload` — the one PIE boot seam the real `--pie` subprocess takes.
 fn pie_sim(proj: &Path) -> RuntimeSim {
@@ -206,6 +256,20 @@ fn pie_sim(proj: &Path) -> RuntimeSim {
     let p_guid = inf_island::cover_pcg_guid(&recipe.name);
     let m_guid = inf_island::road_mesh_guid(&recipe.name);
 
+    // **The character's assets** (SK1c). The hero is `samples/starter-character`
+    // now, so the payload has to carry the rig, the machine and the clips or PIE
+    // poses nothing while the shipping side poses 161 bones — which is exactly
+    // what happened the first time this ran, and the state comparison below said
+    // so at step 0.
+    //
+    // Read off the SIDECARS rather than from a hard-coded name table, which is
+    // how the editor's own asset database finds them: the recipe's `[content]`
+    // list copies the whole character into `Content/`, and every payload there
+    // carries a `.toml` naming its GUID. A table of seven file names here would
+    // be a second place the character's identity is written down.
+    let assets = content_assets(&content);
+    let read_asset = |g: Uuid| assets.get(&g).map(|p| std::fs::read(p).expect("an asset"));
+
     let payload = inf_editor_core::pie::build_scene_payload(
         &doc,
         // resolve (blueprint class), pcg, anim, biome_set, voxel, terrain, mesh,
@@ -213,14 +277,23 @@ fn pie_sim(proj: &Path) -> RuntimeSim {
         // shape are eight chances to mis-order them, and the first draft did:
         // it put the terrain where the biome set goes and the payload came back
         // with `0 terrain(s)`, which the non-vacuity assertion below caught.
-        |_| None,
+        |g| {
+            read_asset(g)
+                .and_then(|b| serde_json::from_slice::<inf_blueprint::BlueprintClass>(&b).ok())
+        },
         |g| (g == p_guid).then(|| pcg.clone()),
-        |_| None,
+        read_asset,
         |g| (g == b_guid).then(|| biomes.clone()),
         |_| None,
         |g| (g == t_guid).then(|| terrain.clone()),
-        |g| (g == m_guid).then(|| mesh.clone()),
-        |_| None,
+        |g| {
+            if g == m_guid {
+                Some(mesh.clone())
+            } else {
+                read_asset(g)
+            }
+        },
+        read_asset,
         HZ as u32,
         false,
     )
@@ -242,6 +315,33 @@ fn pie_sim(proj: &Path) -> RuntimeSim {
         "the palette must ride the wire"
     );
     assert_eq!(payload.pcgs.len(), 1, "the cover graph must ride the wire");
+    // **And the hero's rig rides it too** (SK1c). Without this the PIE side
+    // publishes no pose at all, the shipping side publishes 6 476 bytes of one,
+    // and the step-0 comparison below is the only thing that notices — which is
+    // a long way from the cause. One skeleton, one machine, and the machine's
+    // three clips reached through the transitive hop.
+    println!(
+        "PAYLOAD CHARACTER: {} skeleton(s), {} machine(s), {} clip(s), {} class(es)",
+        payload.skeletons.len(),
+        payload.machines.len(),
+        payload.clips.len(),
+        payload.classes.len()
+    );
+    assert_eq!(
+        payload.skeletons.len(),
+        1,
+        "the hero's rig must ride the wire"
+    );
+    assert_eq!(
+        payload.machines.len(),
+        1,
+        "the hero's machine must ride the wire"
+    );
+    assert_eq!(
+        payload.clips.len(),
+        3,
+        "the machine's clips must ride the wire, or PIE poses every state at rest"
+    );
 
     inf_player::sim_from_payload(&payload)
         .expect("the PIE world builds")
@@ -463,6 +563,39 @@ fn pie_equals_shipping_on_an_island_drive() {
         );
     }
     println!("PIE == SHIPPING over {STEPS} steps of an island drive");
+
+    // **AND THE HERO IS A CHARACTER** (SK1c). The comparison above is a byte
+    // equality, and a byte equality is blind to two hosts posing NOTHING
+    // identically — which is precisely what this gate did for its whole life
+    // before this wave, because the island's hero was a capsule carrying
+    // `AnimStateMachine { sm: None }` and no `SkeletalMesh`.
+    //
+    // So the pose section is measured rather than inferred. **6 476 bytes** is
+    // SK1a's arithmetic for a 161-bone rig — a 36-byte header (the entity's GUID,
+    // its skeleton's GUID and a joint count) plus 40 bytes a joint — and it is
+    // pinned as the number rather than as `> 0` for the reason SK1b's grip gate
+    // pins the same one: a rig that silently lost its side tables, or a hero that
+    // quietly went back to being a capsule, would still be "greater than zero"
+    // on one host and equal on both.
+    //
+    // It is also the whole of this wave's cost on this trace: the drive went from
+    // 403 bytes a state to 6 879.
+    const POSED_BYTES: usize = 36 + 161 * 40;
+    for (who, sim) in [("shipping", &mut ship), ("pie", &mut pie)] {
+        let bytes = inf_ecs::pose::pose_state_bytes(sim.world());
+        assert_eq!(
+            bytes.len(),
+            POSED_BYTES,
+            "{who} published {} bytes of pose, not a 161-bone character's {POSED_BYTES} \
+             — the island's hero has stopped being the starter character",
+            bytes.len()
+        );
+    }
+    println!(
+        "POSE: {POSED_BYTES} B a step on both hosts (403 B a state before the hero \
+         was a character, {} now)",
+        a.states[0].len()
+    );
 
     // **AND THE FOREST AGREES TOO** (island wave I7b). `biome_population` is
     // `#[serde(skip)]`, so it reaches no state fold — two hosts growing

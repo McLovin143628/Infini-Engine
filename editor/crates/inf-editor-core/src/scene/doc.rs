@@ -1958,7 +1958,49 @@ impl SceneDoc {
         controller: Option<Uuid>,
         height_m: f64,
     ) -> Uuid {
-        let guid = self.create(SpawnKind::Empty, name, None);
+        self.edit_create_character_with_guid(
+            Uuid::new_v4(),
+            name,
+            skeleton,
+            mesh,
+            machine,
+            at,
+            controller,
+            height_m,
+        )
+    }
+
+    /// [`edit_create_character`](Self::edit_create_character), **with the entity's
+    /// GUID supplied** (SK1c).
+    ///
+    /// # Why a generator needs this
+    ///
+    /// A committed level's entity GUIDs are part of its bytes. `island.rs`
+    /// derives every one of its own from the island's name — `hero_guid(name)`
+    /// — so the level a fresh checkout authors is the level the last one did,
+    /// and so the gate can find the hero without walking components. The
+    /// interactive door mints, and the island's hero used to be forty lines of
+    /// hand-rolled components for exactly that reason: the one door that knows
+    /// how to build a character could not be told which entity to build.
+    ///
+    /// **What is NOT here, and is load-bearing**: `StreamingSource` and
+    /// `AlwaysLoaded`. A character is not necessarily a streaming anchor, and
+    /// making this door insert one would put a partition opinion on every
+    /// character the wizard spawns. The island re-inserts both after this
+    /// returns, which is where that decision belongs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn edit_create_character_with_guid(
+        &mut self,
+        guid: Uuid,
+        name: &str,
+        skeleton: Uuid,
+        mesh: Uuid,
+        machine: Uuid,
+        at: DVec3,
+        controller: Option<Uuid>,
+        height_m: f64,
+    ) -> Uuid {
+        self.create_with_guid(guid, SpawnKind::Empty, name, None);
         if let Some(entity) = self.world.entity_of(guid) {
             // ── P29.6 ── the character is a CHARACTER now: a capsule sized from
             //    the rig it was generated with, a kinematic body, the movement

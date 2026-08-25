@@ -72,12 +72,21 @@ macro_rules! insert {
 /// road profile carries and is a fall of 0.45 s at 9.81 m/s².
 pub const START_LIFT_M: f64 = 1.0;
 
-/// The tallest a designed character on this island is, metres.
+/// How tall the island's hero is, metres — **the starter character's own
+/// height**, not a number this file chose (SK1c).
 ///
-/// Matches `PHASE29_HEIGHT_M`'s shape — the capsule is derived from it exactly
-/// as the New Character wizard derives one, so the hero the island spawns is the
-/// hero the movement gates already measure.
-const HERO_HEIGHT_M: f64 = 1.8;
+/// The hero *is* `samples/starter-character`, so its capsule has to be the one
+/// `edit_create_character` derives for that rig. Reading the spec is what makes
+/// that true by construction rather than by two literals agreeing: a wizard
+/// default that moves re-blesses the sample folder AND re-blesses both island
+/// levels, in the same run, which is the loud version of a mismatch.
+///
+/// It was `1.8` while the hero was a bare capsule with nothing inside it. The
+/// wizard's default is 1.75, and a 1.75 m body in a 1.8 m capsule floats 5 cm
+/// off the ground it is standing on.
+fn hero_height_m() -> f64 {
+    crate::samples::starter_character_spec().params.height_m
+}
 
 /// How many reaches become real `WaterBody::River` entities.
 ///
@@ -221,9 +230,8 @@ pub fn island_cover_payload(seed: u64) -> inf_pcg::PcgAssetPayload {
 /// Author the island's level from its committed design.
 pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     use inf_ecs::components::{
-        AlwaysLoaded, AnimStateMachine, CharacterController3D, CharacterMovement, Collider3D,
-        ColliderShape3DKind, Light, LightKind, MeshRef, RigidBody3D, SkyAtmosphere, Spline,
-        SplineInterp, StreamingSource, Terrain, TimeOfDay, Transform, WaterBody, WaterKind,
+        AlwaysLoaded, Light, LightKind, MeshRef, SkyAtmosphere, Spline, SplineInterp,
+        StreamingSource, Terrain, TimeOfDay, Transform, WaterBody, WaterKind,
     };
     use inf_ecs::math::{Color, Vec2d, Vec3d};
 
@@ -428,57 +436,41 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
 
     // ── the hero ──────────────────────────────────────────────────────────────
     //
-    // Carries `StreamingSource`, which is both the partition's activation anchor
-    // and the I3 collider band's — the two cannot disagree about where the
-    // simulation is because they read the same component.
-    let radius = (HERO_HEIGHT_M * 0.15).clamp(0.1, 0.5);
-    let half_h = (HERO_HEIGHT_M * 0.5 - radius).max(0.05);
+    // **It is the starter character** (SK1c). This used to be forty lines of
+    // hand-rolled components ending in `AnimStateMachine { sm: None }` and no
+    // `SkeletalMesh` — a capsule that walked, with nothing to draw and nothing to
+    // pose — because the one door that knows how to build a character
+    // (`SceneDoc::edit_create_character`) minted its own entity GUID and the
+    // island derives every one of its own. That door takes a GUID now, so the
+    // island spawns a character through the same code path the New Character
+    // wizard does, and the assets it names are the ones
+    // `samples/starter-character` commits.
+    //
+    // The assets reach a built project through the recipe's `[content]` list
+    // (`inf_island::write_content`), so this crate names a GUID and nothing else:
+    // no new crate edge, and the island's own generator still knows nothing about
+    // `inf-anim`.
+    let ids = crate::samples::starter_character_ids();
+    let asset = |id: Option<inf_asset::AssetId>| id.expect("every starter id is fixed").0;
     let feet = design.start(START_LIFT_M);
     let hero = hero_guid(name);
-    doc.create_with_guid(hero, SpawnKind::Empty, "Hero", None);
-    insert!(
-        doc,
+    doc.edit_create_character_with_guid(
         hero,
-        Transform::from_translation(DVec3::new(feet.x, feet.y + half_h + radius, feet.z)),
+        "Hero",
+        asset(ids.skeleton),
+        asset(ids.mesh),
+        asset(ids.machine),
+        feet,
+        Some(asset(ids.actor)),
+        hero_height_m(),
     );
-    insert!(
-        doc,
-        hero,
-        RigidBody3D {
-            kind: inf_ecs::components::BodyKind3D::Kinematic,
-            ..Default::default()
-        },
-    );
-    insert!(
-        doc,
-        hero,
-        Collider3D {
-            shape_kind: ColliderShape3DKind::Capsule,
-            half_extents: Vec3d::new(radius, half_h, radius),
-            radius,
-            ..Default::default()
-        },
-    );
-    insert!(doc, hero, CharacterController3D::default());
-    insert!(
-        doc,
-        hero,
-        CharacterMovement {
-            player_controlled: true,
-            stand_half_height_m: half_h,
-            crouch_half_height_m: (half_h * 0.5).max(0.05),
-            prone_half_height_m: (radius * 0.6).max(0.03),
-            ..Default::default()
-        },
-    );
-    insert!(
-        doc,
-        hero,
-        AnimStateMachine {
-            sm: None,
-            ..Default::default()
-        },
-    );
+    // **Both of these are outside that door, and both are load-bearing.**
+    // `StreamingSource` is the partition's activation anchor AND the I3 collider
+    // band's — the two cannot disagree about where the simulation is because they
+    // read the same component — and `AlwaysLoaded` keeps the hero resident in its
+    // own cell. `edit_create_character` deliberately inserts neither: a character
+    // is not necessarily a streaming anchor, and putting that opinion in the
+    // wizard's door would put it on every character anybody ever spawns.
     insert!(doc, hero, StreamingSource { radius_m: 256.0 });
     insert!(doc, hero, AlwaysLoaded);
 
@@ -864,15 +856,157 @@ mod tests {
             start.x, start.y, start.z, site.name
         );
 
-        // The level's dependency closure names every asset the build writes.
+        // The level's dependency closure names every asset the build writes --
+        // and, since SK1c, every asset the STARTER CHARACTER ships. The three
+        // character GUIDs enter through `SkeletalMesh.{mesh, skeleton}`,
+        // `AnimStateMachine.sm` and `ActorClass`, which `level_dependencies`
+        // already walks, so this is a closure that grew rather than a new
+        // mechanism -- and it is what makes the cook copy the rig.
+        let ids = crate::samples::starter_character_ids();
         let deps = crate::scene::serialize::level_dependencies(&doc);
         for want in [
             inf_island::terrain_guid(name),
             inf_island::road_mesh_guid(name),
             inf_island::biome_set_guid(name),
+            ids.skeleton.unwrap().0,
+            ids.mesh.unwrap().0,
+            ids.machine.unwrap().0,
         ] {
             assert!(deps.contains(&want), "the level does not depend on {want}");
         }
+        // **The controller is deliberately NOT in it.** `level_dependencies`
+        // walks asset REFERENCES on components and `ActorClass` is not one of
+        // them — a Blueprint class is code, reached by the cook's own scan, and
+        // `samples/phase29-locomotion`'s committed sidecar lists its rig, body
+        // and machine and not its `.inf_act` for exactly the same reason. Stated
+        // here rather than left as an absence, because the `[content]` list in
+        // the recipe is what puts the `.inf_act` in the island's project and
+        // somebody reading this loop will wonder.
+        assert!(
+            !deps.contains(&ids.actor.unwrap().0),
+            "an `ActorClass` has started entering the level's asset closure —              good, but the recipe's `[content]` list and this comment both              assume it does not"
+        );
+    }
+
+    /// **The island's hero is the starter character, built through the wizard's
+    /// own door** (SK1c).
+    ///
+    /// Two halves, and the second is the one the swap exists for.
+    ///
+    /// *It is a character.* It carries a `SkeletalMesh` naming the committed rig
+    /// and body, a machine that is `Some`, and the controller -- the four things
+    /// the hand-rolled capsule had none of. `AnimStateMachine { sm: None }` and
+    /// no `SkeletalMesh` is a hero that walks, draws nothing and poses nothing,
+    /// which is what shipped until this wave.
+    ///
+    /// *It is the door's character.* Every field is compared against what
+    /// `edit_create_character` builds at the same height and the same feet --
+    /// `the_showcase_character_matches_the_wizard_door`'s discipline, applied to
+    /// the second generator in the tree that used to hand-roll one. The capsule
+    /// arithmetic agreed by coincidence before (two copies of the same three
+    /// lines); it agrees by construction now, and this is what says so.
+    #[test]
+    fn the_island_hero_is_the_starter_character_the_wizard_would_build() {
+        use inf_ecs::components::{
+            ActorClass, AlwaysLoaded, AnimStateMachine, CharacterController3D, CharacterMovement,
+            Collider3D, ColliderShape3DKind, RigidBody3D, SkeletalMesh, StreamingSource, Transform,
+        };
+        let Some(d) = committed_design(ISLAND_RECIPES[1]) else {
+            eprintln!("SKIP: no committed fixture design");
+            return;
+        };
+        let name = d.recipe.name.as_str();
+        let doc = island_scene(&d);
+        let e = doc.entity_of(hero_guid(name)).expect("a hero");
+        let w = doc.world().world();
+        let ids = crate::samples::starter_character_ids();
+
+        // -- it is a character --
+        assert_eq!(
+            w.get::<SkeletalMesh>(e).map(|s| (s.skeleton, s.mesh)),
+            Some((Some(ids.skeleton.unwrap().0), Some(ids.mesh.unwrap().0))),
+            "the island hero carries no rig -- it is a capsule again"
+        );
+        assert_eq!(
+            w.get::<AnimStateMachine>(e).and_then(|m| m.sm),
+            Some(ids.machine.unwrap().0),
+            "the island hero's machine is None, so it poses nothing"
+        );
+        assert_eq!(
+            w.get::<ActorClass>(e).map(|a| a.0),
+            Some(ids.actor.unwrap().0)
+        );
+        // …and the two the door does not insert, which the island must.
+        assert!(
+            w.get::<StreamingSource>(e).is_some() && w.get::<AlwaysLoaded>(e).is_some(),
+            "the hero lost its streaming anchor -- the partition and the I3 \
+             collider band both read it"
+        );
+
+        // -- it is the door's character, field by field --
+        let mut door_doc = SceneDoc::new();
+        let door_guid = door_doc.edit_create_character(
+            "Hero",
+            ids.skeleton.unwrap().0,
+            ids.mesh.unwrap().0,
+            ids.machine.unwrap().0,
+            d.start(START_LIFT_M),
+            Some(ids.actor.unwrap().0),
+            hero_height_m(),
+        );
+        let door = door_doc
+            .world()
+            .entity_of(door_guid)
+            .expect("the door built one");
+        let dw = door_doc.world().world();
+        assert_eq!(
+            w.get::<Collider3D>(e)
+                .map(|c| (c.shape_kind, c.half_extents, c.radius)),
+            dw.get::<Collider3D>(door)
+                .map(|c| (c.shape_kind, c.half_extents, c.radius)),
+            "the island's capsule is not the one the wizard would build"
+        );
+        assert_eq!(
+            w.get::<Transform>(e).map(|t| t.translation),
+            dw.get::<Transform>(door).map(|t| t.translation),
+            "the island places its hero at a different height for the same feet"
+        );
+        let cm = |c: Option<&CharacterMovement>| {
+            c.map(|c| {
+                (
+                    c.player_controlled,
+                    c.stand_half_height_m,
+                    c.crouch_half_height_m,
+                    c.prone_half_height_m,
+                )
+            })
+        };
+        assert_eq!(
+            cm(w.get::<CharacterMovement>(e)),
+            cm(dw.get::<CharacterMovement>(door))
+        );
+        assert_eq!(
+            w.get::<RigidBody3D>(e).map(|b| b.kind),
+            dw.get::<RigidBody3D>(door).map(|b| b.kind)
+        );
+        assert!(
+            w.get::<CharacterController3D>(e).is_some()
+                && dw.get::<CharacterController3D>(door).is_some()
+        );
+
+        // ANTI-VACUITY: a capsule with real dimensions, derived from the STARTER
+        // character's height rather than from a number this file used to choose.
+        let c = w.get::<Collider3D>(e).expect("a capsule");
+        assert_eq!(c.shape_kind, ColliderShape3DKind::Capsule);
+        let h = hero_height_m();
+        assert!(
+            (h - 1.75).abs() < 1e-12,
+            "the starter character's height moved: {h}"
+        );
+        assert!(
+            (c.radius - (h * 0.15)).abs() < 1e-12 && c.half_extents.y > 0.3,
+            "{c:?}"
+        );
     }
 
     #[test]
