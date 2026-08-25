@@ -546,13 +546,13 @@ mod tests {
         committed_design(rel)
     }
 
-    /// **Nothing here reads an elevation.** The level is authored from committed
-    /// design alone, which is what makes it a committed document CI can check.
-    #[test]
-    fn the_level_is_authored_from_committed_design_alone() {
-        // **The scan stops at the test module**, and it has to: this arm's own
-        // needle list is in this file, so a whole-file scan matches itself and
-        // fails on the line that declares what it is looking for. (It did.)
+    /// Lines of the module's **non-test, non-comment** source, with their
+    /// one-based numbers — the scan every arm below reads.
+    ///
+    /// The scan stops at the test module, and it has to: an arm's own needle list
+    /// lives in this file, so a whole-file scan matches itself and fails on the
+    /// line that declares what it is looking for. (It did.)
+    fn module_code() -> Vec<(usize, String)> {
         let whole = include_str!("island.rs");
         let src = whole
             .split_once("#[cfg(test)]")
@@ -562,29 +562,132 @@ mod tests {
             src.len() < whole.len(),
             "the test module marker moved; this scan is reading itself"
         );
-        for needle in [
-            "TileMosaic",
-            "plan_tiles",
-            "build_island",
-            "elevation_at",
-            "ProjectionLattice",
-        ] {
-            let hits: Vec<usize> = src
-                .lines()
-                .enumerate()
-                .filter(|(_, l)| {
-                    let t = l.trim_start();
-                    !t.starts_with("//") && l.contains(needle)
-                })
-                .map(|(i, _)| i + 1)
-                .collect();
+        assert!(
+            src.len() > 4_000,
+            "the scan is reading {} bytes of a module that is not that small",
+            src.len()
+        );
+        src.lines()
+            .enumerate()
+            .filter(|(_, l)| !l.trim_start().starts_with("//"))
+            .map(|(i, l)| (i + 1, l.to_string()))
+            .collect()
+    }
+
+    /// **Nothing here reads an elevation.** The level is authored from committed
+    /// design alone, which is what makes it a committed document CI can check.
+    ///
+    /// # An ALLOWLIST, because a ban enumerates only what somebody thought of
+    ///
+    /// The first version of this arm banned five names — `TileMosaic`,
+    /// `plan_tiles`, `build_island`, `elevation_at`, `ProjectionLattice` — and
+    /// every other door onto an elevation sailed through it:
+    /// `inf_island::sample_terrain`, `inf_island::IslandBuild`,
+    /// `inf_terrain::read_terrain_asset`, `TerrainData::height_at`. That is the
+    /// P22 law ("a ban enumerates what you thought of, an allowlist what is
+    /// allowed") met on the arm that carries this wave's own headline decision.
+    ///
+    /// So the claim is inverted: the module may name **exactly these** items of
+    /// `inf_island`, and no `inf_terrain` item at all. Adding a door here is a
+    /// deliberate edit to this list rather than a silent one to the module.
+    #[test]
+    fn the_level_is_authored_from_committed_design_alone() {
+        /// Everything `island.rs` is allowed to reach in the island crate. Every
+        /// one of them is a **committed-design** door or a name-derived GUID; not
+        /// one of them opens an elevation tile.
+        const ALLOWED: &[&str] = &[
+            "IslandDesign",   // the committed design, read by `read_design`
+            "IslandRecipe",   // the committed recipe
+            "biome_set_guid", // …and five GUIDs derived from the island's name
+            "cover_pcg_guid",
+            "level_guid",
+            "read_design", // the one door onto the committed layers
+            "road_mesh_guid",
+            "slug",
+            "terrain_guid",
+        ];
+        let code = module_code();
+        let mut used: std::collections::BTreeMap<String, usize> = Default::default();
+        for (n, line) in &code {
+            let mut rest = line.as_str();
+            while let Some(at) = rest.find("inf_island::") {
+                rest = &rest[at + "inf_island::".len()..];
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    used.entry(name).or_insert(*n);
+                }
+            }
+        }
+        println!("island.rs reaches inf_island::{{{:?}}}", used.keys());
+        for (name, line) in &used {
             assert!(
-                hits.is_empty(),
-                "island.rs names `{needle}` at {hits:?} — the level must be \
-                 authorable without the terrain, or it is a committed document \
-                 only one machine can produce"
+                ALLOWED.contains(&name.as_str()),
+                "island.rs:{line} names `inf_island::{name}`, which is not on the \
+                 committed-design allowlist. The level must be authorable without \
+                 the terrain, or it is a committed document only one machine can \
+                 produce — and the terrain is a build artifact of one machine \
+                 because the sampling step goes through the projection modules \
+                 the portability law exempts. If this door really is design-only, \
+                 add it to ALLOWED with the reason."
             );
         }
+        // …and the allowlist is not vacuous: the module really does reach the
+        // crate, and reaches the ONE door the decision names.
+        assert!(used.len() >= 5, "island.rs reaches {} items", used.len());
+        assert!(
+            used.contains_key("read_design"),
+            "the module no longer opens the committed design at all"
+        );
+
+        // The terrain crate is out of bounds entirely — `read_terrain_asset`,
+        // `TerrainData` and `height_at` all live there, and none of them is a
+        // committed-design door.
+        for (n, line) in &code {
+            assert!(
+                !line.contains("inf_terrain::"),
+                "island.rs:{n} names `inf_terrain::` — every door onto an \
+                 elevation is in that crate: {}",
+                line.trim()
+            );
+        }
+    }
+
+    /// **The scan can fail** — the anti-vacuity arm the sibling gate
+    /// (`inf-island/tests/portable_math_law.rs`) has and this one did not.
+    ///
+    /// A source scan whose extraction is broken is indistinguishable from a
+    /// module that is clean, and the arm above would have passed over an empty
+    /// string, a mis-split file or a needle that never matches.
+    #[test]
+    fn the_committed_design_scan_finds_a_door_when_one_is_there() {
+        // The extractor, run against a line that names a forbidden door.
+        let line = "    let t = inf_island::sample_terrain(&r, &m, &l, &c);";
+        let at = line
+            .find("inf_island::")
+            .expect("the needle is in the fixture");
+        let name: String = line[at + "inf_island::".len()..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        assert_eq!(name, "sample_terrain");
+        assert!(
+            !["IslandDesign", "read_design", "slug"].contains(&name.as_str()),
+            "a real door must not be on the allowlist"
+        );
+        // …and a comment line is filtered, which is why the real scan drops them.
+        assert!("    // inf_island::sample_terrain"
+            .trim_start()
+            .starts_with("//"));
+        // The real module is being read, and it is the module this file is in.
+        let code = module_code();
+        assert!(code.len() > 200, "the scan read {} lines", code.len());
+        assert!(
+            code.iter().any(|(_, l)| l.contains("pub fn island_scene")),
+            "the scan is not reading island.rs"
+        );
     }
 
     #[test]

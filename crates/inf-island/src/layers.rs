@@ -16,7 +16,8 @@
 //!
 //! # The layers are in the ANCHOR's CRS
 //!
-//! Easting, northing and elevation in EPSG:32610, not world metres and not
+//! Easting, northing and elevation in **the recipe's own anchor CRS** — for the
+//! two committed islands that is EPSG:32610 — not world metres and not
 //! WGS84. Three reasons, in order of weight: a projected layer opens in QGIS
 //! beside the survey it came from; the import transform is then an **identity**,
 //! so reading a committed layer is an exact subtraction rather than a
@@ -33,14 +34,35 @@ use crate::hydro::{Lake, Stream};
 use crate::roads::Route;
 use crate::IslandError;
 
-/// The GeoJSON member every layer this module writes carries, naming the CRS the
-/// coordinates are in.
+/// The GeoJSON `crs` member for **the anchor this layer is written against**.
 ///
 /// RFC 7946 removed the `crs` member and mandates WGS84; a projected GeoJSON is
 /// therefore an *extension*, which is exactly why it is stated in the file
 /// instead of assumed. `inf_gis::read_vector` takes the CRS as a parameter and
 /// never reads this — it is here for the human and for QGIS.
-const CRS_MEMBER: &str = "urn:ogc:def:crs:EPSG::32610";
+///
+/// # It was the literal `urn:ogc:def:crs:EPSG::32610`
+///
+/// Which is true of the two committed islands and of nothing else. An island
+/// anchored anywhere outside UTM zone 10N — the recipe takes any projected,
+/// metric CRS — wrote layers that **told QGIS the wrong zone**, and the symptom
+/// of that is a coastline five hundred kilometres from the survey it was traced
+/// off, with no error anywhere. The one thing this member is for is the human,
+/// so a member that is a fact about a different island is worse than none.
+///
+/// An authority code becomes the URN form QGIS expects; anything else (a proj4
+/// string) is written verbatim, because inventing a URN for it would be the same
+/// defect one step further on.
+fn crs_member(spec: &str) -> String {
+    let t = spec.trim();
+    if let Some(code) = t.strip_prefix("EPSG:").or_else(|| t.strip_prefix("epsg:")) {
+        let code = code.trim_start_matches(':');
+        if !code.is_empty() && code.chars().all(|c| c.is_ascii_digit()) {
+            return format!("urn:ogc:def:crs:EPSG::{code}");
+        }
+    }
+    t.to_string()
+}
 
 fn collection(features: Vec<Value>, crs: &str, note: &str) -> Value {
     json!({
@@ -93,7 +115,7 @@ pub fn write_roads(
         path,
         &collection(
             features,
-            CRS_MEMBER,
+            &crs_member(&anchor.crs),
             "the island's designed road network (derived once, committed as the design)",
         ),
     )
@@ -132,7 +154,7 @@ pub fn write_streams(
         path,
         &collection(
             features,
-            CRS_MEMBER,
+            &crs_member(&anchor.crs),
             "streams derived from flow accumulation over the carved ground",
         ),
     )
@@ -174,7 +196,7 @@ pub fn write_lakes(
         path,
         &collection(
             features,
-            CRS_MEMBER,
+            &crs_member(&anchor.crs),
             "lakes derived from the depression fill",
         ),
     )
@@ -209,7 +231,7 @@ pub fn write_masks(
         path,
         &collection(
             features,
-            CRS_MEMBER,
+            &crs_member(&anchor.crs),
             "biome design masks — where the author overrides the classifier",
         ),
     )
@@ -240,7 +262,7 @@ pub fn write_coast(
         path,
         &collection(
             features,
-            CRS_MEMBER,
+            &crs_member(&anchor.crs),
             "the designed coastline — the polygon that makes this an island",
         ),
     )
@@ -539,5 +561,57 @@ mod tests {
         );
         assert!(skipped[1].contains("no `biome`"), "{:?}", skipped[1]);
         assert!(skipped[2].contains("not a polygon"), "{:?}", skipped[2]);
+    }
+
+    /// **A LAYER STATES THE CRS IT WAS ACTUALLY WRITTEN IN.**
+    ///
+    /// The member was the literal `urn:ogc:def:crs:EPSG::32610`, which is true of
+    /// the two committed islands and of nothing else — the recipe takes any
+    /// projected metric CRS. An island anchored in another zone wrote layers that
+    /// told QGIS the wrong one, and the symptom is a coastline hundreds of
+    /// kilometres from the survey it was traced off with no error anywhere. The
+    /// only thing the member is for is the human, so a member that is a fact
+    /// about a different island is worse than none.
+    #[test]
+    fn a_layer_states_the_crs_it_was_actually_written_in() {
+        // The two committed islands are unmoved: same anchor, same member.
+        assert_eq!(crs_member("EPSG:32610"), "urn:ogc:def:crs:EPSG::32610");
+        // …and another zone is another member.
+        assert_eq!(crs_member("EPSG:32633"), "urn:ogc:def:crs:EPSG::32633");
+        assert_eq!(crs_member("epsg:2193"), "urn:ogc:def:crs:EPSG::2193");
+        assert_eq!(crs_member(" EPSG:3857 "), "urn:ogc:def:crs:EPSG::3857");
+        // A proj4 string is written verbatim rather than given an invented URN.
+        let proj = "+proj=utm +zone=33 +datum=WGS84 +units=m +no_defs";
+        assert_eq!(crs_member(proj), proj);
+        assert_eq!(crs_member("EPSG:not-a-code"), "EPSG:not-a-code");
+
+        // And a real write against a zone-33 anchor says so in the file.
+        let dir = tempfile::tempdir().unwrap();
+        let a33 = inf_gis::anchor_at("EPSG:32633", 500_000.0, 5_000_000.0, 0.0, "EGM2008")
+            .expect("a zone-33 anchor");
+        let p = dir.path().join("coast33.geojson");
+        write_coast(
+            &p,
+            &a33,
+            &[vec![
+                DVec2::new(-100.0, -100.0),
+                DVec2::new(100.0, -100.0),
+                DVec2::new(100.0, 100.0),
+            ]],
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            text.contains("urn:ogc:def:crs:EPSG::32633"),
+            "the layer claims: {}",
+            text.lines().take(8).collect::<Vec<_>>().join(" ")
+        );
+        assert!(
+            !text.contains("32610"),
+            "the layer still names zone 10 while being written in zone 33"
+        );
+        // …and it still reads back through the import door in its own CRS.
+        let back = rings_of(&read_layer(&p, inf_gis::LayerKind::Generic, &a33).unwrap());
+        assert_eq!(back[0][0], DVec2::new(-100.0, -100.0));
     }
 }
