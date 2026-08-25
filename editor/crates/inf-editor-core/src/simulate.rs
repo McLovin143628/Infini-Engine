@@ -1149,11 +1149,17 @@ impl SimSession {
         //    then apply each RootMotion entity's clip root delta to its Transform.
         let prev_ts = self.capture_root_motion_times(doc);
         inf_ecs::anim::advance_anim_players(doc.world_mut(), dt);
+        // ── SK1c: root motion moves the character, the propagate settles it, and
+        //    the pose is evaluated against where the character IS. This host was
+        //    already in this order and the shipped player was not; the two do not
+        //    commute (measured: different pose bytes on every step of a
+        //    root-motion + state-machine + authored-IK fixture), so the player
+        //    moved here. `both_fixed_steps_move_the_root_before_the_pose` pins
+        //    both halves as source text — do not reorder these three lines.
         self.apply_root_motion(doc, &prev_ts);
         doc.world_mut().propagate();
-        // ── P11.2 anim state machines ── (P11.3 root-motion consumes poses just
-        //    above this same marker; keep the two adjacent + separated.)
-        //    Step each `AnimStateMachine` against its actor's Blueprint variables.
+        // ── P11.2 anim state machines ── Step each `AnimStateMachine` against
+        //    its actor's Blueprint variables.
         self.advance_state_machines(doc, dt);
         // ── P11.3 attachments ── entities ride their target's socket, written
         //    post-anim-tick; propagate again so followers' own globals settle.

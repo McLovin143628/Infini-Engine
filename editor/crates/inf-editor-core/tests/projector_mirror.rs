@@ -2131,6 +2131,78 @@ fn both_fixed_steps_settle_the_weapon_after_the_pose() {
     }
 }
 
+/// **Root motion moves the character BEFORE the pose is evaluated against it**
+/// — in both hosts, with a propagate in between.
+///
+/// # The landmine this closes (SK1b audit LOW, SK1c clause 4)
+///
+/// The two hosts ran `apply_root_motion` and `advance_state_machines` in
+/// **opposite** order. They agreed on every committed trace, which the audit
+/// recorded honestly as *unmeasured* rather than as *commuting* — extending a
+/// pin to a divergence nobody has measured is how a gate goes red for a reason
+/// nobody can name.
+///
+/// It was measured, and they do not commute. `step_pose_evaluation` reads the
+/// entity's `GlobalTransform` twice — `authored_ik_goals` inverts it to bring a
+/// world-space goal into model space, and `model_to_world` feeds the foot pass,
+/// the hand pass and the feet it publishes — so the pass order decides which
+/// step's placement all of those are computed in. On
+/// `pose_parity`'s root-motion fixture the two hosts produced **different pose
+/// bytes on every one of eight steps**, worst component **0.060**, while the
+/// transform itself agreed to the bit: a divergence entirely inside the pose,
+/// which is precisely where a `RootMotion` component looks harmless.
+///
+/// The shipped player moved to the editor's order, because root motion is
+/// *movement* and every other movement in this engine happens before the pose
+/// (`step_character_movement`, `step_gameplay`, and `anim_bridge`'s documented
+/// one-step latency all rest on that). The propagate is not decoration: without
+/// it the pose still reads last step's `GlobalTransform` and the reorder buys
+/// nothing.
+///
+/// The behavioural half is `pose_parity`'s
+/// `both_hosts_pose_a_root_motion_driven_character_the_same_way`; this is the
+/// half that survives a future fixture nobody writes.
+#[test]
+fn both_fixed_steps_move_the_root_before_the_pose() {
+    const RUNTIME_SIM: &str = "runtime/inf-player/src/runtime_sim.rs";
+    const SIMULATE: &str = "editor/crates/inf-editor-core/src/simulate.rs";
+    for (label, path) in [
+        ("shipped player", RUNTIME_SIM),
+        ("editor Simulate", SIMULATE),
+    ] {
+        let whole = read(path).replace("\r\n", "\n");
+        let start = whole
+            .find("fn fixed_step(")
+            .expect("both hosts have a `fixed_step`");
+        let src = whole[start..].to_string();
+        let at = |needle: &str| -> usize {
+            src.find(needle)
+                .unwrap_or_else(|| panic!("the {label} fixed step does not call `{needle}`"))
+        };
+        let advance = at("advance_anim_players(");
+        let root = at("self.apply_root_motion(");
+        let pose = at("advance_state_machines(");
+        assert!(
+            advance < root && root < pose,
+            "the {label} runs play-heads/root-motion/pose out of order \
+             ({advance}/{root}/{pose}) — the two hosts would convert every \
+             world-space IK goal, foot publish and hand target through \
+             transforms one fixed step apart, and `pose_state_bytes` forks"
+        );
+        // …and the propagate between them, which is what makes the reorder mean
+        // anything: `apply_root_motion` writes `Transform`, and the pose reads
+        // `GlobalTransform`. Without a propagate the pose still sees last step's
+        // placement and the two hosts agree only because they are both wrong.
+        let between = &src[root..pose];
+        assert!(
+            between.contains("propagate()"),
+            "the {label} does not propagate between root motion and the pose — \
+             `apply_root_motion` writes `Transform` and `step_pose_evaluation` \
+             reads `GlobalTransform`, so without it the reorder is inert"
+        );
+    }
+}
+
 /// **Every pose writer runs, in a frozen order** (SK1a) — the twin of the trace
 /// law below, one level down.
 ///

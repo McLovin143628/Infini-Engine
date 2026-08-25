@@ -32,7 +32,9 @@ use inf_anim::{
     AnimClip, Interpolation, Joint, JointTrack, JointTransform, QuatTrack, Skeleton, SkeletonAsset,
     SmState, SmTransition, Socket, StateMachine, Vec3Track,
 };
-use inf_ecs::components::{AnimPlayer, AnimStateMachine, AttachedTo, SkeletalMesh, Transform};
+use inf_ecs::components::{
+    AnimPlayer, AnimStateMachine, AttachedTo, IkTarget, RootMotion, SkeletalMesh, Transform,
+};
 use inf_ecs::math::Vec3d;
 use inf_ecs::EcsWorld;
 use inf_editor_core::scene::SceneDoc;
@@ -1510,3 +1512,184 @@ fn the_cooked_path_reads_the_projects_session_blend_mode() {
         "both names built the same session default, so this arm is vacuous"
     );
 }
+
+// ── SK1c clause 4: the two hosts' root-motion / state-machine order ──────────
+
+/// The clip whose root motion moves the entity, and the guid it is registered
+/// under in **both** hosts' root-motion clip registries.
+const RM_CLIP: Uuid = Uuid::from_u128(0x2401_0000_0000_0000_0000_0000_0000_0009);
+
+/// How far the root-motion clip travels, metres, over its one second.
+const RM_METRES: f32 = 1.0;
+
+/// A **root-motion driven** character that is also posed by the machine and
+/// carries an authored, WORLD-space IK goal.
+///
+/// Each of the three is load-bearing and none of them is exotic:
+///
+/// * `RootMotion` + `AnimPlayer` is the only shape `apply_root_motion` acts on
+///   at all (it captures play-heads off `AnimPlayer` and refuses everything
+///   else), and `samples/character-demo` already carries the component;
+/// * `AnimStateMachine` is what makes `advance_state_machines` do work, and
+///   `AnimStateMachine`'s own doc says the machine wins the *pose* — it says
+///   nothing about root motion, which is the asymmetry this fixture stands on;
+/// * the authored `IkTarget` is what makes the pose depend on where the entity
+///   **is**: `authored_ik_goals` converts a world-space goal into model space
+///   through the entity's own `GlobalTransform`, so one fixed step of skew in
+///   that transform is one fixed step of skew in the solved pose.
+fn root_motion_character(
+) -> (AnimStateMachine, SkeletalMesh, AnimPlayer, RootMotion, IkTarget, Transform) {
+    (
+        AnimStateMachine {
+            sm: Some(SM),
+            params_from_vars: true,
+            ..Default::default()
+        },
+        SkeletalMesh {
+            mesh: Some(MESH),
+            skeleton: Some(SKEL),
+        },
+        AnimPlayer {
+            clip: Some(RM_CLIP),
+            t: 0.0,
+            speed: 1.0,
+            looping: false,
+            playing: true,
+            duration: 1.0,
+        },
+        RootMotion::apply(),
+        IkTarget {
+            goals: vec![inf_ecs::components::IkGoalRecord {
+                chain: vec![0, 1, 2],
+                // A fixed point in the WORLD. The character walks away from it,
+                // so the model-space goal the solver sees changes every step —
+                // which is exactly what makes "which step's transform was this
+                // converted through" observable.
+                target: Vec3d::new(0.35, 1.6, 0.0),
+                weight: 1.0,
+                enabled: true,
+                ..Default::default()
+            }],
+        },
+        Transform::IDENTITY,
+    )
+}
+
+fn rm_clip() -> inf_anim::AnimClip {
+    inf_anim::root_motion::straight_line_clip("rm", Vec3::Z, RM_METRES, 1.0)
+}
+
+/// The player's root-motion trace: `(pose bytes, world z)` per step.
+fn player_root_motion_trace(steps: u32) -> Vec<(Vec<u8>, f64)> {
+    let mut world = EcsWorld::new();
+    let e = world.spawn_with_guid(HERO, "Hero", None);
+    world
+        .world_mut()
+        .entity_mut(e)
+        .insert(root_motion_character());
+    world.mark_dirty();
+    let mut sim = RuntimeSim::new(world, Vec::new(), DVec2::ZERO, HZ);
+    sim.set_state_machines(machines());
+    sim.set_skeletons(skeletons());
+    sim.set_pose_clips(pose_clips());
+    sim.register_root_motion_clip(RM_CLIP, rig().skeleton.clone(), rm_clip());
+    (0..steps)
+        .map(|_| {
+            sim.step_once(RuntimeInput::default());
+            let e = sim.world().entity_of(HERO).expect("the hero");
+            let z = sim.world().world_translation(e).expect("a transform").z;
+            (inf_ecs::pose::pose_state_bytes(sim.world()), z)
+        })
+        .collect()
+}
+
+/// The editor's root-motion trace, through the same two doors.
+fn editor_root_motion_trace(steps: u32) -> Vec<(Vec<u8>, f64)> {
+    let mut doc = SceneDoc::new();
+    let e = doc.create_with_guid(HERO, inf_editor_core::ipc::SpawnKind::Empty, "Hero", None);
+    doc.world_mut()
+        .world_mut()
+        .entity_mut(e)
+        .insert(root_motion_character());
+    doc.world_mut().mark_dirty();
+    let mut session = SimSession::enter(&mut doc, Vec::new(), DVec2::ZERO, HZ);
+    session.set_state_machines(machines());
+    session.set_skeletons(skeletons());
+    session.set_pose_clips(pose_clips());
+    session.register_root_motion_clip(RM_CLIP, rig().skeleton.clone(), rm_clip());
+    let out = (0..steps)
+        .map(|_| {
+            session.step_once(&mut doc, SimInput::default());
+            let e = doc.world().entity_of(HERO).expect("the hero");
+            let z = doc.world().world_translation(e).expect("a transform").z;
+            (inf_ecs::pose::pose_state_bytes(doc.world()), z)
+        })
+        .collect();
+    session.exit(&mut doc);
+    out
+}
+
+/// **The order of `apply_root_motion` and `advance_state_machines` is not
+/// observable** — because the two hosts run them in the same order.
+///
+/// # What this arm is for
+///
+/// The SK1b audit recorded, as a LOW it could not close, that the shipped player
+/// runs `advance_state_machines` and *then* `apply_root_motion` while the editor
+/// Simulate runs them the other way round — and that the two agreed on every
+/// trace in the tree, so nothing could say whether the passes commuted or
+/// whether no committed course had ever exercised both.
+///
+/// They do not commute. Measured on this fixture at the SK1b head, the two hosts
+/// disagreed from **step 1** and stayed apart: the editor converted the authored
+/// world-space goal through the transform root motion had *already* moved this
+/// step, and the player through last step's. One fixed step of skew, 1.667 cm at
+/// 1 m/s, straight into `pose_state_bytes`.
+///
+/// The order is unified — root motion moves the entity, a propagate settles it,
+/// and the pose is then evaluated against where the character actually is — and
+/// `both_fixed_steps_move_the_root_before_the_pose` pins it as source text. This
+/// arm is the behavioural half: it is what goes red if the two ever drift apart
+/// again for a reason the source pin cannot spell.
+#[test]
+fn both_hosts_pose_a_root_motion_driven_character_the_same_way() {
+    const STEPS: u32 = 8;
+    let a = player_root_motion_trace(STEPS);
+    let b = editor_root_motion_trace(STEPS);
+
+    // ANTI-VACUITY, three ways: something was posed, the pose MOVED, and the
+    // entity actually travelled. Two characters standing still at the origin
+    // agree perfectly and prove nothing.
+    assert_eq!(a.len() as u32, STEPS);
+    assert!(
+        !a[0].0.is_empty(),
+        "step 0 published no pose — the fixture never reached a skeleton"
+    );
+    assert_ne!(
+        a[0].0, a[STEPS as usize - 1].0,
+        "the pose never changed over the whole trace"
+    );
+    let travelled = a[STEPS as usize - 1].1 - a[0].1;
+    let expect = f64::from(RM_METRES) * (STEPS - 1) as f64 / HZ;
+    assert!(
+        (travelled - expect).abs() < 1.0e-6,
+        "the fixture did not travel under root motion: {travelled} m, expected \
+         {expect} m — an unregistered clip makes this whole gate vacuous"
+    );
+
+    for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+        assert_eq!(
+            x.1, y.1,
+            "step {i}: the two hosts put the root-motion character at different \
+             places ({} vs {})",
+            x.1, y.1
+        );
+        assert_eq!(
+            x.0, y.0,
+            "step {i}: the two hosts posed a root-motion-driven character \
+             differently — the pass order around `apply_root_motion` has come \
+             apart again"
+        );
+    }
+}
+

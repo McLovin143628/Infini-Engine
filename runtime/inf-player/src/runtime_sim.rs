@@ -1422,11 +1422,38 @@ impl RuntimeSim {
         //    shipped). ── P11.3 root motion ── snapshot play-heads, advance, apply.
         let prev_ts = self.capture_root_motion_times();
         inf_ecs::anim::advance_anim_players(&mut self.world, dt);
-        // ── P11.2 anim state machines ── (adjacent to the P11.3 root-motion apply
-        //    above; kept separate). Step each `AnimStateMachine` against its
-        //    actor's Blueprint variables.
-        self.advance_state_machines(dt);
+        // ── SK1c: ROOT MOTION MOVES THE CHARACTER, THEN THE POSE IS EVALUATED
+        //    AGAINST WHERE IT IS ──
+        //
+        //    These two lines used to be the other way round here and this way
+        //    round in `SimSession::fixed_step`, and the SK1b audit carried the
+        //    disagreement as an unmeasured LOW: the two hosts agreed on every
+        //    committed trace, so nothing could say whether the passes commuted or
+        //    whether no course had ever exercised both.
+        //
+        //    **They do not commute.** `step_pose_evaluation` reads the entity's
+        //    `GlobalTransform` twice — `authored_ik_goals` inverts it to convert a
+        //    world-space IK goal into model space, and `model_to_world` feeds the
+        //    foot pass, the hand pass and the published feet — so which side of
+        //    root motion the pose sits on decides which step's frame those are
+        //    computed in. Measured on
+        //    `both_hosts_pose_a_root_motion_driven_character_the_same_way`'s
+        //    fixture at the SK1b head: **different bytes on every one of eight
+        //    steps**, worst pose component 0.060 at step 2, while the transform
+        //    itself agreed to the bit.
+        //
+        //    Root motion is *movement*, and every other movement in this engine
+        //    happens before the pose — `step_character_movement` and
+        //    `step_gameplay` both do, and `anim_bridge`'s own doc rests on it. So
+        //    the player moves to the editor's order rather than the other way
+        //    round, and the propagate between them is what makes the pose read
+        //    THIS step's placement instead of last step's. Pinned as source text
+        //    by `both_fixed_steps_move_the_root_before_the_pose`.
         self.apply_root_motion(&prev_ts);
+        self.world.propagate();
+        // ── P11.2 anim state machines ── Step each `AnimStateMachine` against
+        //    its actor's Blueprint variables.
+        self.advance_state_machines(dt);
         clk.mark(phase::ANIMATION);
         self.world.propagate();
         clk.mark(phase::PROPAGATE);
