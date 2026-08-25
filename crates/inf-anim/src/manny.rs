@@ -1585,10 +1585,15 @@ pub fn build_manny(params: &BodyParams) -> Result<SkeletonAsset, TemplateError> 
             limits.push(JointLimit::hinge_x(j, range.0, range.1));
         }
     }
-    let ik_follow: Vec<IkFollow> = IK_FOLLOW
+    let mut ik_follow: Vec<IkFollow> = IK_FOLLOW
         .iter()
         .filter_map(|(handle, source)| Some(IkFollow::new(index_of(handle)?, index_of(source)?)))
         .collect();
+    // Ascending by joint, because that is the table's invariant and the drive pass
+    // walks it as it is (see `crate::drive::drive_ik_follow`). The list above is
+    // written in the order a person reads it, not in the order the rig indexes it:
+    // `ik_hand_r` is 154 and `ik_hand_l` is 155.
+    ik_follow.sort_by_key(|f| f.joint);
 
     let skeleton = Skeleton::new(joints)?;
     let mut asset = SkeletonAsset::with_sockets(skeleton, sockets);

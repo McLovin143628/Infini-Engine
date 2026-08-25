@@ -131,7 +131,7 @@ impl SkeletonAsset {
     /// The rig's role lookup — [`RoleIndex::empty`]-equivalent for a rig that
     /// carries no table, so a caller writes the role path once and the fallback
     /// once rather than branching on whether a table exists.
-    pub fn role_index(&self) -> RoleIndex {
+    pub fn role_index(&self) -> RoleIndex<'_> {
         RoleIndex::new(&self.roles)
     }
 }
@@ -194,6 +194,50 @@ impl AssetPayload for SkeletonAsset {
         for r in &self.roles {
             check("a bone role", r.joint)?;
         }
+        // **Ascending, strictly.** Both tables are read on the fixed step by an
+        // index that BORROWS them so a posed character costs no allocation
+        // ([`RoleIndex`]), and a borrowed index cannot sort what it is handed. An
+        // out-of-order table is not unsound — it answers `None` for a row that is
+        // really there — which is exactly the kind of wrong answer this door
+        // exists to turn into a named refusal.
+        let ordered = |what: &str, joints: Vec<u16>| -> inf_asset::Result<()> {
+            if joints.windows(2).all(|w| w[0] < w[1]) {
+                return Ok(());
+            }
+            Err(inf_asset::AssetError::Decode(format!(
+                "{what} is not in ascending joint order, which is what makes it indexable"
+            )))
+        };
+        ordered(
+            "the bone role table",
+            self.roles.iter().map(|r| r.joint).collect(),
+        )?;
+        ordered(
+            "the IK follow table",
+            self.ik_follow.iter().map(|f| f.joint).collect(),
+        )?;
+        // **Ascending, strictly.** Both tables are read on the fixed step, by an
+        // index that BORROWS them so a posed character costs no allocation
+        // (`RoleIndex`), and a borrowed index cannot sort what it is handed. An
+        // out-of-order table is not unsound — it answers `None` for a row that is
+        // really there — which is exactly the kind of wrong answer this door
+        // exists to turn into a named refusal.
+        let ordered = |what: &str, joints: &[u16]| -> inf_asset::Result<()> {
+            if joints.windows(2).all(|w| w[0] < w[1]) {
+                return Ok(());
+            }
+            Err(inf_asset::AssetError::Decode(format!(
+                "{what} is not in ascending joint order, which is what makes it indexable"
+            )))
+        };
+        ordered(
+            "the bone role table",
+            &self.roles.iter().map(|r| r.joint).collect::<Vec<_>>(),
+        )?;
+        ordered(
+            "the IK follow table",
+            &self.ik_follow.iter().map(|f| f.joint).collect::<Vec<_>>(),
+        )?;
         for d in &self.twists {
             check("a twist driver", d.joint)?;
             check("a twist driver's source", d.source)?;
@@ -1114,6 +1158,78 @@ mod tests {
             .is_err(),
             "a v2 payload decoded straight into the v3 shape"
         );
+    }
+
+    /// **An out-of-order side table is refused at the door**, by name (SK1a).
+    ///
+    /// Not unsound and not a panic: `RoleIndex` borrows its rows so that a posed
+    /// character costs no allocation on the fixed step, and a borrowed index
+    /// cannot sort what it is handed — so `role_of`'s binary search answers `None`
+    /// for a row that is really there. A twist that never drives and a foot that
+    /// falls back to its name rule, silently, on a rig that says what it is. That
+    /// is the class of failure this door exists for.
+    #[test]
+    fn an_out_of_order_side_table_is_refused() {
+        use crate::roles::{BoneRole, BoneRoleKind, BoneSide, IkFollow};
+        let three = Skeleton::new(vec![
+            Joint {
+                name: "a".into(),
+                parent: None,
+                inverse_bind: Mat4::IDENTITY.to_cols_array(),
+                local_bind: JointTransform::IDENTITY,
+            },
+            Joint {
+                name: "b".into(),
+                parent: Some(0),
+                inverse_bind: Mat4::IDENTITY.to_cols_array(),
+                local_bind: JointTransform::IDENTITY,
+            },
+            Joint {
+                name: "c".into(),
+                parent: Some(1),
+                inverse_bind: Mat4::IDENTITY.to_cols_array(),
+                local_bind: JointTransform::IDENTITY,
+            },
+        ])
+        .unwrap();
+
+        let mut a = SkeletonAsset::new(three.clone());
+        a.roles = vec![
+            BoneRole::new(2, BoneRoleKind::Head, BoneSide::Center),
+            BoneRole::new(1, BoneRoleKind::Spine, BoneSide::Center),
+        ];
+        let msg = decode::<SkeletonAsset>(&encode(&a).unwrap())
+            .expect_err("an out-of-order role table must be refused")
+            .to_string();
+        assert!(msg.contains("bone role table"), "{msg}");
+        assert!(msg.contains("ascending joint order"), "{msg}");
+
+        // The same table, ordered, decodes and INDEXES — which is the half that
+        // says the refusal is about something.
+        a.roles = crate::RoleIndex::sorted(&a.roles);
+        let back: SkeletonAsset = decode(&encode(&a).unwrap()).expect("ordered decodes");
+        assert_eq!(
+            back.role_index().kind_of(2),
+            Some(BoneRoleKind::Head),
+            "an ordered table answers for its own rows"
+        );
+
+        // A duplicate joint is refused too: two rows for one bone is two answers.
+        a.roles = vec![
+            BoneRole::new(1, BoneRoleKind::Spine, BoneSide::Center),
+            BoneRole::new(1, BoneRoleKind::Head, BoneSide::Center),
+        ];
+        assert!(decode::<SkeletonAsset>(&encode(&a).unwrap()).is_err());
+
+        // And the IK follow table has the same invariant, for the same reason:
+        // the drive pass walks it in place and a handle under a handle must read
+        // the driven parent.
+        let mut b = SkeletonAsset::new(three);
+        b.ik_follow = vec![IkFollow::new(2, 0), IkFollow::new(1, 0)];
+        let msg = decode::<SkeletonAsset>(&encode(&b).unwrap())
+            .expect_err("an out-of-order follow table must be refused")
+            .to_string();
+        assert!(msg.contains("IK follow table"), "{msg}");
     }
 
     /// **A side table naming a joint the rig does not have is refused at the

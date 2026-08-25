@@ -296,22 +296,47 @@ impl GripAffordance {
 /// role table per question per character per fixed step, and at 161 bones this
 /// engine asks four of those questions per posed character.
 ///
+/// # It borrows
+///
+/// Deliberately, and the reason is the fixed step: `foot_states`, `apply_foot_ik`
+/// and the pelvis drop each want this on every posed character on every step, and
+/// an owning index would be a 161-row clone and a sort **per question per
+/// character per step** — a per-frame rebuild keyed on nothing, which is the shape
+/// wave I7b spent a whole clause removing from the render path. The rows must
+/// therefore already be in ascending joint order, which is a property of the
+/// table and not of this type: `SkeletonAsset`'s decode refuses a role row naming
+/// a joint the rig does not have, and [`sorted`](Self::sorted) is what turns an
+/// unordered table into one this can index.
+///
 /// An [`empty`](Self::empty) index answers `None` to everything, which is exactly
 /// what a rig with no table means — so a caller writes the role path once and the
 /// fallback once, rather than branching on whether a table exists.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct RoleIndex {
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RoleIndex<'a> {
     /// `(kind, side) -> joints`, ascending, in the table's own order.
-    rows: Vec<BoneRole>,
+    rows: &'a [BoneRole],
 }
 
-impl RoleIndex {
-    /// The index of `roles`, sorted into ascending joint order so every "first"
-    /// question has one answer.
-    pub fn new(roles: &[BoneRole]) -> Self {
+impl<'a> RoleIndex<'a> {
+    /// The index of `roles`, which must be in **ascending joint order** — every
+    /// generator in this engine writes it that way, and
+    /// [`sorted`](Self::sorted) is the door for a table that is not.
+    ///
+    /// An out-of-order table is not unsound: [`first`](Self::first),
+    /// [`last`](Self::last) and [`all`](Self::all) walk it and answer in *its*
+    /// order, and only [`role_of`](Self::role_of)'s binary search needs the
+    /// invariant. It would answer `None` for a row that is really there, which is
+    /// why the door exists rather than a silent sort on every construction.
+    pub fn new(roles: &'a [BoneRole]) -> Self {
+        Self { rows: roles }
+    }
+
+    /// `roles`, sorted — the owning half, for a caller holding a table it did not
+    /// generate. Returns the `Vec` so the borrow above stays a borrow.
+    pub fn sorted(roles: &[BoneRole]) -> Vec<BoneRole> {
         let mut rows = roles.to_vec();
         rows.sort_by_key(|r| r.joint);
-        Self { rows }
+        rows
     }
 
     /// An index that knows nothing — every query is `None`.
@@ -326,7 +351,7 @@ impl RoleIndex {
 
     /// The rows, ascending by joint.
     pub fn rows(&self) -> &[BoneRole] {
-        &self.rows
+        self.rows
     }
 
     /// What `joint` is, if the table says.
@@ -465,14 +490,16 @@ mod tests {
     fn first_and_last_pick_the_ends_of_a_chain() {
         use BoneRoleKind::*;
         use BoneSide::*;
-        // Deliberately built out of order: the index sorts.
-        let idx = RoleIndex::new(&[
+        // Deliberately built out of order, and put through the sorting door —
+        // which is the door that exists so the index itself can borrow.
+        let rows = RoleIndex::sorted(&[
             BoneRole::new(4, Spine, Center),
             BoneRole::new(2, Spine, Center),
             BoneRole::new(3, Spine, Center),
             BoneRole::new(9, Foot, Left),
             BoneRole::new(1, Pelvis, Center),
         ]);
+        let idx = RoleIndex::new(&rows);
         assert_eq!(idx.first(Spine, Center), Some(2));
         assert_eq!(idx.last(Spine, Center), Some(4));
         assert_eq!(idx.all(Spine, Center), vec![2, 3, 4]);

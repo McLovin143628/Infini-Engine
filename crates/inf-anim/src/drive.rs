@@ -125,14 +125,14 @@ pub fn drive_ik_follow(skeleton: &Skeleton, pose: &mut Pose, follows: &[IkFollow
     if globals.len() < n {
         return 0;
     }
-    // Ascending joint order: a handle whose parent is another handle must see the
-    // parent AFTER it moved. `ik_hand_l` under `ik_hand_gun` is exactly that case
-    // on the Manny hierarchy, and taking a snapshot of the globals up front puts
-    // it at the wrong place by a whole arm.
-    let mut ordered: Vec<IkFollow> = follows.to_vec();
-    ordered.sort_by_key(|f| f.joint);
+    // **Ascending joint order matters**, and is an invariant of the table rather
+    // than something this pass establishes: a handle whose parent is another
+    // handle must see the parent AFTER it moved, and `ik_hand_l` under
+    // `ik_hand_gun` is exactly that case on the mannequin. Sorting a copy here
+    // would be an allocation per posed character per fixed step; `SkeletonAsset`'s
+    // decode refuses an out-of-order table instead, so this walks it as it is.
     let mut driven = 0usize;
-    for f in ordered {
+    for &f in follows {
         let (joint, source) = (f.joint as usize, f.source as usize);
         if joint >= n || source >= n || joint == source {
             continue;
@@ -369,8 +369,9 @@ mod tests {
         let n = drive_ik_follow(
             &sk,
             &mut pose,
-            // Deliberately out of order, to prove the sort is load-bearing.
-            &[IkFollow::new(3, 1), IkFollow::new(2, 1)],
+            // In ascending joint order, which is the table's own invariant: the
+            // gun (2) before the child handle (3) that hangs off it.
+            &[IkFollow::new(2, 1), IkFollow::new(3, 1)],
         );
         assert_eq!(n, 2);
         let g = crate::pose::global_transforms(&sk, &pose);
