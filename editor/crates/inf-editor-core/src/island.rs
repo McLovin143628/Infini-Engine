@@ -269,14 +269,30 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     // `AlwaysLoaded`, because a Terrain occupies space and a partitioner would
     // otherwise bin the whole heightfield into the one cell holding its origin —
     // and the ground would despawn under the player.
+    // **IDENTITY, AND THE OFFSET IT REPLACES WAS THE ISLAND MOVED HALF A WORLD.**
+    //
+    // Every other terrain in this repository is built with level-0 tile
+    // coordinates starting at `(0, 0)`, so its entity is translated to
+    // `-span/2` to centre the grid on the world origin
+    // (`island_frame_terrain_origin` is the pattern). **`IslandGrid` does not
+    // work that way**: `tile0 = -(tiles / 2)`, so the `.inf_terrain`'s own tile
+    // indices are already centred and its sample frame **is** the world frame —
+    // which is exactly what the whole build assumes (`CoarseHeights::of(&data,
+    // min, max, …)`, the grade audit's `data.height_at(p)`, the channel carve,
+    // the biome stamp).
+    //
+    // Translating the entity as well applied that centring twice. Measured on
+    // the fixture, through the shipped host's own `terrain.height_at` seam: the
+    // hero's start read **0.000 m of unauthored ground where the design puts
+    // 129.916 m**, and `(0, 0)` read 80.000 m off a page 768 m away. On the
+    // shipped island the displacement is 3 584 m on both axes, so half the
+    // terrain sat outside the world. Nothing caught it because the island gate
+    // never attached the terrain streamer, so the simulation's working set was
+    // empty and every query answered the unauthored default — the two hosts
+    // agreed about no ground at all.
     let terrain_guid = terrain_entity_guid(name);
     doc.create_with_guid(terrain_guid, SpawnKind::Empty, "Ground", None);
-    let (min, _) = design.grid.bounds();
-    insert!(
-        doc,
-        terrain_guid,
-        Transform::from_translation(DVec3::new(min.x, 0.0, min.y)),
-    );
+    insert!(doc, terrain_guid, Transform::IDENTITY);
     {
         let mut t = Terrain::configured(
             design.recipe.grid.tile_resolution,

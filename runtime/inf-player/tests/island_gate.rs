@@ -98,6 +98,16 @@ fn pack_sim(pack: &Path) -> RuntimeSim {
     let pcg = built.take_pcg_context();
     let mut sim = inf_player::sim_from_built(built);
     inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+    // …**and the TERRAIN streamer**, which `run_headless` attaches on the next
+    // line and this gate did not. Without it the island's 4.6 MB of pages never
+    // move: the `Terrain` component keeps the empty working set a streamed level
+    // ships and every `height_at` in the drive answers off nothing. The gate's
+    // own headline says "with the terrain paging under the wheels", and
+    // `both_hosts_really_streamed` is what now makes that a measurement.
+    inf_player::attach_terrain_streaming(
+        &mut sim,
+        &inf_player::TerrainContent::Pack(source.clone()),
+    );
     sim
 }
 
@@ -108,15 +118,58 @@ fn pack_sim(pack: &Path) -> RuntimeSim {
 /// partitioned level: a `ScenePayload` carries **no partition** (see
 /// `a_scene_payload_carries_no_partition`), so the PIE wire is not the editor's
 /// authoritative reading of a streamed world — the document is.
+///
+/// **Built the way `build_world`'s own `--level` arm builds it**, and that is not
+/// tidiness: the first draft handed the builder `with_defaults(Vec::new())` and
+/// nothing else, so the loose host had no biome sets, no PCG payloads and no
+/// terrain resolver where the pack host had all three. Two hosts compared for
+/// byte equality must be given the same world to disagree about, or the equality
+/// is between one real reading and one impoverished one.
 fn loose_sim(content: &Path, slug: &str) -> RuntimeSim {
     let source = inf_player::level::DevDirLevelSource::new(content.join(format!("{slug}.inf_lvl")));
-    let builder = inf_player::level::InfSceneWorldBuilder::with_defaults(Vec::new());
+    let terrains = inf_player::level::terrain_paths_by_guid_from_dir(content);
+    let pcg_terrains = terrains.clone();
+    let builder = inf_player::level::InfSceneWorldBuilder::with_defaults(
+        inf_player::level::load_actor_classes_from_dir(content),
+    )
+    .with_pcgs(inf_player::level::load_pcg_payloads_by_guid_from_dir(
+        content,
+    ))
+    .with_biome_sets(inf_player::level::load_biome_sets_by_guid_from_dir(content))
+    .with_terrain_resolver(std::sync::Arc::new(move |g| {
+        inf_player::level::terrain_source_from_file(pcg_terrains.get(&g)?).ok()
+    }));
     let mut built = inf_player::level::load(&source, &builder).expect("the loose level builds");
     let partition = built.take_partition();
     let pcg = built.take_pcg_context();
     let mut sim = inf_player::sim_from_built(built);
     inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+    inf_player::attach_terrain_streaming(&mut sim, &inf_player::TerrainContent::Dir(terrains));
     sim
+}
+
+/// What a host's two streamers actually did: `(cell activations, cells resident,
+/// sim-resident level-0 pages, page loads)`.
+///
+/// # Why the gate needs this and could not do without it
+///
+/// **Mutation-measured, and it is the reason this function exists.** Deleting
+/// `attach_cell_streaming` from *one* host reds the byte compare — that is the
+/// wave's own finding D8. Deleting it from **both** left every arm of this file
+/// green: the coverage check still found one terrain, two water bodies and one
+/// hero (they are all `AlwaysLoaded`), the trace still had 900 distinct states
+/// (the drive moves the hero itself), and two hosts that both refuse to stream
+/// agree perfectly. A gate whose subject is streaming has to assert that
+/// streaming *happened*, not merely that two readings of it match.
+fn streaming_counters(sim: &RuntimeSim) -> (u64, usize, usize, u64) {
+    let c = sim.cell_streaming().stats();
+    let t = sim.terrain_streaming().stats();
+    (
+        c.activations,
+        c.cells_resident,
+        t.sim_resident_level0,
+        t.loads,
+    )
 }
 
 /// **The PIE side**: the payload the editor really builds, through
@@ -277,6 +330,10 @@ fn pie_equals_shipping_on_an_island_drive() {
         assert_eq!(heroes, 1, "{who} has no player");
     }
 
+    // What the two had paged before anything moved, so the numbers below are
+    // what the DRIVE did rather than what the boot did.
+    let (ship0, pie0) = (streaming_counters(&ship), streaming_counters(&pie));
+
     let a = drive(&mut ship, from);
     let b = drive(&mut pie, from);
     assert_eq!(a.len(), STEPS as usize);
@@ -307,6 +364,63 @@ fn pie_equals_shipping_on_an_island_drive() {
         );
     }
     println!("PIE == SHIPPING over {STEPS} steps of an island drive");
+
+    // **…AND THE DRIVE REALLY STREAMED**, on both hosts, by the same numbers.
+    // See `streaming_counters`: without this the whole file survives having the
+    // streamers taken off *both* sides, which is the one mutation the byte
+    // compare cannot see.
+    let sc = streaming_counters(&ship);
+    let pc = streaming_counters(&pie);
+    println!(
+        "STREAMED shipping: {} cell activation(s), {} cell(s) resident, {} sim L0 \
+         page(s), {} page load(s)",
+        sc.0, sc.1, sc.2, sc.3
+    );
+    println!(
+        "STREAMED document: {} cell activation(s), {} cell(s) resident, {} sim L0 \
+         page(s), {} page load(s)",
+        pc.0, pc.1, pc.2, pc.3
+    );
+    for (who, c) in [("shipping", sc), ("document", pc)] {
+        assert!(
+            c.0 > 0 && c.1 > 0,
+            "{who} activated {} cell(s) over {:.0} m of driving — the partition \
+             is not streaming and this gate is comparing two static worlds",
+            c.0,
+            STEPS as f64 * STEP_M
+        );
+        assert!(
+            c.2 > 0 && c.3 > 0,
+            "{who} paged {} terrain tile(s) ({} sim-resident) — the ground is not \
+             streaming, so `height_at` answered off an empty working set the \
+             whole way",
+            c.3,
+            c.2
+        );
+    }
+    assert_eq!(
+        sc, pc,
+        "the two hosts streamed DIFFERENTLY over the same drive — the counters \
+         are (cell activations, cells resident, sim L0 pages, page loads)"
+    );
+    // …and the ground paged **under the wheels** rather than only at the boot:
+    // the drive itself loaded pages the start position had not asked for.
+    println!(
+        "PAGED BY THE DRIVE: {} load(s) at the start, {} after {:.0} m",
+        ship0.3,
+        sc.3,
+        STEPS as f64 * STEP_M
+    );
+    assert!(
+        sc.3 > ship0.3 && pc.3 > pie0.3,
+        "the drive paged nothing the boot had not already: {} loads at the start, \
+         {} at the end. The hero moves {:.0} m across a {}-metre tile span, so a \
+         streamer that is working has to fetch something on the way",
+        ship0.3,
+        sc.3,
+        STEPS as f64 * STEP_M,
+        recipe.grid.tile_span_m()
+    );
 }
 
 /// **A `ScenePayload` CARRIES NO PARTITION**, so a PIE preview of the island
@@ -573,5 +687,89 @@ fn the_biome_binding_scatters_when_its_ground_is_resident_and_not_before() {
         "the streamed boot scattered {population} instances — if this is non-zero \
          the gap this arm records has been closed, and the arm should become an \
          assertion that it stays closed"
+    );
+}
+
+/// **THE GROUND THE SIMULATION STANDS ON IS THE GROUND THE RECIPE BUILT.**
+///
+/// # Why this arm exists
+///
+/// The gate above compares two hosts. Two hosts reading the *same* wrong ground
+/// agree perfectly, and for the whole of wave I7 they did: the island's `Terrain`
+/// entity carried `Transform::from_translation(grid.bounds().0)` on top of an
+/// `.inf_terrain` whose tile indices are **already centred on the world origin**
+/// (`IslandGrid::tile0 = -(tiles / 2)`), so the centring was applied twice.
+///
+/// Measured before the fix, through this same seam: the design's own player start
+/// read **0.000 m of unauthored ground where the build puts 129.916 m**, and the
+/// world origin read 80.000 m off a page 768 m away. On the shipped island the
+/// displacement is 3 584 m on each axis — half the terrain outside the world.
+///
+/// So the comparison here is host **against the recipe**, not host against host:
+/// `RuntimeSim::terrain_height_at` is the exact seam a Blueprint's
+/// `terrain.height_at`, the character's ground snap and the physics heightfield
+/// all read, and `IslandBuild::terrain` is what `inf island build` wrote.
+#[test]
+fn the_ground_the_simulation_stands_on_is_the_ground_the_recipe_built() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let pack = cook(tmp.path());
+    let mut ship = pack_sim(&pack);
+
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let build = inf_island::build_island(&recipe, &inf_island::BuildOptions::default())
+        .expect("the fixture island builds");
+    let s = start();
+    let hero = hero_entity(&ship).expect("a hero");
+
+    // The design's own places: where a player starts, the other settlement, the
+    // world origin and a point between them. All four are inside the coastline —
+    // a probe on the sea shelf would be a probe on a flat surface, which agrees
+    // with itself under any displacement.
+    let probes: Vec<(f64, f64)> = build
+        .recipe
+        .sites
+        .iter()
+        .map(|q| (q.x, q.z))
+        .chain([(0.0, 0.0), (200.0, -200.0)])
+        .collect();
+    let mut seen: Vec<f64> = Vec::new();
+    assert!(probes.len() >= 4, "too few probes to say anything");
+    for (x, z) in probes {
+        // Stand the streaming source there and let the sim page its own
+        // neighbourhood in — residency is derived from sim state, so this is the
+        // only honest way to ask.
+        set_hero(&mut ship, hero, glam::DVec3::new(x, s.y, z));
+        for _ in 0..3 {
+            ship.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        }
+        let sim_h = ship.terrain_height_at(x, z);
+        let built = build
+            .terrain
+            .height_at(glam::DVec2::new(x, z))
+            .unwrap_or_else(|| panic!("({x}, {z}) is off the built terrain"));
+        println!("GROUND ({x:>7.1}, {z:>7.1}): sim {sim_h:9.3} m, recipe {built:9.3} m");
+        assert!(
+            (sim_h - built).abs() < 1.0e-6,
+            "the simulation stands at {sim_h} m where the recipe built {built} m at \
+             ({x}, {z}) — the terrain entity and the .inf_terrain disagree about \
+             where the world is"
+        );
+        seen.push(built);
+    }
+    // Anti-vacuity: four probes that all read the same number would agree under
+    // any offset at all, and so would four probes on flat sea.
+    let lo = seen.iter().cloned().fold(f64::INFINITY, f64::min);
+    let hi = seen.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        hi - lo > 20.0,
+        "the four probes span only {:.3} m of relief, so a displaced terrain \
+         could still match them",
+        hi - lo
+    );
+    assert!(
+        lo > recipe.sea.level_m,
+        "a probe at {lo} m is under the {} m waterline — this arm must stand on land",
+        recipe.sea.level_m
     );
 }
