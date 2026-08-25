@@ -29,6 +29,8 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **I6** | **gameplay systems** — doors + locks + the kick + crash-through, inventory, weapons v1, health | **DONE + AUDITED** — battery 312 / **5 873** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, rustdoc **404** of a 450 ceiling (447 at the wave's head, re-measured cold; 39 cleared by the audit), **no schema moved**. `NOT_YET_CONSUMED` is empty. Six defects found by the wave's own world-level arms and five more by its gate; one energy door for the kick, the breach and the bullet (mutation-proved across two crates); the city plans **19 790** doorways and the band makes **234** solid. The audit found **five arms that could not fail** (two trace sections, the wheel verb, the corpse guard, the spent attack edge) and **three world defects** (a barged door lost its lock for ever, `door.is_open` walked all 19 790 doorways, a dead block claiming a swing it did not drive). See *Done — wave I6* and *The I6 audit* below |
 | **I7** | **the island data build** — the recipe, real Vancouver elevation, the designed coastline, the derived water and biomes, the graded roads, the level | **DONE** — see *Done — wave I7* below. The island exists: **51.38 km² of map, 40.65 km² of land, a 948.7 m peak of real North Shore survey, 25.14 km of designed shore, 50 reaches / 26.32 km, 2 lakes, 33 waterfall sites, 33.74 km of graded road, 342.7 MB of terrain built by one command in 24.7 s.** PIE == shipping over a 900-step drive. Battery 318 / 5 946 / 0 / 16, frontend 702 / 78, goldens 54, clippy 0, rustdoc 404, **no schema moved**. **Then CI went red on macOS and ubuntu** — one ulp of proj4rs latitude in a committed level, and a 2 ms sleep that took 5 on a shared runner; both fixed, recipe schema **1 → 2** (the recipe now *states* its geodetic origin), engine schemas still unmoved. See *The I7 CI-red* at the end of this file |
 
+| **I7b** | **the island lives at 60** — the vegetation through the shipped boot, the VSM caster pack, `render (record)` attributed | **IN PROGRESS** — see *Done — wave I7b* at the end of this file. Clause 1 landed (`e2542343`): the shipped boot grows **0 → 2 339** instances, PIE == shipping on the forest as well as the state fold, no schema moved |
+
 Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
 IB-8 and IB-13 forward out of I6**: both are ceilings a thousand-building fixture walks into
 on its first frame, and measuring them against a real city was cheaper than measuring them
@@ -3306,3 +3308,343 @@ the file — which is a stronger statement than "it passed on the third runner".
 reads no clock at all. What remains unverified on those platforms is only that the tree
 compiles and the rest of the battery is unmoved, which `cargo check --workspace
 --all-targets` and the touched crates' suites cover here.
+
+---
+
+## Done — wave I7b (the island lives at 60) — IN PROGRESS
+
+Base `545614f`. Three clauses, each measured before and after on the real island.
+
+### Clause 1 — THE VEGETATION SCATTERS THROUGH THE SHIPPED BOOT (**done**, `e2542343`)
+
+Wave I7's figure was **4 958 instances with the ground paged by hand and 0 through
+the shipped boot**. The cause was one function running once: `evaluate_biome_bindings`
+evaluated over `TerrainData::xz_bounds()` — the bounding box of whatever is resident —
+at load, and a streamed terrain ships no tiles.
+
+**What landed**
+
+* **One Ring-0 door that walks TILES, not a box.** `BiomeBinding::refresh_resident`
+  (`crates/inf-pcg/src/binding.rs`) evaluates the resident level-0 tiles in ascending
+  coordinate order, memoized per tile in a `BiomeScatterCache`. It is **exact**, not an
+  approximation: `scatter_region_in`'s lattice is world-anchored (`floor(x / cell_size)`)
+  and its region clip is half-open, so the union of two abutting boxes is the population
+  of their union, instance for instance. Measured on the real fixture: the per-tile walk
+  over the fully-paged island grows the same **4 958** the whole-bounds walk did.
+* **The key carries the NEIGHBOURS.** A candidate near a tile edge reads *across* it —
+  `BiomeMask`'s feather search walks up to `MAX_FEATHER_SAMPLES` lattice rings and the
+  slope filter's numerical normal probes `FN_HEIGHT_NORMAL_EPS` either side — so a tile
+  evaluated alone rejects what the same tile inside its neighbours keeps. `scatter_reach_m`
+  bounds that reach for **any** document (the mask's own cap, not the feather in front of
+  us) and `neighbour_rings` sizes the neighbourhood from it: **one ring at every grid this
+  engine ships** (a 257² tile at 1 m is 256 m across against a 64.1 m reach).
+* **The fixed step runs it**, as phase 2 of **24**, straight after cell and terrain
+  streaming, because its subject is exactly what those two make resident. One stamp
+  comparison per terrain on a step that paged nothing. The tiles are **moved out of the
+  component and back**, never cloned: this runs 60 times a second and a `TerrainData`
+  clone is a quarter of a megabyte per tile.
+* **One door for the boot.** `BuiltWorld::take_pcg_context` → `pcg_context()` (a clone),
+  so `sim_from_built` — the one function every boot path goes through — seeds the graphs
+  and the palette onto the sim. No new attach for a boot path to forget.
+* The editor's `pcg_evaluate_biomes` goes through the same door, and the mirror gate now
+  **bans `.xz_bounds()` on both sides** by name.
+
+**Measured, CI-scale island (`island_gate`)**
+
+| | |
+|---|---|
+| shipped boot | **0 → 2 339 instances** on 16 paged tiles |
+| over a 900-step drive out and back | **2 339..3 119** instances on **16..20** sim tiles |
+| PIE == shipping | on the state fold **and** on the forest, every step |
+| stray instances | **0 of 2 339** — every place the streamed island grows, the fully-paged reading grows too |
+| a fully-resident interior tile | **225 against 225**, identical |
+
+**Laws met / paid for**
+
+* **A memo keyed on first sight is keyed on the observer** (P21). Mutation-verified:
+  `rings = 0` (the tile's own stamp alone) kills `an_arrival_order_cannot_change_what_grows`
+  and nothing else.
+* **A fixture that rebuilds the world hides the defect it was built for.** The first draft
+  of that arm built a fresh `TerrainData` per arrival, which re-stamps *every* tile, so
+  every key moved and the `rings = 0` mutation passed perfectly. It pages into **one**
+  `TerrainData` through the streamer's own door now.
+* **A `#[serde(skip)]` field reaches no state fold**, so two hosts growing different
+  forests compared equal at every step for ever. The drive folds the population separately.
+* **Out and back is what makes the ground page OUT.** The drive turns round half way with
+  a slow z drift so no two steps stand in one place, and the tile set is asserted to have
+  both grown and shrunk.
+
+### Clause 3 — `render (record)` NAMED, and it was one function (**done**)
+
+**THE ANSWER WAS `O(pages²)` IN A LOOP NOBODY HAD MEASURED.** Wave I7 recorded
+`render (record)` at **10.874 ms against a 6.657 ms GPU frame** and routed it as
+unattributed. The record profile below named it on the first run:
+
+| shipped island, before | ms | % of the record stage |
+|---|---|---|
+| **cluster plan (+ wants)** | **10.051** | **90.1 %** |
+| submit | 0.475 | 4.3 % |
+| view uniforms | 0.421 | 3.8 % |
+| graph | 0.194 | 1.7 % |
+| everything else | < 0.01 | — |
+
+The mechanism, once the phase was split in two: **`VgeomNode::cluster_tile_wants`
+asked `VgeomSource::with_page_sections` for one page at a time, and that function
+parses the payload — header, bounds checks and the whole page directory, with a
+`Vec` allocation — on every call.** So a virtualized mesh with N resident pages
+re-parsed its own directory N times a frame to read sections it had already
+walked past: `O(N²)` per frame, on a world holding **one** virtualized mesh.
+
+`VgeomSource::for_each_page_sections` parses **once** and walks. Nothing else
+changed; the counters are the same additions in the same order (they are applied
+outside the walk now because it holds a borrow).
+
+**Measured, RTX 4070 Ti, 1080p, MIN of 3 rounds × 120 frames, the shipped island:**
+
+| | before | after |
+|---|---|---|
+| p50 / p95 / p99 | 24.080 / 26.827 / 27.634 ms | **3.587 / 3.841 / 4.128 ms** |
+| fps at p50 | 41.5 | **278.8** |
+| `render (record)` | 11.151 ms | **2.037 ms** |
+| of which the cluster plan | 10.051 ms | **0.004 ms plan + 1.313 ms wants** |
+| GPU frame | 12.182 ms | **1.133 ms** |
+| pipelined estimate | 12.182 ms (82.1 fps) | **2.354 ms (424.8 fps)** |
+| distance from 60 fps | p50 **+7.480** | p50 **−13.014** |
+
+**The GPU column moved too, and that is the I4b power-state law, not a second
+fix**: a frame whose CPU took 11 ms left the card idle two thirds of the time and
+an idle card downclocks. `terrain` reads 5.886 → 0.555 ms across the pair. A GPU
+column is comparable only between runs whose CPU frames are comparable — the
+instrument's own header says so, and this is the second wave to pay for it.
+
+The lit frame moved by the CPU half only: `render (record)` **17.526 → 10.347 ms**
+(cluster wants 12.515 → 3.851), p50 **52.020 → 45.702 ms**, and the GPU frame is
+**unchanged at 33.5 ms** because it is 29.9 ms of `vsm-raster` — clause 2's.
+
+### Clause 3's instrument (the thing that named it)
+
+`inf_render::timing::RecordProfile` / `RecordClock`: **15 named phases that tile the whole
+of `EngineRenderer::render`**, the record-path twin of `inf_player::step_profile`. It
+exists because the per-pass `PassTime::cpu_ms` column tiles only the **marked span** —
+`FrameTimer::begin` opens at the frame's first *command*, so the view matrices, the three
+per-frame uniform writes, the encoder, the cluster plan and the submit are inside a
+caller's `render (record)` clock and inside no segment. The I4b audit measured that residue
+at two thirds of a 3.0 ms stage and printed it as one unattributed number; wave I7's island
+measured the same stage at **10.874 ms against a 6.657 ms GPU frame**.
+
+The clock carries `mark_at` — the clock-free seam — from the day it was written, and its
+arms drive the arithmetic with decided timestamps: the I7 CI-red was exactly this shape,
+and it went red on a shared runner rather than in review.
+
+The instrument prints the phases dearest-first and **asserts they tile the record stage**
+(the two are the same call measured twice). It also prints `VsmRasterStats::summary()` and
+the per-rastering-frame pages / draws / casters / invalidation touches, because a
+millisecond count with no page or caster beside it cannot say whether the cost is the
+drawing or the asking.
+
+### Clause 2 — the VSM caster pack: THE ROUTED PRESCRIPTION WAS BACKWARDS
+
+I4b routed *"cache the caster pack, keyed on CONTENT, with the floating origin in
+the key"* off the composed city, where `vsm-raster` recorded **6.05 ms of CPU**.
+The island's `vsm-raster` is **30 ms of GPU**, and the record profile above puts
+the whole caster pack — packing, the invalidation scatter and every upload — at
+**0.926 ms of CPU record**. Caching it cannot touch a 30 ms GPU pass.
+
+**And the dirty split closes it.** `dirty_pages` alone cannot tell *"the world
+moved under the pages"* from *"the pages moved under the world"*, so
+`VsmRasterStats` grew three counters that sum to it exactly. Per rastering frame
+on the lit island:
+
+| | |
+|---|---|
+| **re-cast** (something under an unmoved page changed) | **0.0 — every frame** |
+| **moved** (the page's own matrix) | 532.0 |
+| **re-slotted** (the atlas re-assigned the slot) | 400.8 |
+| pages rastered / deferred / cached | **256.0 (the ceiling) / 676.8 / 91.2** |
+| draws / casters / invalidation touches | 1 621 / 193 / 168 821 |
+
+**Nothing under a shadow page on this island ever changes.** The 168 821
+invalidation touches a frame — the number I4b's routing wanted to spend a cache
+on — invalidate **zero** pages. The whole 30 ms is the clipmap grid shifting
+under a camera travelling **0.9 m a frame** against a level-0 page **1.0 m**
+wide (`2 x first_level_extent_m / clipmap_pages_per_side` = `2 x 32 / 64`). A
+page 1 m across is 128 texels over 1 m — **7.8 mm a shadow texel**, four to eight
+times finer than any pixel a 40 m-high 1080p camera can show. The cache never
+converges: 256 rastered (the cap) and **677 deferred** every frame, for ever.
+
+**The alternative, priced and printed in the instrument** rather than argued —
+a third configuration with the first clipmap level widened 4x, which quarters
+every level's snap rate:
+
+| lit island, 1080p | shipped ladder | first level x4 |
+|---|---|---|
+| p50 / p95 | 45.233 / 49.938 ms (22.1 fps) | **25.086 / 44.450 ms (39.9 fps)** |
+| GPU frame | 33.563 ms | **19.707 ms** |
+| `vsm-raster` | 30.001 ms | **15.931 ms** |
+| pages rastered / deferred / cached | 256.0 / 676.8 / 91.2 | **173.2 / 63.5 / 503.2** |
+| dirty: re-slotted / moved / re-cast | 400.8 / 532.0 / 0.0 | **11.6 / 225.1 / 0.0** |
+
+The cache *starts working* (91 cached → 503) and the deferral queue *drains*
+(677 → 64). **Reported, never shipped**: `first_level_extent_m` is a product
+decision about shadow sharpness, and the wave that measures an alternative is not
+the wave that gets to pick it.
+
+**ROUTED BY NAME — the real fix is the clipmap SCROLL**, and `vsm_raster.rs`'s
+own cache-field doc already names it: *"When a clipmap level's grid shifts, the
+world cell that was page `(x, y)` becomes page `(x − 1, y)` with a
+**bit-identical** matrix, so the label changes while the content does not… the
+'there is no clipmap scroll' remainder wearing the cache key."* A level that
+scrolls by one page keeps **63 of its 64 columns** — about 98 % of the "moved"
+pages hold depth the atlas already has, in a slot that now answers to a different
+label. Relaxing the cache key does **not** reach it (measured reasoning: the
+texels are in another slot, and a stamp-only key asks the wrong slot); it needs
+residency to keep the slot with the **world cell** rather than with the page
+label, which is `inf_vsm`'s to own and touches every P27 invalidation arm. That
+is a phase-sized item, and at ~98 % of 933 dirty pages a frame it is the one that
+would take `vsm-raster` from 30 ms to single digits.
+
+**Also routed, with its number**: `cluster_tile_wants` is now the dearest record
+phase at **1.23 ms shipped / 3.37 ms lit**, and it is the same class the clause-3
+fix belonged to — a per-frame rebuild keyed on nothing. It clears and re-couples
+every resident page every frame. It is deliberately NOT taken here: the P28.2
+ledger records that getting this pairing wrong *retracts an asset for ever*, and
+1.2 ms of a 3.5 ms frame that is 13 ms inside budget does not buy that risk.
+
+### Counts
+
+| | after the I7 audit | **after I7b** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 318 / 5 952 / 0 / 16 | **319 / 5 968 / 0 / 16** — **+11 arms are this wave's** (7 in `inf-pcg`'s binding, 4 in `inf-render`'s timing) and **no test file or crate was added**, so the +1 block and the other +5 arms cannot be. Recorded as measured and flagged rather than claimed away — the I4b `+1 rustdoc` precedent. The likeliest cause is the recorded 318 having been read off a truncated log, which is a mistake this wave made once itself before re-running for the whole thing |
+| frontend tests / files | 702 / 78 | **702 / 78, not re-run** — no file under `editor/studio` was touched |
+| goldens | 54, byte-identical under `INF_GOLDEN_STRICT=1` | **54, byte-identical**, re-run under `INF_GOLDEN_STRICT=1` over **101 arms** with **no PNG rewritten** (`git status` on `tests/goldens/` is empty) |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | see the closing block |
+| rustdoc warnings (ceiling 450) | 404 over 46 crates | see the closing block |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved** |
+| committed samples | 23 levels | **23**, byte-unmoved |
+| new crates / new external deps | — | **none** |
+
+### Decisions (I7b's, binding on later waves)
+
+* **A biome-bound population is a function of the RESIDENT ground, evaluated tile
+  by tile.** Not of a bounding box, and not once at load. `BiomeBinding::
+  refresh_resident` is the one door all three callers (the load pass, the fixed
+  step and the editor's evaluate command) go through, and `.xz_bounds()` is banned
+  from both hosts by name. *Why per tile is exact:* the scatter lattice is
+  world-anchored and its region clip is half-open, so the union of two abutting
+  boxes is the population of their union, instance for instance.
+* **A per-tile memo keys on the tile AND its neighbours.** The evaluation reads
+  across a tile's edge — up to `MAX_FEATHER_SAMPLES` lattice rings of biome mask
+  and one central-difference step of slope — so a tile evaluated alone is not the
+  same tile evaluated inside its neighbourhood, and a key that ignores that
+  memoizes *the residency the tile first arrived under*. `scatter_reach_m` bounds
+  the reach for any document and `neighbour_rings` sizes the ring count from it.
+* **A `#[serde(skip)]` field reaches no state fold, so a PIE == shipping gate over
+  it must fold it itself.** Two hosts growing different forests compared equal at
+  every step for ever. The same sentence applies to every derived cache the
+  projector reads and the snapshot does not.
+* **A drive that only goes out cannot show anything streaming OUT.** The island
+  gate turns round half way, with a drift so no two steps stand in one place.
+* **The record path gets phases, and they tile the whole call.** `PassTime::
+  cpu_ms` tiles the *marked span*; the marked span starts at the frame's first
+  command, so everything before it and after it was unattributed by construction.
+  A stage a diagnostic cannot decompose is a stage nobody can optimise, which is
+  the shape the certification found on the GPU side and wave I4b found on the sim
+  side.
+* **A parse in a loop is `O(N²)` and reads as one slow function.** `with_page_
+  sections` parses the whole asset to read one page's sections; used per page it
+  was 90 % of the shipped island's record stage. Any door of the shape *"give me
+  one element, and to find it I will re-derive the index"* needs a plural twin
+  before it is called in a loop.
+* **A GPU column is comparable only between runs whose CPU frames are comparable**
+  (I4b's law, met again in the other direction). Fixing 9 ms of CPU took the
+  island's *GPU* frame from 12.182 to 1.133 ms because the card had been idling
+  two thirds of every frame and downclocking. Quote both columns or neither.
+* **An unmeasured prescription can be backwards, and this wave met one that was.**
+  The routed caster-pack cache aims at CPU; the island's `vsm-raster` is GPU, its
+  caster pack is 0.926 ms of record, and the content that cache would key on
+  invalidates **zero** pages a frame. Measure before implementing a routing,
+  including a routing this repository wrote itself.
+* **Price an alternative in the tree, not in a memo.** The coarse-clipmap
+  configuration is a third row the instrument measures every run, so the number
+  cannot go stale and nobody has to trust a paragraph.
+
+### THE NINETEENTH chr(92) CATCH, and it is this wave's own
+
+A scripted edit through a Python heredoc ate a `\`-continuation and left **ten spaces**
+inside an `assert!` message — the third wave running, and the second time the *same*
+mechanism has done it. Repaired through the Edit tool, which is what the law prescribes and
+what the heredoc bypassed. **Scripted edits to Rust string literals go through the Edit
+tool, full stop.**
+
+### The island's own frame numbers, RE-RECORDED
+
+RTX 4070 Ti, release, MIN of 3 rounds × 120 frames, 1080p, the same 40 m-high
+flight east from Harbour City wave I7 measured. **Reported, never asserted** —
+the ceilings in `inf_player::budget` are set from the composed city.
+
+**Three runs, and the ranges are quoted rather than the best end** (the I4b
+audit's own law about this file):
+
+| | p50 | p95 | p99 | GPU frame | pipelined estimate |
+|---|---|---|---|---|---|
+| **SHIPPED**, wave I7 | 18.209 | 19.287 | 20.887 | 6.657 | 10.994 (91.0 fps) |
+| **SHIPPED**, I7b's head *(after the audit's terrain fix)* | 24.080 | 26.827 | 27.634 | 12.182 | 12.182 (82.1 fps) |
+| **SHIPPED**, after I7b | **3.56–3.62** | 3.83–7.25 | 4.13–7.51 | 1.07–1.43 | **2.26–2.35 (427–443 fps)** |
+| **LIT**, wave I7 | 48.170 | 53.590 | 56.862 | 31.188 | 31.188 (32.1 fps) |
+| **LIT**, after I7b | **44.48–45.70** | 48.04–50.94 | 49.41–55.11 | 33.56–33.58 | 33.56–33.58 (29.8 fps) |
+| **LIT**, first clipmap level ×4 *(priced, not shipped)* | **25.09–25.16** | 44.45–44.52 | 45.65–46.48 | 19.69–19.71 | 19.69–19.71 (50.7–50.8 fps) |
+
+*The wave I7 row and the I7b-head row are **not** the same tree: the I7 audit put
+the terrain at `Transform::IDENTITY`, so the head this wave started from draws a
+world the I7 row never did. The honest before/after for this wave is the second
+row against the third.*
+
+**Distance from 60 fps, shipped: p50 −12.99 to −13.07, p95 −9.35 to −12.87 ms.**
+The shipped island frame is **inside the 60 fps budget with about 13 ms to
+spare**, where the wave opened at **+7.480**. The lit-with-virtual-shadows
+configuration is **not** the shipped default (`VsmSettings::default().enabled` is
+`false`); it is at 22.5 fps and its whole cost is the one mechanism clause 2
+measures above.
+
+CPU, shipped, after: sim step 0.163 · stream sync 0.099 · projection 0.055 ·
+**render (record) 2.026–2.037** · poll 1.256 · readback 0.008. The record stage's
+own phases: cluster wants 1.303 · submit 0.408 · graph 0.170 · view uniforms
+0.133 · cluster plan 0.004 · everything else under 0.01.
+
+**Content: 0 mesh instances, 1 scatter batch carrying 2 681 SCATTERED
+INSTANCES**, 1 vgeom, 192 terrain tiles, 0 virtual textures — against wave I7's
+*"0 instances, **0 scatter batches**"*. **Those 2 681 are the vegetation**, and
+they are clause 1 arriving in the shipped island's frame:
+`Terrain::biome_population` is projected through `push_biome_population`, which
+goes through the same `push_scatter` body a `PcgVolume` does and produces one
+batch per terrain — never `scene.instances`, which is why the mesh-instance
+column stays at 0. The `scatter` GPU pass costs **0.126 ms** of the frame. The
+count is ~1.3 km² of cover around the hero at the island's own 0.004 /m²
+candidate density, which is what sim residency bounds it to (see below).
+
+### Open / next
+
+* **The instrument's island camera flies away from the vegetation.** The camera
+  path is a parameter and the hero is the streaming source, so the *sim* keeps its
+  residency around the start while the camera flies east — and the biome-bound
+  population is a function of **sim** residency. The frame therefore carries the
+  2 681 instances the hero is standing in, wherever the camera has got to.
+  Closing it means the flight moving the streaming source with it, which changes
+  what every previous island frame number was a number about — so it is stated
+  rather than quietly changed.
+* **The vegetation is bounded by SIM residency**, which is ±2 tiles around each
+  terrain observer (`SIM_MARGIN_TILES`), i.e. a ~1.3 km² carpet around the player
+  on the full island. That is the correct home for it — both hosts must agree, and
+  sim residency is the only residency both hosts share — but it means the *render*
+  cut draws ground with no cover on it past that radius. A render-side population
+  off the camera's own cut would be a second authority and is not taken.
+* **The EDITOR's authoring viewport still shows no vegetation on a streamed terrain**, and
+  that is pre-existing rather than this wave's: the document's `Terrain.data` is empty for
+  a streamed terrain (`inf_editor_core::terrain_stream` keeps its own working set) and the
+  projector reads `biome_population` off the document component. The fix is the editor
+  streamer's twin of `refresh_biome_bindings` over *its* resident set, and it would make
+  the mirror gate three-sided. Routed by name, not taken.
+* **`inf_editor_core::simulate::SimSession` streams nothing at all** — no cells, no terrain
+  — so an editor Simulate of a streamed island stands on no ground and grows nothing.
+  Pre-existing and unchanged by this wave; it is why `island_gate`'s "editor side" is the
+  loose document through `RuntimeSim`, which is the pair P16.5's own gate compares.

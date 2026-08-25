@@ -361,6 +361,11 @@ struct Measured {
     cpu_ms: [f64; CPU_STAGES],
     instances: usize,
     scatter_batches: usize,
+    /// Instances **inside** those batches (island wave I7b). A batch count says
+    /// nothing about how much grows: the island's whole vegetation is one batch
+    /// per terrain, because `push_biome_population` goes through the same
+    /// `push_scatter` body a `PcgVolume` does.
+    scatter_instances: usize,
     vgeom_instances: usize,
     skinned: usize,
     terrain_tiles: usize,
@@ -537,6 +542,7 @@ fn measure(
         cpu_ms: best_cpu,
         instances: scene.instances.len(),
         scatter_batches: scene.scatter.len(),
+        scatter_instances: scene.scatter.iter().map(|b| b.data.instances.len()).sum(),
         vgeom_instances: scene.vgeom_instances.len(),
         skinned: scene.skinned.len(),
         terrain_tiles: scene.terrains.iter().map(|t| t.tiles.len()).sum(),
@@ -1056,10 +1062,12 @@ fn the_frame_at_shipping_resolution() {
             m.best + 1,
         );
         println!(
-            "{label} content: {} mesh instances, {} scatter batches, {} vgeom \
+            "{label} content: {} mesh instances, {} scatter batches / {} \
+             scattered instances, {} vgeom \
              instances, {} skinned, {} terrain tiles, {} virtual textures",
             m.instances,
             m.scatter_batches,
+            m.scatter_instances,
             m.vgeom_instances,
             m.skinned,
             m.terrain_tiles,
@@ -1612,9 +1620,10 @@ fn the_island_at_shipping_resolution() {
             1000.0 / r.p50.max(1.0e-9)
         );
         println!(
-            "  content    {} instances, {} scatter batches, {} vgeom, {} skinned, {} terrain tiles, {} virtual textures",
+            "  content    {} instances, {} scatter batches / {} scattered instances, {} vgeom, {} skinned, {} terrain tiles, {} virtual textures",
             m.instances,
             m.scatter_batches,
+            m.scatter_instances,
             m.vgeom_instances,
             m.skinned,
             m.terrain_tiles,
