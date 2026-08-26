@@ -588,9 +588,6 @@ impl VoxelNode {
         }
     }
 
-    /// Pack this frame's per-chunk instances (projection walk order, resident
-    /// chunks only) and upload them into the shared instance buffer. Returns the
-    /// draw list, parallel to the buffer's slots.
     /// **Everything both draws share**, done once per frame (wave VIS1a) — the
     /// chunk upload, the instance pack and the draw walk. Called from
     /// [`RenderNode::depth_prepass`] and again from [`RenderNode::run`]; the second
@@ -620,6 +617,9 @@ impl VoxelNode {
         !self.draws.is_empty()
     }
 
+    /// Pack this frame's per-chunk instances (projection walk order, resident
+    /// chunks only) and upload them into the shared instance buffer. Returns the
+    /// draw list, parallel to the buffer's slots.
     fn sync_instances(&mut self, gpu: &GpuContext, frame: &FrameData) -> Vec<ChunkCacheKey> {
         let mut raw: Vec<ChunkInstanceRaw> = Vec::new();
         let mut draws: Vec<ChunkCacheKey> = Vec::new();

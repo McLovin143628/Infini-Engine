@@ -13342,7 +13342,7 @@ mod tests {
     /// the message — the [`SceneError::SchemaTooNew`] doctrine, re-checked at the
     /// new ceiling.
     #[test]
-    fn a_v26_payload_is_refused_by_name() {
+    fn a_v27_payload_is_refused_by_name() {
         let level = RuntimeLevel {
             title: "Future".into(),
             entities: vec![v9_rec(Uuid::from_u128(0xFF01), "A", None).into_runtime()],

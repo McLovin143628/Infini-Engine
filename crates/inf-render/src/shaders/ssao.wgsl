@@ -152,7 +152,6 @@ fn fs_ssao(in: VsOut) -> @location(0) vec4<f32> {
 
         // The projection of the surface normal into the slice plane, and its
         // signed angle from the view vector.
-        let n_plane = n - dir_w * 0.0; // (kept explicit: n is already 3-space)
         let np = v * dot(n, v) + dir_w * dot(n, dir_w);
         let np_len = length(np);
         if (np_len < 1e-4) {
