@@ -6594,7 +6594,7 @@ than summarised.
 
 ## Wave SKY2 (clouds that stop looking painted)
 
-Base `b08aa9d8`. RTX 4070 Ti, Windows/Vulkan. **Seven commits**, `(SKY2)`-tagged.
+Base `b08aa9d8`. RTX 4070 Ti, Windows/Vulkan. **Ten commits**, `(SKY2)`-tagged.
 
 The clouds were already raymarched Perlin–Worley volumetrics with an adaptive stride, a two-lobe
 phase function, Hillaire multiple scattering, energy-conserving integration and a compute-baked

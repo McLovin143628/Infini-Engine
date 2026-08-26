@@ -26263,6 +26263,6 @@ purpose** and strict-green after, clippy **0** with `-D warnings`, rustdoc **374
 after `cargo clean --doc` (the wave adds zero), fmt clean, frontend **702 / 78 not re-run** (no file
 under `editor/studio` was touched), no new crate and no new dependency. Eleven items carried by name,
 including the powder term's rendered consequence having no arm of its own and
-`sky_stack_cost_per_tier`'s doc claiming a monotonicity assertion its code does not make. **Seven**
+`sky_stack_cost_per_tier`'s doc claiming a monotonicity assertion its code does not make. **Ten**
 commits, `(SKY2)`-tagged; the full ledger, with the per-gap numbers, the cost and VRAM tables and the
 carried list, is in `docs/memos/island-progress.md` under *Wave SKY2*.
