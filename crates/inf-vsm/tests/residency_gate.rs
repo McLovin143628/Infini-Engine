@@ -86,6 +86,35 @@ impl Shadow {
         }
     }
 
+    /// **The independent twin of the world-cell re-seat** (island wave VSM2):
+    /// translate light `l`'s clipmap pages from the `was` window into the `now`
+    /// one, dropping whatever falls off, derived from the two origin tables and
+    /// from nothing the residency said.
+    fn scroll(&mut self, l: u32, desc: &VsmLightDesc, was: &[(i64, i64)], now: &[(i64, i64)]) {
+        let mut next = BTreeMap::new();
+        for (&(light, page), &slot) in &self.0 {
+            if light != l {
+                next.insert((light, page), slot);
+                continue;
+            }
+            let a = desc.clip_origin(was, page.level);
+            let b = desc.clip_origin(now, page.level);
+            let g = desc.levels[page.level as usize];
+            let (x, y) = (i64::from(page.x) + a.0 - b.0, i64::from(page.y) + a.1 - b.1);
+            if !(0..i64::from(g.pages_x)).contains(&x) || !(0..i64::from(g.pages_y)).contains(&y) {
+                continue;
+            }
+            next.insert(
+                (
+                    light,
+                    VsmPage::new(page.face, page.level, x as u32, y as u32),
+                ),
+                slot,
+            );
+        }
+        self.0 = next;
+    }
+
     /// Resolve `at` by walking the tree upward — the brute force. `None` when
     /// nothing in the chain is resident, which is a legal answer here and is the
     /// whole difference from `inf-vt`'s model.
@@ -481,9 +510,29 @@ fn moving_a_clipmaps_level_offsets_re_points_the_whole_fallback_chain() {
          `parent_at` ignoring its argument"
     );
 
-    assert!(c.res.set_clip_origins(h, &origins), "the offsets moved");
+    // **The scroll carries the pages with the world cell** (island wave VSM2), so
+    // the model has to carry its own before the whole-table check below can mean
+    // anything — and it derives the translation from the two origin tables rather
+    // than being told, which is what makes it an independent check of the
+    // residency's own arithmetic.
+    let mine = |s: &Shadow| s.0.keys().filter(|k| k.0 == h.0).count();
+    let before = mine(&c.shadow);
+    let scroll = c.res.set_clip_origins(h, &origins);
+    assert!(scroll.moved, "the offsets moved");
+    c.shadow.scroll(h.0, &desc, &[], &origins);
+    assert_eq!(
+        (scroll.carried as usize, scroll.evicted as usize),
+        (mine(&c.shadow), before - mine(&c.shadow)),
+        "the residency and the independent translation disagree about how many \
+         pages the scroll carried"
+    );
     assert!(
-        !c.res.set_clip_origins(h, &origins),
+        scroll.carried > 0,
+        "the scroll carried nothing — the fixture has no resident clipmap page \
+         and every assertion below is about an empty permutation"
+    );
+    assert!(
+        !c.res.set_clip_origins(h, &origins).moved,
         "setting the same offsets twice recomputed the table a second time"
     );
     assert_eq!(c.res.clip_origins(h), origins.as_slice());
@@ -507,6 +556,172 @@ fn moving_a_clipmaps_level_offsets_re_points_the_whole_fallback_chain() {
         &c.shadow,
         "after a transaction under the new offsets",
     );
+}
+
+/// **A SCROLL MOVES THE LABEL AND NOT THE TEXELS** (island wave VSM2, clause 1)
+/// — the property the whole wave rests on, as a bijection between world cells and
+/// slots that survives the window sliding.
+///
+/// Wave I7b measured what the absence of this cost: on the lit island **532 of
+/// 933 dirty shadow pages a frame were "moved"**, and ~98 % of those held depth
+/// the atlas already had under a label that had changed. The claim here is
+/// exactly the counter of that: after a one-page shift of level 0's window, every
+/// world cell that is still inside it is in **the slot it was already in**, and
+/// the only pages the residency is missing are the ones the window newly exposes.
+///
+/// Three things are asserted rather than one, because each is a different way for
+/// a re-seat to be wrong:
+///
+/// * **the cells kept their slots** — a `cell -> slot` map taken before and after
+///   is *identical* on the intersection, which a re-seat that re-labelled by
+///   re-admitting would fail;
+/// * **the counts** — `carried` + `evicted` is the whole resident set, `evicted`
+///   is exactly the trailing column, and the arm names the numbers (56 and 8 at
+///   level 0 of an 8×8 grid) rather than reading them back;
+/// * **only the entering column is absent**, checked over every page of the level,
+///   which is what makes "the deferral backlog drains" possible at all.
+///
+/// The coarse levels are the control in the same run: their windows did *not*
+/// move, so not one of their pages may change label.
+#[test]
+fn a_clipmap_scroll_keeps_every_slot_with_its_world_cell() {
+    const N: u32 = 8;
+    const LEVELS: u32 = 3;
+    let mut res = atlas(u64::from(LEVELS * N * N));
+    let h = res
+        .register_light(VsmLightDesc::clipmap(LEVELS, N))
+        .expect("a three-level clipmap");
+    let desc = res.desc(h).expect("registered").clone();
+
+    // A window somewhere out in the world, so a cell index is not its label and a
+    // re-seat that forgot the origin has somewhere to be wrong.
+    let was: Vec<(i64, i64)> = vec![(1_000, -400), (500, -200), (250, -100)];
+    assert!(res.set_clip_origins(h, &was).moved);
+
+    // Every page of every level resident, so the scroll has a full grid to
+    // permute and the trailing column is a whole column.
+    let wants: Vec<VsmWant> = (0..LEVELS)
+        .flat_map(|l| (0..N).flat_map(move |y| (0..N).map(move |x| VsmPage::flat(l, x, y))))
+        .map(|p| VsmWant::new(h, p))
+        .collect();
+    let mut shadow = Shadow::default();
+    shadow.apply(&res.apply_wants(&wants));
+    assert_eq!(
+        shadow.0.len(),
+        (LEVELS * N * N) as usize,
+        "the fixture did not fill the atlas"
+    );
+    assert_world(&res, &shadow, "before the scroll");
+
+    // `cell -> slot`, derived from the origins the residency is holding.
+    let cells = |res: &VsmResidency| -> BTreeMap<(u32, i64, i64), u32> {
+        let o = res.clip_origins(h).to_vec();
+        let mut out = BTreeMap::new();
+        for slot in 0..res.geometry().slot_count() {
+            if let Some((light, p)) = res.slot_occupant(slot) {
+                assert_eq!(light, h);
+                let g = desc.clip_origin(&o, p.level);
+                out.insert((p.level, g.0 + i64::from(p.x), g.1 + i64::from(p.y)), slot);
+            }
+        }
+        out
+    };
+    let before = cells(&res);
+    assert_eq!(before.len(), (LEVELS * N * N) as usize);
+
+    // Level 0's window slides one page along x. The coarse levels do not move —
+    // which is P27.3's per-level snapping, and the control in this run.
+    let now: Vec<(i64, i64)> = vec![(1_001, -400), (500, -200), (250, -100)];
+    let scroll = res.set_clip_origins(h, &now);
+    assert_eq!(
+        (scroll.moved, scroll.carried, scroll.evicted),
+        (true, LEVELS * N * N - N, N),
+        "a one-column shift of one level must carry every page but that level's \
+         trailing column"
+    );
+
+    // 1. THE CELLS KEPT THEIR SLOTS.
+    let after = cells(&res);
+    for (cell, slot) in &after {
+        assert_eq!(
+            before.get(cell),
+            Some(slot),
+            "world cell {cell:?} is in slot {slot} and was somewhere else before \
+             the scroll — the texels moved with the label instead of with the world"
+        );
+    }
+    assert_eq!(after.len(), before.len() - N as usize);
+
+    // 2. …and the coarse levels did not move at all, label for label.
+    for slot in 0..res.geometry().slot_count() {
+        if let (Some((_, a)), Some((_, b))) = (
+            res.slot_occupant(slot),
+            // what the slot held before, from the pre-scroll model
+            shadow.0.iter().find(|(_, &s)| s == slot).map(|(k, _)| *k),
+        ) {
+            if a.level > 0 {
+                assert_eq!(
+                    a, b,
+                    "slot {slot} re-labelled a page of a level whose window did not move"
+                );
+            }
+        }
+    }
+
+    // 3. ONLY THE ENTERING COLUMN IS ABSENT, over every page of level 0.
+    let mut missing = Vec::new();
+    for y in 0..N {
+        for x in 0..N {
+            if !res.is_resident(h, VsmPage::flat(0, x, y)) {
+                missing.push((x, y));
+            }
+        }
+    }
+    assert_eq!(
+        missing,
+        (0..N).map(|y| (N - 1, y)).collect::<Vec<_>>(),
+        "the pages the scroll left missing are not exactly the column the window \
+         newly exposed"
+    );
+
+    // And the table is still exactly the independent walk's answer, under the new
+    // window and the carried slots.
+    shadow.scroll(h.0, &desc, &was, &now);
+    assert_world(&res, &shadow, "after the scroll");
+
+    // **THE OTHER DIRECTION, and it is not symmetry for its own sake.** A window
+    // that slides *back* moves a page's index **up**, so a slot walked in
+    // ascending order lands on a cell whose own occupant has not been carried
+    // yet. A one-pass re-seat is correct in one direction and silently orphans a
+    // slot in the other; this is the direction that says so. Two pages back, so
+    // the intersection with the pre-scroll window is a proper subset in both
+    // axes and neither column is the one that just entered.
+    let back: Vec<(i64, i64)> = vec![(1_000, -401), (500, -200), (250, -100)];
+    // Refilled first, so the shift below is over a **whole** grid and its drop is
+    // the named `2N − 1` rather than whatever the previous scroll happened to
+    // leave.
+    shadow.apply(&res.apply_wants(&wants));
+    assert_world(&res, &shadow, "after the entering column was admitted");
+    let mid = cells(&res);
+    assert_eq!(mid.len(), (LEVELS * N * N) as usize);
+    let scroll = res.set_clip_origins(h, &back);
+    assert_eq!(
+        (scroll.moved, scroll.evicted),
+        (true, 2 * N - 1),
+        "a diagonal one-page shift must drop one row and one column, sharing a corner"
+    );
+    let end = cells(&res);
+    assert!(!end.is_empty());
+    for (cell, slot) in &end {
+        assert_eq!(
+            mid.get(cell),
+            Some(slot),
+            "world cell {cell:?} changed slot on a backwards scroll — a one-pass \
+             in-place permutation orphans a slot in exactly this direction"
+        );
+    }
+    shadow.scroll(h.0, &desc, &now, &back);
+    assert_world(&res, &shadow, "after the backwards scroll");
 }
 
 /// **LRU honesty**, with the timeline written out so the expected victim is a

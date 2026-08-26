@@ -84,6 +84,16 @@ pub struct VsmStreamStats {
     /// does not scroll when the camera turns in place — and that is a
     /// measurement the memo prints rather than a defect.
     pub speculative_wants: u64,
+    /// **Pages carried across a clipmap scroll**, summed over frames (island
+    /// wave VSM2) — see [`inf_vsm::VsmScroll::carried`].
+    ///
+    /// The counter that says the world-cell residency is doing anything at all.
+    /// A scroll that re-seated nothing leaves `level_shifts` moving exactly as it
+    /// did before the wave, and only this tells the two apart.
+    pub scroll_carried: u64,
+    /// **Pages a clipmap scroll dropped off the trailing edge**, summed over
+    /// frames (island wave VSM2) — see [`inf_vsm::VsmScroll::evicted`].
+    pub scroll_evicted: u64,
     /// **Marking threads dispatched**, summed over frames (P27.5) — the tier
     /// knob's own engagement counter.
     ///
@@ -101,8 +111,8 @@ impl VsmStreamStats {
     pub fn summary(&self) -> String {
         format!(
             "vsm marking: {} frames, {} projections, {} admits / {} evicts, {} deferred, \
-             {} marked + {} speculative wants, mask {} landed / {} missed, {} level shifts, \
-             {} marking threads",
+             {} marked + {} speculative wants, mask {} landed / {} missed, {} level shifts \
+             ({} pages carried / {} scrolled off), {} marking threads",
             self.frames,
             self.projections,
             self.admits,
@@ -113,6 +123,8 @@ impl VsmStreamStats {
             self.mark_frames,
             self.mark_misses,
             self.level_shifts,
+            self.scroll_carried,
+            self.scroll_evicted,
             self.mark_threads,
         )
     }
@@ -709,9 +721,15 @@ impl VsmSystem {
         let mut moved: Vec<VsmLightHandle> = Vec::new();
         for (i, layout) in self.layouts.iter().enumerate() {
             let h = VsmLightHandle(i as u32);
-            if self.residency.set_clip_origins(h, &layout.clip_origins) {
+            let scroll = self.residency.set_clip_origins(h, &layout.clip_origins);
+            if scroll.moved {
                 moved.push(h);
             }
+            // **The scroll's own engagement counters** (island wave VSM2): a
+            // re-seat that carried nothing and a frame with no shift look
+            // identical in `level_shifts` alone.
+            self.stats.scroll_carried += u64::from(scroll.carried);
+            self.stats.scroll_evicted += u64::from(scroll.evicted);
         }
         self.stats.level_shifts += moved.len() as u64;
 

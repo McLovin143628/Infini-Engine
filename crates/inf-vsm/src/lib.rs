@@ -92,8 +92,8 @@ pub use atlas::{
 pub use mark::{VsmMarkLayout, VSM_MARK_BITS_PER_WORD};
 pub use residency::{
     resolved_table, VsmAdmit, VsmError, VsmEvict, VsmLightHandle, VsmPriority, VsmResidency,
-    VsmResolved, VsmStats, VsmTransaction, VsmWant, MAX_VSM_PAGES_PER_LIGHT, VSM_PRIORITY_MARKED,
-    VSM_PRIORITY_SPECULATIVE,
+    VsmResolved, VsmScroll, VsmStats, VsmTransaction, VsmWant, MAX_VSM_PAGES_PER_LIGHT,
+    VSM_PRIORITY_MARKED, VSM_PRIORITY_SPECULATIVE,
 };
 pub use table::{
     pack_entry, unpack_entry, VsmEntry, MAX_SLOT_INDEX, VSM_ENTRY_NONE, VSM_TABLE_HEADER_WORDS,

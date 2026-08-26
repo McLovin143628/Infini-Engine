@@ -48,7 +48,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::address::{VsmDescError, VsmLightDesc, VsmPage};
+use crate::address::{VsmDescError, VsmLightDesc, VsmPage, VsmTreeKind};
 use crate::atlas::{plan_atlas, VsmAdvisory, VsmAtlasConfig, VsmAtlasGeometry};
 use crate::table::{pack_entry, unpack_entry, TableImage, MAX_SLOT_INDEX, VSM_ENTRY_NONE};
 
@@ -265,6 +265,34 @@ impl VsmTransaction {
     }
 }
 
+/// **What a clipmap scroll did to residency** (island wave VSM2) — the return of
+/// [`VsmResidency::set_clip_origins`].
+///
+/// A clipmap level's page grid is a *window* on a fixed world lattice, so when
+/// the window slides the world cell that was page `(x, y)` becomes page
+/// `(x − Δx, y − Δy)`. Until this wave the pages kept their **labels** and
+/// therefore changed cell: every slot in the atlas suddenly described somewhere
+/// else, and the raster re-drew depth it already held. They keep their **cell**
+/// now — the slot moves with the world, and only the row and column the window
+/// newly exposes are missing.
+///
+/// The two counts are the engagement counters that make that falsifiable. A
+/// re-seat that did nothing and a scroll that moved no page produce the same
+/// residency; only [`carried`](Self::carried) tells them apart, and only
+/// [`evicted`](Self::evicted) says the trailing band really left.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VsmScroll {
+    /// Whether the origins moved at all. A no-op call recomputes nothing, so a
+    /// host may call [`VsmResidency::set_clip_origins`] every frame.
+    pub moved: bool,
+    /// Resident pages re-seated onto their new label, **keeping their slot** and
+    /// therefore keeping their texels.
+    pub carried: u32,
+    /// Resident pages whose world cell left the window: their slots are freed,
+    /// which is what makes room for the row and column entering the other side.
+    pub evicted: u32,
+}
+
 /// Counters for the debug/stats path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VsmStats {
@@ -286,6 +314,12 @@ pub struct VsmStats {
     /// Wants naming an unknown light handle since the residency was created.
     /// Cumulative, because the interesting reading is "has this ever happened".
     pub unknown_light: u64,
+    /// Pages carried across a clipmap scroll — see [`VsmScroll::carried`].
+    /// Cumulative.
+    pub scroll_carried: u64,
+    /// Pages a clipmap scroll dropped off the trailing edge — see
+    /// [`VsmScroll::evicted`]. Cumulative.
+    pub scroll_evicted: u64,
 }
 
 impl VsmStats {
@@ -453,7 +487,8 @@ impl VsmResidency {
             .map_or(&[], |l| &l.clip_origins)
     }
 
-    /// **Re-point one light's per-level clipmap grids** (P27.3).
+    /// **Re-point one light's per-level clipmap grids, carrying the pages with
+    /// the world** (P27.3, rewritten by island wave VSM2).
     ///
     /// P27.1 shipped one snapped centre for every level, which made the
     /// concentric `N/4 + x/2` parent rule exact and made a *coarse* level's grid
@@ -462,25 +497,64 @@ impl VsmResidency {
     /// levels stop being concentric, so the fallback chain has to be recomputed
     /// against the new offsets ([`VsmLightDesc::parent_at`]).
     ///
-    /// **The pages keep their slots.** A page whose *world cell* changed is
-    /// stale content, not a stale allocation, and which of them is stale is a
-    /// question about the raster's content stamps rather than about residency —
-    /// so this layer does what it owns (the entry chain) and reports the change
-    /// rather than guessing at the other half.
+    /// # THE SLOT BELONGS TO THE WORLD CELL, NOT TO THE LABEL
     ///
-    /// Returns whether anything moved; a no-op call recomputes nothing and does
-    /// not move the light's generation, so a host may call it every frame.
-    pub fn set_clip_origins(&mut self, light: VsmLightHandle, origins: &[(i64, i64)]) -> bool {
+    /// P27.3 shipped this door with the sentence *"the pages keep their slots. A
+    /// page whose world cell moved holds stale **content**, not a stale
+    /// allocation"*, and §5 of `docs/memos/p27-3-page-cache.md` carried the price
+    /// as an honest bound: *"there is no clipmap scroll … every resident page of
+    /// that level names a different world cell and is re-rasterized"*. Island
+    /// wave I7b put the number on it — on the lit island **532 of 933 dirty pages
+    /// a frame were "moved"**, about 98 % of them holding depth the atlas already
+    /// had, in a slot that now answered to a different label — and routed the fix
+    /// by name. This is it.
+    ///
+    /// A window that slides by `Δ` re-labels page `(x, y)` to `(x − Δx, y − Δy)`:
+    /// a **translation in page-index space and nothing else** — no matrix, no
+    /// projection, no basis, and the same arithmetic
+    /// `inf_render::scrolled_page` already predicts a want with. So the whole
+    /// re-seat is a permutation of `resident` and of the slots' own occupant
+    /// records, `O(resident slots)` rather than `O(pages)`, and the pages that
+    /// fall off the trailing edge are the only ones that lose their allocation.
+    ///
+    /// The translation is a **bijection** on the surviving set, so the old entries
+    /// are all cleared before any new one is written: a one-pass walk would
+    /// otherwise clear a cell a page it had already carried was sitting in.
+    ///
+    /// # Only the levels that moved are recomputed
+    ///
+    /// A level's entries are a function of its own residency, its own origin, its
+    /// parent's origin and its parent's already-final words. A level above the
+    /// deepest one whose origin moved has all four unchanged, so its words are
+    /// unchanged — and the fine levels, which are the ones that shift, are a
+    /// small suffix of the walk. On the shipped eight-level ladder a camera at
+    /// 0.9 m a frame moves level 0's window nine frames in ten and level 7's one
+    /// in a hundred and forty.
+    ///
+    /// Returns the counts; a no-op call recomputes nothing, re-seats nothing and
+    /// does not move the light's generation, so a host may call it every frame.
+    pub fn set_clip_origins(&mut self, light: VsmLightHandle, origins: &[(i64, i64)]) -> VsmScroll {
         let Some(l) = self.lights.get_mut(light.index()) else {
-            return false;
+            return VsmScroll::default();
         };
         if l.clip_origins == origins {
-            return false;
+            return VsmScroll::default();
         }
-        l.clip_origins = origins.to_vec();
-        self.recompute_entries(light.index());
-        self.lights[light.index()].generation = next_stamp();
-        true
+        let was = std::mem::replace(&mut l.clip_origins, origins.to_vec());
+        let li = light.index();
+        let (carried, evicted) = self.reseat_world_cells(li, &was);
+        let deepest = self.deepest_moved_level(li, &was);
+        self.recompute_entries_to(li, deepest);
+        self.lights[li].generation = next_stamp();
+        self.stats.scroll_carried += u64::from(carried);
+        self.stats.scroll_evicted += u64::from(evicted);
+        self.stats.evicts += u64::from(evicted);
+        self.stats.resident = self.stats.resident.saturating_sub(evicted);
+        VsmScroll {
+            moved: true,
+            carried,
+            evicted,
+        }
     }
 
     /// **Register a shadow-casting light's page tree.**
@@ -680,35 +754,147 @@ impl VsmResidency {
         self.layout_dirty = true;
     }
 
+    /// **The deepest level whose window moved between `was` and the light's
+    /// current origins** (island wave VSM2), or `None` when none did.
+    ///
+    /// Read through [`VsmLightDesc::clip_origin`] on both sides rather than off
+    /// the two slices, so a table that is *shorter* than the ladder — the empty
+    /// one a freshly registered light carries, which means "exactly concentric" —
+    /// compares against the value it stands for instead of against a missing
+    /// entry.
+    fn deepest_moved_level(&self, l: usize, was: &[(i64, i64)]) -> Option<u32> {
+        let light = &self.lights[l];
+        (0..light.desc.level_count())
+            .filter(|&lv| {
+                light.desc.clip_origin(was, lv) != light.desc.clip_origin(&light.clip_origins, lv)
+            })
+            .next_back()
+    }
+
+    /// **Carry every resident clipmap page onto the label its world cell now
+    /// wears** (island wave VSM2). Returns `(carried, evicted)`.
+    ///
+    /// See [`set_clip_origins`](Self::set_clip_origins) for the ruling. Only a
+    /// clipmap has a window on the world: a quadtree's and a cube's levels are
+    /// nested inside the light's own frustum, their origins mean nothing
+    /// ([`VsmLightDesc::clip_origin`] says so), and a translation applied to them
+    /// would move pages that had not moved.
+    fn reseat_world_cells(&mut self, l: usize, was: &[(i64, i64)]) -> (u32, u32) {
+        let desc = self.lights[l].desc.clone();
+        if !matches!(desc.kind, VsmTreeKind::Clipmap) {
+            return (0, 0);
+        }
+        let now = self.lights[l].clip_origins.clone();
+        let deltas: Vec<(i64, i64)> = (0..desc.level_count())
+            .map(|lv| {
+                let a = desc.clip_origin(was, lv);
+                let b = desc.clip_origin(&now, lv);
+                (a.0 - b.0, a.1 - b.1)
+            })
+            .collect();
+
+        // One pass over the SLOTS. An atlas has thousands of them and a clipmap
+        // ladder has millions of addresses, which is `collect_pages`' argument for
+        // walking slots and it is the same argument here.
+        let mut moves: Vec<(u32, VsmPage, Option<VsmPage>)> =
+            Vec::with_capacity(self.stats.resident as usize);
+        for (slot, s) in self.slots.iter().enumerate() {
+            let Some((owner, page)) = s.occupant else {
+                continue;
+            };
+            if owner as usize != l {
+                continue;
+            }
+            let (dx, dy) = deltas[page.level as usize];
+            let g = desc.levels[page.level as usize];
+            let (x, y) = (i64::from(page.x) + dx, i64::from(page.y) + dy);
+            let inside =
+                (0..i64::from(g.pages_x)).contains(&x) && (0..i64::from(g.pages_y)).contains(&y);
+            let to = inside.then(|| VsmPage::new(page.face, page.level, x as u32, y as u32));
+            moves.push((slot as u32, page, to));
+        }
+
+        // Clear first, seat second: the translation is a bijection on the pages
+        // that survive it, but a page's destination may still hold a page that
+        // has not been carried yet — and a one-pass walk would clear the entry it
+        // had already written.
+        for &(_, from, _) in &moves {
+            let idx = desc.entry_index(from).expect("a seated page exists");
+            self.lights[l].resident[idx as usize] = None;
+        }
+        let (mut carried, mut evicted) = (0u32, 0u32);
+        for &(slot, _, to) in &moves {
+            match to {
+                Some(to) => {
+                    let idx = desc.entry_index(to).expect("checked against the grid");
+                    debug_assert!(
+                        self.lights[l].resident[idx as usize].is_none(),
+                        "two slots carried onto page {to:?} — the scroll is not a bijection"
+                    );
+                    self.lights[l].resident[idx as usize] = Some(slot);
+                    self.slots[slot as usize].occupant = Some((l as u32, to));
+                    carried += 1;
+                }
+                None => {
+                    self.slots[slot as usize].occupant = None;
+                    self.free.insert(slot);
+                    evicted += 1;
+                }
+            }
+        }
+        (carried, evicted)
+    }
+
     /// Fill one light's entries from scratch, coarsest level first, so a level's
     /// non-resident pages can simply copy their parent's already-final entry.
     ///
     /// The only from-scratch computation in the crate; everything else patches.
     fn recompute_entries(&mut self, l: usize) {
+        self.recompute_entries_to(l, Some(self.lights[l].desc.coarsest_level()));
+    }
+
+    /// [`recompute_entries`](Self::recompute_entries) over levels `0..=deepest`
+    /// only (island wave VSM2) — see [`set_clip_origins`](Self::set_clip_origins)
+    /// for why that suffix is the whole of what a scroll can change. `None`
+    /// recomputes nothing.
+    fn recompute_entries_to(&mut self, l: usize, deepest: Option<u32>) {
+        let Some(deepest) = deepest else {
+            return;
+        };
         let desc = self.lights[l].desc.clone();
         let origins = self.lights[l].clip_origins.clone();
+        let deepest = deepest.min(desc.coarsest_level());
+        // **The index arithmetic is hoisted, not re-derived per page** (island
+        // wave VSM2). `entry_index` sums every coarser level's page count and
+        // `entry_word` calls it a second time, so the shipped loop paid two
+        // `O(levels)` walks for each of a ladder's pages — 32 768 of them on the
+        // shipped 8 × 64² clipmap, on the frame budget of a pass that runs
+        // whenever the camera crosses a metre. Within one `(face, level)` the
+        // entry index is `first + y·pages_x + x`, which is exactly what the
+        // table's own level record hands the receiver.
+        let entries = self.table.blocks[l].entries;
         for face in 0..desc.faces() {
-            for level in (0..desc.level_count()).rev() {
+            for level in (0..=deepest).rev() {
                 let g = desc.levels[level as usize];
+                let first = desc.level_first_entry(face, level).expect("in tree") as usize;
                 for y in 0..g.pages_y {
+                    let row = first + (y * g.pages_x) as usize;
                     for x in 0..g.pages_x {
-                        let at = VsmPage::new(face, level, x, y);
-                        let idx = desc.entry_index(at).expect("in tree");
-                        let word = match self.lights[l].resident[idx as usize] {
+                        let idx = row + x as usize;
+                        let word = match self.lights[l].resident[idx] {
                             Some(slot) => pack_entry(slot, level),
                             // A parent the offsets put outside the coarser grid
                             // has no entry to inherit, and `NONE` is the right
                             // answer rather than a panic: it reads as *lit*.
                             None => match desc
-                                .parent_at(&origins, at)
-                                .and_then(|p| self.table.entry_word(l, &desc, p))
+                                .parent_at(&origins, VsmPage::new(face, level, x, y))
+                                .and_then(|p| desc.entry_index(p))
                             {
-                                Some(w) => self.table.words[w],
+                                Some(p) => self.table.words[entries + p as usize],
                                 None => VSM_ENTRY_NONE,
                             },
                         };
-                        let w = self.table.entry_word(l, &desc, at).expect("in tree");
-                        self.table.words[w] = word;
+                        self.table.words[entries + idx] = word;
                     }
                 }
             }
