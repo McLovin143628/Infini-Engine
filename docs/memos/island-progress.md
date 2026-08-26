@@ -7849,10 +7849,10 @@ RTX 4070 Ti at 320×180:
 | voxel volume under a probe box | 37 925 | **430** | 0 | 255 darkened, 87 brightened |
 | fracture debris on a floor | 52 177 | **7 033** | 0 | 5 604 darkened, 10 brightened |
 
-**The fourth column is the audit's correction.** The three numbers in bold were measured at
+**The last column is the audit's correction.** The three numbers in bold were measured at
 `aaa66324`, against the P13.3a hemisphere kernel. Clause 4 replaced that estimator two
 commits later and the AO field moved with it, so the counts a reader gets from the shipped
-tree are the fourth column's — and the "0 brightened" became a handful, which is why the arm
+tree are the last column's — and the "0 brightened" became a handful, which is why the arm
 itself was already amended (in `dc488b69`) from "no pixel brightened" to "the net luminance
 fell". A measurement table has to name the build it was taken on.
 
