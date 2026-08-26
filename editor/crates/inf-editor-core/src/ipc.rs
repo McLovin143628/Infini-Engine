@@ -2047,6 +2047,34 @@ pub struct RenderSettingsRecordDto {
     pub shadows_max_distance: f32,
     pub gi_enabled: bool,
     pub gi_intensity: f32,
+    // -- schema v26 (wave VIS1a) ---------------------------------------------
+    //
+    // ALL of them cross, including the ones whose consumer lands in VIS1b. A DTO
+    // that carried only what the panel currently draws would reset every other
+    // field to its default on the next debounced write -- the panel round-trips
+    // the whole block, so the block has to be whole.
+    pub ssr_enabled: bool,
+    pub ssr_distance: f32,
+    pub ssr_thickness: f32,
+    pub ssr_quality: u8,
+    pub ssr_intensity: f32,
+    pub ssr_roughness_cutoff: f32,
+    pub exposure_mode: u8,
+    pub exposure_compensation_ev: f32,
+    pub exposure_min_luminance: f32,
+    pub exposure_max_luminance: f32,
+    pub exposure_adaptation_speed: f32,
+    pub bloom_karis: bool,
+    pub flare_enabled: bool,
+    pub flare_intensity: f32,
+    pub flare_ghost_count: u32,
+    pub flare_halo: f32,
+    pub flare_streak: f32,
+    pub vignette_intensity: f32,
+    pub vignette_smoothness: f32,
+    pub chromatic_aberration: f32,
+    pub grain_intensity: f32,
+    pub grain_size: f32,
 }
 
 impl RenderSettingsRecordDto {
@@ -2067,6 +2095,28 @@ impl RenderSettingsRecordDto {
             shadows_max_distance: r.shadows_max_distance,
             gi_enabled: r.gi_enabled,
             gi_intensity: r.gi_intensity,
+            ssr_enabled: r.ssr_enabled,
+            ssr_distance: r.ssr_distance,
+            ssr_thickness: r.ssr_thickness,
+            ssr_quality: r.ssr_quality,
+            ssr_intensity: r.ssr_intensity,
+            ssr_roughness_cutoff: r.ssr_roughness_cutoff,
+            exposure_mode: r.exposure_mode,
+            exposure_compensation_ev: r.exposure_compensation_ev,
+            exposure_min_luminance: r.exposure_min_luminance,
+            exposure_max_luminance: r.exposure_max_luminance,
+            exposure_adaptation_speed: r.exposure_adaptation_speed,
+            bloom_karis: r.bloom_karis,
+            flare_enabled: r.flare_enabled,
+            flare_intensity: r.flare_intensity,
+            flare_ghost_count: r.flare_ghost_count,
+            flare_halo: r.flare_halo,
+            flare_streak: r.flare_streak,
+            vignette_intensity: r.vignette_intensity,
+            vignette_smoothness: r.vignette_smoothness,
+            chromatic_aberration: r.chromatic_aberration,
+            grain_intensity: r.grain_intensity,
+            grain_size: r.grain_size,
         }
     }
 
@@ -2087,6 +2137,28 @@ impl RenderSettingsRecordDto {
             shadows_max_distance: self.shadows_max_distance,
             gi_enabled: self.gi_enabled,
             gi_intensity: self.gi_intensity,
+            ssr_enabled: self.ssr_enabled,
+            ssr_distance: self.ssr_distance,
+            ssr_thickness: self.ssr_thickness,
+            ssr_quality: self.ssr_quality,
+            ssr_intensity: self.ssr_intensity,
+            ssr_roughness_cutoff: self.ssr_roughness_cutoff,
+            exposure_mode: self.exposure_mode,
+            exposure_compensation_ev: self.exposure_compensation_ev,
+            exposure_min_luminance: self.exposure_min_luminance,
+            exposure_max_luminance: self.exposure_max_luminance,
+            exposure_adaptation_speed: self.exposure_adaptation_speed,
+            bloom_karis: self.bloom_karis,
+            flare_enabled: self.flare_enabled,
+            flare_intensity: self.flare_intensity,
+            flare_ghost_count: self.flare_ghost_count,
+            flare_halo: self.flare_halo,
+            flare_streak: self.flare_streak,
+            vignette_intensity: self.vignette_intensity,
+            vignette_smoothness: self.vignette_smoothness,
+            chromatic_aberration: self.chromatic_aberration,
+            grain_intensity: self.grain_intensity,
+            grain_size: self.grain_size,
         }
     }
 }

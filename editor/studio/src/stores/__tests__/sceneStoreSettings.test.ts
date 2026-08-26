@@ -34,6 +34,30 @@ const sample: LevelSettingsDto = {
     shadows_max_distance: 60.0,
     gi_enabled: false,
     gi_intensity: 1.0,
+    // Schema v26 (wave VIS1a). Every value is the record's own default, so this
+    // fixture stays what it has always been: a level with nothing authored.
+    ssr_enabled: false,
+    ssr_distance: 24.0,
+    ssr_thickness: 0.15,
+    ssr_quality: 1,
+    ssr_intensity: 1.0,
+    ssr_roughness_cutoff: 0.4,
+    exposure_mode: 0,
+    exposure_compensation_ev: 0.0,
+    exposure_min_luminance: 0.03,
+    exposure_max_luminance: 8.0,
+    exposure_adaptation_speed: 1.5,
+    bloom_karis: false,
+    flare_enabled: false,
+    flare_intensity: 0.25,
+    flare_ghost_count: 4,
+    flare_halo: 0.3,
+    flare_streak: 0.0,
+    vignette_intensity: 0.0,
+    vignette_smoothness: 0.0,
+    chromatic_aberration: 0.0,
+    grain_intensity: 0.0,
+    grain_size: 0.0,
   },
   partition: {
     enabled: false,
@@ -120,5 +144,44 @@ describe("sceneStore level settings slice", () => {
     vi.advanceTimersByTime(300);
     expect(sceneIpc.setSettings).toHaveBeenCalledTimes(1);
     expect(sceneIpc.setSettings).toHaveBeenCalledWith(edited);
+  });
+
+  // **A v26 edit carries the WHOLE block across** (wave VIS1a).
+  //
+  // The World Settings panel only draws controls for the fields that have a
+  // consumer this slice — the SSR block. Everything else v26 added (exposure,
+  // flare, the lens trio) is invisible in the UI, and the failure mode that
+  // creates is silent: a panel that wrote only what it drew would reset an
+  // authored exposure compensation to zero the first time somebody ticked a
+  // reflection checkbox. The DTO carries every field for exactly this reason,
+  // and this is the arm that says so.
+  it("an SSR edit does not reset the v26 fields the panel does not draw", () => {
+    const store = useSceneStore.getState();
+    const authored: LevelSettingsDto = {
+      ...sample,
+      render: {
+        ...sample.render,
+        exposure_mode: 1,
+        exposure_compensation_ev: -1.5,
+        flare_enabled: true,
+        grain_intensity: 0.2,
+      },
+    };
+    store.setLevelSettings(authored);
+
+    // What the panel's `patchRender({ ssr_enabled: true })` produces.
+    const patched: LevelSettingsDto = {
+      ...authored,
+      render: { ...authored.render, ssr_enabled: true },
+    };
+    store.setLevelSettings(patched);
+    vi.advanceTimersByTime(300);
+
+    const sent = vi.mocked(sceneIpc.setSettings).mock.calls.at(-1)?.[0] as LevelSettingsDto;
+    expect(sent.render.ssr_enabled).toBe(true);
+    expect(sent.render.exposure_mode).toBe(1);
+    expect(sent.render.exposure_compensation_ev).toBe(-1.5);
+    expect(sent.render.flare_enabled).toBe(true);
+    expect(sent.render.grain_intensity).toBe(0.2);
   });
 });

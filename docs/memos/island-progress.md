@@ -8012,6 +8012,111 @@ pass is still an opaque shader with alpha and reads the scene never — it belon
 with the MAT wave's translucent rewrite), **reflection probes** and **planar
 reflections**.
 
+### Clause 3 — scene v25 → v26, the arc's one window
+
+**Spent once, for both slices.** VIS1a needs the SSR block; VIS1b needs exposure,
+flare and the lens trio. A second bump would be a second ladder rung for fields
+that were already known, so the window carries **all twenty-two** at once, plus
+the one component change the arc needs.
+
+**Two growths, two freezes.**
+
+1. `RenderSettingsRecord` appends twenty-two fields. The block sits *inside* the
+   file settings with `partition` after it, so the pre-v26 shape freezes as
+   `RenderSettingsRecordV25` and the settings as `RuntimeSettingsV25` /
+   `LevelSettingsV25`; every frozen file record v8..v25 is repointed at the
+   latter. `RuntimeSettingsV9` — the pre-v10 rung — freezes its render block too:
+   a frozen record cannot carry a live one.
+2. `inf_ecs::components::Material` appends `emissive_intensity`. That moves the
+   component's bytes, so `MaterialV25` freezes and the entity record gains a
+   **third** generic parameter. Three parameters, one `map_slots` that names all
+   forty-eight fields: the ladder's own idiom, third use, and the alternative was
+   a third ninety-line restatement in each of two crates.
+
+**What (2) closes.** `Material::emissive` is an 8-bit sRGB colour, so it cannot
+exceed 1.0 in any channel, and the renderer's default bloom threshold is a linear
+luminance of 1.0. An emissive material authored in the editor could *touch* the
+threshold and never cross it — while `hdr_bloom.png` constructs a value of 9.0 by
+hand, because a golden may reach past the UI. A colour picker answers "what
+colour"; nothing answered "how bright". `Material::emissive_linear()` is the
+multiplication, and it is a **method** rather than an expression at each of the
+five packing sites across the two hosts, because "the editor viewport and the
+shipped player agree about what a material emits" is exactly the claim five copies
+of one expression quietly stop supporting.
+
+**The wire cost, measured rather than derived**: **70 bytes per file** and **4
+bytes per materialed entity**. The derivation is where this goes wrong —
+`flare_ghost_count` is a `u32` whose default of 4 encodes in **one** byte under
+bincode's varints, not four — so `the_v26_costs_are_what_the_constants_say`
+encodes both shapes and subtracts, and every other price in the file is stated by
+reference to the two constants it pins.
+
+**The seams.** Both `apply_record` copies apply **every** v26 field, including the
+ones whose consumer lands in VIS1b: an unread field is cheap where an unread
+*wire* field is not, and the seam is the only place a field can be checked before
+its consumer exists.
+
+#### The pin that was missing, and is not any more
+
+The two `apply_record` seams — `inf_player::render` and `inf_viewport::host` —
+have carried a `MIRROR: keep identical to …` doc comment since R-P4 and **nothing
+has ever checked it**. They are in different crates, in different rings, and the
+failure mode is silent: preview and shipping applying a level's block
+differently, which is the claim `PIE == shipping` rests on. This wave doubled the
+size of that mapping, so it is the wave that has to stop trusting the sentence.
+
+`runtime/inf-player/tests/apply_record_mirror.rs` extracts both function bodies,
+strips comments and whitespace, and compares them character for character.
+Mutation-verified: negating one field on one side fails it. Anti-vacuity: it
+asserts the extraction produced more than thirty lines and contains the v26 block,
+so a broken extractor cannot pass by comparing two empty strings.
+
+#### What the panel draws, and what it deliberately does not
+
+The World Settings panel gains a **Reflections** section — screen-space on/off,
+distance, quality, intensity, roughness cutoff, thickness. The exposure, flare and
+lens-trio fields are **not** drawn: their consumers land in VIS1b, and a slider
+that changes nothing is a promise the engine is not keeping.
+
+They still cross the IPC, and that is not optional. A DTO carrying only what the
+panel draws would reset an authored exposure compensation to zero the first time
+somebody ticked a reflection checkbox — the panel round-trips the whole block, so
+the block has to be whole. `an SSR edit does not reset the v26 fields the panel
+does not draw` is the arm.
+
+`Material::emissive_intensity` needs no panel work: the Details panel is
+reflection-driven, and the field derives `Reflect` without `#[reflect(ignore)]`,
+so it appears as a numeric row the day it exists.
+
+#### Counts
+
+Two codec mirrors, two `apply_record` seams, ts-rs bindings regenerated, and
+**twenty-three committed `.inf_lvl` files re-blessed** from v25 to v26 — nineteen
+samples and the four project templates — through `INF_BLESS_SAMPLES=1`, the
+generator lock's own door, so the bytes are the generators' output rather than a
+hand edit.
+
+**And the twenty-three deltas are arithmetic, not assertion.** v26 costs a file
+70 bytes and a materialed entity 4, so every re-blessed level must have grown by
+exactly `70 + 4m` for some integer `m ≥ 0`. All twenty-three do:
+
+| level | delta | ⇒ materials | entities (sidecar) |
+|---|---|---|---|
+| `vgeom-demo/VgeomDemo` | **+1366** | **324** | 325 |
+| `phase29-locomotion` | +186 | 29 | 32 |
+| `phase18-scatter` | +170 | 25 | 31 |
+| `partitioned-world` | +138 | 17 | 20 |
+| `phase16-world` | +134 | 16 | 22 |
+| `phase19-town` | +118 | 12 | 25 |
+| `phase22-playground` | +98 | 7 | 13 |
+| `phase23-workshop`, `blank-3d`, `first-person`, `hybrid-2.5d` | +74 | 1 each | 3 / 3 / 4 / 5 |
+| the other twelve | +70 | 0 | — |
+
+Total **+3346 bytes over 434 materialed entities**. The derived counts are bounded
+by the sidecars' own entity counts in every case, and `VgeomDemo` derives **324
+materials against 325 entities** — 324 meshes and one light, which is what that
+sample is. A formula that merely *fit* would not land there.
+
 ### Clause 4 — GTAO, and a blur that knows what it is blurring
 
 **The estimator changed, not the sample count.** P13.3a projected N points of a
@@ -8148,3 +8253,56 @@ were replaced:
 All three `GOLDEN_SET_DIGEST` pins moved by hand (`838d18fb…` → `84e38ed2…`), with
 the arithmetic written on the phase26 constant. The phase18 **name** array did not
 move and could not: no golden was added or removed, and the set is still 54.
+
+### Carried, by name
+
+1. **VIS-C1b — the GPU-driven half of the depth prepass.** vgeom and scatter do
+   not write it. Their visible sets come from cull compute passes whose occlusion
+   test reads an HZB built from *this frame's* MSAA scene depth, which does not
+   exist when the prepass has to run, and vgeom's two-pass form has no late list
+   at that point. Contributing them means a **second, occlusion-off cull** per
+   asset and per batch into dedicated `visible`/`draw_args` buffers plus a second
+   indirect draw. Culling without occlusion is conservative, so the depth would be
+   a correct superset; whether it pays is the whole question, and it is not
+   answerable without building it. Until it lands, **SSAO, TAA and SSR do not see
+   meshlet geometry or scattered foliage** — on the island that is the vegetation
+   and the buildings.
+2. **VIS-C2b — the attribute prepass, and colour-sourced OPAQUE SSR at zero
+   latency.** Opaque reflections read the previous frame. Making them read this
+   frame needs a same-frame composite after a private resolve, and a composite
+   needs per-pixel `f0`, roughness and a normal, which a forward + 4× MSAA
+   renderer does not have. The two doors are a G-buffer (refused by the standing
+   visbuffer/MSAA coverage ruling) and widening the depth prepass into an
+   attribute prepass — which turns four fragment-less or discard-only pipelines
+   into ones that write material data. A wave of its own. Water does not lag at
+   all, so the visible consequence is confined to opaque surfaces under camera
+   motion.
+3. **VIS-C4b — the AO upsample.** The bilateral blur removes 22 % of the
+   silhouette halo; the remaining 5.1 luminance on the fixture is the
+   half-resolution *upsample*, not the blur. An AO texel covers 2×2 full-res
+   pixels; one straddling an edge takes its depth from the near surface, is
+   computed dark, and the lit passes' bilinear fetch spreads it a pixel onto the
+   far one. Needs a depth-aware upsample in the lit passes or a full-res AO
+   buffer.
+4. **The translucent stage sees THIS frame's colour with LAST frame's matrix.**
+   Water's private refraction resolve writes `scene_hdr` mid-frame, and SSR's
+   colour source is `scene_hdr` through the env group — so on a frame with
+   refracting water *and* SSR on, a translucent surface's reflection samples this
+   frame's opaque colour while reprojecting through the previous frame's
+   view-projection. Under a static camera the two agree; under a moving one the
+   sample is offset by a frame of motion. It needs water, refraction, SSR and a
+   reflective translucent surface at once, and the fix is a second full-resolution
+   HDR target that only SSR reads. Named rather than paid for. The stale sentence
+   that said "nothing downstream sees the intermediate" is corrected in
+   `passes/water.rs`.
+5. **A one-frame render can never show an opaque reflection.** `scene_history_valid`
+   holds the march off on frame 0 and after a resize, because the colour buffer is
+   a zero-initialized allocation then. Every SSR arm therefore renders two or three
+   frames on one renderer. It is the shape `taa_multiframe_stable` already has and
+   the reason SSR is opt-in, but it does mean **no golden can ever capture SSR** —
+   a golden renders one frame from a fresh renderer, twice.
+6. **`voxel.wgsl` still binds no environment group.** Wave VIS1a closed the
+   prepass half of the P21.1 ledger — a voxel volume occludes for SSAO, TAA and
+   SSR now — but a voxel surface still samples no AO, receives no shadow and feeds
+   no GI. The header says so; the routing (meshletize the chunks, P28.2) is
+   unchanged.

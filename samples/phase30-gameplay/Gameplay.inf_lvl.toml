@@ -1,8 +1,8 @@
-schema_version = 25
+schema_version = 26
 guid = "00000000-0000-0000-0000-000084600000"
 title = "Island Gameplay"
 entity_count = 5
-content_hash = "86dabd4482fafc12"
+content_hash = "eb00c328a1d13015"
 dependencies = [
     "00000000-0000-0000-0000-000084600001",
     "00000000-0000-0000-0000-000084600008",

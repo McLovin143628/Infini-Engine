@@ -1569,6 +1569,21 @@ fn the_island_at_shipping_resolution() {
     };
     let (mut lit, lit_tier) = shipped_settings(&gpu, lit_record);
     lit.vsm.enabled = true;
+    // **THE PHOTOREAL ROW** (wave VIS1a): the lit configuration with screen-space
+    // reflections on, through the same authoring door -- `ssr_enabled` is a
+    // schema-v26 field of the render record, so this is what a level that ticks
+    // "Screen-Space" in World Settings produces, not a hand-poked
+    // `RenderSettings`. Its AO is GTAO and its prepass carries terrain, skinned,
+    // voxel and fracture geometry, so this row is the wave's whole GPU cost in
+    // one number, against the LIT row beside it.
+    let (mut lit_ssr, _) = shipped_settings(
+        &gpu,
+        inf_scene::RenderSettingsRecord {
+            ssr_enabled: true,
+            ..lit_record
+        },
+    );
+    lit_ssr.vsm.enabled = true;
     // **THE ALTERNATIVE, PRICED** (island wave I7b) — **and the control island
     // wave VSM2 beat without taking it.**
     //
@@ -1612,6 +1627,7 @@ fn the_island_at_shipping_resolution() {
     for (label, settings) in [
         ("SHIPPED", shipped),
         ("LIT", lit),
+        ("LIT+SSR", lit_ssr),
         ("LIT-COARSE-CLIPMAP", lit_coarse),
     ] {
         let m = measure(&gpu, &mut fx, 1920, 1080, settings, &path);

@@ -235,6 +235,22 @@ pub struct Material {
     /// Self-emitted color (rgb; alpha ignored). Black = non-emissive.
     #[serde(default = "default_emissive")]
     pub emissive: Color,
+    /// **How bright that colour actually is** (`.inf_lvl` schema v26, wave
+    /// VIS1a). A multiplier on [`emissive`](Self::emissive), which is an 8-bit
+    /// sRGB colour and therefore cannot exceed 1.0 in any channel.
+    ///
+    /// **This is what made authored emissive unreachable.** The renderer's HDR
+    /// path thresholds bloom at a linear luminance of 1.0 by default, and the
+    /// brightest colour the Details panel can produce is exactly 1.0 — so an
+    /// emissive material authored in the editor could touch the threshold and
+    /// never cross it, while `hdr_bloom.png` constructs a value of 9.0 by hand
+    /// because a golden may reach past the UI. A colour picker answers "what
+    /// colour", and nothing answered "how bright".
+    ///
+    /// Additive field: `#[serde(default = "default_emissive_intensity")]` → 1.0,
+    /// which reproduces the pre-v26 behaviour exactly (the colour, unscaled).
+    #[serde(default = "default_emissive_intensity")]
+    pub emissive_intensity: f32,
     /// Blend / transparency mode (schema v8). Additive field: `#[serde(default)]`
     /// → [`BlendMode::Opaque`], the pre-v8 behaviour.
     #[serde(default)]
@@ -279,8 +295,28 @@ fn default_roughness() -> f32 {
 fn default_emissive() -> Color {
     Color::new(0.0, 0.0, 0.0, 1.0)
 }
+fn default_emissive_intensity() -> f32 {
+    1.0
+}
 fn default_alpha_cutoff() -> f32 {
     0.5
+}
+
+impl Material {
+    /// **The emitted radiance this surface actually contributes** — the authored
+    /// colour times [`emissive_intensity`](Self::emissive_intensity), rgb (schema
+    /// v26, wave VIS1a).
+    ///
+    /// A method rather than a multiplication at each packing site, because there
+    /// are five of them across two hosts and "the editor viewport and the shipped
+    /// player agree about what a material emits" is exactly the sort of claim
+    /// that five copies of one expression quietly stop supporting. The intensity
+    /// is clamped at zero: a negative multiplier is a light that removes light.
+    pub fn emissive_linear(&self) -> [f32; 3] {
+        let k = self.emissive_intensity.max(0.0);
+        let e = self.emissive.to_array();
+        [e[0] * k, e[1] * k, e[2] * k]
+    }
 }
 
 impl Default for Material {
@@ -290,6 +326,7 @@ impl Default for Material {
             metallic: default_metallic(),
             roughness: default_roughness(),
             emissive: default_emissive(),
+            emissive_intensity: default_emissive_intensity(),
             blend: BlendMode::Opaque,
             alpha_cutoff: default_alpha_cutoff(),
             asset: None,
@@ -6062,6 +6099,45 @@ impl Default for HairGuides {
 mod tests {
     use super::*;
 
+    /// **The emissive intensity is the multiplier the 8-bit colour cannot be**
+    /// (schema v26, wave VIS1a) — the arm the whole field exists for.
+    ///
+    /// `Color` is sRGB in eight bits, so `emissive` cannot exceed 1.0 in any
+    /// channel and an authored emissive could touch the renderer's default bloom
+    /// threshold of 1.0 without ever crossing it. What `emissive_linear` has to
+    /// do is get *past* that ceiling.
+    #[test]
+    fn the_emissive_intensity_reaches_past_the_eight_bit_ceiling() {
+        let m = Material {
+            emissive: Color::new(1.0, 0.5, 0.25, 1.0),
+            emissive_intensity: 12.0,
+            ..Material::default()
+        };
+        assert_eq!(m.emissive_linear(), [12.0, 6.0, 3.0]);
+        assert!(
+            m.emissive_linear()[0] > 1.0,
+            "the whole point: the authored colour alone cannot exceed 1.0"
+        );
+
+        // The default is an identity, so every pre-v26 material emits exactly
+        // what it always did.
+        let d = Material {
+            emissive: Color::new(0.6, 0.4, 0.2, 1.0),
+            ..Material::default()
+        };
+        assert_eq!(d.emissive_intensity, 1.0);
+        assert_eq!(d.emissive_linear(), [0.6, 0.4, 0.2]);
+
+        // A negative multiplier is a light that removes light; it is clamped,
+        // not trusted.
+        let neg = Material {
+            emissive: Color::new(0.5, 0.5, 0.5, 1.0),
+            emissive_intensity: -4.0,
+            ..Material::default()
+        };
+        assert_eq!(neg.emissive_linear(), [0.0, 0.0, 0.0]);
+    }
+
     #[test]
     fn terrain_serde_round_trips_and_defaults() {
         let mut t = Terrain::configured(5, 2.0);
@@ -6963,6 +7039,9 @@ mod tests {
             metallic: 0.2,
             roughness: 0.7,
             emissive: Color::new(0.0, 0.0, 0.0, 1.0),
+            // v26 (wave VIS1a): the multiplier the 8-bit colour above cannot
+            // express, round-tripped beside it.
+            emissive_intensity: 12.5,
             blend: BlendMode::Translucent,
             alpha_cutoff: 0.25,
             // v22 (P26.3b): the persisted `.inf_mat` binding, round-tripped here

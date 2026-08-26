@@ -1,6 +1,6 @@
-schema_version = 25
+schema_version = 26
 guid = "00000000-0000-0000-0000-000084070000"
 title = "Blank 3D"
 entity_count = 3
-content_hash = "be72be9c6506e4ba"
+content_hash = "85a29adbcbb98eaa"
 dependencies = []

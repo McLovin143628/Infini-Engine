@@ -427,7 +427,45 @@ use uuid::Uuid;
 ///     field on `inf_anim::SmTransition`, i.e. **`.inf_sm` v3**, plus a
 ///     `ScenePayload` slot. That is a different container, and bumping a second
 ///     one was outside this wave's mandate. It does not want a scene rung.
-pub const SCHEMA_VERSION: u32 = 25;
+///
+/// * **v26** — wave VIS1a, the photoreal arc's **one** schema window. Two growths
+///   in one bump, and they are one bump on purpose: the arc spans two slices and
+///   a second window would mean a second ladder rung for a feature whose fields
+///   were already known.
+///
+///   1. [`RenderSettingsRecord`] appends **twenty-two** fields — the SSR block
+///      (enabled/distance/thickness/quality/intensity/roughness cutoff), the
+///      exposure block (mode/compensation EV/min-max luminance/adaptation speed),
+///      the Karis bloom flag, the flare block and the lens trio (vignette,
+///      chromatic aberration, grain). The block sits *inside* the file settings
+///      with `partition` after it, so the pre-v26 shape freezes as
+///      `RenderSettingsRecordV25` and the settings as `RuntimeSettingsV25`; every
+///      frozen file record v8..v25 carries the latter.
+///   2. `inf_ecs::components::Material` appends **`emissive_intensity`**. The
+///      component's byte layout moves, so the pre-v26 shape freezes as
+///      `MaterialV25` and the entity record gains a **third** generic parameter
+///      (the `RuntimeEntityGen` idiom, third use) rather than a third
+///      restatement of forty-eight fields.
+///
+///   **What (2) closes**: authored emissive was unreachable at useful magnitudes.
+///   `Material::emissive` is an 8-bit sRGB colour, so it cannot exceed 1.0 in any
+///   channel, and the renderer's bloom threshold is a linear luminance of 1.0 —
+///   an emissive material authored in the editor could touch the threshold and
+///   never cross it, while `hdr_bloom.png` constructs a value of 9.0 by hand
+///   because a golden may reach past the UI. A colour picker answers "what
+///   colour"; nothing answered "how bright".
+///
+///   **Some of these fields have no consumer until VIS1b**, and that is
+///   deliberate under the arc's one-window ruling — but an unread field is cheap
+///   where an unread *wire* field is not, so every one of them is applied by both
+///   hosts' `apply_record` (pinned character-for-character by
+///   `inf-player`'s `apply_record_mirror`) and asserted by a store/load arm from
+///   the day it lands.
+///
+///   The wire cost is **70 bytes per file** and **4 bytes per materialed
+///   entity** — measured, not derived, because `flare_ghost_count` is a `u32`
+///   whose default of 4 encodes in one byte under bincode's varints.
+pub const SCHEMA_VERSION: u32 = 26;
 
 /// File-level simulation settings (schema v3+), mirroring the editor's
 /// `LevelSettings` byte-for-byte. The serde defaults preserve pre-v3 behaviour:
@@ -498,6 +536,54 @@ pub struct RenderSettingsRecord {
     pub shadows_max_distance: f32,
     pub gi_enabled: bool,
     pub gi_intensity: f32,
+    // -- schema v26 (wave VIS1a): the photoreal arc's ONE window ------------
+    //
+    // Every field below is appended at the record's tail, and every one is inert
+    // at its default. Some have their consumer in this slice (the SSR block) and
+    // some in the next (exposure, flare, the lens trio, the Karis downsample) --
+    // they land together because the arc gets ONE schema bump, and an unread
+    // field is cheap where an unread *wire* field is not: each one is applied by
+    // both hosts' `apply_record` and asserted by a store/load arm from the day it
+    // lands.
+    /// Screen-space reflections. Off means every lit shader's SSR branch is untaken.
+    pub ssr_enabled: bool,
+    /// Reflection march length, metres.
+    pub ssr_distance: f32,
+    /// Relative depth-thickness tolerance for accepting a hit.
+    pub ssr_thickness: f32,
+    /// Step budget: `0` Low (16), `1` Medium (32), `2` High (48). An unknown code
+    /// reads as Medium -- `inf_render::SsrQuality::from_code`.
+    pub ssr_quality: u8,
+    /// How much of the reflected colour is blended over the fallback, `0..1`.
+    pub ssr_intensity: f32,
+    /// Perceptual roughness past which a surface does not march at all.
+    pub ssr_roughness_cutoff: f32,
+    /// Exposure mode: `0` manual (the multiplier is [`Self::exposure`]), `1`
+    /// auto. An unknown code reads as manual -- `inf_render::ExposureMode::from_code`.
+    pub exposure_mode: u8,
+    /// Exposure compensation, stops.
+    pub exposure_compensation_ev: f32,
+    /// The dimmest average scene luminance auto exposure adapts to.
+    pub exposure_min_luminance: f32,
+    /// The brightest average scene luminance auto exposure adapts to.
+    pub exposure_max_luminance: f32,
+    /// Adaptation rate, stops per second.
+    pub exposure_adaptation_speed: f32,
+    /// Karis-average first bloom downsample (firefly kill).
+    pub bloom_karis: bool,
+    /// Sun glare / lens flare master enable.
+    pub flare_enabled: bool,
+    pub flare_intensity: f32,
+    pub flare_ghost_count: u32,
+    pub flare_halo: f32,
+    pub flare_streak: f32,
+    /// Corner darkening, `0` = none.
+    pub vignette_intensity: f32,
+    pub vignette_smoothness: f32,
+    /// Lateral chromatic aberration, pixels of separation at the corner.
+    pub chromatic_aberration: f32,
+    pub grain_intensity: f32,
+    pub grain_size: f32,
 }
 
 impl Default for RenderSettingsRecord {
@@ -518,7 +604,161 @@ impl Default for RenderSettingsRecord {
             shadows_max_distance: 60.0,
             gi_enabled: false,
             gi_intensity: 1.0,
+            // v26. Every value here equals `inf_render`'s own default for the
+            // same knob, which is what `apply_record(&default()) ==
+            // RenderSettings::default()` pins on both hosts.
+            ssr_enabled: false,
+            ssr_distance: 24.0,
+            ssr_thickness: 0.15,
+            ssr_quality: 1,
+            ssr_intensity: 1.0,
+            ssr_roughness_cutoff: 0.4,
+            exposure_mode: 0,
+            exposure_compensation_ev: 0.0,
+            exposure_min_luminance: 0.03,
+            exposure_max_luminance: 8.0,
+            exposure_adaptation_speed: 1.5,
+            bloom_karis: false,
+            flare_enabled: false,
+            flare_intensity: 0.25,
+            flare_ghost_count: 4,
+            flare_halo: 0.3,
+            flare_streak: 0.0,
+            vignette_intensity: 0.0,
+            vignette_smoothness: 0.0,
+            chromatic_aberration: 0.0,
+            grain_intensity: 0.0,
+            grain_size: 0.0,
         }
+    }
+}
+
+/// The **pre-v26** render block (schema v26 froze this when wave VIS1a appended
+/// the photoreal arc's authorable surface). Frozen file records **v8..v25** carry
+/// their settings as [`RuntimeSettingsV25`], whose `render` is this shape;
+/// [`RenderSettingsRecordV25::into_current`] lifts it with every v26 field at its
+/// default.
+///
+/// The freeze is the standing bincode rule: the block sits *inside*
+/// [`RuntimeSettings`], with `partition` after it, so growing it moves every byte
+/// of the file's settings that follows.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+struct RenderSettingsRecordV25 {
+    exposure: f32,
+    dither: bool,
+    bloom_enabled: bool,
+    bloom_threshold: f32,
+    bloom_knee: f32,
+    bloom_intensity: f32,
+    ssao_enabled: bool,
+    ssao_radius: f32,
+    ssao_intensity: f32,
+    ssao_bias: f32,
+    taa: bool,
+    shadows_enabled: bool,
+    shadows_max_distance: f32,
+    gi_enabled: bool,
+    gi_intensity: f32,
+}
+
+impl RenderSettingsRecordV25 {
+    /// Lift to the live block with every v26 field at its default -- which is
+    /// exactly what a pre-v26 level meant: no reflections, manual exposure, no
+    /// flare, no lens trio.
+    fn into_current(self) -> RenderSettingsRecord {
+        RenderSettingsRecord {
+            exposure: self.exposure,
+            dither: self.dither,
+            bloom_enabled: self.bloom_enabled,
+            bloom_threshold: self.bloom_threshold,
+            bloom_knee: self.bloom_knee,
+            bloom_intensity: self.bloom_intensity,
+            ssao_enabled: self.ssao_enabled,
+            ssao_radius: self.ssao_radius,
+            ssao_intensity: self.ssao_intensity,
+            ssao_bias: self.ssao_bias,
+            taa: self.taa,
+            shadows_enabled: self.shadows_enabled,
+            shadows_max_distance: self.shadows_max_distance,
+            gi_enabled: self.gi_enabled,
+            gi_intensity: self.gi_intensity,
+            ..RenderSettingsRecord::default()
+        }
+    }
+
+    /// Project the live block onto the pre-v26 shape (the **downgrade-bless**
+    /// path). Everything v26 added is lost, which is precisely what it added.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn from_current(r: RenderSettingsRecord) -> Self {
+        Self {
+            exposure: r.exposure,
+            dither: r.dither,
+            bloom_enabled: r.bloom_enabled,
+            bloom_threshold: r.bloom_threshold,
+            bloom_knee: r.bloom_knee,
+            bloom_intensity: r.bloom_intensity,
+            ssao_enabled: r.ssao_enabled,
+            ssao_radius: r.ssao_radius,
+            ssao_intensity: r.ssao_intensity,
+            ssao_bias: r.ssao_bias,
+            taa: r.taa,
+            shadows_enabled: r.shadows_enabled,
+            shadows_max_distance: r.shadows_max_distance,
+            gi_enabled: r.gi_enabled,
+            gi_intensity: r.gi_intensity,
+        }
+    }
+}
+
+/// The **pre-v26** file-settings layout: [`RuntimeSettings`] with the frozen
+/// render block. Frozen file records v8..v25 carry this.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+struct RuntimeSettingsV25 {
+    #[serde(default)]
+    gravity_2d: Vec2d,
+    #[serde(default = "default_gravity_3d")]
+    gravity_3d: Vec3d,
+    #[serde(default = "default_sim_hz")]
+    sim_hz: f64,
+    #[serde(default)]
+    render: RenderSettingsRecordV25,
+    #[serde(default)]
+    partition: PartitionSettings,
+}
+
+impl RuntimeSettingsV25 {
+    fn into_current(self) -> RuntimeSettings {
+        RuntimeSettings {
+            gravity_2d: self.gravity_2d,
+            gravity_3d: self.gravity_3d,
+            sim_hz: self.sim_hz,
+            render: self.render.into_current(),
+            partition: self.partition,
+        }
+    }
+
+    /// The **downgrade-bless** path.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn from_current(s: RuntimeSettings) -> Self {
+        Self {
+            gravity_2d: s.gravity_2d,
+            gravity_3d: s.gravity_3d,
+            sim_hz: s.sim_hz,
+            render: RenderSettingsRecordV25::from_current(s.render),
+            partition: s.partition,
+        }
+    }
+}
+
+impl Default for RenderSettingsRecordV25 {
+    fn default() -> Self {
+        Self::from_current(RenderSettingsRecord::default())
+    }
+}
+
+impl Default for RuntimeSettingsV25 {
+    fn default() -> Self {
+        Self::from_current(RuntimeSettings::default())
     }
 }
 
@@ -575,7 +815,7 @@ pub type Result<T> = std::result::Result<T, SceneError>;
 /// (`the_v25_wire_shape_is_pinned_against_an_independent_declaration`) re-derives
 /// the whole layout from independently declared shadow types.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RuntimeEntityGen<T = Terrain, V = Option<VehicleClass>> {
+pub struct RuntimeEntityGen<T = Terrain, V = Option<VehicleClass>, M = Material> {
     /// Stable entity GUID (what selection/hierarchy reference across a reload).
     pub guid: Uuid,
     /// Display / Outliner name.
@@ -588,8 +828,9 @@ pub struct RuntimeEntityGen<T = Terrain, V = Option<VehicleClass>> {
     pub visible: bool,
     /// Renderable mesh (primitive; asset-mesh variant is a later phase).
     pub mesh: Option<MeshRef>,
-    /// PBR material parameter block.
-    pub material: Option<Material>,
+    /// PBR material parameter block. Generic since wave VIS1a / v26 — see the
+    /// type's docs for why a third parameter is cheaper than a third restatement.
+    pub material: Option<M>,
     /// Light source.
     pub light: Option<Light>,
     /// Scene camera.
@@ -750,55 +991,84 @@ pub struct RuntimeEntityGen<T = Terrain, V = Option<VehicleClass>> {
 }
 
 /// One entity's persisted state — **the live record**.
-pub type RuntimeEntity = RuntimeEntityGen<Terrain, Option<VehicleClass>>;
+pub type RuntimeEntity = RuntimeEntityGen<Terrain, Option<VehicleClass>, Material>;
+
+/// **The frozen v25 entity record**: the live shape *before* `Material` gained
+/// its `emissive_intensity` (wave VIS1a). Nothing else about the record moved, so
+/// it is the live declaration with one type parameter turned back.
+type EntityRecordV25 = RuntimeEntityGen<Terrain, Option<VehicleClass>, MaterialV25>;
 
 /// **The frozen v24 entity record**: the live shape *before* the vehicle class,
 /// with the live terrain (v25 changed no component). The `()` tail is the whole
 /// difference and costs zero bytes.
-type EntityRecordV24 = RuntimeEntityGen<Terrain, ()>;
+type EntityRecordV24 = RuntimeEntityGen<Terrain, (), MaterialV25>;
 
 /// **The frozen v23 entity record.** [`EntityRecordV24`] with the pre-v24
 /// [`TerrainV23`] — the shape before `TerrainLayer` gained its material binding.
-type EntityRecordV23 = RuntimeEntityGen<TerrainV23, ()>;
+type EntityRecordV23 = RuntimeEntityGen<TerrainV23, (), MaterialV25>;
+
+impl EntityRecordV25 {
+    /// Lift a frozen v25 record to the live [`RuntimeEntity`]: the emissive
+    /// intensity arrives at **1.0**, which is exactly what every pre-v26 level
+    /// meant — the authored colour, unscaled.
+    fn into_runtime(self) -> RuntimeEntity {
+        self.map_material(MaterialV25::into_current)
+    }
+
+    /// Project a live record onto the frozen v25 shape (the **downgrade-bless**
+    /// path). Only the intensity is lost.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn from_current(r: RuntimeEntity) -> Self {
+        r.map_material(MaterialV25::from_current)
+    }
+}
 
 impl EntityRecordV24 {
     /// Lift a frozen v24 record to the live [`RuntimeEntity`]: the vehicle class
     /// arrives absent, which is exactly what every pre-v25 level meant — a
-    /// vehicle tuned by the Ring-0 defaults in both hosts.
+    /// vehicle tuned by the Ring-0 defaults in both hosts; and the intensity
+    /// arrives at 1.0 through the v25 rung.
     fn into_runtime(self) -> RuntimeEntity {
-        self.map_tail(|()| None)
+        self.map_tail(|()| None).into_runtime()
     }
 
     /// Project a live record onto the frozen v24 shape (the **downgrade-bless**
-    /// path). Only the authored class is lost.
+    /// path). The authored class and the intensity are lost.
     #[cfg_attr(not(test), allow(dead_code))]
     fn from_current(r: RuntimeEntity) -> Self {
-        r.map_tail(|_| ())
+        EntityRecordV25::from_current(r).map_tail(|_| ())
     }
 }
 
-impl<T, V> RuntimeEntityGen<T, V> {
+impl<T, V, M> RuntimeEntityGen<T, V, M> {
     /// Replace the tail slot, moving every other field **wholesale**.
-    fn map_tail<W>(self, f: impl FnOnce(V) -> W) -> RuntimeEntityGen<T, W> {
-        self.map_slots(|t| t, f)
+    fn map_tail<W>(self, f: impl FnOnce(V) -> W) -> RuntimeEntityGen<T, W, M> {
+        self.map_slots(|t| t, f, |m| m)
     }
 
     /// Replace the **terrain** slot, moving every other field wholesale.
-    fn map_terrain<U>(self, f: impl FnOnce(T) -> U) -> RuntimeEntityGen<U, V> {
-        self.map_slots(f, |v| v)
+    fn map_terrain<U>(self, f: impl FnOnce(T) -> U) -> RuntimeEntityGen<U, V, M> {
+        self.map_slots(f, |v| v, |m| m)
     }
 
-    /// Replace both generic slots, moving every other field **wholesale**.
+    /// Replace the **material** slot, moving every other field wholesale (wave
+    /// VIS1a).
+    fn map_material<N>(self, f: impl FnOnce(M) -> N) -> RuntimeEntityGen<T, V, N> {
+        self.map_slots(|t| t, |v| v, f)
+    }
+
+    /// Replace all three generic slots, moving every other field **wholesale**.
     ///
-    /// The whole point of the two parameters: a restatement is where a slot goes
+    /// The whole point of the parameters: a restatement is where a slot goes
     /// missing without the compiler noticing (the standing ladder rule), and
     /// this is the ONE function in the ladder that names all forty-eight — so
     /// there is one list to get right instead of one per rung per direction.
-    fn map_slots<U, W>(
+    fn map_slots<U, W, N>(
         self,
         ft: impl FnOnce(T) -> U,
         fv: impl FnOnce(V) -> W,
-    ) -> RuntimeEntityGen<U, W> {
+        fm: impl FnOnce(M) -> N,
+    ) -> RuntimeEntityGen<U, W, N> {
         let RuntimeEntityGen {
             guid,
             name,
@@ -851,6 +1121,7 @@ impl<T, V> RuntimeEntityGen<T, V> {
             vehicle_class,
         } = self;
         let terrain = terrain.map(ft);
+        let material = material.map(fm);
         RuntimeEntityGen {
             guid,
             name,
@@ -986,12 +1257,12 @@ struct Header {
     schema_version: u32,
 }
 
-/// The schema-v25 file layout (current). `entities` reuses [`RuntimeEntity`].
+/// The schema-v26 file layout (current). `entities` reuses [`RuntimeEntity`].
 ///
 /// The geo-anchor is the file's **tail** — see the [`SCHEMA_VERSION`] ladder for
 /// why it lives here rather than inside [`RuntimeSettings`].
 #[derive(Serialize, Deserialize)]
-struct SceneFileV25 {
+struct SceneFileV26 {
     schema_version: u32,
     title: String,
     entities: Vec<RuntimeEntity>,
@@ -1012,6 +1283,21 @@ struct SceneFileV25 {
     geo: inf_math::geo::GeoAnchor,
 }
 
+/// A frozen schema-v25 file layout. v26 grew `Material` (the emissive intensity)
+/// and the render block (the photoreal arc's authorable surface), so BOTH of this
+/// record's payload-bearing fields are repointed at frozen shapes -- the entity
+/// record at [`EntityRecordV25`] and the settings at [`RuntimeSettingsV25`].
+#[derive(Serialize, Deserialize)]
+struct SceneFileV25 {
+    schema_version: u32,
+    title: String,
+    entities: Vec<EntityRecordV25>,
+    #[serde(default)]
+    settings: RuntimeSettingsV25,
+    #[serde(default)]
+    geo: inf_math::geo::GeoAnchor,
+}
+
 /// A frozen schema-v24 file layout. v25 appended the vehicle-class slot to the
 /// **entity** record, so the file record's own shape is unchanged and only
 /// `entities` is repointed at the frozen [`EntityRecordV24`].
@@ -1021,7 +1307,7 @@ struct SceneFileV24 {
     title: String,
     entities: Vec<EntityRecordV24>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV25,
     #[serde(default)]
     geo: inf_math::geo::GeoAnchor,
 }
@@ -1036,7 +1322,7 @@ struct SceneFileV23 {
     title: String,
     entities: Vec<EntityRecordV23>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV25,
 }
 
 /// A frozen schema-v22 file layout. v23 did not touch [`RuntimeSettings`], so
@@ -1048,7 +1334,7 @@ struct SceneFileV22 {
     title: String,
     entities: Vec<EntityRecordV22>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV25,
 }
 
 /// A frozen schema-v21 file layout. It carried the **live** settings shape (v22
@@ -1061,7 +1347,7 @@ struct SceneFileV21 {
     title: String,
     entities: Vec<EntityRecordV21>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV25,
 }
 
 /// A frozen schema-v20 file layout. It carried the **live** settings shape (v21
@@ -1074,7 +1360,7 @@ struct SceneFileV20 {
     title: String,
     entities: Vec<EntityRecordV20>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV25,
 }
 
 /// A frozen schema-v19 file layout. It carried the **live** settings shape (v20
@@ -1088,7 +1374,7 @@ struct SceneFileV19 {
     title: String,
     entities: Vec<EntityRecordV19>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV25,
 }
 
 /// A frozen schema-v18 file layout. It carried the **live** settings shape (v19
@@ -1102,7 +1388,7 @@ struct SceneFileV18 {
     title: String,
     entities: Vec<EntityRecordV18>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV25,
 }
 
 /// A frozen schema-v17 file layout. It carried the **live** settings shape (v18
@@ -1115,7 +1401,7 @@ struct SceneFileV17 {
     title: String,
     entities: Vec<EntityRecordV17>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV25,
 }
 
 /// A frozen schema-v16 file layout. It carried the **live** settings shape (v17
@@ -1128,7 +1414,7 @@ struct SceneFileV16 {
     title: String,
     entities: Vec<EntityRecordV16>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV25,
 }
 
 /// A frozen schema-v15 file layout. It carried the **live** settings shape (v16
@@ -1141,7 +1427,7 @@ struct SceneFileV15 {
     title: String,
     entities: Vec<EntityRecordV15>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV25,
 }
 
 /// A frozen schema-v14 file layout. It carried the **live** settings shape (v15
@@ -1154,7 +1440,7 @@ struct SceneFileV14 {
     title: String,
     entities: Vec<EntityRecordV14>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV25,
 }
 
 /// A frozen schema-v13 file layout. It carried the **live** settings shape (v14
@@ -1167,7 +1453,7 @@ struct SceneFileV13 {
     title: String,
     entities: Vec<EntityRecordV13>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV25,
 }
 
 /// A frozen schema-v12 file layout. It carried the **live** settings shape (v13
@@ -1180,7 +1466,7 @@ struct SceneFileV12 {
     title: String,
     entities: Vec<EntityRecordV12>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV25,
 }
 
 /// A frozen schema-v11 file layout. It carried the **live** settings shape (v12
@@ -1193,7 +1479,7 @@ struct SceneFileV11 {
     title: String,
     entities: Vec<EntityRecordV11>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV25,
 }
 
 /// A frozen schema-v10 file layout. It carried the **live** settings shape (v11
@@ -1206,7 +1492,7 @@ struct SceneFileV10 {
     title: String,
     entities: Vec<EntityRecordV10>,
     #[serde(default)]
-    settings: RuntimeSettings,
+    settings: RuntimeSettingsV25,
 }
 
 /// The **pre-v8** `Light` byte layout (schema v8 froze this when `Light` gained
@@ -1264,6 +1550,7 @@ impl MaterialV7 {
             metallic: self.metallic,
             roughness: self.roughness,
             emissive: self.emissive,
+            emissive_intensity: 1.0,
             blend: BlendMode::Opaque,
             alpha_cutoff: 0.5,
             asset: None,
@@ -1320,6 +1607,7 @@ impl MaterialV21 {
             metallic: self.metallic,
             roughness: self.roughness,
             emissive: self.emissive,
+            emissive_intensity: 1.0,
             blend: self.blend,
             alpha_cutoff: self.alpha_cutoff,
             asset: None,
@@ -1347,6 +1635,77 @@ impl MaterialV21 {
 /// leave the frozen fixtures describing a material nobody would author.
 #[cfg(test)]
 impl Default for MaterialV21 {
+    fn default() -> Self {
+        Self::from_current(Material::default())
+    }
+}
+
+/// The **pre-v26** `Material` byte layout (schema v26 froze this when wave VIS1a
+/// gave `Material` its `emissive_intensity`). Frozen entity records **v22..v25**
+/// carry `material` as `Option<MaterialV25>`; [`MaterialV25::into_current`] lifts
+/// it with an intensity of **1.0**, which is what every pre-v26 level meant: the
+/// authored colour, unscaled.
+///
+/// The THIRD freeze of one component, on the standing reason — bincode is
+/// positional, so *growing* a component is a wire-format change even though the
+/// new field is `#[serde(default)]`, and a v25 payload fed to the grown struct
+/// reads past the end of its `Material` and into the next slot of the same
+/// record. `MaterialV7` and `MaterialV21` above stay exactly as they were; the
+/// three describe three byte layouts and none is a step toward another.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct MaterialV25 {
+    base_color: Color,
+    #[serde(default)]
+    metallic: f32,
+    #[serde(default)]
+    roughness: f32,
+    #[serde(default)]
+    emissive: Color,
+    #[serde(default)]
+    blend: BlendMode,
+    #[serde(default)]
+    alpha_cutoff: f32,
+    #[serde(default)]
+    asset: Option<Uuid>,
+}
+
+impl MaterialV25 {
+    /// Lift to the live [`Material`] with intensity **1.0** — the authored
+    /// colour, unscaled, which is exactly what a v25 level meant.
+    fn into_current(self) -> Material {
+        Material {
+            base_color: self.base_color,
+            metallic: self.metallic,
+            roughness: self.roughness,
+            emissive: self.emissive,
+            emissive_intensity: 1.0,
+            blend: self.blend,
+            alpha_cutoff: self.alpha_cutoff,
+            asset: self.asset,
+        }
+    }
+
+    /// Downgrade a live [`Material`] to the pre-v26 layout (the
+    /// **downgrade-bless** path). Only the intensity is lost, which is precisely
+    /// what v26 added.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn from_current(m: Material) -> Self {
+        Self {
+            base_color: m.base_color,
+            metallic: m.metallic,
+            roughness: m.roughness,
+            emissive: m.emissive,
+            blend: m.blend,
+            alpha_cutoff: m.alpha_cutoff,
+            asset: m.asset,
+        }
+    }
+}
+
+/// The pre-v26 shape of `Material::default()`, derived from the live default
+/// rather than restated — [`MaterialV21`]'s rule, for its reason.
+#[cfg(test)]
+impl Default for MaterialV25 {
     fn default() -> Self {
         Self::from_current(Material::default())
     }
@@ -1409,8 +1768,11 @@ struct RuntimeSettingsV9 {
     gravity_3d: Vec3d,
     #[serde(default = "default_sim_hz")]
     sim_hz: f64,
+    /// Frozen at the pre-v26 shape (wave VIS1a): this record is a *pre-v10* one,
+    /// so its render block cannot be the live one either — see
+    /// [`RenderSettingsRecordV25`].
     #[serde(default)]
-    render: RenderSettingsRecord,
+    render: RenderSettingsRecordV25,
 }
 
 impl RuntimeSettingsV9 {
@@ -1419,7 +1781,7 @@ impl RuntimeSettingsV9 {
             gravity_2d: self.gravity_2d,
             gravity_3d: self.gravity_3d,
             sim_hz: self.sim_hz,
-            render: self.render,
+            render: self.render.into_current(),
             partition: PartitionSettings::default(),
         }
     }
@@ -1433,7 +1795,7 @@ impl RuntimeSettingsV9 {
             gravity_2d: s.gravity_2d,
             gravity_3d: s.gravity_3d,
             sim_hz: s.sim_hz,
-            render: s.render,
+            render: RenderSettingsRecordV25::from_current(s.render),
         }
     }
 }
@@ -1444,7 +1806,7 @@ impl Default for RuntimeSettingsV9 {
             gravity_2d: Vec2d::ZERO,
             gravity_3d: default_gravity_3d(),
             sim_hz: default_sim_hz(),
-            render: RenderSettingsRecord::default(),
+            render: RenderSettingsRecordV25::default(),
         }
     }
 }
@@ -5585,7 +5947,8 @@ struct EntityRecordV22 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRef>,
-    material: Option<Material>,
+    /// Frozen at the pre-v26 layout (wave VIS1a) — see [`MaterialV25`].
+    material: Option<MaterialV25>,
     light: Option<Light>,
     camera: Option<Camera>,
     #[serde(default)]
@@ -5679,7 +6042,7 @@ impl EntityRecordV22 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh,
-            material: self.material,
+            material: self.material.map(MaterialV25::into_current),
             light: self.light,
             camera: self.camera,
             sprite: self.sprite,
@@ -5739,7 +6102,7 @@ impl EntityRecordV22 {
             transform: r.transform,
             visible: r.visible,
             mesh: r.mesh,
-            material: r.material,
+            material: r.material.map(MaterialV25::from_current),
             light: r.light,
             camera: r.camera,
             sprite: r.sprite,
@@ -6159,7 +6522,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV10::into_runtime)
                     .collect(),
-                settings: v10.settings,
+                settings: v10.settings.into_current(),
                 geo: Default::default(),
             })
         }
@@ -6174,7 +6537,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV11::into_runtime)
                     .collect(),
-                settings: v11.settings,
+                settings: v11.settings.into_current(),
                 geo: Default::default(),
             })
         }
@@ -6189,7 +6552,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV12::into_runtime)
                     .collect(),
-                settings: v12.settings,
+                settings: v12.settings.into_current(),
                 geo: Default::default(),
             })
         }
@@ -6204,7 +6567,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV13::into_runtime)
                     .collect(),
-                settings: v13.settings,
+                settings: v13.settings.into_current(),
                 geo: Default::default(),
             })
         }
@@ -6219,7 +6582,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV14::into_runtime)
                     .collect(),
-                settings: v14.settings,
+                settings: v14.settings.into_current(),
                 geo: Default::default(),
             })
         }
@@ -6234,7 +6597,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV15::into_runtime)
                     .collect(),
-                settings: v15.settings,
+                settings: v15.settings.into_current(),
                 geo: Default::default(),
             })
         }
@@ -6249,7 +6612,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV16::into_runtime)
                     .collect(),
-                settings: v16.settings,
+                settings: v16.settings.into_current(),
                 geo: Default::default(),
             })
         }
@@ -6264,7 +6627,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV17::into_runtime)
                     .collect(),
-                settings: v17.settings,
+                settings: v17.settings.into_current(),
                 geo: Default::default(),
             })
         }
@@ -6281,7 +6644,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV19::into_v20)
                     .map(EntityRecordV20::into_runtime)
                     .collect(),
-                settings: v18.settings,
+                settings: v18.settings.into_current(),
                 geo: Default::default(),
             })
         }
@@ -6297,7 +6660,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV19::into_v20)
                     .map(EntityRecordV20::into_runtime)
                     .collect(),
-                settings: v19.settings,
+                settings: v19.settings.into_current(),
                 geo: Default::default(),
             })
         }
@@ -6312,7 +6675,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV20::into_runtime)
                     .collect(),
-                settings: v20.settings,
+                settings: v20.settings.into_current(),
                 geo: Default::default(),
             })
         }
@@ -6327,7 +6690,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV21::into_runtime)
                     .collect(),
-                settings: v21.settings,
+                settings: v21.settings.into_current(),
                 geo: Default::default(),
             })
         }
@@ -6342,7 +6705,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV22::into_runtime)
                     .collect(),
-                settings: v22.settings,
+                settings: v22.settings.into_current(),
                 geo: Default::default(),
             })
         }
@@ -6357,7 +6720,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV23::into_runtime)
                     .collect(),
-                settings: v23.settings,
+                settings: v23.settings.into_current(),
                 geo: Default::default(),
             })
         }
@@ -6372,7 +6735,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .into_iter()
                     .map(EntityRecordV24::into_runtime)
                     .collect(),
-                settings: v24.settings,
+                settings: v24.settings.into_current(),
                 geo: v24.geo,
             })
         }
@@ -6382,9 +6745,24 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map_err(|e| SceneError::Decode(format!("v25: {e}")))?;
             Ok(RuntimeLevel {
                 title: v25.title,
-                entities: v25.entities,
-                settings: v25.settings,
+                entities: v25
+                    .entities
+                    .into_iter()
+                    .map(EntityRecordV25::into_runtime)
+                    .collect(),
+                settings: v25.settings.into_current(),
                 geo: v25.geo,
+            })
+        }
+        26 => {
+            let (v26, _): (SceneFileV26, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| SceneError::Decode(format!("v26: {e}")))?;
+            Ok(RuntimeLevel {
+                title: v26.title,
+                entities: v26.entities,
+                settings: v26.settings,
+                geo: v26.geo,
             })
         }
         // A refusal that names the wrong cause sends the user to the wrong fix
@@ -6405,7 +6783,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
 /// Encode a level to the current schema ([`SCHEMA_VERSION`]) as a deterministic
 /// bincode payload.
 pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
-    let file = SceneFileV25 {
+    let file = SceneFileV26 {
         schema_version: SCHEMA_VERSION,
         title: level.title.clone(),
         entities: level.entities.clone(),
@@ -7257,7 +7635,7 @@ mod tests {
                 gravity_2d: Vec2d::new(0.0, -20.0),
                 gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
                 sim_hz: 120.0,
-                render: RenderSettingsRecord {
+                render: RenderSettingsRecordV25 {
                     exposure: 1.4,
                     dither: false,
                     bloom_enabled: true,
@@ -7406,7 +7784,7 @@ mod tests {
         let v7_bytes =
             bincode::serde::encode_to_vec(v7_scene_reference(), bincode_config()).unwrap();
         let mut base = RuntimeLevel::decode(&v7_bytes).unwrap();
-        base.settings.render = RenderSettingsRecord {
+        base.settings.render = RenderSettingsRecordV25 {
             exposure: 1.4,
             dither: false,
             bloom_enabled: true,
@@ -7422,7 +7800,8 @@ mod tests {
             shadows_max_distance: 80.0,
             gi_enabled: true,
             gi_intensity: 1.25,
-        };
+        }
+        .into_current();
         // Give the spot light its v8 cone/range/shadow fields.
         if let Some(spot) = base.entities.iter_mut().find(|e| e.name == "Spot") {
             let l = spot.light.as_mut().unwrap();
@@ -7438,6 +7817,7 @@ mod tests {
                 metallic: 0.0,
                 roughness: 0.1,
                 emissive: Color::new(0.0, 0.0, 0.0, 1.0),
+                emissive_intensity: 1.0,
                 blend: BlendMode::Translucent,
                 alpha_cutoff: 0.3,
                 asset: None,
@@ -7599,9 +7979,9 @@ mod tests {
                 gravity_2d: Vec2d::new(0.0, -18.0),
                 gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
                 sim_hz: 90.0,
-                render: RenderSettingsRecord {
+                render: RenderSettingsRecordV25 {
                     exposure: 1.1,
-                    ..RenderSettingsRecord::default()
+                    ..RenderSettingsRecordV25::default()
                 },
             },
         }
@@ -7808,7 +8188,7 @@ mod tests {
                     ..v10_rec(g(0xA003), "Sun", None)
                 },
             ],
-            settings: RuntimeSettings {
+            settings: RuntimeSettingsV25::from_current(RuntimeSettings {
                 gravity_2d: Vec2d::new(0.0, -18.0),
                 gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
                 sim_hz: 90.0,
@@ -7822,7 +8202,7 @@ mod tests {
                     activation_radius_m: 200.0,
                     prefetch_margin_m: 300.0,
                 },
-            },
+            }),
         }
     }
 
@@ -8040,7 +8420,7 @@ mod tests {
                     ..v11_rec(g(0xB003), "Sky", None)
                 },
             ],
-            settings: RuntimeSettings {
+            settings: RuntimeSettingsV25::from_current(RuntimeSettings {
                 gravity_2d: Vec2d::new(0.0, -18.0),
                 gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
                 sim_hz: 90.0,
@@ -8054,7 +8434,7 @@ mod tests {
                     activation_radius_m: 200.0,
                     prefetch_margin_m: 300.0,
                 },
-            },
+            }),
         }
     }
 
@@ -8301,9 +8681,10 @@ mod tests {
                         + CHARACTER_SLOT_BYTES
                         + MOVEMENT_SLOT_BYTES
                         + VEHICLE_SLOT_BYTES)
-                + materialed * MATERIAL_BINDING_BYTES
+                + materialed * (MATERIAL_BINDING_BYTES + EMISSIVE_INTENSITY_BYTES)
                 + terrained * TERRAIN_LAYER_MATERIAL_BYTES
-                + geo_anchor_bytes(),
+                + geo_anchor_bytes()
+                + V26_RENDER_BLOCK_BYTES,
             "the one entity carrying an atmosphere grew by the physical block"
         );
     }
@@ -8396,7 +8777,7 @@ mod tests {
                     ..v12_rec(g(0xB003), "Sky", None)
                 },
             ],
-            settings: RuntimeSettings {
+            settings: RuntimeSettingsV25::from_current(RuntimeSettings {
                 gravity_2d: Vec2d::new(0.0, -18.0),
                 gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
                 sim_hz: 90.0,
@@ -8410,7 +8791,7 @@ mod tests {
                     activation_radius_m: 200.0,
                     prefetch_margin_m: 300.0,
                 },
-            },
+            }),
         }
     }
 
@@ -8759,9 +9140,10 @@ mod tests {
                         + CHARACTER_SLOT_BYTES
                         + MOVEMENT_SLOT_BYTES
                         + VEHICLE_SLOT_BYTES)
-                + materialed * MATERIAL_BINDING_BYTES
+                + materialed * (MATERIAL_BINDING_BYTES + EMISSIVE_INTENSITY_BYTES)
                 + terrained * TERRAIN_LAYER_MATERIAL_BYTES
-                + geo_anchor_bytes(),
+                + geo_anchor_bytes()
+                + V26_RENDER_BLOCK_BYTES,
             "the one entity carrying an atmosphere grew by the cloud block"
         );
     }
@@ -8890,7 +9272,7 @@ mod tests {
                     ..v13_rec(g(0xC003), "Sky", None)
                 },
             ],
-            settings: RuntimeSettings {
+            settings: RuntimeSettingsV25::from_current(RuntimeSettings {
                 gravity_2d: Vec2d::new(0.0, -18.0),
                 gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
                 sim_hz: 90.0,
@@ -8904,7 +9286,7 @@ mod tests {
                     activation_radius_m: 200.0,
                     prefetch_margin_m: 300.0,
                 },
-            },
+            }),
         }
     }
 
@@ -9183,9 +9565,10 @@ mod tests {
                         + CHARACTER_SLOT_BYTES
                         + MOVEMENT_SLOT_BYTES
                         + VEHICLE_SLOT_BYTES)
-                + materialed * MATERIAL_BINDING_BYTES
+                + materialed * (MATERIAL_BINDING_BYTES + EMISSIVE_INTENSITY_BYTES)
                 + terrained * TERRAIN_LAYER_MATERIAL_BYTES
-                + geo_anchor_bytes(),
+                + geo_anchor_bytes()
+                + V26_RENDER_BLOCK_BYTES,
             "the one entity carrying an atmosphere grew by the weather block"
         );
     }
@@ -9316,7 +9699,7 @@ mod tests {
                     ..v14_rec(g(0xD003), "Sun", None)
                 },
             ],
-            settings: RuntimeSettings {
+            settings: RuntimeSettingsV25::from_current(RuntimeSettings {
                 gravity_2d: Vec2d::new(0.0, -18.0),
                 gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
                 sim_hz: 90.0,
@@ -9325,7 +9708,7 @@ mod tests {
                     ..RenderSettingsRecord::default()
                 },
                 partition: PartitionSettings::default(),
-            },
+            }),
         }
     }
 
@@ -9521,7 +9904,7 @@ mod tests {
                     ..v15_rec(g(0xE003), "Sun", None)
                 },
             ],
-            settings: RuntimeSettings {
+            settings: RuntimeSettingsV25::from_current(RuntimeSettings {
                 gravity_2d: Vec2d::new(0.0, -18.0),
                 gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
                 sim_hz: 90.0,
@@ -9530,7 +9913,7 @@ mod tests {
                     ..RenderSettingsRecord::default()
                 },
                 partition: PartitionSettings::default(),
-            },
+            }),
         }
     }
 
@@ -9756,7 +10139,7 @@ mod tests {
     #[test]
     fn the_frozen_tile_generation_covers_this_schema() {
         assert_eq!(
-            SCHEMA_VERSION, 25,
+            SCHEMA_VERSION, 26,
             "the scene schema moved. Generation-1 frozen tiles (TerrainTileFrozenV1, via \
              TerrainV14) cover .inf_lvl v1..=v14, generation-2 (TerrainTileFrozenV2, via \
              TerrainV15) covers v15, and generation-3 (TerrainTileFrozenV3, which \
@@ -9862,7 +10245,7 @@ mod tests {
                 .cloned()
                 .map(EntityRecordV16::from_current)
                 .collect(),
-            settings: dry.settings,
+            settings: RuntimeSettingsV25::from_current(dry.settings),
         };
         let v17 = SceneFileV17 {
             schema_version: 17,
@@ -9873,7 +10256,7 @@ mod tests {
                 .cloned()
                 .map(EntityRecordV17::from_current)
                 .collect(),
-            settings: dry.settings,
+            settings: RuntimeSettingsV25::from_current(dry.settings),
         };
         let v16_bytes = bincode::serde::encode_to_vec(&v16, bincode_config()).unwrap();
         let v17_bytes = bincode::serde::encode_to_vec(&v17, bincode_config()).unwrap();
@@ -9960,7 +10343,7 @@ mod tests {
                     ..v16_rec(g(0xF003), "Sun", None)
                 },
             ],
-            settings: RuntimeSettings {
+            settings: RuntimeSettingsV25::from_current(RuntimeSettings {
                 gravity_2d: Vec2d::new(0.0, -18.0),
                 gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
                 sim_hz: 90.0,
@@ -9969,7 +10352,7 @@ mod tests {
                     ..RenderSettingsRecord::default()
                 },
                 partition: PartitionSettings::default(),
-            },
+            }),
         }
     }
 
@@ -10130,7 +10513,7 @@ mod tests {
                     ..v17_rec(g(0xF104), "River", None)
                 },
             ],
-            settings: RuntimeSettings {
+            settings: RuntimeSettingsV25::from_current(RuntimeSettings {
                 gravity_2d: Vec2d::new(0.0, -18.0),
                 gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
                 sim_hz: 90.0,
@@ -10139,7 +10522,7 @@ mod tests {
                     ..RenderSettingsRecord::default()
                 },
                 partition: PartitionSettings::default(),
-            },
+            }),
         }
     }
 
@@ -10257,7 +10640,7 @@ mod tests {
                 .cloned()
                 .map(EntityRecordV17::from_current)
                 .collect(),
-            settings: sinks.settings,
+            settings: RuntimeSettingsV25::from_current(sinks.settings),
         };
         let v18 = SceneFileV18 {
             schema_version: 18,
@@ -10268,7 +10651,7 @@ mod tests {
                 .cloned()
                 .map(EntityRecordV18::from_current)
                 .collect(),
-            settings: sinks.settings,
+            settings: RuntimeSettingsV25::from_current(sinks.settings),
         };
         let v17_bytes = bincode::serde::encode_to_vec(&v17, bincode_config()).unwrap();
         let v18_bytes = bincode::serde::encode_to_vec(&v18, bincode_config()).unwrap();
@@ -10373,7 +10756,7 @@ mod tests {
                     ..v18_rec(g(0xF205), "Raft", None)
                 },
             ],
-            settings: RuntimeSettings {
+            settings: RuntimeSettingsV25::from_current(RuntimeSettings {
                 gravity_2d: Vec2d::new(0.0, -18.0),
                 gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
                 sim_hz: 90.0,
@@ -10382,7 +10765,7 @@ mod tests {
                     ..RenderSettingsRecord::default()
                 },
                 partition: PartitionSettings::default(),
-            },
+            }),
         }
     }
 
@@ -10504,7 +10887,7 @@ mod tests {
                 .cloned()
                 .map(EntityRecordV18::from_current)
                 .collect(),
-            settings: solid.settings,
+            settings: RuntimeSettingsV25::from_current(solid.settings),
         };
         let v18_bytes = bincode::serde::encode_to_vec(&v18, bincode_config()).unwrap();
         // Measured between the two FROZEN rungs, not against the live encoding:
@@ -10519,7 +10902,7 @@ mod tests {
                 .cloned()
                 .map(EntityRecordV19::from_current)
                 .collect(),
-            settings: solid.settings,
+            settings: RuntimeSettingsV25::from_current(solid.settings),
         };
         let v19_bytes = bincode::serde::encode_to_vec(&v19, bincode_config()).unwrap();
         assert_eq!(
@@ -10625,7 +11008,7 @@ mod tests {
                     ..v19_rec(g(0xF206), "Cavern", None)
                 },
             ],
-            settings: RuntimeSettings {
+            settings: RuntimeSettingsV25::from_current(RuntimeSettings {
                 gravity_2d: Vec2d::new(0.0, -18.0),
                 gravity_3d: Vec3d::new(0.0, -9.81, 0.0),
                 sim_hz: 90.0,
@@ -10634,7 +11017,7 @@ mod tests {
                     ..RenderSettingsRecord::default()
                 },
                 partition: PartitionSettings::default(),
-            },
+            }),
         }
     }
 
@@ -10749,7 +11132,7 @@ mod tests {
                 .cloned()
                 .map(EntityRecordV19::from_current)
                 .collect(),
-            settings: solid.settings,
+            settings: RuntimeSettingsV25::from_current(solid.settings),
         };
         let v19_bytes = bincode::serde::encode_to_vec(&v19, bincode_config()).unwrap();
         // **Measured between the two FROZEN rungs, not against the live
@@ -10766,7 +11149,7 @@ mod tests {
                 .cloned()
                 .map(EntityRecordV20::from_current)
                 .collect(),
-            settings: solid.settings,
+            settings: RuntimeSettingsV25::from_current(solid.settings),
         };
         let v20_bytes = bincode::serde::encode_to_vec(&v20, bincode_config()).unwrap();
         assert_eq!(
@@ -10779,6 +11162,7 @@ mod tests {
         assert_eq!(
             solid_bytes.len(),
             v20_bytes.len()
+                + V26_RENDER_BLOCK_BYTES
                 + CHARACTER_SLOT_BYTES
                 + MOVEMENT_SLOT_BYTES
                 + VEHICLE_SLOT_BYTES
@@ -11074,7 +11458,7 @@ mod tests {
                 schema_version: 20,
                 title: "t".into(),
                 entities: vec![EntityRecordV20::from_current(plain.clone())],
-                settings: RuntimeSettings::default(),
+                settings: RuntimeSettingsV25::default(),
             },
             bincode_config(),
         )
@@ -11082,6 +11466,7 @@ mod tests {
         assert_eq!(
             live.len(),
             frozen.len()
+                + V26_RENDER_BLOCK_BYTES
                 + CHARACTER_SLOT_BYTES
                 + MOVEMENT_SLOT_BYTES
                 + VEHICLE_SLOT_BYTES
@@ -11162,6 +11547,11 @@ mod tests {
         roughness: f32,
         #[allow(dead_code)]
         emissive: Color,
+        /// The v26 field, at the slot v26 exists for — declared here so a
+        /// material grown WITHOUT a bump leaves bytes this shape cannot account
+        /// for, and so a field inserted before it fails to decode.
+        #[allow(dead_code)]
+        emissive_intensity: f32,
         #[allow(dead_code)]
         blend: BlendMode,
         #[allow(dead_code)]
@@ -11235,7 +11625,7 @@ mod tests {
     /// and P29.3's movement slot **re-declared field-for-field**. A `type`
     /// because clippy counts the tuple's nesting, and because naming it says
     /// what it is.
-    type V25EntityWire = (
+    type V26EntityWire = (
         EntityRecordV20Gen<MaterialV22Wire, TerrainV24Wire>,
         Option<IkTarget>,
         Option<ClothSim>,
@@ -11356,10 +11746,10 @@ mod tests {
     /// `Material` without a bump shifts every byte after it, which is the case
     /// v22 itself is.
     #[derive(serde::Deserialize)]
-    struct SceneFileV25Wire {
+    struct SceneFileV26Wire {
         schema_version: u32,
         title: String,
-        entities: Vec<V25EntityWire>,
+        entities: Vec<V26EntityWire>,
         settings: RuntimeSettings,
         /// The v24 tail. Declared here so a payload whose anchor is short or
         /// long by a field cannot pass — the anchor is the *file's* growth, and
@@ -11380,7 +11770,7 @@ mod tests {
     }
 
     #[test]
-    fn the_v25_wire_shape_is_pinned_against_an_independent_declaration() {
+    fn the_v26_wire_shape_is_pinned_against_an_independent_declaration() {
         let bound = Uuid::from_u128(0x00FA_7E12);
         let level = RuntimeLevel {
             title: "Pinned".into(),
@@ -11404,9 +11794,9 @@ mod tests {
         };
         let bytes = encode(&level).unwrap();
 
-        let (wire, consumed): (SceneFileV25Wire, usize) =
+        let (wire, consumed): (SceneFileV26Wire, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode_config())
-                .expect("the pinned v25 shape decodes the v25 wire");
+                .expect("the pinned v26 shape decodes the v26 wire");
         assert_eq!(
             consumed,
             bytes.len(),
@@ -11550,7 +11940,7 @@ mod tests {
         // needs a version bump rather than a `#[serde(default)]`, and it is the
         // failure this pin exists to produce.
         let err =
-            bincode::serde::decode_from_slice::<SceneFileV25Wire, _>(&v24, bincode_config()).err();
+            bincode::serde::decode_from_slice::<SceneFileV26Wire, _>(&v24, bincode_config()).err();
         assert!(
             err.is_some(),
             "the pinned v24 shape read a payload with an extra entity slot as if nothing had changed — the shape pin has no forcing function at all"
@@ -11558,7 +11948,7 @@ mod tests {
         // …and the SAME bytes minus the appended slot decode cleanly, so the
         // refusal above is the slot's doing and not a broken fixture.
         assert!(
-            bincode::serde::decode_from_slice::<SceneFileV25Wire, _>(&one_entity, bincode_config())
+            bincode::serde::decode_from_slice::<SceneFileV26Wire, _>(&one_entity, bincode_config())
                 .is_ok(),
             "the control payload does not decode either — the fixture is wrong, not the pin"
         );
@@ -11782,7 +12172,7 @@ mod tests {
                     schema_version: 21,
                     title: "t".into(),
                     entities: vec![EntityRecordV21::from_current(e.clone())],
-                    settings: RuntimeSettings::default(),
+                    settings: RuntimeSettingsV25::default(),
                 },
                 bincode_config(),
             )
@@ -11800,6 +12190,8 @@ mod tests {
         assert_eq!(
             live(&materialed).len(),
             frozen(&materialed).len()
+                + V26_RENDER_BLOCK_BYTES
+                + EMISSIVE_INTENSITY_BYTES
                 + MATERIAL_BINDING_BYTES
                 + MOVEMENT_SLOT_BYTES
                 + VEHICLE_SLOT_BYTES
@@ -11810,7 +12202,11 @@ mod tests {
         );
         assert_eq!(
             live(&bare).len(),
-            frozen(&bare).len() + MOVEMENT_SLOT_BYTES + VEHICLE_SLOT_BYTES + geo_anchor_bytes(),
+            frozen(&bare).len()
+                + V26_RENDER_BLOCK_BYTES
+                + MOVEMENT_SLOT_BYTES
+                + VEHICLE_SLOT_BYTES
+                + geo_anchor_bytes(),
             "an entity with no Material must pay nothing for v22 — the field is \
              inside the component, not on the entity record — and exactly one \
              byte for v23, whose slot is on the record"
@@ -11839,6 +12235,7 @@ mod tests {
                     metallic: 0.75,
                     roughness: 0.25,
                     emissive: Color::new(0.1, 0.0, 0.0, 1.0),
+                    emissive_intensity: 1.0,
                     blend: BlendMode::Masked,
                     alpha_cutoff: 0.375,
                     asset: Some(v22_fixture_material_binding()),
@@ -11883,6 +12280,82 @@ mod tests {
     /// discriminant, on the record, so every entity pays it — exactly like the
     /// v23 slot above and every additive slot since v8.
     const VEHICLE_SLOT_BYTES: usize = 1;
+
+    // ── v26 (wave VIS1a) ────────────────────────────────────────────────────
+
+    /// What v26's render block costs **the file**, once, whatever it contains:
+    /// twenty-one appended fields — six SSR, five exposure, one bloom flag, five
+    /// flare, five lens — encoded at their defaults.
+    ///
+    /// Five of them are `bool`/`u8` (one byte each), sixteen are `f32` (four),
+    /// and `flare_ghost_count` is a `u32` that bincode's varint encoding writes
+    /// as **one** byte at the default 4: 5 + 64 + 1 = **70**. Measured rather
+    /// than asserted from the arithmetic by
+    /// [`the_v26_costs_are_what_the_constants_say`], which is the only honest way
+    /// to price a varint field.
+    const V26_RENDER_BLOCK_BYTES: usize = 70;
+
+    /// What v26's `Material::emissive_intensity` costs an entity that HAS a
+    /// material: one `f32`, inside the component — so an entity with no material
+    /// pays nothing at all.
+    const EMISSIVE_INTENSITY_BYTES: usize = 4;
+
+    /// **The two v26 constants above, measured rather than derived** — the arm
+    /// every other v26 price in this file is priced by reference to.
+    ///
+    /// Deriving them from the field list is exactly the mistake bincode's varint
+    /// integers punish: `flare_ghost_count` is a `u32` whose default of 4 encodes
+    /// in ONE byte, not four, so a hand-count that says "twenty-one fields, four
+    /// bytes each where they are wide" is wrong by three before it starts.
+    #[test]
+    fn the_v26_costs_are_what_the_constants_say() {
+        let plain = v9_rec(Uuid::from_u128(0xFE01), "Marker", None).into_runtime();
+        let mut materialed = plain.clone();
+        materialed.material = Some(Material::default());
+
+        let live = |e: &RuntimeEntity| {
+            encode(&RuntimeLevel {
+                title: "t".into(),
+                entities: vec![e.clone()],
+                settings: RuntimeSettings::default(),
+                geo: Default::default(),
+            })
+            .unwrap()
+            .len()
+        };
+        let frozen = |e: &RuntimeEntity| {
+            bincode::serde::encode_to_vec(
+                &SceneFileV25 {
+                    schema_version: 25,
+                    title: "t".into(),
+                    entities: vec![EntityRecordV25::from_current(e.clone())],
+                    settings: RuntimeSettingsV25::default(),
+                    geo: Default::default(),
+                },
+                bincode_config(),
+            )
+            .unwrap()
+            .len()
+        };
+        let block = live(&plain) - frozen(&plain);
+        let with_material = live(&materialed) - frozen(&materialed);
+        eprintln!(
+            "v26 on the wire: {block} B of render block on a level with no material, \
+             {with_material} B on one entity that has one"
+        );
+        assert_eq!(
+            block, V26_RENDER_BLOCK_BYTES,
+            "the v26 render block costs {block} bytes, not the pinned \
+             {V26_RENDER_BLOCK_BYTES}"
+        );
+        assert_eq!(
+            with_material - block,
+            EMISSIVE_INTENSITY_BYTES,
+            "the emissive intensity costs {} bytes on a materialed entity, not \
+             the pinned {EMISSIVE_INTENSITY_BYTES}",
+            with_material - block
+        );
+    }
 
     /// The movement component the v23 arms author — deliberately non-default in
     /// every family of field (a mode, a gait, a rotation mode, an overlay name,
@@ -12235,6 +12708,151 @@ mod tests {
         assert_ne!(encode(&bare).unwrap(), bytes);
     }
 
+    /// **A NON-DEFAULT v26 RECORD SURVIVES A ROUND TRIP** — every one of the
+    /// twenty-two appended fields, set to a value that is not its default, and
+    /// compared field-for-field on the way back.
+    ///
+    /// This is what "an unread field is fine, an unread WIRE field is not" means
+    /// operationally: most of these have no consumer until VIS1b, and all of them
+    /// are persisted, applied by both hosts and checked here from the day they
+    /// land.
+    #[test]
+    fn v26_render_block_round_trips_field_for_field() {
+        let authored = RenderSettingsRecord {
+            ssr_enabled: true,
+            ssr_distance: 37.5,
+            ssr_thickness: 0.42,
+            ssr_quality: 2,
+            ssr_intensity: 0.75,
+            ssr_roughness_cutoff: 0.61,
+            exposure_mode: 1,
+            exposure_compensation_ev: -1.25,
+            exposure_min_luminance: 0.011,
+            exposure_max_luminance: 12.5,
+            exposure_adaptation_speed: 3.25,
+            bloom_karis: true,
+            flare_enabled: true,
+            flare_intensity: 0.85,
+            flare_ghost_count: 9,
+            flare_halo: 0.55,
+            flare_streak: 0.35,
+            vignette_intensity: 0.45,
+            vignette_smoothness: 0.65,
+            chromatic_aberration: 2.5,
+            grain_intensity: 0.15,
+            grain_size: 1.75,
+            ..RenderSettingsRecord::default()
+        };
+        assert_ne!(
+            authored,
+            RenderSettingsRecord::default(),
+            "the fixture must not be the default, or this arm proves nothing"
+        );
+        let level = RuntimeLevel {
+            title: "V26".into(),
+            entities: vec![],
+            settings: RuntimeSettings {
+                render: authored,
+                ..RuntimeSettings::default()
+            },
+            geo: Default::default(),
+        };
+        let bytes = encode(&level).unwrap();
+        assert_eq!(bytes[0], SCHEMA_VERSION as u8);
+        let back = decode(&bytes).expect("a v26 level decodes");
+        assert_eq!(back.settings.render, authored);
+        assert_eq!(back, level);
+    }
+
+    /// The **emissive intensity** survives a round trip, and it is genuinely
+    /// per-entity: a second material with no intensity change must come back
+    /// unchanged, which a codec writing one value into every slot would fail.
+    #[test]
+    fn v26_emissive_intensity_round_trips_through_the_codec() {
+        let bright = Material {
+            emissive: Color::new(1.0, 0.85, 0.6, 1.0),
+            emissive_intensity: 24.0,
+            ..Material::default()
+        };
+        let level = RuntimeLevel {
+            title: "Lamps".into(),
+            entities: vec![
+                RuntimeEntity {
+                    material: Some(bright),
+                    ..v9_rec(Uuid::from_u128(0xFE10), "Lamp", None).into_runtime()
+                },
+                RuntimeEntity {
+                    material: Some(Material::default()),
+                    ..v9_rec(Uuid::from_u128(0xFE11), "Wall", None).into_runtime()
+                },
+            ],
+            settings: RuntimeSettings::default(),
+            geo: Default::default(),
+        };
+        let bytes = encode(&level).unwrap();
+        let back = decode(&bytes).expect("a v26 level decodes");
+        assert_eq!(back, level);
+        assert_eq!(back.entities[0].material.unwrap().emissive_intensity, 24.0);
+        assert_eq!(back.entities[1].material.unwrap().emissive_intensity, 1.0);
+
+        // …and clearing it really changes the bytes.
+        let mut dim = level.clone();
+        dim.entities[0]
+            .material
+            .as_mut()
+            .unwrap()
+            .emissive_intensity = 1.0;
+        assert_ne!(encode(&dim).unwrap(), bytes);
+    }
+
+    /// **The downgrade direction for v26**, both halves: the frozen v25 entity
+    /// record loses the intensity and nothing else, and the frozen v25 settings
+    /// lose the render tail and nothing else.
+    ///
+    /// Asserted as a property — patch the one field back and compare by
+    /// `PartialEq` — rather than as a field list, which would silently stop
+    /// covering whatever lands next.
+    #[test]
+    fn v25_downgrade_is_lossless_except_for_what_v26_added() {
+        let live = RuntimeEntity {
+            material: Some(Material {
+                emissive_intensity: 9.5,
+                ..Material::default()
+            }),
+            vehicle_class: Some(v25_fixture_class()),
+            character_movement: Some(v23_fixture_movement()),
+            terrain: Some(fixture_terrain()),
+            ..v9_rec(Uuid::from_u128(0xFE20), "Everything", None).into_runtime()
+        };
+        let mut back = EntityRecordV25::from_current(live.clone()).into_runtime();
+        assert_ne!(back, live, "the intensity must be what is lost");
+        back.material.as_mut().unwrap().emissive_intensity = 9.5;
+        assert_eq!(back, live, "the v25 downgrade lost more than the intensity");
+
+        let settings = RuntimeSettings {
+            render: RenderSettingsRecord {
+                ssr_enabled: true,
+                grain_size: 3.0,
+                exposure: 1.7,
+                ..RenderSettingsRecord::default()
+            },
+            ..RuntimeSettings::default()
+        };
+        let round = RuntimeSettingsV25::from_current(settings).into_current();
+        assert_ne!(round, settings, "the v26 tail must be what is lost");
+        assert_eq!(
+            round,
+            RuntimeSettings {
+                render: RenderSettingsRecord {
+                    exposure: 1.7,
+                    ..RenderSettingsRecord::default()
+                },
+                ..settings
+            },
+            "the v25 settings downgrade lost more than the v26 tail"
+        );
+    }
+
     /// The **downgrade** direction for v25: projecting a live record onto the
     /// frozen v24 shape loses the vehicle class and **nothing else**.
     ///
@@ -12280,7 +12898,7 @@ mod tests {
                     schema_version: 24,
                     title: "t".into(),
                     entities: vec![EntityRecordV24::from_current(plain.clone()); n],
-                    settings: RuntimeSettings::default(),
+                    settings: RuntimeSettingsV25::default(),
                     geo: Default::default(),
                 },
                 bincode_config(),
@@ -12291,8 +12909,8 @@ mod tests {
         for n in [1usize, 4, 16] {
             assert_eq!(
                 live(n),
-                frozen(n) + n,
-                "v25 costs {} bytes over {n} entities, not {n}",
+                frozen(n) + n + V26_RENDER_BLOCK_BYTES,
+                "v25 costs {} bytes over {n} entities, not {n} plus v26's block",
                 live(n) - frozen(n)
             );
         }
@@ -12535,7 +13153,7 @@ mod tests {
                     schema_version: 23,
                     title: "t".into(),
                     entities: vec![EntityRecordV23::from_current(e.clone())],
-                    settings: RuntimeSettings::default(),
+                    settings: RuntimeSettingsV25::default(),
                 },
                 bincode_config(),
             )
@@ -12545,7 +13163,7 @@ mod tests {
         // An entity with no terrain pays only the file-level anchor.
         assert_eq!(
             live(&plain).len(),
-            frozen(&plain).len() + geo_anchor_bytes() + VEHICLE_SLOT_BYTES,
+            frozen(&plain).len() + V26_RENDER_BLOCK_BYTES + geo_anchor_bytes() + VEHICLE_SLOT_BYTES,
             "an entity with no terrain must pay nothing for the layer bindings — \
              the field is inside the component"
         );
@@ -12558,6 +13176,7 @@ mod tests {
         assert_eq!(
             live(&ground).len(),
             frozen(&ground).len()
+                + V26_RENDER_BLOCK_BYTES
                 + geo_anchor_bytes()
                 + TERRAIN_LAYER_MATERIAL_BYTES
                 + VEHICLE_SLOT_BYTES,
@@ -12635,7 +13254,7 @@ mod tests {
                     schema_version: 22,
                     title: "t".into(),
                     entities: vec![EntityRecordV22::from_current(e.clone())],
-                    settings: RuntimeSettings::default(),
+                    settings: RuntimeSettingsV25::default(),
                 },
                 bincode_config(),
             )
@@ -12643,7 +13262,11 @@ mod tests {
         };
         assert_eq!(
             live(&plain).len(),
-            frozen(&plain).len() + MOVEMENT_SLOT_BYTES + VEHICLE_SLOT_BYTES + geo_anchor_bytes(),
+            frozen(&plain).len()
+                + V26_RENDER_BLOCK_BYTES
+                + MOVEMENT_SLOT_BYTES
+                + VEHICLE_SLOT_BYTES
+                + geo_anchor_bytes(),
             "the v23 slot must cost exactly one discriminant byte on an entity \
              that has no movement component"
         );

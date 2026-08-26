@@ -30,8 +30,20 @@
 //! resolve target and no draws at all. wgpu performs the MSAA resolve at pass
 //! end regardless of what was drawn, so that one empty pass hands the water pass
 //! a single-sample copy of everything behind the water. `scene_hdr` is
-//! overwritten by the real [`super::resolve`] node later in the frame, so
-//! nothing downstream sees the intermediate.
+//! overwritten by the real [`super::resolve`] node later in the frame.
+//!
+//! **"Nothing downstream sees the intermediate" was true until wave VIS1a and is
+//! not any more**, so the sentence is corrected here rather than left to mislead.
+//! SSR's colour source is `scene_hdr` bound through the shared `EnvBinding`
+//! (`ENV_SCENE_COLOR`), and the **translucent** pass runs after this resolve — so
+//! on a frame that has refracting water AND screen-space reflections on, a
+//! translucent surface's SSR samples *this* frame's opaque colour while
+//! reprojecting through the *previous* frame's matrix. Under a static camera the
+//! two matrices agree and the result is better than intended; under a moving one
+//! the sample is offset by a frame of camera motion. Narrow (it needs water,
+//! refraction, SSR and a reflective translucent surface at once) and carried by
+//! name in the wave's ledger rather than fixed with a second full-resolution HDR
+//! target.
 //!
 //! It costs one resolve, and only on frames that actually carry water — and only
 //! at a quality tier that pays for refraction at all

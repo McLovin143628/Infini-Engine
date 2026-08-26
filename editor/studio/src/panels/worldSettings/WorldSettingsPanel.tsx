@@ -24,11 +24,19 @@ import type { WeatherPresetDto } from "../../bindings/WeatherPresetDto";
 import type { TimeOfDayDto } from "../../bindings/TimeOfDayDto";
 import {
   CheckboxField,
+  EnumField,
   NumberField,
   PropertyRow,
   PropertySection,
   Vec3Field,
 } from "../../components/propertyRows";
+
+/**
+ * The SSR step budget, by wire code (schema v26, wave VIS1a). The order IS the
+ * encoding — `inf_render::SsrQuality::from_code` reads 0/1/2 and an unknown code
+ * as Medium — so this array may only ever be appended to.
+ */
+const SSR_QUALITY = ["Low", "Medium", "High"] as const;
 import { useProjectStore } from "../../stores/projectStore";
 import { useSceneStore } from "../../stores/sceneStore";
 import { useViewportStore } from "../../stores/viewportStore";
@@ -710,6 +718,61 @@ export default function WorldSettingsPanel() {
                 value={settings.render.gi_intensity}
                 step={0.05}
                 onChange={(v) => patchRender({ gi_intensity: v })}
+              />
+            </PropertyRow>
+          </PropertySection>
+
+          {/*
+            Screen-space reflections (schema v26, wave VIS1a).
+
+            Only the blocks whose consumer exists get a control. The v26 record
+            also carries the exposure, flare and lens-trio fields; they persist,
+            they cross the IPC and both hosts apply them, but they have no pass
+            to reach yet, and a slider that changes nothing is a promise the
+            engine is not keeping. They arrive with VIS1b.
+          */}
+          <PropertySection title="Reflections">
+            <PropertyRow label="Screen-Space">
+              <CheckboxField
+                value={settings.render.ssr_enabled}
+                onChange={(v) => patchRender({ ssr_enabled: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Distance (m)">
+              <NumberField
+                value={settings.render.ssr_distance}
+                step={1}
+                onChange={(v) => patchRender({ ssr_distance: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Quality">
+              <EnumField
+                value={SSR_QUALITY[settings.render.ssr_quality] ?? "Medium"}
+                options={SSR_QUALITY}
+                onChange={(v) =>
+                  patchRender({ ssr_quality: Math.max(0, SSR_QUALITY.indexOf(v as never)) })
+                }
+              />
+            </PropertyRow>
+            <PropertyRow label="Intensity">
+              <NumberField
+                value={settings.render.ssr_intensity}
+                step={0.05}
+                onChange={(v) => patchRender({ ssr_intensity: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Roughness Cutoff">
+              <NumberField
+                value={settings.render.ssr_roughness_cutoff}
+                step={0.05}
+                onChange={(v) => patchRender({ ssr_roughness_cutoff: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Thickness">
+              <NumberField
+                value={settings.render.ssr_thickness}
+                step={0.01}
+                onChange={(v) => patchRender({ ssr_thickness: v })}
               />
             </PropertyRow>
           </PropertySection>

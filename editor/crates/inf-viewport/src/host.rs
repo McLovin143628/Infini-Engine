@@ -35,8 +35,8 @@ use inf_render::{
     TerrainTileKey, TextParams, TilemapParams, BUILTIN_FONT_TEXTURE,
 };
 use inf_render::{
-    detect_tier, BloomSettings, GiSettings, RenderSettings, RenderTier, ShadowSettings,
-    SsaoSettings,
+    detect_tier, BloomSettings, ExposureMode, ExposureSettings, FilmSettings, FlareSettings,
+    GiSettings, RenderSettings, RenderTier, ShadowSettings, SsaoSettings, SsrQuality, SsrSettings,
 };
 use uuid::Uuid;
 
@@ -439,7 +439,7 @@ fn apply_record(r: &RenderSettingsRecord) -> RenderSettings {
             threshold: r.bloom_threshold,
             knee: r.bloom_knee,
             intensity: r.bloom_intensity,
-            ..d.bloom
+            karis: r.bloom_karis,
         },
         ssao: SsaoSettings {
             enabled: r.ssao_enabled,
@@ -461,6 +461,42 @@ fn apply_record(r: &RenderSettingsRecord) -> RenderSettings {
             enabled: r.gi_enabled,
             intensity: r.gi_intensity,
             ..d.gi
+        },
+        // ── schema v26 (wave VIS1a): the photoreal arc's authorable surface ──
+        //
+        // EVERY v26 field is applied here, including the ones whose consumer
+        // lands in VIS1b. An unread field is cheap; an unread *wire* field is
+        // not — a value an author can type, a codec persists and no seam ever
+        // reads is a promise the engine is not keeping, and the seam is the only
+        // place that can be checked before the consumer exists.
+        ssr: SsrSettings {
+            enabled: r.ssr_enabled,
+            max_distance: r.ssr_distance,
+            thickness: r.ssr_thickness,
+            quality: SsrQuality::from_code(r.ssr_quality),
+            intensity: r.ssr_intensity,
+            roughness_cutoff: r.ssr_roughness_cutoff,
+        },
+        exposure_control: ExposureSettings {
+            mode: ExposureMode::from_code(r.exposure_mode),
+            compensation_ev: r.exposure_compensation_ev,
+            min_luminance: r.exposure_min_luminance,
+            max_luminance: r.exposure_max_luminance,
+            adaptation_speed: r.exposure_adaptation_speed,
+        },
+        flare: FlareSettings {
+            enabled: r.flare_enabled,
+            intensity: r.flare_intensity,
+            ghost_count: r.flare_ghost_count,
+            halo: r.flare_halo,
+            streak: r.flare_streak,
+        },
+        film: FilmSettings {
+            vignette_intensity: r.vignette_intensity,
+            vignette_smoothness: r.vignette_smoothness,
+            chromatic_aberration: r.chromatic_aberration,
+            grain_intensity: r.grain_intensity,
+            grain_size: r.grain_size,
         },
         ..d
     }
@@ -2092,12 +2128,11 @@ impl EngineHost {
                     let (color, metallic, roughness, emissive, vt) = w
                         .get::<Material>(entity)
                         .map(|m| {
-                            let e = m.emissive.to_array();
                             (
                                 m.base_color.to_array(),
                                 m.metallic,
                                 m.roughness,
-                                [e[0], e[1], e[2]],
+                                m.emissive_linear(),
                                 inf_render::vt_set_for(vt, m.asset.map(|a| a.as_u128())),
                             )
                         })
@@ -2175,12 +2210,11 @@ impl EngineHost {
             let (color, metallic, roughness, emissive, blend, cutoff, vt) = w
                 .get::<Material>(entity)
                 .map(|m| {
-                    let e = m.emissive.to_array();
                     (
                         m.base_color.to_array(),
                         m.metallic,
                         m.roughness,
-                        [e[0], e[1], e[2]],
+                        m.emissive_linear(),
                         blend_code(m.blend),
                         m.alpha_cutoff,
                         inf_render::vt_set_for(vt, m.asset.map(|a| a.as_u128())),
@@ -3585,12 +3619,10 @@ fn project_fracture(
         return None;
     }
     let (color, metallic, roughness, emissive) = match material {
-        Some(m) => (
-            m.base_color.to_array(),
-            m.metallic,
-            m.roughness,
-            m.emissive.to_array(),
-        ),
+        Some(m) => (m.base_color.to_array(), m.metallic, m.roughness, {
+            let e = m.emissive_linear();
+            [e[0], e[1], e[2], 1.0]
+        }),
         None => ([0.8, 0.8, 0.8, 1.0], 0.0_f32, 0.5_f32, [0.0; 4]),
     };
     let placement = state.placement();
