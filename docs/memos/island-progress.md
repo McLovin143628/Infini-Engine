@@ -8254,6 +8254,61 @@ All three `GOLDEN_SET_DIGEST` pins moved by hand (`838d18fb…` → `84e38ed2…
 the arithmetic written on the phase26 constant. The phase18 **name** array did not
 move and could not: no golden was added or removed, and the set is still 54.
 
+### The lit island, measured
+
+`the_island_at_shipping_resolution`, RTX 4070 Ti, **release**, 1080p, 3 × 120 frames, MIN of
+rounds, over the 51.38 km² Vancouver island. The base run is `cac0b948` with one measurement-only
+patch (the island table printed the dearest **eight** passes, and both passes this wave is about
+were below that cut — it prints every pass now).
+
+| | base `cac0b948` | **VIS1a LIT** | **VIS1a LIT+SSR** |
+|---|---|---|---|
+| p50 | 11.581 ms (86.3 fps) | 11.695 ms (85.5 fps) | **11.825 ms (84.6 fps)** |
+| p95 | 20.902 ms | 21.574 ms | 21.065 ms |
+| GPU frame | 8.128 ms | 8.292 ms | **8.309 ms** |
+| pipelined estimate | — | 120.6 fps | **120.3 fps** |
+| SHIPPED p50 (no lighting stack) | 3.639 ms | — | 3.544 ms |
+
+**≥ 60 fps p50 with SSR and GTAO both on: met, at 84.6 fps — 4.8 ms of headroom.** Nothing
+ships opt-in-off for budget reasons.
+
+Per pass, which is where the wave's own cost is:
+
+| pass | base | **LIT** | **LIT+SSR** | what changed |
+|---|---|---|---|---|
+| `depth-prepass` | 0.005 ms | **0.058** | **0.058** | **+0.053 ms** — terrain (192 tiles), the skinned character, voxel and fracture. Before, it was a full-resolution depth *clear* and nothing else: the island carries **0 rigid mesh instances**, so the prepass drew literally nothing. |
+| `ssao` | 0.030 ms | **0.151** | **0.149** | **+0.12 ms** — GTAO's horizon search and the bilateral blur against the hemisphere kernel and the box. Five times the estimator, 1.8 % of the frame. |
+| `water` | 0.061 ms | 0.062 | **0.073** | **+0.011 ms** — the water reflection march, the one that closed P20.3. |
+| `terrain` | 1.912 ms | 1.902 | 1.911 | +0.009 ms with SSR on: the roughness cutoff refuses to march most ground. |
+| `vsm-raster` | 4.583 ms | 4.577 | 4.580 | untouched |
+| `vgeom` / `scatter` | 0.310 / 0.124 | 0.313 / 0.125 | 0.311 / 0.125 | untouched — and this is VIS-C1b: neither writes the prepass, so neither is *in* the AO. |
+
+**The whole wave costs the lit island +0.181 ms of GPU frame** (8.128 → 8.309), **2.2 %**, for a
+prepass that contains the world, a real occlusion integral, energy-correct metals and reflections
+that were previously impossible without probes.
+
+**And SSR itself costs +0.017 ms on this island**, which is a finding rather than a triumph: the
+`roughness_cutoff` of 0.4 declines to march ground, foliage and rock, so what marches here is the
+water and the few smooth surfaces. On a wet street it will cost more, and the quality bands exist
+for that — the cube-field measurement in `gi_v2_cost_per_tier` prices the march itself at
+**+0.018 / +0.019 / +0.141 ms** for Low / Medium / High.
+
+### Counts
+
+| | before (`cac0b948`) | **after VIS1a** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 323 / 6 109 / 0 / 19 | **324 / 6 132 / 0 / 19** — **+1 block** (`apply_record_mirror`, the pin the two seams never had) and **+23 arms** |
+| goldens | 54, byte-identical | **54**, `INF_GOLDEN_STRICT=1` green — **28 deliberately re-blessed** across two stated-purpose commits, `ssao.png` in both |
+| `GOLDEN_SET_DIGEST` pins | `7ff2b370…` | **`84e38ed2…`** — moved twice, by hand, in all three gates (phase26/27/28) |
+| phase18 golden NAME array | 54 names | **54 names, unmoved** — nothing was added or removed |
+| frontend tests / files | 717 / 80 | **718 / 80** — +1 arm, no new file; `tsc` and `eslint` clean |
+| rustdoc individual warnings (cold, after `cargo clean --doc`) | 374 over 30 crates | **374 over 30 crates** — the wave adds **zero**, against a ceiling of 450 |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** (two `needless_range_loop` in this wave's own new arm, caught and fixed) |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **scene v26** / payload v11 / `.inf_sm` v3 — **one bump, spent once for the whole arc** |
+| committed `.inf_lvl` files | — | **23 re-blessed** v25 → v26 (19 samples, 4 templates), every delta `70 + 4m` |
+| new crates / dependencies | — | **none** |
+
 ### Carried, by name
 
 1. **VIS-C1b — the GPU-driven half of the depth prepass.** vgeom and scatter do

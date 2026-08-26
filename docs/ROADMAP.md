@@ -26483,3 +26483,195 @@ resize finding reproduces (`SIMPLEREGION (0, 100, 800, 600)` after a resize to 6
 kills **2** OS-level arms rather than the 1 claimed, and the A8 gate is 4/4 with the RMB gate outside
 every hunk in the range. Counts after the audit: battery **323 / 6 109 / 0 / 19**, frontend
 **717 / 80** (+5 arms, +2 files), goldens **54 / 102** unmoved, clippy 0, rustdoc 374, fmt clean.
+
+## Wave VIS1a — the photoreal foundations (2026-08-26)
+
+**What the screen-space stack could see, what a reflection was allowed to be, and the energy the
+GGX lobe had been losing since P7.1.** Base `cac0b948`; RTX 4070 Ti, Windows/Vulkan. The first of
+two slices of the photoreal arc; VIS1b (light & lens) follows. Full ledger in
+`docs/memos/island-progress.md` under *Wave VIS1a*.
+
+**Clause 1 — the depth prepass sees the world.** `passes/depth_prepass.rs` opened with *"v1 covers
+the rigid `MeshInstance` geometry only … folding terrain + skinned geometry into the prepass is a
+documented follow-up"*, carried in two places since P13.3a, and it is the highest-leverage sentence
+in the visual stack: the prepass is not one feature's input but the shared input to **SSAO**, to
+**TAA**'s reprojection and, since P18.4, to **SSR**. Measured on the lit island before the wave,
+`depth-prepass` cost **0.005 ms** — a full-resolution depth *clear* and nothing else, because the
+island carries **0 rigid mesh instances**. Terrain, skinned meshes, voxel volumes and fracture
+chunks write it now, for **+0.053 ms**.
+
+The ordering is what shapes the design and cannot be arranged away: SSAO consumes the prepass and
+the lit passes consume its AO, so the prepass must finish before the first lit pass — while the
+geometry that writes it lives in nodes that run *after* SSAO, precisely because their fragment
+stages sample that AO. A node cannot reach another node's buffers, and a private copy of a terrain's
+per-tile texture cache is ~840 KiB per resident tile. So the same node contributes twice, at two
+depths of the frame: `RenderNode::depth_prepass` (defaulted to nothing) plus `opens_depth_prepass`,
+marking the one node that clears. The sweep is recorded between the anchor's `run` and its timing
+mark, so `RenderGraph::names()` and the `gpu_timing` gate's derived list are unchanged and the
+`depth-prepass` row is the cost of the whole prepass rather than of one quarter of it. Each
+contributor shares ONE per-frame preparation with its colour pass, so the depth written is the same
+clipmap assembly, the same pose and the same instance upload the colour pass will draw.
+
+Terrain's depth pipeline **keeps a fragment stage** — the P21.2 hole discard is the first statement
+of `fs`, and a prepass that wrote depth through a carved cell would occlude the cave mouth for
+SSAO/TAA/SSR while the colour pass draws the voxel volume through it. It still binds `@group(2)`
+(the vertex stage reads the P22.1 deformation uniform) and must never bind the env group, which
+carries this very texture at `ENV_SCENE_DEPTH`. `skinned_depth.wgsl` copies `skinned_mesh.wgsl`'s
+skinning arithmetic rather than `vsm_skinned.wgsl`'s: the shadow caster normalizes weights and falls
+back to the bind pose, which is right for a shadow and one ulp of self-occlusion here.
+
+**The gate is a difference of differences**, because "SSAO changed the frame" is satisfied by the
+receiver's own self-occlusion. Four frames — with and without the occluder, each SSAO off and on —
+identify the pixels where the *off* pair agrees, then count how many of those the *on* pair darkens:
+skinned **1 583** of 56 053, voxel **430** of 37 925, fracture **7 033** of 52 177, and a net
+luminance that falls in every case. The voxel arm needed a rigid probe box and that is a finding:
+`voxel.wgsl` is composed `Plain` and binds no environment group (the P21.1 ruling), so a voxel
+surface samples no AO — the first draft asserted a voxel-only frame changed under SSAO and measured
+**exactly zero**, and the arm was wrong rather than the code.
+
+**Routed, not taken: VIS-C1b, the GPU-driven half.** vgeom and scatter get their visible sets from
+cull compute passes whose occlusion test reads an HZB built from *this frame's* MSAA depth, which
+does not exist at prepass time, and vgeom's two-pass form has no late list then. Contributing them
+means a second, occlusion-off cull per asset and per batch plus a second indirect draw — a correct
+superset, at a cost this slice cannot measure without first building it. Until it lands, SSAO, TAA
+and SSR do not see meshlet geometry or scattered foliage.
+
+**Clause 2 — SSR v2, and the boat that reflects itself.** SSR was three fields on `GiSettings`, a
+fixed 24-tap uniform march over 8 m, not roughness-aware, and — the fact that governed everything
+else — a **hit finder** rather than a colour fetch: all a hit did was re-anchor the GI probe fetch,
+which made the feature meaningless without probes. It now has `SsrSettings`, its own clause in
+`needs_depth_prepass` (`gi.enabled &&` is gone), its own scene fields and its own colour.
+
+The renderer is forward with 4× MSAA, so there are exactly two colour sources in this engine and the
+wave uses both. **Water** gets *this* frame's, through the private `color_msaa → scene_hdr` resolve
+it already runs for refraction — no latency at all, which is why colour-sourced reflection lands
+there first. **Opaque surfaces** get the previous frame's, reprojected through
+`GiData::prev_view_proj`: one frame of latency for a reflection that is otherwise geometrically
+exact, the bargain `taa` and `cloud_temporal` already strike. The march is `t = max_distance · u²` —
+**2 cm** to the first sample at 32 taps over 24 m against v1's 33 cm at 24 taps over 8 m — with a
+three-step bisection so the colour is fetched inside the step the hit was found in.
+
+**P20.3 is closed.** P20.1 ruled water's reflection to be the sky because *"a wave-perturbed normal
+at the grazing angles that dominate a water surface reflects toward the horizon, which is exactly
+where a screen-space march has nothing to hit"*. Every clause of that is still true, and it is an
+argument about **grazing angles** rather than about water: it could not distinguish the pixel
+looking down into the sea from the pixel looking at the horizon.
+`water_grazing_weight(cos_v) = smoothstep(0.05, 0.25, cos_v)` is that distinction, with the band
+deliberately low — an eye five metres up reads `cos_v ≈ 0.3`, the shot the item exists to get, while
+P20.1's case is hundredths of a cosine where the fade returns 0 before a tap is spent *and* the march
+would leave the frame anyway. Measured on one scarlet block on an open sea: from five metres up the
+frame's redness moves **−57.439 → −56.194** (+1.244, 1.691 % of the frame); from 0.6 m up,
+**−57.190 → −56.645** (+0.545, 1.130 %). The grazing case is not zero and that is honest — a wave
+facet tilted toward the camera reflects what is in front of it, which is P20.1's own sentence read
+the other way round — so the arm asserts the block does not *arrive* at the horizon.
+
+**Routed, not taken: VIS-C2b, the attribute prepass.** Zero-latency opaque SSR needs a same-frame
+composite, which needs per-pixel `f0`, roughness and a normal, which needs either a G-buffer
+(refused by the standing visbuffer/MSAA coverage ruling) or widening the depth prepass into an
+attribute prepass. A wave of its own. Also routed by name and not taken: glass/IOR transmission (it
+belongs with the MAT wave's translucent rewrite), reflection probes, planar reflections.
+
+**Clause 3 — scene v25 → v26, the arc's ONE schema window.** Twenty-two appended render fields (six
+SSR, five exposure, one bloom flag, five flare, five lens) plus `Material::emissive_intensity`. Two
+freezes — `RenderSettingsRecordV25` / `RuntimeSettingsV25` / `LevelSettingsV25` for the settings,
+`MaterialV25` for the component — and the entity record gains a **third** generic parameter rather
+than a third ninety-line restatement in each of two crates. Spent once for both slices, because a
+second window would be a second ladder rung for fields that were already known.
+
+What the material field closes: `Material::emissive` is 8-bit sRGB, so it cannot exceed 1.0 in any
+channel, and the default bloom threshold is a linear luminance of 1.0 — an emissive material authored
+in the editor could *touch* the threshold and never cross it, while `hdr_bloom.png` builds a 9.0 by
+hand because a golden may reach past the UI. A colour picker answers "what colour"; nothing answered
+"how bright". The wire cost is **70 bytes per file and 4 per materialed entity**, and it is measured
+rather than derived, because `flare_ghost_count` is a `u32` whose default of 4 encodes in **one**
+byte under bincode's varints. Twenty-three committed `.inf_lvl` files were re-blessed and every one
+of their deltas is exactly `70 + 4m` — `VgeomDemo` grows **1366 bytes ⇒ 324 materials against 325
+entities**, which is 324 meshes and one light.
+
+**The pin that was missing.** The two `apply_record` seams — `inf_player::render` and
+`inf_viewport::host` — have carried a *"MIRROR: keep identical to …"* doc comment since R-P4 and
+**nothing has ever checked it**. Two crates, two rings, and a silent failure mode that is exactly
+what `PIE == shipping` rests on. This wave doubled the size of that mapping, so it is the wave that
+had to stop trusting the sentence: `apply_record_mirror.rs` extracts both function bodies, strips
+comments and whitespace, and compares them character for character — mutation-verified, and
+anti-vacuous (it asserts the extraction produced 30+ lines and contains the v26 block).
+
+**Clause 4 — GTAO, and a blur that knows what it is blurring.** Four screen-space slices, six
+horizon steps each way, and the cosine-weighted visibility of the wedge between the two horizons in
+closed form; still half-res, still ambient-only, still two passes into the same targets. **One
+defect found by building the arm before trusting the formula**: the integral was not normalized —
+the two arcs on an unoccluded slice reduce to `cos γ + γ·sin γ`, which is 1 only when the projected
+normal points at the camera — and a wall 25 m from the nearest occluder, against a 1.5 m AO radius,
+was being darkened by **0.3 % of its luminance, uniformly**, with nothing in the frame able to
+explain it. Normalizing against each slice's own open value took that from 2.264 to **0.719**
+luminance. The blur went from a 4×4 box to depth-aware bilateral, weighted on the **ratio** of
+reverse-Z depths because there is no far plane to linearize against. Mutation-measured on two slabs
+with a 0.4 m slot in front of a backdrop 25 m behind: the depth-aware blur leaks **5.14** at the
+silhouette, the same blur with its weight forced to 1 leaks **6.59**, and the arm's threshold is
+6.0. The residue is a finding rather than slack — it is the **half-resolution upsample**, not the
+blur, and it is routed as **VIS-C4b**.
+
+**Clause 5 — the GGX stops losing light.** The Smith term accounts for microfacets that mask the
+view or the light and the single-scatter model then *drops* what they masked; over a 21 × 20
+roughness/angle sweep the lobe's directional albedo at `f0 = 1` falls to **0.45** — it loses 55 % of
+what it was given, which a metal wears as being systematically too dark because it has no diffuse
+term to hide it. Kulla & Conty's correction returns exactly that much and no more: at `f0 = 1` the
+product is 1 **by construction**, which is the white furnace written as arithmetic, and
+`the_ggx_furnace_test_is_white` measures the worst error over the sweep at **5.96 × 10⁻⁸**. On the
+GPU, a metal slab under a sun from the mirror angle with the smooth slab as its own control:
+314.63 → **317.57** at roughness 0.15 (+0.9 %) and 572.69 → **648.20** at 0.85 (**+13.2 %**).
+
+### The re-bless
+
+Two commits whose stated purpose is the look, and no others touched a golden.
+`dc488b69` re-blessed **`ssao.png` alone** (mean 0.001456 / max 0.038588 — *inside* the harness's
+perceptual tolerance, which is exactly why it was re-blessed: a golden that no longer depicts what
+the engine draws is a golden nobody can read a regression off). `4c4d20c6` re-blessed **28 of 54**
+for the multi-scatter lobe; largest mean `weather_fog_dawn` **0.000252**, largest max
+`pbr_materials` **0.031216** (the metallic/roughness grid, the frame the change exists for), and 26
+frames byte-identical including all five water goldens, all four cloud presets, the four sky times
+of day and both 2D scenes. All three `GOLDEN_SET_DIGEST` pins moved by hand,
+`7ff2b370…` → `838d18fb…` → `84e38ed2…`; the phase18 **name** array did not move and could not,
+since the set is still 54. That the numbers are visible at all is itself a change: the harness now
+**prints** mean and max on the *passing* path, because a real change to what the engine draws could
+previously sit inside the tolerance unnoticed for ever.
+
+### The lit island, measured
+
+`the_island_at_shipping_resolution`, RTX 4070 Ti, release, 1080p, 3 × 120 frames, MIN of rounds,
+over the 51.38 km² island.
+
+| | base `cac0b948` | **LIT** | **LIT+SSR** |
+|---|---|---|---|
+| p50 | 11.581 ms (86.3 fps) | 11.695 (85.5) | **11.825 ms (84.6 fps)** |
+| GPU frame | 8.128 ms | 8.292 | **8.309 ms** |
+| `depth-prepass` | **0.005** | 0.058 | **0.058** |
+| `ssao` | **0.030** | 0.151 | **0.149** |
+| `water` | 0.061 | 0.062 | **0.073** |
+
+**≥ 60 fps p50 with SSR and GTAO both on: met at 84.6 fps, 4.8 ms of headroom.** Nothing ships
+opt-in-off for budget reasons. The whole wave costs the lit island **+0.181 ms**, 2.2 % of the GPU
+frame. SSR itself costs **+0.017 ms here**, which is a finding rather than a triumph: the
+`roughness_cutoff` of 0.4 declines to march ground, foliage and rock, so what marches on this island
+is the water. `gi_v2_cost_per_tier` prices the march itself at **+0.018 / +0.019 / +0.141 ms** for
+Low / Medium / High against a *warm* control — and the control had to be re-measured warm, because
+the first measurement a process makes carries its pipeline compilations and subtracting it priced
+the march **negative**.
+
+### Counts
+
+battery **324 / 6 132 / 0 / 19** (+1 block, the `apply_record_mirror` pin; +23 arms), goldens **54**
+with 28 deliberately re-blessed, frontend **718 / 80** with `tsc` and `eslint` clean, rustdoc **374
+over 30 crates** after `cargo clean --doc` (the wave adds **zero**, ceiling 450), clippy **0** with
+`-D warnings`, `cargo fmt --all --check` clean, schema **scene v26** (payload v11 and `.inf_sm` v3
+unmoved), **no new crate and no new dependency**.
+
+### Carried, by name
+
+**VIS-C1b** the GPU-driven half of the prepass (vgeom + scatter); **VIS-C2b** the attribute prepass
+and zero-latency opaque SSR; **VIS-C4b** the AO upsample; the translucent stage seeing *this*
+frame's colour with *last* frame's matrix when water refraction and SSR are both on (narrow, and the
+stale "nothing downstream sees the intermediate" sentence in `passes/water.rs` is corrected); no
+golden can ever capture SSR, because a golden renders one frame from a fresh renderer and the colour
+history is empty then; and `voxel.wgsl` still binds no environment group, so a voxel surface
+occludes for SSAO/TAA/SSR now but still samples no AO, receives no shadow and feeds no GI.
