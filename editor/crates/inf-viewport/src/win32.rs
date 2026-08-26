@@ -1018,14 +1018,20 @@ fn child_rect_in_parent(parent: HWND, child: HWND) -> Option<ViewportRect> {
 ///
 /// Pure, so the geometry is testable with no window, no GPU and no OS.
 fn child_local_cutouts(cutouts: &[ViewportRect], hole: ViewportRect) -> Vec<(i32, i32, i32, i32)> {
-    let (w, h) = (hole.width as i32, hole.height as i32);
+    // **In i64, deliberately.** Every number here crosses from the frontend as a
+    // rounded `f64`, and `as u32` SATURATES — so a nonsense width arrives as
+    // `u32::MAX`, which is `-1` in `i32` and makes `clamp(0, -1)` a panic on the
+    // viewport thread, outside the render's `catch_unwind`. Widening costs
+    // nothing and the arithmetic cannot overflow at all.
+    let (hx, hy) = (hole.x as i64, hole.y as i64);
+    let (w, h) = (hole.width as i64, hole.height as i64);
     cutouts
         .iter()
         .filter_map(|c| {
-            let left = (c.x - hole.x).clamp(0, w);
-            let top = (c.y - hole.y).clamp(0, h);
-            let right = (c.x - hole.x + c.width as i32).clamp(0, w);
-            let bottom = (c.y - hole.y + c.height as i32).clamp(0, h);
+            let left = (c.x as i64 - hx).clamp(0, w) as i32;
+            let top = (c.y as i64 - hy).clamp(0, h) as i32;
+            let right = (c.x as i64 - hx + c.width as i64).clamp(0, w) as i32;
+            let bottom = (c.y as i64 - hy + c.height as i64).clamp(0, h) as i32;
             // A rectangle entirely off the hole clips to zero area. Keeping it
             // would cost a GDI object and a CombineRgn for nothing — and an
             // empty region is exactly what `CreateRectRgn(x, y, x, y)` makes,
@@ -1057,7 +1063,14 @@ fn apply_window_region(hwnd: HWND, cutouts: &[ViewportRect], hole: ViewportRect)
             SetWindowRgn(hwnd, None, true);
             return;
         }
-        let full = CreateRectRgn(0, 0, hole.width.max(1) as i32, hole.height.max(1) as i32);
+        // Same saturation guard as `child_local_cutouts`: `u32::MAX as i32` is
+        // -1, and `CreateRectRgn(0, 0, -1, -1)` is an empty region — a viewport
+        // clipped away entirely, which reads as "the cutout hid everything".
+        let (rw, rh) = (
+            (hole.width as i64).clamp(1, i32::MAX as i64) as i32,
+            (hole.height as i64).clamp(1, i32::MAX as i64) as i32,
+        );
+        let full = CreateRectRgn(0, 0, rw, rh);
         if full.is_invalid() {
             tracing::warn!("inf-viewport: CreateRectRgn failed — viewport cutout skipped");
             return;
@@ -2140,6 +2153,26 @@ mod tests {
     #[test]
     fn no_cutouts_is_no_region() {
         assert!(child_local_cutouts(&[], hole(0, 0, 800, 600)).is_empty());
+    }
+
+    /// **A nonsense rectangle must not take the viewport thread down.** These
+    /// numbers cross from the frontend as rounded `f64`s and `as u32`
+    /// SATURATES, so `u32::MAX` is what a bad measurement actually arrives as —
+    /// and in `i32` that is `-1`, which would make `clamp(0, -1)` panic here,
+    /// on a thread outside the render's `catch_unwind`. The answer is a clip,
+    /// not a crash.
+    #[test]
+    fn a_saturated_rectangle_clips_instead_of_panicking() {
+        let h = hole(100, 50, 800, 600);
+        assert_eq!(
+            child_local_cutouts(&[hole(200, 100, u32::MAX, u32::MAX)], h),
+            vec![(100, 50, 800, 600)],
+            "an absurd cutout covers the child and no more"
+        );
+        // …and an absurd HOLE is survivable too: nothing can be inside it.
+        let boxes = child_local_cutouts(&[hole(200, 100, 40, 30)], hole(0, 0, u32::MAX, u32::MAX));
+        assert_eq!(boxes, vec![(200, 100, 240, 130)]);
+        assert!(child_local_cutouts(&[hole(i32::MIN, i32::MIN, 4, 4)], h).is_empty());
     }
 
     /// Several overlays at once (a menu plus the Content Drawer's own menu)

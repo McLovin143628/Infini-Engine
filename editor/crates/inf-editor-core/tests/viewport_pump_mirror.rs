@@ -118,7 +118,17 @@ fn pub_fn_names(source: &str) -> Vec<String> {
 ///   are documented no-ops and there is nothing for a pump arm to do. A
 ///   variant there would be a command that is queued and ignored, which is
 ///   strictly worse than not having one.
-const PLATFORM_ONLY: [&str; 2] = ["EmbedForeign", "ReleaseForeign"];
+/// * `SetRegion` — the overlay cutout (UX2) is `SetWindowRgn`: a **window**
+///   region, which macOS does not have. Its equivalent is a `CALayer` mask, a
+///   different mechanism with its own coordinate flip and its own retain rules,
+///   in a file that has never been run on hardware — so macOS keeps the full
+///   hide and `set_region` there is a documented no-op. The frontend guard is
+///   the other half of the same decision: `viewport_cutout_supported` answers
+///   `cfg!(windows)`, so the shell never asks for a cutout that will not happen
+///   and every overlay on macOS still hides the viewport outright, exactly as
+///   it did before the wave. Same argument as the two above: a queued-and-
+///   ignored command is worse than no command.
+const PLATFORM_ONLY: [&str; 3] = ["EmbedForeign", "ReleaseForeign", "SetRegion"];
 
 /// `ViewportHandle` methods that legitimately exist on **one** platform only.
 ///
