@@ -736,7 +736,35 @@ pub const COVERAGE_BIAS_SLOPE: f32 = 2.4;
 /// Offset of the coverage bias, chosen so `coverage = 0` is exactly cloudless.
 pub const COVERAGE_BIAS_OFFSET: f32 = 1.4;
 
-/// The **weather** at world `(x, z)` metres: `[coverage, type]`, both `[0, 1]`.
+/// Frequency multiplier of the weather field's **convection** octave, relative
+/// to [`WEATHER_PERIOD`] (SKY2).
+///
+/// One [`WEATHER_TILE_M`] tile at [`WEATHER_PERIOD`] gives 5 120 m cells; ×4 puts
+/// this octave at 1 280 m, which is the scale of an individual convective cell.
+/// That is the point: coverage is *synoptic* and answers "is there weather here",
+/// while this answers "how hard is THIS cloud growing", and a field that varied
+/// only at the synoptic scale would build every cloud in a region to the same
+/// height — which is precisely the regular, flat-topped deck the closed-form
+/// gradient produced.
+pub const WEATHER_CONVECTION_OCTAVE: i32 = 4;
+
+/// How far the convection field can lift a cumulus's **base** within the slab,
+/// as a fraction of slab thickness, at `cloud_type = 1`.
+///
+/// Deliberately small, and smaller than the top's variation by a factor of seven,
+/// because that is the physics: a cumulus base sits at the lifting condensation
+/// level, which is a property of the air mass and barely moves across a field of
+/// clouds, while the TOP is set by how far each cell manages to convect. A v2
+/// gradient that varied the base as much as the top would look wrong in a way
+/// that is hard to name and easy to see.
+pub const CLOUD_BASE_LIFT: f32 = 0.08;
+
+/// Ceiling of a cumulus within the slab at zero convection — a fair-weather cell
+/// that tops out under halfway up.
+pub const CLOUD_TOP_WEAK: f32 = 0.45;
+
+/// The **weather** at world `(x, z)` metres: `[coverage, type, convection]`, all
+/// `[0, 1]`.
 ///
 /// This is the 2D map the deliverable calls for, computed analytically rather
 /// than baked. That is a deliberate trade: a texture would be one more resizable
@@ -749,13 +777,22 @@ pub const COVERAGE_BIAS_OFFSET: f32 = 1.4;
 /// between the *pattern* of which regions are cloudy is the level's seed.
 ///
 /// CPU mirror of `cloud_weather` in `shaders/cloud_noise.wgsl`.
-pub fn weather(seed: u32, x_m: f32, z_m: f32, coverage: f32, cloud_type: f32) -> [f32; 2] {
+pub fn weather(seed: u32, x_m: f32, z_m: f32, coverage: f32, cloud_type: f32) -> [f32; 3] {
     let s = WEATHER_PERIOD as f32 / WEATHER_TILE_M;
     let (u, v) = (x_m * s, z_m * s);
     // Two octaves: the synoptic pattern plus a mesoscale break-up.
     let c = value2_tiled(u, v, WEATHER_PERIOD, seed.wrapping_add(211)) * 0.65
         + value2_tiled(u * 3.0, v * 3.0, WEATHER_PERIOD * 3, seed.wrapping_add(223)) * 0.35;
     let t = value2_tiled(u * 2.0, v * 2.0, WEATHER_PERIOD * 2, seed.wrapping_add(233));
+    // The convection octave (SKY2): per-cloud, not per-region. See
+    // [`WEATHER_CONVECTION_OCTAVE`].
+    let n = WEATHER_CONVECTION_OCTAVE as f32;
+    let k = value2_tiled(
+        u * n,
+        v * n,
+        WEATHER_PERIOD * WEATHER_CONVECTION_OCTAVE,
+        seed.wrapping_add(241),
+    );
 
     // Widen the raw field before biasing it. Two octaves of interpolated hash
     // pile up around 0.5 — the sum of smooth things is smoother — and a narrow
@@ -781,25 +818,56 @@ pub fn weather(seed: u32, x_m: f32, z_m: f32, coverage: f32, cloud_type: f32) ->
     // The authored type is the mean; the noise wobbles it by ±0.25 so a sky is
     // not uniformly one cloud species.
     let ty = (cloud_type.clamp(0.0, 1.0) + (t - 0.5) * 0.5).clamp(0.0, 1.0);
-    [cov, ty]
+    [cov, ty, k]
 }
 
 /// The vertical density profile at relative height `h ∈ [0, 1]` within the slab,
-/// for a cloud of type `t ∈ [0, 1]` (0 = stratus, 1 = cumulus).
+/// for a cloud of type `t ∈ [0, 1]` (0 = stratus, 1 = cumulus) whose local
+/// convective strength is `k ∈ [0, 1]` (the weather field's third channel).
 ///
 /// Both species taper to zero at the slab's floor and ceiling — a cloud with a
 /// hard-edged top is the single most obvious tell of a naive volumetric — but
 /// they occupy it differently: a stratus is a thin sheet pinned to the bottom
-/// third, a cumulus fills the column and bulges in its upper half.
+/// third, a cumulus builds a column whose width falls away continuously with
+/// height.
+///
+/// # Why v2 (SKY2)
+///
+/// The closed form this replaces kept a cumulus at full strength from `h = 0.22`
+/// to `h = 0.60` and only tapered over the last two fifths. Because `grad`
+/// multiplies the shape *before* the coverage dissolve, a flat `grad` means the
+/// same set of points survives at every height in that band — which is a
+/// **slab**, not a cloud, and it is why the silhouettes came out soft, regular
+/// and all the same height. Two things change:
+///
+/// * **the taper is continuous** from `top × 0.4` to `top`, so fewer and fewer
+///   points clear the dissolve as the column rises and the cloud narrows into a
+///   tower rather than stopping like a table;
+/// * **`top` is per-cloud**, [`CLOUD_TOP_WEAK`] at zero convection and the whole
+///   slab at full — so a field of cumulus has cells of genuinely different
+///   heights instead of one ceiling everywhere.
+///
+/// The base lifts too, by [`CLOUD_BASE_LIFT`] and no more, for the reason stated
+/// there: a cumulus base sits at the condensation level and barely moves, while
+/// its top is whatever that cell managed to reach.
 ///
 /// CPU mirror of `cloud_height_gradient` in `shaders/cloud_noise.wgsl`.
-pub fn height_gradient(h: f32, t: f32) -> f32 {
+pub fn height_gradient(h: f32, t: f32, k: f32) -> f32 {
     let h = h.clamp(0.0, 1.0);
     let t = t.clamp(0.0, 1.0);
-    // Stratus: a sheet in [0, 0.35], smooth at both ends.
-    let stratus = smoothstep(0.0, 0.08, h) * (1.0 - smoothstep(0.20, 0.40, h));
-    // Cumulus: base at 0.05, shoulders through the middle, anvil off by 0.95.
-    let cumulus = smoothstep(0.02, 0.22, h) * (1.0 - smoothstep(0.60, 1.0, h));
+    let k = k.clamp(0.0, 1.0);
+
+    // This cloud's own floor within the slab, and its height above it. Only a
+    // cumulus lifts: at `t = 0` the stratus sheet keeps the slab's own floor,
+    // which is what a sheet does.
+    let floor = k * CLOUD_BASE_LIFT * t;
+    let hl = ((h - floor) / (1.0 - floor).max(1e-3)).clamp(0.0, 1.0);
+
+    // Stratus: a sheet in [0, 0.40], smooth at both ends.
+    let stratus = smoothstep(0.0, 0.08, hl) * (1.0 - smoothstep(0.20, 0.40, hl));
+    // Cumulus: a base near 0.05, then a continuous taper to this cell's ceiling.
+    let top = CLOUD_TOP_WEAK + (1.0 - CLOUD_TOP_WEAK) * k;
+    let cumulus = smoothstep(0.05, 0.30, hl) * (1.0 - smoothstep(top * 0.4, top, hl));
     stratus + (cumulus - stratus) * t
 }
 
@@ -956,11 +1024,11 @@ impl CloudVolumes {
         // Weather is sampled at the *undrifted* position: the coverage pattern is
         // the geography of the weather system, and a weather system that slid with
         // its own clouds would never let a gap pass overhead.
-        let [cov, ty] = weather(seed, p[0], p[2], params.coverage, params.cloud_type);
+        let [cov, ty, conv] = weather(seed, p[0], p[2], params.coverage, params.cloud_type);
         if cov <= 0.0 {
             return 0.0;
         }
-        let grad = height_gradient(h, ty);
+        let grad = height_gradient(h, ty, conv);
         if grad <= 0.0 {
             return 0.0;
         }
@@ -1402,23 +1470,151 @@ mod tests {
         assert!(mean(1.0) > 0.99, "coverage 1 must be solid overcast");
     }
 
-    /// The vertical profile: zero at both boundaries for every species, and the
-    /// two species genuinely differ in where they put their mass.
+    /// The vertical profile: zero at both boundaries for every species **and
+    /// every convective strength**, and the two species genuinely differ in
+    /// where they put their mass.
     #[test]
     fn height_gradient_closes_at_both_ends() {
         for i in 0..=10 {
             let t = i as f32 / 10.0;
-            assert_eq!(height_gradient(0.0, t), 0.0, "open floor at type {t}");
-            assert_eq!(height_gradient(1.0, t), 0.0, "open ceiling at type {t}");
-            // Non-degenerate somewhere in between.
-            let peak = (0..=20)
-                .map(|k| height_gradient(k as f32 / 20.0, t))
-                .fold(0.0f32, f32::max);
-            assert!(peak > 0.5, "type {t} has no cloud at all: {peak}");
+            for j in 0..=4 {
+                let k = j as f32 / 4.0;
+                assert_eq!(height_gradient(0.0, t, k), 0.0, "open floor at {t}/{k}");
+                assert_eq!(height_gradient(1.0, t, k), 0.0, "open ceiling at {t}/{k}");
+                // Non-degenerate somewhere in between — a species that produced
+                // nothing anywhere would be an empty sky nobody could author.
+                let peak = (0..=40)
+                    .map(|n| height_gradient(n as f32 / 40.0, t, k))
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    peak > 0.5,
+                    "type {t} at convection {k} has no cloud: {peak}"
+                );
+            }
         }
-        // Stratus lives low, cumulus lives high — the defining difference.
-        assert!(height_gradient(0.15, 0.0) > height_gradient(0.15, 1.0));
-        assert!(height_gradient(0.55, 1.0) > height_gradient(0.55, 0.0));
+        // Stratus lives low, cumulus lives high — the defining difference,
+        // asserted at mid convection so neither end of the new field carries it.
+        assert!(height_gradient(0.15, 0.0, 0.5) > height_gradient(0.15, 1.0, 0.5));
+        assert!(height_gradient(0.55, 1.0, 0.5) > height_gradient(0.55, 0.0, 0.5));
+    }
+
+    /// **The towers, as a property** (SKY2). A cumulus profile must do three
+    /// things the closed form it replaces could not, and each is measured
+    /// against the v1 shape rather than asserted.
+    #[test]
+    fn convection_builds_towers_of_different_heights() {
+        // (a) CONVECTION RAISES THE CEILING. A weak cell must genuinely stop
+        // lower than a strong one — that is what breaks the single flat top.
+        let ceiling = |k: f32| -> f32 {
+            (0..=200)
+                .map(|n| n as f32 / 200.0)
+                .filter(|&h| height_gradient(h, 1.0, k) > 0.02)
+                .fold(0.0f32, f32::max)
+        };
+        let weak = ceiling(0.0);
+        let strong = ceiling(1.0);
+        assert!(
+            strong > weak + 0.3,
+            "convection does not build: weak tops at {weak}, strong at {strong}"
+        );
+        // ...and monotonically, so the field's own gradient reads as height.
+        let mut prev = 0.0;
+        for j in 0..=8 {
+            let c = ceiling(j as f32 / 8.0);
+            assert!(
+                c + 1e-6 >= prev,
+                "ceiling fell at convection {j}: {c} < {prev}"
+            );
+            prev = c;
+        }
+
+        // (b) THE TAPER IS CONTINUOUS, which is what makes a tower rather than a
+        // table. Over the upper half of a strong cell the profile must be
+        // strictly decreasing — v1 was flat from 0.22 to 0.60 and a flat grad
+        // passes the same points at every height, i.e. draws a slab.
+        let mut last = f32::INFINITY;
+        for n in 10..=19 {
+            let h = n as f32 / 20.0;
+            let g = height_gradient(h, 1.0, 1.0);
+            assert!(
+                g < last,
+                "the cumulus profile is flat at h={h}: {g} vs {last}"
+            );
+            last = g;
+        }
+
+        // (c) THE BASE BARELY MOVES. Physics, and the thing that would look
+        // wrong if it were symmetric with the top: the lift is bounded by
+        // CLOUD_BASE_LIFT and only a cumulus takes it.
+        let base = |t: f32, k: f32| -> f32 {
+            (0..=400)
+                .map(|n| n as f32 / 400.0)
+                .find(|&h| height_gradient(h, t, k) > 0.02)
+                .unwrap_or(1.0)
+        };
+        let lift = base(1.0, 1.0) - base(1.0, 0.0);
+        assert!(
+            lift > 0.0 && lift < CLOUD_BASE_LIFT + 0.02,
+            "the base moved by {lift}, outside (0, {CLOUD_BASE_LIFT}]"
+        );
+        assert_eq!(
+            base(0.0, 0.0),
+            base(0.0, 1.0),
+            "a stratus SHEET lifted with convection"
+        );
+        // The whole point of bounding it: the top moves several times as far.
+        assert!(
+            strong - weak > lift * 5.0,
+            "base variation ({lift}) is not much smaller than top variation ({})",
+            strong - weak
+        );
+    }
+
+    /// The weather's third channel is a **field**, not a constant, and it is
+    /// decorrelated from the two that were already there — a convection octave
+    /// that tracked coverage would build every cloud in a bank to the same
+    /// height, which is the defect the channel exists to fix.
+    #[test]
+    fn the_convection_field_varies_and_is_its_own() {
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        let mut samples = Vec::new();
+        for i in 0..48 {
+            for j in 0..48 {
+                let (x, z) = (i as f32 * 320.0, j as f32 * 320.0);
+                let w = weather(0, x, z, 0.5, 0.7);
+                lo = lo.min(w[2]);
+                hi = hi.max(w[2]);
+                samples.push(w);
+            }
+        }
+        assert!(
+            hi - lo > 0.5,
+            "the convection field is nearly constant: [{lo}, {hi}]"
+        );
+        // Decorrelation, measured: |r| against coverage and against type.
+        let corr = |a: usize, b: usize| -> f32 {
+            let n = samples.len() as f32;
+            let (mut sa, mut sb) = (0.0, 0.0);
+            for s in &samples {
+                sa += s[a];
+                sb += s[b];
+            }
+            let (ma, mb) = (sa / n, sb / n);
+            let (mut cov, mut va, mut vb) = (0.0f32, 0.0f32, 0.0f32);
+            for s in &samples {
+                let (da, db) = (s[a] - ma, s[b] - mb);
+                cov += da * db;
+                va += da * da;
+                vb += db * db;
+            }
+            cov / (va.sqrt() * vb.sqrt()).max(1e-9)
+        };
+        let r_cov = corr(0, 2).abs();
+        let r_ty = corr(1, 2).abs();
+        eprintln!("convection correlation: |r| vs coverage {r_cov:.3}, vs type {r_ty:.3}");
+        assert!(r_cov < 0.35, "convection tracks coverage: |r| = {r_cov:.3}");
+        assert!(r_ty < 0.35, "convection tracks cloud type: |r| = {r_ty:.3}");
     }
 
     /// The two-lobe phase must be forward-dominant, strictly positive, and

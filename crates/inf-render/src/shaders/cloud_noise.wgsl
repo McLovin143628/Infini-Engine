@@ -30,6 +30,11 @@ const CLOUD_SHAPE_PERLIN_PERIOD: i32 = 4;
 const CLOUD_SHAPE_WORLEY_CELLS: i32 = 4;
 const CLOUD_DETAIL_WORLEY_CELLS: i32 = 2;
 const CLOUD_WEATHER_PERIOD: i32 = 8;
+// Mirrors `clouds::WEATHER_CONVECTION_OCTAVE` / `CLOUD_BASE_LIFT` /
+// `CLOUD_TOP_WEAK`.
+const CLOUD_WEATHER_CONVECTION: i32 = 4;
+const CLOUD_BASE_LIFT: f32 = 0.08;
+const CLOUD_TOP_WEAK: f32 = 0.45;
 // Mirrors `clouds::WEATHER_CONTRAST` / `COVERAGE_BIAS_SLOPE` / `COVERAGE_BIAS_OFFSET`.
 const CLOUD_WEATHER_CONTRAST: f32 = 3.0;
 const CLOUD_COVERAGE_SLOPE: f32 = 2.4;
@@ -234,16 +239,25 @@ fn cloud_value2(x: f32, z: f32, period: i32, seed: u32) -> f32 {
     return cloud_lerp(cloud_lerp(v[0], v[1], u), cloud_lerp(v[2], v[3], u), w);
 }
 
-// The weather at world (x, z) metres: (coverage, type), both [0, 1]. Analytic
-// rather than baked — see the rationale on `clouds::weather`.
+// The weather at world (x, z) metres: (coverage, type, convection), all [0, 1].
+// Analytic rather than baked — see the rationale on `clouds::weather`.
 // CPU mirror: `clouds::weather`.
-fn cloud_weather(x_m: f32, z_m: f32, seed: u32, coverage: f32, cloud_type: f32) -> vec2<f32> {
+fn cloud_weather(x_m: f32, z_m: f32, seed: u32, coverage: f32, cloud_type: f32) -> vec3<f32> {
     let s = f32(CLOUD_WEATHER_PERIOD) / CLOUD_WEATHER_TILE_M;
     let u = x_m * s;
     let v = z_m * s;
     let c = cloud_value2(u, v, CLOUD_WEATHER_PERIOD, seed + 211u) * 0.65
         + cloud_value2(u * 3.0, v * 3.0, CLOUD_WEATHER_PERIOD * 3, seed + 223u) * 0.35;
     let t = cloud_value2(u * 2.0, v * 2.0, CLOUD_WEATHER_PERIOD * 2, seed + 233u);
+    // The convection octave (SKY2) — per-cloud rather than per-region, which is
+    // what lets neighbouring cells build to different heights.
+    let n = f32(CLOUD_WEATHER_CONVECTION);
+    let k = cloud_value2(
+        u * n,
+        v * n,
+        CLOUD_WEATHER_PERIOD * CLOUD_WEATHER_CONVECTION,
+        seed + 241u,
+    );
 
     // Widen the raw field before biasing it: two octaves of interpolated hash pile
     // up around 0.5, and a narrow field means the authored slider crosses the
@@ -256,18 +270,29 @@ fn cloud_weather(x_m: f32, z_m: f32, seed: u32, coverage: f32, cloud_type: f32) 
     // `clouds::weather`.
     let cov = clamp(cw + (cov0 * CLOUD_COVERAGE_SLOPE - CLOUD_COVERAGE_OFFSET), 0.0, 1.0);
     let ty = clamp(clamp(cloud_type, 0.0, 1.0) + (t - 0.5) * 0.5, 0.0, 1.0);
-    return vec2<f32>(cov, ty);
+    return vec3<f32>(cov, ty, k);
 }
 
 // Vertical density profile at relative height h within the slab, for a cloud of
-// type t (0 = stratus sheet, 1 = cumulus tower). Both taper to zero at the floor
-// AND the ceiling — a hard-edged cloud top is the single most obvious tell of a
-// naive volumetric. CPU mirror: `clouds::height_gradient`.
-fn cloud_height_gradient(h_in: f32, t_in: f32) -> f32 {
+// type t (0 = stratus sheet, 1 = cumulus tower) and local convective strength k.
+//
+// v2 (SKY2). The v1 form held a cumulus at full strength from 0.22 to 0.60 and
+// only tapered over the last two fifths — and because `grad` multiplies the
+// shape BEFORE the coverage dissolve, a flat grad means the same points survive
+// at every height in that band, which is a slab rather than a cloud. Now the
+// taper is continuous to a per-cell ceiling, so the column narrows into a tower,
+// and neighbouring cells reach different heights.
+// CPU mirror: `clouds::height_gradient`.
+fn cloud_height_gradient(h_in: f32, t_in: f32, k_in: f32) -> f32 {
     let h = clamp(h_in, 0.0, 1.0);
     let t = clamp(t_in, 0.0, 1.0);
-    let stratus = smoothstep(0.0, 0.08, h) * (1.0 - smoothstep(0.20, 0.40, h));
-    let cumulus = smoothstep(0.02, 0.22, h) * (1.0 - smoothstep(0.60, 1.0, h));
+    let k = clamp(k_in, 0.0, 1.0);
+    // This cloud's own floor. Only a cumulus lifts; a sheet keeps the slab's.
+    let floor = k * CLOUD_BASE_LIFT * t;
+    let hl = clamp((h - floor) / max(1.0 - floor, 1e-3), 0.0, 1.0);
+    let stratus = smoothstep(0.0, 0.08, hl) * (1.0 - smoothstep(0.20, 0.40, hl));
+    let top = CLOUD_TOP_WEAK + (1.0 - CLOUD_TOP_WEAK) * k;
+    let cumulus = smoothstep(0.05, 0.30, hl) * (1.0 - smoothstep(top * 0.4, top, hl));
     return stratus + (cumulus - stratus) * t;
 }
 

@@ -51,7 +51,7 @@ fn cloud_density(p: vec3<f32>) -> f32 {
     if (w.x <= 0.0) {
         return 0.0;
     }
-    let grad = cloud_height_gradient(h, w.y);
+    let grad = cloud_height_gradient(h, w.y, w.z);
     if (grad <= 0.0) {
         return 0.0;
     }
