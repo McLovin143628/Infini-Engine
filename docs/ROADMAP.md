@@ -26466,3 +26466,20 @@ occupies the hole and carving that window is PIE scope; the drag ghost's per-poi
 assumed rather than measured. Polish items deferred by name: the ~4 px fast-re-click window, marquee
 select (not cheap), and migrating the full-screen overlays (now cheap, but the table above says most
 of them should not move). The full ledger is in `docs/memos/island-progress.md` under *Wave UX2*.
+
+**The UX2 audit (2026-08-26)** — five commits, `(UX2) audit:` (four fixes and this ledger). One
+HIGH: the "Play options" carried
+item above **is reachable with nothing running** — the chevron is rendered in the play cluster's
+`!running` branch, where the hole belongs to our own child window and it draws over the dropdown, so
+the item is not PIE scope and is now fixed rather than carried (`playCluster.test.tsx`, 3 arms; the
+premise itself is pinned). Three MED, each fixed and mutation-verified: `ReleaseForeign` restored the
+cutout only `if !cutouts.is_empty()`, so a menu that opened before an embed and closed during it left
+a hole on the child that nothing would remove; the region dedupe compared CSS rectangles while the
+wire carries physical ones, so a cross-monitor drag with a menu open re-pushed the hole and re-applied
+the stale cutout against it (the scale now joins the key and the module watches it the way
+`ViewportPanel` does); and the fly-out-submenu claim — made in three places — had no arm, which
+`menuBarCutout.test.tsx` now supplies by driving the real component. Independently re-run: the
+resize finding reproduces (`SIMPLEREGION (0, 100, 800, 600)` after a resize to 640×480), `RGN_OR`
+kills **2** OS-level arms rather than the 1 claimed, and the A8 gate is 4/4 with the RMB gate outside
+every hunk in the range. Counts after the audit: battery **323 / 6 109 / 0 / 19**, frontend
+**717 / 80** (+5 arms, +2 files), goldens **54 / 102** unmoved, clippy 0, rustdoc 374, fmt clean.

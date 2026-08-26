@@ -13,6 +13,15 @@
  * which are drawn over the whole workspace — still hides it outright, which is
  * what every overlay did from Phase 1 until this wave.
  *
+ * **Do not "finish the migration" without reading this** (UX2 audit): the
+ * palette, the eleven dialogs, the first-run tour and the start screen each
+ * draw a full-window `bg-black/30–40` scrim, and a cutout under one would leave
+ * the viewport as an UNDIMMED rectangle punched through the dim. For those the
+ * full hide is the correct rendering of a modal, not a leftover — the reasoning
+ * table is in `docs/memos/island-progress.md` under *Wave UX2*. The drag ghost
+ * is the one that could migrate, at one IPC push per pointer move, a cost
+ * nobody has measured yet.
+ *
  * The rule is deliberately pessimistic: a viewport is cut out only when EVERY
  * hold on it carries rects. One rect-less hold anywhere and the whole thing
  * hides, because a surface that could not say where it is could be anywhere.

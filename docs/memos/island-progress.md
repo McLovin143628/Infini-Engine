@@ -7584,6 +7584,10 @@ one, a doc link to the private `Cmd::SetRegion`; that is a plain code span now).
    fixed by it. It only exists while PIE is running, which means an embedded *foreign* player window
    occupies the hole; hiding our own child would not uncover it, and carving the foreign window is
    PIE scope and A8 territory. Named rather than touched.
+   > **CORRECTED by the UX2 audit.** The premise is false and the item is now fixed, not carried:
+   > the chevron is rendered in the `!running` branch too, where the hole is our OWN child window
+   > and it draws over the dropdown. It carves like the rest — see *the finding the carried list had
+   > backwards*, below.
 5. **The panel-drag ghost could be a cutout and is not.** It follows the pointer, so it would be one
    IPC push per pointer move. Worth measuring before assuming it is too expensive.
 6. **The full-screen overlays could migrate the day one of them stops drawing a scrim.** The API is
@@ -7597,3 +7601,185 @@ drag** (needs the click/drag discrimination measured on a real pointer, not gues
 select** (explicitly not cheap); **migrating the full-screen overlays onto rect supply** (now cheap,
 but it is a behaviour change on fourteen surfaces and the table above says most of them should not
 move at all).
+
+## Wave UX2 — the adversarial audit (2026-08-26)
+
+Range `1ebc9c35..9601cc54`, seven commits, audited from a fresh read of the code rather than of the
+ledger. Five commits out, `(UX2) audit:`-tagged — four fixes and this ledger. The mechanism holds: the geometry, the GDI
+ownership rule, the pessimistic guard and the negative arm are all what the ledger above says they
+are, and two of the wave's own claims were re-derived independently rather than re-read.
+
+### What was re-run, not re-read
+
+* **The resize finding reproduces.** `a_resize_is_why_the_region_is_rebuilt` printed, on this
+  machine: `before = GDI_REGION_TYPE(2) (0, 100, 800, 600); after a resize to 640x480 =
+  GDI_REGION_TYPE(2) (0, 100, 800, 600)`. Windows keeps the region **verbatim**, describing a child
+  that no longer exists. The worse of the two possibilities, exactly as recorded.
+* **`RGN_DIFF` → `RGN_OR` kills TWO OS-level arms**, not the one the mutation table claims:
+  `the_region_reaches_the_window` (SIMPLE where COMPLEX is required — "the CombineRgn did nothing")
+  and `a_resize_is_why_the_region_is_rebuilt` (the rebuilt region's top edge stays at 0). The table
+  understated its own gate.
+* **Dropping the PIE skip from `Cmd::SetRegion`** fails
+  `neither_visibility_nor_region_is_pushed_while_pie_is_embedded` and nothing else: 5 passed, 1
+  failed.
+* **`ContextMenuSurface` back on the old full-hide guard** fails 2 of the surface's 7 arms, with the
+  seam reading `hide` where it must read `region:820,644,200,120`. As claimed.
+* **An unmeasured hold that no longer forces the hide** fails exactly **3** arms across the two
+  suites, as claimed (`falls back to hiding…`, `one unmeasured overlay hides everything…`, `the
+  pushes are ordered…`).
+* **The A8 gate is green**, 4/4 (`window_class_gate`), and **no hunk in the range falls inside
+  `wnd_proc` at all** — the win32 diff touches the imports, the `Cmd` enum, `ViewportHandle`, the
+  region functions after `child_rect_in_parent`, four places in the thread loop and the test module.
+  The `!simulating` right-button gate is untouched text.
+* **The `\` sweep is clean** (the 25th). Every backslash the range adds is a Rust string-literal
+  continuation inside a multi-line message, and all of them compile and print.
+* **`PLATFORM_ONLY`'s reason is real**: `SetRegion` is documented there as a deliberately one-sided
+  command with the macOS argument written out, and the handle *method* — what Ring 2 actually calls
+  — exists on both sides.
+
+### The finding the carried list had backwards — HIGH, fixed
+
+Carried item 4 says the MainToolbar **"Play options"** dropdown has no airspace guard and needs
+none here, because "it only exists while PIE is running" and an embedded *foreign* window occupies
+the hole. The reasoning is sound. The premise is false: the chevron is rendered in the play
+cluster's **`!running`** branch as well, next to the Play button, where the hole is **our own child
+window** — which draws over the dropdown. A menu whose lower half is invisible and whose clicks land
+in the 3D view is the failure the whole wave exists to remove, one component away from the three it
+fixed, and it was live on `main`.
+
+Fixed: `useViewportCutout(menuOpen, rootRef)` with the **panel** marked and the click-away backdrop
+deliberately not — the backdrop is `fixed inset-0`, so marking it would clip the entire child away
+(the full hide with extra steps), and it draws no scrim, which is what makes a cutout the right
+treatment here at all. `playCluster.test.tsx`: the dropdown **exists with nothing running** (the
+premise, pinned, so a future PIE-only chevron has to rewrite this sentence too), it carves rather
+than hides, and it falls back to the hide with no cutout backend. Mutation-verified: dropping the
+guard fails 2 of the 3 — and it fails them by pushing **nothing at all**, which is what the bug
+looked like from the seam, so an arm written as "must not hide" would have passed over it.
+
+### A menu that closed during PIE left the hole behind for ever — MED, fixed
+
+`Cmd::ReleaseForeign` restored the cutout only `if !cutouts.is_empty()`. That reads as an
+optimisation and is a leak, because it cannot see the case where the region is already **on** the
+child: a menu open *before* the embed applied one, hiding the child does not take it off, and if
+that menu closes while the player owns the slot the release lands in the suspended `SetRegion` arm
+and is only recorded. `ReleaseForeign` then finds an empty set, skips, and the viewport comes back
+**with a hole in it** that nothing is going to remove — until some later menu happens to open and
+close over it. Nothing thrown, nothing logged, and no arm could see it: the wave's own pin only
+asked that `apply_window_region` be *mentioned* in the arm.
+
+`apply_window_region` with no cutouts **is** `SetWindowRgn(None)`, so one unconditional call covers
+both halves. `the_release_restores_an_empty_cutout_set_too` bans `is_empty()` from the arm;
+mutation-verified by putting the guard back (6 passed, 1 failed).
+
+**And the gate that caught it was reading prose.** The fix's own comment contains the words
+`is_empty()`, and the new arm failed on the comment. Every assertion in `region_gate` is a
+`contains` over a scope, so a block whose only mention of `apply_window_region` is a *sentence about*
+`apply_window_region` satisfies one exactly as well as a call does. `scope()` now strips comment
+lines before returning. *A pin that reads prose is pinning prose* — the P23 law ("read a SCOPE, not a
+spelling") one layer further in.
+
+### A cross-monitor drag moved the hole and left the cutout behind — MED, fixed
+
+The dedupe compares **CSS** rectangles; the wire carries **physical** ones. Drag the window to a
+monitor at a different scale with a menu open: the menu has not moved, nothing re-renders, no
+`ResizeObserver` fires — so `regionKey` is unchanged and the push is swallowed — while
+`viewport_set_rect` **does** go out, because `ViewportPanel` watches the scale explicitly with a
+re-arming `matchMedia((resolution: Ndppx))` for exactly this case, and the viewport thread then
+re-applies the old physical rectangle against the new hole. A cutout at the wrong size in the wrong
+place, for as long as the menu stays open. The hazard is not hypothetical here: it is a hazard this
+codebase already identified, wrote down and handled thirty lines away, in the file that supplies the
+other half of the same coordinate.
+
+Two halves, because either alone is inert: the scale joins the region key, and the guard arms the
+same watch `ViewportPanel` does, calling `syncAll` when it fires. Mutation-verified separately —
+dropping the scale from the key fails the new arm, and never arming the watch fails it too.
+
+### The fly-out submenu had no arm — MED, fixed
+
+The wave states in three places (the guard's hook doc, `MenuBar`'s comment, the ledger above) that a
+menu-bar submenu is noticed **only** by the hook's `MutationObserver`: it is positioned outside its
+dropdown's box, so its rectangle is not contained in one that already crossed, and it opens on
+`MenuList`'s own state, so `MenuBar` never re-renders and the per-render re-measure never runs.
+Nothing pinned it, and an unmeasured fly-out hangs half-visible over the 3D view — the wave's own
+failure mode.
+
+`menuBarCutout.test.tsx` drives the real component: open File with `pointerdown` (the native-menu
+feel), hover "Recent Projects" with `pointerover` (which React turns into the row's
+`onPointerEnter`), and read the seam — **one** rectangle, then **two**, then none, and never a hide.
+Mutation-verified: an observer that never calls `observe` leaves the fly-out unmeasured and the arm
+dies. It also answers the timing question the brief asked: the observer fires as a microtask after
+the commit, so the second rectangle crosses in the same tick the submenu appears in — the cutout is
+one IPC round trip behind the submenu's first paint, exactly as the full hide was behind every menu
+before this wave, which is why it is not a regression and is still not a guarantee.
+
+### Verified and found sound (no change)
+
+* **The coordinate math end to end.** Rects are window-CLIENT relative, so dragging the window half
+  off-screen changes nothing (a client rectangle is not a screen one); a menu clamped by
+  `ContextMenuSurface` never goes negative, and one that did survives as `i32` and clips at the
+  child's edge (`cutouts_are_clipped_to_the_child_and_misses_are_dropped` covers `x = -500`).
+* **The saturating-cast pin exercises the panicking case**, not just the survivable one:
+  `a_saturated_rectangle_clips_instead_of_panicking` passes `u32::MAX` as a cutout extent **and** as
+  the HOLE's extent, and it is the second that would have made `clamp(0, -1)` panic on the viewport
+  thread. The i64 widening is right and the arm aims at the thing it names.
+* **Multiple simultaneous rects are order-independent.** The region is `full \ A \ B`, which is
+  `full \ (A ∪ B)` for any order; `every_overlay_contributes_its_own_box` pins the box list and the
+  OS-level arm pins that the subtraction runs at all.
+* **Device loss cannot desynchronise the guard.** The child window is created once
+  (`create_child_window`, one call site outside the tests) and never recreated: device loss rebuilds
+  the GPU stack on the **same** HWND, so there is no path on which a fresh child inherits no region
+  while the loop believes one is applied.
+* **Hide-then-show keeps the region, and that is correct**, because the guard releases the region
+  whenever it hides (the ordering arm pins hide-before-release and region-before-show) — so the only
+  state a `SetVisible` pair can restore is the one that was there.
+* **The DWM measurement covers the only configuration that carves.** The probe measured FIFO, and
+  `SurfaceChain` configures `PresentMode::AutoVsync` — the editor viewport, the one window a region
+  is ever set on, has no other mode; the shipped player never carves at all. So "is Mailbox
+  different?" has no reachable answer to be wrong about. To re-run the probe:
+  `cargo test -p inf-viewport --lib region_present_cost -- --ignored --nocapture`.
+
+### Carried, by name
+
+1. **A menu in a DETACHED panel window addresses the MAIN window's viewport.** `Target::from_arg(None)`
+   is `Target::Primary` and `ViewportState` is app-global, so a right-click in a detached Outliner
+   pushes a cutout measured in *that* window's coordinates at the primary viewport. Pre-UX2 the same
+   path pushed a full hide, so this is a differently-wrong outcome of the same age, not a regression
+   — the honest fix is for the guard to know it is not the host window, which is a decision about
+   detached-window semantics rather than about cutouts.
+2. **The two-command order is a claim about the pushes, not about the OS.** `sync` pushes region and
+   visibility as two separate `#[tauri::command] async fn`s; both end up posting to one channel, but
+   nothing formally orders two invokes against each other. The failure, if it ever happens, is one
+   frame of the artefact the ordering exists to avoid.
+3. **`CombineRgn`'s return value is not checked.** An `RGN_ERROR` would leave that rectangle
+   un-subtracted — a missing cutout, not a crash or a leak. A systematic failure fails the OS-level
+   arm; a transient one is invisible.
+4. **`CLAUDE.md` still carries the Phase-1 sentence** ("flash-free alternatives — SetWindowRgn
+   cutouts / last-frame freeze — remain a future polish item, not yet needed"). It is gitignored and
+   outside this audit's reach; named so the next session does not read it as current.
+
+### Counts after the audit
+
+Battery **323 / 6 109 / 0 / 19** — the wave's own 323 / 6 108 / 0 / 19 re-tallied from a full run and
+confirmed, plus the one arm this audit adds to `region_gate` (7 there now). Frontend **717 / 80**
+(712 / 78 before: +3 `playCluster`, +1 `menuBarCutout`, +1 the scale arm; two new files). Goldens
+**54 / 102**, `INF_GOLDEN_STRICT=1` green, **none moved** — `git status` over `tests/goldens` is
+empty. Rustdoc **374 over 30 crates** after `cargo clean --doc`, unchanged: the audit adds zero.
+`cargo fmt --all --check` clean. Clippy **0** with `-D warnings`. No new crate, no new dependency, no
+schema move, no golden move, and no change to any render path.
+
+### The laws this audit paid for
+
+* **A carried item's PREMISE is a claim, and claims get checked.** "It only exists while PIE is
+  running" was the whole reason the Play dropdown was named rather than fixed, and the component
+  renders that chevron in two branches. A deferral inherits the strength of the sentence justifying
+  it; when the reasoning is sound the premise is where the defect hides.
+* **A guard that skips work while suspended must restore the suspended state too.** The PIE skip was
+  right; `if !cutouts.is_empty()` on the way back out was the same skip applied to a state that had
+  already been applied to the window. Whenever a path can be suspended, ask what the *hardware* is
+  holding, not what the queue is holding.
+* **A dedupe compares what it is given, not what it sends.** The key was CSS, the wire was physical;
+  everything between them was correct and the cutout still went stale. If a value is transformed
+  after the cache key is taken, the transform's inputs belong in the key.
+* **A pin that reads prose is pinning prose.** `region_gate` is `contains`-over-a-scope, so a comment
+  mentioning the call satisfies it — proven by this audit's own fix, whose comment failed the arm
+  that bans a spelling. Comments are stripped now.
