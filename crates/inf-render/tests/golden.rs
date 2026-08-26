@@ -2407,10 +2407,9 @@ fn the_ao_blur_does_not_leak_across_a_silhouette() {
         let (r, g, b) = (img[i] as i32, img[i + 1] as i32, img[i + 2] as i32);
         b > 60 && b - r > 30 && b - g > 20
     };
-    let mut wall = vec![false; (W * H) as usize];
-    for k in 0..(W * H) as usize {
-        wall[k] = is_wall(&off, k * 4);
-    }
+    let wall: Vec<bool> = (0..(W * H) as usize)
+        .map(|k| is_wall(&off, k * 4))
+        .collect();
     // A wall pixel is "at the silhouette" when a non-wall pixel sits within three
     // texels of it — the footprint a 4×4 half-res blur reaches across.
     let near_edge = |k: usize| -> bool {
@@ -2431,10 +2430,7 @@ fn the_ao_blur_does_not_leak_across_a_silhouette() {
 
     let (mut edge_sum, mut edge_n) = (0i64, 0usize);
     let (mut open_sum, mut open_n) = (0i64, 0usize);
-    for k in 0..(W * H) as usize {
-        if !wall[k] {
-            continue;
-        }
+    for (k, _) in wall.iter().enumerate().filter(|(_, w)| **w) {
         let i = k * 4;
         let d = i64::from(off[i]) + i64::from(off[i + 1]) + i64::from(off[i + 2])
             - i64::from(on[i])
@@ -2460,9 +2456,11 @@ fn the_ao_blur_does_not_leak_across_a_silhouette() {
          ({edge_n} px) against {open:.3} in the open ({open_n} px)"
     );
     // **6.0, and the number is mutation-measured rather than chosen.** On this
-    // fixture the depth-aware blur reads **5.144** and the same blur with its
-    // weight forced to 1 — i.e. the 4×4 box this wave replaced — reads **6.591**.
-    // So the threshold falsifies exactly what it names.
+    // fixture the depth-aware blur reads **5.14** and the same blur with its
+    // weight forced to 1 — i.e. the 4×4 box this wave replaced — reads **6.59**.
+    // So the threshold falsifies exactly what it names. (Two decimals, not three:
+    // consecutive runs on the same adapter read 5.144 and 5.149, so the third one
+    // is the GPU's, not the blur's.)
     //
     // **And the residue is a finding, not slack.** The honest answer here is
     // zero: the backdrop is 25 m from the nearest occluder against an AO radius
