@@ -26318,3 +26318,37 @@ wave's "all four goldens look toward the sun". Of the five named gaps, the "stop
 result rests on the jitter, the 16-bit + two-scale erosion and the height v2. Nine LOWs carried,
 including that a 320×180 golden now marches at **160×90** and that `clouds_night` paints a saturated
 red sky at 23:30 (pre-existing P17, out of scope, and one of the eight frames this wave re-blessed).
+
+**THE SKY2 CI-RED — the 16-bit envelope met a cancellation, on macOS only** (run 32944420300,
+`b08aa9d8..e9eb678e`). Green here, green on ubuntu, green on every other job; `macos-latest` failed
+`cloud_noise_bake_matches_the_cpu_reference` with *"worst |d| = 2 f16 steps at (19, 60, 17) exceeds
+the 1-step envelope — that is a port error, not FMA contraction and not a rounding-mode difference"*.
+**It is none of those, and the diagnostic line printed above the panic already disproved it**: macOS
+reads **50.0172 %** of channels exact against Windows' **50.0218 %**, both 49.98 % low and 0.00 %
+high — the two adapters disagree over ~390 of 8 388 608 channels, which no port error can look like.
+What is at that texel is the **G channel at 1.311 302 2e-6**, a binary16 **subnormal**: `worley3_tiled`
+returns `1 − min(sqrt(best), 1)`, so near a cell boundary the value is a catastrophic cancellation
+where **one f16 step is 2⁻²⁴ absolute — the same size as one f32 last place of the `sqrt(best) ≈ 1` it
+came from.** The 2¹³ of headroom `CPU_GPU_STEP_TOLERANCE`'s derivation rests on is, in that corner,
+**2⁰**; WGSL does not require `sqrt` to be correctly rounded and permits contracting the squared
+distance, and either alone is a whole step there. Stacked on a truncating store, two. The fix is a
+second **ruler**, not a looser bound: a channel passes within 1 step **or** within
+`CPU_GPU_VALUE_TOLERANCE` = **2⁻²⁰ ≈ 9.54e-7 of value**, which is **inert for every channel at 0.002
+or above** (there an f16 step is already coarser than it) and therefore reaches only the measured
+**6.6e-4** cancellation tail — entirely in the Worley channels, **none** in the Perlin–Worley one,
+whose minimum over the whole volume is a measured **0.330** because its remap divides a *sum* of two
+non-negative quantities. Mutation-measured: **one** well-scaled channel two steps
+out of 8.4 million still fails, and a tail channel seventeen steps out still fails. A third arm caps
+the escape at **2e-3** of channels (three times the field's own tail, and a bound on the CPU
+reference rather than on any adapter, which is why it may be a constant); the 0.40 channel-exact floor
+is unchanged; `cloud_quality_switch_rebuilds_the_cloud_binds` carried the same exposure on twelve
+channels and went through the same new door. Every assertion now prints the **whole distribution**
+(counts at 0/1/2/3/≥4 steps, the escape count against the tail, worst offender with its channel and
+its value) — the red printed a maximum and one coordinate, so "one texel" and "two million texels"
+read identically. **Laws:** the P25 one-platform-bounds law in its f16 face — *a step of a float
+encoding is a RELATIVE ruler and a cancelled value is not bounded in relative terms, so a gate must
+measure in the unit the error is actually bounded in*; and *a panic message may not name a cause the
+gate did not measure*. Carried: nextest cancelled the macOS run with **1 532 of 6 091 tests unrun**,
+so a second platform red may sit behind this one. 479 lib + 102 golden arms green here, no golden
+re-blessed, no shader touched, no schema moved; two `(SKY2) ci:` commits. Full account in
+`docs/memos/island-progress.md` under *The SKY2 CI-red*.

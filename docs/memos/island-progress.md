@@ -7174,3 +7174,167 @@ by the audit and `git status` clean over `tests/goldens/` after both runs. Clipp
 Schema unmoved at scene **v25** / payload **v11**; no `Cargo.toml`, no file under `editor/studio` and
 no serialization file touched anywhere in `b08aa9d8..HEAD`. **Four commits**, `(SKY2) audit:`-tagged,
 none pushed.
+
+## The SKY2 CI-red (run 32944420300, `b08aa9d8..e9eb678e`)
+
+The wave and its audit went to `main` green on this machine and came back red on **one job of
+eight**: `macos-latest` alone. Windows, ubuntu, the frontend, the wasm/Android job, cargo-deny, the
+mdBook docs and the bindings-drift check all passed. One arm, one texel, and a panic message that
+named a cause:
+
+```
+cloud shape parity: 50.0172% of channels exact (6.2457% of texels), 49.98% low / 0.00% high,
+worst |d| = 2 f16 step(s) at (19, 60, 17) (2097152 texels)
+
+cloud shape: worst |d| = 2 f16 steps at (19, 60, 17) exceeds the 1-step envelope — that is a
+port error, not FMA contraction and not a rounding-mode difference
+```
+
+**The verdict was wrong, and the line printed immediately above it already said so.** Windows reads
+**50.0218 %** of channels exact, 49.98 % low, 0.00 % high; the Apple-silicon runner reads **50.0172 /
+49.98 / 0.00**. That is a disagreement between the two adapters over roughly **390 of 8 388 608
+channels**, four decimal places of agreement about everything else, and the same one-sided truncation
+signature on both. A port error in the hash, the gradient table or the lattice wrap moves the *whole*
+field; it cannot leave the exact fraction where Windows left it. So Metal truncates too, and whatever
+happened at (19, 60, 17) happened to a few hundred channels of a field the two platforms otherwise
+agree about texel for texel.
+
+### What is actually at (19, 60, 17)
+
+Measured on the CPU reference at the fixture's seed and the High tier's 128³:
+
+| channel | reference value | binary16 | one step there |
+|---|---|---|---|
+| R — the Perlin–Worley base | 0.546 135 8 | 14430 | 4.88e-4 |
+| **G — Worley at 8 cells** | **1.311 302 2e-6** | **22** | **5.96e-8** |
+| B — Worley at 16 cells | 0.750 860 6 | 14850 | 4.88e-4 |
+| A — Worley at 32 cells | 0.327 888 7 | 13631 | 2.44e-4 |
+
+G is a **binary16 subnormal**, twenty-two steps above zero. `worley3_tiled` returns
+`1 − min(sqrt(best), 1)`, so near a cell boundary the channel is a **catastrophic cancellation**: a
+number of order 1e-6 made by subtracting a `sqrt(best) ≈ 0.999 998 7` from 1. And there:
+
+* one step of binary16 is **2⁻²⁴ = 5.96e-8, absolute** — subnormals have no exponent left to shrink;
+* one last place of the `sqrt(best)` it was subtracted from is **also 2⁻²⁴**, because that operand is
+  just under 1.0.
+
+So in this corner **the f16 grid is exactly as fine as the f32 grid of its own input.** The whole
+derivation `CPU_GPU_STEP_TOLERANCE` rested on — "an f32 last place is 2¹³ times finer than an f16
+step, so nothing short of a port error can cross one" — has, right here, **2⁰ of headroom**: one last
+place of arithmetic is one whole step. WGSL requires `+`, `−` and `×` to be correctly rounded and
+does **not** require it of `sqrt`, and it permits contracting `d.x*d.x + d.y*d.y + d.z*d.z`; either
+alone is a step in this band. Stacked on a truncating store, two. (The CPU side is not in doubt:
+IEEE-754 requires `sqrt` to be correctly rounded and Rust lowers `f32::sqrt` to the hardware
+instruction on every target, so `want` is the same number everywhere. That is what makes the tail a
+*platform-independent* property of the field.)
+
+**The exposure, measured over the whole volume** — and the reason this is a corner rather than a
+regime: channels whose f16 step is at or under the new value floor number **5 557 of 8 388 608 =
+6.6e-4** in the shape volume and **36 of 131 072 = 2.7e-4** in the detail volume. They sit **entirely
+in the Worley channels**. The Perlin–Worley R channel contributes **none**, and the reason is
+structural rather than lucky: `remap` divides `pn + (1 − w0)` — a *sum* of two non-negative
+quantities — by a divisor in [1, 2], so R is small only where the Perlin field and the inverted
+Worley fBm are simultaneously extreme. Measured, R's minimum over the whole 128³ volume is **0.330**;
+the three Worley channels all reach exactly 0. The cancellation is `1 − min(sqrt(best), 1)` and
+nothing else.
+
+### The fix: two rulers, one door
+
+A channel now passes on **either** ruler — within `CPU_GPU_STEP_TOLERANCE` (still **1**) steps of the
+bit pattern, **or** within the new `CPU_GPU_VALUE_TOLERANCE` = **2⁻²⁰ ≈ 9.54e-7** of *value*. The
+channel-exact floor stays at **0.40**, untouched.
+
+Why the value ruler cannot mask a port error, as the two properties that carry it:
+
+* it is **inert wherever the value is well-scaled**. A channel at 0.002 or above has an f16 step of
+  2⁻²⁰ or coarser, so the value tolerance cannot reach even one step there and the 1-step bound alone
+  governs — exactly as before. The escape route exists only in the 6.6e-4 cancellation tail;
+* it bounds the *value*, and a port error is not small. A wrong hash, gradient table or lattice wrap
+  moves channels by O(0.1–1) — six orders of magnitude over this floor, hundreds of steps over the
+  step bound — so it fails both rulers at once, on essentially every channel.
+
+A third arm keeps the escape's premise honest rather than assumed: at most
+`CPU_GPU_VALUE_ESCAPE_FRACTION` = **2e-3** of channels may pass on value rather than on steps, a
+little over three times the field's own tail. It is not a bound on any adapter's behaviour — the tail
+is computed from the CPU reference, which is identical everywhere — which is precisely why it is
+allowed to be a constant.
+
+`cloud_quality_switch_rebuilds_the_cloud_binds` carried the same 1-step envelope on three texels per
+tier and was fixed in the same commit, through the same predicate: twelve channels against a 6.6e-4
+tail is a few-percent chance per run of the same red on an adapter this machine cannot see. Both
+gates now go through one `baked_half_agrees`.
+
+### The distribution the red did not print
+
+The panic reported a maximum and a coordinate and nothing else — no counts, no channel index, no
+value. Two steps at one texel and two steps at two million texels printed the same sentence. Every
+assertion now quotes the whole distribution, and it is printed on the passing path too:
+
+```
+cloud shape: 8388608 channels over 2097152 texels — 50.0218% exact (6.2481% of texels),
+49.98% low / 0.00% high; |d| in f16 steps = [0]4196134 [1]4192474 [2]0 [3]0 [>=4]0;
+0 channels (0.000e0) passed on value not steps, against a near-zero tail of 5557 (6.624e-4);
+worst |d| = 1 steps = 2.4414063e-4 at (x,y,z,ch) (0, 0, 0, 2)
+```
+
+The test's own comment now says what each regime *means*, because SKY2's message asserted the wrong
+one: everything at 0–1 step is a store that rounds or a store that truncates, and the low/high split
+tells them apart; a handful at 2+ steps all inside the value floor is the cancellation tail; anything
+outside that floor, or a tail that is a large share of the volume, is a real disagreement.
+
+### The mutation table
+
+Every arm was falsified before it landed.
+
+| mutation | what dies | measured |
+|---|---|---|
+| every channel one further step low (a "two steps everywhere" adapter) | the value-envelope arm **and** the 0.40 floor | exact falls to **0.0627 %**; 4 192 470 channels at 2 steps, only 36 (4.3e-6) inside the value floor |
+| **one** well-scaled channel 2 steps out, at (19, 60, 17) R | the value-envelope arm, **alone** | 1 offender, dvalue **9.77e-4**; exact fraction, low/high split and escape fraction all unchanged and passing |
+| one tail channel 3 steps out, at (19, 60, 17) G | *nothing* — by design | dvalue **1.79e-7**, inside the 9.54e-7 floor: this is the window the fix opens, and it is stated |
+| one tail channel 17 steps out | the value-envelope arm | dvalue **1.01e-6** — the tail escape is walled at sixteen subnormal steps, measured rather than argued |
+| the field collapses into the subnormals, 0.5 % of it 2 steps out | the **escape-fraction** arm, alone | **5.000e-3** against the 2e-3 ceiling, with 99.5 % exact and zero channels outside the value floor |
+
+The second row is the one that answers "does this let two steps through": a *single* channel two steps
+out at a well-scaled value still fails, out of 8.4 million, with everything else agreeing.
+
+### The bound that was nearly written instead
+
+The obvious shape — allow 2 steps on a tiny fraction of channels, say 1e-5 — would have been a second
+red on the same platform. 1e-5 of the shape volume is **84 channels**; the population that can reach
+two steps is the tail, **5 557**, sixty-six times larger. And the "one texel" the red seemed to offer
+was never a count: `worst_at` records the first coordinate to reach the maximum, and the gate counted
+nothing at all. **A population bound read off a maximum is a guess wearing a measurement's clothes.**
+
+### The laws
+
+* **The P25 one-platform-bounds law, in its f16 face: a step of a floating-point encoding is a
+  RELATIVE ruler, and a number produced by cancellation is not bounded in relative terms.** Where a
+  value is the difference of two near-equal unit-magnitude quantities, its absolute error is fixed by
+  the inputs' last place while its encoding's step shrinks with the value; below ~1e-4 they are the
+  same size. A gate must measure in the unit the quantity's error is actually bounded in — which for
+  a cancelled value is the field's own units, not the encoding's.
+* **A panic message may not name a cause the gate did not measure.** "That is a port error, not FMA
+  contraction and not a rounding-mode difference" was a verdict about a platform the gate had never
+  run on, printed by an assertion that had counted nothing but a maximum — and the diagnostic line
+  above it contradicted the verdict. Report the distribution; let the reader draw the conclusion.
+
+### Carried, honestly
+
+1. **1 532 of 6 091 tests did not run on macOS.** nextest cancelled on the first failure, so a second
+   platform red can be sitting behind this one. The next push is what finds out.
+2. **The fix cannot be executed on macOS from here.** It is correct by construction for both store
+   rounding modes — a truncating adapter reads ~50 % of channels exact and a rounding one ~100 %, and
+   the value ruler is inert for every well-scaled channel of either — and it is unchanged on Windows.
+3. **`cloud_density_matches_the_cpu_reference` was checked and left alone.** It passed on macOS, and
+   it carries no f16-step exposure: its envelope is already in value units
+   (`CPU_GPU_SHADOW_TOLERANCE` = 0.02 absolute, with the mean bounded at a quarter of that).
+   Re-measured here at mean |d| **0.000 07**, worst **0.002 21** over 2 704 taps, 2 504 of them
+   genuinely shadowed.
+4. **The value floor admits up to sixteen subnormal steps in the tail** — up to 9.54e-7 of a field
+   whose values run to 1, four thousand times finer than one LSB of the 8-bit volumes SKY2 replaced.
+   That is the price of the fix, it is stated in `CPU_GPU_VALUE_TOLERANCE`'s doc, and the fourth
+   mutation row is what keeps it a price rather than a hole.
+
+Verification: `inf-render` **479** lib arms and **102** golden arms green on Windows/RTX 4070 Ti, the
+distribution unchanged at 50.0218 / 49.98 / 0.00 with **zero** channels needing the value ruler. No
+golden re-blessed, no shader touched, no schema moved. `(SKY2) ci:`-tagged.
