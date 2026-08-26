@@ -259,9 +259,33 @@ fn frame_stays_under_budget_under_version_churn() {
 /// ratchet of its own; they are printed, not asserted, because an absolute
 /// millisecond on one machine is not a contract.
 ///
-/// The relative claims that ARE asserted are the ones that can regress
-/// meaningfully: a lower tier must not cost more than a higher one, and the
-/// whole stack must stay inside the frame budget on real hardware.
+/// **What this test asserts is the frame budget, and nothing else** — corrected
+/// at the SKY2 audit, where the doc had claimed for four phases that "a lower
+/// tier must not cost more than a higher one" is asserted here. It never was;
+/// the loop below prints the per-tier numbers and then checks each against
+/// `FRAME_BUDGET_MS`.
+///
+/// **And it must not be**, which is the part worth writing down. The claim was
+/// nearly added during that audit and was measured first. Three consecutive runs
+/// of this test on an RTX 4070 Ti, unchanged, read:
+///
+/// ```text
+/// Low 2.923  Medium 3.332  High 2.828     <- High cheapest
+/// Low 1.429  Medium 2.902  High 0.563     <- High five times cheaper than Low
+/// Low 0.322  Medium 0.403  High 0.537     <- monotone
+/// ```
+///
+/// Ten warm-up frames and a mean of sixty, at 640×360 where the whole frame is a
+/// fraction of a millisecond, measures the GPU's clock state rather than the
+/// tier table. A monotonicity assertion here would be red two runs in three.
+///
+/// Where the claim IS made is `sky2_probe::the_cloud_stack_costs_per_tier`,
+/// which warms forty frames and takes the **median** of sixty at 1920×1080 —
+/// an estimator that survives a boost-clock transition. That arm is `#[ignore]`d
+/// (a 1080p timing loop over three tiers is a minute a leg for a number no other
+/// arm reads), so tier monotonicity is a claim this campaign can **reproduce on
+/// demand and does not enforce in the battery**. Saying so is the honest form;
+/// the alternative on offer was a flaky gate.
 #[test]
 fn sky_stack_cost_per_tier() {
     use inf_render::{

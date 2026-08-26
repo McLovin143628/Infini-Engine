@@ -34,8 +34,8 @@ use inf_render::{
     TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode, VoxelChunkKey,
     WaterKindGpu, WaterQuality, WaveField, WaveSpec, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE,
     BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS,
-    BUILTIN_FONT_TEXTURE, CPU_GPU_EXACT_FRACTION, CPU_GPU_SHADOW_TOLERANCE,
-    CPU_GPU_TEXEL_TOLERANCE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
+    BUILTIN_FONT_TEXTURE, CPU_GPU_EXACT_CHANNEL_FRACTION, CPU_GPU_SHADOW_TOLERANCE,
+    CPU_GPU_STEP_TOLERANCE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -5259,6 +5259,34 @@ fn adjacent_spread(img: &[u8], rows: u32) -> f32 {
     sum / n.max(1) as f32
 }
 
+// ── POWDER'S RENDERED CONSEQUENCE — measured, and deliberately not asserted ──
+//
+// The SKY2 audit set out to close the wave's first carried item by adding an
+// away-from-sun structural arm, on the reasoning that all four cloud goldens
+// look TOWARD the sun where `facing` is ~0 and the term is gated off by
+// geometry. It was built, and then it was measured by mutation — `single`
+// forced to 1.0 in `cloud.wgsl`, everything else identical, sixteen renders
+// over twelve configurations (noon and dusk; anti-sun, side-on and sunward;
+// coverage 0.30 to 0.75; pitch 12° to 45°) — and the arm was thrown away,
+// because what the mutation says is:
+//
+//   * at NOON the powder term moves at most **14 of 255** on any single pixel
+//     and **≤0.9 %** on every aggregate (mean cloud luma, brightest decile,
+//     anti-sun/sunward ratio) in every configuration;
+//   * at DUSK, where the sun term is a larger share of a cloud's radiance than
+//     the ambient, it reaches **44 of 255** on one pixel — and still moves the
+//     mean anti-sun cloud luma by **1.0 %** (0.528 → 0.523).
+//
+// A bound that has to separate 0.528 from 0.523 is not a gate, it is a byte pin
+// with extra steps, and the golden set already holds byte pins. So the honest
+// statement is the measurement rather than an arm, and it is stronger and less
+// flattering than the one the wave carried: powder's rendered consequence is not
+// missing from the goldens because of where their cameras point, it is ≤1 % of
+// the image *everywhere*. The arithmetic and its three gates are pinned by
+// `clouds::tests::powder_darkens_the_thin_sunward_side_only` and
+// `the_powder_gate_ramps_instead_of_stepping_at_sunrise`; the picture is not,
+// because there is not enough of it to pin.
+
 /// **The cloud pass's own temporal history** (wave SKY2), measured rather than
 /// asserted into existence.
 ///
@@ -5378,15 +5406,27 @@ fn the_cloud_temporal_pass_accumulates_and_stays_a_function_of_the_clock() {
 
 /// **CPU/GPU parity of the noise bake.** The GPU volumes must reproduce
 /// `inf_render::shape_texel` / `detail_texel` to within the documented envelope:
-/// at most `CPU_GPU_TEXEL_TOLERANCE` LSBs anywhere, and exactly equal for at
-/// least `CPU_GPU_EXACT_FRACTION` of texels.
+/// at most `CPU_GPU_STEP_TOLERANCE` steps of the binary16 bit pattern on any
+/// channel, and exactly equal on at least `CPU_GPU_EXACT_CHANNEL_FRACTION` of
+/// channels.
 ///
-/// The envelope exists because WGSL permits an implementation to contract
-/// `a*b + c` into an FMA, which shifts a result by ~1 ULP and, after the
-/// `* 255 + 0.5` quantization, by at most one LSB. Everything the field is built
-/// on that *could* diverge structurally — the hash, the gradient table, the
+/// **Both units changed at SKY2** and this comment is the third place that had to
+/// say so: the volumes are `Rgba16Float`, so a texel is four little-endian halves
+/// rather than four bytes, "one step" is the adjacent representable value rather
+/// than `1/255` of the range, and the floor counts channels rather than whole
+/// texels. The reason for the last of those is the finding SKY2 landed: the
+/// disagreement here is **one-sided** — 49.98 % of channels exactly one step low
+/// against 0.00 % high — because WGSL does not pin the rounding mode of the
+/// `textureStore` conversion and this adapter truncates where `f32_to_half`
+/// rounds to nearest. Four independent coin-flips a texel puts *whole-texel*
+/// agreement at 0.5⁴ = 6.25 %, which no honest floor over texels could survive.
+///
+/// The envelope also has to absorb FMA contraction, which WGSL permits and which
+/// shifts an f32 by ~1 ULP — 2¹³ times finer than the f16 grid the value lands
+/// on, so it is the smaller of the two effects here. Everything the field is
+/// built on that *could* diverge structurally — the hash, the gradient table, the
 /// lattice wrap — is pure integer arithmetic, and a mistake in any of those moves
-/// whole texels rather than last places, failing both halves of the gate at once.
+/// whole texels rather than last places, failing the step bound outright.
 #[test]
 fn cloud_noise_bake_matches_the_cpu_reference() {
     let Some(gpu) = gpu_or_skip() else { return };
@@ -5453,18 +5493,18 @@ fn cloud_noise_bake_matches_the_cpu_reference() {
                 high as f64 / channels as f64 * 100.0,
             );
             assert!(
-                worst <= CPU_GPU_TEXEL_TOLERANCE,
+                worst <= CPU_GPU_STEP_TOLERANCE,
                 "{what}: worst |d| = {worst} f16 steps at {worst_at:?} exceeds the \
-             {CPU_GPU_TEXEL_TOLERANCE}-step envelope — that is a port error, not FMA \
+             {CPU_GPU_STEP_TOLERANCE}-step envelope — that is a port error, not FMA \
              contraction and not a rounding-mode difference"
             );
             assert!(
-                per_channel >= CPU_GPU_EXACT_FRACTION,
+                per_channel >= CPU_GPU_EXACT_CHANNEL_FRACTION,
                 "{what}: only {:.2}% of channels are bit-exact (the envelope requires \
                  {:.0}%) — a last-bit rounding-mode difference cannot get below half, \
                  so this is a computation difference",
                 per_channel * 100.0,
-                CPU_GPU_EXACT_FRACTION * 100.0
+                CPU_GPU_EXACT_CHANNEL_FRACTION * 100.0
             );
         };
 
@@ -5687,7 +5727,7 @@ fn cloud_quality_switch_rebuilds_the_cloud_binds() {
             let want = shape_texel(seed, x, y, z, res);
             for c in 0..4 {
                 assert!(
-                    got[c].abs_diff(want[c]) <= CPU_GPU_TEXEL_TOLERANCE,
+                    got[c].abs_diff(want[c]) <= CPU_GPU_STEP_TOLERANCE,
                     "{q:?}: texel ({x},{y},{z}) channel {c} is {} not {} — the \
                      volume does not hold this tier's field",
                     got[c],

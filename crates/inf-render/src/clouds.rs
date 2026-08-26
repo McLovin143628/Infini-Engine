@@ -44,7 +44,7 @@
 //! implementation to contract `a*b + c` into an FMA, so the two mantissas can
 //! differ in the last place and the difference compounds through the octave sum.
 //! The parity gate therefore asserts a **documented envelope** rather than
-//! equality — see [`CPU_GPU_TEXEL_TOLERANCE`] and the `cloud_noise_bake_matches_the_cpu_reference`
+//! equality — see [`CPU_GPU_STEP_TOLERANCE`] and the `cloud_noise_bake_matches_the_cpu_reference`
 //! golden. That is the same call the P10 erosion port made, for the same reason.
 //!
 //! # Off path
@@ -105,8 +105,14 @@ pub const DETAIL_COARSE_WEIGHT: f32 = 0.35;
 /// makes procedural clouds read as wallpaper.
 pub const WEATHER_TILE_M: f32 = 40960.0;
 
-/// Per-channel tolerance of the CPU/GPU noise-bake parity gate, in **steps of
+/// Per-**channel** tolerance of the CPU/GPU noise-bake parity gate, in **steps of
 /// the binary16 bit pattern** — i.e. adjacent representable values.
+///
+/// **Renamed at the SKY2 audit** from `CPU_GPU_TEXEL_TOLERANCE`, which it was
+/// called while a texel was four 8-bit channels and "one LSB" was a property of
+/// the whole texel's encoding. It has always been compared per channel; since the
+/// volumes went `Rgba16Float` the unit is a step of one channel's bit pattern and
+/// nothing about it is per-texel, so the name said the wrong noun.
 ///
 /// **Re-derived for the 16-bit volumes (SKY2).** It used to read "1 LSB of an
 /// 8-bit channel", which is `1/255` of the range; the same number now means
@@ -119,21 +125,29 @@ pub const WEATHER_TILE_M: f32 = 40960.0;
 ///   shifts an f32 by ~1 ULP of **f32**, which is 2¹³ times finer than the f16
 ///   grid the value then lands on. So contraction can only change the stored
 ///   texel when the exact result sits within an f32 ULP of an f16 rounding
-///   boundary, which is rare rather than routine: the measured exact-match
-///   fraction ROSE from 88.0 % / 91.1 % (8-bit) to the figures on
-///   [`CPU_GPU_EXACT_FRACTION`].
+///   boundary, which is rare rather than routine — and the measurement bears that
+///   out, because what disagrees here is *one-sided* and an FMA is not (see
+///   [`CPU_GPU_EXACT_CHANNEL_FRACTION`], where the measured disagreement is
+///   49.98 % low against 0.00 % high).
 /// * WGSL does not pin the rounding mode of the f32 → f16 conversion a
-///   `textureStore` performs. Round-to-nearest-even (what [`f32_to_half`] does,
-///   and what every adapter in reach does) and round-toward-zero differ by at
-///   most one step, so an adapter that chose the other one stays inside this
-///   envelope instead of failing a gate about a thing nobody authored.
+///   `textureStore` performs. Round-to-nearest-even (what [`f32_to_half`] does)
+///   and round-toward-zero — which is what the adapter this was measured on
+///   actually does — differ by at most one step, so an adapter that chose either
+///   stays inside this envelope instead of failing a gate about a thing nobody
+///   authored.
 ///
 /// A real port error moves far more than one step, on far more than one texel,
-/// and would fail this bound and the fraction below together.
-pub const CPU_GPU_TEXEL_TOLERANCE: u16 = 1;
+/// and would fail this bound long before the fraction below noticed anything.
+pub const CPU_GPU_STEP_TOLERANCE: u16 = 1;
 
 /// Fraction of noise-bake **channels** that must match the CPU reference
-/// exactly. The remainder are allowed [`CPU_GPU_TEXEL_TOLERANCE`].
+/// exactly. The remainder are allowed [`CPU_GPU_STEP_TOLERANCE`].
+///
+/// **Renamed at the SKY2 audit** from `CPU_GPU_EXACT_FRACTION`, which SKY2 had
+/// changed from a fraction of *texels* to a fraction of *channels* while leaving
+/// the name alone. A reader of the old name would have compared it against the
+/// 8-bit gate's 75 %-of-texels and concluded the envelope had been loosened by
+/// half, which is the opposite of what happened.
 ///
 /// **Re-derived at SKY2, and the derivation is a measurement rather than an
 /// argument.** The 8-bit gate asked for 75 % of whole *texels* and measured
@@ -143,7 +157,8 @@ pub const CPU_GPU_TEXEL_TOLERANCE: u16 = 1;
 /// (RTX 4070 Ti), the shape volume reads **50.02 % of channels exact, 49.98 %
 /// exactly one step LOW and 0.00 % high** — the signature of a store that
 /// truncates where the reference rounds to nearest, and not of anything else,
-/// because a computation difference is two-sided. Four independent coin-flips
+/// because a computation difference is two-sided. So agreement **fell** rather
+/// than rising, which was the prediction going in: four independent coin-flips
 /// per texel put whole-texel agreement at 0.5⁴ = 6.25 %, which is what the first
 /// 16-bit run reported and which no honest floor over texels could survive.
 ///
@@ -153,16 +168,18 @@ pub const CPU_GPU_TEXEL_TOLERANCE: u16 = 1;
 /// A model that predicts both numbers from one cause is the reason this is
 /// recorded as a rounding mode rather than as a tolerance.
 ///
-/// So the gate counts **channels**, and the floor is what a rounding-mode
-/// disagreement can reach and a *computation* disagreement cannot: an
-/// implementation that rounds the last bit differently agrees on at least half,
-/// because it agrees whenever the exact value is already representable or the
-/// discarded bits fall on its side. One that computes a different number does not
-/// approach half at all — and would also have to keep every one of 8.4 million
-/// channels inside a single step to get past
-/// [`CPU_GPU_TEXEL_TOLERANCE`], which is the bound that does the real work now
-/// that a step is 2¹³ times finer in relative terms than an 8-bit LSB was.
-pub const CPU_GPU_EXACT_FRACTION: f64 = 0.40;
+/// **What this floor can and cannot catch**, stated exactly, because the first
+/// draft of this comment overstated it. It is **one-sided on purpose**: an
+/// adapter that rounds to nearest agrees on ~100 % of channels and one that
+/// truncates on ~50 %, and both must pass, so there is no upper bound to be had.
+/// What it therefore catches is a *wholesale* disagreement — a port error in the
+/// hash, the gradient table or the lattice wrap moves essentially every channel
+/// and drives this to nearly zero. It does **not** catch a defect confined to a
+/// minority of texels, which would sail past a 0.40 floor with 0.9 agreement;
+/// that is [`CPU_GPU_STEP_TOLERANCE`]'s job, and that bound is the one doing the
+/// real work now that a step is 2¹³ times finer in relative terms than an 8-bit
+/// LSB was.
+pub const CPU_GPU_EXACT_CHANNEL_FRACTION: f64 = 0.40;
 
 /// Relative tolerance of the cloud-**shadow** parity gate (dimensionless).
 ///
@@ -341,16 +358,6 @@ impl CloudGpuSeed {
     }
 }
 
-/// Wind displacement of the cloud field after `time_s` seconds at `(wind_x,
-/// wind_z)` m/s, **wrapped into one [`SHAPE_TILE_M`] tile**.
-///
-/// The wrap is not cosmetic. An hour of 10 m/s wind is 36 km; a day is 864 km, at
-/// which point an f32 world coordinate has ~0.06 m of resolution and the
-/// high-frequency erosion detail visibly quantizes into stair-steps. Because the
-/// field is *tileable*, subtracting whole tiles is exactly a no-op on the sampled
-/// value, so the wrap is free of visual consequence and buys back full precision.
-/// The arithmetic is done in `f64` so the wrap itself does not lose the bits it
-/// exists to protect.
 /// Rate, **Hz**, at which the raymarch's blue-noise jitter advances to the next
 /// element of its sequence.
 ///
@@ -385,6 +392,16 @@ pub fn jitter_phase(time_s: f64) -> f32 {
     p.floor().rem_euclid(JITTER_PHASE_PERIOD) as f32
 }
 
+/// Wind displacement of the cloud field after `time_s` seconds at `(wind_x,
+/// wind_z)` m/s, **wrapped into one [`SHAPE_TILE_M`] tile**.
+///
+/// The wrap is not cosmetic. An hour of 10 m/s wind is 36 km; a day is 864 km, at
+/// which point an f32 world coordinate has ~0.06 m of resolution and the
+/// high-frequency erosion detail visibly quantizes into stair-steps. Because the
+/// field is *tileable*, subtracting whole tiles is exactly a no-op on the sampled
+/// value, so the wrap is free of visual consequence and buys back full precision.
+/// The arithmetic is done in `f64` so the wrap itself does not lose the bits it
+/// exists to protect.
 pub fn wind_offset(wind_x: f32, wind_z: f32, time_s: f64) -> [f32; 2] {
     let tile = SHAPE_TILE_M as f64;
     let wrap = |v: f32| -> f32 {
@@ -905,11 +922,17 @@ pub fn height_gradient(h: f32, t: f32, k: f32) -> f32 {
     let stratus = smoothstep(0.0, 0.08, hl) * (1.0 - smoothstep(0.20, 0.40, hl));
     // Cumulus: a base near 0.05, then a continuous taper to this cell's ceiling.
     //
-    // At full convection `top` is 1 and the taper runs 0.6 -> 1.0, which is
-    // EXACTLY the v1 curve — v1 is not replaced, it becomes the strong-cell case
-    // instead of every case. The variation is scaled by `t` so that a sheet-like
-    // deck keeps a system-wide ceiling and only a genuinely cumulus sky gets
-    // per-cell tops.
+    // At full convection and full type `top` is 1 and the taper runs 0.6 -> 1.0,
+    // so the CURVE is v1's curve exactly — v1 is not replaced, it becomes the
+    // strong-cell case instead of every case. What it is evaluated at is not `h`
+    // but `hl`, because the base lift is also maximal there: the strong cell's
+    // profile is v1 shifted up by `CLOUD_BASE_LIFT` and compressed into what is
+    // left of the slab. `the_strong_cell_is_v1_through_the_base_lift` pins that
+    // relation bit for bit, which is the only form of "exactly" worth writing
+    // down.
+    //
+    // The variation is scaled by `t` so that a sheet-like deck keeps a
+    // system-wide ceiling and only a genuinely cumulus sky gets per-cell tops.
     let top = 1.0 + (CLOUD_TOP_WEAK + (1.0 - CLOUD_TOP_WEAK) * k - 1.0) * t;
     let cumulus = smoothstep(0.02, 0.22, hl) * (1.0 - smoothstep(top * 0.6, top, hl));
     stratus + (cumulus - stratus) * t
@@ -942,6 +965,31 @@ pub const MS_OCTAVES: u32 = 3;
 /// optical depth, so it costs one multiply instead of a second march.
 pub const POWDER_K: f32 = 2.0;
 
+/// Sun height below which the powder term does not exist at all — exactly the
+/// threshold [`CloudVolumes::sun_transmittance`] (and its shader twin) early-out
+/// at, because that early-out's `1.0` means "no march was run" and not "no
+/// material".
+pub const POWDER_SUN_Y: f32 = 1e-3;
+
+/// Sun height at which the powder term is fully in (SKY2 audit).
+///
+/// The gate used to be a switch at [`POWDER_SUN_Y`], and a switch there is a
+/// **step at the exact moment of sunrise and sunset**. Measured: at `sun_t = 1`
+/// — a thin, fully-lit edge — seen with the sun behind the eye, the energy falls
+/// to **0.270** of its below-horizon value as `sun_y` crosses the threshold, and
+/// the sun crosses it in about fourteen seconds of level time. The underlying
+/// early-out is a step too, but for a *thin* sample it is not: just above the
+/// horizon that march still returns ~1, so the powder gate was adding a pop
+/// where there had been none.
+///
+/// 0.02 is `sin(1.15°)`, about four minutes of level time at a real solar rate,
+/// and — the reason for this value rather than a larger one — it is comfortably
+/// below the lowest sun any committed golden renders (`clouds_dusk` and
+/// `weather_snow_dusk` at 0.0365). The ramp is therefore invisible to the golden
+/// set by construction rather than by luck, which is what let it land in an audit
+/// commit at all.
+pub const POWDER_SUN_Y_FULL: f32 = 0.02;
+
 /// The sun's contribution at one march sample, per unit extinction: Hillaire's
 /// multiple-scattering octaves, with the **powder** correction on the first.
 ///
@@ -965,7 +1013,9 @@ pub const POWDER_K: f32 = 2.0;
 ///   which means "no march was run" and not "no material". Read as an optical
 ///   depth of zero it takes the entire single-scattering term off a night sky:
 ///   measured at a **45 % drop** in `clouds_night`'s starless cloud brightness
-///   before the gate existed.
+///   before the gate existed. The gate **ramps** rather than switching — see
+///   [`POWDER_SUN_Y_FULL`] for the step it would otherwise put at sunrise, and
+///   the 0.270 that measures it.
 /// * **the first octave only** — octaves 2 and 3 stand in for light that has
 ///   already bounced several times inside the layer and arrives from every
 ///   direction rather than along the sun ray. Darkening those takes back exactly
@@ -974,8 +1024,15 @@ pub fn sun_energy(sun_t: f32, cos_theta: f32, g: f32, sun_y: f32) -> f32 {
     let st = sun_t.clamp(0.0, 1.0);
     let powder = 1.0 - st.powf(POWDER_K);
     let facing = (-cos_theta * 0.5 + 0.5).clamp(0.0, 1.0);
-    let single = if sun_y > 1e-3 {
+    // Three branches rather than one blend, for the reason on
+    // [`POWDER_SUN_Y_FULL`]: above the band this is byte-identical to the
+    // ungated expression and at or below the threshold it is exactly 1.0, so the
+    // ramp exists only inside a band no committed frame visits.
+    let single = if sun_y > POWDER_SUN_Y_FULL {
         1.0 + (powder - 1.0) * facing
+    } else if sun_y > POWDER_SUN_Y {
+        let up = smoothstep(POWDER_SUN_Y, POWDER_SUN_Y_FULL, sun_y);
+        1.0 + ((1.0 + (powder - 1.0) * facing) - 1.0) * up
     } else {
         1.0
     };
@@ -1648,6 +1705,51 @@ mod tests {
         );
     }
 
+    /// **"Exactly v1" made checkable** (SKY2 audit). The v2 profile's headline
+    /// claim is that it does not replace the v1 curve, it demotes it to the
+    /// strong-cell case — and the wave's prose said the strong cell *is* v1,
+    /// which is not quite what the code does and had no arm at all.
+    ///
+    /// What is true, and is pinned here **bit for bit**: at full type and full
+    /// convection the curve is v1 evaluated through the base lift. `top` is 1, so
+    /// the taper runs 0.6 → 1.0 exactly as v1's did and the onset is v1's
+    /// 0.02 → 0.22 exactly; what differs is the argument, because the base lift
+    /// is maximal in the same corner. A future edit that changed either endpoint,
+    /// or that quietly dropped the lift to make the sentence true, fails here.
+    #[test]
+    fn the_strong_cell_is_v1_through_the_base_lift() {
+        /// The P17.3 closed form, transcribed. Not a call into anything — the
+        /// point is to hold a copy of the shape that was replaced.
+        fn v1(h: f32) -> f32 {
+            let stratus = smoothstep(0.0, 0.08, h) * (1.0 - smoothstep(0.20, 0.40, h));
+            let cumulus = smoothstep(0.02, 0.22, h) * (1.0 - smoothstep(0.60, 1.0, h));
+            // t = 1: the cumulus branch alone.
+            stratus + (cumulus - stratus)
+        }
+        let floor = CLOUD_BASE_LIFT;
+        let mut moved = 0;
+        for n in 0..=1000 {
+            let h = n as f32 / 1000.0;
+            let hl = ((h - floor) / (1.0 - floor)).clamp(0.0, 1.0);
+            assert_eq!(
+                height_gradient(h, 1.0, 1.0),
+                v1(hl),
+                "the strong cell is not v1 at h = {h} (through hl = {hl})"
+            );
+            if height_gradient(h, 1.0, 1.0) != v1(h) {
+                moved += 1;
+            }
+        }
+        // ...and the lift is not a rounding artefact: the strong cell genuinely
+        // differs from v1 read at the RAW height over most of the slab, which is
+        // why "exactly v1" needed the qualifier.
+        assert!(
+            moved > 500,
+            "the base lift moved only {moved} of 1001 samples — either \
+             CLOUD_BASE_LIFT went to zero or this arm stopped measuring anything"
+        );
+    }
+
     /// The weather's third channel is a **field**, not a constant, and it is
     /// decorrelated from the two that were already there — a convection octave
     /// that tracked coverage would build every cloud in a bank to the same
@@ -1774,13 +1876,99 @@ mod tests {
             lit_edge > 0.0,
             "the powdered edge went to zero — powder reached the MS octaves"
         );
-        // Monotone and finite over the whole domain, so no configuration of a
+        // Finite and non-negative over the whole domain, so no configuration of a
         // level can produce a NaN in the march's accumulator.
+        //
+        // NOT monotone, and the first draft of this comment claimed it was: with
+        // powder on, the first octave carries `t · (1 − 0.65 t²)` at this
+        // geometry, which peaks near `t = 0.72` and falls after it. That is the
+        // term doing its job — a sample the sun barely reaches scatters little,
+        // and so does one with nothing around it to scatter — so the property to
+        // assert is the one below and not a shape the function does not have.
+        let mut peak_at = 0.0f32;
+        let mut peak = 0.0f32;
         for i in 0..=32 {
             let t = i as f32 / 32.0;
             let e = sun_energy(t, -0.3, g, up);
             assert!(e.is_finite() && e >= 0.0, "sun_energy({t}) = {e}");
+            if e > peak {
+                peak = e;
+                peak_at = t;
+            }
         }
+        // The interior maximum IS the powder term, measured: without it the
+        // energy is monotone in `sun_t` and peaks at 1.0.
+        assert!(
+            peak_at < 0.999,
+            "sun_energy peaks at sun_t = {peak_at} — powder is not shaping the \
+             single-scattering term at all"
+        );
+    }
+
+    /// **The sunrise step, closed and bounded** (SKY2 audit).
+    ///
+    /// The powder gate used to be a switch at [`POWDER_SUN_Y`]. That threshold is
+    /// the right *place* — it is exactly where `sun_transmittance` stops marching
+    /// — but a switch there is a brightness step at the instant of sunrise and of
+    /// sunset, which is when a day-cycle sky is most looked at. Measured before
+    /// the fix: a fully-lit thin edge seen with the sun behind the eye fell to
+    /// **0.270** of its below-horizon value across a threshold the sun crosses in
+    /// about fourteen seconds.
+    ///
+    /// Three things are asserted, and the first two are what make the fix
+    /// landable in an audit commit rather than a re-bless:
+    #[test]
+    fn the_powder_gate_ramps_instead_of_stepping_at_sunrise() {
+        let g = 0.8;
+        // Sun behind the eye and a fully-lit sample: `facing` and `powder` are
+        // both at their maximum, which is where the step was worst.
+        let away = -1.0f32;
+        let e_at = |y: f32| sun_energy(1.0, away, g, y);
+        let night = e_at(-1.0);
+        let day = e_at(1.0);
+
+        // (a) ABOVE the band, unchanged and constant — every committed golden
+        //     with clouds in it renders at `sun_y >= 0.0365`, so this is what
+        //     says the ramp cannot have moved a pinned frame.
+        for &y in &[POWDER_SUN_Y_FULL + 1e-6, 0.0365, 0.14, 0.5, 0.903] {
+            assert_eq!(
+                e_at(y),
+                day,
+                "the ramp reached sun_y = {y}, which is above the band"
+            );
+        }
+
+        // (b) AT OR BELOW the threshold, exactly the night value — the 45 %
+        //     defect the gate exists for stays closed, bit for bit.
+        for &y in &[-1.0f32, -0.3, 0.0, POWDER_SUN_Y] {
+            assert_eq!(e_at(y), night, "the night path moved at sun_y = {y}");
+        }
+
+        // (c) INSIDE the band the term arrives monotonically, and no adjacent
+        //     pair jumps by more than a small fraction of the step the switch
+        //     used to take. That step is the number this arm is named for.
+        let step = 1.0 - day / night;
+        eprintln!("powder gate: night {night:.5} -> day {day:.5}, step {step:.3}");
+        assert!(
+            step > 0.5,
+            "the powder term no longer changes a thin sunward edge ({step:.3}) — \
+             this arm would then be measuring nothing"
+        );
+        const N: usize = 64;
+        let mut prev = night;
+        let mut worst_jump = 0.0f32;
+        for i in 0..=N {
+            let y = POWDER_SUN_Y + (POWDER_SUN_Y_FULL - POWDER_SUN_Y) * (i as f32 / N as f32);
+            let e = e_at(y);
+            assert!(e <= prev + 1e-7, "the ramp is not monotone at sun_y = {y}");
+            worst_jump = worst_jump.max((prev - e) / night);
+            prev = e;
+        }
+        assert!(
+            worst_jump < step / 8.0,
+            "the ramp still steps: worst adjacent jump {worst_jump:.4} of the \
+             night value against the switch's {step:.4}"
+        );
     }
 
     /// The wind is a deterministic function of the level's clock, wraps into one
@@ -1834,6 +2022,39 @@ mod tests {
         // is still a small exact integer.
         let far = jitter_phase(1e9);
         assert!(far < JITTER_PHASE_PERIOD as f32, "{far}");
+
+        // **The wrap is load-bearing, asserted where it bears** (SKY2 audit).
+        // The claim on JITTER_PHASE_PERIOD is that without the wrap the sequence
+        // would stop advancing once `time_s × 240` passes 2²⁴ — nineteen hours of
+        // level time — because an f32 cannot then represent the next integer.
+        // Nothing measured that, so here it is, at nineteen hours and at a full
+        // day: consecutive frames still land on different elements, and the
+        // element is exactly the one integer arithmetic names.
+        //
+        // It is also the whole cross-host story. `time_s * 240.0`, `floor` and
+        // `rem_euclid` are correctly-rounded f64 operations with no library call
+        // and no transcendental between them, and the result is a small integer
+        // that an f32 holds exactly — so two hosts that agree on the clock agree
+        // on the element, which is what the goldens rendering jitter-ON rests on.
+        // 68 400 s is nineteen hours; 86 400 s is a whole day. Both are whole
+        // multiples of a period (3 600 × 240 = 864 000 = 13 500 × 64), so both
+        // land on element 0 — and the half-second case is there because a set of
+        // expectations that are all zero would not notice a `jitter_phase` that
+        // returned zero.
+        for &(t, expect) in &[(68_400.0f64, 0.0f32), (86_400.0, 0.0), (68_400.5, 56.0)] {
+            let p = jitter_phase(t);
+            assert_eq!(p, expect, "phase at t = {t} s is {p}, not {expect}");
+            assert_ne!(
+                p,
+                jitter_phase(t + 1.0 / 60.0),
+                "the sequence stopped advancing at t = {t} s — the wrap is not \
+                 doing its job"
+            );
+        }
+        // 68 400 s × 240 = 16 416 000, which is 256 500 whole periods: the
+        // arithmetic above, spelled out once so the expectations are not magic.
+        assert_eq!(68_400.0f64 * JITTER_PHASE_HZ, 16_416_000.0);
+        assert_eq!(16_416_000.0f64 % JITTER_PHASE_PERIOD, 0.0);
         // Hostile input cannot poison the uniform.
         assert_eq!(jitter_phase(f64::NAN), 0.0);
         assert_eq!(jitter_phase(f64::INFINITY), 0.0);

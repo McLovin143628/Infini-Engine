@@ -153,6 +153,14 @@ fn write_png(path: &std::path::Path, rgba: &[u8]) {
 /// thing this arm *does* check is the relation the wave must not break — tier
 /// monotonicity, which is a property of the tier table rather than of the
 /// hardware.
+///
+/// **It is checked HERE and nowhere else, and this arm is `#[ignore]`d**, so the
+/// campaign reproduces that claim on demand rather than enforcing it in the
+/// battery (SKY2 audit). That is a deliberate trade and not an oversight: the
+/// same assertion in `sky_stack_cost_per_tier`, which warms ten frames and means
+/// sixty at 640×360, was measured red in two runs of three. Forty warm frames and
+/// the median of sixty at 1920×1080 is the cheapest estimator that survives a
+/// boost-clock transition, and it is too expensive to pay every leg.
 #[test]
 #[ignore = "measurement, not a contract: a 1080p timing loop over three tiers"]
 fn the_cloud_stack_costs_per_tier() {

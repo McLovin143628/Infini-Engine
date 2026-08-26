@@ -146,9 +146,16 @@ fn fs(in: VsOut) -> CompositeOut {
             best = v;
         }
     }
-    // Every tap disagreed with this pixel about where the world is — a one-pixel
-    // sliver of sky between two ridges, say. Averaging four wrong answers would
-    // be worse than taking the least wrong one.
+    // A divide-by-zero guard, and NOTHING MORE — stated exactly, because the
+    // first draft of this comment claimed the fallback picked "the least wrong
+    // tap" when four taps all disagreed, and with these constants that branch
+    // cannot be reached. The bilinear weights sum to 1 and the bilateral divisor
+    // is at most `1 + CLOUD_NO_GEOMETRY / CLOUD_BILATERAL_M` = 1501, so `wsum` is
+    // never below 1/1501 = 6.7e-4. It does not need to be reachable: the weights
+    // are NORMALIZED by `wsum`, so even when every tap is wrong the average
+    // already leans on whichever is least wrong. The branch exists so that a
+    // future edit to either constant — or a weight function that can return a
+    // true zero — cannot put a NaN into the scene target.
     if (wsum > 1e-4) {
         out.color = acc / wsum;
     } else {

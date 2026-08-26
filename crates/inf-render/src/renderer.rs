@@ -308,10 +308,13 @@ impl FrameTargets {
             bloom_sizes,
             ao_size: (aw, ah),
             // The cloud stack (SKY2), at the same half resolution SSAO uses.
-            // Allocated unconditionally, like the TAA history beside it: 13.5 MB
-            // at 1080p against the ~33 MB that history already costs, and a
+            // Allocated unconditionally, like the TAA history beside it: at
+            // 1080p the four targets are 960×540 and cost 4.15 + 2.07 + 2×4.15 =
+            // **14.52 MB** against the ~33 MB that history already costs, and a
             // lazily-grown set would still need placeholders bound at every
-            // binding to keep the bind groups valid.
+            // binding to keep the bind groups valid. (The wave's ledger first
+            // priced this at 13.5 MB by counting `Rg16Float` as two bytes a texel
+            // rather than four; corrected at the SKY2 audit.)
             cloud: tex("cloud", aw, ah, CLOUD_FORMAT, 1, RT_TEX),
             cloud_dist: tex("cloud-dist", aw, ah, CLOUD_DIST_FORMAT, 1, RT_TEX),
             cloud_history: [

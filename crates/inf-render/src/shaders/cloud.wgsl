@@ -55,6 +55,11 @@ const CLOUD_MS_OCTAVES: u32 = 3u;
 // `1 - T^2 == 1 - exp(-2*tau)`, i.e. the Guerrilla `1 - exp(-2d)` written
 // against a transmittance the march has already computed.
 const CLOUD_POWDER_K: f32 = 2.0;
+// Sun height at which the powder term starts to exist, and the height at which
+// it is fully in. Mirrors `clouds::POWDER_SUN_Y` / `POWDER_SUN_Y_FULL`; the
+// lower one is exactly `cloud_sun_transmittance`'s own early-out threshold.
+const CLOUD_POWDER_SUN_Y: f32 = 1e-3;
+const CLOUD_POWDER_SUN_Y_FULL: f32 = 0.02;
 // Fraction of the overhead sky that still reaches the BASE of the slab, as the
 // diffusion approximation standing in for multiple scattering through the layer.
 const CLOUD_AMBIENT_BASE: f32 = 0.45;
@@ -139,11 +144,6 @@ fn cloud_full_texel(half_texel: vec2<i32>) -> vec2<i32> {
     return min(half_texel * 2, full - vec2<i32>(1));
 }
 
-// Hillaire's multiple-scattering approximation: N octaves, each with half the
-// previous octave's attenuation exponent, scattering weight and phase
-// eccentricity. Without it a thick cloud's interior goes to soot — single
-// scattering simply has nowhere for the light to come from, while a real cloud's
-// interior is lit almost entirely by light that has bounced several times.
 // The march's start offset for this pixel, in `[0, 1)` of one base step.
 //
 // WHY IT IS NOT A FRAME INDEX. Starting every pixel at the same fraction of a
@@ -165,6 +165,11 @@ fn cloud_jitter(texel: vec2<i32>) -> f32 {
     return fract(b + atmos.cloud_color.w * CLOUD_JITTER_GOLDEN);
 }
 
+// Hillaire's multiple-scattering approximation: N octaves, each with half the
+// previous octave's attenuation exponent, scattering weight and phase
+// eccentricity. Without it a thick cloud's interior goes to soot — single
+// scattering simply has nowhere for the light to come from, while a real cloud's
+// interior is lit almost entirely by light that has bounced several times.
 fn cloud_sun_energy(sun_t: f32, cos_t: f32, g: f32, sun_y: f32) -> f32 {
     // ── the powder term (SKY2) ──
     //
@@ -186,15 +191,31 @@ fn cloud_sun_energy(sun_t: f32, cos_t: f32, g: f32, sun_y: f32) -> f32 {
     // near surface, which is the silver lining — and applying powder there would
     // erase the one effect the two-lobe phase function exists to produce.
     let facing = clamp(-cos_t * 0.5 + 0.5, 0.0, 1.0);
-    // ...and gated on the sun being up, on exactly the threshold
+    // ...and gated on the sun being up, from exactly the threshold
     // `cloud_sun_transmittance` early-outs at. Below it the 1.0 that function
     // returns means "no march was run", not "no material" — reading it as an
     // optical depth of zero would give a powder of zero and take the whole
     // single-scattering term off a night sky, which measured as a 45 % drop in
     // `clouds_night`'s starless cloud brightness before this line existed.
+    //
+    // RAMPED, not switched (SKY2 audit). A hard gate here is a STEP at the exact
+    // moment of sunrise and sunset, and a measured one: for a fully-lit sample
+    // (`sun_t = 1`, a thin edge) seen with the sun behind the eye, the energy
+    // falls to **0.270** of its below-horizon value the instant `sun_y` crosses
+    // the threshold. `cloud_sun_transmittance`'s own early-out is a step too, but
+    // for a thin sample it is not — just above the horizon that march still
+    // returns ~1 — so the powder gate was adding a pop where there had been none.
+    // The ramp closes over `CLOUD_POWDER_SUN_Y_FULL`, about four minutes of level
+    // time at a real solar rate, and the three-branch shape is deliberate: above
+    // the band the expression is byte-identical to the ungated one, and at or
+    // below the threshold it is exactly 1.0, so the ramp exists only inside a
+    // band no committed frame visits.
     var single = 1.0;
-    if (sun_y > 1e-3) {
+    if (sun_y > CLOUD_POWDER_SUN_Y_FULL) {
         single = mix(1.0, powder, facing);
+    } else if (sun_y > CLOUD_POWDER_SUN_Y) {
+        let up = smoothstep(CLOUD_POWDER_SUN_Y, CLOUD_POWDER_SUN_Y_FULL, sun_y);
+        single = 1.0 + (mix(1.0, powder, facing) - 1.0) * up;
     }
 
     var e = 0.0;
