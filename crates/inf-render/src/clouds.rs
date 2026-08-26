@@ -1413,9 +1413,9 @@ mod tests {
         assert_eq!(shape_texel(0, 31, 17, 5, 64), [14544, 13884, 13828, 13768]);
         assert_eq!(shape_texel(0, 63, 63, 63, 64), [14711, 13512, 14202, 14020]);
         assert_eq!(detail_texel(0, 9, 21, 30, 32), [14106, 14518, 14470, 15360]);
-        // The FIELD under those pins is unmoved, which is the half of the claim
-        // the bit patterns alone cannot make: 14745 decodes to 0.699_7 and the
-        // 8-bit pin it replaces was 178, i.e. 0.698. Same noise, finer grid.
+        // The pin decodes to what the generator produces. Necessary, and NOT the
+        // claim — `shape_texel` is `shape_value(..).map(f32_to_half)`, so this
+        // can only fail if the conversion is broken.
         for (h, v) in shape_texel(0, 0, 0, 0, 64)
             .iter()
             .zip(shape_value(0, [0.5 / 64.0; 3]))
@@ -1426,6 +1426,38 @@ mod tests {
                 half_to_f32(*h)
             );
         }
+        // **THE FIELD DID NOT MOVE**, against the era it moved from — which is the
+        // half of the claim neither the bit patterns nor the loop above can make,
+        // and which the wave's prose asserted without a test (SKY2 audit). Every
+        // one of the sixteen re-pinned channels decodes to within **0.53 of an
+        // 8-bit LSB** of the value its 8-bit predecessor encoded, which is what a
+        // lossless field re-encoded on a finer grid looks like and what a changed
+        // field could not be. 14745 → 0.699_7 against 178 → 0.698 is the first of
+        // them.
+        const OLD_8BIT: [[u8; 4]; 4] = [
+            [178, 119, 83, 184],
+            [153, 99, 96, 92],
+            [174, 76, 119, 108],
+            [113, 150, 144, 255],
+        ];
+        let now = [
+            shape_texel(0, 0, 0, 0, 64),
+            shape_texel(0, 31, 17, 5, 64),
+            shape_texel(0, 63, 63, 63, 64),
+            detail_texel(0, 9, 21, 30, 32),
+        ];
+        let mut worst = 0.0f32;
+        for (t, old) in now.iter().zip(OLD_8BIT) {
+            for (h, o) in t.iter().zip(old) {
+                let d = (half_to_f32(*h) - f32::from(o) / 255.0).abs() * 255.0;
+                worst = worst.max(d);
+            }
+        }
+        assert!(
+            worst < 0.75,
+            "the 16-bit pins are {worst:.3} 8-bit LSBs from the 8-bit pins they \
+             replaced — the FIELD moved, not just the encoding"
+        );
         // The hash itself, at the bottom of everything.
         assert_eq!(cloud_hash(0, 0, 0, 0), 0);
         assert_eq!(cloud_hash(1, 2, 3, 4), 2_928_021_154);

@@ -296,8 +296,11 @@ fn cloud_height_gradient(h_in: f32, t_in: f32, k_in: f32) -> f32 {
     let floor = k * CLOUD_BASE_LIFT * t;
     let hl = clamp((h - floor) / max(1.0 - floor, 1e-3), 0.0, 1.0);
     let stratus = smoothstep(0.0, 0.08, hl) * (1.0 - smoothstep(0.20, 0.40, hl));
-    // At full convection this is exactly the v1 curve; the variation is scaled by
-    // `t` so a sheet-like deck keeps a system-wide ceiling.
+    // At full convection and full type this is the v1 CURVE — same 0.02 -> 0.22
+    // onset, same 0.6 -> 1.0 taper — read at `hl` rather than at `h`, because the
+    // base lift is maximal in the same corner. `the_strong_cell_is_v1_through_the_base_lift`
+    // pins that relation. The variation is scaled by `t` so a sheet-like deck
+    // keeps a system-wide ceiling.
     let top = 1.0 + (CLOUD_TOP_WEAK + (1.0 - CLOUD_TOP_WEAK) * k - 1.0) * t;
     let cumulus = smoothstep(0.02, 0.22, hl) * (1.0 - smoothstep(top * 0.6, top, hl));
     return stratus + (cumulus - stratus) * t;
