@@ -1,7 +1,10 @@
 //! Tonemap node (P13.3a): the single post step that converts the linear HDR
 //! scene (`post_hdr` = TAA output or the resolved `scene_hdr`) plus additive
 //! bloom into the display-referred `scene_color` the composite blits. Exposure →
-//! `+ bloom·intensity` → Narkowicz ACES → optional ordered dither. Writes the
+//! `+ bloom·intensity` → Narkowicz ACES → optional ordered dither. **Wave VIS1b
+//! moved the exposure ahead of the bloom add and out of this pass's own uniform**
+//! — it comes from [`crate::exposure::ExposureResources::state`], which the bloom
+//! prefilter reads too, so the threshold is exposure-relative. Writes the
 //! `Rgba8UnormSrgb` LDR target, so the hardware applies the sRGB OETF — matching
 //! the old in-shader tonemap at defaults.
 
@@ -12,7 +15,8 @@ use crate::renderer::{FrameData, LDR_FORMAT};
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct TonemapParams {
-    /// x = exposure, y = bloom intensity, z = dither (>0.5), w unused.
+    /// x = UNUSED since wave VIS1b (see the shader), y = bloom intensity,
+    /// z = dither (>0.5), w unused.
     knobs: [f32; 4],
     /// xy = resolution (px), zw unused.
     resolution: [f32; 4],
@@ -58,6 +62,19 @@ impl TonemapNode {
                     float_tex(2),
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // The frame's exposure (wave VIS1b) — the same sixteen bytes
+                    // the bloom prefilter thresholds against, so the threshold
+                    // and the multiply cannot describe different frames.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -139,7 +156,7 @@ impl RenderNode for TonemapNode {
             0,
             bytemuck::bytes_of(&TonemapParams {
                 knobs: [
-                    frame.settings.exposure,
+                    0.0,
                     bloom_intensity,
                     if frame.settings.dither { 1.0 } else { 0.0 },
                     0.0,
@@ -172,6 +189,10 @@ impl RenderNode for TonemapNode {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: self.params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: frame.exposure.state.as_entire_binding(),
                 },
             ],
         });

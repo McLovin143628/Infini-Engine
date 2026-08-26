@@ -5,15 +5,22 @@
 // the old in-shader tonemap exactly at defaults (bloom off, exposure 1).
 
 struct Params {
-    // x = exposure, y = bloom intensity, z = dither (>0.5), w unused.
+    // x = UNUSED since wave VIS1b (the exposure moved to its own buffer, because
+    // the bloom prefilter needs the same number and a uniform this pass owns
+    // could not reach it), y = bloom intensity, z = dither (>0.5), w unused.
     knobs: vec4<f32>,
     // xy = output resolution (px), zw unused.
     resolution: vec4<f32>,
+};
+struct Exposure {
+    // x = the frame's linear exposure multiplier; see `inf_render::exposure`.
+    v: vec4<f32>,
 };
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var bloom_tex: texture_2d<f32>;
 @group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(4) var<uniform> exposure: Exposure;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -54,8 +61,15 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     var hdr = textureSampleLevel(hdr_tex, samp, in.uv, 0.0).rgb;
     let bloom = textureSampleLevel(bloom_tex, samp, in.uv, 0.0).rgb;
 
+    // **Exposure first, then bloom** (wave VIS1b — the ordering decision).
+    // The prefilter already multiplied by the same `exposure.v.x`, so the bloom
+    // texture arrives in exposed units and must NOT be exposed twice.
+    //
+    // At `exposure == 1.0` this is arithmetically the expression it replaced:
+    // `(a + b) * 1.0` and `a * 1.0 + b` are the same bits. Every committed golden
+    // renders at exposure 1.0, which is why the reordering re-blessed nothing.
+    hdr = hdr * exposure.v.x;
     hdr = hdr + bloom * params.knobs.y;
-    hdr = hdr * params.knobs.x; // exposure
 
     var col = tonemap_aces(hdr);
 

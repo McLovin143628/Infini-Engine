@@ -1555,6 +1555,158 @@ impl RenderSettings {
     }
 }
 
+// ── Exposure math (wave VIS1b) ───────────────────────────────────────────────
+//
+// The whole auto-exposure rule lives here, in plain Rust, and
+// `shaders/exposure.wgsl` is its transliteration — pinned by
+// `passes::shader_compose_tests` reading the four constants back out of the
+// shader source, the idiom the VIS1a audit built for the GGX energy fit. A rule
+// that only exists inside a compute shader cannot be unit-tested, and an
+// adaptation nobody can falsify without a GPU is an adaptation nobody checks.
+
+/// Number of luminance histogram bins. 256 = one workgroup thread per bin, which
+/// is what makes the reduction a single fixed-shape tree rather than a loop whose
+/// order depends on the dispatch.
+pub const EXPOSURE_BINS: u32 = 256;
+/// Lowest log2 luminance the histogram resolves (2⁻¹⁰ ≈ 0.001).
+pub const EXPOSURE_LOG_MIN: f32 = -10.0;
+/// Highest log2 luminance the histogram resolves (2¹⁰ = 1024).
+pub const EXPOSURE_LOG_MAX: f32 = 10.0;
+/// The average scene luminance auto exposure aims to place at the tonemapper's
+/// middle — the photographic 18 % grey card. Everything else in the rule is a
+/// bound or a rate; this is the only aesthetic constant, so it is named once.
+pub const EXPOSURE_KEY: f32 = 0.18;
+
+/// Rec.709 relative luminance — what the histogram bins.
+pub fn luminance(rgb: [f32; 3]) -> f32 {
+    0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+}
+
+/// Which histogram bin a linear luminance falls in.
+///
+/// **Bin 0 is the black bin and is deliberately special**: everything at or below
+/// 2⁻¹⁰ lands in it, and [`exposure_log_average`] then ignores it. A frame is
+/// mostly sky or mostly unlit background far more often than it is mostly
+/// mid-tone, and letting a black backdrop vote drags the average toward nothing
+/// and blows the exposure open on the few pixels that *are* lit.
+pub fn exposure_bin(luminance: f32) -> u32 {
+    if !(luminance > 0.0) {
+        return 0;
+    }
+    let l2 = luminance.log2();
+    if l2 <= EXPOSURE_LOG_MIN {
+        return 0;
+    }
+    let t = (l2 - EXPOSURE_LOG_MIN) / (EXPOSURE_LOG_MAX - EXPOSURE_LOG_MIN);
+    let bin = (t * EXPOSURE_BINS as f32) as u32;
+    bin.min(EXPOSURE_BINS - 1)
+}
+
+/// The luminance a bin index stands for — the bin's **centre in log space**,
+/// which is the value that makes [`exposure_log_average`] a log-average rather
+/// than a biased one.
+pub fn exposure_bin_luminance(bin: u32) -> f32 {
+    let t = (bin.min(EXPOSURE_BINS - 1) as f32 + 0.5) / EXPOSURE_BINS as f32;
+    let l2 = EXPOSURE_LOG_MIN + t * (EXPOSURE_LOG_MAX - EXPOSURE_LOG_MIN);
+    l2.exp2()
+}
+
+/// The scene's average luminance from a histogram: the **log-average**, bin 0
+/// excluded.
+///
+/// A log-average rather than an arithmetic one because it is the outlier-robust
+/// statistic by construction — a sun disc at 10⁴ over two million pixels moves
+/// `log2` by `13/2 000 000`, where an arithmetic mean would let it set the
+/// exposure for the whole frame. That is also why this wave does **not** ship a
+/// percentile trim: the trim exists to buy robustness the log-average already
+/// has, and it would cost two more authored numbers and a second reduction.
+///
+/// A histogram with nothing but black in it returns `0.0`, and
+/// [`exposure_target_ev`] clamps that up to `min_luminance` — a black frame
+/// exposes at the darkest bound the author allowed rather than at infinity.
+pub fn exposure_log_average(bins: &[u32]) -> f32 {
+    let mut weight = 0.0f32;
+    let mut sum = 0.0f32;
+    for (i, &count) in bins.iter().enumerate().skip(1) {
+        let w = count as f32;
+        weight += w;
+        sum += w * exposure_bin_luminance(i as u32).log2();
+    }
+    if weight <= 0.0 {
+        return 0.0;
+    }
+    (sum / weight).exp2()
+}
+
+/// The exposure a scene of average luminance `avg` wants, in **stops**, before
+/// adaptation and before compensation.
+///
+/// `min_luminance`/`max_luminance` bound the *scene*, not the multiplier: below
+/// the floor a night frame is allowed to stay dark instead of being lifted into
+/// noise, and above the ceiling a white-out stays a white-out.
+pub fn exposure_target_ev(avg: f32, min_luminance: f32, max_luminance: f32) -> f32 {
+    let lo = if min_luminance.is_finite() {
+        min_luminance.max(1e-4)
+    } else {
+        1e-4
+    };
+    let hi = if max_luminance.is_finite() {
+        max_luminance.max(lo)
+    } else {
+        lo
+    };
+    let l = if avg.is_finite() {
+        avg.clamp(lo, hi)
+    } else {
+        lo
+    };
+    (EXPOSURE_KEY / l).log2()
+}
+
+/// One adaptation step: move `prev_ev` toward `target_ev` at `speed` **stops per
+/// second** over `dt` seconds.
+///
+/// Linear in stops rather than an exponential decay, because `adaptation_speed`
+/// is documented in stops per second and a linear ramp is the only rule that
+/// makes that sentence true — an exponential's "speed" is a half-life wearing a
+/// rate's name. It also converges in finite time, which is what lets a gate
+/// assert arrival rather than proximity.
+///
+/// `dt == 0` returns `prev_ev` unchanged. That is not an edge case, it is the
+/// contract: `dt` is a **level-clock** delta, so a paused clock is a frozen
+/// adaptation, and a frame counter can never get in.
+pub fn adapt_exposure_ev(prev_ev: f32, target_ev: f32, speed: f32, dt: f32) -> f32 {
+    let step = if speed.is_finite() {
+        speed.max(0.0)
+    } else {
+        0.0
+    } * if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+    let delta = target_ev - prev_ev;
+    prev_ev + delta.clamp(-step, step)
+}
+
+/// The linear multiplier `stops` of exposure compensation is worth.
+///
+/// **Exactly `1.0` at zero, by a branch rather than by trusting `exp2(0.0)`** —
+/// that identity is the whole of manual mode's byte-exactness, so it is written
+/// down instead of assumed.
+pub fn exposure_compensation_factor(stops: f32) -> f32 {
+    if stops == 0.0 || !stops.is_finite() {
+        1.0
+    } else {
+        stops.exp2()
+    }
+}
+
+/// **The manual-mode multiplier**: today's scalar, and the compensation on top.
+///
+/// At the defaults (`compensation_ev == 0.0`) this returns
+/// [`RenderSettings::exposure`] bit for bit, which is what keeps every golden
+/// rendered before wave VIS1b byte-identical after it.
+pub fn manual_exposure_multiplier(exposure: f32, compensation_ev: f32) -> f32 {
+    exposure * exposure_compensation_factor(compensation_ev)
+}
+
 // ── Bloom math ───────────────────────────────────────────────────────────────
 
 /// COD-style soft-knee bloom prefilter: returns the fraction of `brightness`
@@ -1979,6 +2131,117 @@ mod tests {
         assert_eq!(d.film.vignette_intensity, 0.0);
         assert_eq!(d.film.chromatic_aberration, 0.0);
         assert_eq!(d.film.grain_intensity, 0.0);
+    }
+
+    /// **Manual mode is today's scalar, bit for bit** (wave VIS1b's off-path
+    /// arm).
+    ///
+    /// Every golden in the tree renders at `exposure == 1.0` and
+    /// `compensation_ev == 0.0`, and the whole reason none of them re-blessed for
+    /// this wave is that `manual_exposure_multiplier` returns the argument
+    /// unchanged there. Asserted on **bits**, not on `==`, because that is the
+    /// claim: `0.7 * 1.0` being *approximately* 0.7 would still move a frame.
+    #[test]
+    fn manual_exposure_is_the_scalar_bit_for_bit() {
+        for e in [0.0f32, 1.0, 0.7, 2.5, 1e-6, 1e6, f32::MIN_POSITIVE] {
+            assert_eq!(
+                manual_exposure_multiplier(e, 0.0).to_bits(),
+                e.to_bits(),
+                "exposure {e} did not survive the compensation identity"
+            );
+        }
+        // And a non-finite compensation cannot poison the buffer — it reads as
+        // "no compensation" rather than as a NaN multiplier over the whole frame.
+        assert_eq!(manual_exposure_multiplier(1.0, f32::NAN), 1.0);
+        assert_eq!(manual_exposure_multiplier(1.0, f32::INFINITY), 1.0);
+        // One stop up is twice the light; one stop down is half.
+        assert_eq!(manual_exposure_multiplier(1.0, 1.0), 2.0);
+        assert_eq!(manual_exposure_multiplier(1.0, -1.0), 0.5);
+    }
+
+    /// The log-average is the outlier-robust statistic the rule claims it is.
+    ///
+    /// A million mid-grey pixels and **one** pixel at 1024 must not move the
+    /// measured average by anything a bin can see — that property is why this
+    /// wave ships no percentile trim, so it is asserted rather than argued.
+    #[test]
+    fn the_exposure_average_is_robust_to_a_sun_disc() {
+        let mut bins = vec![0u32; EXPOSURE_BINS as usize];
+        let grey = exposure_bin(0.18);
+        bins[grey as usize] = 1_000_000;
+        let clean = exposure_log_average(&bins);
+        assert!(
+            (clean - 0.18).abs() < 0.01,
+            "a uniformly mid-grey frame should read ~0.18, read {clean}"
+        );
+
+        bins[EXPOSURE_BINS as usize - 1] = 1;
+        let with_sun = exposure_log_average(&bins);
+        assert!(
+            (with_sun - clean).abs() < 1e-3,
+            "one blown pixel moved the average from {clean} to {with_sun}"
+        );
+
+        // Black alone measures nothing, and the target then falls back to the
+        // author's floor rather than to infinity.
+        let empty = vec![0u32; EXPOSURE_BINS as usize];
+        assert_eq!(exposure_log_average(&empty), 0.0);
+        assert_eq!(
+            exposure_target_ev(0.0, 0.03, 8.0),
+            (EXPOSURE_KEY / 0.03).log2()
+        );
+    }
+
+    /// The target is bounded by the authored luminance window, and brighter
+    /// scenes always want *less* exposure.
+    #[test]
+    fn the_exposure_target_is_bounded_and_monotone() {
+        let (lo, hi) = (0.03f32, 8.0f32);
+        let mut prev = f32::INFINITY;
+        let mut l = 0.001f32;
+        while l < 64.0 {
+            let ev = exposure_target_ev(l, lo, hi);
+            assert!(ev <= prev + 1e-6, "target rose at {l}: {ev} > {prev}");
+            assert!(
+                ev >= (EXPOSURE_KEY / hi).log2() - 1e-6 && ev <= (EXPOSURE_KEY / lo).log2() + 1e-6,
+                "target {ev} at {l} left the authored window"
+            );
+            prev = ev;
+            l *= 1.3;
+        }
+        // A hostile record cannot produce a non-finite exposure.
+        for bad in [f32::NAN, f32::INFINITY, -1.0] {
+            assert!(exposure_target_ev(bad, lo, hi).is_finite());
+            assert!(exposure_target_ev(1.0, bad, hi).is_finite());
+            assert!(exposure_target_ev(1.0, lo, bad).is_finite());
+        }
+    }
+
+    /// **The adaptation is frame-rate independent**, which is the whole point of
+    /// stepping it by the level clock.
+    ///
+    /// The same clock interval crossed in one step and in twenty must land on the
+    /// same exposure: if it did not, a level would look different on a fast
+    /// machine, and PIE and shipping would disagree the moment their frame rates
+    /// did.
+    #[test]
+    fn the_adaptation_is_a_function_of_the_clock_not_the_frame_count() {
+        let (target, speed) = (3.0f32, 1.5f32);
+        let one = adapt_exposure_ev(0.0, target, speed, 1.0);
+        let mut many = 0.0f32;
+        for _ in 0..20 {
+            many = adapt_exposure_ev(many, target, speed, 0.05);
+        }
+        assert!(
+            (one - many).abs() < 1e-5,
+            "1 x 1.0 s gave {one}, 20 x 0.05 s gave {many}"
+        );
+        // A frozen clock is a frozen adaptation, however many frames run.
+        let mut frozen = 0.5f32;
+        for _ in 0..1000 {
+            frozen = adapt_exposure_ev(frozen, target, speed, 0.0);
+        }
+        assert_eq!(frozen, 0.5);
     }
 
     #[test]

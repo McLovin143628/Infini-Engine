@@ -352,6 +352,12 @@ pub struct FrameData<'a> {
     /// Shared dynamic-GI resources (P13.3b): the GI node writes the SH probes, the
     /// lit passes sample them (byte-neutral when GI is off).
     pub gi: &'a GiResources,
+    /// **The auto-exposure state** (wave VIS1b): the sixteen bytes
+    /// [`crate::passes::exposure`] writes and both the bloom prefilter and the
+    /// tonemap read. Never absent — in manual mode it simply holds
+    /// [`RenderSettings::exposure`] with the compensation folded in, which at the
+    /// default compensation is that scalar bit for bit.
+    pub exposure: &'a crate::exposure::ExposureResources,
     /// Occlusion-audit counters (P18.1): the vgeom cull compute increments them
     /// only when `enabled`, and the node records the readback copy. Off by
     /// default, so the shipping path pays nothing.
@@ -579,6 +585,9 @@ pub struct EngineRenderer {
     /// [`crate::gi::GiQuality`] changes (P18.4), which is why they carry a
     /// generation the env bind-group cache keys on — exactly like the atmosphere.
     gi: GiResources,
+    /// The wave-VIS1b auto-exposure buffers. Created once; the state persists
+    /// across frames, which is what makes the adaptation an adaptation.
+    exposure: crate::exposure::ExposureResources,
     /// Monotonic source of `gi.generation`.
     next_gi_generation: u64,
     /// What the GI voxelizer consumed on the last rendered frame (P18.4).
@@ -871,6 +880,12 @@ impl EngineRenderer {
         graph.add(passes::resolve::ResolveNode);
         // Post chain (all read/write single-sample HDR/LDR targets).
         graph.add(passes::taa::TaaNode::new(gpu, &view_bgl));
+        // Auto exposure (wave VIS1b): the luminance histogram over `post_hdr`,
+        // BEFORE bloom because from this wave the bloom threshold is
+        // exposure-relative — the prefilter and the tonemap read the same
+        // sixteen bytes this node writes, so they cannot disagree about what the
+        // frame's exposure is. In manual mode it records nothing at all.
+        graph.add(passes::exposure::ExposureNode::new(gpu));
         graph.add(passes::bloom::BloomNode::new(gpu));
         graph.add(passes::tonemap::TonemapNode::new(gpu));
         // **The in-game UI, AFTER the tonemap** (island wave I5): a menu drawn
@@ -908,6 +923,7 @@ impl EngineRenderer {
             prev_origin: None,
             shadow: ShadowResources::new(gpu),
             gi: GiResources::new(gpu, settings.gi.quality, 1),
+            exposure: crate::exposure::ExposureResources::new(gpu),
             next_gi_generation: 2,
             gi_audit,
             vgeom_audit: VgeomAuditResources::new(gpu),
@@ -1502,6 +1518,22 @@ impl EngineRenderer {
             return VgeomAudit::default();
         }
         self.vgeom_audit.read(gpu)
+    }
+
+    /// **The exposure the last submitted frame settled on** (wave VIS1b), read
+    /// back from the GPU. Blocks on a buffer map.
+    ///
+    /// Unlike the two audits above this needs **no flag**, because it costs the
+    /// frame nothing: the copy is recorded here, on its own encoder, outside the
+    /// frame loop, rather than at the end of a pass. So there is no
+    /// instrument-on/instrument-off pair of command streams to keep identical —
+    /// a shipped frame simply never calls it.
+    ///
+    /// It exists because an adaptation nobody can observe is an adaptation nobody
+    /// can gate: `read_exposure` is what lets the PIE-vs-shipping arm compare a
+    /// *trace of exposures* rather than a screenshot.
+    pub fn read_exposure(&self, gpu: &GpuContext) -> Result<crate::ExposureState, String> {
+        self.exposure.read(gpu)
     }
 
     /// Enable/disable the **per-pass GPU clock** (island wave I4). **Off by
@@ -2191,6 +2223,7 @@ impl EngineRenderer {
             cloud_history_valid,
             shadow: &self.shadow,
             gi: &self.gi,
+            exposure: &self.exposure,
             vgeom_audit: &self.vgeom_audit,
             vis_readback: &self.vis_readback,
             scatter_audit: &self.scatter_audit,

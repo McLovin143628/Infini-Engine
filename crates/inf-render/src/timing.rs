@@ -296,13 +296,13 @@ impl RecordClock {
 
 /// How many timestamps one frame may write.
 ///
-/// The graph is 29 nodes and the renderer brackets five more segments around it,
-/// plus the frame's own origin mark: 35. Sixty-four leaves room for the passes a
+/// The graph is 31 nodes and the renderer brackets five more segments around it,
+/// plus the frame's own origin mark: 37. Sixty-four leaves room for the passes a
 /// later phase adds without anyone having to remember this constant exists, and
 /// costs 512 bytes of query-set storage.
 pub const MAX_FRAME_MARKS: u32 = 64;
 
-/// The frame writes 29 graph nodes + 5 out-of-graph segments + the origin mark.
+/// The frame writes 31 graph nodes + 5 out-of-graph segments + the origin mark.
 ///
 /// A **compile-time** assertion rather than a test, because both sides are
 /// constants and clippy is right that a runtime `assert!` over two `const`s is
@@ -312,9 +312,10 @@ pub const MAX_FRAME_MARKS: u32 = 64;
 /// — that the report names every node the renderer actually built — is
 /// `gpu_timing::the_report_names_every_pass_and_the_segments_tile_the_frame`,
 /// which reads `EngineRenderer::pass_names` and cannot be folded away.
-/// 29 graph nodes, 5 out-of-graph segments (island wave I4b split `vsm-sync`
-/// out of `vsm-raster`), and the frame's origin mark.
-const FRAME_MARKS_NEEDED: u32 = 35;
+/// 31 graph nodes (wave VIS1b added `exposure` and `flare`), 5 out-of-graph
+/// segments (island wave I4b split `vsm-sync` out of `vsm-raster`), and the
+/// frame's origin mark.
+const FRAME_MARKS_NEEDED: u32 = 37;
 const _: () = assert!(MAX_FRAME_MARKS >= FRAME_MARKS_NEEDED);
 
 /// A per-frame GPU stopwatch over one `wgpu::QuerySet`.

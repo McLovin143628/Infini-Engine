@@ -17,6 +17,8 @@ use crate::renderer::{FrameData, HDR_FORMAT};
 struct BloomParams {
     /// x = threshold, y = knee, zw = source texel size.
     v: [f32; 4],
+    /// x = Karis-average first downsample (>0.5), yzw unused.
+    v2: [f32; 4],
 }
 
 pub struct BloomNode {
@@ -60,6 +62,19 @@ impl BloomNode {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // The frame's exposure (wave VIS1b). Bound on every step,
+                    // because a bind group must be complete; read only by the
+                    // prefilter, which is the only step that keys on brightness.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -152,6 +167,7 @@ impl BloomNode {
         gpu: &GpuContext,
         src: &wgpu::TextureView,
         params: &wgpu::Buffer,
+        exposure: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bloom"),
@@ -168,6 +184,10 @@ impl BloomNode {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: exposure.as_entire_binding(),
                 },
             ],
         })
@@ -249,10 +269,11 @@ impl RenderNode for BloomNode {
                 step,
                 BloomParams {
                     v: [b.threshold, b.knee, texel0[0], texel0[1]],
+                    v2: [if b.karis { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
                 },
             )
             .clone();
-        let pf_bg = self.bind(gpu, frame.post_hdr, &pf);
+        let pf_bg = self.bind(gpu, frame.post_hdr, &pf, &frame.exposure.state);
         self.draw(encoder, &self.prefilter, &mips[0], &pf_bg, true);
         step += 1;
 
@@ -261,9 +282,10 @@ impl RenderNode for BloomNode {
             let (sw, sh) = sizes[i - 1];
             let params = BloomParams {
                 v: [0.0, 0.0, 1.0 / sw as f32, 1.0 / sh as f32],
+                v2: [0.0; 4],
             };
             let buf = self.step_buffer(gpu, step, params).clone();
-            let bg = self.bind(gpu, &mips[i - 1], &buf);
+            let bg = self.bind(gpu, &mips[i - 1], &buf, &frame.exposure.state);
             self.draw(encoder, &self.downsample, &mips[i], &bg, true);
             step += 1;
         }
@@ -273,9 +295,10 @@ impl RenderNode for BloomNode {
             let (sw, sh) = sizes[i + 1];
             let params = BloomParams {
                 v: [0.0, 0.0, 1.0 / sw as f32, 1.0 / sh as f32],
+                v2: [0.0; 4],
             };
             let buf = self.step_buffer(gpu, step, params).clone();
-            let bg = self.bind(gpu, &mips[i + 1], &buf);
+            let bg = self.bind(gpu, &mips[i + 1], &buf, &frame.exposure.state);
             self.draw(encoder, &self.upsample, &mips[i], &bg, false);
             step += 1;
         }

@@ -11,6 +11,7 @@ pub mod cloud_temporal;
 pub mod composite;
 pub mod debug;
 pub mod depth_prepass;
+pub mod exposure;
 pub mod fracture;
 pub mod gi;
 pub mod grid;
@@ -1640,6 +1641,69 @@ mod shader_compose_tests {
         }
     }
 
+    /// **The auto-exposure rule's CPU mirror is the same rule** (wave VIS1b).
+    ///
+    /// `shaders/exposure.wgsl` is a transliteration of five functions in
+    /// `inf_render::settings`, and the whole reason the Rust half exists is that
+    /// a rule living only inside a compute shader cannot be unit-tested. That
+    /// argument is worth nothing unless something checks the two agree, which is
+    /// the VIS1a-audit lesson (*a cited gate that does not exist is worse than no
+    /// claim*) applied before rather than after.
+    ///
+    /// Two halves, like the energy-fit arm above it: the four constants are read
+    /// **out of the shader source** and compared against the Rust constants, and
+    /// then the binning and the adaptation are swept.
+    #[test]
+    fn the_cpu_and_wgsl_exposure_rules_agree() {
+        let src = include_str!("../shaders/exposure.wgsl");
+        for (decl, value) in [
+            ("const EXPOSURE_BINS: u32 = ", crate::EXPOSURE_BINS as f32),
+            ("const EXPOSURE_LOG_MIN: f32 = ", crate::EXPOSURE_LOG_MIN),
+            ("const EXPOSURE_LOG_MAX: f32 = ", crate::EXPOSURE_LOG_MAX),
+            ("const EXPOSURE_KEY: f32 = ", crate::EXPOSURE_KEY),
+        ] {
+            let at = src
+                .find(decl)
+                .unwrap_or_else(|| panic!("exposure.wgsl no longer declares `{decl}`"));
+            let rest = &src[at + decl.len()..];
+            let lit: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+                .collect();
+            let got: f32 = lit
+                .parse()
+                .unwrap_or_else(|_| panic!("`{decl}` is not a number: `{lit}`"));
+            assert_eq!(
+                got, value,
+                "exposure.wgsl's `{decl}` is {got}, the CPU rule's is {value}"
+            );
+        }
+
+        // The binning, over four decades of luminance. `exposure_bin` and the
+        // shader's copy are the same expression; what this sweeps is that the
+        // Rust one really does put black in bin 0 and saturate at the top,
+        // because those two are what `exposure_log_average` rests on.
+        assert_eq!(crate::exposure_bin(0.0), 0);
+        assert_eq!(crate::exposure_bin(f32::NAN), 0);
+        assert_eq!(crate::exposure_bin(1e-6), 0);
+        assert_eq!(crate::exposure_bin(1e9), crate::EXPOSURE_BINS - 1);
+        for i in 1..crate::EXPOSURE_BINS {
+            let l = crate::exposure_bin_luminance(i);
+            assert_eq!(
+                crate::exposure_bin(l),
+                i,
+                "bin {i}'s own representative luminance {l} does not land back in it"
+            );
+        }
+
+        // The adaptation: a linear ramp in stops, and `dt == 0` is a hard freeze.
+        assert_eq!(crate::adapt_exposure_ev(0.0, 4.0, 2.0, 0.0), 0.0);
+        assert_eq!(crate::adapt_exposure_ev(0.0, 4.0, 2.0, 0.5), 1.0);
+        assert_eq!(crate::adapt_exposure_ev(0.0, 4.0, 2.0, 100.0), 4.0);
+        assert_eq!(crate::adapt_exposure_ev(0.0, -4.0, 2.0, 0.5), -1.0);
+        assert_eq!(crate::adapt_exposure_ev(1.0, 4.0, 0.0, 100.0), 1.0);
+    }
+
     fn validate(label: &str, source: &str) {
         let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|e| {
             panic!(
@@ -1671,6 +1735,11 @@ mod shader_compose_tests {
         for (label, source) in [
             ("bloom", include_str!("../shaders/bloom.wgsl")),
             ("composite", include_str!("../shaders/composite.wgsl")),
+            // Wave VIS1b's auto-exposure compute. Standalone for the reason
+            // `vt_feedback` is: it owns its `@group(0)`, has no camera, and
+            // composing it would bind a `view` uniform at the binding its own
+            // params occupy.
+            ("exposure", include_str!("../shaders/exposure.wgsl")),
             ("gi_voxelize", include_str!("../shaders/gi_voxelize.wgsl")),
             // `gi_probes` moved into SHADER_TABLE in P18.4 — it is a composed
             // module now (it includes the atmosphere library for its sky term).
