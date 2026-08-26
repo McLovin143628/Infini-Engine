@@ -293,6 +293,40 @@ impl CloudGpuSeed {
 /// value, so the wrap is free of visual consequence and buys back full precision.
 /// The arithmetic is done in `f64` so the wrap itself does not lose the bits it
 /// exists to protect.
+/// Rate, **Hz**, at which the raymarch's blue-noise jitter advances to the next
+/// element of its sequence.
+///
+/// High enough that any plausible frame rate against any plausible time-of-day
+/// scale lands on a new element every frame, which is what lets the temporal pass
+/// average them; and it is a *rate against the level's clock*, so a paused clock
+/// is a frozen jitter and the same frame renders identically twice.
+pub const JITTER_PHASE_HZ: f64 = 240.0;
+
+/// Length of the jitter sequence before it repeats.
+///
+/// The wrap is not cosmetic, for the same reason [`wind_offset`]'s is not: the
+/// phase crosses the uniform as an f32, and an unwrapped `time_s × 240` is past
+/// 2²⁴ after nineteen hours of level time — at which point the "next element"
+/// would silently be the same element, and the temporal pass would average one
+/// sample position with itself for ever.
+pub const JITTER_PHASE_PERIOD: f64 = 64.0;
+
+/// Which element of the jitter sequence the raymarch offsets by at `time_s`.
+///
+/// **Never a frame index.** The whole determinism argument for jittering a
+/// committed render rests on this: the offset is a function of the level's own
+/// clock and the pixel's position, so two runs that reach the same time-of-day
+/// with the same camera produce the same pixels — which a frame counter, which
+/// depends on how long the process has been up and how many frames it dropped,
+/// could never do.
+pub fn jitter_phase(time_s: f64) -> f32 {
+    let p = time_s * JITTER_PHASE_HZ;
+    if !p.is_finite() {
+        return 0.0;
+    }
+    p.floor().rem_euclid(JITTER_PHASE_PERIOD) as f32
+}
+
 pub fn wind_offset(wind_x: f32, wind_z: f32, time_s: f64) -> [f32; 2] {
     let tile = SHAPE_TILE_M as f64;
     let wrap = |v: f32| -> f32 {
@@ -1198,6 +1232,39 @@ mod tests {
         assert_eq!(wind_offset(1.0, 1.0, f64::NAN), [0.0, 0.0]);
         // Zero wind is a static sky.
         assert_eq!(wind_offset(0.0, 0.0, 99_999.0), [0.0, 0.0]);
+    }
+
+    /// **The jitter's determinism story, as a property.** The march's blue-noise
+    /// offset advances with the LEVEL CLOCK and with nothing else: the same clock
+    /// is the same offset however many frames the process has drawn, a paused
+    /// clock is a frozen pattern, and the phase stays an exactly-representable
+    /// small integer however long the level has been running.
+    #[test]
+    fn the_jitter_phase_follows_the_level_clock_and_nothing_else() {
+        // Pure: the same clock gives the same phase, always.
+        for t in [0.0, 1.0 / 60.0, 43_200.0, 86_400.0, 1e9] {
+            assert_eq!(jitter_phase(t), jitter_phase(t));
+            let p = jitter_phase(t);
+            assert!(p.is_finite() && (0.0..JITTER_PHASE_PERIOD as f32).contains(&p));
+            // Integer-valued, so it survives the f32 uniform exactly and the
+            // shader's multiply by the golden ratio is reproducible.
+            assert_eq!(p, p.floor(), "phase {p} is not an integer at t={t}");
+        }
+        // A clock that advances by one frame at 60 Hz advances the sequence —
+        // which is what the temporal pass averages over.
+        assert_ne!(jitter_phase(10.0), jitter_phase(10.0 + 1.0 / 60.0));
+        // A clock that does NOT advance does not: a paused editor renders the
+        // same sky twice, which is what the golden harness asserts.
+        assert_eq!(jitter_phase(10.0), jitter_phase(10.0 + 1e-9));
+        // The wrap: 19 hours of level time is past 2^24 unwrapped, and the phase
+        // is still a small exact integer.
+        let far = jitter_phase(1e9);
+        assert!(far < JITTER_PHASE_PERIOD as f32, "{far}");
+        // Hostile input cannot poison the uniform.
+        assert_eq!(jitter_phase(f64::NAN), 0.0);
+        assert_eq!(jitter_phase(f64::INFINITY), 0.0);
+        // Negative clocks (a level rewound past midnight) stay in range.
+        assert!((0.0..JITTER_PHASE_PERIOD as f32).contains(&jitter_phase(-7.5)));
     }
 
     /// The seed's round trip through the f32 uniform must be exact, and must

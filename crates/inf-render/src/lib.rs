@@ -10,6 +10,7 @@
 //! render-local at upload. Depth is reverse-infinite Z.
 
 pub mod atmosphere;
+pub mod bluenoise;
 pub mod camera;
 pub mod caps;
 pub mod clouds;

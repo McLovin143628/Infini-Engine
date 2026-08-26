@@ -25,11 +25,13 @@
 // against. `textureLoad`ed at an integer texel, never sampled, so it needs no
 // sampler and no filterability.
 @group(1) @binding(7) var cloud_scene_depth: texture_depth_multisampled_2d;
-//
-// TEMPORAL JITTER — deliberately OFF. Blue-noise-offsetting the first sample and
-// letting TAA resolve it is the standard way to buy back march steps, and it is
-// the documented follow-up; it is also a per-frame-index dependence, which is
-// exactly what a byte-identical determinism gate forbids. Determinism first.
+
+// The blue-noise tile the first sample's position is offset by (SKY2). See
+// `crate::bluenoise` for what makes it blue and why it is generated rather than
+// shipped. `textureLoad`ed at an integer texel, wrapped by hand — nothing
+// filters it, because interpolating a blue-noise tile destroys the property it
+// exists for.
+@group(1) @binding(8) var cloud_blue_noise: texture_2d<f32>;
 
 // Longest span the primary march will cover, metres. A ray a degree above the
 // horizon would otherwise want hundreds of kilometres of slab; past this the
@@ -47,6 +49,14 @@ const CLOUD_MS_OCTAVES: u32 = 3u;
 // Fraction of the overhead sky that still reaches the BASE of the slab, as the
 // diffusion approximation standing in for multiple scattering through the layer.
 const CLOUD_AMBIENT_BASE: f32 = 0.45;
+// Edge of the blue-noise tile, mirroring `bluenoise::BLUE_NOISE_RES`.
+const CLOUD_BLUE_NOISE_RES: i32 = 64;
+// The golden-ratio conjugate. Advancing a blue-noise value by this per sequence
+// element keeps the *set* of offsets a pixel visits low-discrepancy, so the
+// temporal average converges in a handful of elements instead of the dozens a
+// re-randomization would need (Roberts' R1 sequence, the standard companion to a
+// blue-noise tile).
+const CLOUD_JITTER_GOLDEN: f32 = 0.6180339887;
 
 struct CloudOut {
     @location(0) color: vec4<f32>,
@@ -101,6 +111,27 @@ fn cloud_geometry_distance(ndc: vec2<f32>, texel: vec2<i32>, dir: vec3<f32>) -> 
 // eccentricity. Without it a thick cloud's interior goes to soot — single
 // scattering simply has nowhere for the light to come from, while a real cloud's
 // interior is lit almost entirely by light that has bounced several times.
+// The march's start offset for this pixel, in `[0, 1)` of one base step.
+//
+// WHY IT IS NOT A FRAME INDEX. Starting every pixel at the same fraction of a
+// step makes the integration error coherent across the screen, which is the
+// banding this pass shipped with. The standard fix is to offset each pixel by a
+// blue-noise value rotated by the frame counter — and a frame counter is exactly
+// what a byte-identical determinism gate cannot have, because it counts how long
+// the process has been up rather than where the level is. So the rotation is
+// driven by `atmos.cloud_color.w`, the **level clock's** jitter phase
+// (`clouds::jitter_phase`): a paused clock is a frozen pattern and the same
+// document renders the same pixels, while a running clock walks the sequence at
+// 240 Hz for the temporal pass to average.
+fn cloud_jitter(texel: vec2<i32>) -> f32 {
+    let t = vec2<i32>(
+        texel.x % CLOUD_BLUE_NOISE_RES,
+        texel.y % CLOUD_BLUE_NOISE_RES,
+    );
+    let b = textureLoad(cloud_blue_noise, t, 0).r;
+    return fract(b + atmos.cloud_color.w * CLOUD_JITTER_GOLDEN);
+}
+
 fn cloud_sun_energy(sun_t: f32, cos_t: f32, g: f32) -> f32 {
     var e = 0.0;
     var att = 1.0;
@@ -156,7 +187,8 @@ fn fs(in: VsOut) -> CloudOut {
     // march length comes from one sample while the hardware test still resolves
     // coverage per sample, which is a sub-pixel discrepancy at a silhouette and
     // not worth four loads to remove.
-    let geo = cloud_geometry_distance(in.ndc, vec2<i32>(i32(in.pos.x), i32(in.pos.y)), dir);
+    let texel = vec2<i32>(i32(in.pos.x), i32(in.pos.y));
+    let geo = cloud_geometry_distance(in.ndc, texel, dir);
     if (geo > 0.0) {
         t_far = min(t_far, geo);
         if (t_far <= t_near) {
@@ -232,7 +264,12 @@ fn fs(in: VsOut) -> CloudOut {
     var scattered = vec3<f32>(0.0);
     var depth_sum = 0.0;
     var weight_sum = 0.0;
-    var t = t_near + base_dt * 0.5;
+    // The first sample lands a blue-noise fraction of a base step into the slab
+    // instead of half of one. Everything downstream inherits the offset — the
+    // coarse search, the rewind on contact and the fine march all step from
+    // here — so the integration error stops being the same error in every pixel
+    // and becomes fine grain instead of concentric shells.
+    var t = t_near + base_dt * cloud_jitter(texel);
     var stride = CLOUD_STRIDE_RATIO;
     var empty = 0u;
 

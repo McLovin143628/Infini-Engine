@@ -140,6 +140,19 @@ impl CloudNode {
                         },
                         count: None,
                     },
+                    // 8 = the blue-noise tile the first sample is offset by
+                    // (SKY2). Unfilterable and `textureLoad`ed at an integer
+                    // texel, for the reason on `CLOUD_BLUE_NOISE_FORMAT`.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: frag,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -252,6 +265,10 @@ impl RenderNode for CloudNode {
                         wgpu::BindGroupEntry {
                             binding: 7,
                             resource: wgpu::BindingResource::TextureView(&frame.targets.depth),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: wgpu::BindingResource::TextureView(&atmos.cloud_blue_noise),
                         },
                     ],
                 })

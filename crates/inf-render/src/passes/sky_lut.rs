@@ -77,6 +77,16 @@ pub const CLOUD_SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16
 /// Storage format of both cloud noise volumes.
 pub const CLOUD_NOISE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+/// Format of the [`crate::bluenoise`] tile the raymarch jitters against.
+///
+/// `r32float`, and its non-filterability is the point: the tile is a *rank* over
+/// 4 096 texels, read with `textureLoad` at an integer texel and never
+/// interpolated — interpolating a blue-noise tile would smooth away exactly the
+/// high-frequency content it exists to supply. A `r8unorm` alternative would
+/// quantize 4 096 ranks into 256 levels, putting sixteen texels of the tile at
+/// every value.
+pub const CLOUD_BLUE_NOISE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
+
 /// The shared atmosphere uniform (`std140`), written by [`AtmosphereNode`] and
 /// read by both LUT compute shaders, the sky pass and every lit pass. Mirrors
 /// `struct AtmosphereData` in `shaders/atmosphere.wgsl` field for field.
@@ -143,7 +153,12 @@ pub struct AtmosphereGpu {
     /// x = world-shadow strength `[0,1]`, y = shadow-map world extent (m),
     /// z/w = shadow-map centre in **world** X/Z metres (texel-quantized).
     pub cloud_shadow: [f32; 4],
-    /// rgb = cloud droplet albedo tint, w reserved.
+    /// rgb = cloud droplet albedo tint, w = the raymarch's blue-noise jitter
+    /// phase (SKY2) — an integer-valued f32 in `[0, 64)` derived from the
+    /// **level clock**, never from a frame index. See
+    /// [`crate::clouds::jitter_phase`]. It rides here rather than in a lane of
+    /// its own because `cloud_color.w` was the reserved slot the cloud block
+    /// already carried, so the whole temporal path costs the uniform nothing.
     pub cloud_color: [f32; 4],
 
     // ── precipitation (P17.4), SI metres ──────────────────────────────────
@@ -324,7 +339,12 @@ impl AtmosphereGpu {
                 shadow_centre[0],
                 shadow_centre[1],
             ],
-            cloud_color: [c.color[0], c.color[1], c.color[2], 0.0],
+            cloud_color: [
+                c.color[0],
+                c.color[1],
+                c.color[2],
+                crate::clouds::jitter_phase(c.time_s),
+            ],
             // ── precipitation (P17.4) ──
             precip: [
                 if p.precip_active() {
@@ -542,6 +562,12 @@ pub struct AtmosphereResources {
     pub cloud_detail: wgpu::TextureView,
     /// Cloud sun-transmittance map, world-XZ (P17.3).
     pub cloud_shadow: wgpu::TextureView,
+    /// The wave-SKY2 blue-noise tile the raymarch offsets its first sample by
+    /// ([`crate::bluenoise`]). 16 KB, generated once on the CPU and uploaded
+    /// here — it lives beside the cloud textures because it is only ever read by
+    /// a cloud pass, and it rides the same generation for the same reason the
+    /// volumes do.
+    pub cloud_blue_noise: wgpu::TextureView,
     /// **Repeating** bilinear sampler the two tileable cloud volumes are read
     /// through — the whole point of baking them tileable.
     pub cloud_sampler: wgpu::Sampler,
@@ -632,6 +658,50 @@ impl AtmosphereResources {
         let cloud_shape = shape_tex.create_view(&Default::default());
         let cloud_detail = detail_tex.create_view(&Default::default());
         let cloud_shadow = cloud_shadow_tex.create_view(&Default::default());
+
+        // ── the blue-noise tile (SKY2) ──
+        // Uploaded rather than baked on the GPU: it is 16 KB, it is the same tile
+        // at every tier, and the CPU generator IS the definition — a compute
+        // shader would be a second implementation of void-and-cluster to keep in
+        // step for no saving. `R32Float` because the tile is a *rank* over 4 096
+        // texels and an 8-bit channel could only carry 256 of them; it is read
+        // with `textureLoad`, so nothing filters it and the format's
+        // non-filterability costs nothing.
+        let bn_res = crate::bluenoise::BLUE_NOISE_RES;
+        let blue_noise_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cloud-blue-noise"),
+            size: wgpu::Extent3d {
+                width: bn_res,
+                height: bn_res,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: CLOUD_BLUE_NOISE_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &blue_noise_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(crate::bluenoise::blue_noise_tile()),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bn_res * 4),
+                rows_per_image: Some(bn_res),
+            },
+            wgpu::Extent3d {
+                width: bn_res,
+                height: bn_res,
+                depth_or_array_layers: 1,
+            },
+        );
+        let cloud_blue_noise = blue_noise_tex.create_view(&Default::default());
         // Repeat, not clamp: both volumes are tileable by construction, and that
         // is what lets a 30 km march wrap an 8 km texture with no seam. Getting
         // this wrong would smear the last texel across the whole sky.
@@ -676,6 +746,7 @@ impl AtmosphereResources {
             cloud_shape,
             cloud_detail,
             cloud_shadow,
+            cloud_blue_noise,
             cloud_sampler,
             uniform,
             generation,
