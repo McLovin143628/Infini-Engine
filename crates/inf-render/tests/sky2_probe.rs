@@ -169,10 +169,17 @@ fn the_cloud_stack_costs_per_tier() {
     let target = HeadlessTarget::new(&gpu, W, H);
     // TWO configurations, because one of them would be a misleading number. The
     // **ceiling** is solid coverage of a deep slab from a ground camera pitched
-    // into it, which is the most marched steps per pixel a level can ask for;
-    // the **default** is what a scene that merely ticks the clouds box gets.
-    // Quoting only the first over-states the shipped cost and quoting only the
-    // second hides the case a storm preset reaches.
+    // into it — the heaviest a weather preset reaches; the **default** is what a
+    // scene that merely ticks the clouds box gets. Quoting only the first
+    // over-states the shipped cost and quoting only the second hides the storm.
+    //
+    // "Ceiling" is a label, NOT a proof that it is the worst case, and the wave's
+    // own table shows why (SKY2 audit): the pre-wave Medium row read 2.47 ms at
+    // full coverage against 2.63 at the default. A march that stops when
+    // transmittance falls under 1 % terminates SOONER in solid overcast than it
+    // does in a broken sky it has to cross the whole slab of, so full coverage is
+    // not automatically the most steps per pixel. Both rows are reported for
+    // exactly that reason.
     for (label, coverage, cloud_type, pitch) in [
         ("ceiling", 1.0f32, 0.9f32, 20.0f64),
         ("default", CloudParams::default().coverage, 0.7, 28.0),

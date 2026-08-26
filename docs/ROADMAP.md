@@ -2003,6 +2003,16 @@ atmosphere, fog, cloud, or TOD code exists anywhere.
 > always-on VRAM is ~9.6 MB at High (8.4 shape + 0.13 detail + 2 shadow, allocated
 > unconditionally like `ShadowResources`' 48 MB cascade array); the bake runs once per seed.
 >
+> **SUPERSEDED BY WAVE SKY2 — do not quote the two figures above.** Both are correct
+> measurements of code that no longer exists. The cost line measured a frame whose sky is almost
+> entirely behind a cube field, where the depth test rejects the march before it starts; the same
+> code on a sky-filled 1080p frame read 1.55 / 2.47 / **4.03 ms**, and SKY2's rewrite (half-res
+> march + bilateral composite) brought that to 0.59 / 1.01 / **1.75 ms** *with* the new look in
+> it. The volumes went `Rgba16Float`, so the VRAM line is now 16.78 + 0.26 + 2.10 MB plus a
+> 14.52 MB half-res set — **33.68 MB** at High/1080p. See the *Wave SKY2* block at the end of
+> this file and `docs/memos/island-progress.md`. (Noted by the SKY2 audit: the wave corrected
+> this table in its own ledger and left the table itself standing.)
+>
 > **Honest scope:** cloud shadows reach the **direct** lighting of every lit pass, not the GI
 > probes — P18.4 owns GI↔sky coupling and the probes still read the gradient constants, so a
 > heavy overcast dims the sun on the ground but not the bounce. No weather presets, no
@@ -26222,8 +26232,10 @@ through the depth prepass and a cloud writes no depth.
 **Cost at 1080p, before → after**, median of 60 warmed frames through the I4 instrument, in the
 heaviest configuration a preset can reach: Low **1.55 → 0.59**, Medium **2.47 → 1.01**, High
 **4.03 → 1.75 ms** — the whole look change *and* the architecture, inside the ~2 ms budget, with tier
-monotonicity holding. VRAM **10.62 → 32.66 MB** at High/1080p (16-bit volumes double, the half-res
-set adds 13.5 MB on the precedent of the TAA history beside it). `cloud_density_matches_the_cpu_reference`
+monotonicity holding. VRAM **10.62 → 33.68 MB** at High/1080p (16-bit volumes double, the half-res
+set adds 14.52 MB on the precedent of the TAA history beside it; the wave first wrote 13.5 / 32.66,
+having priced the `Rg16Float` distance target at two bytes a texel rather than four — corrected at the
+SKY2 audit). `cloud_density_matches_the_cpu_reference`
 holds at mean |Δ| **0.000 04** over 2 704 taps *through* the new warp and scale; cloud flicker between
 consecutive jitter offsets falls **12.2×** with the temporal pass on.
 
@@ -26238,7 +26250,10 @@ first draft of the height gradient broke **two arms nobody had pointed at** — 
 carries less mass than a slab, a thinner deck self-shadows less, and a deck that self-shadows less is
 *brighter*. The fix is the mechanism, not a threshold: convective variation scaled by cloud TYPE,
 because a cumulus field is independent cells and an overcast deck is one system against one
-inversion. At full convection and full type the curve is exactly v1.
+inversion. At full convection and full type the *curve* is v1's — same onset, same taper — evaluated
+through the base lift, which is maximal in the same corner (the SKY2 audit's correction; the wave
+wrote "exactly v1", and `the_strong_cell_is_v1_through_the_base_lift` now pins the real relation bit
+for bit).
 
 **The re-bless, on purpose and stated.** **Eight** goldens, not the five the brief named — the three
 `weather_*` presets enable clouds through `WeatherState` and a bless run's `git status` is the only
@@ -26266,3 +26281,36 @@ including the powder term's rendered consequence having no arm of its own and
 `sky_stack_cost_per_tier`'s doc claiming a monotonicity assertion its code does not make. **Ten**
 commits, `(SKY2)`-tagged; the full ledger, with the per-gap numbers, the cost and VRAM tables and the
 carried list, is in `docs/memos/island-progress.md` under *Wave SKY2*.
+
+**THE SKY2 AUDIT — no HIGH, thirteen MEDs fixed, one measured and carried.** `b08aa9d8..600c46f5` read
+commit by commit on the same hardware, with the before/after renders looked at rather than described.
+Three commits, `(SKY2) audit:`-tagged. **The two fixes with teeth.** (1) *The powder gate was a step at
+the exact moment of sunrise and sunset* — a fully-lit thin edge seen with the sun behind the eye fell
+to **0.270** of its below-horizon value across a threshold the sun crosses in fourteen seconds. Now
+ramped over `sin 1.15°`, written as three branches so that above the band the expression is
+byte-identical to the ungated one and at or below the threshold it is exactly 1.0: the ramp exists
+only inside a band no committed frame visits (the lowest sun any cloud golden renders is 0.0365), and
+all 102 arms stayed strict-green. (2) *Carried item 8, resolved against itself.* The audit set out to
+add the tier-monotonicity assertion `sky_stack_cost_per_tier`'s doc claims, **measured first**, and
+found three consecutive runs reading `2.923/3.332/2.828`, `1.429/2.902/0.563`, `0.322/0.403/0.537` —
+the assertion would be red two runs in three at ten warm frames and a mean of sixty at 640×360. The
+doc is corrected to say what is asserted and what cannot be, and to say plainly that monotonicity
+lives in an `#[ignore]`d 1080p median-of-60 probe: reproducible on demand, **not enforced in the
+battery**. Also fixed: `CPU_GPU_EXACT_FRACTION` → `CPU_GPU_EXACT_CHANNEL_FRACTION` and
+`CPU_GPU_TEXEL_TOLERANCE` → `CPU_GPU_STEP_TOLERANCE` (carried item 9); two doc comments severed by
+insertions; a constant's doc claiming the exact-match fraction "ROSE" when the wave's own finding is
+that it fell; a parity test's doc still describing 8-bit LSBs; "exactly v1"; the VRAM arithmetic; an
+unreachable composite fallback whose comment described a mechanism that cannot fire; "monotone and
+finite" asserting only finite over a function that is not monotone; and "splitting them retired the
+read-only-depth aliasing", which moved it; and a "the field did not move" assertion that compared
+the new pins against the CURRENT generator (a tautology) rather than against the 8-bit era they
+replaced, which they now do to within 0.53 of an 8-bit LSB on all sixteen channels; and the
+Phase 17 block itself, whose cost and VRAM lines still described the pass SKY2 replaced (the wave
+corrected them in its ledger and left the table standing) and which now carries a SUPERSEDED note. **The finding worth carrying up**: the powder term's
+*rendered* consequence, mutation-measured over sixteen renders in twelve configurations, is at most
+**14/255** on any pixel at noon and **44/255** at dusk, and **≤1 %** on every aggregate statistic —
+too small for any adapter-robust arm, which is a stronger and less flattering statement than the
+wave's "all four goldens look toward the sun". Of the five named gaps, the "stops looking painted"
+result rests on the jitter, the 16-bit + two-scale erosion and the height v2. Nine LOWs carried,
+including that a 320×180 golden now marches at **160×90** and that `clouds_night` paints a saturated
+red sky at 23:30 (pre-existing P17, out of scope, and one of the eight frames this wave re-blessed).

@@ -6731,8 +6731,16 @@ storm darkens the sky" missed by 3 %. Both said one thing: a tapering column car
 slab, a thinner deck self-shadows less, and a deck that self-shadows less is **brighter**. The fix is
 the mechanism rather than a threshold — the convective variation is scaled by cloud **type**, because
 a field of fair-weather cumulus is a field of independent cells whose tops vary enormously while an
-overcast deck is one system pressed against one inversion. At full convection and full type the curve
-is **exactly v1**: v1 is not replaced, it becomes the strong-cell case instead of every case.
+overcast deck is one system pressed against one inversion. At full convection and full type the
+*curve* is exactly v1's — same 0.02 → 0.22 onset, same 0.6 → 1.0 taper — so v1 is not replaced, it
+becomes the strong-cell case instead of every case.
+
+*(Corrected at the SKY2 audit, which found this sentence claiming more than the code does and no arm
+making the claim at all. The strong cell is v1 evaluated at `hl = (h − 0.06)/0.94`, not at `h`,
+because `CLOUD_BASE_LIFT` is maximal in the same corner — so the profile is v1 shifted up 6 % of the
+slab and compressed into what is left of it, which differs from v1-at-`h` on 978 of 1001 sampled
+heights. `the_strong_cell_is_v1_through_the_base_lift` now pins that relation bit for bit and asserts
+the lift is really there, which is the only form of "exactly" worth writing down.)*
 
 The base lifts too, and deliberately barely — `CLOUD_BASE_LIFT` is 0.06 against the top's 0.38 of
 travel — because a cumulus base sits at the condensation level and hardly moves across a field.
@@ -6754,9 +6762,14 @@ cloud-composite  full-res bilateral upsample into color_msaa
 **Depth was the risk.** P17.3's two mechanisms are still two and they moved apart: the `t_far` clamp
 at the nearest geometry stays in the march (a summit inside the slab must not be veiled by cloud
 behind it), and the `frag_depth` hardware test at the slab entry moved to the composite, which is the
-pass that touches the MSAA target. Splitting them retired the read-only-depth aliasing the single
-pass needed. Both depth arms are green and their numbers barely moved — the veil test reads alpha
-**0.244** at half res against **0.243** at full.
+pass that touches the MSAA target. Both depth arms are green and their numbers barely moved — the
+veil test reads alpha **0.244** at half res against **0.243** at full.
+
+*(The first draft added "splitting them retired the read-only-depth aliasing the single pass needed".
+It did not: the aliasing MOVED. The march has no depth attachment at all now and reads depth as a
+plain texture — but `cloud_composite.rs` binds the same depth view as a sampled texture and as a
+`depth_ops: None` attachment, which is precisely the arrangement P17.3 needed and the one WebGPU
+permits. Corrected at the SKY2 audit.)*
 
 **The upsample is bilateral, not the 4×4 box blur SSAO uses.** That blur is right for an occlusion
 term that is already low-frequency and multiplies a surface, and wrong here: a tap whose march
@@ -6816,8 +6829,12 @@ the note is in the source so the next reader does not repeat it.
 | detail volume (32³ High) | 0.13 MB | **0.26 MB** |
 | cloud-shadow map (512²) | 2.10 MB | 2.10 MB |
 | blue-noise tile | — | **0.02 MB** |
-| half-res cloud + distance + 2 histories @1080p | — | **13.5 MB** |
-| **total** | **10.62 MB** | **32.66 MB** |
+| half-res cloud + distance + 2 histories @1080p | — | **14.52 MB** |
+| **total** | **10.62 MB** | **33.68 MB** |
+
+*(The half-res row and the total are the SKY2 audit's corrections. The wave wrote
+13.5 / 32.66, having priced the `Rg16Float` distance target at two bytes a texel
+rather than four. At 960×540 the four targets are 4.15 + 2.07 + 2 × 4.15 MB.)*
 
 The half-res set is allocated unconditionally with the rest of `FrameTargets`, on the precedent of
 the TAA history beside it, which already costs 33 MB at the same resolution.
@@ -6901,3 +6918,240 @@ channel is a third return value of an analytic function, not a texture and not a
     inside the measured numbers, but it is a real difference from P17.3.
 11. **The goldens do not exercise the temporal path's pixels** — jitter is on, accumulation is off.
     Only `the_cloud_temporal_pass_accumulates_and_stays_a_function_of_the_clock` renders it.
+
+## The SKY2 audit
+
+`b08aa9d8..600c46f5` read commit by commit on the same RTX 4070 Ti, plus the before/after renders
+looked at rather than described. **Three audit commits**, `(SKY2) audit:`-tagged. **No HIGH.** Thirteen
+MEDs fixed, one MED measured and carried because it cannot honestly be armed, nine LOWs carried by
+name. Nothing pushed.
+
+### What the audit re-derived and found true
+
+* **The goldens really are strict-green with the jitter ON**, run twice back to back: 102 arms, 54
+  files, `git status` clean over `tests/goldens/` after both. The re-blessed eight differ only where
+  clouds are — `editor_default` moves rows 27–78 of 180 and nothing below the horizon, `clouds_dusk`
+  rows 0–128 and nothing in the ground band — so the re-bless is confined to the thing the wave says
+  it changed.
+* **`jitter_phase` is exact, and the wrap is what makes it so.** `time_s × 240`, `floor` and
+  `rem_euclid` are correctly-rounded f64 operations with no library call between them, and the result
+  is a small integer an f32 holds exactly, so two hosts that agree on the clock agree on the element.
+  At `t = 68 400 s` (nineteen hours) it is exactly 0, because 3 600 × 240 = 13 500 × 64. Nothing had
+  asserted that the sequence still *advances* that far in, which is the whole claim the wrap makes;
+  `the_jitter_phase_follows_the_level_clock_and_nothing_else` now does, at 19 h, at 24 h and at a
+  half-second offset that would not be zero if the function were broken to a constant.
+* **"The goldens render with the jitter ON" is true, and it means element 0.** `CloudParams`'
+  `time_s` defaults to 0, so every golden gets the blue-noise tile applied per pixel and unrotated.
+  That is jitter on — the per-pixel offset is the thing that breaks the lattice — but the *rotation*
+  is exercised only by `the_cloud_temporal_pass_accumulates_and_stays_a_function_of_the_clock`, which
+  walks ten consecutive elements, and by the CPU arm.
+* **The 16-bit parity floor survives both rounding modes, and is right to be one-sided.** A
+  truncating adapter reads ~50 % of channels exact and a rounding one ~100 %; both clear 0.40 and no
+  upper bound is possible without failing an honest adapter. So a rounding driver cannot mask
+  anything the *step* bound would not catch, and the step bound is unchanged at 1.
+* **Both `apply_record` mirrors** (`inf_viewport::host` and `inf_player::render`) set
+  `cloud_temporal` from the record's `taa` bit, and there is no third. `RenderSettingsRecordDto` in
+  `inf-editor-core` carries no such field, so the zero-new-authored-fields claim holds end to end.
+* **`pass_names()` is `self.graph.names()`** — derived, not hand-written, so the `gpu_timing` gate
+  did pick up `cloud-temporal` and `cloud-composite` without an edit, exactly as claimed.
+* **All three `GOLDEN_SET_DIGEST` pins** carry the amended rule text and a stated reason;
+  `phase26_gate` carries the long form and the other two point at it.
+* **The chr(92) sweep, done independently (the 24th).** Every added line of Rust and WGSL in the
+  range was searched for a backslash: nineteen hits, all end-of-line string continuations plus one
+  `\n` and one shell line-break in a doc code block, each producing a sensible message when the
+  continuation's whitespace is stripped. **No twenty-fourth catch.**
+
+### MED, fixed
+
+1. **The powder gate was a step at the exact moment of sunrise and sunset.** `sun_y > 1e-3` is the
+   right *place* — it is where `cloud_sun_transmittance` stops marching — but a switch there is a
+   discontinuity, and a measured one: a fully-lit thin edge seen with the sun behind the eye falls to
+   **0.270** of its below-horizon value across a threshold the sun crosses in about fourteen seconds
+   of level time. The underlying early-out is a step too, but not for a *thin* sample — just above
+   the horizon that march still returns ~1 — so the powder gate was adding a pop where there had been
+   none. Now ramped over `POWDER_SUN_Y → POWDER_SUN_Y_FULL` (0.001 → 0.02 = sin 1.15°, four minutes
+   of level time). **Written as three branches on purpose**: above the band the expression is
+   byte-identical to the ungated one and at or below the threshold it is exactly 1.0, so the ramp
+   exists only inside a band no committed frame visits — the lowest sun any cloud-carrying golden
+   renders is `clouds_dusk` / `weather_snow_dusk` at 0.0365. Confirmed: 102 arms strict-green,
+   unchanged. `the_powder_gate_ramps_instead_of_stepping_at_sunrise` asserts the byte-identity above
+   the band, the byte-identity at night, monotone arrival inside it, and that no adjacent pair jumps
+   by more than an eighth of the step the switch used to take.
+2. **`sky_stack_cost_per_tier`'s doc claimed a monotonicity assertion its code does not make** —
+   carried item 8, which the wave answered with "`sky2_probe` now asserts it". It does, and that arm
+   is `#[ignore]`d, so the claim was enforced nowhere. The audit set out to add the assertion and
+   **measured first**. Three consecutive runs of the test, unchanged:
+   `Low 2.923 / Med 3.332 / High 2.828`, then `1.429 / 2.902 / 0.563`, then `0.322 / 0.403 / 0.537`.
+   Ten warm frames and a mean of sixty at 640×360 measures the GPU's clock state, not the tier table;
+   the assertion would be **red two runs in three**. So the fix is the doc, and it now says what is
+   asserted (the frame budget), what cannot be (monotonicity, with the three runs quoted), and that
+   the claim lives in an `#[ignore]`d 1080p median-of-60 probe — reproducible on demand, not enforced
+   in the battery. The alternative on offer was a flaky gate.
+3. **`CPU_GPU_EXACT_FRACTION` changed meaning without changing name** — carried item 9. Renamed to
+   **`CPU_GPU_EXACT_CHANNEL_FRACTION`**, and its twin to **`CPU_GPU_STEP_TOLERANCE`**, which had the
+   same defect one layer down: it was called `CPU_GPU_TEXEL_TOLERANCE` while a texel was four 8-bit
+   channels, and it has always been compared per channel in units that are now f16 steps.
+4. **Two doc comments were severed by insertions.** `clouds::wind_offset`'s prose ended up attached
+   to `JITTER_PHASE_HZ` (leaving `wind_offset` undocumented and the constant described as a wind
+   wrap), and `cloud.wgsl`'s Hillaire multiple-scattering paragraph ended up above `cloud_jitter`
+   instead of above `cloud_sun_energy`. Both restored.
+5. **`CPU_GPU_STEP_TOLERANCE`'s doc said the exact-match fraction "ROSE from 88.0 % / 91.1 %"** — the
+   opposite of the wave's own headline finding, which is that it *fell*. A leftover from the
+   pre-measurement draft, sitting in the very constant the finding is about.
+6. **`cloud_noise_bake_matches_the_cpu_reference`'s doc still described 8-bit LSBs**, the
+   `* 255 + 0.5` quantization and a fraction of *texels* — three units the same commit had changed in
+   the code below it.
+7. **"At full convection and full type the curve is exactly v1" is not what the code does**, and no
+   arm made the claim at all. `CLOUD_BASE_LIFT` is maximal in the same corner, so the strong cell is
+   v1 evaluated at `hl = (h − 0.06)/0.94` — v1 shifted up 6 % of the slab and compressed into what is
+   left — which differs from v1-at-`h` on **978 of 1001** sampled heights.
+   `the_strong_cell_is_v1_through_the_base_lift` now pins the real relation **bit for bit** and
+   asserts the lift is genuinely there, so an edit that dropped the lift to make the sentence true
+   would fail rather than pass.
+8. **The VRAM table was wrong.** The half-res set is **14.52 MB**, not 13.5, because `Rg16Float` is
+   four bytes a texel and not two; the total is **33.68 MB**, not 32.66. Corrected in the ledger, the
+   ROADMAP block and `renderer.rs`'s comment.
+9. **The composite's "take the least wrong tap" fallback cannot fire.** The bilinear weights sum to
+   1 and the bilateral divisor is at most `1 + 60 000/40 = 1501`, so `wsum ≥ 6.7e-4` and the
+   `wsum > 1e-4` branch is always taken. Nothing is wrong with the code — the weights are normalized,
+   so the average already leans on the least-wrong tap — but the comment described a mechanism that
+   does not exist. Rewritten as what it is: a divide-by-zero guard, with the bound stated.
+10. **"Monotone and finite over the whole domain"** in `powder_darkens_the_thin_sunward_side_only`
+    asserted only finite and non-negative — and `sun_energy` is **not** monotone, by construction:
+    with powder on, the first octave carries `t·(1 − 0.65 t²)` at that geometry and peaks at
+    `t = 0.906`. The comment is corrected and the arm now asserts the interior maximum, which is the
+    property powder actually produces and which dies if the term is switched off.
+11. **"Splitting them retired the read-only-depth aliasing the single pass needed"** — it moved it.
+    `cloud_composite.rs` binds the same depth view as a sampled texture and as a `depth_ops: None`
+    attachment, which is exactly the P17.3 arrangement.
+12. **The Phase 17 ROADMAP block still describes the pass SKY2 replaced.** Its cost line
+    (+0.09 / 0.20 / 0.29 ms) and its VRAM line (~9.6 MB at High) are correct measurements of code
+    that no longer exists, and the wave corrected them *in its own ledger* while leaving the table
+    itself standing — so a reader landing on §Phase 17 quotes a figure less than a third of the
+    truth. The block now carries a SUPERSEDED note with both replacement numbers and a pointer.
+13. **`committed_noise_values_are_bit_stable`'s "the field did not move" assertion did not compare
+    against the field it moved from.** It checked that the new pins decode to what the *current*
+    generator produces — and `shape_texel` is `shape_value(..).map(f32_to_half)`, so that can only
+    fail if the conversion is broken. The cross-era claim the wave's prose makes ("14745 decodes to
+    0.699 7 against the 178 that meant 0.698") is now the assertion: all sixteen re-pinned channels
+    are within **0.53 of an 8-bit LSB** of the values their 8-bit predecessors encoded, against a
+    bound of 0.75 — which is what a lossless re-encoding looks like and what a changed field could
+    not be.
+
+### MED, measured and carried — powder's rendered consequence is ≤ 1 %
+
+The brief asked for a cheap away-from-sun structural arm to close carried item 1. One was built, and
+then **mutation-measured before landing** (`single` forced to 1.0 in `cloud.wgsl`, everything else
+identical; sixteen renders over twelve configurations — noon and dusk, anti-sun / side-on / sunward,
+coverage 0.30–0.75, pitch 12°–45°). It was thrown away, because:
+
+* at **noon** the powder term moves at most **14 of 255** on any single pixel and **≤0.9 %** on every
+  aggregate — mean cloud luma, brightest decile, anti-sun/sunward ratio — in every configuration;
+* at **dusk**, where the sun term is a larger share of a cloud's radiance than the ambient, it
+  reaches **44 of 255** on one pixel and still moves the mean anti-sun cloud luma by **1.0 %**
+  (0.528 → 0.523).
+
+A bound that has to separate 0.528 from 0.523 is a byte pin with extra steps, and the golden set
+already holds byte pins. So the carried item is **strengthened rather than closed**, and the honest
+version is less flattering than the wave's: powder's rendered consequence is not missing from the
+goldens because of where their cameras point, it is **≤1 % of the image everywhere**. The mechanism
+is structural — `luminance = (sun_radiance · energy + amb) · albedo`, and powder scales one Hillaire
+octave of `energy`; looking into the sun `facing ≈ 0` gates it off, and looking away the phase
+function is small and the ambient term dominates. The arithmetic and its three gates are pinned;
+the picture is not, because there is not enough of it to pin. **Of the five named gaps, the "stops
+looking painted" result rests on the jitter, the 16-bit + two-scale erosion, and the height v2.**
+
+### LOW, carried by name
+
+1. **The goldens now march at 160×90.** A 320×180 golden with a half-res cloud pass marches a quarter
+   of the samples the shipped 1080p path does, so the golden set's silhouettes are markedly blurrier
+   than the shipped look and its relationship to the shipped image is weaker than it was before the
+   wave. The 1080p probe shots are what carry the visual claim.
+2. **The CPU mirror of the powder blend is not bit-identical to the shader's.** `clouds::sun_energy`
+   writes `1.0 + (powder − 1.0)·facing` where `cloud.wgsl` writes `mix(1.0, powder, facing)`;
+   algebraically equal, not bit-equal, and nothing compares them. (The parity lockstep is over the
+   density field, not the energy.)
+3. **`CloudTemporalNode` builds its bind group every frame** — no `GenCache`, unlike every other pass
+   in the file. Only on the path the knob turns on.
+4. **`CloudCompositeNode`'s `GenCache` thrashes every frame when the temporal pass is on**, because
+   the ping-pong slot is part of its key and alternates. Correct, and it rebuilds a bind group per
+   frame to be so.
+5. **`the_convection_field_varies_and_is_its_own` measures |r| on 2 304 samples** at 320 m over a
+   15.4 km square — about 144 convection cells, so the standard error on a correlation is ~0.08 and
+   the reported 0.045 / 0.061 are indistinguishable from zero. That is the right conclusion; the
+   ledger did not state the sample count it rests on.
+6. **The composite recomputes the slab intersection at FULL resolution** while the march did it at
+   half. Same formula, different ray, so at a grazing horizon a pixel can be rejected by the
+   composite's `frag_depth` where the march drew cloud, or the reverse. Sub-pixel, and only at the
+   slab's silhouette.
+7. **`cloud_temporal` blends against a stale history when clouds toggle off and back on** — carried
+   item 3's neighbour, and bounded by the same clamp. `cloud_history_valid` asks whether the renderer
+   resized and whether a previous view-projection exists, not whether the node ran.
+8. **"Ceiling" is a label, not a proof.** The wave's cost table calls solid coverage "the most marched
+   steps per pixel a level can ask for", and its own pre-wave Medium row reads **2.47 ms at the
+   ceiling against 2.63 at the default** — because a march that stops when transmittance falls under
+   1 % terminates *sooner* in solid overcast than in a broken sky it has to cross the whole slab of.
+   The conclusion is unaffected (the budget claim quotes the higher of the two, and after the wave
+   the ordering is consistent at every tier), and `sky2_probe`'s comment now says so.
+9. **`clouds_night` renders a saturated blood-red sky** at 23:30 with the sun 17° below the horizon —
+   past the end of astronomical twilight, where the sky should be near-black. **Pre-existing (P17),
+   visible in the before renders, and out of SKY2's scope**, but it is one of the eight frames this
+   wave re-blessed and the next wave puts a day/night cycle on an island. The cloud arms on that
+   golden are all relative, so none of them can see it.
+
+One carried item moved from a memo into the code rather than being fixed: item 4, the one-frame
+history invalidation on a floating-origin rebase, is now written in `cloud_temporal.wgsl` beside the
+reconstruction that causes it. `passes::taa` does not document its own copy of the same bound either,
+so the wave was no worse than its precedent — but a bound that lives only in a progress memo is a
+bound the next reader of the pass will not find.
+
+### The eleven carried items, one verdict each
+
+**Resolved by this audit:** 8 (`sky_stack_cost_per_tier`'s doc — corrected, and the assertion
+*measured* to be unlandable there) and 9 (`CPU_GPU_EXACT_FRACTION` — renamed, with its twin).
+**Strengthened, not closed:** 1 (powder's rendered consequence — the reason is not the cameras, it is
+that the effect is ≤1 %) and 4 (now stated at the site). **Honest sentences, verified true against the
+code:** 2 (no 1080p "before" — the 320×180 pair plus 1080p after-shots do carry the claim), 3, 5 (the
+bilateral key really is `textureLoad(depth, texel, 0)`), 6 (stated in the shader's own doc), 7
+(understated, if anything — see below), 10 (`depth_stencil: None` on the march pipeline, and the cost
+is inside the measured numbers), 11 (`RenderSettings::default()` has the knob off, so the goldens do
+not reach it, and `the_cloud_temporal_pass_accumulates_and_stays_a_function_of_the_clock` is the only
+thing that does — a tripwire, not a gap).
+
+### The visual verdict
+
+Looked at, not taken on trust — before/after at 3× nearest-neighbour and the 1080p after-shots.
+
+* **The crosshatch does disappear.** `clouds_overcast`'s before carries an unmistakable diamond
+  lattice across the whole deck; the after has none. Measured on the sky band with a 5×5 high-pass:
+  high-frequency energy falls 0.586 → 0.441 and the lag-1 horizontal autocorrelation falls
+  **0.340 → 0.047**. A weak diagonal correlation survives (0.359 → 0.320) at an amplitude of ±0.4 of
+  255, which is invisible.
+* **The dither is gone and it was the biggest single win.** `clouds_scattered`'s before has a
+  stippled, blocky two-texel fringe on every cloud; the after does not. High-pass energy over the sky
+  band falls **6.96 → 3.19**.
+* **Towers are present, at 1080p.** The scattered shot reads as a genuine broken-cumulus field:
+  frayed cauliflower edges, wisps, and a horizon bank of separate cells at different heights rather
+  than one flat band. Dusk at 1080p is the best frame in the set — continuous lit rims on layered
+  stratocumulus, convincingly photographic.
+* **What looks worse.** Banding was traded for **grain**: at 1080p the interior of a large cloud
+  carries a visible fine speckle, which is the jitter with `cloud_temporal` off — and off is the
+  default. It is a better artefact than banding and it is not nothing. At golden resolution the
+  half-res march also shows through as 2×2 blockiness on `clouds_dusk`'s bright rims.
+* **`clouds_overcast` is not overcast.** Carried item 7 understates it: at 1080p the frame reads as
+  thin high haze with no ceiling at all, which is not what `coverage = 1.0` should look like.
+* **No temporal ghosting was observable**, because the shipped default does not accumulate — carried
+  item 6's mean-anchor reprojection is only reachable with the knob on, which no golden renders.
+
+### Counts after the audit
+
+Battery **322 / 6 095 / 0 / 18** — the wave's own 322 / 6 093 / 0 / 18 verified, plus the audit's two
+new arms (`the_powder_gate_ramps_instead_of_stepping_at_sunrise`,
+`the_strong_cell_is_v1_through_the_base_lift`); three more arms were strengthened in place, which is
+why the block count does not move. Goldens **54 / 102** strict-green **twice**, **zero** re-blessed
+by the audit and `git status` clean over `tests/goldens/` after both runs. Clippy **0** with
+`-D warnings`. Rustdoc **404 − 30 summaries = 374 over 30 crates** after `cargo clean --doc`
+(ceiling 450) — the audit adds zero, and the figure matches the wave's to the digit. fmt clean.
+Schema unmoved at scene **v25** / payload **v11**; no `Cargo.toml`, no file under `editor/studio` and
+no serialization file touched anywhere in `b08aa9d8..HEAD`. **Three commits**, `(SKY2) audit:`-tagged,
+none pushed.

@@ -24,6 +24,13 @@
 // the depth of the cloud for a tower seen edge-on, and bounded in consequence by
 // the neighbourhood clamp below.
 //
+// And it reprojects in RENDER-LOCAL coordinates, which the reconstruction above
+// makes plain and which nothing else says out loud: `view.eye.xyz` and
+// `prev_view_proj` are both local, so a floating-origin rebase moves the frame
+// under the history and invalidates it for exactly one frame. That is the same
+// bound `passes::taa` has for the same reason, bounded by the same clamp, and it
+// is written here because the alternative was leaving it in a memo. (SKY2 audit.)
+//
 // ## Determinism
 //
 // OFF by default (`RenderSettings::cloud_temporal`), exactly like `taa`, and for
