@@ -26136,3 +26136,50 @@ about *why* `vsm sync` fell with the three-configuration measurement that says h
 wave's own two cheap wins account for (0.54 of 1.86 ms) and leaves the rest recorded as
 unattributed. The full ledger, with the per-clause numbers, the mutation
 table and the carried list, is in `docs/memos/island-progress.md` under *Wave VSM2*.
+
+**The VSM2 audit (adversarial, `57cd1462..3d3343e8`, 2026-08-25).** **No HIGH.** Every headline
+number reproduced on this machine *exactly* — LIT p50 **11.549**, GPU frame **8.151**,
+`vsm-raster` **4.604**, the dirty split **56.7 / 2.2 / 0.0**, pages **44.7 / 965.1 / 14.2**, the
+translation arm's **88 entered == 88 arrived**, the drain's **362 in 2 frames**, the label control's
+**1 323**, the matrix bound's **0.0234 against 128.0** — and both named mutations reproduce as
+claimed. Three CPU rows land below their quoted ranges, all favourably, which is the I7b reading
+met again: a range of three runs is not a bound.
+
+**THE TRADED BOUND: bounded, not cumulative — and it was being measured over the wrong interval.**
+The wave prices its world-cell key at 0.0234 of a shadow texel between **consecutive** frames, and
+a cached page is not consecutive: a slot keeps its texels until its stamp moves and a level-7 cell
+stays inside its window for **8 192 m**. Measured over the life of a page instead —
+**10.8 km**, the floating origin rebasing, **3.5 M comparisons at up to 9 102 frames of
+separation** — the worst is **0.0449 of a texel**, halving with every coarser level: forty times
+the distance for **twice** the error, which is two roundings of one exact value and not an
+integral. It cannot accumulate, because `clipmap_layout` carries no state and a point's page NDC
+is exactly `2(p·r/w_L − cell) − 1`, so the level's snapped centre cancels against the label and the
+origin cancels between `p` and `centre`; the rounding tracks the render-local magnitude, which
+`REBASE_DISTANCE` caps — the same walk with **no rebase** reads 0.2500, which is the control that
+says so. (The obvious arm is wrong: a page matrix maps render-local space and a rebase moves it, so
+two matrices either side of one differ by ~130 000 texels while describing the same footprint.)
+
+Seven MEDs fixed, ten LOWs carried, and they are one shape: **the wave changed what a page's key
+MEANS and did not follow the change all the way out.** A clipmap page's stamp **failed open** when
+its layout was absent (`content_key` defaulting to 0 left it blind to the sun, the extent and the
+box — unreachable today, now falls back to the matrix). Three legends — `dirty_geometry`,
+`DirtyReason::Geometry` and the instrument's own printed column — named *"a clipmap re-centring, an
+origin rebase"* as their examples, which are exactly the two the wave's arms assert at **zero**.
+`speculative_shadow_wants` still computes a label across two layouts and now names the cell **16
+cells behind** the proved one (latent: the shipped horizon is 0, so the lane is inert; armed and
+routed to P28.4, not fixed). The arm for the bounded recompute **compared the table to itself** —
+its own commit says *"the levels a scroll skips are asked what they would have said"* and it did
+not ask them; it asks now through `register_light`'s from-scratch recompute, which makes it red
+under the `deepest = 0` mutation and changes the wave's own mutation row. Two `VsmStats` counters
+had **no reader in the tree**; both are on the stats line. And the ledger's own reading of
+`moved = 2.2` named the invalidation scatter, which feeds the **caster fold** and therefore the
+`re-cast` bucket that reads **0** over all 478 frames — it is the along-light snap, and the ×4
+configuration in the same run reads **exactly 0.0**, which is the control that identifies it.
+
+Counts at the audited head: battery **321 / 6 082 / 0 / 16** (the audit's two arms on the wave's
+6 080, no new block), goldens **54 / 101** byte-identical under `INF_GOLDEN_STRICT=1` with no PNG
+rewritten, clippy **0** with `-D warnings`, rustdoc **404 − 30 = 374 over 30 crates** after
+`cargo clean --doc` (the audit adds zero), fmt clean, frontend untouched, schema unmoved, samples
+byte-unmoved, no new crate or dependency. **No twenty-fourth chr(92) catch.** Five audit commits,
+`(VSM2) audit:`-tagged; the full ledger with the mutation table and the ten carried LOWs is in
+`docs/memos/island-progress.md` under *The VSM2 audit*.

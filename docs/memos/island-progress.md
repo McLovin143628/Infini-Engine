@@ -29,8 +29,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **I6** | **gameplay systems** — doors + locks + the kick + crash-through, inventory, weapons v1, health | **DONE + AUDITED** — battery 312 / **5 873** / 0 / 14, frontend 702 / 78, goldens 54 strict (101 arms), clippy 0, rustdoc **404** of a 450 ceiling (447 at the wave's head, re-measured cold; 39 cleared by the audit), **no schema moved**. `NOT_YET_CONSUMED` is empty. Six defects found by the wave's own world-level arms and five more by its gate; one energy door for the kick, the breach and the bullet (mutation-proved across two crates); the city plans **19 790** doorways and the band makes **234** solid. The audit found **five arms that could not fail** (two trace sections, the wheel verb, the corpse guard, the spent attack edge) and **three world defects** (a barged door lost its lock for ever, `door.is_open` walked all 19 790 doorways, a dead block claiming a swing it did not drive). See *Done — wave I6* and *The I6 audit* below |
 | **I7** | **the island data build** — the recipe, real Vancouver elevation, the designed coastline, the derived water and biomes, the graded roads, the level | **DONE** — see *Done — wave I7* below. The island exists: **51.38 km² of map, 40.65 km² of land, a 948.7 m peak of real North Shore survey, 25.14 km of designed shore, 50 reaches / 26.32 km, 2 lakes, 33 waterfall sites, 33.74 km of graded road, 342.7 MB of terrain built by one command in 24.7 s.** PIE == shipping over a 900-step drive. Battery 318 / 5 946 / 0 / 16, frontend 702 / 78, goldens 54, clippy 0, rustdoc 404, **no schema moved**. **Then CI went red on macOS and ubuntu** — one ulp of proj4rs latitude in a committed level, and a 2 ms sleep that took 5 on a shared runner; both fixed, recipe schema **1 → 2** (the recipe now *states* its geodetic origin), engine schemas still unmoved. See *The I7 CI-red* at the end of this file |
 | **I7b** | **the island lives at 60** — the vegetation through the shipped boot, the VSM caster pack, `render (record)` attributed | **DONE + AUDITED** — see *Done — wave I7b* and *The I7b audit* at the end of this file. The shipped island frame goes **41.5 → ~277 fps** (p50 24.080 → 3.56–3.62 ms, **13 ms inside** the 60 fps budget where it opened 7.5 ms outside) and grows **2 681 instances** of vegetation where it grew none; PIE == shipping on the forest as well as the state fold. Battery 319 / **5 971** / 0 / 16 at the audited head, goldens 54 strict, clippy 0, rustdoc 374 unmoved, **no schema moved**, no new crate or dependency. Clause 2's routed prescription was **measured and retired** and the real fix routed by name. The audit reproduced every headline number on the same machine and found **no HIGH** — four MEDs, all the same shape: *a claim that is true and a gate that cannot tell* |
-
-| **VSM2** | **the lit island at 60** — world-cell-keyed shadow-page residency, the wave I7b routed by name | **DONE** — see *Wave VSM2* at the end of this file. The LIT island goes **22.4 → 85.4 fps** (p50 44.570 → **11.65–11.73 ms**), its GPU frame **33.334 → 8.13–8.15 ms** and `vsm-raster` **29.799 → 4.58–4.61 ms**; `vsm sync` **3.247 → 1.36–1.40 ms**. The dirty split's `moved` bucket — I7b's 532.0 a frame — collapses to **2.2**, and the deferral backlog I7b measured at *677 a frame for ever* falls to **14.2**, all of it bursts that drain in four frames. The shipped ladder now beats I7b's priced-never-shipped first-level-×4 control (15.931 ms) by **3.5×** at level 0's full resolution, so the resolution trade is not needed. Goldens **54 byte-identical**, no schema moved, no new crate or dependency |
+| **VSM2** | **the lit island at 60** — world-cell-keyed shadow-page residency, the wave I7b routed by name | **DONE** — see *Wave VSM2* at the end of this file. The LIT island goes **22.4 → 85.4 fps** (p50 44.570 → **11.65–11.73 ms**), its GPU frame **33.334 → 8.13–8.15 ms** and `vsm-raster` **29.799 → 4.58–4.61 ms**; `vsm sync` **3.247 → 1.36–1.40 ms**. The dirty split's `moved` bucket — I7b's 532.0 a frame — collapses to **2.2**, and the deferral backlog I7b measured at *677 a frame for ever* falls to **14.2**, all of it bursts that drain in four frames. The shipped ladder now beats I7b's priced-never-shipped first-level-×4 control (15.931 ms) by **3.5×** at level 0's full resolution, so the resolution trade is not needed. Goldens **54 byte-identical**, no schema moved, no new crate or dependency. **AUDITED** — every headline number reproduced exactly on the same machine (including `88 entered == 88 arrived` and the label control's 1 323), **no HIGH**, seven MEDs fixed and ten LOWs carried; the traded bound was measured between adjacent frames and is now measured over the **life of a cached page** — 10.8 km, 9 102 frames of separation, **0.0449 of a texel**, bounded by `REBASE_DISTANCE` and **not** cumulative. Battery **321 / 6 082 / 0 / 16**, goldens 54 strict (101 arms), clippy 0, rustdoc 374, no schema moved |
 
 Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
 IB-8 and IB-13 forward out of I6**: both are ceilings a thousand-building fixture walks into
@@ -6263,15 +6262,332 @@ does not merely bound a small number: it distinguishes the two hypotheses.
 * `inf_stream::admit_by_lane`'s per-want `BTreeSet` inserts — ~0.68 ms of the island's
   `vsm sync`, shared with `inf-vt` (clause 5 item 2).
 * `cluster_tile_wants` at 1.554 ms lit, still refused, still with its P28.2 gate.
+* **`terrain` at 1.91 ms GPU** — with `vsm-raster` at 4.60 it is the second-dearest lit pass
+  and the dearest *shipped* one (0.54 ms of a 1.12 ms shipped frame, 49 %), and nothing has
+  looked at it. Clause 5 item 5 named it; this list is where the next wave reads, so it is
+  named here too (the VSM2 audit).
 * A burst past the raster cap is **not reachable in a headless single-sun fixture** — a
   128²-texel page against a test-resolution frame means one frame needs about
   `pixels / 128²` pages, measured at 6–123 over seven configurations — so the drain arm
   uses **four suns over one depth buffer** to fill 1 024 slots. That is a property of the
   clipmap, not of the arm, and it is written down so nobody re-derives it.
-* `a_scroll_of_one_level_leaves_every_coarser_levels_entries_byte_identical` is a
-  **tripwire, not a mutation-killed arm**: over-recomputing is the conservative direction
-  and no mutation makes it red today. Recorded as such rather than counted as coverage.
-* The `moved` bucket reads **2.2 a frame, not 0.0**, on the island. Sub-page f32 jitter in
-  the invalidation scatter's page-rectangle arithmetic and the along-light ticks both land
-  there; it is 0.4 % of the frame's dirty set and it is recorded rather than explained
-  away.
+* ~~`a_scroll_of_one_level_leaves_every_coarser_levels_entries_byte_identical` is a
+  **tripwire, not a mutation-killed arm**~~ — **CLOSED by the VSM2 audit**: it compared the
+  table to itself. It now asks the skipped levels what they would have said, through
+  `register_light`'s from-scratch recompute, and `deepest` forced to level 0 makes it red.
+* ~~The `moved` bucket reads **2.2 a frame, not 0.0** … sub-page f32 jitter in the
+  invalidation scatter's page-rectangle arithmetic and the along-light ticks both land
+  there~~ — **the first half is refuted by the VSM2 audit** and the reading is now
+  identified rather than shared out. The scatter feeds the **caster fold**, whose bucket is
+  `re-cast`, and `re-cast` reads **0 over all 478 frames**; a clipmap page with an unchanged
+  identity has an unchanged `geo_key` unless `content_key` moved, which is arithmetic. The
+  1 041 `moved` pages over the run are the **along-light snap**, and the ×4 control in the
+  same run says so: quadrupling `w_top` takes it to **exactly 0.0**.
+
+## The VSM2 audit (2026-08-25)
+
+Adversarial, `57cd1462..3d3343e8`, fresh reader, nothing pushed. **No HIGH.** Every
+headline number in the wave's ledger reproduced on this machine, exactly — including
+the two the whole wave rests on (`88 entered == 88 arrived`, and the label control's
+**1 323**) — and both mutations the brief named reproduce as claimed.
+
+This wave rewired the shadow-correctness substrate, so the audit spent itself on
+correctness rather than on the fps number, and it found one shape three times: **the
+wave changed what a page's cache key MEANS and did not follow that change all the way
+out**. The bound it prices was measured between two adjacent frames when a cached page
+lives for nine thousand; three legends still name, as their examples, exactly the two
+cases the new key removed; and the one other caller in the tree that computes a
+residency label across two layouts now points backwards. A fourth: the arm the wave
+added to check the bounded recompute compared the table to itself, and its own commit
+message says it does the opposite.
+
+**Six MEDs fixed** across four commits, **one recorded and routed by name** (the speculative lane, which no shipped path reaches), and **ten LOWs carried**.
+
+### The long-travel drift verdict: **bounded, not cumulative**
+
+The brief's question — *is 0.0234 of a shadow texel per 270 m cumulative?* — is the
+right one to have asked, and the answer is **no, and it is bounded by construction**.
+
+`a_world_cell_keeps_its_page_matrix_to_within_a_fraction_of_a_shadow_texel` compares
+**consecutive** frames. A cached page is not consecutive: a slot keeps its texels until
+its stamp moves, and a level-7 cell stays inside its own window for `N · w_7` = **8 192 m**
+of travel. A per-step bound and the bound over the life of a cached page are the same
+number only if the error does not drift, which is a claim about kilometres asserted
+over 0.9 m.
+
+`a_cached_pages_error_does_not_accumulate_over_ten_kilometres` (new) measures it:
+**10.8 km**, the floating origin rebasing as a host's does (**10 rebases**),
+**3 502 142 comparisons at up to 9 102 frames of separation** — worst **0.0449 of a
+shadow texel** and **1.2e-7 of the depth range**, halving with every coarser level
+(0.0449 / 0.0237 / 0.0117 / 0.0060 / 0.0040 / 0.0023 / 0.0017 / 0.0015). Forty times
+the distance costs **twice** the error, which is two roundings of one exact value and
+not an integral.
+
+**Why it cannot accumulate, from the arithmetic.** `clipmap_layout` is a pure function
+of `(quantized dir, origin, world eye, extent, grid, levels)` — no frame carries state
+into the next. In exact arithmetic a point's page NDC is `2(p·r/w_L − cell) − 1`: the
+level's snapped centre `m_L` cancels against the label `x`, and the render origin
+cancels between `p` and `centre`. So every frame's f32 answer approximates **one** exact
+value and any two frames differ by at most twice that rounding. The rounding is set by
+the magnitude of the render-local coordinates, which `inf_math::REBASE_DISTANCE` caps at
+1 024 m — **the control in the same run** is the same walk with the origin never rebased,
+which reads **0.2500**, 5.6× larger and tracking `|centre|` exactly as the arithmetic
+says. The bound is a statement about the rebase distance, not about how far the camera
+has been.
+
+**And the comparison is deliberately not of matrices**, which is worth writing down
+because the obvious arm is wrong: a page matrix maps **render-local** space and a rebase
+moves render-local space, so two matrices from either side of one disagree by ~**130 000
+texels** while describing the same footprint. (Measured, on the way to this arm — the
+first draft asserted on matrices and read 129 944.) What means something is where a fixed
+**world** point lands inside its page, then and now.
+
+**What P27 certified, and whether §7 weakens it.** P27.3 §2 says the page matrix *"is
+the complete list"* of what moves a page's content, and §6 adds the aliasing arm's
+finding that a grid shift re-labels a page *"with a bit-identical matrix"*. §7 does
+**not** quietly weaken that: it says in as many words that the bit-identity holds only
+when a **coarse** level's window moves while level 0's does not, that when level 0's
+moves the agreement is *"to within f32 rounding rather than bit for bit"*, and it puts
+the number and its control in an arm. That is a correction of a P27-era sentence, stated
+as one. What §7 was missing is the sentence this audit adds: the number is a **per-step**
+one, and the one that matters is over the life of a page.
+
+### What reproduced, measured here rather than read
+
+`the_island_at_shipping_resolution`, RTX 4070 Ti, release, 1080p, 3 × 120 frames, MIN of
+rounds (the wave's quoted range in brackets):
+
+| the wave's figure | mine |
+|---|---|
+| LIT p50 / p95 / p99 | **11.549** / 20.384 / 46.689 ms [11.65–11.73 / 20.47–22.85 / 42.80–47.63] |
+| LIT GPU frame / pipelined | **8.151** ms / **122.7 fps** [8.13–8.15 / 122.8–123.0] |
+| LIT `vsm-raster` GPU | **4.604** ms [4.58–4.61] |
+| LIT `vsm sync` CPU | **1.282** ms [1.36–1.40] |
+| LIT dirty per rastering frame | **56.7 / 2.2 / 0.0** — exact |
+| LIT pages / cached / deferred | **44.7 / 965.1 / 14.2** — exact |
+| LIT cut flushes / deferrals / rastering frames | **3 / 6 798 / 478** — exact |
+| SHIPPED p50 / GPU / pipelined | **3.554** / **1.118** / **2.344** ms [3.54–3.70 / 1.11–1.25 / 2.33–2.37] |
+| ×4 control `vsm-raster` | **0.747** ms [0.745–0.751] |
+| `terrain` GPU lit | **1.916** ms [1.91] |
+
+Three CPU rows land **below** their quoted ranges and all three on the favourable side —
+`vsm sync` 1.282 against 1.36–1.40, `render (record)` 4.429 against 4.62–4.63, `cluster
+wants` 1.470 against 1.554. That is the I7b audit's reading met again: the ranges are the
+spread of *those three* runs, not a bound.
+
+The device arms, `cargo test -p inf-render --test vsm_raster` (39 arms, 0 failed):
+
+| the wave's figure | mine |
+|---|---|
+| the translation arm | **88 entered (88 arrived), 0 re-labelled, 9 010 carried across 96 window shifts, 422 resident** — exact |
+| the drain arm | **362 resident, drained in 2 frames (bound 2), 116 deferrals** — exact |
+| scroll staleness | **10 pages re-cast, 2 185 atlas texels changed** — exact |
+| the sun's quantum | **10 pages moved, 144 314 atlas texels changed** |
+| the rebase | **10 pages re-cast, 0 re-slotted, 0 moved** — exact |
+| the matrix bound | **0.0234 texels, 311 bit-identical / 1 425 rounded, label control 128.0** — exact |
+
+### MED 1 — the traded bound was measured over 0.9 m and a cached page lives for 9 102 frames (fixed, `d4494bd2`)
+
+See the verdict above. Fixed by measuring the quantity that matters, over 10.8 km, with
+the rebase in it and with an un-rebased control beside it.
+
+### MED 2 — a clipmap page's stamp fails open when its layout is missing (fixed, `ff599e84`)
+
+`collect_pages` reads the light's `ClipmapLayout` out of `PageGeometry::layouts` and,
+when it is absent, keys a **clipmap** page's geometric stamp on `(light, face, level,
+label)` with `content_key` defaulted to `0` — blind to the sun's quantum, the along-light
+snap, the extent and the box, i.e. a page nothing but its casters could ever invalidate.
+Under P27.3's key the same absence still folded the matrix and saw all of it, so the
+wave's rewrite turned a safe default into an unsafe one. `vsm_projections` pushes one
+layout per registered light and nothing else in the tree builds a `PageGeometry`, so it
+is **unreachable today** — which is why it is MED and not HIGH — and it is now written the
+safe way round: a clipmap with no layout falls back to the matrix branch, which is what
+the perspective lights use.
+
+### MED 3 — three legends name, as their examples, the two cases the wave removed (fixed, `ff599e84`)
+
+`VsmRasterStats::dirty_geometry` and `DirtyReason::Geometry` both read *"a clipmap level
+re-centring, an origin rebase"* — the two the wave's own arms assert at **zero** — and
+`fps_instrument` prints the column a reader is meant to read the whole wave off as
+*"moved (the page's own matrix)"*, which for a clipmap it no longer is. `record`'s comment
+justifying the `is_camera_cut` flush said *"the clipmap centre a cut jumps to is already an
+input to every page matrix"*, and the lateral half of that centre has left the stamp. All
+four now say what does land there, and the cut comment carries the ruling's new
+condition: the redundancy rests on the cut also sliding the **along-light** snap, and a
+*purely lateral* cut would leave coarse cells still correctly cached — so the flush is
+waste rather than need, which is the direction that keeps the belt safe to wear.
+
+Also fixed here: the cache's own doc quoted **2.4e-4 of a page's NDC / 0.12 mm** from a run
+its named arm no longer produces (the arm reads 0.0234 texel = 3.7e-4 NDC = 0.18 mm), and
+the rebase arm's failure message gave a **backwards** mechanism — a page's depth is
+`(p − centre)·forward` and a rebase moves `p` and `centre` by the same delta, so the stored
+value is origin-invariant and a page *not* re-drawn would have been right. What that arm
+measures is that the caster fold **notices** the rebase, which is the guard the key has if
+anything render-local ever reaches a page's content.
+
+### MED 4 — the arm for the bounded recompute compared the table to itself (fixed, `1c1a448a`)
+
+`a_scroll_of_one_level_leaves_every_coarser_levels_entries_byte_identical` snapshots the
+table before and after a level-0 scroll and asserts the coarser levels are unchanged —
+which is precisely what *"the bounded recompute never wrote them"* means, so the
+comparison could not fail whatever the argument was worth. The wave recorded it as a
+tripwire rather than as coverage; its own commit is titled *"the levels a scroll skips are
+asked what they would have said"* and it did not ask them.
+
+The oracle was one shipped door away: `register_light` re-lays the table out and runs the
+from-scratch, every-level `recompute_entries` for every light, touching neither residency
+nor the origins nor a slot. Both directions are driven now — a fine window sliding, where
+the skipped suffix must agree, and the **coarsest** one's, where the recompute has the
+whole ladder to redo. **It changes the wave's own mutation table**: `deepest` forced to
+level 0 used to fail `moving_a_clipmaps_level_offsets_re_points_the_whole_fallback_chain`
+and *nothing else*, and now fails this too. How far below the moved level the change
+reaches is **recorded rather than asserted** (this fixture is resident over the same band
+at every level, so a fallback resolves before it walks that far).
+
+### MED 5 — two counters no reader could reach (fixed, `1c1a448a`)
+
+`VsmStats::scroll_carried` / `scroll_evicted` shipped as public fields that **nothing in
+the tree read**: not `summary()`, not a test, not a host — the stream's counters in
+`VsmStreamStats` are a separate pair fed from the `VsmScroll` return value. In a crate
+whose own arm is called *"the stats line says what it counts"*, a counter no reader can
+reach is a field. Both are on the line now, bracketed like the unknown-handle count so a
+residency that never scrolled stays quiet, and the arm asserts them off a
+two-carried/two-evicted scroll. `VsmScroll::carried`'s doc also now says what it counts:
+**every page that survived the re-seat**, including one of a level whose window did not
+move and which was carried onto the label it already wore — so it reads close to the whole
+resident set on any frame with a shift (the gate's own arm pins `LEVELS·N² − N` = 184, of
+which 128 are such no-ops). It is the engagement counter for *"the re-seat ran"*, not a
+count of labels that changed.
+
+### MED 6 — the one other caller that computes a label across two layouts (recorded and armed, `79cb5608`; routed, not taken)
+
+`speculative_shadow_wants` (P28.4) maps a proved page onto the label its own world cell
+will wear under the **predicted** layout, and the result is applied against **this**
+frame's residency, whose origins are `now`. That was exactly right when residency was
+addressed by the label and a label did not move: pre-admitting the address the receiver
+would use next frame reserved the slot a frame early, and the reservation was the whole
+benefit.
+
+Since the slot belongs to the **cell**, label `x + (now − soon)` read against `now` names
+the cell a lead **behind** the proved one. Measured, at the ROADMAP's own 300 ms horizon
+and the island's own 0.9 m a frame: level 0's window leads by **16 cells** and the
+speculation names the cell **16 cells back** — pages inside the window that nothing marked,
+rastered for nothing and evicted by the next scroll. The reservation is unnecessary as
+well, because `set_clip_origins` now carries the proved cell's own slot onto its new label
+for free.
+
+**Latent, not live.** `DEFAULT_PREDICT_HORIZON_TICKS` is **0** (P28.5's lead-time ruling),
+so `soon == now`, every scrolled page equals its proved page and the producer's own
+overlap filter drops all of it — which `a_committed_camera_reaches_the_shadow_lane`
+already asserts on the shipped path. No shipped frame reaches it. **Not fixed**, because
+flipping the subtraction is a real prefetch and an unmeasured prescription (P25's law) —
+and the useful prediction is the cells the predicted window will *contain* and this one
+does not, which is not this subtraction with its sign flipped either. Routed to P28.4 by
+name, with the number in `the_shadow_speculation_names_the_cell_the_camera_is_leaving` so
+the next wave starts from a measurement.
+
+### MED 7 — the ledger's own reading of `moved = 2.2` names a mechanism that cannot reach that bucket (fixed, in this ledger)
+
+The wave carried the residual honestly and then explained it with the wrong half:
+*"sub-page f32 jitter in the invalidation scatter's page-rectangle arithmetic and the
+along-light ticks both land there"*. The scatter feeds the **caster fold**, whose bucket is
+`re-cast`, and `re-cast` reads **0 over all 478 frames**; and a clipmap page with an
+unchanged identity has an unchanged `geo_key` unless `content_key` moved, which is
+arithmetic rather than a tendency. So the first half is impossible in two independent ways.
+
+What it is, identified by a **control in the same run**: the 1 041 `moved` pages over the
+run (2.2 × 478) are the **along-light snap**, and the ×4 configuration — same scene, same
+flight, same lights, `w_top` quadrupled — reads **exactly 0.0**. That is the burst source
+clause 5 item 1 already routes, not a new one, and the count is consistent with one
+whole-atlas invalidation of the 1 024-slot atlas landing at a round boundary, where the
+next frame's cut flush charges the undrained remainder to `re-slotted` instead.
+
+### The mutations re-run, and what each killed
+
+| mutation | what went red | against the wave's claim |
+|---|---|---|
+| the world cell reduced to the page **label** (the clip origin dropped) | `a_camera_translation_re_labels_no_page_and_re_rasters_only_what_enters` — **and nothing else** in 39 GPU arms, on the `entered == arrived` equality, at **1 323 against 88** | reproduces exactly, number for number |
+| `content_key` with the sun direction dropped | `a_sun_that_crosses_its_quantum_re_rasters_the_atlas_and_one_that_does_not_does_not` and `the_clipmap_content_key_is_blind_to_the_camera_and_to_nothing_else` — **and no other GPU arm** | reproduces exactly; the arm the wave had to write is the arm that catches it |
+| `set_clip_origins`' `deepest` forced to level 0 (an under-sized recompute) | `moving_a_clipmaps_level_offsets_re_points_the_whole_fallback_chain` **and**, after this audit, `a_scroll_of_one_level_leaves_every_coarser_levels_entries_byte_identical` | the wave's row said "and nothing else"; that is now one arm out of date, on purpose |
+| the drain fixture reduced to **one sun** | **72 resident pages against a 256-page cap** — the arm's own precondition fails | confirms the four-sun fixture is a property of the clipmap and not a convenience; the wave's "6–123 over seven configurations" is the same measurement |
+
+**Is the four-sun drain fixture representative?** Yes, and the reason is in the sort key:
+the cap is global across lights and the drain order is `(level, slot)` with **no light
+term**, so four lights sharing 362 dirty pages and one light holding 362 walk the same
+list in the same order under the same `ceil(resident / 256)`. What a four-sun fixture
+cannot exercise is the per-light starvation shape — which does not exist, because there is
+no per-light budget.
+
+### The chr(92) sweep
+
+**No twenty-fourth catch.** Every added line of Rust in `57cd1462..` this tree — the wave's
+and this audit's — is free of a run of four or more interior spaces, checked as a set over
+the whole range rather than by eye.
+
+### One-platform hazards
+
+None introduced, by the wave or by this audit. `content_key` folds `f32::to_bits` of the
+**quantized** direction and the extent, and `mf` as the integer it already is; the lateral
+snap is `f64` rounds of exact dot products; the re-seat is integer arithmetic on page
+indices. No trigonometry, no `libm` route, no committed `f32` content. The new long-travel
+arm is `f32`/`f64` arithmetic with no transcendental in it, and it asserts a bound rather
+than a bit pattern, so it cannot become the P25 one-platform red-CI shape.
+
+### Carried LOWs, by name
+
+1. **The three-configuration CPU probe is not in the tree.** `0.095 / 0.294 / 0.634 ms` for
+   `set_clip_origins` as shipped, unbounded, and with the pre-wave index arithmetic is the
+   evidence for *"the two cheap wins are worth 0.54 of the 1.86 ms"*, and re-deriving it
+   needs two reverted variants that exist nowhere. The conclusion is hedged correctly — the
+   other 1.3 ms is recorded as **unattributed**, with the hypothesis labelled as one, which
+   is what the brief asked to be checked and it holds — so this is a reproducibility gap
+   rather than a claim to doubt.
+2. **`vsm sync`'s "before" is one run, and the I7b audit measured the same configuration at
+   3.681 ms** against this ledger's 3.247. So the "1.86 ms fall" is ±0.4 depending on which
+   before-run is taken. Neither number is wrong; the ledger's own "one run before" note is
+   what makes this a nit rather than a defect.
+3. **"about 18 frames of 480" mixes two denominators.** 18 is 5 % of the 360 frames the p95
+   is taken over; 478 is the rastering-frame count. The reading is right and the arithmetic
+   in the sentence is not.
+4. **The drain order is `(level, slot)`**, so a level-0 dirty set that stayed above 256 would
+   starve every coarser level for ever. Pre-existing (P27.3's ruling), unreachable now that
+   the backlog drains, and unarmed.
+5. **`set_clip_origins` returns `moved: true` for the call that merely materializes the
+   implicit concentric origins** — a freshly registered light's `clip_origins` is empty and
+   the first explicit table compares unequal to it while meaning the same thing — so the
+   light's generation moves and a block that did not change is re-uploaded. Once, on the
+   first frame.
+6. **A clipmap scroll's evictions are not in `VsmTransaction::evicts`.** The wave documents
+   it on the field and the gate's mirror derives the translation itself; verified that no
+   consumer in the tree reads `evicts` for anything but a count (`vsm_atlas::apply`'s report
+   and `VsmStreamStats`).
+7. **The `is_camera_cut` redundancy ruling is now a property of the fixture's cut
+   DIRECTION**, not of the cut. Recorded in `record`'s own comment by this audit so that the
+   next reader who tries to delete the flush knows which half of the argument is
+   load-bearing.
+8. **`VsmScroll::carried` is 2–3× the number a reader will assume**, for the reason in MED 5.
+   Documented rather than changed, because narrowing it to "labels that actually moved" would
+   cost a second walk to buy a prettier counter.
+9. **`terrain` at 1.91 ms GPU** was named in clause 5 and missing from *Open / next*, which is
+   the list the next wave reads. Added there by this audit; it is also 49 % of the **shipped**
+   frame's GPU, which no wave has ever looked at.
+10. **The `moved = 2.2` residual's last 17 pages** (1 041 against the 1 024-slot atlas) are not
+    individually accounted. The mechanism is identified and controlled (MED 7); the remainder
+    is one drain frame's worth of re-counting and is not chased further.
+
+### Counts, at the head this audit certifies
+
+| | after VSM2 | **after the VSM2 audit** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 321 / 6 080 / 0 / 16 | **321 / 6 082 / 0 / 16** — `cargo test --workspace -j 3`, tallied over all 321 blocks. **The wave's 6 080 is exactly right**: this audit adds two arms (the long-travel bound and the speculation's direction) and 6 080 + 2 = 6 082, with the block count unchanged because no test file was added and the two arms it *strengthened* were already counted |
+| frontend tests / files | 702 / 78, not re-run | **702 / 78, not re-run** — no file under `editor/` was touched by the wave or by this audit |
+| goldens | 54, byte-identical over 101 arms | **54, byte-identical, 101 arms, 0 failed, no PNG rewritten** (`git status` on `tests/goldens/` empty), re-run under `INF_GOLDEN_STRICT=1` |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** (local toolchain, run LAST per the rmeta law). Stated precisely: the run re-checked the **7** crates the audit's five files reach — `inf-vsm`, `inf-render`, `inf-photo-gpu`, `inf-player`, `inf-editor-core`, `inf-viewport`, `inf-studio` — and answered the rest from clippy's own cache, whose sources are byte-identical to the ones the wave checked green |
+| rustdoc warnings (ceiling 450) | 374 over 30 crates | **404 `^warning` lines − 30 summaries = 374 individual over 30 crates**, measured after `cargo clean --doc` (8 592 files removed). **The audit adds zero**, and the wave's 374 reproduces exactly |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v25 / payload v11 / `.inf_sm` v3 | **unchanged — no schema moved** |
+| committed samples | byte-unmoved | **byte-unmoved** across the wave *and* this audit |
+| new crates / new external deps | none | **none** |
+
+**Five audit commits**, `(VSM2) audit:`-tagged — four fixes and the ledger, counted rather
+than summarised.

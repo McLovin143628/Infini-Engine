@@ -405,6 +405,28 @@ shipped 8 × 64² ladder, out where the floating origin is about to rebase:
 LABEL would be holding — of **128.0**. Armed as
 `a_world_cell_keeps_its_page_matrix_to_within_a_fraction_of_a_shadow_texel`.
 
+**And that is a PER-STEP number; the one a cached page carries is over its life**
+(the VSM2 audit). A slot keeps its texels until its stamp moves and a level-7
+cell stays inside its window for `N · w_7` = 8 192 m, so the two are the same
+number only if the error does not drift.
+`a_cached_pages_error_does_not_accumulate_over_ten_kilometres` walks **10.8 km**
+with the floating origin rebasing, compares a fixed **world** point's page NDC
+against what it was when its page was first seen — up to **9 102 frames**
+earlier — and reads **0.0449 of a texel**, halving with every coarser level. It
+**does not accumulate**: in exact arithmetic a point's page NDC is
+`2(p·r/w_L − cell) − 1`, so the level's snapped centre cancels against the label
+and the render origin cancels between `p` and `centre`; every frame's f32 answer
+approximates *one* exact value and two frames differ by at most twice that
+rounding. The rounding tracks the magnitude of the render-local coordinates,
+which `inf_math::REBASE_DISTANCE` caps — the same walk with the origin never
+rebased reads **0.2500**, which is the control that says so. The bound is a
+statement about the rebase distance and not about how far the camera has been.
+
+(The comparison is deliberately **not** of matrices. A page matrix maps
+render-local space and a rebase moves render-local space, so two matrices from
+either side of one disagree by ~130 000 texels while describing the same
+footprint — measured, on the way to that arm.)
+
 **The floating origin is out of the key on purpose, and it does not buy a stale
 page.** A rebase moves neither a world cell nor the residency, so `re-slotted` and
 `moved` both read zero across one — and the atlas refreshes anyway, because a
