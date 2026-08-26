@@ -541,9 +541,16 @@ pub struct VsmRasterStats {
     /// slot to a different `(light, page)` since it was last written, so its
     /// texels describe somewhere else. Residency churn, not content.
     pub dirty_slot: u64,
-    /// Dirty because the page's own **geometry stamp** moved: its matrix is a
-    /// different one. A clipmap level re-centring, an origin rebase, the sun
-    /// crossing its quantum — the page is looking somewhere new.
+    /// Dirty because the page's own **geometry stamp** moved: the box it draws
+    /// is a different box. For a clipmap that is the sun crossing its quantum,
+    /// the along-light snap sliding, or a settings change — and since island wave
+    /// VSM2 it is **not** a level re-centring and **not** an origin rebase, which
+    /// are the two the stamp used to move for and the two that leave the page's
+    /// world cell exactly where it was
+    /// (`a_camera_translation_re_labels_no_page_and_re_rasters_only_what_enters`
+    /// and `a_floating_origin_rebase_moves_no_pages_identity_and_still_refreshes_the_atlas`
+    /// each assert this column at **zero** across one). For a perspective light
+    /// it is still the page matrix, so it is the light itself moving.
     pub dirty_geometry: u64,
     /// Dirty because the **casters** under an unmoved page changed: something
     /// inside its footprint moved, arrived, or left. The number this phase's
@@ -710,9 +717,21 @@ pub struct VsmRaster {
     /// moves back by exactly one — so it agrees to within f32 rounding and not
     /// bit for bit. Measured over a 270 m walk of the shipped 8 × 64² ladder in
     /// `a_world_cell_keeps_its_page_matrix_to_within_a_fraction_of_a_shadow_texel`:
-    /// worst **2.4e-4 of a page's NDC at level 0**, which is 0.12 mm against a
-    /// 7.8 mm shadow texel, and smaller at every coarser level. The cached texels
-    /// are a page of depth drawn 0.12 mm from where this frame would draw it.
+    /// worst **0.0234 of a shadow texel**, which is 0.18 mm against a 7.8 mm
+    /// texel, against a label control of 128.0.
+    ///
+    /// **And it does not accumulate**, which a consecutive-frame arm cannot say
+    /// (the VSM2 audit). A slot keeps its texels until its stamp moves, and a
+    /// level-7 page's cell stays inside its window for 8 km, so the number that
+    /// matters is the drift over the *life* of a cached page.
+    /// `a_cached_pages_error_does_not_accumulate_over_ten_kilometres` walks
+    /// 10.8 km with the floating origin rebasing, compares a fixed **world**
+    /// point's page NDC against what it was when its page was first seen — up to
+    /// **9 102 frames** earlier — and measures **0.0449 of a texel**, halving with
+    /// every coarser level. Two frames' answers are two approximations to one
+    /// exact value, so the error is twice a rounding whose size the render-local
+    /// magnitude sets and `inf_math::REBASE_DISTANCE` caps; the same walk with no
+    /// rebase reads 0.25, which is the control that says so.
     cache: Vec<Option<(PageIdent, u64, u64)>>,
     /// Last frame's view, for the [`is_camera_cut`] trigger.
     ///
@@ -1731,7 +1750,16 @@ impl VsmRaster {
             // label — is what a slot's texels are about; a spot's and a cube
             // face's levels are nested in the light's own frustum and their label
             // *is* their footprint.
-            let clip = matches!(desc.kind, inf_vsm::VsmTreeKind::Clipmap);
+            // **A clipmap with no layout falls back to the MATRIX** (the VSM2
+            // audit), because the alternative fails open. `content_key` and the
+            // clip origins both come off the layout, so a `None` here would leave
+            // a clipmap page's geometric stamp as a fold of `(light, face, level,
+            // label)` alone — blind to the sun, the extent and the box, i.e. a
+            // page that can never be invalidated by anything but its casters.
+            // `vsm_projections` pushes one layout per registered light and
+            // nothing else builds a `PageGeometry`, so this is unreachable today;
+            // it is written the safe way round rather than left to stay that way.
+            let clip = matches!(desc.kind, inf_vsm::VsmTreeKind::Clipmap) && layout.is_some();
             let origin = layout
                 .filter(|_| clip)
                 .map_or((0, 0), |l| desc.clip_origin(&l.clip_origins, page.level));
@@ -2310,7 +2338,10 @@ struct PageDraw {
 enum DirtyReason {
     /// The slot changed occupant: its texels describe another world cell.
     Slot,
-    /// The page's own matrix moved — a clipmap re-centre, an origin rebase.
+    /// The box the page draws moved — for a clipmap the sun crossing its
+    /// quantum, the along-light snap sliding or a settings change; for a
+    /// perspective light its own matrix. **Not** a level re-centre and **not** an
+    /// origin rebase since island wave VSM2 — see [`VsmRasterStats::dirty_geometry`].
     Geometry,
     /// The page did not move and something under it did.
     Casters,

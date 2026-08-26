@@ -4002,10 +4002,21 @@ fn a_floating_origin_rebase_moves_no_pages_identity_and_still_refreshes_the_atla
     eprintln!("VSM2 REBASE: {recast} pages re-cast, 0 re-slotted, 0 moved");
     assert!(
         recast > 0,
-        "the atlas kept every page across a kilometre rebase. The stored depth is \
-         render-local, so a page that was NOT re-drawn is holding depth measured \
-         from an origin that has moved"
+        "the atlas kept every page across a kilometre rebase. The caster fold is \
+         the whole of what carries the origin into this key, so if it does not \
+         move here it will not move for any render-local change either, and the \
+         world-cell key has no second guard"
     );
+    // **What this arm does NOT say** (the VSM2 audit). The first write-up's
+    // reason — *"the stored depth is render-local, so a page not re-drawn holds
+    // depth measured from an origin that has moved"* — is backwards: a page's
+    // depth is `(p − centre) · forward` and a rebase moves `p` and `centre` by
+    // the same delta, so the stored value is origin-invariant and a page NOT
+    // re-drawn would in fact be right. What the re-cast above measures is that
+    // the caster fold *notices* the rebase, which is the guard the key needs the
+    // day something render-local does reach a page's content — and the cost of
+    // it is a whole-atlas burst per `inf_math::REBASE_DISTANCE` of travel, which
+    // is the second of the two burst sources the ledger's clause 5 routes.
 }
 
 // ── P27.5: THE SKINNED CULL SPHERE, RULED WITH ITS EXACT FIX MEASURED ───────

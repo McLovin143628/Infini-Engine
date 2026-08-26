@@ -1675,10 +1675,15 @@ fn the_island_at_shipping_resolution() {
                 // to its world cell and a clipmap scroll re-labels rather than
                 // re-draws. What is left in `re-slotted` is the row and column
                 // the window newly exposes, which have never been drawn.
+                // The middle column's legend is **not** "the page's own matrix"
+                // any more (the VSM2 audit): for a clipmap the geometric stamp is
+                // the world cell folded with `ClipmapLayout::content_key`, so a
+                // level re-centring and an origin rebase — the two the old legend
+                // named — are exactly the two that no longer land here.
                 println!(
                     "  {label} dirty per rastering frame: {:.1} re-slotted, \
-                     {:.1} moved (the page's own matrix), {:.1} re-cast \
-                     (something under it)",
+                     {:.1} moved (the box it draws: the sun's quantum, the \
+                     along-light snap), {:.1} re-cast (something under it)",
                     v.dirty_slot as f64 / v.frames as f64,
                     v.dirty_geometry as f64 / v.frames as f64,
                     v.dirty_casters as f64 / v.frames as f64,
