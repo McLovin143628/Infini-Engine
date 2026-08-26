@@ -8078,3 +8078,73 @@ on the passing path too. It did not before, so a real change to what the engine
 draws could sit inside the tolerance unnoticed for ever. All three
 `GOLDEN_SET_DIGEST` pins moved by hand
 (`7ff2b370…` → `838d18fb…`), with the reason written on the phase26 constant.
+
+### Clause 5 — the GGX stops losing light
+
+**The defect, stated plainly.** The Smith masking-shadowing term accounts for
+microfacets that occlude the view or the light — and then the single-scatter model
+*drops* what they occluded. A photon that hits a neighbouring facet does not
+vanish; it bounces again and leaves. The engine has been throwing that light away
+since P7.1, in every one of the six copies of `shade_light`.
+
+**How much.** The furnace test measures it exactly: over a 21 × 20 sweep of
+roughness and viewing angle, the single-scatter lobe's directional albedo at
+`f0 = 1` falls as low as **0.45** — it loses **55 %** of the energy it was given.
+A dielectric hides that behind its diffuse term. A metal has no diffuse term, so
+a rough metal in this engine has read as grey plastic and a matte gold as brown.
+
+**The fix.** Kulla & Conty's correction in the cheap form Filament ships: the
+directional albedo of the single-scatter lobe at `f0 = 1` is exactly `a + b` from
+the split-sum fit the ambient specular already uses, so multiplying the lobe by
+`1 + f0·(1/(a+b) − 1)` returns precisely the dropped energy — no more, because at
+`f0 = 1` the product is `(a+b)·(1/(a+b)) = 1` **by construction**. That identity
+is the white-furnace test written as arithmetic, and it is what
+`the_ggx_furnace_test_is_white` asserts: worst furnace error over the whole sweep,
+**5.96 × 10⁻⁸**.
+
+Three properties come with it, all asserted rather than argued: a dielectric never
+returns more than it was given; the factor is monotone in `f0` and never below 1;
+and at roughness 0 it is **1.000 to within 2 %**, so a polished metal renders as
+it always did — which is what makes applying it unconditionally safe.
+
+**Seven copies, and the one that is deliberate.** `ggx_energy_compensation` lives
+in `env_lighting.wgsl`, which is prepended to `mesh`, `skinned_mesh`,
+`vgeom_mesh`, `scatter_mesh` and `vis_resolve`. `voxel.wgsl` is composed `Plain`
+and binds no environment group at all (the P21.1 ruling), so it carries a verbatim
+copy of the pair. Moving them into `common_view.wgsl` instead was the alternative
+and it is refused: that file is prepended to *every* pass in the engine, including
+the compute bakes and the depth-only ones, and a lighting fit does not belong in
+the module a shadow caster includes. The two copies are held together by the
+furnace test's CPU mirror (`inf_render::gi::ggx_energy_compensation`).
+
+**The payoff, on the GPU.** A metal slab under a sun, from the mirror angle, at two
+roughnesses — with the smooth slab as the internal control, because the
+compensation barely touches it:
+
+| | roughness 0.15 | roughness 0.85 | ratio |
+|---|---|---|---|
+| single-scatter (the factor forced to 1) | 314.63 | 572.69 | 1.820 |
+| **with compensation (ships)** | **317.57** | **648.20** | **2.041** |
+| change | +0.9 % | **+13.2 %** | |
+
+The arm's threshold is 1.93, mutation-measured against both numbers.
+
+#### The re-bless
+
+**28 of the 54 goldens moved**, in one commit whose stated purpose is the look.
+Every frame with a lit surface in it changes by a little; the ones with a metal in
+them change by more. Measured against the previous committed frames before they
+were replaced:
+
+* the largest **mean**: `weather_fog_dawn` at **0.000252**, then `scatter`
+  0.000183, `scatter_impostors` 0.000173, `weather_snow_dusk` 0.000127, `voxel`
+  0.000108;
+* the largest **max**: `pbr_materials` at **0.031216** — the metallic/roughness
+  grid, which is exactly the frame this change exists for;
+* **26 frames are byte-identical**, including all five water goldens, all four
+  cloud presets, the four sky times of day and both 2D scenes: no lit metal, no
+  change.
+
+All three `GOLDEN_SET_DIGEST` pins moved by hand (`838d18fb…` → `84e38ed2…`), with
+the arithmetic written on the phase26 constant. The phase18 **name** array did not
+move and could not: no golden was added or removed, and the set is still 54.

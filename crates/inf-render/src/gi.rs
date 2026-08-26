@@ -262,6 +262,29 @@ pub fn env_brdf_ab(rough: f32, n_dot_v: f32) -> (f32, f32) {
     (-1.04 * a004 + rz, 1.04 * a004 + rw)
 }
 
+/// **Multi-scatter energy compensation for the GGX specular lobe** (wave VIS1a),
+/// per channel. Mirrors `ggx_energy_compensation` in `shaders/env_lighting.wgsl`
+/// (and its verbatim copy in `shaders/voxel.wgsl`, which binds no env group).
+///
+/// A single-scatter GGX accounts for microfacets that mask the view or the light
+/// and then *drops* what they masked — but a photon that hits a neighbouring
+/// facet bounces again and leaves. The loss is a function of roughness: negligible
+/// at 0.1, about a third of the lobe at 1.0, and unhidden on a metal, which has no
+/// diffuse term to make up the difference.
+///
+/// Kulla & Conty's correction in its cheap form: the directional albedo of the
+/// single-scatter lobe at `f0 = 1` is exactly `a + b` from
+/// [`env_brdf_ab`], so scaling the lobe by `1 + f0·(1/(a+b) − 1)` returns
+/// precisely the dropped energy. At `f0 = 1` the product is `1` by construction —
+/// the white-furnace test as arithmetic, and what
+/// `the_ggx_furnace_test_is_white` asserts across a roughness × angle sweep.
+pub fn ggx_energy_compensation(f0: [f32; 3], rough: f32, n_dot_v: f32) -> [f32; 3] {
+    let (a, b) = env_brdf_ab(rough, n_dot_v);
+    let e = (a + b).max(1e-3);
+    let k = 1.0 / e - 1.0;
+    [1.0 + f0[0] * k, 1.0 + f0[1] * k, 1.0 + f0[2] * k]
+}
+
 /// The render-local minimum corner of the camera-centred volume: `eye − extent/2`
 /// on every axis (the voxel grid and the probe grid share it).
 pub fn volume_min(eye_local: Vec3, extent: f32) -> Vec3 {
@@ -968,6 +991,103 @@ mod tests {
         let retired_m = std::f32::consts::PI * l * f0m * 0.5;
         let now_m = l * std::f32::consts::PI * (f0m * a + b);
         assert!((now_m - retired_m).abs() < 0.15 * retired_m);
+    }
+
+    /// **THE FURNACE TEST** (wave VIS1a) — the arm the multi-scatter energy
+    /// compensation exists to pass, and the arm that says the compensation is a
+    /// correction rather than a brightness knob.
+    ///
+    /// A white furnace is a uniform environment of radiance 1 with no absorption
+    /// anywhere. A perfectly reflective surface (`f0 = 1`) in one must return
+    /// **exactly 1**, at every roughness and every viewing angle: there is nowhere
+    /// for energy to go. The single-scatter GGX does not — it returns the
+    /// split-sum directional albedo `a + b`, which falls away from 1 as roughness
+    /// rises, and the shortfall is light the Smith term masked and the model then
+    /// forgot to let bounce.
+    ///
+    /// Three claims, in the order that makes each one mean something:
+    ///
+    /// 1. the single-scatter lobe really does lose energy, and how much;
+    /// 2. the compensated lobe returns exactly 1 at `f0 = 1` — the furnace;
+    /// 3. a dielectric gets proportionally less back, and nothing ever gains
+    ///    energy it did not have.
+    #[test]
+    fn the_ggx_furnace_test_is_white() {
+        let mut worst_loss = 0.0f32;
+        let mut worst_furnace = 0.0f32;
+        for ri in 0..=20 {
+            let rough = ri as f32 / 20.0;
+            for ai in 1..=20 {
+                let nov = ai as f32 / 20.0;
+                let (a, b) = env_brdf_ab(rough, nov);
+                let single = a + b; // directional albedo at f0 = 1
+
+                // (1) the loss.
+                worst_loss = worst_loss.max(1.0 - single);
+
+                // (2) the furnace: a white mirror returns exactly what it is given.
+                let comp = ggx_energy_compensation([1.0; 3], rough, nov);
+                let out = single * comp[0];
+                worst_furnace = worst_furnace.max((out - 1.0).abs());
+
+                // (3) a dielectric is compensated in proportion, never past 1.
+                let f0 = 0.04f32;
+                let d_comp = ggx_energy_compensation([f0; 3], rough, nov);
+                let d_out = (f0 * a + b) * d_comp[0];
+                assert!(
+                    d_out <= 1.0 + 1e-4,
+                    "a dielectric returned {d_out} at rough {rough}, nov {nov} — \
+                     compensation may only return energy the lobe dropped"
+                );
+                assert!(
+                    d_comp[0] >= 1.0 && d_comp[0] <= comp[0],
+                    "an f0 of {f0} was compensated {} against a mirror's {} — the \
+                     factor must be monotone in f0 and never below 1",
+                    d_comp[0],
+                    comp[0]
+                );
+            }
+        }
+        eprintln!(
+            "ggx furnace: the single-scatter lobe loses up to {:.4} of its energy; \
+             compensated, the worst furnace error over the sweep is {worst_furnace:.2e}",
+            worst_loss
+        );
+        // The loss is REAL and large enough to be worth a shader change: a third
+        // of the lobe. Asserted so the day the fit changes, this sentence has to
+        // be rewritten rather than quietly becoming false.
+        assert!(
+            worst_loss > 0.25,
+            "the single-scatter lobe loses only {worst_loss} — either the fit \
+             changed or there is nothing here to compensate"
+        );
+        // …and the furnace is white to float precision.
+        assert!(
+            worst_furnace < 1e-5,
+            "the compensated mirror is off the furnace by {worst_furnace}"
+        );
+    }
+
+    /// The compensation is **inert on a smooth surface**, which is what makes it
+    /// safe to apply unconditionally: at roughness 0 the single-scatter lobe loses
+    /// essentially nothing, so the factor is essentially 1 and a polished metal
+    /// renders as it always did.
+    #[test]
+    fn the_compensation_is_inert_where_there_is_nothing_to_compensate() {
+        let smooth = ggx_energy_compensation([1.0; 3], 0.0, 1.0);
+        assert!(
+            (smooth[0] - 1.0).abs() < 0.02,
+            "a mirror-smooth surface was scaled by {} — the compensation must be \
+             a correction, not a gain",
+            smooth[0]
+        );
+        let rough = ggx_energy_compensation([1.0; 3], 1.0, 1.0);
+        assert!(
+            rough[0] > 1.2,
+            "a fully rough mirror was scaled by only {} — the correction is not \
+             reaching the case it exists for",
+            rough[0]
+        );
     }
 
     #[test]

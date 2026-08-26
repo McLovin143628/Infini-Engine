@@ -2442,11 +2442,26 @@ fn the_golden_set_is_pinned_and_additive() {
     ///
     /// The difference is **mean 0.001456 / max 0.038588**, measured against the
     /// previous frame before it was replaced, and it is *inside* the harness's own
-    /// perceptual tolerance — which is exactly why it is re-blessed rather than
+    /// perceptual tolerance — which is exactly why it was re-blessed rather than
     /// left alone. A golden that no longer depicts what the engine draws is a
-    /// golden nobody can read a regression off. Every other one of the 54 is
+    /// golden nobody can read a regression off. Every other one of the 54 was
     /// **0.000000 / 0.000000**, printed by the harness and checked one by one.
-    const GOLDEN_SET_DIGEST: &str = "838d18fbffeea0c43ea5d84a8f5fbc63";
+    ///
+    /// **And a third time, in the same wave** (from
+    /// `838d18fbffeea0c43ea5d84a8f5fbc63`), for **28** frames — the one commit in
+    /// VIS1a whose stated purpose is the look. The GGX specular lobe gained
+    /// **multi-scatter energy compensation**: a single-scatter GGX accounts for
+    /// the microfacets the Smith term masks and then drops the light they masked,
+    /// which the furnace test measures at up to **55 %** of the lobe, and which a
+    /// metal — having no diffuse term to hide it — wears as being systematically
+    /// too dark. Every frame with a lit surface in it therefore moves, by a little
+    /// (mean ≤ **0.000252**, on `weather_fog_dawn`) or, where there is a metal, by
+    /// more (max **0.031216**, on `pbr_materials` — the metallic/roughness grid,
+    /// which is the frame this change exists for). The other 26 are byte-identical.
+    ///
+    /// Both moves are inside one wave and each has its own commit; neither turned
+    /// a red build green.
+    const GOLDEN_SET_DIGEST: &str = "84e38ed2a762a2e9a0cca84d0fc80b8b";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

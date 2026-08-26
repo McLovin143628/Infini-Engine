@@ -1268,7 +1268,7 @@ fn the_golden_set_is_pinned_and_additive_after_phase_27() {
     /// count unchanged. That both pins had to move separately is the point of
     /// their being separate: a wave that re-blessed for a bad reason would have
     /// to write the reason down twice.
-    const GOLDEN_SET_DIGEST: &str = "838d18fbffeea0c43ea5d84a8f5fbc63";
+    const GOLDEN_SET_DIGEST: &str = "84e38ed2a762a2e9a0cca84d0fc80b8b";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

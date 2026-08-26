@@ -2246,6 +2246,104 @@ fn coverage_ssao() -> RenderSettings {
     }
 }
 
+/// **A ROUGH METAL IS NOT A DARK METAL** (wave VIS1a) — the furnace test's
+/// consequence, on the GPU, in a real frame.
+///
+/// `gi::tests::the_ggx_furnace_test_is_white` pins the arithmetic: a
+/// single-scatter GGX loses up to 55 % of the lobe's energy, and the compensation
+/// returns exactly that much. This is the same claim measured where it is visible
+/// — the *direct* specular response of a metal slab under a sun, at two
+/// roughnesses, from the reflecting angle.
+///
+/// A perfectly reflective surface returns what it is given whatever its
+/// roughness: the lobe spreads, it does not dim. So the two must land close
+/// together. Before the compensation they did not, and the numbers are in the
+/// assertion below.
+#[test]
+fn a_rough_metal_keeps_its_energy() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let slab = |roughness: f32| {
+        let mut scene = RenderScene {
+            grid_enabled: false,
+            ..Default::default()
+        };
+        scene.instances.push(MeshInstance {
+            metallic: 1.0,
+            roughness,
+            ..MeshInstance::lit(
+                DVec3::new(0.0, -0.25, 0.0),
+                Quat::IDENTITY,
+                Vec3::new(24.0, 0.5, 24.0),
+                [0.95, 0.93, 0.88, 1.0],
+                1,
+            )
+        });
+        scene.lights.push(RenderLight {
+            kind: LightKind::Directional,
+            color: [1.0, 1.0, 1.0],
+            intensity: 3.0,
+            direction: Vec3::new(0.0, 0.6, 1.0).normalize(),
+            ..RenderLight::default()
+        });
+        scene.mark_dirty();
+        scene
+    };
+    // Looking along the mirror direction of the sun, so the lobe is on screen at
+    // both roughnesses rather than only at the smooth one.
+    let view = look_view(DVec3::new(0.0, 2.4, -4.0), DVec3::new(0.0, 0.0, 4.0));
+    // The metal only, not the sky above it: the sky is identical in both renders
+    // and averaging it in would dilute the very quantity being measured.
+    let lum = |img: &[u8]| -> f64 {
+        let y0 = H / 2;
+        let mut sum = 0.0f64;
+        for y in y0..H {
+            for x in 0..W {
+                let i = ((y * W + x) * 4) as usize;
+                sum += f64::from(img[i]) + f64::from(img[i + 1]) + f64::from(img[i + 2]);
+            }
+        }
+        sum / f64::from((H - y0) * W)
+    };
+    let smooth = lum(&render_with(
+        &gpu,
+        &slab(0.15),
+        &view,
+        RenderSettings::default(),
+    ));
+    let rough = lum(&render_with(
+        &gpu,
+        &slab(0.85),
+        &view,
+        RenderSettings::default(),
+    ));
+    eprintln!(
+        "ggx energy: a metal slab reads {smooth:.2} at roughness 0.15 and \
+         {rough:.2} at 0.85 — a ratio of {:.3}",
+        rough / smooth
+    );
+    // **The smooth slab is the internal control**, and that is what makes the
+    // ratio mean something: at roughness 0.15 the compensation factor is
+    // essentially 1 (measured on this fixture: the smooth slab moves 314.63 →
+    // 317.57, **+0.9 %**), so the ratio is a direct read of how much energy the
+    // ROUGH slab got back — 572.69 → 648.20, **+13.2 %**.
+    //
+    // The ratio is above 1 rather than below it because a smooth metal
+    // concentrates its lobe into a narrow highlight while a rough one spreads it
+    // across the whole slab; the framing is the mirror direction either way. What
+    // this arm asserts is the *gain*, not a fixed physical constant.
+    //
+    // The threshold is mutation-measured rather than chosen: with the
+    // compensation the ratio is **2.041**, with the factor forced to 1 — the
+    // single-scatter lobe this wave replaced — it is **1.820**.
+    assert!(
+        rough / smooth > 1.93,
+        "a metal at roughness 0.85 returned {:.3}x what the same metal returns at \
+         0.15 — the specular lobe is losing energy the multi-scatter compensation \
+         exists to give back (the single-scatter lobe reads 1.820 on this fixture)",
+        rough / smooth
+    );
+}
+
 /// **THE BLUR DOES NOT LEAK ACROSS A SILHOUETTE** (wave VIS1a) — the arm the 4×4
 /// box blur could not have passed, and the reason the bilateral one replaced it.
 ///

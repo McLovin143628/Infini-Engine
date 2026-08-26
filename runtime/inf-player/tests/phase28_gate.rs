@@ -1959,7 +1959,7 @@ fn the_golden_set_is_pinned_and_additive_after_phase_28() {
     /// purpose, count unchanged. `phase26_gate`'s twin carries the full reason;
     /// all three pins had to be moved by hand, which is what having three of them
     /// buys.
-    const GOLDEN_SET_DIGEST: &str = "838d18fbffeea0c43ea5d84a8f5fbc63";
+    const GOLDEN_SET_DIGEST: &str = "84e38ed2a762a2e9a0cca84d0fc80b8b";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

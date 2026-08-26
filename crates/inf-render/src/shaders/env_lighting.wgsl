@@ -247,6 +247,41 @@ fn gi_env_brdf_ab(rough: f32, nov: f32) -> vec2<f32> {
     return vec2<f32>(-1.04, 1.04) * a004 + r.zw;
 }
 
+// ── multi-scatter energy compensation (wave VIS1a) ──────────────────────────
+//
+// **A single-scatter GGX loses light, and the loss is a function of roughness.**
+// The Smith masking-shadowing term accounts for microfacets that occlude the
+// view or the light, and then the model simply *drops* what they occluded — but
+// a photon that hits a neighbouring facet does not vanish, it bounces again and
+// leaves. The missing energy is small at roughness 0.1 and about a third of the
+// lobe by roughness 1.0, and because metals have no diffuse term to hide it, a
+// rough metal in this engine has been visibly, systematically too dark since
+// P7.1. Brushed steel reads as grey plastic; a matte gold reads as brown.
+//
+// Kulla & Conty's correction, in the cheap form Filament ships: the directional
+// albedo of the single-scatter lobe at `f0 = 1` is exactly `a + b` from the
+// split-sum fit already used for the ambient specular, and multiplying the lobe
+// by `1 + f0·(1/(a+b) − 1)` returns precisely the energy the single-scatter model
+// dropped — no more, because at `f0 = 1` the product is `(a+b)·(1/(a+b)) = 1` by
+// construction, which is the white-furnace test written as arithmetic. A darker
+// `f0` gets proportionally less back, which is right: a dielectric absorbs what
+// it re-scatters.
+//
+// **It is a multiplier on the SPECULAR term only.** The diffuse lobe is
+// unaffected, and so is everything the ambient path does — `gi_ambient_specular`
+// already integrates the same split-sum response and is energy-correct.
+//
+// The CPU mirror is `crate::gi::ggx_energy_compensation`, and the furnace test
+// that pins the pair is `the_ggx_furnace_test_is_white`.
+fn ggx_energy_compensation(f0: vec3<f32>, rough: f32, nov: f32) -> vec3<f32> {
+    let ab = gi_env_brdf_ab(rough, nov);
+    // The directional albedo at f0 = 1: how much of the incoming energy the
+    // single-scatter lobe actually returns.
+    let e = max(ab.x + ab.y, 1e-3);
+    return vec3<f32>(1.0) + f0 * (1.0 / e - 1.0);
+}
+
+
 // ── SSR v2 (wave VIS1a) ─────────────────────────────────────────────────────
 //
 // **What changed, and why it is a different feature rather than a tuning pass.**

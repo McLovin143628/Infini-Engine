@@ -200,7 +200,13 @@ fn shade_light(
     let g = geometry_smith(n_dot_v, n_dot_l, rough);
     let f = fresnel_schlick(v_dot_h, f0);
 
-    let spec = (d * g) * f / max(4.0 * n_dot_v * n_dot_l, 1e-4);
+    // Wave VIS1a: multi-scatter energy compensation. A single-scatter GGX
+    // drops whatever the Smith term masked instead of letting it bounce again,
+    // which is about a third of the lobe at roughness 1.0 and is why every
+    // rough metal in this engine has been too dark since P7.1. See
+    // `ggx_energy_compensation` in `env_lighting.wgsl`.
+    let spec = (d * g) * f / max(4.0 * n_dot_v * n_dot_l, 1e-4)
+        * ggx_energy_compensation(f0, rough, n_dot_v);
     let kd = (vec3<f32>(1.0) - f) * (1.0 - metallic);
     let diffuse = kd * albedo / PI;
     return (diffuse + spec) * radiance * n_dot_l;

@@ -16,8 +16,11 @@
 //
 // P21.2 closes the first of the three things that make a voxel surface part of
 // the world rather than merely in front of it — **seam blending against the
-// heightfield** (see below) — and leaves **shadow/GI participation** and the
-// **depth prepass** (so SSAO and TAA see these surfaces at all) open.
+// heightfield** (see below). **Wave VIS1a closes the second**: a voxel volume
+// writes the shared depth prepass now (`VoxelNode::depth_prepass`), so SSAO, TAA
+// and SSR see these surfaces — meaning a voxel volume *occludes* for them, since
+// this pass still binds no env group and so samples no AO of its own. What
+// remains open is **shadow/GI participation**.
 //
 // ── SEAM BLENDING (P21.2), and what it does NOT do ──────────────────────
 //
@@ -264,6 +267,33 @@ fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
+// **Multi-scatter energy compensation, and the one copy in the tree** (wave
+// VIS1a). Every other lit shader gets `ggx_energy_compensation` from
+// `env_lighting.wgsl`, which is prepended to them; this pass is composed `Plain`
+// and binds no environment group at all (the P21.1 ruling — see this file's
+// header), so it cannot see that library and carries its own copy of the two
+// functions instead.
+//
+// Duplicated deliberately rather than by moving the pair into `common_view.wgsl`:
+// that file is prepended to *every* pass in the engine, including the compute
+// bakes and the depth-only ones, and a lighting fit does not belong in the module
+// a shadow caster includes. The pair is small, pure, and pinned against its CPU
+// mirror by `the_ggx_furnace_test_is_white`, which is what keeps the two copies
+// from drifting.
+fn gi_env_brdf_ab(rough: f32, nov: f32) -> vec2<f32> {
+    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
+    let r = rough * c0 + c1;
+    let a004 = min(r.x * r.x, exp2(-9.28 * nov)) * r.x + r.y;
+    return vec2<f32>(-1.04, 1.04) * a004 + r.zw;
+}
+
+fn ggx_energy_compensation(f0: vec3<f32>, rough: f32, nov: f32) -> vec3<f32> {
+    let ab = gi_env_brdf_ab(rough, nov);
+    let e = max(ab.x + ab.y, 1e-3);
+    return vec3<f32>(1.0) + f0 * (1.0 / e - 1.0);
+}
+
 // Single BRDF term for a light with unit direction `l` and incoming `radiance`.
 // Dielectric only — a terrain splat layer carries no metallic channel — so the
 // mesh version's `metallic` parameter collapses to 0 and is dropped.
@@ -284,7 +314,8 @@ fn shade_light(
     let g = geometry_smith(n_dot_v, n_dot_l, rough);
     let f = fresnel_schlick(v_dot_h, f0);
 
-    let spec = (d * g) * f / max(4.0 * n_dot_v * n_dot_l, 1e-4);
+    let spec = (d * g) * f / max(4.0 * n_dot_v * n_dot_l, 1e-4)
+        * ggx_energy_compensation(f0, rough, n_dot_v);
     let kd = vec3<f32>(1.0) - f;
     let diffuse = kd * albedo / PI;
     return (diffuse + spec) * radiance * n_dot_l;
