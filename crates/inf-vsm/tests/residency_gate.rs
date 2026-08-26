@@ -724,6 +724,76 @@ fn a_clipmap_scroll_keeps_every_slot_with_its_world_cell() {
     assert_world(&res, &shadow, "after the backwards scroll");
 }
 
+/// **A SCROLL OF ONE LEVEL LEAVES EVERY COARSER LEVEL'S ENTRIES BYTE-IDENTICAL**
+/// (island wave VSM2) — the property the bounded recompute rests on.
+///
+/// `set_clip_origins` recomputes levels `0..=deepest-that-moved` and no others,
+/// and the argument is that a level whose own origin, parent's origin, residency
+/// and parent's already-final words are all unchanged has unchanged words. That
+/// argument is *why* a scroll costs a suffix of the ladder rather than the whole
+/// of it — on the shipped eight-level clipmap a camera at 0.9 m a frame moves
+/// level 0's window nine frames in ten and level 7's one in a hundred and forty —
+/// and it is a claim about output, so it is checked against output.
+///
+/// The sibling arm
+/// `moving_a_clipmaps_level_offsets_re_points_the_whole_fallback_chain` catches an
+/// **under**-sized recompute (mutation-verified: `deepest = 0` fails it). This
+/// catches the other half — that the levels it skips really had nothing to say —
+/// by recomputing them anyway through the coarsest-first door and comparing.
+#[test]
+fn a_scroll_of_one_level_leaves_every_coarser_levels_entries_byte_identical() {
+    const N: u32 = 8;
+    const LEVELS: u32 = 4;
+    let mut res = atlas(48);
+    let h = res
+        .register_light(VsmLightDesc::clipmap(LEVELS, N))
+        .expect("a four-level clipmap");
+    let desc = res.desc(h).expect("registered").clone();
+    let was: Vec<(i64, i64)> = (0..LEVELS).map(|l| (700 >> l, -300 >> l)).collect();
+    assert!(res.set_clip_origins(h, &was).moved);
+    // A resident set that spans every level, so each one has both packed entries
+    // and fallbacks in it.
+    let wants: Vec<VsmWant> = (0..LEVELS)
+        .flat_map(|l| (2..5u32).flat_map(move |y| (2..6u32).map(move |x| VsmPage::flat(l, x, y))))
+        .map(|p| VsmWant::new(h, p))
+        .collect();
+    res.apply_wants(&wants);
+
+    // Where each level's entries live inside the light's block.
+    let span = |level: u32| {
+        let base = inf_vsm::VSM_TABLE_LIGHT_HEADER_WORDS
+            + inf_vsm::VSM_TABLE_LEVEL_REC_WORDS * desc.levels.len()
+            + desc.level_first_entry(0, level).expect("in tree") as usize;
+        base..base + desc.levels[level as usize].page_count() as usize
+    };
+    let snapshot = |res: &VsmResidency| -> Vec<Vec<u32>> {
+        let (_, words) = res.table_block(h).expect("a block");
+        (0..LEVELS).map(|l| words[span(l)].to_vec()).collect()
+    };
+    let before = snapshot(&res);
+
+    // Level 0's window alone slides one page.
+    let mut now = was.clone();
+    now[0].0 += 1;
+    let scroll = res.set_clip_origins(h, &now);
+    assert!(scroll.carried > 0, "the scroll carried nothing");
+    let after = snapshot(&res);
+
+    assert_ne!(
+        before[0], after[0],
+        "level 0's window moved and its entries did not — the arm below would be \
+         asserting that a recompute nobody ran changed nothing"
+    );
+    for l in 1..LEVELS as usize {
+        assert_eq!(
+            before[l], after[l],
+            "level {l}'s entries moved when only level 0's window did. The \
+             bounded recompute skips this level, so a difference here is a table \
+             the GPU never receives"
+        );
+    }
+}
+
 /// **LRU honesty**, with the timeline written out so the expected victim is a
 /// consequence rather than an observation.
 #[test]
