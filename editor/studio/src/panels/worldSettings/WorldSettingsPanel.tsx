@@ -37,6 +37,9 @@ import {
  * as Medium — so this array may only ever be appended to.
  */
 const SSR_QUALITY = ["Low", "Medium", "High"] as const;
+// `inf_render::ExposureMode`'s wire codes, in order. Append-only, like every
+// other wire enum in this tree.
+const EXPOSURE_MODE = ["Manual", "Auto"] as const;
 import { useProjectStore } from "../../stores/projectStore";
 import { useSceneStore } from "../../stores/sceneStore";
 import { useViewportStore } from "../../stores/viewportStore";
@@ -725,11 +728,11 @@ export default function WorldSettingsPanel() {
           {/*
             Screen-space reflections (schema v26, wave VIS1a).
 
-            Only the blocks whose consumer exists get a control. The v26 record
-            also carries the exposure, flare and lens-trio fields; they persist,
-            they cross the IPC and both hosts apply them, but they have no pass
-            to reach yet, and a slider that changes nothing is a promise the
-            engine is not keeping. They arrive with VIS1b.
+            Only the blocks whose consumer exists get a control.
+            VIS1a drew this block alone, because the v26 record's exposure,
+            flare and lens-trio fields had no pass to reach and a slider that
+            changes nothing is a promise the engine is not keeping. Wave VIS1b
+            built those passes, so the three sections below exist now.
           */}
           <PropertySection title="Reflections">
             <PropertyRow label="Screen-Space">
@@ -773,6 +776,134 @@ export default function WorldSettingsPanel() {
                 value={settings.render.ssr_thickness}
                 step={0.01}
                 onChange={(v) => patchRender({ ssr_thickness: v })}
+              />
+            </PropertyRow>
+          </PropertySection>
+
+          {/* Auto exposure (wave VIS1b). `Manual` leaves the Rendering
+              section's Exposure scalar as the whole story; `Auto` drives it
+              from a luminance histogram, bounded by the two luminances and
+              adapted at the speed below. */}
+          <PropertySection title="Exposure">
+            <PropertyRow label="Mode">
+              <EnumField
+                value={EXPOSURE_MODE[settings.render.exposure_mode] ?? "Manual"}
+                options={EXPOSURE_MODE}
+                onChange={(v) =>
+                  patchRender({ exposure_mode: Math.max(0, EXPOSURE_MODE.indexOf(v as never)) })
+                }
+              />
+            </PropertyRow>
+            <PropertyRow label="Compensation (EV)">
+              <NumberField
+                value={settings.render.exposure_compensation_ev}
+                step={0.25}
+                onChange={(v) => patchRender({ exposure_compensation_ev: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Min Luminance">
+              <NumberField
+                value={settings.render.exposure_min_luminance}
+                step={0.01}
+                onChange={(v) => patchRender({ exposure_min_luminance: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Max Luminance">
+              <NumberField
+                value={settings.render.exposure_max_luminance}
+                step={0.5}
+                onChange={(v) => patchRender({ exposure_max_luminance: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Adaptation (stops/s)">
+              <NumberField
+                value={settings.render.exposure_adaptation_speed}
+                step={0.25}
+                onChange={(v) => patchRender({ exposure_adaptation_speed: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Bloom Firefly Filter">
+              <CheckboxField
+                value={settings.render.bloom_karis}
+                onChange={(v) => patchRender({ bloom_karis: v })}
+              />
+            </PropertyRow>
+          </PropertySection>
+
+          {/* Sun glare / lens flare (wave VIS1b). Off by default. */}
+          <PropertySection title="Lens Flare">
+            <PropertyRow label="Enabled">
+              <CheckboxField
+                value={settings.render.flare_enabled}
+                onChange={(v) => patchRender({ flare_enabled: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Glare">
+              <NumberField
+                value={settings.render.flare_intensity}
+                step={0.05}
+                onChange={(v) => patchRender({ flare_intensity: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Ghosts">
+              <NumberField
+                value={settings.render.flare_ghost_count}
+                step={1}
+                onChange={(v) => patchRender({ flare_ghost_count: Math.max(0, Math.round(v)) })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Halo">
+              <NumberField
+                value={settings.render.flare_halo}
+                step={0.05}
+                onChange={(v) => patchRender({ flare_halo: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Anamorphic Streak">
+              <NumberField
+                value={settings.render.flare_streak}
+                step={0.05}
+                onChange={(v) => patchRender({ flare_streak: v })}
+              />
+            </PropertyRow>
+          </PropertySection>
+
+          {/* The lens trio (wave VIS1b) -- all three zero at the default, and
+              zero strength is off by arithmetic rather than by a flag. */}
+          <PropertySection title="Film">
+            <PropertyRow label="Vignette">
+              <NumberField
+                value={settings.render.vignette_intensity}
+                step={0.05}
+                onChange={(v) => patchRender({ vignette_intensity: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Vignette Softness">
+              <NumberField
+                value={settings.render.vignette_smoothness}
+                step={0.05}
+                onChange={(v) => patchRender({ vignette_smoothness: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Chromatic Aberration (px)">
+              <NumberField
+                value={settings.render.chromatic_aberration}
+                step={0.5}
+                onChange={(v) => patchRender({ chromatic_aberration: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Film Grain">
+              <NumberField
+                value={settings.render.grain_intensity}
+                step={0.02}
+                onChange={(v) => patchRender({ grain_intensity: v })}
+              />
+            </PropertyRow>
+            <PropertyRow label="Grain Size (px)">
+              <NumberField
+                value={settings.render.grain_size}
+                step={0.5}
+                onChange={(v) => patchRender({ grain_size: v })}
               />
             </PropertyRow>
           </PropertySection>
