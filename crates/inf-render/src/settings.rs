@@ -80,8 +80,10 @@ impl ExposureMode {
 pub struct ExposureSettings {
     pub mode: ExposureMode,
     /// Exposure compensation in **stops**, added on top of whichever multiplier
-    /// the mode produces (so it applies in manual mode too, once VIS1b wires it).
-    /// `0.0` is no compensation.
+    /// the mode produces — manual mode included (wave VIS1b folds it in through
+    /// [`manual_exposure_multiplier`]). `0.0` is no compensation, and it is `1.0`
+    /// by a branch rather than by trusting `exp2(0.0)`, which is what keeps the
+    /// default path bit-exact.
     pub compensation_ev: f32,
     /// The dimmest average scene luminance auto exposure will adapt **to**
     /// (cd/m²-ish, in the renderer's linear units). Below it the frame is allowed
@@ -89,8 +91,22 @@ pub struct ExposureSettings {
     pub min_luminance: f32,
     /// The brightest average scene luminance auto exposure will adapt to.
     pub max_luminance: f32,
-    /// Adaptation rate, in **stops per second**. Larger converges faster; `0`
-    /// freezes the adaptation at whatever it last held.
+    /// Adaptation rate, in **stops per second of LEVEL clock**. Larger converges
+    /// faster; `0` freezes the adaptation at whatever it last held.
+    ///
+    /// **The clock is the document's, so this number scales with
+    /// `TimeOfDay::rate`** — the eye is stepped by `cloud_time_s`, the same clock
+    /// the wind drifts by and the waves move on, which is what makes two runs of
+    /// one level converge through the same exposures. It is also a trap: at
+    /// `rate == 60` a "1.5 stops per second" eye moves 90 stops per *real* second.
+    /// Two further consequences, both stated where they live:
+    ///
+    /// * above `rate == 600` at 60 fps the **discontinuity guard**
+    ///   (`passes::exposure::MAX_STEP_S`), not this number, governs how fast the
+    ///   eye moves;
+    /// * at `rate == 0` — the **default** — the clock never moves at all, and the
+    ///   eye then tracks the frame rather than ramping toward it (see the module
+    ///   doc of `passes::exposure`). This number has no effect there.
     pub adaptation_speed: f32,
 }
 

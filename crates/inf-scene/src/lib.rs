@@ -567,7 +567,11 @@ pub struct RenderSettingsRecord {
     pub exposure_min_luminance: f32,
     /// The brightest average scene luminance auto exposure adapts to.
     pub exposure_max_luminance: f32,
-    /// Adaptation rate, stops per second.
+    /// Adaptation rate, stops per second **of LEVEL clock** — so its meaning
+    /// scales with `TimeOfDay::rate`, and at the default `rate == 0` the clock
+    /// never moves and the eye tracks the frame instead of ramping toward it.
+    /// See `inf_render::ExposureSettings::adaptation_speed`, which carries the
+    /// whole rule.
     pub exposure_adaptation_speed: f32,
     /// Karis-average first bloom downsample (firefly kill).
     pub bloom_karis: bool,

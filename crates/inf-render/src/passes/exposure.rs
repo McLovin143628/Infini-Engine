@@ -20,6 +20,37 @@
 //!
 //! And it writes only when the value has *changed*, so a manual frame after the
 //! first one records nothing at all.
+//!
+//! # The clock, and the level that does not have one
+//!
+//! `dt` is a **level-clock** delta (`inf_ecs::sky::ResolvedSky::cloud_time_s`) and
+//! never a wall clock or a frame index — that is what makes the adaptation a pure
+//! function of the document, and it is what the PIE-vs-shipping arm rests on.
+//!
+//! But `cloud_time_s` is derived from `TimeOfDay` alone, and **`TimeOfDay::rate`
+//! defaults to `0.0`** — so on a level that never authored a running clock (which
+//! is most of them, and every level authored before wave P17) the delta is zero on
+//! every frame after the first. Read naively that makes the eye adapt once and
+//! then freeze at whatever the first frame happened to look like, for ever: a
+//! player walking out of a lit courtyard into a cellar would see **no** adaptation
+//! at all. The VIS1b audit measured exactly that.
+//!
+//! So the rule has two halves, and [`ExposureNode::clock_ran`] is which half is in
+//! force:
+//!
+//! * **the clock has never moved** ⇒ there is no rate for a ramp to be expressed
+//!   in, so the eye *tracks* — every frame snaps to its own target. Unsmoothed,
+//!   and correct rather than frozen;
+//! * **the clock has moved at least once** ⇒ it is a running clock, and a frame
+//!   whose delta is zero is either a paused world or a second render of one
+//!   simulation step. Both must hold the previous value, which is what makes
+//!   "a paused sim is a frozen eye" true and what makes three renders per sim step
+//!   land on the same exposure as one.
+//!
+//! Both halves are a pure function of the document's own clock sequence, so both
+//! hosts still produce the same trace. What is *not* fixed is that the first half
+//! has no smoothing: a ramped eye on a static-clock level needs a simulation clock
+//! in the scene projection, carried as **VIS-C1d**.
 
 use crate::exposure::ExposureState;
 use crate::gpu::GpuContext;
@@ -81,6 +112,18 @@ pub struct ExposureNode {
     /// The manual-mode value already in the buffer, so an unchanged manual frame
     /// records nothing.
     last_manual: Option<f32>,
+    /// **Has this level's clock ever actually moved?** (VIS1b audit.)
+    ///
+    /// See the module doc. `false` ⇒ every frame snaps to its own target, because
+    /// a level whose `TimeOfDay::rate` is `0.0` — the default — hands this node a
+    /// zero delta for ever, and adapting by zero for ever is an eye frozen on the
+    /// first frame it ever saw rather than an eye. `true` ⇒ the clock is a running
+    /// one and a zero delta means a paused world or a repeated render of one
+    /// simulation step, both of which must hold.
+    ///
+    /// A function of the clock **sequence** alone, so both hosts compute it
+    /// identically and the PIE-vs-shipping trace is unaffected.
+    clock_ran: bool,
 }
 
 impl ExposureNode {
@@ -162,6 +205,7 @@ impl ExposureNode {
             prev_clock: None,
             generation: 0,
             last_manual: None,
+            clock_ran: false,
         }
     }
 }
@@ -176,8 +220,11 @@ impl RenderNode for ExposureNode {
 
         if ctl.mode != ExposureMode::Auto {
             // The adaptation must re-snap if auto ever comes back: the stored EV
-            // describes a frame nobody measured while manual held the buffer.
+            // describes a frame nobody measured while manual held the buffer. And
+            // `clock_ran` goes with it — what the clock did during a manual stretch
+            // says nothing about the trace auto exposure is about to start.
             self.prev_clock = None;
+            self.clock_ran = false;
             let m = manual_exposure_multiplier(frame.settings.exposure, ctl.compensation_ev);
             if self.last_manual != Some(m) {
                 gpu.queue.write_buffer(
@@ -202,7 +249,14 @@ impl RenderNode for ExposureNode {
             Some(prev) if same_size => (clock - prev).clamp(0.0, MAX_STEP_S) as f32,
             _ => 0.0,
         };
-        let valid = self.prev_clock.is_some() && same_size;
+        // A clock that has moved once is a running clock for the rest of the
+        // session; see the module doc for why the two halves are not the same
+        // rule. Read from THIS frame's delta before `valid` consumes it, so the
+        // first moving frame already adapts rather than snapping twice.
+        if dt > 0.0 {
+            self.clock_ran = true;
+        }
+        let valid = self.prev_clock.is_some() && same_size && self.clock_ran;
         self.prev_clock = Some(clock);
         self.generation = frame.targets.generation;
 

@@ -313,6 +313,144 @@ fn the_adaptation_follows_the_level_clock_and_never_the_frame_count() {
     assert_eq!(l, r, "two runs of one clock disagreed");
 }
 
+/// **The eye still works on a level whose clock never runs** (VIS1b audit).
+///
+/// `dt` is a `cloud_time_s` delta, `cloud_time_s` is a pure function of
+/// `TimeOfDay`, and **`TimeOfDay::rate` defaults to `0.0`** — so on most levels
+/// the delta is zero on every frame after the first. Read as "a frozen clock is a
+/// frozen eye" that made auto exposure adapt once, to whatever the first frame
+/// happened to look like, and then hold that for ever: a player walking out of a
+/// lit courtyard into a cellar saw **no** adaptation at all.
+///
+/// The rule now has two halves, and this arm is both of them:
+///
+/// * a clock that has **never** moved has no rate for a ramp to be expressed in,
+///   so the eye tracks — every frame snaps to its own target;
+/// * a clock that **has** moved is a running one, and a zero-delta frame after
+///   that is a paused world or a second render of one simulation step, both of
+///   which must hold. That half is what `exposure_pie.rs`'s three-renders-per-step
+///   arm rests on, so it is pinned here rather than left to it.
+#[test]
+fn the_eye_adapts_on_a_level_whose_clock_never_runs() {
+    let Some(gpu) = gpu_or_skip() else { return };
+
+    // ONE scene, mutated in place — the instance upload is version-gated, so two
+    // separately-built scenes both at version 1 would hand the renderer the first
+    // one twice and the arm would certify a frozen eye as a working one. (It did,
+    // on the first run: the histogram read the same 0.2975 both times.)
+    let mut scene = emissive_wall(0.3);
+    let brighten = |s: &mut RenderScene, r: f32| {
+        s.instances[0].emissive = [r; 3];
+        s.mark_dirty();
+    };
+    // The clock is never touched: this is a level at the default `rate == 0`.
+    let mut rig = Rig::new(&gpu, auto(1.5));
+
+    let a = rig.frame(&gpu, &scene);
+    let b = rig.frame(&gpu, &scene);
+    assert!(
+        a.avg_luminance > 0.0,
+        "the histogram measured nothing: {a:?}"
+    );
+    assert_eq!(
+        a.multiplier.to_bits(),
+        b.multiplier.to_bits(),
+        "the same frame twice must expose the same: {a:?} vs {b:?}"
+    );
+
+    // Ten times brighter with the clock still at zero. Before the audit this
+    // returned `a.multiplier` unchanged, for ever.
+    brighten(&mut scene, 3.0);
+    let c = rig.frame(&gpu, &scene);
+    eprintln!(
+        "static clock: dim x{:.4} (avg {:.4}) -> bright x{:.4} (avg {:.4})",
+        a.multiplier, a.avg_luminance, c.multiplier, c.avg_luminance
+    );
+    assert!(
+        c.avg_luminance > a.avg_luminance * 2.0,
+        "the fixture did not actually get brighter ({} -> {}), so the assertion \
+         below would pass for the wrong reason",
+        a.avg_luminance,
+        c.avg_luminance
+    );
+    assert!(
+        c.multiplier < a.multiplier * 0.8,
+        "the eye is frozen on a level whose clock never runs: {} then {}",
+        a.multiplier,
+        c.multiplier
+    );
+    // …and it comes back, which says it is tracking rather than drifting.
+    brighten(&mut scene, 0.3);
+    let d = rig.frame(&gpu, &scene);
+    assert_eq!(
+        d.multiplier.to_bits(),
+        a.multiplier.to_bits(),
+        "the tracked exposure is not a function of the frame alone: {a:?} vs {d:?}"
+    );
+
+    // THE OTHER HALF. Once the clock has moved, a zero-delta frame HOLDS — that
+    // is a paused world, or a second render of one simulation step.
+    let mut scene = emissive_wall(0.3);
+    let mut rig = Rig::new(&gpu, auto(0.5));
+    set_clock(&mut scene, 0.0);
+    rig.frame(&gpu, &scene);
+    set_clock(&mut scene, 0.2);
+    let moved = rig.frame(&gpu, &scene);
+    // The scene changes and the clock does not: the eye must not follow.
+    brighten(&mut scene, 3.0);
+    let held = rig.frame(&gpu, &scene);
+    assert!(
+        held.avg_luminance > moved.avg_luminance * 2.0,
+        "the second half's fixture did not change either ({} -> {})",
+        moved.avg_luminance,
+        held.avg_luminance
+    );
+    assert_eq!(
+        held.ev.to_bits(),
+        moved.ev.to_bits(),
+        "a zero-delta frame on a RUNNING clock must hold, not snap: {moved:?} then {held:?}"
+    );
+}
+
+/// **The meter reads the frame before the lens writes to it** (VIS1b audit).
+///
+/// The histogram taps `post_hdr`, and the flare adds light to the frame. If the
+/// two were the other way round the eye would meter its own glare — a brighter
+/// frame would stop down, which dims the glare, which opens the eye — and the
+/// exposure would be a feedback loop rather than a measurement. It is not, and
+/// this is the assertion rather than the sentence.
+///
+/// The same ordering carries the clause-1 decision: the bloom prefilter and the
+/// tonemap both read the exposure this node writes, so it has to precede both.
+#[test]
+fn the_meter_reads_the_frame_before_the_lens_writes_to_it() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    let names = renderer.pass_names();
+    let at = |n: &str| {
+        names
+            .iter()
+            .position(|p| *p == n)
+            .unwrap_or_else(|| panic!("no `{n}` node in the graph: {names:?}"))
+    };
+    assert!(
+        at("exposure") < at("bloom"),
+        "the exposure must be measured before the bloom prefilter thresholds against it"
+    );
+    assert!(
+        at("bloom") < at("flare"),
+        "the flare gathers the frame's bright part and belongs after the bloom"
+    );
+    assert!(
+        at("flare") < at("tonemap"),
+        "the tonemap adds the flare, so the flare must have been drawn"
+    );
+    assert!(
+        at("exposure") < at("flare"),
+        "the eye would be metering its own glare"
+    );
+}
+
 /// **The bloom threshold is exposure-relative — the ordering decision, priced.**
 ///
 /// Before this wave the tonemap did `(hdr + bloom) * exposure`, so the prefilter

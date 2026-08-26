@@ -783,7 +783,14 @@ export default function WorldSettingsPanel() {
           {/* Auto exposure (wave VIS1b). `Manual` leaves the Rendering
               section's Exposure scalar as the whole story; `Auto` drives it
               from a luminance histogram, bounded by the two luminances and
-              adapted at the speed below. */}
+              adapted at the speed below.
+
+              THE ADAPTATION ROW IS IN LEVEL-CLOCK SECONDS (VIS1b audit). The
+              eye is stepped by the document's own clock -- the one the wind
+              drifts by -- so this number scales with the sky's Time of Day
+              `rate`, and at the default `rate == 0` the clock never moves and
+              the eye tracks the frame instead of ramping toward it. The whole
+              rule lives on `inf_render::ExposureSettings::adaptation_speed`. */}
           <PropertySection title="Exposure">
             <PropertyRow label="Mode">
               <EnumField
