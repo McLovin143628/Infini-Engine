@@ -1209,11 +1209,19 @@ impl VsmRaster {
         }
         // **The `is_camera_cut` precedent** (P27.3's clause 2 names it). A cut does
         // not by itself change any page's content — a page's depth is a function
-        // of the light and the world, and the clipmap centre a cut jumps to is
-        // already an input to every page matrix, so the stamps below catch it
-        // exactly. This is the conservative belt on top; whether it is *redundant*
-        // is measured rather than asserted, in
+        // of the light and the world. This is the conservative belt on top;
+        // whether it is *redundant* is measured rather than asserted, in
         // `a_camera_cut_flushes_the_cache_and_the_stamps_would_have_too`.
+        //
+        // **Why it is redundant is a different sentence since island wave VSM2**
+        // (corrected by that wave's audit). P27.3's was *"the clipmap centre a cut
+        // jumps to is already an input to every page matrix"*, and the lateral
+        // half of that centre is no longer in a clipmap page's stamp at all. What
+        // the arm measures instead is that a cut of that distance also slides the
+        // **along-light** snap, which is in `ClipmapLayout::content_key`. A cut
+        // that were purely lateral would leave coarse cells still inside their
+        // windows and still correctly cached — so the flush would be waste rather
+        // than need, which is the direction that keeps this belt safe to wear.
         let cut = self
             .prev_view
             .as_ref()

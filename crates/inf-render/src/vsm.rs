@@ -348,6 +348,29 @@ pub fn scrolled_page(page: VsmPage, now: &ClipmapLayout, soon: &ClipmapLayout) -
 /// Every want is bounds-checked against the light's own descriptor, so a
 /// prediction that runs off the edge of the window is dropped rather than
 /// clamped onto a page that means something else.
+///
+/// # What island wave VSM2 did to this, and why the knob stays at zero
+///
+/// This computes a **label** across two layouts, and that wave changed what a
+/// label means. It shipped when residency was addressed by the label and the
+/// label did not move: pre-admitting the address the receiver would use next
+/// frame reserved the slot a frame early, and the reservation was the whole
+/// benefit. Since the slot belongs to the **world cell**, label
+/// `x + (now − soon)` read against *this* frame's origins names the cell a lead
+/// **behind** the proved one — measured at exactly `−16` cells for the ROADMAP's
+/// own horizon in
+/// `the_shadow_speculation_names_the_cell_the_camera_is_leaving` — and the
+/// reservation is unnecessary anyway, because `VsmResidency::set_clip_origins`
+/// carries the proved cell's own slot onto its new label for free.
+///
+/// **Latent, not live**: [`DEFAULT_PREDICT_HORIZON_TICKS`](crate::DEFAULT_PREDICT_HORIZON_TICKS)
+/// is 0, so `soon == now`, every scrolled page equals its proved page and the
+/// overlap filter above drops all of it — asserted on the shipped path by
+/// `a_committed_camera_reaches_the_shadow_lane`. A non-zero horizon spends slots
+/// and raster budget on cells the scroll is about to evict. Turning the knob on
+/// is P28.4's to revisit, with the useful prediction being the cells the
+/// predicted window will *contain* and this one does not — which is not this
+/// subtraction with its sign flipped either, and needs a fixture that prices it.
 pub fn speculative_shadow_wants(
     marked: &[inf_vsm::VsmWant],
     now: &[ClipmapLayout],
@@ -3054,6 +3077,94 @@ mod tests {
              path's {worst:.4}. The two are supposed to be separated by the ratio \
              of their render-local magnitudes, so this fixture is not measuring \
              what bounds the number"
+        );
+    }
+
+    /// **WHERE THE SHADOW SPECULATION POINTS NOW THAT A SLOT BELONGS TO A WORLD
+    /// CELL** (the VSM2 audit) — a bound recorded with its number, because the
+    /// wave changed what a residency label *means* and this is the one other
+    /// place in the tree that computes a label across two layouts.
+    ///
+    /// [`speculative_shadow_wants`] maps a proved page onto the label its own
+    /// world cell will wear under the predicted layout, and the result is applied
+    /// against **this** frame's residency — whose origins are `now`. Pre-VSM2
+    /// that was exactly right and is why it was built that way: residency was
+    /// addressed by label, a label did not move, and pre-admitting the address
+    /// the receiver would use next frame reserved the slot a frame early.
+    ///
+    /// Since the slot belongs to the **cell**, label `x + (now − soon)` under
+    /// `now` names cell `c − Δ`: the travel *behind* the proved cell rather than
+    /// ahead of it. And the purpose is served without it — the scroll carries the
+    /// proved cell's own slot onto its new label for free, which is the whole of
+    /// what the pre-admission bought.
+    ///
+    /// **This is latent, not live.** `DEFAULT_PREDICT_HORIZON_TICKS` is **0**
+    /// (P28.5's lead-time ruling), so `soon == now`, every scrolled page equals
+    /// its proved page and the producer's own overlap filter drops the lot —
+    /// `a_committed_camera_reaches_the_shadow_lane` asserts that emptiness on the
+    /// shipped path. What this arm pins is the shape the knob has if anybody
+    /// turns it back on, so that the day P28.4 revisits the lane it starts from a
+    /// measurement rather than from the sign of a subtraction. **Routed, not
+    /// taken**: flipping it to `c + Δ` is a real prefetch and an unmeasured
+    /// prescription, and this wave has no fixture that prices one.
+    #[test]
+    fn the_shadow_speculation_names_the_cell_the_camera_is_leaving() {
+        let origin = inf_math::FloatingOrigin::new(glam::DVec3::ZERO);
+        let dir = quantize_light_dir(Vec3::new(0.35, -0.86, 0.37).normalize(), 0.0039);
+        let (right, _u, _f) = light_basis(dir);
+        let eye = glam::DVec3::new(600.0, 40.0, -120.0);
+        // The ROADMAP's own 300 ms horizon at the shipped step and the island's
+        // own 0.9 m a frame: 18 ticks of travel along the light's `right`.
+        let lead_m = 0.9 * 18.0;
+        let (now, _) = shipped_ladder(eye, &origin);
+        let (soon, _) = shipped_ladder(eye + right.as_dvec3() * lead_m, &origin);
+
+        let (mut res, _) = inf_vsm::VsmResidency::new(inf_vsm::VsmAtlasConfig::default());
+        let h = res
+            .register_light(inf_vsm::VsmLightDesc::clipmap(SHIPPED_LEVELS, SHIPPED_N))
+            .expect("the shipped ladder registers");
+        res.set_clip_origins(h, &now.clip_origins);
+
+        // One proved page in the middle of level 0's window, so neither the
+        // prediction nor its mirror image can run off the grid and be dropped.
+        let label = VsmPage::flat(0, SHIPPED_N / 2, SHIPPED_N / 2);
+        let proved_cell = (
+            now.clip_origins[0].0 + i64::from(label.x),
+            now.clip_origins[0].1 + i64::from(label.y),
+        );
+        let spec = speculative_shadow_wants(
+            &[inf_vsm::VsmWant::new(h, label)],
+            std::slice::from_ref(&now),
+            std::slice::from_ref(&soon),
+            &res,
+        );
+
+        // ANTI-VACUITY: the lead really scrolls level 0's window, so the
+        // measurement below is not of a stationary camera.
+        let travel = soon.clip_origins[0].0 - now.clip_origins[0].0;
+        assert!(
+            travel > 0,
+            "{lead_m} m of lead moved level 0's window {travel} cells"
+        );
+        assert_eq!(spec.len(), 1, "the producer emitted nothing to measure");
+
+        // The cell `apply_wants` will seat, which is the speculated label read
+        // against the residency's CURRENT origins — the ones `sync` set before it.
+        let admitted = (
+            now.clip_origins[0].0 + i64::from(spec[0].page.x),
+            now.clip_origins[0].1 + i64::from(spec[0].page.y),
+        );
+        eprintln!(
+            "VSM2 SPECULATION: level 0's window leads by {travel} cells; a page \
+             proved at cell {proved_cell:?} speculates cell {admitted:?} \
+             ({} cells)",
+            admitted.0 - proved_cell.0
+        );
+        assert_eq!(
+            admitted.0 - proved_cell.0,
+            -travel,
+            "the speculated cell is not exactly the lead behind the proved one, \
+             so this bound is recorded against arithmetic that has changed"
         );
     }
 
