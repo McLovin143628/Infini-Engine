@@ -48,7 +48,7 @@ import { cn } from "../lib/utils";
 import { deliverAssetDrop } from "../lib/assetDrop";
 import { executeCommand } from "../lib/commands";
 import { scene as sceneIpc, shell, viewport } from "../lib/ipc";
-import { useViewportOverlay } from "../lib/viewportOverlay";
+import { CUTOUT_ATTR, useViewportCutout } from "../lib/viewportOverlay";
 import { useDockLayout } from "../panels/dock/dockLayoutStore";
 import { useShellStore } from "../stores/shellStore";
 import { useSpriteSheetStore } from "../stores/spriteSheetStore";
@@ -961,8 +961,10 @@ function AssetContextMenu({
   const removeFromCollection = useAssetStore((s) => s.removeFromCollection);
   const createCollection = useAssetStore((s) => s.createCollection);
   const [subOpen, setSubOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   /**
-   * **The airspace guard this menu never had** (Wave E, E2-4).
+   * **The airspace guard this menu never had** (Wave E, E2-4), now a CUTOUT
+   * (UX2).
    *
    * It is a `position: fixed` popup at the cursor: with the drawer open near the
    * bottom of the window it opens UPWARD, across the viewport hole, and the
@@ -974,12 +976,14 @@ function AssetContextMenu({
    * Held for the component's whole lifetime, which is exactly the menu's: it is
    * mounted only while open (`{menu && <AssetContextMenu …>}`).
    *
-   * Not migrated onto `ContextMenuSurface` (the shared surface Wave E split out)
-   * because this menu has an inline expanding submenu — "Add to Collection ▸" —
-   * that the surface does not model. Carried as a named remainder; the HAZARD is
-   * closed here, which is the half that mattered.
+   * Still not migrated onto `ContextMenuSurface` (the shared surface Wave E
+   * split out) because this menu has an inline expanding submenu — "Add to
+   * Collection ▸" — that the surface does not model; that remainder stands.
+   * Rect-supply needed no migration: the submenu expands INSIDE this element,
+   * so one measured rectangle covers the menu at every size, and the hook's
+   * `ResizeObserver` follows it as it grows.
    */
-  useViewportOverlay(true);
+  useViewportCutout(true, menuRef);
   const store = {
     rename: useAssetStore((s) => s.rename),
     duplicate: useAssetStore((s) => s.duplicate),
@@ -1131,6 +1135,8 @@ function AssetContextMenu({
 
   return (
     <div
+      ref={menuRef}
+      {...{ [CUTOUT_ATTR]: "" }}
       className="fixed z-50 min-w-44 overflow-hidden rounded border border-(--ink-border) bg-(--ink-bg-2) py-1 shadow-lg"
       style={{ left: x, top: y }}
       onClick={(e) => e.stopPropagation()}

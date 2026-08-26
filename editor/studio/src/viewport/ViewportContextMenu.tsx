@@ -11,13 +11,16 @@
  * # Airspace — read this before changing anything here
  *
  * The menu is the FIRST overlay whose anchor is inside the hole, and the shell's
- * standing rule is that HTML can never draw over the native child. So
- * `ContextMenuSurface` holds `useViewportOverlay` for the menu's lifetime and
- * **the 3D view goes blank the instant the menu opens**, exactly as it does for
- * the command palette, every dialog and every panel drag. That is accepted
- * behaviour, not a defect; the flash-free alternatives (a `SetWindowRgn` cutout,
- * or freezing the last frame into the DOM) are the standing Phase-2 polish item
- * named at the top of `lib/viewportOverlay.ts`.
+ * standing rule is that HTML can never draw over the native child. Until UX2 the
+ * consequence was that **the 3D view went blank the instant the menu opened** —
+ * accepted behaviour since Phase 1, and the thing a right-click in a game engine
+ * must not do. `ContextMenuSurface` now holds `useViewportCutout`, which measures
+ * the menu and has the native child carve that rectangle out of itself
+ * (`SetWindowRgn`), so the scene keeps rendering around the menu.
+ *
+ * The blackout is still the fallback, and deliberately: an overlay that cannot
+ * measure itself (the command palette, the dialogs, the panel-drag ghost) and a
+ * platform with no cutout backend (macOS, Linux) both take it.
  *
  * # Coordinates
  *

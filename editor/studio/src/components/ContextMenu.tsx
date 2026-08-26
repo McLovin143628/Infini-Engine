@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "../lib/utils";
-import { useViewportOverlay } from "../lib/viewportOverlay";
+import { CUTOUT_ATTR, useViewportCutout } from "../lib/viewportOverlay";
 
 /**
  * Minimal right-click context menu (no external UI dependency).
@@ -20,10 +20,13 @@ import { useViewportOverlay } from "../lib/viewportOverlay";
  *   result of an `await` (the Outliner asks the backend which editors an object
  *   has before deciding what to offer).
  *
- * **Airspace**: both faces hold `useViewportOverlay` for the menu's open
- * lifetime, so the native viewport child window is hidden while a menu that
- * could cross it is up. That is the shell's standing behaviour for every
- * overlay, and it is why the surface — not each caller — owns the guard.
+ * **Airspace**: both faces hold `useViewportCutout` for the menu's open
+ * lifetime, so the native viewport child window gets out of the way of a menu
+ * that could cross it. Since UX2 that means the menu's own rectangle is CUT OUT
+ * of the native child and the 3D view keeps rendering around it, rather than
+ * the whole viewport blacking out — which is why the surface, not each caller,
+ * owns the guard: one measured element fixes the viewport's right-click menu,
+ * the Outliner's and the panel tabs' at once.
  */
 
 export interface ContextMenuItem {
@@ -63,9 +66,6 @@ export function ContextMenuSurface({
   const menuRef = useRef<HTMLDivElement | null>(null);
   const open = at !== null;
 
-  // The menu can open over the native viewport hole — hide it while open.
-  useViewportOverlay(open);
-
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (e: PointerEvent) => {
@@ -84,9 +84,13 @@ export function ContextMenuSurface({
     };
   }, [open, onClose]);
 
-  // Keep the menu inside the window (measure after first paint, imperative
-  // style write — no state round-trip).
-  useEffect(() => {
+  // Keep the menu inside the window (imperative style write — no state
+  // round-trip). A LAYOUT effect since UX2, and declared above the cutout hook
+  // on purpose: the rectangle handed to the native side has to be where the
+  // menu ENDS UP, and a menu opened near the right edge is moved by this. As a
+  // passive effect it ran after the measurement and the hole was punched at the
+  // unclamped point.
+  useLayoutEffect(() => {
     const el = menuRef.current;
     if (!at || !el) return;
     const r = el.getBoundingClientRect();
@@ -96,11 +100,17 @@ export function ContextMenuSurface({
     el.style.top = `${ny}px`;
   }, [at]);
 
+  // The menu can open over the native viewport hole — cut it out of the native
+  // child for as long as the menu is up (UX2), and fall back to hiding the
+  // whole viewport if there is nothing measurable or no cutout backend.
+  useViewportCutout(open, menuRef);
+
   if (!at) return null;
 
   return createPortal(
     <div
       ref={menuRef}
+      {...{ [CUTOUT_ATTR]: "" }}
       className="fixed z-[90] min-w-48 rounded-md border border-(--ink-border) bg-(--ink-bg-2) py-1 text-(--ink-text)"
       style={{ left: at.x, top: at.y, boxShadow: `0 8px 24px var(--ink-shadow)` }}
       role="menu"

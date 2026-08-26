@@ -9,7 +9,7 @@ import { ChevronRight } from "lucide-react";
 import { executeCommand } from "../lib/commands";
 import type { MenuNode, TopMenu } from "../lib/menus";
 import { buildMenuBar } from "../lib/menus";
-import { useViewportOverlay } from "../lib/viewportOverlay";
+import { CUTOUT_ATTR, useViewportCutout } from "../lib/viewportOverlay";
 import { useProjectStore } from "../stores/projectStore";
 
 export default function MenuBar() {
@@ -21,8 +21,13 @@ export default function MenuBar() {
   const recent = useProjectStore((s) => s.recent);
   const menuBar = useMemo(() => buildMenuBar(recent), [recent]);
 
-  // Dropdowns extend over the native viewport hole — hide it while open.
-  useViewportOverlay(openId !== null);
+  // Dropdowns extend over the native viewport hole. Since UX2 the open panels
+  // are cut out of the native child instead of blacking it out — the marked
+  // elements are the dropdown and each fly-out submenu, because a submenu is
+  // positioned OUTSIDE its dropdown's box and its rectangle would otherwise be
+  // missed. A submenu opening is a child component's state, so the hook's
+  // MutationObserver is what notices it, not a re-render of this component.
+  useViewportCutout(openId !== null, rootRef);
 
   const close = useCallback(() => setOpenId(null), []);
 
@@ -86,7 +91,7 @@ function MenuButton(props: {
         {menu.label}
       </button>
       {open && (
-        <div className="absolute top-full left-0 z-50">
+        <div {...{ [CUTOUT_ATTR]: "" }} className="absolute top-full left-0 z-50">
           <MenuList items={menu.items} onAction={onClose} />
         </div>
       )}
@@ -119,7 +124,10 @@ function MenuList(props: { items: MenuNode[]; onAction: () => void }) {
                 <ChevronRight size={14} className="text-(--ink-text-dim)" />
               </div>
               {openSub === i && (
-                <div className="absolute top-0 left-full z-50 -mt-1">
+                <div
+                  {...{ [CUTOUT_ATTR]: "" }}
+                  className="absolute top-0 left-full z-50 -mt-1"
+                >
                   <MenuList items={node.items} onAction={onAction} />
                 </div>
               )}
