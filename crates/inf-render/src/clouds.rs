@@ -79,32 +79,64 @@ pub const DETAIL_TILE_M: f32 = 256.0;
 /// makes procedural clouds read as wallpaper.
 pub const WEATHER_TILE_M: f32 = 40960.0;
 
-/// Per-channel tolerance of the CPU/GPU noise-bake parity gate, in **RGBA8
-/// LSBs**.
+/// Per-channel tolerance of the CPU/GPU noise-bake parity gate, in **steps of
+/// the binary16 bit pattern** — i.e. adjacent representable values.
 ///
-/// Not a fudge factor, a statement about the platform: WGSL explicitly permits an
-/// implementation to contract `a * b + c` into a fused multiply-add, and the
-/// octave sum in [`shape_texel`] is a chain of exactly that shape. One
-/// contraction shifts the result by ~1 ULP of f32, which after the `* 255.0 +
-/// 0.5` quantization is at most one LSB. So the gate asserts **≤ 1 LSB
-/// everywhere** and additionally that the overwhelming majority of texels are
-/// *exactly* equal (see [`CPU_GPU_EXACT_FRACTION`]) — a real port error moves far
-/// more than one texel by far more than one LSB, and would fail both halves.
-pub const CPU_GPU_TEXEL_TOLERANCE: u8 = 1;
+/// **Re-derived for the 16-bit volumes (SKY2).** It used to read "1 LSB of an
+/// 8-bit channel", which is `1/255` of the range; the same number now means
+/// something between 40× and 2 000× tighter, because a binary16's neighbour is
+/// one part in 2¹¹ of its own magnitude and the field's values live between 0.05
+/// and 1. Two things justify keeping the bound at 1 rather than loosening it:
+///
+/// * WGSL permits contracting `a * b + c` into an FMA, and the octave sum in
+///   [`shape_texel`] is a chain of exactly that shape — but one contraction
+///   shifts an f32 by ~1 ULP of **f32**, which is 2¹³ times finer than the f16
+///   grid the value then lands on. So contraction can only change the stored
+///   texel when the exact result sits within an f32 ULP of an f16 rounding
+///   boundary, which is rare rather than routine: the measured exact-match
+///   fraction ROSE from 88.0 % / 91.1 % (8-bit) to the figures on
+///   [`CPU_GPU_EXACT_FRACTION`].
+/// * WGSL does not pin the rounding mode of the f32 → f16 conversion a
+///   `textureStore` performs. Round-to-nearest-even (what [`f32_to_half`] does,
+///   and what every adapter in reach does) and round-toward-zero differ by at
+///   most one step, so an adapter that chose the other one stays inside this
+///   envelope instead of failing a gate about a thing nobody authored.
+///
+/// A real port error moves far more than one step, on far more than one texel,
+/// and would fail this bound and the fraction below together.
+pub const CPU_GPU_TEXEL_TOLERANCE: u16 = 1;
 
-/// Fraction of noise-bake texels that must match the CPU reference **exactly**.
-/// The remainder are allowed [`CPU_GPU_TEXEL_TOLERANCE`].
+/// Fraction of noise-bake **channels** that must match the CPU reference
+/// exactly. The remainder are allowed [`CPU_GPU_TEXEL_TOLERANCE`].
 ///
-/// The load-bearing assertion is the LSB bound above; this one exists to catch
-/// the case where a port is "close enough everywhere" for a *structural* reason
-/// (an off-by-half-texel sampling convention, say) that happens to stay inside one
-/// LSB in a smooth region. Measured on Windows/Vulkan (RTX 4070 Ti): **88.0 %** of
-/// shape texels and **91.1 %** of detail texels are bit-exact, with a worst case
-/// of exactly 1 LSB — the shape volume contracts slightly more because its Perlin octave
-/// sum is a longer multiply-add chain than the detail volume's single Worley
-/// lookup. The floor carries headroom below the measured figure for adapters that
-/// contract more eagerly.
-pub const CPU_GPU_EXACT_FRACTION: f64 = 0.75;
+/// **Re-derived at SKY2, and the derivation is a measurement rather than an
+/// argument.** The 8-bit gate asked for 75 % of whole *texels* and measured
+/// 88.0 % / 91.1 %, because both sides quantized with the same round-half-up.
+/// At 16 bits the store's rounding mode is not specified by WGSL, and this
+/// adapter does not do what [`f32_to_half`] does: measured on Windows/Vulkan
+/// (RTX 4070 Ti), the shape volume reads **50.02 % of channels exact, 49.98 %
+/// exactly one step LOW and 0.00 % high** — the signature of a store that
+/// truncates where the reference rounds to nearest, and not of anything else,
+/// because a computation difference is two-sided. Four independent coin-flips
+/// per texel put whole-texel agreement at 0.5⁴ = 6.25 %, which is what the first
+/// 16-bit run reported and which no honest floor over texels could survive.
+///
+/// The detail volume reads **62.65 %** of channels exact by the same mechanism,
+/// and the arithmetic closes: its alpha channel is pinned to exactly 1.0, which
+/// is representable and therefore always agrees, so `0.25 + 0.75 × 0.5 = 0.625`.
+/// A model that predicts both numbers from one cause is the reason this is
+/// recorded as a rounding mode rather than as a tolerance.
+///
+/// So the gate counts **channels**, and the floor is what a rounding-mode
+/// disagreement can reach and a *computation* disagreement cannot: an
+/// implementation that rounds the last bit differently agrees on at least half,
+/// because it agrees whenever the exact value is already representable or the
+/// discarded bits fall on its side. One that computes a different number does not
+/// approach half at all — and would also have to keep every one of 8.4 million
+/// channels inside a single step to get past
+/// [`CPU_GPU_TEXEL_TOLERANCE`], which is the bound that does the real work now
+/// that a step is 2¹³ times finer in relative terms than an 8-bit LSB was.
+pub const CPU_GPU_EXACT_FRACTION: f64 = 0.40;
 
 /// Relative tolerance of the cloud-**shadow** parity gate (dimensionless).
 ///
@@ -521,8 +553,11 @@ pub const DETAIL_MAX_CELLS: i32 = DETAIL_WORLEY_CELLS * 4;
 ///
 /// **This is the CPU mirror of `cs_cloud_shape` in `shaders/cloud_bake.wgsl`**,
 /// texel for texel. The parity gate reads the baked volume back and compares.
-pub fn shape_texel(seed: u32, x: u32, y: u32, z: u32, res: u32) -> [u8; 4] {
-    shape_value(seed, texel_centre(x, y, z, res)).map(quant)
+///
+/// Four **binary16 bit patterns** since SKY2 (see
+/// [`crate::passes::sky_lut::CLOUD_NOISE_FORMAT`]), not four bytes.
+pub fn shape_texel(seed: u32, x: u32, y: u32, z: u32, res: u32) -> [u16; 4] {
+    shape_value(seed, texel_centre(x, y, z, res)).map(f32_to_half)
 }
 
 /// The **continuous** shape field at normalized position `p` — what
@@ -579,8 +614,8 @@ fn texel_centre(x: u32, y: u32, z: u32, res: u32) -> [f32; 3] {
 /// volume rather than an invisible one.
 ///
 /// CPU mirror of `cs_cloud_detail` in `shaders/cloud_bake.wgsl`.
-pub fn detail_texel(seed: u32, x: u32, y: u32, z: u32, res: u32) -> [u8; 4] {
-    detail_value(seed, texel_centre(x, y, z, res)).map(quant)
+pub fn detail_texel(seed: u32, x: u32, y: u32, z: u32, res: u32) -> [u16; 4] {
+    detail_value(seed, texel_centre(x, y, z, res)).map(f32_to_half)
 }
 
 /// The **continuous** detail field at normalized `p`. See [`shape_value`].
@@ -593,11 +628,83 @@ pub fn detail_value(seed: u32, p: [f32; 3]) -> [f32; 4] {
     ]
 }
 
-/// `[0, 1]` float → RGBA8 LSB, with the same round-half-up the shader's
-/// `textureStore` of a normalized format performs.
-#[inline]
-fn quant(v: f32) -> u8 {
-    (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+/// IEEE-754 binary32 → binary16, **round to nearest, ties to even** — the same
+/// conversion a `textureStore` into an `rgba16float` performs.
+///
+/// Owned rather than a dependency for the reason the inverse already was: this
+/// exists so the CPU reference can produce the exact bit pattern the bake
+/// writes, and `half` is not in the workspace's pinned set. Subnormals and the
+/// non-finite cases are handled because a hostile authored parameter must
+/// produce a defined texel rather than a panic — the cloud field itself only
+/// ever reaches `[0, 1]`.
+pub fn f32_to_half(value: f32) -> u16 {
+    let x = value.to_bits();
+    let sign = ((x >> 16) & 0x8000) as u16;
+    let exp32 = ((x >> 23) & 0xff) as i32;
+    let mant32 = x & 0x007f_ffff;
+
+    if exp32 == 0xff {
+        // Infinity, or a NaN kept quiet.
+        return sign | 0x7c00 | if mant32 != 0 { 0x0200 } else { 0 };
+    }
+    let exp16 = exp32 - 127 + 15;
+    if exp16 >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if exp16 <= 0 {
+        // Subnormal in binary16, or too small to represent at all.
+        if exp16 < -10 {
+            return sign;
+        }
+        let mant = mant32 | 0x0080_0000;
+        let shift = (14 - exp16) as u32;
+        let m = mant >> shift;
+        let rem = mant & ((1u32 << shift) - 1);
+        let halfway = 1u32 << (shift - 1);
+        let m = if rem > halfway || (rem == halfway && (m & 1) == 1) {
+            m + 1
+        } else {
+            m
+        };
+        return sign | m as u16;
+    }
+    let m = mant32 >> 13;
+    let rem = mant32 & 0x1fff;
+    if rem > 0x1000 || (rem == 0x1000 && (m & 1) == 1) {
+        let m = m + 1;
+        if m == 0x400 {
+            // The mantissa carried into the exponent. `exp16 + 1` reaching 0x1f
+            // encodes infinity, which is the correct answer.
+            return sign | (((exp16 + 1) as u16) << 10);
+        }
+        return sign | ((exp16 as u16) << 10) | m as u16;
+    }
+    sign | ((exp16 as u16) << 10) | m as u16
+}
+
+/// IEEE-754 binary16 → binary32.
+///
+/// The other half of the pair, and the one the cloud-**shadow** readback has
+/// used since P17.3 — moved here from `passes::sky_lut` so the format's two
+/// directions live in one place, next to the field they encode.
+pub fn half_to_f32(h: u16) -> f32 {
+    let sign = u32::from((h >> 15) & 1);
+    let exp = u32::from((h >> 10) & 0x1f);
+    let frac = u32::from(h & 0x3ff);
+    let bits = match exp {
+        // Zero / subnormal: scale the fraction by 2^-24 in f32 space.
+        0 => {
+            if frac == 0 {
+                sign << 31
+            } else {
+                let v = frac as f32 * (1.0 / 16_777_216.0);
+                return if sign == 1 { -v } else { v };
+            }
+        }
+        0x1f => (sign << 31) | 0x7f80_0000 | (frac << 13),
+        _ => (sign << 31) | ((exp + 112) << 23) | (frac << 13),
+    };
+    f32::from_bits(bits)
 }
 
 // ── the weather (2D coverage / type) field ───────────────────────────────────
@@ -785,7 +892,8 @@ pub fn sun_energy(sun_t: f32, cos_theta: f32, g: f32, sun_y: f32) -> f32 {
 /// to the *density function*. Re-baking the noise on the CPU would fold the bake's
 /// own (already separately gated) rounding into the answer.
 pub struct CloudVolumes {
-    /// `res³` RGBA8 texels, x-major then y then z (the compute shader's order).
+    /// `res³` **Rgba16Float** texels, x-major then y then z (the compute
+    /// shader's order) — eight bytes each, little-endian halves.
     pub shape: Vec<u8>,
     pub shape_res: u32,
     pub detail: Vec<u8>,
@@ -793,8 +901,8 @@ pub struct CloudVolumes {
 }
 
 impl CloudVolumes {
-    /// Trilinearly filtered sample of a wrapping RGBA8 volume, mirroring a
-    /// `Repeat` + `Linear` sampler. Returns the four channels in `[0, 1]`.
+    /// Trilinearly filtered sample of a wrapping `Rgba16Float` volume, mirroring
+    /// a `Repeat` + `Linear` sampler. Returns the four channels in `[0, 1]`.
     ///
     /// **Precision note:** real hardware trilinear filtering carries only ~8 bits
     /// of sub-texel precision, while this computes in full f32 — which is exactly
@@ -819,9 +927,10 @@ impl CloudVolumes {
             let ix = (base[0] as i32 + o[0]).rem_euclid(res as i32) as usize;
             let iy = (base[1] as i32 + o[1]).rem_euclid(res as i32) as usize;
             let iz = (base[2] as i32 + o[2]).rem_euclid(res as i32) as usize;
-            let idx = ((iz * res as usize + iy) * res as usize + ix) * 4;
-            for ch in 0..4 {
-                out[ch] += w * (data[idx + ch] as f32 / 255.0);
+            let idx = ((iz * res as usize + iy) * res as usize + ix) * 8;
+            for (ch, o) in out.iter_mut().enumerate() {
+                let h = u16::from_le_bytes([data[idx + ch * 2], data[idx + ch * 2 + 1]]);
+                *o += w * half_to_f32(h);
             }
         }
         out
@@ -1098,14 +1207,81 @@ mod tests {
     #[test]
     fn committed_noise_values_are_bit_stable() {
         // Seed 0 (the component default), a 64³ volume, four scattered texels.
-        assert_eq!(shape_texel(0, 0, 0, 0, 64), [178, 119, 83, 184]);
-        assert_eq!(shape_texel(0, 31, 17, 5, 64), [153, 99, 96, 92]);
-        assert_eq!(shape_texel(0, 63, 63, 63, 64), [174, 76, 119, 108]);
-        assert_eq!(detail_texel(0, 9, 21, 30, 32), [113, 150, 144, 255]);
+        //
+        // **RE-PINNED DELIBERATELY at wave SKY2**, and this is the whole point of
+        // the test: the volumes moved from `Rgba8Unorm` to `Rgba16Float`, so a
+        // texel is now four binary16 BIT PATTERNS rather than four bytes. The old
+        // values were `[178, 119, 83, 184]`, `[153, 99, 96, 92]`,
+        // `[174, 76, 119, 108]` and `[113, 150, 144, 255]`. Nothing about the
+        // *field* changed — the loop below asserts the new pins decode to the same
+        // numbers the generator produces — only what a texel can hold.
+        assert_eq!(shape_texel(0, 0, 0, 0, 64), [14745, 14207, 13628, 14794]);
+        assert_eq!(shape_texel(0, 31, 17, 5, 64), [14544, 13884, 13828, 13768]);
+        assert_eq!(shape_texel(0, 63, 63, 63, 64), [14711, 13512, 14202, 14020]);
+        assert_eq!(detail_texel(0, 9, 21, 30, 32), [14106, 14518, 14470, 15360]);
+        // The FIELD under those pins is unmoved, which is the half of the claim
+        // the bit patterns alone cannot make: 14745 decodes to 0.699_7 and the
+        // 8-bit pin it replaces was 178, i.e. 0.698. Same noise, finer grid.
+        for (h, v) in shape_texel(0, 0, 0, 0, 64)
+            .iter()
+            .zip(shape_value(0, [0.5 / 64.0; 3]))
+        {
+            assert!(
+                (half_to_f32(*h) - v).abs() < 5e-4,
+                "the pin and the field disagree: {} vs {v}",
+                half_to_f32(*h)
+            );
+        }
         // The hash itself, at the bottom of everything.
         assert_eq!(cloud_hash(0, 0, 0, 0), 0);
         assert_eq!(cloud_hash(1, 2, 3, 4), 2_928_021_154);
         assert_eq!(cloud_hash(0xffff_ffff, 0, 0, 7), 2_111_138_898);
+    }
+
+    /// **The owned binary16 conversion.** It is what the CPU reference uses to
+    /// produce the bit pattern the bake's `textureStore` writes, so a rounding
+    /// bug here would look exactly like a GPU port error in the parity gate —
+    /// which is the reason it is pinned separately rather than only through that
+    /// gate.
+    #[test]
+    fn the_half_conversion_round_trips_and_rounds_to_nearest_even() {
+        // The exact encodings, hand-checked: sign | exponent | mantissa.
+        assert_eq!(f32_to_half(0.0), 0x0000);
+        assert_eq!(f32_to_half(-0.0), 0x8000);
+        assert_eq!(f32_to_half(1.0), 0x3c00);
+        assert_eq!(f32_to_half(-2.0), 0xc000);
+        assert_eq!(f32_to_half(0.5), 0x3800);
+        // Overflow saturates to infinity rather than wrapping to a small number,
+        // which is what a truncating implementation does.
+        assert_eq!(f32_to_half(1e30), 0x7c00);
+        assert_eq!(f32_to_half(f32::INFINITY), 0x7c00);
+        assert!(half_to_f32(f32_to_half(f32::NAN)).is_nan());
+        // Underflow to a subnormal, then to zero.
+        assert_ne!(f32_to_half(1e-6), 0);
+        assert_eq!(f32_to_half(1e-10), 0);
+
+        // Round to nearest, TIES TO EVEN — the half-way case both directions.
+        // 1 + 2^-11 is exactly between 1.0 (even mantissa) and the next half.
+        let tie_up = 1.0f32 + 2f32.powi(-11);
+        assert_eq!(f32_to_half(tie_up), 0x3c00, "tie did not round to even");
+        // 1 + 3*2^-11 is exactly between the first and second halves above 1;
+        // the second has an even mantissa (2), so it wins.
+        let tie_down = 1.0f32 + 3.0 * 2f32.powi(-11);
+        assert_eq!(f32_to_half(tie_down), 0x3c02, "tie did not round to even");
+
+        // Every value the cloud field can hold round-trips inside half a step.
+        for i in 0..=4096 {
+            let v = i as f32 / 4096.0;
+            let back = half_to_f32(f32_to_half(v));
+            assert!(
+                (back - v).abs() <= v.abs() * 5e-4 + 1e-7,
+                "{v} round-tripped to {back}"
+            );
+        }
+        // ...and the decode is the exact inverse of the encode on the grid.
+        for bits in 0u16..0x7c00 {
+            assert_eq!(f32_to_half(half_to_f32(bits)), bits, "bits {bits:#06x}");
+        }
     }
 
     /// The noise must not depend on how the bake is *scheduled* — the "pool
@@ -1115,13 +1291,13 @@ mod tests {
     #[test]
     fn bake_order_does_not_change_the_volume() {
         let res = 16;
-        let forward: Vec<[u8; 4]> = (0..res * res * res)
+        let forward: Vec<[u16; 4]> = (0..res * res * res)
             .map(|i| {
                 let (x, y, z) = (i % res, (i / res) % res, i / (res * res));
                 shape_texel(99, x, y, z, res)
             })
             .collect();
-        let mut reversed: Vec<[u8; 4]> = (0..res * res * res)
+        let mut reversed: Vec<[u16; 4]> = (0..res * res * res)
             .rev()
             .map(|i| {
                 let (x, y, z) = (i % res, (i / res) % res, i / (res * res));
@@ -1412,19 +1588,25 @@ mod tests {
     fn density_reference_respects_the_slab() {
         let res = 16;
         let dres = 8;
-        let mut shape = Vec::with_capacity((res * res * res * 4) as usize);
+        // Eight bytes a texel: the volumes are `Rgba16Float` since SKY2, and this
+        // buffer stands in for a readback of one.
+        let mut shape = Vec::with_capacity((res * res * res * 8) as usize);
         for z in 0..res {
             for y in 0..res {
                 for x in 0..res {
-                    shape.extend_from_slice(&shape_texel(0, x, y, z, res));
+                    for h in shape_texel(0, x, y, z, res) {
+                        shape.extend_from_slice(&h.to_le_bytes());
+                    }
                 }
             }
         }
-        let mut detail = Vec::with_capacity((dres * dres * dres * 4) as usize);
+        let mut detail = Vec::with_capacity((dres * dres * dres * 8) as usize);
         for z in 0..dres {
             for y in 0..dres {
                 for x in 0..dres {
-                    detail.extend_from_slice(&detail_texel(0, x, y, z, dres));
+                    for h in detail_texel(0, x, y, z, dres) {
+                        detail.extend_from_slice(&h.to_le_bytes());
+                    }
                 }
             }
         }

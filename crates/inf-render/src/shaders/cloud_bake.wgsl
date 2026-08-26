@@ -4,13 +4,16 @@
 // `passes::ShaderKind::CloudBake`); the atmosphere uniform rides at
 // @group(0) @binding(0) so the bake can read the seed out of the cloud block.
 //
-// Both volumes are `rgba8unorm` — 8 bits is plenty for a field that is then
-// remapped and thresholded, and it is the format whose quantization the CPU
-// parity reference mirrors exactly (`clouds::quant`: `v * 255 + 0.5`, which is
-// what a normalized `textureStore` performs).
+// Both volumes are `rgba16float` (wave SKY2). Eight bits was NOT plenty: the
+// density function `remap`s the sampled value twice, and a remap is a division
+// by a small window — the coverage dissolve keeps roughly a tenth of the range,
+// so 256 levels became ~25 distinct densities across a cloud's soft shoulder and
+// terraced it. See `passes::sky_lut::CLOUD_NOISE_FORMAT` for why not
+// `rgba16unorm` (not a core storage format). The CPU parity reference mirrors
+// the conversion exactly with `clouds::f32_to_half`.
 
-@group(0) @binding(1) var cloud_shape_out: texture_storage_3d<rgba8unorm, write>;
-@group(0) @binding(2) var cloud_detail_out: texture_storage_3d<rgba8unorm, write>;
+@group(0) @binding(1) var cloud_shape_out: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(2) var cloud_detail_out: texture_storage_3d<rgba16float, write>;
 
 // Texel CENTRES, so the CPU reference and the shader agree on *where* they are.
 // Sampling corners instead would make the volume non-tileable at the seam, which

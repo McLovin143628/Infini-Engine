@@ -5224,10 +5224,11 @@ fn cloud_bakes_are_deterministic() {
         "the shadow map is uniformly transparent — did the bake dispatch?"
     );
     let q = CloudQuality::High;
+    // Eight bytes a texel: `Rgba16Float` since SKY2 (four binary16 channels).
     let r = q.shape_res() as usize;
-    assert_eq!(s1.len(), r * r * r * 4);
+    assert_eq!(s1.len(), r * r * r * 8);
     let r = q.detail_res() as usize;
-    assert_eq!(d1.len(), r * r * r * 4);
+    assert_eq!(d1.len(), r * r * r * 8);
     let r = q.shadow_res() as usize;
     assert_eq!(h1.len(), r * r);
 }
@@ -5255,23 +5256,39 @@ fn cloud_noise_bake_matches_the_cpu_reference() {
     let q = res.cloud_quality;
     let seed = scene.atmosphere.clouds.seed;
 
+    // Since SKY2 the volumes are `Rgba16Float`, so a texel is four little-endian
+    // binary16s and "one LSB" means one step of the bit pattern — i.e. the
+    // adjacent representable value. Because the halves here are all positive and
+    // finite, the bit patterns are monotone in magnitude and a difference of the
+    // patterns IS the number of representable values between them.
     let compare =
-        |what: &str, data: &[u8], edge: u32, reference: &dyn Fn(u32, u32, u32) -> [u8; 4]| {
-            let mut exact = 0u64;
+        |what: &str, data: &[u8], edge: u32, reference: &dyn Fn(u32, u32, u32) -> [u16; 4]| {
+            let mut exact_ch = 0u64;
+            let mut exact_texel = 0u64;
+            let mut low = 0u64;
+            let mut high = 0u64;
             let mut total = 0u64;
-            let mut worst = 0u8;
+            let mut worst = 0u16;
             let mut worst_at = (0, 0, 0);
             for z in 0..edge {
                 for y in 0..edge {
                     for x in 0..edge {
-                        let i = (((z * edge + y) * edge + x) * 4) as usize;
-                        let got = [data[i], data[i + 1], data[i + 2], data[i + 3]];
+                        let i = (((z * edge + y) * edge + x) * 8) as usize;
+                        let mut got = [0u16; 4];
+                        for (c, g) in got.iter_mut().enumerate() {
+                            *g = u16::from_le_bytes([data[i + c * 2], data[i + c * 2 + 1]]);
+                        }
                         let want = reference(x, y, z);
                         total += 1;
                         if got == want {
-                            exact += 1;
+                            exact_texel += 1;
                         }
                         for c in 0..4 {
+                            match got[c].cmp(&want[c]) {
+                                std::cmp::Ordering::Equal => exact_ch += 1,
+                                std::cmp::Ordering::Less => low += 1,
+                                std::cmp::Ordering::Greater => high += 1,
+                            }
                             let d = got[c].abs_diff(want[c]);
                             if d > worst {
                                 worst = d;
@@ -5281,20 +5298,29 @@ fn cloud_noise_bake_matches_the_cpu_reference() {
                     }
                 }
             }
-            let frac = exact as f64 / total as f64;
+            let channels = total * 4;
+            let per_channel = exact_ch as f64 / channels as f64;
             eprintln!(
-            "{what} parity: {:.4}% exact, worst |d| = {worst} LSB at {worst_at:?} ({total} texels)",
-            frac * 100.0
-        );
-            assert!(
-                worst <= CPU_GPU_TEXEL_TOLERANCE,
-                "{what}: worst |d| = {worst} LSB at {worst_at:?} exceeds the \
-             {CPU_GPU_TEXEL_TOLERANCE}-LSB envelope — that is a port error, not FMA contraction"
+                "{what} parity: {:.4}% of channels exact ({:.4}% of texels), \
+                 {:.2}% low / {:.2}% high, worst |d| = {worst} f16 step(s) at \
+                 {worst_at:?} ({total} texels)",
+                per_channel * 100.0,
+                exact_texel as f64 / total as f64 * 100.0,
+                low as f64 / channels as f64 * 100.0,
+                high as f64 / channels as f64 * 100.0,
             );
             assert!(
-                frac >= CPU_GPU_EXACT_FRACTION,
-                "{what}: only {:.2}% of texels are bit-exact (the envelope requires {:.0}%)",
-                frac * 100.0,
+                worst <= CPU_GPU_TEXEL_TOLERANCE,
+                "{what}: worst |d| = {worst} f16 steps at {worst_at:?} exceeds the \
+             {CPU_GPU_TEXEL_TOLERANCE}-step envelope — that is a port error, not FMA \
+             contraction and not a rounding-mode difference"
+            );
+            assert!(
+                per_channel >= CPU_GPU_EXACT_FRACTION,
+                "{what}: only {:.2}% of channels are bit-exact (the envelope requires \
+                 {:.0}%) — a last-bit rounding-mode difference cannot get below half, \
+                 so this is a computation difference",
+                per_channel * 100.0,
                 CPU_GPU_EXACT_FRACTION * 100.0
             );
         };
@@ -5509,8 +5535,12 @@ fn cloud_quality_switch_rebuilds_the_cloud_binds() {
             (res / 3, res / 2, res / 5),
             (res - 1, res - 1, res - 1),
         ] {
-            let i = (((z * res + y) * res + x) * 4) as usize;
-            let got = [shape[i], shape[i + 1], shape[i + 2], shape[i + 3]];
+            // Eight bytes a texel: `Rgba16Float` since SKY2.
+            let i = (((z * res + y) * res + x) * 8) as usize;
+            let mut got = [0u16; 4];
+            for (c, g) in got.iter_mut().enumerate() {
+                *g = u16::from_le_bytes([shape[i + c * 2], shape[i + c * 2 + 1]]);
+            }
             let want = shape_texel(seed, x, y, z, res);
             for c in 0..4 {
                 assert!(

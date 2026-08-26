@@ -75,7 +75,27 @@ pub const CLOUD_SHADOW_EXTENT_M: f32 = 20_000.0;
 pub const CLOUD_SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// Storage format of both cloud noise volumes.
-pub const CLOUD_NOISE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+///
+/// **`Rgba16Float` since wave SKY2**, and the reason is what happens *after* the
+/// texel is read. The density function does not display the value, it
+/// `remap`s it — twice, against the coverage floor and against the erosion — and
+/// a remap is a division by a small window. An 8-bit channel carries 256 levels
+/// across the whole `[0, 1]` range; the coverage dissolve at a typical setting
+/// keeps a window about a tenth of that wide, so what survives is ~25 distinct
+/// densities, and 25 levels stretched across a cloud's soft shoulder is
+/// *terracing*. Sixteen-bit float carries ~2 048 levels over the same window.
+///
+/// `Rgba16Unorm` would be the tighter fit for a `[0, 1]` field and is **not** a
+/// core WebGPU storage format (it needs `TEXTURE_FORMAT_16BIT_NORM`);
+/// `Rgba16Float` is core, filterable everywhere, and its precision is worst at
+/// the top of the range, which is where a cloud is opaque and nobody can see it.
+///
+/// The cost is exactly a doubling: 16.78 MB for a High-tier 128³ shape volume
+/// against 8.39 MB, and 0.26 MB for the 32³ detail volume against 0.13 MB.
+pub const CLOUD_NOISE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// Bytes one [`CLOUD_NOISE_FORMAT`] texel occupies — four binary16 channels.
+pub const CLOUD_NOISE_TEXEL_BYTES: u32 = 8;
 
 /// Format of the [`crate::bluenoise`] tile the raymarch jitters against.
 ///
@@ -771,17 +791,18 @@ impl AtmosphereResources {
     }
 
     /// Blocking readback of the baked cloud **shape** volume as tightly-packed
-    /// RGBA8 texels in x-major order. The CPU/GPU noise-parity gate compares this
-    /// against [`crate::clouds::shape_texel`].
+    /// `Rgba16Float` texels in x-major order — eight bytes each, four
+    /// little-endian halves. The CPU/GPU noise-parity gate compares this against
+    /// [`crate::clouds::shape_texel`].
     pub fn read_cloud_shape(&self, gpu: &GpuContext) -> Result<Vec<u8>, String> {
         let r = self.cloud_quality.shape_res();
-        read_texture(gpu, &self.shape_tex, (r, r, r), 4)
+        read_texture(gpu, &self.shape_tex, (r, r, r), CLOUD_NOISE_TEXEL_BYTES)
     }
 
     /// Blocking readback of the baked cloud **detail** volume.
     pub fn read_cloud_detail(&self, gpu: &GpuContext) -> Result<Vec<u8>, String> {
         let r = self.cloud_quality.detail_res();
-        read_texture(gpu, &self.detail_tex, (r, r, r), 4)
+        read_texture(gpu, &self.detail_tex, (r, r, r), CLOUD_NOISE_TEXEL_BYTES)
     }
 
     /// Blocking readback of the cloud-shadow map's transmittances, decoded from
@@ -797,28 +818,10 @@ impl AtmosphereResources {
     }
 }
 
-/// IEEE-754 binary16 → f32. Six lines rather than a dependency: this exists only
-/// so the cloud-shadow parity gate can read the map back, and `half` is not
-/// otherwise in the workspace's pinned set.
-fn half_to_f32(h: u16) -> f32 {
-    let sign = ((h >> 15) & 1) as u32;
-    let exp = ((h >> 10) & 0x1f) as u32;
-    let frac = (h & 0x3ff) as u32;
-    let bits = match exp {
-        // Zero / subnormal: scale the fraction by 2^-24 in f32 space.
-        0 => {
-            if frac == 0 {
-                sign << 31
-            } else {
-                return (if sign == 1 { -1.0 } else { 1.0 }) * (frac as f32) * 5.960_464_5e-8;
-            }
-        }
-        // Inf / NaN.
-        0x1f => (sign << 31) | 0x7f80_0000 | (frac << 13),
-        _ => (sign << 31) | ((exp + 112) << 23) | (frac << 13),
-    };
-    f32::from_bits(bits)
-}
+// IEEE-754 binary16 → f32 lives in `crate::clouds` since wave SKY2, beside the
+// f32 → binary16 the 16-bit noise volumes needed. Two directions of one format,
+// in one place.
+use crate::clouds::half_to_f32;
 
 /// 256-byte-row-aligned texture → CPU copy, unpadded on the way out (the same
 /// shape as [`crate::headless::HeadlessTarget::read_rgba`], for a 4×f16 format).
