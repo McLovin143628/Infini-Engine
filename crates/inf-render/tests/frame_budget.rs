@@ -1213,27 +1213,38 @@ fn vis1b_post_cost() {
         best
     };
 
-    match timed(RenderSettings::default()) {
-        None => eprintln!(
+    // **A CONTROL PER ROW, TAKEN NEXT TO IT** (VIS1b audit).
+    //
+    // One control at the top of the list is a colder machine's number by the time
+    // the sixth configuration runs. Measured: over one pass through the list the
+    // `tonemap` row — which is a control for every configuration except the lens
+    // trio — read 0.0154, 0.0225, 0.0287, 0.0369, 0.0389, 0.0461 without anything
+    // touching that pass, a **3×** monotone drift larger than every cost the
+    // table was reporting, and "bloom + Karis" priced Karis at +0.045 ms over
+    // bloom where the island's own clock puts it at zero. That is the GPU's boost
+    // clock falling as the test heats it, and it is the same class of mistake the
+    // wall-clock version made: a difference taken across a drifting baseline.
+    //
+    // So each row carries its own control, measured immediately before it. The
+    // pair is two adjacent measurements at one thermal point, which is what makes
+    // subtracting them mean something.
+    if timed(RenderSettings::default()).is_none() {
+        eprintln!(
             "vis1b_post_cost: {} reports no timestamp queries, so the costs are \
              NOT measured here",
             info.name
-        ),
-        Some(base) => {
-            let show = |label: &str, r: &[(String, f64)]| {
-                let joined: Vec<String> = r
-                    .iter()
-                    .zip(base.iter())
-                    .map(|((n, ms), (_, b))| format!("{n} {ms:.4} (+{:.4})", ms - b))
-                    .collect();
-                eprintln!("vis1b {label}: {}", joined.join(", "));
+        );
+    } else {
+        for (label, settings) in rows {
+            let (Some(base), Some(r)) = (timed(RenderSettings::default()), timed(settings)) else {
+                continue;
             };
-            show("OFF (the control)", &base);
-            for (label, settings) in rows {
-                if let Some(r) = timed(settings) {
-                    show(label, &r);
-                }
-            }
+            let joined: Vec<String> = r
+                .iter()
+                .zip(base.iter())
+                .map(|((n, ms), (_, b))| format!("{n} {ms:.4} (control {b:.4}, {:+.4})", ms - b))
+                .collect();
+            eprintln!("vis1b {label}: {}", joined.join(", "));
         }
     }
 

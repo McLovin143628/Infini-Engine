@@ -422,6 +422,15 @@ fn the_eye_adapts_on_a_level_whose_clock_never_runs() {
 ///
 /// The same ordering carries the clause-1 decision: the bloom prefilter and the
 /// tonemap both read the exposure this node writes, so it has to precede both.
+///
+/// **And, while a renderer is standing here, the timestamp budget.**
+/// `timing::FRAME_MARKS_NEEDED` is the graph's node count written down by hand,
+/// and it had drifted three short in both directions across two waves — 29 and
+/// then 31 against a graph of 32 and then 34. `mark` drops silently past
+/// `MAX_FRAME_MARKS`, so the constant that exists to make that impossible was
+/// itself the thing nobody was checking. This is the comparison that cannot go
+/// stale: the graph's own length, plus the five out-of-graph segments and the
+/// origin mark, against the query set's size.
 #[test]
 fn the_meter_reads_the_frame_before_the_lens_writes_to_it() {
     let Some(gpu) = gpu_or_skip() else { return };
@@ -448,6 +457,25 @@ fn the_meter_reads_the_frame_before_the_lens_writes_to_it() {
     assert!(
         at("exposure") < at("flare"),
         "the eye would be metering its own glare"
+    );
+
+    // Five out-of-graph segments (`vt-stream`, `vsm-sync`, `vsm-raster`,
+    // `vt-feedback`, `vsm-mark`) plus the frame's origin mark.
+    const OUT_OF_GRAPH: usize = 5;
+    const ORIGIN: usize = 1;
+    let needed = names.len() + OUT_OF_GRAPH + ORIGIN;
+    eprintln!(
+        "frame marks: {} graph nodes + {OUT_OF_GRAPH} + {ORIGIN} = {needed} of \
+         {} query slots",
+        names.len(),
+        inf_render::MAX_FRAME_MARKS
+    );
+    assert!(
+        needed <= inf_render::MAX_FRAME_MARKS as usize,
+        "the frame writes {needed} timestamps into {} slots — `FrameTimer::mark` \
+         drops the tail silently, so the per-pass report would stop naming the \
+         last passes rather than fail",
+        inf_render::MAX_FRAME_MARKS
     );
 }
 

@@ -2530,8 +2530,8 @@ fn the_golden_set_is_pinned_and_additive() {
     assert_eq!(
         digest, GOLDEN_SET_DIGEST,
         "the golden set's CONTENT moved. A golden was re-blessed, deleted (the \
-         harness regenerates any golden it cannot read, so the count above stays \
-         56), or replaced. Adding one is allowed and means moving both constants \
+         harness regenerates any golden it cannot read, so the count above still \
+         matches), or replaced. Adding one is allowed and means moving both constants \
          in the same commit. Changing an existing frame is allowed ONLY in a \
          commit whose stated purpose is to change the look, with the difference \
          described — never as a side effect of something else.\n{manifest}"

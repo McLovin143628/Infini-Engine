@@ -296,13 +296,13 @@ impl RecordClock {
 
 /// How many timestamps one frame may write.
 ///
-/// The graph is 31 nodes and the renderer brackets five more segments around it,
-/// plus the frame's own origin mark: 37. Sixty-four leaves room for the passes a
+/// The graph is 34 nodes and the renderer brackets five more segments around it,
+/// plus the frame's own origin mark: 40. Sixty-four leaves room for the passes a
 /// later phase adds without anyone having to remember this constant exists, and
 /// costs 512 bytes of query-set storage.
 pub const MAX_FRAME_MARKS: u32 = 64;
 
-/// The frame writes 31 graph nodes + 5 out-of-graph segments + the origin mark.
+/// The frame writes 34 graph nodes + 5 out-of-graph segments + the origin mark.
 ///
 /// A **compile-time** assertion rather than a test, because both sides are
 /// constants and clippy is right that a runtime `assert!` over two `const`s is
@@ -312,10 +312,21 @@ pub const MAX_FRAME_MARKS: u32 = 64;
 /// — that the report names every node the renderer actually built — is
 /// `gpu_timing::the_report_names_every_pass_and_the_segments_tile_the_frame`,
 /// which reads `EngineRenderer::pass_names` and cannot be folded away.
-/// 31 graph nodes (wave VIS1b added `exposure` and `flare`), 5 out-of-graph
+///
+/// 34 graph nodes (wave VIS1b added `exposure` and `flare`), 5 out-of-graph
 /// segments (island wave I4b split `vsm-sync` out of `vsm-raster`), and the
 /// frame's origin mark.
-const FRAME_MARKS_NEEDED: u32 = 37;
+///
+/// **The node count is restated here rather than derived, and it had drifted**
+/// (VIS1b audit). It read 29 + 5 + 1 = 35 before this wave and 31 + 5 + 1 = 37
+/// after it, while `EngineRenderer::new` has been calling `graph.add` 32 times
+/// and now 34 — three short in both, because a number written down by hand goes
+/// stale the way every other one does. Nothing was lost: `mark` only drops past
+/// **64**, so the tail has always fitted. The number is corrected and the second
+/// arm of `exposure::the_meter_reads_the_frame_before_the_lens_writes_to_it`
+/// now compares this budget against `pass_names().len()` at runtime, which is
+/// the only comparison that cannot drift.
+const FRAME_MARKS_NEEDED: u32 = 40;
 const _: () = assert!(MAX_FRAME_MARKS >= FRAME_MARKS_NEEDED);
 
 /// A per-frame GPU stopwatch over one `wgpu::QuerySet`.
