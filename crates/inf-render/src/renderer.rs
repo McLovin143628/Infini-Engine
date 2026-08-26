@@ -558,6 +558,20 @@ pub struct EngineRenderer {
     frame_index: u64,
     /// Jittered view-proj we rendered last frame (TAA reprojection source).
     prev_view_proj: Option<[f32; 16]>,
+    /// **The floating origin [`Self::prev_view_proj`] was built against** (wave
+    /// VIS1a audit).
+    ///
+    /// That matrix is **render-local**: it maps `world − origin` to clip. When
+    /// the origin rebases — a 10 m snap, which on a level the size of the island
+    /// happens while the camera simply drives — the previous frame's matrix
+    /// describes a different local frame from this frame's points, and
+    /// reprojecting through it displaces every sample by the rebase delta. TAA
+    /// and the cloud reprojection have always had that one-frame smear and blend
+    /// it away over the next few frames; SSR's fetch is a *hard* colour read, so
+    /// it would show a whole screen of reflections taken from ten metres away.
+    /// [`FrameData::scene_history_valid`] therefore also requires the origin to
+    /// have held.
+    prev_origin: Option<glam::DVec3>,
     /// Shared shadow GPU resources (created once, independent of viewport size;
     /// the shadow graph node writes them, the lit passes sample them).
     shadow: ShadowResources,
@@ -891,6 +905,7 @@ impl EngineRenderer {
             wireframe_warned: false,
             frame_index: 0,
             prev_view_proj: None,
+            prev_origin: None,
             shadow: ShadowResources::new(gpu),
             gi: GiResources::new(gpu, settings.gi.quality, 1),
             next_gi_generation: 2,
@@ -1988,7 +2003,15 @@ impl EngineRenderer {
         // — but deliberately without either knob's flag, because SSR is a third
         // consumer of the same history and neither TAA nor the cloud pass is its
         // prerequisite.
-        let scene_history_valid = !resized && self.prev_view_proj.is_some();
+        //
+        // **And on the origin having held** (wave VIS1a audit) — see
+        // [`Self::prev_origin`] and [`scene_history_is_valid`].
+        let scene_history_valid = scene_history_is_valid(
+            resized,
+            self.prev_view_proj.is_some(),
+            self.prev_origin,
+            view.origin.origin(),
+        );
         // The cloud's own history validity. Same three conditions, its own knob:
         // a resize reallocated the ping-pong, and the first frame has no previous
         // view-projection to reproject through.
@@ -2270,8 +2293,10 @@ impl EngineRenderer {
         gpu.queue.submit([encoder.finish()]);
         rec.mark(crate::timing::record::SUBMIT);
 
-        // Next frame reprojects against the matrix we actually rendered with.
+        // Next frame reprojects against the matrix we actually rendered with —
+        // and against the origin that matrix is expressed in (wave VIS1a audit).
         self.prev_view_proj = Some(jvp.to_cols_array());
+        self.prev_origin = Some(view.origin.origin());
         self.frame_index = self.frame_index.wrapping_add(1);
         // P26.3 engagement: counted where the frame actually went out, not where
         // a pool was handed over, so it says "a frame was drawn able to sample
@@ -2288,5 +2313,77 @@ impl EngineRenderer {
         if let Some(p) = rec.finish() {
             self.record_profile = p;
         }
+    }
+}
+
+/// **When the previous frame's resolved colour may be reprojected into** (wave
+/// VIS1a, tightened by its audit).
+///
+/// Written as a free function of its four inputs so the rule can be falsified
+/// without a GPU: `EngineRenderer::render` has one caller's worth of state and no
+/// way to say "and now the origin rebased" in a test.
+///
+/// Three conditions, and the third is the one the audit added:
+///
+/// * **`resized`** — `FrameTargets::create` reallocated `scene_hdr`, so it is a
+///   zero-initialized allocation and reflecting it is reflecting black;
+/// * **a previous matrix exists** — frame 0 has nothing to reproject through;
+/// * **the floating origin has not moved.** `prev_view_proj` maps `world −
+///   origin` to clip, so it is only a description of *this* frame's points while
+///   `origin` is the one it was built with. A 10 m rebase between two frames
+///   makes it a description of somewhere else, and SSR's fetch is a hard colour
+///   read rather than a blend — the whole screen would reflect what was ten
+///   metres away. TAA and `cloud_temporal` carry the same one-frame smear and
+///   dissolve it over the following frames; that is theirs to fix, not this
+///   function's to hide.
+pub(crate) fn scene_history_is_valid(
+    resized: bool,
+    has_prev_view_proj: bool,
+    prev_origin: Option<glam::DVec3>,
+    origin: glam::DVec3,
+) -> bool {
+    !resized && has_prev_view_proj && prev_origin == Some(origin)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A REBASED ORIGIN INVALIDATES THE COLOUR HISTORY** (wave VIS1a audit).
+    ///
+    /// Mutation-verified: dropping the `prev_origin == Some(origin)` clause makes
+    /// the third case below pass, which is the frame on which every SSR fetch on
+    /// screen would be displaced by the rebase delta.
+    #[test]
+    fn the_colour_history_is_invalid_across_a_resize_a_first_frame_and_a_rebase() {
+        let o = glam::DVec3::new(10.0, 0.0, -20.0);
+        // The ordinary frame: same origin, a matrix, no resize.
+        assert!(scene_history_is_valid(false, true, Some(o), o));
+        // Frame 0 — nothing to reproject through.
+        assert!(!scene_history_is_valid(false, false, None, o));
+        // A resize reallocated the texture.
+        assert!(!scene_history_is_valid(true, true, Some(o), o));
+        // **The rebase.** One 10 m snap on either axis is a different local
+        // frame, and the previous matrix describes that one.
+        for moved in [
+            glam::DVec3::new(20.0, 0.0, -20.0),
+            glam::DVec3::new(10.0, 10.0, -20.0),
+            glam::DVec3::new(10.0, 0.0, -10.0),
+        ] {
+            assert!(
+                !scene_history_is_valid(false, true, Some(o), moved),
+                "the origin rebased from {o} to {moved} and the history was \
+                 still called valid — every reprojected SSR fetch on the frame \
+                 would be displaced by the delta"
+            );
+        }
+        // …and it recovers on the very next frame, once one has been rendered in
+        // the new frame: a rebase costs one frame of reflections, not a session.
+        assert!(scene_history_is_valid(
+            false,
+            true,
+            Some(glam::DVec3::new(20.0, 0.0, -20.0)),
+            glam::DVec3::new(20.0, 0.0, -20.0)
+        ));
     }
 }
