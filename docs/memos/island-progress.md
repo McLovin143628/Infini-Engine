@@ -6922,7 +6922,7 @@ channel is a third return value of an analytic function, not a texture and not a
 ## The SKY2 audit
 
 `b08aa9d8..600c46f5` read commit by commit on the same RTX 4070 Ti, plus the before/after renders
-looked at rather than described. **Three audit commits**, `(SKY2) audit:`-tagged. **No HIGH.** Thirteen
+looked at rather than described. **Four audit commits**, `(SKY2) audit:`-tagged. **No HIGH.** Thirteen
 MEDs fixed, one MED measured and carried because it cannot honestly be armed, nine LOWs carried by
 name. Nothing pushed.
 
@@ -7105,6 +7105,25 @@ reconstruction that causes it. `passes::taa` does not document its own copy of t
 so the wave was no worse than its precedent — but a bound that lives only in a progress memo is a
 bound the next reader of the pass will not find.
 
+### The mutation table
+
+Every arm this audit landed or leaned on was measured against a mutation, because a bound nobody has
+falsified is a decoration.
+
+| mutation | what dies | measured |
+|---|---|---|
+| `jitter_phase` returns a constant | `the_jitter_phase_follows_the_level_clock_and_nothing_else` | `assert_ne!` at the 60 Hz step, and again at 19 h / 24 h / the half-second offset |
+| **freeze the rotation** (`CLOUD_JITTER_GOLDEN = 0`, per-pixel tile intact) | `the_cloud_temporal_pass_accumulates_and_stays_a_function_of_the_clock` | raw frame-to-frame flicker collapses **0.002 125 → 0.000 026** (81×), and the arm fails its damping bound at 0.000 018 against 0.000 026 × 0.6 |
+| `single = 1.0` (powder off) | *nothing* — which is the finding | ≤14/255 at noon, ≤44/255 at dusk, ≤1 % on every aggregate over sixteen renders |
+| `CLOUD_BASE_LIFT = 0` | `the_strong_cell_is_v1_through_the_base_lift`'s second half | the `moved > 500` guard, which reads 978 of 1001 today |
+| either taper endpoint moved | the same arm's first half | a bit-exact comparison against a transcribed v1 |
+
+The second row is the one worth keeping: the raw march's flicker between consecutive jitter offsets
+is what the whole temporal design rests on, and it is 81× smaller with the rotation frozen. The arm's
+own `flicker_off > 1e-5` guard — written by the wave against exactly this — reads 0.000 026 under the
+mutation, so it survives by a factor of 2.6 and the damping bound is what catches it. Both are doing
+work.
+
 ### The eleven carried items, one verdict each
 
 **Resolved by this audit:** 8 (`sky_stack_cost_per_tier`'s doc — corrected, and the assertion
@@ -7153,5 +7172,5 @@ by the audit and `git status` clean over `tests/goldens/` after both runs. Clipp
 `-D warnings`. Rustdoc **404 − 30 summaries = 374 over 30 crates** after `cargo clean --doc`
 (ceiling 450) — the audit adds zero, and the figure matches the wave's to the digit. fmt clean.
 Schema unmoved at scene **v25** / payload **v11**; no `Cargo.toml`, no file under `editor/studio` and
-no serialization file touched anywhere in `b08aa9d8..HEAD`. **Three commits**, `(SKY2) audit:`-tagged,
+no serialization file touched anywhere in `b08aa9d8..HEAD`. **Four commits**, `(SKY2) audit:`-tagged,
 none pushed.

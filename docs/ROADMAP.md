@@ -26284,7 +26284,11 @@ carried list, is in `docs/memos/island-progress.md` under *Wave SKY2*.
 
 **THE SKY2 AUDIT — no HIGH, thirteen MEDs fixed, one measured and carried.** `b08aa9d8..600c46f5` read
 commit by commit on the same hardware, with the before/after renders looked at rather than described.
-Three commits, `(SKY2) audit:`-tagged. **The two fixes with teeth.** (1) *The powder gate was a step at
+Four commits, `(SKY2) audit:`-tagged. **Mutation-measured, all of it** — the sharpest result is that
+freezing the jitter ROTATION (`CLOUD_JITTER_GOLDEN = 0`, per-pixel tile intact) collapses the raw
+march's frame-to-frame flicker **0.002 125 → 0.000 026**, 81×, and kills
+`the_cloud_temporal_pass_accumulates_and_stays_a_function_of_the_clock` on its damping bound; while
+forcing `single = 1.0` (powder off) kills **nothing**, which is the finding below. **The two fixes with teeth.** (1) *The powder gate was a step at
 the exact moment of sunrise and sunset* — a fully-lit thin edge seen with the sun behind the eye fell
 to **0.270** of its below-horizon value across a threshold the sun crosses in fourteen seconds. Now
 ramped over `sin 1.15°`, written as three branches so that above the band the expression is
