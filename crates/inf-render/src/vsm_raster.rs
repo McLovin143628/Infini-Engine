@@ -72,7 +72,7 @@ use crate::vsm::{
 /// "everything moved" on an upgrade, silently and only in the frame time. Nothing
 /// here is ever serialized, so this is a *runtime* identity and not a format.
 #[inline]
-fn mix64(v: u64) -> u64 {
+pub(crate) fn mix64(v: u64) -> u64 {
     let mut z = v.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -81,23 +81,27 @@ fn mix64(v: u64) -> u64 {
 
 /// An order-**dependent** accumulator, for the fields of one record.
 #[derive(Debug, Clone, Copy)]
-struct Fold(u64);
+pub(crate) struct Fold(u64);
 
 impl Fold {
     #[inline]
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         Self(mix64(seed))
     }
     #[inline]
-    fn u64(self, v: u64) -> Self {
+    pub(crate) fn u64(self, v: u64) -> Self {
         Self(mix64(self.0 ^ v))
     }
     #[inline]
-    fn f32s(self, v: &[f32]) -> Self {
+    pub(crate) fn i64(self, v: i64) -> Self {
+        self.u64(v as u64)
+    }
+    #[inline]
+    pub(crate) fn f32s(self, v: &[f32]) -> Self {
         v.iter().fold(self, |a, &f| a.u64(u64::from(f.to_bits())))
     }
     #[inline]
-    fn done(self) -> u64 {
+    pub(crate) fn done(self) -> u64 {
         // Never 0: a zero key would be indistinguishable from the empty fold, and
         // the empty fold is a real answer (a page with no caster in it).
         self.0 | 1
@@ -673,38 +677,43 @@ pub struct VsmRaster {
     /// finer to key it on.
     skinned_version: Option<u64>,
 
-    /// **The page cache** (P27.3), indexed by atlas slot: what that slot's texels
-    /// currently hold, as `(light, page, content stamp, geometry stamp)`.
+    /// **The page cache**, indexed by atlas slot: what that slot's texels
+    /// currently hold, as `(what it depicts, content stamp, geometry stamp)`.
     ///
-    /// The fourth member is a **diagnostic and never a key** (island wave I7b):
-    /// the hit test is the first three, and `geo_key` is carried only so a miss
-    /// can say *why* — see [`VsmRasterStats::dirty_geometry`].
+    /// The third member is a **diagnostic and never a key** (island wave I7b):
+    /// the hit test is the first two, and `geo_key` is carried only so a miss can
+    /// say *why* — see [`VsmRasterStats::dirty_geometry`].
     ///
-    /// All three, and the reason is **not** the one the first write-up gave
-    /// (P27.3 audit). That reason was "a slot that is evicted, filled by another
-    /// page and then re-admitted to the first one would otherwise read as a hit
-    /// while holding the *second* page's depth", and it is backwards: the stamp's
-    /// geometric half is the page's own **matrix**, i.e. its world footprint, so
-    /// two pages that share a stamp share the depth they want and a hit under a
-    /// stamp-only key is a *correct* hit. Dropping `page`, dropping `light`, and
-    /// dropping `level` + `light` from the geometric fold each survive the whole
-    /// tree.
+    /// # THE KEY NAMES A WORLD CELL, NOT A GRID LABEL (island wave VSM2)
     ///
-    /// What the two label members actually do is refuse a correct hit. When a
-    /// clipmap level's grid shifts, the world cell that was page `(x, y)` becomes
-    /// page `(x − 1, y)` with a **bit-identical** matrix, so the label changes
-    /// while the content does not — measured, with a count, by
-    /// `a_clipmap_grid_shift_re_labels_a_page_and_the_cache_key_pays_for_it`. They
-    /// cost a re-raster of depth the atlas already holds, which is the *"there is
-    /// no clipmap scroll"* remainder wearing the cache key, and they are kept as
-    /// cheap defence in depth on the `is_camera_cut` precedent.
+    /// P27.3 shipped `(light, page, stamp)`, and the P27.3 audit corrected the
+    /// reason it gave for the label members: they cannot make a *wrong* hit
+    /// right — the stamp's geometric half is the page's own matrix, i.e. its world
+    /// footprint — what they do is refuse a **correct** one. When a clipmap
+    /// level's grid shifts, the world cell that was page `(x, y)` becomes page
+    /// `(x − 1, y)`, so a label-keyed slot loses a page it is already holding.
+    /// That was the *"there is no clipmap scroll"* remainder wearing the cache
+    /// key, and wave I7b measured its price at **532 "moved" pages a frame** on
+    /// the lit island.
     ///
-    /// That arm carries the condition under which this stops being a ruling: every
-    /// matrix collision it finds is inside **one light and one level**. A stamp
-    /// shared across two lights or two levels would make the fold's `light` and
-    /// `level` terms inert and a stamp-only key unsound, and on that day the arm
-    /// fails and this paragraph is rewritten rather than the members removed.
-    cache: Vec<Option<(u32, VsmPage, u64, u64)>>,
+    /// [`PageIdent`] is what the slot holds *about the world*, so a scroll —
+    /// which is now a re-seat in `inf_vsm`, not a re-label — moves the label and
+    /// leaves the identity alone. What replaces the matrix bits in the geometric
+    /// stamp is `ClipmapLayout::content_key` folded with the cell: the two
+    /// together name the depth a page wants, and neither moves because the camera
+    /// took a step.
+    ///
+    /// **And that is a slightly weaker statement than "the same matrix", stated
+    /// rather than glossed.** The matrix a re-labelled cell gets is the *same
+    /// affine map recomputed through a different route* — level 0's projection is
+    /// rebuilt about a centre that moved a page, and the page's own sub-rectangle
+    /// moves back by exactly one — so it agrees to within f32 rounding and not
+    /// bit for bit. Measured over a 270 m walk of the shipped 8 × 64² ladder in
+    /// `a_world_cell_keeps_its_page_matrix_to_within_a_fraction_of_a_shadow_texel`:
+    /// worst **2.4e-4 of a page's NDC at level 0**, which is 0.12 mm against a
+    /// 7.8 mm shadow texel, and smaller at every coarser level. The cached texels
+    /// are a page of depth drawn 0.12 mm from where this frame would draw it.
+    cache: Vec<Option<(PageIdent, u64, u64)>>,
     /// Last frame's view, for the [`is_camera_cut`] trigger.
     ///
     /// [`is_camera_cut`]: crate::passes::vgeom::is_camera_cut
@@ -1554,7 +1563,7 @@ impl VsmRaster {
 
         // ── 5. the cache now holds what the pass just wrote.
         for p in pages.iter() {
-            self.cache[p.slot as usize] = Some((p.light, p.page, p.key, p.geo_key));
+            self.cache[p.slot as usize] = Some((p.ident, p.key, p.geo_key));
         }
 
         self.last_pages = pages
@@ -1705,10 +1714,8 @@ impl VsmRaster {
             let Some((x, y)) = geometry.slot_origin(slot) else {
                 continue;
             };
-            let offset = geom
-                .layouts
-                .get(light.index())
-                .map_or([0.0, 0.0], |l| l.offset(page.level));
+            let layout = geom.layouts.get(light.index());
+            let offset = layout.map_or([0.0, 0.0], |l| l.offset(page.level));
             let view_proj = vsm_page_matrix(
                 Mat4::from_cols_array(&proj.view_proj),
                 desc.kind,
@@ -1719,27 +1726,59 @@ impl VsmRaster {
                 page.y,
                 offset,
             );
+            // **What this page depicts** (island wave VSM2). A clipmap's page grid
+            // is a window on a fixed world lattice, so the cell — and not the
+            // label — is what a slot's texels are about; a spot's and a cube
+            // face's levels are nested in the light's own frustum and their label
+            // *is* their footprint.
+            let clip = matches!(desc.kind, inf_vsm::VsmTreeKind::Clipmap);
+            let origin = layout
+                .filter(|_| clip)
+                .map_or((0, 0), |l| desc.clip_origin(&l.clip_origins, page.level));
+            let ident = PageIdent {
+                light: light.0,
+                face: page.face,
+                level: page.level,
+                cell: (origin.0 + i64::from(page.x), origin.1 + i64::from(page.y)),
+            };
             out.push(PageDraw {
-                // **The geometric half of the content stamp is the page's own
-                // matrix**, folded bit for bit. It is not a proxy for the things
-                // that move a page's content — it *is* them: the light's direction
-                // (quantized), the level's snapped centre, that level's offset, the
-                // floating origin, the page's sub-rectangle and the settings that
-                // size the box are all inputs to it and nothing else is. So a
-                // rebase moves it, a sun crossing its quantum moves it, and a
-                // camera crossing a level's page stride moves *that* level's and
-                // not the others'.
-                geo_key: Fold::new(u64::from(page.face))
-                    .u64(u64::from(page.level))
-                    .u64(u64::from(light.0))
-                    .f32s(&view_proj.to_cols_array())
-                    .0,
+                // **The geometric half of the content stamp.**
+                //
+                // For a **clipmap** it is the page's world footprint plus the
+                // light's own box: `ClipmapLayout::content_key` folds the
+                // quantized sun direction, the along-light snap, the extent, the
+                // grid and the level count — every input to the stored depth
+                // except the lateral snap and the render origin, which are the two
+                // that move while the world does not. So a sun crossing its
+                // quantum moves it, a settings change moves it, and a camera step
+                // does not.
+                //
+                // For a **perspective** light it is the page's own matrix, folded
+                // bit for bit, exactly as P27.3 shipped: that matrix moves only
+                // when the light does, and when it does every one of its pages is
+                // genuinely somewhere new.
+                geo_key: if clip {
+                    Fold::new(u64::from(page.face))
+                        .u64(u64::from(page.level))
+                        .u64(u64::from(light.0))
+                        .i64(ident.cell.0)
+                        .i64(ident.cell.1)
+                        .u64(layout.map_or(0, |l| l.content_key))
+                        .0
+                } else {
+                    Fold::new(u64::from(page.face))
+                        .u64(u64::from(page.level))
+                        .u64(u64::from(light.0))
+                        .f32s(&view_proj.to_cols_array())
+                        .0
+                },
                 key: 0,
                 view_proj,
                 rect: (x, y, geometry.stored_page_size),
                 slot,
                 light: light.0,
                 page,
+                ident,
                 casters: 0,
                 caster_fold: 0,
                 group_mask: [0; VSM_GROUP_MASK_WORDS],
@@ -2192,6 +2231,23 @@ pub struct PageGeometry<'a> {
     pub layouts: &'a [ClipmapLayout],
 }
 
+/// **What an atlas slot's texels depict**, independent of the grid label the page
+/// happens to wear this frame (island wave VSM2).
+///
+/// For a **clipmap** the cell is the page's index on that level's fixed world
+/// lattice — `clip_origins[level] + (x, y)` — so a window that slides changes the
+/// label and not this. For a **spot or a cube face** there is no window: the
+/// levels are nested inside the light's own frustum, `clip_origins` is meaningless
+/// there ([`inf_vsm::VsmLightDesc::clip_origin`] says so), and the cell is the
+/// label itself, which is exactly the P27.3 behaviour those lights keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PageIdent {
+    light: u32,
+    face: u32,
+    level: u32,
+    cell: (i64, i64),
+}
+
 /// One page's raster state.
 struct PageDraw {
     view_proj: Mat4,
@@ -2200,6 +2256,8 @@ struct PageDraw {
     slot: u32,
     light: u32,
     page: VsmPage,
+    /// What this page depicts — the cache's key half. See [`PageIdent`].
+    ident: PageIdent,
     /// The geometric half of the content stamp — see [`VsmRaster::collect_pages`].
     geo_key: u64,
     /// The commutative fold of every caster whose light-space bounds touch this
@@ -2250,7 +2308,7 @@ struct PageDraw {
 /// [`VsmRasterStats::dirty_slot`] / `dirty_geometry` / `dirty_casters` counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DirtyReason {
-    /// The slot changed occupant: its texels describe another `(light, page)`.
+    /// The slot changed occupant: its texels describe another world cell.
     Slot,
     /// The page's own matrix moved — a clipmap re-centre, an origin rebase.
     Geometry,
@@ -2272,15 +2330,21 @@ enum DirtyReason {
 /// every branch of it.
 ///
 /// The order of the tests is load-bearing: `key` folds `geo_key` *and* the caster
-/// fold *and* the caster count, so "same label, same `geo_key`, different `key`"
+/// fold *and* the caster count, so "same cell, same `geo_key`, different `key`"
 /// is exactly and only "the casters under an unmoved page changed".
-fn classify_page(slot: Option<(u32, VsmPage, u64, u64)>, p: &PageDraw) -> Option<DirtyReason> {
+///
+/// **The identity is a world cell since island wave VSM2**, so a clipmap scroll
+/// — which re-seats the slot rather than re-labelling it — leaves this function
+/// looking at the same page it looked at last frame, and the `Slot` branch counts
+/// only real residency churn.
+fn classify_page(slot: Option<(PageIdent, u64, u64)>, p: &PageDraw) -> Option<DirtyReason> {
     match slot {
-        Some((l, pg, k, _)) if l == p.light && pg == p.page && k == p.key => None,
-        // The slot still holds this page's label, so the stamp moved under it:
-        // either the page is looking somewhere new (its own matrix) or something
+        Some((id, k, _)) if id == p.ident && k == p.key => None,
+        // The slot still holds this page's world cell, so the stamp moved under
+        // it: either the page's box is looking somewhere new (the sun crossed a
+        // quantum, the along-light snap slid, the settings moved) or something
         // under it did (the caster fold).
-        Some((l, pg, _, g)) if l == p.light && pg == p.page => Some(if g == p.geo_key {
+        Some((id, _, g)) if id == p.ident => Some(if g == p.geo_key {
             DirtyReason::Casters
         } else {
             DirtyReason::Geometry
@@ -3253,53 +3317,95 @@ mod tests {
     /// [`classify_page`] is the shipped classifier — `record`'s own `retain`
     /// calls it — so this drives the world and not a restatement of it. Four
     /// cache states against one page, and the fourth is the one the routing hung
-    /// on: same slot, same label, **same `geo_key`**, a different whole `key`,
+    /// on: same slot, same cell, **same `geo_key`**, a different whole `key`,
     /// which can only mean the casters under an unmoved page moved.
+    ///
+    /// **Island wave VSM2 added the fifth**, and it is the one the whole wave
+    /// rests on: a slot whose page wears a **different label for the same world
+    /// cell** — what a clipmap scroll produces — is a HIT. Under P27.3's key that
+    /// state was `DirtyReason::Slot` and it was 532 pages a frame.
     #[test]
     fn the_dirty_split_names_all_three_reasons_and_tiles_the_dirty_set() {
         let page = VsmPage::flat(2, 3, 4);
+        let ident = PageIdent {
+            light: 1,
+            face: 0,
+            level: 2,
+            cell: (-9_001, 4_002),
+        };
         let p = PageDraw {
             view_proj: Mat4::IDENTITY,
             rect: (0, 0, 128),
             slot: 7,
             light: 1,
             page,
+            ident,
             geo_key: 0x6E0_6E0,
             caster_fold: 0x5151,
             casters: 2,
             group_mask: [0; VSM_GROUP_MASK_WORDS],
             key: 0xC0FFEE,
         };
+        let elsewhere = PageIdent {
+            cell: (ident.cell.0 + 1, ident.cell.1),
+            ..ident
+        };
 
-        // 1. the slot holds exactly this page's label and this content: a hit.
+        // 1. the slot holds exactly this page's cell and this content: a hit.
         assert_eq!(
-            classify_page(Some((p.light, p.page, p.key, p.geo_key)), &p),
+            classify_page(Some((ident, p.key, p.geo_key)), &p),
             None,
             "an unchanged page was re-rastered"
+        );
+        // 1b. **THE SCROLL**: the same cell under a label that has moved. The
+        // identity is what the slot holds *about the world*, and the label is not
+        // in it, so this is the identical state to (1) — which is the claim, and
+        // the reason `page` sits beside `ident` here rather than inside it.
+        assert_eq!(
+            classify_page(
+                Some((ident, p.key, p.geo_key)),
+                &PageDraw {
+                    page: VsmPage::flat(2, 2, 4),
+                    ..p
+                }
+            ),
+            None,
+            "a page re-labelled by a clipmap scroll was charged a re-raster for \
+             depth the slot is already holding — the whole of wave VSM2"
         );
         // 2. the slot is empty, or holds somebody else: residency churn.
         assert_eq!(classify_page(None, &p), Some(DirtyReason::Slot));
         assert_eq!(
-            classify_page(Some((p.light + 1, p.page, p.key, p.geo_key)), &p),
+            classify_page(
+                Some((PageIdent { light: 2, ..ident }, p.key, p.geo_key)),
+                &p
+            ),
             Some(DirtyReason::Slot),
             "another light's page in this slot is not this page's content"
         );
         assert_eq!(
+            classify_page(Some((elsewhere, p.key, p.geo_key)), &p),
+            Some(DirtyReason::Slot),
+            "another WORLD CELL's depth in this slot is not this page's content"
+        );
+        assert_eq!(
             classify_page(
-                Some((p.light, VsmPage::flat(2, 9, 4), p.key, p.geo_key)),
+                Some((PageIdent { level: 9, ..ident }, p.key, p.geo_key)),
                 &p
             ),
-            Some(DirtyReason::Slot)
+            Some(DirtyReason::Slot),
+            "the same cell index at another level is another footprint entirely"
         );
-        // 3. same label, and the page's own matrix moved: the grid shifted.
+        // 3. same cell, and the light's own box moved: a sun quantum, the
+        // along-light snap, a settings change.
         assert_eq!(
-            classify_page(Some((p.light, p.page, p.key ^ 1, p.geo_key ^ 1)), &p),
+            classify_page(Some((ident, p.key ^ 1, p.geo_key ^ 1)), &p),
             Some(DirtyReason::Geometry),
             "a page whose geometry stamp moved was charged to the casters"
         );
-        // 4. **the re-cast**: same label, same geometry stamp, different content.
+        // 4. **the re-cast**: same cell, same geometry stamp, different content.
         assert_eq!(
-            classify_page(Some((p.light, p.page, p.key ^ 1, p.geo_key)), &p),
+            classify_page(Some((ident, p.key ^ 1, p.geo_key)), &p),
             Some(DirtyReason::Casters),
             "a page that did not move and whose casters did is not reachable, so \
              the island's `0.0 re-cast` is a property of this classifier rather \
@@ -3308,11 +3414,11 @@ mod tests {
 
         // …and the three tile the dirty set: every miss is exactly one of them.
         let states = [
-            Some((p.light, p.page, p.key, p.geo_key)),
+            Some((ident, p.key, p.geo_key)),
             None,
-            Some((p.light + 1, p.page, p.key, p.geo_key)),
-            Some((p.light, p.page, p.key ^ 1, p.geo_key ^ 1)),
-            Some((p.light, p.page, p.key ^ 1, p.geo_key)),
+            Some((PageIdent { light: 2, ..ident }, p.key, p.geo_key)),
+            Some((ident, p.key ^ 1, p.geo_key ^ 1)),
+            Some((ident, p.key ^ 1, p.geo_key)),
         ];
         let (mut hits, mut slot, mut geo, mut cast) = (0u64, 0u64, 0u64, 0u64);
         for s in states {

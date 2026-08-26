@@ -3239,9 +3239,23 @@ fn a_spot_lights_pages_are_invalidated_by_the_mover_they_see() {
     );
 }
 
-/// **A clipmap grid shift re-labels a page, and the cache key pays a re-raster
-/// for the label** (P27.3 audit) — the aliasing ruling, measured, and it does not
-/// say what the ledger said it said.
+/// **A clipmap grid shift re-labels a page** (P27.3 audit) — the aliasing ruling,
+/// measured, and it does not say what the P27.3 ledger said it said.
+///
+/// # What island wave VSM2 changed about this arm's conclusion
+///
+/// The paragraphs below are P27.3's, kept because the *measurement* is unchanged
+/// and it is the evidence the wave acted on: a clipmap level's window slides, a
+/// world cell moves from page `(x, y)` to `(x − 1, y)`, and the matrix it wants is
+/// the one the atlas already holds. What has changed is the sentence at the end.
+/// **The key does not pay for the label any more**: residency carries the slot
+/// with the world cell (`inf_vsm::VsmResidency::set_clip_origins`) and the cache
+/// is keyed on that cell, so the `free_hits` this arm counts are now taken rather
+/// than refused. The counter-assertion is
+/// `a_camera_translation_re_labels_no_page_and_re_rasters_only_what_enters`; what
+/// stays here is the phenomenon, and the soundness condition below — every
+/// collision inside one light and one level — which the world-cell key now states
+/// explicitly instead of relying on.
 ///
 /// The P27.3 ledger justifies all three members of `(light, page, stamp)` with:
 /// *"a slot that is evicted, refilled by another page and re-admitted to the first
@@ -3363,13 +3377,610 @@ fn a_clipmap_grid_shift_re_labels_a_page_and_the_cache_key_pays_for_it() {
          cost this arm measures is not reachable and the ledger's aliasing \
          sentence has no case at all"
     );
-    // …and the number: refills whose depth the atlas already held, which a
-    // stamp-only key would have served and this one re-rasterizes.
+    // …and the number: refills whose depth the atlas already held, which P27.3's
+    // label-keyed cache re-rasterized and island wave VSM2's world-cell key
+    // serves.
     eprintln!(
         "VSM CACHE KEY: {refills} slot refills over the walk, {free_hits} of them \
          wanting depth the slot already held ({relabelled} re-labelled addresses \
          over {} distinct matrices)",
         seen.len()
+    );
+}
+
+// ── ISLAND WAVE VSM2: THE CLIPMAP SCROLL ────────────────────────────────────
+
+/// The eye `x` metres along the light's **`right`** and `eye_z` back along it.
+///
+/// `right` is `+X` for this file's `+Z` sun (`light_basis` composes it as
+/// `fwd × up` with `fwd = −Z`), so walking `x` scrolls the clipmap windows and
+/// leaves the along-light snap — the one term of the centre that IS in the
+/// content key — exactly where it was.
+fn view_beside(x: f64, eye_z: f64) -> RenderView {
+    RenderView {
+        eye_world: glam::DVec3::new(x, 0.0, eye_z),
+        ..view(eye_z)
+    }
+}
+
+/// **A fixture whose atlas actually fills**, and the reason it takes this shape.
+///
+/// A page is 128² texels and the level rule puts about one of them under each
+/// screen pixel, so one frame of one sun needs about `pixels / 128²` pages — **36**
+/// at 1 024 × 576, and **9** at this file's usual 256 × 144. That is a property of
+/// the clipmap and not of the fixture: a single-sun scene at a test resolution
+/// cannot make a whole atlas dirty at once, so the raster's own
+/// `VSM_MAX_RASTER_PAGES` ceiling, and therefore everything about deferral, would
+/// be **unreachable** and an arm about the drain would be asserting on a raster
+/// that never defers. (Measured, over seven configurations: 6 to 123 resident
+/// pages, whatever the grid, the extent or the walk.)
+///
+/// Four suns over one depth buffer mark four ladders — legal, cheap, and the only
+/// thing in reach that fills a thousand slots: **343 resident by frame 40, 488 by
+/// frame 80.**
+const LADDER_W: u32 = 1024;
+const LADDER_H: u32 = 576;
+/// One level-0 page a step at the settings below (`2 × 6 / 64`), so every frame
+/// scrolls the finest window.
+const LADDER_STEP_M: f64 = 0.1875;
+
+fn big_ladder() -> VsmSettings {
+    VsmSettings {
+        clipmap_pages_per_side: 64,
+        clipmap_levels: 8,
+        first_level_extent_m: 6.0,
+        ..settings_with(2048)
+    }
+}
+
+/// This file's cube and backdrop plus a long receding floor — a marked set that
+/// spans levels rather than one distance — under `suns` directional lights.
+fn ladder_scene(suns: usize) -> RenderScene {
+    let mut s = scene(0, 0.5, 1.0);
+    s.instances.push(backdrop());
+    s.instances.push(inf_render::MeshInstance::lit(
+        glam::DVec3::new(0.0, -1.0, -30.0),
+        glam::Quat::IDENTITY,
+        glam::Vec3::new(60.0, 0.2, 80.0),
+        [1.0, 1.0, 1.0, 1.0],
+        4,
+    ));
+    for k in 1..suns {
+        s.lights.push(inf_render::RenderLight {
+            kind: inf_render::LightKind::Directional,
+            direction: glam::Vec3::new(0.1 * k as f32, 0.3, 1.0).normalize(),
+            cast_shadows: true,
+            ..Default::default()
+        });
+    }
+    s.mark_dirty();
+    s
+}
+
+/// The ladder's camera at `step`: a pure translation along the light's `right`.
+fn ladder_view(step: u32) -> RenderView {
+    RenderView {
+        width: LADDER_W,
+        height: LADDER_H,
+        ..view_beside(f64::from(step) * LADDER_STEP_M, 5.0)
+    }
+}
+
+/// **A PURE CAMERA TRANSLATION RE-LABELS NOTHING** (island wave VSM2, clause 1)
+/// — the counter-assertion, on a real device, through the shipped classifier.
+///
+/// Wave I7b measured the lit island's dirty split at **400.8 re-slotted / 532.0
+/// moved / 0.0 re-cast per rastering frame**, and named the mechanism: a camera
+/// travelling 0.9 m against a 1.0 m level-0 page shifts the clipmap window, and a
+/// window that shifts *re-labels* every resident page of that level. Under
+/// P27.3's `(light, page, stamp)` key each of those re-labelled pages read as a
+/// `Geometry` miss — a re-raster of depth the atlas was already holding.
+///
+/// So the assertion is that the **`moved` bucket is zero**, over a walk that
+/// really does shift the windows. It is not "small": the identity a slot is keyed
+/// on has no label in it, so a scroll cannot move it at all, and any non-zero
+/// reading here would be a page whose *box* moved for another reason.
+///
+/// What is left is `re-slotted` — the row and column the window newly exposes,
+/// which have never been drawn and must be. That is the work the mechanism is
+/// supposed to cost, so it is bounded rather than banned, against the resident
+/// set the same frame reports.
+#[test]
+fn a_camera_translation_re_labels_no_page_and_re_rasters_only_what_enters() {
+    let Some(gpu) = gpu_or_skip("the VSM clipmap scroll") else {
+        return;
+    };
+    let s = ladder_scene(4);
+    let target = inf_render::HeadlessTarget::new(&gpu, LADDER_W, LADDER_H);
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    let mut rs = *renderer.settings();
+    rs.vsm = big_ladder();
+    renderer.set_settings(rs);
+
+    // Warm: the atlas fills and the cache goes quiet.
+    let mut step = 0u32;
+    while step < 40 {
+        renderer.render(
+            &gpu,
+            &s,
+            &ladder_view(step),
+            &target.view,
+            (LADDER_W, LADDER_H),
+        );
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        step += 1;
+    }
+    let warm = renderer.vsm_raster_stats().expect("stats");
+    let warm_stream = renderer.vsm().expect("live").stats();
+    assert!(warm.pages > 0, "the warm-up rasterized nothing at all");
+
+    // …then a pure translation along the light's `right`, a level-0 page at a
+    // time so every step shifts the finest window.
+    //
+    // **Which world cells the atlas holds is tracked independently**, off the
+    // residency's own origins, because the load-bearing count below is not "a
+    // small number of pages entered" — it is "the pages that were re-drawn are
+    // EXACTLY the pages that arrived", and only a set difference can say that.
+    let cells =
+        |r: &inf_render::EngineRenderer| -> std::collections::BTreeSet<(u32, u32, i64, i64)> {
+            let sys = r.vsm().expect("live");
+            resident_pages(r)
+                .into_iter()
+                .map(|(light, p, _)| {
+                    let o = sys.residency().clip_origins(VsmLightHandle(light));
+                    let g = o.get(p.level as usize).copied().unwrap_or((0, 0));
+                    (light, p.level, g.0 + i64::from(p.x), g.1 + i64::from(p.y))
+                })
+                .collect()
+        };
+    let mut held = cells(&renderer);
+    let mut resident = held.len();
+    let mut arrived = 0u64;
+    for _ in 0..24u32 {
+        renderer.render(
+            &gpu,
+            &s,
+            &ladder_view(step),
+            &target.view,
+            (LADDER_W, LADDER_H),
+        );
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        step += 1;
+        let now = cells(&renderer);
+        arrived += now.difference(&held).count() as u64;
+        resident = resident.max(now.len());
+        held = now;
+    }
+    let end = renderer.vsm_raster_stats().expect("stats");
+    let end_stream = renderer.vsm().expect("live").stats();
+
+    // ANTI-VACUITY: the walk really scrolled, and the re-seat really carried.
+    let shifts = end_stream.level_shifts - warm_stream.level_shifts;
+    let carried = end_stream.scroll_carried - warm_stream.scroll_carried;
+    assert!(
+        shifts >= 24,
+        "only {shifts} level shifts over 24 page-steps"
+    );
+    assert!(
+        carried > 0,
+        "the scroll carried no page at all — the windows moved and residency did \
+         not follow them, so `moved == 0` below is a statement about an empty atlas"
+    );
+    assert!(resident > 64, "only {resident} resident pages");
+
+    // **THE CLAIM.**
+    let moved = end.dirty_geometry - warm.dirty_geometry;
+    assert_eq!(
+        moved, 0,
+        "{moved} pages were re-rastered because their own box moved, over a walk \
+         in which nothing but the camera did. That is the `moved` bucket wave I7b \
+         measured at 532.0 a frame, and the whole of what world-cell residency is \
+         for"
+    );
+    assert_eq!(
+        end.dirty_casters - warm.dirty_casters,
+        0,
+        "nothing under a page changed and the caster fold says otherwise"
+    );
+
+    // …and what it cost instead, **exactly**: every page charged to `re-slotted`
+    // is a world cell that was not in the atlas last frame, and there are no
+    // others. A ratio ("small against the resident set") would not do: a cache
+    // keyed on the LABEL rather than on the cell re-draws the pages a scroll
+    // re-labels and still leaves most of the atlas served, so it passes any
+    // threshold loose enough to survive the real entering band. Measured on this
+    // fixture — the label key re-draws **1 323** pages where the cell key
+    // re-draws 88, and only this equality separates them.
+    let entered = end.dirty_slot - warm.dirty_slot;
+    let cached = end.cached_pages - warm.cached_pages;
+    eprintln!(
+        "VSM2 SCROLL: 24 page-steps over {resident} resident pages — {entered} \
+         entered ({arrived} arrived), {cached} served from the atlas, {moved} \
+         re-labelled, {carried} carried across {shifts} window shifts"
+    );
+    assert!(arrived > 0, "no cell entered the window over 24 page-steps");
+    assert_eq!(
+        entered, arrived,
+        "{entered} pages were re-drawn for want of a slot and only {arrived} world \
+         cells arrived. The difference is pages the atlas was already holding, \
+         re-drawn because their grid LABEL moved — which is the whole cost wave \
+         I7b measured and this wave removed"
+    );
+    assert!(
+        entered < cached / 20,
+        "{entered} pages entered against {cached} served: the atlas is being \
+         re-drawn rather than scrolled"
+    );
+}
+
+/// **THE DEFERRAL BACKLOG DRAINS, AND THE BOUND IS THE ATLAS DIVIDED BY THE
+/// BUDGET** (island wave VSM2, clause 2).
+///
+/// Wave I7b measured **256 pages rastered (the ceiling) and 677 deferred, every
+/// frame, for ever** — a queue that could not drain because the thing filling it
+/// was the camera itself. Two claims here, and the second is the one that was
+/// false before this wave:
+///
+/// * a burst — a cache flush, which is what a camera cut, an origin rebase and a
+///   sun quantum all produce — drains in exactly
+///   `ceil(resident / VSM_MAX_RASTER_PAGES)` frames, derived from the state the
+///   same run reports rather than from a constant;
+/// * and once drained it **stays** drained through a camera that keeps moving.
+///
+/// `VSM_MAX_RASTER_PAGES` stays where P27.3 put it and stays loud: the deferral
+/// counter is read here, and the shipped path still logs every one of them.
+#[test]
+fn the_deferral_backlog_drains_within_the_atlas_over_the_budget() {
+    let Some(gpu) = gpu_or_skip("the VSM deferral drain") else {
+        return;
+    };
+    let s = ladder_scene(4);
+    let target = inf_render::HeadlessTarget::new(&gpu, LADDER_W, LADDER_H);
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    let mut rs = *renderer.settings();
+    rs.vsm = big_ladder();
+    renderer.set_settings(rs);
+    let frame = |r: &mut inf_render::EngineRenderer, step: u32| {
+        r.render(
+            &gpu,
+            &s,
+            &ladder_view(step),
+            &target.view,
+            (LADDER_W, LADDER_H),
+        );
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        r.vsm_raster_stats().expect("stats")
+    };
+    let mut step = 0u32;
+    while step < 48 {
+        frame(&mut renderer, step);
+        step += 1;
+    }
+
+    // THE BURST. Everything the atlas holds, dirty in one frame — **and the
+    // camera is held still through the drain**, because a burst and a scroll
+    // running together would be measuring two things and the bound belongs to
+    // one of them. The moving half is the second act below.
+    let resident = resident_pages(&renderer).len();
+    assert!(
+        resident > inf_render::VSM_MAX_RASTER_PAGES as usize,
+        "only {resident} resident pages against a {} page budget — a burst cannot \
+         exceed the ceiling here, so nothing would ever be deferred and this arm \
+         would pass on a raster that never defers",
+        inf_render::VSM_MAX_RASTER_PAGES
+    );
+    renderer.vsm_mut().expect("live").flush_page_cache();
+    let bound = resident.div_ceil(inf_render::VSM_MAX_RASTER_PAGES as usize);
+
+    let mut before = renderer.vsm_raster_stats().expect("stats");
+    let mut drained_at = None;
+    let mut deferred_total = 0u64;
+    for f in 1..=bound + 4 {
+        let now = frame(&mut renderer, step);
+        deferred_total += now.deferred_pages - before.deferred_pages;
+        let dirty = now.dirty_pages - before.dirty_pages;
+        if dirty == 0 && drained_at.is_none() {
+            drained_at = Some(f - 1);
+        }
+        before = now;
+    }
+    eprintln!(
+        "VSM2 DRAIN: {resident} resident pages at a {}-page budget drained in {:?} \
+         frames (bound {bound}), {deferred_total} deferrals on the way",
+        inf_render::VSM_MAX_RASTER_PAGES,
+        drained_at
+    );
+    assert!(
+        deferred_total > 0,
+        "the burst deferred nothing, so the drain below is not a drain"
+    );
+    assert_eq!(
+        drained_at,
+        Some(bound),
+        "a whole-atlas burst of {resident} pages at {} a frame did not drain in \
+         the {bound} frames the arithmetic allows",
+        inf_render::VSM_MAX_RASTER_PAGES
+    );
+
+    // …AND IT STAYS DRAINED through a camera that keeps moving — the half that
+    // was false for the whole of wave I7b.
+    let settled = renderer.vsm_raster_stats().expect("stats");
+    for _ in 0..24 {
+        step += 1;
+        frame(&mut renderer, step);
+    }
+    let end = renderer.vsm_raster_stats().expect("stats");
+    assert_eq!(
+        end.deferred_pages - settled.deferred_pages,
+        0,
+        "the backlog re-formed under a moving camera — which is exactly the state \
+         wave I7b measured at 677 deferred pages a frame, for ever"
+    );
+}
+
+/// **A CASTER THAT MOVES DURING A SCROLL STILL RE-RASTERS ITS PAGE** (island wave
+/// VSM2, clause 3) — the staleness the world-cell key could hide and does not.
+///
+/// The wave's whole gain is that a page whose *label* changed keeps its texels.
+/// The failure mode that buys is a page that keeps texels it should not: a caster
+/// that moves in the same frame the window scrolls, where the slot's identity is
+/// unchanged and only the caster fold can tell. The existing
+/// `a_mover_invalidates_exactly_the_pages_its_bounds_touch` holds the camera
+/// still; this one does not.
+///
+/// Read on the **atlas**, not on a counter: the depth under the caster has to
+/// change. The counter is the anti-vacuity beside it.
+#[test]
+fn a_caster_that_moves_during_a_scroll_re_rasters_its_world_cell() {
+    let Some(gpu) = gpu_or_skip("the VSM scroll staleness") else {
+        return;
+    };
+    let mut s = scene(0, 0.5, 1.0);
+    s.instances.push(backdrop());
+    s.mark_dirty();
+    let set = big_ladder();
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    let mut rs = *renderer.settings();
+    rs.vsm = set;
+    renderer.set_settings(rs);
+
+    // Twelve steps of a scrolling camera with a still caster: the control, and the
+    // state the mutation below has to be distinguished from.
+    let mut step = 0u32;
+    let mut run = |r: &mut inf_render::EngineRenderer, sc: &RenderScene, step: &mut u32, n: u32| {
+        for _ in 0..n {
+            r.render(
+                &gpu,
+                sc,
+                &view_beside(f64::from(*step) * 0.375, 5.0),
+                &target.view,
+                (FW, FH),
+            );
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            *step += 1;
+        }
+        r.vsm_raster_stats().expect("stats")
+    };
+    run(&mut renderer, &s, &mut step, 16);
+    let still = run(&mut renderer, &s, &mut step, 12);
+    let before = atlas_bits(&gpu, &renderer);
+    let quiet = renderer.vsm_raster_stats().expect("stats");
+    assert_eq!(
+        quiet.dirty_casters - still.dirty_casters,
+        0,
+        "a still caster under a scrolling camera invalidated pages by content — \
+         the control this arm needs is not quiet"
+    );
+
+    // …now move the caster IN THE SAME FRAME the window scrolls. Half a cube
+    // along the light's `right`, which stays inside the same level-0 page for
+    // part of its footprint and crosses into the next for the rest — so the
+    // question "did the slot notice" is asked of a cell whose label is moving too.
+    let mut moved = s.clone();
+    moved.instances[0].translation.x += 0.9;
+    moved.mark_dirty();
+    let after_stats = run(&mut renderer, &moved, &mut step, 1);
+    let after = atlas_bits(&gpu, &renderer);
+
+    let recast = after_stats.dirty_casters - quiet.dirty_casters;
+    let changed = before
+        .iter()
+        .zip(after.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    eprintln!(
+        "VSM2 SCROLL-STALENESS: {recast} pages re-cast, {changed} atlas texels \
+         changed"
+    );
+    assert!(
+        recast > 0,
+        "a caster moved while the clipmap scrolled and not one page was charged \
+         to the casters — the world-cell key is holding depth of a world that has \
+         moved"
+    );
+    assert!(
+        changed > 0,
+        "the atlas is byte-identical after a caster moved under a scrolling \
+         camera: the shadow is stale on the device, whatever the counters say"
+    );
+}
+
+/// **THE SUN'S QUANTUM REACHES THE ATLAS** (island wave VSM2) — P27.3's clause-3
+/// policy, on a device, for the first time.
+///
+/// P27.3 quantizes the sun's direction so a page's content is a function of the
+/// *quantized* angle: below the quantum nothing is re-drawn, above it everything
+/// is. Until this wave that held **by construction** — the geometric stamp was the
+/// page matrix folded bit for bit, and the direction is one of its inputs — so
+/// there was nothing to arm and nothing was armed (the tree drives the quantizer's
+/// arithmetic, `the_sun_quantum_is_one_shadow_texel_at_the_reference_height`, and
+/// never a sun that turns).
+///
+/// The wave's world-cell key replaces those matrix bits with
+/// `ClipmapLayout::content_key`, which names the quantized direction **explicitly**
+/// — so the property stops being structural and starts being a line of code that
+/// can be deleted. Measured: dropping the direction from that fold leaves every
+/// GPU arm in this file green. It leaves this one red.
+///
+/// Read on the atlas, because "the sun moved and the shadows did not" is a claim
+/// about texels.
+#[test]
+fn a_sun_that_crosses_its_quantum_re_rasters_the_atlas_and_one_that_does_not_does_not() {
+    let Some(gpu) = gpu_or_skip("the VSM sun quantum") else {
+        return;
+    };
+    let mut s = scene(0, 0.5, 1.0);
+    s.instances.push(backdrop());
+    s.mark_dirty();
+    let set = settings_with(64);
+    let q = inf_render::vsm_sun_quantum(&set);
+    let base = s.lights[0].direction;
+    // Under and over, through the shipped quantizer rather than through the
+    // formula beside it — the fixture's own precondition.
+    let under = (base + glam::Vec3::X * (q * 0.1)).normalize();
+    let over = (base + glam::Vec3::X * (q * 20.0)).normalize();
+    assert_eq!(
+        inf_render::quantize_light_dir(base, q),
+        inf_render::quantize_light_dir(under, q),
+        "the fixture's sub-quantum nudge crosses the quantum"
+    );
+    assert_ne!(
+        inf_render::quantize_light_dir(base, q),
+        inf_render::quantize_light_dir(over, q),
+        "the fixture's nudge does not cross the quantum"
+    );
+
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    let mut rs = *renderer.settings();
+    rs.vsm = set;
+    renderer.set_settings(rs);
+    let v = view(5.0);
+    let mut turn = |r: &mut inf_render::EngineRenderer, d: glam::Vec3, n: u32| {
+        let mut sc = s.clone();
+        sc.lights[0].direction = d;
+        sc.mark_dirty();
+        for _ in 0..n {
+            r.render(&gpu, &sc, &v, &target.view, (FW, FH));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        (r.vsm_raster_stats().expect("stats"), atlas_bits(&gpu, r))
+    };
+    let (warm, before) = turn(&mut renderer, base, 12);
+    assert!(warm.pages > 0, "the warm-up rasterized nothing");
+
+    // 1. UNDER the quantum: the quantizer swallows it whole.
+    let (quiet, still) = turn(&mut renderer, under, 1);
+    assert_eq!(
+        quiet.dirty_pages - warm.dirty_pages,
+        0,
+        "a sub-quantum sun nudge re-rasterized pages — the quantum is not the \
+         policy P27.3 measured"
+    );
+    assert_eq!(still, before, "…and it moved the atlas anyway");
+
+    // 2. OVER it: every page of the box is looking somewhere new.
+    let (moved, after) = turn(&mut renderer, over, 1);
+    let geo = moved.dirty_geometry - quiet.dirty_geometry;
+    let changed = before
+        .iter()
+        .zip(after.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    eprintln!("VSM2 SUN QUANTUM: {geo} pages moved, {changed} atlas texels changed");
+    assert!(
+        geo > 0,
+        "the sun crossed its quantum and not one page was charged to its own \
+         geometry — the quantized direction has left the clipmap's content key \
+         and a turning sun now drags stale shadows behind it"
+    );
+    assert!(
+        changed > 0,
+        "the sun crossed its quantum and the atlas is byte-identical"
+    );
+}
+
+/// **A FLOATING-ORIGIN REBASE MOVES NO PAGE'S IDENTITY** (island wave VSM2,
+/// clause 1's hazard) — the I4b defect's exact shape, armed where this wave
+/// introduced a new key.
+///
+/// The I4b audit's one on-screen defect was a cache whose key carried the eye
+/// bucket, the bands, the caster stamp and the content fold **and not the
+/// origin**, so a rebase re-uploaded a merge of the stale half and put every
+/// scatter shadow caster a kilometre out of place. `PageIdent` is a new key in the
+/// same subsystem, so the question has to be asked of it too — and the answer is
+/// a different one, on purpose:
+///
+/// * the identity is a **world cell**, so a rebase moves neither it nor
+///   residency: `re-slotted` and `moved` both read **zero**;
+/// * and the atlas still refreshes, because a caster's stamp folds its
+///   **render-local** model matrix, which a rebase does move — so every page with
+///   a caster in it is charged to `re-cast` and re-drawn. The correctness is in
+///   the *fold*, exactly where it was before this wave, and the world-cell key is
+///   blind to the rebase without being wrong about it.
+#[test]
+fn a_floating_origin_rebase_moves_no_pages_identity_and_still_refreshes_the_atlas() {
+    let Some(gpu) = gpu_or_skip("the VSM origin rebase") else {
+        return;
+    };
+    let mut s = scene(0, 0.5, 1.0);
+    s.instances.push(backdrop());
+    s.mark_dirty();
+    let set = big_ladder();
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    let mut rs = *renderer.settings();
+    rs.vsm = set;
+    renderer.set_settings(rs);
+    let here = view_beside(0.0, 5.0);
+    for _ in 0..16 {
+        renderer.render(&gpu, &s, &here, &target.view, (FW, FH));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    let quiet = renderer.vsm_raster_stats().expect("stats");
+
+    // THE REBASE: the same world eye, a render origin a kilometre away. Nothing
+    // in the world moved and every render-local coordinate did.
+    let rebased = RenderView {
+        origin: inf_math::FloatingOrigin::new(glam::DVec3::new(
+            inf_math::REBASE_DISTANCE,
+            0.0,
+            inf_math::REBASE_DISTANCE,
+        )),
+        ..here
+    };
+    assert_ne!(
+        here.origin.to_render(here.eye_world),
+        rebased.origin.to_render(rebased.eye_world),
+        "the two views share a render-local eye, so the rebase case was never \
+         reached"
+    );
+    renderer.render(&gpu, &s, &rebased, &target.view, (FW, FH));
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let after = renderer.vsm_raster_stats().expect("stats");
+
+    assert_eq!(
+        after.cut_flushes, quiet.cut_flushes,
+        "the rebase read as a camera cut — `is_camera_cut` takes the f64 WORLD \
+         eye, and a flush here would make the two claims below unfalsifiable"
+    );
+    assert_eq!(
+        (
+            after.dirty_slot - quiet.dirty_slot,
+            after.dirty_geometry - quiet.dirty_geometry
+        ),
+        (0, 0),
+        "a rebase moved a page's identity: the world-cell key is carrying a \
+         render-local term and the I4b defect has a second home"
+    );
+    let recast = after.dirty_casters - quiet.dirty_casters;
+    eprintln!("VSM2 REBASE: {recast} pages re-cast, 0 re-slotted, 0 moved");
+    assert!(
+        recast > 0,
+        "the atlas kept every page across a kilometre rebase. The stored depth is \
+         render-local, so a page that was NOT re-drawn is holding depth measured \
+         from an origin that has moved"
     );
 }
 

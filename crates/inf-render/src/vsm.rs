@@ -171,6 +171,25 @@ pub struct ClipmapLayout {
     /// index of page `(0, 0)`. The **y** axis runs with the page grid's rows,
     /// which run *down*, i.e. against the light basis's `up`.
     pub clip_origins: Vec<(i64, i64)>,
+    /// **What this light's shadow box IS, independent of where the camera stands
+    /// and of where the floating origin is** (island wave VSM2).
+    ///
+    /// A fold of every input to a page's stored depth *except* the two that move
+    /// while the world does not: the lateral snap (`m_r`, `m_u`) and the render
+    /// origin. What is in it is the quantized light direction, the along-light
+    /// snap index, level 0's half-extent, the page grid and the level count — and
+    /// the along-light *range* is a function of the last three, so it is in there
+    /// too.
+    ///
+    /// This is the geometric half of a clipmap page's cache key. Pairing it with
+    /// the page's **world cell** names the depth a page wants without naming the
+    /// f32 matrix that happens to draw it, which is the whole of what lets a slot
+    /// survive a scroll: see [`crate::vsm_raster::VsmRaster::record`].
+    ///
+    /// Zero for a light that has no window on the world — a spot or a cube face,
+    /// whose page label *is* its footprint and whose matrix moves only when the
+    /// light does.
+    pub content_key: u64,
 }
 
 impl ClipmapLayout {
@@ -183,6 +202,7 @@ impl ClipmapLayout {
             centre,
             level_offset: vec![[0.0, 0.0]; levels.max(1) as usize],
             clip_origins: vec![(-n, -n); levels.max(1) as usize],
+            content_key: 0,
         }
     }
 
@@ -255,6 +275,21 @@ pub fn clipmap_layout(
         centre: origin.to_render(centre0),
         level_offset,
         clip_origins,
+        // **Everything a page's depth depends on that is not the lateral snap and
+        // not the render origin** (island wave VSM2) — see
+        // [`ClipmapLayout::content_key`]. `mf` is a rounded quotient and therefore
+        // integral; it is folded as the integer it is rather than as its own f32
+        // bits, so the key is a statement about the world lattice.
+        content_key: crate::vsm_raster::Fold::new(u64::from(n))
+            .u64(u64::from(levels))
+            .f32s(&[
+                light_dir_to.x,
+                light_dir_to.y,
+                light_dir_to.z,
+                half_extent.max(1e-3),
+            ])
+            .i64(mf as i64)
+            .done(),
     }
 }
 
@@ -2657,5 +2692,283 @@ mod tests {
             }
         }
         assert_eq!(checked, 288, "the sweep shrank");
+    }
+
+    // ── island wave VSM2: what a WORLD CELL is worth ─────────────────────────
+
+    /// The shipped clipmap ladder: 8 levels, 64 pages a side, 32 m at level 0.
+    const SHIPPED_N: u32 = 64;
+    const SHIPPED_LEVELS: u32 = 8;
+    const SHIPPED_HALF: f32 = 32.0;
+
+    /// The shipped ladder's layout and level-0 projection at `eye`, through the
+    /// same two doors `vsm_projections` uses.
+    fn shipped_ladder(
+        eye: glam::DVec3,
+        origin: &inf_math::FloatingOrigin,
+    ) -> (ClipmapLayout, Mat4) {
+        let dir = quantize_light_dir(
+            Vec3::new(0.35, -0.86, 0.37).normalize(),
+            vsm_sun_quantum(&crate::settings::VsmSettings {
+                first_level_extent_m: SHIPPED_HALF,
+                clipmap_pages_per_side: SHIPPED_N,
+                ..Default::default()
+            }),
+        );
+        let l = clipmap_layout(dir, origin, eye, SHIPPED_HALF, SHIPPED_N, SHIPPED_LEVELS);
+        let range = 2.0 * SHIPPED_HALF * (1u32 << (SHIPPED_LEVELS - 1)) as f32;
+        let vp = clipmap_matrix(dir, l.centre, SHIPPED_HALF, range);
+        (l, vp)
+    }
+
+    /// The page matrix of the world `cell` of `level`, or `None` when that cell
+    /// is outside the window — the raster's own composition
+    /// (`VsmRaster::collect_pages`), addressed by cell instead of by label.
+    fn matrix_of_cell(l: &ClipmapLayout, vp: Mat4, level: u32, cell: (i64, i64)) -> Option<Mat4> {
+        let o = l.clip_origins[level as usize];
+        let (x, y) = (cell.0 - o.0, cell.1 - o.1);
+        (0..i64::from(SHIPPED_N)).contains(&x).then_some(())?;
+        (0..i64::from(SHIPPED_N)).contains(&y).then_some(())?;
+        Some(vsm_page_matrix(
+            vp,
+            VsmTreeKind::Clipmap,
+            level,
+            SHIPPED_N,
+            SHIPPED_N,
+            x as u32,
+            y as u32,
+            l.offset(level),
+        ))
+    }
+
+    /// **A WORLD CELL KEEPS ITS PAGE MATRIX TO WITHIN A FRACTION OF A SHADOW
+    /// TEXEL** (island wave VSM2) — the bound the cache key trades a bit-compare
+    /// for, measured rather than argued.
+    ///
+    /// The P27.3 audit's aliasing arm and this file's own comments say a clipmap
+    /// scroll re-labels a page *"with a bit-identical matrix"*. That is true when
+    /// only a **coarse** level's window moves, and it is not true when level 0's
+    /// does: `clipmap_layout` rebuilds level 0's projection about a centre that
+    /// slid one page, and the page's own sub-rectangle slides back by exactly
+    /// one. The two cancel in exact arithmetic and to within f32 rounding in the
+    /// shipped path — so a world-cell-keyed slot may hold depth drawn under a
+    /// matrix a *fraction of a texel* from this frame's, and that is the honest
+    /// statement of what the wave's cache key buys.
+    ///
+    /// The number is the whole point, so it is printed and bounded in **shadow
+    /// texels**, where a page is 128 of them and one NDC unit is 64.
+    ///
+    /// # The control is in the same run, and it is three orders of magnitude away
+    ///
+    /// The same comparison made on the **label** rather than on the cell — which
+    /// is what a slot that kept its label across a scroll would be holding —
+    /// measures a whole page. So this arm does not merely bound a small number:
+    /// it separates the two hypotheses by ~10³, and a re-seat that silently
+    /// stopped tracking the world would fail it by that margin.
+    #[test]
+    fn a_world_cell_keeps_its_page_matrix_to_within_a_fraction_of_a_shadow_texel() {
+        // One NDC unit is half a page, and a page is `VSM_PAGE_SIZE` texels.
+        let texels_per_ndc = (inf_vsm::VSM_PAGE_SIZE / 2) as f32;
+        // Out where the floating origin is about to rebase, because the wobble is
+        // f32 rounding on `centre · right / half_0` and that is where it is
+        // largest on any shipped path.
+        let origin = inf_math::FloatingOrigin::new(glam::DVec3::ZERO);
+        let start = glam::DVec3::new(inf_math::REBASE_DISTANCE * 0.94, 40.0, -120.0);
+        let (l0, _) = shipped_ladder(start, &origin);
+        let dir = quantize_light_dir(Vec3::new(0.35, -0.86, 0.37).normalize(), 0.0039);
+        let (right, _u, _f) = light_basis(dir);
+
+        // One cell per level, taken at the middle of that level's window so it
+        // stays inside it for as long as possible.
+        let anchors: Vec<(i64, i64)> = (0..SHIPPED_LEVELS)
+            .map(|lv| {
+                let o = l0.clip_origins[lv as usize];
+                (
+                    o.0 + i64::from(SHIPPED_N) / 2,
+                    o.1 + i64::from(SHIPPED_N) / 2,
+                )
+            })
+            .collect();
+
+        let mut prev: Vec<Option<(Mat4, VsmPage)>> = vec![None; SHIPPED_LEVELS as usize];
+        let (mut shifts, mut identical, mut differed) = (0usize, 0usize, 0usize);
+        let (mut worst_cell, mut worst_label) = (0.0f32, 0.0f32);
+        let mut origins_prev: Option<Vec<(i64, i64)>> = None;
+        // 300 steps of the island's own 0.9 m: 270 m, which moves level 0's window
+        // about 270 times and level 7's twice.
+        for step in 0..300u32 {
+            let eye = start + right.as_dvec3() * (0.9 * f64::from(step));
+            let (l, vp) = shipped_ladder(eye, &origin);
+            if let Some(o) = &origins_prev {
+                shifts += (0..SHIPPED_LEVELS as usize)
+                    .filter(|&i| o[i] != l.clip_origins[i])
+                    .count();
+            }
+            origins_prev = Some(l.clip_origins.clone());
+            for lv in 0..SHIPPED_LEVELS as usize {
+                let o = l.clip_origins[lv];
+                let cell = anchors[lv];
+                let now = matrix_of_cell(&l, vp, lv as u32, cell).map(|m| {
+                    (
+                        m,
+                        VsmPage::flat(lv as u32, (cell.0 - o.0) as u32, (cell.1 - o.1) as u32),
+                    )
+                });
+                if let (Some((a, was)), Some((b, is))) = (prev[lv], now) {
+                    let d = |x: Mat4, y: Mat4| {
+                        x.to_cols_array()
+                            .iter()
+                            .zip(y.to_cols_array().iter())
+                            .map(|(p, q)| (p - q).abs())
+                            .fold(0.0f32, f32::max)
+                    };
+                    if a.to_cols_array().map(f32::to_bits) == b.to_cols_array().map(f32::to_bits) {
+                        identical += 1;
+                    } else {
+                        differed += 1;
+                    }
+                    worst_cell = worst_cell.max(d(a, b) * texels_per_ndc);
+                    // THE CONTROL: the matrix the OLD LABEL now names. A slot that
+                    // kept its label rather than its cell is holding this.
+                    if was != is {
+                        if let Some(c) = matrix_of_cell(
+                            &l,
+                            vp,
+                            lv as u32,
+                            (o.0 + i64::from(was.x), o.1 + i64::from(was.y)),
+                        ) {
+                            worst_label = worst_label.max(d(a, c) * texels_per_ndc);
+                        }
+                    }
+                }
+                prev[lv] = now;
+            }
+        }
+
+        // ANTI-VACUITY, both ways: the walk really shifted grids, the wobble is
+        // really there (so the bound is not being asserted over an empty set), and
+        // some frames really are bit-identical (so it is not being asserted over a
+        // path that never re-labels).
+        assert!(shifts > 200, "only {shifts} level shifts over 270 m");
+        assert!(differed > 0 && identical > 0, "{identical} / {differed}");
+        assert!(
+            worst_label > 32.0,
+            "the label control moved only {worst_label:.3} texels — a page is 128 \
+             of them, so the fixture never re-labelled anything and the separation \
+             this arm rests on was not measured"
+        );
+
+        eprintln!(
+            "VSM2 world-cell matrix: worst {worst_cell:.4} shadow texels over 300 \
+             steps ({identical} bit-identical / {differed} rounded), against a \
+             label control of {worst_label:.1} texels"
+        );
+        assert!(
+            worst_cell < 0.1,
+            "a world cell's page matrix moved {worst_cell:.4} shadow texels between \
+             two frames of a pure camera translation. The world-cell cache key \
+             holds depth drawn under the earlier one, so this is the error a \
+             cached page carries — sub-texel is the ruling and this is not"
+        );
+    }
+
+    /// **THE CONTENT KEY MOVES FOR EVERYTHING THAT CHANGES A PAGE'S DEPTH, AND
+    /// FOR NOTHING ELSE** (island wave VSM2).
+    ///
+    /// `ClipmapLayout::content_key` is the half of a clipmap page's geometric
+    /// stamp that replaced the matrix bits, so what it is *blind* to is exactly
+    /// what a slot now survives — and what it is blind to by mistake would be a
+    /// stale shadow that no counter reports. Both directions, one arm:
+    ///
+    /// * **blind** to the lateral snap (the camera walking) and to the floating
+    ///   origin (a rebase), which are the two inputs that move while the world
+    ///   does not;
+    /// * **moves** for the quantized sun, the along-light snap, the level-0
+    ///   extent, the page grid and the level count — every other input to
+    ///   `clipmap_matrix`.
+    #[test]
+    fn the_clipmap_content_key_is_blind_to_the_camera_and_to_nothing_else() {
+        let at =
+            |eye: glam::DVec3, o: &inf_math::FloatingOrigin| shipped_ladder(eye, o).0.content_key;
+        let zero = inf_math::FloatingOrigin::new(glam::DVec3::ZERO);
+        let eye = glam::DVec3::new(4_000.0, 40.0, -900.0);
+
+        // 1. the camera walks laterally: the windows move and the key does not.
+        let dir = quantize_light_dir(Vec3::new(0.35, -0.86, 0.37).normalize(), 0.0039);
+        let (right, up, fwd) = light_basis(dir);
+        let walked = eye + right.as_dvec3() * 37.0 + up.as_dvec3() * 11.0;
+        assert_ne!(
+            shipped_ladder(eye, &zero).0.clip_origins,
+            shipped_ladder(walked, &zero).0.clip_origins,
+            "the fixture's walk did not move a window, so the blindness below is \
+             asserted over a camera that did not move"
+        );
+        assert_eq!(
+            at(eye, &zero),
+            at(walked, &zero),
+            "a lateral step moved the key"
+        );
+
+        // 2. THE FLOATING ORIGIN REBASES. The render-local centre jumps a
+        // kilometre and the world has not moved — the I4b defect's exact shape,
+        // in the one place this wave introduced a new key.
+        let rebased = inf_math::FloatingOrigin::new(glam::DVec3::new(
+            inf_math::REBASE_DISTANCE,
+            0.0,
+            inf_math::REBASE_DISTANCE,
+        ));
+        assert_ne!(
+            shipped_ladder(eye, &zero).0.centre,
+            shipped_ladder(eye, &rebased).0.centre,
+            "the two origins produce one render-local centre, so the rebase case \
+             was never reached"
+        );
+        assert_eq!(at(eye, &zero), at(eye, &rebased), "a rebase moved the key");
+
+        // 3. …and it moves for everything else. The along-light snap first,
+        // because it is the one term of the centre that IS in the key.
+        let along = eye + fwd.as_dvec3() * 400.0;
+        assert_ne!(at(eye, &zero), at(along, &zero), "the along-light snap");
+
+        let base =
+            clipmap_layout(dir, &zero, eye, SHIPPED_HALF, SHIPPED_N, SHIPPED_LEVELS).content_key;
+        for (what, key) in [
+            (
+                "the sun turned a quantum",
+                clipmap_layout(
+                    quantize_light_dir(Vec3::new(0.36, -0.86, 0.37).normalize(), 0.0039),
+                    &zero,
+                    eye,
+                    SHIPPED_HALF,
+                    SHIPPED_N,
+                    SHIPPED_LEVELS,
+                )
+                .content_key,
+            ),
+            (
+                "the level-0 extent",
+                clipmap_layout(
+                    dir,
+                    &zero,
+                    eye,
+                    SHIPPED_HALF * 4.0,
+                    SHIPPED_N,
+                    SHIPPED_LEVELS,
+                )
+                .content_key,
+            ),
+            (
+                "the page grid",
+                clipmap_layout(dir, &zero, eye, SHIPPED_HALF, SHIPPED_N / 2, SHIPPED_LEVELS)
+                    .content_key,
+            ),
+            (
+                "the level count",
+                clipmap_layout(dir, &zero, eye, SHIPPED_HALF, SHIPPED_N, SHIPPED_LEVELS - 1)
+                    .content_key,
+            ),
+        ] {
+            assert_ne!(base, key, "{what} left the content key where it was");
+        }
     }
 }
