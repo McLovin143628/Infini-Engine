@@ -1590,14 +1590,22 @@ pub fn luminance(rgb: [f32; 3]) -> f32 {
 /// mid-tone, and letting a black backdrop vote drags the average toward nothing
 /// and blows the exposure open on the few pixels that *are* lit.
 pub fn exposure_bin(luminance: f32) -> u32 {
-    if !(luminance > 0.0) {
+    // `luminance.is_nan() || luminance <= 0.0` is exactly the shader's
+    // `!(l > 0.0)` — NaN and everything at or below zero — written the long way
+    // because clippy is right that `!(a > b)` on a partially ordered type reads
+    // like a typo. The equivalence is the point: the two have to agree.
+    if luminance.is_nan() || luminance <= 0.0 {
         return 0;
     }
     let l2 = luminance.log2();
     if l2 <= EXPOSURE_LOG_MIN {
         return 0;
     }
-    let t = (l2 - EXPOSURE_LOG_MIN) / (EXPOSURE_LOG_MAX - EXPOSURE_LOG_MIN);
+    // Clamped BEFORE the cast, in both copies. An infinity in the HDR buffer
+    // would otherwise reach `u32(t * 256)` as an out-of-range float-to-int
+    // conversion, which Rust saturates and WGSL leaves *indeterminate* — the same
+    // spec hole the flare's ghost count is clamped against.
+    let t = ((l2 - EXPOSURE_LOG_MIN) / (EXPOSURE_LOG_MAX - EXPOSURE_LOG_MIN)).clamp(0.0, 1.0);
     let bin = (t * EXPOSURE_BINS as f32) as u32;
     bin.min(EXPOSURE_BINS - 1)
 }

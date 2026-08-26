@@ -26705,3 +26705,150 @@ re-blessed**, all four golden pins moved on the **additive** branch, rustdoc **3
 clippy **0**, frontend **718 / 80**, schema unmoved; the island re-measures at **82.7 fps p50**
 with every per-pass number reproducing to the printed decimal. Full ledger in
 `docs/memos/island-progress.md`.
+
+## Wave VIS1b — light & lens (2026-08-26)
+
+**What the frame is exposed at, what the lens does with the light that gets past white, and what
+the recording medium adds on top.** Base `278fb3c6`; RTX 4070 Ti, Windows/Vulkan. The second of the
+photoreal arc's two slices; every authorable field it consumes was landed by VIS1a's one schema
+window, so **scene v26 does not move**. Full ledger in `docs/memos/island-progress.md` under
+*Wave VIS1b*.
+
+**Clause 1 — auto exposure, and the ordering decision it forces.** Exposure was one linear scalar in
+the tonemap's own uniform, applied *after* the bloom add: no histogram, no adaptation, no EV
+anywhere. It is now a 256-bin luminance histogram over `post_hdr` — two compute dispatches and a
+buffer clear in front of the bloom node — reduced to a **log-average**, turned into a target in
+stops, and adapted toward at the rate the level authors. The whole rule lives in
+`inf_render::settings` as plain Rust, unit-tested without a GPU, and `exposure.wgsl` is its
+transliteration: `the_cpu_and_wgsl_exposure_rules_agree` reads the four constants back **out of the
+shader source**, which is the idiom the VIS1a audit built for the GGX energy fit, applied before
+rather than after.
+
+A log-average and **no percentile trim**: the trim buys robustness the log-average has by
+construction (a sun disc at 10⁴ over two million pixels moves `log2` by `13/2 000 000`), asserted
+rather than argued. Bin 0 is the black bin and is excluded.
+
+**THE ORDERING, DECIDED BY MEASUREMENT.** `(hdr + bloom) · exposure` meant the bloom prefilter keyed
+on raw radiance, so the threshold meant a different thing at every exposure — and under auto
+exposure that is a defect rather than a taste: a dim scene the eye has opened four stops has nothing
+over a linear threshold of 1.0 and cannot bloom at all. Measured on a backdrop-with-highlight
+fixture at two radiances twenty times apart: the bloom's energy spread is **1.02×**
+exposure-relative against **2.02×** exposure-independent. Shipped exposure-relative — and it
+**re-blessed nothing**, because `(a+b)·1.0` and `a·1.0+b` are the same bits and every committed
+golden renders at exposure 1.0. Mutation-verified the other way: forcing the prefilter's exposure to
+1.0 makes the spread **6.52×** and fails the arm.
+
+`dt` is a **`cloud_time_s` delta** — the document's own clock, never a wall clock and never a frame
+index — so a frozen clock is a frozen eye, one 1.0 s step equals twenty 0.05 s steps, and two runs
+of one clock are one trace. The ramp is linear **in stops**, because `adaptation_speed` is documented
+in stops per second and an exponential's "speed" is a half-life wearing a rate's name. Manual mode —
+the default — writes sixteen bytes and returns before it touches the encoder, and only when the
+value changed; the multiplier is `RenderSettings::exposure` **bit for bit**, asserted on `to_bits`.
+
+**PIE == shipping on a trace that adapts** (`exposure_pie.rs`, `vsm_pie.rs`'s shape): one project
+cooked, two worlds — cooked pack and editor `ScenePayload` — stepped in lockstep, projected through
+`project_scene`, rendered, and the exposure read back. Clock 16:56 → 20:16, average scene luminance
+**0.4137 → 0.1827**, EV **−1.2007 → −1.1087**, a ramp rather than a step, equal on both sides. And
+the clause the two-host comparison *cannot* make: the same level re-cooked and rendered **three
+times per simulation step** must produce the identical trace, because two hosts drawing the same
+number of frames agree about a frame counter as readily as about a clock.
+
+**Two consequences a designer has to have read**, both found while building that arm.
+`adaptation_speed` is stops per second **of level clock**, so its meaning scales with
+`TimeOfDay::rate` — the two being the same clock is the point, and it is now written on the field.
+And the adaptation carries a **discontinuity guard**: one frame may adapt over at most **10 s** of
+clock, because a time-of-day scrub hands the node a jump of hours. Ten seconds a frame is
+`rate == 600` at 60 fps (a day in 2.4 real minutes), and **above that rate the guard rather than the
+authored speed governs** — the PIE arm's own trace is the guard's arithmetic
+(`4e-4 × 10 = 0.004` stops a frame, 0.096 over twenty-four, against the 0.0920 it measures). Carried
+by name, with the honest fix stated: a signal that the clock *jumped*, not a bigger number.
+
+**Clause 2 — emissive intensity reaches the editor.** VIS1a landed the field; this lands the door and
+the widget. **The door**: `props::apply_value` wrote `*n as f32` unconditionally, and the only
+numeric guard in the tree was `Number.isFinite` in the React number field — one of **four** writers,
+and blind to the case that reaches the GPU anyway (`1e300` is a finite `f64` and is `inf` cast to
+`f32`, after which `emissive_linear`'s `0.0 * inf` is a NaN in the instance buffer at six sites
+across two hosts). A refusal, not a failure. **The widget**: there was no per-field range mechanism
+anywhere — `PropValue::Number(f64)` is the whole vocabulary, so `metallic`, `roughness`,
+`alpha_cutoff` and `emissive_intensity` were all step-1 spinners. `PropRange` is a Ring-0 table keyed
+by `(type_path, field)`, carried on `PropFieldDto` the way `AssetRef`'s `asset_kind` is, with four
+entries that are facts about units rather than guesses, and the type path pinned against the
+reflected type. **The authored twin arm**: an ECS `Material` with an 8-bit picker colour and an
+intensity of 9.0, through `project_scene`, blooms **+2 545 504** against **+89 298** at the pre-v26
+ceiling of 1.0.
+
+**Clause 3 — the sun gets a lens.** A relocation, as specified: `underwater.wgsl`'s sun screen
+projection (with `clip.w <= 0` a hard zero), its radial gather with exponential decay and its
+CPU-side `SunParams` move here unchanged in shape; what changes is the source term, from an analytic
+"does this ray reach the surface" to the frame's own bright pass. Half resolution into its own target
+(**4.15 MB** at 1080p), after bloom and before the tonemap: veiling glare, a ghost chain reflected
+through the frame centre, one halo ring, an optional anamorphic streak. The occlusion test reads the
+**MSAA scene depth** rather than the prepass — reverse-Z means a depth of exactly zero is sky, so the
+fraction of nine taps that read zero *is* the sun's visibility, and it sees meshlets and scattered
+foliage, which VIS-C1b still leaves out of the prepass. Measured at dawn: the flare adds **+4.69 %**
+of frame luminance, top half **+160 545** against bottom **+65 601**, and occluding the disc cuts the
+glare **92 %** (226 146 → 18 901).
+
+**The fixture is a finding, twice.** `RenderScene::default()`'s sky is the pre-P17.2 gradient plus a
+`pow(dot,48)·0.105` glow — nothing in it reaches the threshold, and the first arm measured a
+byte-identical frame; a sun *disc* exists only on the atmosphere path. A **noon** disc then measured
+the whole effect at **+0.08 %**, because the sky around it is already at the top of the ACES curve.
+A low sun in a dim sky is both the shot a flare is taken in and the one an assertion can read.
+
+**Clause 4 — bloom quality.** Karis' average on the first downsample, under the `bloom.karis` bit
+VIS1a landed: the prefilter takes the four source texels individually and weights each by
+`1/(1+luma)`. Measured against the thing it exists to kill — one 0.03 m cube at radiance 900 beside a
+broad emissive wall — the firefly's bloom falls **13.3564 → 0.0063** while the broad highlight's
+falls **84.7943 → 84.1689**, a 0.7 % cost for a 100 % cut. **Stopped with the route: the luma key and
+the per-mip falloff** both need an authored bit and the arc's schema window is spent; overloading
+`bloom_karis`, whose wire name and doc are specific, would be a byte pin that stops describing what
+it pins. Named **VIS-C4d**.
+
+**Clause 5 — the lens trio.** One composite-stage uber-post, in the **tonemap** rather than in
+`composite.wgsl`, because the in-game UI draws after the tonemap (island wave I5) and nobody wants a
+grained health bar. Chromatic aberration as a radial three-tap in *pixels of separation at the
+corner*; the vignette **before** the ACES curve, because a lens loses light at the corner and does
+not paint it black; the grain **after** it, in display space, multiplied by the colour as well as
+added so black stays black. **The grain is a function of the level clock** —
+`floor(cloud_time_s · 24)` wrapped into 24 bits, computed in `f64` on the CPU because `cloud_time_s`
+reaches `day_of_year · 86 400` where an `f32` cannot resolve a twenty-fourth of a second — hashed
+with an integer avalanche rather than `fract(sin(dot()))`, which is the `f32` trig the P14 law bans
+on any path two machines have to agree about. Measured: the vignette takes the corner/centre ratio
+**0.7102 → 0.5260**; the aberration adds **2.329** of mean `|R−B|` at the edge against **0.355** in
+the centre. **And that measurement is a finding**: read off the *trio* frame it goes the wrong way
+(19.501 → 18.606), because the vignette has removed 47 % of the light from the corners the fringe is
+strongest in. Three effects in one frame need three measurements.
+
+**The budget.** `the_island_at_shipping_resolution` gains a fourth configuration, **`LIT+VIS`** —
+`LIT+SSR` plus auto exposure, the Karis bit, the glare and the trio, all set through the *record*
+door. RTX 4070 Ti, release, 1080p, 3 × 120 frames, MIN of rounds, over the 51.38 km² island:
+**p50 12.133 ms (82.4 fps)**, GPU frame **8.432 ms** against `LIT+SSR`'s 8.310 — **the whole wave
+costs the lit island +0.122 ms, 1.5 %**. Per pass: `exposure` **+0.020 ms**, `flare` **+0.073**,
+`tonemap` **+0.005** (the trio has no row of its own — it is arithmetic and two fetches inside that
+pass), `bloom` **+0.000** (Karis is inside the clock's resolution at half res). **≥ 60 fps p50 with
+the whole stack on: met, with 4.5 ms of headroom**, and reproduced across two runs 0.017 ms apart.
+Priced where they are legible — the cube field at 640×360, off the GPU clock, one at a time:
+`exposure` +0.0143 ms, `flare` +0.0082, the trio +0.0143, Karis +0.0000 over bloom. VRAM: **+4.15 MB**
+at 1080p for the half-res flare target, plus 1 KiB of buffers.
+
+**Two goldens, both additive.** `sun_flare.png` (55 → 56, digests `d6da45fd…` → `9311730d…`) and
+`lens_trio.png` (56 → 57, `9311730d…` → `dc695d74…`), each moving `GOLDENS` in four gates and the
+phase18 name array by one, with **not one committed image changed** in either commit.
+`INF_GOLDEN_STRICT=1` green over all 57.
+
+**Routed, not taken, by name:** depth of field, motion blur, the grading LUT / white balance,
+reflection probes, planar reflections, and **glass / IOR transmission — which goes to the MAT wave
+with the translucent rewrite**. Plus VIS-C4d above. None was refused on cost; each needs a schema
+window or a wave of its own.
+
+**Counts:** battery **327 / 6 159 / 0 / 19** (+3 blocks — `inf-render`'s `exposure`, `inf-player`'s
+`authored_emissive` and `exposure_pie` — and +21 arms); goldens **57**, two added and **none
+re-blessed**, digest `d6da45fd…` → `dc695d74…` in all three gates plus the phase18 name array;
+render graph **29 → 31** nodes, both picked up by `gpu_timing`'s derived list with no edit
+(`FRAME_MARKS_NEEDED` 35 → 37); frontend **719 / 80**, `tsc` and `eslint` clean; rustdoc **374**
+unmoved against a ceiling of 450 (two broken intra-doc links of the wave's own, found and fixed);
+clippy `-D warnings` **0**; `cargo fmt --all --check` clean; schemas **unmoved**; no new crate or
+dependency. **Carried by name**: VIS-C4d (the bloom quality block); the adaptation's discontinuity
+guard as a rate ceiling; `RenderTier` does not clamp the lens; the flare target is allocated
+unconditionally; the lens trio has no cost row of its own; the flare's bright-pass threshold is not
+authored; the exposure histogram's sample lattice is fixed rather than rotated.

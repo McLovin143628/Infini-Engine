@@ -84,7 +84,10 @@ fn exposure_bin(l: f32) -> u32 {
     if (l2 <= EXPOSURE_LOG_MIN) {
         return 0u;
     }
-    let t = (l2 - EXPOSURE_LOG_MIN) / (EXPOSURE_LOG_MAX - EXPOSURE_LOG_MIN);
+    // Clamped BEFORE the cast, in both copies: an infinity in the HDR buffer
+    // would otherwise reach `u32(t * 256)` as an out-of-range float-to-int
+    // conversion, which WGSL leaves *indeterminate*.
+    let t = clamp((l2 - EXPOSURE_LOG_MIN) / (EXPOSURE_LOG_MAX - EXPOSURE_LOG_MIN), 0.0, 1.0);
     return min(u32(t * f32(EXPOSURE_BINS)), EXPOSURE_BINS - 1u);
 }
 

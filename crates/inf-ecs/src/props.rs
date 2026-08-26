@@ -54,8 +54,9 @@ pub enum PropValue {
 /// A numeric field's **UI range** — the hint that turns a bare number box into a
 /// slider (wave VIS1b).
 ///
-/// A *hint*, not a constraint: [`apply_value`] does not clamp to it, because a
-/// number an author deliberately typed is not the widget's business. What the
+/// A *hint*, not a constraint: the write door (`apply_value`) does not clamp to
+/// it, because a number an author deliberately typed is not the widget's
+/// business — the door refuses only what is not finite. What the
 /// range does is give the drag a scale, which is the whole difference between
 /// "roughness" as a step-1 spinner (three clicks from 0 to useless) and as a
 /// slider.

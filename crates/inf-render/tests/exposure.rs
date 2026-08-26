@@ -376,13 +376,7 @@ fn the_bloom_threshold_is_exposure_relative() {
         let mut scene = scene_at(radiance);
         set_clock(&mut scene, 0.0);
         let on = {
-            let mut r = Rig::new(
-                &gpu,
-                RenderSettings {
-                    bloom,
-                    ..settings.clone()
-                },
-            );
+            let mut r = Rig::new(&gpu, RenderSettings { bloom, ..settings });
             r.frame(&gpu, &scene);
             mean_luma(&r.pixels(&gpu))
         };

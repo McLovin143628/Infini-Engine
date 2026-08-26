@@ -2,7 +2,7 @@
 //! the bloom prefilter and the tonemap read.
 //!
 //! The pair lives here rather than inside [`crate::passes::exposure`] for the
-//! reason [`crate::csm::ShadowResources`] and [`crate::gi::GiResources`] do: a
+//! reason `ShadowResources` and `GiResources` do (both `renderer.rs`): a
 //! node cannot reach another node's buffers, and the exposure multiplier has
 //! **three** readers at three depths of the frame — the histogram node writes it,
 //! the bloom prefilter thresholds against it, and the tonemap multiplies by it.

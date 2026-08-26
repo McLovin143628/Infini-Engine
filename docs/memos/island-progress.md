@@ -8677,3 +8677,454 @@ prepass arms ask WHERE, and the boat gets a golden; `ed119857` both mirrors pinn
 persisted field read; `66f98b7e` a dead line, a doc comment on the wrong function, a stale
 name; `aa11c039` clippy's `neg_multiply` on the audit's own new arm; and the ledger commits
 that carry this section into the memo and the ROADMAP.
+
+## Wave VIS1b — light & lens (2026-08-26)
+
+The second slice of the photoreal arc, and the one the viewer sees. VIS1a decided what
+the screen-space stack could *see*; this slice decides what the frame is *exposed* at,
+what the lens does with the light that gets past white, and what the recording medium
+adds on top. Base `278fb3c6`, RTX 4070 Ti, Windows/Vulkan. Every authorable field it
+consumes was landed by VIS1a's one schema window, so **scene v26 does not move**.
+
+### Clause 1 — auto exposure, and the ordering decision it forces
+
+**What exposure was.** One linear scalar in the tonemap's own uniform, applied *after*
+the bloom add (`tonemap.wgsl:57-58`). No histogram, no adaptation, no EV anywhere.
+
+**What it is now.** A 256-bin luminance histogram over `post_hdr` — two compute
+dispatches and a buffer clear in front of the bloom node — reduced to a **log-average**,
+turned into a target in stops, and adapted toward at the rate the level authors.
+
+**The rule lives in Rust, and the shader is its transliteration.** `exposure_bin`,
+`exposure_bin_luminance`, `exposure_log_average`, `exposure_target_ev`,
+`adapt_exposure_ev` and `manual_exposure_multiplier` are all in
+`inf_render::settings`, all unit-tested without a GPU, and
+`the_cpu_and_wgsl_exposure_rules_agree` reads the four constants back **out of the
+shader source** and compares them — the idiom the VIS1a audit built for the GGX energy
+fit, applied before rather than after. A rule that exists only inside a compute shader
+is a rule nobody can falsify.
+
+**A log-average, and no percentile trim.** The trim exists to buy robustness against a
+blown source; the log-average has it by construction — a sun disc at 10⁴ over two
+million pixels moves `log2` by `13 / 2 000 000`. Asserted rather than argued: a million
+mid-grey pixels read **0.18**, and adding one pixel in the top bin moves that by less
+than 1e-3. Bin 0 is the black bin and is excluded, because a frame is mostly unlit
+backdrop far more often than it is mostly mid-tone.
+
+#### The ordering decision, and its measurement
+
+Today's chain was `(hdr + bloom) · exposure`, so the bloom prefilter keyed on **raw
+radiance** and the threshold meant a different thing at every exposure. With auto
+exposure that stops being a matter of taste: a dim scene the eye has opened four stops
+has *nothing* over a linear threshold of 1.0 and cannot bloom at all, while the same
+scene four stops brighter blooms off everything in it.
+
+The measurement is the bloom's **energy contribution** on one scene at two radiances
+twenty times apart, under auto exposure, on a backdrop-with-highlight fixture at
+320×180:
+
+| ordering | dim scene | bright scene | spread |
+|---|---|---|---|
+| **exposure-relative (ships)** | +9.033 | +9.214 | **1.02×** |
+| exposure-independent (the old order) | +8.030 | +3.971 | **2.02×** |
+
+Shipped: the prefilter multiplies by the frame's exposure before keying, and the tonemap
+adds the result **without exposing it twice**. Mutation-verified the other way — forcing
+the prefilter's exposure to 1.0 makes the spread **6.52×** and fails the arm.
+
+**And it re-blessed nothing.** `(a + b) · 1.0` and `a · 1.0 + b` are the same bits;
+every committed golden renders at `exposure == 1.0`; `INF_GOLDEN_STRICT=1` is green over
+all 55 and `git status` over `tests/goldens` is empty. The brief allowed a deliberate
+re-bless here and none was needed.
+
+#### The clock, and what "a paused sim is a frozen eye" costs
+
+`dt` is a **`cloud_time_s` delta** — the document's own clock, the one the wind drifts
+by, the waves move on and the rain falls at. Never a wall clock, never a frame index.
+Three consequences, all asserted:
+
+* a frozen clock freezes the adaptation, however many frames run;
+* one 1.0 s step and twenty 0.05 s steps land on the same EV (within 1e-4 on the GPU,
+  exactly in the CPU rule), so a level does not look different on a faster machine;
+* two runs of one clock are the same trace.
+
+The ramp is **linear in stops**, because `adaptation_speed` is documented in stops per
+second and a linear ramp is the only rule that makes that sentence true — an
+exponential's "speed" is a half-life wearing a rate's name. It also arrives in finite
+time, which lets a gate assert arrival rather than proximity.
+
+**Two consequences a designer has to have read**, both found while building the PIE arm.
+
+`adaptation_speed` is stops per second **of level clock**, so its meaning scales with
+`TimeOfDay::rate`. The two being the same clock is the whole point of stepping the eye by
+the document; it is also a trap, and it is now written on the field.
+
+And the adaptation carries a **discontinuity guard** — one frame may adapt over at most
+**10 s** of clock, because an author scrubbing the time-of-day slider hands the node a
+jump of hours and adapting over that would snap the eye on the frame the slider moved.
+Ten seconds a frame is `rate == 600` at 60 fps, a whole day in 2.4 real minutes; **above
+that rate the guard rather than the authored speed governs**, and the authored number
+stops meaning what it says. Every plausible game clock is far below it (`rate == 60` is a
+day in 24 minutes). The wave's own PIE arm is deliberately *above* it — it runs at
+`rate == 30 000` so the sun sets inside twenty-four frames — and the trace it measures is
+therefore the guard's arithmetic: `4e-4 × 10 = 0.004` stops a frame, 0.096 over
+twenty-four, against the **0.0920** span the arm reads. The constant's own doc names the
+ceiling; carried below as a thing to revisit rather than hidden.
+
+#### Manual mode records nothing
+
+At `ExposureMode::Manual` — the default, and what every level authored before this wave
+carries — the node writes sixteen bytes and returns **before it touches the encoder**.
+No histogram, no dispatch, no barrier. And it writes only when the value *changed*, so a
+manual frame after the first records nothing at all. The multiplier is
+`RenderSettings::exposure` with the compensation folded in, which at the default
+compensation of zero is that scalar **bit for bit** — asserted on `to_bits`, over
+`0.0`, `1.0`, `0.7`, `2.5`, `1e-6`, `1e6` and `f32::MIN_POSITIVE`.
+
+#### PIE == shipping, on a trace that adapts
+
+`exposure_pie.rs`, on `vsm_pie.rs`'s shape: one project cooked, two worlds built from it
+— one off the **cooked pack**, one off the editor's **`ScenePayload`** — stepped in
+lockstep and projected through `project_scene`, then rendered and read back.
+
+Anti-vacuity comes first, in four directions: both sides carry the sky authority with a
+running rate; the clock moved **11 500 s**; the histogram measured something; and the EV
+is a **ramp** (more than half the frames differ from their predecessor) rather than a
+step. Measured: 16:56 → 20:16, average scene luminance **0.4137 → 0.1827**, EV
+**−1.2007 → −1.1087** over 24 frames. The two traces are equal.
+
+**And the last third of that file is the clause the two-host comparison cannot make.**
+Two hosts drawing the same number of frames agree about a frame counter as readily as
+about a clock, so the arm re-cooks the level and renders it **three times per simulation
+step** — a windowed PIE at 180 Hz over a 60 Hz sim — and requires the identical trace.
+
+#### What it costs
+
+`read_exposure` needs **no enable flag**, unlike the vgeom and scatter audits beside it:
+the copy is recorded on its own encoder outside the frame loop, so there is no
+instrument-on/instrument-off pair of command streams to keep identical, and a shipped
+frame simply never calls it.
+
+### Clause 2 — emissive intensity reaches the editor
+
+VIS1a landed `Material::emissive_intensity` and `emissive_linear()`; what it did not
+land was a way to *author* it or a door that refuses a hostile value. Both are here.
+
+**The door.** `props::apply_value` wrote `*n as f32` unconditionally. The only numeric
+guard in the whole chain was `Number.isFinite` in the React number field — which covers
+**one of four** writers (Details, `tuning::apply_tune`'s live preview, the sequencer's
+scrub, `edit_apply_material`) and cannot see the case that actually reaches the GPU
+anyway: `1e300` is a perfectly finite `f64` and is `inf` the instant it is cast to
+`f32`, after which `emissive_linear`'s `0.0 * inf` is a **NaN in the instance buffer**
+at six sites across two hosts. The refusal now sits in the one place all four pass
+through, and it is a refusal rather than a failure — no write, no undo step, the panel
+re-reads what it had. Asserted over NaN, both infinities and ±1e300, with `1e30` still
+getting through: the door refuses non-finite numbers, not ambitious ones.
+
+**The slider.** There was no per-field range mechanism anywhere in this tree.
+`PropValue::Number(f64)` is the entire widget vocabulary for `f32`, `f64`, `i32` and
+`u32` alike, so `emissive_intensity`, `metallic`, `roughness` and `alpha_cutoff` were
+all **step-1 spinners** — three clicks from 0 to useless on a `[0,1]` field.
+`PropRange` is that mechanism: a Ring-0 table keyed by `(type_path, field)`, carried on
+`PropFieldDto` exactly the way `AssetRef`'s `asset_kind` already is. Four entries, and
+each is a fact about units rather than a guess. Keeping it short is the point — a table
+of guesses is worse than the honest spinner, which at least admits to knowing nothing.
+The type path is pinned against the reflected type, because a string key silently stops
+applying the day a field is renamed and the symptom is a widget nobody files a bug
+about.
+
+The range is a **hint**: the slider clamps to it because a slider is a range; the number
+box does not, because an emissive intensity of 200 is a legal thing to want.
+
+**The authored twin arm.** `golden_hdr_bloom` builds its glow by writing
+`MeshInstance::emissive = [8.0, 1.0, 0.4]` by hand, because a golden may reach past the
+UI. `runtime/inf-player/tests/authored_emissive.rs` is the same magnitude through the
+**real component path** — an ECS `Material` carrying an 8-bit picker colour and an
+intensity of 9.0, through `inf_player::render::project_scene`, then rendered. It lives
+in a host's tests because `inf-render` cannot see `inf-ecs` (the ring rule), so that is
+the only place the component path and the renderer meet.
+
+| | bloom energy added |
+|---|---|
+| authored `emissive_intensity = 9.0` | **+2 545 504** |
+| the same materials at the pre-v26 ceiling of 1.0 | +89 298 |
+
+A 28× margin against a 4× threshold. And the multiplier comparison is a finding:
+`project_scene` iterates in **GUID order**, so two worlds built with fresh guids paired
+the red lamp with the blue one and the first run failed. Fixed guids.
+
+### Clause 3 — the sun gets a lens
+
+**A relocation, as specified.** Three pieces already existed in `underwater.wgsl`,
+written for light shafts seen from below the sea, and they move here unchanged in shape:
+the sun's screen position (a point 10 km along the sun direction, projected, with
+`clip.w <= 0` a **hard zero** rather than a guess), the radial gather with an
+exponential per-tap decay, and the CPU-side `SunParams` the whole thing hangs off.
+
+What changes is the **source term**. Underwater, each tap asks an analytic question
+("does this ray reach the surface unobstructed?") because the surface shader renders the
+deep colour from below and a luminance gather would have nothing to gather. Above water
+there *are* bright pixels to gather, so the gather is the same kernel over a different
+question — and the occlusion test moves from "did the sea floor cut this ray off" to "is
+the sun itself behind something".
+
+Half resolution, into its own target (**4.15 MB at 1080p**, the cloud stack's
+precedent), after bloom and before the tonemap. Four terms: the veiling glare (16 taps,
+0.94 per-tap decay, 0.6 reach), a ghost chain reflected through the frame centre with a
+per-ghost tint, one halo ring, and an optional horizontal anamorphic streak.
+
+**The occlusion test reads the MSAA scene depth, not the prepass.** Reverse-infinite Z
+means a depth of exactly zero is sky, so the fraction of nine taps around the sun's
+screen position that read zero **is** its visibility — no unprojection, no distance
+compare, and it sees meshlets and scattered foliage, which VIS-C1b still leaves out of
+the prepass. Off screen counts as *not* occluded: the glare of a sun just past the frame
+edge is the whole reason a veiling term exists.
+
+Measured at 320×180, dawn with the disc low in a dim sky:
+
+| | frame luminance |
+|---|---|
+| flare adds | **+4.69 %** |
+| top half (where the sun is) | **+160 545** |
+| bottom half | +65 601 |
+| sun clear, glare added | **226 146** |
+| sun behind a slab | **18 901** (a **92 %** cut) |
+
+**The fixture is a finding, twice.** The first draft used `RenderScene::default()`,
+whose sky is the pre-P17.2 gradient plus a `pow(dot, 48) · 0.105` warm glow — nothing in
+it reaches the threshold, and the arm measured a byte-identical frame. A sun *disc*
+exists only on the atmosphere path. The second draft put a **noon** sun in: the sky
+around it is already at the top of the ACES curve, so the whole effect measured
+**+0.08 %**. A low sun in a dim sky is both the shot a flare is taken in and the one an
+assertion can read.
+
+**Off is a clear and a branch.** The node clears its target and records nothing else;
+the tonemap's add sits behind a uniform branch it does not take, so a level that never
+asked for a lens does not pay a full-resolution fetch for one.
+
+`sun_flare.png` is the **56th** golden — the additive branch: `GOLDENS` 55 → 56 in four
+gates, all three `GOLDEN_SET_DIGEST` pins moved by hand (`d6da45fd…` → `9311730d…`), the
+phase18 name array grown by one, and not one committed image changed.
+
+### Clause 4 — bloom quality, and what did not fit
+
+**Karis' average on the first downsample**, under the `bloom.karis` bit VIS1a already
+landed. The prefilter takes the four source texels the half-res pixel covers
+individually and weights each by `1/(1+luma)` before the mean, instead of letting one
+bilinear tap box-average them.
+
+Measured against the thing it exists to kill — one 0.03 m cube at radiance 900 beside a
+broad emissive wall:
+
+| | plain | Karis | change |
+|---|---|---|---|
+| the firefly's bloom | 13.3564 | **0.0063** | **−100 %** |
+| the broad highlight's bloom | 84.7943 | **84.1689** | −0.7 % |
+
+That ratio is the arm's threshold: the cut has to be more than twice the cost.
+
+**Stopped, with the route: the luma key and the per-mip falloff.** Both need an
+authored bit and the arc's one scene-schema window was spent in VIS1a. Overloading
+`bloom_karis` — whose wire name and doc are specific — to mean "bloom quality v2" is
+exactly the kind of thing an auditor is right to flag. Named: **VIS-C4d, the bloom
+quality block**, for the next scene-schema bump.
+
+### Clause 5 — the lens trio
+
+One composite-stage uber-post, in the **tonemap** rather than in `composite.wgsl`. The
+reason is one pass later in the graph: the in-game UI draws *after* the tonemap (island
+wave I5), deliberately, so a menu is not bloomed or reprojected along with the world
+behind it — and putting the grain and the vignette in the composite would put them over
+that menu.
+
+* **Chromatic aberration**: a radial three-tap, offset in *pixels of separation at the
+  corner* so the authored number means the same thing at every resolution. Two extra
+  fetches when non-zero, and the one fetch the pass already made when it is not.
+* **Vignette, before the curve.** A lens loses light toward the corner; it does not
+  paint the corner black. Attenuating radiance and letting ACES answer for it keeps a
+  blown corner highlight blown, which a post-tonemap multiply gets wrong.
+* **Film grain, after it**, in display space, multiplied by the colour as well as added
+  so black stays black — a grain that lifts the shadows is a fog.
+
+**The grain is a function of the level clock.** `floor(cloud_time_s · 24)` wrapped into
+24 bits, computed in `f64` on the CPU and bitcast back to an integer in the shader.
+Computed CPU-side because `cloud_time_s` reaches `day_of_year · 86 400`, where an `f32`
+cannot resolve a twenty-fourth of a second and a shader-side `floor` would quantise the
+grain to a standstill after new year's day. An integer avalanche hash rather than
+`fract(sin(dot()))`: that is the `f32` trig the P14 law bans on any path two machines
+have to agree about, and a shared level is such a path. Asserted three ways — the same
+clock is byte-identical, a grain period apart is not, a tenth of a period apart is.
+
+Measured at 320×180: the vignette takes the corner/centre luminance ratio from
+**0.7102 → 0.5260**; the aberration adds **2.329** of mean `|R − B|` in the edge band
+against **0.355** in the centre, which is the radial claim.
+
+**And the aberration measurement is a finding.** Read off the *trio* frame it goes the
+wrong way — 19.501 → 18.606 — because `|R − B|` is an absolute difference and the
+vignette has removed 47 % of the light from the very corners the fringe is strongest in.
+Three effects in one frame need three measurements; the arm renders the aberration
+alone.
+
+`lens_trio.png` is the **57th** golden, additive again: `GOLDENS` 56 → 57 in four gates,
+three digest pins moved by hand (`9311730d…` → `dc695d74…`), the name array grown by
+one, no committed image changed.
+
+### The authorable surface
+
+The World Settings panel gains **Exposure** (mode / compensation EV / min-max luminance
+/ adaptation in stops per second, plus the bloom firefly filter), **Lens Flare**
+(enabled / glare / ghosts / halo / anamorphic streak) and **Film** (vignette, its
+softness, chromatic aberration in pixels at the corner, grain and its cell size). VIS1a
+drew none of them on purpose — *"a slider that changes nothing is a promise the engine
+is not keeping"* — and that sentence is now discharged rather than deleted.
+
+`Material::emissive_intensity` needs no panel of its own: the Details grid is
+reflection-driven, and with `PropRange` it draws as a slider.
+
+### The lit island, measured
+
+`the_island_at_shipping_resolution`, RTX 4070 Ti, **release**, 1080p, 3 × 120 frames, MIN
+of rounds, over the 51.38 km² Vancouver island. The instrument gains a fourth
+configuration this wave — **`LIT+VIS`**, which is `LIT+SSR` plus auto exposure, the Karis
+bit, the sun glare and the lens trio, every one of them set through the *record* door, so
+it is what a level that ticks them in World Settings produces rather than a hand-poked
+`RenderSettings`.
+
+| | SHIPPED | LIT | LIT+SSR | **LIT+VIS** |
+|---|---|---|---|---|
+| p50 | 3.552 ms (281.5 fps) | 11.906 ms (84.0 fps) | 11.953 ms (83.7 fps) | **12.133 ms (82.4 fps)** |
+| p95 | 3.784 ms | 21.479 ms | 21.567 ms | 21.527 ms |
+| GPU frame | 1.124 ms | 8.290 ms | 8.310 ms | **8.432 ms** |
+| pipelined estimate | 430.5 fps | 120.6 fps | 120.3 fps | **118.6 fps** |
+
+**≥ 60 fps p50 with the whole VIS stack on: met, at 82.4 fps — 4.5 ms of headroom.**
+Nothing in this slice ships opt-in-off for budget reasons.
+
+Per pass, which is where the wave's own cost is:
+
+| pass | LIT | LIT+SSR | **LIT+VIS** | what changed |
+|---|---|---|---|---|
+| `exposure` | 0.001 | 0.001 | **0.021** | **+0.020 ms** — the histogram over a quarter of a 1080p frame plus the single-workgroup reduce. In manual mode the node records nothing, which is the 0.001 beside it. |
+| `flare` | 0.001 | 0.001 | **0.074** | **+0.073 ms** — half-res, sixteen veil taps + four ghosts + halo + a seven-tap streak + nine depth taps for the sun's visibility. The dearest thing this slice adds, and **0.9 % of the frame**. |
+| `tonemap` | 0.015 | 0.015 | **0.020** | **+0.005 ms** — the lens trio, which has no row of its own because it is arithmetic and two extra fetches inside this pass. |
+| `bloom` | 0.042 | 0.043 | **0.043** | **+0.000 ms** — Karis' four weighted taps replace one bilinear tap on the prefilter alone, at half resolution, and the clock cannot see it. |
+| `vsm-raster` | 4.572 | 4.581 | 4.593 | untouched |
+| `terrain` | 1.900 | 1.903 | 1.906 | untouched |
+| `gi` | 0.784 | 0.784 | 0.783 | untouched |
+| `ssao` | 0.149 | 0.149 | 0.150 | untouched (VIS1a's GTAO) |
+| `depth-prepass` | 0.059 | 0.058 | 0.060 | untouched (VIS1a's widening) |
+| `water` | 0.062 | 0.073 | 0.073 | untouched (VIS1a's SSR) |
+| `vgeom` / `scatter` | 0.309 / 0.125 | 0.308 / 0.125 | 0.311 / 0.126 | untouched |
+
+**The whole wave costs the lit island +0.122 ms of GPU frame** (8.310 → 8.432), **1.5 %**,
+for an eye that adapts, a lens that glares and a frame that has been through a camera.
+
+**Reproduced**: an earlier run of the same tree read `LIT+VIS` at **8.415 ms / 83.6 fps**
+against this table's 8.432 / 82.4 — 0.017 ms apart, which is what this instrument's
+agreement with itself looks like and is the right amount of trust to put in the third
+decimal.
+
+#### The same passes, priced where they are legible
+
+The island's frame is dominated by shadow rasterization and terrain, so a pass worth two
+hundredths of a millisecond sits near the noise there. `vis1b_post_cost` prices them on the
+cube field at 640×360, one at a time, off the **GPU clock** (not a stopwatch — see the
+finding below), against a warm control:
+
+| feature | the pass, off | the pass, on | cost |
+|---|---|---|---|
+| auto exposure | `exposure` 0.0000 | 0.0143 | **+0.0143 ms** |
+| bloom | `bloom` 0.0000 | 0.0236 | +0.0236 ms |
+| bloom + Karis | `bloom` 0.0000 | 0.0236 | **+0.0000 ms over bloom** |
+| sun glare | `flare` 0.0000 | 0.0082 | **+0.0082 ms** |
+| the lens trio | `tonemap` 0.0041 | 0.0184 | **+0.0143 ms** |
+
+**And the instrument itself is a finding.** The first version of that test measured wall
+time around sixty frames, the way `gi_v2_cost_per_tier` does — and on a 0.114 ms frame it
+priced the lens trio, two texture fetches and some arithmetic, at **+0.093 ms**: the same
+as the entire bloom mip chain. That cannot be true. A whole-frame stopwatch on a frame
+that short is measuring submit overhead, so the test reads `gpu_timings` now, which is the
+same clock the island table above is built from.
+
+### Counts
+
+| | before (`278fb3c6`) | **after VIS1b** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 324 / 6 138 / 0 / 19 | **327 / 6 159 / 0 / 19** — **+3 blocks** (`inf-render`’s `exposure`, `inf-player`’s `authored_emissive` and `exposure_pie`) and **+21 arms** |
+| goldens | 55 | **57** — `sun_flare.png` and `lens_trio.png` **added**, **none re-blessed**, `INF_GOLDEN_STRICT=1` green over all 57 |
+| `GOLDEN_SET_DIGEST` pins | `d6da45fd…` | **`dc695d74…`** — moved twice, by hand, in all three gates, both times on the **additive** branch |
+| phase18 golden NAME array | 55 names | **57 names** |
+| render graph nodes | 29 | **31** (`exposure`, `flare`) — `gpu_timing`'s derived list picks both up with no edit; `FRAME_MARKS_NEEDED` 35 → 37 |
+| frontend tests / files | 718 / 80 | **719 / 80** — +1 arm, no new file; `tsc` and `eslint` clean |
+| rustdoc individual warnings (cold, after `cargo clean --doc`) | 374 over 30 crates | **374 over 30 crates** — the wave adds **zero**, after two broken intra-doc links of its own were found and fixed — against a ceiling of 450 |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** — three of the wave’s own (a `neg_cmp_op_on_partial_ord`, a `clone_on_copy` and an `unusual_byte_groupings`), caught and fixed |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 | **unmoved** — the arc's window was spent in VIS1a and this slice needed none of it |
+| new crates / dependencies | — | **none** |
+| VRAM at 1080p | — | **+4.15 MB** (the half-res flare target) **+ 1 KiB** (the histogram and the exposure state) |
+
+### Routed, not taken — by name
+
+The brief named six things this arc does not take unless they were measured to fit.
+None was, and none is guessed at:
+
+1. **Depth of field** and 2. **motion blur** — both are their own passes with their own
+   authored blocks, and the arc's one scene-schema window closed in VIS1a. Neither is
+   named-for-later on cost grounds; the budget below has room. They need a bump.
+3. **The grading LUT / white balance.** The tonemap is still Narkowicz ACES with no
+   grading stage at all. A LUT is a texture asset, an import path and a schema field —
+   a wave, not a clause.
+4. **Reflection probes** and 5. **planar reflections** — carried unchanged from VIS1a's
+   own list; SSR's fallback is the specular-GI lobe and the sky-tinted constant, and
+   probes are what would make that fallback *correct* rather than plausible.
+6. **Glass / IOR transmission** goes to the **MAT wave** with the translucent rewrite,
+   by name. The translucent pass is still an opaque shader with alpha that reads the
+   scene never, and there is no IOR anywhere in the material model.
+
+And one this wave added: **VIS-C4d, the bloom quality block** (the luma key and the
+per-mip falloff), for the same schema reason.
+
+### Carried, by name
+
+1. **VIS-C4d — the bloom luma key and per-mip falloff.** Both need an authored bit;
+   `bloom_karis`'s wire name and doc are specific and overloading it to mean "bloom
+   quality v2" would be a byte pin that stops describing what it pins. Next
+   scene-schema bump.
+2. **`RenderTier` does not clamp the lens.** Auto exposure is two compute dispatches and
+   the flare is a half-res pass, and neither is clamped down on `Low` or mobile the way
+   `vgeom`, `vsm` and `atmosphere` are. Defensible today — both are off by default and
+   both are *look* decisions rather than capability ones, which is the
+   `VirtualTextureSettings` argument — and worth revisiting the day a tier ships with
+   the lens on.
+3. **The flare target is allocated unconditionally.** 4.15 MB at 1080p, on the cloud
+   stack's and the TAA history's terms: a lazily-grown target would still need a
+   placeholder bound at the tonemap's binding to keep that bind group valid.
+4. **The lens trio has no cost row of its own.** It is arithmetic and two texture
+   fetches inside `tonemap`, so its price shows up in that pass's row and nowhere else.
+   Separable by toggling, not by reading the table.
+5. **The flare's bright-pass threshold is not authored.** `FlareSettings` has five
+   fields and none of them is a threshold; `1.0` in exposed units is hard-coded, which
+   is the same number bloom defaults to and the right default — but it is a constant an
+   author cannot reach.
+6. **The adaptation's discontinuity guard is a rate ceiling in disguise.**
+   `MAX_STEP_S = 10 s` of clock per frame is `TimeOfDay::rate == 600` at 60 fps; above
+   it the guard governs the eye's speed instead of `adaptation_speed`, and the authored
+   number quietly stops meaning what it says. Nothing shipped is near it, and there is no
+   *correct* threshold — a scrub and a very fast clock look the same to a delta — so the
+   honest fix is a signal that the clock JUMPED (an edit stamp on `TimeOfDay`, which
+   would also serve the wind and the waves) rather than a bigger number.
+7. **The exposure histogram samples a quarter of the frame** on a fixed lattice
+   (stride 2 in each axis). The log-average's standard error at half a million samples
+   is far below a bin's 0.078-stop width, so nothing the rule can see is lost — but the
+   *lattice* is fixed rather than rotated, so a scene with a strong period-2 pattern in
+   it would be measured on one phase of that pattern for ever.
+
+### Commits
+
+`bbb2fb73` auto exposure, and the ordering decision it forces; `a2f92078` the sun gets a
+lens — veiling glare, ghosts, halo, streak, and the 56th golden; `da7f310f` the lens trio
+and the 57th; `7fd8d71c` emissive intensity gets a slider and the door refuses a NaN;
+`8625af94` World Settings draws the three blocks that now have passes; `5d9cd1b7`
+PIE == shipping on a trace whose exposure adapts; `17d32865` the instruments, and a rate
+ceiling nobody had noticed; plus the ledger commit that carries this section into the memo
+and the ROADMAP.

@@ -68,7 +68,7 @@ fn authored_world(intensity: f32) -> RuntimeSim {
         // orders and the multiplier comparison below would pair the red lamp
         // with the blue one. (It did, on the first run.)
         let e = world.spawn_with_guid(
-            uuid::Uuid::from_u128(0xE_1155_1E0_0000_0001 + i as u128),
+            uuid::Uuid::from_u128(0xE115_51E0_0000_0001 + i as u128),
             &format!("Lamp{i}"),
             None,
         );

@@ -2511,7 +2511,7 @@ fn film_grain_follows_the_level_clock_and_never_the_frame_index() {
         },
         ..RenderSettings::default()
     };
-    let at = |t: f64| render_with(&gpu, &lens_trio_scene(t), &view, grain_only.clone());
+    let at = |t: f64| render_with(&gpu, &lens_trio_scene(t), &view, grain_only);
 
     assert_eq!(
         at(10.0),
