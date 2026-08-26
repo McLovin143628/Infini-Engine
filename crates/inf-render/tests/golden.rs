@@ -2224,6 +2224,293 @@ fn golden_ssao() {
     assert!(lit, "expected the SSAO scene to stay lit");
 }
 
+/// The SSAO settings the prepass-coverage arms below turn on. A generous radius,
+/// because these scenes are metres across rather than the SSAO golden's
+/// centimetres.
+fn coverage_ssao() -> RenderSettings {
+    RenderSettings {
+        ssao: SsaoSettings {
+            enabled: true,
+            radius: 1.5,
+            intensity: 1.0,
+            bias: 0.03,
+        },
+        ..RenderSettings::default()
+    }
+}
+
+/// A rigid receiver: an 8 m floor slab with its top face at `y = 0`, and — where
+/// the occluder is not itself the ground — the only surface in these scenes that
+/// samples AO at all.
+fn ao_floor() -> MeshInstance {
+    MeshInstance::lit(
+        DVec3::new(0.0, -0.25, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(8.0, 0.5, 8.0),
+        [0.6, 0.6, 0.62, 1.0],
+        1,
+    )
+}
+
+/// **THE PREPASS SEES THE WORLD** (wave VIS1a) — the falsifiable half of widening
+/// the depth prepass past rigid meshes.
+///
+/// Before this wave `DepthPrepassNode` drew rigid meshes and nothing else, so a
+/// terrain, a character, a voxel volume or a fracture chunk wrote *nothing* into
+/// the prepass: `ssao.wgsl` read `DEPTH_CLEAR` wherever they stood, took its
+/// "sky ⇒ fully unoccluded" branch, and left the AO texture at a uniform 1.0 —
+/// which multiplies the ambient term by one.
+///
+/// The measurement is **the occlusion this geometry casts onto pixels it does not
+/// itself cover**, which isolates the claim exactly. Four frames are rendered:
+/// the scene with and without the occluder, each with SSAO off and on. The
+/// SSAO-off pair identifies the pixels the occluder does not draw over — where
+/// they agree, the *same* surface is visible in both scenes. On exactly those
+/// pixels the SSAO-on pair may then differ for one reason only: the occluder's
+/// depth reached the prepass and the AO kernel found it.
+///
+/// A removed `depth_prepass` implementation collapses that count to zero. Nothing
+/// else in the renderer can move it.
+fn assert_prepass_reaches(
+    gpu: &GpuContext,
+    what: &str,
+    with: &RenderScene,
+    without: &RenderScene,
+    view: &RenderView,
+) {
+    let off_w = render_with(gpu, with, view, RenderSettings::default());
+    let off_o = render_with(gpu, without, view, RenderSettings::default());
+    let on_w = render_with(gpu, with, view, coverage_ssao());
+    let on_o = render_with(gpu, without, view, coverage_ssao());
+
+    let (mut shared, mut darker, mut brighter) = (0usize, 0usize, 0usize);
+    for i in (0..off_w.len()).step_by(4) {
+        if off_w[i..i + 3] != off_o[i..i + 3] {
+            continue; // the occluder is drawn here — not a shared surface
+        }
+        shared += 1;
+        let a = i32::from(on_w[i]) + i32::from(on_w[i + 1]) + i32::from(on_w[i + 2]);
+        let b = i32::from(on_o[i]) + i32::from(on_o[i + 1]) + i32::from(on_o[i + 2]);
+        if a < b - 1 {
+            darker += 1;
+        } else if a > b + 1 {
+            brighter += 1;
+        }
+    }
+    eprintln!(
+        "prepass coverage — {what}: of {shared} pixels showing the SAME surface \
+         in both scenes, {darker} darkened and {brighter} brightened once the \
+         occluder joined the prepass"
+    );
+    // 100 rather than something near the measured counts (1 583 skinned, 7 033
+    // fracture, and the voxel probe's smaller share): the claim is "not zero",
+    // and a threshold set against one adapter's exact number is a flake waiting
+    // for a different rasterizer.
+    assert!(
+        darker > 100,
+        "{what}: adding this geometry darkened only {darker} of {shared} shared \
+         pixels — its depth is not in the prepass, so the AO texture is 1.0 where \
+         it stands and it occludes nothing"
+    );
+    assert!(
+        brighter * 4 < darker,
+        "{what}: {brighter} shared pixels got BRIGHTER against {darker} darker — \
+         occlusion may only ever remove ambient light"
+    );
+}
+
+/// Terrain — the one that matters most, because a level whose content *is* its
+/// ground had no ambient occlusion at all before this wave.
+///
+/// Terrain is both the occluder and the receiver (`terrain.wgsl` is composed
+/// `LitDeform` and samples `ao_tex` at `@group(3)`), so there is no separate
+/// control to take: the frame with SSAO off IS the control, and before this wave
+/// the frame with SSAO on was byte-identical to it. Measured, so that is what is
+/// asserted.
+#[test]
+fn the_prepass_sees_terrain() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let scene = RenderScene {
+        grid_enabled: false,
+        terrains: vec![hill_terrain(33, 1.0, 2, 2)],
+        ..Default::default()
+    };
+    let view = look_view(DVec3::new(32.0, 24.0, -12.0), DVec3::new(32.0, 3.0, 32.0));
+    let off = render_with(&gpu, &scene, &view, RenderSettings::default());
+    let on = render_with(&gpu, &scene, &view, coverage_ssao());
+    let (mean, max) = image_diff(&off, &on, W, H);
+    let sum = |img: &[u8]| -> u64 {
+        img.chunks(4)
+            .map(|p| u64::from(p[0]) + u64::from(p[1]) + u64::from(p[2]))
+            .sum()
+    };
+    eprintln!(
+        "prepass coverage — terrain: SSAO moved the frame by mean {mean:.6} / max \
+         {max:.6}; total luminance {} lit against {} occluded",
+        sum(&off),
+        sum(&on)
+    );
+    assert!(
+        mean > 0.0005,
+        "terrain: SSAO changed nothing (mean {mean}, max {max}) — the ground is \
+         not in the depth prepass, so the AO texture is a uniform 1.0"
+    );
+    assert!(
+        sum(&on) < sum(&off),
+        "terrain: SSAO brightened the frame — occlusion may only ever remove \
+         ambient light"
+    );
+}
+
+/// A skinned character standing on a rigid floor: the contact shadow around its
+/// feet is the thing a rigid-only prepass could not draw.
+#[test]
+fn the_prepass_sees_a_skinned_character() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (sk, clip, mesh) = skinned_cylinder();
+    let mut floor_only = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    floor_only.instances.push(ao_floor());
+    floor_only.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.98, 0.95],
+        intensity: 1.2,
+        direction: Vec3::new(0.3, 0.9, 0.3).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        ..RenderLight::default()
+    });
+    floor_only.mark_dirty();
+
+    let mut scene = floor_only.clone();
+    scene.skinned_meshes.push(std::sync::Arc::new(mesh));
+    scene.skinned.push(SkinnedInstance {
+        vt: Default::default(),
+        translation: DVec3::ZERO,
+        rotation: Quat::IDENTITY,
+        scale: Vec3::ONE,
+        color: [0.75, 0.55, 0.35, 1.0],
+        metallic: 0.0,
+        roughness: 0.6,
+        emissive: [0.0; 3],
+        id: 2,
+        mesh: 0,
+        palette: palette_at(&sk, &clip, 0.5),
+    });
+    scene.mark_dirty();
+    let view = look_view(DVec3::new(3.2, 1.6, 3.6), DVec3::new(0.0, 0.6, 0.0));
+    assert_prepass_reaches(&gpu, "skinned", &scene, &floor_only, &view);
+}
+
+/// A carved SDF volume, measured against a rigid probe box resting on its slab.
+///
+/// **The probe is not decoration.** `voxel.wgsl` is composed `Plain` and binds no
+/// environment group at all — the P21.1 ruling — so a voxel surface samples no AO
+/// and never will until that ruling changes. What putting a voxel volume in the
+/// prepass buys is therefore the occlusion it casts on *everything else*, and
+/// that is what this measures.
+#[test]
+fn the_prepass_sees_a_voxel_volume() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    // The fixture's slab top is the sample plane y = 15 at 0.5 m per voxel, i.e.
+    // world y = 7.5; the dome is centred on world (8, 7.5, 8) with a 4.5 m radius.
+    // The probe sits on the flat slab, clear of the dome.
+    let probe = MeshInstance::lit(
+        DVec3::new(13.0, 8.25, 8.0),
+        Quat::IDENTITY,
+        Vec3::new(3.0, 1.5, 3.0),
+        [0.75, 0.72, 0.68, 1.0],
+        7,
+    );
+    let mut scene = voxel_scene();
+    scene.instances.push(probe);
+    scene.mark_dirty();
+    let mut probe_only = RenderScene {
+        grid_enabled: false,
+        lights: scene.lights.clone(),
+        ..Default::default()
+    };
+    probe_only.instances.push(probe);
+    probe_only.mark_dirty();
+    let view = look_view(DVec3::new(20.0, 11.0, 20.0), DVec3::new(12.0, 8.0, 8.0));
+    assert_prepass_reaches(&gpu, "voxel", &scene, &probe_only, &view);
+}
+
+/// Fracture debris on a rigid floor. There is no committed fracture golden to
+/// hang this on, so the fixture is built here: two cube-shaped chunks side by
+/// side, which is all the arm needs — the claim is about the *seam*, not about
+/// the geometry.
+#[test]
+fn the_prepass_sees_fracture_debris() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut vertices = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    // Six independent quads so every face carries its own outward normal.
+    let faces: [([f32; 3], [f32; 3], [f32; 3]); 6] = [
+        ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+        ([0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+        ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]),
+        ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
+        ([0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
+        ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+    ];
+    for (n, u, v) in faces {
+        let base = vertices.len() as u32;
+        for (su, sv) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            vertices.push(inf_render::scene::RenderFractureVertex {
+                pos: [
+                    (n[0] + u[0] * su + v[0] * sv) * 0.5,
+                    (n[1] + u[1] * su + v[1] * sv) * 0.5,
+                    (n[2] + u[2] * su + v[2] * sv) * 0.5,
+                ],
+                normal: n,
+                uv: [su * 0.5 + 0.5, sv * 0.5 + 0.5],
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    let mut floor_only = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    floor_only.instances.push(ao_floor());
+    floor_only.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.98, 0.95],
+        intensity: 1.4,
+        direction: Vec3::new(0.3, 0.9, 0.3).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        ..RenderLight::default()
+    });
+    floor_only.mark_dirty();
+
+    let mut scene = floor_only.clone();
+    // Two chunks side by side, so there is a crevice for the occlusion to find.
+    for (i, x) in [-0.52f64, 0.52].into_iter().enumerate() {
+        scene
+            .fracture_chunks
+            .push(inf_render::scene::RenderFractureChunk {
+                entity: 1,
+                chunk: i as u32,
+                translation: DVec3::new(x, 0.5, 0.0),
+                rotation: Quat::IDENTITY,
+                vertices: vertices.clone(),
+                indices: indices.clone(),
+                color: [0.7, 0.68, 0.65, 1.0],
+                metallic: 0.0,
+                roughness: 0.8,
+                emissive: [0.0; 3],
+                version: 1,
+            });
+    }
+    scene.mark_dirty();
+    let view = look_view(DVec3::new(2.2, 1.7, 2.6), DVec3::new(0.0, 0.5, 0.0));
+    assert_prepass_reaches(&gpu, "fracture", &scene, &floor_only, &view);
+}
+
 /// TAA multi-frame stability smoke (P13.3a): with TAA ON and a **static** camera,
 /// render N frames on one renderer (the history accumulates). Asserts (1) no NaN /
 /// out-of-range garbage ever appears, and (2) after convergence consecutive frames

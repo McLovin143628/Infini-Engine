@@ -19,6 +19,45 @@ use crate::renderer::FrameData;
 pub trait RenderNode: std::any::Any {
     fn name(&self) -> &'static str;
     fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData);
+
+    /// **Write this node's geometry into the shared single-sample depth prepass**
+    /// (wave VIS1a). Default: contribute nothing, which is what every pass that
+    /// rasterizes no opaque geometry does.
+    ///
+    /// It exists as a second entry point rather than as an extra node because of
+    /// an ordering fact that cannot be arranged away: [`super::passes::ssao`]
+    /// *consumes* `targets.depth_prepass`, and the lit passes consume the AO it
+    /// produces — so the prepass must be complete before the first lit pass, while
+    /// the geometry that has to write it (terrain, skinned) lives in nodes that run
+    /// after SSAO because their own fragment stages sample that AO. A node cannot
+    /// reach another node's buffers, and duplicating a terrain's per-tile texture
+    /// cache to give the prepass its own copy would cost ~840 KiB per resident
+    /// tile. So the same node contributes twice, at two depths of the frame.
+    ///
+    /// An implementor **must** gate on
+    /// [`RenderSettings::needs_depth_prepass`](crate::RenderSettings::needs_depth_prepass)
+    /// and **must** load rather than clear: the anchor node
+    /// ([`opens_depth_prepass`](RenderNode::opens_depth_prepass)) owns the clear.
+    fn depth_prepass(
+        &mut self,
+        _gpu: &GpuContext,
+        _encoder: &mut wgpu::CommandEncoder,
+        _frame: &FrameData,
+    ) {
+    }
+
+    /// True for the one node that **clears** the prepass target and therefore
+    /// anchors where in the frame every other node's
+    /// [`depth_prepass`](RenderNode::depth_prepass) is recorded.
+    ///
+    /// The sweep runs immediately after this node's own `run`, so the whole
+    /// prepass — the anchor's rigid meshes and every contributor's geometry —
+    /// falls inside the anchor's own timing segment. That keeps
+    /// [`RenderGraph::names`] and the per-pass table exactly as they were: the
+    /// `depth-prepass` row is the cost of the prepass, all of it.
+    fn opens_depth_prepass(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
@@ -66,11 +105,22 @@ impl RenderGraph {
         frame: &FrameData,
         mut timer: Option<&mut crate::timing::FrameTimer>,
     ) {
-        for node in &mut self.nodes {
-            let _span = tracing::trace_span!("render_node", name = node.name()).entered();
-            node.run(gpu, encoder, frame);
+        for i in 0..self.nodes.len() {
+            let _span = tracing::trace_span!("render_node", name = self.nodes[i].name()).entered();
+            self.nodes[i].run(gpu, encoder, frame);
+            // **The prepass sweep** (wave VIS1a). Indexed rather than iterated so
+            // every *other* node may be borrowed mutably while this one is not;
+            // recorded between the anchor's `run` and its `mark`, so the whole
+            // prepass is one timing segment and `names()` is unchanged.
+            if self.nodes[i].opens_depth_prepass() {
+                for j in 0..self.nodes.len() {
+                    if j != i {
+                        self.nodes[j].depth_prepass(gpu, encoder, frame);
+                    }
+                }
+            }
             if let Some(t) = timer.as_deref_mut() {
-                t.mark(encoder, node.name());
+                t.mark(encoder, self.nodes[i].name());
             }
         }
     }

@@ -35,6 +35,7 @@ use crate::graph::RenderNode;
 use crate::passes::mesh::{InstanceRaw, LightsUniform};
 use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
 use crate::scene::{SkinnedInstance, SkinnedMeshData};
+use crate::settings::RenderSettings;
 
 /// Vertex attributes for one [`SkinnedVertex`] (buffer 0).
 ///
@@ -239,6 +240,9 @@ pub struct SkinnedMeshNode {
     /// `POLYGON_MODE_LINE` feature; selected when the frame's view mode is
     /// [`ViewMode::Wireframe`](crate::renderer::ViewMode::Wireframe).
     pipeline_wire: Option<wgpu::RenderPipeline>,
+    /// The single-sample, fragment-less depth-prepass twin (wave VIS1a). Binds
+    /// view at `@group(0)` and the joint palette at `@group(1)`.
+    pipeline_depth: wgpu::RenderPipeline,
     joints_bgl: wgpu::BindGroupLayout,
     /// AO + shadows + GI env bind at `@group(2)` (P13.3b; was the AO-only bind).
     env: super::EnvBinding,
@@ -393,9 +397,61 @@ impl SkinnedMeshNode {
                 )
             });
 
+        // **The depth-prepass pipeline** (wave VIS1a). Two groups — view and the
+        // joint palette — because a depth-only pass binds no lights and no
+        // environment; and the env group in particular must NOT be bound here,
+        // since it carries the prepass texture at `ENV_SCENE_DEPTH` and this pass
+        // has that texture as its depth attachment.
+        //
+        // No fragment stage: `skinned_mesh.wgsl`'s `fs` never discards.
+        let depth_shader = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("skinned-depth"),
+                source: wgpu::ShaderSource::Wgsl(super::shader_source("skinned_depth").into()),
+            });
+        let depth_layout = gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("skinned-depth"),
+                bind_group_layouts: &[Some(view_bgl), Some(&joints_bgl)],
+                immediate_size: 0,
+            });
+        let pipeline_depth = gpu
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("skinned-depth"),
+                layout: Some(&depth_layout),
+                vertex: wgpu::VertexState {
+                    module: &depth_shader,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    // The SAME vertex layouts as the colour pipeline, so one
+                    // geometry buffer and one instance buffer serve both. The
+                    // attributes the depth entry does not read are simply unread.
+                    buffers: &vertex_layouts(),
+                },
+                fragment: None,
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(DEPTH_COMPARE),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(), // single-sample
+                multiview_mask: None,
+                cache: None,
+            });
+
         Self {
             pipeline,
             pipeline_wire,
+            pipeline_depth,
             joints_bgl,
             env,
             lights_buf,
@@ -592,6 +648,67 @@ fn upload_mesh(gpu: &GpuContext, mesh: &SkinnedMeshData) -> GpuSkinnedMesh {
 impl RenderNode for SkinnedMeshNode {
     fn name(&self) -> &'static str {
         "skinned-mesh"
+    }
+
+    /// **The character in the prepass** (wave VIS1a). `sync` is keyed on
+    /// `(scene.version, origin)` and is therefore free the second time it is called
+    /// in one frame — so the prepass and the colour pass share one upload, and the
+    /// depth this writes is the pose the colour pass will draw, not one frame's
+    /// worth of skew.
+    fn depth_prepass(
+        &mut self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &FrameData,
+    ) {
+        if !RenderSettings::needs_depth_prepass(frame.settings) {
+            return;
+        }
+        self.sync(gpu, frame);
+        if !self.active {
+            return;
+        }
+        let Some(instance_buf) = self.instance_buf.as_ref() else {
+            return;
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("skinned-depth"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &frame.targets.depth_prepass,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline_depth);
+        pass.set_bind_group(0, frame.view_bg, &[]);
+        pass.set_vertex_buffer(1, instance_buf.slice(..));
+        for (i, inst) in self.instances.iter().enumerate() {
+            let Some(gpu_mesh) = self
+                .meshes
+                .get(inst.mesh)
+                .and_then(|key| self.mesh_cache.get(key))
+                .map(|(_, m)| m)
+            else {
+                continue;
+            };
+            if gpu_mesh.index_count == 0 {
+                continue;
+            }
+            // The palette bind group is built against `joints_bgl`; this pipeline
+            // puts that layout at slot 1 rather than 3, and the same object binds.
+            pass.set_bind_group(1, &inst.palette_bg, &[]);
+            pass.set_vertex_buffer(0, gpu_mesh.vertices.slice(..));
+            pass.set_index_buffer(gpu_mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+            let base = i as u32;
+            pass.draw_indexed(0..gpu_mesh.index_count, 0, base..base + 1);
+        }
     }
 
     fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {

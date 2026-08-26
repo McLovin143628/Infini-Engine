@@ -391,6 +391,20 @@ fn vs(in: VIn) -> VOut {
     return out;
 }
 
+// **The depth-prepass fragment** (wave VIS1a). No colour target, no lighting, no
+// splat — the one thing a depth-only terrain draw still needs is the P21.2 hole
+// discard, because a carved cell has no surface and a prepass that wrote depth
+// there would occlude the cave mouth for SSAO, TAA and SSR while the colour pass
+// draws the voxel volume through it. Character for character the test `fs` makes
+// below, and it must stay that way: two hole rules that disagree is a cave whose
+// AO is a wall.
+@fragment
+fn fs_depth(in: VOut) {
+    if (is_holed(in.uv, max(in.span_res.y, 2.0))) {
+        discard;
+    }
+}
+
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
     let span = in.span_res.x;

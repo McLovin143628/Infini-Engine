@@ -3,8 +3,13 @@
 //! reconstructs position/normal from it and [`super::taa`] reprojects against it.
 //! A no-op unless SSAO or TAA is enabled ([`RenderSettings::needs_depth_prepass`]).
 //!
-//! v1 covers the rigid [`MeshInstance`] geometry only (the SSAO golden is boxes);
-//! folding terrain + skinned geometry into the prepass is a documented follow-up.
+//! This node covers the rigid [`MeshInstance`] geometry and **owns the clear**;
+//! since wave VIS1a it is also the graph's prepass *anchor*
+//! ([`RenderNode::opens_depth_prepass`]), so terrain, skinned meshes, voxel
+//! volumes and fracture chunks record their own depth-only draws into the same
+//! target immediately after this node runs — see [`crate::graph::RenderNode`] for
+//! why that is a second entry point rather than four extra nodes.
+//!
 //! It re-packs its own instance buffer (mirroring [`super::mesh`]) so the pass is
 //! self-contained — a small duplicate upload paid only on the opt-in SSAO/TAA path.
 
@@ -138,6 +143,12 @@ impl DepthPrepassNode {
 impl RenderNode for DepthPrepassNode {
     fn name(&self) -> &'static str {
         "depth-prepass"
+    }
+
+    /// This is the node that clears the prepass target, so it is the anchor the
+    /// graph records every other node's contribution after (wave VIS1a).
+    fn opens_depth_prepass(&self) -> bool {
+        true
     }
 
     fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {

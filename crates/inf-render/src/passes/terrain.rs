@@ -103,6 +103,7 @@ use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
 use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
 use crate::scene::{RenderTerrain, RenderTerrainTile, TerrainTileKey};
+use crate::settings::RenderSettings;
 
 /// Number of discrete LOD levels (finest = 0).
 pub const TERRAIN_LOD_COUNT: u32 = 4;
@@ -785,6 +786,9 @@ struct MaterialSlot {
 
 pub struct TerrainNode {
     pipeline: wgpu::RenderPipeline,
+    /// The single-sample, colour-target-less twin of [`Self::pipeline`] (wave
+    /// VIS1a) — the same `vs`, `fs_depth` for the hole discard.
+    pipeline_depth: wgpu::RenderPipeline,
     tile_bgl: wgpu::BindGroupLayout,
     /// One grid mesh per LOD (index 0 = finest).
     lod_meshes: Vec<LodMesh>,
@@ -803,6 +807,14 @@ pub struct TerrainNode {
     env: super::EnvBinding,
     instances: Option<wgpu::Buffer>,
     instance_capacity: usize,
+    /// This frame's assembled clipmap patches, per terrain — the plan both the
+    /// depth prepass and the colour pass walk (wave VIS1a). Empty means "nothing
+    /// to draw"; [`Self::prepared_frame`] says whether it describes this frame.
+    patches: Vec<Vec<TerrainPatch>>,
+    /// The frame index [`Self::patches`] and the instance buffer were built for.
+    /// `prepare` is called twice per frame (prepass, then colour) and does the
+    /// assembly, the texture sync and the instance upload exactly once.
+    prepared_frame: Option<u64>,
 }
 
 /// Reference (CPU) mirror of the shader's triplanar axis weights: normalized
@@ -1020,6 +1032,68 @@ impl TerrainNode {
                 cache: None,
             });
 
+        // **The depth-prepass pipeline** (wave VIS1a): the same vertex stage, the
+        // same two vertex buffers and the same reverse-Z depth state, single-sample
+        // and with no colour target. Its layout stops at `@group(2)` — the env
+        // group is fragment-only and must NOT be bound here, because it carries the
+        // prepass texture at `ENV_SCENE_DEPTH` and this pass has that texture as its
+        // depth attachment. `@group(2)` stays because the *vertex* stage reads the
+        // deformation uniform from it, so a rut in the ground is in the prepass too.
+        let depth_layout = gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("terrain-depth"),
+                bind_group_layouts: &[Some(view_bgl), Some(&tile_bgl), Some(&material_bgl)],
+                immediate_size: 0,
+            });
+        let pipeline_depth = gpu
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("terrain-depth"),
+                layout: Some(&depth_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[
+                        wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<[f32; 3]>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &vertex_attrs,
+                        },
+                        wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<PatchRaw>() as u64,
+                            step_mode: wgpu::VertexStepMode::Instance,
+                            attributes: &instance_attrs,
+                        },
+                    ]
+                    .map(Some),
+                },
+                // A discard-only fragment stage (`targets: &[]`) — the R-P5 masked
+                // prepass precedent. It cannot be dropped: the hole mask lives in
+                // the fragment.
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_depth"),
+                    compilation_options: Default::default(),
+                    targets: &[],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(DEPTH_COMPARE),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(), // single-sample
+                multiview_mask: None,
+                cache: None,
+            });
+
         let lod_meshes = (0..TERRAIN_LOD_COUNT)
             .map(|lod| {
                 let (verts, idx) = build_lod_geometry(cells_at_lod(lod));
@@ -1049,6 +1123,7 @@ impl TerrainNode {
 
         Self {
             pipeline,
+            pipeline_depth,
             tile_bgl,
             lod_meshes,
             textures: BTreeMap::new(),
@@ -1057,6 +1132,8 @@ impl TerrainNode {
             env,
             instances: None,
             instance_capacity: 0,
+            patches: Vec::new(),
+            prepared_frame: None,
         }
     }
 
@@ -1449,12 +1526,24 @@ fn create_tile_textures(
     }
 }
 
-impl RenderNode for TerrainNode {
-    fn name(&self) -> &'static str {
-        "terrain"
-    }
-
-    fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
+impl TerrainNode {
+    /// **Everything both draws share**, done once per frame (wave VIS1a): the
+    /// texture/material sync, the clipmap assembly, and the one instance upload.
+    ///
+    /// Called from [`RenderNode::depth_prepass`] and again from
+    /// [`RenderNode::run`]; the second call is a stamp comparison. Keyed on
+    /// `frame.frame_index`, which `EngineRenderer::render` bumps exactly once per
+    /// frame, so the two calls of one frame agree and no two frames ever do.
+    ///
+    /// Returns whether there is anything to draw. The *body* of the empty case is
+    /// the cache release, and it stays here rather than in `run` because `run` is
+    /// no longer the first of the two to look.
+    fn prepare(&mut self, gpu: &GpuContext, frame: &FrameData) -> bool {
+        if self.prepared_frame == Some(frame.frame_index) {
+            return !self.patches.is_empty();
+        }
+        self.prepared_frame = Some(frame.frame_index);
+        self.patches.clear();
         let terrains = frame.scene.terrains.as_slice();
         // No terrain (or nothing resident in any of them) → byte-identical to
         // pre-P10.1: the node encodes nothing at all.
@@ -1479,7 +1568,7 @@ impl RenderNode for TerrainNode {
             self.materials.clear();
             self.instances = None;
             self.instance_capacity = 0;
-            return;
+            return false;
         }
         self.sync_textures(gpu, terrains, frame.deform);
 
@@ -1491,7 +1580,7 @@ impl RenderNode for TerrainNode {
             .map(|t| assemble_patches(t, frame.view, &frame.view.origin))
             .collect();
         if patches.iter().all(Vec::is_empty) {
-            return;
+            return false;
         }
 
         // Pack per-patch instance data into ONE buffer, terrain-major then patch
@@ -1546,7 +1635,7 @@ impl RenderNode for TerrainNode {
             }
         }
         if raw.is_empty() {
-            return;
+            return false;
         }
 
         if self.instances.is_none() || self.instance_capacity < raw.len() {
@@ -1562,6 +1651,98 @@ impl RenderNode for TerrainNode {
         let inst_buf = self.instances.as_ref().unwrap();
         gpu.queue
             .write_buffer(inst_buf, 0, bytemuck::cast_slice(&raw));
+        self.patches = patches;
+        true
+    }
+
+    /// Walk the prepared patches, issuing the per-patch draw.
+    ///
+    /// **One walk, two callers** (wave VIS1a). The instance cursor advances once
+    /// per patch *whether or not* the patch draws, so it stays in lockstep with
+    /// the packing walk in [`Self::prepare`]; a patch whose texture is missing
+    /// (evicted between plan and draw) is skipped, never shifted onto another
+    /// patch's instance. Written once so the depth prepass and the colour pass can
+    /// never disagree about which patch is which instance — the exact way the two
+    /// would drift apart silently.
+    fn draw_patches(&self, pass: &mut wgpu::RenderPass<'_>, terrains: &[RenderTerrain]) {
+        let mut idx: u32 = 0;
+        for (terrain, patches) in terrains.iter().zip(&self.patches) {
+            let material = self.materials.get(&terrain.id);
+            if let Some(m) = material {
+                pass.set_bind_group(2, &m.bind_group, &[]);
+            }
+            for patch in patches {
+                let i = idx;
+                idx += 1;
+                if material.is_none() {
+                    continue;
+                }
+                let Some(tex) = self.textures.get(&(terrain.id, patch.key)) else {
+                    continue;
+                };
+                let mesh = &self.lod_meshes[patch.mesh_lod.min(TERRAIN_LOD_COUNT - 1) as usize];
+                pass.set_bind_group(1, &tex.bind_group, &[]);
+                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.index_count, 0, i..i + 1);
+            }
+        }
+    }
+}
+
+impl RenderNode for TerrainNode {
+    fn name(&self) -> &'static str {
+        "terrain"
+    }
+
+    /// **The island in the prepass** (wave VIS1a). Before this, SSAO, TAA and SSR
+    /// read a depth buffer that contained rigid meshes and nothing else — which on
+    /// a level whose ground *is* the content meant AO over an empty frame.
+    fn depth_prepass(
+        &mut self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &FrameData,
+    ) {
+        if !RenderSettings::needs_depth_prepass(frame.settings) {
+            return;
+        }
+        if !self.prepare(gpu, frame) {
+            return;
+        }
+        let Some(inst_buf) = self.instances.as_ref() else {
+            return;
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("terrain-depth"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &frame.targets.depth_prepass,
+                // LOAD, never clear: `DepthPrepassNode` owns the clear and has
+                // already written its rigid meshes into this target.
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline_depth);
+        pass.set_bind_group(0, frame.view_bg, &[]);
+        pass.set_vertex_buffer(1, inst_buf.slice(..));
+        self.draw_patches(&mut pass, frame.scene.terrains.as_slice());
+    }
+
+    fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
+        if !self.prepare(gpu, frame) {
+            return;
+        }
+        let Some(inst_buf) = self.instances.as_ref() else {
+            return;
+        };
         let env_bg = self.env.bind_group(gpu, frame).clone();
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1591,33 +1772,7 @@ impl RenderNode for TerrainNode {
         pass.set_bind_group(0, frame.view_bg, &[]);
         pass.set_bind_group(3, &env_bg, &[]);
         pass.set_vertex_buffer(1, inst_buf.slice(..));
-
-        // The instance cursor advances once per patch **whether or not** the patch
-        // draws, so it stays in lockstep with the packing walk above; a patch whose
-        // texture is missing (evicted between plan and draw) is skipped, never
-        // shifted onto another patch's instance.
-        let mut idx: u32 = 0;
-        for (terrain, patches) in terrains.iter().zip(&patches) {
-            let material = self.materials.get(&terrain.id);
-            if let Some(m) = material {
-                pass.set_bind_group(2, &m.bind_group, &[]);
-            }
-            for patch in patches {
-                let i = idx;
-                idx += 1;
-                if material.is_none() {
-                    continue;
-                }
-                let Some(tex) = self.textures.get(&(terrain.id, patch.key)) else {
-                    continue;
-                };
-                let mesh = &self.lod_meshes[patch.mesh_lod.min(TERRAIN_LOD_COUNT - 1) as usize];
-                pass.set_bind_group(1, &tex.bind_group, &[]);
-                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.index_count, 0, i..i + 1);
-            }
-        }
+        self.draw_patches(&mut pass, frame.scene.terrains.as_slice());
     }
 }
 

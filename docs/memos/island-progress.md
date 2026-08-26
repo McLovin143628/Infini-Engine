@@ -7783,3 +7783,98 @@ schema move, no golden move, and no change to any render path.
 * **A pin that reads prose is pinning prose.** `region_gate` is `contains`-over-a-scope, so a comment
   mentioning the call satisfies it — proven by this audit's own fix, whose comment failed the arm
   that bans a spelling. Comments are stripped now.
+
+## Wave VIS1a — the photoreal foundations (2026-08-26)
+
+The first of two slices of the photoreal stack. VIS1a is the foundations: what the
+screen-space effects can *see*, what a reflection is allowed to *be*, the one schema window
+the whole VIS arc gets to spend, the AO integral, and the energy the GGX lobe has been
+losing since P7.1. VIS1b (light & lens) follows.
+
+### Clause 1 — the depth prepass sees the world
+
+`passes/depth_prepass.rs` opened with the sentence *"v1 covers the rigid `MeshInstance`
+geometry only … folding terrain + skinned geometry into the prepass is a documented
+follow-up"*, and that follow-up has been named in two places since P13.3a. It is the single
+highest-leverage thing in the visual stack, because the prepass is not one feature's input —
+it is the shared input to **SSAO**, to **TAA**'s reprojection and, since P18.4, to **SSR**.
+On a level whose content *is* its ground, all three of them were reading a buffer that had
+been cleared and never written.
+
+**The ordering fact that shapes the design.** SSAO consumes `targets.depth_prepass` and the
+lit passes consume the AO it produces, so the prepass must be complete before the first lit
+pass — while the geometry that has to write it lives in nodes that run *after* SSAO,
+precisely because their own fragment stages sample that AO. A node cannot reach another
+node's buffers, and giving the prepass its own copy of a terrain's per-tile texture cache
+costs ~840 KiB per resident tile. So the same node contributes twice, at two depths of the
+frame: `RenderNode` gained a defaulted `depth_prepass` entry point, and
+`RenderNode::opens_depth_prepass` marks the one node that *clears* the target. The graph
+records every other node's contribution immediately after the anchor's own `run` and before
+its timing mark — so `RenderGraph::names()` is unchanged, `gpu_timing`'s auto-derived list is
+unchanged, and the `depth-prepass` row of the per-pass table is the cost of the prepass, all
+of it, rather than of one quarter of it.
+
+**Who writes it now**: rigid meshes (as before), **terrain**, **skinned meshes**, **voxel
+volumes** and **fracture chunks**. Each contributor shares ONE per-frame preparation with its
+colour pass — `prepare()` keyed on `frame.frame_index`, which `EngineRenderer::render` bumps
+exactly once per frame — so the depth written is the *same* clipmap assembly, the *same* pose
+and the *same* instance upload the colour pass will draw, not a second one that could skew.
+
+Three details that are load-bearing rather than incidental:
+
+* **Terrain's depth pipeline keeps a fragment stage.** `terrain.wgsl`'s hole discard (P21.2)
+  is the first statement of `fs`, and a prepass that wrote depth through a carved cell would
+  occlude the cave mouth for SSAO, TAA and SSR while the colour pass draws the voxel volume
+  through it. `fs_depth` is that test and nothing else, with `targets: &[]` — the R-P5 masked
+  prepass precedent.
+* **Terrain's depth pipeline still binds `@group(2)`.** The *vertex* stage reads the P22.1
+  deformation uniform from it, so a rut in the ground is in the prepass too. What it does
+  **not** bind, and must never bind, is the env group: that group carries the prepass texture
+  at `ENV_SCENE_DEPTH`, and this pass has that texture as its depth attachment.
+* **The skinned depth shader copies `skinned_mesh.wgsl`'s skinning arithmetic character for
+  character, not `vsm_skinned.wgsl`'s.** The shadow caster normalizes the weights and falls
+  back to the bind pose when they sum to nothing — right for a shadow, wrong here: a prepass
+  depth that disagrees with the colour depth by one ulp is a self-occlusion pattern in the AO.
+
+**The gate is a difference of differences.** "SSAO changed the frame" is satisfied by the
+receiver's own self-occlusion, so `assert_prepass_reaches` renders four frames — the scene
+with and without the occluder, each with SSAO off and on — identifies the pixels where the
+SSAO-off pair *agrees* (the same surface is visible in both scenes), and counts how many of
+those the SSAO-on pair darkens. That number can move for exactly one reason. Measured on an
+RTX 4070 Ti at 320×180:
+
+| contributor | shared pixels | darkened | brightened |
+|---|---|---|---|
+| skinned character on a floor | 56 053 | **1 583** | 0 |
+| voxel volume under a probe box | 37 925 | **430** | 0 |
+| fracture debris on a floor | 52 177 | **7 033** | 0 |
+
+Terrain is both occluder and receiver, so it has no separate control and needs none: the
+SSAO-off frame *is* the control, and before this wave the SSAO-on frame was byte-identical to
+it. It now differs by mean **0.001113** / max **0.018196**, and the frame's total luminance
+falls from 18 454 974 to 18 405 924 — occlusion removing ambient light, never adding it.
+
+**The voxel arm needed a probe box, and that is a finding rather than a fixture detail.**
+`voxel.wgsl` is composed `Plain` and binds no environment group at all — the P21.1 ruling —
+so a voxel surface samples no AO and never will until that ruling changes. The first draft of
+the arm asserted that turning SSAO on changed a voxel-only frame; it reported a mean
+difference of **exactly zero**, and it was the arm that was wrong. What putting a voxel volume
+in the prepass buys is the occlusion it casts on *everything else*, and that is what the arm
+measures now.
+
+**Goldens: none moved.** `git status` over `tests/goldens` is empty and
+`INF_GOLDEN_STRICT=1` is green over all 54. That is not luck — the prepass is gated on
+`RenderSettings::needs_depth_prepass`, which is `ssao.enabled || taa || (gi.enabled &&
+gi.ssr)`, and the only golden that turns any of those on is `ssao.png`, whose scene is five
+rigid boxes with no terrain, no skinning, no voxels and no debris in it.
+
+**Not folded in, routed by name: vgeom and scatter.** Both are GPU-driven. Their visible sets
+are produced by cull compute passes whose occlusion test reads an HZB built from *this
+frame's* MSAA scene depth — which does not exist when the prepass has to run — and vgeom's
+two-pass form does not even have its late list yet at that point. Contributing them means a
+**second, occlusion-off cull** per asset and per batch, into dedicated `visible`/`draw_args`
+buffers, plus a second indirect draw; culling without occlusion is conservative, so the depth
+would be a correct superset, and the whole question is whether that cost pays. That is a
+measurement this slice cannot make without first building the thing, so it is named rather
+than guessed: **VIS-C1b, the GPU-driven half of the prepass.** Until it lands, SSAO/TAA/SSR
+do not see meshlet geometry or scattered foliage.

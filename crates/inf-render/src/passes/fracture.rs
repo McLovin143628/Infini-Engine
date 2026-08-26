@@ -48,6 +48,7 @@ use crate::graph::RenderNode;
 use crate::passes::mesh::{vertex_layouts, InstanceRaw, LightsUniform};
 use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
 use crate::scene::{RenderFractureChunk, RenderFractureVertex};
+use crate::settings::RenderSettings;
 
 /// What identifies one cached chunk buffer: `(actor id, chunk index)`.
 ///
@@ -171,6 +172,11 @@ fn pack(origin: &FloatingOrigin, chunk: &RenderFractureChunk) -> InstanceRaw {
 /// Draws every live fracture chunk.
 pub struct FractureNode {
     pipeline: wgpu::RenderPipeline,
+    /// The single-sample, fragment-less depth-prepass twin (wave VIS1a).
+    pipeline_depth: wgpu::RenderPipeline,
+    /// The frame [`Self::draw_order`] and the instance buffer were built for; the
+    /// prepass and the colour pass share one preparation (wave VIS1a).
+    prepared_frame: Option<u64>,
     chunks: BTreeMap<FractureCacheKey, GpuFracture>,
     /// One shared per-frame instance buffer: chunk `i`'s instance sits at index
     /// `i` of the draw order, and each chunk is drawn with `instance_range i..i+1`
@@ -273,8 +279,48 @@ impl FractureNode {
                 multiview_mask: None,
                 cache: None,
             });
+        // The depth-prepass pipeline (wave VIS1a): the same `mesh.wgsl` `vs`, view
+        // group only, no fragment stage. Debris is opaque — the R-P5 alpha test
+        // lives in `fs` and a fracture chunk never carries blend code 1 — so the
+        // silhouette a fragment-less pipeline writes is the one `fs` would.
+        let depth_layout = gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("fracture-depth"),
+                bind_group_layouts: &[Some(view_bgl)],
+                immediate_size: 0,
+            });
+        let pipeline_depth = gpu
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("fracture-depth"),
+                layout: Some(&depth_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &vertex_layouts(),
+                },
+                fragment: None,
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(DEPTH_COMPARE),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
         Self {
             pipeline,
+            pipeline_depth,
+            prepared_frame: None,
             chunks: BTreeMap::new(),
             instances: None,
             instance_capacity: 0,
@@ -283,6 +329,29 @@ impl FractureNode {
             lights_bg,
             env,
         }
+    }
+
+    /// **Everything both draws share**, done once per frame (wave VIS1a). Called
+    /// from [`RenderNode::depth_prepass`] and again from [`RenderNode::run`]; the
+    /// second call is a stamp comparison. Returns whether there is anything to
+    /// draw.
+    fn prepare(&mut self, gpu: &GpuContext, frame: &FrameData) -> bool {
+        if self.prepared_frame == Some(frame.frame_index) {
+            return !self.draw_order.is_empty();
+        }
+        self.prepared_frame = Some(frame.frame_index);
+        // **The off path touches no encoder at all.** Every level that has broken
+        // nothing — which is every committed golden — takes this branch, so the
+        // command stream is byte-identical to its pre-P22.3 self. (The
+        // `VoxelNode` rule, for the same reason.)
+        if frame.scene.fracture_chunks.is_empty() {
+            self.chunks.clear();
+            self.draw_order.clear();
+            return false;
+        }
+        self.sync_chunks(gpu, &frame.scene.fracture_chunks);
+        self.sync_instances(gpu, frame);
+        !self.draw_order.is_empty()
     }
 
     /// How many chunk buffer sets are cached — the engagement counter a gate
@@ -380,19 +449,54 @@ impl RenderNode for FractureNode {
         "fracture"
     }
 
-    fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
-        // **The off path touches no encoder at all.** Every level that has broken
-        // nothing — which is every committed golden — takes this branch, so the
-        // command stream is byte-identical to its pre-P22.3 self. (The
-        // `VoxelNode::run` rule, for the same reason.)
-        if frame.scene.fracture_chunks.is_empty() {
-            self.chunks.clear();
-            self.draw_order.clear();
+    /// **Debris in the prepass** (wave VIS1a) — a collapsed wall's chunks are
+    /// exactly the contact geometry AO exists to darken.
+    fn depth_prepass(
+        &mut self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &FrameData,
+    ) {
+        if !RenderSettings::needs_depth_prepass(frame.settings) {
             return;
         }
-        self.sync_chunks(gpu, &frame.scene.fracture_chunks);
-        self.sync_instances(gpu, frame);
-        if self.draw_order.is_empty() {
+        if !self.prepare(gpu, frame) {
+            return;
+        }
+        let Some(instances) = self.instances.as_ref() else {
+            return;
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("fracture-depth"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &frame.targets.depth_prepass,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline_depth);
+        pass.set_bind_group(0, frame.view_bg, &[]);
+        pass.set_vertex_buffer(1, instances.slice(..));
+        for (i, key) in self.draw_order.iter().enumerate() {
+            let Some(gpu_chunk) = self.chunks.get(key) else {
+                continue;
+            };
+            pass.set_vertex_buffer(0, gpu_chunk.vertices.slice(..));
+            pass.set_index_buffer(gpu_chunk.indices.slice(..), wgpu::IndexFormat::Uint32);
+            let i = i as u32;
+            pass.draw_indexed(0..gpu_chunk.index_count, 0, i..i + 1);
+        }
+    }
+
+    fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
+        if !self.prepare(gpu, frame) {
             return;
         }
         let lights =

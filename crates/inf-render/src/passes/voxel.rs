@@ -45,6 +45,7 @@ use crate::graph::RenderNode;
 use crate::passes::mesh::LightsUniform;
 use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
 use crate::scene::{RenderVoxelChunk, RenderVoxelVertex, RenderVoxelVolume, VoxelChunkKey};
+use crate::settings::RenderSettings;
 
 /// How many frames the voxel pass has **engaged** on — i.e. actually recorded a
 /// render pass and at least one draw.
@@ -356,6 +357,15 @@ fn vertex_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
 /// The voxel-surface render node (P21.1).
 pub struct VoxelNode {
     pipeline: wgpu::RenderPipeline,
+    /// The single-sample, fragment-less depth-prepass twin (wave VIS1a) — the
+    /// same `vs`, view group only (`voxel.wgsl`'s `fs` never discards, and the
+    /// lights group is fragment-only).
+    pipeline_depth: wgpu::RenderPipeline,
+    /// This frame's resident chunk draw list, and the frame it was built for
+    /// (wave VIS1a). The prepass and the colour pass share one walk and one
+    /// instance upload; the second caller's `prepare` is a stamp comparison.
+    draws: Vec<ChunkCacheKey>,
+    prepared_frame: Option<u64>,
     /// Per-chunk vertex/index buffers, keyed by [`ChunkCacheKey`] so two volumes
     /// sharing a chunk coordinate cache side by side. `BTreeMap` ⇒ deterministic
     /// iteration.
@@ -461,8 +471,48 @@ impl VoxelNode {
                 cache: None,
             });
 
+        // The depth-prepass pipeline (wave VIS1a): view only — the vertex stage
+        // reads nothing else, and the env group must not appear here at all.
+        let depth_layout = gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("voxel-depth"),
+                bind_group_layouts: &[Some(view_bgl)],
+                immediate_size: 0,
+            });
+        let pipeline_depth = gpu
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("voxel-depth"),
+                layout: Some(&depth_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &vertex_layouts(),
+                },
+                fragment: None,
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(DEPTH_COMPARE),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
         Self {
             pipeline,
+            pipeline_depth,
+            draws: Vec::new(),
+            prepared_frame: None,
             chunks: BTreeMap::new(),
             instances: None,
             instance_capacity: 0,
@@ -541,6 +591,35 @@ impl VoxelNode {
     /// Pack this frame's per-chunk instances (projection walk order, resident
     /// chunks only) and upload them into the shared instance buffer. Returns the
     /// draw list, parallel to the buffer's slots.
+    /// **Everything both draws share**, done once per frame (wave VIS1a) — the
+    /// chunk upload, the instance pack and the draw walk. Called from
+    /// [`RenderNode::depth_prepass`] and again from [`RenderNode::run`]; the second
+    /// call is a stamp comparison. Returns whether there is anything to draw.
+    fn prepare(&mut self, gpu: &GpuContext, frame: &FrameData) -> bool {
+        if self.prepared_frame == Some(frame.frame_index) {
+            return !self.draws.is_empty();
+        }
+        self.prepared_frame = Some(frame.frame_index);
+        self.draws.clear();
+        if frame.scene.voxels.is_empty() {
+            // The byte-stability guarantee for the committed goldens: no render
+            // pass, no buffer write, no command of any kind on a scene with no
+            // volumes. Releasing the cache here (a plain map drop — not an encoder
+            // touch) is the same eviction `plan_chunk_cache` would produce against
+            // an empty projection, applied on the one transition the early-out
+            // would otherwise hide: the last volume leaving the scene.
+            self.chunks.clear();
+            self.instances = None;
+            self.instance_capacity = 0;
+            return false;
+        }
+        self.sync_chunks(gpu, &frame.scene.voxels);
+        self.draws = self.sync_instances(gpu, frame);
+        // Volumes present but nothing drawable (every chunk malformed or empty)
+        // still means no encoder touch.
+        !self.draws.is_empty()
+    }
+
     fn sync_instances(&mut self, gpu: &GpuContext, frame: &FrameData) -> Vec<ChunkCacheKey> {
         let mut raw: Vec<ChunkInstanceRaw> = Vec::new();
         let mut draws: Vec<ChunkCacheKey> = Vec::new();
@@ -587,29 +666,61 @@ impl RenderNode for VoxelNode {
         "voxel"
     }
 
-    fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
-        if frame.scene.voxels.is_empty() {
-            // The byte-stability guarantee for the 47 committed goldens: no render
-            // pass, no buffer write, no command of any kind on a scene with no
-            // volumes. Releasing the cache here (a plain map drop — not an encoder
-            // touch) is the same eviction `plan_chunk_cache` would produce against
-            // an empty projection, applied on the one transition the early-out
-            // would otherwise hide: the last volume leaving the scene.
-            self.chunks.clear();
-            self.instances = None;
-            self.instance_capacity = 0;
+    /// **Caves in the prepass** (wave VIS1a). A voxel volume is the one surface a
+    /// heightfield cannot represent, so an AO pass that could not see it darkened
+    /// nothing inside a tunnel.
+    fn depth_prepass(
+        &mut self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &FrameData,
+    ) {
+        if !RenderSettings::needs_depth_prepass(frame.settings) {
             return;
         }
-        self.sync_chunks(gpu, &frame.scene.voxels);
-        let draws = self.sync_instances(gpu, frame);
-        if draws.is_empty() {
-            // Volumes present but nothing drawable (every chunk malformed or
-            // empty). Still no encoder touch.
+        if !self.prepare(gpu, frame) {
             return;
         }
         let Some(instances) = self.instances.as_ref() else {
             return;
         };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("voxel-depth"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &frame.targets.depth_prepass,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline_depth);
+        pass.set_bind_group(0, frame.view_bg, &[]);
+        pass.set_vertex_buffer(1, instances.slice(..));
+        for (slot, key) in self.draws.iter().enumerate() {
+            let Some(gpu_chunk) = self.chunks.get(key) else {
+                continue;
+            };
+            pass.set_vertex_buffer(0, gpu_chunk.vertices.slice(..));
+            pass.set_index_buffer(gpu_chunk.indices.slice(..), wgpu::IndexFormat::Uint32);
+            let slot = slot as u32;
+            pass.draw_indexed(0..gpu_chunk.index_count, 0, slot..slot + 1);
+        }
+    }
+
+    fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
+        if !self.prepare(gpu, frame) {
+            return;
+        }
+        let Some(instances) = self.instances.as_ref() else {
+            return;
+        };
+        let draws = &self.draws;
         let (chunks, pipeline, lights_bg) = (&self.chunks, &self.pipeline, &self.lights_bg);
 
         // Past this line the encoder WILL be touched — the one place the counter

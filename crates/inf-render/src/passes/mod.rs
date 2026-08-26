@@ -398,6 +398,13 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
         ShaderKind::Lit(2),
     ),
     (
+        // Wave VIS1a: the skinned depth-prepass vertex stage. `Plain` — a
+        // depth-only pass binds view and its joint palette and nothing else.
+        "skinned_depth",
+        include_str!("../shaders/skinned_depth.wgsl"),
+        ShaderKind::Plain,
+    ),
+    (
         "terrain",
         include_str!("../shaders/terrain.wgsl"),
         // P22.1: the deformation window texture joins the per-tile group
