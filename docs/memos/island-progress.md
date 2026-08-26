@@ -8309,6 +8309,15 @@ for that — the cube-field measurement in `gi_v2_cost_per_tier` prices the marc
 | committed `.inf_lvl` files | — | **23 re-blessed** v25 → v26 (19 samples, 4 templates), every delta `70 + 4m` |
 | new crates / dependencies | — | **none** |
 
+### Bookkeeping, honestly
+
+The island instrument's **`LIT+SSR` row** — the configuration the whole budget clause is judged on
+— is in `b1294a9b`, the *schema* commit, not in the ledger commit that reads its numbers. It was
+written while the v26 bump was staged and swept in by a `git add` scoped to `runtime/inf-player`.
+The content is intact and the row is what produced the table above; it is simply findable under a
+commit whose message does not mention it. The Wave-G lesson again: **a path-scoped `add` is still
+wide enough to collect a neighbour**, and file-scoped staging means the files, not the directory.
+
 ### Carried, by name
 
 1. **VIS-C1b — the GPU-driven half of the depth prepass.** vgeom and scatter do
