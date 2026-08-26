@@ -852,17 +852,29 @@ where
     let mut textures: Vec<(Uuid, Vec<u8>)> = Vec::new();
     let mut seen_material: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     let mut seen_texture: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    // TER2a: the bindings a level names are its `Material.asset`s AND its
+    // terrains' four splat layers, through the one door
+    // `Terrain::layer_materials` — because `want_floor` is a pure function of
+    // the registration SEQUENCE, so a walk that found a different set would
+    // page different tiles from the shipped build's, and PIE == shipping would
+    // stop being true of texture residency.
+    let mut bound: Vec<Uuid> = Vec::new();
     for &guid in doc.order() {
         let Some(e) = world.entity_of(guid) else {
             continue;
         };
-        let Some(asset) = world
+        if let Some(asset) = world
             .world()
             .get::<inf_ecs::components::Material>(e)
             .and_then(|m| m.asset)
-        else {
-            continue;
-        };
+        {
+            bound.push(asset);
+        }
+        if let Some(terrain) = world.world().get::<inf_ecs::components::Terrain>(e) {
+            bound.extend(terrain.layer_materials());
+        }
+    }
+    for asset in bound {
         if !seen_material.insert(asset) {
             continue;
         }

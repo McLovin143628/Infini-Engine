@@ -1483,7 +1483,7 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 /// P20.3 also **re-blessed the three P20.1 water scenes**, deliberately: shoreline
 /// wetness is default-on and all three carry terrain, so their ground at and below
 /// the water level is now darker. Every other image is byte-identical.
-const GOLDENS: [&str; 57] = [
+const GOLDENS: [&str; 58] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
@@ -1505,6 +1505,11 @@ const GOLDENS: [&str; 57] = [
     "gi_specular.png",
     "gi_terrain.png",
     "grid_sky.png",
+    // Wave TER2a: the island's own ground -- four PBR materials blended by real
+    // splat weights, seen from ONE METRE up. Every terrain golden before it is
+    // an overlook, because below about three metres there was nothing to look
+    // at.
+    "ground_close.png",
     "hdr_bloom.png",
     // Wave VIS1b: the lens trio -- vignette, chromatic aberration, film grain --
     // on one high-contrast scene. All three are zero at the default.

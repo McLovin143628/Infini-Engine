@@ -10449,3 +10449,382 @@ fn golden_vsm_bias_grazing() {
     let off = render_warm(&gpu, &scene, &view, RenderSettings::default());
     assert_ne!(img, off, "the grazing sun cast no shadow");
 }
+
+// ── the near-ground golden (wave TER2a, clause 3's gate) ────────────────────
+
+/// **Render one frame with live virtual-texture pools installed.**
+///
+/// The harness's [`render_with`] cannot do this: `EngineRenderer::set_vt_pools`
+/// takes the pools by value, and the determinism gate renders twice — so a
+/// caller has to be able to build a *fresh* set for each frame. Hence a closure
+/// rather than a value.
+fn render_with_vt(
+    gpu: &GpuContext,
+    view: &RenderView,
+    settings: RenderSettings,
+    build: &dyn Fn(
+        &GpuContext,
+    ) -> (
+        RenderScene,
+        inf_render::vt_library::VtTextures,
+        inf_render::vt::VtPools,
+    ),
+) -> Vec<u8> {
+    let target = HeadlessTarget::new(gpu, W, H);
+    let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
+    renderer.set_settings(settings);
+    let (scene, _lib, pools) = build(gpu);
+    // `_lib` is held for the whole render deliberately: it owns the residency
+    // the pools' geometry was built from, and dropping it early would leave the
+    // atlas describing a table that no longer exists.
+    renderer.set_vt_pools(Some(pools));
+    renderer.render(gpu, &scene, view, &target.view, (W, H));
+    target.read_rgba(gpu).expect("readback")
+}
+
+/// [`check_golden_with`] for a scene that needs virtual textures — the same
+/// determinism gate, the same bless/strict rules, over a scene built twice.
+fn check_golden_vt(
+    gpu: &GpuContext,
+    name: &str,
+    view: &RenderView,
+    settings: RenderSettings,
+    build: &dyn Fn(
+        &GpuContext,
+    ) -> (
+        RenderScene,
+        inf_render::vt_library::VtTextures,
+        inf_render::vt::VtPools,
+    ),
+) -> Vec<u8> {
+    let a = render_with_vt(gpu, view, settings, build);
+    let b = render_with_vt(gpu, view, settings, build);
+    let (mean, max) = image_diff(&a, &b, W, H);
+    assert!(
+        mean < 0.005 && max < 0.05,
+        "{name}: renderer not deterministic (mean {mean}, max {max})"
+    );
+    let path = goldens_dir().join(format!("{name}.png"));
+    let bless = std::env::var("INF_BLESS_GOLDENS").is_ok();
+    let strict = std::env::var("INF_GOLDEN_STRICT").is_ok();
+    if bless || read_png(&path).is_none() {
+        write_png(&path, &a);
+        eprintln!("golden {name}: wrote {}", path.display());
+    } else if strict {
+        let golden = read_png(&path).expect("golden png");
+        let (mean, max) = image_diff(&a, &golden, W, H);
+        eprintln!("golden {name}: mean {mean:.6}, max {max:.6} against the committed frame");
+        assert!(
+            within_tolerance(mean, max),
+            "{name}: differs from golden (mean {mean}, max {max})"
+        );
+    }
+    a
+}
+
+/// The island's own four ground sets, in its own splat order.
+const GROUND_ORDER: [inf_material::ground::GroundKind; 4] = [
+    inf_material::ground::GroundKind::Grass,
+    inf_material::ground::GroundKind::Rock,
+    inf_material::ground::GroundKind::ForestFloor,
+    inf_material::ground::GroundKind::Sand,
+];
+
+/// The four ground sets the island binds, registered as real virtual textures.
+///
+/// **The real committed content**, synthesised through the same
+/// `inf_material::ground` door `samples/ground/` is written from — not a fixture
+/// that resembles it. A golden over a stand-in would depict a surface the engine
+/// never ships.
+///
+/// # Two deliberate departures from the shipped configuration, both stated
+///
+/// * **The pool is `Rgba8`.** The shipped atlas is BC1 and the containers here
+///   are BC1, but a headless CI adapter need not expose
+///   `TEXTURE_COMPRESSION_BC`; the residency door transcodes on the way in
+///   (`TiledTextureReader::tile_rgba8`), which is the same path a mobile tier
+///   takes and is adapter-robust. What reaches the frame is the same texels.
+/// * **Mip 0 is not requested.** The wants below start at mip 1, so a 1 024²
+///   albedo contributes 27 pages rather than 92 and the four sets fit inside a
+///   320-page pool. At 320×180 with a one-metre eye a screen pixel covers
+///   several millimetres of ground and mip 1 (3.9 mm a texel over a 2 m tile) is
+///   at or finer than that — so nothing the frame can show is lost, and the test
+///   does not allocate 37 MB on a software adapter.
+fn ground_vt_library(
+    gpu: &GpuContext,
+) -> (
+    inf_render::vt_library::VtTextures,
+    inf_render::vt::VtPools,
+    [inf_render::VtTextureSet; 4],
+) {
+    let mut lib = inf_render::vt_library::VtTextures::new(inf_render::VtPoolConfig {
+        format: inf_render::PageFormat::Rgba8,
+        stored_tile_size: inf_render::STORED_TILE_SIZE,
+        budget_bytes: inf_render::PageFormat::Rgba8.page_bytes(inf_render::STORED_TILE_SIZE) * 320,
+        max_texture_dim: 8192,
+        trilinear: false,
+        // Unthrottled: this is a still frame, and a deferred page would make the
+        // picture a fact about the upload budget rather than about the content.
+        upload_budget_bytes: 0,
+    })
+    .0;
+    let tile = |rgba: Vec<u8>, n: u32, srgb: bool| {
+        inf_material::build_tiled_texture(
+            rgba,
+            n,
+            n,
+            inf_material::TextureImportSettings {
+                srgb,
+                generate_mips: true,
+                compression: inf_material::TextureCompression::Bc1,
+                hdr: false,
+            },
+        )
+        .expect("the ground set tiles")
+        .into_bytes()
+    };
+    let albedo_n = inf_material::ground::GROUND_ALBEDO_EXTENT;
+    let map_n = inf_material::ground::GROUND_MAP_EXTENT;
+    let mut guid: u128 = 0x9E20_0000;
+    let mut maps = Vec::new();
+    for kind in GROUND_ORDER {
+        let g = inf_material::ground::synthesize(kind);
+        let (a, n, o, d) = (guid + 1, guid + 2, guid + 3, guid + 4);
+        lib.register_or_record(a, Arc::new(tile(g.albedo, albedo_n, true)))
+            .expect("albedo registers");
+        lib.register_or_record(n, Arc::new(tile(g.normal, map_n, false)))
+            .expect("normal registers");
+        lib.register_or_record(o, Arc::new(tile(g.orm, map_n, false)))
+            .expect("orm registers");
+        let detail = g.detail.map(|rgba| {
+            lib.register_or_record(d, Arc::new(tile(rgba, map_n, false)))
+                .expect("detail registers");
+            d
+        });
+        maps.push(inf_render::vt_library::VtMaterialMaps {
+            albedo: Some(a),
+            normal: Some(n),
+            orm: Some(o),
+            detail,
+            detail_scale_q8: (kind.detail_scale() * 256.0) as u16,
+        });
+        guid += 6;
+    }
+    let mut pools = inf_render::vt::VtPools::new(&gpu.device, &gpu.queue, lib.residency(), false);
+    // Everything from mip 1 down — see the note above.
+    let mut wants = Vec::new();
+    for h in 0..maps.len() as u32 * 4 {
+        let handle = inf_vt::VtTextureHandle(h);
+        let Some(desc) = lib.residency().desc(handle) else {
+            break;
+        };
+        for m in 1..desc.mip_count() {
+            let g = desc.mips[m as usize];
+            for y in 0..g.tiles_y {
+                for x in 0..g.tiles_x {
+                    wants.push(inf_vt::VtWant::new(handle, inf_vt::TileCoord::new(m, x, y)));
+                }
+            }
+        }
+    }
+    let (txn, report) = lib.sync(&gpu.device, &gpu.queue, &mut pools, &wants);
+    assert_eq!(
+        txn.deferred, 0,
+        "the ground pyramid did not fit the fixture pool"
+    );
+    assert!(
+        report.missing.is_empty(),
+        "{} pages missing",
+        report.missing.len()
+    );
+    let sets = std::array::from_fn(|k| {
+        let s = lib.set_for_maps(&maps[k]);
+        assert!(!s.is_none(), "ground set {k} never went warm");
+        s
+    });
+    (lib, pools, sets)
+}
+
+/// A patch of the island's own ground, seen from **one metre up** — the height
+/// of an eye.
+///
+/// Sixteen metres square at half-metre samples, rising gently to the north with
+/// a bank on the east side, and splat weights that put all four layers on it:
+/// sand at the water's edge, grass over the flat, forest floor inland, rock on
+/// the bank. The camera stands on it and looks along it, which is the shot every
+/// previous terrain golden could not take — before TER2a, ground below about
+/// three metres had no colour signal at all and this frame would have been one
+/// flat green with a shading normal on it.
+fn ground_close_terrain(sets: [inf_render::VtTextureSet; 4]) -> RenderTerrain {
+    let res = 33u32;
+    let mps = 0.5f64;
+    let span = (res as f64 - 1.0) * mps;
+    let height = |x: f64, z: f64| -> f64 {
+        let bank = ((x - 10.0) / 4.0).clamp(0.0, 1.0);
+        0.35 * z + 1.6 * bank * bank
+    };
+    // Four bands across +X, feathered, in the island's own layer order:
+    // grass, rock, forest floor, sand.
+    let weight = |x: f64| -> [u8; 4] {
+        // The four bands are packed into the near half of the patch so all four
+        // are in one frame at a metre's eye height — a golden that showed two of
+        // them would prove the branch runs and not that the four blend.
+        let u = (x / (2.0 * span)).clamp(0.0, 1.0);
+        let tent = |c: f64| (1.0 - (u - c).abs() * 5.0).max(0.0);
+        let raw = [tent(0.22), tent(0.58), tent(0.40), tent(0.05)];
+        let s: f64 = raw.iter().sum::<f64>().max(1e-6);
+        let mut out = [0u8; 4];
+        let mut acc = 0i32;
+        for k in 0..4 {
+            out[k] = (raw[k] / s * 255.0).round() as u8;
+            acc += out[k] as i32;
+        }
+        out[0] = (out[0] as i32 + (255 - acc)).clamp(0, 255) as u8;
+        out
+    };
+    let mut tiles = Vec::new();
+    for tx in 0..2 {
+        for tz in 0..2 {
+            let (ox, oz) = (tx as f64 * span, tz as f64 * span);
+            let mut heights = vec![0f32; (res * res) as usize];
+            let mut weights = vec![[0u8; 4]; (res * res) as usize];
+            let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for j in 0..res {
+                for i in 0..res {
+                    let (wx, wz) = (ox + i as f64 * mps, oz + j as f64 * mps);
+                    let h = height(wx, wz) as f32;
+                    heights[(j * res + i) as usize] = h;
+                    weights[(j * res + i) as usize] = weight(wx);
+                    lo = lo.min(h);
+                    hi = hi.max(h);
+                }
+            }
+            tiles.push(RenderTerrainTile {
+                key: TerrainTileKey::lod0((tx, tz)),
+                origin: DVec3::new(ox, 0.0, oz),
+                heights,
+                weights,
+                biomes: Vec::new(),
+                height_bounds: (lo, hi),
+                holes: Vec::new(),
+                version: 1,
+            });
+        }
+    }
+    let layers = std::array::from_fn(|k| RenderTerrainLayer {
+        albedo: GROUND_ORDER[k].base_color(),
+        roughness: GROUND_ORDER[k].roughness(),
+        tex_scale: GROUND_ORDER[k].tex_scale_m() as f32,
+        vt: sets[k],
+    });
+    RenderTerrain {
+        id: 0,
+        tile_resolution: res,
+        meters_per_sample: mps,
+        tiles,
+        layers,
+        macro_variation: 0.15,
+        biome_palette: Vec::new(),
+    }
+}
+
+/// **The near-ground golden** (wave TER2a) — the 58th, on the additive branch.
+///
+/// What it depicts is the thing this wave exists to make exist: real PBR ground
+/// materials, blended by real splat weights, at the range a player's eye is at.
+/// Every terrain golden before it is an overlook, because below about three
+/// metres there was nothing to look at — no colour signal and no height signal,
+/// just a 1 m central-difference shading normal on a flat green.
+///
+/// The structural arm beside the pixels is a **difference**, on
+/// `terrain_vt_fragment`'s own reasoning: a frame that is merely "not blank"
+/// proves nothing, so this measures the textured frame against the identical
+/// frame with **no pools installed** — same scene, same weights, same camera,
+/// same layer colours, and the branch `vt_active()` guards simply not taken.
+#[test]
+fn golden_ground_close() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    // A metre above the ground under the camera, looking along the bands.
+    let eye = DVec3::new(1.0, 0.35 * 8.0 + 1.0, 8.0);
+    let view = look_view(eye, DVec3::new(21.0, 3.2, 12.0));
+    let build = |gpu: &GpuContext| {
+        let (lib, pools, sets) = ground_vt_library(gpu);
+        let scene = RenderScene {
+            grid_enabled: false,
+            terrains: vec![ground_close_terrain(sets)],
+            ..Default::default()
+        };
+        (scene, lib, pools)
+    };
+    let img = check_golden_vt(
+        &gpu,
+        "ground_close",
+        &view,
+        RenderSettings::default(),
+        &build,
+    );
+
+    // The control: the identical scene with no pools, so `vt_active()` is false
+    // and the four layers shade off their scalar colours alone.
+    let flat = {
+        let target = HeadlessTarget::new(&gpu, W, H);
+        let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        let (_lib, _pools, sets) = ground_vt_library(&gpu);
+        let scene = RenderScene {
+            grid_enabled: false,
+            terrains: vec![ground_close_terrain(sets)],
+            ..Default::default()
+        };
+        renderer.set_vt_pools(None);
+        renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+        target.read_rgba(&gpu).expect("readback")
+    };
+
+    // **Detail, measured.** A textured ground has high-frequency variation a
+    // flat-albedo one cannot have: count horizontally adjacent pixel pairs whose
+    // luminance differs by more than four levels. The scalar frame's only
+    // sources of that are the procedural grain and the shading normal, both of
+    // which are in BOTH frames — so the difference is the material's own texels.
+    let steps = |img: &[u8]| -> u64 {
+        let mut n = 0u64;
+        for y in 0..H {
+            for x in 1..W {
+                let a = px(img, x - 1, y);
+                let b = px(img, x, y);
+                let la = 0.2126 * a[0] as f64 + 0.7152 * a[1] as f64 + 0.0722 * a[2] as f64;
+                let lb = 0.2126 * b[0] as f64 + 0.7152 * b[1] as f64 + 0.0722 * b[2] as f64;
+                if (la - lb).abs() > 4.0 {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+    let (on, off) = (steps(&img), steps(&flat));
+    eprintln!(
+        "ground_close: {on} textured luminance steps against {off} untextured ({:.2}x)",
+        on as f64 / off.max(1) as f64
+    );
+    assert!(
+        on > off * 2,
+        "the ground is no busier textured ({on}) than untextured ({off}) — the \
+         virtual-texture branch did not run"
+    );
+    // …and it is not merely noise: the frame must still be recognisably ground
+    // rather than a spray of texels, so the two frames' MEAN luminance stays
+    // close. A material that resolved to garbage would move it.
+    let mean = |img: &[u8]| -> f64 {
+        let s: f64 = img
+            .chunks_exact(4)
+            .map(|p| 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64)
+            .sum();
+        s / f64::from(W * H)
+    };
+    let (ma, mb) = (mean(&img), mean(&flat));
+    eprintln!("ground_close: mean luma {ma:.1} textured against {mb:.1} untextured");
+    assert!(
+        (ma - mb).abs() < mb * 0.5,
+        "the textured frame's mean luminance ({ma:.1}) is nowhere near the \
+         untextured one's ({mb:.1}) — the materials did not resolve to ground"
+    );
+}

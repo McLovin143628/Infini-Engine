@@ -337,8 +337,34 @@ fn terrain_layers(world: vec3<f32>, w: vec4<f32>, tex_scale: f32) -> TerrainLaye
         if (!vt_bound(slots.x) && !vt_bound(slots.y) && !vt_bound(slots.z)) {
             continue;
         }
-        let s = vt_surface(slots, uv, ddx, ddy,
-                           material.albedo[k].rgb, 1.0, 0.0, material.params[k].x);
+        // **A LAYER'S SCALARS ARE A FALLBACK, NOT A glTF FACTOR** (wave TER2a).
+        //
+        // `vt_surface` multiplies: `out.albedo = albedo * texel`, and
+        // `out.roughness = roughness * orm.g`. That is right for a mesh, where
+        // `base_color` is glTF's `baseColorFactor` and a separate field from any
+        // fallback. A terrain layer has ONE colour, and it is what the surface
+        // shades with when nothing is bound — so passing it as a factor renders
+        // a bound ground material at the product of its own colour and itself.
+        //
+        // Measured on the island's own numbers when its four layers were first
+        // bound: the textured frame came out at a mean luminance of 56.4 against
+        // the same frame's 114.3 untextured — **2.03x too dark** — because grass
+        // shaded at 0.086 x 0.078 instead of 0.078. Wave T could not have seen
+        // it: no `.inf_mat` in the repository named a texture, so this branch had
+        // never run over content.
+        //
+        // The fallback still reaches the pixel: the call site mixes
+        // `material.albedo` toward this result by `coverage`, so a layer with no
+        // albedo texture contributes its colour exactly as before.
+        var tint = material.albedo[k].rgb;
+        if (vt_bound(slots.x)) {
+            tint = vec3<f32>(1.0);
+        }
+        var rough = material.params[k].x;
+        if (vt_bound(slots.z)) {
+            rough = 1.0;
+        }
+        let s = vt_surface(slots, uv, ddx, ddy, tint, 1.0, 0.0, rough);
         out.albedo = out.albedo + s.albedo * wk;
         out.roughness = out.roughness + s.roughness * wk;
         out.coverage = out.coverage + wk;

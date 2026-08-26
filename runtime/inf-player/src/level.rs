@@ -2344,17 +2344,65 @@ impl PackLevelSource {
         // The bindings this level names. A level that will not decode yields no
         // bindings and therefore no material content, which is the same picture
         // the world builder is about to produce for the same reason.
-        let bound: std::collections::BTreeSet<Uuid> = self
-            .level_bytes()
+        let mut bound: std::collections::BTreeSet<Uuid> = std::collections::BTreeSet::new();
+        let mut collect = |entities: &[RuntimeEntity]| {
+            for e in entities {
+                bound.extend(e.material.as_ref().and_then(|m| m.asset));
+                // TER2a: a terrain's four splat layers bind materials too,
+                // through the one door `Terrain::layer_materials`. The ground is
+                // the largest textured surface a world has, and this walk could
+                // not see it.
+                if let Some(t) = &e.terrain {
+                    bound.extend(t.layer_materials());
+                }
+            }
+        };
+        if let Some(lvl) = LevelSource::level_bytes(self)
             .ok()
             .and_then(|b| inf_scene::decode(&b).ok())
-            .map(|lvl| {
-                lvl.entities
-                    .iter()
-                    .filter_map(|e| e.material.as_ref().and_then(|m| m.asset))
-                    .collect()
-            })
-            .unwrap_or_default();
+        {
+            collect(&lvl.entities);
+        }
+        // **AND THE PARTITION** (TER2a). A cooked partitioned level ships **no
+        // entities at all** — `resolve_cell_store`'s own doc says so in those
+        // words — so this walk, which read only the level, found nothing on
+        // every partitioned world and every surface in one shipped untextured.
+        // Nothing caught it because until TER2a no content in this repository
+        // had a texture for it to lose: the island reported "0 virtual
+        // textures" over 51 km² of ground and that read as "the ground names no
+        // material", which was also true.
+        //
+        // The whole partition is walked, not the resident cells: this runs once
+        // at load and produces the registration SEQUENCE, which must be a
+        // function of the LEVEL rather than of where the camera happened to be
+        // — a residency that depended on the first frame's position would page
+        // different tiles on two runs of one drive.
+        let part = AssetId(crate::cell_stream::derived_partition_id(
+            self.root_level.uuid(),
+        ));
+        if self.reader.contains(part) {
+            match crate::cell_stream::PackCellStore::open(self.reader.clone(), part) {
+                Ok(store) => {
+                    use crate::cell_stream::CellStore as _;
+                    if let Ok(p) = store.persistent() {
+                        collect(&p);
+                    }
+                    for c in store.grid_coords() {
+                        if let Ok(Some(cell)) = store.cell(c) {
+                            collect(&cell);
+                        }
+                    }
+                }
+                // A partition that will not open is a world that will not boot,
+                // and `resolve_cell_store` is where that is reported as the hard
+                // error it is. Here it means "no bindings from the partition",
+                // which is the same picture this function produced for every
+                // partitioned level before TER2a.
+                Err(e) => tracing::warn!(
+                    "inf-player: the level's .inf_part did not open, so no material                      bound inside a streamed cell is registered: {e}"
+                ),
+            }
+        }
 
         let mut materials = HashMap::new();
         for mat in &bound {

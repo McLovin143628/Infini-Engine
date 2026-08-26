@@ -227,6 +227,46 @@ pub fn island_cover_payload(seed: u64) -> inf_pcg::PcgAssetPayload {
     inf_pcg::PcgAssetPayload::new(island_cover_document(seed))
 }
 
+/// **The island's four ground layers** (wave TER2a, clause 3).
+///
+/// The order is `inf_island::splat`'s and is load-bearing: the build writes a
+/// per-sample `[u8; 4]` whose channels are grass, rock, forest floor and sand in
+/// that order, and this is what those four channels *are*. Swapping two here
+/// paints the beaches with rock and nothing would report it.
+///
+/// Each layer names a `.inf_mat` from the engine's committed ground library
+/// (`samples/ground/`), which is what turns the terrain shader's four-layer
+/// virtual-texture branch from a capability into a picture. The scalar
+/// `albedo`/`roughness` beside it are **not decoration**: they are what a
+/// surface shades with while its pages stream in, and what it shades with for
+/// ever on an adapter with no virtual textures — so they are the ground sets'
+/// own base colours rather than a second opinion about them.
+///
+/// `tex_scale` is metres per tile, and it is also what the procedural triplanar
+/// grain is scaled by, so it is one number doing two jobs: at 2 m a 1 024²
+/// albedo is 1.95 mm a texel and the grain that breaks up its tiling is a 2 m
+/// feature. Both are what those surfaces want.
+fn island_ground_layers() -> [inf_ecs::components::TerrainLayer; 4] {
+    use inf_ecs::components::TerrainLayer;
+    use inf_ecs::math::Color;
+    use inf_material::ground::GroundKind;
+    let layer = |kind: GroundKind| {
+        let c = kind.base_color();
+        TerrainLayer {
+            albedo: Color::new(c[0], c[1], c[2], 1.0),
+            roughness: f64::from(kind.roughness()),
+            tex_scale: kind.tex_scale_m(),
+            material: Some(crate::ground::ground_material_guid(kind)),
+        }
+    };
+    [
+        layer(GroundKind::Grass),
+        layer(GroundKind::Rock),
+        layer(GroundKind::ForestFloor),
+        layer(GroundKind::Sand),
+    ]
+}
+
 /// Author the island's level from its committed design.
 pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     use inf_ecs::components::{
@@ -326,6 +366,7 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
         );
         t.asset = Some(inf_island::terrain_guid(name));
         t.biome_set = Some(inf_island::biome_set_guid(name));
+        t.layers = island_ground_layers();
         debug_assert!(t.data.is_empty(), "a streamed terrain ships no tiles");
         insert!(doc, terrain_guid, t);
     }

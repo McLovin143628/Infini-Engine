@@ -745,6 +745,7 @@ pub fn project_scene_full(
                     data,
                     translation,
                     id,
+                    vt,
                     &mut prev_terrains,
                 ));
             }
@@ -766,6 +767,7 @@ pub fn project_scene_full(
                         w.get::<Terrain>(entity),
                         translation,
                         inf_render::terrain_id_from_guid(guid.as_u128()),
+                        vt,
                         &mut prev_voxels,
                     )
                 });
@@ -1717,6 +1719,9 @@ pub fn project_terrain(
     data: &inf_terrain::TerrainData,
     translation: DVec3,
     id: u64,
+    // The live virtual-texture registry (TER2a) — `None` on a level with no
+    // bindings, and then every layer's set is `VtTextureSet::NONE`.
+    vt: Option<&inf_render::VtTextures>,
     prev: &mut Vec<RenderTerrain>,
 ) -> RenderTerrain {
     let res = data.tile_resolution();
@@ -1725,12 +1730,13 @@ pub fn project_terrain(
         albedo: terrain.layers[k].albedo.to_array(),
         roughness: terrain.layers[k].roughness as f32,
         tex_scale: terrain.layers[k].tex_scale as f32,
-        // Wave T's per-layer virtual material has no persisted field to
-        // come from yet — `inf_ecs::TerrainLayer` carries no texture
-        // reference and the scene schema is frozen for that wave. Both hosts
-        // spell the default the same way, so neither can start binding one
-        // without the other. See docs/memos/wave-t-textures-disposition.md.
-        vt: Default::default(),
+        // TER2a: the authoring field Wave G added, resolved through the SAME
+        // door every mesh instance's set goes through. Before this the two hosts
+        // both spelled `vt: Default::default()` with a comment saying
+        // `TerrainLayer` carried no texture reference -- which stopped being
+        // true at Wave G and left the four-layer VT branch unreachable by
+        // construction on every terrain in the engine.
+        vt: inf_render::vt_set_for(vt, terrain.layers[k].material.map(|m| m.as_u128())),
     });
     let macro_variation = terrain.macro_variation as f32;
     // EMPTY on purpose (P19.2) — see the `biome_palette` note at the tail of this
@@ -2026,6 +2032,7 @@ fn project_voxel(
     terrain: Option<&Terrain>,
     translation: DVec3,
     id: u64,
+    vt: Option<&inf_render::VtTextures>,
     prev: &mut Vec<inf_render::RenderVoxelVolume>,
 ) -> Option<inf_render::RenderVoxelVolume> {
     let voxel_size_m = slot.data.voxel_size_m();
@@ -2034,12 +2041,11 @@ fn project_voxel(
             albedo: t.layers[k].albedo.to_array(),
             roughness: t.layers[k].roughness as f32,
             tex_scale: t.layers[k].tex_scale as f32,
-            // Wave T's per-layer virtual material has no persisted field to
-            // come from yet — `inf_ecs::TerrainLayer` carries no texture
-            // reference and the scene schema is frozen for that wave. Both hosts
-            // spell the default the same way, so neither can start binding one
-            // without the other. See docs/memos/wave-t-textures-disposition.md.
-            vt: Default::default(),
+            // TER2a: the same binding the heightfield takes, through the same
+            // door -- a voxel surface shades off the SAME four terrain layers,
+            // so a cave mouth whose rock came from a different place than the
+            // cliff above it would be visible as a seam.
+            vt: inf_render::vt_set_for(vt, t.layers[k].material.map(|m| m.as_u128())),
         },
         None => RenderTerrainLayer::default(),
     });

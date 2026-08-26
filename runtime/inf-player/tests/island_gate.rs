@@ -1171,3 +1171,143 @@ fn the_ground_the_simulation_stands_on_is_the_ground_the_recipe_built() {
         recipe.sea.level_m
     );
 }
+
+/// **The island's ground is four real materials, end to end** (wave TER2a).
+///
+/// Before this wave the island's four `TerrainLayer`s named no material, so the
+/// terrain shader's whole per-layer virtual-texture branch was unreachable and
+/// the frame reported *zero* virtual textures over 51 km² of ground. Binding
+/// them is not one edit: a material GUID on a layer has to survive the level
+/// save, the cook's dependency closure, the pack, and the shipped player's
+/// binding walk — four separate places that each had a rule for
+/// `Material.asset` and none for a terrain layer.
+///
+/// So this arm walks the whole chain on the real cooked pack and names which
+/// link is broken when it breaks, rather than asserting a count at the end and
+/// leaving the reader to bisect four crates.
+#[test]
+fn the_cooked_island_carries_the_ground_its_layers_bind() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let pack = cook(tmp.path());
+    let source = inf_player::level::PackLevelSource::open(&pack).expect("the pack opens");
+
+    // 1. THE LEVEL. Its four layers name four DISTINCT materials, in the splat
+    //    order `inf_island::splat` writes weights in.
+    let mut built = inf_player::build_world_from_pack(&source).expect("the world builds");
+    let bound: Vec<uuid::Uuid> = {
+        let world = built.world.world_mut();
+        let mut q = world.query::<&inf_ecs::components::Terrain>();
+        let ids: Vec<uuid::Uuid> = q
+            .iter(world)
+            .flat_map(|t| t.layer_materials().collect::<Vec<_>>())
+            .collect();
+        ids
+    };
+    assert_eq!(
+        bound.len(),
+        4,
+        "the cooked island's terrain binds {} layer materials, not four: {bound:?}",
+        bound.len()
+    );
+    let mut distinct = bound.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(distinct.len(), 4, "two layers share a material: {bound:?}");
+    for (k, kind) in [
+        inf_material::ground::GroundKind::Grass,
+        inf_material::ground::GroundKind::Rock,
+        inf_material::ground::GroundKind::ForestFloor,
+        inf_material::ground::GroundKind::Sand,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            bound[k],
+            inf_editor_core::ground::ground_material_guid(kind),
+            "layer {k} is not {} — the splat writes its weights into that \
+             channel, so a swap here paints the beaches with rock",
+            kind.label()
+        );
+    }
+
+    // 1b. **AND THE LEVEL ITSELF CARRIES NONE OF IT** — the finding this arm
+    //     exists to keep found. A cooked partitioned level ships **zero
+    //     entities**; they are all in the derived `.inf_part`. So the walk that
+    //     collects a level's material bindings found nothing at all on every
+    //     partitioned world, for `Material.asset` as much as for a terrain
+    //     layer, and every surface in one shipped untextured. Nothing caught it
+    //     because until TER2a no content in this repository had a texture to
+    //     lose: the island reported "0 virtual textures" over 51 km² of ground,
+    //     which read as "the ground names no material" and was also true.
+    //
+    //     Asserted rather than commented, so the day the cook stops emptying a
+    //     partitioned level this arm says so instead of silently measuring a
+    //     path that no longer exists.
+    {
+        let raw = inf_player::level::LevelSource::level_bytes(&source).expect("level bytes");
+        let lvl = inf_scene::decode(&raw).expect("level decodes");
+        assert!(
+            lvl.entities.is_empty(),
+            "the cooked island level carries {} entities — if a partitioned              level now keeps them, `material_content`'s partition walk is              double-counting and this arm's premise has changed",
+            lvl.entities.len()
+        );
+        println!(
+            "ISLAND GROUND: the cooked level carries 0 entities (they are in the              .inf_part), so every binding below came from the partition walk"
+        );
+    }
+
+    // 2. THE PACK. The cook's closure followed the level's sidecar edge to each
+    //    `.inf_mat`, derived a `.inf_matd` for it, and followed THAT to the
+    //    `.inf_tex` containers.
+    let content = source.material_content();
+    assert_eq!(
+        content.materials.len(),
+        4,
+        "the pack carries {} derived ground records, not four — the cook's \
+         closure did not follow `Terrain.layers[*].material`",
+        content.materials.len()
+    );
+    // Fourteen: four albedo + four normal + four ORM + two detail (grass and
+    // rock are the only sets that ship one).
+    assert_eq!(
+        content.textures.len(),
+        14,
+        "the pack carries {} ground textures, not fourteen",
+        content.textures.len()
+    );
+
+    // 3. THE RESIDENCY. The registration set a shipped host builds from this
+    //    content, and the deterministic floor it admits — the numbers the frame
+    //    instrument's "N virtual textures" line reports.
+    let mats = content.vt_materials();
+    assert_eq!(mats.len(), 4, "the host's material map is not the pack's");
+    let order = inf_render::registration_order(&mats);
+    assert_eq!(
+        order.len(),
+        14,
+        "the registration order names {} textures, not fourteen — `want_floor` \
+         is a pure function of this sequence, so it is the thing two hosts have \
+         to agree about",
+        order.len()
+    );
+    println!(
+        "ISLAND GROUND: 4 layers -> 4 materials -> {} textures; registration \
+         order {:?}",
+        content.textures.len(),
+        order
+            .iter()
+            .map(|g| format!("{:x}", *g as u64))
+            .collect::<Vec<_>>()
+    );
+
+    // 4. AND IT IS NOT VACUOUS. Every texture the records name really is in the
+    //    pack — a record naming bytes that are absent renders untextured and the
+    //    counts above would still be four and fourteen.
+    for g in &order {
+        assert!(
+            content.textures.contains_key(&uuid::Uuid::from_u128(*g)),
+            "the pack names texture {g:x} and does not carry it"
+        );
+    }
+}

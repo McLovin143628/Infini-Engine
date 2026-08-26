@@ -524,6 +524,15 @@ impl EditorRenderAssets {
             {
                 bindings.insert(asset);
             }
+            // TER2a: a terrain's four splat layers bind materials too, through
+            // the one door `Terrain::layer_materials`. The ground is by far the
+            // largest textured surface a world has, and it was invisible to this
+            // walk — so a terrain layer could name a material and the viewport
+            // would never register it, never build a level for it, and show the
+            // flat albedo for ever.
+            if let Some(terrain) = w.get::<inf_ecs::components::Terrain>(entity) {
+                bindings.extend(terrain.layer_materials());
+            }
         }
         VtLevelKey {
             bindings,

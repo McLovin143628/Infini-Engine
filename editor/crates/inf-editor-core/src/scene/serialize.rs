@@ -7283,6 +7283,18 @@ pub fn level_dependencies(doc: &SceneDoc) -> Vec<Uuid> {
         add(w.get::<c::Text2D>(e).and_then(|x| x.font_texture));
         add(w.get::<c::Terrain>(e).and_then(|x| x.asset));
         add(w.get::<c::Terrain>(e).and_then(|x| x.biome_set));
+        // TER2a: the four splat layers' `.inf_mat` bindings, through the one
+        // door. NOT an `Option<Uuid>` slot like every line around it — a
+        // terrain carries FOUR — which is why it goes through
+        // `Terrain::layer_materials` rather than being spelled here: this is the
+        // enumeration the cook's closure, the delete guard and the Content
+        // Drawer's reference view all read, and it is the fourth walk that has
+        // to agree with the other three about what a level binds.
+        if let Some(t) = w.get::<c::Terrain>(e) {
+            for m in t.layer_materials() {
+                add(Some(m));
+            }
+        }
         add(w.get::<c::PcgVolume>(e).and_then(|x| x.graph));
         add(w.get::<c::SkeletalMesh>(e).and_then(|x| x.mesh));
         add(w.get::<c::SkeletalMesh>(e).and_then(|x| x.skeleton));

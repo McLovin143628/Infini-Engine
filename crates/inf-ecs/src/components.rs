@@ -3197,6 +3197,28 @@ impl Terrain {
             biome_population: Vec::new(),
         }
     }
+
+    /// **Every `.inf_mat` GUID this terrain's layers bind** (wave TER2a), in
+    /// layer order, deduplicated only by the caller.
+    ///
+    /// # Why it is a function and not four field reads
+    ///
+    /// Because *four* separate walks have to agree about what a level binds, and
+    /// the P22.2 law is about exactly this shape: the editor's virtual-texture
+    /// cache key, the editor's material resolver, the PIE payload builder and
+    /// the shipped player's pack reader each enumerate a level's material
+    /// bindings, and `VtTextures::want_floor` is a pure function of the
+    /// registration *sequence*, so a walk that missed a binding — or found it in
+    /// a different order — would page a different set of texture tiles from the
+    /// other three. "Which of a terrain's fields is a material binding" is a
+    /// rule; it lives here, once.
+    ///
+    /// It answers **nothing** for a terrain whose layers name no material, which
+    /// is every terrain authored before Wave G's `TerrainLayer::material` and
+    /// the permanent flat-albedo path.
+    pub fn layer_materials(&self) -> impl Iterator<Item = uuid::Uuid> + '_ {
+        self.layers.iter().filter_map(|l| l.material)
+    }
 }
 
 /// One baked PCG instance — the world-space result of evaluating a
