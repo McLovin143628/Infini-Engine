@@ -1259,8 +1259,16 @@ fn the_golden_set_is_pinned_and_additive_after_phase_27() {
     /// mode — is a debug overlay, which is not a thing to freeze.
     const GOLDENS: usize = 54;
     /// `xxh3_128` over `"{file_name} {hex}\n"` for every golden, name-sorted.
-    /// **RULE: this may change only in a commit that adds a golden.**
-    const GOLDEN_SET_DIGEST: &str = "23d41a61c31c28a17a20871b6c875707";
+    /// **RULE: this may change only in a commit that adds a golden, or in one
+    /// whose stated purpose is to change what the engine LOOKS like.**
+    ///
+    /// **Moved once, at wave SKY2** (from `23d41a61c31c28a17a20871b6c875707`),
+    /// the same move `phase26_gate`'s twin records at length — eight cloud-
+    /// carrying frames re-blessed on purpose by the volumetric-cloud overhaul,
+    /// count unchanged. That both pins had to move separately is the point of
+    /// their being separate: a wave that re-blessed for a bad reason would have
+    /// to write the reason down twice.
+    const GOLDEN_SET_DIGEST: &str = "7ff2b3702b825f00707a71dff282f400";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

@@ -2413,11 +2413,26 @@ fn the_golden_set_is_pinned_and_additive() {
     /// the CONTENT pin (P26.5 audit). Committed PNGs are `-text` in
     /// `.gitattributes`, so these bytes are the same on every checkout.
     ///
-    /// **RULE: this may change only in a commit that adds a golden**, never in
-    /// one that edits an existing frame. Phase 26 re-blessed none, and neither
-    /// did P27.4 — `git status` over this directory across that batch reports
-    /// four additions and nothing else.
-    const GOLDEN_SET_DIGEST: &str = "23d41a61c31c28a17a20871b6c875707";
+    /// **RULE: this may change only in a commit that adds a golden, or in one
+    /// whose stated purpose is to change what the engine LOOKS like** — never as
+    /// a side effect, and never to turn a red build green. Phase 26 re-blessed
+    /// none, and neither did P27.4 — `git status` over this directory across that
+    /// batch reports four additions and nothing else.
+    ///
+    /// **Moved once, at wave SKY2** (from `23d41a61c31c28a17a20871b6c875707`),
+    /// and the second half of the rule above is the amendment that wave had to
+    /// write. SKY2 is the volumetric-cloud overhaul: its deliverable IS the look,
+    /// so eight frames with clouds in them — the four `clouds_*`, plus
+    /// `editor_default` and the three `weather_*` presets — were re-blessed on
+    /// purpose, with the differences described one by one in the commit message
+    /// and in `docs/memos/island-progress.md` under *Wave SKY2*. The count did
+    /// not move.
+    ///
+    /// This gate is why the eighth frame is on that list. The wave's brief named
+    /// five; `weather_fog_dawn`, `weather_snow_dusk` and `weather_storm_noon`
+    /// enable clouds through a `WeatherState` preset and were not on it. A
+    /// count-only pin would have said nothing about any of the three.
+    const GOLDEN_SET_DIGEST: &str = "7ff2b3702b825f00707a71dff282f400";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
@@ -2464,6 +2479,8 @@ fn the_golden_set_is_pinned_and_additive() {
         "the golden set's CONTENT moved. A golden was re-blessed, deleted (the \
          harness regenerates any golden it cannot read, so the count above stays \
          54), or replaced. Adding one is allowed and means moving both constants \
-         in the same commit; changing an existing frame is not.\n{manifest}"
+         in the same commit. Changing an existing frame is allowed ONLY in a \
+         commit whose stated purpose is to change the look, with the difference \
+         described — never as a side effect of something else.\n{manifest}"
     );
 }

@@ -447,6 +447,10 @@ fn apply_record(r: &RenderSettingsRecord) -> RenderSettings {
             bias: r.ssao_bias,
         },
         taa: r.taa,
+        // MIRROR (wave SKY2): the cloud's own temporal accumulation follows the
+        // level's TAA switch. See the twin in `inf_player::render::apply_record`
+        // for why it is two mechanisms behind one authored bit.
+        cloud_temporal: r.taa,
         shadows: ShadowSettings {
             enabled: r.shadows_enabled,
             max_distance: r.shadows_max_distance,

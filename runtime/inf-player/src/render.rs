@@ -1588,6 +1588,16 @@ fn apply_record(r: &RenderSettingsRecord) -> RenderSettings {
             bias: r.ssao_bias,
         },
         taa: r.taa,
+        // The cloud's own temporal accumulation follows the level's TAA switch
+        // (wave SKY2). One authored bit, two mechanisms — and it has to be two,
+        // because `passes::taa` reprojects through the depth prepass and a cloud
+        // writes no depth, so it cannot ride that pass. What the author is
+        // deciding with `taa` is a POLICY ("this level accepts a frame that
+        // depends on the frames before it"), and that policy governs both.
+        // Riding the existing bit is also what keeps the wave at zero new
+        // authored fields: a `cloud_temporal` of its own would be a
+        // `RenderSettingsRecord` field, and that record is scene schema.
+        cloud_temporal: r.taa,
         shadows: ShadowSettings {
             enabled: r.shadows_enabled,
             max_distance: r.shadows_max_distance,
