@@ -131,9 +131,50 @@ function stateFor(id: string): OverlayState {
   return { visible: true, cutouts };
 }
 
-/** A cutout set's identity, so an unchanged region costs no IPC. */
+/**
+ * A cutout set's identity, so an unchanged region costs no IPC.
+ *
+ * **The scale is part of the identity** (UX2 audit). What crosses is PHYSICAL
+ * pixels; what is compared here would otherwise be CSS ones. Drag the window to
+ * a monitor at a different scale with a menu open and the CSS rectangle is
+ * unchanged, so the dedupe swallows the push — while the hole itself moved,
+ * because `viewport_set_rect` DID re-push (`ViewportPanel` watches the scale
+ * explicitly for exactly this case) and the native side re-applied the same
+ * stale physical rectangle against the new one.
+ */
 function regionKey(cutouts: OverlayRect[]): string {
-  return cutouts.map((r) => `${r.x},${r.y},${r.width},${r.height}`).join(";");
+  const dpr = window.devicePixelRatio || 1;
+  return `${dpr}|${cutouts.map((r) => `${r.x},${r.y},${r.width},${r.height}`).join(";")}`;
+}
+
+/** The display-scale watch, armed once; see [`regionKey`]. */
+let dprArmed = false;
+let dprQuery: MediaQueryList | null = null;
+
+function onDprChange(): void {
+  // Re-arm for the NEW ratio (a media query matches one value), then re-push:
+  // the key above has changed even though nothing was re-measured.
+  armDprQuery();
+  syncAll();
+}
+
+function armDprQuery(): void {
+  dprQuery?.removeEventListener("change", onDprChange);
+  dprQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+  dprQuery.addEventListener("change", onDprChange);
+}
+
+/**
+ * Notice a display-scale change that arrives with no resize and no re-measure —
+ * a cross-monitor drag with a menu open (UX2 audit). Same mechanism, and the
+ * same reason, as `ViewportPanel`'s: the CSS layout is identical, so nothing
+ * else fires.
+ */
+function watchDevicePixelRatio(): void {
+  if (dprArmed) return;
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+  dprArmed = true;
+  armDprQuery();
 }
 
 function pushVisible(id: string, visible: boolean): void {
@@ -191,6 +232,7 @@ function syncAll(): void {
  */
 export function acquireViewportOverlay(rects: OverlayRect[] | null = null): OverlayRelease {
   probeCutoutSupport();
+  watchDevicePixelRatio();
   const hold: Hold = { rects };
   wide.add(hold);
   syncAll();
@@ -238,6 +280,7 @@ export function acquireViewportOverlayFor(id: string): () => void {
  */
 export function registerViewport(id: string): () => void {
   probeCutoutSupport();
+  watchDevicePixelRatio();
   attached.add(id);
   sync(id);
   return () => {
@@ -361,6 +404,9 @@ export function __setCutoutSupportedForTest(supported: boolean): void {
 
 /** Test-only: reset module state between cases. */
 export function __resetViewportOverlayForTest(): void {
+  dprQuery?.removeEventListener("change", onDprChange);
+  dprQuery = null;
+  dprArmed = false;
   wide.clear();
   scoped.clear();
   shown.clear();

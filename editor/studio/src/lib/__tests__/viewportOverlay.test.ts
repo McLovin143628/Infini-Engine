@@ -313,6 +313,51 @@ test("cutouts cross in PHYSICAL pixels, like every other viewport rect", async (
   }
 });
 
+test("a cross-monitor drag re-carves at the new scale, with nothing re-measured", async () => {
+  // **UX2 audit.** The dedupe compares CSS rectangles and the wire carries
+  // PHYSICAL ones, so a scale change with the menu open is invisible to it: the
+  // menu has not moved, nothing re-renders, no `ResizeObserver` fires — and
+  // `ViewportPanel` meanwhile DOES re-push the hole (it watches the scale
+  // explicitly, for exactly this case), so the native side re-applies the old
+  // physical rectangle against the new hole. A cutout at half the size, in the
+  // wrong place, for as long as the menu stays open.
+  const real = window.devicePixelRatio;
+  const realMatchMedia = window.matchMedia;
+  // jsdom's MediaQueryList never fires; capture the listeners of the LATEST
+  // query armed (the watch re-arms on every change) and fire them by hand.
+  let listeners = new Set<() => void>();
+  window.matchMedia = ((query: string) => {
+    const mine = new Set<() => void>();
+    listeners = mine;
+    return {
+      media: query,
+      matches: true,
+      addEventListener: (_: string, fn: () => void) => void mine.add(fn),
+      removeEventListener: (_: string, fn: () => void) => void mine.delete(fn),
+    } as unknown as MediaQueryList;
+  }) as typeof window.matchMedia;
+  const fire = () => listeners.forEach((f) => f());
+  Object.defineProperty(window, "devicePixelRatio", { value: 1, configurable: true });
+  try {
+    await readyToCarve();
+    const menu = acquireViewportOverlay([rect(400, 260, 220, 300)]);
+    await settle();
+    expect(log).toEqual(["region:400,260,220,300"]);
+
+    Object.defineProperty(window, "devicePixelRatio", { value: 2, configurable: true });
+    fire();
+    await settle();
+    // Same menu, same CSS rectangle, twice the pixels.
+    expect(log).toEqual(["region:400,260,220,300", "region:800,520,440,600"]);
+    // …and no hide anywhere in it: the view keeps rendering across the move.
+    expect(calls).toEqual([]);
+    menu();
+  } finally {
+    Object.defineProperty(window, "devicePixelRatio", { value: real, configurable: true });
+    window.matchMedia = realMatchMedia;
+  }
+});
+
 test("with no cutout backend a measured overlay still hides — macOS and Linux", async () => {
   // The one-platform law at the seam. `viewport_cutout_supported` answers
   // `cfg!(windows)`; everywhere else the menu would be drawn UNDER a viewport
