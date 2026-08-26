@@ -24,19 +24,19 @@ use inf_render::passes::vgeom::{cpu_visible_set, cull_flags, frustum_planes, lod
 use inf_render::{
     assemble_patches, cull_visible, cull_visible_streamed, detail_texel, expand_text, half_to_f32,
     shape_texel, Ambient2D, AtmosphereParams, AtmosphereQuality, BloomSettings, CloudParams,
-    CloudQuality, CloudVolumes, EngineRenderer, GiAudit, GiQuality, GiSettings, GpuContext, HAlign,
-    HeadlessTarget, HeightFog, LightKind, MeshInstance, PrebatchedRun, PrecipParams, PrecipQuality,
-    PrimMesh, RenderChunk, RenderDeform, RenderDeformCell, RenderLight, RenderLight2D, RenderScene,
-    RenderSettings, RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap,
-    RenderView, RenderVoxelChunk, RenderVoxelVertex, RenderVoxelVolume, RenderWater, ScatterBatch,
-    ScatterData, ScatterInstance, ShadowSettings, SkinnedInstance, SkinnedMeshData, SkinnedVertex,
-    SpriteInstance, SpriteTextureUpload, SsaoSettings, SunParams, TerrainTileKey, TextParams,
-    TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode, VoxelChunkKey,
-    WaterKindGpu, WaterQuality, WaveField, WaveSpec, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE,
-    BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS,
-    BUILTIN_FONT_TEXTURE, CPU_GPU_EXACT_CHANNEL_FRACTION, CPU_GPU_SHADOW_TOLERANCE,
-    CPU_GPU_STEP_TOLERANCE, CPU_GPU_VALUE_ESCAPE_FRACTION, CPU_GPU_VALUE_TOLERANCE,
-    HEADLESS_FORMAT, TILE_CHUNK_DIM,
+    CloudQuality, CloudVolumes, EngineRenderer, FlareSettings, GiAudit, GiQuality, GiSettings,
+    GpuContext, HAlign, HeadlessTarget, HeightFog, LightKind, MeshInstance, PrebatchedRun,
+    PrecipParams, PrecipQuality, PrimMesh, RenderChunk, RenderDeform, RenderDeformCell,
+    RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
+    RenderTerrainTile, RenderTilemap, RenderView, RenderVoxelChunk, RenderVoxelVertex,
+    RenderVoxelVolume, RenderWater, ScatterBatch, ScatterData, ScatterInstance, ShadowSettings,
+    SkinnedInstance, SkinnedMeshData, SkinnedVertex, SpriteInstance, SpriteTextureUpload,
+    SsaoSettings, SunParams, TerrainTileKey, TextParams, TilemapParams, VgeomAsset, VgeomInstance,
+    VgeomMesh, VgeomSettings, ViewMode, VoxelChunkKey, WaterKindGpu, WaterQuality, WaveField,
+    WaveSpec, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
+    BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, CPU_GPU_EXACT_CHANNEL_FRACTION,
+    CPU_GPU_SHADOW_TOLERANCE, CPU_GPU_STEP_TOLERANCE, CPU_GPU_VALUE_ESCAPE_FRACTION,
+    CPU_GPU_VALUE_TOLERANCE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -2154,6 +2154,186 @@ fn golden_hdr_bloom() {
         .chunks(4)
         .any(|p| p[0] > 180 || p[1] > 180 || p[2] > 180);
     assert!(bright, "expected the emissive cubes to stay bright");
+}
+
+// ── wave VIS1b: sun glare / lens flare ───────────────────────────────────────
+
+/// A scene aimed at the real sun: the physical atmosphere on, its disc in the
+/// upper part of the frame, dark ground under it, and optionally a slab standing
+/// in front of the disc.
+///
+/// **The disc has to be the atmosphere's, not the gradient sky's.** The first
+/// draft of this fixture used `RenderScene::default()`, whose sky is the
+/// pre-P17.2 three-colour gradient plus a `pow(dot, 48) * 0.105` warm glow —
+/// nothing in it reaches the flare's threshold of 1.0 in exposed units, and the
+/// arm measured a byte-identical frame. `sky.wgsl` draws a disc only on the
+/// atmosphere path, where `SUN_DISC_GAIN = 4.0` exists *precisely so it clips to
+/// white through ACES and drives bloom* — which is the same property a lens
+/// flare needs, because a flare is what a lens does with light that has blown
+/// past the display's white.
+fn sun_flare_scene(occluder: bool) -> (RenderScene, RenderView) {
+    // 04:30 UTC on the solstice at 48.9°N — the dawn goldens' own hour. A LOW
+    // sun, deliberately: the sky around a noon disc is already near the top of
+    // the ACES curve, so glare added there is invisible on an 8-bit frame, and
+    // the first draft of this fixture (08:20, a high sun) measured the whole
+    // effect at +0.08% of frame luminance. At dawn the disc is the only bright
+    // thing in a dim sky, which is both the shot a lens flare is taken in and the
+    // one an assertion can read.
+    let (mut scene, bodies) = tod_scene(16_200.0);
+    scene.grid_enabled = false;
+    let eye = DVec3::new(0.0, 2.0, 0.0);
+    scene.instances.push(MeshInstance::lit(
+        eye + DVec3::new(0.0, -3.0, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(60.0, 0.5, 60.0),
+        [0.05, 0.05, 0.06, 1.0],
+        1,
+    ));
+    if occluder {
+        // Straight along the line of sight to the sun, twenty metres out. It is
+        // the *disc* this hides, not the frame: the ghost chain and the halo have
+        // other bright pixels to work from, and that difference is what the
+        // occlusion arm reads.
+        scene.instances.push(MeshInstance::lit(
+            eye + bodies.sun * 20.0,
+            Quat::IDENTITY,
+            Vec3::splat(6.0),
+            [0.02, 0.02, 0.02, 1.0],
+            2,
+        ));
+    }
+    scene.mark_dirty();
+    // Pitched eight degrees below the sun's own elevation, so the disc sits high
+    // in frame with ground under it — the shot a veiling glare, a ghost chain
+    // running back through the centre and a halo are all visible in at once.
+    // Derived from the body rather than fixed, for `horizon_view`'s own reason:
+    // a refined solar model must not turn this into a picture of empty sky.
+    let elevation = bodies.sun.y.clamp(-1.0, 1.0).asin().to_degrees();
+    let view = horizon_view(bodies.sun, elevation - 10.0);
+    (scene, view)
+}
+
+fn flare_on() -> RenderSettings {
+    RenderSettings {
+        flare: FlareSettings {
+            enabled: true,
+            intensity: 3.0,
+            ghost_count: 5,
+            halo: 0.6,
+            streak: 0.45,
+        },
+        ..RenderSettings::default()
+    }
+}
+
+/// **Sun glare golden** (wave VIS1b, clause 3) — the 56th.
+///
+/// The **additive** branch of the golden rule: `GOLDENS` moves in four gates, all
+/// three `GOLDEN_SET_DIGEST` pins move, the phase18 name array grows, and not one
+/// committed image changes — because the flare is off by default and off is a
+/// clear of its own target plus a branch the tonemap does not take.
+///
+/// The structural arm beside it is for the CI legs that do not compare pixels
+/// strictly, and it measures the effect against **the same frame with the feature
+/// off** rather than against an absolute: a glare is light added around a source,
+/// so the frame gets brighter and the pixels that brighten are near the sun.
+#[test]
+fn golden_sun_flare() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, view) = sun_flare_scene(false);
+
+    let img = check_golden_with(&gpu, "sun_flare", &scene, &view, flare_on());
+    let off = render_with(&gpu, &scene, &view, RenderSettings::default());
+
+    let luma = |img: &[u8]| -> f64 {
+        img.chunks(4)
+            .map(|p| 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64)
+            .sum::<f64>()
+    };
+    let (on_l, off_l) = (luma(&img), luma(&off));
+    assert!(
+        on_l > off_l * 1.02,
+        "the flare added no light: on {on_l:.0} vs off {off_l:.0}"
+    );
+    // And it added it as a *lens* does — brightest near the sun. The sun sits in
+    // the upper half by construction (`sun_flare_view`), so the upper half must
+    // gain proportionally more than the lower one.
+    let half = |img: &[u8], top: bool| -> f64 {
+        let rows = if top { 0..H / 2 } else { H / 2..H };
+        rows.flat_map(|y| (0..W).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let p = px(img, x, y);
+                0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64
+            })
+            .sum()
+    };
+    let top_gain = half(&img, true) - half(&off, true);
+    let bot_gain = half(&img, false) - half(&off, false);
+    eprintln!(
+        "sun_flare: luma {off_l:.0} -> {on_l:.0} (+{:.2}%); top gain {top_gain:.0}, \
+         bottom gain {bot_gain:.0}",
+        (on_l / off_l - 1.0) * 100.0
+    );
+    assert!(
+        top_gain > bot_gain,
+        "the glare is not centred on the sun: top {top_gain:.0} vs bottom {bot_gain:.0}"
+    );
+}
+
+/// **The glare goes out when the sun does** — the occlusion test, measured.
+///
+/// This is the claim that separates a lens flare from a screen-space smear: a
+/// veiling glare is light scattered inside the lens *by the source*, so putting a
+/// wall in front of the sun must take it away. The arm reads the difference
+/// between flare-on and flare-off in each of two scenes, so the wall's own effect
+/// on the frame cancels out and what is left is the glare alone.
+#[test]
+fn the_sun_glare_is_extinguished_when_the_sun_is_occluded() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let luma = |img: &[u8]| -> f64 {
+        img.chunks(4)
+            .map(|p| 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64)
+            .sum::<f64>()
+    };
+    let added = |occluder: bool| -> f64 {
+        let (scene, view) = sun_flare_scene(occluder);
+        let on = render_with(&gpu, &scene, &view, flare_on());
+        let off = render_with(&gpu, &scene, &view, RenderSettings::default());
+        luma(&on) - luma(&off)
+    };
+    let clear = added(false);
+    let hidden = added(true);
+    eprintln!("sun glare: clear sky adds {clear:.0}, sun behind a wall adds {hidden:.0}");
+    assert!(clear > 0.0, "the clear-sky fixture produced no glare");
+    assert!(
+        hidden < clear * 0.5,
+        "occluding the sun barely dimmed the glare: {hidden:.0} against {clear:.0}"
+    );
+}
+
+/// **The flare is off by default, and off costs the frame nothing.**
+///
+/// `INF_GOLDEN_STRICT=1` over all committed frames is the pixel half of this; the
+/// engagement half is here, and it is the stronger claim: the two frames must
+/// **differ** when the feature is on, so the golden above cannot be passing
+/// because the pass never ran.
+#[test]
+fn flare_off_is_byte_identical_and_on_is_not() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (scene, view) = sun_flare_scene(false);
+    let a = render_with(&gpu, &scene, &view, RenderSettings::default());
+    let b = render_with(
+        &gpu,
+        &scene,
+        &view,
+        RenderSettings {
+            flare: FlareSettings::default(),
+            ..RenderSettings::default()
+        },
+    );
+    assert_eq!(a, b, "the default flare block is not the default");
+    let on = render_with(&gpu, &scene, &view, flare_on());
+    assert_ne!(a, on, "turning the flare on changed nothing");
 }
 
 /// SSAO golden (P13.3a): a cluster of boxes forming **crevices** (a floor slab

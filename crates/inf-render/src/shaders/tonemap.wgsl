@@ -7,7 +7,8 @@
 struct Params {
     // x = UNUSED since wave VIS1b (the exposure moved to its own buffer, because
     // the bloom prefilter needs the same number and a uniform this pass owns
-    // could not reach it), y = bloom intensity, z = dither (>0.5), w unused.
+    // could not reach it), y = bloom intensity, z = dither (>0.5), w = the lens
+    // flare is on (>0.5).
     knobs: vec4<f32>,
     // xy = output resolution (px), zw unused.
     resolution: vec4<f32>,
@@ -21,6 +22,10 @@ struct Exposure {
 @group(0) @binding(2) var bloom_tex: texture_2d<f32>;
 @group(0) @binding(3) var<uniform> params: Params;
 @group(0) @binding(4) var<uniform> exposure: Exposure;
+// The half-res sun glare / ghost chain (wave VIS1b). Already in exposed units —
+// its own bright pass multiplied by the same `exposure.v.x` — so it is added
+// here rather than exposed again. Black on every frame the flare is off.
+@group(0) @binding(5) var flare_tex: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -70,6 +75,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // renders at exposure 1.0, which is why the reordering re-blessed nothing.
     hdr = hdr * exposure.v.x;
     hdr = hdr + bloom * params.knobs.y;
+    if (params.knobs.w > 0.5) {
+        // Branched rather than added unconditionally: the target is black when
+        // the flare is off, so the add would be exact — but it would still be a
+        // full-resolution texture fetch on every shipped frame of every level
+        // that never asked for a lens.
+        hdr = hdr + textureSampleLevel(flare_tex, samp, in.uv, 0.0).rgb;
+    }
 
     var col = tonemap_aces(hdr);
 

@@ -221,6 +221,16 @@ pub struct FrameTargets {
     /// Bloom mip chain (index 0 = half-res; the tonemap adds mip 0).
     pub bloom: Vec<wgpu::TextureView>,
     pub bloom_sizes: Vec<(u32, u32)>,
+    /// **Half-res sun glare / lens flare** (wave VIS1b), which the tonemap adds
+    /// beside the bloom.
+    ///
+    /// Allocated unconditionally, like the cloud stack and the TAA history: at
+    /// 1080p it is 960×540 `Rgba16Float` = **4.15 MB**, against the ~33 MB the
+    /// history already costs, and a lazily-grown target would still need a
+    /// placeholder bound at the tonemap's binding to keep that bind group valid.
+    pub flare: wgpu::TextureView,
+    /// Half-res flare target size in px.
+    pub flare_size: (u32, u32),
     /// TAA history ping-pong (HDR).
     pub taa_history: [wgpu::TextureView; 2],
     /// Half-res AO target size in px (for the SSAO shader).
@@ -306,6 +316,8 @@ impl FrameTargets {
             ],
             bloom,
             bloom_sizes,
+            flare: tex("flare", aw, ah, HDR_FORMAT, 1, RT_TEX),
+            flare_size: (aw, ah),
             ao_size: (aw, ah),
             // The cloud stack (SKY2), at the same half resolution SSAO uses.
             // Allocated unconditionally, like the TAA history beside it: at
@@ -887,6 +899,11 @@ impl EngineRenderer {
         // frame's exposure is. In manual mode it records nothing at all.
         graph.add(passes::exposure::ExposureNode::new(gpu));
         graph.add(passes::bloom::BloomNode::new(gpu));
+        // Sun glare / lens flare (wave VIS1b): AFTER bloom and BEFORE the
+        // tonemap, which is the slot the whole feature is specified into — it
+        // gathers the frame's bright part and it feeds the display transform.
+        // Off by default, and off is a clear of its own half-res target.
+        graph.add(passes::flare::FlareNode::new(gpu, &view_bgl));
         graph.add(passes::tonemap::TonemapNode::new(gpu));
         // **The in-game UI, AFTER the tonemap** (island wave I5): a menu drawn
         // into the HDR scene target would be bloomed, temporally reprojected and

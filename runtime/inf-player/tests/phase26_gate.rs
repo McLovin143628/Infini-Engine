@@ -2409,7 +2409,7 @@ fn the_golden_set_is_pinned_and_additive() {
     /// it by nothing, because virtual shadows were inert until a receiver
     /// existed. Wave VIS1a's **audit** added the fifty-fifth — `water_ssr.png`,
     /// the one frame the wave's own reflection feature can be pinned by.
-    const GOLDENS: usize = 55;
+    const GOLDENS: usize = 56;
     /// `xxh3_128` over `"{file_name} {hex}\n"` for every golden, name-sorted —
     /// the CONTENT pin (P26.5 audit). Committed PNGs are `-text` in
     /// `.gitattributes`, so these bytes are the same on every checkout.
@@ -2472,7 +2472,15 @@ fn the_golden_set_is_pinned_and_additive() {
     /// the boat reflecting itself is a deterministic one-frame image, and the
     /// wave's signature feature now has a pixel pin instead of a sentence saying
     /// it could not have one.
-    const GOLDEN_SET_DIGEST: &str = "d6da45fdbc8ef842fcea3acf10c8bf84";
+    ///
+    /// **And a fifth time, wave VIS1b, additive again** (from
+    /// `d6da45fdbc8ef842fcea3acf10c8bf84`): `sun_flare.png`, the sun glare /
+    /// ghost chain / halo / anamorphic streak, at dawn with the disc low in a dim
+    /// sky. `GOLDENS` moves 55 -> 56 beside it and not one committed image
+    /// changed -- the flare is off by default, off is a clear of its own half-res
+    /// target, and the tonemap's add sits behind a uniform branch it does not
+    /// take.
+    const GOLDEN_SET_DIGEST: &str = "9311730d7adf90ca1dc516f738f40e6d";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
@@ -2518,7 +2526,7 @@ fn the_golden_set_is_pinned_and_additive() {
         digest, GOLDEN_SET_DIGEST,
         "the golden set's CONTENT moved. A golden was re-blessed, deleted (the \
          harness regenerates any golden it cannot read, so the count above stays \
-         55), or replaced. Adding one is allowed and means moving both constants \
+         56), or replaced. Adding one is allowed and means moving both constants \
          in the same commit. Changing an existing frame is allowed ONLY in a \
          commit whose stated purpose is to change the look, with the difference \
          described — never as a side effect of something else.\n{manifest}"

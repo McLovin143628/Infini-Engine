@@ -12,6 +12,7 @@ pub mod composite;
 pub mod debug;
 pub mod depth_prepass;
 pub mod exposure;
+pub mod flare;
 pub mod fracture;
 pub mod gi;
 pub mod grid;
@@ -446,6 +447,14 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
     (
         "depth_prepass",
         include_str!("../shaders/depth_prepass.wgsl"),
+        ShaderKind::Plain,
+    ),
+    (
+        // Wave VIS1b's sun glare. `Plain` — it needs `view` for the sun's screen
+        // projection and the viewport size, and binds no lighting environment:
+        // what it gathers is the frame, not the scene.
+        "flare",
+        include_str!("../shaders/flare.wgsl"),
         ShaderKind::Plain,
     ),
     (

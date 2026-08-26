@@ -16,7 +16,7 @@ use crate::renderer::{FrameData, LDR_FORMAT};
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct TonemapParams {
     /// x = UNUSED since wave VIS1b (see the shader), y = bloom intensity,
-    /// z = dither (>0.5), w unused.
+    /// z = dither (>0.5), w = lens flare on (>0.5).
     knobs: [f32; 4],
     /// xy = resolution (px), zw unused.
     resolution: [f32; 4],
@@ -83,6 +83,10 @@ impl TonemapNode {
                         },
                         count: None,
                     },
+                    // The half-res sun glare (wave VIS1b). Always bound — a bind
+                    // group must be complete — and only sampled when the flare
+                    // is on.
+                    float_tex(5),
                 ],
             });
         let layout = gpu
@@ -159,7 +163,11 @@ impl RenderNode for TonemapNode {
                     0.0,
                     bloom_intensity,
                     if frame.settings.dither { 1.0 } else { 0.0 },
-                    0.0,
+                    if frame.settings.flare.enabled {
+                        1.0
+                    } else {
+                        0.0
+                    },
                 ],
                 resolution: [
                     frame.targets.size.0 as f32,
@@ -193,6 +201,10 @@ impl RenderNode for TonemapNode {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: frame.exposure.state.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&frame.targets.flare),
                 },
             ],
         });
