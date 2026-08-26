@@ -2171,7 +2171,14 @@ fn golden_hdr_bloom() {
 /// white through ACES and drives bloom* — which is the same property a lens
 /// flare needs, because a flare is what a lens does with light that has blown
 /// past the display's white.
-fn sun_flare_scene(occluder: bool) -> (RenderScene, RenderView) {
+///
+/// `occluder` is `Some(radiance)` to stand a slab in the line of sight to the
+/// disc, emissive at that radiance. **`Some(0.0)` and `Some(30.0)` are two
+/// different questions** (VIS1b audit): a dark slab hides the disc *and* the
+/// bright pixels a gather would have found there, so it dims the glare whether
+/// or not anything tests occlusion; a bright one hides the disc and leaves the
+/// bright pixels, so only an occlusion test can put the glare out.
+fn sun_flare_scene(occluder: Option<f32>) -> (RenderScene, RenderView) {
     // 04:30 UTC on the solstice at 48.9°N — the dawn goldens' own hour. A LOW
     // sun, deliberately: the sky around a noon disc is already near the top of
     // the ACES curve, so glare added there is invisible on an 8-bit frame, and
@@ -2189,18 +2196,20 @@ fn sun_flare_scene(occluder: bool) -> (RenderScene, RenderView) {
         [0.05, 0.05, 0.06, 1.0],
         1,
     ));
-    if occluder {
+    if let Some(radiance) = occluder {
         // Straight along the line of sight to the sun, twenty metres out. It is
         // the *disc* this hides, not the frame: the ghost chain and the halo have
         // other bright pixels to work from, and that difference is what the
         // occlusion arm reads.
-        scene.instances.push(MeshInstance::lit(
+        let mut slab = MeshInstance::lit(
             eye + bodies.sun * 20.0,
             Quat::IDENTITY,
             Vec3::splat(6.0),
             [0.02, 0.02, 0.02, 1.0],
             2,
-        ));
+        );
+        slab.emissive = [radiance; 3];
+        scene.instances.push(slab);
     }
     scene.mark_dirty();
     // Pitched eight degrees below the sun's own elevation, so the disc sits high
@@ -2240,7 +2249,7 @@ fn flare_on() -> RenderSettings {
 #[test]
 fn golden_sun_flare() {
     let Some(gpu) = gpu_or_skip() else { return };
-    let (scene, view) = sun_flare_scene(false);
+    let (scene, view) = sun_flare_scene(None);
 
     let img = check_golden_with(&gpu, "sun_flare", &scene, &view, flare_on());
     let off = render_with(&gpu, &scene, &view, RenderSettings::default());
@@ -2287,6 +2296,22 @@ fn golden_sun_flare() {
 /// wall in front of the sun must take it away. The arm reads the difference
 /// between flare-on and flare-off in each of two scenes, so the wall's own effect
 /// on the frame cancels out and what is left is the glare alone.
+///
+/// # The dark wall does not pin the occlusion test, and that is the audit's finding
+///
+/// A **dark** slab in front of the disc removes the sun's screen position *and*
+/// every bright pixel a radial gather would have found there, so the glare falls
+/// away whether or not anything asks about occlusion. Measured: with
+/// `flare_sun_visibility` severed to a constant `1.0`, the dark-wall reading goes
+/// only 18 901 → 51 197 against a threshold of 113 073 — the arm stayed green with
+/// the feature's headline claim deleted, and 84 % of the "92 % cut" the wave
+/// reported is the slab hiding the disc rather than the test.
+///
+/// So the second half stands a **bright** slab there instead, with the ghost
+/// chain, the halo and the streak turned off so only the veil is in the
+/// measurement. Now the frame is *brighter* where the sun was and the only thing
+/// that can put the glare out is the depth test. Severed, that reading goes from
+/// near zero to larger than the clear sky's.
 #[test]
 fn the_sun_glare_is_extinguished_when_the_sun_is_occluded() {
     let Some(gpu) = gpu_or_skip() else { return };
@@ -2295,19 +2320,52 @@ fn the_sun_glare_is_extinguished_when_the_sun_is_occluded() {
             .map(|p| 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64)
             .sum::<f64>()
     };
-    let added = |occluder: bool| -> f64 {
+    let added = |occluder: Option<f32>, settings: RenderSettings| -> f64 {
         let (scene, view) = sun_flare_scene(occluder);
-        let on = render_with(&gpu, &scene, &view, flare_on());
+        let on = render_with(&gpu, &scene, &view, settings);
         let off = render_with(&gpu, &scene, &view, RenderSettings::default());
         luma(&on) - luma(&off)
     };
-    let clear = added(false);
-    let hidden = added(true);
+    let clear = added(None, flare_on());
+    let hidden = added(Some(0.0), flare_on());
     eprintln!("sun glare: clear sky adds {clear:.0}, sun behind a wall adds {hidden:.0}");
     assert!(clear > 0.0, "the clear-sky fixture produced no glare");
     assert!(
         hidden < clear * 0.5,
         "occluding the sun barely dimmed the glare: {hidden:.0} against {clear:.0}"
+    );
+
+    // ── the half that pins the depth test itself ──
+    //
+    // The veil alone: no ghosts, no halo, no streak. Those three are images of
+    // whatever is bright and are deliberately NOT gated on the sun's visibility,
+    // so leaving them in would put the bright slab's own ghosts in the number the
+    // assertion reads.
+    let veil_only = RenderSettings {
+        flare: FlareSettings {
+            enabled: true,
+            intensity: 3.0,
+            ghost_count: 0,
+            halo: 0.0,
+            streak: 0.0,
+        },
+        ..RenderSettings::default()
+    };
+    let veil_clear = added(None, veil_only);
+    let veil_behind_a_lamp = added(Some(30.0), veil_only);
+    eprintln!(
+        "veil only: clear sky {veil_clear:.0}, sun behind a BRIGHT slab \
+         {veil_behind_a_lamp:.0}"
+    );
+    assert!(
+        veil_clear > 0.0,
+        "the veil-only fixture produced no glare at all"
+    );
+    assert!(
+        veil_behind_a_lamp < veil_clear * 0.1,
+        "the veil did not read the sun's OCCLUSION — a slab brighter than the sky \
+         hid the disc and the glare stayed on: {veil_behind_a_lamp:.0} against a \
+         clear sky's {veil_clear:.0}"
     );
 }
 
@@ -2320,7 +2378,7 @@ fn the_sun_glare_is_extinguished_when_the_sun_is_occluded() {
 #[test]
 fn flare_off_is_byte_identical_and_on_is_not() {
     let Some(gpu) = gpu_or_skip() else { return };
-    let (scene, view) = sun_flare_scene(false);
+    let (scene, view) = sun_flare_scene(None);
     let a = render_with(&gpu, &scene, &view, RenderSettings::default());
     let b = render_with(
         &gpu,

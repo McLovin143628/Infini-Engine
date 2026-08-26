@@ -115,6 +115,20 @@ fn flare_sun_uv() -> vec3<f32> {
 // IS the fraction of the disc that is unoccluded — no unprojection, no distance
 // comparison, and correct for every kind of geometry because it reads the MSAA
 // scene depth every pass wrote rather than the rigid-only prepass.
+//
+// TWO BOUNDS, STATED (VIS1b audit).
+//
+// It reads **sample 0** of the multisampled depth, not a resolve — so a sliver
+// that covers sample 0 of a tap's pixel and not the pixel reads as a full
+// occlusion of that tap. Nine taps spread over several pixels is what keeps that
+// from being a pop: one tap is a ninth of the visibility, and the alternative is
+// resolving a depth buffer for one scalar.
+//
+// And `spread` is in units of `1/width` on **both** axes, so the 3×3 kernel is
+// wider than it is tall by the aspect ratio (≈6 px by ≈3.4 px at 16:9). That is a
+// shape, not a bug — the kernel exists to sample a neighbourhood of the disc, and
+// a slightly elliptical neighbourhood samples it — but it is the sort of thing
+// that should be written down rather than rediscovered.
 fn flare_sun_visibility(sun_uv: vec2<f32>) -> f32 {
     // The SCENE's size, not this target's: `fl_depth` is the full-resolution MSAA
     // scene depth, so its texels are full-resolution texels.
