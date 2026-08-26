@@ -3,7 +3,7 @@
  * play controls, platform target. Everything dispatches through the command
  * registry; play/build actions are enumerated stubs until P2/P9.
  */
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   Box,
   ChevronDown,
@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import type { GizmoModeDto } from "../bindings/GizmoModeDto";
 import { executeCommand } from "../lib/commands";
+import { CUTOUT_ATTR, useViewportCutout } from "../lib/viewportOverlay";
 import { useSimStore } from "../stores/simStore";
 import { usePieStore } from "../stores/pieStore";
 import { useViewportStore } from "../stores/viewportStore";
@@ -73,13 +74,32 @@ function MenuItem(props: { label: string; command: string; onPick: () => void })
  * a split-button dropdown for the mode — "Play (Embedded)", "Play in New Window",
  * and the in-process "Simulate". While a session runs, the transport buttons
  * (Pause/Resume/Stop/Step) drive whichever kind is live; Eject sits in the menu.
+ *
+ * # Airspace (UX2 audit)
+ *
+ * The dropdown is `absolute top-9` under a toolbar that sits directly above the
+ * workspace, so it opens ACROSS the native viewport hole — and it had no
+ * airspace guard of any kind. UX2 found it and recorded it as PIE-only, on the
+ * reasoning that hiding our own child could not uncover an embedded foreign
+ * player window anyway; that reasoning is sound and the premise was wrong. The
+ * chevron is rendered in the `!running` branch too, where the hole is our own
+ * child window drawing OVER the dropdown: a menu you can open, cannot see the
+ * lower half of, and whose clicks land in the 3D view. Exported for its arm.
  */
-function PlayCluster() {
+export function PlayCluster() {
   const pieRunning = usePieStore((s) => s.running);
   const piePaused = usePieStore((s) => s.paused);
   const simRunning = useSimStore((s) => s.running);
   const simPaused = useSimStore((s) => s.paused);
   const [menuOpen, setMenuOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  // Cut the dropdown out of the viewport rather than blank it (UX2). Only the
+  // PANEL is marked: the click-away backdrop is `fixed inset-0` and marking it
+  // would clip the whole child away, which is the full hide with extra steps.
+  // It is transparent — no scrim — so a cutout is the right treatment, unlike
+  // the palette and the dialogs.
+  useViewportCutout(menuOpen, rootRef);
 
   const running = pieRunning || simRunning;
   const paused = pieRunning ? piePaused : simPaused;
@@ -88,6 +108,7 @@ function PlayCluster() {
 
   return (
     <div
+      ref={rootRef}
       data-tour="play-cluster"
       className={`relative flex items-center gap-0.5 rounded bg-(--ink-bg-1) p-0.5 ${
         running ? "ring-1 ring-(--ink-success)" : ""
@@ -140,7 +161,10 @@ function PlayCluster() {
         <>
           {/* Click-away backdrop. */}
           <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
-          <div className="absolute right-0 top-9 z-50 min-w-44 overflow-hidden rounded border border-(--ink-border) bg-(--ink-bg-2) py-1 shadow-lg">
+          <div
+            {...{ [CUTOUT_ATTR]: "" }}
+            className="absolute right-0 top-9 z-50 min-w-44 overflow-hidden rounded border border-(--ink-border) bg-(--ink-bg-2) py-1 shadow-lg"
+          >
             {!running ? (
               <>
                 <MenuItem
