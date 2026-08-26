@@ -2872,6 +2872,191 @@ mod tests {
         );
     }
 
+    /// **THE ERROR A CACHED PAGE CARRIES DOES NOT GROW WITH THE DISTANCE
+    /// TRAVELLED** (the VSM2 audit) — the other half of the bound above, and the
+    /// question that separates a rounding from a floating-origin bug.
+    ///
+    /// `a_world_cell_keeps_its_page_matrix_to_within_a_fraction_of_a_shadow_texel`
+    /// compares **consecutive** frames, and a cached page is not consecutive: a
+    /// slot keeps its texels until its stamp moves, and a level-7 cell stays
+    /// inside its own window for `N · w_7` = **8 192 m** of travel. A per-step
+    /// bound and the bound over the life of a cached page are the same number
+    /// only if the error does not drift — which is a claim about kilometres that
+    /// was being asserted over 0.9 m. A shadow 0.0234 of a texel out is nothing;
+    /// one that accumulates is the floating-origin defect wearing shadow clothes.
+    ///
+    /// So this walks **10.8 km**, rebasing the floating origin exactly as a host
+    /// does, and compares against what each sample had when its page was **first
+    /// seen**, however many frames earlier that was — measured at up to **9 102
+    /// frames** of separation, which is the life of a level-7 page.
+    ///
+    /// # What is compared, and why it is not the matrix
+    ///
+    /// A page matrix maps **render-local** space, and a floating-origin rebase
+    /// moves render-local space — so two matrices from either side of a rebase
+    /// disagree by the rebase itself (measured: ~130 000 texels) while describing
+    /// the same footprint. The quantity that means something is where a fixed
+    /// **world** point lands in its page: a caster at `p` was drawn into the
+    /// cached page at `M_then · to_render_then(p)` and this frame would draw it
+    /// at `M_now · to_render_now(p)`, and the difference between those two, in
+    /// shadow texels, is the error the cached depth carries. That is what this
+    /// measures, through `clipmap_level_ndc` and `vsm_page_matrix` — the shipped
+    /// composition — with the page each point falls in derived the way the
+    /// marking pass derives it.
+    ///
+    /// # Why it is bounded, and the control that says by what
+    ///
+    /// In exact arithmetic a point's page NDC is a function of the world point
+    /// and the cell alone: `ndc_L = (2/N)(p·r/w_L − m_L)` and the page's
+    /// sub-rectangle subtracts `m_L − N/2 + x`, i.e. the cell, so the level's
+    /// snapped centre cancels against the label and the origin cancels between
+    /// `p` and `centre`. Every frame's f32 answer is therefore an approximation
+    /// to **one** exact value and two frames differ by at most twice the
+    /// rounding: nothing integrates. The rounding is dominated by the magnitude
+    /// of the render-local coordinates, which [`inf_math::REBASE_DISTANCE`] caps
+    /// — so the **control in the same run** is the same walk with the origin
+    /// never rebased, where those coordinates reach 10.8 km instead of 1 km and
+    /// the error follows them exactly as the arithmetic says. What bounds the
+    /// number is the rebase, not anything about how far the camera has been.
+    #[test]
+    fn a_cached_pages_error_does_not_accumulate_over_ten_kilometres() {
+        let texels_per_ndc = (inf_vsm::VSM_PAGE_SIZE / 2) as f32;
+        let dir = quantize_light_dir(Vec3::new(0.35, -0.86, 0.37).normalize(), 0.0039);
+        let (right, up, _f) = light_basis(dir);
+        let start = glam::DVec3::new(0.0, 40.0, -120.0);
+        // Along the light's `right` AND its `up`, so both page axes scroll. Both
+        // are perpendicular to `forward`, so the along-light snap `mf` — the one
+        // term of the centre that IS in `content_key` — does not tick, and a
+        // world point's page NDC is supposed to be the same for the whole walk.
+        const STEPS: u32 = 12_000;
+        const STEP_M: f64 = 0.9;
+        // Fixed world points along the route, at spacings that are not multiples
+        // of any level's page stride so no sample sits on a cell boundary.
+        const PROBES: u32 = 230;
+        let probe = |k: u32| {
+            start
+                + right.as_dvec3() * (50.37 * f64::from(k))
+                + up.as_dvec3() * (7.23 * f64::from(k))
+                + glam::DVec3::new(0.0, 1.7, 0.0)
+        };
+
+        // `(level, probe) -> (page ndc, the cell it fell in, the step first seen)`.
+        type Seen = std::collections::HashMap<(u32, u32), (Vec3, (i64, i64), u32)>;
+        // One walk. `rebasing` picks whether the floating origin follows the eye
+        // (every shipped host) or stays where it started (the control).
+        let walk = |rebasing: bool| -> (f32, f32, [f32; SHIPPED_LEVELS as usize], u32, u32, u32) {
+            let mut origin = inf_math::FloatingOrigin::new(start);
+            let mut seen: Seen = Seen::default();
+            let (mut worst, mut worst_z) = (0.0f32, 0.0f32);
+            let mut per_level = [0.0f32; SHIPPED_LEVELS as usize];
+            let (mut rebases, mut gap, mut compares) = (0u32, 0u32, 0u32);
+            for step in 0..STEPS {
+                let eye = start
+                    + right.as_dvec3() * (STEP_M * f64::from(step))
+                    + up.as_dvec3() * (0.13 * f64::from(step));
+                if rebasing && origin.maybe_rebase(eye) {
+                    rebases += 1;
+                }
+                let (l, vp) = shipped_ladder(eye, &origin);
+                for k in 0..PROBES {
+                    let world = probe(k);
+                    let local = origin.to_render(world);
+                    let ndc0 = (vp * local.extend(1.0)).truncate();
+                    for lv in 0..SHIPPED_LEVELS {
+                        // Which page of this level the point falls in — the
+                        // marking pass's own arithmetic.
+                        let n = SHIPPED_N as f32;
+                        let nl = clipmap_level_ndc(ndc0, lv, l.offset(lv));
+                        let (fx, fy) = ((nl.x + 1.0) * 0.5 * n, (1.0 - nl.y) * 0.5 * n);
+                        if !(0.0..n).contains(&fx) || !(0.0..n).contains(&fy) {
+                            continue;
+                        }
+                        let (x, y) = (fx as u32, fy as u32);
+                        let o = l.clip_origins[lv as usize];
+                        let cell = (o.0 + i64::from(x), o.1 + i64::from(y));
+                        let m = vsm_page_matrix(
+                            vp,
+                            VsmTreeKind::Clipmap,
+                            lv,
+                            SHIPPED_N,
+                            SHIPPED_N,
+                            x,
+                            y,
+                            l.offset(lv),
+                        );
+                        let ndc = (m * local.extend(1.0)).truncate();
+                        match seen.entry((lv, k)) {
+                            std::collections::hash_map::Entry::Occupied(e) => {
+                                let (was, was_cell, first) = *e.get();
+                                // A fixed world point keeps its world cell, so a
+                                // change here is the boundary case rather than
+                                // drift, and it is skipped rather than counted.
+                                if was_cell != cell {
+                                    continue;
+                                }
+                                let err = (was.x - ndc.x).abs().max((was.y - ndc.y).abs())
+                                    * texels_per_ndc;
+                                worst = worst.max(err);
+                                worst_z = worst_z.max((was.z - ndc.z).abs());
+                                per_level[lv as usize] = per_level[lv as usize].max(err);
+                                gap = gap.max(step - first);
+                                compares += 1;
+                            }
+                            std::collections::hash_map::Entry::Vacant(e) => {
+                                e.insert((ndc, cell, step));
+                            }
+                        }
+                    }
+                }
+            }
+            (worst, worst_z, per_level, rebases, gap, compares)
+        };
+
+        let (worst, worst_z, per_level, rebases, gap, compares) = walk(true);
+        let (fixed, _, _, _, _, _) = walk(false);
+        let travelled = STEP_M * f64::from(STEPS);
+        eprintln!(
+            "VSM2 LONG TRAVEL: {travelled:.0} m, {rebases} origin rebases, \
+             {compares} comparisons at up to {gap} frames of separation — worst \
+             {worst:.4} shadow texels ({worst_z:.2e} of the depth range), per \
+             level {per_level:.4?}; the same walk with the origin NEVER rebased: \
+             {fixed:.4}"
+        );
+
+        // ANTI-VACUITY: the walk is long, the origin really rebased, and the
+        // comparisons really span thousands of frames rather than adjacent ones.
+        assert!(travelled > 10_000.0, "the walk is only {travelled:.0} m");
+        assert!(rebases >= 8, "only {rebases} rebases over {travelled:.0} m");
+        assert!(compares > 10_000, "only {compares} comparisons");
+        assert!(
+            gap > 5_000,
+            "the longest comparison spans only {gap} frames, so this arm is the \
+             consecutive-frame one again under another name"
+        );
+
+        // **THE CLAIM**: the same ruling the per-step arm makes, over the life of
+        // a cached page rather than over one step of the camera.
+        assert!(
+            worst < 0.1,
+            "a world point drifted {worst:.4} shadow texels inside its own page \
+             over {travelled:.0} m. A cached page holds the depth the earlier \
+             frame drew, so this is the error a shadow carries — and a number \
+             that grows with the distance travelled is the floating-origin \
+             defect, not a rounding"
+        );
+        // THE CONTROL, in the same run: with no rebase the render-local
+        // coordinates reach 10.8 km instead of 1 km, and the error follows them.
+        // That is what makes "bounded" a statement about `REBASE_DISTANCE`
+        // rather than a hope.
+        assert!(
+            fixed > worst * 2.0,
+            "the un-rebased control drifted {fixed:.4} texels against the shipped \
+             path's {worst:.4}. The two are supposed to be separated by the ratio \
+             of their render-local magnitudes, so this fixture is not measuring \
+             what bounds the number"
+        );
+    }
+
     /// **THE CONTENT KEY MOVES FOR EVERYTHING THAT CHANGES A PAGE'S DEPTH, AND
     /// FOR NOTHING ELSE** (island wave VSM2).
     ///
