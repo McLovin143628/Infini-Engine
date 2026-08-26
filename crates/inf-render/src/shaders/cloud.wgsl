@@ -1,29 +1,34 @@
-// Volumetric cloud raymarch (P17.3).
+// Volumetric cloud raymarch (P17.3, re-targeted at wave SKY2).
 //
-// A fullscreen pass that runs AFTER all opaque geometry and terrain and BEFORE
-// the translucent pass, compositing premultiplied-alpha cloud radiance into the
-// MSAA scene target. See `passes::cloud` for why it sits there rather than inside
-// the sky pass.
+// The march runs at HALF RESOLUTION into targets of its own and is composited
+// back at full resolution by `cloud_composite.wgsl`, optionally with a temporal
+// pass (`cloud_temporal.wgsl`) in between. Why: measured on an RTX 4070 Ti at
+// 1920x1080 with a ground camera pitched into open sky, the full-res march cost
+// 5.5 ms at High — the P17 cost table's 0.29 ms was a frame whose sky is almost
+// entirely behind a cube field, where the depth test rejects the march before it
+// starts. A quarter of the pixels is the only lever with that much in it.
 //
 // Composition (`passes::ShaderKind::Cloud`): common_view + `atmosphere.wgsl`
 // @group(1) @binding(0) + `atmosphere_lut.wgsl` @group(1) bindings 1/2/3 +
 // `cloud_noise.wgsl` + `cloud_field.wgsl` @group(1) bindings 4/5/6.
 //
-// DEPTH — two mechanisms, because one is not enough. The pass writes
-// `@builtin(frag_depth)` at the ray's ENTRY into the slab and depth-tests
-// `Greater` (reverse-Z) with writes off, which rejects — per MSAA sample, so with
-// antialiased silhouettes — every fragment whose geometry is entirely in front of
-// the layer. That is NOT the whole occlusion: a 2 km summit under a 1.5-4 km deck
-// is INSIDE the slab, sits beyond its entry plane, passes the test, and would
-// have the whole marched span (including cloud physically behind the mountain)
-// composited over it as a veil. So the march also clamps `t_far` to the scene
-// depth for its pixel — see `cloud_geometry_distance` below. It costs early-Z,
-// which for a pass that already ray-marches is not a cost worth naming.
+// DEPTH — the two mechanisms P17.3 documented are still two, and they have moved
+// apart. The march clamps `t_far` at the nearest geometry (`cloud_geometry_distance`
+// below), which is what stops a 2 km summit under a 1.5-4 km deck from being
+// veiled by cloud that is physically behind it. The `@builtin(frag_depth)`
+// hardware test — which rejects, per MSAA sample and so with antialiased
+// silhouettes, every fragment whose geometry is in front of the whole layer —
+// now lives in the COMPOSITE, because that is the pass that touches the MSAA
+// scene target. Splitting them changes neither.
+//
+// This pass reads the full-res depth at the texel its half-res pixel covers, and
+// the composite's bilateral upsample is what keeps a silhouette from taking the
+// wrong tap.
 
-// The scene depth, bound as a READ-ONLY attachment and as this texture at once —
-// the one arrangement WebGPU permits for reading the depth you are also testing
-// against. `textureLoad`ed at an integer texel, never sampled, so it needs no
-// sampler and no filterability.
+// The scene depth. `textureLoad`ed at an integer texel, never sampled, so it
+// needs no sampler and no filterability. It is no longer also an attachment of
+// this pass (the march has no depth attachment at all), so the read-only-depth
+// aliasing dance P17.3 needed is gone.
 @group(1) @binding(7) var cloud_scene_depth: texture_depth_multisampled_2d;
 
 // The blue-noise tile the first sample's position is offset by (SKY2). See
@@ -62,9 +67,22 @@ const CLOUD_BLUE_NOISE_RES: i32 = 64;
 // blue-noise tile).
 const CLOUD_JITTER_GOLDEN: f32 = 0.6180339887;
 
+// Distance written for a pixel the march found no geometry in. `f16` tops out at
+// 65 504, so a "no geometry" sentinel has to be a real number rather than an
+// infinity; 60 km is past `CLOUD_MAX_MARCH_M` by a factor of two and inside the
+// format.
+const CLOUD_NO_GEOMETRY: f32 = 60000.0;
+
 struct CloudOut {
+    // Premultiplied cloud radiance and coverage.
     @location(0) color: vec4<f32>,
-    @builtin(frag_depth) depth: f32,
+    // r = the coverage-weighted mean distance to the cloud (metres), or the
+    // slab's entry distance where there is no cloud — the temporal pass's
+    // reprojection anchor, and it must be finite everywhere or a sky pixel next
+    // to a cloud reprojects from the eye.
+    // g = the geometry distance this march clamped at, or CLOUD_NO_GEOMETRY —
+    // the composite's bilateral key.
+    @location(1) dist: vec2<f32>,
 };
 
 struct VsOut {
@@ -101,13 +119,24 @@ fn cloud_to_world(local: vec3<f32>) -> vec3<f32> {
 // distance is `dot(hit - eye, dir)` — used rather than `length` because it stays
 // signed, which is what distinguishes "geometry behind the eye" (impossible after
 // a depth test, but cheap to be safe about) from "geometry at zero range".
-fn cloud_geometry_distance(ndc: vec2<f32>, texel: vec2<i32>, dir: vec3<f32>) -> f32 {
-    let d = textureLoad(cloud_scene_depth, texel, 0);
+fn cloud_geometry_distance(ndc: vec2<f32>, full_texel: vec2<i32>, dir: vec3<f32>) -> f32 {
+    let d = textureLoad(cloud_scene_depth, full_texel, 0);
     if (d <= 0.0) {
         return -1.0;
     }
     let hit = unproject(ndc, d);
     return dot(hit - view.eye.xyz, dir);
+}
+
+// The full-resolution depth texel this half-resolution pixel stands for.
+//
+// The `min` is not defensive padding: an odd viewport (1081 rows, say) has a
+// half-res target of 540 whose last row doubles to 1080, which is in range — but
+// a target rounded UP would not be, and the clamp costs one instruction and
+// removes the question.
+fn cloud_full_texel(half_texel: vec2<i32>) -> vec2<i32> {
+    let full = vec2<i32>(textureDimensions(cloud_scene_depth));
+    return min(half_texel * 2, full - vec2<i32>(1));
 }
 
 // Hillaire's multiple-scattering approximation: N octaves, each with half the
@@ -194,7 +223,10 @@ fn cloud_sun_energy(sun_t: f32, cos_t: f32, g: f32, sun_y: f32) -> f32 {
 fn fs(in: VsOut) -> CloudOut {
     var out: CloudOut;
     out.color = vec4<f32>(0.0);
-    out.depth = 0.0;
+    // Finite defaults on every early-out path: a NaN or a zero here would reach
+    // the temporal pass's world reconstruction and the composite's bilateral
+    // weight, both of which divide by things derived from it.
+    out.dist = vec2<f32>(0.0, CLOUD_NO_GEOMETRY);
 
     let dir = view_ray(in.ndc);
     let eye_world = cloud_to_world(view.eye.xyz);
@@ -232,7 +264,16 @@ fn fs(in: VsOut) -> CloudOut {
     // coverage per sample, which is a sub-pixel discrepancy at a silhouette and
     // not worth four loads to remove.
     let texel = vec2<i32>(i32(in.pos.x), i32(in.pos.y));
-    let geo = cloud_geometry_distance(in.ndc, texel, dir);
+    let geo = cloud_geometry_distance(in.ndc, cloud_full_texel(texel), dir);
+    // Published for the composite's bilateral upsample: it is the key that keeps
+    // a full-res pixel from taking a tap whose march stopped at different
+    // geometry, which is the whole reason a half-res volumetric does not smear
+    // across a skyline.
+    var geo_key = CLOUD_NO_GEOMETRY;
+    if (geo > 0.0) {
+        geo_key = min(geo, CLOUD_NO_GEOMETRY);
+    }
+    out.dist = vec2<f32>(t_near, geo_key);
     if (geo > 0.0) {
         t_far = min(t_far, geo);
         if (t_far <= t_near) {
@@ -243,13 +284,6 @@ fn fs(in: VsOut) -> CloudOut {
     if (span <= 0.0) {
         return out;
     }
-
-    // ── depth: the slab entry point ──
-    // Held at least a metre ahead of the eye so the projection's w stays finite
-    // when the camera is inside the layer.
-    let entry_local = view.eye.xyz + dir * max(t_near, 1.0);
-    let clip = view.view_proj * vec4<f32>(entry_local, 1.0);
-    let entry_depth = clamp(clip.z / max(clip.w, 1e-6), 0.0, 1.0);
 
     // ── march ──
     let sun = normalize(atmos.sun_dir.xyz);
@@ -396,6 +430,12 @@ fn fs(in: VsOut) -> CloudOut {
     }
 
     out.color = vec4<f32>(color, alpha);
-    out.depth = entry_depth;
+    // The coverage-weighted mean distance to the cloud this pixel sees — the
+    // temporal pass reprojects against it. Where the march accumulated no
+    // weight at all the slab entry stays, which is a defensible anchor and,
+    // more to the point, a finite one.
+    if (weight_sum > 0.0) {
+        out.dist.x = min(depth_sum / weight_sum, CLOUD_NO_GEOMETRY);
+    }
     return out;
 }

@@ -783,11 +783,21 @@ pub const WEATHER_CONVECTION_OCTAVE: i32 = 4;
 /// clouds, while the TOP is set by how far each cell manages to convect. A v2
 /// gradient that varied the base as much as the top would look wrong in a way
 /// that is hard to name and easy to see.
-pub const CLOUD_BASE_LIFT: f32 = 0.08;
+pub const CLOUD_BASE_LIFT: f32 = 0.06;
 
-/// Ceiling of a cumulus within the slab at zero convection — a fair-weather cell
-/// that tops out under halfway up.
-pub const CLOUD_TOP_WEAK: f32 = 0.45;
+/// Ceiling of a **cumulus** within the slab at zero convection — a fair-weather
+/// cell that tops out under two thirds of the way up, against the full slab a
+/// strong one reaches.
+///
+/// The variation is scaled by cloud *type* (see [`height_gradient`]), which is
+/// not a fudge: a field of fair-weather cumulus is a field of independent
+/// convective cells and its tops vary enormously, while an overcast
+/// stratocumulus deck is ONE system and its ceiling is the inversion it is
+/// pressed against. Letting the convection field vary a storm deck's height as
+/// much as a cumulus field's thins the deck, and a thinner deck is a *brighter*
+/// one — less self-shadowing — which is how the first draft of this profile
+/// broke `golden_weather_storm_noon`'s "a storm darkens the sky" by 3 %.
+pub const CLOUD_TOP_WEAK: f32 = 0.62;
 
 /// The **weather** at world `(x, z)` metres: `[coverage, type, convection]`, all
 /// `[0, 1]`.
@@ -866,12 +876,14 @@ pub fn weather(seed: u32, x_m: f32, z_m: f32, coverage: f32, cloud_type: f32) ->
 /// **slab**, not a cloud, and it is why the silhouettes came out soft, regular
 /// and all the same height. Two things change:
 ///
-/// * **the taper is continuous** from `top × 0.4` to `top`, so fewer and fewer
-///   points clear the dissolve as the column rises and the cloud narrows into a
-///   tower rather than stopping like a table;
 /// * **`top` is per-cloud**, [`CLOUD_TOP_WEAK`] at zero convection and the whole
 ///   slab at full — so a field of cumulus has cells of genuinely different
-///   heights instead of one ceiling everywhere.
+///   heights instead of one ceiling everywhere, and the band over which the
+///   taper runs moves with it;
+/// * **the variation is scaled by `t`**, so an overcast deck keeps one
+///   system-wide ceiling (it *is* one system) while a cumulus field gets
+///   per-cell tops. Without that scaling the profile thins a storm deck, and a
+///   thinner deck is a brighter one.
 ///
 /// The base lifts too, by [`CLOUD_BASE_LIFT`] and no more, for the reason stated
 /// there: a cumulus base sits at the condensation level and barely moves, while
@@ -892,8 +904,14 @@ pub fn height_gradient(h: f32, t: f32, k: f32) -> f32 {
     // Stratus: a sheet in [0, 0.40], smooth at both ends.
     let stratus = smoothstep(0.0, 0.08, hl) * (1.0 - smoothstep(0.20, 0.40, hl));
     // Cumulus: a base near 0.05, then a continuous taper to this cell's ceiling.
-    let top = CLOUD_TOP_WEAK + (1.0 - CLOUD_TOP_WEAK) * k;
-    let cumulus = smoothstep(0.05, 0.30, hl) * (1.0 - smoothstep(top * 0.4, top, hl));
+    //
+    // At full convection `top` is 1 and the taper runs 0.6 -> 1.0, which is
+    // EXACTLY the v1 curve — v1 is not replaced, it becomes the strong-cell case
+    // instead of every case. The variation is scaled by `t` so that a sheet-like
+    // deck keeps a system-wide ceiling and only a genuinely cumulus sky gets
+    // per-cell tops.
+    let top = 1.0 + (CLOUD_TOP_WEAK + (1.0 - CLOUD_TOP_WEAK) * k - 1.0) * t;
+    let cumulus = smoothstep(0.02, 0.22, hl) * (1.0 - smoothstep(top * 0.6, top, hl));
     stratus + (cumulus - stratus) * t
 }
 
@@ -1579,12 +1597,21 @@ mod tests {
             prev = c;
         }
 
-        // (b) THE TAPER IS CONTINUOUS, which is what makes a tower rather than a
-        // table. Over the upper half of a strong cell the profile must be
-        // strictly decreasing — v1 was flat from 0.22 to 0.60 and a flat grad
-        // passes the same points at every height, i.e. draws a slab.
+        // (b) THE PROFILE IS NOT ONE CURVE. The sharpest form of the claim, and
+        // the one the eye actually sees: at a height where a weak cell has
+        // already ended, a strong one is still substantial. v1 could not say
+        // this — it had one ceiling and every cloud stopped at it together.
+        let strong_high = height_gradient(0.80, 1.0, 1.0);
+        let weak_high = height_gradient(0.80, 1.0, 0.0);
+        assert!(
+            strong_high > 0.2 && weak_high == 0.0,
+            "at h=0.80 a strong cell reads {strong_high} and a weak one \
+             {weak_high} — the ceiling is still shared"
+        );
+        // ...and the taper is continuous over the band it runs in, so the top of
+        // a tower narrows rather than stopping like a table.
         let mut last = f32::INFINITY;
-        for n in 10..=19 {
+        for n in 13..=19 {
             let h = n as f32 / 20.0;
             let g = height_gradient(h, 1.0, 1.0);
             assert!(

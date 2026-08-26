@@ -38,8 +38,8 @@ const CLOUD_WEATHER_PERIOD: i32 = 8;
 // Mirrors `clouds::WEATHER_CONVECTION_OCTAVE` / `CLOUD_BASE_LIFT` /
 // `CLOUD_TOP_WEAK`.
 const CLOUD_WEATHER_CONVECTION: i32 = 4;
-const CLOUD_BASE_LIFT: f32 = 0.08;
-const CLOUD_TOP_WEAK: f32 = 0.45;
+const CLOUD_BASE_LIFT: f32 = 0.06;
+const CLOUD_TOP_WEAK: f32 = 0.62;
 // Mirrors `clouds::WEATHER_CONTRAST` / `COVERAGE_BIAS_SLOPE` / `COVERAGE_BIAS_OFFSET`.
 const CLOUD_WEATHER_CONTRAST: f32 = 3.0;
 const CLOUD_COVERAGE_SLOPE: f32 = 2.4;
@@ -296,8 +296,10 @@ fn cloud_height_gradient(h_in: f32, t_in: f32, k_in: f32) -> f32 {
     let floor = k * CLOUD_BASE_LIFT * t;
     let hl = clamp((h - floor) / max(1.0 - floor, 1e-3), 0.0, 1.0);
     let stratus = smoothstep(0.0, 0.08, hl) * (1.0 - smoothstep(0.20, 0.40, hl));
-    let top = CLOUD_TOP_WEAK + (1.0 - CLOUD_TOP_WEAK) * k;
-    let cumulus = smoothstep(0.05, 0.30, hl) * (1.0 - smoothstep(top * 0.4, top, hl));
+    // At full convection this is exactly the v1 curve; the variation is scaled by
+    // `t` so a sheet-like deck keeps a system-wide ceiling.
+    let top = 1.0 + (CLOUD_TOP_WEAK + (1.0 - CLOUD_TOP_WEAK) * k - 1.0) * t;
+    let cumulus = smoothstep(0.02, 0.22, hl) * (1.0 - smoothstep(top * 0.6, top, hl));
     return stratus + (cumulus - stratus) * t;
 }
 

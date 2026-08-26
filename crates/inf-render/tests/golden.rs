@@ -5233,6 +5233,149 @@ fn cloud_bakes_are_deterministic() {
     assert_eq!(h1.len(), r * r);
 }
 
+/// Mean absolute difference between horizontally adjacent pixels over the top
+/// `rows` of a frame — a measure of how much **high-frequency** content the sky
+/// band carries.
+///
+/// This is the metric the jitter trades banding for and the temporal pass buys
+/// back: a coherent sampling lattice puts its error in low frequencies (bands),
+/// a blue-noise-jittered one puts it here, and an accumulation over several
+/// jitter offsets removes it. Cloud structure contributes to this number too,
+/// which is why it is only ever compared between two renders of the *same*
+/// clouds.
+fn adjacent_spread(img: &[u8], rows: u32) -> f32 {
+    let mut sum = 0.0f32;
+    let mut n = 0u32;
+    for y in 0..rows {
+        for x in 1..W {
+            let a = px(img, x - 1, y);
+            let b = px(img, x, y);
+            for c in 0..3 {
+                sum += (a[c] as f32 - b[c] as f32).abs() / 255.0;
+            }
+            n += 3;
+        }
+    }
+    sum / n.max(1) as f32
+}
+
+/// **The cloud pass's own temporal history** (wave SKY2), measured rather than
+/// asserted into existence.
+///
+/// Three claims, one test, because they are the same mechanism seen three ways:
+///
+/// 1. **Off is inert.** With `cloud_temporal` off, a renderer that has drawn ten
+///    frames produces byte-for-byte what a fresh one produces at the same level
+///    clock. No accumulation, no dependence on how long the process has been up
+///    — which is what lets every golden render with the jitter ON.
+/// 2. **On accumulates.** With it on, the tenth frame is a different image, and
+///    the difference is in the direction the wave claims: LESS high-frequency
+///    content in the sky band, because the jittered march's per-pixel error is
+///    what the history averages away.
+/// 3. **On is still deterministic as a sequence.** Ten frames rendered twice
+///    give the same tenth frame. The accumulation is a function of the level
+///    clocks visited, not of the wall clock — the distinction the whole jitter
+///    design rests on.
+#[test]
+fn the_cloud_temporal_pass_accumulates_and_stays_a_function_of_the_clock() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (base, bodies) = cloud_scene(43_200.0, 0.55, 0.85);
+    let view = horizon_view(bodies.sun, 25.0);
+    let target = HeadlessTarget::new(&gpu, W, H);
+
+    // The level's clock advances a frame at a time, which is what walks the
+    // jitter sequence. A static clock would freeze the pattern and the
+    // accumulation would converge onto the single frame it started from — true,
+    // deterministic, and no evidence of anything.
+    const FRAMES: u32 = 10;
+    const DT: f64 = 1.0 / 60.0;
+    let at = |f: u32| -> RenderScene {
+        let mut s = base.clone();
+        s.atmosphere.clouds.time_s = 43_200.0 + f64::from(f) * DT;
+        s.mark_dirty();
+        s
+    };
+
+    // The last TWO frames of a run, which is what makes the flicker measurable:
+    // consecutive level clocks are consecutive jitter offsets, so the difference
+    // between these two IS the march's per-pixel error, isolated from the cloud
+    // structure that swamps it in any single-frame statistic.
+    let run2 = |temporal: bool| -> (Vec<u8>, Vec<u8>) {
+        let mut r = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        r.set_settings(RenderSettings {
+            cloud_temporal: temporal,
+            ..RenderSettings::default()
+        });
+        for f in 0..FRAMES - 1 {
+            r.render(&gpu, &at(f), &view, &target.view, (W, H));
+        }
+        let penultimate = target.read_rgba(&gpu).expect("readback");
+        r.render(&gpu, &at(FRAMES - 1), &view, &target.view, (W, H));
+        (penultimate, target.read_rgba(&gpu).expect("readback"))
+    };
+    let run = |temporal: bool| -> Vec<u8> { run2(temporal).1 };
+    // A fresh renderer at the LAST clock only — no history behind it.
+    let single = {
+        let mut r = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        r.set_settings(RenderSettings::default());
+        r.render(&gpu, &at(FRAMES - 1), &view, &target.view, (W, H));
+        target.read_rgba(&gpu).expect("readback")
+    };
+
+    // (1) Off is inert — byte-identical, not "close".
+    let off = run(false);
+    assert_eq!(
+        off, single,
+        "with cloud_temporal OFF the tenth frame differs from a fresh one at the \
+         same clock — something is accumulating that should not be"
+    );
+
+    // (3) On is a function of the clocks visited.
+    let on = run(true);
+    assert_eq!(
+        on,
+        run(true),
+        "the temporal accumulation is not reproducible across runs"
+    );
+
+    // (2) On accumulates, in the direction claimed: FLICKER between consecutive
+    // jitter offsets is what the history is for, so that is what is measured.
+    let rows = H / 3;
+    let (a_off, b_off) = run2(false);
+    let (a_on, b_on) = run2(true);
+    let flicker_off = image_diff(&a_off, &b_off, W, H).0;
+    let flicker_on = image_diff(&a_on, &b_on, W, H).0;
+    let (mean, max) = image_diff(&on, &single, W, H);
+    let spread_on = adjacent_spread(&on, rows);
+    let spread_off = adjacent_spread(&single, rows);
+    eprintln!(
+        "cloud temporal: frame-to-frame flicker {flicker_on:.6} accumulated vs \
+         {flicker_off:.6} raw; vs single mean {mean:.5} max {max:.5}; adjacent \
+         spread {spread_on:.5} vs {spread_off:.5}"
+    );
+    assert!(
+        mean > 1e-4,
+        "the temporal pass changed nothing (mean {mean:.6}) — it is a no-op"
+    );
+    assert!(
+        flicker_off > 1e-5,
+        "the raw march does not flicker between jitter offsets ({flicker_off:.7}) \
+         — the jitter is not reaching the image and this test measures nothing"
+    );
+    assert!(
+        flicker_on < flicker_off * 0.6,
+        "the history did not damp the jitter: {flicker_on:.6} against a raw \
+         {flicker_off:.6}"
+    );
+    // ...and it did not do it by going flat, which a blend that returned the
+    // history unclamped would also achieve.
+    assert!(
+        spread_on > spread_off * 0.5,
+        "the accumulation flattened the sky ({spread_on:.5} against \
+         {spread_off:.5}) — that is a smear, not a convergence"
+    );
+}
+
 /// **CPU/GPU parity of the noise bake.** The GPU volumes must reproduce
 /// `inf_render::shape_texel` / `detail_texel` to within the documented envelope:
 /// at most `CPU_GPU_TEXEL_TOLERANCE` LSBs anywhere, and exactly equal for at

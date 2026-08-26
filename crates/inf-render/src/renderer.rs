@@ -163,6 +163,25 @@ pub const LDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 pub const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 /// Single-channel SSAO target format (half-res).
 pub const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+
+/// Format of the half-res cloud march target and its temporal history (SKY2).
+///
+/// The same HDR format the scene uses, because that is what it carries: the
+/// march accumulates premultiplied radiance in the scene's units, and dropping
+/// it to something narrower here would clip a sunlit cloud top before the
+/// tonemap ever saw it.
+pub const CLOUD_FORMAT: wgpu::TextureFormat = HDR_FORMAT;
+
+/// Format of the half-res cloud **distance** target (SKY2): `r` = the
+/// coverage-weighted mean distance to the cloud, `g` = the distance the march
+/// clamped at, both in metres.
+///
+/// `Rg16Float` because both are distances a kilometre or two out, where an f16's
+/// ~3 significant digits are metres of error on a value the temporal
+/// reprojection and the bilateral upsample both tolerate an order of magnitude
+/// more of. It also fixes the sentinel: f16 tops out at 65 504, so "no geometry"
+/// is 60 000 m rather than an infinity.
+pub const CLOUD_DIST_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 /// 4× MSAA — guaranteed support for all formats we use.
 pub const SCENE_SAMPLES: u32 = 4;
 /// Bloom downsample mip-chain depth (levels beyond half-res).
@@ -206,6 +225,14 @@ pub struct FrameTargets {
     pub taa_history: [wgpu::TextureView; 2],
     /// Half-res AO target size in px (for the SSAO shader).
     pub ao_size: (u32, u32),
+    /// **Half-res** cloud march output (SKY2): premultiplied radiance + coverage.
+    pub cloud: wgpu::TextureView,
+    /// Half-res cloud distances (SKY2). See [`CLOUD_DIST_FORMAT`].
+    pub cloud_dist: wgpu::TextureView,
+    /// Half-res cloud temporal history ping-pong (SKY2).
+    pub cloud_history: [wgpu::TextureView; 2],
+    /// Half-res cloud target size in px.
+    pub cloud_size: (u32, u32),
 }
 
 impl FrameTargets {
@@ -280,6 +307,18 @@ impl FrameTargets {
             bloom,
             bloom_sizes,
             ao_size: (aw, ah),
+            // The cloud stack (SKY2), at the same half resolution SSAO uses.
+            // Allocated unconditionally, like the TAA history beside it: 13.5 MB
+            // at 1080p against the ~33 MB that history already costs, and a
+            // lazily-grown set would still need placeholders bound at every
+            // binding to keep the bind groups valid.
+            cloud: tex("cloud", aw, ah, CLOUD_FORMAT, 1, RT_TEX),
+            cloud_dist: tex("cloud-dist", aw, ah, CLOUD_DIST_FORMAT, 1, RT_TEX),
+            cloud_history: [
+                tex("cloud-history-0", aw, ah, CLOUD_FORMAT, 1, RT_TEX),
+                tex("cloud-history-1", aw, ah, CLOUD_FORMAT, 1, RT_TEX),
+            ],
+            cloud_size: (aw, ah),
         }
     }
 }
@@ -337,6 +376,19 @@ pub struct FrameData<'a> {
     pub view_proj: [f32; 16],
     /// Jittered view-projection of the **previous** frame (TAA reprojection).
     pub taa_prev_view_proj: [f32; 16],
+    /// The half-res cloud view the composite upsamples: `cloud_history[cur]`
+    /// when [`crate::RenderSettings::cloud_temporal`] is on, else the raw march
+    /// in `targets.cloud` (SKY2).
+    pub cloud_src: &'a wgpu::TextureView,
+    /// Which slot `cloud_src` points at — `cur` with the temporal pass on, and a
+    /// fixed sentinel with it off. The composite's bind-group cache keys on it,
+    /// because a ping-pong slot is a change the [`crate::passes::ResourceKey`]
+    /// cannot see.
+    pub cloud_slot: usize,
+    pub cloud_history_prev: &'a wgpu::TextureView,
+    pub cloud_history_cur: &'a wgpu::TextureView,
+    /// Whether the previous frame's cloud history is usable this frame.
+    pub cloud_history_valid: bool,
     /// False on the first frame / after a resize (history has nothing usable).
     pub taa_history_valid: bool,
     /// Shoreline wetness (P20.3): the fixed-size uniform `EngineRenderer::render`
@@ -739,11 +791,20 @@ impl EngineRenderer {
         // opaque. A no-op on a scene with no `scatter` batches, so every existing
         // golden is untouched.
         graph.add(passes::scatter::ScatterNode::new(gpu, &view_bgl));
-        // Volumetric clouds (P17.3): a depth-tested, premultiplied-alpha raymarch
-        // over everything opaque. AFTER the opaque passes so the depth buffer can
-        // occlude it, BEFORE translucency so glass composites over it. A no-op
-        // unless the scene enables clouds, so opaque scenes stay byte-identical.
+        // Volumetric clouds (P17.3, split three ways at wave SKY2): the HALF-RES
+        // raymarch, an optional temporal accumulation against the cloud's own
+        // history, and the full-res bilateral composite that meets the scene.
+        // All three AFTER the opaque passes so the depth buffer can occlude the
+        // clouds and clamp the march, and BEFORE translucency so glass
+        // composites over them. Each is a no-op unless the scene enables clouds,
+        // so opaque scenes stay byte-identical.
         graph.add(passes::cloud::CloudNode::new(gpu, &view_bgl));
+        graph.add(passes::cloud_temporal::CloudTemporalNode::new(
+            gpu, &view_bgl,
+        ));
+        graph.add(passes::cloud_composite::CloudCompositeNode::new(
+            gpu, &view_bgl,
+        ));
         // Precipitation (P17.4): a depth-tested, premultiplied-alpha billboard
         // layer around the camera. AFTER the clouds so rain composites over the
         // deck it falls out of, BEFORE translucency so glass composites over it.
@@ -1909,6 +1970,11 @@ impl EngineRenderer {
         rec.mark(crate::timing::record::VIEW_UNIFORMS);
 
         let history_valid = self.settings.taa && !resized && self.prev_view_proj.is_some();
+        // The cloud's own history validity. Same three conditions, its own knob:
+        // a resize reallocated the ping-pong, and the first frame has no previous
+        // view-projection to reproject through.
+        let cloud_history_valid =
+            self.settings.cloud_temporal && !resized && self.prev_view_proj.is_some();
         let prev_vp = self.prev_view_proj.unwrap_or_else(|| jvp.to_cols_array());
         let cur = (self.frame_index & 1) as usize;
         let prev = 1 - cur;
@@ -2048,6 +2114,17 @@ impl EngineRenderer {
         } else {
             &targets.scene_hdr
         };
+        // The cloud composite reads the accumulation when there is one and the
+        // raw march when there is not — the same shape `post_hdr` takes, and for
+        // the same reason: one selection here rather than a branch inside the
+        // pass that consumes it. `CLOUD_SLOT_RAW` is past both ping-pong indices
+        // so the composite's bind-group cache tells the two cases apart.
+        const CLOUD_SLOT_RAW: usize = 2;
+        let (cloud_src, cloud_slot) = if self.settings.cloud_temporal {
+            (&targets.cloud_history[cur], cur)
+        } else {
+            (&targets.cloud, CLOUD_SLOT_RAW)
+        };
         let frame = FrameData {
             scene,
             view,
@@ -2064,6 +2141,11 @@ impl EngineRenderer {
             view_proj: jvp.to_cols_array(),
             taa_prev_view_proj: prev_vp,
             taa_history_valid: history_valid,
+            cloud_src,
+            cloud_slot,
+            cloud_history_prev: &targets.cloud_history[prev],
+            cloud_history_cur: &targets.cloud_history[cur],
+            cloud_history_valid: cloud_history_valid,
             shadow: &self.shadow,
             gi: &self.gi,
             vgeom_audit: &self.vgeom_audit,

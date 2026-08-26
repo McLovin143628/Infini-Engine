@@ -73,6 +73,22 @@ pub struct RenderSettings {
     /// Temporal anti-aliasing. **OFF by default** (headless determinism); when
     /// on, the camera jitters (Halton 2,3) and a history buffer accumulates.
     pub taa: bool,
+    /// Temporal accumulation of the **cloud** march against the cloud pass's own
+    /// history (wave SKY2). **OFF by default**, on exactly the terms
+    /// [`taa`](Self::taa) is: an accumulating buffer makes a frame a function of
+    /// the frames before it, and a byte-identical golden cannot be that.
+    ///
+    /// It is a separate knob rather than a rider on `taa` because the cloud
+    /// **cannot** ride the scene's TAA: that pass reprojects through the depth
+    /// prepass, a cloud writes no depth, and so every cloud pixel takes
+    /// `taa.wgsl`'s "no depth" branch and reprojects to itself — correct under a
+    /// static camera and a smear under a turning one.
+    ///
+    /// Note what this does *not* gate: the march's blue-noise jitter, which is a
+    /// pure function of the level clock and the pixel and is therefore
+    /// deterministic on its own. What this adds is convergence of that jitter;
+    /// what it costs is single-frame reproducibility.
+    pub cloud_temporal: bool,
     /// Virtualized-geometry meshlet render path (P13.1b). When **on**, a scene's
     /// `vgeom_instances` are drawn by the GPU-driven meshlet path (cull+LOD
     /// compute → vertex-pulled indirect draw) instead of the classic mesh
@@ -1195,6 +1211,7 @@ impl Default for RenderSettings {
             bloom: BloomSettings::default(),
             ssao: SsaoSettings::default(),
             taa: false,
+            cloud_temporal: false,
             vgeom: VgeomSettings::default(),
             scatter: ScatterSettings::default(),
             shadows: ShadowSettings::default(),

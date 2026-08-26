@@ -6,6 +6,8 @@ pub mod bloom;
 pub mod classic_vgeom;
 pub mod cloud;
 pub mod cloud_bake;
+pub mod cloud_composite;
+pub mod cloud_temporal;
 pub mod composite;
 pub mod debug;
 pub mod depth_prepass;
@@ -75,6 +77,11 @@ pub(crate) enum ShaderKind {
     /// `@group(1)` — the raymarch pass (P17.3), which needs the sky LUTs for
     /// lighting and both noise volumes for density, but no lighting env.
     Cloud,
+    /// [`cloud_composite_shader`]: common_view + the atmosphere **uniform** at
+    /// `@group(1) @binding(0)` and nothing else — the SKY2 composite, which needs
+    /// the cloud slab's geometry for the depth it writes and neither the LUTs nor
+    /// the noise volumes for anything.
+    CloudComposite,
     /// [`cloud_bake_shader`]: the atmosphere uniform + the cloud **generators** at
     /// `@group(0)`, with no sampled textures at all — the two noise volumes are
     /// *storage* textures here, which is precisely why `cloud_field.wgsl` (which
@@ -257,6 +264,25 @@ pub(crate) fn cloud_shader(source: &str) -> String {
         atmosphere_apply_source(),
         cloud_noise_source(),
         cloud_field_source(1, 4, 5, 6),
+        source
+    )
+}
+
+/// The cloud **composite** module: common_view + the atmosphere uniform at
+/// `@group(1) @binding(0)`.
+///
+/// Deliberately NOT [`cloud_shader`]. That composition declares the two noise
+/// volumes and their sampler at bindings 4/5/6, and a composite that declared
+/// bindings its layout does not provide is the pick-shader bug class this table
+/// exists to make impossible. What the composite reads out of the atmosphere is
+/// `cloud_layer`, and that is all.
+pub(crate) fn cloud_composite_shader(source: &str) -> String {
+    format!(
+        "{}
+{}
+{}",
+        include_str!("../shaders/common_view.wgsl"),
+        atmosphere_source(1, 0),
         source
     )
 }
@@ -444,6 +470,16 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
         ShaderKind::Cloud,
     ),
     (
+        "cloud_temporal",
+        include_str!("../shaders/cloud_temporal.wgsl"),
+        ShaderKind::Plain,
+    ),
+    (
+        "cloud_composite",
+        include_str!("../shaders/cloud_composite.wgsl"),
+        ShaderKind::CloudComposite,
+    ),
+    (
         "cloud_bake",
         include_str!("../shaders/cloud_bake.wgsl"),
         ShaderKind::CloudBake,
@@ -570,6 +606,7 @@ pub(crate) fn shader_source(label: &str) -> String {
         ShaderKind::Sky => sky_shader(source),
         ShaderKind::AtmosphereCompute => atmosphere_compute_shader(source),
         ShaderKind::Cloud => cloud_shader(source),
+        ShaderKind::CloudComposite => cloud_composite_shader(source),
         ShaderKind::CloudBake => cloud_bake_shader(source),
         ShaderKind::CloudShadowBake => cloud_shadow_bake_shader(source),
         ShaderKind::Precip => precip_shader(source),

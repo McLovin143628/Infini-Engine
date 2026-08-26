@@ -1,66 +1,81 @@
 //! Volumetric cloud raymarch (P17.3) — the pass that actually draws the sky's
-//! clouds.
+//! clouds, at **half resolution** since wave SKY2.
 //!
-//! ## Why it is a pass of its own, and why it sits *here*
+//! ## The three passes, and why there are three
 //!
-//! The obvious home is the sky pass, and it is the wrong one. [`super::sky`] is
-//! the **first** scene pass: it *clears* colour and depth, so at the moment it
-//! runs there is no geometry in the depth buffer to occlude anything, and a cloud
-//! drawn there would hang in front of the terrain it is supposed to be behind.
+//! ```text
+//! cloud            half-res march  -> (cloud, cloud_dist)
+//! cloud-temporal   half-res blend  -> cloud_history[cur]      (optional)
+//! cloud-composite  full-res upsample + blend into color_msaa
+//! ```
 //!
-//! So the clouds are a dedicated pass placed after all opaque geometry (mesh,
-//! vgeom, skinned, terrain) and before the translucent pass:
+//! P17.3 did all of it in one pass straight into the MSAA scene target. Two
+//! measurements moved it:
+//!
+//! * **cost.** At 1920x1080 with a ground camera pitched into open sky the
+//!   full-res march reads **5.5 ms at High** on an RTX 4070 Ti. The 0.29 ms in
+//!   the P17 cost table is not wrong, it is a different question — it measured a
+//!   frame whose sky is almost entirely behind a cube field, where the hardware
+//!   depth test rejects the march before it starts. Nothing else available is
+//!   worth a factor of four.
+//! * **temporal.** The march's jitter needs somewhere to converge, and it cannot
+//!   be the scene's TAA: that pass reprojects through the depth prepass, and a
+//!   cloud writes no depth, so every cloud pixel takes its "no depth" branch and
+//!   reprojects to itself. A history of its own is not a luxury here.
+//!
+//! ## Why the composite still sits *here* in the graph
+//!
+//! Unchanged from P17.3, and still load-bearing. [`super::sky`] is the **first**
+//! scene pass: it *clears* colour and depth, so a cloud drawn there would hang in
+//! front of the terrain it belongs behind. The composite therefore runs after all
+//! opaque geometry (mesh, vgeom, skinned, terrain) and before the translucent
+//! pass:
 //!
 //! * **after opaque** so the depth buffer is populated and the hardware can
 //!   reject cloud fragments behind the world;
 //! * **before translucent** so glass and water composite over clouds, as they
 //!   would over any other distant background;
-//! * **inside the MSAA scene target**, so the resolve → TAA → bloom → tonemap
-//!   chain treats cloud radiance as ordinary scene radiance rather than as a
-//!   post-hoc overlay. A cloud edge against the sun should bloom; it does,
-//!   without a line of code here.
+//! * **into the MSAA scene target**, so the resolve → TAA → bloom → tonemap chain
+//!   treats cloud radiance as ordinary scene radiance rather than as a post-hoc
+//!   overlay. A cloud edge against the sun should bloom; it does, without a line
+//!   of code here.
 //!
-//! ## Depth — two mechanisms, because one is not enough
+//! ## Depth — two mechanisms, now in two passes
 //!
-//! **1. The hardware test.** The fragment writes `@builtin(frag_depth)` at the
-//! ray's **entry** into the cloud slab, with depth **writes off** and `Greater`
-//! comparison (reverse-Z). That rejects, per MSAA sample and therefore with
-//! antialiased silhouettes, every fragment whose geometry is entirely in front of
-//! the slab — the common case, and the whole reason this pass is not in the sky
-//! pass.
+//! **1. The march clamp**, here. A 2 km summit under a 1.5-4 km deck is *inside*
+//! the slab, so it sits beyond the slab's entry plane and no hardware test can
+//! reject the cloud behind it — it would be composited over the summit as a veil,
+//! which ordinary content on an 8 km terrain hits immediately. So the march reads
+//! the scene depth for its pixel and clamps `t_far` at the nearest geometry.
 //!
-//! **2. The march clamp.** The hardware test alone is *not* the occlusion, and
-//! believing it was would be a real bug: a 2 km summit under a 1.5–4 km deck is
-//! **inside** the slab, so it sits beyond the slab's entry plane, passes a
-//! `Greater` test against the entry depth, and would have the entire marched span
-//! — including the cloud physically *behind* the mountain — composited over it as
-//! a veil. Ordinary content on an 8 km terrain hits this immediately. So the
-//! shader also reads the scene depth for its pixel and clamps `t_far` to the
-//! distance of the nearest geometry, which stops the march at the surface.
+//! **2. The hardware test**, in [`super::cloud_composite`]. `frag_depth` at the
+//! ray's entry into the slab, `Greater` (reverse-Z), writes off — which rejects,
+//! per MSAA sample and so with antialiased silhouettes, every fragment whose
+//! geometry is entirely in front of the layer.
 //!
-//! To do both at once the depth attachment is bound **read-only**
-//! (`depth_ops: None`) and the same view is additionally bound as a
-//! `texture_depth_multisampled_2d` — the one arrangement WebGPU permits for
-//! reading an attachment you are also testing against.
+//! Splitting them changed neither, and it retired the read-only-depth aliasing
+//! the single pass needed (binding the depth attachment and the depth texture at
+//! once): the march is not a depth attachment any more, and the composite does
+//! not sample depth for the test.
 //!
-//! **What is still approximate**, now that those two are in place: the clamp
-//! samples MSAA sample 0 only, so on a pixel *partially* covered by intersecting
-//! geometry the march length comes from one sample while the hardware test still
-//! resolves coverage per sample — a sub-pixel discrepancy at a silhouette. And
-//! the pass runs before the translucent one, so cloud behind glass composites in
-//! the right order but cloud *inside* a translucent volume does not (there is no
-//! ordering that would fix that without a per-fragment sort).
+//! **What is still approximate.** The clamp reads MSAA sample 0 only, and now at
+//! half resolution — one tap standing for a 2x2 block. That is what the
+//! composite's *bilateral* upsample is for, and it is why that upsample is not
+//! the 4x4 box blur SSAO uses: a cloud tap whose march stopped at a mountain and
+//! the tap beside it looking past the summit must not be averaged. The pass still
+//! runs before the translucent one, so cloud behind glass composites in the right
+//! order but cloud *inside* a translucent volume does not (no ordering fixes that
+//! without a per-fragment sort).
 //!
 //! ## Off path
 //!
-//! Clouds inactive ⇒ `run` returns before touching the encoder: no render pass,
-//! no pipeline bind, no draw. Every pre-P17.3 golden therefore renders the exact
-//! command stream it did before.
+//! Clouds inactive ⇒ all three nodes return before touching the encoder: no
+//! render pass, no pipeline bind, no draw. Every pre-P17.3 golden therefore
+//! renders the exact command stream it did before.
 
-use crate::camera::{DEPTH_COMPARE, DEPTH_FORMAT};
 use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
-use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
+use crate::renderer::{FrameData, CLOUD_DIST_FORMAT, CLOUD_FORMAT};
 
 pub struct CloudNode {
     pipeline: wgpu::RenderPipeline,
@@ -179,31 +194,29 @@ impl CloudNode {
                     module: &shader,
                     entry_point: Some("fs"),
                     compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: SCENE_FORMAT,
-                        // PREMULTIPLIED alpha: the march accumulates radiance
-                        // already weighted by the transmittance it was seen
-                        // through, so the source is `(L·α, α)` and must not be
-                        // multiplied by α a second time.
-                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+                    // TWO targets, both half-res and both written rather than
+                    // blended: the march owns these textures outright. The
+                    // premultiplied blend that used to be here moved to the
+                    // composite, which is the pass that meets the scene.
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            format: CLOUD_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: CLOUD_DIST_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                    ],
                 }),
                 primitive: Default::default(),
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    // Test but never write: a cloud is a participating medium, not
-                    // a surface, and writing its entry depth would make later
-                    // passes think there is geometry there.
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(DEPTH_COMPARE),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: SCENE_SAMPLES,
-                    ..Default::default()
-                },
+                // No depth attachment at all. The hardware test moved to the
+                // composite with the `frag_depth` it needs; keeping a test here
+                // would test a half-res fragment against a full-res buffer.
+                depth_stencil: None,
+                multisample: Default::default(),
                 multiview_mask: None,
                 cache: None,
             });
@@ -277,26 +290,30 @@ impl RenderNode for CloudNode {
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("cloud"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &frame.targets.color_msaa,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &frame.targets.depth,
-                // `None` = READ-ONLY depth: contents are preserved for the passes
-                // that follow, the hardware test still runs, and — the reason it
-                // is here — the same view may simultaneously be bound as a sampled
-                // texture so the shader can clamp its march at geometry. A
-                // read/write attachment aliased into a binding is a validation
-                // error; a read-only one is exactly what WebGPU allows.
-                depth_ops: None,
-                stencil_ops: None,
-            }),
+            // Two half-res targets, CLEARED rather than loaded: the march writes
+            // every pixel of both, including the early-out paths, so a load would
+            // be a read of data nothing can see.
+            color_attachments: &[
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &frame.targets.cloud,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &frame.targets.cloud_dist,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+            ],
+            depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,
