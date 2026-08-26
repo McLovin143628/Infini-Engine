@@ -1569,23 +1569,29 @@ fn the_island_at_shipping_resolution() {
     };
     let (mut lit, lit_tier) = shipped_settings(&gpu, lit_record);
     lit.vsm.enabled = true;
-    // **THE ALTERNATIVE, PRICED** (island wave I7b). The lit island's whole GPU
-    // frame is `vsm-raster`, and the reason is not the world: the dirty split
-    // below reads **0 pages re-cast** every frame — nothing under a page ever
-    // moves — against ~530 "moved" and ~400 "re-slotted", which is the clipmap
-    // grid shifting under a camera that travels 0.9 m a frame against a level-0
-    // page **1.0 m** wide (`2 x first_level_extent_m / clipmap_pages_per_side`,
-    // 2 x 32 / 64). A page 1 m across is 128 texels over 1 m — 7.8 mm a texel,
-    // four to eight times finer than any pixel this camera can show.
+    // **THE ALTERNATIVE, PRICED** (island wave I7b) — **and the control island
+    // wave VSM2 beat without taking it.**
+    //
+    // I7b measured the lit island's whole GPU frame as `vsm-raster`, and the
+    // reason was not the world: the dirty split read **0 pages re-cast** every
+    // frame — nothing under a page ever moves — against ~530 "moved" and ~400
+    // "re-slotted", which is the clipmap grid shifting under a camera that
+    // travels 0.9 m a frame against a level-0 page **1.0 m** wide
+    // (`2 x first_level_extent_m / clipmap_pages_per_side`, 2 x 32 / 64).
     //
     // So the third configuration is the shipped lit one with the first clipmap
     // level widened 4x, which quarters every level's snap rate. It is
     // **reported, never shipped**: `first_level_extent_m` is a product decision
     // about shadow sharpness, and the wave that measures an alternative is not
-    // the wave that gets to pick it. The number is what the routing needed —
-    // the I7 lesson that an unmeasured prescription can be backwards, met on a
-    // prescription that WAS backwards (the routed caster-pack cache aims at the
-    // 0.9 ms of CPU record, not at the 30 ms of GPU).
+    // the wave that gets to pick it.
+    //
+    // It stays because it is still the honest control for the LIT row above.
+    // I7b priced it at `vsm-raster` **15.931 ms** against the shipped ladder's
+    // 30.001; wave VSM2 — which keys shadow-page residency to the **world cell**
+    // rather than to the grid label, so a scroll re-labels instead of re-drawing
+    // — takes the SHIPPED ladder to **4.58-4.61 ms**, three and a half times
+    // better than the trade, at level 0's full resolution. The `moved` column
+    // below is what changed: **532.0 a frame -> 2.2**.
     let mut lit_coarse = lit;
     lit_coarse.vsm.first_level_extent_m = lit.vsm.first_level_extent_m * 4.0;
     let clamped = !(lit.shadows.enabled && lit.gi.enabled);
@@ -1663,6 +1669,12 @@ fn the_island_at_shipping_resolution() {
                 // thrashing" is not a diagnosis; these three sum to
                 // `dirty_pages` and say whether the pages moved under the world
                 // or the world moved under the pages.
+                //
+                // Island wave VSM2 is read off the middle column: it was **532.0
+                // a frame** and it is **2.2**, because a page's slot now belongs
+                // to its world cell and a clipmap scroll re-labels rather than
+                // re-draws. What is left in `re-slotted` is the row and column
+                // the window newly exposes, which have never been drawn.
                 println!(
                     "  {label} dirty per rastering frame: {:.1} re-slotted, \
                      {:.1} moved (the page's own matrix), {:.1} re-cast \

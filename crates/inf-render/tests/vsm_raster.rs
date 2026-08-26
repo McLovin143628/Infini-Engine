@@ -244,6 +244,37 @@ fn resident_pages(renderer: &inf_render::EngineRenderer) -> Vec<(u32, VsmPage, (
     out
 }
 
+/// **What each resident slot depicts** (island wave VSM2), as the shipped page
+/// cache keys it: `(light, face, level, world cell x, world cell y, the light's
+/// content key)`.
+///
+/// The renderer's own `PageIdent` is private, so this is the same statement built
+/// from the two public doors it is built from — the residency's clip origins and
+/// the layout's content key. A test that compared page *matrices* instead would
+/// be comparing something the cache no longer looks at.
+fn page_identities(r: &inf_render::EngineRenderer) -> Vec<(u32, u32, u32, i64, i64, u64)> {
+    let sys = r.vsm().expect("a live vsm system");
+    resident_pages(r)
+        .into_iter()
+        .map(|(light, p, _)| {
+            let o = sys.residency().clip_origins(VsmLightHandle(light));
+            let g = o.get(p.level as usize).copied().unwrap_or((0, 0));
+            let key = sys
+                .layouts()
+                .get(light as usize)
+                .map_or(0, |l| l.content_key);
+            (
+                light,
+                p.face,
+                p.level,
+                g.0 + i64::from(p.x),
+                g.1 + i64::from(p.y),
+                key,
+            )
+        })
+        .collect()
+}
+
 /// Texels of one rectangle that are not the reverse-Z clear value.
 fn written(atlas: &(u32, u32, Vec<f32>), rect: (u32, u32, u32)) -> Vec<f32> {
     let mut out = Vec::new();
@@ -2396,12 +2427,9 @@ fn a_camera_cut_flushes_the_cache_and_the_stamps_would_have_too() {
     }
     let before = renderer.vsm_raster_stats().expect("stats");
     assert_eq!(before.cut_flushes, 0, "a cut fired on a still camera");
-    // The page matrices as they stand, so the redundancy claim is measured on the
-    // shipped door rather than argued.
-    let near_matrices: Vec<[f32; 16]> = resident_pages(&renderer)
-        .iter()
-        .map(|(l, p, _)| page_vp(&renderer, *l, *p).to_cols_array())
-        .collect();
+    // The page **identities** as they stand, so the redundancy claim is measured
+    // on the shipped door rather than argued.
+    let near_identities = page_identities(&renderer);
 
     renderer.render(&gpu, &s, &far, &target.view, (FW, FH));
     let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
@@ -2414,20 +2442,23 @@ fn a_camera_cut_flushes_the_cache_and_the_stamps_would_have_too() {
         after.pages > before.pages,
         "the cut flushed the cache and nothing was re-rasterized"
     );
-    // **The redundancy, measured.** Every page's matrix moved across the cut, so
-    // every stamp moved with it and the flush changed no verdict.
-    let far_matrices: Vec<[f32; 16]> = resident_pages(&renderer)
+    // **The redundancy, measured — and island wave VSM2 moved the thing that has
+    // to be measured.** The cache key is no longer the page matrix: it is the
+    // page's **world cell** plus the light's `content_key`, so a matrix
+    // comparison here would be a gate that cannot see its own claim (the I7b
+    // audit's shape). What makes the flush redundant now is that this cut also
+    // slides the clipmap's *along-light* snap, which is in `content_key` — so
+    // every surviving cell's stamp moves with it, and the lateral survivors a
+    // scroll would keep are invalidated anyway.
+    let far_identities = page_identities(&renderer);
+    assert!(!near_identities.is_empty() && !far_identities.is_empty());
+    let same = near_identities
         .iter()
-        .map(|(l, p, _)| page_vp(&renderer, *l, *p).to_cols_array())
-        .collect();
-    assert!(!near_matrices.is_empty() && !far_matrices.is_empty());
-    let same = near_matrices
-        .iter()
-        .filter(|m| far_matrices.contains(m))
+        .filter(|m| far_identities.contains(m))
         .count();
     assert_eq!(
         same, 0,
-        "{same} page matrices survived a 194 m camera cut unchanged — the cut \
+        "{same} page identities survived a 194 m camera cut unchanged — the cut \
          trigger is NOT redundant with the content stamps, and this arm's ruling \
          has to be rewritten rather than the trigger removed"
     );
@@ -3521,18 +3552,11 @@ fn a_camera_translation_re_labels_no_page_and_re_rasters_only_what_enters() {
     // residency's own origins, because the load-bearing count below is not "a
     // small number of pages entered" — it is "the pages that were re-drawn are
     // EXACTLY the pages that arrived", and only a set difference can say that.
-    let cells =
-        |r: &inf_render::EngineRenderer| -> std::collections::BTreeSet<(u32, u32, i64, i64)> {
-            let sys = r.vsm().expect("live");
-            resident_pages(r)
-                .into_iter()
-                .map(|(light, p, _)| {
-                    let o = sys.residency().clip_origins(VsmLightHandle(light));
-                    let g = o.get(p.level as usize).copied().unwrap_or((0, 0));
-                    (light, p.level, g.0 + i64::from(p.x), g.1 + i64::from(p.y))
-                })
-                .collect()
-        };
+    let cells = |r: &inf_render::EngineRenderer| {
+        page_identities(r)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+    };
     let mut held = cells(&renderer);
     let mut resident = held.len();
     let mut arrived = 0u64;
@@ -3748,7 +3772,7 @@ fn a_caster_that_moves_during_a_scroll_re_rasters_its_world_cell() {
     // Twelve steps of a scrolling camera with a still caster: the control, and the
     // state the mutation below has to be distinguished from.
     let mut step = 0u32;
-    let mut run = |r: &mut inf_render::EngineRenderer, sc: &RenderScene, step: &mut u32, n: u32| {
+    let run = |r: &mut inf_render::EngineRenderer, sc: &RenderScene, step: &mut u32, n: u32| {
         for _ in 0..n {
             r.render(
                 &gpu,
@@ -3857,7 +3881,7 @@ fn a_sun_that_crosses_its_quantum_re_rasters_the_atlas_and_one_that_does_not_doe
     rs.vsm = set;
     renderer.set_settings(rs);
     let v = view(5.0);
-    let mut turn = |r: &mut inf_render::EngineRenderer, d: glam::Vec3, n: u32| {
+    let turn = |r: &mut inf_render::EngineRenderer, d: glam::Vec3, n: u32| {
         let mut sc = s.clone();
         sc.lights[0].direction = d;
         sc.mark_dirty();

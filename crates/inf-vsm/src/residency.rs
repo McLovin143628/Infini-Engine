@@ -201,6 +201,15 @@ pub struct VsmTransaction {
     /// Pages that gained a slot, in entry order.
     pub admits: Vec<VsmAdmit>,
     /// Pages whose slots became unreachable, in the order they were taken.
+    ///
+    /// **This is the transaction's own evictions, and a clipmap scroll's are not
+    /// in it** (island wave VSM2). A scroll is not a transaction: it re-labels
+    /// residency in place through [`VsmResidency::set_clip_origins`], which
+    /// reports its own counts in [`VsmScroll`] and republishes the light's table
+    /// block through the `tables` list of the transaction that follows. A mirror
+    /// that reconstructs residency from this stream alone must apply the scroll's
+    /// translation itself — `tests/residency_gate.rs`'s shadow model does, from
+    /// the two origin tables and from nothing the residency said.
     pub evicts: Vec<VsmEvict>,
     /// Lights whose indirection block changed, ascending.
     pub tables: Vec<VsmLightHandle>,
@@ -764,11 +773,9 @@ impl VsmResidency {
     /// entry.
     fn deepest_moved_level(&self, l: usize, was: &[(i64, i64)]) -> Option<u32> {
         let light = &self.lights[l];
-        (0..light.desc.level_count())
-            .filter(|&lv| {
-                light.desc.clip_origin(was, lv) != light.desc.clip_origin(&light.clip_origins, lv)
-            })
-            .next_back()
+        (0..light.desc.level_count()).rfind(|&lv| {
+            light.desc.clip_origin(was, lv) != light.desc.clip_origin(&light.clip_origins, lv)
+        })
     }
 
     /// **Carry every resident clipmap page onto the label its world cell now

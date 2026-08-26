@@ -276,15 +276,15 @@ leak direction again.
 
 ## 5. Honest bounds, carried
 
-* **There is no clipmap scroll.** When level `L`'s grid shifts, every resident
-  page of that level names a different world cell and is re-rasterized. A scroll —
+* ~~**There is no clipmap scroll.**~~ **CLOSED by island wave VSM2** — see §7.
+  The bound as it stood: *"when level `L`'s grid shifts, every resident page of
+  that level names a different world cell and is re-rasterized. A scroll —
   re-seating page `(x, y)` at `(x − sx, y − sy)` and evicting what falls off —
   would leave only the newly exposed row and column dirty, i.e. `2N − 1` pages
   instead of the level's whole resident set. At the shipped grid that is 127
-  against up to 4 096. It is bounded work at a bounded cadence (`w_L` of camera
-  travel), it is entirely Ring-0 and adapter-free, and it belongs with P28.3's
-  merged residency, which is where re-seating a slot stops being one crate's
-  private business.
+  against up to 4 096."* It was right about the mechanism and right about the
+  cost; wave I7b measured the price at **532 "moved" pages a frame** on the lit
+  island and VSM2 built the scroll.
 * **`hole_words` in the terrain caster's cache key is redundant today** — a
   projector that writes a mask also moves the tile's version, and the mutation
   that deletes the term survives the whole file. It is kept for the case the
@@ -360,3 +360,72 @@ caster in every fixture sits well inside the clipmap's box and reaching the case
 needs a caster at the far face of a kilometres-deep projection. The fail direction
 of a tightened test is a *stale page*, which is the wrong one, so this is a
 carried gap rather than a redundancy — P27.4's.
+
+---
+
+## 7. What island wave VSM2 changed: **the slot belongs to the world cell**
+
+§5's first bullet is closed. `VsmResidency::set_clip_origins` now *carries* the
+pages when a window slides — the label moves, the slot and its texels do not — and
+`VsmRaster`'s cache is keyed on what the slot depicts rather than on the label it
+wears. Both halves are needed and neither is sufficient: re-seating without
+re-keying leaves the raster looking for the old label, and re-keying without
+re-seating asks the wrong slot for the texels.
+
+**The key.** A clipmap page's geometric stamp was the page matrix folded bit for
+bit. It is now `(light, face, level, world cell)` folded with
+`ClipmapLayout::content_key` — the quantized sun direction, the along-light snap
+index, level 0's half-extent, the page grid and the level count. §2's list of what
+moves a page's content is unchanged; what changed is which of those terms are
+named **directly** rather than through the matrix they all feed:
+
+| §2's input | in the VSM2 key as |
+|---|---|
+| the quantized sun direction | `content_key`, by name |
+| the level's snapped centre, its NDC offset, the page's sub-rectangle | jointly, as the **world cell** — the three of them are one statement about which square of the world the page covers |
+| the along-light snap | `content_key`, as the integer `mf` |
+| the settings that size the box | `content_key` (extent, grid, levels; the depth range is a function of those three) |
+| the floating origin | **deliberately absent** — see below |
+| the caster fold | unchanged |
+
+A **perspective** light keeps the matrix bits it had. Its levels are nested inside
+its own frustum, `clip_origin` is meaningless for it by this crate's own
+definition, and when that matrix moves every one of its pages really is somewhere
+new.
+
+**What dropping the bit-compare costs, measured.** The matrix a re-labelled cell
+gets is the same affine map recomputed through a different route — level 0's
+projection is rebuilt about a centre that slid one page and the page's
+sub-rectangle slides back by one — so it agrees to within f32 rounding rather than
+bit for bit. (The P27.3 audit's aliasing arm found bit-identical collisions
+because a *coarse* level's window can move while level 0's does not; when level
+0's moves, every level's matrix is recomputed.) Worst over a 270 m walk of the
+shipped 8 × 64² ladder, out where the floating origin is about to rebase:
+**0.0234 of a shadow texel**, against a control — the matrix a slot that kept its
+LABEL would be holding — of **128.0**. Armed as
+`a_world_cell_keeps_its_page_matrix_to_within_a_fraction_of_a_shadow_texel`.
+
+**The floating origin is out of the key on purpose, and it does not buy a stale
+page.** A rebase moves neither a world cell nor the residency, so `re-slotted` and
+`moved` both read zero across one — and the atlas refreshes anyway, because a
+caster's stamp folds its **render-local** model matrix, which a rebase does move.
+The correctness lives in the caster fold, exactly where it lived before, and the
+I4b defect (a cache blind to the origin over content that was *not*) has no second
+home here. Armed on a device, both halves, in
+`a_floating_origin_rebase_moves_no_pages_identity_and_still_refreshes_the_atlas`.
+
+**§3's drain policy is unchanged and its cap stays at 256.** What changed is that
+the queue now empties: I7b measured 256 rastered and 677 deferred *every frame,
+for ever*; the lit island now rasters **44.7 pages a frame with 965.1 served from
+the atlas**, and the deferral that is left is bursts — a camera cut, an origin
+rebase, a sun quantum, or the along-light snap ticking once per `w_top` of travel
+— each draining in `ceil(resident / 256)` frames. Armed as
+`the_deferral_backlog_drains_within_the_atlas_over_the_budget`, which asserts the
+bound *derived from the resident set the same run reports* and then asserts the
+backlog does not re-form under a moving camera.
+
+**§5's `is_camera_cut` ruling stands, and its arm was re-pointed.** The arm
+measured *matrices*, which the key no longer looks at; it measures page
+identities now. The redundancy survives for a reason worth writing down: the 194 m
+cut it uses also slides the along-light snap, which is in `content_key`, so the
+lateral survivors a scroll would have kept are invalidated regardless.
