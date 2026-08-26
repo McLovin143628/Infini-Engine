@@ -2407,8 +2407,9 @@ fn the_golden_set_is_pinned_and_additive() {
     /// P27.4 added four to — the virtual-shadow-map set (`vsm_directional`,
     /// `vsm_spot`, `vsm_point`, `vsm_bias_grazing`). P27.1 through P27.3 moved
     /// it by nothing, because virtual shadows were inert until a receiver
-    /// existed.
-    const GOLDENS: usize = 54;
+    /// existed. Wave VIS1a's **audit** added the fifty-fifth — `water_ssr.png`,
+    /// the one frame the wave's own reflection feature can be pinned by.
+    const GOLDENS: usize = 55;
     /// `xxh3_128` over `"{file_name} {hex}\n"` for every golden, name-sorted —
     /// the CONTENT pin (P26.5 audit). Committed PNGs are `-text` in
     /// `.gitattributes`, so these bytes are the same on every checkout.
@@ -2461,7 +2462,17 @@ fn the_golden_set_is_pinned_and_additive() {
     ///
     /// Both moves are inside one wave and each has its own commit; neither turned
     /// a red build green.
-    const GOLDEN_SET_DIGEST: &str = "84e38ed2a762a2e9a0cca84d0fc80b8b";
+    ///
+    /// **And a fourth time, in that wave's audit** (from
+    /// `84e38ed2a762a2e9a0cca84d0fc80b8b`), on the **additive** branch of the rule
+    /// rather than the re-bless one: `water_ssr.png` is a *new* frame, `GOLDENS`
+    /// moves 54 → 55 beside it, and not one committed image changed. It exists because VIS1a shipped carrying "no golden can ever
+    /// capture SSR" — which is true of the **opaque** path only. Water marches
+    /// against its own private same-frame resolve and needs no colour history, so
+    /// the boat reflecting itself is a deterministic one-frame image, and the
+    /// wave's signature feature now has a pixel pin instead of a sentence saying
+    /// it could not have one.
+    const GOLDEN_SET_DIGEST: &str = "d6da45fdbc8ef842fcea3acf10c8bf84";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
@@ -2507,7 +2518,7 @@ fn the_golden_set_is_pinned_and_additive() {
         digest, GOLDEN_SET_DIGEST,
         "the golden set's CONTENT moved. A golden was re-blessed, deleted (the \
          harness regenerates any golden it cannot read, so the count above stays \
-         54), or replaced. Adding one is allowed and means moving both constants \
+         55), or replaced. Adding one is allowed and means moving both constants \
          in the same commit. Changing an existing frame is allowed ONLY in a \
          commit whose stated purpose is to change the look, with the difference \
          described — never as a side effect of something else.\n{manifest}"

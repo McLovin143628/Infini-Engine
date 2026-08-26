@@ -2573,6 +2573,80 @@ fn assert_prepass_reaches(
         "{what}: {brighter} shared pixels got BRIGHTER against {darker} darker — \
          too many for the bilateral blur's edge redistribution to explain"
     );
+
+    // **AND IT LANDS ON THE OBJECT** (wave VIS1a audit). Counting darkened
+    // pixels says the occluder's depth reached the prepass; it does not say the
+    // prepass wrote the depth the COLOUR pass writes. A contributor whose
+    // depth-only pipeline skinned with a different palette, morphed with a
+    // different clipmap or simply multiplied its model matrix in the other order
+    // would still darken plenty of pixels — somewhere else. That is the failure
+    // this widening actually risks (self-shadowing, a halo one silhouette away
+    // from the thing casting it), and the count above is blind to it.
+    //
+    // So: the occluder's own screen footprint is exactly the mask the loop skips,
+    // and a contact shadow must sit against it. The ladder is printed before it
+    // is asserted — the threshold below is read off these numbers rather than
+    // guessed.
+    let occ: Vec<bool> = (0..off_w.len())
+        .step_by(4)
+        .map(|i| off_w[i..i + 3] != off_o[i..i + 3])
+        .collect();
+    let dark: Vec<bool> = (0..off_w.len())
+        .step_by(4)
+        .map(|i| {
+            let a = i32::from(on_w[i]) + i32::from(on_w[i + 1]) + i32::from(on_w[i + 2]);
+            let b = i32::from(on_o[i]) + i32::from(on_o[i + 1]) + i32::from(on_o[i + 2]);
+            off_w[i..i + 3] == off_o[i..i + 3] && a < b - 1
+        })
+        .collect();
+    let mut grown = occ.clone();
+    let mut near = [0usize; 4];
+    for (band, step) in [4usize, 4, 8, 16].into_iter().enumerate() {
+        grown = dilate(&grown, W as usize, H as usize, step);
+        near[band] = dark.iter().zip(&grown).filter(|(d, g)| **d && **g).count();
+    }
+    eprintln!(
+        "prepass placement — {what}: of {darker} darkened pixels, {} lie within \
+         4 px of the occluder's own footprint, {} within 8, {} within 16, {} \
+         within 32",
+        near[0], near[1], near[2], near[3]
+    );
+    // 32 px at 320x180 is a fifth of the frame's height, and the AO radius on
+    // these fixtures (1.5 m at 2-5 m of camera distance) projects to well under
+    // that. A displaced prepass moves the whole contact shadow bodily, so this
+    // falls off a cliff rather than degrading: mutation-measured by translating
+    // one contributor's depth-pass model matrix by a metre.
+    assert!(
+        near[3] * 5 > darker * 4,
+        "{what}: only {} of {darker} darkened pixels are within 32 px of the \
+         occluder's own screen footprint — the geometry is in the prepass but at \
+         a different place from where the colour pass draws it, which is a \
+         self-shadowing pattern rather than ambient occlusion",
+        near[3]
+    );
+}
+
+/// Chebyshev dilation of a boolean mask by `r`, separably. Used by
+/// [`assert_prepass_reaches`] to ask "is this darkened pixel anywhere near the
+/// thing that is supposed to have darkened it".
+fn dilate(mask: &[bool], w: usize, h: usize, r: usize) -> Vec<bool> {
+    let mut row = vec![false; mask.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let lo = x.saturating_sub(r);
+            let hi = (x + r).min(w - 1);
+            row[y * w + x] = mask[y * w + lo..=y * w + hi].iter().any(|b| *b);
+        }
+    }
+    let mut out = vec![false; mask.len()];
+    for y in 0..h {
+        let lo = y.saturating_sub(r);
+        let hi = (y + r).min(h - 1);
+        for x in 0..w {
+            out[y * w + x] = (lo..=hi).any(|yy| row[yy * w + x]);
+        }
+    }
+    out
 }
 
 /// Terrain — the one that matters most, because a level whose content *is* its
@@ -7303,6 +7377,68 @@ fn water_changed_fraction(a: &[u8], b: &[u8]) -> f64 {
         }
     }
     n as f64 / (W * H) as f64
+}
+
+/// **GOLDEN — the boat reflects itself** (wave VIS1a audit): a scarlet block on
+/// an open sea with screen-space reflections on, from five metres above the
+/// surface.
+///
+/// **This golden exists because the wave said it could not.** VIS1a's ledger
+/// carried "no golden can ever capture SSR — a golden renders one frame from a
+/// fresh renderer", which is true of the **opaque** path and only of it: that one
+/// samples the previous frame's resolve, so `scene_history_valid` holds its march
+/// off on frame 0. **Water's does not.** The water pass runs its own
+/// `color_msaa → scene_hdr` resolve before it draws, so `water_ssr` marches
+/// against *this* frame's colour and depth and needs no history at all — which is
+/// exactly what `water_reflects_the_scene_from_above_and_defers_to_the_sky_at_grazing`
+/// demonstrates by measuring it with a single-frame `render_with`. A feature that
+/// can be rendered in one deterministic frame can be pinned as pixels, and the
+/// wave's signature effect had no pixel pin.
+///
+/// The scene is the sibling arm's, deliberately: that one measures *how much* red
+/// arrives and *where it must not*, and this one fixes what the frame looks like
+/// while it does.
+#[test]
+fn golden_water_ssr() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = ocean_scene(12.0 * 3600.0, 3.0);
+    scene.terrains.clear();
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, 4.5, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(6.0, 3.0, 6.0),
+        [0.95, 0.05, 0.05, 1.0],
+        1,
+    ));
+    scene.mark_dirty();
+    let ssr_on = RenderSettings {
+        ssr: inf_render::SsrSettings {
+            enabled: true,
+            ..inf_render::SsrSettings::default()
+        },
+        ..RenderSettings::default()
+    };
+    let view = look_view(DVec3::new(0.0, 8.0, 24.0), DVec3::new(0.0, 3.0, -2.0));
+    let img = check_golden_with(&gpu, "water_ssr", &scene, &view, ssr_on);
+
+    // The structural half, for the CI legs that do not compare pixels strictly:
+    // the reflection is really in THIS frame, not merely in the committed one.
+    // A ratio against the same frame with SSR off, so it survives a different
+    // rasterizer.
+    let off = render_with(&gpu, &scene, &view, RenderSettings::default());
+    let redness = |i: &[u8]| -> f64 {
+        i.chunks(4)
+            .map(|p| p[0] as f64 - 0.5 * (p[1] as f64 + p[2] as f64))
+            .sum::<f64>()
+            / (W * H) as f64
+    };
+    let (r_off, r_on) = (redness(&off), redness(&img));
+    eprintln!("golden water_ssr: redness {r_off:.3} -> {r_on:.3}");
+    assert!(
+        r_on > r_off + 0.5,
+        "the committed frame carries no reflection (redness {r_off:.3} -> \
+         {r_on:.3}) — the golden would be pinning the sky term alone"
+    );
 }
 
 /// **THE BOAT REFLECTS ITSELF** (wave VIS1a) — the P20.3 routed item, closed,

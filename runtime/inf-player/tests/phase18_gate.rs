@@ -1483,7 +1483,7 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 /// P20.3 also **re-blessed the three P20.1 water scenes**, deliberately: shoreline
 /// wetness is default-on and all three carry terrain, so their ground at and below
 /// the water level is now darker. Every other image is byte-identical.
-const GOLDENS: [&str; 54] = [
+const GOLDENS: [&str; 55] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
@@ -1542,6 +1542,13 @@ const GOLDENS: [&str; 54] = [
     "water_lake_dusk.png",
     "water_ocean_noon.png",
     "water_river.png",
+    // Wave VIS1a audit: the ONE golden the wave's own signature feature can be
+    // pinned by. Opaque SSR samples the previous frame's resolve, so a
+    // single-frame golden can never show it — but water marches against THIS
+    // frame's private resolve and needs no history, so the boat reflecting
+    // itself is a deterministic one-frame image. The wave shipped believing
+    // otherwise; see the VIS1a audit ledger.
+    "water_ssr.png",
     "water_underwater_ocean.png",
     "water_wetness_shore.png",
     "weather_fog_dawn.png",
