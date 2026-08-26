@@ -584,7 +584,9 @@ pub struct RenderSettingsRecord {
     /// Corner darkening, `0` = none.
     pub vignette_intensity: f32,
     pub vignette_smoothness: f32,
-    /// Lateral chromatic aberration, pixels of separation at the corner.
+    /// Lateral chromatic aberration, pixels of **per-channel displacement per
+    /// axis** at the corner — so R and B end up `2n` px apart per axis. See
+    /// `inf_render::FilmSettings::chromatic_aberration`, which carries the unit.
     pub chromatic_aberration: f32,
     pub grain_intensity: f32,
     pub grain_size: f32,

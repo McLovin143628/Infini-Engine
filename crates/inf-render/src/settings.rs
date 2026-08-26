@@ -163,7 +163,17 @@ pub struct FilmSettings {
     pub vignette_intensity: f32,
     /// How gradually the vignette ramps in from the centre (`0` = a hard ring).
     pub vignette_smoothness: f32,
-    /// Lateral chromatic aberration, in **pixels of separation at the corner**.
+    /// Lateral chromatic aberration, in **pixels of per-channel displacement at
+    /// the corner, per axis** — zero at the centre and growing with the radius,
+    /// so the authored number means the same thing at every resolution.
+    ///
+    /// Stated per axis and per channel because it is not the same as the R↔B
+    /// *separation*, which is what an author reading "pixels of separation" would
+    /// expect (VIS1b audit): red is displaced `-n` px in each axis at a corner and
+    /// blue `+n`, so the two are `2n` px apart per axis and `2√2·n ≈ 2.83n` px
+    /// apart along the diagonal. Documented rather than rescaled — rescaling the
+    /// shader would move `lens_trio.png`, and the number's *meaning* is what was
+    /// wrong, not its behaviour. Negative is legal and reverses the fringe.
     pub chromatic_aberration: f32,
     /// Film-grain strength, `0` = none.
     pub grain_intensity: f32,
@@ -2188,6 +2198,15 @@ mod tests {
     /// A million mid-grey pixels and **one** pixel at 1024 must not move the
     /// measured average by anything a bin can see — that property is why this
     /// wave ships no percentile trim, so it is asserted rather than argued.
+    ///
+    /// **And it has to be a sun disc rather than a sun pixel** (VIS1b audit). The
+    /// one-pixel half above does not falsify anything: the top bin stands for 996,
+    /// so an *arithmetic* mean over the same bins moves by `996/10⁶ = 0.000996`
+    /// and slips under the `1e-3` tolerance by 0.4 %. Mutation-measured — swapping
+    /// `exposure_log_average`'s log-space fold for a plain weighted mean leaves
+    /// this arm green. A disc is two hundred pixels, not one, and there the two
+    /// statistics separate by **three orders of magnitude**: the log-average moves
+    /// 0.0003 and the mean moves 0.199, which is the measured average doubling.
     #[test]
     fn the_exposure_average_is_robust_to_a_sun_disc() {
         let mut bins = vec![0u32; EXPOSURE_BINS as usize];
@@ -2204,6 +2223,33 @@ mod tests {
         assert!(
             (with_sun - clean).abs() < 1e-3,
             "one blown pixel moved the average from {clean} to {with_sun}"
+        );
+
+        // THE DISC. Two hundred blown pixels in a million is a solar disc at
+        // 1080p, and it is what separates the log-average from a mean: the mean
+        // would read `clean + 200*996/10^6 = clean + 0.199`, i.e. it would come
+        // back with twice the frame's actual brightness and stop the level down a
+        // whole stop for one bright object.
+        bins[EXPOSURE_BINS as usize - 1] = 200;
+        let with_disc = exposure_log_average(&bins);
+        let mean_would_be = {
+            let mut w = 0.0f64;
+            let mut s = 0.0f64;
+            for (i, &c) in bins.iter().enumerate().skip(1) {
+                w += c as f64;
+                s += c as f64 * exposure_bin_luminance(i as u32) as f64;
+            }
+            s / w
+        };
+        assert!(
+            (with_disc - clean).abs() < 5e-3,
+            "a 200-pixel sun disc moved the log-average from {clean} to {with_disc}"
+        );
+        assert!(
+            (mean_would_be - clean as f64).abs() > 0.1,
+            "the fixture no longer separates a log-average from a mean: the mean \
+             reads {mean_would_be} against the log-average's {with_disc} — this \
+             arm would pass with the robustness deleted"
         );
 
         // Black alone measures nothing, and the target then falls back to the

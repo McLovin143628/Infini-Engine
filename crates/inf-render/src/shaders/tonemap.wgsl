@@ -126,8 +126,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // A lens refracts the short wavelengths harder, so the three channels land on
     // slightly different radii — zero in the middle, worst at the corner, and
     // ALONG the radius rather than in a fixed screen direction. The authored
-    // number is pixels of separation at the corner, so it means the same thing at
-    // every resolution.
+    // number is in PIXELS, so it means the same thing at every resolution.
+    //
+    // Precisely (VIS1b audit): `off` is the per-channel displacement, and at a
+    // corner `dir` is (±1, ±1) and `r` is 1, so red lands `n` px off in each axis
+    // and blue `n` px the other way — R and B are `2n` px apart per axis, `2√2·n`
+    // along the diagonal. `FilmSettings::chromatic_aberration` says so; the field
+    // used to be documented as "pixels of separation", which is 2.83× out.
     var hdr: vec3<f32>;
     if (params.film.z != 0.0) {
         let dir = (in.uv - vec2<f32>(0.5)) * 2.0;

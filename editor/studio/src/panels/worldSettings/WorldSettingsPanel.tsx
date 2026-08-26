@@ -876,7 +876,12 @@ export default function WorldSettingsPanel() {
           </PropertySection>
 
           {/* The lens trio (wave VIS1b) -- all three zero at the default, and
-              zero strength is off by arithmetic rather than by a flag. */}
+              zero strength is off by arithmetic rather than by a flag.
+
+              The aberration's pixels are PER-CHANNEL PER-AXIS displacement at
+              the corner (VIS1b audit), so red and blue end up twice that far
+              apart on each axis. See
+              `inf_render::FilmSettings::chromatic_aberration`. */}
           <PropertySection title="Film">
             <PropertyRow label="Vignette">
               <NumberField
