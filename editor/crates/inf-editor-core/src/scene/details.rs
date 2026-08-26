@@ -52,6 +52,7 @@ fn asset_row(
             asset_kind: asset_kind.into(),
         },
         same: sel.iter().skip(1).all(|g| read(*g) == value),
+        range: None,
     }
 }
 
@@ -103,6 +104,7 @@ pub fn build(doc: &SceneDoc) -> DetailsDto {
                         label: f.label.clone(),
                         value: to_dto(&f.value),
                         same,
+                        range: f.range.map(|r| [r.min, r.max, r.step]),
                     }
                 })
                 .collect(),
@@ -134,6 +136,7 @@ pub fn build(doc: &SceneDoc) -> DetailsDto {
                 asset_kind: "material".into(),
             },
             same,
+            range: None,
         });
     }
 
@@ -239,6 +242,9 @@ pub fn to_dto(v: &PropValue) -> PropValueDto {
                     // Nested struct rows are single-value; multi-select complex
                     // rows render read-only, so `same` is not consulted here.
                     same: true,
+                    // A nested field's name alone does not identify anything the
+                    // range table keys on, so the walker does not offer one.
+                    range: None,
                 })
                 .collect(),
         },

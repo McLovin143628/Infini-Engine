@@ -10,6 +10,8 @@ import { renderControl } from "../DetailsPanel";
 import {
   EnumField,
   ListField,
+  NumberField,
+  RangedNumberField,
   StructField,
   listMove,
   listRemoveAt,
@@ -45,15 +47,33 @@ describe("renderControl new kinds", () => {
     expect(set).toHaveBeenCalledWith({ kind: "list", value: next });
   });
 
+  // Wave VIS1b: a numeric row draws a slider only when Ring 0 handed it a range.
+  // The range is a HINT -- the panel must not invent one, and must not lose one.
+  it("renders a slider only for a field the engine gave a range", () => {
+    const set = vi.fn();
+    const plain = renderControl(num(0.5), set, "Material", "metallic");
+    expect((plain as React.ReactElement).type).toBe(NumberField);
+
+    const ranged = renderControl(num(0.5), set, "Material", "metallic", [0, 1, 0.01]);
+    expect((ranged as React.ReactElement).type).toBe(RangedNumberField);
+    expect((ranged as React.ReactElement<{ range: number[] }>).props.range).toEqual([0, 1, 0.01]);
+    (ranged as React.ReactElement<{ onChange: (v: number) => void }>).props.onChange(0.75);
+    expect(set).toHaveBeenCalledWith({ kind: "number", value: 0.75 });
+
+    // A null range is the absent case, not a range of nulls.
+    const nulled = renderControl(num(0.5), set, "Material", "metallic", null);
+    expect((nulled as React.ReactElement).type).toBe(NumberField);
+  });
+
   it("renders a StructField whose onChange replaces the whole struct", () => {
     const set = vi.fn();
     const struct: PropValueDto = {
       kind: "struct",
-      fields: [{ name: "metallic", label: "Metallic", value: num(0.5), same: true }],
+      fields: [{ name: "metallic", label: "Metallic", value: num(0.5), same: true, range: null }],
     };
     const el = renderControl(struct, set, "Material", "props");
     expect((el as React.ReactElement).type).toBe(StructField);
-    const next = [{ name: "metallic", label: "Metallic", value: num(0.9), same: true }];
+    const next = [{ name: "metallic", label: "Metallic", value: num(0.9), same: true, range: null }];
     (el as React.ReactElement<{ onChange: (f: unknown) => void }>).props.onChange(next);
     expect(set).toHaveBeenCalledWith({ kind: "struct", fields: next });
   });

@@ -51,6 +51,86 @@ pub enum PropValue {
     EntityRef(Option<Uuid>),
 }
 
+/// A numeric field's **UI range** — the hint that turns a bare number box into a
+/// slider (wave VIS1b).
+///
+/// A *hint*, not a constraint: [`apply_value`] does not clamp to it, because a
+/// number an author deliberately typed is not the widget's business. What the
+/// range does is give the drag a scale, which is the whole difference between
+/// "roughness" as a step-1 spinner (three clicks from 0 to useless) and as a
+/// slider.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PropRange {
+    pub min: f64,
+    pub max: f64,
+    pub step: f64,
+}
+
+/// The per-field range table, keyed by `(type_path, field)`.
+///
+/// It lives in Ring 0 rather than in the panel for the reason
+/// `ResolvedSky::cloud_time_s` does: the same four `min=0 max=1 step=0.01`
+/// triples are currently retyped by hand in `MaterialInstanceEditor`,
+/// `AudioMixerPanel`, `WorldSettingsPanel` and `BlendSpacePanel`, and a number
+/// restated in four places is four chances to disagree.
+///
+/// Deliberately **short**. Every entry has to be a fact about the field's units,
+/// and a table of guesses would be worse than no table — the reflection grid's
+/// step-1 spinner is at least honest about knowing nothing.
+const PROP_RANGES: &[(&str, &str, PropRange)] = &[
+    // `Material`, the four numeric fields it has. Metallic/roughness/alpha are
+    // `[0,1]` by the PBR model's own definition; the intensity's ceiling is a
+    // *display* range rather than a limit — see `Material::emissive_intensity`.
+    (
+        MATERIAL_TYPE_PATH,
+        "metallic",
+        PropRange {
+            min: 0.0,
+            max: 1.0,
+            step: 0.01,
+        },
+    ),
+    (
+        MATERIAL_TYPE_PATH,
+        "roughness",
+        PropRange {
+            min: 0.0,
+            max: 1.0,
+            step: 0.01,
+        },
+    ),
+    (
+        MATERIAL_TYPE_PATH,
+        "alpha_cutoff",
+        PropRange {
+            min: 0.0,
+            max: 1.0,
+            step: 0.01,
+        },
+    ),
+    (
+        MATERIAL_TYPE_PATH,
+        "emissive_intensity",
+        PropRange {
+            min: 0.0,
+            max: 64.0,
+            step: 0.1,
+        },
+    ),
+];
+
+/// `Material`'s reflect type path, pinned against the type itself by
+/// `the_range_table_names_types_that_exist`.
+const MATERIAL_TYPE_PATH: &str = "inf_ecs::components::Material";
+
+/// The UI range for `type_path`'s `field`, if the table names one.
+pub fn prop_range(type_path: &str, field: &str) -> Option<PropRange> {
+    PROP_RANGES
+        .iter()
+        .find(|(t, f, _)| *t == type_path && *f == field)
+        .map(|(_, _, r)| *r)
+}
+
 /// One editable field of a component.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PropField {
@@ -59,6 +139,10 @@ pub struct PropField {
     /// Human label, e.g. `Base Color`.
     pub label: String,
     pub value: PropValue,
+    /// The widget's numeric range, when the field is one the engine knows the
+    /// units of (wave VIS1b). `None` ⇒ a plain number box, which is every field
+    /// this tree has ever drawn.
+    pub range: Option<PropRange>,
 }
 
 /// One component's editable fields.
@@ -88,7 +172,7 @@ pub fn read_entity(
         if comp.reflect_type_path() == <Name as TypePath>::type_path() {
             continue;
         }
-        if let Some(fields) = read_struct_fields(comp.as_partial_reflect(), 0) {
+        if let Some(fields) = read_struct_fields(comp.as_partial_reflect(), 0, info.type_path) {
             out.push(ComponentProps {
                 type_path: info.type_path.to_string(),
                 display: info.display.to_string(),
@@ -99,7 +183,14 @@ pub fn read_entity(
     out
 }
 
-fn read_struct_fields(pr: &dyn PartialReflect, depth: usize) -> Option<Vec<PropField>> {
+/// `owner` is the **component's** type path, so the range table can be consulted;
+/// it is `""` for the nested levels, where a field name alone would not identify
+/// anything.
+fn read_struct_fields(
+    pr: &dyn PartialReflect,
+    depth: usize,
+    owner: &str,
+) -> Option<Vec<PropField>> {
     let ReflectRef::Struct(s) = pr.reflect_ref() else {
         return None;
     };
@@ -110,6 +201,7 @@ fn read_struct_fields(pr: &dyn PartialReflect, depth: usize) -> Option<Vec<PropF
         if let Some(value) = read_value(field, depth) {
             fields.push(PropField {
                 label: prettify(&name),
+                range: prop_range(owner, &name),
                 name,
                 value,
             });
@@ -180,7 +272,11 @@ fn read_value(pr: &dyn PartialReflect, depth: usize) -> Option<PropValue> {
             if depth >= MAX_STRUCT_DEPTH {
                 return None;
             }
-            let fields = read_struct_fields(pr, depth + 1)?;
+            // No owner below the top level: a nested struct's field name alone
+            // does not identify anything the range table could key on, and
+            // `PropValue::Struct` carries `(name, value)` pairs rather than
+            // `PropField`s anyway.
+            let fields = read_struct_fields(pr, depth + 1, "")?;
             let pairs = fields.into_iter().map(|f| (f.name, f.value)).collect();
             return Some(PropValue::Struct(pairs));
         }
@@ -318,11 +414,31 @@ fn apply_value(
 ) -> bool {
     match value {
         PropValue::Number(n) => {
+            // **The finite door** (wave VIS1b), and it is here rather than in the
+            // React number field because this is the one place EVERY numeric write
+            // passes through: the Details panel, `tuning::apply_tune`'s live
+            // preview, the sequencer's scrub, and `edit_apply_material`. The
+            // frontend's `Number.isFinite` guard covers exactly one of the four,
+            // and it cannot cover the case that actually reaches the GPU anyway —
+            // `1e300` is a perfectly finite `f64` and is `inf` the instant it is
+            // cast to `f32`, after which `Material::emissive_linear`'s
+            // `0.0 * inf` is a NaN in the instance buffer.
+            //
+            // A refusal, not a failure: the write does not apply, the undo step is
+            // not recorded, and the panel re-reads the value it already had. That
+            // is the P21 ruling — an erroring edit takes its whole handler down.
+            if !n.is_finite() {
+                return false;
+            }
             if let Some(x) = field.try_downcast_mut::<f64>() {
                 *x = *n;
                 true
             } else if let Some(x) = field.try_downcast_mut::<f32>() {
-                *x = *n as f32;
+                let v = *n as f32;
+                if !v.is_finite() {
+                    return false;
+                }
+                *x = v;
                 true
             } else if let Some(x) = field.try_downcast_mut::<i32>() {
                 *x = n.round() as i32;
@@ -743,6 +859,105 @@ mod tests {
         let (_w, reg, _e) = world_with_spline();
         let d = default_list_element(&reg, <Spline as TypePath>::type_path(), "points").unwrap();
         assert_eq!(d, PropValue::Vec3([0.0, 0.0, 0.0]));
+    }
+
+    /// **The range table names types and fields that exist** (wave VIS1b).
+    ///
+    /// A table keyed by strings is a table that silently stops applying the day a
+    /// field is renamed, and the symptom is a widget quietly reverting to a
+    /// step-1 spinner -- nobody files that bug. So the key is checked against the
+    /// reflected type rather than trusted.
+    #[test]
+    fn the_range_table_names_types_that_exist() {
+        use crate::components::Material;
+        assert_eq!(MATERIAL_TYPE_PATH, <Material as TypePath>::type_path());
+
+        let mut w = EcsWorld::new();
+        let e = w.spawn("Lamp", None);
+        w.world_mut().entity_mut(e).insert(Material::default());
+        let reg = ComponentRegistry::new();
+        let props = read_entity(w.world(), &reg, e);
+        let mat = props.iter().find(|p| p.display == "Material").unwrap();
+
+        for (tp, field, want) in PROP_RANGES {
+            assert_eq!(*tp, MATERIAL_TYPE_PATH);
+            let row = mat
+                .fields
+                .iter()
+                .find(|f| f.name == *field)
+                .unwrap_or_else(|| {
+                    panic!("the range table names `{field}`, which Material has not")
+                });
+            assert!(
+                matches!(row.value, PropValue::Number(_)),
+                "`{field}` carries a range and is not a number"
+            );
+            assert_eq!(row.range.as_ref(), Some(want));
+            assert!(
+                want.min < want.max && want.step > 0.0,
+                "`{field}` range is empty"
+            );
+        }
+        // And a field the table does NOT name still draws as a bare number.
+        let colour = mat.fields.iter().find(|f| f.name == "emissive").unwrap();
+        assert_eq!(colour.range, None);
+    }
+
+    /// **A write that is not finite is refused at the door** (wave VIS1b).
+    ///
+    /// The door is here rather than in the React number field because this is the
+    /// one place all four writers pass through -- Details, the live tuner, the
+    /// sequencer's scrub and apply-material -- and because the case that actually
+    /// reaches the GPU is invisible to a `Number.isFinite` guard: `1e300` is a
+    /// perfectly finite `f64` and is `inf` the moment it is cast to `f32`, after
+    /// which `Material::emissive_linear`'s `0.0 * inf` is a NaN packed straight
+    /// into the instance buffer.
+    #[test]
+    fn a_non_finite_number_is_refused_and_leaves_the_value_alone() {
+        use crate::components::Material;
+        let mut w = EcsWorld::new();
+        let e = w.spawn("Lamp", None);
+        w.world_mut().entity_mut(e).insert(Material {
+            emissive_intensity: 9.0,
+            ..Material::default()
+        });
+        let reg = ComponentRegistry::new();
+        let tp = <Material as TypePath>::type_path();
+
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e300, -1e300] {
+            assert!(
+                !write_field(
+                    w.world_mut(),
+                    &reg,
+                    e,
+                    tp,
+                    "emissive_intensity",
+                    &PropValue::Number(bad)
+                ),
+                "{bad} was accepted"
+            );
+            let m = w.world().entity(e).get::<Material>().unwrap();
+            assert_eq!(m.emissive_intensity, 9.0, "{bad} moved the value");
+            assert!(m.emissive_linear().iter().all(|c| c.is_finite()));
+        }
+        // A large but representable value still gets through: the door refuses
+        // non-finite numbers, not ambitious ones.
+        assert!(write_field(
+            w.world_mut(),
+            &reg,
+            e,
+            tp,
+            "emissive_intensity",
+            &PropValue::Number(1.0e30)
+        ));
+        assert_eq!(
+            w.world()
+                .entity(e)
+                .get::<Material>()
+                .unwrap()
+                .emissive_intensity,
+            1.0e30
+        );
     }
 
     #[test]

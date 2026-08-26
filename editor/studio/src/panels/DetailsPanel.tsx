@@ -18,6 +18,7 @@ import {
   NumberField,
   PropertyRow,
   PropertySection,
+  RangedNumberField,
   StructField,
   TextField,
   Vec3Field,
@@ -154,7 +155,7 @@ export default function DetailsPanel() {
                     changed
                     onReset={() => void resetProperty(comp.type_path, field.name)}
                   >
-                    {renderControl(field.value, set, comp.type_path, field.name)}
+                    {renderControl(field.value, set, comp.type_path, field.name, field.range)}
                   </PropertyRow>
                 );
               })}
@@ -213,12 +214,23 @@ export function renderControl(
   set: (v: PropValueDto) => void,
   typePath: string,
   path: string,
+  range?: readonly [number, number, number] | null,
 ): React.ReactNode {
   switch (value.kind) {
     case "bool":
       return <CheckboxField value={value.value} onChange={(v) => set({ kind: "bool", value: v })} />;
     case "number":
-      return (
+      // The range is a per-field hint from Ring 0 (`inf_ecs::props::prop_range`),
+      // absent for every field the engine does not know the units of — which is
+      // still nearly all of them, deliberately. A table of guesses would be worse
+      // than the honest step-1 spinner.
+      return range ? (
+        <RangedNumberField
+          value={value.value}
+          range={range}
+          onChange={(v) => set({ kind: "number", value: v })}
+        />
+      ) : (
         <NumberField value={value.value} onChange={(v) => set({ kind: "number", value: v })} />
       );
     case "text":

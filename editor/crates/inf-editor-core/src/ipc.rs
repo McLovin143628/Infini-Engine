@@ -256,6 +256,14 @@ pub struct PropFieldDto {
     pub value: PropValueDto,
     /// Whether every selected object shares this value (multi-edit "—").
     pub same: bool,
+    /// The numeric widget's `[min, max, step]`, when the engine knows the
+    /// field's units (wave VIS1b, `inf_ecs::props::prop_range`). `None` ⇒ the
+    /// plain number box every reflected row has always drawn.
+    ///
+    /// A **hint**, carried on the same terms as `AssetRef`'s `asset_kind`: the
+    /// panel must not need a second source of truth about what a row means, and
+    /// the write door does not clamp to it.
+    pub range: Option<[f64; 3]>,
 }
 
 /// One component section in the Details grid.

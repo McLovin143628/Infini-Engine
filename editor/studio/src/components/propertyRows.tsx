@@ -123,6 +123,54 @@ export function NumberField({
   );
 }
 
+/**
+ * A number row with a **slider** beside it (wave VIS1b), for the fields the
+ * engine knows the units of.
+ *
+ * The range comes from `inf_ecs::props::prop_range` through `PropFieldDto.range`
+ * — it is not typed here, and that is the point: the same `0 / 1 / 0.01` triple
+ * was already retyped by hand in four panels, and a number restated in four
+ * places is four chances to disagree.
+ *
+ * The **slider** clamps to the range because a slider is a range; the **number
+ * box does not**, because a range is a display hint and a value an author
+ * deliberately typed is not the widget's business. (An emissive intensity of 200
+ * is a legal thing to want; the slider simply cannot reach it.) The write door
+ * that does refuse is `inf_ecs::props::apply_value`, and it refuses exactly one
+ * thing: a value that is not finite.
+ */
+export function RangedNumberField({
+  value,
+  onChange,
+  range,
+  className,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  range: readonly [number, number, number];
+  className?: string;
+}) {
+  const [min, max, step] = range;
+  const shown = Number.isFinite(value) ? value : min;
+  return (
+    <div className={cn("flex w-full min-w-0 items-center gap-1.5", className)}>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={Math.min(Math.max(shown, min), max)}
+        onChange={(e) => {
+          const n = Number(e.target.value);
+          if (Number.isFinite(n)) onChange(n);
+        }}
+        className="h-1 min-w-0 flex-1 accent-(--ink-accent)"
+      />
+      <NumberField value={value} onChange={onChange} step={step} className="w-14 shrink-0" />
+    </div>
+  );
+}
+
 const AXIS_TINTS = ["text-(--ink-error)", "text-(--ink-success)", "text-(--ink-info)"] as const;
 
 export function Vec3Field({
