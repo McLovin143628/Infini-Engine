@@ -15,7 +15,7 @@
 //! touches the encoder. No histogram, no dispatch, no barrier: the multiplier is
 //! [`RenderSettings::exposure`](crate::RenderSettings::exposure) with the
 //! compensation folded in, which at the default compensation of zero is that
-//! scalar **bit for bit**. That is what keeps all fifty-five goldens byte
+//! scalar **bit for bit**. That is what keeps every committed golden byte
 //! identical across this wave.
 //!
 //! And it writes only when the value has *changed*, so a manual frame after the
@@ -40,9 +40,17 @@ const SAMPLE_STRIDE: u32 = 2;
 ///
 /// Not a smoothing constant — a **discontinuity guard**. `cloud_time_s` is the
 /// document's clock, and an author scrubbing time of day or a level rolling over
-/// a year hands this node a jump of hours. Ten seconds is far above any real
-/// frame at any clock rate (a level running at 60× real time advances one second
-/// per frame at 60 fps) and far below a scrub.
+/// a year hands this node a jump of hours; adapting over that would snap the eye
+/// on the frame the slider moved.
+///
+/// **What it costs, stated rather than hidden.** Ten seconds of clock per frame
+/// is `TimeOfDay::rate == 600` at 60 fps — a whole day in 2.4 real minutes. Above
+/// that rate the guard, not `adaptation_speed`, governs how fast the eye moves,
+/// and the authored number stops meaning what it says. Every plausible game clock
+/// is far below it (`rate == 60` is a day in 24 minutes) and the wave's own
+/// PIE-vs-shipping arm, which runs at `rate == 30 000` to make the sun set inside
+/// twenty-four frames, is *above* it — deliberately, and it is the only thing in
+/// the tree that is.
 const MAX_STEP_S: f64 = 10.0;
 
 #[repr(C)]

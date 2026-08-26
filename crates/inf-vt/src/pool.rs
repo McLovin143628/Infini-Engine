@@ -160,7 +160,7 @@ pub struct VtPoolConfig {
     ///
     /// `false` by default, and that is a golden constraint rather than a
     /// preference: turning it on changes the pixels of every textured scene, and
-    /// the 54 committed goldens are frozen. It is carried here — in the pool
+    /// the committed goldens are frozen. It is carried here — in the pool
     /// config the residency already receives — rather than in a shader define,
     /// because a settings-dependent shader source means a pipeline rebuild the
     /// moment the setting moves; as a flag bit in the indirection table it is a

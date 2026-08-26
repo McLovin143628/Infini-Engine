@@ -28,7 +28,7 @@
 //! The honest bound, and it is recorded in
 //! `docs/memos/wave-t-textures-disposition.md` rather than only here: the
 //! textured branch of the terrain fragment shader has **not been executed on a
-//! GPU**. What *is* executed is the untextured default, by all 54 goldens — which
+//! GPU**. What *is* executed is the untextured default, by every committed golden — which
 //! is what makes "the goldens did not move" a measurement of the no-op and not of
 //! the feature.
 

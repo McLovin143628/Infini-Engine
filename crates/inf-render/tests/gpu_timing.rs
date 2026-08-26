@@ -1,7 +1,7 @@
 //! **The per-pass GPU clock, proven on a device** (island wave I4).
 //!
 //! `crates/inf-render/src/timing.rs` is the instrument's renderer half; this file
-//! is what says it works. Three claims, and the third is the one the 54 frozen
+//! is what says it works. Three claims, and the third is the one the frozen
 //! goldens depend on:
 //!
 //! 1. every graph node the renderer built appears in the report, in run order,

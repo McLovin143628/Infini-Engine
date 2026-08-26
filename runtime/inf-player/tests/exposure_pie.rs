@@ -48,12 +48,19 @@ const CLOCK_RATE: f64 = 30_000.0;
 
 /// The level's authored adaptation speed, **stops per second of LEVEL clock**.
 ///
-/// It reads absurdly small and is not: this level's clock runs thirty thousand
-/// times real time, so 4e-4 stops per clock-second is twelve stops per *real*
-/// second — a fast eye, seen through a fast clock. That the two are the same
-/// number is the whole point of stepping the adaptation by the document's clock,
-/// and it is the sentence a level designer needs to have read before typing into
-/// the Adaptation row.
+/// It reads absurdly small and is not: `adaptation_speed` is stops per second of
+/// the *document's* clock, and this level's clock runs thirty thousand times real
+/// time. That the two are the same number is the whole point of stepping the eye
+/// by the document, and it is the sentence a designer has to have read before
+/// typing into the Adaptation row.
+///
+/// **And this level is past the discontinuity guard**, which is why the arithmetic
+/// below is the guard's rather than the rate's. `passes::exposure::MAX_STEP_S`
+/// clamps one frame's clock delta to **10 s**, so this trace adapts at
+/// `4e-4 × 10 = 0.004` stops a frame — 0.096 over twenty-four, which is the
+/// **0.0920** span the arm measures. A level at `rate == 30 000` is a fixture, not
+/// a game; the guard's own doc names the ceiling (`rate == 600` at 60 fps) and
+/// what happens above it.
 const ADAPTATION_STOPS_PER_CLOCK_S: f32 = 4.0e-4;
 
 fn gpu_or_skip(what: &str) -> Option<GpuContext> {

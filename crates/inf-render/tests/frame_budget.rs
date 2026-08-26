@@ -1057,3 +1057,211 @@ fn deform_window_cost() {
         info.name
     );
 }
+
+/// **What the wave-VIS1b post chain costs**, read off the GPU clock rather than a
+/// stopwatch.
+///
+/// The first version of this test measured wall time around sixty frames, the way
+/// [`gi_v2_cost_per_tier`] does, and it **could not resolve these passes**: on a
+/// 0.114 ms frame it priced the lens trio — two extra texture fetches and some
+/// arithmetic inside `tonemap` — at +0.093 ms, the same as the entire bloom mip
+/// chain, which cannot be true. A whole-frame stopwatch on a frame that short is
+/// measuring submit overhead.
+///
+/// So this reads [`EngineRenderer::gpu_timings`] and reports the **named pass
+/// rows**, which is the same instrument the island table is built from and the
+/// only one with the resolution these numbers need. On a device without timestamp
+/// queries it reports the refusal rather than printing zeros as measurements, and
+/// still runs the anti-vacuity half.
+///
+/// Reported, never asserted — except the anti-vacuity: turning a feature on must
+/// change the frame, or the prices above it are the price of nothing.
+#[test]
+fn vis1b_post_cost() {
+    use inf_render::{
+        BloomSettings, ExposureMode, ExposureSettings, FilmSettings, FlareSettings, RenderSettings,
+    };
+
+    let Ok(gpu) = GpuContext::headless() else {
+        eprintln!("SKIP vis1b_post_cost: no GPU adapter");
+        return;
+    };
+    let info = gpu.adapter.get_info();
+    let software = info.device_type == wgpu::DeviceType::Cpu
+        || info.name.to_ascii_lowercase().contains("paravirtual");
+
+    // The cube field **plus one very bright thing**. Without it the bloom
+    // prefilter and the flare's bright pass both key on a frame whose brightest
+    // pixel is under 1.0, produce black, and get priced at the cost of producing
+    // nothing — and the anti-vacuity check at the bottom would be certifying a
+    // pass that ran and did nothing.
+    let mut scene = cube_field(11);
+    let mut lamp = MeshInstance::lit(
+        DVec3::new(0.0, 3.0, 0.0),
+        Quat::IDENTITY,
+        Vec3::splat(1.4),
+        [0.02, 0.02, 0.02, 1.0],
+        900_001,
+    );
+    lamp.emissive = [30.0, 24.0, 12.0];
+    scene.instances.push(lamp);
+    scene.mark_dirty();
+    let view = overlook_view();
+    let target = HeadlessTarget::new(&gpu, W, H);
+
+    let bloom = BloomSettings {
+        enabled: true,
+        ..BloomSettings::default()
+    };
+    let rows: [(&str, RenderSettings); 5] = [
+        (
+            "auto exposure",
+            RenderSettings {
+                exposure_control: ExposureSettings {
+                    mode: ExposureMode::Auto,
+                    ..ExposureSettings::default()
+                },
+                ..RenderSettings::default()
+            },
+        ),
+        (
+            "bloom",
+            RenderSettings {
+                bloom,
+                ..RenderSettings::default()
+            },
+        ),
+        (
+            "bloom + Karis",
+            RenderSettings {
+                bloom: BloomSettings {
+                    karis: true,
+                    ..bloom
+                },
+                ..RenderSettings::default()
+            },
+        ),
+        (
+            "sun glare",
+            RenderSettings {
+                flare: FlareSettings {
+                    enabled: true,
+                    intensity: 0.35,
+                    ghost_count: 4,
+                    halo: 0.3,
+                    streak: 0.25,
+                },
+                ..RenderSettings::default()
+            },
+        ),
+        (
+            "the lens trio",
+            RenderSettings {
+                film: FilmSettings {
+                    vignette_intensity: 0.35,
+                    vignette_smoothness: 0.4,
+                    chromatic_aberration: 2.0,
+                    grain_intensity: 0.08,
+                    grain_size: 1.5,
+                },
+                ..RenderSettings::default()
+            },
+        ),
+    ];
+
+    // The per-pass GPU cost of `settings`, for the four passes this wave touches.
+    let timed = |settings: RenderSettings| -> Option<Vec<(String, f64)>> {
+        let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        renderer.set_settings(settings);
+        if !renderer.set_gpu_timing(&gpu, true) {
+            return None;
+        }
+        // Warm: the first frames build pipelines, and a pipeline build inside a
+        // timed segment is the mistake the VIS1a control made at whole-frame
+        // scale.
+        for _ in 0..8 {
+            renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            let _ = renderer.gpu_timings(&gpu);
+        }
+        // MIN over a handful of frames — the minimum is the one least disturbed
+        // by whatever else the machine was doing, which is how the island
+        // instrument reads its own rounds.
+        let mut best: Option<Vec<(String, f64)>> = None;
+        for _ in 0..8 {
+            renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            let Some(t) = renderer.gpu_timings(&gpu) else {
+                continue;
+            };
+            let want = ["exposure", "bloom", "flare", "tonemap"];
+            let row: Vec<(String, f64)> = t
+                .passes
+                .iter()
+                .filter(|p| want.contains(&p.name))
+                .map(|p| (p.name.to_string(), p.ms))
+                .collect();
+            best = Some(match best {
+                None => row,
+                Some(prev) => prev
+                    .into_iter()
+                    .zip(row)
+                    .map(|(a, b)| (a.0, a.1.min(b.1)))
+                    .collect(),
+            });
+        }
+        best
+    };
+
+    match timed(RenderSettings::default()) {
+        None => eprintln!(
+            "vis1b_post_cost: {} reports no timestamp queries, so the costs are \
+             NOT measured here",
+            info.name
+        ),
+        Some(base) => {
+            let show = |label: &str, r: &[(String, f64)]| {
+                let joined: Vec<String> = r
+                    .iter()
+                    .zip(base.iter())
+                    .map(|((n, ms), (_, b))| format!("{n} {ms:.4} (+{:.4})", ms - b))
+                    .collect();
+                eprintln!("vis1b {label}: {}", joined.join(", "));
+            };
+            show("OFF (the control)", &base);
+            for (label, settings) in rows {
+                if let Some(r) = timed(settings) {
+                    show(label, &r);
+                }
+            }
+        }
+    }
+
+    if software {
+        return;
+    }
+    // Anti-vacuity: every one of them must actually change the frame.
+    let plain = frame(&gpu, &scene, &view, RenderSettings::default(), &target);
+    for (label, settings) in rows {
+        assert_ne!(
+            plain,
+            frame(&gpu, &scene, &view, settings, &target),
+            "{label} changed no pixel"
+        );
+    }
+}
+
+/// One frame's pixels under `settings` — the anti-vacuity half of
+/// [`vis1b_post_cost`].
+fn frame(
+    gpu: &GpuContext,
+    scene: &RenderScene,
+    view: &RenderView,
+    settings: inf_render::RenderSettings,
+    target: &HeadlessTarget,
+) -> Vec<u8> {
+    let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
+    renderer.set_settings(settings);
+    renderer.render(gpu, scene, view, &target.view, (W, H));
+    target.read_rgba(gpu).expect("readback")
+}

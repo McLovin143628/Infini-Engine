@@ -1584,6 +1584,35 @@ fn the_island_at_shipping_resolution() {
         },
     );
     lit_ssr.vsm.enabled = true;
+    // **THE WHOLE VIS STACK** (wave VIS1b): the LIT+SSR row plus auto exposure,
+    // the sun glare and the lens trio — every one of them a schema-v26 field of
+    // the render record, so this is what a level that ticks all of them in World
+    // Settings produces rather than a hand-poked `RenderSettings`.
+    //
+    // The three costs are separable by construction and the ledger separates
+    // them: the exposure histogram is its own `exposure` graph row, the glare is
+    // its own `flare` row, and the lens trio has none because it is arithmetic
+    // and two texture fetches inside `tonemap`.
+    let (mut lit_vis, _) = shipped_settings(
+        &gpu,
+        inf_scene::RenderSettingsRecord {
+            ssr_enabled: true,
+            exposure_mode: 1,
+            bloom_karis: true,
+            flare_enabled: true,
+            flare_intensity: 0.35,
+            flare_ghost_count: 4,
+            flare_halo: 0.3,
+            flare_streak: 0.25,
+            vignette_intensity: 0.35,
+            vignette_smoothness: 0.4,
+            chromatic_aberration: 2.0,
+            grain_intensity: 0.08,
+            grain_size: 1.5,
+            ..lit_record
+        },
+    );
+    lit_vis.vsm.enabled = true;
     // **THE ALTERNATIVE, PRICED** (island wave I7b) — **and the control island
     // wave VSM2 beat without taking it.**
     //
@@ -1628,6 +1657,7 @@ fn the_island_at_shipping_resolution() {
         ("SHIPPED", shipped),
         ("LIT", lit),
         ("LIT+SSR", lit_ssr),
+        ("LIT+VIS", lit_vis),
         ("LIT-COARSE-CLIPMAP", lit_coarse),
     ] {
         let m = measure(&gpu, &mut fx, 1920, 1080, settings, &path);

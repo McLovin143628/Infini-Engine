@@ -2341,7 +2341,7 @@ fn cs_surface(@builtin(global_invocation_id) gid: vec3<u32>) {{
 /// they falsify opposite mistakes:
 ///
 /// 1. **inert** — with the detail lane zero, `vt_surface` returns exactly what
-///    it returned before Wave T. That is what makes "the 54 goldens did not
+///    it returned before Wave T. That is what makes "the goldens did not
 ///    move" a measurement rather than a hope, and it is asserted as equality,
 ///    not as a tolerance.
 /// 2. **engaged** — with the lane set, the tangent-space normal moves in the

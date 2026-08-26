@@ -20,7 +20,7 @@
 //!   device ([`GpuContext::headless_ray_query`](crate::GpuContext::headless_ray_query)),
 //!   which is the only place in the tree that signs the token, and the shipped
 //!   context is exactly the one it was before this batch.
-//! * The 54 committed goldens are byte-frozen across the batch, which is the
+//! * The committed goldens are byte-frozen across the batch, which is the
 //!   measurement that says the shipped frame did not move.
 //!
 //! # The platform bound, stated rather than discovered

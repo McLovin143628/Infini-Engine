@@ -167,18 +167,25 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // visibility rides on the whole term rather than on the tap, because a
     // veiling glare is light scattered inside the lens by the SOURCE — put the
     // sun behind a building and the glare goes with it.
-    let vis = flare_sun_visibility(sun.xy);
-    if (sun.z > 0.5 && vis > 0.001 && fl.params.x > 0.0) {
-        let step = (sun.xy - in.uv) * (FLARE_VEIL_REACH / f32(FLARE_VEIL_TAPS));
-        var pos = in.uv;
-        var decay = 1.0;
-        var veil = vec3<f32>(0.0);
-        for (var i = 0; i < FLARE_VEIL_TAPS; i = i + 1) {
-            pos = pos + step;
-            veil = veil + flare_bright(pos) * decay;
-            decay = decay * FLARE_VEIL_DECAY;
+    //
+    // The visibility is measured INSIDE the branch: it costs nine depth taps and
+    // a level with the ghosts on and the glare off should not pay for them.
+    // Legal in non-uniform control flow because `flare_sun_visibility` takes no
+    // derivatives — every fetch is a `textureLoad`.
+    if (sun.z > 0.5 && fl.params.x > 0.0) {
+        let vis = flare_sun_visibility(sun.xy);
+        if (vis > 0.001) {
+            let step = (sun.xy - in.uv) * (FLARE_VEIL_REACH / f32(FLARE_VEIL_TAPS));
+            var pos = in.uv;
+            var decay = 1.0;
+            var veil = vec3<f32>(0.0);
+            for (var i = 0; i < FLARE_VEIL_TAPS; i = i + 1) {
+                pos = pos + step;
+                veil = veil + flare_bright(pos) * decay;
+                decay = decay * FLARE_VEIL_DECAY;
+            }
+            acc = acc + veil * (fl.params.x * vis / f32(FLARE_VEIL_TAPS));
         }
-        acc = acc + veil * (fl.params.x * vis / f32(FLARE_VEIL_TAPS));
     }
 
     // ── the ghost chain ──

@@ -227,7 +227,7 @@ mod tests {
         Vec2::new(1920.0, 1080.0)
     }
 
-    /// **A closed menu draws NOTHING.** This is what the 54 frozen goldens rest
+    /// **A closed menu draws NOTHING.** This is what the frozen goldens rest
     /// on: the UI node is a no-op on an empty list, and the list is empty on
     /// every frame nobody opened a menu on — which is every golden scene.
     #[test]

@@ -203,7 +203,7 @@ impl SsrQuality {
 /// own clause in [`RenderSettings::needs_depth_prepass`].
 ///
 /// **OFF by default**, and off is byte-identical: the lit shaders' SSR branch is
-/// `params2.y > 0.5` and stays untaken, so all 54 goldens run the instruction
+/// `params2.y > 0.5` and stays untaken, so every committed golden runs the instruction
 /// stream they always did.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SsrSettings {
@@ -569,7 +569,7 @@ pub struct VgeomSettings {
     /// [`RenderSettings::taa`](crate::RenderSettings::taa) is itself off by
     /// default for headless determinism. A default that turned one on without
     /// the other would ship a visibly worse frame; a default that turned both on
-    /// would re-bless fifty-four byte-frozen goldens. So it is a setting, the
+    /// would re-bless every byte-frozen golden. So it is a setting, the
     /// forward path stays the shipped default, and P28.3 revisits it when the
     /// unified streamer makes the cost side of the ledger measurable.
     ///
@@ -805,7 +805,7 @@ pub struct VirtualTextureSettings {
     /// paid only where it shows.
     ///
     /// **Off by default, and that is a law rather than a taste.** It moves
-    /// pixels in every textured scene, and the 54 committed goldens are frozen
+    /// pixels in every textured scene, and the committed goldens are frozen
     /// (`phase26_gate` / `phase27_gate` / `phase28_gate` each assert the set's
     /// digest independently). Turning it on is a blessed decision with a
     /// measurement behind it, not a default flip.

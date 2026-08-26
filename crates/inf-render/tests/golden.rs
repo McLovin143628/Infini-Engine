@@ -165,7 +165,7 @@ fn check_golden_with(
 
 /// **THE UI NODE MOVES NO PIXEL UNTIL SOMETHING IS IN IT** (island wave I5).
 ///
-/// This is what the 54 frozen goldens rest on. A new node in the graph is a new
+/// This is what the frozen goldens rest on. A new node in the graph is a new
 /// chance for a frame to change, so the claim is measured on both sides rather
 /// than argued: with an empty [`inf_ui::UiDrawList`] — which is every golden
 /// scene, and the default — the frame is **byte-identical** to the same frame,

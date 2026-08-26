@@ -16,7 +16,7 @@
 //!
 //! Everything. `RenderScene::ui` is empty on every frame nobody opened a menu
 //! on, and an empty list returns before the encoder is touched — which is what
-//! the 54 frozen goldens rest on, and it is asserted rather than assumed (see
+//! the frozen goldens rest on, and it is asserted rather than assumed (see
 //! `the_ui_node_is_a_no_op_on_an_empty_list`).
 
 use inf_render_2d::{builtin_font_rgba8, TextureHandle, BUILTIN_FONT_TEXTURE, WHITE_TEXTURE};

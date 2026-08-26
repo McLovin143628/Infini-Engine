@@ -1556,7 +1556,7 @@ impl EngineRenderer {
     /// Enable/disable the **per-pass GPU clock** (island wave I4). **Off by
     /// default**, on the same terms as the two audits either side of it: with it
     /// off the frame records byte-identical commands, which is what lets an
-    /// instrument share a renderer with 54 byte-frozen goldens.
+    /// instrument share a renderer with a set of byte-frozen goldens.
     ///
     /// Returns whether timing is live afterwards — `false` when asked for on a
     /// device without `TIMESTAMP_QUERY`(`_INSIDE_ENCODERS`), which is every

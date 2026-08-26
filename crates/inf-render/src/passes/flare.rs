@@ -37,6 +37,11 @@ use crate::renderer::{FrameData, HDR_FORMAT};
 /// display's white, and after the exposure multiply that is exactly `> 1.0`.
 const FLARE_THRESHOLD: f32 = 1.0;
 
+/// The most ghosts the chain will draw. **MIRROR: `FLARE_MAX_GHOSTS` in
+/// `flare.wgsl`**, and both halves are load-bearing — see the clamp's comment in
+/// `run`.
+const MAX_GHOSTS: u32 = 8;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct FlareUniform {
@@ -227,7 +232,12 @@ impl RenderNode for FlareNode {
             bytemuck::bytes_of(&FlareUniform {
                 params: [
                     sane(f.intensity),
-                    f.ghost_count as f32,
+                    // Clamped HERE as well as in the shader. `ghost_count` is a
+                    // `u32` off a level file, and `i32(4.29e9)` is an
+                    // out-of-range float-to-int conversion — which WGSL leaves
+                    // *indeterminate*, so the shader's own `min` would be
+                    // guarding against a value the spec does not describe.
+                    f.ghost_count.min(MAX_GHOSTS) as f32,
                     sane(f.halo),
                     sane(f.streak),
                 ],
