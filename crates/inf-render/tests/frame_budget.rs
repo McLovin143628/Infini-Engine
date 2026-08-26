@@ -603,13 +603,20 @@ fn gi_v2_cost_per_tier() {
         start.elapsed().as_secs_f64() * 1000.0 / f64::from(N)
     };
 
+    // Wave VIS1a: `ssr` is its own block now, so it is applied beside `gi`
+    // rather than inside it — and the measurement below is the same one, because
+    // what this arm prices is "the heaviest thing a project can ask for", not
+    // which struct the field lives on.
     let gi = |quality: GiQuality, probe_budget: u32, ssr: bool| RenderSettings {
         gi: GiSettings {
             enabled: true,
             quality,
             probe_budget,
-            ssr,
             ..GiSettings::default()
+        },
+        ssr: inf_render::SsrSettings {
+            enabled: ssr,
+            ..inf_render::SsrSettings::default()
         },
         ..RenderSettings::default()
     };
@@ -640,6 +647,42 @@ fn gi_v2_cost_per_tier() {
         with_ssr - baseline,
         info.name
     );
+
+    // **What a step costs** (wave VIS1a). SSR v1 spent a fixed 24 uniform taps
+    // over 8 m and could not be tuned at all; v2's budget is authorable, and a
+    // knob whose price nobody has measured is a knob nobody can spend. The three
+    // bands are 16 / 32 / 48 taps over 24 m, plus up to three bisection taps on a
+    // hit — reported, never asserted, because this is one scene on one adapter
+    // and the ceiling below is set from the composed frame.
+    let gi_off_ssr = |q: inf_render::SsrQuality| RenderSettings {
+        ssr: inf_render::SsrSettings {
+            enabled: true,
+            quality: q,
+            ..inf_render::SsrSettings::default()
+        },
+        ..RenderSettings::default()
+    };
+    //
+    // The reflection-less control is re-measured HERE rather than reused from
+    // `baseline` above: that one is the first measurement this process makes and
+    // carries the pipeline compilations with it (0.469 ms against the 0.18 ms a
+    // warm reflection-less frame costs), so subtracting it would price the march
+    // NEGATIVE. A control has to be taken in the regime it is a control for.
+    let warm = measure(RenderSettings::default());
+    for q in [
+        inf_render::SsrQuality::Low,
+        inf_render::SsrQuality::Medium,
+        inf_render::SsrQuality::High,
+    ] {
+        let ms = measure(gi_off_ssr(q));
+        eprintln!(
+            "ssr {q:?} ({} steps, no GI): {ms:.3} ms/frame (+{:.4} over a warm \
+             reflection-less {warm:.3} ms, i.e. {:.5} ms a step)",
+            q.steps(),
+            ms - warm,
+            (ms - warm) / f64::from(q.steps())
+        );
+    }
 
     // Below High, the tier clamp is what governs — by construction, not by luck.
     let asked = gi(GiQuality::High, 0, true);

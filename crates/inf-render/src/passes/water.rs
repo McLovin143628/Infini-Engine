@@ -73,10 +73,11 @@ use crate::water::{
 ///
 /// 256 is the WebGPU guaranteed maximum for
 /// `min_uniform_buffer_offset_alignment`, so any multiple of it is a legal
-/// dynamic offset on every adapter without querying. The uniform itself is 448
-/// bytes (12 header vec4s + 8 waves x 2 vec4s), so the stride is **512** — the
-/// next multiple. `the_uniform_matches_the_shader_struct` pins the pair, because
-/// a uniform that outgrew its stride would silently overlap the next body.
+/// dynamic offset on every adapter without querying. The uniform itself is **464**
+/// bytes (13 header vec4s — 12 until wave VIS1a appended the SSR block — plus
+/// 8 waves × 2 vec4s), so the stride is **512**, the next multiple.
+/// `the_uniform_matches_the_shader_struct` pins the pair, because a uniform that
+/// outgrew its stride would silently overlap the next body.
 const UNIFORM_STRIDE: u64 = 512;
 
 /// Bodies drawn per frame at most. A level with more water than this is not an
@@ -97,6 +98,9 @@ const OPEN_WATER_DEPTH_M: f32 = 60.0;
 struct WaterUniform {
     dims: [u32; 4],
     flags: [u32; 4],
+    /// Wave VIS1a, the SSR block: x = march distance (m), y = relative
+    /// thickness, z = step budget, w = intensity.
+    ssr: [f32; 4],
     center_extent: [f32; 4],
     level_flow: [f32; 4],
     shallow: [f32; 4],
@@ -402,6 +406,7 @@ fn pack_uniform(
     quality: WaterQuality,
     frame_offset: u32,
     sky: &crate::scene::SkyParams,
+    ssr: &crate::settings::SsrSettings,
 ) -> WaterUniform {
     // The ocean's patch follows the camera, snapped so the tessellation does not
     // crawl; a lake's is the authored region. Both are converted to render-local.
@@ -458,7 +463,22 @@ fn pack_uniform(
             quality.grid_vertices(),
             w.frames.len() as u32,
         ],
-        flags: [frame_offset, u32::from(quality.refraction()), 0, 0],
+        flags: [
+            frame_offset,
+            u32::from(quality.refraction()),
+            // Wave VIS1a: whether this surface marches for its own reflection.
+            // `refraction()` gates it too, because the SSR fetch reads the very
+            // texture the refraction resolve produces — a tier that does not pay
+            // for that resolve has nothing to reflect.
+            u32::from(ssr.enabled && quality.refraction()),
+            0,
+        ],
+        ssr: [
+            ssr.max_distance.max(0.0),
+            ssr.thickness.clamp(1e-4, 1.0),
+            ssr.quality.steps() as f32,
+            ssr.intensity.clamp(0.0, 1.0),
+        ],
         center_extent: [center_xz[0], center_xz[1], half_extent[0], half_extent[1]],
         level_flow: [
             level_local,
@@ -585,6 +605,7 @@ impl RenderNode for WaterNode {
                 quality,
                 offsets[i],
                 &frame.scene.sky,
+                &frame.settings.ssr,
             );
             gpu.queue.write_buffer(
                 &self.uniforms,
@@ -718,6 +739,7 @@ impl RenderNode for WaterNode {
 mod tests {
     use super::*;
     use crate::scene::SkyParams;
+    use crate::settings::SsrSettings;
     use crate::water::{WaterFrame, WaveField, WaveSpec};
     use glam::DVec2;
     use inf_math::FloatingOrigin;
@@ -733,10 +755,11 @@ mod tests {
 
     #[test]
     fn the_uniform_matches_the_shader_struct() {
-        // `struct Water` in water.wgsl, field by field: 12 vec4 headers + 16 wave
-        // vec4s. A mismatch here is silent on the GPU — the shader simply reads
-        // the wrong 16 bytes for every field after the divergence.
-        assert_eq!(std::mem::size_of::<WaterUniform>(), (12 + 16) * 16);
+        // `struct Water` in water.wgsl, field by field: 13 vec4 headers (12 until
+        // wave VIS1a appended the SSR block) + 16 wave vec4s. A mismatch here is
+        // silent on the GPU — the shader simply reads the wrong 16 bytes for
+        // every field after the divergence.
+        assert_eq!(std::mem::size_of::<WaterUniform>(), (13 + 16) * 16);
         assert_eq!(std::mem::align_of::<WaterUniform>(), 4);
         // …and it fits inside one dynamic-offset slot, which is what lets every
         // body in a frame share one buffer and one bind group.
@@ -783,6 +806,7 @@ mod tests {
                 WaterQuality::High,
                 0,
                 &sky,
+                &SsrSettings::default(),
             )
             .center_extent[0]
         };
@@ -809,8 +833,24 @@ mod tests {
         // Pick a world point and its render-local image under each origin, then
         // check the phase the shader would evaluate is the same angle.
         let world = DVec3::new(4_990.0, 0.0, -2_970.0);
-        let ua = pack_uniform(&w, &a, glam::Vec3::ZERO, WaterQuality::High, 0, &sky);
-        let ub = pack_uniform(&w, &b, glam::Vec3::ZERO, WaterQuality::High, 0, &sky);
+        let ua = pack_uniform(
+            &w,
+            &a,
+            glam::Vec3::ZERO,
+            WaterQuality::High,
+            0,
+            &sky,
+            &SsrSettings::default(),
+        );
+        let ub = pack_uniform(
+            &w,
+            &b,
+            glam::Vec3::ZERO,
+            WaterQuality::High,
+            0,
+            &sky,
+            &SsrSettings::default(),
+        );
         let la = a.to_render(world);
         let lb = b.to_render(world);
         for i in 0..w.waves.waves().len() {
@@ -879,6 +919,7 @@ mod tests {
             WaterQuality::High,
             0,
             &sky,
+            &SsrSettings::default(),
         );
         let b = pack_uniform(
             &lake,
@@ -887,6 +928,7 @@ mod tests {
             WaterQuality::High,
             0,
             &sky,
+            &SsrSettings::default(),
         );
         assert_eq!(
             a.center_extent, b.center_extent,
@@ -906,7 +948,15 @@ mod tests {
             (WaterQuality::Medium, 1),
             (WaterQuality::High, 1),
         ] {
-            let u = pack_uniform(&ocean(), &origin, glam::Vec3::ZERO, q, 0, &sky);
+            let u = pack_uniform(
+                &ocean(),
+                &origin,
+                glam::Vec3::ZERO,
+                q,
+                0,
+                &sky,
+                &SsrSettings::default(),
+            );
             assert_eq!(u.flags[1], want, "{q:?}");
             assert_eq!(u.dims[2], q.grid_vertices());
         }
@@ -923,6 +973,7 @@ mod tests {
             WaterQuality::High,
             0,
             &sky,
+            &SsrSettings::default(),
         );
         let b = pack_uniform(
             &ocean(),
@@ -931,6 +982,7 @@ mod tests {
             WaterQuality::High,
             0,
             &sky,
+            &SsrSettings::default(),
         );
         assert_eq!(bytemuck::bytes_of(&a), bytemuck::bytes_of(&b));
     }

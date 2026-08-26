@@ -37,8 +37,11 @@ struct Water {
     // x = kind, y = wave count, z = grid vertices per side, w = frame count.
     dims: vec4<u32>,
     // x = frame offset into `water_frames`, y = refraction enabled (0/1),
-    // zw reserved.
+    // z = SSR enabled (0/1, wave VIS1a), w reserved.
     flags: vec4<u32>,
+    // Wave VIS1a, the SSR block: x = march distance (m), y = relative thickness,
+    // z = step budget, w = intensity.
+    ssr: vec4<f32>,
     // xy = render-local centre (ocean: the snapped camera position; lake: the
     // region centre), zw = half extent in metres.
     center_extent: vec4<f32>,
@@ -252,19 +255,9 @@ fn vs(@builtin(vertex_index) vi: u32) -> VsOut {
     return out;
 }
 
-// The reflection source. The physical sky-view LUT when the atmosphere is on,
-// the authored three-colour gradient otherwise.
-//
-// **Not SSR, deliberately.** A wave-perturbed normal at the grazing angles that
-// dominate a water surface reflects toward the horizon, which is exactly where a
-// screen-space march has nothing to hit: the ray leaves the frame within a few
-// steps and every pixel takes the miss path. The miss path IS the sky, so v1
-// asks the sky directly — one texture fetch, no march, no per-pixel failure
-// mode, and the same authority the sky pass itself samples, so water and sky
-// agree by construction. Reflecting scene geometry (a boat, a cliff) needs the
-// P18.4 SSR machinery to run AFTER the opaque resolve and is named as the P20.3
-// follow-up.
-fn water_reflection(dir: vec3<f32>) -> vec3<f32> {
+// The sky half of the reflection. The physical sky-view LUT when the atmosphere
+// is on, the authored three-colour gradient otherwise.
+fn water_sky_reflection(dir: vec3<f32>) -> vec3<f32> {
     if (atmos.params.x >= 0.5) {
         return atmos_sample_skyview(atmos.planet.z, normalize(dir));
     }
@@ -273,6 +266,142 @@ fn water_reflection(dir: vec3<f32>) -> vec3<f32> {
         return mix(water.horizon.rgb, water.zenith.rgb, pow(clamp(t, 0.0, 1.0), 0.55));
     }
     return mix(water.horizon.rgb, water.ground.rgb, clamp(-t * 3.0, 0.0, 1.0));
+}
+
+// **The boat finally reflects itself** (wave VIS1a) — the P20.3 routed item.
+//
+// P20.1's ruling was: *"Not SSR, deliberately. A wave-perturbed normal at the
+// grazing angles that dominate a water surface reflects toward the horizon, which
+// is exactly where a screen-space march has nothing to hit: the ray leaves the
+// frame within a few steps and every pixel takes the miss path."* Every sentence
+// of that is still true, and it is **an argument about the grazing angles, not
+// about the surface**. What it justified — asking the sky directly and never
+// marching — was right while there was no way to tell the two regimes apart.
+//
+// There is now, and it is the term the shader already computes: `cos_v`, the
+// cosine between the surface normal and the eye. A grazing pixel has `cos_v`
+// near zero and is exactly the pixel the ruling describes; a pixel looking down
+// into the water — the one under the hull, the one against the jetty, the one
+// that has a cliff standing in it — has `cos_v` well away from zero and is the
+// pixel the ruling never had a way to serve. `water_grazing_weight` is that
+// split, and it is a **fade**, not a threshold, so there is no line across the
+// surface where the behaviour changes.
+//
+// The two other halves of the original argument are answered by construction:
+//
+// * **the miss path is still the sky.** A march that leaves the frame, finds
+//   nothing, or lands off the previous colour returns zero confidence and the
+//   sky term is what remains. Nothing goes black.
+// * **there is no extra resolve.** Water already runs a private
+//   `color_msaa → scene_hdr` resolve for refraction (`passes/water.rs`), so the
+//   opaque scene colour of THIS frame is already bound at `water_scene_color`
+//   and the depth of this frame at `water_scene_depth`. Unlike the opaque SSR in
+//   `env_lighting.wgsl`, this one has no frame of latency at all — which is the
+//   whole reason the water pass is where colour-sourced reflection lands first.
+//   `flags.z` is therefore gated on refraction as well: a tier that does not pay
+//   for the resolve has nothing to reflect.
+fn water_grazing_weight(cos_v: f32) -> f32 {
+    // Nothing below ~3° above the surface (cos_v < 0.05); full by ~14° (0.25).
+    //
+    // **The band is low on purpose, and the numbers are the argument.** A boat is
+    // reflected at ordinary viewing angles — an eye eight metres up looking twenty
+    // metres out reads cos_v ≈ 0.3, and that is the shot the ruling was denying.
+    // What P20.1 describes is the *extreme*: an eye a few centimetres above the
+    // waterline, where cos_v is hundredths and the reflected ray runs at the
+    // horizon. Two things then hold it off, and the belt is the cheaper of them:
+    // this fade returns 0 before a single tap is spent, and even without it the
+    // march would leave the frame and return no confidence. Setting the band high
+    // enough to cover "grazing" loosely would have cost the shot the wave exists
+    // to get.
+    return smoothstep(0.05, 0.25, cos_v);
+}
+
+// March the reflection ray against this frame's opaque depth and return
+// `vec4(colour, confidence)`. Confidence 0 is a miss.
+//
+// `in_pos` is the fragment's `@builtin(position)`, so the march starts at the
+// water surface as the depth buffer sees it.
+fn water_ssr(world: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
+    let size = view.grid_axis_viewport.zw;
+    let max_dist = water.ssr.x;
+    let thickness = water.ssr.y;
+    let steps = i32(max(water.ssr.z, 1.0));
+    let inv = 1.0 / f32(steps);
+    var prev_t = 0.0;
+    for (var s = 1; s <= steps; s = s + 1) {
+        let u = f32(s) * inv;
+        // The same quadratic march `env_lighting.wgsl` uses: dense where a
+        // contact reflection lives, coarse where a miss is cheap.
+        let t = max_dist * u * u;
+        let p = world + dir * t;
+        let clip = view.view_proj * vec4<f32>(p, 1.0);
+        if (clip.w <= 0.0) {
+            return vec4<f32>(0.0);
+        }
+        let ndc = clip.xyz / clip.w;
+        if (any(abs(ndc.xy) > vec2<f32>(1.0)) || ndc.z <= 0.0) {
+            return vec4<f32>(0.0);
+        }
+        let uv = ndc.xy * vec2<f32>(0.5, -0.5) + 0.5;
+        let texel = vec2<i32>(clamp(uv * size, vec2<f32>(0.0), size - vec2<f32>(1.0)));
+        let scene_z = textureLoad(water_scene_depth, texel, 0);
+        if (scene_z <= 0.0) {
+            prev_t = t;
+            continue; // sky behind this texel — keep going
+        }
+        let penetration = 1.0 - ndc.z / scene_z;
+        if (penetration > 0.0 && penetration < thickness) {
+            var lo = prev_t;
+            var hi = t;
+            for (var b = 0; b < 3; b = b + 1) {
+                let mid = 0.5 * (lo + hi);
+                let q = world + dir * mid;
+                let qc = view.view_proj * vec4<f32>(q, 1.0);
+                let qn = qc.xyz / max(qc.w, 1e-6);
+                let quv = qn.xy * vec2<f32>(0.5, -0.5) + 0.5;
+                let qt = vec2<i32>(clamp(quv * size, vec2<f32>(0.0), size - vec2<f32>(1.0)));
+                let qz = textureLoad(water_scene_depth, qt, 0);
+                if (qz > 0.0 && qn.z < qz) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            let hc = view.view_proj * vec4<f32>(world + dir * hi, 1.0);
+            let hn = hc.xyz / max(hc.w, 1e-6);
+            let huv = clamp(hn.xy * vec2<f32>(0.5, -0.5) + 0.5, vec2<f32>(0.0), vec2<f32>(1.0));
+            // Dissolve over the outer 8 % of the frame, and over the last quarter
+            // of the ray, for `env_lighting.wgsl`'s reasons.
+            let e = min(min(huv.x, 1.0 - huv.x), min(huv.y, 1.0 - huv.y));
+            let edge = smoothstep(0.0, 0.08, e);
+            let far = 1.0 - smoothstep(0.75, 1.0, hi / max(max_dist, 1e-4));
+            let c = textureSampleLevel(water_scene_color, water_scene_smp, huv, 0.0).rgb;
+            return vec4<f32>(c, edge * far);
+        }
+        prev_t = t;
+    }
+    return vec4<f32>(0.0);
+}
+
+// The reflection a water fragment sees: the sky, with whatever the scene puts in
+// front of it blended over at non-grazing angles.
+fn water_reflection(world: vec3<f32>, dir: vec3<f32>, cos_v: f32) -> vec3<f32> {
+    let sky = water_sky_reflection(dir);
+    // `flags.z` is 0 on every scene with SSR off, so this branch is untaken and
+    // every committed water golden runs exactly the arithmetic it always did.
+    if (water.flags.z == 1u) {
+        let w = water_grazing_weight(cos_v) * water.ssr.w;
+        if (w > 0.0) {
+            // Start a little above the surface: the march is against the OPAQUE
+            // depth, and a ray that begins exactly on the water plane over a
+            // shallow bottom reads its own floor as a hit at step one.
+            let hit = water_ssr(world + dir * 0.05, dir);
+            if (hit.w > 0.0) {
+                return mix(sky, hit.rgb, clamp(w * hit.w, 0.0, 1.0));
+            }
+        }
+    }
+    return sky;
 }
 
 @fragment
@@ -344,7 +473,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let cos_v = clamp(dot(n, vdir), 0.0, 1.0);
     let fresnel = WATER_F0 + (1.0 - WATER_F0) * pow(1.0 - cos_v, 5.0);
     let refl_dir = reflect(-vdir, n);
-    let sky = water_reflection(refl_dir);
+    let sky = water_reflection(in.world, refl_dir, cos_v);
 
     // Sun specular: a GGX-ish lobe about the reflected direction. Water is very
     // smooth, so this is a small, bright highlight rather than a broad sheen.

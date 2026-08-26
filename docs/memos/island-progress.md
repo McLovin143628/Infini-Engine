@@ -7878,3 +7878,136 @@ would be a correct superset, and the whole question is whether that cost pays. T
 measurement this slice cannot make without first building the thing, so it is named rather
 than guessed: **VIS-C1b, the GPU-driven half of the prepass.** Until it lands, SSAO/TAA/SSR
 do not see meshlet geometry or scattered foliage.
+
+### Clause 2 — SSR v2, and the boat that reflects itself
+
+**What SSR was.** Three fields on `GiSettings`, a fixed 24-tap uniform march over
+8 m, not roughness-aware, and — the fact that governs everything else — a *hit
+finder* rather than a colour fetch. All a hit did was re-anchor the GI probe
+fetch at the hit point. That made SSR meaningless without dynamic GI, because
+there were no probes to re-anchor, which is why it lived on `GiSettings` and had
+no authorable field of its own.
+
+**What it is now.** Its own `SsrSettings` block (`enabled`, `max_distance`,
+`thickness`, `quality`, `intensity`, `roughness_cutoff`), its own clause in
+`needs_depth_prepass` — `gi.enabled &&` is gone from it — its own record fields in
+scene v26, and its own colour.
+
+**Where the colour comes from, and the ruling that shapes it.** The renderer is
+forward with 4× MSAA. At the moment a lit fragment shades, this frame's opaque
+colour does not exist and there is no G-buffer to defer against — deferring is
+exactly what the visbuffer-off-by-default ruling refuses, on coverage grounds. So
+there are two colour sources in this engine and the wave uses both:
+
+* **Water gets this frame's colour.** The water pass already runs a private
+  `color_msaa → scene_hdr` resolve for refraction (`passes/water.rs`), so the
+  opaque scene of *this* frame is already bound at `water_scene_color` and its
+  depth at `water_scene_depth`. Water's reflection has **no latency at all**, and
+  that is why the water pass is where colour-sourced reflection lands first.
+* **Opaque surfaces get the previous frame's, reprojected.** `targets.scene_hdr`
+  holds what `passes::resolve` wrote at the end of the previous frame; the hit
+  point is projected through `GiData::prev_view_proj` so the sample lands where it
+  was when that colour was written. One frame of latency, for a reflection that is
+  otherwise geometrically exact — the bargain `taa` and `cloud_temporal` already
+  strike, and SSR is off by default on the same terms. A `scene_history_valid`
+  flag holds the march off entirely on frame 0 and after a resize, when the
+  texture is a zero-initialized allocation: **a one-frame render can never show a
+  reflection**, which is why every SSR arm renders two or three frames on one
+  renderer.
+
+**The march.** `t = max_distance · u²` rather than uniform steps: at 32 taps over
+24 m the first sample is **2 cm** out, against v1's 33 cm at 24 taps over 8 m —
+which is a third of a metre of error on a *contact* reflection, the one thing
+screen space is actually good at. A crossing is then bisected three times, so the
+colour is fetched inside the step the hit was found in rather than at its far end.
+Early exits are real exits: `clip.w <= 0` and leaving NDC both return immediately,
+because no later sample on that ray can come back.
+
+`SsrQuality` is the budget: Low 16, Medium 32 (the default), High 48. `RenderTier`
+clamps Medium to Low's budget and refuses the march entirely on Low and mobile.
+
+**Roughness.** `roughness_cutoff` (default 0.4) is the cost knob as much as the
+quality one: a rough surface's reflection is a wide lobe a single mirror ray
+cannot represent, and the specular-GI term already answers it. The weight ramps to
+zero over the upper half of the range, so no edge appears where the march stops.
+Measured — a floor at roughness 0.95 moves the frame's redness by **0.000** where
+the same floor at 0.05 moves it by **3.520**.
+
+**The fallback is the design.** A miss — off screen, behind the camera, occluded,
+too rough — falls through to the specular-GI lobe when GI is on and to the
+sky-tinted constant when it is not. The reflection dissolves into something
+plausible rather than into black.
+
+#### The boat finally reflects itself — P20.3, closed
+
+P20.1's ruling: *"Not SSR, deliberately. A wave-perturbed normal at the grazing
+angles that dominate a water surface reflects toward the horizon, which is exactly
+where a screen-space march has nothing to hit."* Every clause of that is still
+true. **It is an argument about grazing angles, not about water**, and what it
+could not distinguish is the pixel looking *down* into the sea — under a hull,
+against a jetty, with a cliff standing in it — from the pixel looking at the
+horizon.
+
+`water_grazing_weight(cos_v) = smoothstep(0.05, 0.25, cos_v)` is that distinction,
+and the band is deliberately **low**: an eye five metres up looking twenty-four
+out reads `cos_v ≈ 0.3`, which is the shot the item exists to get. What P20.1
+describes is the extreme — hundredths of a cosine, the ray running at the horizon
+— and two things hold that off: the fade returns 0 before a tap is spent, and the
+march would leave the frame anyway and return no confidence. Setting the band
+high enough to cover "grazing" loosely would have cost the shot.
+
+The measurement that makes superseding the ruling safe, on an RTX 4070 Ti at
+320×180, one scarlet block floating on an open sea:
+
+| camera | frame redness, SSR off → on | Δ | frame moved |
+|---|---|---|---|
+| eye 5 m above the surface, 24 m out | −57.439 → **−56.194** | **+1.244** | 1.691 % |
+| eye 0.6 m above the surface, same distance | −57.190 → −56.645 | **+0.545** | 1.130 % |
+
+The grazing case is **not** zero, and that is honest rather than a slack
+threshold: a wave facet tilted toward the camera has a `cos_v` of its own, and a
+facet facing you really does reflect what is in front of it. That is the same
+wave-perturbed normal P20.1's sentence names, read the other way round. What the
+arm asserts is that the block does not *arrive* at the horizon — less than half
+the redness, on a strictly smaller share of the frame.
+
+`flags.z` (SSR on) is additionally gated on `quality.refraction()`: a tier that
+does not pay for the private resolve has nothing to reflect.
+
+#### What it costs
+
+`gi_v2_cost_per_tier`, the cube-field scene at 640×360, warm control:
+
+| configuration | ms/frame | over a reflection-less 0.180 ms |
+|---|---|---|
+| SSR Low (16 taps) | 0.198 | **+0.018** |
+| SSR Medium (32 taps) | 0.200 | **+0.019** |
+| SSR High (48 taps) | 0.321 | **+0.141** |
+
+**The control had to be re-measured warm**, and that is a finding rather than
+bookkeeping: `baseline` is the first measurement the process makes and carries the
+pipeline compilations with it (0.469 ms against 0.180 ms warm), so subtracting it
+priced the march **negative**. A control taken outside the regime it is a control
+for is not a control.
+
+The comparison against v1's fixed 24 taps is a comparison of *features* rather
+than of steps — v1 marched 8 m in 24 uniform taps and fetched no colour; v2
+marches 24 m in 32 quadratic taps plus up to three bisection taps and fetches one
+texel. The island table below carries the number that matters.
+
+#### Stopped, with the route: colour-sourced OPAQUE SSR at zero latency
+
+Reflections on opaque surfaces read the previous frame. Making them read *this*
+frame means a same-frame composite after a private resolve, and a composite needs
+per-pixel `f0`, roughness and a normal — which a forward+MSAA renderer does not
+have. The two ways to give it one are a G-buffer (refused by the standing
+visbuffer/MSAA coverage ruling) and widening the depth prepass into an
+**attribute** prepass, which turns four fragment-less or discard-only pipelines
+into ones that write material data and is a wave of its own. Named:
+**VIS-C2b, the attribute prepass**. Until it lands, an opaque reflection lags by
+one frame under camera motion; water does not lag at all.
+
+Also routed and not taken, by name: **glass / IOR transmission** (the translucent
+pass is still an opaque shader with alpha and reads the scene never — it belongs
+with the MAT wave's translucent rewrite), **reflection probes** and **planar
+reflections**.

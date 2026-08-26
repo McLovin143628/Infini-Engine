@@ -394,6 +394,15 @@ pub struct FrameData<'a> {
     pub cloud_history_valid: bool,
     /// False on the first frame / after a resize (history has nothing usable).
     pub taa_history_valid: bool,
+    /// **Whether `targets.scene_hdr` holds the previous frame's resolved opaque
+    /// colour** (wave VIS1a) — the SSR colour source. False on the first frame and
+    /// after a resize, when it is a freshly zero-initialized allocation and
+    /// reflecting it would be reflecting black.
+    ///
+    /// Deliberately **not** [`taa_history_valid`](Self::taa_history_valid): that
+    /// one is additionally gated on `settings.taa`, and SSR is a third consumer of
+    /// the same history rather than a rider on the first two.
+    pub scene_history_valid: bool,
     /// Shoreline wetness (P20.3): the fixed-size uniform `EngineRenderer::render`
     /// packs from `scene.waters` and the lit passes read through `EnvBinding`.
     /// **Not resizable** — see `passes::EnvBinding::bind_group`'s invariant.
@@ -1973,6 +1982,13 @@ impl EngineRenderer {
         rec.mark(crate::timing::record::VIEW_UNIFORMS);
 
         let history_valid = self.settings.taa && !resized && self.prev_view_proj.is_some();
+        // **Whether `targets.scene_hdr` holds the PREVIOUS frame's resolved opaque
+        // colour** (wave VIS1a). It is the same two conditions the two temporal
+        // knobs above use — a resize reallocated it, and frame 0 has nothing in it
+        // — but deliberately without either knob's flag, because SSR is a third
+        // consumer of the same history and neither TAA nor the cloud pass is its
+        // prerequisite.
+        let scene_history_valid = !resized && self.prev_view_proj.is_some();
         // The cloud's own history validity. Same three conditions, its own knob:
         // a resize reallocated the ping-pong, and the first frame has no previous
         // view-projection to reproject through.
@@ -2144,6 +2160,7 @@ impl EngineRenderer {
             view_proj: jvp.to_cols_array(),
             taa_prev_view_proj: prev_vp,
             taa_history_valid: history_valid,
+            scene_history_valid,
             cloud_src,
             cloud_slot,
             cloud_history_prev: &targets.cloud_history[prev],

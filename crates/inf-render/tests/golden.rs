@@ -2126,6 +2126,7 @@ fn golden_hdr_bloom() {
             threshold: 1.0,
             knee: 0.6,
             intensity: 0.5,
+            ..BloomSettings::default()
         },
         ..RenderSettings::default()
     };
@@ -3386,15 +3387,32 @@ fn golden_gi_specular() {
         "roughness does not read: smooth {smooth:.4} vs matte {matte:.4}"
     );
 
-    // SSR (deliverable 4b): deterministic, and it actually re-anchors the fetch.
+    // SSR (deliverable 4b, rewritten in wave VIS1a): deterministic, and it
+    // actually reaches the shading.
+    //
+    // **Two frames, not one.** SSR v2 samples the PREVIOUS frame's resolved
+    // colour; on frame 0 that texture is a zero-initialized allocation and the
+    // `ssr.w` history flag holds the march off entirely, so a single-frame render
+    // can never show a reflection. That is the same shape `taa_multiframe_stable`
+    // has, for the same reason, and it is why SSR is opt-in.
     let mut ssr = spec_on;
-    ssr.gi.ssr = true;
-    let a = render_with(&gpu, &scene, &view, ssr);
-    let b = render_with(&gpu, &scene, &view, ssr);
+    ssr.ssr.enabled = true;
+    let a = render_frames_with(&gpu, &scene, &view, ssr, 2).0;
+    let b = render_frames_with(&gpu, &scene, &view, ssr, 2).0;
     assert_eq!(a, b, "SSR is not deterministic");
+    let base2 = render_frames_with(&gpu, &scene, &view, spec_on, 2).0;
     assert_ne!(
-        a, img,
+        a, base2,
         "SSR changed nothing — the screen-space march never found a hit"
+    );
+    // ...and the first frame really is the one with no history, which is what
+    // makes the two-frame shape necessary rather than superstitious.
+    let one = render_frames_with(&gpu, &scene, &view, ssr, 1).0;
+    let one_base = render_frames_with(&gpu, &scene, &view, spec_on, 1).0;
+    assert_eq!(
+        one, one_base,
+        "SSR reflected something on frame 0, where the colour history is a \
+         zero-initialized allocation"
     );
 }
 
@@ -4132,7 +4150,6 @@ fn gi_v2_off_path_is_byte_identical() {
 
     let base = render_with(&gpu, &scene, &view, RenderSettings::default());
     let mut fiddled = RenderSettings::default();
-    fiddled.gi.ssr = true;
     fiddled.gi.specular = false;
     fiddled.gi.probe_budget = 37;
     fiddled.gi.instance_budget = 3;
@@ -4145,14 +4162,120 @@ fn gi_v2_off_path_is_byte_identical() {
         "a GI-off scene moved when the P18.4 knobs changed — the off path is not neutral"
     );
 
-    // ...and with GI ON but SSR off, the SSR tuning knobs are equally inert.
+    // **The SSR knobs left `GiSettings` in wave VIS1a**, so their off-path claim
+    // is now about their own block: every tuning field moved, `enabled` left
+    // alone, and not a pixel with it. Measured over TWO frames, because a
+    // one-frame render has no colour history and would satisfy this arm even if
+    // the knobs did reach the shading.
+    let two = render_frames_with(&gpu, &scene, &view, RenderSettings::default(), 2).0;
+    let mut tuned = RenderSettings::default();
+    tuned.ssr.max_distance = 64.0;
+    tuned.ssr.thickness = 0.9;
+    tuned.ssr.quality = inf_render::SsrQuality::High;
+    tuned.ssr.intensity = 0.25;
+    tuned.ssr.roughness_cutoff = 1.0;
+    assert!(!tuned.ssr.enabled);
+    let tuned_two = render_frames_with(&gpu, &scene, &view, tuned, 2).0;
+    assert_eq!(two, tuned_two, "SSR tuning moved pixels while SSR is off");
+
+    // ...and with GI ON but SSR off, the same knobs are still inert.
     let gi_on = gi_settings(40.0, 32, 1.0);
-    let a = render_with(&gpu, &scene, &view, gi_on);
-    let mut tuned = gi_on;
-    tuned.gi.ssr_distance = 64.0;
-    tuned.gi.ssr_thickness = 0.9;
-    let b = render_with(&gpu, &scene, &view, tuned);
-    assert_eq!(a, b, "SSR tuning moved pixels while SSR is off");
+    let a = render_frames_with(&gpu, &scene, &view, gi_on, 2).0;
+    let mut gi_tuned = gi_on;
+    gi_tuned.ssr.max_distance = 64.0;
+    gi_tuned.ssr.thickness = 0.9;
+    let b = render_frames_with(&gpu, &scene, &view, gi_tuned, 2).0;
+    assert_eq!(a, b, "SSR tuning moved pixels while SSR is off, with GI on");
+}
+
+/// **SSR NO LONGER NEEDS PROBES** (wave VIS1a) — the decoupling, measured.
+///
+/// Until this wave SSR was a field on `GiSettings` and did one thing: move the GI
+/// probe fetch point. With GI off there were no probes, so the feature was
+/// unreachable — which is why `gi_v2_off_path_is_byte_identical` could assert that
+/// SSR requested without GI produced no depth prepass and changed nothing.
+///
+/// It has its own colour source now. This is the same scene with **GI off**, and
+/// the reflection has to arrive anyway.
+#[test]
+fn ssr_reflects_without_gi() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    // A mirror-smooth floor and a scarlet block standing on it: the block's
+    // reflection is the only red the floor can acquire.
+    scene.instances.push(MeshInstance {
+        metallic: 1.0,
+        roughness: 0.05,
+        ..MeshInstance::lit(
+            DVec3::new(0.0, -0.25, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(14.0, 0.5, 14.0),
+            [0.55, 0.55, 0.58, 1.0],
+            1,
+        )
+    });
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, 1.0, -1.5),
+        Quat::IDENTITY,
+        Vec3::new(2.0, 2.0, 2.0),
+        [0.95, 0.05, 0.05, 1.0],
+        2,
+    ));
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.98, 0.95],
+        intensity: 2.0,
+        direction: Vec3::new(0.2, 0.9, 0.35).normalize(),
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+    let view = look_view(DVec3::new(0.0, 2.2, 6.5), DVec3::new(0.0, 0.2, -1.0));
+
+    let mut on = RenderSettings::default();
+    on.ssr.enabled = true;
+    assert!(!on.gi.enabled, "the whole point: no probes");
+    assert!(
+        on.needs_depth_prepass(),
+        "SSR must force the prepass it marches against"
+    );
+
+    let off_img = render_frames_with(&gpu, &scene, &view, RenderSettings::default(), 3).0;
+    let on_img = render_frames_with(&gpu, &scene, &view, on, 3).0;
+    let redness = |img: &[u8]| -> f64 {
+        img.chunks(4)
+            .map(|p| p[0] as f64 - 0.5 * (p[1] as f64 + p[2] as f64))
+            .sum::<f64>()
+            / (W * H) as f64
+    };
+    let (r_off, r_on) = (redness(&off_img), redness(&on_img));
+    eprintln!("ssr without gi: redness {r_off:.3} -> {r_on:.3}");
+    assert!(
+        r_on > r_off + 0.5,
+        "the block did not appear in the mirror floor with GI off (redness \
+         {r_off:.3} -> {r_on:.3}) — SSR is still riding the probe field"
+    );
+
+    // A rough floor must NOT reflect: the roughness cutoff is the cost knob, and
+    // a knob that changes nothing is not one.
+    let mut rough_scene = scene.clone();
+    rough_scene.instances[0].roughness = 0.95;
+    rough_scene.mark_dirty();
+    let rough_off = render_frames_with(&gpu, &rough_scene, &view, RenderSettings::default(), 3).0;
+    let rough_on = render_frames_with(&gpu, &rough_scene, &view, on, 3).0;
+    let rough_delta = redness(&rough_on) - redness(&rough_off);
+    eprintln!(
+        "ssr roughness cutoff: rough floor moved {rough_delta:.3} against {:.3} smooth",
+        r_on - r_off
+    );
+    assert!(
+        rough_delta < (r_on - r_off) * 0.25,
+        "a floor at roughness 0.95 reflected {rough_delta:.3} against the smooth \
+         floor's {:.3} — the roughness cutoff is not holding the march off",
+        r_on - r_off
+    );
 }
 
 /// **GI resources joined the `ResourceKey`** (P18.4 deliverable 7) — the GPU-side
@@ -6925,6 +7048,124 @@ fn water_changed_fraction(a: &[u8], b: &[u8]) -> f64 {
         }
     }
     n as f64 / (W * H) as f64
+}
+
+/// **THE BOAT REFLECTS ITSELF** (wave VIS1a) — the P20.3 routed item, closed,
+/// and the measurement that makes closing it safe.
+///
+/// P20.1 ruled water's reflection to be the sky and only the sky: *"a
+/// wave-perturbed normal at the grazing angles that dominate a water surface
+/// reflects toward the horizon, which is exactly where a screen-space march has
+/// nothing to hit."* Every clause of that is still true. What it could not
+/// distinguish is the pixel looking *down* into the water — the one under a hull,
+/// against a jetty, with a cliff standing in it — from the grazing one, and
+/// `water_grazing_weight(cos_v)` is that distinction.
+///
+/// So this arm is two measurements, not one:
+///
+/// * **from above**, a scarlet block floating on the sea must appear in the water
+///   beside it — the change SSR makes, and the direction it makes it in;
+/// * **from a grazing angle**, the SAME scene must change far less, because that
+///   is the regime the original ruling describes and the regime the fade defers
+///   to the sky in. Without this half, "SSR on water" would be a claim that the
+///   ruling was simply wrong.
+#[test]
+fn water_reflects_the_scene_from_above_and_defers_to_the_sky_at_grazing() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = ocean_scene(12.0 * 3600.0, 3.0);
+    scene.terrains.clear(); // open water, so nothing but the block can reflect
+                            // A scarlet block sitting in the sea. Deliberately a colour nothing else in
+                            // the frame carries: the sky is blue, the water is blue-green, and the
+                            // measurement below is "did red arrive".
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, 4.5, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(6.0, 3.0, 6.0),
+        [0.95, 0.05, 0.05, 1.0],
+        1,
+    ));
+    scene.mark_dirty();
+
+    let ssr_on = RenderSettings {
+        ssr: inf_render::SsrSettings {
+            enabled: true,
+            ..inf_render::SsrSettings::default()
+        },
+        ..RenderSettings::default()
+    };
+
+    // The frame's overall redness. Measured over the WHOLE image on purpose: the
+    // block itself renders identically in both, so anything that moves this
+    // number moved on the water.
+    let redness = |img: &[u8]| -> f64 {
+        let mut sum = 0.0f64;
+        for p in img.chunks(4) {
+            sum += p[0] as f64 - 0.5 * (p[1] as f64 + p[2] as f64);
+        }
+        sum / (W * H) as f64
+    };
+
+    // ── the reflection shot ──────────────────────────────────────────────────
+    // An eye five metres above the surface, twenty-four out: the water between
+    // the camera and the block reflects it, which is the picture the P20.3 item
+    // names. `cos_v` there is about 0.3 — well inside the ordinary-viewing
+    // regime, and well away from the horizon case the ruling was about.
+    let above = look_view(DVec3::new(0.0, 8.0, 24.0), DVec3::new(0.0, 3.0, -2.0));
+    let off = render_with(&gpu, &scene, &above, RenderSettings::default());
+    let on = render_with(&gpu, &scene, &above, ssr_on);
+    let (r_off, r_on) = (redness(&off), redness(&on));
+    let above_change = water_changed_fraction(&off, &on);
+    eprintln!(
+        "water SSR, eye 5 m above the surface: redness {r_off:.3} -> {r_on:.3}, \
+         {:.3} % of the frame moved",
+        above_change * 100.0
+    );
+    assert!(
+        r_on > r_off + 0.5,
+        "the block did not arrive in the water in front of it (redness {r_off:.3} \
+         -> {r_on:.3}) — the march found nothing, or the grazing fade is holding \
+         it off at an angle it should not"
+    );
+
+    // ── the grazing control ──────────────────────────────────────────────────
+    // The same sea, the same block, at the same distance, with the eye 60 cm
+    // above the waterline instead of five metres. This is the regime P20.1
+    // described — `cos_v` in the hundredths — and it must still be the sky's.
+    let grazing = look_view(DVec3::new(0.0, 3.6, 24.0), DVec3::new(0.0, 3.4, -20.0));
+    let g_off = render_with(&gpu, &scene, &grazing, RenderSettings::default());
+    let g_on = render_with(&gpu, &scene, &grazing, ssr_on);
+    let grazing_change = water_changed_fraction(&g_off, &g_on);
+    let (g_off_r, g_on_r) = (redness(&g_off), redness(&g_on));
+    eprintln!(
+        "water SSR at grazing: redness {g_off_r:.3} -> {g_on_r:.3} (delta {:.3} \
+         against {:.3} from above), {:.3} % of the frame moved (against {:.3} %)",
+        g_on_r - g_off_r,
+        r_on - r_off,
+        grazing_change * 100.0,
+        above_change * 100.0
+    );
+    // **What the control is, precisely.** P20.1's objection was that at grazing
+    // angles the march is *futile* — every ray leaves the frame and every pixel
+    // takes the miss path, which is the sky. It was never that SSR would be
+    // wrong there. So the claim to check is that the block does not arrive: the
+    // scarlet that floods the reflection shot must stay out of the horizon shot.
+    //
+    // It is not zero, and that is honest rather than a slack threshold: a wave
+    // facet tilted toward the camera has a `cos_v` of its own, and a facet facing
+    // you really does reflect what is in front of it. That is the same
+    // wave-perturbed normal P20.1's sentence names, read the other way round.
+    assert!(
+        g_on_r - g_off_r < (r_on - r_off) * 0.5,
+        "the block reflected as strongly at grazing ({:.3}) as from above ({:.3}) \
+         — the angle fade is not deferring to the sky where P20.1's argument holds",
+        g_on_r - g_off_r,
+        r_on - r_off
+    );
+    assert!(
+        grazing_change < above_change,
+        "a grazing sea moved {grazing_change:.4} of the frame against \
+         {above_change:.4} from above"
+    );
 }
 
 /// **GOLDEN — ocean at noon.** A Gerstner sea against a hill coast, with the sun

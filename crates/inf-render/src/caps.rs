@@ -97,6 +97,18 @@ impl RenderTier {
                 settings.scatter = settings
                     .scatter
                     .clamp_bands(crate::settings::ScatterSettings::MEDIUM_BANDS_M);
+                // Wave VIS1a: the reflection march drops a quality band on
+                // Medium rather than going off. Unlike the meshlet path it has a
+                // cheap rung, and a mid GPU that authored reflections should get
+                // reflections. `min` on the code, so a project that already
+                // asked for Low keeps Low.
+                settings.ssr.quality = crate::settings::SsrQuality::from_code(
+                    settings
+                        .ssr
+                        .quality
+                        .code()
+                        .min(crate::settings::SsrQuality::Low.code()),
+                );
             }
             RenderTier::Low => {
                 settings.vgeom.enabled = false;
@@ -114,6 +126,9 @@ impl RenderTier {
                 settings.taa = false;
                 settings.shadows.enabled = false;
                 settings.gi.enabled = false;
+                // Wave VIS1a: no reflection march at all on Low, beside the AO
+                // and the shadows it already refuses.
+                settings.ssr.enabled = false;
             }
         }
         // Water, like the atmosphere, is never turned *off* by a tier — a sea a
@@ -281,6 +296,9 @@ impl RenderTier {
         settings.taa = false;
         settings.bloom.enabled = false;
         settings.shadows.enabled = false;
+        // Wave VIS1a: and no reflection march — a phone's bandwidth is the
+        // scarce thing, and this one reads a full-resolution colour buffer.
+        settings.ssr.enabled = false;
         // A phone still gets a sky — at the smallest LUTs and the fewest steps.
         settings.atmosphere.quality = settings.atmosphere.quality.clamp_to(RenderTier::Low);
         // A phone still samples its virtual textures — out of the smallest pool
@@ -739,6 +757,42 @@ mod tests {
         let l = RenderTier::Low.apply(s2);
         assert!(!l.vgeom.enabled && !l.bloom.enabled && !l.ssao.enabled);
         assert!(!l.taa && !l.shadows.enabled && !l.gi.enabled);
+    }
+
+    /// **The reflection march's own clamp ladder** (wave VIS1a): High grants what
+    /// was asked, Medium drops the step budget one band, Low and mobile refuse it.
+    ///
+    /// The idempotence half is the one that matters, and it is the reason Medium
+    /// clamps by `min` over the wire code rather than by assignment: `apply`
+    /// applied twice must equal `apply` applied once, and it must never *raise* a
+    /// project that already asked for Low.
+    #[test]
+    fn the_reflection_march_clamps_down_and_stays_down() {
+        let mut asked = RenderSettings::default();
+        asked.ssr.enabled = true;
+        asked.ssr.quality = crate::settings::SsrQuality::High;
+
+        let h = RenderTier::High.apply(asked);
+        assert!(h.ssr.enabled);
+        assert_eq!(h.ssr.quality, crate::settings::SsrQuality::High);
+
+        let m = RenderTier::Medium.apply(asked);
+        assert!(m.ssr.enabled, "a mid GPU still reflects");
+        assert_eq!(m.ssr.quality, crate::settings::SsrQuality::Low);
+        assert_eq!(
+            RenderTier::Medium.apply(m),
+            m,
+            "the clamp is not idempotent"
+        );
+
+        assert!(!RenderTier::Low.apply(asked).ssr.enabled);
+        assert!(!RenderTier::clamp_mobile(asked).ssr.enabled);
+
+        // …and a tier never turns it ON for a project that did not ask.
+        let off = RenderSettings::default();
+        for t in [RenderTier::High, RenderTier::Medium, RenderTier::Low] {
+            assert!(!t.apply(off).ssr.enabled, "{t:?} enabled SSR by itself");
+        }
     }
 
     /// **The P27.5 clamp, wired in P27.1.** Low keeps CSM; nothing ever turns

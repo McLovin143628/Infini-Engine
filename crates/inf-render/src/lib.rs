@@ -151,8 +151,9 @@ pub use scene::{
 };
 pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,
-    BloomSettings, GiSettings, PredictSettings, RaytraceSettings, RenderSettings, ScatterSettings,
-    ShadowSettings, SsaoSettings, StreamSettings, VgeomSettings, VirtualTextureSettings,
+    BloomSettings, ExposureMode, ExposureSettings, FilmSettings, FlareSettings, GiSettings,
+    PredictSettings, RaytraceSettings, RenderSettings, ScatterSettings, ShadowSettings,
+    SsaoSettings, SsrQuality, SsrSettings, StreamSettings, VgeomSettings, VirtualTextureSettings,
     VsmSettings, VsmSettingsError, DEFAULT_PREDICT_HORIZON_TICKS, DEFAULT_STREAM_BUDGET_BYTES,
     ROADMAP_PREDICT_HORIZON_TICKS, STREAM_BUDGET_LOW_BYTES, STREAM_BUDGET_MEDIUM_BYTES,
     VGEOM_BUDGET_LOW_BYTES, VGEOM_BUDGET_MEDIUM_BYTES, VSM_BUDGET_LOW_BYTES,

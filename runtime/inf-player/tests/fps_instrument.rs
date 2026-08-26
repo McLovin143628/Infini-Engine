@@ -1643,7 +1643,15 @@ fn the_island_at_shipping_resolution() {
         println!("  gpu {:>16}: {:.3} ms", "frame", m.gpu_frame_ms);
         let mut passes = m.passes.clone();
         passes.sort_by(|a, b| b.1.total_cmp(&a.1));
-        for (name, ms, rec) in passes.iter().take(8) {
+        // **Every pass, not the dearest eight** (wave VIS1a). A `take(8)` cannot
+        // report a pass that is cheap *now* and is the subject of the wave —
+        // `depth-prepass` and `ssao` were both below the cut on the island, which
+        // is precisely the information a before/after table needs. The city's lit
+        // table already prints on this rule; the island's did not.
+        for (name, ms, rec) in passes
+            .iter()
+            .filter(|(_, ms, rec)| *ms >= 0.0005 || *rec >= 0.0005)
+        {
             println!("  gpu {name:>16}: {ms:.3} ms   (record {rec:.3} ms)");
         }
         // **What the shadow pass actually DID** (island wave I7b). `vsm-raster`

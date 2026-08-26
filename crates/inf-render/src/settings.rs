@@ -14,6 +14,13 @@ pub struct BloomSettings {
     pub knee: f32,
     /// Additive strength of the blurred bloom over the scene (0..~1).
     pub intensity: f32,
+    /// **Karis-average first downsample** (wave VIS1a's authorable surface; the
+    /// consumer lands in VIS1b). A single very bright pixel survives a box
+    /// downsample as a crawling firefly; weighting each tap by `1/(1+luma)` before
+    /// averaging kills it at the cost of some genuine highlight energy.
+    ///
+    /// **OFF by default**, so `hdr_bloom.png` cannot move for it.
+    pub karis: bool,
 }
 
 impl Default for BloomSettings {
@@ -25,6 +32,215 @@ impl Default for BloomSettings {
             threshold: 1.0,
             knee: 0.5,
             intensity: 0.06,
+            karis: false,
+        }
+    }
+}
+
+/// **How the exposure scalar is arrived at** (wave VIS1a's authorable surface;
+/// the auto branch's consumer lands in VIS1b).
+///
+/// A wire enum: the discriminants are the persisted `u8` in
+/// `inf_scene::RenderSettingsRecord::exposure_mode` and are **append-only**.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExposureMode {
+    /// [`RenderSettings::exposure`] is the multiplier, exactly as it has been
+    /// since P13.3a. The default, and the only mode with a consumer in VIS1a.
+    #[default]
+    Manual = 0,
+    /// A luminance histogram over the post-HDR buffer drives an adapting
+    /// multiplier, bounded by [`ExposureSettings::min_luminance`] /
+    /// [`max_luminance`](ExposureSettings::max_luminance) and offset by
+    /// [`compensation_ev`](ExposureSettings::compensation_ev).
+    Auto = 1,
+}
+
+impl ExposureMode {
+    /// The wire code, and its inverse. Written as a pair so the two can never
+    /// drift; an unknown code decodes to [`Manual`](ExposureMode::Manual), which
+    /// is the behaviour every level has had since v8.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::Auto,
+            _ => Self::Manual,
+        }
+    }
+}
+
+/// **Eye adaptation** (wave VIS1a's authorable surface; VIS1b builds the
+/// histogram that reads it).
+///
+/// Every field is inert at the default — [`ExposureMode::Manual`] means the
+/// renderer multiplies by [`RenderSettings::exposure`] and consults nothing here.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExposureSettings {
+    pub mode: ExposureMode,
+    /// Exposure compensation in **stops**, added on top of whichever multiplier
+    /// the mode produces (so it applies in manual mode too, once VIS1b wires it).
+    /// `0.0` is no compensation.
+    pub compensation_ev: f32,
+    /// The dimmest average scene luminance auto exposure will adapt **to**
+    /// (cd/m²-ish, in the renderer's linear units). Below it the frame is allowed
+    /// to go dark rather than being lifted into noise.
+    pub min_luminance: f32,
+    /// The brightest average scene luminance auto exposure will adapt to.
+    pub max_luminance: f32,
+    /// Adaptation rate, in **stops per second**. Larger converges faster; `0`
+    /// freezes the adaptation at whatever it last held.
+    pub adaptation_speed: f32,
+}
+
+impl Default for ExposureSettings {
+    fn default() -> Self {
+        Self {
+            mode: ExposureMode::Manual,
+            compensation_ev: 0.0,
+            min_luminance: 0.03,
+            max_luminance: 8.0,
+            adaptation_speed: 1.5,
+        }
+    }
+}
+
+/// **Sun glare / lens flare** (wave VIS1a's authorable surface; the pass lands in
+/// VIS1b as a relocation of the underwater shaft kernel).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlareSettings {
+    /// Master enable. **OFF by default** — no golden may move for a feature whose
+    /// consumer is not built yet, and none may move for it afterwards either.
+    pub enabled: bool,
+    /// Overall strength of the veiling glare around the sun's screen position.
+    pub intensity: f32,
+    /// How many ghost images the chain draws along the sun→centre axis.
+    pub ghost_count: u32,
+    /// Strength of the ring halo.
+    pub halo: f32,
+    /// Strength of the horizontal anamorphic streak (`0` = none).
+    pub streak: f32,
+}
+
+impl Default for FlareSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            intensity: 0.25,
+            ghost_count: 4,
+            halo: 0.3,
+            streak: 0.0,
+        }
+    }
+}
+
+/// **The cheap lens trio** — vignette, chromatic aberration, film grain (wave
+/// VIS1a's authorable surface; the uber-post composite lands in VIS1b).
+///
+/// One struct rather than three, because they share a pass and are meaningless
+/// apart from it. Every field is `0` at the default: a zero-strength effect is
+/// not "off by a branch", it is off by arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct FilmSettings {
+    /// Corner darkening, `0` = none.
+    pub vignette_intensity: f32,
+    /// How gradually the vignette ramps in from the centre (`0` = a hard ring).
+    pub vignette_smoothness: f32,
+    /// Lateral chromatic aberration, in **pixels of separation at the corner**.
+    pub chromatic_aberration: f32,
+    /// Film-grain strength, `0` = none.
+    pub grain_intensity: f32,
+    /// Grain cell size in pixels; larger is coarser.
+    pub grain_size: f32,
+}
+
+/// How far a screen-space reflection is allowed to march (wave VIS1a).
+///
+/// A wire enum: the discriminants are the persisted `u8` in
+/// `inf_scene::RenderSettingsRecord::ssr_quality` and are **append-only**.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SsrQuality {
+    /// 16 steps.
+    Low = 0,
+    /// 32 steps — the default.
+    #[default]
+    Medium = 1,
+    /// 48 steps.
+    High = 2,
+}
+
+impl SsrQuality {
+    /// Maximum march steps. The march is **geometric** rather than uniform (see
+    /// `env_lighting.wgsl`), so these are budgets rather than resolutions: the
+    /// near field is dense at every setting and the tail is what gets coarser.
+    pub fn steps(self) -> u32 {
+        match self {
+            Self::Low => 16,
+            Self::Medium => 32,
+            Self::High => 48,
+        }
+    }
+
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_code(code: u8) -> Self {
+        match code {
+            0 => Self::Low,
+            2 => Self::High,
+            _ => Self::Medium,
+        }
+    }
+}
+
+/// **Screen-space reflections, first-class** (wave VIS1a).
+///
+/// Until this wave SSR was three fields on [`GiSettings`] and could not be turned
+/// on without dynamic GI, because all it did was move the probe fetch point. It is
+/// now its own block with its own colour source, its own authorable record and its
+/// own clause in [`RenderSettings::needs_depth_prepass`].
+///
+/// **OFF by default**, and off is byte-identical: the lit shaders' SSR branch is
+/// `params2.y > 0.5` and stays untaken, so all 54 goldens run the instruction
+/// stream they always did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SsrSettings {
+    /// Master enable.
+    pub enabled: bool,
+    /// March length, metres. Default 24 m — long enough for a building to appear
+    /// in a wet street, short enough that the geometric step tail stays dense.
+    pub max_distance: f32,
+    /// **Relative** depth-thickness tolerance: a hit is accepted when the ray
+    /// sample sits behind the depth buffer by less than this fraction of its own
+    /// view distance. Relative rather than absolute so one number works at every
+    /// scale under the reverse-infinite-Z projection. Default 0.15.
+    pub thickness: f32,
+    /// The march's step budget. Default [`SsrQuality::Medium`] (32).
+    pub quality: SsrQuality,
+    /// How much of the reflected colour is blended over the fallback, `0..1`.
+    /// Default 1.0 — a hit is a reflection, not a suggestion.
+    pub intensity: f32,
+    /// Perceptual roughness past which a surface does **not** march at all.
+    ///
+    /// This is the cost knob as much as the quality one: a rough surface's
+    /// reflection is a wide lobe that a single mirror ray cannot represent
+    /// anyway, and the specular-GI term already answers it correctly. The weight
+    /// ramps to zero over the upper half of the range, so there is no visible
+    /// edge where the march stops. Default 0.4.
+    pub roughness_cutoff: f32,
+}
+
+impl Default for SsrSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_distance: 24.0,
+            thickness: 0.15,
+            quality: SsrQuality::Medium,
+            intensity: 1.0,
+            roughness_cutoff: 0.4,
         }
     }
 }
@@ -107,6 +323,21 @@ pub struct RenderSettings {
     /// Dynamic global illumination (P13.3b). **OFF by default** → the hemispheric
     /// ambient path is byte-identical.
     pub gi: GiSettings,
+    /// **Screen-space reflections** (wave VIS1a; three fields on [`GiSettings`]
+    /// before that). **OFF by default** → the lit shaders' SSR branch is untaken
+    /// and every golden runs the instruction stream it always did.
+    pub ssr: SsrSettings,
+    /// **Eye adaptation** (wave VIS1a's authorable surface). Default
+    /// [`ExposureMode::Manual`], which consults nothing and leaves
+    /// [`exposure`](Self::exposure) as the whole story — the consumer for the
+    /// auto branch lands in VIS1b.
+    pub exposure_control: ExposureSettings,
+    /// **Sun glare / lens flare** (wave VIS1a's authorable surface). Off by
+    /// default; the pass lands in VIS1b.
+    pub flare: FlareSettings,
+    /// **Vignette / chromatic aberration / film grain** (wave VIS1a's authorable
+    /// surface). Zero-strength at the default; the composite lands in VIS1b.
+    pub film: FilmSettings,
     /// Physical-atmosphere quality (P17.2): LUT resolution, ray-march step
     /// counts and star density. Unlike its neighbours this has **no enable
     /// flag** — whether an atmosphere is drawn at all is a property of the
@@ -260,22 +491,13 @@ pub struct GiSettings {
     /// already does) and therefore **on by default** — but only reachable when
     /// [`enabled`](GiSettings::enabled) is set, so no non-GI golden is affected.
     pub specular: bool,
-    /// **SSR v1** (P18.4): a screen-space raymarch against the scene depth that
-    /// re-anchors the specular probe fetch at the ray's hit point. **Off by
-    /// default** — it forces the depth prepass on
-    /// ([`needs_depth_prepass`](RenderSettings::needs_depth_prepass)) and the march
-    /// is 24 taps, so it is a deliberate opt-in; with it off the lit shaders take
-    /// the identical instruction stream.
-    pub ssr: bool,
-    /// SSR march length in metres. Default 8 m — contact reflections, not mirrors.
-    pub ssr_distance: f32,
-    /// SSR **relative** depth-thickness tolerance: a hit is accepted when the ray
-    /// sample sits behind the depth buffer by less than this fraction of its own
-    /// view distance. Relative rather than absolute so one number works at every
-    /// scale under the reverse-infinite-Z projection (which has no far plane to
-    /// linearize against). Default 0.15.
-    pub ssr_thickness: f32,
 }
+// **SSR left this struct in wave VIS1a.** `ssr` / `ssr_distance` /
+// `ssr_thickness` lived here from P18.4 because all SSR did was move the GI
+// probe fetch point, which made it meaningless without probes. It has its own
+// colour source now, so it has its own block: [`SsrSettings`], reachable at
+// [`RenderSettings::ssr`], authorable in the scene's render record, and readable
+// by [`RenderSettings::needs_depth_prepass`] without consulting GI at all.
 
 impl Default for GiSettings {
     fn default() -> Self {
@@ -288,9 +510,6 @@ impl Default for GiSettings {
             instance_budget: 4096,
             probe_budget: 0,
             specular: true,
-            ssr: false,
-            ssr_distance: 8.0,
-            ssr_thickness: 0.15,
         }
     }
 }
@@ -1216,6 +1435,10 @@ impl Default for RenderSettings {
             scatter: ScatterSettings::default(),
             shadows: ShadowSettings::default(),
             gi: GiSettings::default(),
+            ssr: SsrSettings::default(),
+            exposure_control: ExposureSettings::default(),
+            flare: FlareSettings::default(),
+            film: FilmSettings::default(),
             atmosphere: AtmosphereSettings::default(),
             water: crate::water::WaterSettings::default(),
             vt: VirtualTextureSettings::default(),
@@ -1324,8 +1547,11 @@ impl RenderSettings {
     /// **P18.4:** SSR appears here — the screen-space reflection march in the lit
     /// passes reads this exact texture, so turning SSR on without the prepass would
     /// march against whatever the last frame left behind.
+    /// **Wave VIS1a:** SSR's clause no longer says `gi.enabled &&`. SSR is its own
+    /// block with its own colour source now, so it forces the prepass on its own —
+    /// which is the whole difference between a feature and a rider.
     pub fn needs_depth_prepass(&self) -> bool {
-        self.ssao.enabled || self.taa || (self.gi.enabled && self.gi.ssr)
+        self.ssao.enabled || self.taa || self.ssr.enabled
     }
 }
 
@@ -1678,27 +1904,81 @@ mod tests {
     }
 
     /// P18.4 off-path discipline: the new GI knobs must not reach any pass while
-    /// GI itself is off — SSR in particular must not conjure a depth prepass for a
-    /// scene that never asked for GI.
+    /// GI itself is off.
+    ///
+    /// **Amended in wave VIS1a.** The original arm asserted that SSR requested with
+    /// GI off produces *no* depth prepass — which was correct while SSR's only
+    /// effect was to move the GI probe fetch point, and is precisely what the wave
+    /// retired. The claim is now the opposite one and it is deliberate: SSR forces
+    /// the prepass on its own, because it marches against it on its own.
     #[test]
     fn gi_v2_defaults_are_inert_until_gi_is_enabled() {
-        let mut s = RenderSettings::default();
+        let s = RenderSettings::default();
         assert!(!s.gi.enabled);
         assert_eq!(s.gi.quality, crate::gi::GiQuality::High);
         assert_eq!(s.gi.probe_budget, 0, "goldens render at full probe update");
         assert!(s.gi.specular, "the cheap SH specular is the default");
-        assert!(!s.gi.ssr, "SSR is opt-in");
-
-        // SSR requested but GI off → no prepass, nothing changes.
-        s.gi.ssr = true;
-        assert!(!s.needs_depth_prepass());
-        // With GI on it forces the prepass it marches against.
-        s.gi.enabled = true;
-        assert!(s.needs_depth_prepass());
+        assert!(!s.ssr.enabled, "SSR is opt-in");
 
         // The cascade blend defaults on but is inert while shadows are off.
         assert_eq!(RenderSettings::default().shadows.cascade_blend, 0.1);
         assert!(!RenderSettings::default().shadows.enabled);
+    }
+
+    /// **SSR is its own feature now** (wave VIS1a) — it forces the prepass without
+    /// GI, and every one of its defaults is the inert one.
+    #[test]
+    fn ssr_is_first_class_and_off() {
+        let mut s = RenderSettings::default();
+        assert!(!s.ssr.enabled);
+        assert!(!s.needs_depth_prepass());
+        s.ssr.enabled = true;
+        assert!(
+            s.needs_depth_prepass(),
+            "SSR must force the prepass it marches against, with or without GI"
+        );
+        assert!(!s.gi.enabled, "and it must not need GI to do it");
+
+        let d = SsrSettings::default();
+        assert_eq!(d.quality, SsrQuality::Medium);
+        assert_eq!(d.quality.steps(), 32);
+        assert_eq!(SsrQuality::Low.steps(), 16);
+        assert_eq!(SsrQuality::High.steps(), 48);
+        assert_eq!(d.intensity, 1.0);
+        assert_eq!(d.roughness_cutoff, 0.4);
+        assert_eq!(d.max_distance, 24.0);
+        assert_eq!(d.thickness, 0.15);
+    }
+
+    /// The two wire enums round-trip through their persisted codes, and an
+    /// unknown code decodes to the behaviour every pre-v26 level already had.
+    #[test]
+    fn the_wire_enums_round_trip_and_fail_safe() {
+        for q in [SsrQuality::Low, SsrQuality::Medium, SsrQuality::High] {
+            assert_eq!(SsrQuality::from_code(q.code()), q);
+        }
+        assert_eq!(SsrQuality::from_code(200), SsrQuality::Medium);
+        for m in [ExposureMode::Manual, ExposureMode::Auto] {
+            assert_eq!(ExposureMode::from_code(m.code()), m);
+        }
+        assert_eq!(ExposureMode::from_code(200), ExposureMode::Manual);
+        assert_eq!(ExposureMode::default(), ExposureMode::Manual);
+    }
+
+    /// **The VIS1b fields land inert** — every one of them is off, zero, or the
+    /// value that makes its arithmetic an identity, so no golden can move for a
+    /// block whose consumer is not built yet.
+    #[test]
+    fn the_vis1b_authorable_surface_is_inert_at_its_defaults() {
+        let d = RenderSettings::default();
+        assert!(!d.bloom.karis);
+        assert_eq!(d.exposure_control.mode, ExposureMode::Manual);
+        assert_eq!(d.exposure_control.compensation_ev, 0.0);
+        assert!(!d.flare.enabled);
+        assert_eq!(d.film, FilmSettings::default());
+        assert_eq!(d.film.vignette_intensity, 0.0);
+        assert_eq!(d.film.chromatic_aberration, 0.0);
+        assert_eq!(d.film.grain_intensity, 0.0);
     }
 
     #[test]

@@ -137,6 +137,21 @@ pub struct GiDataGpu {
     /// P18.4: x = probe update start, y = probe update count, z = probe total,
     /// w = sky source (0 = authored gradient, 1 = the P17.2 sky-view LUT).
     pub sched: [f32; 4],
+    /// **Wave VIS1a, the SSR block**: x = march steps, y = roughness cutoff,
+    /// z = intensity, w = whether the previous frame's resolved colour is usable
+    /// (`0` on the first frame after a resize, when the history texture is a
+    /// freshly zero-initialized allocation and reflecting it would be reflecting
+    /// black).
+    pub ssr: [f32; 4],
+    /// **Wave VIS1a**: the PREVIOUS frame's jittered view-projection, so an SSR
+    /// hit found in this frame's depth is sampled from the colour buffer at the
+    /// place it occupied when that colour was written.
+    ///
+    /// It rides here rather than in `ViewUniforms` because this uniform is
+    /// already bound by every lit pass through `EnvBinding` and by nothing else,
+    /// so a matrix added here reaches exactly the shaders that need it and
+    /// changes no other pass's uniform layout.
+    pub prev_view_proj: [f32; 16],
 }
 
 impl GiDataGpu {
@@ -157,7 +172,31 @@ impl GiDataGpu {
             sky_horizon: [0.0; 4],
             params2: [0.0; 4],
             sched: [0.0; 4],
+            ssr: [0.0; 4],
+            prev_view_proj: [0.0; 16],
         }
+    }
+
+    /// The SSR half of the uniform, packed from the settings and the frame.
+    ///
+    /// A free function of two arguments rather than an inline literal, because it
+    /// is written from **two** places — the GI-on path below and the wave VIS1a
+    /// GI-off path that exists so SSR no longer needs probes — and two copies of
+    /// a packing rule is two chances for the off-GI frame to march differently
+    /// from the on-GI one.
+    fn with_ssr(mut self, frame: &FrameData) -> Self {
+        let s = &frame.settings.ssr;
+        self.params2[1] = if s.enabled { 1.0 } else { 0.0 };
+        self.params2[2] = s.max_distance.max(0.0);
+        self.params2[3] = s.thickness.clamp(1e-4, 1.0);
+        self.ssr = [
+            s.quality.steps() as f32,
+            s.roughness_cutoff.clamp(0.0, 1.0),
+            s.intensity.clamp(0.0, 1.0),
+            if frame.scene_history_valid { 1.0 } else { 0.0 },
+        ];
+        self.prev_view_proj = frame.taa_prev_view_proj;
+        self
     }
 }
 
@@ -735,10 +774,23 @@ impl RenderNode for GiNode {
     fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
         let s = &frame.settings.gi;
         if !s.enabled {
-            // Publish the disabled uniform once; the buffer is created once per
-            // quality and only this node writes it, so re-writing the constant
-            // every frame is redundant.
-            if !self.published_disabled {
+            // **Wave VIS1a: SSR without GI.** SSR's parameters ride this uniform
+            // and its reprojection matrix moves every frame, so a scene that wants
+            // reflections without probes needs the block written every frame even
+            // though every GI field in it is zero. The `published_disabled` cache
+            // stays for the far commoner case — neither feature on — where the
+            // constant really is a constant and re-writing it is waste.
+            if frame.settings.ssr.enabled {
+                self.published_disabled = false;
+                gpu.queue.write_buffer(
+                    &frame.gi.uniform,
+                    0,
+                    bytemuck::bytes_of(&GiDataGpu::disabled().with_ssr(frame)),
+                );
+            } else if !self.published_disabled {
+                // Publish the disabled uniform once; the buffer is created once per
+                // quality and only this node writes it, so re-writing the constant
+                // every frame is redundant.
                 gpu.queue.write_buffer(
                     &frame.gi.uniform,
                     0,
@@ -1054,19 +1106,19 @@ impl RenderNode for GiNode {
             sun_color: [sun_color[0], sun_color[1], sun_color[2], 0.0],
             sky_zenith: [sky.zenith[0], sky.zenith[1], sky.zenith[2], 0.0],
             sky_horizon: [sky.horizon[0], sky.horizon[1], sky.horizon[2], 0.0],
-            params2: [
-                if s.specular { 1.0 } else { 0.0 },
-                if s.ssr { 1.0 } else { 0.0 },
-                s.ssr_distance.max(0.0),
-                s.ssr_thickness.clamp(1e-4, 1.0),
-            ],
+            // The SSR half is filled by `with_ssr` below — one packing rule, so
+            // the GI-on frame and the GI-off frame march identically.
+            params2: [if s.specular { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
             sched: [
                 probe_start as f32,
                 probe_count as f32,
                 probe_total as f32,
                 if sky_from_atmosphere { 1.0 } else { 0.0 },
             ],
-        };
+            ssr: [0.0; 4],
+            prev_view_proj: [0.0; 16],
+        }
+        .with_ssr(frame);
         gpu.queue
             .write_buffer(&frame.gi.uniform, 0, bytemuck::bytes_of(&data));
 

@@ -37,6 +37,13 @@ struct GiData {
     // P18.4 amortization: x = probe start, y = probe count, z = probe total,
     // w = sky source (0 gradient, 1 atmosphere LUT).
     sched: vec4<f32>,
+    // Wave VIS1a, the SSR block: x = march steps, y = roughness cutoff,
+    // z = intensity, w = whether the previous frame's resolved colour is usable.
+    ssr: vec4<f32>,
+    // Wave VIS1a: the PREVIOUS frame's jittered view-projection, so a hit found in
+    // this frame's depth is sampled from the colour buffer at the place it
+    // occupied when that colour was written.
+    prev_view_proj: mat4x4<f32>,
 };
 
 @group(GROUP_ENV) @binding(0) var ao_tex: texture_2d<f32>;
@@ -51,6 +58,12 @@ struct GiData {
 // `RenderSettings::needs_depth_prepass` is true whenever SSR is on, so the texture
 // this reads was written by THIS frame's prepass.
 @group(GROUP_ENV) @binding(12) var gi_scene_depth: texture_depth_2d;
+// Wave VIS1a: the PREVIOUS frame's resolved opaque colour — SSR's colour source.
+// Sampled (not loaded), because the reprojected coordinate is fractional. The
+// sampler is the atmosphere's (clamp-to-edge, linear), which is what a reprojected
+// fetch wants; see `ENV_SCENE_COLOR` in `passes/mod.rs` for why the source is the
+// previous frame rather than this one.
+@group(GROUP_ENV) @binding(21) var ssr_scene_color: texture_2d<f32>;
 
 // 3×3-PCF shadow factor of ONE cascade. Returns `-1.0` when the receiver falls
 // outside this cascade's projection (the caller's "try the next one" signal), so
@@ -234,43 +247,92 @@ fn gi_env_brdf_ab(rough: f32, nov: f32) -> vec2<f32> {
     return vec2<f32>(-1.04, 1.04) * a004 + r.zw;
 }
 
-// **SSR v1** — a screen-space raymarch against the single-sample scene depth.
-// Returns `vec4(hit_world_pos, 1)` on a hit, `vec4(0, 0, 0, 0)` on a miss.
+// ── SSR v2 (wave VIS1a) ─────────────────────────────────────────────────────
 //
-// Honest scope, and the reason this is a *hit finder* rather than a colour fetch:
-// the renderer is FORWARD, so at the moment a lit fragment shades, the scene
-// colour it would want to reflect does not exist yet — there is no G-buffer to
-// defer against and no colour history bound. What screen space CAN answer here is
-// *where* the reflection ray lands, and the GI probe field answers what is bright
-// there. So a hit **re-anchors the SH reconstruction at the hit point** instead of
-// evaluating it at the shading point: the reflection then follows the geometry
-// that causes it (parallax, contact darkening) rather than smearing the receiver's
-// own probe lobe across the surface. A colour-sourced SSR needs either a deferred
-// pass or a reprojected history — the documented follow-up.
+// **What changed, and why it is a different feature rather than a tuning pass.**
+// SSR v1 (P18.4) was a *hit finder*: it marched the depth buffer to find where the
+// reflection ray landed and then re-anchored the GI probe fetch there. That made it
+// meaningless without dynamic GI — there were no probes to re-anchor — which is
+// why it lived on `GiSettings` and could not be turned on alone. v2 fetches
+// **colour**, so it is its own feature with its own settings block, its own clause
+// in `needs_depth_prepass`, and no dependency on probes at all.
 //
-// Fixed step count, no jitter, no history ⇒ deterministic by construction.
-// Reverse-infinite-Z: a LARGER ndc.z is NEARER, and view distance is proportional
-// to 1/ndc.z — so the penetration test below is a ratio and needs no near plane.
-fn gi_ssr_hit(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
+// **The colour comes from the previous frame.** The renderer is forward with 4x
+// MSAA: when a lit fragment shades, this frame's opaque colour does not exist and
+// there is no G-buffer to defer against — deferring is what the
+// visbuffer-off-by-default ruling refuses, on coverage grounds. So the fetch reads
+// `targets.scene_hdr`, which `passes::resolve` wrote at the end of the previous
+// frame, **reprojected through that frame's view-projection** so the sample lands
+// where the hit point was when the colour was written. The price is one frame of
+// latency; the bargain is the one `taa` and `cloud_temporal` already strike, and
+// SSR is off by default on the same terms.
+//
+// **The march is geometric, not uniform.** v1 spent 24 evenly-spaced samples over
+// 8 m, which is 33 cm of near-field resolution — coarse enough that a contact
+// reflection lands a third of a metre from the object making it. `t = max_dist *
+// u²` puts the first step 2 cm out at 32 samples over 24 m and lets the tail
+// coarsen, which is where a miss is cheap and a hit is a distant, low-detail
+// reflection anyway. A crossing is then bisected three times, so the reported hit
+// is inside the step it was found in rather than at its far end.
+//
+// Reverse-infinite-Z: a LARGER ndc.z is NEARER and view distance is proportional
+// to 1/ndc.z, so the penetration test is a ratio and needs no near plane.
+
+// How strongly this surface reflects at all. Full up to half the authored cutoff,
+// fading to nothing at it — a hard stop would put a visible edge across a surface
+// whose roughness varies.
+fn ssr_roughness_weight(rough: f32) -> f32 {
+    let cutoff = max(gi.ssr.y, 1e-4);
+    return 1.0 - smoothstep(cutoff * 0.5, cutoff, rough);
+}
+
+// The previous frame's resolved colour at render-local point `p`, with an edge
+// fade in `w`. `w == 0` means "off screen last frame" — a miss, not black.
+fn ssr_prev_color(p: vec3<f32>) -> vec4<f32> {
+    let clip = gi.prev_view_proj * vec4<f32>(p, 1.0);
+    if (clip.w <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let ndc = clip.xyz / clip.w;
+    if (any(abs(ndc.xy) > vec2<f32>(1.0))) {
+        return vec4<f32>(0.0);
+    }
+    let uv = ndc.xy * vec2<f32>(0.5, -0.5) + 0.5;
+    // Fade over the outer 8 % of the frame: a reflection that walks off the edge
+    // of the screen must dissolve rather than end in a line.
+    let e = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    let edge = smoothstep(0.0, 0.08, e);
+    let c = textureSampleLevel(ssr_scene_color, atmos_lut_smp, uv, 0.0).rgb;
+    return vec4<f32>(c, edge);
+}
+
+// March `dir` from `origin` against this frame's depth. Returns
+// `vec4(reflected_colour, confidence)`; confidence 0 is a miss.
+fn ssr_trace(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
     let max_dist = gi.params2.z;
     let thickness = gi.params2.w;
     let vp = view.grid_axis_viewport.zw;
-    let steps = 24;
-    let dt = max_dist / f32(steps);
+    let steps = i32(max(gi.ssr.x, 1.0));
+    let inv = 1.0 / f32(steps);
+
+    var prev_t = 0.0;
     for (var s = 1; s <= steps; s = s + 1) {
-        let p = origin + dir * (dt * f32(s));
+        let u = f32(s) * inv;
+        let t = max_dist * u * u;
+        let p = origin + dir * t;
         let clip = view.view_proj * vec4<f32>(p, 1.0);
         if (clip.w <= 0.0) {
-            return vec4<f32>(0.0);
+            return vec4<f32>(0.0); // behind the camera — nothing further can hit
         }
         let ndc = clip.xyz / clip.w;
         if (any(abs(ndc.xy) > vec2<f32>(1.0)) || ndc.z <= 0.0) {
-            return vec4<f32>(0.0);
+            return vec4<f32>(0.0); // left the frame — every later sample is too
         }
-        let uv = ndc.xy * vec2<f32>(0.5, -0.5) + 0.5;
-        let texel = vec2<i32>(clamp(uv * vp, vec2<f32>(0.0), vp - vec2<f32>(1.0)));
+        let texel = vec2<i32>(clamp(ndc.xy * vec2<f32>(0.5, -0.5) * vp + 0.5 * vp,
+                                    vec2<f32>(0.0), vp - vec2<f32>(1.0)));
         let scene_z = textureLoad(gi_scene_depth, texel, 0);
         if (scene_z <= 0.0) {
+            prev_t = t;
             continue; // sky / nothing rasterized here
         }
         // The scene surface is nearer than the ray sample ⇒ the ray went behind
@@ -278,8 +340,34 @@ fn gi_ssr_hit(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
         // foreground object would report a spurious hit on its silhouette.
         let penetration = 1.0 - ndc.z / scene_z;
         if (penetration > 0.0 && penetration < thickness) {
-            return vec4<f32>(p, 1.0);
+            // Bisect the crossing: the step that hit may be metres long in the
+            // tail, and the colour fetched at its far end is the colour of
+            // whatever is behind the thing being reflected.
+            var lo = prev_t;
+            var hi = t;
+            for (var b = 0; b < 3; b = b + 1) {
+                let mid = 0.5 * (lo + hi);
+                let q = origin + dir * mid;
+                let qc = view.view_proj * vec4<f32>(q, 1.0);
+                let qn = qc.xyz / max(qc.w, 1e-6);
+                let qt = vec2<i32>(clamp(qn.xy * vec2<f32>(0.5, -0.5) * vp + 0.5 * vp,
+                                         vec2<f32>(0.0), vp - vec2<f32>(1.0)));
+                let qz = textureLoad(gi_scene_depth, qt, 0);
+                if (qz > 0.0 && qn.z < qz) {
+                    hi = mid; // already behind the surface
+                } else {
+                    lo = mid;
+                }
+            }
+            let hit = origin + dir * hi;
+            let c = ssr_prev_color(hit);
+            // Confidence also falls off with march distance: a reflection found
+            // at the very end of the ray is the one most likely to be a
+            // silhouette artefact, and the one the fallback approximates best.
+            let far = 1.0 - smoothstep(0.75, 1.0, hi / max(max_dist, 1e-4));
+            return vec4<f32>(c.rgb, c.w * far);
         }
+        prev_t = t;
     }
     return vec4<f32>(0.0);
 }
@@ -294,14 +382,12 @@ fn gi_ssr_hit(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
 // incidence. The caller multiplies by AO.
 fn gi_specular(world_pos: vec3<f32>, n: vec3<f32>, v: vec3<f32>, rough: f32, f0: vec3<f32>) -> vec3<f32> {
     let r = reflect(-v, n);
-    var probe_pos = world_pos;
-    if (gi.params2.y > 0.5) {
-        let hit = gi_ssr_hit(world_pos + n * 0.02, r);
-        if (hit.w > 0.5) {
-            probe_pos = hit.xyz;
-        }
-    }
-    let c = gi_fetch_sh(probe_pos);
+    // **The SSR re-anchoring left this function in wave VIS1a.** It existed
+    // because v1 had no colour to fetch, so the best a hit could do was move the
+    // probe fetch point; v2 fetches the colour itself and blends it over this
+    // term as the fallback (`gi_ambient_specular`). Keeping both would apply the
+    // parallax twice.
+    let c = gi_fetch_sh(world_pos);
     // A rough surface integrates the lobe away; a smooth one keeps it.
     let lobe = clamp(1.0 - rough, 0.0, 1.0);
     let radiance = gi_sh_radiance(c, r, lobe) * gi.params.y;
@@ -315,9 +401,21 @@ fn gi_specular(world_pos: vec3<f32>, n: vec3<f32>, v: vec3<f32>, rough: f32, f0:
     return radiance * GI_PI * (f0 * ab.x + vec3<f32>(ab.y));
 }
 
-// The full P18.4 ambient specular for a lit pass: the GI term when GI **and** its
-// specular flag are on, otherwise the pre-P18.4 constant. Written once here so all
-// four lit shaders take the identical off-path instruction stream.
+// The full ambient specular for a lit pass. Written once here so every lit shader
+// takes the identical off-path instruction stream.
+//
+// Three layers, outermost last:
+//   1. the pre-P18.4 constant `ambient · f0 · 0.5`;
+//   2. P18.4's SH reconstruction along the reflection vector, when GI and its
+//      specular flag are on;
+//   3. wave VIS1a's SSR, blended over whichever of those is the fallback.
+//
+// **The fallback is the design, not a failure path.** A screen-space march can
+// only ever answer for what is on screen; everything it cannot see — behind the
+// camera, off the edge, occluded, too rough to be worth a mirror ray — is
+// answered by the term underneath, which is the probe field when there is one and
+// the sky-tinted constant when there is not. So the reflection dissolves into
+// something plausible instead of into black.
 fn gi_ambient_specular(
     world_pos: vec3<f32>,
     n: vec3<f32>,
@@ -326,8 +424,29 @@ fn gi_ambient_specular(
     f0: vec3<f32>,
     ambient: vec3<f32>,
 ) -> vec3<f32> {
+    var base: vec3<f32>;
     if (gi.params.x > 0.5 && gi.params2.x > 0.5) {
-        return gi_specular(world_pos, n, v, rough, f0);
+        base = gi_specular(world_pos, n, v, rough, f0);
+    } else {
+        base = ambient * f0 * 0.5;
     }
-    return ambient * f0 * 0.5;
+    // `params2.y` is 0 on every scene with SSR off, so this branch is untaken and
+    // the arithmetic above is exactly what it has been since P18.4.
+    if (gi.params2.y > 0.5) {
+        // `ssr.w` is the history flag: on the first frame after a resize the
+        // colour buffer is a zero-initialized allocation, and reflecting it would
+        // be reflecting black.
+        let w = ssr_roughness_weight(rough) * gi.ssr.z * gi.ssr.w;
+        if (w > 0.0) {
+            let hit = ssr_trace(world_pos + n * 0.02, reflect(-v, n));
+            if (hit.w > 0.0) {
+                // The same split-sum response the fallback is expressed in, so
+                // the blend is between two terms in one set of units.
+                let ab = gi_env_brdf_ab(rough, clamp(dot(n, v), 0.0, 1.0));
+                let refl = hit.rgb * (f0 * ab.x + vec3<f32>(ab.y));
+                base = mix(base, refl, clamp(w * hit.w, 0.0, 1.0));
+            }
+        }
+    }
+    return base;
 }

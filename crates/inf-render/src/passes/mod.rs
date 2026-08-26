@@ -184,6 +184,28 @@ const ENV_VSM_ATLAS: u32 = 17;
 const ENV_VSM_TABLE: u32 = 18;
 const ENV_VSM_PROJECTIONS: u32 = 19;
 const ENV_VSM_PARAMS: u32 = 20;
+/// **The previous frame's resolved opaque colour** (wave VIS1a) — SSR's colour
+/// source, on the same folding argument [`ENV_VT_ATLAS`] records.
+///
+/// It is `targets.scene_hdr`, which `passes::resolve` writes at the end of every
+/// frame and nothing writes before the lit passes of the next one. That makes it
+/// safe to bind here: at the moment a lit pass samples it, it is not an
+/// attachment of any pass in flight.
+///
+/// **A previous frame rather than this one, and that is the whole SSR ruling.**
+/// The renderer is forward with 4x MSAA: when a lit fragment shades, this frame's
+/// opaque colour does not exist yet, and there is no G-buffer to defer against —
+/// deferring is precisely what the visbuffer-off-by-default ruling refuses on
+/// coverage grounds. So SSR samples the last resolve, reprojected through
+/// `GiData::prev_view_proj`, and pays a frame of latency for a reflection that is
+/// otherwise geometrically exact. That is the same bargain
+/// [`crate::RenderSettings::taa`] and `cloud_temporal` strike, and SSR is off by
+/// default on the same terms.
+///
+/// It is read through [`ENV_ATMOS_SAMPLER`] — clamp-to-edge, linear, which is
+/// exactly what a reprojected fetch wants — so it costs one binding index and no
+/// sampler, the arrangement [`ENV_CLOUD_SHADOW`] already uses.
+const ENV_SCENE_COLOR: u32 = 21;
 
 /// The atmosphere *medium* library, bound at `group`/`binding`.
 pub(crate) fn atmosphere_source(group: u32, binding: u32) -> String {
@@ -995,6 +1017,17 @@ pub(crate) fn env_bgl_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
     .chain(crate::vsm_receiver::bind_group_layout_entries(
         ENV_VSM_ATLAS,
     ))
+    // ── wave VIS1a: SSR's colour source (21) ──
+    .chain(std::iter::once(wgpu::BindGroupLayoutEntry {
+        binding: ENV_SCENE_COLOR,
+        visibility: frag,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }))
     .collect::<Vec<_>>()
 }
 
@@ -1186,6 +1219,16 @@ impl EnvBinding {
                     wgpu::BindGroupEntry {
                         binding: ENV_VSM_PARAMS,
                         resource: frame.vsm_params().as_entire_binding(),
+                    },
+                    // ── wave VIS1a: SSR's colour source ──
+                    //
+                    // Size-dependent, so it is already covered by
+                    // `targets.generation` in `resource_key` and needs no
+                    // component of its own — the `depth_prepass` clause above,
+                    // verbatim.
+                    wgpu::BindGroupEntry {
+                        binding: ENV_SCENE_COLOR,
+                        resource: wgpu::BindingResource::TextureView(&frame.targets.scene_hdr),
                     },
                 ],
             })
