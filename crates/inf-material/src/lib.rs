@@ -14,6 +14,7 @@ pub mod bc;
 pub mod derive;
 pub mod error;
 pub mod graph;
+pub mod ground;
 pub mod instance;
 pub mod mapset;
 pub mod material;
@@ -28,6 +29,7 @@ pub use graph::{
     validate_module, ComplexityReport, MatIssue, MatType, MaterialBudget, MaterialCompile,
     TextureCompile,
 };
+pub use ground::{synthesize, GroundKind, GroundMaps, GROUND_ALBEDO_EXTENT, GROUND_MAP_EXTENT};
 pub use instance::{MatOverrides, MaterialInstance};
 pub use mapset::{classify_map, pack_orm, plan_map_set, MapKind, MapSetPlan, PlannedTexture};
 pub use material::{MatBlend, MaterialAsset};

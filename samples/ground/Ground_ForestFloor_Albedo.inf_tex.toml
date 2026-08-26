@@ -1,0 +1,9 @@
+schema_version = 1
+guid = "00000000-0000-0000-0000-00009e20000d"
+kind = "texture"
+content_hash = "7669a87e0994f0765eea7ad28913f9fe"
+dependencies = []
+tags = [
+    "forest-floor",
+    "ground",
+]

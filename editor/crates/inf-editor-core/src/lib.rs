@@ -38,6 +38,11 @@ pub mod erosion_gpu;
 // creates, so the river validator and the cook advisory apply to imported water
 // on the day it lands.
 pub mod gis;
+// TER2a: the engine's committed ground library — five PBR ground sets, written
+// into `samples/ground/` and byte-locked. The first `.inf_tex` files this
+// repository has ever held, and the first content that reaches the virtual
+// texture stack at all.
+pub mod ground;
 // IB-5a: land cover becomes biome ids — the Jenks classifier's first caller
 // outside its own tests, and the first thing in the tree that writes a biome id
 // from data rather than from a brush.

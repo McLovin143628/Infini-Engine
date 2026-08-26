@@ -1,0 +1,9 @@
+schema_version = 1
+guid = "00000000-0000-0000-0000-00009e200001"
+kind = "texture"
+content_hash = "902633f68bc71bcf691f6b06c3763ff3"
+dependencies = []
+tags = [
+    "grass",
+    "ground",
+]

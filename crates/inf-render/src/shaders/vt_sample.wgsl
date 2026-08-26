@@ -447,6 +447,18 @@ fn vt_surface(
 /// deduplicates virtual textures by GUID (`VtTextures::by_guid`), so the second
 /// user of a detail map pays nothing at all, in the atlas or on disk.
 ///
+/// # The scale is a RATE, not a length (wave TER2a)
+///
+/// `duv = uv * scale`, so `vt_detail_scale` is **detail tiles per uv unit** and
+/// a larger number is a finer detail. The authoring field it comes from is
+/// called `detail_scale_m` and was documented as "world metres per tile", which
+/// is backwards; TER2a is the first wave to author a material that names a
+/// detail texture, and it found the default `0.5` producing a detail layer
+/// *coarser* than its base. The docs are corrected on all four surfaces and the
+/// arithmetic here is not — for a mesh uv, "tiles per uv unit" is the only thing
+/// the number can mean. On terrain (`uv = world.xz / tex_scale`) one detail tile
+/// covers `tex_scale / scale` metres.
+///
 /// # The blend
 ///
 /// * **Normal** — the UDN blend, `normalize(vec3(base.xy + detail.xy, base.z))`.

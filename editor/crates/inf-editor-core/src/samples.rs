@@ -10329,6 +10329,16 @@ pub fn starter_character_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/starter-character")
 }
 
+/// The repo-root `samples/ground/` directory — the engine's ground library
+/// (TER2a clause 3). Beside the starter character rather than inside a sample,
+/// because it is engine content: the island binds it, a template can, and any
+/// project can drag it in.
+pub fn ground_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../samples")
+        .join(crate::ground::GROUND_FOLDER)
+}
+
 /// What the committed starter character is called -- the prefix on every one of
 /// its files, and the name a level that spawns it shows in the Outliner.
 pub const STARTER_CHARACTER_NAME: &str = "Starter";
@@ -10874,6 +10884,10 @@ mod tests {
             // Before the island: the island's hero IS this character, and its
             // levels name these eight GUIDs.
             write_starter_character().expect("regenerate the starter character");
+            // …and before the island for the same reason: the island's four
+            // TerrainLayers name four of these material GUIDs (TER2a clause 3).
+            crate::ground::write_ground_library(&ground_dir())
+                .expect("regenerate the ground library");
             write_city().expect("regenerate the island city");
             write_gameplay().expect("regenerate the island gameplay fixture");
             crate::island::write_island_levels().expect("regenerate the island levels");
@@ -11573,6 +11587,52 @@ mod tests {
             );
         } else {
             eprintln!("SKIP: the starter character has not been blessed yet");
+        }
+
+        // **The ground library (TER2a clause 3).** Every file, for the starter
+        // character's own two reasons and a third: these are the first `.inf_tex`
+        // files this repository has held, they are seven megabytes of them, and
+        // they are BYTE-LOCKED ON EVERY LEG — which is the whole reason the
+        // synthesis is a transcendental-free CPU generator rather than the P7
+        // GPU bake. A leg that produced different bytes would be a leg whose
+        // ground streams different pages, and it would fail here.
+        let gdir = ground_dir();
+        if gdir.join("Ground_Grass.inf_mat").exists() {
+            let want = crate::ground::ground_library().expect("the ground library builds");
+            let mut have: Vec<String> = std::fs::read_dir(&gdir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n != "README.md")
+                .collect();
+            have.sort();
+            assert_eq!(
+                have,
+                crate::ground::ground_files(),
+                "the committed ground library is not the file SET the generator \
+                 writes -- an extra file here is one the asset scan promotes \
+                 under a minted GUID, and a missing one is a terrain layer bound \
+                 to nothing"
+            );
+            for f in &want {
+                assert_eq!(
+                    std::fs::read(gdir.join(&f.name)).unwrap(),
+                    f.payload,
+                    "committed ground {} drifted from the generator",
+                    f.name
+                );
+                let side = inf_asset::AssetSidecar::load(&gdir.join(&f.name))
+                    .unwrap_or_else(|e| panic!("{} has no sidecar: {e}", f.name));
+                assert_eq!(
+                    side.to_toml().unwrap(),
+                    f.sidecar.to_toml().unwrap(),
+                    "committed ground {}'s sidecar drifted",
+                    f.name
+                );
+            }
+        } else {
+            eprintln!("SKIP: the ground library has not been blessed yet");
         }
     }
 

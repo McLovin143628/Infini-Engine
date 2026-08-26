@@ -114,8 +114,15 @@ pub struct DerivedMaterial {
     /// been invisible to the cook and to the game. Wave G's `.inf_mat` v3 and
     /// this v2 are two halves of one field.
     pub detail: Option<AssetId>,
-    /// World metres per detail tile (schema v2). Zero disables the blend — see
+    /// How often the detail texture repeats, in **tiles per uv unit**
+    /// (schema v2). Zero disables the blend — see
     /// `MaterialAsset::detail_is_active`.
+    ///
+    /// The name says metres and the shader does not: `vt_apply_detail` computes
+    /// `duv = uv · scale`, so a larger number is a **finer** detail. Corrected in
+    /// wave TER2a, the first wave to author a material that names a detail
+    /// texture; the full note is on `MaterialAsset::detail_scale_m`, which this
+    /// field is copied from unchanged.
     pub detail_scale_m: f32,
 }
 
@@ -179,7 +186,10 @@ impl DerivedMaterial {
 
     /// The detail scale as the renderer's 8.8 fixed-point word.
     ///
-    /// **The one place metres become `detail_scale_q8`.** `VtTextureSet` packs
+    /// **The one place the authored rate becomes `detail_scale_q8`.**
+    /// (It was "the one place metres become …", and the unit in that sentence
+    /// was wrong — see the field's own note. The *conversion* is unchanged and
+    /// correct: 8.8 fixed point either way.) `VtTextureSet` packs
     /// the scale into sixteen bits of a per-instance word, and a conversion that
     /// existed at both host boundaries would be a conversion that could differ
     /// between them — the mirror hazard this engine has a law about. Zero (no
@@ -190,9 +200,10 @@ impl DerivedMaterial {
         if self.detail.is_none() || !self.detail_scale_m.is_finite() || self.detail_scale_m <= 0.0 {
             return 0;
         }
-        // 8.8: the integer part in the high byte, 1/256 m in the low. Saturating
-        // rather than wrapping — a 300 m detail tile is a nonsense value, and
-        // wrapping it to 44 m would be a nonsense value that looks plausible.
+        // 8.8: the integer part in the high byte, 1/256 of a tile-per-uv in the
+        // low. Saturating rather than wrapping — a rate of 300 is a nonsense
+        // value, and wrapping it to 44 would be a nonsense value that looks
+        // plausible.
         let q = (self.detail_scale_m * 256.0).round();
         q.clamp(1.0, u16::MAX as f64 as f32) as u16
     }

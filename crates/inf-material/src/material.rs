@@ -63,8 +63,34 @@ pub struct MaterialAsset {
     /// asked for it first in the consolidated schema wave.
     #[serde(default)]
     pub detail_texture: Option<AssetId>,
-    /// World metres per tile of [`detail_texture`](Self::detail_texture)
-    /// (schema v3).
+    /// How often [`detail_texture`](Self::detail_texture) repeats, in **tiles
+    /// per uv unit** (schema v3).
+    ///
+    /// # The name says metres and the renderer does not (wave TER2a)
+    ///
+    /// `vt_apply_detail` computes `duv = uv · scale`, so this is a *rate*, not a
+    /// length: a larger number makes the detail **finer**. The field is named
+    /// `_m` and was documented as "world metres per tile", and that reading is
+    /// backwards — which nothing noticed because until TER2a **no material in
+    /// this repository named a detail texture at all**, so the field had no
+    /// consumer to be wrong for.
+    ///
+    /// On a mesh there are no metres to be had: a mesh uv is whatever the
+    /// author unwrapped, so "tiles per uv unit" is the only thing the number can
+    /// mean and the behaviour is right. On **terrain**, where
+    /// `uv = world.xz / TerrainLayer::tex_scale`, one detail tile covers
+    /// `tex_scale / detail_scale_m` metres — so a layer tiling every 2 m with a
+    /// detail scale of 16 gets a 12.5 cm detail tile.
+    ///
+    /// It is the *documentation* that is corrected rather than the arithmetic,
+    /// on the VIS1b chromatic-aberration precedent: rescaling would change what
+    /// every future authored number means, and the behaviour is correct for the
+    /// surface type the field was designed against. Renaming the field would
+    /// move the wire format for a comment.
+    ///
+    /// **Consequence worth stating**: [`DEFAULT_DETAIL_SCALE_M`] is `0.5`, which
+    /// under the real semantics makes a detail layer **twice as coarse** as its
+    /// base rather than ten times finer. See its own note.
     ///
     /// # Why the reference alone would have been inert
     ///
@@ -75,9 +101,9 @@ pub struct MaterialAsset {
     /// an artist can fill in that changes nothing on screen, which is a worse
     /// outcome than not shipping it. The two land together.
     ///
-    /// Metres, per the units doctrine. [`DEFAULT_DETAIL_SCALE_M`] is the default
-    /// so a material that names a detail texture and says nothing else gets a
-    /// visible, sensible blend.
+    /// [`DEFAULT_DETAIL_SCALE_M`] is the default so a material that names a
+    /// detail texture and says nothing else gets a visible blend — though see
+    /// the unit note above for what "sensible" turned out to mean.
     #[serde(default = "default_detail_scale")]
     pub detail_scale_m: f32,
 }
@@ -86,12 +112,26 @@ fn default_alpha_cutoff() -> f32 {
     0.5
 }
 
-/// Default world metres per detail-texture tile.
+/// The default [`MaterialAsset::detail_scale_m`] — **tiles per uv unit**.
 ///
-/// Half a metre: fine enough to break up a surface at walking distance, coarse
-/// enough not to alias into noise at a few metres. The same order as the terrain
-/// splat's own `tex_scale` defaults (4–10 m) divided by the ~10× frequency ratio
-/// a detail layer is for.
+/// # This number is wrong for terrain and is kept anyway (wave TER2a)
+///
+/// It was chosen as "half a metre per tile", reasoning from the terrain splat's
+/// own `tex_scale` defaults (4–10 m) "divided by the ~10× frequency ratio a
+/// detail layer is for". The renderer's `duv = uv · scale` means the opposite:
+/// `0.5` makes the detail repeat **half as often** as the base uv, so on a
+/// terrain layer tiling every 4 m the "detail" tile is 8 m — twice as coarse as
+/// the thing it details.
+///
+/// It is not changed, for the reason a default is a default: it is the value
+/// every `.inf_mat` written before TER2a decodes with (the field is
+/// `#[serde(default)]`), and moving it would silently re-scale content nobody
+/// has authored yet in a direction no author asked for. What is changed is that
+/// the number now says what it does. Content that wants a detail layer states a
+/// rate: `inf_material::ground` authors 16 and 20.
+///
+/// The honest fix is a field whose name and unit agree, which is a schema move
+/// and therefore a wave rather than a comment.
 pub const DEFAULT_DETAIL_SCALE_M: f32 = 0.5;
 
 fn default_detail_scale() -> f32 {
