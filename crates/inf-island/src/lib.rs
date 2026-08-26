@@ -76,6 +76,7 @@ pub mod report;
 pub mod roads;
 pub mod shape;
 pub mod source;
+pub mod splat;
 pub mod terrain;
 
 pub use biome::{biome_set, classify_biomes, BiomeClassification, BiomeMask, IslandBiome};
@@ -96,6 +97,10 @@ pub use shape::{
 };
 pub use source::{
     cache_path, plan_tiles, tile_url, TileId, TileMosaic, TilePlan, PLAUSIBLE_ELEVATION_M,
+};
+pub use splat::{
+    biome_mix, stamp_splat, SplatField, SplatRules, SplatStats, LAYER_FOREST_FLOOR, LAYER_GRASS,
+    LAYER_ROCK, LAYER_SAND,
 };
 pub use terrain::{sample_terrain, CoarseHeights, IslandGrid, ProjectionLattice, SampleStats};
 

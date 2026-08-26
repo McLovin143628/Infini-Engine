@@ -58,6 +58,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("roads.rs", include_str!("../src/roads.rs")),
     ("shape.rs", include_str!("../src/shape.rs")),
     ("source.rs", include_str!("../src/source.rs")),
+    ("splat.rs", include_str!("../src/splat.rs")),
     ("terrain.rs", include_str!("../src/terrain.rs")),
 ];
 

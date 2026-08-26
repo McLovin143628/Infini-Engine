@@ -117,6 +117,9 @@ pub struct IslandBuild {
     pub network: StreamNetwork,
     pub routes: Vec<Route>,
     pub biomes: BiomeClassification,
+    /// What the ground splat painted (TER2a clause 2) — the per-layer coverage
+    /// of the four `TerrainLayer`s, measured over the level-0 samples.
+    pub splat: crate::splat::SplatStats,
     pub biome_set: inf_terrain::BiomeSet,
     pub coast: Coastline,
     pub report: IslandReport,
@@ -572,6 +575,41 @@ pub fn build_island(
         }
         classifier.at(p, f64::from(coarse.at(i, j)), coarse.slope_deg(i, j))
     });
+    // ── the splat, off the same classification ──────────────────────────────
+    //
+    // TER2a clause 2. The ids above are categorical and NEAREST by ruling; the
+    // *weights* are what the four ground materials blend by, and they are
+    // derived here rather than in a step of their own because they are the same
+    // decision expressed as a mix — and because `BuildStep::ALL` is frozen and
+    // the fixture counts one log line per step.
+    //
+    // The field is read off the classifier cell by cell (the same call the id
+    // stamp makes, so the two cannot disagree about what is where) and then
+    // interpolated BILINEARLY at 1 m, which is where the feather comes from.
+    // See `crate::splat`.
+    let splat_field = crate::splat::SplatField::of(&coarse, |i, j| {
+        if !coarse.known[j * coarse.nx + i] {
+            return inf_terrain::UNASSIGNED_BIOME;
+        }
+        let p = coarse.position(i, j);
+        classifier.at(p, f64::from(coarse.at(i, j)), coarse.slope_deg(i, j))
+    });
+    let splat = crate::splat::stamp_splat(
+        &mut data,
+        &splat_field,
+        crate::splat::SplatRules::of(recipe),
+    );
+    if splat.sum_violations > 0 {
+        // The splat invariant is a contract, not a tolerance: a weight that does
+        // not sum to 255 darkens or brightens that metre of ground by however
+        // much it missed by, and the shader's defensive renormalisation hides
+        // it. A build that produced one is reporting a defect in the quantizer.
+        blocking.push(format!(
+            "{} splat weights do not sum to 255 — the ground would shade by an \
+             amount no author asked for",
+            splat.sum_violations
+        ));
+    }
     let mut set = biome_set(
         &recipe.name,
         Some(inf_asset::AssetId(cover_pcg_guid(&recipe.name))),
@@ -581,13 +619,14 @@ pub fn build_island(
         BuildStep::Biomes,
         format!(
             "breaks {:?} over a {:.0}..{:.0} m band; {} samples painted, {} masked, \
-             {} reserved",
+             {} reserved; {}",
             classification.breaks,
             classification.band_m.0,
             classification.band_m.1,
             painted,
             classification.masked,
-            classification.reserved
+            classification.reserved,
+            splat.summary()
         ),
         &mut log,
     );
@@ -770,6 +809,7 @@ pub fn build_island(
         network,
         routes,
         biomes: classification,
+        splat,
         biome_set: set,
         coast,
         report,

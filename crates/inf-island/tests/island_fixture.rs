@@ -474,6 +474,127 @@ fn the_biome_map_covers_the_land_and_the_design_wins_where_it_speaks() {
     b.biome_set.validate().expect("the biome set is valid");
 }
 
+/// **The ground is four materials, not one colour** (wave TER2a, clause 2).
+///
+/// Before this wave the island wrote biome ids and nothing else, so every one of
+/// its samples shipped `DEFAULT_WEIGHT` — 100 % of layer 0 — and three of its
+/// four declared `TerrainLayer`s were unreachable. This is the arm that says the
+/// splat exists, that it *blends* rather than picking, and that its invariant
+/// holds sample for sample on real ground.
+///
+/// # It reads the TERRAIN, not the report
+///
+/// The P21 law. `SplatStats` is what the build says it did; the assertions below
+/// walk the built tiles and count what is actually written on them, so a stamp
+/// that returned perfect statistics and wrote nothing fails here.
+#[test]
+fn the_ground_carries_a_real_splat_and_every_weight_sums_to_255() {
+    let b = build();
+    let st = b.splat;
+    println!("SPLAT: {}", st.summary());
+    assert!(st.samples > 0, "the splat wrote nothing");
+    assert_eq!(st.sum_violations, 0, "a weight did not sum to 255");
+
+    // Walk the terrain itself: every level-0 tile carries a real buffer, every
+    // sample sums to 255, and the coverage the report claims is the coverage the
+    // tiles have.
+    let res = b.terrain.tile_resolution();
+    let mut seen = 0u64;
+    let mut default_tiles = 0u64;
+    let mut dominant = [0u64; 4];
+    for (_, tile) in b.terrain.tiles() {
+        if tile.weights_are_default() {
+            default_tiles += 1;
+            continue;
+        }
+        for j in 0..res {
+            for i in 0..res {
+                let w = tile.weight_sample(res, i, j);
+                let s: u32 = w.iter().map(|&v| u32::from(v)).sum();
+                assert_eq!(s, 255, "a written weight sums to {s}: {w:?}");
+                let mut best = 0usize;
+                for k in 0..4 {
+                    if w[k] > w[best] {
+                        best = k;
+                    }
+                }
+                dominant[best] += 1;
+                seen += 1;
+            }
+        }
+    }
+    assert_eq!(
+        default_tiles, 0,
+        "{default_tiles} tiles ship the flat default"
+    );
+    assert_eq!(seen, st.samples, "the report counted a different terrain");
+    assert_eq!(
+        dominant,
+        [
+            st.dominant[0],
+            st.dominant[1],
+            st.dominant[2],
+            st.dominant[3]
+        ],
+        "the report's coverage is not the terrain's"
+    );
+
+    // **Every one of the four layers is reached.** Three of them were declared
+    // and unreachable before this wave, and a splat that only ever writes one
+    // channel is the same flat colour wearing a mask.
+    for (k, name) in ["grass", "rock", "forest floor", "sand"].iter().enumerate() {
+        assert!(
+            dominant[k] > 0,
+            "no sample on the island is dominated by {name} (layer {k})"
+        );
+    }
+
+    // …and it BLENDS. A paint-by-numbers mask would put every sample on one
+    // channel at 255 and never feather a boundary.
+    assert!(
+        st.blended_fraction() > 0.02,
+        "only {:.3} % of the island blends two layers — the boundaries are steps, \
+         not feathers",
+        st.blended_fraction() * 100.0
+    );
+
+    // The slope term did something the 8 m classification could not: this island
+    // is a piece of a mountain, so faces over the rock angle exist.
+    assert!(
+        st.rock_by_slope > 0,
+        "not one sample was pushed toward rock by its own slope"
+    );
+
+    // **The pyramid rule still holds**: weights are level-0 only, and a coarse
+    // page shades off layer 0. Read off the built asset, which is what ships.
+    let asset = b.asset.as_ref().expect("the fixture builds an asset");
+    let reader = asset.reader();
+    let mut coarse_checked = 0u64;
+    let coarse_keys: Vec<_> = reader.keys().filter(|k| k.lod > 0).collect();
+    for key in coarse_keys {
+        let tile = reader
+            .tile(key)
+            .expect("a catalogued tile decodes")
+            .expect("a catalogued tile is present");
+        assert!(
+            tile.weights_are_default(),
+            "lod {} tile {:?} leaked splat weights into the pyramid",
+            key.lod,
+            key.coord
+        );
+        coarse_checked += 1;
+    }
+    assert!(
+        coarse_checked > 0,
+        "the pyramid has no coarse tiles to check"
+    );
+    println!(
+        "SPLAT PYRAMID: {coarse_checked} coarse tiles carry no weights (the \
+         existing layer-reduction rule, restated because this wave makes it \
+         visible)"
+    );
+}
+
 /// **Two builds of one recipe are byte-identical**, which is what makes the
 /// terrain an artifact rather than a roll of the dice.
 ///
