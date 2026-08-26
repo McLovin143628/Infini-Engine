@@ -8011,3 +8011,70 @@ Also routed and not taken, by name: **glass / IOR transmission** (the translucen
 pass is still an opaque shader with alpha and reads the scene never — it belongs
 with the MAT wave's translucent rewrite), **reflection probes** and **planar
 reflections**.
+
+### Clause 4 — GTAO, and a blur that knows what it is blurring
+
+**The estimator changed, not the sample count.** P13.3a projected N points of a
+rotated hemisphere kernel back through the depth buffer and counted how many
+landed behind geometry. That is a *fraction of samples occluded*: no cosine
+weighting, so a grazing occluder counts as much as one overhead; variance set by
+the sample count, so it needs a blur wide enough to hide the rotation tile; and an
+answer that depends on the kernel's own distribution rather than on the scene.
+
+GTAO (Jimenez et al. 2016) integrates the visibility function. Four screen-space
+slices per pixel, six horizon-search steps each way per slice, and the
+cosine-weighted visibility of the wedge between the two horizons evaluated in
+closed form. Still half-res, still ambient-only, still two fullscreen passes into
+the same two targets. The march is a straight line of texels, so the depth fetches
+are coherent — unlike the kernel's scattered projections.
+
+**One defect found by building the arm before trusting the formula.** The
+integral was not normalized: `gtao_arc(h1) + gtao_arc(h2)` on an *unoccluded*
+slice reduces to `cos γ + γ·sin γ`, which is 1 only when the projected normal
+points at the camera. A wall 25 m from the nearest occluder, with an AO radius of
+1.5 m, was being darkened by **0.3 % of its luminance, uniformly**, with nothing
+in the frame able to explain it. `gtao_open(γ)` is that value written down, and
+each slice is normalized against it, so an open surface reads exactly 1 **by
+construction rather than by a constant somebody trusted**. The open backdrop's
+darkening fell from 2.264 to **0.719** luminance.
+
+**The blur.** A 4×4 box averages a pixel with its neighbours whatever surface they
+belong to, so occlusion computed for a near object bleeds past its silhouette —
+and at half resolution one leaked texel is four on screen. The replacement is
+depth-aware: the same footprint, each tap weighted by `1 − 25·|1 − z/z_centre|`.
+The weight is on the **ratio** of reverse-Z depths, not their difference, because
+reverse-infinite-Z has no far plane to linearize against — SSR's thickness test
+for the same reason.
+
+**Measured, and mutation-measured.** `the_ao_blur_does_not_leak_across_a_silhouette`
+puts two slabs with a 0.4 m slot between them in front of a backdrop 25 m behind,
+and looks through the slot: the slot's inner faces are the most heavily occluded
+surfaces the integral can produce and they sit one blur footprint from backdrop
+pixels seen through the gap.
+
+| blur | backdrop darkening at the silhouette | in the open |
+|---|---|---|
+| depth-aware bilateral (ships) | **5.144** | 0.719 |
+| the same blur with its weight forced to 1 (the 4×4 box) | **6.591** | 0.747 |
+
+The threshold is 6.0, so the arm falsifies exactly what it names.
+
+**And the residue is a finding, not slack.** The honest answer at the backdrop is
+zero. The 5.1 that remains is **not the blur** — it is the half-resolution
+upsample: an AO texel covers 2×2 full-res pixels, one straddling the slot's edge
+takes its depth sample from the slab and is therefore computed dark, and the lit
+passes' bilinear fetch spreads it a full-res pixel onto the wall. Removing that
+needs a depth-aware upsample in the lit passes or a full-res AO buffer. Routed:
+**VIS-C4b, the AO upsample**.
+
+**The golden, re-blessed deliberately.** `ssao.png` moved by **mean 0.001456 /
+max 0.038588** — and that is *inside* the harness's perceptual tolerance, which is
+why it is re-blessed rather than left alone: a golden that no longer depicts what
+the engine draws is a golden nobody can read a regression off. Every other one of
+the 54 measured **0.000000 / 0.000000**.
+
+That number is visible at all because the harness now **prints** the mean and max
+on the passing path too. It did not before, so a real change to what the engine
+draws could sit inside the tolerance unnoticed for ever. All three
+`GOLDEN_SET_DIGEST` pins moved by hand
+(`7ff2b370…` → `838d18fb…`), with the reason written on the phase26 constant.

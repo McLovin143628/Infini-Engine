@@ -2432,7 +2432,21 @@ fn the_golden_set_is_pinned_and_additive() {
     /// five; `weather_fog_dawn`, `weather_snow_dusk` and `weather_storm_noon`
     /// enable clouds through a `WeatherState` preset and were not on it. A
     /// count-only pin would have said nothing about any of the three.
-    const GOLDEN_SET_DIGEST: &str = "7ff2b3702b825f00707a71dff282f400";
+    ///
+    /// **Moved a second time, at wave VIS1a** (from
+    /// `7ff2b3702b825f00707a71dff282f400`), for **one** frame: `ssao.png`. That
+    /// wave replaces the ambient-occlusion estimator — a hemisphere-kernel
+    /// sample-count for GTAO's horizon-search visibility integral, and a 4×4 box
+    /// blur for a depth-aware bilateral one — so the committed frame of the SSAO
+    /// scene is a picture of an estimator that no longer exists.
+    ///
+    /// The difference is **mean 0.001456 / max 0.038588**, measured against the
+    /// previous frame before it was replaced, and it is *inside* the harness's own
+    /// perceptual tolerance — which is exactly why it is re-blessed rather than
+    /// left alone. A golden that no longer depicts what the engine draws is a
+    /// golden nobody can read a regression off. Every other one of the 54 is
+    /// **0.000000 / 0.000000**, printed by the harness and checked one by one.
+    const GOLDEN_SET_DIGEST: &str = "838d18fbffeea0c43ea5d84a8f5fbc63";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

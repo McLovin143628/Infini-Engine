@@ -439,6 +439,7 @@ fn apply_record(r: &RenderSettingsRecord) -> RenderSettings {
             threshold: r.bloom_threshold,
             knee: r.bloom_knee,
             intensity: r.bloom_intensity,
+            ..d.bloom
         },
         ssao: SsaoSettings {
             enabled: r.ssao_enabled,

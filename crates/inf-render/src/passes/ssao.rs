@@ -1,29 +1,44 @@
-//! SSAO node (P13.3a): reconstructs half-res hemisphere ambient occlusion from
-//! the single-sample depth prepass, blurs it, and leaves the result in the `ao`
-//! target that the lit passes (mesh/terrain/skinned) multiply into their ambient
-//! term. When SSAO is **disabled** the node simply clears `ao` to white (1.0), so
-//! the lit passes' AO bind is pixel-neutral and every non-SSAO golden is stable.
+//! The ambient-occlusion node: reconstructs half-res AO from the single-sample
+//! depth prepass, blurs it, and leaves the result in the `ao` target that the lit
+//! passes multiply into their ambient term. When AO is **disabled** the node
+//! simply clears `ao` to white (1.0), so the lit passes' AO bind is pixel-neutral
+//! and every non-AO golden is stable.
 //!
-//! Two fullscreen passes: `fs_ssao` (raw AO from depth + a rotated kernel) →
-//! `fs_blur` (4×4 box blur to hide the rotation noise). The hemisphere kernel is
-//! generated once, deterministically ([`crate::settings::ssao_hemisphere_kernel`]).
+//! Two fullscreen passes: `fs_ssao` (the raw integral from depth) then `fs_blur`.
+//!
+//! **Wave VIS1a replaced the estimator.** P13.3a projected a rotated hemisphere
+//! kernel through the depth buffer and counted occluded samples; this is GTAO —
+//! a horizon search per screen-space slice and a closed-form cosine-weighted
+//! visibility integral over the wedge between the two horizons. The blur went
+//! with it, from a 4x4 box to a depth-aware bilateral one. See `ssao.wgsl` for
+//! the argument. The node's *shape* is unchanged: same two passes, same targets,
+//! same half resolution, same ambient-only consumer.
 
 use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
 use crate::renderer::{FrameData, AO_FORMAT};
-use crate::settings::ssao_hemisphere_kernel;
 
-const KERNEL_SLOTS: usize = 32;
-const KERNEL_COUNT: usize = 24;
+/// Screen-space slices per pixel, and horizon-search steps per slice direction.
+///
+/// **4 x 6 rather than the 24 kernel taps it replaces, and the equality is a
+/// coincidence worth not reading anything into**: a kernel tap was one
+/// projection and one depth fetch at a scattered coordinate, a horizon step is
+/// one depth fetch along a straight line of texels. The budgets are fixed
+/// constants for the same reason `SHADOW_CASCADES` is: they are a quality/cost
+/// point the renderer owns, not something a level author should be choosing.
+/// `MAX_SLICES` / `MAX_STEPS` in the shader bound the loops.
+const SLICES: u32 = 4;
+const STEPS: u32 = 6;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SsaoParams {
-    kernel: [[f32; 4]; KERNEL_SLOTS],
-    /// x = count, y = radius, z = intensity, w = bias.
+    /// x = slice count, y = radius, z = intensity, w = bias.
     cfg: [f32; 4],
     /// xy = depth size (px), zw = ao size (px).
     dims: [f32; 4],
+    /// x = steps per slice direction, yzw reserved.
+    cfg2: [f32; 4],
 }
 
 pub struct SsaoNode {
@@ -33,7 +48,6 @@ pub struct SsaoNode {
     blur_bgl: wgpu::BindGroupLayout,
     params_buf: wgpu::Buffer,
     sampler: wgpu::Sampler,
-    kernel: [[f32; 4]; KERNEL_SLOTS],
     ssao_bg: Option<(u64, wgpu::BindGroup)>,
     blur_bg: Option<(u64, wgpu::BindGroup)>,
 }
@@ -81,6 +95,18 @@ impl SsaoNode {
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("ssao-blur"),
                 entries: &[
+                    // Wave VIS1a: the blur is bilateral now, so it reads the same
+                    // depth the integral did.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -161,14 +187,6 @@ impl SsaoNode {
             ..Default::default()
         });
 
-        let mut kernel = [[0.0f32; 4]; KERNEL_SLOTS];
-        for (slot, s) in kernel
-            .iter_mut()
-            .zip(ssao_hemisphere_kernel(KERNEL_COUNT, 0x5A17))
-        {
-            *slot = [s[0], s[1], s[2], 0.0];
-        }
-
         Self {
             ssao_pipeline,
             blur_pipeline,
@@ -176,7 +194,6 @@ impl SsaoNode {
             blur_bgl,
             params_buf,
             sampler,
-            kernel,
             ssao_bg: None,
             blur_bg: None,
         }
@@ -215,14 +232,14 @@ impl RenderNode for SsaoNode {
             &self.params_buf,
             0,
             bytemuck::bytes_of(&SsaoParams {
-                kernel: self.kernel,
-                cfg: [KERNEL_COUNT as f32, s.radius, s.intensity, s.bias],
+                cfg: [SLICES as f32, s.radius, s.intensity, s.bias],
                 dims: [
                     frame.targets.size.0 as f32,
                     frame.targets.size.1 as f32,
                     frame.targets.ao_size.0 as f32,
                     frame.targets.ao_size.1 as f32,
                 ],
+                cfg2: [STEPS as f32, 0.0, 0.0, 0.0],
             }),
         );
 
@@ -256,6 +273,10 @@ impl RenderNode for SsaoNode {
                 label: Some("ssao-blur"),
                 layout: &self.blur_bgl,
                 entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&frame.targets.depth_prepass),
+                    },
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: self.params_buf.as_entire_binding(),
