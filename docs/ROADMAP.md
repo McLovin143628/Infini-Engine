@@ -26524,7 +26524,11 @@ back to the bind pose, which is right for a shadow and one ulp of self-occlusion
 receiver's own self-occlusion. Four frames — with and without the occluder, each SSAO off and on —
 identify the pixels where the *off* pair agrees, then count how many of those the *on* pair darkens:
 skinned **1 583** of 56 053, voxel **430** of 37 925, fracture **7 033** of 52 177, and a net
-luminance that falls in every case. The voxel arm needed a rigid probe box and that is a finding:
+luminance that falls in every case. (**Those three counts are pre-C4** — they were taken against the
+hemisphere kernel, and GTAO replaced the estimator two commits later. As shipped the same arms read
+skinned **1 392**, voxel **255**, fracture **5 604**; corrected by the audit, which also added the
+half these counts were blind to: *where* the darkening lands.) The voxel arm needed a rigid probe
+box and that is a finding:
 `voxel.wgsl` is composed `Plain` and binds no environment group (the P21.1 ruling), so a voxel
 surface samples no AO — the first draft asserted a voxel-only frame changed under SSAO and measured
 **exactly zero**, and the arm was wrong rather than the code.
@@ -26661,7 +26665,8 @@ the march **negative**.
 ### Counts
 
 battery **324 / 6 132 / 0 / 19** (+1 block, the `apply_record_mirror` pin; +23 arms), goldens **54**
-with 28 deliberately re-blessed, frontend **718 / 80** with `tsc` and `eslint` clean, rustdoc **374
+with 28 deliberately re-blessed *(the audit takes these to **6 138** and **55** — see its block
+below)*, frontend **718 / 80** with `tsc` and `eslint` clean, rustdoc **374
 over 30 crates** after `cargo clean --doc` (the wave adds **zero**, ceiling 450), clippy **0** with
 `-D warnings`, `cargo fmt --all --check` clean, schema **scene v26** (payload v11 and `.inf_sm` v3
 unmoved), **no new crate and no new dependency**.
@@ -26672,6 +26677,31 @@ unmoved), **no new crate and no new dependency**.
 and zero-latency opaque SSR; **VIS-C4b** the AO upsample; the translucent stage seeing *this*
 frame's colour with *last* frame's matrix when water refraction and SSR are both on (narrow, and the
 stale "nothing downstream sees the intermediate" sentence in `passes/water.rs` is corrected); no
-golden can ever capture SSR, because a golden renders one frame from a fresh renderer and the colour
-history is empty then; and `voxel.wgsl` still binds no environment group, so a voxel surface
+golden can capture **opaque** SSR, because a golden renders one frame from a fresh renderer and the
+colour history is empty then (**corrected by the audit** — the wave wrote "no golden can ever
+capture SSR", which is false of the *water* half: it marches against its own private same-frame
+resolve and needs no history, so `water_ssr.png` is the 55th golden and the feature has a pixel
+pin); a previous-frame SSR fetch has **no history-depth validation**, so a disocclusion smears the
+occluder's colour into the hole rather than falling back (**found by the audit**, carried as
+VIS-C2c); and `voxel.wgsl` still binds no environment group, so a voxel surface
 occludes for SSAO/TAA/SSR now but still samples no AO, receives no shadow and feeds no GI.
+
+**Audit (2026-08-26)**: three MEDs fixed — the opaque SSR colour history was not invalidated across
+a **floating-origin rebase** (a render-local `prev_view_proj` against a 10 m-snapped frame displaces
+every reflection on screen for a frame); the ledger's claim that the two WGSL copies of
+`ggx_energy_compensation` are "held together by the furnace test's CPU mirror" named a gate that did
+not exist (a Rust test cannot read WGSL — there is a character-for-character source pin now, plus a
+numeric CPU↔WGSL one); and the four prepass-coverage arms counted darkened pixels without asking
+**where** they landed, so a contributor whose depth pipeline disagreed with its colour pipeline's
+transform passed all four (mutation-measured: a one-metre displacement of the skinned depth
+transform leaves all three original assertions green). Two more MEDs were carried rather than
+fixed — the disocclusion smear above, and the fact that a character-for-character mirror cannot
+see a field *both* seams forget, now closed by a field-coverage arm alongside a second pin on the
+`prim_mesh` mirror nobody had checked either. The wave's clause-1 counts and its "+0.017 ms for
+SSR on the island" are re-stated against the shipped build (the first were taken pre-GTAO; the
+second is at or below the instrument's noise floor — the re-run reads −0.005 ms). Counts after the
+audit: battery **324 / 6 138 / 0 / 19** (+6 arms, no new block), goldens **55** with **none
+re-blessed**, all four golden pins moved on the **additive** branch, rustdoc **374** unmoved,
+clippy **0**, frontend **718 / 80**, schema unmoved; the island re-measures at **82.7 fps p50**
+with every per-pass number reproducing to the printed decimal. Full ledger in
+`docs/memos/island-progress.md`.

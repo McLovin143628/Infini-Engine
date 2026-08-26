@@ -7843,16 +7843,25 @@ SSAO-off pair *agrees* (the same surface is visible in both scenes), and counts 
 those the SSAO-on pair darkens. That number can move for exactly one reason. Measured on an
 RTX 4070 Ti at 320×180:
 
-| contributor | shared pixels | darkened | brightened |
-|---|---|---|---|
-| skinned character on a floor | 56 053 | **1 583** | 0 |
-| voxel volume under a probe box | 37 925 | **430** | 0 |
-| fracture debris on a floor | 52 177 | **7 033** | 0 |
+| contributor | shared pixels | darkened | brightened | *(as shipped, post-C4)* |
+|---|---|---|---|---|
+| skinned character on a floor | 56 053 | **1 583** | 0 | 1 392 darkened, 8 brightened |
+| voxel volume under a probe box | 37 925 | **430** | 0 | 255 darkened, 87 brightened |
+| fracture debris on a floor | 52 177 | **7 033** | 0 | 5 604 darkened, 10 brightened |
+
+**The fourth column is the audit's correction.** The three numbers in bold were measured at
+`aaa66324`, against the P13.3a hemisphere kernel. Clause 4 replaced that estimator two
+commits later and the AO field moved with it, so the counts a reader gets from the shipped
+tree are the fourth column's — and the "0 brightened" became a handful, which is why the arm
+itself was already amended (in `dc488b69`) from "no pixel brightened" to "the net luminance
+fell". A measurement table has to name the build it was taken on.
 
 Terrain is both occluder and receiver, so it has no separate control and needs none: the
 SSAO-off frame *is* the control, and before this wave the SSAO-on frame was byte-identical to
 it. It now differs by mean **0.001113** / max **0.018196**, and the frame's total luminance
 falls from 18 454 974 to 18 405 924 — occlusion removing ambient light, never adding it.
+(*As shipped, post-C4: mean 0.001965 / max 0.055529, 18 454 974 → 18 368 385. The direction
+is the claim and it is unchanged; the magnitude is GTAO's.*)
 
 **The voxel arm needed a probe box, and that is a finding rather than a fixture detail.**
 `voxel.wgsl` is composed `Plain` and binds no environment group at all — the P21.1 ruling —
@@ -7914,6 +7923,17 @@ there are two colour sources in this engine and the wave uses both:
   texture is a zero-initialized allocation: **a one-frame render can never show a
   reflection**, which is why every SSR arm renders two or three frames on one
   renderer.
+  **Two audit corrections to that paragraph.** *(1)* "geometrically exact" is
+  exact only where the hit point was **visible** last frame: the fetch checks that
+  the reprojected coordinate is on screen and nothing else, so at a disocclusion —
+  strafe past a building edge — it samples whatever *occluded* the hit point and
+  composites it at full confidence rather than falling back. Carried as
+  **VIS-C2c**; the fix needs the previous frame's depth kept beside its colour.
+  *(2)* `scene_history_valid` was missing a third condition. `prev_view_proj` is
+  **render-local**, so a floating-origin rebase between two frames makes it a
+  description of a different local frame and displaces every fetch on screen by
+  the 10 m delta. The flag now requires the origin to have held; TAA and
+  `cloud_temporal` carry the same pre-existing smear and dissolve it away.
 
 **The march.** `t = max_distance · u²` rather than uniform steps: at 32 taps over
 24 m the first sample is **2 cm** out, against v1's 33 cm at 24 taps over 8 m —
@@ -8365,8 +8385,294 @@ wide enough to collect a neighbour**, and file-scoped staging means the files, n
    frames on one renderer. It is the shape `taa_multiframe_stable` already has and
    the reason SSR is opt-in, but it does mean **no golden can ever capture SSR** —
    a golden renders one frame from a fresh renderer, twice.
+   **CORRECTED BY THE AUDIT.** The last sentence is true of the *opaque* path and
+   only of it. Water's SSR marches against the private `color_msaa → scene_hdr`
+   resolve the water pass runs *before it draws*, so it reads this frame's colour
+   and needs no history at all — which the wave's own
+   `water_reflects_the_scene_from_above_and_defers_to_the_sky_at_grazing`
+   demonstrates with a single-frame `render_with`. The audit added
+   **`water_ssr.png`**, the 55th golden, so the arc's signature effect has a pixel
+   pin rather than a sentence explaining why it cannot have one.
 6. **`voxel.wgsl` still binds no environment group.** Wave VIS1a closed the
    prepass half of the P21.1 ledger — a voxel volume occludes for SSAO, TAA and
    SSR now — but a voxel surface still samples no AO, receives no shadow and feeds
    no GI. The header says so; the routing (meshletize the chunks, P28.2) is
    unchanged.
+
+## Wave VIS1a — the adversarial audit (2026-08-26)
+
+Range `cac0b948..ca084b50`, eight commits, read diff by diff against the ledger above. The
+wave is maximum blast radius by construction — a schema bump, a 28-golden re-bless, two
+digest moves and a new screen-space pipeline — so the audit's first job was to re-derive the
+numbers rather than read them.
+
+**What re-derived clean, independently.** Every arithmetic claim in the wave holds:
+
+* the **twenty-three `.inf_lvl` deltas** are each exactly `70 + 4m` (checked with
+  `git cat-file -s` on both sides of `b1294a9b`, remainder zero in all twenty-three); `Σm =
+  434`; the total is `23·70 + 4·434 = 3346` bytes, as claimed. `VgeomDemo` derives `m = 324`
+  against the sidecar's own `entity_count = 325`. And **70 is not an assertion**: summing the
+  appended fields by bincode width — 3 bools, 16 f32 (64 B), 2 u8, and `flare_ghost_count`'s
+  varint `4` in **one** byte — is 70 exactly, which is the number the wave said it measured
+  rather than derived, derived;
+* the **28 re-blessed goldens**: the harness's own metric (64×36 box downscale, per-channel
+  mean/max) recomputed here from the pre-`4c4d20c6` blobs. Largest mean `weather_fog_dawn`
+  **0.000252**, largest max `pbr_materials` **0.031216**, **26 byte-identical** — all five
+  water frames, all four cloud presets, all four skies, all four 2D scenes. Every number in
+  the wave's re-bless paragraph is right;
+* **and the direction is right, which is the part a mean cannot say.** At full resolution,
+  across seven of the moved frames, **every changed pixel got brighter and not one got
+  darker** (`pbr_materials` 808 pixels up / 0 down, `weather_fog_dawn` 11 116 / 0, `scatter`
+  8 074 / 0, `voxel` 4 766 / 0, `gi_specular` 818 / 0, `ssao` 499 / 0, `cubes` 27 / 0). Energy
+  compensation returns dropped light and can do nothing else; a shader change that merely
+  *moved* pixels would not have that signature;
+* `ssao.png`'s clause-4 re-bless is **0.001456 / 0.038588** and it is the only golden that
+  moved in `dc488b69`;
+* both `GOLDEN_SET_DIGEST` moves are tied to their stated commit and applied in all three
+  gates (`7ff2b370…` in `dc488b69`, `838d18fb…` in `4c4d20c6`), the pre-wave pin at
+  `cac0b948` really was `7ff2b370…`, and **goldens moved in exactly two of the eight
+  commits and in no other** (`git diff --name-only` per commit: 0/0/1/28/0/0/0/0).
+
+**What the wave was right to be careful about, and was.** The four new depth-only pipelines
+match their colour twins' `cull_mode` and depth state one for one (terrain `None`/`None`,
+skinned `Back`/`Back`, voxel `Back`/`Back`, fracture `None`/`None`);
+`skinned_depth.wgsl`'s skinning expression is `skinned_mesh.wgsl`'s character for character
+and both bind the same `frame.view_bg`, so the TAA jitter is shared rather than duplicated;
+the new `ENV_SCENE_COLOR` binding is size-dependent and is already covered by
+`targets.generation` in `resource_key`; and every new sample in non-uniform control flow —
+`ssr_prev_color`, `water_ssr`, the bilateral blur — uses `textureSampleLevel` with an
+explicit LOD, which is the one-platform hazard a colour-fetching march would otherwise have
+walked into. The workspace eaten-`\` gate is **untouched** by the wave: no allowlist was
+widened to let this wave's prose through.
+
+### Findings
+
+**HIGH — the opaque SSR colour history survives a floating-origin rebase, and it must not.**
+`scene_history_valid` was `!resized && prev_view_proj.is_some()`. `prev_view_proj` is
+**render-local**: it maps `world − origin` to clip. When `inf_math`'s floating origin snaps —
+ten metres, which on a 51 km² island happens while the camera simply drives — the previous
+frame's matrix describes a *different* local frame from this frame's points, and every
+reprojected SSR fetch on screen is displaced by the rebase delta. TAA and `cloud_temporal`
+have always carried that one-frame smear and dissolve it over the following frames; SSR's
+fetch is a **hard colour read**, so the whole screen would reflect what was ten metres away,
+once per rebase, on exactly the wet-street motion the feature exists for. The wave's own
+sentence — "geometrically exact" — is the claim this falsifies. Fixed: `EngineRenderer`
+remembers the origin its `prev_view_proj` was built in, and the rule is now the free function
+`scene_history_is_valid(resized, has_prev, prev_origin, origin)` so it can be falsified
+without a GPU. Mutation-verified: dropping the origin clause makes the rebase case pass.
+The TAA/cloud twins are pre-existing and are **carried, not silently fixed**.
+
+**MED — a cited gate that did not exist: the two WGSL copies of the energy fit.** Clause 5's
+ledger and `voxel.wgsl`'s own header both say the two copies of `ggx_energy_compensation` are
+"held together by the furnace test's CPU mirror". They were not. `the_ggx_furnace_test_is_white`
+exercises `inf_render::gi::ggx_energy_compensation`, which is **Rust**; nothing in the tree
+compared `voxel.wgsl`'s copy with `env_lighting.wgsl`'s, and nothing compared either with the
+Rust. A voxel surface could have drifted to a different specular energy fit from every other
+lit surface in the engine and no arm would have moved. This is the P20 law — *a cited gate
+that doesn't exist is worse than no claim* — and the wave met it while writing the sentence.
+Fixed with two arms in `passes::shader_compose_tests`: a character-for-character source pin
+over both WGSL copies of `gi_env_brdf_ab` and `ggx_energy_compensation` (the
+`apply_record_mirror` idiom applied to shader text, anti-vacuous on line count and content),
+and a numeric CPU↔WGSL arm that reads the fit's four constants out of the shader source and
+then checks `gi::env_brdf_ab` against a transliteration over a 21 × 20 sweep. Mutation-verified:
+changing `1e-3` to `1e-4` in the voxel copy fails the pin.
+
+**MED — the four prepass-coverage arms could not see the failure the widening actually
+risks.** `assert_prepass_reaches` counts how many shared pixels darken. That answers "did
+this geometry's depth reach the prepass". It does **not** answer "did the prepass write the
+depth the *colour* pass writes", which is the whole hazard of contributing the same geometry
+through a second pipeline: a depth pass that skinned with a different palette, morphed with a
+different clipmap or multiplied its model matrix in the other order still darkens plenty of
+pixels — somewhere else, as a self-shadowing halo one silhouette away from the thing casting
+it. Measured: translating `skinned_depth.wgsl`'s skinned position by **one metre** leaves all
+three original assertions green (2 271 darkened > 100, net luminance −22 022, 168 brightened
+against 2 271). Fixed by asking **where** the darkening lands: the occluder's own screen
+footprint is exactly the mask the loop already skips, so the arm now dilates it and requires
+≥ 80 % of darkened pixels to lie within 32 px. As shipped: skinned **1 392 of 1 392**, voxel
+**255 of 255**, fracture **5 448 of 5 604** (97.2 %). Under the one-metre mutation the skinned
+arm reads **1 422 of 2 271** (62.6 %) and fails. It falls off a cliff rather than degrading,
+which is what makes 80 % a threshold rather than a guess.
+
+**MED — "no golden can ever capture SSR" is false, and the wave's signature feature had no
+pixel pin because of it.** Carried item 5 is true of the **opaque** path: it samples the
+previous frame's resolve, and `scene_history_valid` holds the march off on frame 0. Water's
+SSR does not work that way at all — the water pass runs its own private `color_msaa →
+scene_hdr` resolve *before it draws*, so `water_ssr` marches against **this** frame's colour
+and depth and needs no history. The wave's own arm proves it: the wave's own single-frame water arm measures the effect with a single-frame `render_with`.
+So the feature that closes P20.3 — the one the whole slice is named for — was pinned by
+nothing but a redness sum. Fixed by adding **`water_ssr.png`**, the **55th** golden: the
+scarlet block on the open sea from five metres up, the shot the P20.3 item exists to get.
+Deterministic (`mean 0.000000 / max 0.000000` on a re-render), and it carries a structural
+arm for the CI legs that do not compare pixels strictly — redness **−57.439 → −56.195**,
+which is the ledger's own **+1.244**. This is the **additive** branch of the golden rule, not
+the re-bless one: `GOLDENS` 54 → 55 in four gates, all three `GOLDEN_SET_DIGEST` pins moved
+(`84e38ed2…` → `d6da45fd…`), the phase18 name array grown by one, and **not one committed
+image changed**.
+
+**MED — the clause-1 measurement table describes a build that was superseded two commits
+later.** The difference-of-differences counts (skinned 1 583, voxel 430, fracture 7 033, and
+"0 brightened" in every row) were taken at `aaa66324`, against the P13.3a hemisphere kernel.
+`dc488b69` replaced the estimator with GTAO and the AO field moved with it. Re-run on the
+shipped tree the same arms read skinned **1 392 / 8**, voxel **255 / 87**, fracture
+**5 604 / 10**, and terrain moves the frame by mean **0.001965 / max 0.055529** rather than
+0.001113 / 0.018196. The wave half-noticed — the "no pixel brightened" assertion was quietly
+amended to "the net luminance fell" in `dc488b69` — but the table was not. Corrected in both
+the memo and ROADMAP with the build each column was taken on. The **voxel** row is the one to
+watch: 87 brightened against 255 darkened is a 2.9× margin against a 2× threshold, where the
+wave wrote the arm expecting zero.
+
+**MED — the mirror the wave built could not see a field both copies forget, and it was not
+the only mirror in those two files.** `apply_record_mirror` compares the two seams character
+for character, which catches drift and cannot catch *agreement on a mistake*: delete
+`intensity: r.ssr_intensity` from **both** copies and the arm stays green while an authored
+value silently stops reaching the renderer — the exact promise the wave's "an unread field is
+cheap where an unread **wire** field is not" ruling makes. What stood in for that was two
+`contains` checks on the strings `ssr: SsrSettings {` and `film: FilmSettings {`, which pass
+with any number of the fields inside those literals missing. And `apply_record` is not the
+only `MIRROR: keep identical to …` pair in `inf_player::render` / `inf_viewport::host` —
+`prim_mesh`, the mapping from an authored `Primitive` to the geometry the renderer builds,
+carries the identical sentence and was equally unchecked; if those two drift the editor
+viewport draws a different **shape** from the shipped player. Two arms added:
+`every_field_of_the_render_record_is_read_by_both_seams` reads the field names out of
+`pub struct RenderSettingsRecord` in `inf_scene` (37 of them) and requires each as `r.<name>`
+in both bodies — mutation-verified by replacing `r.ssr_intensity` with a literal on one side
+— and `the_two_prim_mesh_seams_are_character_for_character_the_same` pins the other pair. The
+two `prim_mesh` bodies were verified identical before the arm was added, so it lands green
+rather than as a discovered drift.
+
+**MED, carried — a previous-frame SSR fetch has no history validation, so a disocclusion
+smears.** `ssr_prev_color` projects the hit point through `prev_view_proj`, checks it was
+inside the frame, and samples. It never asks whether the pixel it lands on **showed the same
+surface** last frame. Strafe past a building edge and the hit points that were hidden behind
+it last frame fetch the building's colour and composite it at full confidence — the reflection
+does not fall back to the specular-GI lobe, it reports something confidently wrong. Fixing it
+needs the previous frame's *depth* kept alongside its colour (a second target and a second
+resolve, or the attribute prepass VIS-C2b already routes). Not fixable in an audit; carried by
+name as **VIS-C2c**, and the ledger's "geometrically exact" is corrected to name it. Water is
+unaffected — it reads this frame.
+
+### Carried by name, low
+
+1. **VIS-C4c — the GTAO slice basis and its sign convention are unverified.** The slice plane
+   is spanned by `v` and a direction built from **world up** (`cross(v, (0,1,0))`), not from
+   the screen axes the march actually walks; and `gamma` is signed positive toward `+dir_w`
+   while the horizon convention puts the `+dir` side at *negative* angles. An open surface
+   reads exactly 1 either way — the normalisation by `gtao_open(gamma)` guarantees it by
+   construction — so nothing measured falsifies it, and a mirrored wedge would only mis-weight
+   *partially occluded slanted* surfaces. Named rather than guessed at: distinguishing the two
+   needs a reference integrator, which is a wave of its own.
+2. **Nothing asserts the render graph has exactly one prepass anchor.** `opens_depth_prepass`
+   is a default-false trait method and `DepthPrepassNode` is the only implementor that returns
+   true; a second one would run the whole sweep twice. Cheap to gate the day the graph gains
+   an accessor for it.
+3. **The prepass widening's effect on TAA is unpinned by pixels.** No golden turns TAA on —
+   `ssao.png` is the only frame that enables any `needs_depth_prepass` input — and
+   `taa_multiframe_stable` is a rigid-cube scene. So TAA reprojecting against *real* terrain,
+   skinned and voxel depth is exercised by nothing. That is also the honest answer to "did a
+   TAA-adjacent golden change and should it have been re-blessed": none could.
+4. **The voxel engagement counter counts only the colour pass.** `VoxelNode::depth_prepass`
+   records a render pass and draws, and does not bump it. Harmless today — no frame runs the
+   prepass contribution without the colour pass — and worth remembering the day one does.
+5. **`RenderTier::Medium` clamps SSR to Low, not "down a band".** `code().min(SsrQuality::Low.
+   code())` is `min(code, 0)`, which is `Low` for every input; the doc says "drops a quality
+   band" and the commit says "drops Medium a band", and from High that is two. The `min` also
+   only reads as a clamp because the wire codes happen to ascend with cost — appending a
+   *cheaper* quality later would silently break it, which the enum's append-only note does not
+   say.
+6. **The chr(92) count is wrong, and the record is the reason.** `b1294a9b`'s message calls
+   its two eaten continuations "the 26th catch of that law". The repo's own ledgers name at
+   most the **twenty-third** (`ROADMAP.md:25986`), and four later waves record "**no
+   twenty-fourth**". VIS1a's two are the **twenty-fourth and twenty-fifth**. The gate itself —
+   `no_string_literal_in_the_workspace_carries_an_eaten_continuation` in
+   `inf-packager::cook` — is green and was not widened.
+7. **`b1294a9b` carries a second rider its message does not name.** The close-out commit
+   `ca084b50` files the `LIT+SSR` instrument row honestly; the same path-scoped `add` also
+   collected the `passes/water.rs` module-doc correction (the translucent matrix-latency
+   sentence). That one *is* in the ledger, so nothing is hidden — but the bookkeeping note
+   names one rider where there were two, which is the same lesson twice.
+8. Four small repairs made in passing: `ssao.wgsl` carried a dead
+   `let n_plane = n - dir_w * 0.0;` that nothing read (removed; `ssao.png` stayed
+   byte-identical under `INF_GOLDEN_STRICT=1`, which is the check that the removal really was
+   dead code); `voxel.rs`'s new `prepare` had been inserted *between* `sync_instances` and its
+   doc comment, so the comment described the wrong function; `inf_scene`'s too-new-payload arm
+   was still called `a_v26_payload_is_refused_by_name` after v26 became a **supported**
+   version (its body tests v27, and the editor mirror had already been renamed `a_v27_…`); and
+   `apply_record_mirror`'s module doc claimed the extractor normalises the two record types'
+   names away, which it does not and does not need to — the sentence now says why.
+
+**And the chr(92) law fired on the audit itself — four times, in one file.** The two new
+`apply_record_mirror` arms were written through a Python script inside a *quoted* heredoc,
+with every Rust line-continuation spelled `\`. Four literals came out with the backslash
+gone and the indentation baked in, and one `"\n}"` came out as a real newline inside a
+non-raw literal — the sibling shape the gate cannot see. The gate caught the four (10, 10,
+10 and **14**-space interior runs) and named them by line. So the law's remedy needs
+widening, and the gate's own doc already half-says it: catches 22 and 23 proved `r"…"` is not
+a remedy, and these four prove **neither is a quoted heredoc** — anything that routes a Rust
+continuation through Python is the trap, not the quoting. What is safe is editing the file
+directly, or keeping every literal on one line. By the repo's own count these are the
+**twenty-sixth through twenty-ninth** catches, VIS1a's own two being the twenty-fourth and
+twenty-fifth.
+
+### The island, re-measured
+
+`the_island_at_shipping_resolution` re-run on the audited tree — RTX 4070 Ti, **release**,
+1080p, 3 × 120 frames, MIN of rounds, over the same 51.38 km² island.
+
+| | wave's ledger | **audit re-run** |
+|---|---|---|
+| `SHIPPED` p50 | 3.544 ms | 3.619 ms |
+| `LIT` p50 / GPU frame | 11.695 / 8.292 ms | 12.088 / **8.334** ms |
+| **`LIT+SSR` p50 / GPU frame** | 11.825 / 8.309 ms | **12.086 / 8.329 ms** (82.7 fps) |
+| `depth-prepass` | 0.058 ms | **0.058 ms** |
+| `ssao` | 0.149 ms | **0.149 ms** |
+| `water` (LIT → LIT+SSR) | 0.062 → 0.073 ms | **0.062 → 0.073 ms** |
+| `terrain` / `vsm-raster` | 1.911 / 4.580 ms | 1.906 / 4.601 ms |
+| `vgeom` / `scatter` | 0.311 / 0.125 ms | **0.311 / 0.125 ms** |
+
+**Every per-pass number the wave's clause tables rest on reproduces to the printed decimal.**
+The p50s sit ~0.3 ms higher, which is the CPU stage and the machine, not the wave; the
+**≥ 60 fps p50 with SSR and GTAO both on** claim is met at **82.7 fps** with **4.5 ms** of
+headroom rather than 4.8.
+
+**One number needs re-stating, and it is a finding rather than a correction.** The wave priced
+SSR on this island at **+0.017 ms** (8.292 → 8.309). This run reads **8.334 → 8.329**, i.e.
+*minus* 0.005. Both are the same statement: on the island the `roughness_cutoff` of 0.4
+declines to march ground, foliage and rock, so what marches is the water and a handful of
+smooth surfaces, and the marginal cost is **at or below the instrument's noise floor**. A
+signed number to three decimals is more precision than the measurement has; the cube-field
+band in `gi_v2_cost_per_tier` (+0.018 / +0.019 / +0.141 ms for Low / Medium / High) is where
+the march's price is actually legible. Two caveats belong with it: the audit's own
+origin-rebase fix can only ever *skip* a march (never add one), so a rebasing camera pays a
+little less and shows no opaque reflection on those frames; and the wave's "SSR itself costs
++0.017 ms on this island" sentence should be read as "nothing measurable".
+
+### The battery, after the audit
+
+| | wave (`ca084b50`) | **after the audit** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 324 / 6 132 / 0 / 19 | **324 / 6 138 / 0 / 19** — **+6 arms**, no new block (every arm landed in a block that already existed) |
+| goldens | 54 | **55** — `water_ssr.png` **added**, **none re-blessed**, `INF_GOLDEN_STRICT=1` green over all 55 |
+| `GOLDEN_SET_DIGEST` | `84e38ed2…` | **`d6da45fd…`** in all three gates — the **additive** branch, moved once |
+| phase18 golden NAME array | 54 names | **55 names** |
+| frontend tests / files | 718 / 80 | **718 / 80** — unmoved; `tsc` and `eslint` clean |
+| rustdoc individual warnings (cold, after `cargo clean --doc`) | 374 | **374** — the audit adds **zero**, against a ceiling of 450 |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| `cargo fmt --all --check` | clean | **clean** |
+| the workspace eaten-`\` gate | green | **green** — and it caught four of the audit's own literals first |
+| schema versions | scene v26 | **unmoved** |
+| new crates / dependencies | none | **none** |
+
+The six arms: `scene_history_is_valid`'s rebase table;
+`the_voxel_copy_of_the_energy_fit_is_character_for_character_the_env_one`;
+`the_cpu_mirror_of_the_energy_fit_matches_the_wgsl_constants`; `golden_water_ssr`;
+`the_two_prim_mesh_seams_are_character_for_character_the_same`; and
+`every_field_of_the_render_record_is_read_by_both_seams`. The prepass-placement ladder is a
+seventh claim but lives inside `assert_prepass_reaches`, so it strengthens three existing arms
+rather than adding one.
+
+### Commits
+
+`bff7d225` the rebased origin; `37c0c586` the energy fit's two WGSL copies; `da1d564d` the
+prepass arms ask WHERE, and the boat gets a golden; `ed119857` both mirrors pinned and every
+persisted field read; `66f98b7e` a dead line, a doc comment on the wrong function, a stale
+name; and this ledger.
