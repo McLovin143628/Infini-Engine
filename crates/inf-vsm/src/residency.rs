@@ -294,8 +294,18 @@ pub struct VsmScroll {
     /// Whether the origins moved at all. A no-op call recomputes nothing, so a
     /// host may call [`VsmResidency::set_clip_origins`] every frame.
     pub moved: bool,
-    /// Resident pages re-seated onto their new label, **keeping their slot** and
-    /// therefore keeping their texels.
+    /// Resident pages that came through the re-seat **keeping their slot**, and
+    /// therefore their texels.
+    ///
+    /// **Every surviving page of the light, not only the re-labelled ones** (the
+    /// VSM2 audit, stated rather than implied): the walk is over the light's
+    /// slots and a level whose own window did not move contributes a page carried
+    /// onto the label it already wore. On the shipped ladder one camera step
+    /// moves level 0's window and rarely a coarse one's, so this reads close to
+    /// the whole resident set on any frame with a shift. It is the engagement
+    /// counter for *"the re-seat ran over the pages"* — which is what
+    /// `level_shifts` alone cannot say — and not a measure of how many labels
+    /// changed.
     pub carried: u32,
     /// Resident pages whose world cell left the window: their slots are freed,
     /// which is what makes room for the row and column entering the other side.
@@ -351,7 +361,19 @@ impl VsmStats {
             } else {
                 ""
             }
-        ) + &if self.unknown_light > 0 {
+        ) + &if self.scroll_carried > 0 || self.scroll_evicted > 0 {
+            // **The scroll's counters are on the line** (the VSM2 audit). They
+            // landed as `VsmStats` fields that nothing in the tree ever read, in
+            // a crate whose own arm is called *"the stats line says what it
+            // counts"* — a counter no reader can reach is not an engagement
+            // counter, it is a field.
+            format!(
+                " [{} carried / {} scrolled off]",
+                self.scroll_carried, self.scroll_evicted
+            )
+        } else {
+            String::new()
+        } + &if self.unknown_light > 0 {
             format!(" [{} unknown-handle wants]", self.unknown_light)
         } else {
             String::new()
@@ -1388,6 +1410,21 @@ mod tests {
         assert!(clamped.contains("[budget-clamped]"), "{clamped}");
         assert_eq!(r.capacity_bytes(), 4 * 64 * 1024);
         assert_eq!(r.resident_bytes(), 4 * 64 * 1024);
+
+        // **The scroll's counters are on the line too** (the VSM2 audit), and
+        // absent until a scroll happens — the same rule the unknown-handle
+        // bracket follows, so a residency that never scrolled stays quiet.
+        assert!(!clamped.contains("carried"), "{clamped}");
+        // Level 0's window slides two cells off its concentric `−N/2`: with four
+        // slots holding pages `(0..4, 0)` of an 8-page grid, labels 2 and 3 are
+        // carried onto 0 and 1 and labels 0 and 1 fall off the trailing edge.
+        let scroll = r.set_clip_origins(h, &[(-2, -4), (-4, -4), (-4, -4)]);
+        assert_eq!((scroll.carried, scroll.evicted), (2, 2), "{scroll:?}");
+        let scrolled = r.stats().summary();
+        assert!(
+            scrolled.contains("[2 carried / 2 scrolled off]"),
+            "the scroll's counters reached no reader: {scrolled}"
+        );
     }
 
     /// An atlas with **no slots at all** defers rather than panicking — the

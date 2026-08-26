@@ -740,6 +740,23 @@ fn a_clipmap_scroll_keeps_every_slot_with_its_world_cell() {
 /// **under**-sized recompute (mutation-verified: `deepest = 0` fails it). This
 /// catches the other half — that the levels it skips really had nothing to say —
 /// by recomputing them anyway through the coarsest-first door and comparing.
+///
+/// # What the VSM2 audit changed here
+///
+/// It did not do that. It snapshotted the table before and after and asserted the
+/// skipped levels were unchanged — which is exactly what "the recompute never
+/// wrote them" means, so the comparison could not fail whatever the argument was
+/// worth, and the wave recorded it as a tripwire rather than as coverage.
+///
+/// The **oracle** it was missing is one line away and is a shipped door:
+/// `register_light` re-lays the table out and runs `recompute_entries` — the
+/// from-scratch, every-level computation — for every light, without touching
+/// residency, the origins, or a slot. So the skipped levels really are asked what
+/// they would have said, and the answer is compared. Both directions are driven:
+/// a **fine** level's window sliding (where the skipped suffix must agree) and
+/// the **coarsest** one's (where the recompute has the whole ladder to redo).
+/// Mutation-verified: `recompute_entries_to` clamped to level 0 fails the second
+/// half.
 #[test]
 fn a_scroll_of_one_level_leaves_every_coarser_levels_entries_byte_identical() {
     const N: u32 = 8;
@@ -792,6 +809,57 @@ fn a_scroll_of_one_level_leaves_every_coarser_levels_entries_byte_identical() {
              the GPU never receives"
         );
     }
+
+    // **THE ORACLE**: what the skipped levels would have said. Registering
+    // another light re-lays the table out and recomputes EVERY light's entries
+    // from scratch over every level, and it touches neither residency nor the
+    // origins — so this is the from-scratch answer for exactly the state the
+    // bounded recompute left behind. Without it the loop above is a statement
+    // that a recompute nobody ran changed nothing.
+    res.register_light(VsmLightDesc::quadtree(2))
+        .expect("a second light needs no slot");
+    assert_eq!(
+        snapshot(&res),
+        after,
+        "the bounded recompute and a from-scratch one disagree about this \
+         light's table after a level-0 scroll — the levels the scroll skipped \
+         did have something to say"
+    );
+
+    // …AND THE OTHER DIRECTION, which is where the recompute has work to do: the
+    // COARSEST level's window slides, so `deepest_moved_level` is the top of the
+    // ladder and every level below it has a parent that moved. An under-sized
+    // recompute leaves this half stale.
+    let mut top = now.clone();
+    top[LEVELS as usize - 1].1 -= 1;
+    let scroll = res.set_clip_origins(h, &top);
+    assert!(scroll.carried > 0, "the coarse scroll carried nothing");
+    let coarse = snapshot(&res);
+    assert_ne!(
+        coarse[LEVELS as usize - 1],
+        after[LEVELS as usize - 1],
+        "the coarsest level's window moved and its entries did not"
+    );
+    // How far below the moved level the change actually reached, **recorded and
+    // not asserted**: on this fixture every level is resident over the same band,
+    // so a finer page's fallback resolves at the next level down and never walks
+    // as far as the coarsest. So the suffix is redone and none of it moves, which
+    // is a true measurement and not the propagation claim — that one belongs to
+    // `moving_a_clipmaps_level_offsets_re_points_the_whole_fallback_chain`, which
+    // checks every address against an independent walk.
+    let followed = (0..LEVELS as usize - 1)
+        .filter(|&l| coarse[l] != after[l])
+        .count();
+    eprintln!("VSM2 coarse scroll: {followed} finer level(s) followed it");
+    res.register_light(VsmLightDesc::quadtree(2))
+        .expect("a third light needs no slot");
+    assert_eq!(
+        snapshot(&res),
+        coarse,
+        "the bounded recompute and a from-scratch one disagree after the \
+         coarsest level scrolled: the suffix `0..=deepest` did not cover what \
+         the shift changed"
+    );
 }
 
 /// **LRU honesty**, with the timeline written out so the expected victim is a
