@@ -1284,7 +1284,7 @@ fn thread_main(
     // **The overlay cutouts currently carved out of our child** (UX2), in
     // parent-client physical pixels. Empty = no region = the whole child draws.
     // Kept in loop state rather than applied and forgotten because a resize
-    // discards the window region and an embedded PIE window suspends it: both
+    // leaves the region STALE and an embedded PIE window suspends it: both
     // paths need to know what to put back.
     let mut cutouts: Vec<ViewportRect> = Vec::new();
     // Whether our own child should be presenting. Hidden while an HTML overlay is
@@ -1472,13 +1472,16 @@ fn thread_main(
                     );
                 }
             }
-            // **A resize discards the window region** (UX2), and the region is
-            // stored in child coordinates besides — so a live cutout has to be
-            // rebuilt against the rectangle the child was just moved to.
-            // Without this, dragging a splitter with a menu open either
-            // restores the blackout the wave removed or clips the child to a
-            // rectangle it no longer occupies. Skipped when nothing is cut out,
-            // so the ordinary resize path pays nothing.
+            // **A resize leaves the region STALE, not absent** (UX2, measured —
+            // `a_resize_is_why_the_region_is_rebuilt`). Windows keeps it
+            // verbatim, still describing the child's previous rectangle, which
+            // is the worse of the two possibilities: an absent region would
+            // merely restore the blackout, while a stale one silently clips the
+            // wrong pixels. The cutouts are measured against the WINDOW and the
+            // region is stored in CHILD coordinates, so both the origin and the
+            // extent have just moved under it. Skipped when nothing is cut out
+            // — there is no region then — so the ordinary resize path pays
+            // nothing.
             if !cutouts.is_empty() && embedded.is_none() {
                 apply_window_region(hwnd, &cutouts, r);
             }
@@ -2314,6 +2317,92 @@ mod tests {
                 (rgn_box.left, rgn_box.top, rgn_box.right, rgn_box.bottom),
                 (0, 100, 800, 600),
                 "cutting the top band off must move the region's top edge down"
+            );
+
+            let _ = DestroyWindow(child);
+            let _ = DestroyWindow(parent);
+        }
+    }
+
+    /// **The premise the resize re-application rests on** (UX2), measured
+    /// rather than recalled.
+    ///
+    /// The `SetRect` block rebuilds the region because a resize is said to take
+    /// it away. That is a claim about Windows, not about this code, and it is
+    /// exactly the kind of sentence a ledger states and nobody checks — so this
+    /// asks. `SetWindowPos` the child to a new size and read the region back.
+    ///
+    /// **The re-application is required either way**, which is why this arm
+    /// reports the mechanism rather than gating on one: a window region is
+    /// stored in CHILD coordinates and the cutouts are measured against the
+    /// WINDOW, so a hole that moves relative to the child needs rebuilding
+    /// whether or not the old region survived.
+    #[test]
+    fn a_resize_is_why_the_region_is_rebuilt() {
+        let Some((parent, child)) = bench_windows() else {
+            eprintln!("a_resize_is_why_the_region_is_rebuilt: no window station — skipped");
+            return;
+        };
+        unsafe {
+            apply_window_region(
+                child,
+                &[ViewportRect {
+                    x: 0,
+                    y: 0,
+                    width: 800,
+                    height: 100,
+                }],
+                hole(0, 0, 800, 600),
+            );
+            let mut before = RECT::default();
+            let kind_before = GetWindowRgnBox(child, &mut before);
+            assert_eq!(kind_before, SIMPLEREGION, "the cutout applied");
+
+            let _ = SetWindowPos(child, None, 0, 0, 640, 480, SWP_NOACTIVATE | SWP_NOZORDER);
+            let mut after = RECT::default();
+            let kind_after = GetWindowRgnBox(child, &mut after);
+            eprintln!(
+                "a_resize_is_why_the_region_is_rebuilt: before = {kind_before:?} \
+                 ({}, {}, {}, {}); after a resize to 640x480 = {kind_after:?} ({}, {}, {}, {})",
+                before.left,
+                before.top,
+                before.right,
+                before.bottom,
+                after.left,
+                after.top,
+                after.right,
+                after.bottom,
+            );
+
+            // Whatever Windows did, the region is now WRONG for the new child:
+            // either it is gone, or it still describes the 800x600 one. Both are
+            // states the re-application has to leave behind, and the assertion
+            // is the disjunction rather than a guess at which.
+            assert!(
+                kind_after == RGN_ERROR || (after.right, after.bottom) != (640, 480),
+                "if a resize both KEPT the region and re-fitted it to the new \
+                 size, the SetRect re-application would be redundant and this \
+                 test is the place that finds out"
+            );
+
+            // The re-application is what puts it right, and it is the whole
+            // contract: the same cutout against the new hole.
+            apply_window_region(
+                child,
+                &[ViewportRect {
+                    x: 0,
+                    y: 0,
+                    width: 640,
+                    height: 100,
+                }],
+                hole(0, 0, 640, 480),
+            );
+            let mut fixed = RECT::default();
+            assert_eq!(GetWindowRgnBox(child, &mut fixed), SIMPLEREGION);
+            assert_eq!(
+                (fixed.left, fixed.top, fixed.right, fixed.bottom),
+                (0, 100, 640, 480),
+                "after the rebuild the region fits the child it is on"
             );
 
             let _ = DestroyWindow(child);

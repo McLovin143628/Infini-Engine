@@ -1,11 +1,13 @@
 //! **The cutout survives the three things that take it away** (UX2).
 //!
-//! A window region is not a property the child keeps for you. It is discarded
-//! by a resize, it is expressed in coordinates a resize moves, and it is
-//! meaningless while an embedded PIE window occupies the slot. Each of those is
-//! handled at the point it happens in the viewport loop, and each failure looks
-//! the same from outside: the 3D view goes black behind a menu again, or a
-//! chunk of it disappears and stays gone. Neither throws, neither logs.
+//! A window region does not follow the window it is on. A resize leaves it
+//! **stale** — measured, not assumed: `a_resize_is_why_the_region_is_rebuilt`
+//! reads the region back after a `SetWindowPos` and finds it unchanged, still
+//! describing the child's previous rectangle — and it is meaningless while an
+//! embedded PIE window occupies the slot. Each of those is handled at the point
+//! it happens in the viewport loop, and each failure looks the same from
+//! outside: the 3D view goes black behind a menu again, or a chunk of it
+//! disappears and stays gone. Neither throws, neither logs.
 //!
 //! # Why a source gate
 //!
@@ -38,10 +40,10 @@ fn scope(start: &str, end: &str) -> String {
     rest[..to].to_string()
 }
 
-/// **A resize rebuilds the region.** `SetWindowPos` discards it, and the region
-/// is stored in child coordinates, so the origin it was built against has just
-/// moved. Dragging a splitter with a menu open either restores the blackout the
-/// wave removed or clips the child to a rectangle it no longer occupies.
+/// **A resize rebuilds the region.** `SetWindowPos` leaves the old one in
+/// place, and the region is stored in child coordinates, so the origin it was
+/// built against has just moved under it. Dragging a splitter with a menu open
+/// otherwise clips the child to a rectangle it no longer occupies.
 #[test]
 fn a_resize_reapplies_the_cutout() {
     let block = scope("if let Some(r) = latest_rect {", "host.resize(");
