@@ -20,6 +20,39 @@ struct TonemapParams {
     knobs: [f32; 4],
     /// xy = resolution (px), zw unused.
     resolution: [f32; 4],
+    /// x = vignette intensity, y = vignette smoothness, z = chromatic aberration
+    /// (px of separation at the corner), w = grain intensity.
+    film: [f32; 4],
+    /// x = grain cell size (px), y = the grain's level-clock seed, zw unused.
+    film2: [f32; 4],
+}
+
+/// How often the grain re-rolls, in **level-clock** hertz.
+///
+/// Twenty-four, because that is what film runs at and grain is a film artefact.
+/// It is a level-clock rate rather than a frame rate on purpose: a level paused
+/// at a given time of day has a frozen grain, and two runs of one document see
+/// the same grain at the same clock reading — which is what makes a golden with
+/// grain on a deterministic image rather than a lottery.
+const GRAIN_HZ: f64 = 24.0;
+
+/// The grain's seed for a level clock reading, wrapped into 24 bits.
+///
+/// Wrapped, and computed in `f64` here rather than in the shader, because
+/// `cloud_time_s` reaches `day_of_year * 86 400` — at 1e7 seconds an `f32` cannot
+/// resolve a twenty-fourth of a second, so a shader-side `floor(clock * 24)`
+/// would quantise the grain to a standstill on any level past new year's day.
+/// 2²⁴ is the largest range an `f32` carries exactly, and the shader bitcasts it
+/// back to an integer.
+pub fn grain_seed(level_time_s: f64) -> f32 {
+    if !level_time_s.is_finite() {
+        return 0.0;
+    }
+    let idx = (level_time_s * GRAIN_HZ).floor();
+    if !idx.is_finite() || idx.abs() > 9.0e15 {
+        return 0.0;
+    }
+    ((idx as i64).rem_euclid(1 << 24)) as f32
 }
 
 pub struct TonemapNode {
@@ -155,6 +188,8 @@ impl RenderNode for TonemapNode {
         } else {
             0.0
         };
+        let film = frame.settings.film;
+        let sane = |v: f32| if v.is_finite() { v.max(0.0) } else { 0.0 };
         gpu.queue.write_buffer(
             &self.params_buf,
             0,
@@ -172,6 +207,30 @@ impl RenderNode for TonemapNode {
                 resolution: [
                     frame.targets.size.0 as f32,
                     frame.targets.size.1 as f32,
+                    0.0,
+                    0.0,
+                ],
+                // The lens trio's door. `FilmSettings` comes off a level file, so
+                // a non-finite number would multiply the whole frame by NaN — and
+                // a negative vignette would ADD light at the corners, which is
+                // the one thing a vignette must never do.
+                film: [
+                    sane(film.vignette_intensity),
+                    sane(film.vignette_smoothness),
+                    if film.chromatic_aberration.is_finite() {
+                        film.chromatic_aberration
+                    } else {
+                        0.0
+                    },
+                    sane(film.grain_intensity),
+                ],
+                film2: [
+                    if film.grain_size.is_finite() {
+                        film.grain_size.max(1.0)
+                    } else {
+                        1.0
+                    },
+                    grain_seed(frame.scene.atmosphere.clouds.time_s),
                     0.0,
                     0.0,
                 ],

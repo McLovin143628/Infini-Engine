@@ -1261,7 +1261,7 @@ fn the_golden_set_is_pinned_and_additive_after_phase_27() {
     /// Wave VIS1a's **audit** adds the fifty-fifth, `water_ssr.png`: a new frame,
     /// so this pin and the digest below move together on the additive branch and
     /// no committed image changed. `phase26_gate`'s twin carries the reason.
-    const GOLDENS: usize = 56;
+    const GOLDENS: usize = 57;
     /// `xxh3_128` over `"{file_name} {hex}\n"` for every golden, name-sorted.
     /// **RULE: this may change only in a commit that adds a golden, or in one
     /// whose stated purpose is to change what the engine LOOKS like.**
@@ -1272,7 +1272,7 @@ fn the_golden_set_is_pinned_and_additive_after_phase_27() {
     /// count unchanged. That both pins had to move separately is the point of
     /// their being separate: a wave that re-blessed for a bad reason would have
     /// to write the reason down twice.
-    const GOLDEN_SET_DIGEST: &str = "9311730d7adf90ca1dc516f738f40e6d";
+    const GOLDEN_SET_DIGEST: &str = "dc695d749b043505fc4d40b21dc325b3";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

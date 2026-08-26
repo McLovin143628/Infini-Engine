@@ -24,19 +24,19 @@ use inf_render::passes::vgeom::{cpu_visible_set, cull_flags, frustum_planes, lod
 use inf_render::{
     assemble_patches, cull_visible, cull_visible_streamed, detail_texel, expand_text, half_to_f32,
     shape_texel, Ambient2D, AtmosphereParams, AtmosphereQuality, BloomSettings, CloudParams,
-    CloudQuality, CloudVolumes, EngineRenderer, FlareSettings, GiAudit, GiQuality, GiSettings,
-    GpuContext, HAlign, HeadlessTarget, HeightFog, LightKind, MeshInstance, PrebatchedRun,
-    PrecipParams, PrecipQuality, PrimMesh, RenderChunk, RenderDeform, RenderDeformCell,
-    RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
-    RenderTerrainTile, RenderTilemap, RenderView, RenderVoxelChunk, RenderVoxelVertex,
-    RenderVoxelVolume, RenderWater, ScatterBatch, ScatterData, ScatterInstance, ShadowSettings,
-    SkinnedInstance, SkinnedMeshData, SkinnedVertex, SpriteInstance, SpriteTextureUpload,
-    SsaoSettings, SunParams, TerrainTileKey, TextParams, TilemapParams, VgeomAsset, VgeomInstance,
-    VgeomMesh, VgeomSettings, ViewMode, VoxelChunkKey, WaterKindGpu, WaterQuality, WaveField,
-    WaveSpec, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS,
-    BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE, CPU_GPU_EXACT_CHANNEL_FRACTION,
-    CPU_GPU_SHADOW_TOLERANCE, CPU_GPU_STEP_TOLERANCE, CPU_GPU_VALUE_ESCAPE_FRACTION,
-    CPU_GPU_VALUE_TOLERANCE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
+    CloudQuality, CloudVolumes, EngineRenderer, FilmSettings, FlareSettings, GiAudit, GiQuality,
+    GiSettings, GpuContext, HAlign, HeadlessTarget, HeightFog, LightKind, MeshInstance,
+    PrebatchedRun, PrecipParams, PrecipQuality, PrimMesh, RenderChunk, RenderDeform,
+    RenderDeformCell, RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain,
+    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, RenderVoxelChunk,
+    RenderVoxelVertex, RenderVoxelVolume, RenderWater, ScatterBatch, ScatterData, ScatterInstance,
+    ShadowSettings, SkinnedInstance, SkinnedMeshData, SkinnedVertex, SpriteInstance,
+    SpriteTextureUpload, SsaoSettings, SunParams, TerrainTileKey, TextParams, TilemapParams,
+    VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode, VoxelChunkKey, WaterKindGpu,
+    WaterQuality, WaveField, WaveSpec, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL,
+    BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE,
+    CPU_GPU_EXACT_CHANNEL_FRACTION, CPU_GPU_SHADOW_TOLERANCE, CPU_GPU_STEP_TOLERANCE,
+    CPU_GPU_VALUE_ESCAPE_FRACTION, CPU_GPU_VALUE_TOLERANCE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -2334,6 +2334,218 @@ fn flare_off_is_byte_identical_and_on_is_not() {
     assert_eq!(a, b, "the default flare block is not the default");
     let on = render_with(&gpu, &scene, &view, flare_on());
     assert_ne!(a, on, "turning the flare on changed nothing");
+}
+
+// ── wave VIS1b: the lens trio (vignette / chromatic aberration / film grain) ──
+
+/// A high-contrast scene: a pale floor with saturated blocks on it, lit hard.
+///
+/// Contrast is what the trio needs to be *measurable* — a vignette needs light in
+/// the corners to take away, chromatic aberration needs edges to fringe, and
+/// grain needs mid-tones to sit on.
+fn lens_trio_scene(clock: f64) -> RenderScene {
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    scene.atmosphere.clouds.time_s = clock;
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.3, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(14.0, 0.4, 14.0),
+        [0.78, 0.78, 0.80, 1.0],
+        1,
+    ));
+    let colors = [
+        [0.9, 0.12, 0.10, 1.0],
+        [0.10, 0.85, 0.20, 1.0],
+        [0.10, 0.20, 0.95, 1.0],
+        [0.95, 0.85, 0.10, 1.0],
+        [0.05, 0.05, 0.06, 1.0],
+    ];
+    for (i, c) in colors.into_iter().enumerate() {
+        let a = i as f64 * 1.2566;
+        scene.instances.push(MeshInstance::lit(
+            DVec3::new(a.cos() * 3.0, 0.6, a.sin() * 3.0),
+            Quat::from_rotation_y(0.4 * i as f32),
+            Vec3::splat(0.85),
+            c,
+            i as u32 + 2,
+        ));
+    }
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        direction: Vec3::new(0.4, 0.8, 0.45).normalize(),
+        color: [1.0, 0.97, 0.92],
+        intensity: 3.2,
+        ..Default::default()
+    });
+    scene.mark_dirty();
+    scene
+}
+
+fn lens_trio_on() -> RenderSettings {
+    RenderSettings {
+        film: FilmSettings {
+            vignette_intensity: 0.65,
+            vignette_smoothness: 0.45,
+            chromatic_aberration: 7.0,
+            grain_intensity: 0.22,
+            grain_size: 2.0,
+        },
+        ..RenderSettings::default()
+    }
+}
+
+/// Mean channel value over a screen rectangle, 0..255.
+fn mean_channel(img: &[u8], c: usize, x0: u32, y0: u32, x1: u32, y1: u32) -> f64 {
+    let mut acc = 0.0f64;
+    let mut n = 0.0f64;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            acc += px(img, x, y)[c] as f64;
+            n += 1.0;
+        }
+    }
+    acc / n.max(1.0)
+}
+
+/// Mean `|R − B|` over a screen rectangle — what lateral chromatic aberration
+/// puts at an edge and what nothing else in this frame does.
+fn mean_rb_split(img: &[u8], x0: u32, y0: u32, x1: u32, y1: u32) -> f64 {
+    let mut acc = 0.0f64;
+    let mut n = 0.0f64;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = px(img, x, y);
+            acc += (p[0] as f64 - p[2] as f64).abs();
+            n += 1.0;
+        }
+    }
+    acc / n.max(1.0)
+}
+
+/// **The lens trio golden** (wave VIS1b, clause 5) — the 57th.
+///
+/// One composite-stage uber-post: vignette before the ACES curve (a lens loses
+/// light at the corner, it does not paint the corner black), chromatic aberration
+/// as a radial three-tap, film grain after the curve in display space. All three
+/// zero at the default, so this is the **additive** branch of the golden rule
+/// again and no committed image moved.
+#[test]
+fn golden_lens_trio() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let scene = lens_trio_scene(0.0);
+    let view = look_view(DVec3::new(0.0, 3.4, 7.5), DVec3::new(0.0, 0.4, 0.0));
+
+    let img = check_golden_with(&gpu, "lens_trio", &scene, &view, lens_trio_on());
+    let off = render_with(&gpu, &scene, &view, RenderSettings::default());
+
+    // The vignette: the corners lose light relative to the centre.
+    let corner = |img: &[u8]| {
+        (mean_channel(img, 1, 0, 0, W / 8, H / 8)
+            + mean_channel(img, 1, W - W / 8, H - H / 8, W, H))
+            / 2.0
+    };
+    let centre = |img: &[u8]| mean_channel(img, 1, W * 3 / 8, H * 3 / 8, W * 5 / 8, H * 5 / 8);
+    let ratio_on = corner(&img) / centre(&img).max(1e-6);
+    let ratio_off = corner(&off) / centre(&off).max(1e-6);
+    eprintln!(
+        "lens_trio: corner/centre {ratio_off:.4} -> {ratio_on:.4}; \
+         |R-B| edge band {:.3} -> {:.3}, centre {:.3} -> {:.3}",
+        mean_rb_split(&off, 0, 0, W / 5, H),
+        mean_rb_split(&img, 0, 0, W / 5, H),
+        mean_rb_split(&off, W * 2 / 5, H * 2 / 5, W * 3 / 5, H * 3 / 5),
+        mean_rb_split(&img, W * 2 / 5, H * 2 / 5, W * 3 / 5, H * 3 / 5),
+    );
+    assert!(
+        ratio_on < ratio_off * 0.85,
+        "the vignette did not darken the corners: {ratio_on:.4} against {ratio_off:.4}"
+    );
+
+    // The aberration, measured ALONE.
+    //
+    // It cannot be read off the trio frame, and that is a finding rather than a
+    // fixture detail: `|R − B|` is an absolute difference, the vignette takes 47 %
+    // of the light out of the very corners the fringe is strongest in, and the
+    // first draft of this arm therefore measured the split going *down* at the
+    // edge (19.501 → 18.606) with the aberration plainly working. Three effects
+    // in one frame need three measurements.
+    let ca_only = RenderSettings {
+        film: FilmSettings {
+            chromatic_aberration: 7.0,
+            ..FilmSettings::default()
+        },
+        ..RenderSettings::default()
+    };
+    let ca = render_with(&gpu, &scene, &view, ca_only);
+    let edge_gain = mean_rb_split(&ca, 0, 0, W / 5, H) - mean_rb_split(&off, 0, 0, W / 5, H);
+    let centre_gain = mean_rb_split(&ca, W * 2 / 5, H * 2 / 5, W * 3 / 5, H * 3 / 5)
+        - mean_rb_split(&off, W * 2 / 5, H * 2 / 5, W * 3 / 5, H * 3 / 5);
+    eprintln!("chromatic aberration alone: edge +{edge_gain:.3}, centre +{centre_gain:.3}");
+    assert!(
+        edge_gain > 0.0 && edge_gain > centre_gain * 2.0,
+        "the fringe is not radial: edge {edge_gain:.3} vs centre {centre_gain:.3}"
+    );
+}
+
+/// **The grain is a function of the level clock, and of nothing else.**
+///
+/// The SKY2 jitter precedent, applied to a lens artefact: a frame index would
+/// make the same document render differently on a machine that dropped a frame,
+/// and would make a one-frame golden a lottery. Three claims:
+///
+/// * two renders at the same clock reading are **byte-identical**;
+/// * two renders at clock readings a grain period apart are **not**;
+/// * a clock advanced by less than a grain period does not re-roll — which is
+///   what makes it a 24 Hz grain rather than noise.
+#[test]
+fn film_grain_follows_the_level_clock_and_never_the_frame_index() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let view = look_view(DVec3::new(0.0, 3.4, 7.5), DVec3::new(0.0, 0.4, 0.0));
+    let grain_only = RenderSettings {
+        film: FilmSettings {
+            grain_intensity: 0.5,
+            grain_size: 2.0,
+            ..FilmSettings::default()
+        },
+        ..RenderSettings::default()
+    };
+    let at = |t: f64| render_with(&gpu, &lens_trio_scene(t), &view, grain_only.clone());
+
+    assert_eq!(
+        at(10.0),
+        at(10.0),
+        "the grain is not a function of the clock"
+    );
+    assert_ne!(
+        at(10.0),
+        at(10.0 + 1.0 / 24.0 + 1e-3),
+        "the grain never re-rolled across a grain period"
+    );
+    assert_eq!(
+        at(10.0),
+        at(10.0 + 1.0 / 240.0),
+        "the grain re-rolled inside one 24 Hz period"
+    );
+    // And zero strength is not merely invisible, it is the untouched frame.
+    let plain = render_with(
+        &gpu,
+        &lens_trio_scene(10.0),
+        &view,
+        RenderSettings::default(),
+    );
+    let zero = render_with(
+        &gpu,
+        &lens_trio_scene(10.0),
+        &view,
+        RenderSettings {
+            film: FilmSettings::default(),
+            ..RenderSettings::default()
+        },
+    );
+    assert_eq!(plain, zero, "the default film block is not the default");
+    assert_ne!(plain, at(10.0), "turning the grain on changed nothing");
 }
 
 /// SSAO golden (P13.3a): a cluster of boxes forming **crevices** (a floor slab

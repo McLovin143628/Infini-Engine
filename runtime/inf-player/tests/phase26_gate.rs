@@ -2409,7 +2409,7 @@ fn the_golden_set_is_pinned_and_additive() {
     /// it by nothing, because virtual shadows were inert until a receiver
     /// existed. Wave VIS1a's **audit** added the fifty-fifth — `water_ssr.png`,
     /// the one frame the wave's own reflection feature can be pinned by.
-    const GOLDENS: usize = 56;
+    const GOLDENS: usize = 57;
     /// `xxh3_128` over `"{file_name} {hex}\n"` for every golden, name-sorted —
     /// the CONTENT pin (P26.5 audit). Committed PNGs are `-text` in
     /// `.gitattributes`, so these bytes are the same on every checkout.
@@ -2480,7 +2480,12 @@ fn the_golden_set_is_pinned_and_additive() {
     /// changed -- the flare is off by default, off is a clear of its own half-res
     /// target, and the tonemap's add sits behind a uniform branch it does not
     /// take.
-    const GOLDEN_SET_DIGEST: &str = "9311730d7adf90ca1dc516f738f40e6d";
+    ///
+    /// **And a sixth, still additive, in the same wave**: `lens_trio.png` -- the
+    /// vignette, the chromatic aberration and the film grain on one high-contrast
+    /// scene. `GOLDENS` moves 56 -> 57, every `FilmSettings` field is zero at the
+    /// default, and the tonemap's three branches are not taken there.
+    const GOLDEN_SET_DIGEST: &str = "dc695d749b043505fc4d40b21dc325b3";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

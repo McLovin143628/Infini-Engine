@@ -1483,7 +1483,7 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 /// P20.3 also **re-blessed the three P20.1 water scenes**, deliberately: shoreline
 /// wetness is default-on and all three carry terrain, so their ground at and below
 /// the water level is now darker. Every other image is byte-identical.
-const GOLDENS: [&str; 56] = [
+const GOLDENS: [&str; 57] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
@@ -1506,6 +1506,9 @@ const GOLDENS: [&str; 56] = [
     "gi_terrain.png",
     "grid_sky.png",
     "hdr_bloom.png",
+    // Wave VIS1b: the lens trio -- vignette, chromatic aberration, film grain --
+    // on one high-contrast scene. All three are zero at the default.
+    "lens_trio.png",
     "ortho_2d.png",
     "pbr_materials.png",
     "primitives.png",
@@ -1560,7 +1563,7 @@ const GOLDENS: [&str; 56] = [
     "weather_storm_noon.png",
 ];
 
-/// **GATE (f).** The golden *inventory* is exactly these 56 PNGs.
+/// **GATE (f).** The golden *inventory* is exactly these 57 PNGs.
 ///
 /// Nothing is re-blessed here, and no pixel is compared — that stays in
 /// `inf-render`'s own harness, which is where the renderer and the images live.
