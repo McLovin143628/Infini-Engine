@@ -72,6 +72,32 @@ pub const SHAPE_TILE_M: f32 = 8192.0;
 /// World size, **metres**, of one wrap of the **detail** (erosion) texture.
 pub const DETAIL_TILE_M: f32 = 256.0;
 
+/// Amplitude, **metres**, of the domain warp applied to the erosion's sample
+/// position (SKY2).
+///
+/// The displacement comes from the shape volume's own Worley octaves, which the
+/// density function has already fetched — so the warp costs three subtractions
+/// and nothing else. Its job is to shear the wisps *along* the billows they are
+/// eroding rather than stamping a rectilinear pattern across them, which is the
+/// difference between a cloud that has been eroded and a cloud with a texture on
+/// it. 60 m is a quarter of [`DETAIL_TILE_M`]: enough to break the grid, not
+/// enough to smear the erosion into noise.
+///
+/// It is a **domain warp**, not a divergence-free curl field. The name matters
+/// because the two look different where the field is compressive, and this one
+/// has no incompressibility to appeal to.
+pub const DETAIL_CURL_M: f32 = 60.0;
+
+/// Tile multiplier of the erosion's **second**, coarser scale (SKY2): 1 024 m.
+///
+/// One octave set at 256 m can only fray a silhouette at 256 m, and a cumulus is
+/// bumpy at several hundred metres as well. Without the coarse scale the edge
+/// reads as fur; with it, as cauliflower.
+pub const DETAIL_COARSE_SCALE: f32 = 4.0;
+
+/// Weight of the coarse erosion scale in the blend, `[0, 1]`.
+pub const DETAIL_COARSE_WEIGHT: f32 = 0.35;
+
 /// World size, **metres**, of one wrap of the 2D coverage/type weather field.
 ///
 /// Deliberately much larger than [`SHAPE_TILE_M`]: coverage is the *weather*, and
@@ -1050,19 +1076,44 @@ impl CloudVolumes {
             return 0.0;
         }
 
-        // Erosion. Wispy (inverted) at the base, billowy at the top — the standard
-        // trick that makes a cumulus fray downward and stay solid on its shoulders.
+        // Erosion, at two scales through a warped domain (SKY2). Wispy
+        // (inverted) at the base, billowy at the top — the standard trick that
+        // makes a cumulus fray downward and stay solid on its shoulders.
         let detail_strength = params.detail.clamp(0.0, 1.0);
         if detail_strength > 0.0 {
+            // The WARP. Displacing the erosion's sample position by the shape
+            // volume's own Worley octaves shears the wisps along the billows
+            // instead of stamping a rectilinear pattern across them — the
+            // difference between an eroded cloud and a cloud with a texture on
+            // it. It is a domain warp and not a divergence-free curl field, and
+            // it is free: `s` is already in a register.
+            let curl = [
+                (s[1] - 0.5) * DETAIL_CURL_M,
+                (s[2] - 0.5) * DETAIL_CURL_M,
+                (s[3] - 0.5) * DETAIL_CURL_M,
+            ];
             // Detail drifts faster than the shape: relative motion inside a cloud
             // is what makes it look alive rather than like a rigid sculpture.
             let dp = [
-                (p[0] + off[0] * 2.0) / DETAIL_TILE_M,
-                p[1] / DETAIL_TILE_M,
-                (p[2] + off[1] * 2.0) / DETAIL_TILE_M,
+                (p[0] + off[0] * 2.0 + curl[0]) / DETAIL_TILE_M,
+                (p[1] + curl[1]) / DETAIL_TILE_M,
+                (p[2] + off[1] * 2.0 + curl[2]) / DETAIL_TILE_M,
             ];
             let e = Self::sample(&self.detail, self.detail_res, dp);
-            let fbm = e[0] * 0.625 + e[1] * 0.25 + e[2] * 0.125;
+            let fine = e[0] * 0.625 + e[1] * 0.25 + e[2] * 0.125;
+            // The SECOND SCALE. One erosion octave set at a 256 m tile can only
+            // fray a silhouette at 256 m; a cloud's outline is bumpy at several
+            // hundred metres too, and without that the edge reads as fur rather
+            // than as cauliflower. Same volume, coarser tile, and a different
+            // drift rate so the two scales move against each other.
+            let cp = [
+                (p[0] + off[0] * 1.4) / (DETAIL_TILE_M * DETAIL_COARSE_SCALE),
+                p[1] / (DETAIL_TILE_M * DETAIL_COARSE_SCALE),
+                (p[2] + off[1] * 1.4) / (DETAIL_TILE_M * DETAIL_COARSE_SCALE),
+            ];
+            let e2 = Self::sample(&self.detail, self.detail_res, cp);
+            let coarse = e2[0] * 0.625 + e2[1] * 0.25 + e2[2] * 0.125;
+            let fbm = fine * (1.0 - DETAIL_COARSE_WEIGHT) + coarse * DETAIL_COARSE_WEIGHT;
             let wispy = fbm + (1.0 - fbm - fbm) * smoothstep(0.0, 0.35, h);
             d = remap(d, wispy * 0.6 * detail_strength, 1.0);
         }
@@ -1851,6 +1902,88 @@ mod tests {
         assert_eq!(
             vols.sun_transmittance(&p, [0.0, 1600.0, 0.0], [1.0, 0.0, 0.0], 8),
             1.0
+        );
+    }
+
+    /// **The erosion carves rather than scaling** (SKY2), measured on the CPU
+    /// mirror against the same field with `detail = 0`.
+    ///
+    /// A "texture on a cloud" — an erosion that merely modulates brightness —
+    /// would move every sample the same way. A remap that eats the field from a
+    /// rising floor moves samples in both directions and takes some of them to
+    /// zero outright, which is what a silhouette needs if it is going to have
+    /// holes in it. That is the property, and it is the one the two-scale warped
+    /// erosion has to keep.
+    #[test]
+    fn the_erosion_carves_the_field_rather_than_scaling_it() {
+        let res = 32u32;
+        let dres = 16u32;
+        let mut shape = Vec::with_capacity((res * res * res * 8) as usize);
+        for z in 0..res {
+            for y in 0..res {
+                for x in 0..res {
+                    for h in shape_texel(0, x, y, z, res) {
+                        shape.extend_from_slice(&h.to_le_bytes());
+                    }
+                }
+            }
+        }
+        let mut detail = Vec::with_capacity((dres * dres * dres * 8) as usize);
+        for z in 0..dres {
+            for y in 0..dres {
+                for x in 0..dres {
+                    for h in detail_texel(0, x, y, z, dres) {
+                        detail.extend_from_slice(&h.to_le_bytes());
+                    }
+                }
+            }
+        }
+        let vols = CloudVolumes {
+            shape,
+            shape_res: res,
+            detail,
+            detail_res: dres,
+        };
+        let smooth = CloudParams {
+            coverage: 0.8,
+            detail: 0.0,
+            ..on()
+        };
+        let eroded = CloudParams {
+            detail: 0.6,
+            ..smooth
+        };
+
+        let mut moved = 0u32;
+        let mut killed = 0u32;
+        let mut present = 0u32;
+        for i in 0..600 {
+            // A scattered walk through the slab, not a line: a line can miss the
+            // erosion's tile entirely and report a confident zero.
+            let f = i as f32;
+            let p = [f * 137.0, 1600.0 + (i % 23) as f32 * 100.0, f * -91.0];
+            let a = vols.density(&smooth, p);
+            let b = vols.density(&eroded, p);
+            if a > 0.0 {
+                present += 1;
+                if (a - b).abs() > a * 0.01 {
+                    moved += 1;
+                }
+                if b == 0.0 {
+                    killed += 1;
+                }
+            }
+        }
+        eprintln!("erosion: {present} present, {moved} moved, {killed} carved away");
+        assert!(present > 40, "the probe found almost no cloud ({present})");
+        assert!(
+            moved * 2 > present,
+            "the erosion moved only {moved} of {present} samples — it is inert"
+        );
+        assert!(
+            killed > 0,
+            "the erosion never took a sample to zero — it is a brightness \
+             modulation, not a carve, and a silhouette cannot get holes from it"
         );
     }
 

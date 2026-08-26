@@ -74,20 +74,37 @@ fn cloud_density(p: vec3<f32>) -> f32 {
         return 0.0;
     }
 
-    // Erosion. Skipped entirely on the Low tier (`cloud_march.w == 0`) — the
-    // documented cheap path, which loses the wisps but stays a pure function of
-    // the same inputs.
+    // Erosion, at two scales through a warped domain (SKY2). Skipped entirely on
+    // the Low tier (`cloud_march.w == 0`) — the documented cheap path, which
+    // loses the wisps but stays a pure function of the same inputs.
     let detail_strength = clamp(atmos.clouds.w, 0.0, 1.0);
     if (atmos.cloud_march.w > 0.5 && detail_strength > 0.0) {
+        // The WARP: displace the erosion's sample position by the shape volume's
+        // own Worley octaves, which are already in a register. It shears the
+        // wisps along the billows instead of stamping a rectilinear pattern
+        // across them. A domain warp, not a divergence-free curl field.
+        let curl = (vec3<f32>(s.g, s.b, s.a) - vec3<f32>(0.5)) * CLOUD_DETAIL_CURL_M;
         // Detail drifts at twice the shape's rate: relative motion inside a cloud
         // is what makes it look alive rather than like a rigid sculpture.
         let dp = vec3<f32>(
-            (p.x + off.x * 2.0) / CLOUD_DETAIL_TILE_M,
-            p.y / CLOUD_DETAIL_TILE_M,
-            (p.z + off.y * 2.0) / CLOUD_DETAIL_TILE_M,
+            (p.x + off.x * 2.0 + curl.x) / CLOUD_DETAIL_TILE_M,
+            (p.y + curl.y) / CLOUD_DETAIL_TILE_M,
+            (p.z + off.y * 2.0 + curl.z) / CLOUD_DETAIL_TILE_M,
         );
         let e = textureSampleLevel(cloud_detail_tex, cloud_smp, dp, 0.0);
-        let fbm = e.r * 0.625 + e.g * 0.25 + e.b * 0.125;
+        let fine = e.r * 0.625 + e.g * 0.25 + e.b * 0.125;
+        // The SECOND SCALE: the same volume at a 1 024 m tile, drifting at a
+        // different rate. One octave set at 256 m can only fray an outline at
+        // 256 m, and a cumulus is bumpy at several hundred metres too.
+        let cp = vec3<f32>(
+            (p.x + off.x * 1.4) / (CLOUD_DETAIL_TILE_M * CLOUD_DETAIL_COARSE_SCALE),
+            p.y / (CLOUD_DETAIL_TILE_M * CLOUD_DETAIL_COARSE_SCALE),
+            (p.z + off.y * 1.4) / (CLOUD_DETAIL_TILE_M * CLOUD_DETAIL_COARSE_SCALE),
+        );
+        let e2 = textureSampleLevel(cloud_detail_tex, cloud_smp, cp, 0.0);
+        let coarse = e2.r * 0.625 + e2.g * 0.25 + e2.b * 0.125;
+        let fbm = fine * (1.0 - CLOUD_DETAIL_COARSE_WEIGHT)
+            + coarse * CLOUD_DETAIL_COARSE_WEIGHT;
         // Wispy (inverted) at the base, billowy at the shoulders — the standard
         // trick that frays a cumulus downward while keeping its top solid.
         let wispy = fbm + (1.0 - fbm - fbm) * smoothstep(0.0, 0.35, h);
