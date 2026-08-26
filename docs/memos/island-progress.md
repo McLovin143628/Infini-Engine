@@ -8675,4 +8675,5 @@ rather than adding one.
 `bff7d225` the rebased origin; `37c0c586` the energy fit's two WGSL copies; `da1d564d` the
 prepass arms ask WHERE, and the boat gets a golden; `ed119857` both mirrors pinned and every
 persisted field read; `66f98b7e` a dead line, a doc comment on the wrong function, a stale
-name; and this ledger.
+name; `aa11c039` clippy's `neg_multiply` on the audit's own new arm; and the ledger commits
+that carry this section into the memo and the ROADMAP.
