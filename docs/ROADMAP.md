@@ -26183,3 +26183,86 @@ rewritten, clippy **0** with `-D warnings`, rustdoc **404 − 30 = 374 over 30 c
 byte-unmoved, no new crate or dependency. **No twenty-fourth chr(92) catch.** Five audit commits,
 `(VSM2) audit:`-tagged; the full ledger with the mutation table and the ten carried LOWs is in
 `docs/memos/island-progress.md` under *The VSM2 audit*.
+
+## Wave SKY2 — clouds that stop looking painted (2026-08-25)
+
+**THE FIVE NAMED GAPS ARE CLOSED, and the High tier is 2.3× cheaper than the code the wave started
+from.** Base `b08aa9d8`; RTX 4070 Ti, Windows/Vulkan. The clouds were already raymarched
+Perlin–Worley volumetrics with an adaptive stride, a two-lobe phase, Hillaire multiple scattering and
+a compute-baked ground shadow map; what they lacked was a jittered march start, a powder term, more
+than eight bits of density, more than one erosion scale, and a height profile that was not the same
+curve for every cloud.
+
+**The measurement that governed the wave was a correction, not a gap.** §8's cost table records the
+cloud stack at **+0.09 / 0.20 / 0.29 ms** Low/Medium/High at 720p. At 1920×1080 with a ground camera
+pitched into open sky the same code reads **1.55 / 2.47 / 4.03 ms**. Both are correct measurements of
+different frames: `sky_stack_cost_per_tier` measures a cube field from `overlook_view()`, where
+almost every pixel has geometry in front of the slab and the hardware test rejects the march before
+it starts. A sky-filled frame marches nearly every pixel. That reading is why the brief's clause (e),
+*"half-res ONLY if the measured cost demands it"*, was not optional.
+
+**What landed.** (1) A **blue-noise jittered march start** — `inf_render::bluenoise`, ~150 lines of
+owned void-and-cluster with a *rational* energy kernel so nothing in it calls a transcendental, and a
+**rank** rather than an image so every prefix is well spread (2.20× / 2.01× / 1.70× the white-noise
+nearest-neighbour spacing at 64/256/1024). The rotation is `clouds::jitter_phase`, the **level clock**
+at 240 Hz wrapped to 64 elements — never a frame index — so a paused clock is a frozen pattern and
+**the goldens render with the jitter ON**. (2) The **powder** term, `1 − T²` against the transmittance
+the light march already returned, gated on the sun being up and applied to the first Hillaire octave
+only; both gates are defects the first draft had, and the first cost `clouds_night` 45 % of its
+starless cloud brightness before it existed. (3) **`Rgba16Float` noise volumes** — eight bits was
+plenty until the remap, which turned 256 levels into ~25 across a cloud's shoulder — plus a **domain
+warp** of the erosion (free: the shape volume's Worley octaves are already in a register) and a
+**second erosion scale** at a 1 024 m tile. (4) **Height gradient v2**: a per-cell ceiling driven by a
+new **convection** channel of the weather field at 1 280 m, so a field of cumulus has towers of
+genuinely different heights. (5) The march moved to **half resolution** with a **bilateral** upsample
+keyed on the distance each tap's march clamped at — not SSAO's box blur, which would paint a halo of
+half-cloud along every ridge — and got a **history of its own**, because `passes::taa` reprojects
+through the depth prepass and a cloud writes no depth.
+
+**Cost at 1080p, before → after**, median of 60 warmed frames through the I4 instrument, in the
+heaviest configuration a preset can reach: Low **1.55 → 0.59**, Medium **2.47 → 1.01**, High
+**4.03 → 1.75 ms** — the whole look change *and* the architecture, inside the ~2 ms budget, with tier
+monotonicity holding. VRAM **10.62 → 32.66 MB** at High/1080p (16-bit volumes double, the half-res
+set adds 13.5 MB on the precedent of the TAA history beside it). `cloud_density_matches_the_cpu_reference`
+holds at mean |Δ| **0.000 04** over 2 704 taps *through* the new warp and scale; cloud flicker between
+consecutive jitter offsets falls **12.2×** with the temporal pass on.
+
+**Two findings the wave did not go looking for.** The 16-bit parity re-derivation predicted exact
+agreement would *rise* and it fell to 6.25 %; the measurement says why, and it is not FMA
+contraction — **50.02 % of channels exact, 49.98 % exactly one step LOW, 0.00 % high**, the signature
+of a `textureStore` that truncates where the reference rounds to nearest. WGSL does not pin that
+rounding mode. The gate now counts **channels** at a floor a rounding-mode disagreement cannot fall
+below and a computation disagreement cannot reach, and the detail volume's 62.65 % falls out of the
+same model (its alpha is pinned to 1.0, which is representable): 0.25 + 0.75×0.5 = 0.625. And the
+first draft of the height gradient broke **two arms nobody had pointed at** — a tapering column
+carries less mass than a slab, a thinner deck self-shadows less, and a deck that self-shadows less is
+*brighter*. The fix is the mechanism, not a threshold: convective variation scaled by cloud TYPE,
+because a cumulus field is independent cells and an overcast deck is one system against one
+inversion. At full convection and full type the curve is exactly v1.
+
+**The re-bless, on purpose and stated.** **Eight** goldens, not the five the brief named — the three
+`weather_*` presets enable clouds through `WeatherState` and a bless run's `git status` is the only
+thing that could have found them. Count stays **54**; `INF_GOLDEN_STRICT=1` green over all 102 arms
+after. All three `GOLDEN_SET_DIGEST` content pins (`phase26/27/28_gate`, deliberately un-shared) were
+moved by hand with the reason written in each, and their RULE is amended from *"only in a commit that
+adds a golden"* to *"…or in one whose stated purpose is to change what the engine LOOKS like — never
+as a side effect, and never to turn a red build green"*. Every structural arm survived: luminance
+bounds, the ≥1.8× luma spread (9.3× measured), dusk r/b over noon, stars occluded, both depth-contract
+arms, the byte-identical shadow ground band, `cloud_bakes_are_deterministic`, and `phase17_gate`'s
+state trace.
+
+**Schema: ZERO new authored fields.** `RenderSettings::cloud_temporal` is a renderer knob; both copies
+of `apply_record` drive it from the record's existing `taa` bit, because what an author decides there
+is a policy ("this level accepts a frame that depends on the frames before it") and that policy
+governs both mechanisms. The jitter phase rides `cloud_color.w`, a lane the cloud uniform already
+reserved. Scene stays **v25**, payload **v11**.
+
+Counts: battery **322 / 6 093 / 0 / 18** (+1 block — the `sky2_probe` measurement file — +11 arms and
++2 `#[ignore]`d probes on VSM2's 321 / 6 082 / 0 / 16), goldens **54 / 102** with **8 re-blessed on
+purpose** and strict-green after, clippy **0** with `-D warnings`, rustdoc **374 over 30 crates**
+after `cargo clean --doc` (the wave adds zero), fmt clean, frontend **702 / 78 not re-run** (no file
+under `editor/studio` was touched), no new crate and no new dependency. Eleven items carried by name,
+including the powder term's rendered consequence having no arm of its own and
+`sky_stack_cost_per_tier`'s doc claiming a monotonicity assertion its code does not make. **Seven**
+commits, `(SKY2)`-tagged; the full ledger, with the per-gap numbers, the cost and VRAM tables and the
+carried list, is in `docs/memos/island-progress.md` under *Wave SKY2*.

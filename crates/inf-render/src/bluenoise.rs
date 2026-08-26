@@ -18,8 +18,8 @@
 //! 16 KB binary in `tests/` would be one more thing whose provenance nobody can
 //! check, and a dependency would be a licence review for a hundred lines of
 //! arithmetic. The generator is also the *documentation*: what makes the tile blue
-//! is legible in [`generate`], and [`tests`] measures the property rather than
-//! trusting the label.
+//! is legible in [`generate`], and this module's tests measure the property
+//! rather than trusting the label.
 //!
 //! # Determinism (the house law)
 //!

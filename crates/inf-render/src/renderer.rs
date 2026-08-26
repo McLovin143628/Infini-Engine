@@ -382,8 +382,8 @@ pub struct FrameData<'a> {
     pub cloud_src: &'a wgpu::TextureView,
     /// Which slot `cloud_src` points at — `cur` with the temporal pass on, and a
     /// fixed sentinel with it off. The composite's bind-group cache keys on it,
-    /// because a ping-pong slot is a change the [`crate::passes::ResourceKey`]
-    /// cannot see.
+    /// because a ping-pong slot is a change the passes' `ResourceKey` cannot
+    /// see.
     pub cloud_slot: usize,
     pub cloud_history_prev: &'a wgpu::TextureView,
     pub cloud_history_cur: &'a wgpu::TextureView,
@@ -2145,7 +2145,7 @@ impl EngineRenderer {
             cloud_slot,
             cloud_history_prev: &targets.cloud_history[prev],
             cloud_history_cur: &targets.cloud_history[cur],
-            cloud_history_valid: cloud_history_valid,
+            cloud_history_valid,
             shadow: &self.shadow,
             gi: &self.gi,
             vgeom_audit: &self.vgeom_audit,
