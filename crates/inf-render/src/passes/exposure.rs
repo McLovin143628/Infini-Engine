@@ -35,7 +35,7 @@
 //! player walking out of a lit courtyard into a cellar would see **no** adaptation
 //! at all. The VIS1b audit measured exactly that.
 //!
-//! So the rule has two halves, and [`ExposureNode::clock_ran`] is which half is in
+//! So the rule has two halves, and `ExposureNode::clock_ran` is which half is in
 //! force:
 //!
 //! * **the clock has never moved** ⇒ there is no rate for a ramp to be expressed

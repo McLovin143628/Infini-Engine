@@ -26828,7 +26828,9 @@ costs the lit island +0.122 ms, 1.5 %**. Per pass: `exposure` **+0.020 ms**, `fl
 pass), `bloom` **+0.000** (Karis is inside the clock's resolution at half res). **≥ 60 fps p50 with
 the whole stack on: met, with 4.5 ms of headroom**, and reproduced across two runs 0.017 ms apart.
 Priced where they are legible — the cube field at 640×360, off the GPU clock, one at a time:
-`exposure` +0.0143 ms, `flare` +0.0082, the trio +0.0143, Karis +0.0000 over bloom. VRAM: **+4.15 MB**
+`exposure` +0.0143 ms, `flare` +0.0082, the trio +0.0143 *(corrected at the audit to
+**+0.0010** — that row was measured last, from a control six configurations older, and the
+difference is the GPU's boost clock falling)*, Karis +0.0000 over bloom. VRAM: **+4.15 MB**
 at 1080p for the half-res flare target, plus 1 KiB of buffers.
 
 **Two goldens, both additive.** `sun_flare.png` (55 → 56, digests `d6da45fd…` → `9311730d…`) and
@@ -26845,10 +26847,40 @@ window or a wave of its own.
 `authored_emissive` and `exposure_pie` — and +21 arms); goldens **57**, two added and **none
 re-blessed**, digest `d6da45fd…` → `dc695d74…` in all three gates plus the phase18 name array;
 render graph **29 → 31** nodes, both picked up by `gpu_timing`'s derived list with no edit
-(`FRAME_MARKS_NEEDED` 35 → 37); frontend **719 / 80**, `tsc` and `eslint` clean; rustdoc **374**
+(`FRAME_MARKS_NEEDED` 35 → 37) — *the true counts are **32 → 34** and the budget **40**; the
+hand-written node count had been three short since before this wave, corrected at the audit*;
+frontend **719 / 80**, `tsc` and `eslint` clean; rustdoc **374**
 unmoved against a ceiling of 450 (two broken intra-doc links of the wave's own, found and fixed);
 clippy `-D warnings` **0**; `cargo fmt --all --check` clean; schemas **unmoved**; no new crate or
 dependency. **Carried by name**: VIS-C4d (the bloom quality block); the adaptation's discontinuity
 guard as a rate ceiling; `RenderTier` does not clamp the lens; the flare target is allocated
 unconditionally; the lens trio has no cost row of its own; the flare's bright-pass threshold is not
 authored; the exposure histogram's sample lattice is fixed rather than rotated.
+
+**Audit (2026-08-26)**: one HIGH and four MEDs fixed. **The eye was frozen on every level whose
+clock never runs** — `dt` is a `cloud_time_s` delta, `cloud_time_s` is a pure function of
+`TimeOfDay`, and **`TimeOfDay::rate` defaults to `0.0`**, so on most levels the delta is zero on
+every frame after the first and the EV holds at whatever that frame looked like for ever (measured:
+a scene made ten times brighter in place moved the multiplier from ×0.6051 to ×0.6051 while the
+histogram read 0.2975 → 3.0305). The rule has two halves now — a clock that has never moved makes
+the eye *track*, a clock that has moved makes a zero delta *hold* — both functions of the document's
+clock **sequence**, so the PIE trace and every golden are untouched; carried as **VIS-C1d** is the
+half a fix cannot give, a *ramped* eye on a static-clock level, which needs a simulation clock in the
+scene projection. **The 92 % occlusion arm could not see the occlusion test**: severing
+`flare_sun_visibility` to a constant `1.0` leaves it green at 51 197 against a 113 073 threshold,
+because a *dark* slab removes the bright pixels the gather would have found anyway — a **bright**
+slab with the ghosts off reads 161 298 clear against **0** occluded, and **2 581 476** severed.
+**The level-clock caveat the ledger said was "now written on the field" was not** (the P20 law); it
+is now, on the render setting, the persisted record and the panel. **The log-average's robustness
+arm is passed by a plain arithmetic mean** — one blown pixel moves a mean by 0.000996 against a
+1e-3 tolerance — so the arm now uses a 200-pixel disc, where the two separate by three orders.
+**The cost instrument was still measuring drift**: one control at the top of a six-row list, and the
+`tonemap` control row drifted 0.0154 → 0.0461 across the pass; paired now, and the lens trio's
+published **+0.0143 ms is +0.0010** (fourteen times out — the other four rows reproduce exactly).
+LOWs fixed in passing: the chromatic aberration's unit is per-channel-per-axis displacement, not
+separation (2.83× out); `FRAME_MARKS_NEEDED` was three short in both directions and now has a
+runtime twin. Counts after the audit: battery **327 / 6 161 / 0 / 19** (+2 arms, no new block),
+goldens **57** with **none re-blessed** and every pin unmoved, `INF_GOLDEN_STRICT=1` green over all
+57, rustdoc **374** unmoved, clippy **0**, frontend **719 / 80**, `fmt` clean, schemas unmoved; the
+island re-measures at **82.6 fps p50** with the whole VIS stack on and every per-pass number
+reproducing to the printed decimal. Full ledger in `docs/memos/island-progress.md`.

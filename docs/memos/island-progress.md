@@ -9037,7 +9037,7 @@ finding below), against a warm control:
 | bloom | `bloom` 0.0000 | 0.0236 | +0.0236 ms |
 | bloom + Karis | `bloom` 0.0000 | 0.0236 | **+0.0000 ms over bloom** |
 | sun glare | `flare` 0.0000 | 0.0082 | **+0.0082 ms** |
-| the lens trio | `tonemap` 0.0041 | 0.0184 | **+0.0143 ms** |
+| the lens trio | `tonemap` 0.0041 | 0.0184 | **+0.0143 ms** — *corrected at the audit to **+0.0010 ms**: this row was measured last, from a control taken six configurations earlier, and the difference is the GPU's boost clock falling. See the audit's own table.* |
 
 **And the instrument itself is a finding.** The first version of that test measured wall
 time around sixty frames, the way `gi_v2_cost_per_tier` does — and on a 0.114 ms frame it
@@ -9054,7 +9054,7 @@ same clock the island table above is built from.
 | goldens | 55 | **57** — `sun_flare.png` and `lens_trio.png` **added**, **none re-blessed**, `INF_GOLDEN_STRICT=1` green over all 57 |
 | `GOLDEN_SET_DIGEST` pins | `d6da45fd…` | **`dc695d74…`** — moved twice, by hand, in all three gates, both times on the **additive** branch |
 | phase18 golden NAME array | 55 names | **57 names** |
-| render graph nodes | 29 | **31** (`exposure`, `flare`) — `gpu_timing`'s derived list picks both up with no edit; `FRAME_MARKS_NEEDED` 35 → 37 |
+| render graph nodes | 29 | **31** (`exposure`, `flare`) — `gpu_timing`'s derived list picks both up with no edit; `FRAME_MARKS_NEEDED` 35 → 37. *Corrected at the audit: the true counts are **32 → 34** and the budget **40** — the hand-written node count had been three short since before this wave, in both directions.* |
 | frontend tests / files | 718 / 80 | **719 / 80** — +1 arm, no new file; `tsc` and `eslint` clean |
 | rustdoc individual warnings (cold, after `cargo clean --doc`) | 374 over 30 crates | **374 over 30 crates** — the wave adds **zero**, after two broken intra-doc links of its own were found and fixed — against a ceiling of 450 |
 | `clippy --workspace --all-targets` `-D warnings` | 0 | **0** — three of the wave’s own (a `neg_cmp_op_on_partial_ord`, a `clone_on_copy` and an `unusual_byte_groupings`), caught and fixed |
@@ -9128,3 +9128,270 @@ and the 57th; `7fd8d71c` emissive intensity gets a slider and the door refuses a
 PIE == shipping on a trace whose exposure adapts; `17d32865` the instruments, and a rate
 ceiling nobody had noticed; plus the ledger commit that carries this section into the memo
 and the ROADMAP.
+
+## Wave VIS1b — the adversarial audit (2026-08-26)
+
+Range `278fb3c6..3f93fcf9`, eight commits, read diff by diff against the ledger above and
+then re-measured. This slice is the opposite shape from VIS1a's — no schema window, no
+re-bless, two purely additive goldens — so the blast radius is small and the audit's job was
+not bookkeeping but asking whether the features **work**, and whether the arms that say so
+could fail.
+
+**What re-derived clean, on this machine, independently.**
+
+* every number clauses 1 and 4 print reproduces to the digit: the bloom-energy spread
+  **1.02× exposure-relative against 2.02× exposure-independent** (`dim 9.033 / bright 9.214`
+  and `dim 8.030 / bright 3.971`), and Karis at **13.3564 → 0.0063** on the firefly against
+  **84.7943 → 84.1689** on the broad highlight;
+* every number clause 3 prints: **+4.69 %** of frame luminance (4 822 084 → 5 048 230),
+  top-half gain **160 545** against bottom **65 601**, and the occluded reading
+  **226 146 → 18 901**;
+* the golden bookkeeping, against git rather than against the prose: goldens move in
+  **exactly two** of the eight commits (`git diff --name-only` per commit is
+  0/1/1/0/0/0/0/0), both **additions**, all three `GOLDEN_SET_DIGEST` pins and the phase18
+  name array moved by hand **in the same commits** (`d6da45fd…` → `9311730d…` →
+  `dc695d74…`), and the pre-wave pin at `278fb3c6` really was `d6da45fd…`;
+* **schema unmoved** is not a claim, it is a grep: no `schema_version` / `SCHEMA_VERSION` /
+  `PAYLOAD_VERSION` line moves anywhere in the range, and `crates/inf-scene` is not in the
+  wave's diff at all;
+* **+21 arms and +3 blocks**: twenty-one `#[test]` lines added across the range, and three
+  test targets that did not exist (`inf-render`'s `exposure`, `inf-player`'s
+  `authored_emissive` and `exposure_pie`);
+* the VRAM row: 960×540 `Rgba16Float` is **4 147 200 B = 4.15 MB**, and the histogram
+  (1 KiB) plus the state, readback and params buffers (80 B) is the "+1 KiB" beside it;
+* the emissive door's **four writers**, enumerated rather than trusted:
+  `inf_ecs::props::apply_value` is reached only through `write_field` →
+  `EcsWorld::write_prop`, whose callers are `SceneDoc::write_prop` / `raw_write_prop` and
+  therefore `edit_set_prop`, the undo replay, and `edit_apply_material` (which writes its six
+  scalars *through* `edit_set_prop` rather than onto the component). There is no fifth. And
+  `emissive_linear`'s **six** sites across two hosts are real — three in
+  `inf_player::render`, three in `inf_viewport::host`. The door **refuses**, it does not
+  clamp, and that is said on it; a *negative* intensity is not refused and is clamped one
+  layer down by `emissive_linear`'s `max(0.0)`, which is said on that;
+* the chr(92) sweep over the wave's Rust diff finds **no** eaten continuation, and the
+  workspace gate's allowlist was not widened;
+* **the retired prose broke no gate** (the UX2 `scope()` precedent): none of the twelve
+  files that carried "the 54 frozen goldens" is read by a source pin — the tree's
+  `include_str!` pins read `passes/mod.rs`, `debris.rs`, `gi.rs`, `vsm_raster.rs`,
+  `inf-player/src/render.rs`, `inf-viewport/src/host.rs`, `inf-player/src/window.rs` and
+  `inf-scene/src/lib.rs`, and none of those eight is one of the twelve;
+* `read_exposure` has no caller outside two test files, which is what its "needs no enable
+  flag" argument rests on.
+
+### Findings
+
+**HIGH — the eye was frozen on every level whose clock never runs.** `dt` is a
+`cloud_time_s` delta; `cloud_time_s` is `(day − 1) · 86 400 + TimeOfDay::seconds` and
+nothing else; and **`TimeOfDay::rate` defaults to `0.0`**. So on a level that never authored
+a running clock — which is most of them, and every level authored before P17 — the delta is
+zero on every frame after the first, the adaptation step is `clamp(delta, −0, 0)` and is
+identically zero, and the EV holds at whatever the first frame happened to look like for
+ever. A player walking out of a lit courtyard into a cellar saw **no** adaptation at all.
+The ledger presents the frozen clock only as a virtue ("a paused sim is a frozen eye") and
+never says that the default authoring state *is* a frozen clock. Measured on the shipped
+tree — one renderer, the clock untouched, the scene made ten times brighter in place — the
+multiplier read **×0.6051 before and ×0.6051 after**, with the histogram reading
+**0.2975 → 3.0305**. The eye saw it and did not move.
+
+Fixed by giving the rule two halves. A clock that has **never** moved has no rate for a ramp
+to be expressed in, so the eye *tracks* — every frame snaps to its own target, unsmoothed
+and correct rather than frozen. A clock that **has** moved is a running one, and a
+zero-delta frame after that is a paused world or a second render of one simulation step,
+both of which must hold — which is what keeps "a paused sim is a frozen eye" true and what
+`exposure_pie.rs`'s three-renders-per-step arm rests on. Both halves are a function of the
+document's clock **sequence** alone, so the PIE-vs-shipping trace is untouched, and every
+golden renders one frame in manual mode so no pixel moved. Post-fix the same fixture reads
+**×0.6051 → ×0.0594** and returns to ×0.6051 bit for bit when the scene dims again.
+Mutation-verified: dropping the `clock_ran` clause fails the new arm with exactly the frozen
+symptom and leaves the other six exposure arms green.
+
+*The fixture is itself a finding.* The instance upload is version-gated on
+`RenderScene::version`, and two separately-built scenes are both at version 1 — so the first
+draft handed the renderer the same scene twice and certified a frozen eye as a working one
+(the histogram read 0.2975 both times). It mutates one scene in place now and asserts the
+fixture actually changed before asserting the eye followed it.
+
+**MED — the 92 % occlusion arm could not see the occlusion test.** Clause 3's headline claim
+is that the veiling glare reads the **sun's** visibility; the arm that proves it stands a
+**dark** slab in the line of sight and reads 226 146 → 18 901 against a threshold of half. A
+dark slab removes the disc *and* every bright pixel a radial gather would have found there,
+so the glare falls away whether or not anything tests occlusion. Mutation-measured: with
+`flare_sun_visibility` severed to a constant `1.0` — the whole feature deleted — the arm
+reads **51 197** against its 113 073 threshold and **stays green**. Of the 207 245 the wave
+attributed to the occlusion test, the test accounts for **32 296**; the other 84 % is the
+slab hiding the disc.
+
+Fixed by asking the question a dark slab cannot: a **bright** slab (radiance 30, an order
+over the dawn sky) in the same place, with the ghosts, the halo and the streak off so only
+the veil is in the measurement — those three are images of whatever is bright and are
+deliberately not gated on visibility. Veil only: clear sky **161 298**, sun behind a bright
+slab **0**. Severed, the same reading is **2 581 476**, sixteen times the clear sky's, and
+the arm fails by a factor of 25 000. It falls off a cliff rather than degrading. The
+dark-slab half is kept — it is the shipped story — and the two together say the glare goes
+out for the right reason.
+
+**MED — "it is now written on the field" named a sentence that was not there.** The ledger
+and the ROADMAP both say `adaptation_speed`'s level-clock coupling "is now written on the
+field". It was not: the caveat lived on `passes::exposure::MAX_STEP_S`'s doc and inside
+`exposure_pie.rs`'s own constant, while `ExposureSettings::adaptation_speed`,
+`RenderSettingsRecord::exposure_adaptation_speed` and the World Settings row all said a bare
+"stops per second". That is the P20 law — *a cited thing that does not exist is worse than
+no claim*. Written now, on all three, with both consequences named: the rate ceiling above
+`TimeOfDay::rate == 600`, and the tracking half below `rate == 0`.
+
+**MED — the log-average's robustness arm is passed by a plain arithmetic mean.** Clause 1
+ships no percentile trim because "the log-average has it by construction", and says the
+property is *asserted rather than argued*: a million mid-grey pixels and **one** pixel at
+1024 must move the average by less than `1e-3`. The top bin stands for **996**, so an
+arithmetic mean over the same histogram moves by `996 / 10⁶ = 0.000996` and slips under the
+tolerance by **0.4 %** — the statistic the arm exists to reject passes it. A one-pixel disc
+is not a disc. Two hundred pixels in a million *is* a solar disc at 1080p, and there the two
+separate by three orders of magnitude: the log-average moves **0.0003** while the mean would
+read `clean + 0.199` — twice the frame's actual brightness, a whole stop down for one bright
+object. The arm measures both now, in both directions.
+
+**MED — the cost instrument was still measuring the GPU cooling down.** The wave's own
+finding was that a wall-clock stopwatch priced the lens trio at +0.093 ms — "that cannot be
+true" — and moved `vis1b_post_cost` onto `gpu_timings`. The move was right and the mistake
+survived it one order of magnitude down: the table takes **one** control at the top and
+subtracts it from six configurations measured after it. Re-run on the shipped tree, the
+`tonemap` row — a control for every configuration except the trio, and touched by none of
+the other five — read **0.0154, 0.0225, 0.0287, 0.0369, 0.0389, 0.0461** across one pass
+through the list. A 3× monotone drift in a pass that did not change, larger than every cost
+the table was reporting; "bloom + Karis" duly priced Karis at **+0.045 ms** over bloom where
+the island's own clock puts it at 0.000. Fixed by pairing — each row measures its own
+control immediately before itself, so the subtraction is two adjacent measurements at one
+thermal point. The corrected table is stable across runs:
+
+| feature | pass | wave | **audit** |
+|---|---|---|---|
+| auto exposure | `exposure` | +0.0143 | **+0.0143** |
+| bloom | `bloom` | +0.0236 | **+0.0236** |
+| bloom + Karis | `bloom` | +0.0000 over bloom | **+0.0000 over bloom** |
+| sun glare | `flare` | +0.0082 | **+0.0082** |
+| **the lens trio** | `tonemap` | +0.0143 | **+0.0010** |
+
+Four of five were right. The trio was measured last, from the coldest control, and its
+published cost is the drift — **fourteen times** out. +0.0010 ms at 640×360 is also the only
+reading consistent with the island, where the same trio moves `tonemap` 0.015 → 0.021 at six
+times the pixels.
+
+**LOW — the chromatic aberration's unit is 2.83× out.**
+`FilmSettings::chromatic_aberration` is documented as "pixels of **separation** at the
+corner". It is not: the offset is the per-channel displacement, so at a corner red lands `n`
+px off in each axis and blue `n` px the other way — R and B end up `2n` px apart per axis and
+`2√2·n ≈ 2.83n` along the diagonal. An authored 7 is a 19.8 px fringe. Documented rather
+than rescaled on all four surfaces that state it: rescaling the shader would move
+`lens_trio.png`, and what was wrong is the number's *meaning*, not its behaviour.
+
+**LOW — the frame-mark budget was three short, in both directions, across two waves.**
+`timing::FRAME_MARKS_NEEDED` is the graph's node count written down by hand: 29 + 5 + 1 = 35
+while `EngineRenderer::new` called `graph.add` **32** times, then 31 + 5 + 1 = 37 against
+**34**. Nothing was lost — `FrameTimer::mark` only drops past **64** and the tail has always
+fitted — but the constant that exists so a silently-dropped tail is impossible was itself the
+number nobody checked, and the wave restated it. Corrected to 40, and the second arm of
+`the_meter_reads_the_frame_before_the_lens_writes_to_it` now compares
+`pass_names().len() + 5 + 1` against `MAX_FRAME_MARKS` at runtime, which is the only form of
+that comparison that cannot go stale. The counts table above is corrected in place.
+
+### Carried by name, low
+
+1. **VIS-C1d — a ramped eye on a static-clock level.** The HIGH's fix makes the eye track
+   rather than freeze; what it cannot give it is *smoothing*, because there is no duration to
+   smooth over. The honest route is a simulation clock in the scene projection —
+   `RenderScene::sim_time_s` off the fixed-step count, filled by both projectors — which is a
+   two-host plumbing change rather than an audit's business. It would also retire the wave's
+   carried item 6 (the `MAX_STEP_S` rate ceiling) and the `TimeOfDay::rate` coupling with it,
+   since a fixed step never hands the node a jump of hours. Related and unfixed: a level that
+   *stops* a running clock mid-session freezes the eye, because `clock_ran` is sticky.
+2. **The retired-prose count is twelve, not eleven.** `17d32865` says it replaced "the 54
+   frozen goldens" in eleven places. Counted from its own diff: **twelve** sites said `54` or
+   `fifty-four`, and a thirteenth said `fifty-five` (`passes/exposure.rs`, already corrected
+   once inside this wave). The one remaining `54` — `phase26_gate.rs`, "every other one of
+   the 54 was 0.000000" — is a *historical* statement about VIS1a's re-bless and is correctly
+   left alone.
+3. **The "exposure-independent (the old order)" row measures "no auto exposure".** The arm
+   reproduces the old ordering by fixing the exposure at 1.0, where `(a+b)·1` and `a·1+b` are
+   the same expression — so the **threshold** really is absolute in that row. But the frames
+   it compares are also un-adapted, so the printed 2.02× carries the absence of adaptation as
+   well as the absolute threshold. The number is right for what it measured; the label is
+   doing two jobs. The ordering *alone* is what the 6.52× shader mutation priced.
+4. **The CPU↔WGSL exposure pin reads four constants, not the expressions.** It says so, and
+   it is weaker than the GGX-fit arm it is modelled on, which also pins the WGSL **source**
+   character for character. A drift in `exposure_bin`'s formula or in the reduction would
+   pass it. Related and benign: the two log-averages are not literally the same expression —
+   the Rust one folds `exposure_bin_luminance(i).log2()` where the shader folds
+   `exposure_bin_log(i)` directly, i.e. `exp2(x).log2()` against `x`, which differ by an ulp.
+   That is why the PIE arm's agreement is stated at 1e-4 rather than on bits.
+5. **The histogram meters the editor's furniture.** `post_hdr` is after the grid, the sprite
+   layer and the debug lines, so an editor viewport's infinite grid votes in the log-average.
+   A shipped frame has none of them (`grid_enabled` is false), and the meter's tap point is
+   now pinned by an arm — `exposure` is node **28** of 34, before `bloom` (29) and `flare`
+   (30), so the eye cannot meter its own glare.
+6. **The flare's occlusion kernel reads sample 0 and is anisotropic.** Both are now written
+   on `flare_sun_visibility` rather than left to be rediscovered: a sliver covering sample 0
+   of a tap's pixel reads as a full occlusion of that tap (one ninth of the visibility,
+   against resolving a depth buffer for one scalar), and the tap spread is in units of
+   `1/width` on both axes, so the 3×3 kernel is about 6 px by 3.4 px at 16:9.
+7. The wave's own seven carried items stand as written. Two are worth a sentence each:
+   **`RenderTier` does not clamp the lens** is defensible precisely because both features are
+   off by default, so a Low tier pays for them only when a level asked; and **the lens trio
+   has no cost row of its own** is still true — it is arithmetic inside `tonemap`, and the
+   corrected +0.0010 ms above is what toggling it costs, not what a table row would say.
+
+### The island, re-measured
+
+`the_island_at_shipping_resolution` re-run on the audited tree — RTX 4070 Ti, **release**,
+1080p, 3 × 120 frames, MIN of rounds, over the same 51.38 km² island. The exposure fix is in
+it and costs nothing: the histogram runs on every auto frame either way.
+
+| | wave's ledger | **audit re-run** |
+|---|---|---|
+| `SHIPPED` p50 | 3.552 ms | 3.653 ms |
+| `LIT` p50 / GPU frame | 11.906 / 8.290 ms | 11.818 / **8.314** ms |
+| `LIT+SSR` p50 / GPU frame | 11.953 / 8.310 ms | 11.803 / **8.311** ms |
+| **`LIT+VIS` p50 / GPU frame** | 12.133 / 8.432 ms (82.4 fps) | **12.107 / 8.438 ms (82.6 fps)** |
+| `exposure` (LIT → LIT+VIS) | 0.001 → 0.021 ms | 0.001 → **0.023** ms |
+| `flare` | 0.001 → 0.074 ms | 0.001 → **0.073** ms |
+| `tonemap` | 0.015 → 0.020 ms | 0.015 → **0.021** ms |
+| `bloom` | 0.042 → 0.043 ms | 0.042 → **0.042** ms |
+| `vsm-raster` / `terrain` | 4.593 / 1.906 ms | 4.608 / 1.903 ms |
+| `gi` / `ssao` / `depth-prepass` | 0.783 / 0.150 / 0.060 ms | 0.782 / 0.150 / 0.059 ms |
+| `vgeom` / `scatter` | 0.311 / 0.126 ms | 0.312 / 0.125 ms |
+| **the whole wave** | +0.122 ms | **+0.127 ms** (8.311 → 8.438), **1.5 %** |
+
+**The claim holds: ≥ 60 fps p50 with the whole VIS stack on, at 82.6 fps with 4.49 ms of
+headroom.** Every per-pass number the wave's clause tables rest on reproduces to the printed
+decimal or to one thousandth of a millisecond, and the GPU frame lands between the wave's two
+published readings (8.415 and 8.432), which is what this instrument's agreement with itself
+looks like.
+
+### The battery, after the audit
+
+| | wave (`3f93fcf9`) | **after the audit** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 327 / 6 159 / 0 / 19 | **327 / 6 161 / 0 / 19** — **+2 arms**, no new block |
+| goldens | 57 | **57** — none added, **none re-blessed**, `INF_GOLDEN_STRICT=1` green over all 57 and `git status` empty over `tests/goldens` |
+| `GOLDEN_SET_DIGEST` / phase18 name array | `dc695d74…` / 57 | **unmoved** |
+| frontend tests / files | 719 / 80 | **719 / 80** — unmoved; `tsc` and `eslint` clean |
+| rustdoc individual warnings (cold, after `cargo clean --doc`) | 374 over 30 crates | **374 over 30 crates** — the audit adds **zero**, after one broken intra-doc link of its own was found and fixed, against a ceiling of 450 |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| `cargo fmt --all --check` | clean | **clean** |
+| the workspace eaten-`\` gate | green | **green** — and the audit's own literals add **no thirtieth catch** |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 | **unmoved** |
+| new crates / dependencies | none | **none** |
+
+The two arms: `the_eye_adapts_on_a_level_whose_clock_never_runs` (both halves of the clock
+rule) and `the_meter_reads_the_frame_before_the_lens_writes_to_it` (the graph order that
+keeps the eye from metering its own glare, plus the timestamp budget). Three more claims
+strengthen existing arms rather than adding one:
+`the_sun_glare_is_extinguished_when_the_sun_is_occluded` gains the bright-slab half,
+`the_exposure_average_is_robust_to_a_sun_disc` gains the two-hundred-pixel disc and the mean
+it must beat, and `vis1b_post_cost` gains a control per row.
+
+### Commits
+
+`914a73eb` the eye was frozen on every level whose clock never runs; `80bbd900` the 92 %
+occlusion arm could not see the occlusion test; `36f73831` a robustness arm a plain mean also
+passes, and a unit 2.83× out; `dd33d71a` the cost instrument was still measuring the GPU
+cooling down; plus the ledger commit that carries this section into the memo and the ROADMAP.
