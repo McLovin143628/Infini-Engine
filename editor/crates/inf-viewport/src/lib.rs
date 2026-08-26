@@ -196,6 +196,8 @@ pub fn spawn(
 impl ViewportHandle {
     pub fn set_rect(&self, _rect: ViewportRect) {}
     pub fn set_visible(&self, _visible: bool) {}
+    /// UX2: no native child, so nothing to cut a hole in.
+    pub fn set_region(&self, _rects: Vec<ViewportRect>) {}
     pub fn drop_payload(&self, _x: f32, _y: f32, _payload: &str) {}
     pub fn set_mode(&self, _mode: camera::ViewportMode) {}
     pub fn set_snap_2d(&self, _snap: camera::Snap2DSettings) {}

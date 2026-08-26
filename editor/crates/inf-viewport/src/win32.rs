@@ -18,6 +18,15 @@ use std::time::{Duration, Instant};
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
+// **The cutout region** (UX2). An HTML overlay that crosses the viewport hole
+// used to hide the whole child window; these four are how it now removes only
+// the rectangle it actually covers. Same `windows` crate, same
+// `Win32_Graphics_Gdi` feature `ScreenToClient` already needs — no new
+// dependency, and `SetWindowRgn` lives in `Gdi` here rather than in
+// `WindowsAndMessaging` where its header does.
+use windows::Win32::Graphics::Gdi::{
+    CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, HGDIOBJ, RGN_DIFF,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_MENU,
@@ -106,6 +115,16 @@ fn hierarchy_depth(doc: &inf_editor_core::scene::SceneDoc, guid: uuid::Uuid) -> 
 enum Cmd {
     SetRect(ViewportRect),
     SetVisible(bool),
+    /// **Carve overlay-shaped holes out of the child window instead of hiding
+    /// it** (UX2).
+    ///
+    /// The rectangles are the areas an HTML overlay covers, in PARENT-CLIENT
+    /// physical pixels — the same space [`Cmd::SetRect`] speaks, because that
+    /// is the space the frontend measures in (window CSS pixels ×
+    /// `devicePixelRatio`) and the space this thread already knows the hole's
+    /// origin in. An EMPTY vector means "no cutouts": the region is released
+    /// and the whole child draws again.
+    SetRegion(Vec<ViewportRect>),
     Drop {
         x: f32,
         y: f32,
@@ -198,13 +217,25 @@ impl ViewportHandle {
         let _ = self.tx.send(Cmd::SetRect(rect));
     }
 
-    /// Show/hide the child window. The shell hides the viewport while an
-    /// HTML overlay (menu, palette, dialog, drag ghost) is open — the native
-    /// window otherwise draws OVER the webview (airspace rule), occluding
-    /// any overlay that crosses the hole. P2.1 explores flash-free
-    /// alternatives (window-region cutouts / last-frame freeze).
+    /// Show/hide the child window. The shell hides the viewport while an HTML
+    /// overlay it cannot measure (the command palette, a modal dialog, the
+    /// panel-drag ghost) is open — the native window otherwise draws OVER the
+    /// webview (airspace rule), occluding any overlay that crosses the hole.
+    ///
+    /// An overlay that CAN measure itself uses [`set_region`](Self::set_region)
+    /// instead and the 3D view keeps rendering around it (UX2).
     pub fn set_visible(&self, visible: bool) {
         let _ = self.tx.send(Cmd::SetVisible(visible));
+    }
+
+    /// **Cut the overlay's own rectangles out of the child window** (UX2) — the
+    /// flash-free half of the airspace rule, carried as a "future polish item"
+    /// in six places since Phase 1.
+    ///
+    /// `rects` are parent-client physical pixels (the [`set_rect`](Self::set_rect)
+    /// space). An empty vector releases the region. See [`Cmd::SetRegion`].
+    pub fn set_region(&self, rects: Vec<ViewportRect>) {
+        let _ = self.tx.send(Cmd::SetRegion(rects));
     }
 
     /// Hand off a drag-drop that ended over the viewport hole (Spike A stub:
@@ -973,6 +1004,95 @@ fn child_rect_in_parent(parent: HWND, child: HWND) -> Option<ViewportRect> {
     }
 }
 
+/// Overlay rectangles (parent-client physical px) → child-local `left, top,
+/// right, bottom` boxes, clipped to the child and with the empties dropped
+/// (UX2).
+///
+/// **The subtraction happens here rather than in the frontend on purpose.** A
+/// window region is stored in child coordinates, so a cutout measured against
+/// the window has to lose the hole's origin somewhere; doing it on this side
+/// means the origin used is the one the child was *just* positioned at, which
+/// is what makes the re-application after a resize correct rather than merely
+/// repeated. The frontend would have to cache an origin and would be wrong for
+/// exactly as long as a splitter drag lasts.
+///
+/// Pure, so the geometry is testable with no window, no GPU and no OS.
+fn child_local_cutouts(cutouts: &[ViewportRect], hole: ViewportRect) -> Vec<(i32, i32, i32, i32)> {
+    let (w, h) = (hole.width as i32, hole.height as i32);
+    cutouts
+        .iter()
+        .filter_map(|c| {
+            let left = (c.x - hole.x).clamp(0, w);
+            let top = (c.y - hole.y).clamp(0, h);
+            let right = (c.x - hole.x + c.width as i32).clamp(0, w);
+            let bottom = (c.y - hole.y + c.height as i32).clamp(0, h);
+            // A rectangle entirely off the hole clips to zero area. Keeping it
+            // would cost a GDI object and a CombineRgn for nothing — and an
+            // empty region is exactly what `CreateRectRgn(x, y, x, y)` makes,
+            // so it cannot change the answer either.
+            (right > left && bottom > top).then_some((left, top, right, bottom))
+        })
+        .collect()
+}
+
+/// Apply (or release) the child window's cutout region (UX2).
+///
+/// With no cutouts the region is released (`SetWindowRgn(None)`) and the whole
+/// child draws — today's behaviour, and the state every path must be able to
+/// get back to. Otherwise the region is the child's full client rectangle minus
+/// each cutout (`RGN_DIFF`), so the webview shows through exactly where the
+/// overlay is and the engine keeps presenting everywhere else.
+///
+/// The GDI ownership rule is the one thing to get right here: **`SetWindowRgn`
+/// takes ownership of the region on success** and the caller must not touch it
+/// afterwards — but on failure it does not, and a leaked `HRGN` per menu open
+/// is a GDI-handle leak with a 10 000-object ceiling. So the region is deleted
+/// on every path that did not hand it over.
+fn apply_window_region(hwnd: HWND, cutouts: &[ViewportRect], hole: ViewportRect) {
+    let boxes = child_local_cutouts(cutouts, hole);
+    unsafe {
+        if boxes.is_empty() {
+            // `bRedraw = true`: releasing the region has to repaint, or the
+            // child keeps the hole on screen until something else invalidates it.
+            SetWindowRgn(hwnd, None, true);
+            return;
+        }
+        let full = CreateRectRgn(0, 0, hole.width.max(1) as i32, hole.height.max(1) as i32);
+        if full.is_invalid() {
+            tracing::warn!("inf-viewport: CreateRectRgn failed — viewport cutout skipped");
+            return;
+        }
+        for (left, top, right, bottom) in boxes {
+            let hole_rgn = CreateRectRgn(left, top, right, bottom);
+            if hole_rgn.is_invalid() {
+                continue;
+            }
+            CombineRgn(Some(full), Some(full), Some(hole_rgn), RGN_DIFF);
+            let _ = DeleteObject(HGDIOBJ::from(hole_rgn));
+        }
+        if SetWindowRgn(hwnd, Some(full), true) == 0 {
+            // The system did NOT take ownership — delete it ourselves, or every
+            // failed menu open costs a GDI handle for the session.
+            let _ = DeleteObject(HGDIOBJ::from(full));
+            tracing::warn!("inf-viewport: SetWindowRgn failed — viewport cutout skipped");
+        }
+    }
+}
+
+/// The hole rectangle to build a region against: the last one the frontend
+/// pushed, or — before any `SetRect` has arrived — the child's own current
+/// rectangle (the same bridge [`Cmd::EmbedForeign`] uses for the same gap).
+fn region_hole(parent_hwnd: isize, hwnd: HWND, last_rect: Option<ViewportRect>) -> ViewportRect {
+    last_rect
+        .or_else(|| child_rect_in_parent(HWND(parent_hwnd as *mut _), hwnd))
+        .unwrap_or(ViewportRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        })
+}
+
 fn register_raw_mouse(hwnd: HWND) {
     // Usage page 0x01 (generic desktop), usage 0x02 (mouse); deltas are
     // delivered as WM_INPUT while our window has keyboard focus.
@@ -1148,6 +1268,12 @@ fn thread_main(
     // rect, so rect changes follow the embedded window while our own child hides.
     let mut embedded: Option<HWND> = None;
     let mut last_rect: Option<ViewportRect> = None;
+    // **The overlay cutouts currently carved out of our child** (UX2), in
+    // parent-client physical pixels. Empty = no region = the whole child draws.
+    // Kept in loop state rather than applied and forgotten because a resize
+    // discards the window region and an embedded PIE window suspends it: both
+    // paths need to know what to put back.
+    let mut cutouts: Vec<ViewportRect> = Vec::new();
     // Whether our own child should be presenting. Hidden while an HTML overlay is
     // up (Cmd::SetVisible(false)) or while a PIE window is embedded; when it isn't
     // presenting, the loop sleeps instead of busy-spinning on a dead surface (M3).
@@ -1193,6 +1319,22 @@ fn thread_main(
                             // SW_SHOWNA: show without stealing focus from the webview.
                             let _ = ShowWindow(hwnd, if v { SW_SHOWNA } else { SW_HIDE });
                         }
+                    }
+                }
+                // **The cutout** (UX2). Same PIE skip as `SetVisible` one arm
+                // up, for the same reason: while a player window occupies the
+                // slot our child is hidden behind it, and shaping a hidden
+                // window would only leave a stale region to be restored with.
+                // The rects are still recorded, so `ReleaseForeign` puts back
+                // whatever the shell was holding.
+                Ok(Cmd::SetRegion(rects)) => {
+                    cutouts = rects;
+                    if embedded.is_none() {
+                        apply_window_region(
+                            hwnd,
+                            &cutouts,
+                            region_hole(parent_hwnd, hwnd, last_rect),
+                        );
                     }
                 }
                 Ok(Cmd::Drop { x, y, payload }) => {
@@ -1275,6 +1417,16 @@ fn thread_main(
                     unsafe {
                         let _ = ShowWindow(hwnd, SW_SHOWNA);
                     }
+                    // Restore whatever cutout the shell is holding (UX2): a menu
+                    // opened while PIE was embedded would otherwise be occluded
+                    // the instant the player window went away.
+                    if !cutouts.is_empty() {
+                        apply_window_region(
+                            hwnd,
+                            &cutouts,
+                            region_hole(parent_hwnd, hwnd, last_rect),
+                        );
+                    }
                 }
                 Ok(Cmd::Destroy) | Err(TryRecvError::Disconnected) => break 'outer,
                 Err(TryRecvError::Empty) => break,
@@ -1306,6 +1458,16 @@ fn thread_main(
                         SWP_NOACTIVATE | SWP_NOZORDER,
                     );
                 }
+            }
+            // **A resize discards the window region** (UX2), and the region is
+            // stored in child coordinates besides — so a live cutout has to be
+            // rebuilt against the rectangle the child was just moved to.
+            // Without this, dragging a splitter with a menu open either
+            // restores the blackout the wave removed or clips the child to a
+            // rectangle it no longer occupies. Skipped when nothing is cut out,
+            // so the ordinary resize path pays nothing.
+            if !cutouts.is_empty() && embedded.is_none() {
+                apply_window_region(hwnd, &cutouts, r);
             }
             host.resize(r.width.max(1), r.height.max(1));
         }
@@ -1926,4 +2088,211 @@ fn thread_main(
     }
 
     tracing::info!("inf-viewport: shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hole(x: i32, y: i32, width: u32, height: u32) -> ViewportRect {
+        ViewportRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// **The coordinate contract** (UX2): a cutout arrives in the same
+    /// parent-client space `SetRect` speaks and is stored in CHILD coordinates,
+    /// so the hole's origin comes off here. Get this backwards and the region
+    /// is punched at the wrong place — which looks exactly like a menu drawn
+    /// under the 3D view, the bug the wave exists to remove.
+    #[test]
+    fn a_cutout_loses_the_holes_origin() {
+        let boxes = child_local_cutouts(&[hole(300, 200, 160, 90)], hole(100, 50, 800, 600));
+        assert_eq!(boxes, vec![(200, 150, 360, 240)]);
+    }
+
+    /// A menu that runs off the bottom of the hole is clipped to it, and one
+    /// that misses the hole entirely produces no box at all — an empty
+    /// rectangle would cost a GDI object and a `CombineRgn` to subtract
+    /// nothing.
+    #[test]
+    fn cutouts_are_clipped_to_the_child_and_misses_are_dropped() {
+        let h = hole(100, 50, 800, 600);
+        // Overhangs the right and bottom edges.
+        assert_eq!(
+            child_local_cutouts(&[hole(800, 600, 400, 400)], h),
+            vec![(700, 550, 800, 600)]
+        );
+        // Entirely above the hole (a menu bar dropdown that did not reach it).
+        assert!(child_local_cutouts(&[hole(120, 0, 200, 40)], h).is_empty());
+        // Entirely to the left.
+        assert!(child_local_cutouts(&[hole(-500, 100, 200, 40)], h).is_empty());
+    }
+
+    /// No cutouts is the RELEASED region — the state every path has to be able
+    /// to get back to, and the one `apply_window_region` turns into
+    /// `SetWindowRgn(None)`.
+    #[test]
+    fn no_cutouts_is_no_region() {
+        assert!(child_local_cutouts(&[], hole(0, 0, 800, 600)).is_empty());
+    }
+
+    /// Several overlays at once (a menu plus the Content Drawer's own menu)
+    /// each contribute their own box; the region is their union subtracted, not
+    /// a bounding rectangle over both — which over two distant menus would
+    /// blank most of the view to uncover a few hundred pixels.
+    #[test]
+    fn every_overlay_contributes_its_own_box() {
+        let boxes = child_local_cutouts(
+            &[hole(100, 100, 50, 50), hole(700, 500, 60, 40)],
+            hole(100, 50, 800, 600),
+        );
+        assert_eq!(boxes, vec![(0, 50, 50, 100), (600, 450, 660, 490)]);
+    }
+
+    /// **The DWM caveat, measured** (UX2). A window region is documented to be
+    /// able to knock the compositor off its fast path, so the ruling that
+    /// picked this mechanism came with an instruction to measure presentation
+    /// cost with a region applied before committing to it.
+    ///
+    /// Ignored by default: it needs a real window, a real adapter and a real
+    /// compositor, none of which CI has. Run it deliberately:
+    ///
+    /// ```text
+    /// cargo test -p inf-viewport --lib region_present_cost -- --ignored --nocapture
+    /// ```
+    ///
+    /// It reports the frame-time distribution of the SAME scene rendered into
+    /// the SAME child window twice — once whole, once with a cutout the size of
+    /// a context menu. Both are FIFO presents, so the number to read is whether
+    /// the region run still lands on the vsync interval.
+    #[test]
+    #[ignore = "needs a window, an adapter and a compositor — run with --ignored"]
+    fn region_present_cost() {
+        const W: u32 = 1280;
+        const H: u32 = 720;
+        const WARMUP: usize = 30;
+        const FRAMES: usize = 240;
+
+        /// `DefWindowProcW` is a Rust-ABI item here; a class needs a `"system"`
+        /// one. The bench parent does nothing but exist and pump.
+        unsafe extern "system" fn bench_wnd_proc(
+            hwnd: HWND,
+            msg: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+
+        let parent = unsafe {
+            let hinstance = GetModuleHandleW(None).expect("module handle");
+            let class = w!("InfinityViewportRegionBench");
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(bench_wnd_proc),
+                hInstance: hinstance.into(),
+                lpszClassName: class,
+                ..Default::default()
+            };
+            RegisterClassW(&wc);
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                class,
+                w!("region bench"),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                80,
+                80,
+                W as i32 + 32,
+                H as i32 + 64,
+                None,
+                None,
+                Some(hinstance.into()),
+                None,
+            )
+            .expect("bench parent window")
+        };
+        let child = create_child_window(parent.0 as isize).expect("bench child window");
+        unsafe {
+            let _ = SetWindowPos(
+                child,
+                Some(HWND_TOP),
+                0,
+                0,
+                W as i32,
+                H as i32,
+                SWP_NOACTIVATE,
+            );
+        }
+
+        let hinstance = unsafe { GetModuleHandleW(None) }
+            .map(|h| h.0 as isize)
+            .unwrap_or_default();
+        let target = SurfaceTarget::Win32 {
+            hwnd: child.0 as isize,
+            hinstance,
+        };
+        let mut host = match EngineHost::new(target, W, H) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("region_present_cost: no engine host ({e}) — nothing to measure");
+                return;
+            }
+        };
+        let camera = EditorCamera::default();
+
+        let mut run = |label: &str| -> Vec<f64> {
+            let mut samples = Vec::with_capacity(FRAMES);
+            for i in 0..(WARMUP + FRAMES) {
+                unsafe {
+                    let mut msg = MSG::default();
+                    while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                        let _ = TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
+                let view = host.view_for(&camera);
+                let t0 = Instant::now();
+                let presented = host.render_frame(&view).expect("render");
+                let dt = t0.elapsed().as_secs_f64() * 1000.0;
+                if i >= WARMUP && presented {
+                    samples.push(dt);
+                }
+            }
+            samples.sort_by(f64::total_cmp);
+            let pick = |q: f64| samples[((samples.len() as f64 - 1.0) * q) as usize];
+            eprintln!(
+                "region_present_cost [{label}]: n={} median={:.3} ms p95={:.3} ms max={:.3} ms",
+                samples.len(),
+                pick(0.5),
+                pick(0.95),
+                samples[samples.len() - 1],
+            );
+            samples
+        };
+
+        let whole = run("no region");
+        // A context-menu-sized cutout in the middle of the view.
+        apply_window_region(
+            child,
+            &[ViewportRect {
+                x: 400,
+                y: 260,
+                width: 220,
+                height: 300,
+            }],
+            hole(0, 0, W, H),
+        );
+        let cut = run("region applied");
+        apply_window_region(child, &[], hole(0, 0, W, H));
+
+        let median = |v: &[f64]| v[(v.len() - 1) / 2];
+        eprintln!(
+            "region_present_cost: median delta = {:+.3} ms ({:.1}% of a 60 Hz frame)",
+            median(&cut) - median(&whole),
+            (median(&cut) - median(&whole)) / 16.667 * 100.0,
+        );
+    }
 }

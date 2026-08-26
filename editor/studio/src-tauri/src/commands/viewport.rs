@@ -176,6 +176,12 @@ impl ViewportState {
         self.with(target, |h| h.set_visible(visible));
     }
 
+    /// Carve the open HTML overlays' rectangles out of the native viewport
+    /// instead of hiding it (UX2). An empty slice releases the region.
+    pub fn set_region(&self, target: Target, rects: Vec<inf_viewport::ViewportRect>) {
+        self.with(target, |h| h.set_region(rects.clone()));
+    }
+
     /// Adopt a foreign (PIE player) window into the viewport slot (embedded PIE).
     pub fn embed_foreign(&self, target: Target, hwnd: i64) {
         self.with(target, |h| h.embed_foreign(hwnd as isize));
@@ -480,10 +486,13 @@ pub async fn viewport_set_rect(
     Ok(())
 }
 
-/// Show/hide the native viewport. The shell hides it while an HTML overlay
-/// (menu, command palette, dialog, drag ghost) is open — the native child
-/// otherwise draws OVER the webview (airspace rule) and occludes any
-/// overlay crossing the hole. P2.1 explores flash-free alternatives.
+/// Show/hide the native viewport. The shell hides it while an HTML overlay it
+/// cannot measure (the command palette, a dialog, the panel-drag ghost) is
+/// open — the native child otherwise draws OVER the webview (airspace rule)
+/// and occludes any overlay crossing the hole.
+///
+/// An overlay that CAN measure itself goes through [`viewport_set_region`]
+/// instead and the 3D view keeps rendering around it (UX2).
 #[tauri::command]
 pub async fn viewport_set_visible(
     visible: bool,
@@ -492,6 +501,55 @@ pub async fn viewport_set_visible(
 ) -> Result<(), String> {
     state.set_visible(Target::from_arg(viewport), visible);
     Ok(())
+}
+
+/// **Cut the open overlays' rectangles out of the native viewport** (UX2) — the
+/// flash-free alternative the airspace rule has named as a future polish item
+/// since Phase 1, and the reason a right-click no longer blacks out the 3D view.
+///
+/// `rects` are [`ViewportRect`]s in the same space [`viewport_set_rect`] uses:
+/// PHYSICAL pixels relative to the window client area (the frontend measures
+/// CSS rects and multiplies by `devicePixelRatio`). The viewport thread
+/// subtracts the hole's own origin, because it is the side that knows where the
+/// child currently is — see `inf_viewport`'s `child_local_cutouts`.
+///
+/// An EMPTY vector releases the region, which is both "no overlay is open" and
+/// the state the fallback full-hide path leaves behind.
+#[tauri::command]
+pub async fn viewport_set_region(
+    rects: Vec<ViewportRect>,
+    viewport: Option<String>,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    let rects = rects
+        .into_iter()
+        .map(|r| inf_viewport::ViewportRect {
+            x: r.x.round() as i32,
+            y: r.y.round() as i32,
+            width: r.width.round().max(0.0) as u32,
+            height: r.height.round().max(0.0) as u32,
+        })
+        .collect();
+    state.set_region(Target::from_arg(viewport), rects);
+    Ok(())
+}
+
+/// **Whether this platform can cut a hole instead of hiding** (UX2).
+///
+/// The shell has to know before it decides what to push: on a platform with no
+/// cutout it must keep sending the full hide, or every menu that crosses the
+/// hole would be drawn under a viewport that stayed visible — a worse bug than
+/// the blackout this wave removes. Windows carves with `SetWindowRgn`; the
+/// macOS layer-mask twin is not built and Linux has no embedding backend at
+/// all, so both answer `false` and keep today's behaviour.
+///
+/// A command rather than a build-time constant in the frontend because the
+/// frontend has no build-time knowledge of the host OS, and rather than a
+/// user-agent sniff because this is a fact about the *viewport backend*, not
+/// about the webview.
+#[tauri::command]
+pub async fn viewport_cutout_supported() -> Result<bool, String> {
+    Ok(cfg!(windows))
 }
 
 /// Switch the active viewport projection (Perspective ↔ 2D ortho) from the

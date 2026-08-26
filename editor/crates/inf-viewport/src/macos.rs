@@ -130,6 +130,19 @@ impl ViewportHandle {
         let _ = self.tx.send(Cmd::SetVisible(visible));
     }
 
+    /// **Not built on this platform** (UX2, stated rather than implied).
+    ///
+    /// The Windows twin carves the overlay's rectangles out of the child window
+    /// with `SetWindowRgn` so the 3D view keeps rendering around a menu. The
+    /// macOS equivalent is a `CALayer` mask on the hosted layer — a different
+    /// mechanism with its own coordinate flip and its own retain rules, and
+    /// this file has never been run on hardware. Rather than claim the fix
+    /// where it is not built (the one-platform law), macOS keeps the full hide:
+    /// the shell still sends `set_visible(false)` for every overlay, because
+    /// the guard falls back to it for any viewport whose region push does
+    /// nothing.
+    pub fn set_region(&self, _rects: Vec<ViewportRect>) {}
+
     /// Drag-drop handoff (see the Windows twin for the contract).
     pub fn drop_payload(&self, x: f32, y: f32, payload: &str) {
         let _ = self.tx.send(Cmd::Drop {

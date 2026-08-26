@@ -215,11 +215,30 @@ export const viewport = {
   setRect: (rect: ViewportRect, viewport?: string): Promise<void> =>
     invoke("viewport_set_rect", { rect, viewport }),
   /**
-   * Show/hide the native viewport (the shell hides it while an HTML overlay
-   * — menu, palette, dialog, drag ghost — is open; airspace rule).
+   * Show/hide the native viewport (the shell hides it while an HTML overlay it
+   * cannot measure — the palette, a dialog, the drag ghost — is open; airspace
+   * rule). An overlay that measures itself uses `setRegion` instead.
    */
   setVisible: (visible: boolean, viewport?: string): Promise<void> =>
     invoke("viewport_set_visible", { visible, viewport }),
+  /**
+   * **Cut the open overlays' rectangles out of the native viewport** (UX2) —
+   * the flash-free half of the airspace rule, so a right-click menu no longer
+   * blacks out the 3D view.
+   *
+   * `rects` are PHYSICAL pixels relative to the window client area — the same
+   * space `setRect` speaks (`toPhysicalRect` in lib/viewportRect.ts). The
+   * backend subtracts the hole's origin, because it is the side that knows
+   * where the native child currently is. An empty array releases the region.
+   */
+  setRegion: (rects: ViewportRect[], viewport?: string): Promise<void> =>
+    invoke("viewport_set_region", { rects, viewport }),
+  /**
+   * Whether this platform can cut a hole instead of hiding (UX2): Windows can
+   * (`SetWindowRgn`), macOS and Linux cannot and keep the full hide. The
+   * overlay guard asks once and falls back to hiding until it knows.
+   */
+  cutoutSupported: (): Promise<boolean> => invoke("viewport_cutout_supported"),
   /**
    * Hand off a drag that ended over the viewport hole. Coordinates are
    * PHYSICAL pixels relative to the hole's top-left corner (HTML drag ghosts

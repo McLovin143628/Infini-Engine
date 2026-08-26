@@ -206,6 +206,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         viewport::viewport_attach,
         viewport::viewport_set_rect,
         viewport::viewport_set_visible,
+        viewport::viewport_set_region,
+        viewport::viewport_cutout_supported,
         viewport::viewport_drop,
         viewport::viewport_set_mode,
         viewport::viewport_set_snap2d,
