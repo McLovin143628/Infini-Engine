@@ -6134,10 +6134,10 @@ thing:
    deeper box (depth precision) or a partial invalidation keyed on the along-light
    interval. Neither is this wave's, and neither is free.
 2. **`vsm sync` 1.36–1.40 ms, and the remainder is not this wave's code.** Measured on a
-   CPU-only probe at island scale (1 024 slots, 8 levels, 64 pages a side, a window
-   sliding every frame): `set_clip_origins` — the scroll, the re-seat and the bounded
-   recompute together — costs **0.090 ms**, and `apply_wants` costs **0.677 ms** *with 16
-   admits and 16 evicts*, i.e. almost all of it is the walk and not the churn. The cost
+   CPU-only probe at island scale (1 024 slots, 8 levels, 64 pages a side, level `L`'s
+   window sliding every `2^L` frames): `set_clip_origins` — the scroll, the re-seat and the
+   bounded recompute together — costs **0.095 ms**, and `apply_wants` costs **0.677 ms**
+   *with 16 admits and 16 evicts*, i.e. almost all of it is the walk and not the churn. The cost
    is `inf_stream::admit_by_lane`'s two `BTreeSet` inserts per resident want over ~1 000
    wants a frame, plus the `reserved.clone()` before them. That is P28.3's shared arbiter,
    used by `inf-vt` as well; a slot **bitset** would take it, and it is a change to a
@@ -6166,8 +6166,23 @@ thing:
   walks for each of a ladder's **32 768** pages, on the frame budget of a pass that runs
   whenever the camera crosses a metre.
 
-Together those two are why `vsm sync` fell 3.247 → 1.39 rather than rising: the wave adds
-a re-seat and residency churn where there was none, and still comes out 2.3× cheaper.
+**What those two are worth, measured rather than inferred.** On a CPU-only probe at island
+scale (1 024 slots, 8 levels, 64 pages a side, level `L`'s window sliding every `2^L`
+frames, the whole thing including the re-seat):
+
+| `set_clip_origins`, per frame | |
+|---|---|
+| as shipped | **0.095 ms** |
+| with the recompute unbounded | 0.294 ms |
+| …and with the pre-wave index arithmetic as well | **0.634 ms** |
+
+So the two are worth **0.54 ms a frame** of the island's `vsm sync` fall of **1.86**, and
+the wave pays the re-seat and the new residency churn out of that and still comes out
+ahead. **The other 1.3 ms is NOT attributed on the CPU side**, and it is recorded as
+unattributed rather than assigned: the likeliest reading is the I4b law met from its other
+end — a frame whose GPU pass was 30 ms keeps the queue saturated, and every `write_buffer`
+this stage makes is dearer under a backed-up queue than under an 8 ms one. That is a
+hypothesis with a mechanism, not a measurement, and it is written here as one.
 
 ### The bound this wave trades a bit-compare for, measured
 

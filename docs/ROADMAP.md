@@ -26108,17 +26108,22 @@ three orders of magnitude of separation in one run.
 ~4.4 bursts in a run are the instrument's own round boundaries** (the flight restarts and
 `is_camera_cut` fires) — a player sees only the along-light ticks. `vsm sync`'s remaining 1.36–1.40
 misses the ~1 ms target by 0.4, and a CPU-only probe at island scale attributes it: the scroll, the
-re-seat and the bounded recompute together are **0.090 ms**, while `apply_wants` is **0.677 ms with
+re-seat and the bounded recompute together are **0.095 ms**, while `apply_wants` is **0.677 ms with
 16 admits and 16 evicts** — `inf_stream::admit_by_lane`'s two `BTreeSet` inserts per resident want
 over ~1 000 wants a frame, in P28.3's shared arbiter that `inf-vt` uses too, for CPU that is not on
 the critical path. Routed by name, not taken. `cluster_tile_wants` is the dearest record phase again
 at 1.554 ms lit and stays refused with its P28.2 gate.
 
-Two cheap wins came off the same door and are why `vsm sync` **fell** while the wave added residency
-churn: `set_clip_origins` recomputes only levels `0..=deepest-that-moved` (a level whose own origin,
-its parent's origin, its residency and its parent's words are all unchanged has unchanged words),
-and the entry index is hoisted out of a loop that was paying two `O(levels)` sums for each of a
-ladder's **32 768** pages.
+Two cheap wins came off the same door, and what they are worth is measured rather than inferred:
+`set_clip_origins` recomputes only levels `0..=deepest-that-moved` (a level whose own origin, its
+parent's origin, its residency and its parent's words are all unchanged has unchanged words), and
+the entry index is hoisted out of a loop that was paying two `O(levels)` sums for each of a ladder's
+**32 768** pages. On a CPU-only probe at island scale the whole door — scroll, re-seat, recompute —
+costs **0.095 ms a frame**; unbounded it is 0.294 and with the pre-wave index arithmetic as well it
+is **0.634**. So they are worth **0.54 ms of the 1.86 ms `vsm sync` fell**, and the remaining 1.3 ms
+is recorded as **unattributed on the CPU side** rather than claimed — the likeliest reading being
+the I4b law from its other end, that a stage's `write_buffer` calls are dearer under a queue backed
+up by a 30 ms GPU pass than under an 8 ms one.
 
 Counts: battery **321 / 6 080 / 0 / 16** (**+9 arms, no new block**), goldens **54 / 101**
 byte-identical under `INF_GOLDEN_STRICT=1` with no PNG rewritten, clippy **0** with `-D warnings`,
@@ -26126,5 +26131,8 @@ rustdoc **374 over 30 crates** after `cargo clean --doc` (**the wave adds zero**
 frontend **702 / 78 not re-run** (no file under `editor/` was touched), schema **unmoved**, no new
 crate and no new dependency. Seven mutations run, each dying at the arm that names it — including
 two that named arms this wave had to write, the `entered == arrived` equality and the sun-quantum
-GPU arm. Four commits, `(VSM2)`-tagged. The full ledger, with the per-clause numbers, the mutation
+GPU arm. **Five** commits, `(VSM2)`-tagged — the fifth replaces an inference this ledger had made
+about *why* `vsm sync` fell with the three-configuration measurement that says how much of it the
+wave's own two cheap wins account for (0.54 of 1.86 ms) and leaves the rest recorded as
+unattributed. The full ledger, with the per-clause numbers, the mutation
 table and the carried list, is in `docs/memos/island-progress.md` under *Wave VSM2*.
