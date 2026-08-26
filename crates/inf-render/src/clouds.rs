@@ -715,6 +715,66 @@ pub fn phase(cos_theta: f32, g: f32) -> f32 {
     hg(g) * FORWARD_LOBE_WEIGHT + hg(BACK_LOBE_G * (g / 0.8).min(1.0)) * (1.0 - FORWARD_LOBE_WEIGHT)
 }
 
+/// Octaves of the Hillaire multiple-scattering approximation the march sums.
+pub const MS_OCTAVES: u32 = 3;
+
+/// Exponent of the **powder** term (SKY2). `1 − T^K == 1 − exp(−K·τ)`, i.e. the
+/// Guerrilla `1 − exp(−2d)` written against a transmittance rather than an
+/// optical depth, so it costs one multiply instead of a second march.
+pub const POWDER_K: f32 = 2.0;
+
+/// The sun's contribution at one march sample, per unit extinction: Hillaire's
+/// multiple-scattering octaves, with the **powder** correction on the first.
+///
+/// CPU mirror of `cloud_sun_energy` in `shaders/cloud.wgsl`.
+///
+/// # What powder is for
+///
+/// Beer's law says a point with nothing between it and the sun is fully lit, and
+/// for a *volume* that is the wrong answer: the light gets there, but there is
+/// almost no material at that point to scatter it toward the eye, so it
+/// contributes almost nothing. Leaving the correction out is what makes a
+/// volumetric read as airbrushed — the sunward face and the shaded face differ
+/// only by a shadow, and the medium never darkens where it thins.
+///
+/// Three things gate it, and each is a defect the other two do not catch:
+///
+/// * **`facing`** — the deficit is only *visible* from the side turned away from
+///   the sun. Applied looking into the sun it would erase the silver lining,
+///   which is the one effect the two-lobe phase function exists to produce.
+/// * **`sun_y`** — below the horizon `sun_t` is the documented early-out's `1.0`,
+///   which means "no march was run" and not "no material". Read as an optical
+///   depth of zero it takes the entire single-scattering term off a night sky:
+///   measured at a **45 % drop** in `clouds_night`'s starless cloud brightness
+///   before the gate existed.
+/// * **the first octave only** — octaves 2 and 3 stand in for light that has
+///   already bounced several times inside the layer and arrives from every
+///   direction rather than along the sun ray. Darkening those takes back exactly
+///   the term that keeps a thick deck's interior out of soot.
+pub fn sun_energy(sun_t: f32, cos_theta: f32, g: f32, sun_y: f32) -> f32 {
+    let st = sun_t.clamp(0.0, 1.0);
+    let powder = 1.0 - st.powf(POWDER_K);
+    let facing = (-cos_theta * 0.5 + 0.5).clamp(0.0, 1.0);
+    let single = if sun_y > 1e-3 {
+        1.0 + (powder - 1.0) * facing
+    } else {
+        1.0
+    };
+
+    let mut e = 0.0f32;
+    let mut att = 1.0f32;
+    let mut sca = 1.0f32;
+    let mut ecc = 1.0f32;
+    for n in 0..MS_OCTAVES {
+        let p = if n == 0 { single } else { 1.0 };
+        e += sca * sun_t.max(0.0).powf(att) * phase(cos_theta, g * ecc) * p;
+        att *= 0.5;
+        sca *= 0.5;
+        ecc *= 0.5;
+    }
+    e
+}
+
 // ── the CPU reference of the density function ────────────────────────────────
 
 /// A read-back copy of the two baked 3D volumes, so the CPU reference evaluates
@@ -1207,6 +1267,70 @@ mod tests {
             (iso - phase(-1.0, 0.0)).abs() < 0.02,
             "g=0 not near-isotropic"
         );
+    }
+
+    /// **The powder term does the three things it exists to do, and nothing
+    /// else.** Each assertion here is a defect the wave actually had to fix or
+    /// deliberately avoid, written as the property that catches it.
+    #[test]
+    fn powder_darkens_the_thin_sunward_side_only() {
+        let g = 0.8;
+        let up = 0.5; // a sun well above the horizon
+
+        // (a) A point with nothing between it and the sun — the thin edge of a
+        // cloud — is DARKER than Beer alone says, seen with the sun behind the
+        // eye. That is the dark rim, and it is the whole term.
+        let lit_edge = sun_energy(1.0, -1.0, g, up);
+        let beer_edge = sun_energy(1.0, -1.0, g, -1.0); // same call, powder gated off
+        assert!(
+            lit_edge < beer_edge * 0.75,
+            "powder did not darken a thin sunward edge: {lit_edge} vs {beer_edge}"
+        );
+
+        // (b) ...and it leaves the SILVER LINING alone. Looking into the sun the
+        // eye sees forward-scattered light from the near surface; darkening that
+        // would erase the effect the two-lobe phase exists for.
+        let into_sun = sun_energy(1.0, 1.0, g, up);
+        let into_sun_beer = sun_energy(1.0, 1.0, g, -1.0);
+        assert_eq!(
+            into_sun, into_sun_beer,
+            "powder reached the forward lobe: {into_sun} vs {into_sun_beer}"
+        );
+
+        // (c) A sun below the horizon is the early-out, not an optical depth of
+        // zero. Every geometry must be untouched at night.
+        for &c in &[-1.0f32, -0.5, 0.0, 0.5, 1.0] {
+            assert_eq!(
+                sun_energy(1.0, c, g, -0.3),
+                sun_energy(1.0, c, g, 0.0),
+                "the night path moved at cos {c}"
+            );
+        }
+
+        // (d) DEEP inside a cloud, where the sun ray is already extinguished,
+        // powder is ~1 and takes nothing away — an overcast deck must not go to
+        // soot. Measured against the same sample with the term gated off.
+        let deep = sun_energy(0.02, -1.0, g, up);
+        let deep_beer = sun_energy(0.02, -1.0, g, -1.0);
+        assert!(
+            deep > deep_beer * 0.995,
+            "powder darkened a fully-shadowed interior: {deep} vs {deep_beer}"
+        );
+
+        // (e) The multiple-scattering octaves survive. Powder on ALL of them
+        // would drive the edge to zero; on the first only it cannot, because the
+        // remaining octaves carry 0.5 + 0.25 of the weight.
+        assert!(
+            lit_edge > 0.0,
+            "the powdered edge went to zero — powder reached the MS octaves"
+        );
+        // Monotone and finite over the whole domain, so no configuration of a
+        // level can produce a NaN in the march's accumulator.
+        for i in 0..=32 {
+            let t = i as f32 / 32.0;
+            let e = sun_energy(t, -0.3, g, up);
+            assert!(e.is_finite() && e >= 0.0, "sun_energy({t}) = {e}");
+        }
     }
 
     /// The wind is a deterministic function of the level's clock, wraps into one

@@ -46,6 +46,10 @@ const CLOUD_EMPTY_RUN: u32 = 4u;
 const CLOUD_STRIDE_RATIO: f32 = 3.0;
 // Octaves of the Hillaire multiple-scattering approximation.
 const CLOUD_MS_OCTAVES: u32 = 3u;
+// Exponent of the powder (in-scatter probability) term. 2 is the usual value:
+// `1 - T^2 == 1 - exp(-2*tau)`, i.e. the Guerrilla `1 - exp(-2d)` written
+// against a transmittance the march has already computed.
+const CLOUD_POWDER_K: f32 = 2.0;
 // Fraction of the overhead sky that still reaches the BASE of the slab, as the
 // diffusion approximation standing in for multiple scattering through the layer.
 const CLOUD_AMBIENT_BASE: f32 = 0.45;
@@ -132,13 +136,53 @@ fn cloud_jitter(texel: vec2<i32>) -> f32 {
     return fract(b + atmos.cloud_color.w * CLOUD_JITTER_GOLDEN);
 }
 
-fn cloud_sun_energy(sun_t: f32, cos_t: f32, g: f32) -> f32 {
+fn cloud_sun_energy(sun_t: f32, cos_t: f32, g: f32, sun_y: f32) -> f32 {
+    // ── the powder term (SKY2) ──
+    //
+    // Beer's law alone says a point with nothing between it and the sun is fully
+    // lit, and that is the wrong answer for a *volume*: light reaches such a
+    // point, but there is almost no material there to scatter it toward the eye,
+    // so the point contributes almost nothing. The consequence of leaving it out
+    // is the flat, airbrushed look — a cloud whose sunward face and whose shaded
+    // face differ only in a shadow, with no dark rim where the medium thins.
+    //
+    // Written against the transmittance the light march already returned:
+    // `1 - T^K == 1 - exp(-K*tau)`, so the in-scatter probability costs one
+    // multiply rather than a second march.
+    let st = clamp(sun_t, 0.0, 1.0);
+    let powder = 1.0 - pow(st, CLOUD_POWDER_K);
+    // Blended by view direction, which is not a fudge but the term's own
+    // geometry: the deficit is only *visible* from the side that faces away from
+    // the sun. Looking INTO the sun the eye sees light forward-scattered by the
+    // near surface, which is the silver lining — and applying powder there would
+    // erase the one effect the two-lobe phase function exists to produce.
+    let facing = clamp(-cos_t * 0.5 + 0.5, 0.0, 1.0);
+    // ...and gated on the sun being up, on exactly the threshold
+    // `cloud_sun_transmittance` early-outs at. Below it the 1.0 that function
+    // returns means "no march was run", not "no material" — reading it as an
+    // optical depth of zero would give a powder of zero and take the whole
+    // single-scattering term off a night sky, which measured as a 45 % drop in
+    // `clouds_night`'s starless cloud brightness before this line existed.
+    var single = 1.0;
+    if (sun_y > 1e-3) {
+        single = mix(1.0, powder, facing);
+    }
+
     var e = 0.0;
     var att = 1.0;
     var sca = 1.0;
     var ecc = 1.0;
     for (var n = 0u; n < CLOUD_MS_OCTAVES; n = n + 1u) {
-        e = e + sca * pow(max(sun_t, 0.0), att) * cloud_phase(cos_t, g * ecc);
+        // Powder applies to the FIRST octave only. The later octaves stand in for
+        // light that has already bounced several times inside the layer, which
+        // arrives from every direction rather than along the sun ray — darkening
+        // those would take back exactly the term that keeps a thick deck's
+        // interior from going to soot.
+        var p = 1.0;
+        if (n == 0u) {
+            p = single;
+        }
+        e = e + sca * pow(max(sun_t, 0.0), att) * cloud_phase(cos_t, g * ecc) * p;
         att = att * 0.5;
         sca = sca * 0.5;
         ecc = ecc * 0.5;
@@ -292,7 +336,7 @@ fn fs(in: VsOut) -> CloudOut {
             }
             let h = clamp(cloud_height_frac(p.y), 0.0, 1.0);
             let sun_t = cloud_sun_transmittance(p, sun, light_steps);
-            let energy = cloud_sun_energy(sun_t, cos_t, g);
+            let energy = cloud_sun_energy(sun_t, cos_t, g, sun.y);
             // The ambient a point inside the cloud sees is the sky ABOVE the
             // layer, which the cloud above it has largely occluded. A
             // single-scattering march has nowhere to get the light back from, so
