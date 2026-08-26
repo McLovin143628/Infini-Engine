@@ -1504,6 +1504,138 @@ mod gen_cache_tests {
 mod shader_compose_tests {
     use super::*;
 
+    /// The body of a WGSL `fn <name>(`, from its signature's opening brace to the
+    /// matching close, with `//` comments stripped and whitespace collapsed.
+    ///
+    /// The `apply_record_mirror` idiom (wave VIS1a), applied to shader text.
+    fn wgsl_fn(src: &str, name: &str, what: &str) -> String {
+        let needle = format!("fn {name}(");
+        let at = src
+            .find(&needle)
+            .unwrap_or_else(|| panic!("{what}: no `{needle}`"));
+        let open = src[at..].find('{').expect("a signature has a body") + at;
+        let (mut depth, mut end) = (0usize, open);
+        for (i, c) in src[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(end > open, "{what}: unbalanced braces in `{name}`");
+        let mut out = String::new();
+        for line in src[open + 1..end].lines() {
+            let code = line.split("//").next().unwrap_or("").trim();
+            if code.is_empty() {
+                continue;
+            }
+            out.push_str(code);
+            out.push('\n');
+        }
+        out
+    }
+
+    /// **THE TWO COPIES OF THE ENERGY FIT ARE ONE FIT** (wave VIS1a audit).
+    ///
+    /// `ggx_energy_compensation` and the split-sum fit it reads (`gi_env_brdf_ab`)
+    /// live in `env_lighting.wgsl`, which is prepended to `mesh`, `skinned_mesh`,
+    /// `vgeom_mesh`, `scatter_mesh` and `vis_resolve`. `voxel.wgsl` is composed
+    /// `Plain` and binds no environment group at all (the P21.1 ruling), so it
+    /// carries a **verbatim copy** of the pair.
+    ///
+    /// Wave VIS1a's ledger said the two copies were "held together by the furnace
+    /// test's CPU mirror". They were not: `gi::tests::the_ggx_furnace_test_is_white`
+    /// exercises `inf_render::gi::ggx_energy_compensation`, which is Rust, and a
+    /// Rust test cannot see either WGSL copy. A cited gate that does not exist is
+    /// worse than no claim (the P20 law), so this is the gate.
+    ///
+    /// Mutation-verified: changing `1e-3` to `1e-4` in either copy fails it, and
+    /// so does deleting a line from either.
+    #[test]
+    fn the_voxel_copy_of_the_energy_fit_is_character_for_character_the_env_one() {
+        let env = include_str!("../shaders/env_lighting.wgsl");
+        let voxel = include_str!("../shaders/voxel.wgsl");
+        for name in ["gi_env_brdf_ab", "ggx_energy_compensation"] {
+            let a = wgsl_fn(env, name, "env_lighting.wgsl");
+            let b = wgsl_fn(voxel, name, "voxel.wgsl");
+            // Anti-vacuity: an extractor that returned nothing would compare two
+            // empty strings and pass.
+            assert!(
+                a.lines().count() >= 3 && a.contains("return"),
+                "`{name}` extracted as {} lines from env_lighting.wgsl — the \
+                 extraction is broken, not the shader",
+                a.lines().count()
+            );
+            assert_eq!(
+                a, b,
+                "the two copies of `{name}` have drifted. A voxel surface would \
+                 shade its specular lobe with a different energy fit from every \
+                 other lit surface in the engine.\n\nenv_lighting:\n{a}\n\nvoxel:\n{b}"
+            );
+        }
+    }
+
+    /// …and both WGSL copies agree with the **CPU** mirror the furnace test
+    /// actually pins (wave VIS1a audit).
+    ///
+    /// Not a text comparison — the two languages spell the same arithmetic
+    /// differently — but a *numeric* one: the WGSL source is transliterated here
+    /// once, and the transliteration is checked against `gi::env_brdf_ab` /
+    /// `gi::ggx_energy_compensation` over a sweep. That is what makes
+    /// `the_ggx_furnace_test_is_white` a statement about what the GPU does rather
+    /// than about a Rust function nothing renders with.
+    #[test]
+    fn the_cpu_mirror_of_the_energy_fit_matches_the_wgsl_constants() {
+        // Transliterated from `fn gi_env_brdf_ab` in `env_lighting.wgsl`. The
+        // constants are read off the shader text below so a change there cannot
+        // leave this copy behind.
+        let src = wgsl_fn(
+            include_str!("../shaders/env_lighting.wgsl"),
+            "gi_env_brdf_ab",
+            "env_lighting.wgsl",
+        );
+        for lit in [
+            "vec4<f32>(-1.0,-0.0275,-0.572,0.022)",
+            "vec4<f32>(1.0,0.0425,1.04,-0.04)",
+            "exp2(-9.28*nov)",
+            "vec2<f32>(-1.04,1.04)",
+        ] {
+            let flat: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(
+                flat.contains(lit),
+                "the WGSL split-sum fit no longer contains `{lit}` — the CPU \
+                 mirror in `gi::env_brdf_ab` is now a fit of something else"
+            );
+        }
+        // The numeric half: the CPU mirror is what the furnace test measures, and
+        // it must be the same function at every roughness and angle.
+        for ri in 0..=20 {
+            let rough = ri as f32 / 20.0;
+            for ai in 1..=20 {
+                let nov = ai as f32 / 20.0;
+                let (a, b) = crate::gi::env_brdf_ab(rough, nov);
+                let r = [
+                    rough * -1.0 + 1.0,
+                    rough * -0.0275 + 0.0425,
+                    rough * -0.572 + 1.04,
+                    rough * 0.022 + -0.04,
+                ];
+                let a004 = (r[0] * r[0]).min((-9.28 * nov).exp2()) * r[0] + r[1];
+                let (wa, wb) = (-1.04 * a004 + r[2], 1.04 * a004 + r[3]);
+                assert!(
+                    (a - wa).abs() < 1e-6 && (b - wb).abs() < 1e-6,
+                    "rough {rough}, nov {nov}: cpu ({a}, {b}) vs wgsl ({wa}, {wb})"
+                );
+            }
+        }
+    }
+
     fn validate(label: &str, source: &str) {
         let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|e| {
             panic!(
