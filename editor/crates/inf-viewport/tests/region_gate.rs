@@ -27,7 +27,14 @@
 
 const WIN32: &str = include_str!("../src/win32.rs");
 
-/// The source between `start` and the next `end` after it, both required.
+/// The **code** between `start` and the next `end` after it, both required.
+///
+/// Comment lines are dropped (UX2 audit): every assertion below is a `contains`,
+/// and a block whose only mention of `apply_window_region` is a sentence *about*
+/// `apply_window_region` satisfies one exactly as well as a call does. This gate
+/// found that out the hard way — a comment added by the audit's own fix said
+/// `is_empty()` and failed the arm that bans it. A pin that reads prose is
+/// pinning prose.
 fn scope(start: &str, end: &str) -> String {
     let src = WIN32.replace("\r\n", "\n");
     let from = src
@@ -37,7 +44,11 @@ fn scope(start: &str, end: &str) -> String {
     let to = rest
         .find(end)
         .unwrap_or_else(|| panic!("`{start}` must be followed by `{end}`"));
-    rest[..to].to_string()
+    rest[..to]
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// **A resize rebuilds the region.** `SetWindowPos` leaves the old one in
@@ -96,6 +107,28 @@ fn releasing_an_embedded_window_restores_the_cutout() {
     assert!(
         block.contains("apply_window_region("),
         "ReleaseForeign must restore the region the shell is holding. Arm:\n{block}"
+    );
+}
+
+/// **…and the EMPTY set is a state it has to restore too** (UX2 audit).
+///
+/// The wave shipped this call behind `if !cutouts.is_empty()`, which reads as an
+/// optimisation and is a leak. A menu open *before* the embed leaves a real
+/// region on the child; `SetVisible`-style hiding does not take it off, and if
+/// that menu closes while the player owns the slot the release lands in the
+/// suspended `SetRegion` arm and is only recorded. With the guard in place the
+/// child then came back visible with a hole in it that nothing was going to
+/// remove — until the next menu happened to open and close over the viewport.
+/// `apply_window_region` with no cutouts IS `SetWindowRgn(None)`, so the arm
+/// must call it unconditionally.
+#[test]
+fn the_release_restores_an_empty_cutout_set_too() {
+    let block = scope("Ok(Cmd::ReleaseForeign) => {", "Ok(Cmd::Destroy)");
+    assert!(
+        !block.contains("is_empty()"),
+        "ReleaseForeign must re-apply whatever the shell is holding INCLUDING \
+         nothing — a skipped release leaves a permanent hole in the viewport. \
+         Arm:\n{block}"
     );
 }
 

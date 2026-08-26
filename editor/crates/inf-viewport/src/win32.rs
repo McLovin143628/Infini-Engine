@@ -1434,13 +1434,16 @@ fn thread_main(
                     // Restore whatever cutout the shell is holding (UX2): a menu
                     // opened while PIE was embedded would otherwise be occluded
                     // the instant the player window went away.
-                    if !cutouts.is_empty() {
-                        apply_window_region(
-                            hwnd,
-                            &cutouts,
-                            region_hole(parent_hwnd, hwnd, last_rect),
-                        );
-                    }
+                    //
+                    // **Unconditionally, including the empty set** (UX2 audit).
+                    // The other half is the case a `!cutouts.is_empty()` guard
+                    // cannot see: a menu open BEFORE the embed left a real
+                    // region on the child, and if it closed while the player
+                    // owned the slot the release was recorded here and skipped
+                    // — so the child came back visible with a hole in it that
+                    // nothing was going to take away. `apply_window_region`
+                    // with no cutouts IS the release, so one call covers both.
+                    apply_window_region(hwnd, &cutouts, region_hole(parent_hwnd, hwnd, last_rect));
                 }
                 Ok(Cmd::Destroy) | Err(TryRecvError::Disconnected) => break 'outer,
                 Err(TryRecvError::Empty) => break,
