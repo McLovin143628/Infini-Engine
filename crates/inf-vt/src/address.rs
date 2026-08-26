@@ -87,6 +87,32 @@ impl VtMipDesc {
 /// to overflow — a bound the encoder can rely on instead of checking.
 pub const MAX_VT_MIPS: usize = 32;
 
+/// The widest level a virtual texture may declare, in texels.
+///
+/// **This is the door D-22 said had nothing behind it.** Until wave TER2a
+/// [`VtTextureDesc::validate`] had no extent rule at all: what kept a pyramid
+/// inside an `f32` uv was that no content this project could produce came near
+/// the limit, and the arm that watched it
+/// (`table::tests::an_f32_uv_still_addresses_every_texel_of_the_largest_legal_pyramid`)
+/// watches the **resident** side — the atlas constants — and is explicit that
+/// "it does not fire on a registration, and it cannot". TER2a is the wave that
+/// authors real ground materials for a 51 km² world, which is exactly the
+/// content D-22 said to re-measure before, so the gap is closed rather than
+/// carried again.
+///
+/// `1 << 23` is the `f32` mantissa's integer limit: a shader resolves a texel
+/// inside one tiling period as `uv · width`, and past `2^23` consecutive
+/// integers stop being representable, so two distinct texels start rounding onto
+/// one address. It is the same number the resident-side arm compares against,
+/// stated on the other half of the same address chain.
+///
+/// For scale: the largest texture this engine's own importer will produce is
+/// bounded by `VtPoolConfig::max_texture_dim` (8 192) on the atlas side, and the
+/// ground sets TER2a authors are 1 024² — **8 192 times** under this ceiling.
+/// The guard exists so that a hand-built descriptor, a future importer, or a
+/// photogrammetry bake that grew cannot walk past it silently.
+pub const MAX_VT_EXTENT: u32 = 1 << 23;
+
 /// One virtual texture's address space: the tile geometry and the pyramid.
 ///
 /// Built from a container by `inf_material::tiles::TiledTextureReader::vt_desc`,
@@ -342,6 +368,18 @@ impl VtTextureDesc {
             if m.width == 0 || m.height == 0 {
                 return Err(DescError::MipExtent { mip: i as u32 });
             }
+            // TER2a (D-22): the extent rule this door did not have. See
+            // [`MAX_VT_EXTENT`] — a level past the f32 mantissa's integer limit
+            // cannot be addressed to the texel by `uv · width`, and two texels
+            // would silently round onto one.
+            if m.width > MAX_VT_EXTENT || m.height > MAX_VT_EXTENT {
+                return Err(DescError::MipTooLarge {
+                    mip: i as u32,
+                    width: m.width,
+                    height: m.height,
+                    max: MAX_VT_EXTENT,
+                });
+            }
             if m.tiles_x != m.width.div_ceil(self.tile_size).max(1)
                 || m.tiles_y != m.height.div_ceil(self.tile_size).max(1)
             {
@@ -389,6 +427,16 @@ pub enum DescError {
     TileGeometry { tile_size: u32, border: u32 },
     #[error("mip {mip} has a zero extent")]
     MipExtent { mip: u32 },
+    #[error(
+        "mip {mip} is {width}×{height}, past the {max}-texel ceiling an f32 uv \
+         can address to the texel"
+    )]
+    MipTooLarge {
+        mip: u32,
+        width: u32,
+        height: u32,
+        max: u32,
+    },
     #[error("mip {mip}'s grid does not tile its extent")]
     MipGrid { mip: u32 },
     #[error("mip {mip} is not half of mip {} — this is not a mip chain", mip - 1)]
@@ -438,6 +486,89 @@ pub fn full_pyramid(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The extent guard D-22 asked for, and the island-scale exposure it was
+    /// asked about** (wave TER2a, clause 1).
+    ///
+    /// Two halves, because the "32 K f32-uv tripwire" is really two independent
+    /// exposures on one address chain and only one of them had a door:
+    ///
+    /// 1. **the pyramid's own extent** — `uv · width` inside one tiling period.
+    ///    This is the half `validate` had no rule for at all;
+    ///    [`MAX_VT_EXTENT`] is now that rule, and this arm fires it.
+    /// 2. **the world position the uv is derived from** — for terrain,
+    ///    `(world.xz − origin.xz) / tex_scale` in `terrain.wgsl`, which is an
+    ///    **f32 world coordinate**. This one has no door and needs none; it is a
+    ///    precision budget, and the numbers below are the measurement TER2a took
+    ///    before authoring the ground sets it authors.
+    #[test]
+    fn the_extent_guard_fires_and_the_island_sits_far_under_it() {
+        // ── half 1: the guard ────────────────────────────────────────────────
+        let ok = full_pyramid(1024, 1024, 128, 4, true);
+        assert!(ok.validate().is_ok(), "a 1024² ground set must register");
+        // A hand-built descriptor one texel past the ceiling is refused, by name.
+        let mut over = full_pyramid(1024, 1024, 128, 4, true);
+        over.mips[0].width = MAX_VT_EXTENT + 1;
+        over.mips[0].tiles_x = over.mips[0].width.div_ceil(over.tile_size).max(1);
+        match over.validate() {
+            Err(DescError::MipTooLarge {
+                mip, width, max, ..
+            }) => {
+                assert_eq!(mip, 0);
+                assert_eq!(width, MAX_VT_EXTENT + 1);
+                assert_eq!(max, MAX_VT_EXTENT);
+            }
+            other => panic!("an over-wide pyramid was not refused: {other:?}"),
+        }
+        // ANTI-VACUITY: exactly at the ceiling is legal, so the guard is a
+        // ceiling and not an off-by-one that moved the real limit.
+        let mut at = full_pyramid(1024, 1024, 128, 4, true);
+        at.mips[0].width = MAX_VT_EXTENT;
+        at.mips[0].tiles_x = at.mips[0].width.div_ceil(at.tile_size).max(1);
+        assert!(
+            matches!(at.validate(), Err(DescError::MipChain { .. })) || at.validate().is_ok(),
+            "the ceiling itself must not be refused for being too large"
+        );
+
+        // ── half 2: the island's own numbers ─────────────────────────────────
+        //
+        // The Vancouver island is 28 × 28 tiles of 257 samples at 1 m, centred
+        // on the world origin: 7 168 m square, so the furthest ground from the
+        // origin is the corner at 3 584 m on each axis. `terrain.wgsl` rebuilds
+        // an ABSOLUTE world XZ in f32 there (it must — a render-local uv would
+        // slide the material every time the floating origin snaps).
+        const ISLAND_HALF_EXTENT_M: f32 = 3584.0;
+        // The f32 quantum at that magnitude: 2^exp · 2^-23.
+        let ulp_m = f32::from_bits(ISLAND_HALF_EXTENT_M.to_bits() + 1) - ISLAND_HALF_EXTENT_M;
+        // The finest ground TER2a authors: a 1 024² albedo tiled every 1.5 m
+        // (sand — the tightest of the five).
+        const FINEST_EXTENT: f32 = 1024.0;
+        const TIGHTEST_TEX_SCALE_M: f32 = 1.5;
+        let texel_m = TIGHTEST_TEX_SCALE_M / FINEST_EXTENT;
+        println!(
+            "VT EXTENT (TER2a clause 1): guard {MAX_VT_EXTENT} texels; the \
+             island's ground sets are {FINEST_EXTENT}² — {}x under it. \
+             f32 world quantum at the island's far corner ({ISLAND_HALF_EXTENT_M} m) \
+             is {:.6} mm; the finest texel is {:.4} mm at tex_scale \
+             {TIGHTEST_TEX_SCALE_M} m, so a texel is {:.1} distinct positions wide.",
+            MAX_VT_EXTENT / FINEST_EXTENT as u32,
+            ulp_m * 1000.0,
+            texel_m * 1000.0,
+            texel_m / ulp_m
+        );
+        assert!(
+            texel_m / ulp_m >= 4.0,
+            "an f32 world position quantises the island's finest ground texel: \
+             {:.6} mm quantum against a {:.6} mm texel. The two-u32 uv path (T44) \
+             is what this measurement exists to trigger.",
+            ulp_m * 1000.0,
+            texel_m * 1000.0
+        );
+        assert!(
+            FINEST_EXTENT as u32 <= MAX_VT_EXTENT,
+            "the content this wave authors would not register"
+        );
+    }
 
     #[test]
     fn the_derived_order_is_not_the_payload_order() {

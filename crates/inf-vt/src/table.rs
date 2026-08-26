@@ -374,16 +374,22 @@ mod tests {
     /// the atlas slot field or the tile size past the point where a *resident*
     /// address space out-resolves an `f32` uv.
     ///
-    /// It does **not** fire on a registration, and it cannot: `VtTextureDesc`'s
-    /// only depth bound is [`crate::MAX_VT_MIPS`] (32 halvings), so the
-    /// descriptor layer would accept a 2³¹-texel pyramid — a hundred times past
-    /// what an `f32` uv resolves — and nothing in `validate` says otherwise. The
-    /// second assertion below pins that gap open rather than hiding it, so the
-    /// reason this item is *latent* is written down as what it actually is:
-    /// **no content this project can produce is anywhere near the limit** (an
-    /// import decodes a real image file, and `DEFAULT_MAX_TEXTURE_DIM` is 8 192),
-    /// not a structural refusal. A structural refusal is the work the two-`u32`
-    /// path lands with.
+    /// It does **not** fire on a registration, and it does not need to any more.
+    ///
+    /// # The registration half, closed (wave TER2a, clause 1 — D-22)
+    ///
+    /// Until TER2a this comment said the descriptor layer was *not* what kept a
+    /// pyramid inside the `f32` uv: `VtTextureDesc`'s only depth bound was
+    /// [`crate::MAX_VT_MIPS`] (32 halvings, a 2³¹ mip 0) and `validate` "has no
+    /// extent rule at all", so the reason T44 was latent was that no content this
+    /// project could produce came near the limit — not a structural refusal.
+    ///
+    /// TER2a is the wave D-22 said to re-measure before, because it authors real
+    /// ground materials for a 51 km² world. It landed the structural refusal:
+    /// [`crate::MAX_VT_EXTENT`], enforced by `VtTextureDesc::validate`, whose own
+    /// arm fires it and records the island's numbers. So the two halves of the
+    /// address chain each have a rule now, and this arm keeps the **resident**
+    /// one.
     #[test]
     fn an_f32_uv_still_addresses_every_texel_of_the_largest_legal_pyramid() {
         // A texel step at extent `w` is `1/w` in uv; the finest uv step an f32
@@ -405,17 +411,27 @@ mod tests {
         // hides a mistake in the arithmetic — it is exactly one power of two.
         assert_eq!(resident_extent, 1 << 23);
 
-        // **The gap, pinned open.** The descriptor layer is *not* what keeps a
-        // pyramid inside the f32 uv: 32 halvings is a 2^31 mip 0, and `validate`
-        // has no extent rule at all. Asserted as an inequality in the direction
-        // that is true, so this arm states the honest shape of T44 instead of
-        // implying a guard that does not exist.
+        // **The gap, closed rather than pinned open** (TER2a). `MAX_VT_MIPS`
+        // still allows a 2^31 mip 0 — 32 halvings is what the packed table's
+        // 8-bit mip field is sized for and that has not changed — so the depth
+        // bound is NOT what keeps a pyramid addressable. `MAX_VT_EXTENT` is, and
+        // it is the same number this arm compares the resident side against.
+        // Both facts are asserted, because the interesting failure is the two
+        // drifting apart: a widened atlas with an un-widened descriptor ceiling
+        // would refuse content the pool could hold, and the reverse would accept
+        // content the shader cannot address.
         let descriptor_ceiling: u64 = 1u64 << (crate::MAX_VT_MIPS - 1);
         assert!(
             descriptor_ceiling > u64::from(F32_UV_LIMIT),
-            "MAX_VT_MIPS now bounds a pyramid below the f32 uv limit, which \
-             would make T44 structurally impossible rather than merely absent — \
-             a good change, and one that should retire this comment"
+            "MAX_VT_MIPS now bounds a pyramid below the f32 uv limit on its own, \
+             which would make MAX_VT_EXTENT redundant — a good change, and one \
+             that should retire this half of the comment"
+        );
+        assert_eq!(
+            crate::MAX_VT_EXTENT,
+            F32_UV_LIMIT,
+            "the registration guard and the resident tripwire read two different \
+             f32 limits, so one of them is wrong"
         );
     }
 }

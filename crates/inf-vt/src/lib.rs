@@ -129,7 +129,9 @@ pub mod pool;
 pub mod residency;
 pub mod table;
 
-pub use address::{full_pyramid, DescError, TileCoord, VtMipDesc, VtTextureDesc, MAX_VT_MIPS};
+pub use address::{
+    full_pyramid, DescError, TileCoord, VtMipDesc, VtTextureDesc, MAX_VT_EXTENT, MAX_VT_MIPS,
+};
 pub use container::{
     decode_bc1, decode_bc3, is_v2, stored_page_format, stored_tile_bytes, TexMipEntry,
     TexTileEntry, TiledTextureError, TiledTextureHeader, TiledTextureReader, TiledTextureView,
