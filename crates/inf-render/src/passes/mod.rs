@@ -1614,17 +1614,21 @@ mod shader_compose_tests {
             );
         }
         // The numeric half: the CPU mirror is what the furnace test measures, and
-        // it must be the same function at every roughness and angle.
+        // it must be the same function at every roughness and angle. `c0`/`c1`
+        // are the shader's own two vectors, kept as arrays so `rough * c0 + c1`
+        // transliterates term for term rather than being folded by hand.
+        let c0 = [-1.0f32, -0.0275, -0.572, 0.022];
+        let c1 = [1.0f32, 0.0425, 1.04, -0.04];
         for ri in 0..=20 {
             let rough = ri as f32 / 20.0;
             for ai in 1..=20 {
                 let nov = ai as f32 / 20.0;
                 let (a, b) = crate::gi::env_brdf_ab(rough, nov);
                 let r = [
-                    rough * -1.0 + 1.0,
-                    rough * -0.0275 + 0.0425,
-                    rough * -0.572 + 1.04,
-                    rough * 0.022 + -0.04,
+                    rough * c0[0] + c1[0],
+                    rough * c0[1] + c1[1],
+                    rough * c0[2] + c1[2],
+                    rough * c0[3] + c1[3],
                 ];
                 let a004 = (r[0] * r[0]).min((-9.28 * nov).exp2()) * r[0] + r[1];
                 let (wa, wb) = (-1.04 * a004 + r[2], 1.04 * a004 + r[3]);
