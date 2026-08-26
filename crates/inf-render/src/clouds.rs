@@ -136,9 +136,81 @@ pub const WEATHER_TILE_M: f32 = 40960.0;
 ///   stays inside this envelope instead of failing a gate about a thing nobody
 ///   authored.
 ///
+/// **The 2¹³ of headroom in the first bullet is a property of a well-scaled
+/// value, and one corner of this field is not one** — the macOS CI red that
+/// [`CPU_GPU_VALUE_TOLERANCE`] exists to answer. This bound is therefore not the
+/// whole envelope any more: read it together with that constant, which governs
+/// the near-zero tail where a step of the bit pattern is finer than the
+/// arithmetic that produced the value.
+///
 /// A real port error moves far more than one step, on far more than one texel,
 /// and would fail this bound long before the fraction below noticed anything.
 pub const CPU_GPU_STEP_TOLERANCE: u16 = 1;
+
+/// Absolute per-**channel** tolerance of the noise-bake parity gate, in the
+/// field's own units, for the channels where a step of the binary16 bit pattern
+/// is the wrong ruler. A channel passes on **either** ruler: within
+/// [`CPU_GPU_STEP_TOLERANCE`] steps, or within this many units of value.
+///
+/// **Added after a macOS-only CI red (wave SKY2).** The Apple-silicon runner
+/// reported `worst |d| = 2 f16 steps at (19, 60, 17)` where Windows/Vulkan
+/// reports 1 everywhere, and the panic message asserted that two steps "is a port
+/// error, not FMA contraction and not a rounding-mode difference". It is neither
+/// a port error nor a claim the gate had ever measured. What that texel is, is
+/// the field's own arithmetic hitting a floor:
+///
+/// * the G/B/A channels are [`worley3_tiled`], which returns `1 − min(√best, 1)`.
+///   Near a cell boundary that is a **catastrophic cancellation**: at (19, 60, 17)
+///   the reference value is **1.311 302 2e-6**, which binary16 holds as a
+///   *subnormal* twenty-two steps above zero;
+/// * one step of binary16 there is **2⁻²⁴ = 5.96e-8 absolute** — and one last
+///   place of the `√best ≈ 1.0` it was subtracted from is **also 2⁻²⁴**. So in
+///   this corner the f16 grid is exactly as fine as the f32 grid of the input,
+///   the 2¹³ of headroom [`CPU_GPU_STEP_TOLERANCE`]'s derivation leans on is
+///   **zero**, and any last-place disagreement is one whole step;
+/// * WGSL does not require `sqrt` to be correctly rounded the way it does `+`,
+///   `−` and `×` (the CPU's `f32::sqrt` *is*, on every platform Rust targets —
+///   IEEE-754 requires it — which is why the reference is the same everywhere),
+///   and it permits contracting `d.x*d.x + d.y*d.y + d.z*d.z`. Either alone is a
+///   step here. Stacked with a truncating store, two.
+///
+/// **The value, derived.** 2⁻²⁰ ≈ 9.54e-7 — sixteen last places of unity, which
+/// covers the whole permitted inaccuracy of that short chain (a few ULP of
+/// `sqrt`, one or two of the contracted sum, one of the store) with room over.
+/// Its two load-bearing properties:
+///
+/// * it is **inert wherever the value is well-scaled**. A channel at 0.002 or
+///   above has an f16 step of 2⁻²⁰ or coarser, so this tolerance cannot reach one
+///   step and [`CPU_GPU_STEP_TOLERANCE`] alone governs — as it did before. The
+///   escape exists only in the cancellation tail, measured at **6.6e-4 of shape
+///   channels and 2.7e-4 of detail channels**, entirely in the Worley channels.
+///   The Perlin–Worley `R` channel contributes **none**: its minimum over the
+///   whole 128³ volume is **0.330**, because [`remap`] divides `pn + (1 − w0)` —
+///   a *sum* of two non-negative quantities — by a divisor in `[1, 2]`, so it is
+///   small only where the Perlin field and the inverted Worley fBm are
+///   simultaneously extreme, and they never are. The cancellation is
+///   `1 − min(√best, 1)` and nothing else;
+/// * it **cannot hide a port error**, because it is a bound on the *value* and a
+///   port error is not small. A wrong hash, gradient table or lattice wrap moves
+///   channels by O(0.1–1) — six orders of magnitude over this floor — and every
+///   such channel fails the step bound individually and immediately. The most
+///   this admits anywhere is 9.54e-7 of a field whose values run to 1, which is
+///   four thousand times finer than one LSB of the 8-bit volumes SKY2 replaced.
+pub const CPU_GPU_VALUE_TOLERANCE: f32 = 1.0 / 1_048_576.0;
+
+/// Ceiling on the fraction of channels allowed to pass on
+/// [`CPU_GPU_VALUE_TOLERANCE`]'s ruler rather than on
+/// [`CPU_GPU_STEP_TOLERANCE`]'s.
+///
+/// The escape above is legitimate *because* the cancellation tail is a thousandth
+/// of the field. This is the arm that keeps that premise true rather than
+/// assumed: the tail is a property of the CPU reference — which is identical on
+/// every platform — and measures **6.6e-4** of shape channels at the SKY2 field,
+/// so 2e-3 is a little over three times it. A change that collapsed a large part
+/// of the field toward zero would widen the escape route silently, and would fail
+/// here first; it is not a bound on any adapter's behaviour, which is the whole
+/// reason it can be a constant at all (the P25 one-platform-bounds law).
+pub const CPU_GPU_VALUE_ESCAPE_FRACTION: f64 = 2e-3;
 
 /// Fraction of noise-bake **channels** that must match the CPU reference
 /// exactly. The remainder are allowed [`CPU_GPU_STEP_TOLERANCE`].
@@ -176,9 +248,9 @@ pub const CPU_GPU_STEP_TOLERANCE: u16 = 1;
 /// hash, the gradient table or the lattice wrap moves essentially every channel
 /// and drives this to nearly zero. It does **not** catch a defect confined to a
 /// minority of texels, which would sail past a 0.40 floor with 0.9 agreement;
-/// that is [`CPU_GPU_STEP_TOLERANCE`]'s job, and that bound is the one doing the
-/// real work now that a step is 2¹³ times finer in relative terms than an 8-bit
-/// LSB was.
+/// that is [`CPU_GPU_STEP_TOLERANCE`]'s job (with [`CPU_GPU_VALUE_TOLERANCE`] for
+/// the near-zero tail), and that pair is the one doing the real work now that a
+/// step is 2¹³ times finer in relative terms than an 8-bit LSB was.
 pub const CPU_GPU_EXACT_CHANNEL_FRACTION: f64 = 0.40;
 
 /// Relative tolerance of the cloud-**shadow** parity gate (dimensionless).

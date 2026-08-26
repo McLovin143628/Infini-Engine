@@ -22,9 +22,9 @@ use inf_render::gizmo::{self, GizmoAxis, GizmoMode};
 use inf_render::golden::{image_diff, within_tolerance};
 use inf_render::passes::vgeom::{cpu_visible_set, cull_flags, frustum_planes, lod_threshold};
 use inf_render::{
-    assemble_patches, cull_visible, cull_visible_streamed, detail_texel, expand_text, shape_texel,
-    Ambient2D, AtmosphereParams, AtmosphereQuality, BloomSettings, CloudParams, CloudQuality,
-    CloudVolumes, EngineRenderer, GiAudit, GiQuality, GiSettings, GpuContext, HAlign,
+    assemble_patches, cull_visible, cull_visible_streamed, detail_texel, expand_text, half_to_f32,
+    shape_texel, Ambient2D, AtmosphereParams, AtmosphereQuality, BloomSettings, CloudParams,
+    CloudQuality, CloudVolumes, EngineRenderer, GiAudit, GiQuality, GiSettings, GpuContext, HAlign,
     HeadlessTarget, HeightFog, LightKind, MeshInstance, PrebatchedRun, PrecipParams, PrecipQuality,
     PrimMesh, RenderChunk, RenderDeform, RenderDeformCell, RenderLight, RenderLight2D, RenderScene,
     RenderSettings, RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap,
@@ -35,7 +35,8 @@ use inf_render::{
     WaterKindGpu, WaterQuality, WaveField, WaveSpec, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE,
     BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS,
     BUILTIN_FONT_TEXTURE, CPU_GPU_EXACT_CHANNEL_FRACTION, CPU_GPU_SHADOW_TOLERANCE,
-    CPU_GPU_STEP_TOLERANCE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
+    CPU_GPU_STEP_TOLERANCE, CPU_GPU_VALUE_ESCAPE_FRACTION, CPU_GPU_VALUE_TOLERANCE,
+    HEADLESS_FORMAT, TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -5404,11 +5405,44 @@ fn the_cloud_temporal_pass_accumulates_and_stays_a_function_of_the_clock() {
     );
 }
 
+/// The gap between binary16 `h` and its successor, in the field's units — one
+/// "step" measured as a value rather than as a bit pattern.
+///
+/// Everything here is positive and finite (the cloud field lives in `[0, 1]`), so
+/// the bit patterns are monotone in magnitude and this is well defined.
+fn half_step_value(h: u16) -> f32 {
+    (half_to_f32(h.saturating_add(1)) - half_to_f32(h)).abs()
+}
+
+/// One baked binary16 channel against its CPU reference, **in both units the
+/// disagreement comes in**: steps of the bit pattern, and units of the field.
+fn half_channel_delta(got: u16, want: u16) -> (u16, f32) {
+    (
+        got.abs_diff(want),
+        (half_to_f32(got) - half_to_f32(want)).abs(),
+    )
+}
+
+/// The envelope the two bake gates share (`cloud_noise_bake_matches_the_cpu_reference`
+/// and `cloud_quality_switch_rebuilds_the_cloud_binds`) — one door, so a bound
+/// re-derived for one of them cannot leave the other carrying the old exposure.
+///
+/// A channel passes on **either** ruler. See `clouds::CPU_GPU_VALUE_TOLERANCE`
+/// for why there are two: in the Worley channels' near-zero tail a step of the
+/// bit pattern is as fine as an f32 last place of the `√best ≈ 1` the value was
+/// subtracted from, so the step ruler asks there for an agreement no two
+/// compilers owe each other.
+fn baked_half_agrees(got: u16, want: u16) -> bool {
+    let (steps, dv) = half_channel_delta(got, want);
+    steps <= CPU_GPU_STEP_TOLERANCE || dv <= CPU_GPU_VALUE_TOLERANCE
+}
+
 /// **CPU/GPU parity of the noise bake.** The GPU volumes must reproduce
 /// `inf_render::shape_texel` / `detail_texel` to within the documented envelope:
-/// at most `CPU_GPU_STEP_TOLERANCE` steps of the binary16 bit pattern on any
-/// channel, and exactly equal on at least `CPU_GPU_EXACT_CHANNEL_FRACTION` of
-/// channels.
+/// on every channel either at most `CPU_GPU_STEP_TOLERANCE` steps of the binary16
+/// bit pattern or at most `CPU_GPU_VALUE_TOLERANCE` of value, with the second
+/// route taken by at most `CPU_GPU_VALUE_ESCAPE_FRACTION` of channels; and exact
+/// equality on at least `CPU_GPU_EXACT_CHANNEL_FRACTION` of channels.
 ///
 /// **Both units changed at SKY2** and this comment is the third place that had to
 /// say so: the volumes are `Rgba16Float`, so a texel is four little-endian halves
@@ -5421,12 +5455,26 @@ fn the_cloud_temporal_pass_accumulates_and_stays_a_function_of_the_clock() {
 /// rounds to nearest. Four independent coin-flips a texel puts *whole-texel*
 /// agreement at 0.5⁴ = 6.25 %, which no honest floor over texels could survive.
 ///
-/// The envelope also has to absorb FMA contraction, which WGSL permits and which
-/// shifts an f32 by ~1 ULP — 2¹³ times finer than the f16 grid the value lands
-/// on, so it is the smaller of the two effects here. Everything the field is
-/// built on that *could* diverge structurally — the hash, the gradient table, the
-/// lattice wrap — is pure integer arithmetic, and a mistake in any of those moves
-/// whole texels rather than last places, failing the step bound outright.
+/// **The value ruler is the macOS CI red's answer**, and it is the interesting
+/// half of this gate now. SKY2's envelope was one step everywhere, on the
+/// argument that an f32 last place is 2¹³ times finer than an f16 step and so
+/// nothing short of a port error could cross one. That argument holds for a
+/// well-scaled value and fails completely in the Worley channels' cancellation
+/// tail, where `1 − min(√best, 1)` lands in binary16's *subnormals* and one step
+/// is 2⁻²⁴ — exactly one last place of the near-1.0 quantity it came from.
+/// Windows/Vulkan happened to land inside one step there; the Apple-silicon
+/// runner landed two out, and SKY2's panic message called that "a port error, not
+/// FMA contraction and not a rounding-mode difference" — a claim about a platform
+/// the gate had never run on. It is neither: it is one last place of arithmetic
+/// on top of one step of store rounding, in the one corner where those are the
+/// same size. `clouds::CPU_GPU_VALUE_TOLERANCE` carries the derivation.
+///
+/// What the pair still catches without appeal to any platform: everything the
+/// field is built on that *could* diverge structurally — the hash, the gradient
+/// table, the lattice wrap — is pure integer arithmetic, and a mistake in any of
+/// those moves whole texels by O(0.1–1). That is six orders of magnitude over the
+/// value tolerance and hundreds of steps over the step tolerance, so it fails on
+/// both rulers at once, on essentially every channel.
 #[test]
 fn cloud_noise_bake_matches_the_cpu_reference() {
     let Some(gpu) = gpu_or_skip() else { return };
@@ -5451,8 +5499,16 @@ fn cloud_noise_bake_matches_the_cpu_reference() {
             let mut low = 0u64;
             let mut high = 0u64;
             let mut total = 0u64;
+            // The distribution, which is the thing the macOS red could not be
+            // read from: one coordinate and no counts says nothing about whether
+            // two steps is a corner or a collapse.
+            let mut steps = [0u64; 5]; // 0, 1, 2, 3, >=4
+            let mut escaped = 0u64; // > 1 step, inside the value tolerance
+            let mut over = Vec::new(); // > 1 step and outside it — the failures
+            let mut tail = 0u64; // channels whose f16 grid is finer than that
             let mut worst = 0u16;
-            let mut worst_at = (0, 0, 0);
+            let mut worst_at = (0, 0, 0, 0usize);
+            let mut worst_dv = 0.0f32;
             for z in 0..edge {
                 for y in 0..edge {
                     for x in 0..edge {
@@ -5472,10 +5528,22 @@ fn cloud_noise_bake_matches_the_cpu_reference() {
                                 std::cmp::Ordering::Less => low += 1,
                                 std::cmp::Ordering::Greater => high += 1,
                             }
-                            let d = got[c].abs_diff(want[c]);
+                            let (d, dv) = half_channel_delta(got[c], want[c]);
+                            steps[(d as usize).min(4)] += 1;
+                            if half_step_value(want[c]) <= CPU_GPU_VALUE_TOLERANCE {
+                                tail += 1;
+                            }
+                            if d > CPU_GPU_STEP_TOLERANCE {
+                                if baked_half_agrees(got[c], want[c]) {
+                                    escaped += 1;
+                                } else if over.len() < 8 {
+                                    over.push((x, y, z, c, got[c], want[c], d, dv));
+                                }
+                            }
                             if d > worst {
                                 worst = d;
-                                worst_at = (x, y, z);
+                                worst_at = (x, y, z, c);
+                                worst_dv = dv;
                             }
                         }
                     }
@@ -5483,24 +5551,65 @@ fn cloud_noise_bake_matches_the_cpu_reference() {
             }
             let channels = total * 4;
             let per_channel = exact_ch as f64 / channels as f64;
-            eprintln!(
-                "{what} parity: {:.4}% of channels exact ({:.4}% of texels), \
-                 {:.2}% low / {:.2}% high, worst |d| = {worst} f16 step(s) at \
-                 {worst_at:?} ({total} texels)",
+            let escaped_frac = escaped as f64 / channels as f64;
+            // Printed unconditionally AND quoted into every panic below: a
+            // divergence on a platform nobody here can run has to be diagnosable
+            // from the CI log alone.
+            let dist = format!(
+                "{what}: {channels} channels over {total} texels — {:.4}% exact \
+                 ({:.4}% of texels), {:.2}% low / {:.2}% high; |d| in f16 steps = \
+                 [0]{} [1]{} [2]{} [3]{} [>=4]{}; {escaped} channels ({escaped_frac:.3e}) \
+                 passed on value not steps, against a near-zero tail of {tail} \
+                 ({:.3e}); worst |d| = {worst} steps = {worst_dv:e} at (x,y,z,ch) \
+                 {worst_at:?}",
                 per_channel * 100.0,
                 exact_texel as f64 / total as f64 * 100.0,
                 low as f64 / channels as f64 * 100.0,
                 high as f64 / channels as f64 * 100.0,
+                steps[0],
+                steps[1],
+                steps[2],
+                steps[3],
+                steps[4],
+                tail as f64 / channels as f64,
+            );
+            eprintln!("{dist}");
+            // What each regime means, so the next reader of a red log does not
+            // have to re-derive it (SKY2's message asserted the wrong one):
+            //
+            //   every channel at 0 or 1 step   an adapter that rounds to nearest,
+            //                                  or one that truncates; both legal,
+            //                                  and the low/high split tells them
+            //                                  apart.
+            //   a handful at 2+ steps, all
+            //   inside CPU_GPU_VALUE_TOLERANCE the Worley cancellation tail: an
+            //                                  f32 last place stacked on the
+            //                                  store's rounding, in the corner
+            //                                  where those are the same size.
+            //   anything outside that value    a real disagreement in the field.
+            //   floor, or a tail that is a     Not a rounding mode: no rounding
+            //   large share of the volume      of the same number can do it.
+            assert!(
+                over.is_empty(),
+                "{dist}\n{} channel(s) are more than {CPU_GPU_STEP_TOLERANCE} step(s) \
+                 out AND outside the {CPU_GPU_VALUE_TOLERANCE:e} value envelope — that \
+                 is a real disagreement in the field, not a rounding mode and not the \
+                 near-zero tail (which is bounded by the value envelope by \
+                 construction). First offenders as (x, y, z, channel, got, want, steps, \
+                 |dvalue|): {over:?}",
+                over.len()
             );
             assert!(
-                worst <= CPU_GPU_STEP_TOLERANCE,
-                "{what}: worst |d| = {worst} f16 steps at {worst_at:?} exceeds the \
-             {CPU_GPU_STEP_TOLERANCE}-step envelope — that is a port error, not FMA \
-             contraction and not a rounding-mode difference"
+                escaped_frac <= CPU_GPU_VALUE_ESCAPE_FRACTION,
+                "{dist}\n{escaped_frac:.3e} of channels needed the value envelope rather \
+                 than the step envelope, over a ceiling of {CPU_GPU_VALUE_ESCAPE_FRACTION:e} \
+                 — the escape is only legitimate while the cancellation tail is a \
+                 thousandth of the field, and this says the field has collapsed toward \
+                 zero somewhere it should not have"
             );
             assert!(
                 per_channel >= CPU_GPU_EXACT_CHANNEL_FRACTION,
-                "{what}: only {:.2}% of channels are bit-exact (the envelope requires \
+                "{dist}\nonly {:.2}% of channels are bit-exact (the envelope requires \
                  {:.0}%) — a last-bit rounding-mode difference cannot get below half, \
                  so this is a computation difference",
                 per_channel * 100.0,
@@ -5726,10 +5835,17 @@ fn cloud_quality_switch_rebuilds_the_cloud_binds() {
             }
             let want = shape_texel(seed, x, y, z, res);
             for c in 0..4 {
+                // The same two-ruler envelope the parity gate uses, through the
+                // same door: three texels is 12 channels, the cancellation tail
+                // is ~6.6e-4 of channels, so a one-step-only bound here had a
+                // few-percent chance per run of red-CIing on an adapter this
+                // machine cannot see — the P25 one-platform-bounds law, met
+                // where it is cheapest to miss.
+                let (d, dv) = half_channel_delta(got[c], want[c]);
                 assert!(
-                    got[c].abs_diff(want[c]) <= CPU_GPU_STEP_TOLERANCE,
-                    "{q:?}: texel ({x},{y},{z}) channel {c} is {} not {} — the \
-                     volume does not hold this tier's field",
+                    baked_half_agrees(got[c], want[c]),
+                    "{q:?}: texel ({x},{y},{z}) channel {c} is {} not {} ({d} f16 \
+                     steps = {dv:e}) — the volume does not hold this tier's field",
                     got[c],
                     want[c]
                 );

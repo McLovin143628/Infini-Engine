@@ -94,8 +94,9 @@ pub use caps::{
     RenderTier,
 };
 pub use clouds::{
-    detail_texel, shape_texel, wind_offset, CloudParams, CloudQuality, CloudVolumes,
+    detail_texel, half_to_f32, shape_texel, wind_offset, CloudParams, CloudQuality, CloudVolumes,
     CPU_GPU_EXACT_CHANNEL_FRACTION, CPU_GPU_SHADOW_TOLERANCE, CPU_GPU_STEP_TOLERANCE,
+    CPU_GPU_VALUE_ESCAPE_FRACTION, CPU_GPU_VALUE_TOLERANCE,
 };
 pub use debug_draw::{
     collider_outline_2d, collider_outline_3d, ColliderOutline2D, ColliderOutline3D, DebugDraw,
