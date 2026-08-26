@@ -2093,6 +2093,8 @@ fn thread_main(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::Graphics::Gdi::{GetWindowRgnBox, COMPLEXREGION, RGN_ERROR, SIMPLEREGION};
+    use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
 
     fn hole(x: i32, y: i32, width: u32, height: u32) -> ViewportRect {
         ViewportRect {
@@ -2153,6 +2155,139 @@ mod tests {
         assert_eq!(boxes, vec![(0, 50, 50, 100), (600, 450, 660, 490)]);
     }
 
+    /// A parent + child window pair for the OS-level arms, or `None` where no
+    /// window can be created at all. Creating a window needs a window station,
+    /// not a GPU and not a display — so this runs in CI on Windows — but a
+    /// session that cannot is a skip with a printed reason, the same shape the
+    /// golden harness uses for a missing adapter.
+    fn bench_windows() -> Option<(HWND, HWND)> {
+        /// `DefWindowProcW` is a Rust-ABI item here; a class needs a `"system"`
+        /// one. The parent does nothing but exist and pump.
+        unsafe extern "system" fn bench_wnd_proc(
+            hwnd: HWND,
+            msg: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+
+        let parent = unsafe {
+            let hinstance = GetModuleHandleW(None).ok()?;
+            let class = w!("InfinityViewportRegionBench");
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(bench_wnd_proc),
+                hInstance: hinstance.into(),
+                lpszClassName: class,
+                ..Default::default()
+            };
+            RegisterClassW(&wc);
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                class,
+                w!("region bench"),
+                WS_OVERLAPPEDWINDOW,
+                80,
+                80,
+                1312,
+                784,
+                None,
+                None,
+                Some(hinstance.into()),
+                None,
+            )
+            .ok()?
+        };
+        let child = create_child_window(parent.0 as isize).ok()?;
+        unsafe {
+            let _ = SetWindowPos(child, Some(HWND_TOP), 0, 0, 800, 600, SWP_NOACTIVATE);
+        }
+        Some((parent, child))
+    }
+
+    /// **The region actually reaches the window** (UX2) — an OS-level arm, not
+    /// a source one.
+    ///
+    /// `apply_window_region` can be wrong in ways the geometry unit tests
+    /// cannot see: a `CombineRgn` that leaves the destination untouched, a
+    /// `SetWindowRgn` whose failure is swallowed, a region deleted before it is
+    /// handed over. `GetWindowRgnBox` asks Windows what the window's region
+    /// actually IS, so all three are visible here. It needs no adapter and no
+    /// display, only a window station — so unlike the presentation measurement
+    /// this one runs everywhere Windows does.
+    #[test]
+    fn the_region_reaches_the_window() {
+        let Some((parent, child)) = bench_windows() else {
+            eprintln!("the_region_reaches_the_window: no window station — skipped");
+            return;
+        };
+
+        unsafe {
+            // A fresh child has no region at all.
+            let mut rgn_box = RECT::default();
+            assert_eq!(
+                GetWindowRgnBox(child, &mut rgn_box),
+                RGN_ERROR,
+                "a child window starts with no region"
+            );
+
+            // One cutout in the middle: a rectangle minus an interior rectangle
+            // is a COMPLEX region whose bounding box is still the whole child.
+            apply_window_region(
+                child,
+                &[ViewportRect {
+                    x: 400,
+                    y: 260,
+                    width: 220,
+                    height: 300,
+                }],
+                hole(0, 0, 800, 600),
+            );
+            assert_eq!(
+                GetWindowRgnBox(child, &mut rgn_box),
+                COMPLEXREGION,
+                "a hole punched in the middle makes the region complex — a \
+                 SIMPLEREGION here means the CombineRgn did nothing"
+            );
+            assert_eq!(
+                (rgn_box.left, rgn_box.top, rgn_box.right, rgn_box.bottom),
+                (0, 0, 800, 600),
+                "the region still spans the child; only its interior is missing"
+            );
+
+            // …and no cutouts RELEASES it, rather than leaving a stale hole.
+            apply_window_region(child, &[], hole(0, 0, 800, 600));
+            assert_eq!(
+                GetWindowRgnBox(child, &mut rgn_box),
+                RGN_ERROR,
+                "an empty cutout set must release the region"
+            );
+
+            // A cutout that reaches an edge leaves ONE rectangle, and its top
+            // edge has moved — the arm that reads the subtraction's direction,
+            // which the complex-region arm above cannot.
+            apply_window_region(
+                child,
+                &[ViewportRect {
+                    x: 0,
+                    y: 0,
+                    width: 800,
+                    height: 100,
+                }],
+                hole(0, 0, 800, 600),
+            );
+            assert_eq!(GetWindowRgnBox(child, &mut rgn_box), SIMPLEREGION);
+            assert_eq!(
+                (rgn_box.left, rgn_box.top, rgn_box.right, rgn_box.bottom),
+                (0, 100, 800, 600),
+                "cutting the top band off must move the region's top edge down"
+            );
+
+            let _ = DestroyWindow(child);
+            let _ = DestroyWindow(parent);
+        }
+    }
+
     /// **The DWM caveat, measured** (UX2). A window region is documented to be
     /// able to knock the compositor off its fast path, so the ruling that
     /// picked this mechanism came with an instruction to measure presentation
@@ -2177,45 +2312,12 @@ mod tests {
         const WARMUP: usize = 30;
         const FRAMES: usize = 240;
 
-        /// `DefWindowProcW` is a Rust-ABI item here; a class needs a `"system"`
-        /// one. The bench parent does nothing but exist and pump.
-        unsafe extern "system" fn bench_wnd_proc(
-            hwnd: HWND,
-            msg: u32,
-            wparam: WPARAM,
-            lparam: LPARAM,
-        ) -> LRESULT {
-            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-        }
-
-        let parent = unsafe {
-            let hinstance = GetModuleHandleW(None).expect("module handle");
-            let class = w!("InfinityViewportRegionBench");
-            let wc = WNDCLASSW {
-                lpfnWndProc: Some(bench_wnd_proc),
-                hInstance: hinstance.into(),
-                lpszClassName: class,
-                ..Default::default()
-            };
-            RegisterClassW(&wc);
-            CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
-                class,
-                w!("region bench"),
-                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                80,
-                80,
-                W as i32 + 32,
-                H as i32 + 64,
-                None,
-                None,
-                Some(hinstance.into()),
-                None,
-            )
-            .expect("bench parent window")
+        let Some((parent, child)) = bench_windows() else {
+            eprintln!("region_present_cost: no window station — nothing to measure");
+            return;
         };
-        let child = create_child_window(parent.0 as isize).expect("bench child window");
         unsafe {
+            let _ = ShowWindow(parent, SW_SHOWNA);
             let _ = SetWindowPos(
                 child,
                 Some(HWND_TOP),
@@ -2294,5 +2396,9 @@ mod tests {
             median(&cut) - median(&whole),
             (median(&cut) - median(&whole)) / 16.667 * 100.0,
         );
+        unsafe {
+            let _ = DestroyWindow(child);
+            let _ = DestroyWindow(parent);
+        }
     }
 }
