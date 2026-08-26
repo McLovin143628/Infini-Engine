@@ -233,7 +233,8 @@ impl ViewportHandle {
     /// in six places since Phase 1.
     ///
     /// `rects` are parent-client physical pixels (the [`set_rect`](Self::set_rect)
-    /// space). An empty vector releases the region. See [`Cmd::SetRegion`].
+    /// space). An empty vector releases the region. See `Cmd::SetRegion` (this
+    /// module) for the coordinate contract in full.
     pub fn set_region(&self, rects: Vec<ViewportRect>) {
         let _ = self.tx.send(Cmd::SetRegion(rects));
     }

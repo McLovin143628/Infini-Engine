@@ -7338,3 +7338,262 @@ nothing at all. **A population bound read off a maximum is a guess wearing a mea
 Verification: `inf-render` **479** lib arms and **102** golden arms green on Windows/RTX 4070 Ti, the
 distribution unchanged at 50.0218 / 49.98 / 0.00 with **zero** channels needing the value ruler. No
 golden re-blessed, no shader touched, no schema moved. `(SKY2) ci:`-tagged.
+
+## Wave UX2 (the viewport stops blacking out)
+
+Base `1ebc9c35`. RTX 4070 Ti, Windows/Vulkan. **Seven commits**, `(UX2)`-tagged.
+
+Right-clicking in the 3D view blacked the 3D view out. So did opening the File menu, and so did
+right-clicking an asset in the Content Drawer. That is the Phase-1 **airspace rule** working exactly
+as designed — the engine renders into a native child window that draws OVER the webview, so any HTML
+surface which might cross the hole hides it first — and it is the single most game-engine-unlike
+thing in the editor.
+
+The sentence that promised the fix has been carried, verbatim, in **six** places since Phase 1:
+
+> *P2.1 explores flash-free alternatives (window-region cutouts / last-frame freeze).*
+
+`viewportOverlay.ts:27-28`, `win32.rs:204-205`, `commands/viewport.rs:486`, `ROADMAP:330-331`,
+`ROADMAP:22573`, `ViewportContextMenu.tsx:15-20`. No code was ever written behind it. This wave
+wrote it.
+
+### The mechanism, and the one that was rejected before it
+
+`SetWindowRgn`. A window region is the area within a window the system permits drawing in; set the
+child's region to *its own client rectangle minus the menu*, and the webview shows through exactly
+where the menu is while the engine keeps presenting everywhere else. Every piece of plumbing already
+existed — a command channel to the viewport thread, a rect contract in physical pixels, a refcounted
+guard on the frontend — and it needs no new dependency: `SetWindowRgn`, `CreateRectRgn`, `CombineRgn`
+and `DeleteObject` are all in `windows::Win32::Graphics::Gdi`, behind the same
+`Win32_Graphics_Gdi` feature `ScreenToClient` has needed since Spike A.
+
+The alternative the sentence also named — freezing the last rendered frame into an `<img>` — was
+rejected on the scout's numbers before this wave started: there is no readback path on the live
+viewport (its swapchain is not `COPY_SRC`), and the P23.2a preview measurement puts a 512² PNG
+*encode* at **22.9 ms** against a **0.34 ms** render. Seventy times the cost of the thing it would be
+hiding, at a quarter of the resolution, on a right-click.
+
+### The DWM caveat, measured
+
+The ruling that chose `SetWindowRgn` came with a condition: a window region is documented to be able
+to knock the compositor off its fast path, so **measure presentation cost with one applied before
+committing**. `region_present_cost` renders the same scene into the same child window twice, 240
+frames after 30 warm-up, FIFO, 1280×720:
+
+| run | median | p95 | max |
+|---|---|---|---|
+| no region | 16.677 ms | 17.467 ms | 33.244 ms |
+| a 220×300 cutout applied | 16.704 ms | 17.625 ms | 18.695 ms |
+| **second sample, no region** | 16.686 ms | 17.373 ms | 33.196 ms |
+| **second sample, cutout applied** | 16.692 ms | 17.606 ms | 18.669 ms |
+
+Both runs stay pinned to the 60 Hz interval. The region costs **+0.006 to +0.027 ms**, 0.2 % of a
+frame at worst, and p95 moves by 0.15–0.23 ms. The caveat does not bite on this driver. (The `max`
+column is the warm-up tail of the first run of the pair, not an effect of the region.) The
+measurement is `#[ignore]`d — it needs a window, an adapter and a compositor — and prints the
+distribution it judged on, so a future driver that *does* tank can be seen rather than argued about.
+
+### The guard's rule, and why it is pessimistic
+
+`acquireViewportOverlay(rects?)` now takes rectangles. A viewport is **cut out when every hold on it
+carries some**, and **hides outright the moment one does not**.
+
+That asymmetry is the design, not caution. A surface that cannot say where it is could be anywhere;
+leaving the viewport visible under it means the overlay is drawn *under* the 3D view — invisible,
+and the clicks land in the viewport instead. That is strictly worse than the blackout, and it is
+exactly the bug Wave E found in the Content Drawer's hand-rolled menu. So the fallback is the
+pre-UX2 behaviour, reached by three different routes:
+
+* an overlay that supplies no rects (the palette, the dialogs, the drag ghost);
+* an overlay whose measurement comes back empty (nothing marked, or nothing laid out);
+* a platform with no cutout backend.
+
+The third needed a door of its own. `viewport_cutout_supported` answers `cfg!(windows)`, and the
+guard asks once — at viewport registration, long before any menu — and behaves exactly as it did
+before this wave until the answer arrives. So there is nothing to await anywhere: the fallback is
+the old behaviour, not a broken one. **macOS keeps the full hide, stated rather than implied.** Its
+twin is a `CALayer` mask: a different mechanism with its own coordinate flip and its own retain
+rules, in a file that has never been run on hardware. The one-platform law says don't claim the fix
+where it isn't built.
+
+### What is cut out, and what still hides — with a reason
+
+| surface | treatment | why |
+|---|---|---|
+| viewport right-click menu | cutout | `ContextMenuSurface` |
+| Outliner right-click menu | cutout | `ContextMenuSurface` |
+| panel tab / floating frame menu | cutout | `ContextMenuSurface` |
+| menu-bar dropdowns + submenus | cutout | marked separately, see below |
+| Content Drawer asset menu | cutout | one rect covers it at every size |
+| command palette, 11 dialogs, first-run tour | **full hide** | each draws `fixed inset-0 bg-black/30–40` |
+| panel-drag ghost | **full hide** | follows the pointer; a rect per frame is IPC per frame |
+| start screen | **full hide** | it *is* the window |
+
+The middle row is the one worth writing down. Those surfaces are not "not migrated yet" — cutting
+them out would be **wrong**. Each draws a full-window scrim, and a cutout would leave the viewport
+as an undimmed rectangle punched through the dim. The full hide is the correct rendering of a modal,
+and the API leaves it as a first-class choice rather than a leftover.
+
+One measured element fixed three menus at once because `ContextMenuSurface` owns the guard for all
+three — the Wave E decision to give the surface the guard instead of each caller paid for itself
+here.
+
+### Where the rectangle comes from, and where the subtraction happens
+
+The frontend measures CSS rects and multiplies by `devicePixelRatio` through `toPhysicalRect`, the
+same door `viewport_set_rect` has used since Spike A. It sends them **window-relative**; the viewport
+thread subtracts the hole's own origin.
+
+That split is deliberate and it is the reason a resize stays correct. A window region is stored in
+child coordinates, so the origin has to come off somewhere — and doing it on the native side means
+the origin used is the one the child was *just* positioned at. The frontend would have to cache an
+origin and would be wrong for exactly as long as a splitter drag lasts.
+
+Three things take a region away, each handled where it happens:
+
+1. **A resize leaves it stale.** `Cmd::SetRect` rebuilds it against the new rectangle, skipped
+   entirely when nothing is cut out so the ordinary resize path pays nothing.
+2. **An embedded PIE window suspends it.** `SetVisible` has skipped while embedded since P9.4;
+   `SetRegion` skips for the same reason (shaping a hidden window leaves a stale region), records the
+   rects anyway, and `ReleaseForeign` puts them back.
+3. **`SetWindowRgn` takes ownership only on success.** The failure path deletes the region, or every
+   failed menu open costs a GDI handle against a 10 000-object process ceiling.
+
+### The premise that was wrong, and the arm that found it
+
+The brief, the ruling and this wave's own first three comments all said **"the region is reset by
+resize"**. `a_resize_is_why_the_region_is_rebuilt` asks Windows instead of repeating it, and the
+answer is different: after a `SetWindowPos` from 800×600 to 640×480 the region reads back
+**verbatim** — `SIMPLEREGION (0, 100, 800, 600)`, still describing a child that no longer exists.
+
+That is the worse of the two possibilities, and it makes the re-application **more** necessary rather
+than less. An absent region merely restores the blackout the wave removed; a stale one silently clips
+the wrong pixels — a band of viewport missing along one edge for as long as the menu stays open, with
+nothing thrown and nothing logged. The mechanism was already right, because the reason it was built
+for is the other half: the cutouts are measured against the **window** while the region is stored in
+**child** coordinates, so a hole that moves relative to the child needs rebuilding whichever way
+Windows behaves. What was wrong was the sentence explaining it, in three comments and a gate's module
+doc. It now says what was measured.
+
+The arm asserts the **disjunction** — after a resize the region is either gone or does not fit — and
+then asserts what the rebuild puts back, `(0, 100, 640, 480)`. So it keeps working the day a Windows
+build starts discarding, and still fails if one ever both keeps *and* re-fits, which is the only
+world in which the re-application would be redundant. *Assert the world, not the report.*
+
+### The measuring hook
+
+`useViewportCutout(active, root)` measures the elements marked `data-viewport-cutout` at or under
+`root`. **Nothing is measured implicitly** — an overlay that marks nothing measures `null` and hides,
+because assuming some container is the overlay punches the hole in the wrong place, which is the
+worse failure.
+
+Two details cost more thought than they look:
+
+* **The acquisition is a layout effect, with the rect already in hand.** Acquire-then-measure would
+  push a hide and undo it a millisecond later — the same blackout flash, just shorter, and it would
+  fail the wave's own negative gate.
+* **The clamp had to move.** `ContextMenuSurface` keeps a menu inside the window by writing
+  `left`/`top` imperatively; as a passive effect that ran *after* the cutout measured, so a menu
+  opened near the right edge punched its hole at the unclamped point. It is now a layout effect
+  declared above the hook, and the gate asserts the **first** push already carries the clamped
+  rectangle.
+
+Re-measurement is deliberately generous — every render, a `ResizeObserver` on the root, a
+`MutationObserver` under it — because it is three `getBoundingClientRect` calls behind an IPC dedupe
+and being one frame stale is a visibly wrong hole. The `MutationObserver` is not belt-and-braces: a
+menu-bar submenu opens on a **child** component's state, so the host never re-renders, and it is the
+only thing that notices.
+
+### The gates, and what falsifies them
+
+The frontend cannot photograph a native child window, so every claim is asserted at the seam — which
+command crossed, carrying what, in what order. **The arm that matters most is negative**: with a
+measured overlay open, `viewport_set_visible(false)` must not be sent at all. A gate that only
+checked the region was pushed passes just as happily with the hide still there.
+
+| mutation | what dies |
+|---|---|
+| `ContextMenuSurface` back on the old full-hide guard | 2 surface arms — the seam reads `hide` where it must read `region:400,260,220,300` |
+| the clamp back to a passive effect | 1 arm — first push at the **unclamped** `1000,700` instead of `820,644` |
+| an unmeasured hold no longer forces the hide | 3 arms across both suites |
+| the resize re-apply dropped | 2 source arms |
+| the PIE skip dropped from `SetRegion` | 1 source arm |
+| `RGN_DIFF` → `RGN_OR` in `apply_window_region` | the OS-level arm — the region goes SIMPLE and its top edge stays at 0 |
+
+`the_region_reaches_the_window` is the one arm that is neither a source pin nor a frontend seam: it
+creates a real child window and asks Windows, through `GetWindowRgnBox`, what the region actually is
+— no region on a fresh child, COMPLEX with a hole in the middle, released by an empty set, and a top
+edge that MOVES when the cut reaches an edge. It needs a window station but no adapter and no
+display, so it runs in CI on Windows and skips with a printed reason where it cannot.
+
+**And the battery found a drift the wave had not.** `both_platform_pumps_carry_the_same_commands` —
+the mirror gate P21.2 built after P20.4 shipped `set_water` on one side and cost a follow-up commit
+to a red macOS CI — caught `Cmd::SetRegion` existing on win32 alone, in under a millisecond. It is a
+deliberate one-sided command, so it joined `EmbedForeign`/`ReleaseForeign` on `PLATFORM_ONLY` with
+the reason written down; the handle *method* exists on both sides, which is what Ring 2 calls, and
+`both_platform_handles_expose_the_same_methods` was green throughout.
+
+**One hardening the battery did not find and a reading of the code did.** Every number in a cutout
+crosses from the frontend as a rounded `f64`, and `as u32` **saturates** — so a nonsense measurement
+does not arrive as a big number, it arrives as `u32::MAX`, which is `-1` in `i32`, and `clamp(0, -1)`
+**panics**. That panic would land on the viewport thread inside the command drain, outside the
+render's `catch_unwind`, and take the viewport down with whatever lock it held. The geometry now runs
+in `i64`, where the arithmetic cannot overflow and the bounds cannot invert, and `CreateRectRgn` got
+the same guard (`u32::MAX as i32` there is an *empty* region — a viewport clipped away entirely,
+which reads as "the cutout hid everything"). `a_saturated_rectangle_clips_instead_of_panicking`.
+
+### The laws
+
+* **A platform premise is a measurement, not a recollection.** "The region is reset by resize" was
+  carried by the brief, the ruling and three of this wave's own comments, and it is false on this
+  Windows build — the region survives, describing a window that no longer exists. Ask the OS. The
+  P21 law in a new coat: *assert the world, not the report.*
+* **`as u32` saturates, so a bad number arrives as the WORST number.** A frontend measurement that
+  goes wrong does not reach a Rust door as something implausible-but-survivable; it reaches it as
+  `u32::MAX`, which is `-1` one cast later. Any door that clamps against a converted extent has a
+  panic in it until the arithmetic is widened.
+* **A fallback is a design decision and has to have a reason written down.** "Not migrated yet" and
+  "must not be migrated" look identical in a diff. The palette and the eleven dialogs draw a
+  full-window scrim; cutting them out would punch an undimmed rectangle through the dim. That
+  sentence is the difference between a leftover and a choice.
+
+### Counts
+
+Battery **323 / 6 108 / 0 / 19** (+1 block — `region_gate` — +15 arms and +1 `#[ignore]`d probe over
+the last recorded 322 / 6 093 / 0 / 18, which predates the two SKY2 CI-red commits). Goldens **54 /
+102**, `INF_GOLDEN_STRICT=1` green, **none moved and none re-blessed** — no render path was touched.
+Frontend **712 / 78** (702 before; +10 arms, no new file). Clippy **0** with `-D warnings`.
+Rustdoc **374 over 30 crates** after `cargo clean --doc` — the wave adds **zero** (it briefly added
+one, a doc link to the private `Cmd::SetRegion`; that is a plain code span now). `cargo fmt --all
+--check` clean. **No new crate, no new dependency, no schema move, no golden move.**
+
+### Carried, honestly
+
+1. **The thing a human still has to look at.** CI has no window and no compositor, so "the menu
+   appears at the cursor with the scene still rendering behind it" is human-verified-on-Windows,
+   labelled the way Wave E labelled the right-click appearing at all. What *is* measured is that the
+   region reaches the window (`GetWindowRgnBox`), that presentation survives it (`region_present_cost`),
+   and that the right command crosses with the right rectangle (the seam arms). What is not is that
+   WebView2 repaints the newly exposed pixels — standard for a clipped sibling, and not asserted here.
+2. **macOS and Linux keep the blackout.** Stated in `macos.rs::set_region`'s doc, in the guard's
+   module doc, and in `viewport_cutout_supported`. The CALayer-mask twin is a wave of its own.
+3. **A menu that covers the whole hole is a hide with extra steps.** The region goes empty, the child
+   is entirely clipped, and the engine keeps rendering frames nobody sees. Bounded (a context menu is
+   ~220×300), and cheap to fix later by falling back to the hide when the union covers the hole.
+4. **The MainToolbar "Play options" dropdown has no airspace guard at all** — found by this wave, not
+   fixed by it. It only exists while PIE is running, which means an embedded *foreign* player window
+   occupies the hole; hiding our own child would not uncover it, and carving the foreign window is
+   PIE scope and A8 territory. Named rather than touched.
+5. **The panel-drag ghost could be a cutout and is not.** It follows the pointer, so it would be one
+   IPC push per pointer move. Worth measuring before assuming it is too expensive.
+6. **The full-screen overlays could migrate the day one of them stops drawing a scrim.** The API is
+   there; the reason not to is in the table above, not in the backlog.
+
+### Polish items, deferred by name
+
+The brief allowed up to three cheap items from the Wave E carried list. All deferred, and the wave
+stayed the blackout: **the ~4 px fast-re-click window that activates instead of starting a gizmo
+drag** (needs the click/drag discrimination measured on a real pointer, not guessed); **marquee
+select** (explicitly not cheap); **migrating the full-screen overlays onto rect supply** (now cheap,
+but it is a behaviour change on fourteen surfaces and the table above says most of them should not
+move at all).
