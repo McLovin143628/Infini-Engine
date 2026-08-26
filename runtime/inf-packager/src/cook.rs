@@ -3221,6 +3221,20 @@ mod advisory_source_gate {
     /// instances is a worse trade than writing down where they came from, which
     /// is what this paragraph is. What actually stops them being written is the
     /// scripted-edit law (`chr(92)`, raw strings, heredocs).
+    ///
+    /// # A RAW string is not a remedy either (SK1c audit)
+    ///
+    /// The law's shorthand has been "use a raw string or a heredoc", and catches
+    /// **twenty-two and twenty-three** were written *from a raw Python string*
+    /// — the wave that made them said so in its own commit. Both came back as
+    /// the ordinary shape this sweep catches (runs of **14** spaces inside two
+    /// assertion messages), which is worth being precise about, because the
+    /// mechanism is not the one the phrase suggests: `r"…"` protects a backslash
+    /// from *Python's* escape processing and does nothing about a line that was
+    /// re-wrapped, re-indented or joined on the way to the file. **Only
+    /// `chr(92)` and a heredoc are remedies**; a raw string is a smaller trap,
+    /// not the absence of one, and the sweep is what has actually caught
+    /// twenty-three of these rather than any of the three spellings.
     #[test]
     fn no_string_literal_in_the_workspace_carries_an_eaten_continuation() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

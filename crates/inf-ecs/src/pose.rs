@@ -4027,9 +4027,11 @@ mod tests {
     /// This fixture used to author `rifle_l` / `rifle_r` here, which made two
     /// hand-written catalogues in the tree — this one and the grip gate's — with
     /// different names and different apertures for the same idea. The generator
-    /// is the single door now; the arms below name `inf_anim::GRIP_RIFLE` and
-    /// `GRIP_RIFLE_FORE`, which is the *left* hand's affordance, so the two-hand
-    /// coverage the old pair gave is kept.
+    /// is the single door now. **The two-hand coverage the old pair gave is kept
+    /// by `a_grip_closes_the_hand_its_slot_names`** (SK1c audit), which drives
+    /// `GRIP_HANDLE` through *both* slots and asserts the other hand did not
+    /// move — the arms that pre-date it name `inf_anim::GRIP_RIFLE` and only
+    /// that, so before it the left hand was never exercised here at all.
     fn mannequin_rig() -> SkeletonAsset {
         inf_anim::build_manny(&inf_anim::BodyParams::default()).expect("the mannequin builds")
     }

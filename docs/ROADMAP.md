@@ -25946,6 +25946,18 @@ threshold is one triangle), which is the worst shape a defect can have and is wh
 shipped bytes for every sample in the tree, and it is carried with all four blockers so the wave
 that takes it takes them at once.
 
+**Carried into the weapons wave, by name, because they will be planned from here.** (1) **The aim
+mask still has no consumer, two waves running.** `Mask_AimOffset` is authored as a blend profile
+onto every generated machine — including the committed starter character's — and **no transition
+names it**, because no aim or reload clip exists to name it from. (The `Mask_AimOffset` *channel*
+does have readers, in `inf_ecs::movement` and `d3::movement`; the *profile* on the machine has
+none.) A derived aim/reload clip is the item that closes it. (2) **The weapon is still a placeholder
+cube**, with the four blockers above. (3) **The off hand's fingers do not cross-fade** when a grab
+takes the hand off a weapon (SK1c audit, H1): the arm crosses over continuously, the fingers let go
+of the fore-grip in one fixed step, because one grip slot carries one affordance. (4) **The grab is
+a gesture, not a carry**, and it reaches the interaction's own point (`door::prompt_position`) rather
+than a handle — this engine has no handle.
+
 Counts at the closing head: battery **321 / 6 067 / 0 / 16** (+1 block, `weapon_hands_gate`; +15
 arms), goldens **54** byte-identical under `INF_GOLDEN_STRICT=1` over 101 arms with no PNG
 rewritten — no render path is touched and no golden can see the hero, since `inf-render` names
@@ -25957,7 +25969,82 @@ clean, frontend **702 / 78** with `tsc` and `eslint` clean, schema **unmoved** (
 still **23**, and the only committed bytes that moved are the two island `.inf_lvl` files at +70 B
 each plus the nineteen new files under `samples/starter-character/`. **The twenty-second and
 twenty-third chr(92) catches were this wave's own** — two eaten continuations written from a *raw*
-Python string, where a single backslash is what a Rust continuation needs and a doubled one is what
-a raw string preserves: the mirror image of the mistake the law was written about, caught by the
-workspace gate on the first full battery. Nine commits, `(SK1c)`-tagged. The full ledger, with the
-per-clause numbers and the carried list, is in `docs/memos/island-progress.md` under *Wave SK1c*.
+Python string, caught by the workspace gate on the first full battery. Both came back as the
+ordinary shape (runs of 14 spaces, measured by the audit), so the LAW's shorthand tightens: `r"…"`
+protects a backslash from *Python's* escape processing and does nothing about a line re-wrapped on
+the way to the file — **only `chr(92)` and a heredoc are remedies**, which the gate's own doc now
+says. Nine commits, `(SK1c)`-tagged. The full ledger, with the per-clause numbers and the carried
+list, is in `docs/memos/island-progress.md` under *Wave SK1c*.
+
+## The SK1c audit (2026-08-25)
+
+Adversarial, `2452ce20..e1da99c5`, fresh reader, nothing pushed. **Every headline number the wave
+prints reproduced**, including the two it asked to be taken on trust: the order divergence was
+re-measured step by step on the wave's own fixture (0.0273 / 0.0347 / **0.0601** / 0.0549 / 0.0490
+/ 0.0429 / 0.0369 / 0.0314 as a *local* component, a flat 0.0163–0.0183 m in model space, transform
+bit-identical, red at **step 0**), and the committed starter character was re-blessed from scratch
+— `INF_BLESS_SAMPLES=1` rewrote **nothing** but the one README this audit deliberately changed.
+
+**One HIGH.** *An armed character's E-grab moved no hand, and the only thing it did was open the
+hand holding the weapon.* SK1c's hand pass writes down one precedence rule — the weapon owns the
+hand it is in and a grab takes the other one, "so a character reaching for a door handle with a
+rifle in its right hand reaches with its left" — and neither half was true, because no arm ran the
+combination: `weapon_hands_gate` unequips at step 61 and presses E at step 71. Measured on a rigged
+hero: the left wrist stayed **exactly** where the fore-grip put it (0.9397 m from the handle before
+and after) and its fingers went from 0.0957 m of closure to **0.1839 m — fully open** — while
+`GameplayReport::hands.1` counted a grab. Two independent defects: `apply_hand_ik` resolved a grip
+to the hand the *affordance* names (and `grip_catalogue` authors `handle`, `rifle` and `prop` on the
+right hand only), so the left slot's `handle` closed the hand already holding the rifle and was then
+overwritten by it; and the `GunGrip` off-hand solve, which runs *after* the reaches, ran
+unconditionally and overwrote the grab's reach every step. Fixed: the request's **slot** decides the
+hand (the affordance still supplies aperture and curl), and the off hand is on **loan** — the hold's
+weight is the complement of the grab's, so the arm crosses over continuously. Armed by
+`an_armed_character_grabs_with_its_free_hand` in `weapon_3d` (the crate that owns the producer, not
+the gate) measured against the *unarmed* grab, and by `a_grip_closes_the_hand_its_slot_names` run
+both ways round. Two mutations, one per defect; `grip_gate`, `weapon_hands_gate` (still 18 distinct
+poses, 6 476 B a step) and `weapon_3d` byte-green across both.
+
+**Four MED**, of two shapes. *A claim asserted in prose and printed in code*: the payload's
+controller class was **printed, not asserted** — reverting only the blueprint resolver left all six
+island arms green — and the comment above it cited "the state comparison below", which is
+`pack_sim` against `loose_sim` and cannot see `pie_sim` at all. *A readable face naming something
+that is not there*: the starter character's README named **six files that do not exist**
+(`Starter Body.inf_mesh` and five more, with spaces, against a folder of `Starter_Body.inf_mesh`) —
+the wave's own headline defect one layer up, invisible because the README is byte-locked against the
+constant that writes it; and **nothing checked either island recipe's `[content]` list**, a third
+place the character's identity is written down, of which the gate covered five entries of
+seventeen. Plus: *"155 KB in every binary that links `inf-project`, which includes the shipped
+player. Measured, not argued."* It was argued — `inf.exe` carries all 95 932 body bytes and
+**`inf-player.exe` carries none of them**, and a scaffolded project's cooked pack is **6 480 B**,
+not 152 KB.
+
+Four sentences were also corrected where they will be *read*: "no gate fixture in the tree carries
+`RootMotion` at all" (three do, and the true statement is that none carried `RootMotion` *and* a
+pose); the five capsule-gate arm counts (three of five wrong: `phase30_gameplay_gate` is 6,
+`door_3d` 15, `phase29_gate` 18); a doc claiming the starter build has *no warnings* and refuses on
+a non-empty list, when it has always asserted exactly one pinned by content; and a citation of a
+test that does not exist. **The chr(92) law tightens**: catches 22 and 23 were written from a *raw*
+Python string — the remedy the law's shorthand names — and both came back as the ordinary shape
+(runs of **14** spaces). `r"…"` protects a backslash from *Python's* escape processing and does
+nothing about a line re-wrapped on the way to the file, so **only `chr(92)` and a heredoc are
+remedies**; written into the gate's own doc. **No twenty-fourth**, swept over both shapes across
+every `.rs` the wave and the audit touched.
+
+Also verified rather than read: the four-template CI cook-and-run smoke (green locally, the three 3D
+packs carrying 7 assets each against the platformer's 2); that **no other consumer of the old pass
+order existed** and that the added propagate is **not double-paid** (`EcsWorld::propagate` is
+dirty-gated and `apply_root_motion` marks dirty only when it moved something, so the later call
+becomes a branch); that the fix is invisible where the passes commuted (nothing in the tree inserts
+an `AnimPlayer` at runtime); and that all four of clause 5's blocker citations are real. Ten
+mutations run, including severing `step_hand_ik` — which reddens `weapon_hands_gate` 2 of 3 **and**
+the new feature arm, where before this audit the producer had no arm outside its own gate file.
+
+Counts at the audited head: battery **321 / 6 071 / 0 / 16** (**+4 arms, no new block** — the wave's
+own 321 / 6 067 reproduced exactly first), goldens **54 / 101** byte-identical under
+`INF_GOLDEN_STRICT=1` with no PNG rewritten, clippy **0** with `-D warnings`, rustdoc **374 over 30
+crates** after `cargo clean --doc` (**the audit adds zero**), fmt clean, frontend **702 / 78** with
+`tsc` and `eslint` clean, schema **unmoved**, `EXPECTED_LEVELS` still **23**, and the only committed
+byte that moved is `samples/starter-character/README.md` — a full `INF_BLESS_SAMPLES=1` reproduced
+every other one. **No twenty-fourth chr(92) catch.** Four audit commits, `(SK1c) audit:`-tagged; the
+full ledger, with the sixteen carried LOW and the ten mutations, is in
+`docs/memos/island-progress.md` under *The SK1c audit*.
