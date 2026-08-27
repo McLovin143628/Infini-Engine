@@ -1565,6 +1565,53 @@ fn the_island_at_shipping_resolution() {
     let from = DVec3::new(s.x, s.y, s.z);
     let path = move |step: u64, w: u32, h: u32| island_fly(step, w, h, from);
 
+    // **THE REAL ISLAND'S OWN FIXED STEP** (island wave I8a). The hero starts in
+    // Harbour City, so the settlement blocks around it activate and the collider
+    // band admits their parts — which is what a step over a city costs and what
+    // `CITY_STEP_BUDGET_MS` is a ratchet about. Measured here rather than on the
+    // CI fixture because the fixture's reservations take the town's 76 m grid and
+    // a number about a city has to come from one.
+    //
+    // **Reported, never asserted**, on the same terms as every frame number
+    // below: the ceiling is set from the composed phase-30 city and asserting it
+    // over a different world would re-pin a ratchet by accident.
+    {
+        for _ in 0..STEP_WARMUP {
+            fx.sim
+                .step_once(inf_player::runtime_sim::RuntimeInput::default());
+        }
+        fx.sim.set_step_profiling(true);
+        let mut acc = inf_player::step_profile::StepProfile::default();
+        let t0 = std::time::Instant::now();
+        for _ in 0..STEP_SAMPLES {
+            fx.sim
+                .step_once(inf_player::runtime_sim::RuntimeInput::default());
+            acc.accumulate(&fx.sim.step_profile());
+        }
+        let wall = t0.elapsed().as_secs_f64() * 1000.0 / STEP_SAMPLES as f64;
+        acc.scale(1.0 / STEP_SAMPLES as f64);
+        fx.sim.set_step_profiling(false);
+        let (tracked, touching) = fx.sim.bridge3d().world().contact_pair_counts();
+        println!(
+            "=== THE REAL ISLAND'S FIXED STEP === {wall:.3} ms/step (phases sum to \
+             {:.3}) against a {:.1} ms ratchet; {} bodies, {} ADMITTED structure \
+             colliders, {tracked} contact pairs ({touching} touching)",
+            acc.total_ms(),
+            inf_player::budget::CITY_STEP_BUDGET_MS,
+            fx.sim.bridge3d().body_count(),
+            fx.sim.bridge3d().admitted_structures(),
+        );
+        for (n, ms) in acc.dearest_first() {
+            if ms <= 0.02 {
+                continue;
+            }
+            println!(
+                "  step {n:<18} {ms:7.3} ms ({:4.1} %)",
+                ms / acc.total_ms().max(1.0e-9) * 100.0
+            );
+        }
+    }
+
     let (shipped, tier) = shipped_settings(&gpu, fx.record);
     // The lit configuration is the SHIPPED one with the authorable half turned
     // on, through the same door — never a hand-built settings block, which would
