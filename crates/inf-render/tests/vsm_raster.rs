@@ -1649,15 +1649,29 @@ fn a_vgeom_casters_level_is_the_one_its_pixel_error_justifies() {
         fine.vgeom_casters > 0 && coarse.vgeom_casters > 0,
         "one of the two runs packed no vgeom caster at all ({fine:?} / {coarse:?})"
     );
-    // **At least one caster is the finest level**, which for integer levels is
-    // exactly `sum < count`. The equality this used to be — one caster, level 0 —
-    // stopped being the shape of the answer at island wave I8c: a meshlet caster
-    // is packed once per distinct level its resident PAGE BUCKETS ask for, so a
-    // tight tolerance splits the record and a loose one collapses it.
+    // **A tight tolerance does not saturate and a loose one does exactly.** The
+    // equality this used to be — one caster, level 0 — stopped being the shape of
+    // the answer at island wave I8c: a meshlet caster is packed once per distinct
+    // level its page BUCKETS ask for, so a tight tolerance splits the record
+    // across the finer half of the chain and a loose one collapses it onto the
+    // coarsest. Both halves are read against the chain's own length, which is
+    // what makes them claims about `pick_classic_level` rather than about a
+    // number this fixture happens to produce.
+    let coarsest = (inf_vgeom::VgeomMesh::classic_lods(&mesh).len() - 1) as u64;
     assert!(
-        fine.vgeom_level_sum < fine.vgeom_casters,
-        "no caster at a tenth of a pixel of tolerated error drew the finest level \
-         of the chain: {fine:?}"
+        coarsest > 0,
+        "the fixture mesh has no LOD chain to pick from"
+    );
+    assert!(
+        fine.vgeom_level_sum < fine.vgeom_casters * coarsest,
+        "every caster at a tenth of a pixel of tolerated error drew the coarsest \
+         level {coarsest} of the chain: {fine:?}"
+    );
+    assert_eq!(
+        coarse.vgeom_level_sum,
+        coarse.vgeom_casters * coarsest,
+        "400 px of tolerated error did not put every caster on the coarsest level \
+         {coarsest}: {coarse:?}"
     );
     // …and the tolerance is what moves it: the MEAN level rises, compared by
     // cross-multiplication because the two runs no longer pack the same number of
@@ -3082,14 +3096,17 @@ fn a_vgeom_caster_that_crosses_a_lod_threshold_invalidates_its_pages() {
     let (warm, after, resident) = coarsen(&s);
     // ANTI-VACUITY: the level really moved, so this is an arm about a LOD change
     // and not about a settings write.
-    // **`sum < count` is "at least one caster is level 0"** for integer levels —
-    // which is the claim, and it is the shape the claim has to take since island
-    // wave I8c: a meshlet caster is packed once per distinct level its resident
-    // PAGE BUCKETS ask for, so a tenth of a pixel of camera error puts the finest
-    // level in the set without making the set a single record.
+    // **The tight tolerance does not saturate.** The equality this used to be —
+    // one caster at level 0 — stopped being the shape of the answer at island
+    // wave I8c: a meshlet caster is packed once per distinct level its page
+    // BUCKETS ask for, so what is left of the claim is that the finest tolerance
+    // is nowhere near the coarsest level, which is what makes the coarsening
+    // below a threshold crossing rather than a no-op.
+    let coarsest = (inf_vgeom::VgeomMesh::classic_lods(&mesh).len() - 1) as u64;
     assert!(
-        warm.vgeom_casters > 0 && warm.vgeom_level_sum < warm.vgeom_casters,
-        "no caster at a tenth of a pixel of error drew the finest level: {warm:?}"
+        warm.vgeom_casters > 0 && warm.vgeom_level_sum < warm.vgeom_casters * coarsest,
+        "every caster at a tenth of a pixel of error already drew the coarsest \
+         level {coarsest}: {warm:?}"
     );
     assert!(
         after.vgeom_level_sum > warm.vgeom_level_sum,

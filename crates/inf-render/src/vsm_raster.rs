@@ -1397,18 +1397,41 @@ impl VsmRaster {
         self.sync_vgeom(gpu, scene);
         self.sync_skinned(gpu, scene);
         self.sync_terrain(gpu, scene, view);
-        // **The frame's detail buckets** (island wave I8c): every distinct page
-        // bucket that is RESIDENT, with the finest world-per-texel any page of it
-        // carries. Taken from the whole resident set rather than from the dirty
-        // one, deliberately — a caster's level is folded into the content stamp,
-        // so keying it on which pages happened to be dirty this frame would make
-        // every cached page's stamp move whenever the dirty set changed shape.
+        // **The frame's detail buckets** (island wave I8c): one per clipmap level
+        // each shadow-casting light *has*, plus [`PERSPECTIVE_BUCKET`] if any
+        // perspective light is resident, with the level's own world-per-texel.
+        //
+        // **The whole ladder and not the resident half of it**, which is the
+        // difference between a stable key and a churning one. A caster's bucket
+        // mask rides in its content stamp, so a mask that lost a bit whenever a
+        // level's last page happened to be evicted would move the stamp — and
+        // re-rasterize every page that caster touches — for a residency event
+        // nothing drew. `desc.levels` is a property of the light's configuration,
+        // so the ladder moves only when the light does. The base is read off one
+        // resident page of that light: a clipmap level's world-per-texel is
+        // `base × 2^level` by construction, and the page matrix's first row
+        // carries no translation, so it does not move with the snap.
         let mut bucket_map: std::collections::BTreeMap<u32, f32> =
             std::collections::BTreeMap::new();
+        let mut ladder_from: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
         for p in &pages {
-            let e = bucket_map.entry(p.level_bit).or_insert(f32::INFINITY);
-            if p.world_per_texel > 0.0 && p.world_per_texel < *e {
-                *e = p.world_per_texel;
+            if p.level_bit == PERSPECTIVE_BUCKET {
+                bucket_map.entry(PERSPECTIVE_BUCKET).or_insert(0.0);
+                continue;
+            }
+            if !ladder_from.insert(p.light) || p.world_per_texel <= 0.0 {
+                continue;
+            }
+            let Some(desc) = residency.desc(VsmLightHandle(p.light)) else {
+                continue;
+            };
+            let base = p.world_per_texel / (1u64 << u64::from(p.page.level.min(30))) as f32;
+            for l in 0..desc.levels.len().min(31) {
+                let w = base * (1u64 << l) as f32;
+                let e = bucket_map.entry(1u32 << l).or_insert(f32::INFINITY);
+                if w > 0.0 && w < *e {
+                    *e = w;
+                }
             }
         }
         let buckets: Vec<(u32, f32)> = bucket_map

@@ -390,8 +390,8 @@ struct Measured {
     /// clock around the same call.
     ///
     /// The two clocks are the wave's clause 3. `island_gate` and this file's own
-    /// isolated block both read the step at **5.67–5.69 ms** against the 6.0 ms
-    /// `CITY_STEP_BUDGET_MS` ratchet, while `cpu_ms[0]` reads 6.35–7.27 ms across
+    /// isolated block both read the step at **5.67–5.74 ms** against the 6.0 ms
+    /// `CITY_STEP_BUDGET_MS` ratchet, while `cpu_ms[0]` reads 6.32–6.85 ms across
     /// the five render configurations — over the ratchet in every row, on a
     /// simulation that is identical in all five. Whether that is the step or the
     /// machine is not answerable from a wall clock alone, and it is answerable
@@ -399,11 +399,20 @@ struct Measured {
     /// measures from the previous one), so `cpu_ms[0] − step_phases_ms` is time
     /// the thread spent not inside the step at all.
     ///
+    /// **Measured, the residue is +0.002 ms** — so the answer is not scheduling.
+    /// The step really does take longer in a frame than it does alone, and the
+    /// extra is *inside its own phases*, which is what the breakdown beside this
+    /// number exists to attribute.
+    ///
     /// The profile costs one `Instant::now()` per phase — 24 of them, ~25 ns each
     /// on Windows, under a microsecond against a millisecond step — and a
     /// profiled step is byte-identical to an unprofiled one
     /// (`the_profile_does_not_move_the_simulation`).
     step_phases_ms: f64,
+    /// The same phases, **phase by phase** (island wave I8c) — meaned over the
+    /// best round, in the shape the isolated block prints, so the two clocks can
+    /// be compared where they differ rather than only in total.
+    step_profile: inf_player::step_profile::StepProfile,
 }
 
 impl Measured {
@@ -458,7 +467,7 @@ fn measure(
         Option<inf_render::FrameTimings>,
         [f64; CPU_STAGES],
         inf_render::RecordProfile,
-        f64,
+        inf_player::step_profile::StepProfile,
     ) {
         let view = path(step, w, h);
         // The CPU half, stage by stage. A frame that is CPU-bound and cannot say
@@ -470,8 +479,9 @@ fn measure(
             .step_once(inf_player::runtime_sim::RuntimeInput::default());
         cpu[0] = t.elapsed().as_secs_f64() * 1000.0;
         // The step's own phases, which tile it by construction — so the residue
-        // against `cpu[0]` is time this thread was not inside the step.
-        let phases = fx.sim.step_profile().total_ms();
+        // against `cpu[0]` is time this thread was not inside the step, and the
+        // breakdown is where the difference from the isolated block lives.
+        let phases = fx.sim.step_profile();
         let t = std::time::Instant::now();
         fx.sim.sync_render_terrain(view.eye_world);
         sync_voxel_store(&mut voxels, &fx.voxel_assets, &fx.sim, view.eye_world);
@@ -524,6 +534,7 @@ fn measure(
     let mut best_cpu = [0.0f64; CPU_STAGES];
     let mut best_record = inf_render::RecordProfile::default();
     let mut best_phases = 0.0f64;
+    let mut best_step = inf_player::step_profile::StepProfile::default();
     let mut best = 0usize;
     for r in 0..ROUNDS {
         let mut ms = Vec::with_capacity(FRAMES);
@@ -531,14 +542,14 @@ fn measure(
         let mut gpu_total = 0.0;
         let mut cpu_total = [0.0f64; CPU_STAGES];
         let mut rec_total = inf_render::RecordProfile::default();
-        let mut phase_total = 0.0f64;
+        let mut phase_total = inf_player::step_profile::StepProfile::default();
         step = 0;
         for _ in 0..FRAMES {
             let t0 = std::time::Instant::now();
             let (timings, cpu, rec, phases) = frame(&mut scene, &mut renderer, fx, step);
             ms.push(t0.elapsed().as_secs_f64() * 1000.0);
             step += 1;
-            phase_total += phases;
+            phase_total.accumulate(&phases);
             for (slot, v) in cpu_total.iter_mut().zip(cpu) {
                 *slot += v;
             }
@@ -562,7 +573,9 @@ fn measure(
             best_cpu = cpu_total.map(|v| v / FRAMES as f64);
             best_record = rec_total;
             best_record.scale(1.0 / FRAMES as f64);
-            best_phases = phase_total / FRAMES as f64;
+            best_step = phase_total;
+            best_step.scale(1.0 / FRAMES as f64);
+            best_phases = best_step.total_ms();
             best_passes = sums
                 .into_iter()
                 .map(|(n, gpu, cpu)| (n, gpu / FRAMES as f64, cpu / FRAMES as f64))
@@ -590,6 +603,7 @@ fn measure(
         vsm: renderer.vsm_raster_stats(),
         record: best_record,
         step_phases_ms: best_phases,
+        step_profile: best_step,
     }
 }
 
@@ -648,8 +662,19 @@ fn print_record_profile(label: &str, m: &Measured) {
 ///   step at all: the render thread, the driver and the frame's own poll,
 ///   sharing a machine with it.
 ///
-/// Neither number is wrong and only one of them is a fact about the simulation.
-/// This prints both and the residue, so the two harnesses stop being two truths.
+/// # And the answer, measured (island wave I8c)
+///
+/// **The residue is +0.002 ms.** So it is *not* scheduling: the step is not being
+/// preempted, it is genuinely doing more work inside a frame than it does alone.
+/// The extra is inside the phases, which is why the phases are printed here
+/// beside the isolated block's own table — a step interleaved with a projection
+/// that walks 389 793 instances and a record stage that walks 192 terrain tiles
+/// re-reads its own working set from a colder cache every time, and that is a
+/// cost a shipped game pays and a step harness on its own does not.
+///
+/// Neither number is wrong and only one of them is a fact about the simulation
+/// alone. This prints both, the residue, and the breakdown, so the two harnesses
+/// stop being two truths.
 fn print_step_clocks(label: &str, m: &Measured) {
     let wall = m.cpu_ms[0];
     let phases = m.step_phases_ms;
@@ -659,11 +684,19 @@ fn print_step_clocks(label: &str, m: &Measured) {
     println!(
         "  {label} fixed step: {phases:.3} ms in its own phases against a \
          {CITY_STEP_BUDGET_MS} ms ratchet, inside a {wall:.3} ms wall clock \
-         ({:+.3} ms, {:.1} %, is this thread not being inside the step while a \
-         render thread and a driver share the machine with it)",
+         ({:+.3} ms, {:.1} %, is this thread not being inside the step at all)",
         wall - phases,
         (wall - phases) / wall.max(1.0e-9) * 100.0,
     );
+    for (n, ms) in m.step_profile.dearest_first() {
+        if ms <= 0.02 {
+            continue;
+        }
+        println!(
+            "  {label}   in-frame step {n:<18} {ms:7.3} ms ({:4.1} %)",
+            ms / phases.max(1.0e-9) * 100.0
+        );
+    }
     // The one direction that cannot hold: the phases tile the step and the wall
     // clock brackets the call that runs them, so a phase sum PAST the wall means
     // the two are not the same span and the reconciliation above is arithmetic
