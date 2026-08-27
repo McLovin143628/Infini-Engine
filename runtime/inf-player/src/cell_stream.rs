@@ -65,6 +65,14 @@
 //! island's `rehomed` is **0**; the fixture that walks a mover across a boundary
 //! is where it is not.
 //!
+//! **And activation had to learn the same rule** (NPC1a audit). Before the
+//! re-home, a `Guid` lived in exactly the cell the cook put it in, so a cell
+//! entering the want set could spawn its whole payload unconditionally. Once an
+//! entity can be handed to a neighbour, its birth cell can leave and come back
+//! while the entity is still alive — and `spawn_with_guid` does not refuse a key
+//! the world already holds. Activation therefore skips a payload entity that is
+//! already in the world; see step 5.
+//!
 //! ## Blueprint actors, and the v1 boundary
 //!
 //! [`RuntimeSim`](crate::runtime_sim::RuntimeSim) assigns blueprint actor ids
@@ -813,6 +821,16 @@ impl CellStreaming {
         // leaving cells happened to be walked in.
         rehomed.sort_unstable();
         for (coord, guid) in rehomed {
+            // A subtree's root is despawned by the loop above *after* its
+            // children are looked at, and `despawn` takes the subtree with it —
+            // so a child re-homed a few iterations before its parent died is a
+            // `Guid` with no entity behind it. Re-checking here rather than
+            // trusting the queue keeps `rehomed` a count of entities that are
+            // actually alive in their new cell, which is what the island's
+            // `rehomed == 0` reading and the fixture's `== 1` both mean.
+            if world.entity_of(guid).is_none() {
+                continue;
+            }
             self.stats.rehomed += 1;
             let list = self.resident.entry(coord).or_default();
             if !list.contains(&guid) {
@@ -839,7 +857,7 @@ impl CellStreaming {
         // output order must be a function of the content and not of a hash seed.
         let mut arrived: BTreeSet<Uuid> = BTreeSet::new();
         for coord in entering {
-            let entities = match self.loaded.remove(&coord) {
+            let mut entities = match self.loaded.remove(&coord) {
                 Some(e) => e,
                 None => {
                     self.stats.blocking_loads += 1;
@@ -856,6 +874,30 @@ impl CellStreaming {
                     }
                 }
             };
+            // **A CELL'S PAYLOAD MAY NAME AN ENTITY THAT IS ALREADY ALIVE**
+            // (NPC1a audit). Until the re-home rule above, a `Guid` lived in
+            // exactly the cell the cook put it in, so activation could spawn a
+            // payload unconditionally and the invariant held by construction.
+            // Once an entity can be handed to a neighbour, its birth cell can
+            // leave and come back **while the entity is still standing in the
+            // neighbour** — and `EcsWorld::spawn_with_guid` does not refuse a
+            // key the world already holds: it overwrites the index entry, so
+            // the world ends up with two entities carrying one `Guid`, one of
+            // them unreachable by every `entity_of` in this file and by every
+            // despawn that would have removed it.
+            //
+            // The damage is not a leak. The survivor is in the world's walks,
+            // so it is in the physics bridge, in `state_bytes` and in the
+            // projection: one authored prop simulating twice, for ever.
+            //
+            // So an entity that is already in the world is **not respawned**,
+            // and is not added to this cell's list either — it belongs to the
+            // cell it is standing in, which is the whole rule this wave
+            // introduced. Costs one `entity_of` per payload entity on
+            // activation only, and is a no-op on every level whose content
+            // stands still (nothing is ever re-homed, so nothing is ever
+            // already alive).
+            entities.retain(|e| world.entity_of(e.guid).is_none());
             let guids = crate::level::spawn_entities(world, entities);
             self.stats.activations += 1;
             self.events.push(CellEvent {
@@ -1521,6 +1563,64 @@ mod tests {
             s.stats().rehomed,
             0,
             "a level whose entities do not move must re-home nothing"
+        );
+    }
+
+    /// How many entities in the world carry `g` — **not** `entity_of`, which
+    /// reads the `Guid` **index** and can only ever answer once.
+    ///
+    /// That distinction is the whole point of the arm below: `spawn_with_guid`
+    /// overwrites the index entry rather than refusing a key the world already
+    /// holds, so a duplicate is invisible to every `entity_of` in this file and
+    /// visible only to a walk.
+    fn entities_carrying(world: &EcsWorld, g: Uuid) -> usize {
+        world
+            .world()
+            .iter_entities()
+            .filter(|e| e.get::<inf_ecs::Guid>().is_some_and(|x| x.0 == g))
+            .count()
+    }
+
+    /// **A RE-HOMED ENTITY IS NOT SPAWNED A SECOND TIME WHEN ITS BIRTH CELL
+    /// COMES BACK** (NPC1a audit).
+    ///
+    /// The re-home rule broke an invariant the activation path had relied on
+    /// since P16: *a `Guid` lives in exactly the cell the cook put it in*, so a
+    /// cell entering the want set could spawn its whole payload unconditionally.
+    /// Once an entity can be handed to a neighbour, its birth cell can leave and
+    /// come back **while the entity is still alive**, and the payload spawns it
+    /// again — `EcsWorld::spawn_with_guid` does not refuse a key the world
+    /// already holds, so the index points at the copy and the original becomes
+    /// an unreachable entity that no deactivation can ever find.
+    ///
+    /// The damage is worse than a leak: the survivor is in the world's walks,
+    /// so it is in the physics bridge, in `state_bytes` and in the projection —
+    /// one authored prop simulating twice, and the next deactivation of the
+    /// **new** cell despawns the copy that the birth cell just made.
+    #[test]
+    fn a_rehomed_entity_is_not_spawned_again_when_its_birth_cell_returns() {
+        let (mut world, mut s) = fixture();
+        move_source(&mut world, 95.0);
+        s.sync_sim(&mut world, 1);
+        assert!(s.is_resident((0, 0)) && s.is_resident((1, 0)));
+
+        // Cell 0's prop walks into cell 1, and cell 0 leaves.
+        move_entity(&mut world, guid(0x100), 150.0);
+        move_source(&mut world, 150.0);
+        s.sync_sim(&mut world, 2);
+        assert_eq!(s.stats().rehomed, 1, "the fixture did not re-home");
+        assert!(!s.is_resident((0, 0)));
+
+        // …and now cell 0 comes back, with its payload still naming the prop.
+        move_source(&mut world, 95.0);
+        s.sync_sim(&mut world, 3);
+        assert!(s.is_resident((0, 0)), "cell 0 did not come back");
+        assert_eq!(
+            entities_carrying(&world, guid(0x100)),
+            1,
+            "the birth cell re-activated and spawned a second copy of an entity \
+             that had been re-homed and was still alive — the Guid index now \
+             points at the copy and the original is unreachable"
         );
     }
 
