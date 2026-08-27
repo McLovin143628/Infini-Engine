@@ -758,6 +758,56 @@ pub fn step_crowd(world: &mut EcsWorld, dt: f64) -> CrowdStats {
     step_crowd_banded(world, dt, DEFAULT_CROWD_RADII)
 }
 
+/// **What one agent's tier and place would be** — the step's PURE half, split
+/// out so it can be measured and, if it ever pays, parallelized.
+///
+/// # Why this is a separate function
+///
+/// The step below is three things in a trench coat: a world read (where is this
+/// agent), a decision (`band.tier` + `route(clock)`), and a world write
+/// (spawn/despawn/transform). Only the middle one is a pure function, and only a
+/// pure function can go through [`inf_core::parallel_map`]'s deterministic
+/// in-order map — the ECS mutation cannot, it needs `&mut World`.
+///
+/// So the decision lives here, the step calls it, and the sweep instrument times
+/// **this exact function** serially and in parallel at N ∈ {1, 10, 100, 1 000}.
+/// A benchmark of a private copy would be a benchmark of something the engine
+/// does not run, which is this repository's own "a gate must aim at the thing it
+/// names".
+///
+/// `here` is where the agent is *now* — its live transform if it has an entity,
+/// its remembered [`CrowdRecord::last`] if it does not.
+#[inline]
+pub fn plan_agent(
+    band: &CrowdBand,
+    guid: Uuid,
+    rec: &CrowdRecord,
+    here: DVec3,
+    t_s: f64,
+) -> AgentPlan {
+    let tier = band.tier(here);
+    AgentPlan {
+        tier,
+        // A dematerialized agent stops moving: its record remembers where it
+        // stood, and the day NPC1d gives Dormant agents an off-screen schedule
+        // is the day this line reads the schedule instead.
+        at: if tier.materialized() {
+            rec.position_at(guid, t_s)
+        } else {
+            here
+        },
+    }
+}
+
+/// One agent's decided tier and place — [`plan_agent`]'s answer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AgentPlan {
+    /// What it costs this step.
+    pub tier: CrowdTier,
+    /// Where it is this step.
+    pub at: DVec3,
+}
+
 /// [`step_crowd`] with explicit radii — the seam the sweep instrument drives to
 /// price a tier ladder, and the one a level's own crowd settings will use.
 pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) -> CrowdStats {
@@ -790,7 +840,8 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
             Some(t) => t.translation.to_dvec3(),
             None => rec.last,
         };
-        let tier = band.tier(here);
+        let plan = plan_agent(&band, guid, rec, here, t_s);
+        let tier = plan.tier;
         let was = rec.tier;
         if tier != was {
             stats.retiered += 1;
@@ -805,7 +856,7 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
         stats.per_tier[tier.as_u8() as usize] += 1;
 
         if !tier.materialized() {
-            rec.last = here;
+            rec.last = plan.at;
             if let Some(e) = entity {
                 world.despawn(e);
                 stats.despawned += 1;
@@ -821,7 +872,7 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
         };
         // 5. Where the route says it is, for every tier — see the module docs
         //    for why the position law does not vary with the tier in NPC1a.
-        let p = rec.position_at(guid, t_s);
+        let p = plan.at;
         rec.last = p;
         let w = world.world_mut();
         if let Some(mut t) = w.get_mut::<Transform>(entity) {

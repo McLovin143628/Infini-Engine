@@ -235,6 +235,26 @@ pub fn ground_contacts(world: &EcsWorld) -> Vec<GroundContact> {
         if collider.sensor {
             continue;
         }
+        // **AND NEITHER DOES A BODY THAT IS NOT THERE** (NPC1a). This pass picks
+        // its subjects by *components*, and the sim-LOD tier takes a crowd
+        // agent's rapier body away without taking its `Collider3D` off — so a
+        // `Far` agent, which the physics bridge gives no body and nothing can
+        // collide with, went on pressing footprints into the ground.
+        //
+        // **Measured, and it is why this line exists**: NPC1a's N-sweep put a
+        // thousand agents on the instrument scene and the deformation section
+        // came out at **2 222 656 bytes a step — 86 % of the whole trace** —
+        // *identical* in the banded run and in the all-`Full` control. Identical
+        // is the tell: the field was a function of where the agents were and not
+        // of whether any of them existed physically, which is two systems
+        // disagreeing about whether a thing is in the world.
+        //
+        // The rule is the general one and not a crowd special case: **a thing
+        // with no rapier body presses no ground.** For a crowd agent the tier is
+        // the authority on that; for everything else `pressure_of` already was.
+        if crate::crowd::agent_tier(world, e.id()).is_some_and(|t| !t.has_body()) {
+            continue;
+        }
         let Some(pressure) = pressure_of(
             e.get::<RigidBody3D>(),
             e.get::<CharacterController3D>().is_some(),
@@ -417,6 +437,56 @@ mod tests {
         ));
         world.propagate();
         (world, a)
+    }
+
+    /// **A CROWD AGENT WITH NO BODY PRESSES NO GROUND** (NPC1a).
+    ///
+    /// This pass picks its subjects by *components*, and the sim-LOD tier takes
+    /// a `Far` agent's rapier body away without taking its `Collider3D` off. So
+    /// before this wave a thousand `Far` agents — none of which anything could
+    /// collide with — stamped a thousand footprints a step, and NPC1a's N-sweep
+    /// measured what that costs: the deformation section came out at **2 222 656
+    /// bytes a step, 86 % of the whole trace, and IDENTICAL in the banded run
+    /// and in the all-`Full` control**. Identical was the tell.
+    ///
+    /// The arm walks the tier ladder on one fixture, so it fails if the gate
+    /// stops working *or* if it starts over-reaching: `Full` and `Near` press,
+    /// `Far` does not, and an entity carrying no `CrowdAgent` at all — every
+    /// hero and every fixture in this tree — presses exactly as before.
+    #[test]
+    fn a_crowd_agent_with_no_body_presses_no_ground() {
+        use crate::crowd::{CrowdAgent, CrowdTier};
+
+        let (mut world, walker) = world_with_walker(3, 4.0, 4.0);
+        let guid = world.guid_of(walker).expect("the walker has a guid");
+        // The control: no `CrowdAgent` at all is the pre-NPC1a path.
+        assert_eq!(ground_contacts(&world).len(), 1, "the fixture presses");
+
+        for (tier, want) in [
+            (CrowdTier::Full, 1),
+            (CrowdTier::Near, 1),
+            (CrowdTier::Far, 0),
+            (CrowdTier::Dormant, 0),
+        ] {
+            world
+                .world_mut()
+                .entity_mut(walker)
+                .insert(CrowdAgent { tier, guid });
+            let n = ground_contacts(&world).len();
+            assert_eq!(
+                n,
+                want,
+                "a {} agent produced {n} ground contact(s) against {want} — the \
+                 tier and the physics bridge disagree about whether it is in the \
+                 world",
+                tier.name()
+            );
+        }
+
+        // …and taking the component off puts it back on the pre-NPC1a path,
+        // which is what says the gate reads the tier rather than the presence.
+        world.world_mut().entity_mut(walker).remove::<CrowdAgent>();
+        assert_eq!(ground_contacts(&world).len(), 1);
     }
 
     #[test]

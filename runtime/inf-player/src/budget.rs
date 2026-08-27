@@ -244,6 +244,74 @@ pub const STREAMED_STEP_BUDGET_MS: f64 = 4.0;
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.**
 pub const CITY_STEP_BUDGET_MS: f64 = 6.0;
 
+/// Hard **mean** budget, in milliseconds, for the fixed step's **crowd** phase
+/// (wave NPC1a) — `inf_ecs::crowd::step_crowd` over a thousand NPCs.
+///
+/// # Why a phase gets its own number
+///
+/// [`CITY_STEP_BUDGET_MS`] is a whole-step total, and it is deliberately one
+/// number with its phases printed beside it. That works while every phase is
+/// something the engine has always done; it stops working the moment a phase is
+/// *new*, because a new phase's growth is invisible inside a total that has
+/// three hundred times the content in it. NPC1a is exactly that case: before it
+/// there was no crowd, no `crowd` row and nothing anywhere in this tree that had
+/// ever put a thousand NPCs in a world and looked at the clock.
+///
+/// So the crowd carries its own ceiling, sized against its own measurement, and
+/// the whole-step number stays where it is. That is also the shape the wave's
+/// "zero cost when absent" claim needs: a level with no population must move
+/// neither number, and only a per-phase one can say so.
+///
+/// # What is IN it, and what is deliberately not
+///
+/// The phase is the tier decision, the materialize/dematerialize pass and the
+/// kinematic route write — `inf_ecs::crowd::step_crowd`, and nothing else. The
+/// pose the `Full` and `Near` tiers then pay for lands in `animation`, and the
+/// capsules they hand the solver land in `physics3d sync` and `solver`. That
+/// split is the point rather than an accident: the crowd system's job is to
+/// decide *how many* agents reach those phases, so a budget that folded them in
+/// could be met by a tier ladder that decided nothing.
+///
+/// # The number
+///
+/// Measured by `runtime/inf-player/tests/crowd_sweep.rs` over the fps
+/// instrument's own composed scene (the phase-30 city, a streamed terrain, the
+/// phase-29 character) with **1 000** agents standing in a 320 m block on the
+/// drive line, three rounds of forty steps after forty discarded, MIN of rounds:
+///
+/// | N | crowd phase | per agent |
+/// |---|---|---|
+/// | 0 | **0.0001 ms** | — |
+/// | 1 | 0.005 | 5.0 µs |
+/// | 10 | 0.008 | 0.8 |
+/// | 100 | 0.034 | 0.34 |
+/// | **1 000** | **0.286 ms** | **0.29 µs** |
+///
+/// **2.0 ms is ~7× the 1 000-agent measurement**, which is
+/// [`PROJECTION_BUDGET_MS`]'s own minting arithmetic — and, like that one, the
+/// measurement it is minted against is a `dev`-profile number (`opt-level = 1`
+/// with debug assertions), so the release margin is wider still. It is a third
+/// of [`CITY_STEP_BUDGET_MS`], which is the property that makes it able to see
+/// anything: a crowd phase that grew to fill a whole step would be invisible to
+/// the total and trips this by an order of magnitude.
+///
+/// # A clock, so: release only, real machine only
+///
+/// [`CITY_STEP_BUDGET_MS`]'s conditioning, for its reasons — reported
+/// everywhere, asserted under `cargo test --release` off CI.
+///
+/// **RATCHET RULE (§8): this constant may only ever DECREASE.**
+pub const NPC_STEP_BUDGET_MS: f64 = 2.0;
+
+/// The population the [`NPC_STEP_BUDGET_MS`] measurement is taken at.
+///
+/// Pinned beside the budget because a per-step millisecond without a population
+/// beside it is a number about an unnamed world — the `SHIPPING_FRAME_CEILING_MS`
+/// rule ("a frame time without an adapter name") one system over. A sweep that
+/// quietly measured a hundred agents would meet this budget by a factor of ten
+/// and certify nothing.
+pub const NPC_BUDGET_AGENTS: usize = 1000;
+
 /// Hard ceiling on **terrain** page bytes resident at any point of the gate
 /// flythrough (`TerrainStreamStats::bytes_resident`, summed over every streamed
 /// terrain — the camera's render cut plus the pages the sim pinned).

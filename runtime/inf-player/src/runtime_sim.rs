@@ -420,6 +420,12 @@ pub struct RuntimeSim {
     /// third time, and read for the same reason: it is the thing a gate asserts
     /// on. All zeroes on a level with no population.
     crowd: inf_ecs::crowd::CrowdStats,
+    /// The sim-LOD ladder's three radii, metres (NPC1a). Data rather than a
+    /// constant `step_crowd` reads for itself, for `debris_budget`'s reason one
+    /// system over: a level's own crowd block will set it, and the sweep
+    /// instrument sets it to price the ladder against an all-`Full` control.
+    /// Defaults to `inf_ecs::crowd::DEFAULT_CROWD_RADII`.
+    crowd_radii: (f64, f64, f64),
     /// Whether [`fixed_step`](Self::fixed_step) marks its phases (island wave
     /// I4b). `false` on every shipped run; see [`crate::step_profile`] for why a
     /// stopwatch here cannot move the simulation.
@@ -566,6 +572,7 @@ impl RuntimeSim {
             debris_budget: DebrisBudget::default(),
             fracture_audit: FractureAudit::default(),
             crowd: inf_ecs::crowd::CrowdStats::default(),
+            crowd_radii: inf_ecs::crowd::DEFAULT_CROWD_RADII,
             gameplay: inf_physics::d3::GameplayReport::default(),
             voxels: BTreeMap::new(),
             profiling: false,
@@ -731,6 +738,32 @@ impl RuntimeSim {
     /// place.
     pub fn set_crowd_population(&mut self, records: BTreeMap<Uuid, inf_ecs::crowd::CrowdRecord>) {
         inf_ecs::crowd::set_population(&mut self.world, records);
+    }
+
+    /// **Retune the sim-LOD ladder** (NPC1a) — `(full_m, near_m, far_m)`.
+    ///
+    /// Refused unless the radii are finite and ascending, because a ladder that
+    /// is not is not a ladder: `CrowdBand::from_anchors` would fail open to
+    /// `Full` and the caller would think it had tightened something. Returns
+    /// whether the change was taken.
+    ///
+    /// **Nothing in production calls this**, and saying so is the point — the
+    /// `set_debris_budget` seam, one system over. It exists so the sweep
+    /// instrument can price the ladder against an all-`Full` control on the same
+    /// scene, and so a level's own crowd block is a call site rather than a
+    /// refactor.
+    pub fn set_crowd_radii(&mut self, radii: (f64, f64, f64)) -> bool {
+        let (f, n, r) = radii;
+        if !(f.is_finite() && n.is_finite() && r.is_finite()) || !(f <= n && n <= r) {
+            return false;
+        }
+        self.crowd_radii = radii;
+        true
+    }
+
+    /// The ladder this sim tiers with.
+    pub fn crowd_radii(&self) -> (f64, f64, f64) {
+        self.crowd_radii
     }
     /// Seed the simulation's voxel volumes (P21.2), keyed by entity `Guid`.
     ///
@@ -1342,7 +1375,7 @@ impl RuntimeSim {
         //    Inert — one `contains_resource` branch, no allocation — on every
         //    level with no population, which is every level committed before
         //    this wave. (MIRROR of `SimSession::fixed_step`.)
-        self.crowd = inf_ecs::crowd::step_crowd(&mut self.world, dt);
+        self.crowd = inf_ecs::crowd::step_crowd_banded(&mut self.world, dt, self.crowd_radii);
         clk.mark(phase::CROWD);
         // 1. ECS → physics.
         self.bridge.sync_from_world(&self.world);
