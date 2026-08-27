@@ -9410,7 +9410,10 @@ signal, and the only fine detail on the ground was a 1 m central-difference
 shading normal.
 
 It now carries four PBR ground materials blended by real per-sample weights,
-sampled triplanar on its cliffs, with three kinds of ground cover standing on it.
+sampled triplanar on its cliffs, and three kinds of ground-cover mesh authored,
+committed and cooked into its pack — **and not yet drawn**: the scatter path
+still builds every instance as a placeholder cube, which the TER2a audit found
+and which clause 5 below now states rather than implies.
 
 ### Clause 1 — the measurements, taken first
 
@@ -9430,9 +9433,34 @@ vertices), through the shipping instrument at 1080p on the real island:
 
 Four times the geometry costs 22 % more time. Solving `V + F = 1.912` against
 `4V + F = 2.328` puts the vertex half at **0.139 ms** and the fragment half at
-**1.773 ms** — so the pass is **7.3 % vertex and 92.7 % fragment/bandwidth**, and
-the prediction reconstructs the measurement to a thousandth (0.139 × 4 + 1.773 =
-2.329 against 2.328).
+**1.773 ms** — so the pass is **7.3 % vertex and 92.7 % fragment/bandwidth**.
+
+*The TER2a audit struck a line here that claimed more than it measured.* It read
+"the prediction reconstructs the measurement to a thousandth (0.139 × 4 + 1.773 =
+2.329 against 2.328)", which is **algebra, not evidence**: a two-point linear
+solve reconstructs its own two points by construction, and the only thing that
+last thousandth measures is the rounding to three decimals. What the split rests
+on is its two assumptions, so they are stated instead:
+
+* **The vertex half scales 3.879×, not 4×.** `BASE_CELLS` 32 → 64 is exactly four
+  times the *triangles* (2 × 64² against 2 × 32²) and 65²/33² = **3.879** times
+  the *vertices*. Re-solving on 3.879 puts the vertex half at 0.145 ms and the
+  fragment half at 1.768 — **7.6 % / 92.4 %**. The verdict is insensitive to
+  which of the two the pass is actually paying for, which is why it is a verdict.
+* **The fragment half is assumed constant across the two densities**, i.e. equal
+  overdraw and equal quad occupancy. It cannot be exactly true — a denser mesh
+  displaces to a slightly different silhouette and packs smaller triangles into
+  the same 2×2 quads — and the sign of the error is that the finer mesh pays a
+  little *more* fragment time, which would make the vertex half smaller still.
+  The whole-frame row is the check available without a third configuration: the
+  frame moved +0.346 ms while the pass moved +0.416, so the rest of the frame got
+  0.07 ms *cheaper*, which is either noise or slightly better occlusion and is in
+  neither case a fragment cost the solve hid.
+
+**Audit re-run** (same machine, `LIT+VIS`): the base configuration reproduces at
+terrain **2.515 ms** against the ledger's 2.509 and a GPU frame of 9.051 against
+9.042, and the 64-cell arm is re-measured in the audit ledger at the foot of this
+section.
 
 **What that buys TER2b.** Ring 0 today is 8 m per vertex over 1 m height data —
 seven of every eight survey metres never reach a silhouette. Doubling the ring-0
@@ -9499,6 +9527,17 @@ libm-ban table, which **caught it unprompted**
 |---|---|---|---|---|
 | dominant | 42.0 % | 6.7 % | 15.3 % | 35.9 % |
 
+*Read the denominator* (TER2a audit). This is over **all 599 076 level-0
+samples**, and the same build's carve step reports **402 732 of them on land** —
+so **32.8 % of the map is sea floor**, which the classifier leaves
+`UNASSIGNED_BIOME` and `biome_mix` paints as pure sand by design (a sea floor
+reads as sand). Sand-dominant is 215 068 samples against 196 344 non-land ones,
+so **at most ~4.6 % of the LAND is sand-dominant** and the headline 35.9 % is
+overwhelmingly ground nobody stands on. Stated as a bound rather than a
+measurement, because it is arithmetic over two printed totals and not a third
+walk: the row above is a fact about the *mask*, and the beach is a much smaller
+number than it looks. The same denominator applies to the blend fraction below.
+
 **38.6 % of samples blend two layers or more**, 39 234 were pushed toward rock by
 their own slope, and **zero** fail the sum-to-255 invariant — which is now
 *blocking* rather than a tolerance, because a weight that does not sum shades that
@@ -9538,6 +9577,20 @@ with **no transcendental in the path**: value noise and Worley smoothed by
 than rotation (a rotation would destroy the tiling), and an sRGB encode that **is**
 the IEC curve rather than an approximation — `1/2.4` is exactly `5/12`, so it is a
 twelfth root, measured against `powf` over 4 097 points at **0.000 levels of 255**.
+
+*"No transcendental in the path" had no gate, and now does* (the TER2a audit's
+second finding). Every sibling crate that commits derived bytes carries a source
+gate over `inf_math::libm_ban::ALL` — and this wave's other two generators are
+covered, `inf_island::splat` by `inf-island`'s table (which caught it unprompted,
+as clause 2 records) and `inf_editor_core::cover` by that crate's recursive scan.
+`inf-material` had **none at all**, so the largest of the three — 1 102 lines
+writing 7.39 MB — rested on the sentence above and on nothing else.
+`crates/inf-material/tests/portable_math_law.rs` is now that gate: a recursive
+walk of `src/` (no table to rot), the full canonical list, and exactly **one**
+exemption — the `powf` reference curve the sRGB arm measures against, enumerated
+as a literal line, with a meta-arm that it is still inside `#[cfg(test)]` because
+that is its whole justification. Mutation-verified: a `powf` added to
+`linear_to_srgb`'s shipped half fails it by file and line.
 
 *The first draft of that root is a finding in itself.* Newton on `y¹² − x` is
 quadratically convergent near the root and violently unstable away from it: seeded
@@ -9665,12 +9718,42 @@ cut is kept for what it promises on flatter worlds and on tiers with worse textu
 caches, and is *not* what makes triplanar affordable here. Saying otherwise would
 be an argument standing where a measurement is.
 
-### Clause 5 — three things that stand on the ground
+*The audit asked whether the cut is simply set too tight, and it is not — the
+reason is worth writing down because the next reader will have the same idea.*
+`tw.y ≥ 0.98` is about **20.7°**, where the planar projection stretches by
+`1/cos` = **1.069**, seven per cent, which nobody can see. Moving the cut to 45°
+(`tw.y ≥ 0.5`, a 1.41× stretch) would keep the single fetch on far more fragments
+and save far more than 0.013 ms. It would also put a **discontinuity** there: a
+hard cut is only invisible where the two projections agree, and at 45° they do
+not. The cheap gate and the seamless gate are the same knob turned opposite ways,
+and the only setting that buys real time without a visible line is a *blend band*
+— three fetches across it — which costs what it saves. The knob is at the right
+end of its travel; the honest summary stays "the gate is not what makes this
+affordable".
+
+### Clause 5 — three things authored for the ground, and not yet on it
+
+> **CORRECTED BY THE TER2a AUDIT.** This clause was written and committed as
+> "three things that **stand on** the ground", and it is not true at the frame.
+> The three meshes are authored, byte-locked, cooked and reachable in the pack —
+> every one of which this clause proves — and **nothing draws them**.
+> `push_scatter` has built every scattered instance as a `PrimMesh::Cube` tinted
+> by a five-entry `pcg_kind_color` palette since P18.5, `inf_render::ScatterBatch`
+> has no mesh field and no `VtTextureSet` at all, and `PcgKind::mesh` is read by
+> the packager's dependency closure and by nothing that draws — the evaluation in
+> `inf_pcg::rules` keeps a `kind_index` and the GUID does not survive into
+> `PcgInstance`. So the island draws **16 771 tinted cubes** at its authored
+> 0.7–1.6 m scale range, which is 6.25× as many as before the density raise.
+> The gap is the documented kind→real-mesh viewport gap (the same one sprites and
+> tilemaps have) and closing it is a wave. It is now pinned by
+> `island_gate::the_cover_meshes_are_shipped_and_are_not_yet_drawn`, a tripwire
+> that fails the day a real mesh reaches the path — and names this paragraph as
+> what has to be rewritten when it does.
 
 The island's `.inf_pcg` declared three scatter kinds and **all three carried
 `mesh: None`** — a bare transform, which the scatter evaluates, the biome binding
-restricts, the residency pages and the frame counts, and which draws nothing.
-2 681 instances of nothing, every frame.
+restricts, the residency pages and the frame counts, and which draws a
+placeholder cube. 2 681 instances naming nothing, every frame.
 
 `inf_editor_core::cover` generates three, on `block_body_mesh`'s precedent —
 `MeshAsset`s assembled from vertices and indices, in `f64`, with an integer hash
@@ -9684,9 +9767,11 @@ uses and for the same committed-bytes reason):
 | shrub | 32 | 20 | 0.741 m | 0.203 m |
 | rock | 384 | 128 | 0.310 m | 0.242 m |
 
-Each shares a **ground material** rather than carrying textures of its own, which
-is the storage argument virtual texturing rests on, and its sidecar names it so the
-cook ships the two together.
+Each names a **ground material** in its sidecar rather than carrying textures of
+its own — the storage argument virtual texturing rests on — so the cook's closure
+ships the two together. *That edge is a dependency edge and nothing more*: a
+`ScatterBatch` has no material slot, so no texel of that material reaches a
+scattered instance today (see the correction at the head of this clause).
 
 **FINDING — the cook had no scatter-kind mesh edge.** `asset_deps`' `Pcg` arm
 followed a graph's grammar modules only, and its comment said a scatter kind's mesh
@@ -9750,6 +9835,38 @@ scalar colours alone. **11 721 textured luminance steps against 175 untextured
 (67×)**, at a mean luminance of **94.5 against 95.5** — the same ground, with the
 texture on it.
 
+**Three corrections to that paragraph, all from the TER2a audit, and the last is
+a MED.**
+
+1. *The step count is stale.* On the shipped tree it reads **9 175 against 175
+   (52.4×)** at a mean of **94.4**, deterministically over repeated runs. The
+   11 721 was measured at `8da363bb`, before clause 4's triplanar changed the
+   shading on this scene's bank; the committed image did not have to move because
+   the change sits inside the strict tolerance, but the statistic did.
+2. *The step count is a **threshold** count* — adjacent pairs differing by more
+   than four levels of 255 — so it is exquisitely sensitive to a sub-level shift
+   and should not be read as a stable measurement of anything. The **ratio** the
+   arm asserts (`on > off × 2`) has two orders of magnitude of margin and is what
+   the arm is for.
+3. **"67× the high-frequency detail" is not evidence that the 2.03×-too-dark fix
+   worked, and the audit measured it going the wrong way.** With the
+   `vt_surface`-factor bug deliberately restored, this same statistic reads
+   **13 214 against 175 — 75×**, *higher* than the fixed tree's 52×: a darker
+   frame sits on a steeper part of the ACES curve, so the same linear texel
+   variation resolves into *more* 8-bit levels. The number was cited for a
+   property it does not have.
+
+**And the arm that IS cited for the fix did not hold it** (the audit's MED-4,
+fixed). Under the same mutation the frame's mean luminance goes **48.6
+against 95.5** — a 49 % gap — and the arm's allowance was `mb × 0.5`, i.e.
+**47.75**. It passed **by 0.85 of a level**. The `steps` arm passed too (see
+above). The only thing that failed was the committed image under
+`INF_GOLDEN_STRICT=1`, and **CI never sets it** (`grep -rn INF_GOLDEN_STRICT
+.github/` is empty), so on every leg CI actually runs, the wave's own second
+finding was unpinned. The allowance is **20 %** now — an order of magnitude above
+the real signal (1.1 %) and an order below the defect (49 %) — and both
+directions are mutation-verified.
+
 **Additive**: `GOLDENS` 57 → 58 in four gates, all three `GOLDEN_SET_DIGEST` pins
 moved by hand in the same commit (`dc695d74…` → `07cc8ae8…`), the phase18 name
 array grown, and **not one committed image changed** — `INF_GOLDEN_STRICT=1` green
@@ -9781,9 +9898,14 @@ over all 58.
    the adapter. A CPU evaluator over the material registry — so a graph-authored
    texture could be committed and byte-locked — is the honest way to have both,
    and it is a wave.
-6. **A LOD band and an alpha cut-out for the cover meshes.** Three low-poly props
-   at 32, 20 and 128 triangles, drawn opaque at every distance. They are the
-   difference between cover and a number, not an art pass.
+6. **The kind → real-mesh upload for scatter — and only then a LOD band and an
+   alpha cut-out for the cover meshes.** *(Reordered by the audit: the first of
+   these was missing from this list and is the prerequisite for the other two.)*
+   `push_scatter` builds a `PrimMesh::Cube`, `ScatterBatch` has no mesh field,
+   and `PcgKind::mesh` is dropped at evaluation, so the three props at 32, 20 and
+   128 triangles are shipped and not drawn — the same documented viewport gap as
+   sprites and tilemaps, and a wave. A LOD band and a cut-out are what comes
+   after it, not instead of it.
 7. **`RenderTier` does not clamp the triplanar cut.** The cost is 0.126 ms of
    fetches and 0.252 ms of derivative work on a 4070 Ti; a mobile tier pays the
    derivative half unconditionally the moment a terrain layer binds a material.
@@ -9815,13 +9937,43 @@ over all 58.
    test, both for adapter-robustness rather than preference; a matched-adapter
    strict leg still compares the same pixels because the transcode is the same
    texels one format decision earlier.
-7. **Two predictions this wave made were wrong, and the instrument said so
-   both times.** The density scaling put the working set at 13 405 where the
-   frame drew **16 771** (20 % low); and the first twelfth-root seed put an sRGB
-   encode **8.2 levels** out where its own arm demanded a fraction of one. Both
-   are fixed and both are recorded with the prediction beside the measurement,
-   because the failure mode they share — an inference presented as a number — is
-   the one this repository has a law about.
+7. **FIVE predictions this wave made were wrong, and something said so every
+   time.** *(This item said "two" and listed two; the ROADMAP block and the
+   ledger commit both say five and the other three are recorded elsewhere in
+   this section. Corrected by the audit — a summary that undercounts its own
+   ledger is the shape the ledger exists to prevent.)*
+   (a) the density scaling put the working set at 13 405 where the frame drew
+   **16 771** — the prediction 20 % below the measurement, equivalently the
+   measurement 25 % above it (clause 5, and the arm now reads the measurement);
+   (b) the first twelfth-root seed put an sRGB encode **8.2 levels** out where
+   its own arm demanded a fraction of one (clause 3);
+   (c) the cliff arm's first control read **232 against 232**, because a column
+   on flat ground walks tens of metres of the very axis being measured
+   (clause 4);
+   (d) its second read **2.3×**, because a 68° wall leaves 2.5 % of the
+   horizontal plane in the answer and the baseline rises with it (clause 4);
+   (e) the density **arm** compared two literals — a tautology the compiler
+   folds and clippy refused — and now reads the document's own `base_density`
+   (the counts table's clippy row).
+   And a sixth the audit added: **the split in clause 1a was presented with a
+   reconstruction that is algebra**, not a check. All are recorded with the
+   wrong number beside the right one, because the failure mode they share — an
+   inference presented as a measurement — is the one this repository has a law
+   about.
+
+8. **The ground cover is committed, cooked and not drawn** (the audit's HIGH —
+   see the correction at the head of clause 5). Three `.inf_mesh` props reach
+   the pack and nothing reads their GUIDs at draw time: `push_scatter` builds a
+   `PrimMesh::Cube` tinted from a five-entry palette, `ScatterBatch` has no mesh
+   field and no `VtTextureSet`, and `PcgKind::mesh` does not survive evaluation.
+   Pinned by `island_gate::the_cover_meshes_are_shipped_and_are_not_yet_drawn`.
+   **A product decision sits on top of it and is the orchestrator's, not the
+   audit's**: the density raise 0.004 → 0.02 was justified by the meshes, and
+   what it actually multiplied is the number of placeholder cubes in the
+   player's 1.3 km² — 2 681 → 16 771 at a 0.7–1.6 m scale range, one every ~9 m
+   of resident ground. Keeping it is right for the day the meshes draw and is
+   measured and inside budget; reverting to 0.004 until then is the other
+   defensible answer. It is stated here rather than taken.
 
 ### The island, before and after
 
@@ -9847,6 +9999,22 @@ column is the VIS1b audit's own re-run at `fd4a755f`.
 
 **≥ 60 fps p50 with everything on: MET, at 74.0 fps — 7.63 ms of GPU headroom.**
 Nothing in this wave ships opt-in-off for budget reasons.
+
+**And the SHIPPED row grew more than any other, which this table printed and did
+not say** (the TER2a audit's addition). `SHIPPED` p50 went 3.653 → 5.543 ms —
+**+1.890 ms, +52 %** — the largest relative move in the table, on the one
+configuration that is what ships. The audit measured its inside, which the ledger
+never printed: **the shipped GPU frame is 2.244 ms and its terrain pass is
+1.667 ms of that — 74 %.** Against clause 1's own base reading of **0.510 ms** for
+the shipped terrain at `BASE_CELLS` 32, the pass went **×3.27**, and the shipped
+GPU frame roughly doubled (≈1.09 → 2.24 ms). None of that breaches anything —
+5.543 ms is a third of `SHIPPING_FRAME_BUDGET_MS` (16.6) — but "the whole wave
+costs +0.604 ms, 7.2 %" is the number from the configuration where the cost is
+*smallest*, because a lit frame has 4.6 ms of `vsm-raster` to hide a terrain pass
+behind and a shipped one has nothing. **The honest headline is two numbers**: the
+lit island pays +7.2 % of its GPU frame and the shipped island pays about +100 %
+of a much smaller one, and TER2b — which plans to spend the fragment headroom
+clause 1 found — is planning against the shipped budget as well as the lit one.
 
 **The whole wave costs the lit island +0.604 ms of GPU frame** (8.438 → 9.042),
 **7.2 %**, and every millisecond of it is in one pass:
@@ -9891,7 +10059,7 @@ pack, in a registration order printed in full.
 | the workspace eaten-`\` gate | green | **green** — and it fired on this wave **three separate times**, over scripted edits to Rust string literals in `terrain_vt_fragment.rs`, `terrain_layers.rs`, `samples.rs`, `level.rs` and `island_gate.rs`. The law keeps paying for itself: every one was a `\`-continuation eaten by a Python string, and every one would have shipped a user-facing message with a run of eighteen spaces in it |
 | schema versions | scene v26 / payload v11 / `.inf_sm` v3 | **unmoved** — and so is the **island recipe** (v2). Its `island.toml` gained entries in the existing `[content]` array, which is a use of a field rather than a change to one. `inf-ecs` gained a **method**, not a field; `crates/inf-scene` is not in the wave's diff at all |
 | new crates / external dependencies | — | **none** |
-| committed content | 0 `.inf_tex` | **17 `.inf_tex` + 5 `.inf_mat` + 3 `.inf_mesh`**, 7.2 MB under `samples/ground/` |
+| committed content | 0 `.inf_tex` | **17 `.inf_tex` + 5 `.inf_mat` + 3 `.inf_mesh`**, **7.43 MB** under `samples/ground/` (the audit measured it: 7 394 656 B of `.inf_tex`, 24 012 B of `.inf_mesh`, 539 B of `.inf_mat`, plus sidecars and the README; the "7.2 MB" first written here matched neither the decimal total nor the 7.08 MiB one) |
 | frontend tests / files | 719 / 80 | **unmoved, and not run** — `git diff fd4a755f..HEAD -- editor/studio` is empty, so nothing in the frontend suite's scope moved |
 | `.inf_terrain` build artifact (outside the tree) | 342 MB | **549.9 MB** — the splat weights, 51.4 M samples × 4 B |
 
@@ -9904,3 +10072,301 @@ things it found on the way (clause 3b + the 58th golden); `f5ff1c57` the cliffs 
 being smeared, and the derivatives cost twice the fetches (clause 4); `5c11b1d2` 2 681
 instances of nothing get something to be (clause 5); plus the ledger commit that carries
 this section into the memo and the ROADMAP.
+
+---
+
+## Wave TER2a — the adversarial audit (2026-08-26)
+
+Range `fd4a755f..7470a3c1`, seven commits, on a clean tree. **One HIGH, three
+MED, six LOW.** The HIGH and all three MEDs are fixed or pinned; the LOWs are
+corrected in place above. Nothing in the wave was reverted.
+
+**The wave is, on the whole, unusually well measured.** Everything the audit
+re-ran reproduced, most of it to the printed decimal, and two of the wave's five
+recorded wrong-predictions are the kind of self-catch this campaign exists to
+produce. What the audit found is not arithmetic that is wrong — it is **one
+clause that describes a picture the engine does not draw**, one stated portability
+property with no arm behind it, and a cost headline taken from the configuration
+where the cost is smallest.
+
+### HIGH-1 — the ground cover is committed, cooked, and NOT drawn
+
+*Fixed by correction and by tripwire; `ac9de674`.*
+
+Clause 5 shipped as *"three things that stand on the ground"* and as *"2 681
+instances of nothing get something to be"*. Both are false at the frame.
+
+| link in the chain | state |
+|---|---|
+| three `.inf_mesh` props generated, byte-locked, committed | **true** |
+| the island's three `PcgKind`s name their GUIDs | **true** |
+| the cook's `.inf_pcg` → scatter-mesh edge (the wave's fourth finding) | **true** |
+| the sidecar edge to a shared ground material | **true** |
+| **anything draws them** | **false** |
+
+`push_scatter` (`runtime/inf-player/src/render.rs:1231`, mirrored in
+`inf_viewport::host`) builds `ScatterData::build(PrimMesh::Cube, …)` and tints
+each instance with `pcg_kind_color(si.kind)` — a five-entry literal palette — and
+has done so since P18.5, with its own doc comment saying so. `ScatterBatch`
+(`crates/inf-render/src/scene.rs`) has **no mesh field and no `VtTextureSet`**, so
+there is nowhere for the shared material to live either. And `PcgKind::mesh` is
+read by the packager's dependency closure and by nothing that draws:
+`inf_pcg::rules` resolves a `kind_index` and the GUID never reaches a
+`PcgInstance`, so no projector can see it. The word *cube* appears nowhere in the
+wave's ledger.
+
+**What the wave actually shipped, then, is 16 771 tinted cubes** at the island's
+authored 0.7–1.6 m scale range — one every ~9 m of the player's ~1.3 km² of
+resident ground, against one every ~22 m before the density raise. The raise was
+justified in `ISLAND_SCATTER_DENSITY`'s own note by the meshes.
+
+*Why nothing caught it*: `island_gate`'s clause-5 block asserts pack membership
+and `triangles > 0`. That is a gate that does not aim at the thing it names —
+the P23 law, met again, and this time the name was in the section title.
+
+**Fixed as**: `island_gate::the_cover_meshes_are_shipped_and_are_not_yet_drawn`,
+a tripwire on the P22 pattern — it asserts the **wrong** outcome so the day the
+kind→real-mesh upload lands it goes red, and it fails with the list of prose that
+has to be rewritten. It reads `push_scatter`'s **body** rather than the file (a
+ban reads a scope, not a spelling), pins the biome-population delegation as its
+anti-vacuity half so it cannot be reading a function the island does not use, and
+pins `PcgInstance`/`ScatteredInstance` field by field as struct literals so the
+day either grows a mesh reference it stops **compiling**. Mutation-verified:
+`PrimMesh::Cube` → `PrimMesh::Sphere` inside `push_scatter` — and only there, the
+file has five occurrences and the body has one — fails the arm by name.
+
+**Not taken, and named**: reverting the density to 0.004 until the upload lands
+is the other defensible answer to what the raise multiplied. It is a product
+decision and it is stated in the carried list, not made by the audit.
+
+### MED-2 — the crate that writes 7.39 MB of committed texels had no libm gate
+
+*Fixed; `ca30db85`.* See the note inside clause 3 above. `inf-material` had no
+source gate of any kind while `inf_material::ground`'s header rests four
+paragraphs of ruling on "no transcendental in the path", and
+`inf_editor_core::samples`'s byte lock compares 7.39 MB against a fresh
+generation on every CI leg on the strength of it. The wave's other two generators
+were both covered — `splat.rs` by `inf-island`'s table (which caught it
+unprompted) and `cover.rs` by `inf-editor-core`'s recursive scan — so of three
+modules added to the committed-bytes path, the largest was the uncovered one.
+`crates/inf-material/tests/portable_math_law.rs` closes it, with a recursive walk
+(no table to rot), one enumerated test-line exemption and two meta-arms.
+Mutation-verified.
+
+### MED-3 — the SHIPPED frame grew +52 % and the ledger printed it without a word
+
+*Fixed by measurement and correction (the frame-table section above).* The wave's
+headline is "the whole wave costs the lit island **+0.604 ms of GPU frame**,
+7.2 %". Its own table also prints `SHIPPED` p50 3.653 → 5.543 ms — **+1.890 ms,
++52 %**, the largest relative move in the table — and says nothing about it. The
+audit measured the inside the ledger never printed:
+
+| shipped configuration | before (clause 1's own base reading) | after (audit re-run) |
+|---|---|---|
+| `terrain` pass | **0.510 ms** | **1.667 ms** (**×3.27**) |
+| whole GPU frame | ≈1.09 ms (inferred) | **2.244 ms** |
+| terrain's share of it | — | **74 %** |
+| p50 | 3.653 ms | 5.421 ms (audit) / 5.543 (wave) |
+
+Nothing breaches — 5.5 ms against `SHIPPING_FRAME_BUDGET_MS` 16.6 — but a lit
+frame has 4.6 ms of `vsm-raster` to hide a terrain pass behind and a shipped one
+has nothing, so the honest headline is **two** numbers: +7.2 % of a lit frame and
+about **+100 %** of a shipped one. The scout warned terrain was 49 % of the
+shipped frame; it is now 74 %, and TER2b plans to spend the fragment headroom
+clause 1 found.
+
+### MED-4 — the near-ground golden did not hold the finding it was cited for
+
+*Fixed; `63c8cdd6`.* The full write-up is beside the 58th golden above. In one
+line: with the `vt_surface`-factor bug restored, the golden's mean-luminance arm
+passed **by 0.85 of a level** against a 50 % allowance, its `steps` arm passed and
+went the **wrong way** (75× with the defect against 52× without it — the "67× the
+high-frequency detail" the ledger cites as the fix's measurement is a statistic
+the defect *improves*), and the only thing that failed was the committed image
+under `INF_GOLDEN_STRICT=1`, which **CI never sets**. The allowance is 20 % now,
+an order of magnitude clear of the real signal in one direction and the defect in
+the other, mutation-verified both ways, with its derivation written on it.
+
+*The shape is the one this campaign keeps meeting*: an arm that was written to
+say "the texture is on the ground" was read as "and it is the right brightness",
+and nobody asked it whether it could tell the difference.
+
+### The LOWs, all corrected in place
+
+1. **"The prediction reconstructs the measurement to a thousandth" is algebra**,
+   not a check — a two-point linear solve reconstructs its own two points by
+   construction. Replaced above with the two assumptions the split actually
+   rests on, including that the vertex half scales **3.879×** (65²/33²) and not
+   4×, which moves the verdict from 7.3 %/92.7 % to 7.6 %/92.4 % and therefore
+   does not move it at all.
+2. **Committed content is 7.43 MB, not 7.2** (7 394 656 B of `.inf_tex` +
+   24 012 B of `.inf_mesh` + 539 B of `.inf_mat` + sidecars). "7.2 MB" matched
+   neither the decimal total nor the 7.08 MiB one. Clause 3's own "7.39 MB" is
+   right — it is the `.inf_tex` alone.
+3. **The ROADMAP read "measured at 16 771 — 20 % above the prediction"**, which
+   is neither: the measurement is 25 % above the prediction and the prediction
+   20 % below the measurement. The memo had it right; the ROADMAP now does too.
+4. **The carried list said "two predictions were wrong" and listed two**, while
+   the ROADMAP block and the ledger commit both say five and the other three are
+   recorded elsewhere in this section. A summary that undercounts its own ledger
+   is the shape the ledger exists to prevent. Now five, each with a pointer, plus
+   the sixth the audit added.
+5. **`detail_scale_m` was corrected on four *code* surfaces and never entered in
+   `docs/memos/units-doctrine.md`**, which is the doctrine's own registry and the
+   one place a reader looks for "which of our units lie". Entered now, with the
+   release condition (it renames at the next `.inf_mat` schema move, to
+   `detail_tiles_per_uv`, and the default is re-chosen there).
+6. **The splat coverage table's denominator is the whole map, not the land.** All
+   599 076 level-0 samples, of which the same build's carve step reports **32.8 %
+   are not land at all** — and the sea floor is `UNASSIGNED_BIOME`, which
+   `biome_mix` paints as pure sand by design. Sand-dominant is 215 068 against
+   196 344 non-land, so **at most ~4.6 % of the LAND is sand-dominant** against a
+   headline of 35.9 %. The row is a fact about the mask and reads as a fact about
+   the ground; the denominator is now stated beside it, as a bound rather than a
+   measurement (it is arithmetic over two printed totals, not a third walk).
+
+### What was re-run, and what it said
+
+Every load-bearing number in the wave was re-measured on the same machine
+(RTX 4070 Ti, Windows/Vulkan).
+
+| claim | wave | audit re-run |
+|---|---|---|
+| splat coverage (grass / rock / forest / sand) | 42.0 / 6.7 / 15.3 / 35.9 % | **identical** |
+| blended / rock-by-slope / sum violations | 38.6 % / 39 234 / 0 | **identical** |
+| coarse tiles carrying no weights | 20 | **20** |
+| `two_builds_of_one_recipe_produce_the_same_terrain` | green | **green** (7 043 328 B, 56 tiles, 3 LODs) |
+| shoreline / road-grade / committed-water / start-gap arms | green | **green** (0.004 m from the waterline, 0.008 m start gap) |
+| `MAX_VT_EXTENT` guard + anti-vacuity | fires | **fires**, by name |
+| f32 quantum vs finest texel at the island's far corner | 0.244 mm vs 1.465 mm = 6.0 | **identical** |
+| ground-set texel densities and mean sRGB (all five) | table | **identical to the printed decimal** |
+| sRGB encode against `powf` | 0.000 levels of 255 | **0.000 at v = 0.9983** |
+| `LIT+VIS` p50 / GPU frame | 13.505 / 9.042 ms (74.0 fps) | **13.522 / 9.051 (74.0 fps)** |
+| `terrain` / `scatter` / VT / instances | 2.509 / 0.131 / 14 / 16 771 | **2.515 / 0.131 / 14 / 16 771** |
+| `vt stream` share of the record stage | 0.4–0.8 % | **0.4–0.6 %** |
+| goldens | 58, one **A**, zero **M**, zero **D** | **confirmed against git** |
+| schemas | scene v26, recipe v2, `inf-scene` untouched | **confirmed by diff** |
+| frontend | `git diff -- editor/studio` empty | **confirmed** |
+
+**And the wave's headline A/B, re-run independently — on the *post*-wave tree,
+which is a different experiment and a stronger one.** The wave solved its split
+at the base commit, where the terrain pass had no bound materials and no
+triplanar. The audit re-ran `TERRAIN_BASE_CELLS` 32 → 64 on the shipped tree,
+where the fragment half is 31 % dearer:
+
+| configuration | terrain @ 32 | terrain @ 64 | delta |
+|---|---|---|---|
+| `SHIPPED` | 1.667 ms | 2.047 ms | +22.8 % |
+| `LIT` | 2.512 | 3.085 | +22.8 % |
+| `LIT+SSR` | 2.511 | 3.092 | +23.1 % |
+| **`LIT+VIS`** | **2.515** | **3.084** | **+22.6 %** |
+| `LIT-COARSE-CLIPMAP` | 2.561 | 3.149 | +23.0 % |
+| whole GPU frame (`LIT+VIS`) | 9.051 | 9.550 | **+0.499 ms** |
+| p50 | 74.0 fps | 71.5 fps | −2.5 |
+
+Solving on these puts the vertex half at **0.190 ms** and the fragment half at
+**2.325** — **7.5 % / 92.5 %**, against the wave's 7.3 % / 92.7 % on a tree whose
+fragment cost was a third lower. **The verdict is the wave's and it survives its
+own experiment being repeated somewhere else.**
+
+**The number TER2b should plan with is the audit's, not the wave's.** Doubling
+ring-0 density costs **+0.569 ms of terrain and +0.499 ms of a 9.051 ms frame
+(5.5 %)** on the tree TER2b starts from — not the +0.42 ms of an 8.44 ms frame
+the wave quoted from the base tree, which no longer exists. Against 7.6 ms of
+headroom it is still cheap, and it is still the right thing to spend on.
+
+### What the audit did NOT find
+
+Stated because an audit that only lists what it broke is not a reading of the
+wave.
+
+* **The cooked-path virtual-texture question is genuinely closed**, and it is the
+  one the brief flagged as a possible I7-vegetation-gap shape. `material_content`
+  walks the whole partition, `the_cooked_island_carries_the_ground_its_layers_bind`
+  asserts **0 entities in the level → 4 layers → 4 materials → 14 textures** on
+  the real cooked pack, and the assertion that the level is empty is what makes
+  the partition walk load-bearing rather than incidental — remove the walk and the
+  arm reads zero. Confirmed in the **shipped boot** rather than only in the gate:
+  the shipping instrument builds its material set through
+  `PackLevelSource::material_content` and prints **14 virtual textures** on every
+  one of its five configurations. Not a HIGH; a fix.
+* **Portability holds.** `inf_island::splat` is clean of all 81 needles (swept
+  independently), reaches exactly one transcendental — `patan2_64`, the door
+  `CoarseHeights::slope_deg` already uses — and the crate's own table caught it
+  unprompted, as the clause says. `inf_editor_core::cover` is clean and covered.
+* **The tile-edge feather is real and armed.** Two tiles share a row; the border
+  rows read the neighbour through `height_at` and `a_shared_tile_edge_paints_one_answer`
+  compares the shared edge sample for sample with an anti-vacuity half proving the
+  fixture is steep enough for the slope term to matter. Nothing the splat did
+  moved a fixture pin: the shoreline arm still reads 0.004 m from the waterline
+  and the start gap 0.008 m.
+* **`pie_equals_shipping_on_an_island_drive` is green** with the new meshes and
+  6.25× the density, along with all eight `island_gate` arms.
+* **The 58th golden shows what it says it shows.** Looked at, not counted: four
+  banded grounds under a one-metre eye, with visible millimetre-scale mottling in
+  the foreground. Not a flat green frame.
+* **The triplanar gate's threshold is at the right end of its travel**, which the
+  audit checked because it looked wrong. See the note in clause 4.
+* **The eaten-`\` count stands at 29.** The workspace gate is green; the audit
+  swept the whole range independently with the gate's own rule (interior run ≥ 8
+  inside a line carrying a quote, comments excluded) and found only the one
+  pre-existing `ALIGNED_ON_PURPOSE` site; and it swept the gate's four **scope
+  gaps** — `samples/`, `templates/`, `platforms/`, `scripts/`, plus `docs/` — where
+  the only two hits are ROADMAP prose *quoting* past catches. No thirtieth.
+  (The wave's own three catches are visible in the range: one of them, in
+  `level.rs` and `island_gate.rs`, shipped inside `8da363bb` and was corrected in
+  `f5ff1c57` — the range as pushed is clean.)
+* **One observation, not a finding**: `material_content`'s partition walk is
+  `O(all cells)` at load and has no load-budget arm over it. It costs nothing
+  measurable on the 51 km² island (the instrument boots and cooks inside its own
+  run) and it is the right shape — a registration sequence must be a function of
+  the level and not of where the camera was on frame one — but the day a world has
+  a hundred times the cells, that walk is where to look first.
+
+### The audit's own counts
+
+| | after TER2a (`7470a3c1`) | **after the audit** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 327 / 6 192 / 0 / 19 | **328 / 6 196 / 0 / 19** — **+1 block** (`inf-material`'s new gate is a new test target, the first this crate has had beside `vt_fill_quality`) and **+4 arms** (3 in that gate, 1 in `island_gate`). The wave's own "327 / 6 192" is confirmed by subtraction rather than taken on trust: this run measured 328 / 6 196 and the audit added exactly one target and four arms |
+| goldens | 58 | **58** — the audit added none, re-blessed none, and touched no image. `git status` over `crates/inf-render/tests/goldens` is empty after an `INF_GOLDEN_STRICT=1` run |
+| `INF_GOLDEN_STRICT=1` | claimed green over 58 | **green over 58**, re-run — 117 arms in the golden target, 0 failed |
+| rustdoc individual warnings (cold, after `cargo clean --doc`) | 374 over 30 crates | **374 over 30 crates** — the audit adds **zero**, against a ceiling of 450. (Counted as `grep -c '^warning:'` minus the 30 per-crate summary lines, which is 404 − 30; the per-crate figures sum to 374 independently) |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| `cargo fmt --all --check` | clean | **clean** |
+| the workspace eaten-`\` gate | green, 29 catches | **green, still 29** — swept independently over the range and over the gate's four scope gaps |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **unmoved**, confirmed by diff (`crates/inf-scene` is not in the audit's diff either) |
+| new crates / external dependencies | none | **none** — `inf-math` joins `inf-material`'s `[dev-dependencies]`, which is an internal crate on a dev edge, for `libm_ban::ALL`. `Cargo.lock` moves and nothing links differently |
+| frontend | untouched, not run | **untouched, not run** |
+| committed content | 17 `.inf_tex` + 5 `.inf_mat` + 3 `.inf_mesh` | **unmoved** — the audit committed no content and regenerated none |
+
+### The audit's commits
+
+`ac9de674` the ground cover is committed, cooked, and not drawn (HIGH-1 —
+tripwire + four corrected surfaces); `ca30db85` the crate that writes seven
+megabytes of committed texels had no libm gate (MED-2); `63c8cdd6` the
+near-ground golden did not hold the finding it was cited for (MED-4); plus the
+ledger commit carrying this section and the corrections above into the memo, the
+ROADMAP and `docs/memos/units-doctrine.md`.
+
+### The laws this wave paid for
+
+* **A dependency edge is not a draw call.** Four links of a five-link chain
+  proved, in four separate places, and the fifth — the only one a player can see
+  — assumed. The gate that covered it asserted pack membership, which is the
+  fourth link over again. *When a clause's title is about what the world looks
+  like, at least one arm has to be about what the world looks like.*
+* **A tolerance chosen for plausibility is not a tolerance chosen for a defect.**
+  `mb * 0.5` was a sensible-looking number that missed the wave's own finding by
+  0.85 of a level. A tolerance is only worth its place if somebody has run the
+  mutation it exists to catch and written the margin down.
+* **An opt-in gate is not a gate.** `INF_GOLDEN_STRICT` is set by people, not by
+  CI, so a pin that only strict mode holds is a pin that holds on the days
+  somebody remembers.
+* **A two-point solve reconstructs its own two points.** Presenting that as a
+  check is an inference wearing a measurement's clothes — the house law, met by
+  the very ledger that quotes it five times.
+* **Quote the denominator or the percentage is a different number.** 35.9 % of
+  the map is sand; ~4.6 % of the *land* is.
+* **A cost headline belongs to the configuration that ships.** +7.2 % of a lit
+  frame and +100 % of a shipped one are the same change measured where it hides
+  and where it does not.

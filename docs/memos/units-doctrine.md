@@ -98,6 +98,21 @@ next touched**, not in a dedicated sweep:
   `crates/inf-render/src/shaders/grid.wgsl`, with only a comment naming the units. Promote them
   to named constants (`GRID_MINOR_M`, `GRID_MAJOR_M`) when the grid pass is next touched — and
   keep them consistent with `ORIGIN_SNAP`, which was chosen as a multiple of them.
+- **`MaterialAsset::detail_scale_m` and `DerivedMaterial::detail_scale_m` are NOT metres**
+  (found by wave TER2a, recorded here by its audit — this is the doctrine's own registry and the
+  wave corrected the four code surfaces without entering it). `vt_apply_detail` computes
+  `duv = uv · scale`, so the field is **detail tiles per uv unit**: a *rate*, dimensionless per
+  uv, and a larger number is a **finer** detail. The `_m` suffix asserts the opposite, which is
+  rule 2 failing in the one direction rule 2 exists to prevent — a suffix that lies is worse
+  than no suffix, because a reader stops looking. On a mesh there are no metres to be had (a
+  mesh uv is whatever the author unwrapped) so the *behaviour* is right; on terrain, where
+  `uv = world.xz / TerrainLayer::tex_scale`, one detail tile covers `tex_scale / detail_scale_m`
+  metres. `DEFAULT_DETAIL_SCALE_M = 0.5` is therefore backwards by default — it makes a detail
+  layer twice as **coarse** as its base — and is kept because it is what every `.inf_mat` written
+  before TER2a decodes with (`#[serde(default)]`). **Release condition**: renaming the field is a
+  wire change, so it lands with the next `.inf_mat` schema move — `detail_tiles_per_uv`, and the
+  default re-chosen at the same time. Until then the only shipped content that names a detail
+  texture is `samples/ground/`, which authors 16 and 20 and states the metres they work out to.
 
-Neither blocks Phase 16. The doctrine above is the gate for *new* parameters; these two are
-grandfathered until their files come up.
+None of these blocks anything. The doctrine above is the gate for *new* parameters; these three
+are grandfathered until their files come up.

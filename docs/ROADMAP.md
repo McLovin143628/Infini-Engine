@@ -26900,8 +26900,13 @@ moves** (scene v26 stands, the island recipe stays v2, `inf-ecs` gains a *method
 `TERRAIN_BASE_CELLS` 32 → 64 is four times the triangles at every ring; through the shipping
 instrument at 1080p on the real island the `LIT+VIS` terrain pass goes **1.912 → 2.328 ms**, +22 %
 for 4× the geometry. Solving `V + F` against `4V + F` puts the vertex half at **0.139 ms (7.3 %)**
-and the fragment half at **1.773 ms (92.7 %)**, and the prediction reconstructs the measurement to a
-thousandth. **TER2b plans from this**: doubling ring-0 density costs 0.42 ms of an 8.44 ms frame
+and the fragment half at **1.773 ms (92.7 %)**. *(The TER2a audit struck the sentence that followed —
+"the prediction reconstructs the measurement to a thousandth" — as algebra rather than evidence: a
+two-point linear solve reconstructs its own two points by construction. What it put in its place is
+the two assumptions: the vertex half scales **3.879×** and not 4× (65²/33²; re-solving gives
+**7.6 % / 92.4 %**, so the verdict is insensitive), and equal overdraw across the two densities,
+whose only available check is that the whole frame moved +0.346 ms while the pass moved +0.416.)*
+**TER2b plans from this**: doubling ring-0 density costs 0.42 ms of an 8.44 ms frame
 against 4.5 ms of headroom, so the 1 m survey can reach silhouettes. And the **T44 / D-22 VT-extent
 exposure is closed, not re-carried**: `VtTextureDesc::validate` had *no extent rule at all* —
 `MAX_VT_EXTENT` (`1 << 23`, the `f32` mantissa's limit, the same number the resident-side tripwire
@@ -26970,15 +26975,26 @@ triplanar 2.179 ms, always-planar **2.431** (+0.252 unconditional), gated **2.55
 takes `dpdx(world)` once and swizzles. The gate saves **0.013 ms on this island** and is kept for what
 it promises on flatter worlds, not as the thing that makes triplanar affordable.
 
-**Clause 5 — three things that stand on the ground.** All three of the island's scatter kinds carried
-`mesh: None` — a bare transform the scatter evaluates, the biome binding restricts and the frame
-counts, and which draws nothing. `inf_editor_core::cover` generates a grass tuft (32 tris), a shrub
-(20) and a rock (128) on `block_body_mesh`'s precedent, each sharing a ground material rather than
-carrying textures of its own. **A FOURTH FINDING**: the cook had **no scatter-kind mesh edge** —
+**Clause 5 — three things authored for the ground, and not yet on it** (title and claim **corrected by
+the TER2a audit**, which found this clause the wave's one false one). All three of the island's
+scatter kinds carried `mesh: None`, and `inf_editor_core::cover` generates a grass tuft (32 tris), a
+shrub (20) and a rock (128) on `block_body_mesh`'s precedent, each naming a ground material in its
+sidecar rather than carrying textures of its own. **They are authored, byte-locked, cooked and
+reachable — and nothing draws them.** `push_scatter` has built every scattered instance as a
+`PrimMesh::Cube` tinted by a five-entry `pcg_kind_color` palette since P18.5; `ScatterBatch` carries
+no mesh field and no `VtTextureSet`, so there is nowhere for the shared material to go either; and
+`PcgKind::mesh` is read by the packager's dependency closure and by nothing that draws — the
+evaluation keeps a `kind_index` and the GUID never reaches `PcgInstance`. So the island draws
+**16 771 tinted cubes** at its authored 0.7–1.6 m scale range, 6.25× as many as before the density
+raise, and the sidecar edge is a cook edge and not a texel. Pinned by
+`island_gate::the_cover_meshes_are_shipped_and_are_not_yet_drawn`, a tripwire that fails the day a
+real mesh reaches the path; closing the kind→real-mesh upload (the same documented viewport gap as
+sprites and tilemaps) is a wave. **A FOURTH FINDING**: the cook had **no scatter-kind mesh edge** —
 `asset_deps` followed a graph's grammar modules only, and its comment cited an arm for why that was
 deliberate. There is no such arm. Density **0.004 → 0.02 /m²**: the bound is the **working set**,
 predicted at 13 405 by scaling the 2 681 the instrument drew at 0.004 and **measured at 16 771** —
-20 % above the prediction, because a jittered per-cell scatter does not divide evenly, and the
+the measurement 25 % above the prediction, equivalently the prediction 20 % below the measurement
+(this sentence said "20 % above the prediction", which is neither; the memo had it right), and the
 prediction is kept beside the measurement because an inference dressed as a measurement is worse than
 none. 16 771 is **25.6 %** of the CPU fallback's 65 536 ceiling, so both tiers still draw the same
 island — and the cover is effectively free, `scatter` going 0.125 → 0.131 ms for **6.25× the
@@ -26992,11 +27008,18 @@ world; "before" is the VIS1b audit's own re-run at `fd4a755f`). `SHIPPED` p50 3.
 `scatter` 0.125 → **0.131** for **6.25× the instances** (2 681 → 16 771); `vsm-raster`, `gi`, `ssao`,
 `vgeom` and `depth-prepass` all unmoved; **virtual textures 0 → 14**; `vt stream` 0.4–0.8 % of the
 record stage. **The requirement is met: ≥ 60 fps p50 with everything on, at 74.0 fps, with 7.63 ms of
-GPU headroom** — nothing ships opt-in-off for budget reasons. The whole wave costs **+0.604 ms of GPU
-frame (7.2 %)** and every millisecond is in one pass: 1.903 → 2.179 for the four bound materials,
-→ 2.509 for triplanar. The splat weights cost the **build artifact** 208 MB (51.4 M samples × 4 B;
-`.inf_terrain` 342 → 549.9 MB) and the frame nothing measurable — the run taken immediately after
-clause 2 read 8.440 ms against the base's 8.438.
+GPU headroom** — nothing ships opt-in-off for budget reasons. The whole wave costs the **lit** island
+**+0.604 ms of GPU frame (7.2 %)** and every millisecond is in one pass: 1.903 → 2.179 for the four
+bound materials, → 2.509 for triplanar. The splat weights cost the **build artifact** 208 MB
+(51.4 M samples × 4 B; `.inf_terrain` 342 → 549.9 MB) and the frame nothing measurable — the run taken
+immediately after clause 2 read 8.440 ms against the base's 8.438. **And the SHIPPED row grew more
+than any other, which this table printed and did not say** (the TER2a audit): `SHIPPED` p50 +1.890 ms
+is **+52 %**, the largest relative move here and the one configuration that is what ships. The audit
+measured its inside — shipped GPU frame **2.244 ms** of which **terrain is 1.667 ms, 74 %**, against
+clause 1's base reading of 0.510 ms for the same pass, so it went **×3.27** and the shipped GPU frame
+roughly doubled. Nothing breaches (5.5 ms against a 16.6 ms budget), but the honest headline is two
+numbers: **+7.2 % of a lit frame and about +100 % of a shipped one**, because a lit frame has 4.6 ms
+of `vsm-raster` to hide a terrain pass behind and a shipped one has nothing. TER2b plans against both.
 
 **Goldens 57 → 58**, purely additive and verified against git rather than against the prose:
 `git diff fd4a755f..HEAD -- tests/goldens` is exactly one **A** line (`ground_close.png`, the island's
@@ -27013,5 +27036,35 @@ the CPU tier can draw), `cargo fmt --all --check` clean, **no new crate or exter
 frontend **719 / 80 unmoved and not run** (`git diff -- editor/studio` is empty). The workspace
 eaten-`\` gate fired **three separate times** on this wave's scripted edits and each one would have
 shipped a user-facing message with a run of eighteen spaces in it. New committed content: **17
-`.inf_tex` + 5 `.inf_mat` + 3 `.inf_mesh`, 7.2 MB** under `samples/ground/`. Full ledger in
+`.inf_tex` + 5 `.inf_mat` + 3 `.inf_mesh`, 7.43 MB** under `samples/ground/` (measured by the audit;
+"7.2 MB" matched neither the decimal total nor the 7.08 MiB one). Full ledger in
 `docs/memos/island-progress.md`.
+
+**TER2a AUDIT (2026-08-26)** — one **HIGH**, three **MED**, six **LOW**; every HIGH and MED fixed or
+pinned, the LOWs corrected in place. **HIGH**: clause 5's above — the ground cover is committed,
+cooked and **not drawn**, and the clause said it was; corrected on four surfaces and pinned by a
+tripwire arm (`island_gate::the_cover_meshes_are_shipped_and_are_not_yet_drawn`, mutation-verified).
+**MED-2**: `crates/inf-material/src/ground.rs` synthesises 7.39 MB of **committed** bytes on a stated
+"no transcendental in the path" and the crate had **no source gate** — every sibling that commits
+derived bytes has one, and the wave's other two generators are covered by `inf-island`'s table and
+`inf-editor-core`'s recursive scan, so the largest of the three was the uncovered one;
+`crates/inf-material/tests/portable_math_law.rs` closes it, with one enumerated test-line exemption
+and a meta-arm that the exemption is inside `#[cfg(test)]`. **MED-3**: the SHIPPED frame's +52 %,
+above. **MED-4**: `ground_close`'s structural arms **did not hold the wave's own 2.03×-too-dark
+finding** — with the bug restored the mean-luminance arm passed by 0.85 of a level against a 50 %
+allowance, the `steps` arm passed and moved the *wrong way* (75× with the defect against 52×
+without, so the ledger's "67× the high-frequency detail" is a statistic the defect improves), and the
+only thing that failed was the committed image under `INF_GOLDEN_STRICT=1` — **which CI never sets**.
+The allowance is 20 % now, an order of magnitude clear in both directions, mutation-verified.
+Everything else the wave claimed **reproduced on a re-run**: the splat coverage to the printed
+decimal (42.0 / 6.7 / 15.3 / 35.9 %, 38.6 % blended, 39 234 rock-by-slope, 0 sum violations, 20 coarse
+tiles default), the byte-identity arm, the VT-extent guard and its 6.0 positions-per-texel, the whole
+frame table (`LIT+VIS` 13.522 p50 / 9.051 GPU / terrain 2.515 / scatter 0.131 / 14 VT / 16 771
+instances against 13.505 / 9.042 / 2.509 / 0.131 / 14 / 16 771), 58 goldens with exactly one **A**
+line, and no schema move. **The headline A/B was re-run independently on the post-wave tree** — a
+different experiment from the wave's — and the verdict survives: terrain +22.6 % for 4× the geometry,
+**7.5 % vertex / 92.5 % fragment**. TER2b should plan with the audit's number, **+0.569 ms of terrain
+and +0.499 ms of a 9.051 ms frame (5.5 %)**, not the wave's +0.42 of 8.44 from a tree that no longer
+exists. Counts after the audit: battery **328 / 6 196 / 0 / 19**, goldens **58** none re-blessed,
+`INF_GOLDEN_STRICT=1` green, rustdoc **374 over 30 crates** unmoved, clippy **0**, fmt clean, schemas
+unmoved, no external dependency. Ledger in `docs/memos/island-progress.md`.
