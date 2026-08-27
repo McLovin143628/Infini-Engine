@@ -1026,6 +1026,13 @@ mod tests {
     fn the_settlement_generator_is_authored_from_committed_design_alone() {
         const ALLOWED: &[&str] = &["IslandDesign", "Route", "Site", "SiteKind"];
         let code = module_code();
+        assert!(
+            crate::island::scan::aliases(&code).is_empty(),
+            "settlement.rs imports `inf_island` under another name at line(s) \
+             {:?} — the scan follows the literal `inf_island::` and an alias \
+             walks past it (island wave I8a audit)",
+            crate::island::scan::aliases(&code)
+        );
         let used = crate::island::scan::island_doors(&code);
         println!("settlement.rs reaches inf_island::{{{:?}}}", used.keys());
         for (name, line) in &used {
@@ -1057,6 +1064,21 @@ mod tests {
         let found = crate::island::scan::island_doors(&probe);
         assert!(found.contains_key("sample_terrain"));
         assert!(!ALLOWED.contains(&"sample_terrain"));
+        // **And the WRAPPED form** (island wave I8a audit), which is what this
+        // module's own import becomes the day a fifth door joins it: four names
+        // is 48 characters and `rustfmt` wraps at a hundred.
+        let wrapped = vec![
+            (1usize, "use inf_island::{".to_string()),
+            (2, "IslandDesign, Route, Site, SiteKind,".to_string()),
+            (3, "sample_terrain,".to_string()),
+            (4, "};".to_string()),
+        ];
+        let found = crate::island::scan::island_doors(&wrapped);
+        assert!(
+            found.contains_key("sample_terrain"),
+            "a wrapped brace import scanned clean: {:?}",
+            found.keys()
+        );
     }
 
     /// **THE LEDGER LINE**: what the committed design actually plans, printed

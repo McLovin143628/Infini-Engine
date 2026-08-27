@@ -78,8 +78,10 @@ fn committed_levels() -> Vec<PathBuf> {
 /// (`samples/island/VancouverIsland.inf_lvl`,
 /// `samples/island-fixture/IslandFixture.inf_lvl`).
 ///
-/// The islands are levels whose **terrain is not committed** — 342.7 MB and
-/// 4.6 MB respectively, built by `inf island build` from the recipe beside each.
+/// The islands are levels whose **terrain is not committed** — 549.9 MB and
+/// 4.6 MB respectively (the first was 342.7 MB before wave TER2b's detail band;
+/// re-measured by the I8a audit), built by `inf island build` from the recipe
+/// beside each.
 /// The level itself is authored from the committed design alone, which is
 /// exactly what lets it be counted here.
 ///

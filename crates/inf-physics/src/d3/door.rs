@@ -71,9 +71,20 @@ pub fn door_label(placement: &DoorPlacement, state: &DoorState, from: DoorSide) 
     }
     if from == placement.spec.lock_side && !state.lock_broken {
         // The lock verb is offered on ONE face — the owner's "lockable from the
-        // inside" — and it is offered alongside the open/close rather than
-        // instead of it, because a door you can lock is still a door you can
-        // walk through.
+        // inside".
+        //
+        // **AND ON A SHUT DOOR IT IS OFFERED INSTEAD OF THE OPEN, NOT BESIDE
+        // IT** (island wave I8a audit; this comment used to claim the opposite,
+        // and `use_door` has never done what it said). Read the branch order in
+        // [`use_door`]: from the lock side, a shut leaf takes the lock verb
+        // whatever its bolt is doing, so pressing E from inside cycles
+        // lock → unlock → lock and never opens. A character who closes the door
+        // behind them cannot open it again from that side. The behaviour is
+        // deliberate and pinned (`a_sprint_through_an_unlocked_door_leaves_a_
+        // lock_that_still_works`: *"an OPEN door shuts and a SHUT one locks — a
+        // door standing open with its bolt thrown would be a lock nobody could
+        // see"*); what was not true is this sentence, and giving the two verbs
+        // separate inputs is a gameplay change, not an audit's.
         let word = if state.locked { "unlock" } else { "lock" };
         return format!("{} ({word} with the same key)", placement.label);
     }

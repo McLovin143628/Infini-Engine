@@ -765,18 +765,64 @@ pub(crate) mod scan {
     /// that imported every door in the crate by one `use` line scanned clean.
     /// Found the day a second module joined the scan and its own anti-vacuity
     /// arm (*"the module no longer reads the committed design at all"*) fired.
+    ///
+    /// # …and a brace group that WRAPS, which is the same hole one line down
+    ///
+    /// (Island wave I8a audit.) Reading `{` to the `}` on the same line still
+    /// missed the form `rustfmt` produces the moment an import list is long
+    /// enough to wrap:
+    ///
+    /// ```text
+    /// use inf_island::{
+    ///     IslandDesign, Route, Site, SiteKind, sample_terrain,
+    /// };
+    /// ```
+    ///
+    /// The first line's `{` opens a group with nothing after it, the following
+    /// lines never say `inf_island::` at all, and the module scans clean again.
+    /// That is not a hypothetical shape: `settlement.rs`'s own import is four
+    /// names and 48 characters, and the fifth door anybody adds wraps it. An open
+    /// group therefore stays open across lines until its `}`, and every name in
+    /// it is recorded against the line the group **started** on.
     pub fn island_doors(code: &[(usize, String)]) -> std::collections::BTreeMap<String, usize> {
+        fn record(used: &mut std::collections::BTreeMap<String, usize>, group: &str, line: usize) {
+            for name in group.split(',') {
+                let name = name.trim();
+                if !name.is_empty() {
+                    used.entry(name.to_string()).or_insert(line);
+                }
+            }
+        }
         let mut used: std::collections::BTreeMap<String, usize> = Default::default();
+        // `Some(line)` while a brace group opened on `line` is still unclosed.
+        let mut open: Option<usize> = None;
         for (n, line) in code {
             let mut rest = line.as_str();
+            if let Some(started) = open {
+                match rest.split_once('}') {
+                    Some((group, tail)) => {
+                        record(&mut used, group, started);
+                        open = None;
+                        rest = tail;
+                    }
+                    None => {
+                        record(&mut used, rest, started);
+                        continue;
+                    }
+                }
+            }
             while let Some(at) = rest.find("inf_island::") {
                 rest = &rest[at + "inf_island::".len()..];
                 if let Some(stripped) = rest.strip_prefix('{') {
-                    let group = stripped.split_once('}').map(|(g, _)| g).unwrap_or(stripped);
-                    for name in group.split(',') {
-                        let name = name.trim();
-                        if !name.is_empty() {
-                            used.entry(name.to_string()).or_insert(*n);
+                    match stripped.split_once('}') {
+                        Some((group, tail)) => {
+                            record(&mut used, group, *n);
+                            rest = tail;
+                        }
+                        None => {
+                            record(&mut used, stripped, *n);
+                            open = Some(*n);
+                            rest = "";
                         }
                     }
                     continue;
@@ -791,6 +837,30 @@ pub(crate) mod scan {
             }
         }
         used
+    }
+
+    /// Lines that reach `inf_island` under **another name**, which is the one
+    /// spelling [`island_doors`] cannot follow (island wave I8a audit).
+    ///
+    /// The extractor is an allowlist over what it can read, and what it reads is
+    /// the literal `inf_island::`. `use inf_island as isl;` — or
+    /// `use inf_island::sample_terrain as h;` — renames the door and the scan
+    /// walks past it. There is no cheap way to follow an alias without parsing,
+    /// so the alias itself is refused: a module authored from committed design
+    /// alone has no reason to want one, and a REFUSAL is a rule an author meets
+    /// immediately rather than a hole nobody meets at all.
+    /// Only `use` lines are read, so `inf_island::clamp(x as i32)` is not an
+    /// alias and does not trip it. A `type` alias needs no rule: the aliased path
+    /// still spells `inf_island::<Door>` on its own line, so the scan has already
+    /// recorded the door by the time anybody uses the short name.
+    pub fn aliases(code: &[(usize, String)]) -> Vec<usize> {
+        code.iter()
+            .filter(|(_, l)| {
+                let t = l.trim_start();
+                t.starts_with("use ") && t.contains("inf_island") && t.contains(" as ")
+            })
+            .map(|(n, _)| *n)
+            .collect()
     }
 }
 
@@ -841,6 +911,13 @@ mod tests {
             "terrain_guid",
         ];
         let code = module_code();
+        assert!(
+            super::scan::aliases(&code).is_empty(),
+            "island.rs imports `inf_island` under another name at line(s) {:?} — \
+             the scan follows the literal `inf_island::` and an alias walks past \
+             it (island wave I8a audit)",
+            super::scan::aliases(&code)
+        );
         let used = super::scan::island_doors(&code);
         println!("island.rs reaches inf_island::{{{:?}}}", used.keys());
         for (name, line) in &used {
@@ -906,6 +983,48 @@ mod tests {
         let doors = super::scan::island_doors(&group);
         let names: Vec<&str> = doors.keys().map(String::as_str).collect();
         assert_eq!(names, vec!["IslandBuild", "IslandDesign", "sample_terrain"]);
+        // **AND THE SAME GROUP WRAPPED OVER THREE LINES** (island wave I8a
+        // audit), which is what `rustfmt` writes the moment the list is long
+        // enough — and which the same-line reader above still could not see: the
+        // `{` opened a group with nothing after it and the following lines never
+        // say `inf_island::` at all.
+        let wrapped = vec![
+            (10usize, "use inf_island::{".to_string()),
+            (11, "IslandDesign, Route, Site,".to_string()),
+            (12, "SiteKind, sample_terrain,".to_string()),
+            (13, "};".to_string()),
+        ];
+        let doors = super::scan::island_doors(&wrapped);
+        let mut names: Vec<&str> = doors.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![
+                "IslandDesign",
+                "Route",
+                "Site",
+                "SiteKind",
+                "sample_terrain"
+            ],
+            "a wrapped brace import scanned clean — the hole moved one line down"
+        );
+        assert_eq!(
+            doors.get("sample_terrain"),
+            Some(&10),
+            "a name inside a wrapped group is reported against the line the group \
+             opened on"
+        );
+        // …and an ALIAS is refused rather than followed, because the extractor
+        // reads one spelling and a rename is the spelling it cannot read.
+        assert_eq!(
+            super::scan::aliases(&[
+                (1usize, "use inf_island as isl;".to_string()),
+                (2, "use inf_island::sample_terrain as h;".to_string()),
+                (3, "let n = inf_island::clamp(x as i32);".to_string()),
+            ]),
+            vec![1, 2],
+            "the alias probe either missed a rename or called an `as` cast one"
+        );
         // …and a comment line is filtered, which is why the real scan drops them.
         assert!("    // inf_island::sample_terrain"
             .trim_start()
