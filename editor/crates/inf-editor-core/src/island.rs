@@ -187,7 +187,7 @@ pub const ISLAND_SCATTER_DENSITY: f64 = 0.02;
 /// A stable GUID from the island's name and a salt, mirroring
 /// `inf_island`'s own derivation so the level and the build agree about which
 /// asset is which without either storing a table.
-fn derived(name: &str, salt: &str) -> Uuid {
+pub(crate) fn derived(name: &str, salt: &str) -> Uuid {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in salt.as_bytes().iter().chain(b"/").chain(name.as_bytes()) {
         h ^= u64::from(*b);
@@ -668,22 +668,22 @@ pub fn write_island_levels() -> Result<(), String> {
     Ok(())
 }
 
+/// **The committed-design source scan**, shared by every module that authors a
+/// committed island document (island wave I8a).
+///
+/// It was `island.rs`'s alone until the settlement generator arrived, and one
+/// file's scan is a scan that stops at the file somebody happened to write
+/// first: the level's numbers and the settlements' block positions reach the
+/// same committed `.inf_lvl`, so both have to be authored from committed design
+/// alone or neither is.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn design(rel: &str) -> Option<inf_island::IslandDesign> {
-        committed_design(rel)
-    }
-
-    /// Lines of the module's **non-test, non-comment** source, with their
-    /// one-based numbers — the scan every arm below reads.
+pub(crate) mod scan {
+    /// The **non-test, non-comment** lines of a module source, one-based.
     ///
-    /// The scan stops at the test module, and it has to: an arm's own needle list
-    /// lives in this file, so a whole-file scan matches itself and fails on the
-    /// line that declares what it is looking for. (It did.)
-    fn module_code() -> Vec<(usize, String)> {
-        let whole = include_str!("island.rs");
+    /// The scan stops at the test module, and it has to: an arm's own needle
+    /// list lives in the file it scans, so a whole-file scan matches itself and
+    /// fails on the line that declares what it is looking for. (It did.)
+    pub fn code_lines(whole: &str) -> Vec<(usize, String)> {
         let src = whole
             .split_once("#[cfg(test)]")
             .map(|(before, _)| before)
@@ -702,6 +702,60 @@ mod tests {
             .filter(|(_, l)| !l.trim_start().starts_with("//"))
             .map(|(i, l)| (i + 1, l.to_string()))
             .collect()
+    }
+
+    /// Every `inf_island::` item a code listing names, with the line each was
+    /// first seen on.
+    ///
+    /// # It reads a BRACE GROUP as well as a path, and that was a hole
+    ///
+    /// The first version took the identifier immediately after `inf_island::`
+    /// and stopped. `use inf_island::{IslandDesign, Route};` puts a `{` there,
+    /// so the extractor read an **empty name and recorded nothing** — a module
+    /// that imported every door in the crate by one `use` line scanned clean.
+    /// Found the day a second module joined the scan and its own anti-vacuity
+    /// arm (*"the module no longer reads the committed design at all"*) fired.
+    pub fn island_doors(code: &[(usize, String)]) -> std::collections::BTreeMap<String, usize> {
+        let mut used: std::collections::BTreeMap<String, usize> = Default::default();
+        for (n, line) in code {
+            let mut rest = line.as_str();
+            while let Some(at) = rest.find("inf_island::") {
+                rest = &rest[at + "inf_island::".len()..];
+                if let Some(stripped) = rest.strip_prefix('{') {
+                    let group = stripped.split_once('}').map(|(g, _)| g).unwrap_or(stripped);
+                    for name in group.split(',') {
+                        let name = name.trim();
+                        if !name.is_empty() {
+                            used.entry(name.to_string()).or_insert(*n);
+                        }
+                    }
+                    continue;
+                }
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    used.entry(name).or_insert(*n);
+                }
+            }
+        }
+        used
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn design(rel: &str) -> Option<inf_island::IslandDesign> {
+        committed_design(rel)
+    }
+
+    /// Lines of the module's **non-test, non-comment** source, with their
+    /// one-based numbers — the scan every arm below reads.
+    fn module_code() -> Vec<(usize, String)> {
+        super::scan::code_lines(include_str!("island.rs"))
     }
 
     /// **Nothing here reads an elevation.** The level is authored from committed
@@ -737,20 +791,7 @@ mod tests {
             "terrain_guid",
         ];
         let code = module_code();
-        let mut used: std::collections::BTreeMap<String, usize> = Default::default();
-        for (n, line) in &code {
-            let mut rest = line.as_str();
-            while let Some(at) = rest.find("inf_island::") {
-                rest = &rest[at + "inf_island::".len()..];
-                let name: String = rest
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .collect();
-                if !name.is_empty() {
-                    used.entry(name).or_insert(*n);
-                }
-            }
-        }
+        let used = super::scan::island_doors(&code);
         println!("island.rs reaches inf_island::{{{:?}}}", used.keys());
         for (name, line) in &used {
             assert!(
@@ -794,19 +835,27 @@ mod tests {
     #[test]
     fn the_committed_design_scan_finds_a_door_when_one_is_there() {
         // The extractor, run against a line that names a forbidden door.
-        let line = "    let t = inf_island::sample_terrain(&r, &m, &l, &c);";
-        let at = line
-            .find("inf_island::")
-            .expect("the needle is in the fixture");
-        let name: String = line[at + "inf_island::".len()..]
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        assert_eq!(name, "sample_terrain");
+        let probe = vec![(
+            1usize,
+            "    let t = inf_island::sample_terrain(&r, &m, &l, &c);".to_string(),
+        )];
+        let found = super::scan::island_doors(&probe);
+        assert_eq!(found.keys().collect::<Vec<_>>(), vec!["sample_terrain"]);
         assert!(
-            !["IslandDesign", "read_design", "slug"].contains(&name.as_str()),
+            !["IslandDesign", "read_design", "slug"].contains(&"sample_terrain"),
             "a real door must not be on the allowlist"
         );
+        // **And a BRACE GROUP, which the first extractor could not see at all**
+        // (island wave I8a): `use inf_island::{A, B};` put a `{` where the
+        // identifier was expected, the take-while read an empty string, and a
+        // module importing every door in the crate on one line scanned clean.
+        let group = vec![(
+            2usize,
+            "use inf_island::{IslandBuild, sample_terrain, IslandDesign};".to_string(),
+        )];
+        let doors = super::scan::island_doors(&group);
+        let names: Vec<&str> = doors.keys().map(String::as_str).collect();
+        assert_eq!(names, vec!["IslandBuild", "IslandDesign", "sample_terrain"]);
         // …and a comment line is filtered, which is why the real scan drops them.
         assert!("    // inf_island::sample_terrain"
             .trim_start()

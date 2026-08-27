@@ -74,6 +74,9 @@ pub mod render_assets;
 pub mod samples;
 pub mod scene;
 pub mod sequencer;
+// Island wave I8a: the settlement generator — streets, blocks, zones — beside
+// `island`, which stands its `PcgVolume`s up in the committed level.
+pub mod settlement;
 pub mod simulate;
 pub mod skel;
 // P29.6 pillar S1: the `.inf_sm` text sidecar, as a save door.
