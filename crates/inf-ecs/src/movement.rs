@@ -79,6 +79,13 @@ pub mod actions {
     pub const DIVE: &str = "dive";
     /// Edge: enter the nearest vehicle, or leave the one being driven (P29.7).
     pub const INTERACT: &str = "interact";
+    /// Edge: **throw or draw the bolt** on the door in reach (island wave I8b).
+    ///
+    /// Its own control because one key cannot carry two verbs that are both
+    /// wanted in the same state: `interact` on a shut door used to lock it from
+    /// the owner's face, which meant a character who closed a door behind them
+    /// could never open it again. See `inf_physics::d3::door::lock_door`.
+    pub const LOCK: &str = "lock";
     /// Edge: toggle 6-DOF flight (P29.7).
     pub const FLY: &str = "fly";
     /// Held: the handbrake, while driving (P29.7).
@@ -1154,6 +1161,8 @@ pub struct MovementIntent {
     pub dive: bool,
     /// Edge: enter/exit a vehicle (P29.7).
     pub interact: bool,
+    /// Edge: lock or unlock the door in reach (island wave I8b).
+    pub lock: bool,
     /// Edge: toggle flight (P29.7).
     pub fly: bool,
     /// Held: handbrake (P29.7).
@@ -1250,6 +1259,7 @@ impl MovementIntent {
             roll: pressed(actions::ROLL),
             dive: pressed(actions::DIVE) || (stance == PressClass::LongPress && sprint),
             interact: pressed(actions::INTERACT),
+            lock: pressed(actions::LOCK),
             fly: pressed(actions::FLY),
             handbrake: held(actions::HANDBRAKE),
             // ── I6: the four the owner's table bound and I5 left unconsumed ──
@@ -1324,6 +1334,7 @@ pub fn apply_intent(world: &mut EcsWorld, intent: &MovementIntent) {
         rt.press_roll |= intent.roll;
         rt.press_dive |= intent.dive;
         rt.press_interact |= intent.interact;
+        rt.press_lock |= intent.lock;
         rt.press_fly |= intent.fly;
         // I6. `want_attack` is a LEVEL and is assigned; the other three are
         // edges and are ORed, for the reason the block above gives — a frame

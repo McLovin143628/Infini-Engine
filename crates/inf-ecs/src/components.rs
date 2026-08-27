@@ -1938,6 +1938,11 @@ pub struct MovementRuntime {
     /// Edge: the enter/exit control. Enters the nearest vehicle from the ground
     /// and leaves the one being driven.
     pub press_interact: bool,
+    /// **Edge: the lock control** (island wave I8b) — throw or draw the bolt on
+    /// the door in reach.
+    ///
+    /// A runtime field like every other edge here, so it moves no schema.
+    pub press_lock: bool,
     /// Edge: the flight toggle.
     pub press_fly: bool,
     /// Held: the handbrake, routed to the vehicle being driven.

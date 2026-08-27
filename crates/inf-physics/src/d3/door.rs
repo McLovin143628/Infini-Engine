@@ -70,23 +70,19 @@ pub fn door_label(placement: &DoorPlacement, state: &DoorState, from: DoorSide) 
         return format!("{} (Locked)", placement.label);
     }
     if from == placement.spec.lock_side && !state.lock_broken {
-        // The lock verb is offered on ONE face — the owner's "lockable from the
-        // inside".
+        // **BOTH VERBS, and this sentence is true now** (island wave I8b,
+        // closing the I8a audit's MED-5). It used to say the lock was offered
+        // "alongside" the open while [`use_door`] meant *instead*: from the lock
+        // side a shut leaf took the lock verb whatever its bolt was doing, so
+        // pressing E from inside cycled lock → unlock → lock and never opened,
+        // and a character who shut the door behind them could not open it again.
         //
-        // **AND ON A SHUT DOOR IT IS OFFERED INSTEAD OF THE OPEN, NOT BESIDE
-        // IT** (island wave I8a audit; this comment used to claim the opposite,
-        // and `use_door` has never done what it said). Read the branch order in
-        // [`use_door`]: from the lock side, a shut leaf takes the lock verb
-        // whatever its bolt is doing, so pressing E from inside cycles
-        // lock → unlock → lock and never opens. A character who closes the door
-        // behind them cannot open it again from that side. The behaviour is
-        // deliberate and pinned (`a_sprint_through_an_unlocked_door_leaves_a_
-        // lock_that_still_works`: *"an OPEN door shuts and a SHUT one locks — a
-        // door standing open with its bolt thrown would be a lock nobody could
-        // see"*); what was not true is this sentence, and giving the two verbs
-        // separate inputs is a gameplay change, not an audit's.
+        // The two verbs have separate controls now — E is [`use_door`] and
+        // always opens or closes, on either face; the bolt is [`lock_door`] and
+        // is offered on the owner's face alone — so the prompt names a pair a
+        // player can actually press.
         let word = if state.locked { "unlock" } else { "lock" };
-        return format!("{} ({word} with the same key)", placement.label);
+        return format!("{} (open, or {word})", placement.label);
     }
     placement.label.clone()
 }
@@ -390,28 +386,51 @@ pub fn is_open_near(world: &EcsWorld, at: DVec3) -> bool {
 /// locked one, a lock toggled, a leaf opening. The caller does not need to know
 /// which; it needs to know whether anything happened, and the verdict says.
 ///
-/// **What the press does is decided by the same `lock_side` the prompt read**,
-/// so what the player is told and what the press does cannot come apart — the
-/// property I5 built the one resolution site for.
+/// **E ALWAYS MEANS OPEN OR CLOSE, ON EITHER FACE** (island wave I8b).
+///
+/// It did not used to. From the lock side a **shut** leaf took the *lock* verb
+/// whatever its bolt was doing, so the press cycled lock → unlock → lock and a
+/// character who shut the door behind them could never open it again — 2 070
+/// doorways at a time on the shipped island. That was deliberate ("locked from
+/// the inside" has to mean something for whoever locked it) and it was wrong,
+/// because one control cannot carry two verbs that are both wanted in the same
+/// state. The bolt has its own control now ([`lock_door`]), [`door_label`]
+/// names both, and this function does the one thing its name says.
+///
+/// `feet` is unused for the verb and kept in the signature because every caller
+/// has it in hand and because a side-dependent open direction would read it
+/// here.
 pub fn use_door(world: &mut EcsWorld, guid: Uuid, feet: DVec3) -> door::DoorVerdict {
+    let _ = feet;
+    let Some(p) = placement_of(world, guid) else {
+        return door::DoorVerdict::Unusable;
+    };
+    // A locked door answers `Locked` and does not move — `door::toggle`'s own
+    // rule, unchanged, and what the prompt already reads.
+    with_state(world, &p, |spec, state| door::toggle(spec, state))
+}
+
+/// **The bolt's own control** (island wave I8b) — the second half of the pair
+/// [`door_label`] promises.
+///
+/// Offered on the owner's face alone ([`door::set_locked`] answers `WrongSide`
+/// from the other one, and for a lock that has been broken), and **refused on an
+/// open leaf**: a door standing open with its bolt thrown is a lock nobody can
+/// see, which is the one part of the old single-button behaviour worth keeping.
+///
+/// It toggles rather than taking a target state, because the control it is
+/// reached from is one key: a player who can lock a door can unlock it with the
+/// same press, which is what a key in a hand does.
+pub fn lock_door(world: &mut EcsWorld, guid: Uuid, feet: DVec3) -> door::DoorVerdict {
     let Some(p) = placement_of(world, guid) else {
         return door::DoorVerdict::Unusable;
     };
     let side = p.spec.side_of(p.hinge, feet);
     with_state(world, &p, |spec, state| {
-        // The lock verb wins on its own face while the door is shut and locked:
-        // that is what "locked from the inside" has to mean for the person who
-        // locked it, or they could never get out. On the other face, or once the
-        // lock is broken, the same press is the ordinary open/close.
-        if side == spec.lock_side && !state.lock_broken {
-            if state.locked {
-                return door::set_locked(spec, state, side, false);
-            }
-            if !state.is_open(spec) {
-                return door::set_locked(spec, state, side, true);
-            }
+        if state.is_open(spec) {
+            return door::DoorVerdict::WrongSide;
         }
-        door::toggle(spec, state)
+        door::set_locked(spec, state, side, !state.locked)
     })
 }
 

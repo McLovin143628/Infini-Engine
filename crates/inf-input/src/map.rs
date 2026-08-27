@@ -585,6 +585,12 @@ pub fn default_map() -> InputMap {
         // no jump and a pedestrian has no handbrake.
         .bind_key("interact", "KeyE")
         .bind_button("interact", GamepadButton::North)
+        // **The bolt is its own key** (island wave I8b). `interact` on a shut
+        // door used to lock it from the owner's face, which is a verb nobody can
+        // undo: the same press could never open it again. E opens, L locks, and
+        // the prompt names both.
+        .bind_key("lock", "KeyL")
+        .bind_button("lock", GamepadButton::East)
         .bind_key("fly", "KeyV")
         .bind_button("fly", GamepadButton::West)
         .bind_key("handbrake", "Space")

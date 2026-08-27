@@ -557,6 +557,26 @@ fn step_one(
     } else {
         std::mem::take(&mut cm.runtime.press_interact)
     };
+    // **The bolt's own edge** (island wave I8b). Taken unconditionally — a
+    // driver has no door to lock, and an edge that is never taken is an edge
+    // that is banked for the whole drive (the `press_interact` lesson above).
+    let want_lock = std::mem::take(&mut cm.runtime.press_lock);
+    if want_lock && cm.mode.is_grounded_family() {
+        let feet = position - DVec3::Y * (cm.half_height_for(cm.mode) + radius);
+        // **The SAME resolution site the open verb uses**, so the prompt, the
+        // open and the lock cannot come apart about which door is meant. A hit
+        // that is not a door answers `Unusable` and nothing happens, which is
+        // the right answer for a switch nobody has written a lock for.
+        let mut taken = occupied_seats(world, guid);
+        taken.insert(guid);
+        if let Some(h) =
+            super::interact::resolve(world, bridge, feet, cm.runtime.aim_yaw_deg, &taken)
+        {
+            if h.verb == inf_ecs::interact::InteractVerb::Use {
+                super::door::lock_door(world, h.guid, feet);
+            }
+        }
+    }
     if want_enter && cm.mode.is_grounded_family() {
         let feet = position - DVec3::Y * (cm.half_height_for(cm.mode) + radius);
         // **The one interaction door** (island wave I5). The `press_interact`

@@ -314,6 +314,14 @@ fn press_e() -> MovementIntent {
     }
 }
 
+/// **The lock control** (island wave I8b) — its own key, because E always opens.
+fn press_lock() -> MovementIntent {
+    MovementIntent {
+        lock: true,
+        ..Default::default()
+    }
+}
+
 fn press_attack() -> MovementIntent {
     MovementIntent {
         attack: true,
@@ -443,19 +451,34 @@ fn the_lock_verb_appears_on_the_inside_and_not_on_the_outside() {
     let prompt = inside.prompt().expect("a door prompt");
     println!("standing inside, the prompt reads: {prompt}");
     assert!(prompt.contains("lock"), "{prompt}");
-    // Pressing E from the inside LOCKS it rather than opening it - the owner's
-    // "lockable from the inside", asserted as the door's own state.
-    inside.step(&press_e());
+    // **BOTH VERBS, from the same place** (island wave I8b). The prompt names
+    // the pair, so both halves are asserted here: the LOCK control throws the
+    // bolt without moving the leaf...
+    inside.step(&press_lock());
     assert!(
         inside.door_state().locked,
-        "the inside press did not lock it"
+        "the lock control did not lock it"
     );
     assert_eq!(inside.door_state().open_deg, 0.0);
-    // ...and pressing it again UNLOCKS rather than double-locking.
-    inside.step(&press_e());
+    // ...pressing it again draws the bolt rather than double-locking...
+    inside.step(&press_lock());
     assert!(
         !inside.door_state().locked,
-        "the second press did not unlock"
+        "the second lock press did not unlock"
+    );
+    // ...and E, from this same face, OPENS. That is the whole of the I8a audit's
+    // MED-5: before this the shut leaf took the lock verb whatever its bolt was
+    // doing, so a character who closed the door behind them could never open it
+    // again.
+    inside.step(&press_e());
+    assert!(
+        inside.door_state().open_deg != 0.0,
+        "E from the lock side did not open the door: {:?}",
+        inside.door_state()
+    );
+    assert!(
+        !inside.door_state().locked,
+        "opening threw the bolt as a side effect"
     );
 
     // And from the outside the same door offers no lock verb at all.
@@ -1152,10 +1175,11 @@ fn a_sprint_through_an_unlocked_door_leaves_a_lock_that_still_works() {
     );
     // …so the lock verb is still on offer, from the inside, and it works.
     //
-    // **Two presses**, because `use_door` on the lock side is one verb with two
-    // meanings: an OPEN door shuts and a SHUT one locks — a door standing open
-    // with its bolt thrown would be a lock nobody could see. That is the gate's
-    // own lock station, met here from the other side of a breach.
+    // **Two presses, on two controls** (island wave I8b): E shuts the leaf and
+    // the lock control throws the bolt. The bolt still refuses an OPEN door —
+    // a door standing open with its bolt thrown would be a lock nobody could
+    // see — which is why the shut has to come first. That is the gate's own
+    // lock station, met here from the other side of a breach.
     rig.steps(&idle(), 90);
     let spec = rig.door_spec();
     let inside = HINGE + DVec3::new(0.0, 0.0, 1.0);
@@ -1173,8 +1197,8 @@ fn a_sprint_through_an_unlocked_door_leaves_a_lock_that_still_works() {
         "the leaf did not shut: {:?}",
         rig.door_state()
     );
-    let v = d3::door::use_door(&mut rig.world, DOOR, inside);
-    println!("pressing E from the inside face after the breach: {shut:?}, then {v:?}");
+    let v = d3::door::lock_door(&mut rig.world, DOOR, inside);
+    println!("shutting with E then locking from the inside face: {shut:?}, then {v:?}");
     assert!(
         rig.door_state().locked,
         "the door could not be locked after being barged through: {v:?}"
