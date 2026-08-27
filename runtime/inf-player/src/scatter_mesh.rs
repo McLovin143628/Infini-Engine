@@ -188,6 +188,37 @@ pub fn from_dir(dir: &Path) -> ScatterMeshes {
     out
 }
 
+/// **Register the building module meshes** (island wave I8b) — the twelve shape
+/// families every palette module draws.
+///
+/// They name no `.inf_mesh` file and never will: the geometry is a function of
+/// the module's own name, minted under a private salt by
+/// `inf_pcg::building::modules`. So neither loader above can find them by
+/// scanning a pack or a directory, and both hosts add them to the table they
+/// just built instead — from one Ring-0 source, through one Ring-0 flattener.
+///
+/// **Existing entries win.** A project that really does ship an `.inf_mesh`
+/// under one of these ids has authored it deliberately, and an engine default
+/// must not overwrite authored content.
+///
+/// MIRROR: identical in `inf_viewport::host`, pinned by `inf-editor-core`'s
+/// `tests/projector_mirror.rs`.
+pub fn add_building_modules(table: &mut inf_render::ScatterMeshes) {
+    // MIRROR-BEGIN building_module_table
+    for (id, m) in inf_pcg::building::modules::module_meshes() {
+        let key = id.as_u128();
+        if table.contains_key(&key) {
+            continue;
+        }
+        let g = inf_render::ScatterGeometry::from_streams(&m.positions, &m.normals, &m.indices);
+        if g.is_empty() || g.triangle_count() > inf_render::MAX_SCATTER_MESH_TRIANGLES {
+            continue;
+        }
+        table.insert(key, std::sync::Arc::new(g));
+    }
+    // MIRROR-END building_module_table
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

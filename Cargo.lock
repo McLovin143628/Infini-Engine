@@ -3754,6 +3754,7 @@ dependencies = [
  "inf-ecs",
  "inf-editor-core",
  "inf-math",
+ "inf-pcg",
  "inf-physics",
  "inf-render",
  "inf-terrain",

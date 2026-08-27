@@ -3251,9 +3251,29 @@ pub struct ScatteredInstance {
     /// that no longer exists by the time a projector reads it, so two instances
     /// carrying `0` may be a grass tuft and a wall module. A GUID is global.
     ///
-    /// `None` is "draw the placeholder primitive" — a kind with no mesh, a
-    /// grammar module, or a mesh the host could not resolve.
+    /// `None` is "draw the placeholder primitive" — a kind with no mesh, or a
+    /// mesh the host could not resolve. Since island wave I8b a **grammar
+    /// module names one too**.
     pub mesh: Option<uuid::Uuid>,
+    /// **The half-extents of the box this instance occupies**, metres, in its
+    /// own rotated frame — `None` for "the unit primitive at
+    /// [`scale`](Self::scale)" (island wave I8b).
+    ///
+    /// Mirrors `inf_pcg::PcgInstance::extent` field for field. [`scale`] is one
+    /// uniform `f64` and every building module carries `1.0`, so before this
+    /// field a 10 m slab and a 0.3 m mullion drew as the same one-metre cube
+    /// while their colliders were right. The projector turns it into
+    /// `ScatterInstance::scale`, which has been a `Vec3` since IB-2b gave the
+    /// structure shell three half-extents.
+    ///
+    /// [`scale`]: Self::scale
+    pub extent: Option<[f32; 3]>,
+    /// **How brightly this instance emits at night**, as a multiplier on its own
+    /// colour — `0.0` for everything that does not (island wave I8b).
+    ///
+    /// Mirrors `inf_pcg::PcgInstance::glow`. Authored, not resolved: the hour is
+    /// applied once, by the projector, which is the only place that knows it.
+    pub glow: f32,
 }
 
 /// One placed **collision box** a `.inf_pcg` graph produced (P19.5) — the solid
@@ -6274,6 +6294,8 @@ mod tests {
                 scale: 1.5,
                 kind: 2,
                 mesh: None,
+                extent: None,
+                glow: 0.0,
             }],
             // P19.5's solid half is derived state on exactly the same terms —
             // and **this is the whole schema answer for the batch**: a field
@@ -6345,6 +6367,8 @@ mod tests {
             scale: 1.0,
             kind: 0,
             mesh: None,
+            extent: None,
+            glow: 0.0,
         };
         let group = |start, len, inst_start, inst_len| StructureGroup {
             shell: solid,
@@ -6449,6 +6473,8 @@ mod tests {
                     scale: 1.5,
                     kind: i % 4,
                     mesh: None,
+                    extent: None,
+                    glow: 0.0,
                 })
                 .collect(),
             ..Terrain::configured(5, 1.0)

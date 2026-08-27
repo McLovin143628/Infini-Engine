@@ -479,6 +479,8 @@ fn population(
             scale: 1.0,
             kind: (i % 5) as u32,
             mesh: None,
+            extent: None,
+            glow: 0.0,
         });
         solid.push(inf_ecs::components::ScatteredSolid {
             center: DVec3::new(x, lift, z),

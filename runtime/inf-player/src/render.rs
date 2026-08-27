@@ -682,6 +682,14 @@ pub fn project_scene_full(
     // when a clock is present, pushes the sun/moon directional light as
     // `lights[0]` — a stable index on both projector sides.
     project_sky(scene, world);
+
+    // **The hour, resolved once** (island wave I8b clause 3). `project_sky` has
+    // just written `scene.sun`, so the sun's own height is in hand and the night
+    // glow is a function of it rather than of a second read of the clock. The
+    // step is QUANTIZED because it is part of the scatter memo's key -- see
+    // `inf_render::night_glow_step`.
+    // MIRROR: the same two lines in the other host, in the same place.
+    let glow_step = inf_render::night_glow_step(scene.sun.direction);
     // The clock and wind every water body responds to, resolved ONCE per
     // projection in Ring 0 (`inf_ecs::sky`) so the two MIRROR projectors cannot
     // disagree about what "now" and "the wind" mean — the same reasoning that put
@@ -836,6 +844,7 @@ pub fn project_scene_full(
                     scatter_meshes,
                     translation,
                     id,
+                    glow_step,
                 );
             }
         }
@@ -856,7 +865,7 @@ pub fn project_scene_full(
             if !terrain.biome_population.is_empty() {
                 let id = next_id;
                 next_id += 1;
-                push_biome_population(scene, terrain, scatter_meshes, translation, id);
+                push_biome_population(scene, terrain, scatter_meshes, translation, id, glow_step);
             }
         }
         // Water surfaces (P20.1): an ocean, a lake or a spline river. A river
@@ -1287,12 +1296,19 @@ fn push_scatter(
     draw_distance: f64,
     near_distance: f64,
     id: u32,
+    glow_step: u16,
 ) {
     // MIRROR-BEGIN scatter_mesh_buckets
     if instances.is_empty() {
         return;
     }
-    let mut buckets: std::collections::BTreeMap<Option<u128>, Vec<ScatterInstance>> =
+    // **The bucket key grew a second half** (island wave I8b): the mesh a
+    // batch draws AND the emission it draws with. `ScatterBatch::emissive` is
+    // one value for a whole batch, so two instances that glow differently
+    // cannot share one -- and a window pane and the wall beside it are exactly
+    // that pair. Bucketing on the authored glow costs one extra batch per
+    // volume that has any, and nothing at all for one that has none.
+    let mut buckets: std::collections::BTreeMap<(Option<u128>, u32), Vec<ScatterInstance>> =
         std::collections::BTreeMap::new();
     for si in instances {
         // A GUID the host could not resolve buckets with the meshless ones, so an
@@ -1302,14 +1318,26 @@ fn push_scatter(
             .mesh
             .map(|m| m.as_u128())
             .filter(|k| meshes.contains_key(k));
-        buckets.entry(key).or_default().push(ScatterInstance {
-            position: si.position,
-            rotation: si.rotation.as_quat(),
-            scale: glam::Vec3::splat(si.scale as f32),
-            color: pcg_kind_color(si.kind),
-        });
+        // **The box the instance occupies, not a unit cube** (I8b). `scale` is
+        // one uniform f64 and every building module carries 1.0, so before this
+        // a 10 m slab drew the same size as a 0.3 m mullion. Both the authored
+        // geometry and the fallback primitive are unit-box shaped -- they span
+        // [-0.5, 0.5] -- so the scale is twice the half-extent for either.
+        let scale = si.extent.map_or_else(
+            || glam::Vec3::splat(si.scale as f32),
+            |e| glam::Vec3::new(e[0] * 2.0, e[1] * 2.0, e[2] * 2.0),
+        );
+        buckets
+            .entry((key, si.glow.to_bits()))
+            .or_default()
+            .push(ScatterInstance {
+                position: si.position,
+                rotation: si.rotation.as_quat(),
+                scale,
+                color: pcg_kind_color(si.kind),
+            });
     }
-    for (key, bucket) in buckets {
+    for ((key, glow_bits), bucket) in buckets {
         let data = ScatterData::build_with_geometry(
             PrimMesh::Cube,
             key.and_then(|k| meshes.get(&k)).cloned(),
@@ -1321,7 +1349,7 @@ fn push_scatter(
             anchor: translation,
             metallic: 0.0,
             roughness: 0.75,
-            emissive: [0.0; 3],
+            emissive: inf_render::glow_emissive(f32::from_bits(glow_bits), glow_step),
             id,
             draw_distance,
             near_distance,
@@ -1372,6 +1400,7 @@ fn push_pcg_scatter(
     meshes: &inf_render::ScatterMeshes,
     translation: DVec3,
     id: u32,
+    glow_step: u16,
 ) {
     // MIRROR-BEGIN pcg_scatter_lod
     if vol.structure_groups.is_empty() {
@@ -1383,6 +1412,7 @@ fn push_pcg_scatter(
             vol.draw_distance,
             0.0,
             id,
+            glow_step,
         );
         return;
     }
@@ -1411,6 +1441,7 @@ fn push_pcg_scatter(
         vol.draw_distance,
         0.0,
         id,
+        glow_step,
     );
     // **The two bands are complementary in the GROUP's distance, and the cull is
     // per INSTANCE** (I3 audit). A part sits up to its shell's own half-diagonal
@@ -1439,6 +1470,7 @@ fn push_pcg_scatter(
         parts_far,
         0.0,
         id,
+        glow_step,
     );
     let shells: Vec<ScatteredInstance> = vol
         .structure_groups
@@ -1456,8 +1488,12 @@ fn push_pcg_scatter(
                 .get(g.inst_start as usize)
                 .map_or(0, |i| i.kind),
             // A shell is a BOX by definition (see `push_shells`), so it names no
-            // mesh however many its parts name.
+            // mesh however many its parts name -- and `push_shells` reads its
+            // three half-extents off the group rather than off the instance, so
+            // the I8b extent has nothing to say here either.
             mesh: None,
+            extent: None,
+            glow: 0.0,
         })
         .collect();
     push_shells(scene, &shells, vol, translation, vol.draw_distance, lod, id);
@@ -1508,6 +1544,7 @@ fn carry_or_push_pcg_scatter(
     meshes: &inf_render::ScatterMeshes,
     translation: DVec3,
     id: u32,
+    glow_step: u16,
 ) {
     // MIRROR-BEGIN pcg_scatter_memo
     let source = inf_render::ScatterSource {
@@ -1515,6 +1552,7 @@ fn carry_or_push_pcg_scatter(
         stamp: vol.structures_gen,
         draw_distance_bits: vol.draw_distance.to_bits(),
         table,
+        glow_step,
         anchor: translation,
     };
     if let Some(batches) = prev.take(source) {
@@ -1527,7 +1565,7 @@ fn carry_or_push_pcg_scatter(
         return;
     }
     let at = scene.scatter.len();
-    push_pcg_scatter(scene, vol, meshes, translation, id);
+    push_pcg_scatter(scene, vol, meshes, translation, id, glow_step);
     let packed = scene.scatter[at..].to_vec();
     scene.scatter_memo.insert(source, packed);
     // MIRROR-END pcg_scatter_memo
@@ -1605,6 +1643,7 @@ fn push_biome_population(
     meshes: &inf_render::ScatterMeshes,
     translation: DVec3,
     id: u32,
+    glow_step: u16,
 ) {
     push_scatter(
         scene,
@@ -1614,6 +1653,7 @@ fn push_biome_population(
         0.0,
         0.0,
         id,
+        glow_step,
     )
 }
 

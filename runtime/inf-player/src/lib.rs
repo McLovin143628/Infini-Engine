@@ -602,6 +602,14 @@ fn load_voxel_assets(args: &Args) -> voxel::VoxelRegistry {
 /// an empty table is precisely "every scattered instance draws its placeholder",
 /// which is what the engine did before this wave.
 fn load_scatter_meshes(args: &Args) -> inf_render::ScatterMeshes {
+    let mut table = scanned_scatter_meshes(args);
+    // I8b: and the twelve building module families, which name no file.
+    scatter_mesh::add_building_modules(&mut table);
+    table
+}
+
+/// The half of [`load_scatter_meshes`] that comes off disk.
+fn scanned_scatter_meshes(args: &Args) -> inf_render::ScatterMeshes {
     match &args.world {
         WorldChoice::Demo => inf_render::ScatterMeshes::new(),
         WorldChoice::Level(path) => {

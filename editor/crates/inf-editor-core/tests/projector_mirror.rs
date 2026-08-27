@@ -891,6 +891,70 @@ fn both_projectors_band_a_structure_lod_the_same_way() {
 /// `std::mem::take` from either host fails (2) — while deleting it from *both*
 /// leaves them identical and is caught by (2) rather than by (1), which is the
 /// `apply_record_mirror` audit's own lesson about equality pins.
+/// **Both hosts register the same twelve building module meshes** (island wave
+/// I8b).
+///
+/// The shape families name no `.inf_mesh` file — the geometry is a function of
+/// the module's own name — so neither host's asset scan can find them and both
+/// add them to the table by hand. Two hand-written loops over one Ring-0 source
+/// is exactly the shape that stops agreeing, and the consequence is the one this
+/// whole file exists to prevent: a preview that draws a framed window where the
+/// shipped build draws a placeholder cube.
+///
+/// Three claims, each separately falsifiable: the fenced body is identical; both
+/// hosts CALL it; and the source it reads is the Ring-0 table rather than a
+/// local list (a host that inlined twelve ids would satisfy the equality and
+/// would drift the moment a family was added).
+#[test]
+fn both_hosts_register_the_building_module_meshes() {
+    let editor = fenced(
+        &read(VIEWPORT),
+        "building_module_table",
+        "the editor viewport",
+    );
+    let player = fenced(
+        &read("runtime/inf-player/src/scatter_mesh.rs"),
+        "building_module_table",
+        "the shipped player",
+    );
+    assert!(
+        editor.len() > 200,
+        "the `building_module_table` fence is {} chars — an empty fence would          make this gate vacuous",
+        editor.len()
+    );
+    assert_eq!(
+        editor, player,
+        "the building module table has drifted between the editor viewport and          the shipped player."
+    );
+    assert!(
+        editor.contains("inf_pcg::building::modules::module_meshes()"),
+        "the table is no longer built from the Ring-0 source — a host-local list          of ids is the drift this arm exists to prevent"
+    );
+    for (label, path, call) in [
+        (
+            "editor viewport",
+            VIEWPORT,
+            "add_building_modules(&mut self.scatter_meshes)",
+        ),
+        (
+            "shipped player",
+            "runtime/inf-player/src/lib.rs",
+            "scatter_mesh::add_building_modules(&mut table)",
+        ),
+    ] {
+        let raw = read(path).replace(
+            "
+", "
+",
+        );
+        let src = support::strip_comments_and_strings(&raw);
+        assert!(
+            src.contains(call),
+            "the {label} builds its scatter-mesh table without the building              modules, so every wall it draws is a placeholder"
+        );
+    }
+}
+
 #[test]
 fn both_projectors_memoize_pcg_scatter_the_same_way() {
     let editor = fenced(&read(VIEWPORT), "pcg_scatter_memo", "the editor viewport");
@@ -915,6 +979,10 @@ fn both_projectors_memoize_pcg_scatter_the_same_way() {
         "stamp:",
         "draw_distance_bits:",
         "table,",
+        // I8b: the quantized night-glow step. A batch's emission is not part of
+        // `ScatterData`, so a carried batch keeps the hour it was packed in — a
+        // city lit at noon, and invisible to every other field here.
+        "glow_step,",
         "anchor:",
     ] {
         assert!(

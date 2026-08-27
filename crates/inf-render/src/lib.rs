@@ -147,10 +147,10 @@ pub use scene::{
     ID_NONE, MAX_SCATTER_MESH_TRIANGLES, STRUCTURE_LOD_M,
 };
 pub use scene::{
-    detail_scale_q8, scatter_table_stamp, take_unchanged_terrain, take_unchanged_voxel,
-    terrain_id_from_guid, Ambient2D, LightKind, MeshInstance, PrebatchedRun, RenderChunk,
-    RenderLight, RenderLight2D, RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile,
-    SeamSample, VtTextureSet, DEFAULT_SEAM_BAND_M,
+    detail_scale_q8, glow_emissive, night_glow_step, scatter_table_stamp, take_unchanged_terrain,
+    take_unchanged_voxel, terrain_id_from_guid, Ambient2D, LightKind, MeshInstance, PrebatchedRun,
+    RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderTerrain, RenderTerrainLayer,
+    RenderTerrainTile, SeamSample, VtTextureSet, DEFAULT_SEAM_BAND_M, NIGHT_GLOW_STEPS,
 };
 pub use settings::{
     adapt_exposure_ev, exposure_bin, exposure_bin_luminance, exposure_compensation_factor,

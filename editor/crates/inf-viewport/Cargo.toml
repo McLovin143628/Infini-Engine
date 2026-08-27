@@ -22,6 +22,12 @@ inf-ecs = { workspace = true }
 # against the shared terrain and applies strokes. Pure Ring-0 (no GPU), so it's
 # a general dependency even though only the windowed hosts drive sculpting.
 inf-terrain = { workspace = true }
+# I8b: the twelve building-module shape families and their content-derived
+# GUIDs. Ring 1 -> Ring 0, and no new build cost -- `inf-editor-core` above
+# already links it. Named DIRECTLY rather than re-exported through the editor
+# core because the block that reads it is character-pinned against the shipped
+# player's copy, and a mirror cannot spell one crate two ways.
+inf-pcg = { workspace = true }
 # P21.1: the sparse SDF chunk volumes that locally extend the heightfield.
 inf-voxel = { workspace = true }
 # P22.3: `FractureState` — the Simulate session's live destruction state, which

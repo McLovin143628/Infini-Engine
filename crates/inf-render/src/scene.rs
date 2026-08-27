@@ -841,6 +841,16 @@ pub struct ScatterSource {
     pub draw_distance_bits: u64,
     /// [`scatter_table_stamp`] of the mesh table the batch was bucketed against.
     pub table: u64,
+    /// **The quantized night-glow step the emissive was written at** (island
+    /// wave I8b), from [`night_glow_step`].
+    ///
+    /// A batch's emission is `glow x gain`, and the gain moves with the sun. It
+    /// is not part of `ScatterData` -- the uploaded instance bytes are unmoved
+    /// by it -- but it IS part of the `ScatterBatch` record, so a carried batch
+    /// would keep the emission of the hour it was packed in. Keying on the
+    /// quantized step is what makes dusk a re-pack instead of a city whose
+    /// windows are lit at noon.
+    pub glow_step: u16,
     /// The world anchor the payload's offsets were packed against.
     pub anchor: DVec3,
 }
@@ -857,6 +867,7 @@ impl ScatterSource {
         stamp: 0,
         draw_distance_bits: 0,
         table: 0,
+        glow_step: 0,
         anchor: DVec3::ZERO,
     };
 
@@ -888,6 +899,59 @@ pub fn scatter_table_stamp(meshes: &ScatterMeshes) -> u64 {
         acc ^= e.wrapping_mul(0x9e37_79b9_7f4a_7c15);
     }
     acc
+}
+
+/// How many steps the night-glow gain is quantized to (island wave I8b).
+///
+/// The gain is a continuous function of the sun's height and it decides a
+/// `ScatterBatch`'s emission, which is part of the scatter memo's key. A
+/// continuous key would re-pack every settlement volume on every frame of dusk;
+/// sixteen steps make it sixteen re-packs across a whole sunset, each costing
+/// what one cell activation costs. The alternative -- an emission the carried
+/// batch keeps -- is a city whose windows are lit at noon.
+pub const NIGHT_GLOW_STEPS: u16 = 16;
+
+/// Where the ramp begins and ends, as the sun direction's own `y`.
+///
+/// Windows come on while the sun is still a little above the horizon (people
+/// switch lights on at dusk, not at astronomical night) and are fully lit a
+/// little below it. Both ends are the sun's height rather than a clock, so a
+/// polar summer simply never lights the city, which is correct.
+const GLOW_SUN_DAY_Y: f32 = 0.10;
+const GLOW_SUN_NIGHT_Y: f32 = -0.08;
+
+/// The **quantized** night-glow step for a sun direction, `0` (full day) to
+/// [`NIGHT_GLOW_STEPS`] (full night).
+///
+/// One door, called by both projectors, so the memo key and the emission it
+/// stands for cannot be computed two ways. A non-finite direction reads as day,
+/// which is the answer that changes nothing.
+pub fn night_glow_step(sun_dir: Vec3) -> u16 {
+    let y = sun_dir.y;
+    if !y.is_finite() {
+        return 0;
+    }
+    let t = ((GLOW_SUN_DAY_Y - y) / (GLOW_SUN_DAY_Y - GLOW_SUN_NIGHT_Y)).clamp(0.0, 1.0);
+    // The same `t*t*(3-2t)` ease every ramp in this engine uses, so the lights
+    // come up rather than switching.
+    let eased = t * t * (3.0 - 2.0 * t);
+    (eased * NIGHT_GLOW_STEPS as f32)
+        .round()
+        .clamp(0.0, NIGHT_GLOW_STEPS as f32) as u16
+}
+
+/// The linear emission a glowing scatter instance contributes at `step`.
+///
+/// `glow` is the instance's authored multiplier (`0.0` for everything that does
+/// not glow); the tint is a warm interior white, because a lit window is warm
+/// whatever colour the wall it sits in is tinted. Returns exactly `[0, 0, 0]`
+/// for a step of zero, so a daytime batch is byte-identical to the pre-I8b one.
+pub fn glow_emissive(glow: f32, step: u16) -> [f32; 3] {
+    if !(glow > 0.0) || step == 0 {
+        return [0.0; 3];
+    }
+    let g = glow * (step as f32 / NIGHT_GLOW_STEPS as f32);
+    [g, g * 0.86, g * 0.62]
 }
 
 /// **The scatter carry-forward memo** — the scatter twin of what

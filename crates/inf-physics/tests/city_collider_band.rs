@@ -130,6 +130,8 @@ fn block_population(
             scale: p.scale,
             kind: p.kind_index,
             mesh: p.mesh,
+            extent: None,
+            glow: 0.0,
         })
         .collect();
     let solids = composed

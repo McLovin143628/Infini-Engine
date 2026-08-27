@@ -25,11 +25,13 @@
 //! identity**. That lives on the parallel `instances` list, as
 //! `PcgInstance::kind_index`, the index into the grammar's `ModuleDef` palette.
 //!
-//! The two lists are index-aligned **only** for buildings. `assemble.rs` pushes
-//! an instance and a collider together at every one of its five sites, so
-//! `BuildingOutput`'s lists correspond element for element; the generic
-//! `expand_span` path pushes a collider only when the module declares one, so
-//! its lists do not. Hence the two doors here:
+//! The two lists are index-aligned **only** for buildings, and since island wave
+//! I8b only on a PREFIX. `assemble.rs` pushes an instance and a collider
+//! together at every one of its placement sites, so `BuildingOutput`'s lists
+//! correspond element for element up to `colliders.len()`; after that come the
+//! window panes, which are drawn and are not solid. The generic `expand_span`
+//! path pushes a collider only when the module declares one, so its lists do
+//! not correspond at all. Hence the two doors here:
 //!
 //! * [`parts_from_building`] — the one with material slots, because the
 //!   alignment holds and `kind_index` names a `ModuleDef`.
@@ -308,26 +310,44 @@ pub fn parts_from_building(
     out: &BuildingOutput,
     grammar: &Grammar,
 ) -> Result<BakeInput, BakeError> {
-    parts_from_pairs(&out.instances, &out.colliders, grammar)
+    // **A DECORATION TAIL is legal here and nowhere else** (island wave I8b).
+    // The assembler appends instances with no collider — a window pane, which
+    // is not solid — *after* every aligned pair, and says so in
+    // `GrammarOutput::decor`. A building's list is therefore an aligned prefix
+    // plus a tail, and the tail is not geometry this bake has any business
+    // producing: a pane has no `ScatteredSolid` to become a box from.
+    parts_from_pairs(&out.instances, &out.colliders, grammar, Tail::Allowed)
 }
 
 /// The generic grammar door. Refuses an unaligned pair rather than guessing.
 pub fn parts_from_output(out: &GrammarOutput, grammar: &Grammar) -> Result<BakeInput, BakeError> {
-    parts_from_pairs(&out.instances, &out.colliders, grammar)
+    // **Exact, deliberately.** Down here a longer instance list means a module
+    // that declared no `collider` — the drift this refusal was written for —
+    // and not a pane. The two callers differ by exactly this argument, which is
+    // why it is an argument and not a relaxation of the shared body.
+    parts_from_pairs(&out.instances, &out.colliders, grammar, Tail::Refused)
+}
+
+/// Whether a caller's instance list may be longer than its collider list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tail {
+    /// A building: the surplus is `GrammarOutput::decor`.
+    Allowed,
+    /// Anything else: the surplus is a module that declared no collider.
+    Refused,
 }
 
 fn parts_from_pairs(
     instances: &[inf_pcg::PcgInstance],
     colliders: &[inf_pcg::PcgCollider],
     grammar: &Grammar,
+    tail: Tail,
 ) -> Result<BakeInput, BakeError> {
-    // **The aligned PREFIX, not the whole list** (island wave I8b). The
-    // assembler now appends decoration — a window pane, which has no collider
-    // because a pane is not solid — *after* every aligned pair, and states that
-    // invariant in `GrammarOutput::decor`. So a longer instance list is legal
-    // and a shorter one is still the defect this refusal names: a part whose
-    // material slot cannot be known. `zip` below takes the prefix.
-    if instances.len() < colliders.len() {
+    let unaligned = match tail {
+        Tail::Allowed => instances.len() < colliders.len(),
+        Tail::Refused => instances.len() != colliders.len(),
+    };
+    if unaligned {
         return Err(BakeError::Unaligned {
             instances: instances.len(),
             colliders: colliders.len(),
@@ -758,10 +778,13 @@ mod tests {
                 scale: 1.0,
                 kind_index: 0,
                 mesh: None,
+                extent: None,
+                glow: 0.0,
             }],
             colliders: vec![],
             groups: vec![],
             doorways: vec![],
+            decor: vec![],
         };
         assert_eq!(
             parts_from_output(&out, &grammar),
