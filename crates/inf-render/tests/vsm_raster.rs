@@ -1033,6 +1033,49 @@ fn a_terrain_tile_casts_from_its_own_heights() {
          not casting",
         with_terrain.saturating_sub(without)
     );
+
+    // **WHAT THE PASS HANDS OVER** (island wave I8c). The counters above count
+    // *asks*; a draw's price is its index count, and a terrain group's is the
+    // whole decimated tile — `min(VSM_TERRAIN_CASTER_CELLS, res − 1)` cells
+    // squared, six indices a quad — submitted into every page the tile reaches,
+    // however little of the world that page covers. That product is the number
+    // island wave I8c's VSM clause is aimed at, so it is measured rather than
+    // reasoned about.
+    let cells = inf_render::VSM_TERRAIN_CASTER_CELLS.min(RES - 1);
+    let per_tile = u64::from(cells * cells * 6);
+    assert!(
+        stats.draws_terrain > 0,
+        "the terrain cast and no terrain draw was issued: {stats:?}"
+    );
+    assert_eq!(
+        stats.indices_terrain,
+        stats.draws_terrain * per_tile,
+        "each terrain draw submits the whole {per_tile}-index tile, so the two \
+         counters must be that product: {stats:?}"
+    );
+    assert!(
+        stats.indices_terrain < stats.indices_drawn,
+        "the cube casts too, so the terrain cannot be the whole index load: \
+         {stats:?}"
+    );
+    // …and the histogram tiles the page set, exactly as the dirty split tiles
+    // the dirty one.
+    assert_eq!(
+        stats.pages_by_level.iter().sum::<u64>(),
+        stats.pages,
+        "the level histogram does not tile the rastered pages: {stats:?}"
+    );
+    let bare_stats = control.vsm_raster_stats().expect("stats");
+    assert_eq!(
+        (bare_stats.draws_terrain, bare_stats.indices_terrain),
+        (0, 0),
+        "a scene with no terrain submitted terrain indices: {bare_stats:?}"
+    );
+    assert!(
+        bare_stats.indices_drawn > 0,
+        "the control drew nothing at all, so the comparison above is vacuous: \
+         {bare_stats:?}"
+    );
 }
 
 /// One planar terrain tile: `height(u, v) = a + b·u + c·v` over the tile's own

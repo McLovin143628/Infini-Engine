@@ -194,6 +194,11 @@ const _: () = assert!(VSM_DEPTH_CLEAR == 0.0);
 /// exactly the per-kind index ranges `PrimGpu` already holds.
 pub const VSM_RIGID_GROUPS: u32 = PrimMesh::ALL.len() as u32;
 
+/// Buckets in [`VsmRasterStats::pages_by_level`] — `VsmSettings::clipmap_levels`
+/// is clamped to `1..=16`, and a perspective light's quadtree is bounded by the
+/// same address space, so sixteen holds every level a page can carry.
+pub const VSM_LEVEL_BUCKETS: usize = 16;
+
 /// The draw-args buffer's usage. `COPY_SRC` is a **gate's** flag, exactly as the
 /// atlas's is: the per-page cull's verdict lives only in these `instance_count`
 /// words, and *mirrored ≠ measured* (P26.5) means a gate has to read the GPU's own
@@ -568,20 +573,62 @@ pub struct VsmRasterStats {
     /// Times the whole cache was thrown away because the view cut
     /// (`is_camera_cut`), summed over frames.
     pub cut_flushes: u64,
+
+    // ── island wave I8c: WHAT the raster submits ──────────────────────────────
+    //
+    // The I8b audit left `vsm-raster` at **6.083 ms of an 18.003 ms lit GPU
+    // frame** with the CPU side of the same pass at 0.657 ms — so the cost is on
+    // the device, and `pages`/`draws`/`casters` cannot say whether it is the
+    // number of rectangles, the number of asks, or the geometry behind them.
+    // These three are the third question, and they are the only one of the three
+    // that a fix can be aimed at: a draw's price is its index count, and a group
+    // is one per resident TERRAIN TILE (`sync_terrain`) at
+    // `6 x VSM_TERRAIN_CASTER_CELLS²` indices each, against 36 for a cube.
+    /// **Indices submitted**, summed over the frame's issued draws — `index_count`
+    /// per `draw_indexed_indirect`, whatever the GPU cull then does with the
+    /// instance count.
+    ///
+    /// Deliberately the count the CPU *asks* for rather than the one the device
+    /// draws: the instance count lives only on the GPU (`read_draw_counts` is a
+    /// gate's door and stalls), and what this pass can control is what it hands
+    /// over.
+    pub indices_drawn: u64,
+    /// Of [`indices_drawn`](Self::indices_drawn), the ones belonging to a
+    /// **terrain-tile** group. Read as a fraction of the whole: a page is at most
+    /// 128 m of world at the coarsest clipmap level and a tile is 256 m of
+    /// heightfield, so a terrain group's whole mesh is submitted into every page
+    /// its bounding sphere touches.
+    pub indices_terrain: u64,
+    /// Of [`draws`](Self::draws), the ones that were a terrain tile.
+    pub draws_terrain: u64,
+    /// **Rasterized pages by clipmap level**, `[0]` finest — summed over frames.
+    ///
+    /// The companion of the dirty split: `dirty_slot` says a page was re-slotted
+    /// and this says *which* level's window it entered, which is what decides how
+    /// much world a page covers (`first_level_extent_m x 2^level` over
+    /// `clipmap_pages_per_side`) and therefore how wasteful a whole-tile draw
+    /// into it is. Levels past [`VSM_LEVEL_BUCKETS`] fold into the last bucket
+    /// rather than being dropped.
+    pub pages_by_level: [u64; VSM_LEVEL_BUCKETS],
 }
 
 impl VsmRasterStats {
     /// A one-line human summary, in the shape the other streamers ship.
     pub fn summary(&self) -> String {
         format!(
-            "vsm raster: {} frames, {} pages, {} draws, {} casters ({} scattered, \
+            "vsm raster: {} frames, {} pages, {} draws ({} terrain, {} skipped), \
+             {} indices ({} terrain), {} casters ({} scattered, \
              {} meshlet-asset, {} skinned, {} terrain), {} pages deferred, \
              {} casters dropped, {} groups refused, {} pages cached / {} dirty \
              ({} re-slotted, {} moved, {} re-cast) / {} cleared, {} invalidation \
-             touches, {} cut flushes",
+             touches, {} cut flushes, {} masked frames, pages by level {}",
             self.frames,
             self.pages,
             self.draws,
+            self.draws_terrain,
+            self.skipped_draws,
+            self.indices_drawn,
+            self.indices_terrain,
             self.casters,
             self.scatter_casters,
             self.vgeom_casters,
@@ -598,7 +645,30 @@ impl VsmRasterStats {
             self.cleared_pages,
             self.invalidation_touches,
             self.cut_flushes,
+            self.masked_frames,
+            self.levels_summary(),
         )
+    }
+
+    /// `pages_by_level` as `0:n/1:n/…`, **omitting the levels that never
+    /// rasterized** — a sixteen-entry array printed whole is fifteen zeros and
+    /// one number, and a reader stops reading it.
+    ///
+    /// `-` when nothing rasterized at all, so the field is never empty inside a
+    /// comma-separated line.
+    pub fn levels_summary(&self) -> String {
+        let s: Vec<String> = self
+            .pages_by_level
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| **n > 0)
+            .map(|(l, n)| format!("{l}:{n}"))
+            .collect();
+        if s.is_empty() {
+            "-".to_string()
+        } else {
+            s.join("/")
+        }
     }
 }
 
@@ -1449,6 +1519,11 @@ impl VsmRaster {
         // ── 4. the raster: ONE pass over the atlas, **loading** rather than
         // clearing, a scissored clear per dirty page, then a viewport per page.
         let mut draws = 0u64;
+        // Island wave I8c's three: what the frame HANDS OVER, not what it asks
+        // for. See `VsmRasterStats::indices_drawn`.
+        let mut draws_terrain = 0u64;
+        let mut indices_drawn = 0u64;
+        let mut indices_terrain = 0u64;
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("vsm-pages"),
@@ -1583,6 +1658,11 @@ impl VsmRaster {
                         // (the `inf_vgeom` rule, quoted because it is the same rule).
                         pass.draw_indexed_indirect(&self.args, slot * VSM_ARG_WORDS * 4);
                         draws += 1;
+                        indices_drawn += u64::from(geo.index_count);
+                        if matches!(geo.source, GroupSource::Terrain { .. }) {
+                            draws_terrain += 1;
+                            indices_terrain += u64::from(geo.index_count);
+                        }
                     }
                 }
             }
@@ -1604,7 +1684,14 @@ impl VsmRaster {
         self.stats.pages += u64::from(page_count);
         self.stats.cleared_pages += u64::from(page_count);
         self.stats.draws += draws;
+        self.stats.draws_terrain += draws_terrain;
+        self.stats.indices_drawn += indices_drawn;
+        self.stats.indices_terrain += indices_terrain;
         self.stats.skipped_draws += skipped;
+        for p in pages.iter() {
+            let b = (p.page.level as usize).min(VSM_LEVEL_BUCKETS - 1);
+            self.stats.pages_by_level[b] += 1;
+        }
         self.stats.casters += u64::from(caster_count);
         self.stats.scatter_casters += u64::from(scattered);
         let of = |f: fn(&GroupSource) -> bool| -> u64 {
@@ -3492,7 +3579,7 @@ mod tests {
             frames: 3,
             pages: 17,
             draws: 51,
-            skipped_draws: 0,
+            skipped_draws: 79,
             casters: 9,
             scatter_casters: 2,
             deferred_pages: 1,
@@ -3511,6 +3598,10 @@ mod tests {
             cleared_pages: 31,
             invalidation_touches: 37,
             cut_flushes: 41,
+            indices_drawn: 59,
+            indices_terrain: 61,
+            draws_terrain: 67,
+            pages_by_level: [71, 0, 0, 73, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         }
         .summary();
         assert!(!s.contains("  "), "a run of spaces in the summary: {s:?}");
@@ -3520,12 +3611,24 @@ mod tests {
         // The P27.3 counters use primes so a missing one cannot be read out of
         // another field's digits — which is what "2" and "1" above rely on the
         // reader not to worry about.
+        //
+        // **`skipped_draws` and `masked_frames` were in the struct and in no
+        // line** until island wave I8c, which is this repository's own "a counter
+        // nobody can read is a counter nobody checks" met inside the very file
+        // that minted it. They are printed now, and `skipped_draws` takes a prime
+        // of its own here so the list can see it.
         for n in [
             "3", "17", "51", "9", "2", "1", "4", "6", "23", "29", "31", "37", "41", "43", "47",
-            "53",
+            "53", "59", "61", "67", "71", "73", "79",
         ] {
             assert!(s.contains(n), "{n} is missing from {s:?}");
         }
+        // The level histogram is sparse, and it prints only the levels that moved
+        // — `3:73` says level three and not "the fourth zero along".
+        assert!(
+            s.contains("0:71/3:73"),
+            "the level histogram is not in {s:?}"
+        );
     }
 
     /// **The per-page clear writes the depth convention's own clear value**

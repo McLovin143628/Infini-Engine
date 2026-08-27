@@ -1828,6 +1828,26 @@ fn the_island_at_shipping_resolution() {
                     v.dirty_geometry as f64 / v.frames as f64,
                     v.dirty_casters as f64 / v.frames as f64,
                 );
+                // **WHAT THE PASS HANDS OVER** (island wave I8c). `vsm-raster`
+                // was 6.087 ms of an 18.0 ms lit GPU frame with 0.657 ms of
+                // recording behind it, so the cost is on the device — and pages,
+                // draws and casters are three counts of *asks*. A draw's price is
+                // its index count, and a geometry group is one per resident
+                // TERRAIN TILE at `6 × VSM_TERRAIN_CASTER_CELLS²` indices against
+                // a cube's 36. This is the line that says which of the two the
+                // frame is made of, and the level histogram beside it says how
+                // much world each of those rectangles covers.
+                println!(
+                    "  {label} submitted per rastering frame: {:.0} indices \
+                     ({:.0} terrain, {:.1} %) over {:.0} draws ({:.0} terrain); \
+                     pages by level {}",
+                    v.indices_drawn as f64 / v.frames as f64,
+                    v.indices_terrain as f64 / v.frames as f64,
+                    v.indices_terrain as f64 / (v.indices_drawn.max(1)) as f64 * 100.0,
+                    v.draws as f64 / v.frames as f64,
+                    v.draws_terrain as f64 / v.frames as f64,
+                    v.levels_summary(),
+                );
             }
         }
         let submitted = cpu_sum - m.cpu_ms[4] - m.cpu_ms[5];
