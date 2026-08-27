@@ -17,13 +17,18 @@
 //!
 //! **It fills the coarse part of the empty band, not all of it** (TER2b audit).
 //! Octaves halve from the source's Nyquist and the last one that clears the
-//! grid's is kept, so on the island the band runs 6.22 m → 3.11 m and the
+//! grid's is kept, so on the island the band runs 6.23 m → 3.11 m and the
 //! remaining 3.11 m → 2 m stays as empty as it was: one octave of the 1.64 the
 //! upsample opens. Filling it would mean an octave at 1.56 m against a 2 m
 //! Nyquist, which is aliasing rather than detail — the arm
-//! [`tests::the_island_band_runs_from_the_sources_nyquist_to_the_grids`] is the
+//! `tests::the_island_band_runs_from_the_sources_nyquist_to_the_grids` is the
 //! one that refuses it, and the honest statement is "the band is filled down to
 //! the finest octave the grid can carry".
+//!
+//! The real island's own line, measured (`3.113×` upsample, 51.4 M level-0
+//! samples): *37 675 364 of 51 782 416 samples took designed relief in a
+//! 3.11..6.23 m band (2 octaves); mean 0.093 m, worst 1.493 m; excluded
+//! 11 129 344 water, 661 345 corridor, 166 728 channel, 2 149 635 pad.*
 //!
 //! # The band, derived rather than authored
 //!
@@ -96,7 +101,7 @@ pub const MAX_AMPLITUDE_M: f64 = 1.5;
 /// a table.
 ///
 /// **A decimetre and not fifteen centimetres** (TER2b audit): the slope floor is
-/// `0.10 × 1.5 m`, and then [`biome_amplitude`] multiplies it, and the least
+/// `0.10 × 1.5 m`, and then `biome_amplitude` multiplies it, and the least
 /// specific biome — the `_` arm every unclassified sample takes — is `0.7`. So a
 /// flat plain's ceiling is `0.105 m`, measured at **0.086 m** of actual peak
 /// displacement on a flat two-tile fixture, because a two-octave fBm does not
@@ -468,7 +473,7 @@ fn outcome_at(
 /// that called it "fractions of a millimetre". It is a first-class seam, not a
 /// rounding remark.
 ///
-/// So pass one settles the **rim** — [`is_rim`], the only samples whose
+/// So pass one settles the **rim** — `is_rim`, the only samples whose
 /// difference leaves the tile — over ground no tile has moved yet, and pass two
 /// spends those answers while computing the interiors, which cannot reach out of
 /// their tile at all. Both copies of a shared sample are computed in pass one
