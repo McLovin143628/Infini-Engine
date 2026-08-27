@@ -189,6 +189,12 @@ pub struct EditorRenderAssets {
     skeletons: HashMap<Uuid, Option<Arc<Skeleton>>>,
     /// Decoded clips by GUID.
     clips: HashMap<Uuid, Option<Arc<AnimClip>>>,
+    /// **Scatter geometry by mesh GUID** (wave TER2b) — the flat pull arrays a
+    /// `PcgKind`'s `.inf_mesh` becomes so that scattered ground cover draws its
+    /// authored shape instead of the placeholder cube every instance drew from
+    /// P18.5 until this wave. `None` is a negative entry on the `vgeom` terms:
+    /// this GUID has no usable geometry, so stop opening the file.
+    scatter: HashMap<Uuid, Option<Arc<inf_render::ScatterGeometry>>>,
     /// **Bumped whenever the bytes behind a GUID might have moved** (P26.4
     /// audit): the index was rebuilt, or the content root changed.
     ///
@@ -310,12 +316,14 @@ impl EditorRenderAssets {
         self.skinned.retain(|mesh, _| live.contains(mesh));
         self.skeletons.retain(|id, _| live.contains(id));
         self.clips.retain(|id, _| live.contains(id));
+        self.scatter.retain(|mesh, _| live.contains(mesh));
     }
 
     /// Forget one mesh asset's opened payloads (a targeted re-import invalidation).
     pub fn invalidate(&mut self, mesh_id: Uuid) {
         self.vgeom.remove(&mesh_id);
         self.skinned.remove(&mesh_id);
+        self.scatter.remove(&mesh_id);
         self.rescanned_for.clear();
     }
 
@@ -324,6 +332,7 @@ impl EditorRenderAssets {
         self.skinned.clear();
         self.skeletons.clear();
         self.clips.clear();
+        self.scatter.clear();
     }
 
     // ── resolution ──────────────────────────────────────────────────────────
@@ -626,6 +635,55 @@ impl EditorRenderAssets {
     fn material_root(&mut self, id: Uuid) -> Option<Uuid> {
         let path = self.resolve_path(id)?;
         (path.extension().and_then(|s| s.to_str()) == Some("inf_mat")).then_some(id)
+    }
+
+    /// The authored scatter geometry for one mesh GUID, loaded once and cached.
+    ///
+    /// # Why the vgeom store next door cannot answer this
+    ///
+    /// A `.inf_vmesh` is a meshlet DAG: `meshlet_vertices` + `meshlet_triangles`
+    /// and no plain index list, and the cook does not derive one for a small prop
+    /// in any case (`[vgeom] min_triangles`). The scatter raster pulls a flat
+    /// vertex array and a flat index array out of two storage buffers, so it
+    /// wants the `.inf_mesh` itself. This is the editor's twin of
+    /// `inf_player::scatter_mesh` and it goes through the same one door,
+    /// `ScatterGeometry::from_streams`.
+    ///
+    /// The triangle ceiling is the player's, by name, so the editor and a shipped
+    /// build refuse the same content: a scatter kind draws its geometry once per
+    /// instance with no LOD behind it.
+    pub fn resolve_scatter_geometry(
+        &mut self,
+        mesh_id: Uuid,
+    ) -> Option<Arc<inf_render::ScatterGeometry>> {
+        if let Some(hit) = self.scatter.get(&mesh_id) {
+            return hit.clone();
+        }
+        let built = self.build_scatter_geometry(mesh_id);
+        self.scatter.insert(mesh_id, built.clone());
+        built
+    }
+
+    fn build_scatter_geometry(
+        &mut self,
+        mesh_id: Uuid,
+    ) -> Option<Arc<inf_render::ScatterGeometry>> {
+        let mesh: inf_mesh::MeshAsset = self.load_payload(mesh_id)?;
+        let (positions, normals, _uvs, _tangents, indices) = mesh.vgeom_streams();
+        let geom = inf_render::ScatterGeometry::from_streams(&positions, &normals, &indices);
+        if geom.is_empty() {
+            tracing::warn!("inf-editor-core: scatter mesh {mesh_id} has no drawable triangles");
+            return None;
+        }
+        if geom.triangle_count() > inf_render::MAX_SCATTER_MESH_TRIANGLES {
+            tracing::warn!(
+                "inf-editor-core: scatter mesh {mesh_id} is {} triangles, past the {} the                  scatter path draws per instance; it falls back to the placeholder primitive",
+                geom.triangle_count(),
+                inf_render::MAX_SCATTER_MESH_TRIANGLES
+            );
+            return None;
+        }
+        Some(Arc::new(geom))
     }
 
     fn load_payload<T: inf_asset::AssetPayload>(&mut self, id: Uuid) -> Option<T> {

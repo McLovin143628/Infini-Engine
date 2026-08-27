@@ -129,6 +129,7 @@ fn block_population(
             rotation: p.rotation,
             scale: p.scale,
             kind: p.kind_index,
+            mesh: p.mesh,
         })
         .collect();
     let solids = composed

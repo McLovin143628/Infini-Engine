@@ -33,6 +33,7 @@
 //!    alignment are all hashed off the same slot, decorrelated by salts.
 
 use glam::{DQuat, DVec3};
+use uuid::Uuid;
 
 use inf_core::JobPool;
 
@@ -180,6 +181,25 @@ pub struct PcgInstance {
     pub rotation: DQuat,
     pub scale: f64,
     pub kind_index: u32,
+    /// **The mesh this instance draws** (wave TER2b) — `PcgKind::mesh`, resolved
+    /// where the rule that owns the palette is still in hand.
+    ///
+    /// # Why the index beside it is not enough
+    ///
+    /// [`kind_index`](Self::kind_index) is **rule-local**. `evaluate_with_in`
+    /// concatenates every rule of every enabled layer into one flat list with no
+    /// run boundaries; `BiomeBinding::evaluate_in` concatenates one such list per
+    /// biome graph; and `compose_volume` interleaves *grammar module* indices —
+    /// a different palette entirely — into the same `u32`. So an index of `0` in
+    /// a finished population names as many different things as there were
+    /// palettes, and a projector holding only the index cannot tell them apart.
+    /// A GUID is global by construction, which is the whole reason it is the
+    /// thing carried.
+    ///
+    /// `None` for a bare transform (a kind with no mesh) and for every placement
+    /// that does not come from a scatter palette — the grammar and building
+    /// paths, whose `kind_index` names a module and which draw as boxes.
+    pub mesh: Option<Uuid>,
 }
 
 /// One placed **collision box** — the solid half of a placement, beside
@@ -360,6 +380,7 @@ fn scatter_cell(
                 rotation,
                 scale,
                 kind_index: 0,
+                mesh: None,
             });
         }
     }

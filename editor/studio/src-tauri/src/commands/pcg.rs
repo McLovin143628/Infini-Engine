@@ -207,6 +207,7 @@ fn population_of(
             rotation: i.rotation,
             scale: i.scale,
             kind: i.kind_index,
+            mesh: i.mesh,
         })
         .collect();
     let solids: Vec<inf_ecs::components::ScatteredSolid> = out
@@ -1089,6 +1090,7 @@ pub async fn pcg_evaluate_biomes(
                     rotation: i.rotation,
                     scale: i.scale,
                     kind: i.kind_index,
+                    mesh: i.mesh,
                 })
                 .collect();
             let placed = baked.len() as u32;

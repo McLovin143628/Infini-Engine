@@ -195,6 +195,9 @@ fn project(scene: &mut RenderScene, sim: &RuntimeSim, voxels: &VoxelVolumes) {
         voxels,
         &mut inf_render::DebrisCache::default(),
         None,
+        // This gate's world is a voxel/debris budget fixture with no scatter
+        // kinds in it, so an empty table is the whole truth about it.
+        &inf_render::ScatterMeshes::new(),
     );
 }
 

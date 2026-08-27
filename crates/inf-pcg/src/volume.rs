@@ -73,6 +73,7 @@ mod tests {
             rotation: DQuat::IDENTITY,
             scale: 1.0,
             kind_index: i,
+            mesh: None,
         }
     }
     fn col(i: u32) -> PcgCollider {

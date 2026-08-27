@@ -251,7 +251,20 @@ fn vs_mesh(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32)
 //   half height).
 //
 // The kind rides in `material.z`, a slot the struct already carried unused.
+//
+// **An AUTHORED mesh has no kind, and says so in `material.w`** (wave TER2b).
+// The five branches below all answer "the smallest sphere containing the scaled
+// PRIMITIVE", and a scattered `.inf_mesh` is not one: a 0.307 m grass tuft drawn
+// at instance scale 1.0 would take the unit cube's `0.866` and get a card almost
+// three times its own height. So a batch carrying real geometry passes its own
+// unit bounding radius in `material.w` -- zero means "no authored mesh, use the
+// kind" -- and the card is that radius times the instance's largest axis, which
+// is exactly the rule the cull compute already uses for the same batch
+// (`anchor.w` on line 195). One radius, two consumers, no third opinion.
 fn impostor_radius(kind: u32, s: vec3<f32>) -> f32 {
+    if (sp.material.w > 0.0) {
+        return sp.material.w * max(s.x, max(s.y, s.z));
+    }
     if (kind == 1u) {
         return 0.5 * max(s.x, max(s.y, s.z));
     }

@@ -751,6 +751,7 @@ mod tests {
                 rotation: DQuat::IDENTITY,
                 scale: 1.0,
                 kind_index: 0,
+                mesh: None,
             }],
             colliders: vec![],
             groups: vec![],

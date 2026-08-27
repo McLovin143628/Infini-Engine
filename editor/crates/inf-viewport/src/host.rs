@@ -291,6 +291,14 @@ pub struct EngineHost {
     ///
     /// [`EditorRenderAssets::retain_only`]: inf_editor_core::render_assets::EditorRenderAssets::retain_only
     render_assets: inf_editor_core::render_assets::EditorRenderAssets,
+    /// The authored meshes scattered content draws (wave TER2b) — resolved out of
+    /// `render_assets` at the head of each projection and read by `push_scatter`.
+    ///
+    /// Separate from the store it comes from because the projector must not hold
+    /// a `&mut` to the store while it walks the world, and because this is the
+    /// *table* the player's shipped host also hands its projector: one shape, two
+    /// hosts, and the mirror gate compares the body that reads it.
+    scatter_meshes: inf_render::ScatterMeshes,
     /// **What the live virtual-texture level was built from** (P26.5) — the
     /// binding set AND the asset index's generation, as one value.
     ///
@@ -1020,6 +1028,7 @@ impl EngineHost {
             debris_cache: inf_render::DebrisCache::default(),
             fractures: inf_editor_core::simulate::shared_fractures(),
             render_assets: inf_editor_core::render_assets::EditorRenderAssets::new(),
+            scatter_meshes: inf_render::ScatterMeshes::new(),
             vt_level_key: Default::default(),
             tool_status: None,
             stream_log_countdown: STREAM_LOG_INTERVAL_FRAMES,
@@ -1564,6 +1573,12 @@ impl EngineHost {
         // it. Rebuilt only when the BINDING SET changes, because building it
         // creates GPU resources and a projection runs on every document version.
         self.sync_vt_bindings(doc);
+        // Wave TER2b, on the same terms and for the same reason: every `.inf_mesh`
+        // this document's scattered instances name, resolved into flat pull arrays
+        // BEFORE the walk. `push_scatter` gets a finished table because the
+        // shipped player's projector runs per frame and must not open a file, and
+        // the two projectors are pinned character for character.
+        self.sync_scatter_meshes(doc);
         let w = world.world();
         // The live registry, borrowed for the whole projection: every instance's
         // texture set is a lookup in it (P26.4). `None` on a level with no
@@ -1827,7 +1842,7 @@ impl EngineHost {
                         .unwrap_or(DVec3::ZERO);
                     let id = next_id;
                     next_id += 1;
-                    push_pcg_scatter(&mut self.scene, vol, translation, id);
+                    push_pcg_scatter(&mut self.scene, vol, &self.scatter_meshes, translation, id);
                     // ONE row per batch, not one per instance: a pick anywhere in
                     // the scatter selects the owning volume, and the map stops
                     // carrying 100k rows to say the same thing.
@@ -1856,7 +1871,13 @@ impl EngineHost {
                         .unwrap_or(DVec3::ZERO);
                     let id = next_id;
                     next_id += 1;
-                    push_biome_population(&mut self.scene, terrain, translation, id);
+                    push_biome_population(
+                        &mut self.scene,
+                        terrain,
+                        &self.scatter_meshes,
+                        translation,
+                        id,
+                    );
                     self.id_to_guid.insert(id, guid);
                 }
             }
@@ -2399,6 +2420,11 @@ impl EngineHost {
         // deleted, or — the case P16.4b was written about — a whole document
         // replaced by File ▸ Open. The projection is the only place that knows the
         // live set, so this is the only place that can release the rest.
+        // …and the scatter-kind meshes are live render assets too (wave TER2b):
+        // they are named by an instance list rather than by a component field, so
+        // the walk above never sees them and an audit without them would free the
+        // island's ground cover on the very projection that drew it.
+        live_render_assets.extend(self.scatter_meshes.keys().map(|k| Uuid::from_u128(*k)));
         self.render_assets.retain_only(live_render_assets);
 
         // Re-validate the tool target: keep it if that terrain is still projected
@@ -2687,11 +2713,30 @@ fn pcg_kind_color(kind: u32) -> [f32; 4] {
 /// **biome population**. Written once so the two cannot drift, which is the same
 /// argument that pins the two hosts against each other.
 ///
-/// PCG scatter has always drawn as a placeholder cube — kind→real-mesh upload is
-/// the same documented viewport gap as sprites/tilemaps — and that does not change
-/// here; only how the cubes reach the GPU does. The payload replaces one
-/// `MeshInstance` per scattered instance with a content-keyed buffer uploaded once
-/// per content change and culled per-instance on the GPU.
+/// # The cover draws its own meshes (wave TER2b)
+///
+/// From P18.5 until this wave every scattered instance drew a `PrimMesh::Cube`
+/// tinted from a five-entry debug palette, whatever mesh its `PcgKind` named —
+/// the island shipped 16 771 tinted cubes with three authored props sitting
+/// unread in its pack. `ScatteredInstance::mesh` now carries the GUID
+/// (`kind_index` could not: it is rule-local, and populations are concatenated),
+/// `meshes` is the host's resolved table of geometry, and instances **bucket by
+/// mesh** — one `ScatterBatch` per authored mesh plus one for everything that has
+/// none. The bucket map is a `BTreeMap` and not a `HashMap` because the batch
+/// order a projection emits is what the content-keyed GPU caches see, and an
+/// order that depends on a hash seed is a re-upload nobody asked for.
+///
+/// **The cube does not leave; it becomes the proxy.** `PrimMesh::Cube` is still
+/// passed, and it is what the impostor card, the CPU fallback and the shadow
+/// caster pack use — those three bind one shared vertex buffer for the whole
+/// frame, so a per-batch mesh does not fit in them. What changed is the full-mesh
+/// raster, which pulls its vertices out of a storage buffer and can therefore be
+/// handed any geometry at all. The impostor is sized off the authored radius
+/// rather than the cube's (`impostor_radius` in `scatter_mesh.wgsl`).
+///
+/// The instance tint is still the placeholder palette: the scatter pull buffer is
+/// position + normal and carries no uv, so there is nowhere for a material to be
+/// sampled. Texturing a scattered mesh is the named follow-up.
 ///
 /// **`draw_distance` rides on the batch now.** The editor used to cull it against
 /// its own camera eye on the CPU and the player ignored the field entirely, so a
@@ -2704,37 +2749,56 @@ fn pcg_kind_color(kind: u32) -> [f32; 4] {
 ///
 /// MIRROR: identical in `inf_viewport::host` and `inf_player::render`, pinned by
 /// `inf-editor-core`'s `tests/projector_mirror.rs`.
+#[allow(clippy::too_many_arguments)]
 fn push_scatter(
     scene: &mut RenderScene,
     instances: &[ScatteredInstance],
+    meshes: &inf_render::ScatterMeshes,
     translation: DVec3,
     draw_distance: f64,
     near_distance: f64,
     id: u32,
 ) {
+    // MIRROR-BEGIN scatter_mesh_buckets
     if instances.is_empty() {
         return;
     }
-    let data = ScatterData::build(
-        PrimMesh::Cube,
-        translation,
-        instances.iter().map(|si| ScatterInstance {
+    let mut buckets: std::collections::BTreeMap<Option<u128>, Vec<ScatterInstance>> =
+        std::collections::BTreeMap::new();
+    for si in instances {
+        // A GUID the host could not resolve buckets with the meshless ones, so an
+        // absent mesh degrades to the placeholder it always was rather than to an
+        // empty batch.
+        let key = si
+            .mesh
+            .map(|m| m.as_u128())
+            .filter(|k| meshes.contains_key(k));
+        buckets.entry(key).or_default().push(ScatterInstance {
             position: si.position,
             rotation: si.rotation.as_quat(),
             scale: glam::Vec3::splat(si.scale as f32),
             color: pcg_kind_color(si.kind),
-        }),
-    );
-    scene.scatter.push(ScatterBatch {
-        data: Arc::new(data),
-        anchor: translation,
-        metallic: 0.0,
-        roughness: 0.75,
-        emissive: [0.0; 3],
-        id,
-        draw_distance,
-        near_distance,
-    });
+        });
+    }
+    for (key, bucket) in buckets {
+        let data = ScatterData::build_with_geometry(
+            PrimMesh::Cube,
+            key.and_then(|k| meshes.get(&k)).cloned(),
+            translation,
+            bucket,
+        );
+        scene.scatter.push(ScatterBatch {
+            data: Arc::new(data),
+            anchor: translation,
+            metallic: 0.0,
+            roughness: 0.75,
+            emissive: [0.0; 3],
+            id,
+            draw_distance,
+            near_distance,
+        });
+    }
+    // MIRROR-END scatter_mesh_buckets
 }
 
 /// The shell batch: one oriented **box** per structure group, banded
@@ -2811,12 +2875,19 @@ fn push_shells(
 ///
 /// MIRROR: identical in `inf_viewport::host` and `inf_player::render`, pinned by
 /// `inf-editor-core`'s `tests/projector_mirror.rs`.
-fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3, id: u32) {
+fn push_pcg_scatter(
+    scene: &mut RenderScene,
+    vol: &PcgVolume,
+    meshes: &inf_render::ScatterMeshes,
+    translation: DVec3,
+    id: u32,
+) {
     // MIRROR-BEGIN pcg_scatter_lod
     if vol.structure_groups.is_empty() {
         push_scatter(
             scene,
             &vol.evaluated,
+            meshes,
             translation,
             vol.draw_distance,
             0.0,
@@ -2841,7 +2912,15 @@ fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3
     let mut loose: Vec<ScatteredInstance> = Vec::new();
     loose.extend_from_slice(&vol.evaluated[..first.min(vol.evaluated.len())]);
     loose.extend_from_slice(&vol.evaluated[last..]);
-    push_scatter(scene, &loose, translation, vol.draw_distance, 0.0, id);
+    push_scatter(
+        scene,
+        &loose,
+        meshes,
+        translation,
+        vol.draw_distance,
+        0.0,
+        id,
+    );
     // **The two bands are complementary in the GROUP's distance, and the cull is
     // per INSTANCE** (I3 audit). A part sits up to its shell's own half-diagonal
     // nearer the eye than the shell's centre does, so cutting both at `lod`
@@ -2864,6 +2943,7 @@ fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3
     push_scatter(
         scene,
         &vol.evaluated[first.min(last)..last],
+        meshes,
         translation,
         parts_far,
         0.0,
@@ -2884,6 +2964,9 @@ fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3
                 .evaluated
                 .get(g.inst_start as usize)
                 .map_or(0, |i| i.kind),
+            // A shell is a BOX by definition (see `push_shells`), so it names no
+            // mesh however many its parts name.
+            mesh: None,
         })
         .collect();
     push_shells(scene, &shells, vol, translation, vol.draw_distance, lod, id);
@@ -2907,8 +2990,22 @@ fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3
 ///
 /// MIRROR: identical in `inf_viewport::host` and `inf_player::render`, pinned by
 /// `inf-editor-core`'s `tests/projector_mirror.rs`.
-fn push_biome_population(scene: &mut RenderScene, terrain: &Terrain, translation: DVec3, id: u32) {
-    push_scatter(scene, &terrain.biome_population, translation, 0.0, 0.0, id)
+fn push_biome_population(
+    scene: &mut RenderScene,
+    terrain: &Terrain,
+    meshes: &inf_render::ScatterMeshes,
+    translation: DVec3,
+    id: u32,
+) {
+    push_scatter(
+        scene,
+        &terrain.biome_population,
+        meshes,
+        translation,
+        0.0,
+        0.0,
+        id,
+    )
 }
 
 /// Project a [`Foliage`] component's painted instances into GPU-instanced scatter
@@ -4429,6 +4526,51 @@ impl EngineHost {
     /// which sorts them (`inf_render::registration_order`). The P26.3 LAW says
     /// the handles this mints differ from the player's, and the sort is what
     /// keeps the *pages* the same anyway.
+    /// Resolve every `.inf_mesh` this document's scattered instances name into
+    /// [`scatter_meshes`](Self::scatter_meshes) — wave TER2b.
+    ///
+    /// # Why the GUIDs are read off the INSTANCES and not off a component
+    ///
+    /// Because there is no component that has them. A `PcgVolume` names a
+    /// `.inf_pcg`, whose *rules* name meshes, and the viewport thread holds a
+    /// document rather than an asset database — the same wall the biome palette
+    /// and the water hints are pushed over. What the viewport does have is the
+    /// evaluated population, and since wave TER2b every instance in it carries
+    /// the GUID its kind resolved to. So the walk is over the answer rather than
+    /// over the question.
+    ///
+    /// **It is O(instances) and it runs per projection**, which is per *document
+    /// version* and not per frame. On the island's 16 771 instances that is
+    /// 16 771 inserts into a set that never exceeds three entries; the loads
+    /// behind it happen once each, because `resolve_scatter_geometry` caches its
+    /// misses as well as its hits.
+    ///
+    /// The table is rebuilt rather than accumulated so that a mesh unbound in one
+    /// document does not go on being drawn in the next; the *geometry* behind each
+    /// entry is `Arc`-shared with the store, so rebuilding costs pointer copies.
+    fn sync_scatter_meshes(&mut self, doc: &SceneDoc) {
+        let world = doc.world();
+        let w = world.world();
+        let mut wanted: BTreeSet<Uuid> = BTreeSet::new();
+        for &guid in doc.order() {
+            let Some(entity) = world.entity_of(guid) else {
+                continue;
+            };
+            if let Some(vol) = w.get::<PcgVolume>(entity) {
+                wanted.extend(vol.evaluated.iter().filter_map(|i| i.mesh));
+            }
+            if let Some(terrain) = w.get::<Terrain>(entity) {
+                wanted.extend(terrain.biome_population.iter().filter_map(|i| i.mesh));
+            }
+        }
+        self.scatter_meshes.clear();
+        for id in wanted {
+            if let Some(g) = self.render_assets.resolve_scatter_geometry(id) {
+                self.scatter_meshes.insert(id.as_u128(), g);
+            }
+        }
+    }
+
     fn sync_vt_bindings(&mut self, doc: &SceneDoc) {
         // **The rule is a value, and it lives in Ring 1** (P26.5). The two terms
         // used to be two fields compared inline here, where nothing headless can

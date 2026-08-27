@@ -3238,7 +3238,22 @@ pub struct ScatteredInstance {
     /// Uniform scale.
     pub scale: f64,
     /// Palette index resolved by the rule (which mesh/primitive kind).
+    ///
+    /// **Rule-local, and therefore not an identity.** See [`mesh`](Self::mesh):
+    /// populations are concatenated without offsetting this, so it survives only
+    /// as the placeholder *tint* index it has always been.
     pub kind: u32,
+    /// **The `.inf_mesh` this instance draws** (wave TER2b) — `inf_pcg::PcgKind::mesh`,
+    /// carried through from the rule that owns the palette.
+    ///
+    /// Mirrors `inf_pcg::PcgInstance::mesh` field for field, and exists for the
+    /// same reason: [`kind`](Self::kind) is a *rule-local* index into a palette
+    /// that no longer exists by the time a projector reads it, so two instances
+    /// carrying `0` may be a grass tuft and a wall module. A GUID is global.
+    ///
+    /// `None` is "draw the placeholder primitive" — a kind with no mesh, a
+    /// grammar module, or a mesh the host could not resolve.
+    pub mesh: Option<uuid::Uuid>,
 }
 
 /// One placed **collision box** a `.inf_pcg` graph produced (P19.5) — the solid
@@ -6218,6 +6233,7 @@ mod tests {
                 rotation: DQuat::IDENTITY,
                 scale: 1.5,
                 kind: 2,
+                mesh: None,
             }],
             // P19.5's solid half is derived state on exactly the same terms —
             // and **this is the whole schema answer for the batch**: a field
@@ -6288,6 +6304,7 @@ mod tests {
             rotation: DQuat::IDENTITY,
             scale: 1.0,
             kind: 0,
+            mesh: None,
         };
         let group = |start, len, inst_start, inst_len| StructureGroup {
             shell: solid,
@@ -6369,6 +6386,7 @@ mod tests {
                     rotation: DQuat::IDENTITY,
                     scale: 1.5,
                     kind: i % 4,
+                    mesh: None,
                 })
                 .collect(),
             ..Terrain::configured(5, 1.0)

@@ -1438,6 +1438,7 @@ pub fn population_of(
             rotation: i.rotation,
             scale: i.scale,
             kind: i.kind_index,
+            mesh: i.mesh,
         })
         .collect();
     let solids: Vec<inf_ecs::components::ScatteredSolid> = out
@@ -1762,6 +1763,7 @@ fn population_from(instances: &[inf_pcg::PcgInstance]) -> Vec<ScatteredInstance>
             rotation: i.rotation,
             scale: i.scale,
             kind: i.kind_index,
+            mesh: i.mesh,
         })
         .collect()
 }

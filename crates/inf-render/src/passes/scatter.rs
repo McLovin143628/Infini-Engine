@@ -296,6 +296,47 @@ struct InstanceUpload {
     mesh: PrimMesh,
 }
 
+/// A content-addressed **geometry** upload (wave TER2b) — one authored mesh's
+/// pull buffers, shared by every batch that draws it.
+///
+/// The sibling of [`InstanceUpload`] and keyed the same way, for the same reason:
+/// the island scatters three meshes across a whole biome set, so a per-batch
+/// upload would put the same 24 kB on the GPU once per batch, and a per-frame one
+/// would put it there sixty times a second. `ScatterGeometry::key` is a hash of
+/// the two arrays, so two kinds that happen to author identical geometry share
+/// one upload and a changed mesh is a *different* entry rather than a stale one.
+struct GeomUpload {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+}
+
+impl GeomUpload {
+    fn new(gpu: &GpuContext, geom: &crate::scene::ScatterGeometry) -> Self {
+        let mk = |name: &str, bytes: &[u8]| {
+            let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(name),
+                // `.max(16)` for the same reason every other buffer here has it:
+                // a zero-sized storage binding is a validation error, and an
+                // empty mesh must degrade to "draws nothing", not to a panic.
+                size: (bytes.len() as u64).max(16),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            if !bytes.is_empty() {
+                gpu.queue.write_buffer(&buf, 0, bytes);
+            }
+            buf
+        };
+        Self {
+            vertices: mk(
+                "scatter-geom-vertices",
+                bytemuck::cast_slice(&geom.vertices),
+            ),
+            indices: mk("scatter-geom-indices", bytemuck::cast_slice(&geom.indices)),
+        }
+    }
+}
+
 impl InstanceUpload {
     fn new(gpu: &GpuContext, mesh: PrimMesh, payload: &[ScatterInstanceRaw]) -> Self {
         let count = payload.len() as u32;
@@ -343,11 +384,13 @@ struct BatchScratch {
 }
 
 impl BatchScratch {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         gpu: &GpuContext,
         raster_bgl: &wgpu::BindGroupLayout,
         deform: &crate::deform::DeformResources,
         prim: &PrimStorage,
+        geom: Option<&GeomUpload>,
         upload: Arc<InstanceUpload>,
     ) -> Self {
         // The CULL bind group is not built here: it embeds the HZB pyramid, which
@@ -414,13 +457,24 @@ impl BatchScratch {
                     binding: 2,
                     resource: visible.as_entire_binding(),
                 },
+                // The geometry the full-mesh raster pulls from: the authored
+                // mesh's own buffers when the batch has one, and the shared
+                // built-in pack otherwise. Nothing else in the group changes —
+                // which is why an authored mesh costs a bind group and not a
+                // pipeline.
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: prim.vertices.as_entire_binding(),
+                    resource: geom
+                        .map(|g| &g.vertices)
+                        .unwrap_or(&prim.vertices)
+                        .as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: prim.indices.as_entire_binding(),
+                    resource: geom
+                        .map(|g| &g.indices)
+                        .unwrap_or(&prim.indices)
+                        .as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -462,6 +516,10 @@ pub struct ScatterNode {
     /// batches with identical geometry share one upload. Retained to the frame's
     /// live set (the `ClassicVgeomNode` eviction rule).
     uploads: HashMap<u128, Arc<InstanceUpload>>,
+    /// Authored scatter geometry, keyed by `ScatterGeometry::key` (wave TER2b).
+    /// Retained to the frame's live set exactly as `uploads` is, so a level whose
+    /// cover meshes go out of scope frees them.
+    geoms: HashMap<u128, Arc<GeomUpload>>,
     /// Per-batch draw state, keyed by `(content key, batch pick id)`. Content alone
     /// is **not** enough: two batches of the same payload at different anchors are
     /// two different draws, and sharing their uniforms means the second overwrites
@@ -778,6 +836,7 @@ impl ScatterNode {
             hzb: HzbChain::new(gpu),
             dummy_hzb: dummy_hzb(gpu),
             uploads: HashMap::new(),
+            geoms: HashMap::new(),
             scratch: HashMap::new(),
             fallback_pipeline,
             fallback_prim: crate::primitives::PrimGpu::new(gpu, "scatter-fallback"),
@@ -809,14 +868,19 @@ impl ScatterNode {
                     Arc::new(InstanceUpload::new(gpu, b.data.mesh, &b.data.instances))
                 })
                 .clone();
+            // Wave TER2b: the authored geometry, on its own content key. Uploaded
+            // BEFORE the scratch that binds it, because the bind group holds the
+            // buffers and there is no second chance to fill them.
+            let geom = b.data.geometry.as_ref().filter(|g| !g.is_empty()).map(|g| {
+                self.geoms
+                    .entry(g.key())
+                    .or_insert_with(|| Arc::new(GeomUpload::new(gpu, g)))
+                    .clone()
+            });
+            let prim = &self.prim_storage;
+            let raster_bgl = &self.raster_bgl;
             self.scratch.entry((key, b.id)).or_insert_with(|| {
-                BatchScratch::new(
-                    gpu,
-                    &self.raster_bgl,
-                    frame.deform,
-                    &self.prim_storage,
-                    upload,
-                )
+                BatchScratch::new(gpu, raster_bgl, frame.deform, prim, geom.as_deref(), upload)
             });
         }
         let live_content: std::collections::BTreeSet<u128> = frame
@@ -836,8 +900,16 @@ impl ScatterNode {
         // Scratch first: it holds an `Arc` into the uploads, so dropping the draws
         // before the payloads keeps the eviction order obvious rather than merely
         // correct-by-refcount.
+        let live_geoms: std::collections::BTreeSet<u128> = frame
+            .scene
+            .scatter
+            .iter()
+            .filter(|b| !b.data.is_empty())
+            .filter_map(|b| b.data.geometry.as_ref().map(|g| g.key()))
+            .collect();
         self.scratch.retain(|k, _| live_draws.contains(k));
         self.uploads.retain(|k, _| live_content.contains(k));
+        self.geoms.retain(|k, _| live_geoms.contains(k));
         frame
             .scatter_audit
             .record_uploads(self.uploads.len() as u32);
@@ -1338,10 +1410,19 @@ impl RenderNode for ScatterNode {
                     continue;
                 };
                 let anchor = frame.view.origin.to_render(b.anchor);
-                let radius = b.data.mesh.bounding_radius() * b.data.max_scale();
+                let radius = b.data.bounding_radius() * b.data.max_scale();
                 let (mesh_end, cull, fade, impostors) =
                     effective_bands(&frame.settings.scatter, b.draw_distance);
-                let range = self.prim_storage.range(g.upload.mesh);
+                // An authored mesh owns its whole pull buffer, so its range is
+                // the identity one; a built-in is a sub-range of the shared pack.
+                let range = match b.data.geometry.as_ref().filter(|x| !x.is_empty()) {
+                    Some(x) => crate::primitives::PrimRange {
+                        index_start: 0,
+                        index_count: x.indices.len() as u32,
+                        base_vertex: 0,
+                    },
+                    None => self.prim_storage.range(g.upload.mesh),
+                };
                 gpu.queue.write_buffer(
                     &g.cull_params,
                     0,
@@ -1367,12 +1448,25 @@ impl RenderNode for ScatterNode {
                     &g.raster_params,
                     0,
                     bytemuck::bytes_of(&RasterParamsGpu {
-                        anchor: anchor.extend(b.data.mesh.bounding_radius()).to_array(),
+                        anchor: anchor.extend(b.data.bounding_radius()).to_array(),
                         // `z` is the primitive KIND (island wave I4b): the
                         // impostor's card radius is the instance's own bounding
                         // sphere, and which sphere that is depends on the shape.
                         // See `impostor_radius` in `scatter_mesh.wgsl`.
-                        material: [b.metallic, b.roughness, b.data.mesh as u32 as f32, 0.0],
+                        // `w` is the AUTHORED mesh's unit bounding radius, or 0
+                        // for "there is none, size the impostor card off the
+                        // primitive kind in `z`" (wave TER2b — see
+                        // `impostor_radius` in `scatter_mesh.wgsl`).
+                        material: [
+                            b.metallic,
+                            b.roughness,
+                            b.data.mesh as u32 as f32,
+                            b.data
+                                .geometry
+                                .as_ref()
+                                .filter(|x| !x.is_empty())
+                                .map_or(0.0, |x| x.radius),
+                        ],
                         emissive: [b.emissive[0], b.emissive[1], b.emissive[2], 0.0],
                         bands: [mesh_end, cull, fade, if impostors { 1.0 } else { 0.0 }],
                         geom: [

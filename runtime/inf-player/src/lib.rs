@@ -41,6 +41,7 @@ pub mod fracture;
 pub mod mods;
 pub mod render;
 pub mod runtime_sim;
+pub mod scatter_mesh;
 /// Skeletal render assets (the P18.3 follow-up) — bind-space skinned geometry,
 /// skeletons and clips, resolved out of a cooked pack or a dev dir.
 pub mod skinned;
@@ -442,6 +443,10 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     // and (the P18.3 follow-up) the skeletal store so a `SkeletalMesh` renders its
     // real posed geometry instead of a placeholder.
     let (vmeshes, skinned, voxel_assets) = load_render_assets(args);
+    // Wave TER2b: the authored meshes a scatter kind names. Loaded here, once,
+    // beside the other render stores and for the same reason -- a projection runs
+    // every frame and must not open a file.
+    let scatter_meshes = std::sync::Arc::new(load_scatter_meshes(args));
     // P26.4: the level's bound `.inf_mat` records + their `.inf_tex` containers,
     // sliced out of the pack that is already open. This is what makes a shipped
     // build's surfaces textured — see `material_content_for_world` for why a
@@ -473,6 +478,7 @@ pub fn run_windowed(args: &Args) -> ExitCode {
         sim,
         map,
         vmeshes,
+        scatter_meshes,
         skinned,
         voxel_assets,
         materials,
@@ -589,6 +595,40 @@ fn load_voxel_assets(args: &Args) -> voxel::VoxelRegistry {
 /// Loaded together on purpose: on the pack path they share **one**
 /// `Arc<PackReader>`, so the mapping is opened once however many kinds of asset
 /// the renderer reaches into it for (the P18.2 rule).
+/// The authored meshes scattered content draws (wave TER2b), for whichever world
+/// the arguments name.
+///
+/// Empty for `--demo`: a demo world has no `.inf_pcg` and therefore no cover, and
+/// an empty table is precisely "every scattered instance draws its placeholder",
+/// which is what the engine did before this wave.
+fn load_scatter_meshes(args: &Args) -> inf_render::ScatterMeshes {
+    match &args.world {
+        WorldChoice::Demo => inf_render::ScatterMeshes::new(),
+        WorldChoice::Level(path) => {
+            let content_dir = args
+                .content
+                .clone()
+                .or_else(|| path.parent().map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from("."));
+            scatter_mesh::from_dir(&content_dir)
+        }
+        WorldChoice::Pack(path) => {
+            let pack_path = if path.is_dir() {
+                path.join(level::PACK_FILE)
+            } else {
+                path.clone()
+            };
+            match inf_asset::PackReader::open(&pack_path) {
+                Ok(reader) => scatter_mesh::from_pack(&reader),
+                Err(e) => {
+                    tracing::warn!("inf-player: no scatter meshes loaded from pack: {e}");
+                    inf_render::ScatterMeshes::new()
+                }
+            }
+        }
+    }
+}
+
 fn load_render_assets(
     args: &Args,
 ) -> (

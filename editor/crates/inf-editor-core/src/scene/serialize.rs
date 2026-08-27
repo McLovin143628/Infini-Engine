@@ -7927,6 +7927,7 @@ mod tests {
                 rotation: glam::DQuat::IDENTITY,
                 scale: 1.0,
                 kind: 0,
+                mesh: None,
             });
             doc.world_mut().world_mut().entity_mut(e).insert(vol);
             doc.world_mut().mark_dirty();

@@ -214,6 +214,11 @@ struct Fixture {
     vmeshes: inf_player::vmesh::VmeshRegistry,
     skinned: inf_player::skinned::SkinnedRegistry,
     voxel_assets: inf_player::voxel::VoxelRegistry,
+    /// Wave TER2b: the authored meshes scattered ground cover draws. Assembled
+    /// from the same reader as everything else, through the same door
+    /// `load_scatter_meshes` calls at boot -- so the frame this instrument times
+    /// is the frame a shipped run draws, cover meshes and all.
+    scatter_meshes: inf_render::ScatterMeshes,
     record: inf_scene::RenderSettingsRecord,
     materials: std::sync::Arc<inf_player::MaterialContent>,
 }
@@ -230,6 +235,7 @@ fn open(pack: &Path) -> Fixture {
     );
     let skinned = inf_player::skinned::SkinnedRegistry::from_pack(reader.clone());
     let voxel_assets = inf_player::voxel::VoxelRegistry::from_pack(reader.clone());
+    let scatter_meshes = inf_player::scatter_mesh::from_pack(&reader);
     let vmeshes = inf_player::vmesh::VmeshRegistry::from_pack(reader)
         .expect("the pack's derived meshlet DAGs index");
     Fixture {
@@ -237,6 +243,7 @@ fn open(pack: &Path) -> Fixture {
         vmeshes,
         skinned,
         voxel_assets,
+        scatter_meshes,
         record,
         materials,
     }
@@ -451,6 +458,7 @@ fn measure(
             &voxels,
             &mut debris,
             renderer.vt_textures(),
+            &fx.scatter_meshes,
         );
         cpu[2] = t.elapsed().as_secs_f64() * 1000.0;
         let t = std::time::Instant::now();
@@ -1524,6 +1532,7 @@ fn the_island_at_shipping_resolution() {
         );
         let skinned = inf_player::skinned::SkinnedRegistry::from_pack(reader.clone());
         let voxel_assets = inf_player::voxel::VoxelRegistry::from_pack(reader.clone());
+        let scatter_meshes = inf_player::scatter_mesh::from_pack(&reader);
         let vmeshes = inf_player::vmesh::VmeshRegistry::from_pack(reader)
             .expect("the island's meshlet DAGs index");
         let mut sim = inf_player::sim_from_built(built);
@@ -1544,6 +1553,7 @@ fn the_island_at_shipping_resolution() {
             vmeshes,
             skinned,
             voxel_assets,
+            scatter_meshes,
             record,
             materials,
         }

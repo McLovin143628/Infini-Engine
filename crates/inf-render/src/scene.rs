@@ -442,12 +442,150 @@ pub struct ScatterInstanceRaw {
 /// strictly cheaper than what it supersedes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScatterData {
-    /// Which built-in primitive every instance of this batch draws.
+    /// Which built-in primitive every instance of this batch draws — and, when
+    /// [`geometry`](Self::geometry) is `Some`, which primitive stands in for it
+    /// in the paths that cannot yet draw a real mesh (the impostor card, the CPU
+    /// fallback, the shadow caster pack). See [`ScatterGeometry`].
     pub mesh: PrimMesh,
+    /// **The authored mesh every instance of this batch draws** (wave TER2b), or
+    /// `None` for the built-in primitive named by [`mesh`](Self::mesh).
+    pub geometry: Option<Arc<ScatterGeometry>>,
     /// Packed, anchor-relative instance records in authored order.
     pub instances: Vec<ScatterInstanceRaw>,
     key: u128,
     max_scale: f32,
+}
+
+/// Real triangle geometry for a scatter batch (wave TER2b) — an authored
+/// `.inf_mesh` in the layout `scatter_mesh.wgsl` already pulls from.
+///
+/// # Why this is a payload and not a `PrimMesh`
+///
+/// The scatter raster does **not** bind a vertex buffer. It reads
+/// `vertices[idx * 6u + k]` and `indices[...]` out of two storage buffers and
+/// takes its draw count from an indirect args block the cull compute wrote — the
+/// P18.5 arrangement. Everything a mesh needs to reach that path is therefore the
+/// same two flat arrays [`PrimStorage`](crate::primitives::PrimStorage) already
+/// holds for the five built-ins, which is why plumbing an authored mesh through
+/// costs a payload and a bind group and not a second pipeline.
+///
+/// **Stride six: position then normal, and no uv.** That is
+/// [`SCATTER_PULL_STRIDE`](crate::primitives::SCATTER_PULL_STRIDE), and it is the
+/// reason a scattered instance is tinted rather than textured — there is no uv in
+/// the buffer for a material to be sampled at. Widening it is the named follow-up
+/// (see the module note in `scatter_mesh.wgsl`).
+///
+/// # Content-addressed, like everything else the scatter path uploads
+///
+/// [`key`](Self::key) is an `xxh3` over the two arrays, and `ScatterData::key`
+/// folds it in — so two batches of the same placements drawn as *different*
+/// meshes are two different payloads, and the same mesh scattered in two places
+/// is one geometry upload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScatterGeometry {
+    /// `position` then `normal` per vertex, flat — `SCATTER_PULL_STRIDE` floats
+    /// each, in the authored vertex order.
+    pub vertices: Vec<f32>,
+    /// Triangle indices into [`vertices`](Self::vertices), by vertex (not float).
+    pub indices: Vec<u32>,
+    /// The mesh's bounding-sphere radius about its own origin, at unit scale —
+    /// the cull radius, and `PrimMesh::bounding_radius`'s counterpart.
+    pub radius: f32,
+    key: u128,
+}
+
+/// The most triangles one scattered mesh may carry.
+///
+/// A ceiling, not a quality knob — the same shape as
+/// [`MAX_CPU_SCATTER_INSTANCES`](crate::MAX_CPU_SCATTER_INSTANCES). Scatter draws
+/// its geometry **per instance** with no meshlet LOD behind it, so the cost of a
+/// kind is its triangle count times its live population: the island's 16 771
+/// instances at this ceiling would be **68.7 M** triangles before culling,
+/// against the 10 M-triangle scene P13 gated at 2.4 % cull. The three
+/// ground-cover props are 32, 20 and 128 triangles, so this is three orders of
+/// magnitude of headroom for the content this path is *for*, and a refusal for
+/// content that wants the virtualized path instead.
+///
+/// Here rather than in either host **because both hosts must refuse the same
+/// content**: a mesh the editor draws and a shipped build does not is the exact
+/// divergence the projector-mirror gate exists to prevent, one level up.
+/// A refused mesh falls back to the placeholder primitive, inertly and with a
+/// warning, exactly as an unresolvable GUID does.
+pub const MAX_SCATTER_MESH_TRIANGLES: usize = 4_096;
+
+/// The authored meshes a scatter projection may draw, by mesh-asset GUID
+/// (`Uuid::as_u128` — this crate keys everything content-addressed on `u128` and
+/// deliberately does not name `uuid` in a projector-facing signature).
+///
+/// **Populated by the host, read by the projector.** A projection runs per frame
+/// in the shipped player, so it must not open files; each host fills this from
+/// its own store — the player's pack at level load, the editor's content root on
+/// a document change — and hands the projector a finished table. A GUID that is
+/// absent is a mesh the host could not resolve, and the projector draws the
+/// placeholder primitive for it, which is exactly what it did before there were
+/// meshes at all.
+pub type ScatterMeshes = std::collections::HashMap<u128, Arc<ScatterGeometry>>;
+
+impl ScatterGeometry {
+    /// Build from the streams `inf_mesh::MeshAsset::vgeom_streams` produces.
+    ///
+    /// **The one door.** Both hosts resolve a scatter kind's mesh GUID to a
+    /// `MeshAsset` through their own asset store — the editor's loose content
+    /// root, the player's pack — and both arrive here, so the flattening, the
+    /// radius and the content key are one piece of code rather than a pair that
+    /// agree by inspection. `positions` and `normals` must be the same length; a
+    /// shorter `normals` list pads with `+Y`, which is what an unnormalled import
+    /// already means everywhere else in this engine.
+    pub fn from_streams(positions: &[[f32; 3]], normals: &[[f32; 3]], indices: &[u32]) -> Self {
+        let mut vertices =
+            Vec::with_capacity(positions.len() * crate::primitives::SCATTER_PULL_STRIDE);
+        let mut r2: f32 = 0.0;
+        for (i, p) in positions.iter().enumerate() {
+            vertices.extend_from_slice(p);
+            vertices.extend_from_slice(normals.get(i).unwrap_or(&[0.0, 1.0, 0.0]));
+            r2 = r2.max(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+        }
+        // Indices past the end would read garbage out of a storage buffer, which
+        // is a hang or a spike of noise rather than an error. Dropping the
+        // offending triangle is the same refusal the mesh reader makes.
+        let n = positions.len() as u32;
+        let indices: Vec<u32> = indices
+            .chunks_exact(3)
+            .filter(|t| t.iter().all(|i| *i < n))
+            .flatten()
+            .copied()
+            .collect();
+        let mut bytes = Vec::with_capacity(vertices.len() * 4 + indices.len() * 4);
+        bytes.extend_from_slice(bytemuck::cast_slice(&vertices));
+        bytes.extend_from_slice(bytemuck::cast_slice(&indices));
+        let key = xxhash_rust::xxh3::xxh3_128(&bytes);
+        Self {
+            vertices,
+            indices,
+            radius: r2.sqrt(),
+            key,
+        }
+    }
+
+    /// The content key — the renderer's GPU-cache identity for this geometry.
+    pub fn key(&self) -> u128 {
+        self.key
+    }
+
+    /// Triangles in the mesh.
+    pub fn triangle_count(&self) -> usize {
+        self.indices.len() / 3
+    }
+
+    /// Vertices in the mesh.
+    pub fn vertex_count(&self) -> usize {
+        self.vertices.len() / crate::primitives::SCATTER_PULL_STRIDE
+    }
+
+    /// Nothing to draw — an empty mesh, or one whose every triangle was refused.
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty() || self.vertices.is_empty()
+    }
 }
 
 impl ScatterData {
@@ -458,6 +596,24 @@ impl ScatterData {
     /// in authored order, with no floating-origin, camera or frame input.
     pub fn build(
         mesh: PrimMesh,
+        anchor: DVec3,
+        instances: impl IntoIterator<Item = ScatterInstance>,
+    ) -> Self {
+        Self::build_with_geometry(mesh, None, anchor, instances)
+    }
+
+    /// [`build`](Self::build), for a batch that draws an **authored mesh** (wave
+    /// TER2b).
+    ///
+    /// `mesh` stays, and is the *proxy*: the impostor card's shape, the CPU
+    /// fallback's geometry and the shadow caster's are all still the built-in
+    /// primitive, because those three paths bind one shared vertex buffer for the
+    /// whole frame and a per-batch mesh does not fit in it. What changes is the
+    /// full-mesh raster, which pulls from a storage buffer and therefore can be
+    /// handed any geometry at all.
+    pub fn build_with_geometry(
+        mesh: PrimMesh,
+        geometry: Option<Arc<ScatterGeometry>>,
         anchor: DVec3,
         instances: impl IntoIterator<Item = ScatterInstance>,
     ) -> Self {
@@ -485,16 +641,38 @@ impl ScatterData {
         // cubes and as spheres are two different batches, and an id that did not
         // say so would serve one from the other's cached buffers.
         let mut bytes =
-            Vec::with_capacity(packed.len() * std::mem::size_of::<ScatterInstanceRaw>() + 4);
+            Vec::with_capacity(packed.len() * std::mem::size_of::<ScatterInstanceRaw>() + 20);
         bytes.extend_from_slice(&(mesh as u32).to_le_bytes());
+        // …and so is the authored geometry, on exactly the same argument: the
+        // same placements drawn as a grass tuft and as a rock are two batches.
+        // A `None` folds nothing, so every batch that predates wave TER2b keys
+        // byte-identically to what it always did.
+        if let Some(g) = &geometry {
+            bytes.extend_from_slice(&g.key().to_le_bytes());
+        }
         bytes.extend_from_slice(bytemuck::cast_slice(&packed));
         let key = xxhash_rust::xxh3::xxh3_128(&bytes);
         Self {
             mesh,
+            geometry,
             instances: packed,
             key,
             max_scale,
         }
+    }
+
+    /// The batch's cull radius at unit scale: the authored mesh's own bounding
+    /// sphere when there is one, and the proxy primitive's otherwise.
+    ///
+    /// A cull radius that is too *small* deletes instances at the frustum edge,
+    /// so this is the one place the proxy must not be used for a real mesh — a
+    /// 0.74 m shrub inside a `√3/2` unit cube would be culled correctly by
+    /// accident, and a 3 m one would not.
+    pub fn bounding_radius(&self) -> f32 {
+        self.geometry
+            .as_ref()
+            .map(|g| g.radius)
+            .unwrap_or_else(|| self.mesh.bounding_radius())
     }
 
     /// The content key — the renderer's GPU-cache identity for this payload.

@@ -279,6 +279,19 @@ pub fn evaluate_with_in(
             let mut insts = scatter_region_in(pool, &rule.scatter, field.as_ref(), height, region);
             for inst in &mut insts {
                 inst.kind_index = weighted_pick(&rule.kinds, rule.scatter.seed, inst.pos);
+                // **The GUID survives the pick** (wave TER2b). `kind_index` alone
+                // cannot name a mesh: it is RULE-local, and this function
+                // concatenates every rule of every layer into one flat list with
+                // no run boundaries, so two rules' index `0` are the same `u32`
+                // and different content. `BiomeBinding::evaluate_in` concatenates
+                // graphs the same way, and `compose_volume` interleaves grammar
+                // module indices into the very same slot. Resolving the palette
+                // HERE, where the rule is still in hand, is the only place the
+                // answer is unambiguous.
+                inst.mesh = rule
+                    .kinds
+                    .get(inst.kind_index as usize)
+                    .and_then(|k| k.mesh);
             }
             out.append(&mut insts);
         }

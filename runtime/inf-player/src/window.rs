@@ -170,6 +170,10 @@ pub struct PlayerApp {
     /// the render host so asset meshes render real geometry. Empty for
     /// primitive-only / PIE worlds.
     vmeshes: Arc<VmeshRegistry>,
+    /// The authored meshes scattered content draws (wave TER2b) — set from the
+    /// loaded pack / dev-dir, empty for PIE and the browser worlds, where every
+    /// scattered instance falls back to its placeholder primitive.
+    scatter_meshes: Arc<inf_render::ScatterMeshes>,
     /// Skeletal render assets a `SkeletalMesh` resolves to (the P18.3 follow-up);
     /// attached to the render host so a bound character draws its real posed
     /// geometry. Inert for primitive-only / browser worlds, which is why
@@ -250,6 +254,7 @@ impl PlayerApp {
             debug_cells: false,
             paused: false,
             vmeshes,
+            scatter_meshes: Arc::new(inf_render::ScatterMeshes::new()),
             skinned: Arc::new(SkinnedRegistry::new()),
             voxel_assets: Arc::new(VoxelRegistry::new()),
             materials: Arc::new(crate::MaterialContent::default()),
@@ -648,6 +653,7 @@ impl PlayerApp {
             match Self::build_host(&live.window, self.width, self.height, self.render) {
                 Ok(mut host) => {
                     host.set_vmeshes(self.vmeshes.clone());
+                    host.set_scatter_meshes(self.scatter_meshes.clone());
                     host.set_skinned(self.skinned.clone());
                     host.set_voxel_assets(self.voxel_assets.clone());
                     // P26.4: the atlas and the indirection buffer belonged to the
@@ -735,6 +741,7 @@ impl ApplicationHandler for PlayerApp {
                 // and the skeletal store so a `SkeletalMesh` renders its real
                 // posed geometry rather than a placeholder cube.
                 host.set_vmeshes(self.vmeshes.clone());
+                host.set_scatter_meshes(self.scatter_meshes.clone());
                 host.set_skinned(self.skinned.clone());
                 // P21.1: and the `.inf_voxel` source, so a placed cave draws its
                 // carved surface rather than nothing.
@@ -985,6 +992,7 @@ pub fn run(
     sim: RuntimeSim,
     map: InputMap,
     vmeshes: Arc<VmeshRegistry>,
+    scatter_meshes: Arc<inf_render::ScatterMeshes>,
     skinned: Arc<SkinnedRegistry>,
     voxel_assets: Arc<VoxelRegistry>,
     materials: Arc<crate::MaterialContent>,
@@ -994,6 +1002,7 @@ pub fn run(
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = PlayerApp::new(title, width, height, sim, map, vmeshes, render);
+    app.scatter_meshes = scatter_meshes;
     app.skinned = skinned;
     app.voxel_assets = voxel_assets;
     app.materials = materials;

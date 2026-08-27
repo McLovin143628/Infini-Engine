@@ -271,6 +271,7 @@ impl Ctx<'_> {
             rotation: glam::DQuat::IDENTITY,
             scale: 1.0,
             kind_index: kind,
+            mesh: None,
         });
         out.colliders.push(PcgCollider {
             center,
@@ -650,6 +651,7 @@ impl Ctx<'_> {
                     rotation: yaw_onto(DVec3::new(normal.x, 0.0, normal.y)),
                     scale: 1.0,
                     kind_index: kind,
+                    mesh: None,
                 });
                 out.colliders.push(PcgCollider {
                     center: DVec3::new(p.x, y + half.y, p.y),
@@ -710,6 +712,7 @@ impl Ctx<'_> {
                     rotation: glam::DQuat::IDENTITY,
                     scale: 1.0,
                     kind_index: kind,
+                    mesh: None,
                 });
                 out.colliders.push(PcgCollider {
                     center: DVec3::new(p.x, y + half.y, p.y),

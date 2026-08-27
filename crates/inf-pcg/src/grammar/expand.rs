@@ -927,6 +927,7 @@ fn place_module(
             rotation: yaw * super::span::euler_deg_to_quat(module.rotation_deg),
             scale: module.scale,
             kind_index: kind,
+            mesh: None,
         },
         solid,
     ))

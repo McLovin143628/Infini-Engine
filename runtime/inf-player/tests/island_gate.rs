@@ -408,6 +408,11 @@ fn veg_digest(sim: &RuntimeSim) -> (u128, usize) {
             bytes.extend_from_slice(&i.position.y.to_bits().to_le_bytes());
             bytes.extend_from_slice(&i.position.z.to_bits().to_le_bytes());
             bytes.extend_from_slice(&i.kind.to_le_bytes());
+            // Wave TER2b: and the MESH, which is what the instance actually
+            // draws. Two populations that agree on every position and differ on
+            // which prop stands there are two different worlds, and before this
+            // line the fold could not tell them apart.
+            bytes.extend_from_slice(&i.mesh.map_or(0u128, |m| m.as_u128()).to_le_bytes());
         }
         n += t.biome_population.len();
         per_terrain.push((g.0, bytes));
@@ -1310,13 +1315,13 @@ fn the_cooked_island_carries_the_ground_its_layers_bind() {
     //     that says both halves landed.
     //
     //     **It ends at the pack, and the TER2a audit made that explicit.** What
-    //     this block proves is that the bytes are cooked and reachable. It does
-    //     NOT prove anything is drawn from them, and today nothing is:
-    //     `push_scatter` builds every scattered instance as a `PrimMesh::Cube`
-    //     with a palette tint, and `PcgKind::mesh` is discarded at evaluation —
-    //     `PcgInstance` keeps a `kind_index` and no GUID. See
-    //     `the_cover_meshes_are_shipped_and_are_not_yet_drawn` below, which is
-    //     the tripwire that pins the gap so it cannot be claimed shut again.
+    //     this block proves is that the bytes are cooked and reachable — the
+    //     fourth link of a five-link chain, and never the fifth. Wave TER2b
+    //     closed the fifth: `the_scattered_cover_draws_its_authored_meshes`
+    //     below drives the shipped projector over the real population and
+    //     asserts the three meshes reach three geometry uploads. This block
+    //     stays because a mesh that never reaches the pack cannot be drawn
+    //     whatever the projector does.
     {
         let reader = std::sync::Arc::new(
             inf_asset::PackReader::open(&pack.join(inf_player::level::PACK_FILE))
@@ -1354,139 +1359,245 @@ fn the_cooked_island_carries_the_ground_its_layers_bind() {
     }
 }
 
-/// The body of `fn NAME(` in `src`, by brace matching. `None` when absent.
+/// **The scattered cover draws its authored meshes** (wave TER2b).
 ///
-/// Deliberately crude and deliberately *scoped*: the P23 law is that a byte pin
-/// cannot see a semantic change, so a ban has to read a **block** rather than a
-/// file — a helper added elsewhere in the module would otherwise satisfy or
-/// defeat a whole-file `contains`.
-fn fn_body<'a>(src: &'a str, name: &str) -> Option<&'a str> {
-    let at = src.find(&format!("fn {name}("))?;
-    let open = at + src[at..].find('{')?;
-    let bytes = src.as_bytes();
-    let mut depth = 0usize;
-    for (i, b) in bytes.iter().enumerate().skip(open) {
-        match b {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&src[open..=i]);
+/// # What this arm replaces
+///
+/// `the_cover_meshes_are_shipped_and_are_not_yet_drawn` — a TER2a-audit tripwire
+/// written to assert the WRONG outcome, so that the day a real mesh reached the
+/// scatter path it would go red and take the ledger with it. It has now gone red,
+/// and it did so in the strongest form it could: its two struct literals stopped
+/// **compiling**, because `inf_pcg::PcgInstance` and
+/// `inf_ecs::components::ScatteredInstance` each grew the `mesh` field the arm
+/// existed to say did not exist.
+///
+/// What was wrong, and is not any more:
+///
+/// * `PcgKind::mesh` was read by the packager's dependency closure and by nothing
+///   that draws. `rules::evaluate_with_in` now resolves it where the rule that
+///   owns the palette is still in hand, and it rides on the instance. It has to
+///   be the GUID and not an index: `kind_index` is **rule-local**, populations
+///   from every rule of every layer of every biome graph are concatenated with no
+///   run boundaries, and `compose_volume` interleaves grammar module indices into
+///   the same `u32`.
+/// * `push_scatter` built one `ScatterData::build(PrimMesh::Cube, …)` for every
+///   instance. It buckets by mesh now, and builds one batch per authored mesh.
+/// * `inf_render::ScatterBatch` had nowhere to put geometry. `ScatterData` now
+///   carries an `Option<Arc<ScatterGeometry>>`, folded into its content key, and
+///   the scatter raster pulls that batch's own vertices and indices out of two
+///   storage buffers instead of the shared built-in pack.
+///
+/// # It drives the SHIPPED door on the REAL island
+///
+/// The arm it replaces asserted pack membership, which is the fourth link of a
+/// five-link chain — the TER2a audit's law: *when a clause's title is about what
+/// the world looks like, at least one arm has to be about what the world looks
+/// like.* So this one cooks the island, boots the shipping sim, drives it until
+/// the ground is resident and the population has scattered, and projects it
+/// through `project_scene_full` — the very function the windowed player calls —
+/// with the very table `load_scatter_meshes` builds at boot.
+///
+/// Its anti-vacuity half is the **same projection with an empty table**: that is
+/// the pre-TER2b engine exactly, and it must produce one meshless batch where the
+/// real one produces three mesh-carrying ones. An arm that could not tell those
+/// two apart would be measuring nothing.
+#[test]
+fn the_scattered_cover_draws_its_authored_meshes() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let pack = cook(tmp.path());
+    let reader = inf_asset::PackReader::open(&pack.join(inf_player::level::PACK_FILE))
+        .expect("the pack maps");
+
+    // ── 1. the table the shipped player's projector is handed ──
+    //
+    // Through the SHIPPED door — `inf_player::scatter_mesh::from_pack` is what
+    // `load_scatter_meshes` calls at boot — so this is a real run's table, not
+    // one the test assembled.
+    let meshes = inf_player::scatter_mesh::from_pack(&reader);
+    assert_eq!(
+        meshes.len(),
+        inf_editor_core::cover::CoverKind::ALL.len(),
+        "the cooked island's scatter kinds resolve to {} meshes, not the three the \
+         cover library authors",
+        meshes.len()
+    );
+    for kind in inf_editor_core::cover::CoverKind::ALL {
+        let id = inf_editor_core::cover::cover_mesh_guid(kind);
+        let g = meshes
+            .get(&id.as_u128())
+            .unwrap_or_else(|| panic!("{} did not resolve to scatter geometry", kind.label()));
+        assert!(
+            g.triangle_count() > 0 && g.vertex_count() > 0,
+            "{} resolved to an empty mesh",
+            kind.label()
+        );
+        assert!(
+            g.radius > 0.0 && g.radius < 2.0,
+            "{} has a unit bounding radius of {} m, which is not ground cover -- \
+             the cull sphere and the impostor card are both sized from it",
+            kind.label(),
+            g.radius
+        );
+        // NOT VACUOUS: the resolved geometry is the committed mesh's, through the
+        // same one door, and not something the loader synthesized.
+        let bytes = reader.read(inf_asset::AssetId(id)).expect("the mesh reads");
+        let mesh: inf_mesh::MeshAsset = inf_asset::decode(&bytes).expect("the cover mesh decodes");
+        let (p, n, _u, _t, i) = mesh.vgeom_streams();
+        assert_eq!(
+            g.key(),
+            inf_render::ScatterGeometry::from_streams(&p, &n, &i).key(),
+            "{}'s resolved geometry is not the committed mesh's",
+            kind.label()
+        );
+        println!(
+            "ISLAND COVER: {} -> {} triangles, {} vertices, r = {:.3} m",
+            kind.label(),
+            g.triangle_count(),
+            g.vertex_count(),
+            g.radius
+        );
+    }
+
+    // ── 2. the island's own document names them ──
+    let doc = inf_editor_core::island::island_cover_document(7);
+    let kinds: Vec<&inf_pcg::PcgKind> = doc
+        .layers
+        .iter()
+        .flat_map(|l| &l.rules)
+        .flat_map(|r| &r.kinds)
+        .collect();
+    assert_eq!(kinds.len(), 3, "the island's cover document is three kinds");
+    for (k, cover) in kinds.iter().zip(inf_editor_core::cover::CoverKind::ALL) {
+        assert_eq!(
+            k.mesh,
+            Some(inf_editor_core::cover::cover_mesh_guid(cover)),
+            "the island's {} kind names no mesh",
+            cover.label()
+        );
+    }
+
+    // ── 3. the shipping projection, on the real population ──
+    let mut sim = pack_sim(&pack);
+    let t = drive(&mut sim, start());
+    let placed = *t.veg_len.last().expect("the drive traced");
+    assert!(
+        placed > 0,
+        "nothing scattered on the drive, so the projection below would be vacuous"
+    );
+    // Every instance the sim placed carries the GUID its kind resolved to — the
+    // link the audit found broken, asserted on the WORLD rather than on a
+    // constructed record.
+    {
+        let world = sim.world().world();
+        let mut named = 0usize;
+        let mut total = 0usize;
+        for e in world.iter_entities() {
+            let Some(terrain) = e.get::<inf_ecs::components::Terrain>() else {
+                continue;
+            };
+            for i in &terrain.biome_population {
+                total += 1;
+                if i.mesh.is_some_and(|m| meshes.contains_key(&m.as_u128())) {
+                    named += 1;
                 }
             }
-            _ => {}
         }
+        assert_eq!(
+            named, total,
+            "{named} of {total} scattered instances name a resolvable mesh"
+        );
     }
-    None
-}
 
-/// **The cover meshes are shipped and are NOT yet drawn** (TER2a audit).
-///
-/// # What this arm is for
-///
-/// Wave TER2a's clause 5 authored three `.inf_mesh` cover props, bound their
-/// GUIDs to the island's three scatter kinds, closed the cook's missing
-/// `.inf_pcg` → scatter-mesh edge, and raised the island's scatter density
-/// 0.004 → 0.02 /m² on the strength of it. Every one of those is real and the
-/// arm above proves the bytes reach the pack.
-///
-/// **What none of it changed is the picture.** The scatter path has drawn a
-/// placeholder cube since P18.5 and still does:
-///
-/// * `inf_pcg::PcgKind::mesh` is read by the **packager's dependency closure**
-///   and by nothing else. `rules.rs`'s evaluation keeps `kind_index` — a palette
-///   index — and the GUID does not survive into `PcgInstance`, so no projector
-///   can see it.
-/// * `push_scatter` builds `ScatterData::build(PrimMesh::Cube, …)` and tints each
-///   instance with `pcg_kind_color(kind)`, a five-entry literal palette.
-/// * `inf_render::ScatterBatch` has no mesh field and no `VtTextureSet` at all,
-///   so there is nowhere for a material to live either — the "each shares a
-///   ground material" half of clause 5 is the sidecar edge that makes the cook
-///   ship them together, and not a texel on screen.
-///
-/// So the island draws **16 771 tinted unit cubes** where the ledger's first
-/// draft said "three kinds of ground cover standing on it", and the density
-/// raise multiplied their number by 6.25. The gap is the same documented
-/// kind→real-mesh viewport gap as sprites and tilemaps; closing it is a wave.
-///
-/// # It is a TRIPWIRE, and it is meant to fail
-///
-/// On the P22 pattern (the gate that asserts the *wrong* outcome so the day the
-/// right one arrives it goes red and the ledger gets rewritten). The day
-/// `push_scatter` uploads a real mesh, this arm fails — and what it fails with
-/// is the list of prose that has to be corrected at the same time.
-///
-/// One host is read and not two on purpose: `inf-editor-core`'s
-/// `tests/projector_mirror.rs` already pins `inf_viewport::host`'s `push_scatter`
-/// byte-identical to this one, so a divergence is that gate's failure, not a
-/// hole in this one.
-#[test]
-fn the_cover_meshes_are_shipped_and_are_not_yet_drawn() {
-    const RENDER_RS: &str = include_str!("../src/render.rs");
-    let body = fn_body(RENDER_RS, "push_scatter")
-        .expect("`fn push_scatter(` is gone from inf-player's projector");
-
-    assert!(
-        body.contains("PrimMesh::Cube"),
-        "`push_scatter` no longer builds a `PrimMesh::Cube`. If a scatter kind's \
-         `.inf_mesh` now reaches the renderer, that is the gap wave TER2a's \
-         clause 5 could not close and this tripwire exists to mark — DELETE this \
-         arm and rewrite the TER2a ledger's clause 5, the `ISLAND_SCATTER_DENSITY` \
-         note and the island-progress carried list, all of which say in as many \
-         words that the cover is committed and not drawn.\n--- push_scatter ---\n{body}"
-    );
-    assert!(
-        body.contains("pcg_kind_color(si.kind)"),
-        "`push_scatter` no longer tints by the placeholder palette; see above"
-    );
-    // …and there is nowhere for a material to go either. Read as a scope, not as
-    // a file: the `ScatterBatch` literal this function builds.
-    assert!(
-        !body.contains("vt:"),
-        "a `ScatterBatch` in `push_scatter` now carries a virtual-texture set — \
-         the other half of the same gap; see above"
-    );
-
-    // ANTI-VACUITY. A `contains` over a body that no longer holds the scatter is
-    // satisfied by nothing at all, so pin that this really is the function the
-    // island's ground cover goes through: the biome population delegates to it.
-    let pop =
-        fn_body(RENDER_RS, "push_biome_population").expect("`fn push_biome_population(` is gone");
-    assert!(
-        pop.contains("push_scatter("),
-        "the terrain biome population — which is how the island's `.inf_pcg` \
-         reaches the frame — no longer goes through `push_scatter`, so this arm \
-         is reading a function the island does not use\n--- body ---\n{pop}"
-    );
-
-    // And the GUID really is dropped before any projector sees it. Both records
-    // are pinned **field by field** as struct literals rather than by a
-    // `contains`: the day either grows a mesh reference this stops compiling,
-    // which is the strongest form this pin can take (the P22 law — a ban
-    // enumerates what you thought of, a literal enumerates what is there).
-    let placed = inf_pcg::PcgInstance {
-        pos: glam::DVec3::ZERO,
-        rotation: glam::DQuat::IDENTITY,
-        scale: 1.0,
-        kind_index: 7,
+    let project = |table: &inf_render::ScatterMeshes| {
+        let mut scene = inf_render::RenderScene::default();
+        inf_player::render::project_scene_full(
+            &mut scene,
+            &sim,
+            1.0,
+            &inf_player::vmesh::VmeshRegistry::new(),
+            &inf_player::skinned::SkinnedRegistry::new(),
+            &inf_voxel::VoxelVolumes::new(),
+            &mut inf_render::DebrisCache::default(),
+            None,
+            table,
+        );
+        scene
     };
-    let mirrored = inf_ecs::components::ScatteredInstance {
-        position: placed.pos,
-        rotation: placed.rotation,
-        scale: placed.scale,
-        kind: placed.kind_index,
-    };
+
+    let scene = project(&meshes);
+    let with_geom: Vec<&inf_render::ScatterBatch> = scene
+        .scatter
+        .iter()
+        .filter(|b| b.data.geometry.is_some())
+        .collect();
+    let drawn: std::collections::BTreeSet<u128> = with_geom
+        .iter()
+        .filter_map(|b| b.data.geometry.as_ref().map(|g| g.key()))
+        .collect();
     assert_eq!(
-        mirrored.kind, 7,
-        "a scattered instance's whole appearance is one u32 palette index — \
-         `PcgKind::mesh` is read by the cook's dependency closure and by nothing \
-         that draws"
+        drawn.len(),
+        3,
+        "the island's three cover meshes must reach three DISTINCT geometry \
+         uploads; the projection produced {} of {} scatter batches carrying \
+         geometry",
+        with_geom.len(),
+        scene.scatter.len()
+    );
+    for kind in inf_editor_core::cover::CoverKind::ALL {
+        let id = inf_editor_core::cover::cover_mesh_guid(kind);
+        let key = meshes.get(&id.as_u128()).expect("resolved").key();
+        assert!(drawn.contains(&key), "{} is not drawn", kind.label());
+    }
+    let instances: usize = with_geom.iter().map(|b| b.data.len()).sum();
+    assert_eq!(
+        instances, placed,
+        "{instances} of {placed} scattered instances reached a mesh-carrying batch"
+    );
+    // Every batch's cull radius is its OWN geometry's, not the proxy's — the one
+    // place the proxy must not be used, because a radius that is too small
+    // deletes instances at the frustum edge.
+    for b in &with_geom {
+        let want = b.data.geometry.as_ref().expect("filtered").radius;
+        assert_eq!(b.data.bounding_radius(), want);
+    }
+
+    // ── 4. …and the anti-vacuity half: the pre-TER2b engine, exactly ──
+    let before = project(&inf_render::ScatterMeshes::new());
+    assert!(
+        before.scatter.iter().all(|b| b.data.geometry.is_none()),
+        "an empty scatter-mesh table must produce the placeholder path -- if it \
+         does not, the arm above is not measuring the table"
+    );
+    assert_eq!(
+        before.scatter.len(),
+        1,
+        "with no table the whole population is ONE placeholder batch, which is \
+         what the engine drew from P18.5 until this wave"
+    );
+
+    // The PROXY primitive is still a cube, and that is a CARRIED BOUND rather
+    // than an oversight: the impostor card, the CPU fallback and the cascade
+    // shadow caster pack all draw it, because those three bind one shared vertex
+    // buffer for the whole frame and a per-batch mesh does not fit in it. The
+    // impostor is at least sized off the authored radius (`material.w` in
+    // `scatter_mesh.wgsl`); the other two are not, and that is named in the
+    // wave's carried list.
+    assert!(
+        scene
+            .scatter
+            .iter()
+            .chain(&before.scatter)
+            .all(|b| b.data.mesh == inf_render::PrimMesh::Cube),
+        "the scatter proxy primitive moved -- if that is deliberate, the carried \
+         bound about impostors, the CPU fallback and shadow casters has to be \
+         rewritten with it"
     );
 
     println!(
-        "ISLAND COVER (TER2a audit): the three `.inf_mesh` props are cooked and \
-         reachable, and NOT drawn — every scattered instance is a \
-         `PrimMesh::Cube` tinted by `pcg_kind_color`, at the island's authored \
-         scale range 0.7..1.6 m. Closing kind -> real-mesh upload is a wave."
+        "ISLAND COVER: {placed} instances -> {} batches carrying 3 distinct \
+         geometry uploads (was 1 placeholder batch); cull radii off the meshes \
+         themselves; proxy primitive still a cube for the impostor / \
+         CPU-fallback / shadow-caster paths.",
+        with_geom.len()
     );
 }

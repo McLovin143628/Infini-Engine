@@ -65,6 +65,14 @@ pub struct PlayerRenderHost {
     ///
     /// [`set_skinned`]: PlayerRenderHost::set_skinned
     skinned: Arc<SkinnedRegistry>,
+    /// The authored meshes scattered content draws (wave TER2b) — every
+    /// `.inf_mesh` a loaded `.inf_pcg`'s scatter kinds name, flattened into the
+    /// two arrays the scatter raster pulls from. Set via [`set_scatter_meshes`];
+    /// empty means every scattered instance draws its placeholder primitive,
+    /// which is what the whole engine did until this wave.
+    ///
+    /// [`set_scatter_meshes`]: PlayerRenderHost::set_scatter_meshes
+    scatter_meshes: Arc<inf_render::ScatterMeshes>,
     /// Where a `VoxelVolume.asset` finds its `.inf_voxel` bytes (P21.1) — the
     /// pack, a dev directory, or nothing. Set via [`set_voxel_assets`].
     ///
@@ -141,6 +149,7 @@ impl PlayerRenderHost {
             origin: FloatingOrigin::default(),
             vmeshes: Arc::new(VmeshRegistry::new()),
             skinned: Arc::new(SkinnedRegistry::new()),
+            scatter_meshes: Arc::new(inf_render::ScatterMeshes::new()),
             voxel_assets: Arc::new(VoxelRegistry::new()),
             voxels: inf_voxel::VoxelVolumes::new(),
             vgeom_enabled,
@@ -180,6 +189,17 @@ impl PlayerRenderHost {
     /// be cold again for no reason.
     pub fn set_skinned(&mut self, skinned: Arc<SkinnedRegistry>) {
         self.skinned = skinned;
+    }
+
+    /// Attach the scatter-kind mesh table (wave TER2b) so a `PcgKind` that names
+    /// an `.inf_mesh` draws it instead of the placeholder cube every scattered
+    /// instance drew from P18.5 until this wave.
+    ///
+    /// `Arc` for `set_skinned`'s reason: a device-loss rebuild must hand the same
+    /// table to the new host, and the table is the only thing standing between a
+    /// projection and a file read.
+    pub fn set_scatter_meshes(&mut self, meshes: Arc<inf_render::ScatterMeshes>) {
+        self.scatter_meshes = meshes;
     }
 
     /// Attach the `.inf_voxel` source (P21.1) so a `VoxelVolume` entity renders
@@ -313,6 +333,7 @@ impl PlayerRenderHost {
             &self.voxels,
             &mut self.debris_cache,
             self.renderer.vt_textures(),
+            &self.scatter_meshes,
         );
     }
 
@@ -563,6 +584,11 @@ pub fn project_scene_with_skinned(
         voxels,
         &mut inf_render::DebrisCache::default(),
         None,
+        // The narrow doors carry no scatter-mesh table for the same reason they
+        // carry no skeletal store: a dozen gates drive them and none has cover
+        // content. Every scattered instance falls back to its placeholder
+        // primitive, which is exactly what it did before wave TER2b.
+        &inf_render::ScatterMeshes::new(),
     );
 }
 
@@ -590,6 +616,7 @@ pub fn project_scene_full(
     voxels: &inf_voxel::VoxelVolumes,
     debris: &mut inf_render::DebrisCache,
     vt: Option<&inf_render::VtTextures>,
+    scatter_meshes: &inf_render::ScatterMeshes,
 ) {
     scene.instances.clear();
     scene.lights.clear();
@@ -793,7 +820,7 @@ pub fn project_scene_full(
             if !vol.evaluated.is_empty() {
                 let id = next_id;
                 next_id += 1;
-                push_pcg_scatter(scene, vol, translation, id);
+                push_pcg_scatter(scene, vol, scatter_meshes, translation, id);
             }
         }
         // P19.3 — THE TERRAIN'S BIOME POPULATION: the terrain-level sibling of
@@ -813,7 +840,7 @@ pub fn project_scene_full(
             if !terrain.biome_population.is_empty() {
                 let id = next_id;
                 next_id += 1;
-                push_biome_population(scene, terrain, translation, id);
+                push_biome_population(scene, terrain, scatter_meshes, translation, id);
             }
         }
         // Water surfaces (P20.1): an ocean, a lake or a spline river. A river
@@ -1199,11 +1226,30 @@ fn prim_mesh(p: Primitive) -> PrimMesh {
 /// **biome population**. Written once so the two cannot drift, which is the same
 /// argument that pins the two hosts against each other.
 ///
-/// PCG scatter has always drawn as a placeholder cube — kind→real-mesh upload is
-/// the same documented viewport gap as sprites/tilemaps — and that does not change
-/// here; only how the cubes reach the GPU does. The payload replaces one
-/// `MeshInstance` per scattered instance with a content-keyed buffer uploaded once
-/// per content change and culled per-instance on the GPU.
+/// # The cover draws its own meshes (wave TER2b)
+///
+/// From P18.5 until this wave every scattered instance drew a `PrimMesh::Cube`
+/// tinted from a five-entry debug palette, whatever mesh its `PcgKind` named —
+/// the island shipped 16 771 tinted cubes with three authored props sitting
+/// unread in its pack. `ScatteredInstance::mesh` now carries the GUID
+/// (`kind_index` could not: it is rule-local, and populations are concatenated),
+/// `meshes` is the host's resolved table of geometry, and instances **bucket by
+/// mesh** — one `ScatterBatch` per authored mesh plus one for everything that has
+/// none. The bucket map is a `BTreeMap` and not a `HashMap` because the batch
+/// order a projection emits is what the content-keyed GPU caches see, and an
+/// order that depends on a hash seed is a re-upload nobody asked for.
+///
+/// **The cube does not leave; it becomes the proxy.** `PrimMesh::Cube` is still
+/// passed, and it is what the impostor card, the CPU fallback and the shadow
+/// caster pack use — those three bind one shared vertex buffer for the whole
+/// frame, so a per-batch mesh does not fit in them. What changed is the full-mesh
+/// raster, which pulls its vertices out of a storage buffer and can therefore be
+/// handed any geometry at all. The impostor is sized off the authored radius
+/// rather than the cube's (`impostor_radius` in `scatter_mesh.wgsl`).
+///
+/// The instance tint is still the placeholder palette: the scatter pull buffer is
+/// position + normal and carries no uv, so there is nowhere for a material to be
+/// sampled. Texturing a scattered mesh is the named follow-up.
 ///
 /// **`draw_distance` rides on the batch now.** The editor used to cull it against
 /// its own camera eye on the CPU and the player ignored the field entirely, so a
@@ -1216,37 +1262,56 @@ fn prim_mesh(p: Primitive) -> PrimMesh {
 ///
 /// MIRROR: identical in `inf_viewport::host` and `inf_player::render`, pinned by
 /// `inf-editor-core`'s `tests/projector_mirror.rs`.
+#[allow(clippy::too_many_arguments)]
 fn push_scatter(
     scene: &mut RenderScene,
     instances: &[ScatteredInstance],
+    meshes: &inf_render::ScatterMeshes,
     translation: DVec3,
     draw_distance: f64,
     near_distance: f64,
     id: u32,
 ) {
+    // MIRROR-BEGIN scatter_mesh_buckets
     if instances.is_empty() {
         return;
     }
-    let data = ScatterData::build(
-        PrimMesh::Cube,
-        translation,
-        instances.iter().map(|si| ScatterInstance {
+    let mut buckets: std::collections::BTreeMap<Option<u128>, Vec<ScatterInstance>> =
+        std::collections::BTreeMap::new();
+    for si in instances {
+        // A GUID the host could not resolve buckets with the meshless ones, so an
+        // absent mesh degrades to the placeholder it always was rather than to an
+        // empty batch.
+        let key = si
+            .mesh
+            .map(|m| m.as_u128())
+            .filter(|k| meshes.contains_key(k));
+        buckets.entry(key).or_default().push(ScatterInstance {
             position: si.position,
             rotation: si.rotation.as_quat(),
             scale: glam::Vec3::splat(si.scale as f32),
             color: pcg_kind_color(si.kind),
-        }),
-    );
-    scene.scatter.push(ScatterBatch {
-        data: Arc::new(data),
-        anchor: translation,
-        metallic: 0.0,
-        roughness: 0.75,
-        emissive: [0.0; 3],
-        id,
-        draw_distance,
-        near_distance,
-    });
+        });
+    }
+    for (key, bucket) in buckets {
+        let data = ScatterData::build_with_geometry(
+            PrimMesh::Cube,
+            key.and_then(|k| meshes.get(&k)).cloned(),
+            translation,
+            bucket,
+        );
+        scene.scatter.push(ScatterBatch {
+            data: Arc::new(data),
+            anchor: translation,
+            metallic: 0.0,
+            roughness: 0.75,
+            emissive: [0.0; 3],
+            id,
+            draw_distance,
+            near_distance,
+        });
+    }
+    // MIRROR-END scatter_mesh_buckets
 }
 
 /// Project a [`PcgVolume`]'s evaluated cache into GPU-instanced scatter batches
@@ -1285,12 +1350,19 @@ fn push_scatter(
 ///
 /// MIRROR: identical in `inf_viewport::host` and `inf_player::render`, pinned by
 /// `inf-editor-core`'s `tests/projector_mirror.rs`.
-fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3, id: u32) {
+fn push_pcg_scatter(
+    scene: &mut RenderScene,
+    vol: &PcgVolume,
+    meshes: &inf_render::ScatterMeshes,
+    translation: DVec3,
+    id: u32,
+) {
     // MIRROR-BEGIN pcg_scatter_lod
     if vol.structure_groups.is_empty() {
         push_scatter(
             scene,
             &vol.evaluated,
+            meshes,
             translation,
             vol.draw_distance,
             0.0,
@@ -1315,7 +1387,15 @@ fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3
     let mut loose: Vec<ScatteredInstance> = Vec::new();
     loose.extend_from_slice(&vol.evaluated[..first.min(vol.evaluated.len())]);
     loose.extend_from_slice(&vol.evaluated[last..]);
-    push_scatter(scene, &loose, translation, vol.draw_distance, 0.0, id);
+    push_scatter(
+        scene,
+        &loose,
+        meshes,
+        translation,
+        vol.draw_distance,
+        0.0,
+        id,
+    );
     // **The two bands are complementary in the GROUP's distance, and the cull is
     // per INSTANCE** (I3 audit). A part sits up to its shell's own half-diagonal
     // nearer the eye than the shell's centre does, so cutting both at `lod`
@@ -1338,6 +1418,7 @@ fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3
     push_scatter(
         scene,
         &vol.evaluated[first.min(last)..last],
+        meshes,
         translation,
         parts_far,
         0.0,
@@ -1358,6 +1439,9 @@ fn push_pcg_scatter(scene: &mut RenderScene, vol: &PcgVolume, translation: DVec3
                 .evaluated
                 .get(g.inst_start as usize)
                 .map_or(0, |i| i.kind),
+            // A shell is a BOX by definition (see `push_shells`), so it names no
+            // mesh however many its parts name.
+            mesh: None,
         })
         .collect();
     push_shells(scene, &shells, vol, translation, vol.draw_distance, lod, id);
@@ -1430,8 +1514,22 @@ fn push_shells(
 ///
 /// MIRROR: identical in `inf_viewport::host` and `inf_player::render`, pinned by
 /// `inf-editor-core`'s `tests/projector_mirror.rs`.
-fn push_biome_population(scene: &mut RenderScene, terrain: &Terrain, translation: DVec3, id: u32) {
-    push_scatter(scene, &terrain.biome_population, translation, 0.0, 0.0, id)
+fn push_biome_population(
+    scene: &mut RenderScene,
+    terrain: &Terrain,
+    meshes: &inf_render::ScatterMeshes,
+    translation: DVec3,
+    id: u32,
+) {
+    push_scatter(
+        scene,
+        &terrain.biome_population,
+        meshes,
+        translation,
+        0.0,
+        0.0,
+        id,
+    )
 }
 
 /// Project a [`Foliage`] component's painted instances into GPU-instanced scatter
