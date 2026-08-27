@@ -388,6 +388,11 @@ struct Trace {
     veg_len: Vec<usize>,
     /// Per step: how many level-0 tiles the simulation held.
     tiles: Vec<usize>,
+    /// Per step: agents at each sim-LOD tier (NPC1a), and the running re-tier
+    /// count. All zeroes on a drive with no population, which is every arm in
+    /// this file but the crowd one.
+    crowd: Vec<[usize; 4]>,
+    retiered: Vec<u64>,
 }
 
 /// Fold a terrain's population into a comparable digest — **positions, not a
@@ -457,6 +462,8 @@ fn drive(sim: &mut RuntimeSim, from: glam::DVec3) -> Trace {
         veg: Vec::with_capacity(STEPS as usize),
         veg_len: Vec::with_capacity(STEPS as usize),
         tiles: Vec::with_capacity(STEPS as usize),
+        crowd: Vec::with_capacity(STEPS as usize),
+        retiered: Vec::with_capacity(STEPS as usize),
     };
     for step in 0..STEPS {
         // Out along +x and back — twice the step so the turn is still 360 m out
@@ -477,6 +484,9 @@ fn drive(sim: &mut RuntimeSim, from: glam::DVec3) -> Trace {
         t.veg.push(d);
         t.veg_len.push(n);
         t.tiles.push(sim_tiles(sim));
+        let c = sim.crowd_stats();
+        t.crowd.push(c.per_tier);
+        t.retiered.push(c.retiered);
     }
     t
 }
@@ -761,6 +771,248 @@ fn pie_equals_shipping_on_an_island_drive() {
         "the 900-step drive ended holding no settlement at all — this trace is \
          no longer over a world with a city in it"
     );
+}
+
+// ── the crowd (wave NPC1a) ──────────────────────────────────────────────────
+
+/// How many test NPCs the crowd arm stands on the island.
+///
+/// Small on purpose. The claim is that **PIE equals shipping across a tier
+/// TRANSITION**, and a transition needs the hero to drive past an agent, not a
+/// thousand agents to exist: N is chosen so that a 360 m drive out and back
+/// walks every rung of the ladder in both directions, and so that a 900-step
+/// two-host comparison of a 161-bone rig stays a test rather than a benchmark.
+/// The scale measurement is `crowd_sweep.rs`'s job and lives there.
+const CROWD_N: usize = 24;
+
+/// **The archetype the island's crowd wears — its own hero's.**
+///
+/// Read off the world rather than from a GUID table, `content_assets`'s doctrine
+/// one level up: the hero is `samples/starter-character`, a **161-bone** rig, and
+/// a table here would be a second place its identity is written down. It is also
+/// what makes this arm able to quote the 6 476 B figure the trace re-shape is
+/// argued against, because that number *is* this rig.
+fn crowd_archetype(sim: &RuntimeSim) -> inf_ecs::crowd::CrowdArchetype {
+    let w = sim.world().world();
+    let mut best: Option<(Uuid, inf_ecs::crowd::CrowdArchetype)> = None;
+    for e in w.iter_entities() {
+        let (Some(g), Some(sk)) = (
+            e.get::<inf_ecs::Guid>(),
+            e.get::<inf_ecs::components::SkeletalMesh>(),
+        ) else {
+            continue;
+        };
+        if sk.skeleton.is_none() {
+            continue;
+        }
+        let sm = e
+            .get::<inf_ecs::components::AnimStateMachine>()
+            .and_then(|a| a.sm);
+        if best.as_ref().is_none_or(|(bg, _)| g.0 < *bg) {
+            best = Some((
+                g.0,
+                inf_ecs::crowd::CrowdArchetype::humanoid(sk.mesh, sk.skeleton, sm),
+            ));
+        }
+    }
+    let (guid, a) = best.expect(
+        "the island has no rigged character to copy, so every test NPC would pose nothing and the arm would compare two empty pipelines",
+    );
+    assert!(
+        a.skeleton.is_some() && a.sm.is_some(),
+        "the island hero {guid} has no skeleton or no machine"
+    );
+    a
+}
+
+/// **The population**: `CROWD_N` NPCs strung out along the drive, standing still.
+///
+/// Standing rather than walking, deliberately. The hero is what moves — it is the
+/// `StreamingSource` the band anchors on — so a stationary agent's tier is a pure
+/// function of *the hero's* position, and the drive out and back walks each agent
+/// down the ladder and back up it. A walking agent would work too and would make
+/// the transition depend on two moving things at once, which is a worse test of
+/// one rule.
+///
+/// A pure function of the start point and `n`, so both hosts are given the same
+/// people to disagree about.
+fn crowd_population(
+    from: glam::DVec3,
+    n: usize,
+    archetype: inf_ecs::crowd::CrowdArchetype,
+) -> std::collections::BTreeMap<Uuid, inf_ecs::crowd::CrowdRecord> {
+    const NAMESPACE: u128 = 0x4e50_4331_6169_736c_616e_6400_0000_0000;
+    let mut out = std::collections::BTreeMap::new();
+    for i in 0..n {
+        // Along the drive's own axis, spaced so the 360 m run crosses several
+        // Full/Near/Far boundaries, and offset off the line so nobody is
+        // standing inside the hero.
+        let along = i as f64 * (2.0 * STEPS as f64 * STEP_M / n as f64);
+        let at = glam::DVec3::new(from.x + along, from.y, from.z + 6.0);
+        out.insert(
+            Uuid::from_u128(NAMESPACE | i as u128),
+            inf_ecs::crowd::CrowdRecord::standing(archetype, at),
+        );
+    }
+    out
+}
+
+/// **PIE == SHIPPING WITH A CROWD, ACROSS TIER TRANSITIONS** (wave NPC1a).
+///
+/// # The claim, and why it needs its own arm
+///
+/// `pie_equals_shipping_on_an_island_drive` is deliberately left alone: it pins
+/// the hero at exactly `36 + 161 x 40 = 6 476` bytes of pose on both hosts, and
+/// that pin is what says the sim-LOD ladder did not touch hero-class characters.
+/// This arm adds the case that ladder introduced.
+///
+/// A sim-LOD tier decides three things a trace can see — whether an agent has a
+/// rapier body, whether it is posed at all, and whether it has an entity — and it
+/// decides them **per step, from sim state**. So a tier that was a function of
+/// anything else would put the two hosts on different code paths at the step they
+/// disagreed, and the byte compare below is what says they never do. The
+/// dangerous case is not the steady state at either end of the ladder; it is the
+/// **transition**, where one host might promote an agent a step before the other
+/// and pose 6 476 bytes the other did not.
+///
+/// # What makes it non-vacuous
+///
+/// Four counters, each of which would be zero if the fixture were not posing the
+/// problem, and every one of them is asserted:
+///
+/// * agents really change tier over the drive (`retiered`);
+/// * every rung of the ladder is occupied at some point, `Dormant` included;
+/// * agents really materialize **and** dematerialize;
+/// * the pose section really moves — a crowd whose agents were all `Far` for the
+///   whole run would compare equal on two hosts that had both stopped posing.
+#[test]
+fn pie_equals_shipping_with_a_crowd_across_tier_transitions() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let pack = cook(tmp.path());
+    let proj = tmp.path().join("island");
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let slug = inf_island::slug(&recipe.name);
+    let from = start();
+
+    let mut ship = pack_sim(&pack);
+    let mut pie = loose_sim(&proj.join("Content"), &slug);
+
+    // The archetype comes off the SHIPPING host and is given to both, so the two
+    // are handed the identical people. Reading it twice would be two readings
+    // that could disagree, which is the defect this arm exists to catch wearing
+    // the fixture's clothes.
+    let archetype = crowd_archetype(&ship);
+    let pop = crowd_population(from, CROWD_N, archetype);
+    assert_eq!(pop.len(), CROWD_N);
+    ship.set_crowd_population(pop.clone());
+    pie.set_crowd_population(pop);
+
+    let a = drive(&mut ship, from);
+    let b = drive(&mut pie, from);
+
+    // ── the ladder was really walked ────────────────────────────────────────
+    let occupied = |i: usize| a.crowd.iter().any(|c| c[i] > 0);
+    let names = ["full", "near", "far", "dormant"];
+    let seen: Vec<&str> = (0..4).filter(|i| occupied(*i)).map(|i| names[i]).collect();
+    let transitions = *a.retiered.iter().max().expect("900 steps");
+    let peak_full = a.crowd.iter().map(|c| c[0]).max().unwrap_or(0);
+    let peak_dormant = a.crowd.iter().map(|c| c[3]).max().unwrap_or(0);
+    println!(
+        "CROWD over the drive: {CROWD_N} agents, tiers occupied {seen:?}, {transitions} re-tierings, peak {peak_full} full / {peak_dormant} dormant"
+    );
+    assert_eq!(
+        seen.len(),
+        4,
+        "only {seen:?} of the four tiers were ever occupied - the drive does not walk the ladder, so the transition this arm is about never happens"
+    );
+    assert!(
+        transitions > 0,
+        "no agent changed tier over {STEPS} steps of a {:.0} m drive",
+        2.0 * STEPS as f64 * STEP_M
+    );
+
+    // ── and the two hosts agree, step for step ──────────────────────────────
+    let distinct: std::collections::BTreeSet<&Vec<u8>> = a.states.iter().collect();
+    println!(
+        "CROWD DRIVE: {} distinct states of {STEPS}, {} bytes a state",
+        distinct.len(),
+        a.states[0].len()
+    );
+    assert!(
+        distinct.len() > STEPS as usize / 2,
+        "only {} of {STEPS} states differ - the crowd drive is not moving the world",
+        distinct.len()
+    );
+    for (i, (x, y)) in a.states.iter().zip(&b.states).enumerate() {
+        assert_eq!(
+            x, y,
+            "PIE and shipping diverged at step {i} of {STEPS} with a crowd in the world - a sim-LOD tier, a materialization or a cached pose digest is a function of something other than sim state"
+        );
+    }
+    assert_eq!(
+        a.crowd, b.crowd,
+        "the two hosts tiered the crowd differently at some step"
+    );
+    println!("PIE == SHIPPING over {STEPS} steps of an island drive WITH A CROWD");
+
+    // ── the trace re-shape, as arithmetic on the island's own rig ───────────
+    //
+    // The island hero is 161 bones, so a posed character is exactly the 6 476 B
+    // the ledger quotes and a non-posing agent is `AGENT_TRACE_BYTES`. Measured
+    // at the end of the drive rather than asserted from the constant, because
+    // the whole point of the re-shape is what the fold actually contains.
+    let posed = inf_ecs::pose::pose_state_bytes(ship.world()).len();
+    let crowd_bytes = inf_ecs::crowd::crowd_state_bytes(ship.world()).len();
+    let posed_agents = inf_ecs::pose::posed_count(ship.world());
+    const POSED_BYTES: usize = 36 + 161 * 40;
+    let stats = ship.crowd_stats();
+    let not_posing =
+        stats.at(inf_ecs::crowd::CrowdTier::Far) + stats.at(inf_ecs::crowd::CrowdTier::Dormant);
+    println!(
+        "THE RE-SHAPE at the end of the drive: {posed_agents} posed x {POSED_BYTES} B = {posed} B of pose, {not_posing} agents off the pose path x {} B = {crowd_bytes} B of crowd section. Had they all been Full the pose section would have been {} B.",
+        inf_ecs::crowd::AGENT_TRACE_BYTES,
+        (CROWD_N + 1) * POSED_BYTES
+    );
+    assert_eq!(
+        posed % POSED_BYTES,
+        0,
+        "the pose section is {posed} B, not a whole number of 161-bone characters - the island's rig moved and every arithmetic in this wave's ledger is quoted against it"
+    );
+    assert_eq!(
+        crowd_bytes,
+        CROWD_N * inf_ecs::crowd::AGENT_TRACE_BYTES,
+        "the crowd section folds {crowd_bytes} B for {CROWD_N} agents"
+    );
+    assert!(
+        not_posing > 0,
+        "every agent was posed at the end of the drive, so the re-shape saved nothing and this arm is measuring the pre-NPC1a engine"
+    );
+    assert!(
+        posed_agents < CROWD_N + 1,
+        "{posed_agents} of {} characters were posed - the ladder decided nothing",
+        CROWD_N + 1
+    );
+
+    // ── AND THE ISLAND ITSELF DID NOT MOVE ──────────────────────────────────
+    //
+    // The walked-away fix (`CellStreamStats::rehomed`) changed what deactivation
+    // does to every streamed entity, not just to crowd agents. This is the
+    // control that says the island's own content stands still and therefore
+    // traces exactly as it did: zero re-homes over a 360 m drive across cell
+    // boundaries in both directions.
+    for (who, sim) in [("shipping", &ship), ("pie", &pie)] {
+        let st = sim.cell_streaming().stats();
+        println!(
+            "{who}: {} activation(s) / {} deactivation(s), {} re-homed",
+            st.activations, st.deactivations, st.rehomed
+        );
+        assert_eq!(
+            st.rehomed, 0,
+            "{who} re-homed {} streamed entit(ies) on an island whose content does not move - the NPC1a deactivation rule is admitting things it must not",
+            st.rehomed
+        );
+    }
 }
 
 /// **A `ScenePayload` CARRIES NO PARTITION**, so a PIE preview of the island
