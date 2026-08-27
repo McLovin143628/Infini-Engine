@@ -37,10 +37,23 @@
 //! where a town's population would be.
 //!
 //! The archetype is read **off the scene's own hero** — its `SkeletalMesh` and
-//! `AnimStateMachine` GUIDs — so every test NPC is the same 161-bone character
-//! the trace arithmetic is quoted against, sharing one vertex buffer, one
-//! skeleton, one machine and every clip (the renderer `Arc`-dedupes by
-//! `(mesh, skeleton)`); a thousand of them cost one of each.
+//! `AnimStateMachine` GUIDs — so every test NPC is a copy of the character this
+//! scene already has, sharing one vertex buffer, one skeleton, one machine and
+//! every clip (the renderer `Arc`-dedupes by `(mesh, skeleton)`); a thousand of
+//! them cost one of each.
+//!
+//! **And that character is a 20-joint rig, not the island's 161-bone hero**
+//! (NPC1a audit — this paragraph said "161-bone" while the sweep's own `(c)`
+//! line printed "this scene rigs its character at 20 joints", which is derived
+//! from the pose section it measured). It matters in one direction and it is
+//! worth being explicit about which: a posed character here is **836 B** against
+//! the island's 6 476, so every *byte* column below understates an
+//! island-class crowd by about 8× on the pose section — and so does the
+//! `animation` millisecond, which is a pose evaluation per joint. The palette
+//! column does not: wall 3's palette is one 16 KiB power-of-two block per
+//! skinned character whatever its joint count. **A thousand island-class NPCs
+//! cost more than the 6.8 ms step measured here**, and the ladder is worth
+//! correspondingly more than the 2.0× this table prices it at.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -697,6 +710,28 @@ fn the_n_sweep() {
         budgeted.n,
         inf_player::budget::NPC_STEP_BUDGET_MS
     );
+    // ── THE PHASE'S WORK IS A FUNCTION OF THE CROWD (NPC1a audit) ───────────
+    //
+    // `step_crowd` does the same work per agent at every tier — a decision, a
+    // transform write, a component write — so the banded run and the all-`Full`
+    // control, which hold the SAME thousand agents, must charge this phase the
+    // same. The wave's first cut did not: it read **0.282 ms banded and 0.759
+    // all-`Full`**, because the phase folded a digest of every entry in the pose
+    // store on every step and the control had 1 001 of them against 291. The
+    // ratio is therefore the tell for "this phase is being paid for other
+    // systems' work", and the budget minted from a contaminated reading was
+    // three times what the crowd actually costs.
+    //
+    // Reported here, and asserted in the same release/off-CI block the budget is
+    // asserted in — this file's own discipline, and the reason the *semantic*
+    // half is armed as a counter in `inf_ecs::crowd`'s
+    // `a_settled_crowd_folds_no_pose_digests_however_many_characters_pose`.
+    let control = full[NS.len() - 1];
+    let shape = control.crowd_ms / budgeted.crowd_ms.max(1.0e-9);
+    println!(
+        "THE PHASE'S SHAPE at N={}: banded {:.4} ms against all-Full {:.4} ms ({shape:.2}x) over the same population - the crowd phase must not be a function of how many characters POSE.",
+        budgeted.n, budgeted.crowd_ms, control.crowd_ms
+    );
     if cfg!(debug_assertions) {
         println!(
             "dev profile (opt-level 1, debug assertions ON): every millisecond above is a number about a build nobody ships, so the budget is reported and not asserted - re-run with --release for the numbers it was minted from."
@@ -714,6 +749,13 @@ fn the_n_sweep() {
         budgeted.n,
         inf_player::budget::NPC_STEP_BUDGET_MS,
         inf_player::budget::RATCHET_NOTE
+    );
+    assert!(
+        shape < 2.0,
+        "the crowd phase charged {:.4} ms banded and {:.4} ms all-Full ({shape:.2}x) over the SAME {} agents - the phase is doing work that scales with how many characters pose rather than with the population, which is what made NPC1a's first budget three times the crowd's real cost",
+        budgeted.crowd_ms,
+        control.crowd_ms,
+        budgeted.n
     );
 }
 

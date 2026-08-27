@@ -281,21 +281,31 @@ pub const CITY_STEP_BUDGET_MS: f64 = 6.0;
 ///
 /// | N | crowd phase | per agent |
 /// |---|---|---|
-/// | 0 | **0.0001 ms** | — |
-/// | 1 | 0.005 | 5.0 µs |
-/// | 10 | 0.008 | 0.8 |
-/// | 100 | 0.034 | 0.34 |
-/// | **1 000** | **0.282 - 0.301 ms** | **0.28 - 0.30 µs** |
+/// | 0 | **0.0002 ms** | — |
+/// | 1 | 0.003 | 3.0 µs |
+/// | 10 | 0.004 | 0.4 |
+/// | 100 | 0.014 | 0.14 |
+/// | **1 000** | **0.103 ms** | **0.103 µs** |
 ///
-/// The thousand-agent row is a **range over six readings** rather than one
-/// number, because that is what the run-to-run spread on this machine is and a
-/// budget quoted against a single reading is a budget quoted against a lucky
-/// one. The spread is 6.7 % of the mean, which is a tenth of the margin below.
+/// # The number this was FIRST minted against, and why it moved (NPC1a audit)
 ///
-/// **2.0 ms is ~7× the 1 000-agent measurement**, which is
+/// NPC1a minted 2.0 ms as ~7× a measurement of **0.282–0.301 ms** over six
+/// readings. That measurement was real and it was not a measurement of the
+/// crowd: the phase built a digest of **every** pose in the store on every step
+/// to serve the rare demotion, so it scaled with the *level's* posed characters
+/// rather than with the population. The wave's own table said so and nobody read
+/// it that way — at N = 1 000 the phase charged **0.282 ms banded and 0.759 ms
+/// all-`Full`**, the same thousand agents doing the same work, differing only in
+/// how many characters were in the pose store.
+///
+/// With the digest taken per demotion the two configurations now agree —
+/// **0.103 and 0.109 ms** — which is what a phase whose work is per *agent* has
+/// to look like, and the ratchet takes the budget down with it.
+///
+/// **1.0 ms is ~10× the 1 000-agent measurement**, near
 /// [`PROJECTION_BUDGET_MS`]'s own minting arithmetic — and, like that one, the
 /// measurement it is minted against is a `dev`-profile number (`opt-level = 1`
-/// with debug assertions), so the release margin is wider still. It is a third
+/// with debug assertions), so the release margin is wider still. It is a sixth
 /// of [`CITY_STEP_BUDGET_MS`], which is the property that makes it able to see
 /// anything: a crowd phase that grew to fill a whole step would be invisible to
 /// the total and trips this by an order of magnitude.
@@ -305,8 +315,9 @@ pub const CITY_STEP_BUDGET_MS: f64 = 6.0;
 /// [`CITY_STEP_BUDGET_MS`]'s conditioning, for its reasons — reported
 /// everywhere, asserted under `cargo test --release` off CI.
 ///
-/// **RATCHET RULE (§8): this constant may only ever DECREASE.**
-pub const NPC_STEP_BUDGET_MS: f64 = 2.0;
+/// **RATCHET RULE (§8): this constant may only ever DECREASE.** Minted at 2.0
+/// (NPC1a) and ratcheted to 1.0 by the NPC1a audit.
+pub const NPC_STEP_BUDGET_MS: f64 = 1.0;
 
 /// The population the [`NPC_STEP_BUDGET_MS`] measurement is taken at.
 ///
