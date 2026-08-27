@@ -688,6 +688,17 @@ impl CrowdStats {
 /// Records arrive tier-less (`Dormant`, no entity); the first [`step_crowd`]
 /// materializes the ones the band wants. That ordering is the point: a spawner
 /// that decided tiers itself would be a second copy of the decision.
+///
+/// # The `Guid`s are the CALLER's to keep distinct
+///
+/// A record's key becomes its entity's `Guid` when it materializes, and
+/// `EcsWorld::spawn_with_guid` does not refuse a key the world already uses — it
+/// would overwrite the index entry, and the level's own entity would become
+/// unreachable by `Guid` while still existing. Every caller in this tree draws
+/// from a fixed namespace of its own for exactly that reason. A checked door
+/// belongs on `spawn_with_guid` rather than here (it is the one place that could
+/// answer for *every* spawner), and it is not this wave's to build; NPC1d, which
+/// derives a population from a level's own buildings, is the wave that needs it.
 pub fn set_population(world: &mut EcsWorld, records: BTreeMap<Uuid, CrowdRecord>) {
     world
         .world_mut()

@@ -14089,3 +14089,409 @@ was read for the same exposure and none of them has it:
   of the page that holds it"* on the way. Moving the *measurement point*
   instead left all four published numbers identical and made the mutation fail
   by **3.3×** instead of 2.06×.
+
+
+## Wave NPC1a — the sim foundations of a crowd (2026-08-27)
+
+Base `241356e6`. Five clauses. **Greenfield**: no memo, no ROADMAP entry and no
+certification item in this repository had ever mentioned an NPC, a crowd or a
+sim-LOD, and nothing in it had put a thousand characters in a world and looked
+at the clock. This section founds the arc's record.
+
+What the wave leaves behind is a **ladder** — `Full / Near / Far / Dormant`,
+decided in one Ring-0 door both hosts call, keyed on `StreamingSource` distance
+and never on a camera — and the first measurement of what a crowd costs. It also
+leaves behind one correction to its own brief, which the instrument found on its
+first run and which is the most useful thing this wave hands NPC1b: **a crowd's
+trace wall is the ground its feet leave, not the joints it carries.**
+
+### Clause 1 — the tier, and where it is decided
+
+`inf_ecs::crowd`, Ring 0, beside `inf_ecs::band` and shaped like it. `CrowdBand`
+is `SimBand` with a third radius: anchors are the entities carrying
+`StreamingSource` — the set P16's cell activation already reads to decide which
+parts of the world exist at all — snapped to the same `BAND_LATTICE_M = 16` m
+lattice, sorted, deduplicated, non-finite ones dropped. There is **no camera
+argument** to `step_crowd`, so a caller cannot pass one by accident.
+
+| tier | radius | rapier | pose | hand IK | entity |
+|---|---|---|---|---|---|
+| `Full` | ≤ **32 m** | capsule | full | yes | yes |
+| `Near` | ≤ **96 m** | capsule | full | **no** | yes |
+| `Far` | ≤ **512 m** | **none** | **none** | no | yes |
+| `Dormant` | past it | — | — | — | **no** |
+
+The three radii are chosen against numbers that already exist rather than for
+looks. `DEFAULT_COLLIDER_NEAR_M` is 64 m — the radius inside which a *building*
+is solid — so `Full` is half of it (an NPC you can walk into has to be inside a
+world you can walk into) and `Near` is one and a half times it (an NPC is one
+capsule where a grammar building is dozens of solids). `Far` is half of
+`DEFAULT_COLLIDER_FAR_M`, because a `Dormant` agent is *gone* rather than cheap
+and the radius has to sit comfortably inside the cell-activation neighbourhood.
+
+**It fails toward `Full`.** A world with no streaming source — every committed
+level before this wave, every unit fixture — is `CrowdBand::unbounded` and every
+agent is `Full`, which is the pre-NPC1a behaviour of a character in this engine.
+Same for a world whose only sources are at non-finite positions, and same for a
+non-finite agent position in an unbounded band. Dropping a tier is the dangerous
+direction (an NPC stops animating, stops colliding, or stops existing); keeping
+it is merely slow.
+
+**Hysteresis is refused**, and the cost of refusing it is measured rather than
+argued: an agent parked on a tier boundary re-tiers on *every* step, and the
+bound the arm holds is that the thrash alternates between exactly **two** tiers
+— the two it is between — never wandering, with a control a metre inside the
+boundary that never moves at all. That is `SimBand`'s own
+`a_source_parked_on_a_lattice_line_rebands_every_step`, one system over, and for
+its reason: a stateful tier would agree with itself inside each host and diverge
+between them the first time one of them started mid-trace.
+
+**The position law does not vary with the tier**, and that is deliberate rather
+than unfinished. An agent's place is `route(clock)` at `Full` exactly as at
+`Far`, so a transition is **invisible in the transform** — which is what makes
+the gate's new arm a test of the tier machinery rather than of the route. NPC1c
+replaces that function with a path over the road graph and steers the near tiers
+through `move_and_slide`.
+
+**No schema moves.** `CrowdPopulationRes` is a bevy resource and `CrowdAgent` is
+a component the scene serializer does not know about, exactly as
+`DeformFieldRes` is: the `.inf_lvl` walk writes `RuntimeEntity` fields and never
+a resource, so nothing here can be saved and **scene v26 does not move**. That
+is correct for NPC1a and it is the shape NPC1d inherits — a population is data
+in the recipe, and bodies materialize by tier.
+
+**Where the tier is read**, five places, each through the door that already
+existed for its question:
+
+* `step_pose_evaluation` filters its target set on `poses()` and its hand pass on
+  `hand_ik()`. An entity with **no** `CrowdAgent` answers `Full`, so every hero
+  and every fixture in this tree takes exactly the path it took before — "the
+  hero is untouched" as a structure rather than a promise;
+* the 3D bridge folds `bodiless_agents` into the same `broken_here` gate a
+  fractured actor already uses;
+* `deform::ground_contacts` skips an agent with no body (clause 5's finding);
+* both fixed steps call `step_crowd` in a new phase;
+* `state_bytes` folds `crowd_state_bytes` ninth and last.
+
+**Its own phase, and its own budget.** `STEP_PHASES` 24 → **25**, `crowd` at
+index 4 — after streaming and the sky, **before** the physics sync, the character
+step and the animation. That ordering is not stylistic and is pinned as source
+text in both files by `projector_mirror`'s
+`both_fixed_steps_tier_the_crowd_before_the_passes_that_read_a_tier`: a host that
+tiered after its sync would give a `Far` agent a capsule for one step, and a host
+that tiered after the pose would pose an agent it had just decided not to.
+
+`NPC_STEP_BUDGET_MS` is minted at **2.0** — about 7× the **0.282–0.301 ms**
+measured at N = 1 000 in the dev profile over six readings (a 6.7 % spread, which
+is a tenth of the margin), a third of `CITY_STEP_BUDGET_MS` —
+with `NPC_BUDGET_AGENTS = 1000` pinned beside it, because a per-step millisecond
+with no population beside it is a number about an unnamed world.
+
+### Clause 2 — the trace re-shape, and the correction it took
+
+The wall: `pose_state_bytes` is `36 + 40 B` a joint, **6 476 B per posed
+character per step** at the island hero's 161 bones, and `island_gate` retains
+every step's bytes.
+
+The re-shape rides the tiers. A `Far` agent evaluates no pose, so it contributes
+**nothing** to that section; a `Dormant` one has no entity, so it contributes
+nothing to the bincode snapshot either. What would then be invisible is the thing
+that *decided* it — two hosts that tiered one NPC differently would compare equal
+at every step until one of them happened to run a pose the other did not — so
+`crowd_state_bytes` carries **49 bytes an agent at every tier**: the `Guid` (16),
+the tier (1), where it stands (24) and a **cached digest of the last pose it
+published** (8), folded on the way *down* out of a posing tier so a `Far` agent
+carries the pose it was last seen in rather than a zero.
+
+**On the island's own 161-bone rig**, at the end of the crowd drive: 5 posed ×
+6 476 = **32 380 B** of pose plus 20 agents off the pose path × 49 = **1 176 B**
+of crowd section, against **161 900 B** had all twenty-five been `Full` — a
+**5.0×** pose section on twenty-five characters. The per-agent ceiling of the
+move is 6 476 / 49 = **132×**.
+
+**And then the instrument measured the whole trace and the wave was wrong about
+which section it was in.** At N = 100 on the sweep scene the trace grows
+**1 118 B an agent**, and the decomposition is:
+
+| section | B / agent | share of the trace |
+|---|---|---|
+| **deform** | **752** | **63 %** |
+| pose | 251 | 21 % |
+| snapshot | 67 | — |
+| crowd | 49 | — |
+
+The pose is a fifth. **A crowd's trace wall is the deformation field its feet
+leave.** NPC1b and NPC1c inherit that, and the first draft of the instrument
+would never have found it: it printed one total and attributed the growth to the
+pose, which is inference dressed as measurement and was wrong by a factor of six.
+Every section is read separately now.
+
+### Clause 3 — the actor door, decided with arithmetic
+
+The brief offered two doors: open `RuntimeSim`'s actor map so streamed NPCs can
+carry Blueprint brains, or build a dedicated crowd system and leave the deferral
+standing. The available reasoning — *"`run_all_with_args` is a serial for-loop,
+therefore Blueprints are too slow"* — is a statement about a **shape**, and this
+repository has retracted several of those, so both phases were driven at the same
+N in the same process off the shipped `StepProfile` clock:
+
+| | per entity | 1 000 of them | share of a 6.0 ms step |
+|---|---|---|---|
+| a `Tick` blueprint that writes **one variable** | **0.494 µs** | 0.494 ms | **8.2 %** |
+| a crowd agent | **0.081 µs** | 0.081 ms | 1.3 % |
+
+**6.1×, and 8.2 % of the step budget spent before an NPC has thought about
+anything.** So the crowd takes the **smaller door**: crowd brains are a dedicated
+system, Blueprint stays for hero-class actors, and `cell_stream`'s dynamic-actor-
+map deferral **stands** — its sentence now says why rather than only that.
+
+**AND THE WALKED-AWAY FIX, which is the other half of clause 3.**
+`cell_stream`'s second corollary read: *"a statically-placed entity that a
+blueprint moves far from its birth cell still despawns when that birth cell
+deactivates, because residency is a function of where the cook put it"*, with
+`AlwaysLoaded` — i.e. opting out of streaming entirely — offered as the remedy.
+That is a deferral wearing a rule's clothes, and a crowd is the content that
+makes it untenable: an NPC walking two cells over is the *normal* case, and "mark
+every NPC `AlwaysLoaded`" is a fifty-square-kilometre world with nothing
+streaming in it.
+
+`sync_sim` now checks, **at the moment of deactivation and only then**, whether
+the entity is standing in a cell this sync is *keeping*, and hands it to that
+cell's list instead of despawning it. `CellStreamStats::rehomed` counts it. The
+conservative half is untouched and is what makes the change safe: an entity whose
+current cell is not wanted dies exactly as before. Three arms — the re-home, the
+**control** (a stationary entity still dies and `rehomed` stays 0), and the third
+that says a re-homed entity is not immortal (when its *new* cell leaves, it goes)
+— plus the island's own reading: **`rehomed == 0` on both hosts** over a 360 m
+drive that activates and deactivates cells in both directions. The island's
+content stands still, so the island traces exactly as it did.
+
+### Clause 4 — the substrate
+
+`CrowdAgent` (the published verdict), `CrowdRecord` (archetype + route + tier +
+where it stood + the cached digest), `CrowdPopulationRes` (the population, in
+`Guid` order, with a **step count** rather than an accumulated `dt` so a long run
+cannot drift), `CrowdStats` (per-tier counts, spawned, despawned, re-tiered, band
+stamp).
+
+**Per-agent randomness is `mix64(guid ^ tick ^ salt)`**, as a function
+(`agent_rand` / `agent_unit`), pinned against the SplitMix64 finalizer's
+constants rather than against one of the tree's four copies of it. There is no
+engine RNG and there must not be one on a sim path: a stateful generator is
+state, and state that is not folded into `state_bytes` breaks parity the first
+time one host starts mid-trace. The two draws NPC1a takes are the agent's speed
+multiplier (`0.85 … 1.15`) and its route phase (up to 8 m), both at `tick = 0`,
+both **derived and never stored** — a jitter written into the record at spawn
+time would be a second copy of a pure function, and the copy is what drifts.
+
+**`inf_ecs::crowd` joined the libm ban list on day one** — 36 subjects to 37 —
+i.e. added *with* its module rather than after an audit went looking for it,
+which is how several of the other thirty-six arrived (the P24.2 re-audit, SK1b's
+`inf_ecs::pose`, the Wave-G sweep). It earns the place: `CrowdRoute::position_at` decides where a
+thousand NPCs stand, that lands on a `Transform`, and the transform is folded
+into `state_bytes` and compared between two hosts and two machines. The route is
+built out of `+ - * / sqrt %` alone for exactly that reason.
+
+**`parallel_map` does not pay, and it was measured before it was prescribed.**
+The step's pure half is split out as `plan_agent` — the function the shipped step
+calls, not a copy, so the benchmark aims at the thing it names — and driven
+serially and through `inf_core::parallel_map_ref`:
+
+| N | serial | parallel | ratio |
+|---|---|---|---|
+| 1 | 0.0004 ms | 0.0225 | **0.02×** |
+| 10 | 0.0004 | 0.0149 | 0.03× |
+| 100 | 0.0023 | 0.2826 | 0.01× |
+| 1 000 | 0.0161 | 0.1294 | 0.12× |
+| 10 000 | 0.0856 | 0.2352 | **0.36×** |
+
+The pool dispatch is the entire cost: the decision half is a nearest-anchor
+distance and a ping-pong along a segment, a handful of flops with no allocation.
+The step calls it inline. What **is** asserted is that the two produce identical
+output, which is the contract that would make the parallel path legal the day the
+work grows.
+
+### Clause 5 — the N-sweep, and what it found
+
+`runtime/inf-player/tests/crowd_sweep.rs`, on the fps instrument's own composed
+scene (the phase-30 city — 1 000 grammar buildings, 370 468 solids — a streamed
+terrain and the phase-29 character), N copies of that character in a 320 m block
+on the drive line. Three rounds of forty steps after forty discarded, MIN of
+rounds. **Dev profile**, so every millisecond is a number about a build nobody
+ships and is reported rather than asserted.
+
+**BANDED** (the shipped ladder):
+
+| N | step ms | crowd | anim | trace B | posed | tiers (F/N/Fa/D) | skinned | palette | proj ms |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | 3.319 | **0.000** | 0.022 | 9 184 | 1 | — | 1 | 0.03 MB | 0.041 |
+| 1 | 3.332 | 0.005 | 0.026 | 12 728 | 2 | 1/0/0/0 | 2 | 0.06 | 0.041 |
+| 10 | 3.469 | 0.008 | 0.035 | 20 628 | 4 | 0/3/7/0 | 11 | 0.34 | 0.050 |
+| 100 | 3.676 | 0.034 | 0.133 | 121 032 | 31 | 4/26/70/0 | 101 | 3.16 | 0.149 |
+| **1 000** | **6.772** | **0.282** | 1.073 | 1 075 242 | 291 | 32/258/710/0 | 1 001 | **31.28 MB** | 1.136 |
+
+**ALL-FULL** (the control — the same scene with every agent forced to `Full`):
+
+| N | step ms | crowd | anim | trace B | posed |
+|---|---|---|---|---|---|
+| 0 | 3.271 | 0.000 | 0.021 | 9 184 | 1 |
+| 1 | 3.344 | 0.005 | 0.028 | 12 728 | 2 |
+| 10 | 3.489 | 0.012 | 0.060 | 43 328 | 11 |
+| 100 | 4.304 | 0.077 | 0.379 | 324 704 | 101 |
+| **1 000** | **13.670** | 0.759 | **3.810** | **3 182 530** | 1 001 |
+
+**The ladder is worth 2.0× of the whole fixed step at N = 1 000** (6.772 against
+13.670), **3.5× of the animation phase** (3.810 against 1.073) and **3.0× of
+the trace** (3 182 530 against 1 075 242). The crowd
+phase itself is **0.28 ms for a thousand agents — 4.1 % of the step** — and
+**0.0001 ms with no population at all**.
+
+#### THE FINDING, on the instrument's first run
+
+At N = 1 000 the deformation section came out at **2 222 656 bytes a step, 86 %
+of the whole trace, and *identical* in the banded run and in the all-`Full`
+control**. Identical is the tell. `ground_contacts` picks its subjects by
+**components**, and the tier takes a `Far` agent's rapier body away without
+taking its `Collider3D` off — so a thousand agents that nothing could collide
+with went on pressing footprints into the ground. Two systems disagreeing about
+whether a thing is in the world.
+
+The rule is the general one and not a crowd special case: **a thing with no
+rapier body presses no ground.** For a crowd agent the tier is the authority on
+that; for everything else `pressure_of` already was. Measured after: N = 1 000
+banded goes **2 588 970 → 1 075 242 B** a step (2.4×), and the ladder's trace
+ratio goes **1.2× → 3.0×**. The arm walks the whole ladder on one fixture, so it
+fails if the gate stops working *or* if it starts over-reaching, and it ends by
+taking the component off again to prove it reads the tier and not the presence.
+
+#### What the sweep confirms and corrects, wall by wall
+
+* **wall 1 (the trace)** — *corrected*. The pose is real and is 21 % of a crowd's
+  trace; the deformation field is 63 %. The re-shape's per-agent ceiling of 132×
+  is right about the section it names and was the wrong section to name first.
+* **wall 5 (zero anim LOD)** — *confirmed and closed for the crowd*: the
+  animation phase is 3.5× smaller banded at N = 1 000 (1.073 ms against 3.810).
+* **wall 6 (the step has no room)** — *confirmed*. N = 1 000 all-`Full` puts the
+  dev-profile step at **13.7 ms**; banded it is 6.8. The crowd's own phase is
+  0.28 ms of that, so the room a crowd needs is not in the crowd system.
+* **wall 7 (blueprint tick is serial)** — *confirmed with a number*: 0.494 µs an
+  actor for one variable write, 6.1× a crowd agent.
+* **wall 9 (the collider band)** — *confirmed and resolved as designed*, with a
+  correction to where the saving lands. The `physics3d sync` phase barely moves
+  (**2.149** banded against **2.296** all-`Full`) because that phase walks
+  *entities*, not bodies, and 710 `Far` agents still have transforms to walk. The
+  **solver** is where 710 fewer capsules pay: **1.807 against 4.373 — 2.4×**. A
+  reader looking for the tier's physics saving in the sync phase would conclude
+  it did nothing.
+* **wall 3 (one draw + one 16 KiB palette per character ×2)** — *confirmed and
+  handed to NPC1b as a number*: **31.28 MB of palette upload a frame at
+  N = 1 000**, and 1 001 skinned entries in the projected scene where the ladder
+  put only 291 of them on the pose path. The renderer does not read the tier at
+  all yet, which is NPC1b's whole subject.
+* **the projection** — 1.136 ms at N = 1 000 against a 1.5 ms
+  `PROJECTION_BUDGET_MS`. A crowd is **most of that budget** before NPC1b starts.
+
+### The laws this wave paid for
+
+* **An instrument's first run is where a wave finds out what it was wrong
+  about.** The brief's wall 1 named the pose, the wave built its re-shape around
+  the pose, and the first per-section reading said the pose is a fifth of it.
+  Nothing about the re-shape is wasted — it is right about its own section — but
+  the *headline* was aimed at the wrong number for as long as nobody had read the
+  sections.
+* **Identical is a tell.** Two configurations that must differ and do not are
+  more informative than either of them alone. The deform defect was not visible
+  in its size (2.2 MB is a plausible number for a thousand-agent field); it was
+  visible in the banded and all-`Full` runs agreeing to the byte.
+* **A gate that reads components and a gate that reads bodies are two opinions
+  about whether a thing exists.** The tier reached the physics bridge, the pose
+  and the trace, and did not reach the one pass that picks its subjects by
+  component. Anything that asks "is this thing physically here" has to ask one
+  authority.
+* **A per-entity cost comparison has to be driven, not derived.** "A serial
+  for-loop is too slow" was true here and is a statement about a shape; the
+  decision it justifies is worth a number, and the number (0.494 µs, 8.2 % of a
+  step for one variable write) is more useful than the ruling it supports.
+* **Measure the prescription before landing it, and be willing to land nothing.**
+  The brief asked for `parallel_map` *"where parallelism pays"*. It pays nowhere
+  between N = 1 and N = 10 000 — 0.02× to 0.36× — so the wave wired none of it
+  and printed the table that says why.
+* **The eaten-continuation gate is a workspace gate, and it caught this wave
+  twice in one file.** The first mangling was a `rustfmt` join that absorbed a
+  `\`-continuation and left fourteen spaces mid-sentence; the second was my own
+  fix, which indented a printed line by eight spaces *inside* the literal and hit
+  the same `EATEN = 8` threshold from the other direction. The lesson is not
+  "escape better" — it is that **a print's visual indentation belongs outside the
+  string**, because the only cheap way to tell a formatting run from an eaten
+  continuation is not to have runs. (A third near-miss: the scripted edit that was
+  supposed to fix the first one aborted on a *later* assertion in the same script
+  and wrote nothing, so the file kept the mangled line while the transcript said
+  "ok". A script that asserts before it writes is right; a script that reports
+  success per-statement would have been righter.)
+* **A conservative rule and a deferred one look identical from the outside.**
+  `cell_stream`'s "residency is a function of where the cook put it" reads as a
+  design decision and was a v1 deferral. The tell is the remedy it offers: a rule
+  that tells content to opt out of the system is a rule that has not been
+  finished.
+
+### Counts
+
+| | at `241356e6` | **wave NPC1a** |
+|---|---|---|
+| battery | 328 blocks / 6 254 passed / 0 failed / 19 ignored | **329 / 6 275 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, **+1 block and +21 arms**, every one attributed: 13 in `inf_ecs::crowd`, 1 in `inf_ecs::deform` (`a_crowd_agent_with_no_body_presses_no_ground`), 2 in `cell_stream` (the re-home and its control), 1 in `projector_mirror` (`both_fixed_steps_tier_the_crowd_before_the_passes_that_read_a_tier`), 1 in `island_gate` (`pie_equals_shipping_with_a_crowd_across_tier_transitions`) and 3 in the new `crowd_sweep` block |
+| goldens | 58 | **58** — none added, none re-blessed; `INF_GOLDEN_STRICT=1` green over **117 arms, 0 failed**, `git status` over `tests/goldens` empty afterwards. This wave changes no render code, so the expectation was that nothing moves and nothing did |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — 404 `^warning` lines minus 30 per-crate summaries, after `cargo clean --doc` (8 851 files, 216.8 MiB). **The wave adds zero.** Headroom **76**. It did add two on the way: a `[CellStreamStats::rehomed]` and a third `[sync_sim]` in a module doc where the same link already fails twice, both dropped to plain code spans |
+| `clippy --workspace --all-targets -D warnings` | 0 | **0** (local toolchain, run LAST per the rmeta law) |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** — the population is a bevy resource and `CrowdAgent` is a component the scene serializer does not know about, so nothing in this wave reaches a serialized format |
+| step phases | 24 | **25** (`crowd`, index 4) |
+| §8 budgets | — | **+1**: `NPC_STEP_BUDGET_MS = 2.0` with `NPC_BUDGET_AGENTS = 1000` |
+| trace sections folded | 8 | **9** (`crowd::crowd_state_bytes`, last) |
+| libm-ban subjects | 36 | **37** (`inf_ecs::crowd`, day one) |
+| committed levels (`EXPECTED_LEVELS`) | 23 | **23** |
+| committed content | — | **unmoved**; the crowd is spawned by tests, never by a level |
+| new crates / external dependencies | — | **none**; `Cargo.lock` unmoved |
+| frontend | — | **untouched and not run** |
+
+### Carried, by name
+
+1. **The deformation field is a crowd's dominant trace section** and its dominant
+   unbounded-growth hazard: 708 928 B a step at N = 1 000 even banded, from the
+   290 agents that still have bodies. `MAX_DEFORM_CELLS` is 4 096 and a crowd
+   overshoots it by construction (the bound may be exceeded while one step's
+   contacts cover more cells than it allows). Nothing in this wave changes the
+   field; NPC1b or NPC1c has to decide whether a crowd agent's footprint is worth
+   its bytes at all.
+2. **31.28 MB of joint palette a frame at N = 1 000**, 1 001 skinned scene
+   entries, and **the renderer does not read the tier**. NPC1b's whole subject,
+   quantified.
+3. **The projection is 1.136 ms at N = 1 000** against a 1.5 ms budget. A crowd
+   spends three quarters of `PROJECTION_BUDGET_MS` before the renderer starts.
+4. **A `Far → Near` promotion pops.** The machine does not advance while an agent
+   is `Far`, so it resumes where it left off rather than where it would have been.
+   Correct, deterministic, and visible; the fix is a re-entry policy (the P29.2
+   inertialization seam already exists) and it belongs with NPC1b's LOD-aware
+   renderer.
+5. **A crowd agent has no `CharacterMovement`.** Its position is its route, and
+   giving it the player's controller as well would be two authorities writing one
+   transform. NPC1c is where the near tiers start steering and where that
+   component arrives.
+6. **The ladder's radii are constants, not level data.** `set_crowd_radii` exists
+   and **nothing in production calls it** (the `set_debris_budget` seam, stated
+   the same way): the sweep drives it to price the ladder against an all-`Full`
+   control. A level's own crowd block is the day it gets a caller.
+7. **`Dormant` re-materializes at `last`, not at where the schedule says it would
+   have walked to.** A record remembers where it stood; NPC1d's off-screen
+   simulation is what makes that a schedule query instead.
+8. **The sweep's scene rigs its character at 20 joints**, so its pose numbers are
+   836 B a character and the 6 476 B arithmetic is quoted against the *island's*
+   161-bone hero. Both are measured, in the file that measures each; a reader
+   comparing the two tables has to carry the rig with them.
+9. **A crowd record's `Guid` is the caller's to keep distinct.** It becomes the
+   agent's entity `Guid` on materialization, and `EcsWorld::spawn_with_guid` does
+   not refuse a key the world already holds — it would overwrite the index entry
+   and leave the level's own entity unreachable by `Guid` while it still exists.
+   Every caller here draws from a fixed namespace of its own. The checked door
+   belongs on `spawn_with_guid`, where it could answer for every spawner in the
+   engine, and NPC1d — which derives a population from a level's own buildings —
+   is the wave that needs it.

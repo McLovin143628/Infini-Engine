@@ -285,7 +285,12 @@ pub const CITY_STEP_BUDGET_MS: f64 = 6.0;
 /// | 1 | 0.005 | 5.0 µs |
 /// | 10 | 0.008 | 0.8 |
 /// | 100 | 0.034 | 0.34 |
-/// | **1 000** | **0.286 ms** | **0.29 µs** |
+/// | **1 000** | **0.282 - 0.301 ms** | **0.28 - 0.30 µs** |
+///
+/// The thousand-agent row is a **range over six readings** rather than one
+/// number, because that is what the run-to-run spread on this machine is and a
+/// budget quoted against a single reading is a budget quoted against a lucky
+/// one. The spread is 6.7 % of the mean, which is a tenth of the margin below.
 ///
 /// **2.0 ms is ~7× the 1 000-agent measurement**, which is
 /// [`PROJECTION_BUDGET_MS`]'s own minting arithmetic — and, like that one, the

@@ -54,10 +54,10 @@
 //! That was a deferral wearing a rule's clothes, and a crowd is the content that
 //! makes it untenable: an NPC walking two cells over is the *normal* case, and
 //! "mark every NPC AlwaysLoaded" is a fifty-square-kilometre world with nothing
-//! streaming in it. So [`sync_sim`](CellStreaming::sync_sim) now checks, at the
+//! streaming in it. So `CellStreaming::sync_sim` now checks, at the
 //! moment of deactivation and only then, whether the entity is standing in a
 //! cell this sync is **keeping** — and if it is, hands it to that cell's list
-//! instead of despawning it ([`CellStreamStats::rehomed`] counts it).
+//! instead of despawning it (`CellStreamStats::rehomed` counts it).
 //!
 //! The conservative half is untouched, and it is what makes the change safe: an
 //! entity whose current cell is not wanted is despawned exactly as before, and a
