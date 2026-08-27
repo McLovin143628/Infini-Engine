@@ -118,6 +118,53 @@ mod tests {
         }
     }
 
+    /// **A colliding `kind_index` cannot make a wall panel draw a grass tuft**
+    /// (wave TER2b audit).
+    ///
+    /// Wave TER2b's clause 0 rests on a claim this module is the proof of: an
+    /// index cannot name a mesh here, because composition interleaves a *scatter*
+    /// palette's indices with a *grammar module* palette's into the same `u32`
+    /// with no offset — so the GUID rides on the instance instead. The claim was
+    /// argued in three doc comments and asserted nowhere, and what protects it is
+    /// three `mesh: None` literals at the grammar and building placement sites,
+    /// which a fourth site would not inherit.
+    ///
+    /// This collides the indices **deliberately**: both halves use `0..4`, so
+    /// every grammar instance shares an index with a scatter instance that draws
+    /// a real mesh. The mesh must follow the instance and not the index.
+    #[test]
+    fn a_colliding_kind_index_does_not_carry_a_mesh_across_the_join() {
+        let tuft = uuid::Uuid::from_u128(0xC0FFEE);
+        let scatter: Vec<PcgInstance> = (0..4)
+            .map(|i| PcgInstance {
+                mesh: Some(tuft),
+                ..inst(i)
+            })
+            .collect();
+        // The grammar's own placements, with the SAME indices and no mesh — which
+        // is what `place_module` and `building::assemble` write.
+        let grammar = GrammarOutput {
+            instances: (0..4).map(inst).collect(),
+            ..GrammarOutput::default()
+        };
+        let out = compose_volume(scatter, grammar);
+        assert_eq!(out.instances.len(), 8);
+        for (n, i) in out.instances.iter().enumerate() {
+            let want = if n < 4 { Some(tuft) } else { None };
+            assert_eq!(
+                i.mesh, want,
+                "instance {n} carries kind_index {} and mesh {:?}; after the join \
+                 the first four are scatter and the last four are grammar modules, \
+                 and their indices are the same four numbers",
+                i.kind_index, i.mesh
+            );
+        }
+        // …and the indices really did collide, or the arm proves nothing.
+        let scatter_kinds: Vec<u32> = out.instances[..4].iter().map(|i| i.kind_index).collect();
+        let grammar_kinds: Vec<u32> = out.instances[4..].iter().map(|i| i.kind_index).collect();
+        assert_eq!(scatter_kinds, grammar_kinds);
+    }
+
     #[test]
     fn a_volume_with_no_buildings_composes_to_no_groups() {
         let out = compose_volume((0..3).map(inst).collect(), GrammarOutput::default());

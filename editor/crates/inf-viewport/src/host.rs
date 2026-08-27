@@ -299,6 +299,17 @@ pub struct EngineHost {
     /// *table* the player's shipped host also hands its projector: one shape, two
     /// hosts, and the mirror gate compares the body that reads it.
     scatter_meshes: inf_render::ScatterMeshes,
+    /// Every mesh GUID this document's scattered instances **named**, whether or
+    /// not it resolved (wave TER2b audit).
+    ///
+    /// The live-asset audit has to be keyed on the question and not on the
+    /// answer: a GUID that failed to resolve is a *negative* entry in
+    /// `render_assets`, and keying the audit on `scatter_meshes` — which holds
+    /// only the hits — evicted every miss on the very projection that took it, so
+    /// a scatter kind naming a mesh past `MAX_SCATTER_MESH_TRIANGLES` re-opened
+    /// and re-decoded that file on every document version, which is once per
+    /// input event during a gizmo drag.
+    scatter_wanted: std::collections::BTreeSet<Uuid>,
     /// **What the live virtual-texture level was built from** (P26.5) — the
     /// binding set AND the asset index's generation, as one value.
     ///
@@ -1029,6 +1040,7 @@ impl EngineHost {
             fractures: inf_editor_core::simulate::shared_fractures(),
             render_assets: inf_editor_core::render_assets::EditorRenderAssets::new(),
             scatter_meshes: inf_render::ScatterMeshes::new(),
+            scatter_wanted: Default::default(),
             vt_level_key: Default::default(),
             tool_status: None,
             stream_log_countdown: STREAM_LOG_INTERVAL_FRAMES,
@@ -2424,7 +2436,13 @@ impl EngineHost {
         // they are named by an instance list rather than by a component field, so
         // the walk above never sees them and an audit without them would free the
         // island's ground cover on the very projection that drew it.
-        live_render_assets.extend(self.scatter_meshes.keys().map(|k| Uuid::from_u128(*k)));
+        //
+        // Keyed on what the instances **named**, not on what resolved (TER2b
+        // audit): `resolve_scatter_geometry` caches its misses as well as its
+        // hits, and reading the resolved table here threw every miss away again
+        // one line later — so an unresolvable kind re-read and re-decoded its
+        // `.inf_mesh` on every document version.
+        live_render_assets.extend(self.scatter_wanted.iter().copied());
         self.render_assets.retain_only(live_render_assets);
 
         // Re-validate the tool target: keep it if that terrain is still projected
@@ -4486,6 +4504,52 @@ impl EngineHost {
         self.synced_version = None; // force a re-projection
     }
 
+    /// Resolve every `.inf_mesh` this document's scattered instances name into
+    /// [`scatter_meshes`](Self::scatter_meshes) — wave TER2b.
+    ///
+    /// # Why the GUIDs are read off the INSTANCES and not off a component
+    ///
+    /// Because there is no component that has them. A `PcgVolume` names a
+    /// `.inf_pcg`, whose *rules* name meshes, and the viewport thread holds a
+    /// document rather than an asset database — the same wall the biome palette
+    /// and the water hints are pushed over. What the viewport does have is the
+    /// evaluated population, and since wave TER2b every instance in it carries
+    /// the GUID its kind resolved to. So the walk is over the answer rather than
+    /// over the question.
+    ///
+    /// **It is O(instances) and it runs per projection**, which is per *document
+    /// version* and not per frame. On the island's 16 771 instances that is
+    /// 16 771 inserts into a set that never exceeds three entries; the loads
+    /// behind it happen once each, because `resolve_scatter_geometry` caches its
+    /// misses as well as its hits.
+    ///
+    /// The table is rebuilt rather than accumulated so that a mesh unbound in one
+    /// document does not go on being drawn in the next; the *geometry* behind each
+    /// entry is `Arc`-shared with the store, so rebuilding costs pointer copies.
+    fn sync_scatter_meshes(&mut self, doc: &SceneDoc) {
+        let world = doc.world();
+        let w = world.world();
+        let mut wanted: BTreeSet<Uuid> = BTreeSet::new();
+        for &guid in doc.order() {
+            let Some(entity) = world.entity_of(guid) else {
+                continue;
+            };
+            if let Some(vol) = w.get::<PcgVolume>(entity) {
+                wanted.extend(vol.evaluated.iter().filter_map(|i| i.mesh));
+            }
+            if let Some(terrain) = w.get::<Terrain>(entity) {
+                wanted.extend(terrain.biome_population.iter().filter_map(|i| i.mesh));
+            }
+        }
+        self.scatter_meshes.clear();
+        for &id in &wanted {
+            if let Some(g) = self.render_assets.resolve_scatter_geometry(id) {
+                self.scatter_meshes.insert(id.as_u128(), g);
+            }
+        }
+        self.scatter_wanted = wanted;
+    }
+
     /// **Register the document's bound materials as virtual textures** (P26.4,
     /// clause 0) — the editor half of `PlayerRenderHost::set_material_content`,
     /// and the reason a `.inf_mat`'s maps appear on a surface in the viewport.
@@ -4526,51 +4590,11 @@ impl EngineHost {
     /// which sorts them (`inf_render::registration_order`). The P26.3 LAW says
     /// the handles this mints differ from the player's, and the sort is what
     /// keeps the *pages* the same anyway.
-    /// Resolve every `.inf_mesh` this document's scattered instances name into
-    /// [`scatter_meshes`](Self::scatter_meshes) — wave TER2b.
     ///
-    /// # Why the GUIDs are read off the INSTANCES and not off a component
-    ///
-    /// Because there is no component that has them. A `PcgVolume` names a
-    /// `.inf_pcg`, whose *rules* name meshes, and the viewport thread holds a
-    /// document rather than an asset database — the same wall the biome palette
-    /// and the water hints are pushed over. What the viewport does have is the
-    /// evaluated population, and since wave TER2b every instance in it carries
-    /// the GUID its kind resolved to. So the walk is over the answer rather than
-    /// over the question.
-    ///
-    /// **It is O(instances) and it runs per projection**, which is per *document
-    /// version* and not per frame. On the island's 16 771 instances that is
-    /// 16 771 inserts into a set that never exceeds three entries; the loads
-    /// behind it happen once each, because `resolve_scatter_geometry` caches its
-    /// misses as well as its hits.
-    ///
-    /// The table is rebuilt rather than accumulated so that a mesh unbound in one
-    /// document does not go on being drawn in the next; the *geometry* behind each
-    /// entry is `Arc`-shared with the store, so rebuilding costs pointer copies.
-    fn sync_scatter_meshes(&mut self, doc: &SceneDoc) {
-        let world = doc.world();
-        let w = world.world();
-        let mut wanted: BTreeSet<Uuid> = BTreeSet::new();
-        for &guid in doc.order() {
-            let Some(entity) = world.entity_of(guid) else {
-                continue;
-            };
-            if let Some(vol) = w.get::<PcgVolume>(entity) {
-                wanted.extend(vol.evaluated.iter().filter_map(|i| i.mesh));
-            }
-            if let Some(terrain) = w.get::<Terrain>(entity) {
-                wanted.extend(terrain.biome_population.iter().filter_map(|i| i.mesh));
-            }
-        }
-        self.scatter_meshes.clear();
-        for id in wanted {
-            if let Some(g) = self.render_assets.resolve_scatter_geometry(id) {
-                self.scatter_meshes.insert(id.as_u128(), g);
-            }
-        }
-    }
-
+    /// (Wave TER2b inserted `sync_scatter_meshes` **between** this block and the
+    /// function it documents; the TER2b audit put it back. A doc comment that
+    /// slides onto the next function does not warn — it just describes the wrong
+    /// thing, and here it described a P26.4 finding on a wave-TER2b walk.)
     fn sync_vt_bindings(&mut self, doc: &SceneDoc) {
         // **The rule is a value, and it lives in Ring 1** (P26.5). The two terms
         // used to be two fields compared inline here, where nothing headless can
