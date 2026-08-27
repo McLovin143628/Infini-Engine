@@ -1070,6 +1070,20 @@ pub fn run_pie(
     // it — the identical class P21.4 closed for voxel volumes and P24.1 for
     // skeletal meshes, and passed in for the identical reason.
     app.materials = materials;
+    // **AND THE FOURTH OF THE CLASS IS STILL OPEN** (wave TER2b). There is no
+    // `app.scatter_meshes = …` line here, so `PlayerApp::new`'s empty table
+    // stands and every scattered instance in a windowed PIE session draws the
+    // placeholder cube — while a cooked boot, which fills the table in
+    // `run_windowed`, draws the authored ground cover. That is the identical
+    // shape as the three lines above, and it is stated here rather than only in
+    // a memo because this is where the previous three were closed and where a
+    // reader looks to find out which are.
+    //
+    // **The fix needs no schema move**: `ScenePayload::meshes` is already a
+    // general `Vec<(Uuid, Vec<u8>)>` of `.inf_mesh` bytes that only
+    // `SkeletalMesh.mesh` fills today, so adding a level's scatter kinds to it
+    // is a *use* of a field, not a bump. `pie_equals_shipping_on_an_island_drive`
+    // cannot see this: it compares SIMULATION state, and the gap is at the frame.
     app.pie = Some(PieLink {
         control,
         out,

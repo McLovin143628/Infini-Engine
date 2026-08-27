@@ -46,6 +46,23 @@ use crate::IslandError;
 ///
 /// **v2** (the I7 CI-red): `[anchor]` states its geodetic origin. See the module
 /// docs for the byte that made it necessary.
+///
+/// # What a bump costs, priced once so the next one does not have to guess
+///
+/// [`IslandRecipe::validate`] compares this for **exact equality** and there is
+/// **no migrate function** — unlike every engine schema, which has both. So
+/// v2 → v3 does not lift old recipes: it **refuses every committed recipe on
+/// disk** until a human hand-edits each one, and a build that refuses is a build
+/// that cannot re-derive the committed layers it is refusing over.
+///
+/// Wave TER2b priced exactly that and did not pay it. The detail band wanted a
+/// seed, an amplitude and a band, which are three lines; what stopped them is
+/// that all three are a pure function of two numbers the recipe already states
+/// (`[grid] meters_per_sample` and the source's own pitch), so
+/// `detail::DetailBand::of` derives them and the schema stays at 2. **Bump this
+/// when a recipe has to state something it cannot derive** — and add a migrate
+/// function in the same commit, or the bump is a breaking change wearing a
+/// version number.
 pub const RECIPE_SCHEMA_VERSION: u32 = 2;
 
 /// How far a stated geodetic origin may sit from the projection's own answer,
