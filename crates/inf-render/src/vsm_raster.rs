@@ -375,8 +375,8 @@ pub struct VsmCasterRaw {
     /// this record is the right classic level for, `1 << level` per clipmap level
     /// and [`PERSPECTIVE_BUCKET`] for a spot or a cube face. **Zero is every
     /// bucket**, which is what every caster that is not a meshlet asset carries.
-    /// `vsm_cull.wgsl` tests it against [`VsmPageRaw::info`]`.w` and
-    /// `scatter_caster_stamps` mirrors that test on the CPU.
+    /// `vsm_cull.wgsl` tests it against the page's own bucket in `VsmPage.info.w`
+    /// and `scatter_caster_stamps` mirrors that test on the CPU.
     ///
     /// The WGSL twin's own comment says the same thing, and it has to: the field
     /// was `reserved` until I8c and a doc that still said so would be the one
@@ -397,8 +397,8 @@ struct VsmPageRaw {
     /// x = the page's base in the visible list, y = the atlas slot, z = the light
     /// handle, **w = the page's detail bucket** as a one-bit mask (island wave
     /// I8c) — `1 << level` for a clipmap page, [`PERSPECTIVE_BUCKET`] for a spot
-    /// or a cube face. It is [`PageDraw::level_bit`], and the cull tests a
-    /// caster's own [`VsmCasterRaw::ids`]`.w` against it.
+    /// or a cube face. It is `PageDraw::level_bit`, and the cull tests a caster's
+    /// own [`VsmCasterRaw::ids`]`.w` against it.
     info: [u32; 4],
 }
 

@@ -849,11 +849,26 @@ fn a_virtualized_geometry_instance_casts_into_the_pages_it_touches() {
         stats.draws_vgeom > 0 && stats.indices_vgeom > 0,
         "the vmesh cast and no meshlet indices were submitted: {stats:?}"
     );
+    // **NOT `indices_vgeom % draws_vgeom == 0`** (the I8c audit). The first
+    // version of this arm asserted that, on the reasoning that "every meshlet
+    // draw submits the same level's whole index range" — which stopped being
+    // true in the same wave that wrote it: an asset is packed once per distinct
+    // classic level its page buckets ask for, and **this fixture packs two**
+    // (`the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into`
+    // measures 2 caster records over 8 meshlet draws). The divisibility held by
+    // arithmetic luck over two levels' index counts. What is true of every
+    // meshlet draw is that it submits whole triangles of a real level.
     assert_eq!(
-        stats.indices_vgeom % stats.draws_vgeom,
+        stats.indices_vgeom % 3,
         0,
-        "every meshlet draw submits the same level's whole index range, so the \
-         two counters must divide: {stats:?}"
+        "the meshlet index load is not a whole number of triangles: {stats:?}"
+    );
+    assert!(
+        stats.indices_vgeom >= stats.draws_vgeom * 3,
+        "{} meshlet draws submitted {} indices — a draw that submits less than a \
+         triangle is an empty index range: {stats:?}",
+        stats.draws_vgeom,
+        stats.indices_vgeom
     );
     assert!(
         stats.indices_vgeom < stats.indices_drawn,
@@ -1868,14 +1883,39 @@ fn the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into() {
         "THE PAGE-LOD FLOOR'S SHADOW PRICE: {moved_texels} of {compared} shared \
          texels moved ({:.2} %); the worst is {:.4} m — {:.2} texels of the \
          level-{} page it happened in — against a camera tolerance of \
-         {camera_world:.4} m. Shipped mean classic level {:.2} against {:.2} at a \
-         collapsed tolerance.",
+         {camera_world:.4} m. Shipped mean classic level {:.2} over {} caster \
+         records a frame ({} meshlet draws), against {:.2} over {} at a collapsed \
+         tolerance.",
         moved_texels as f64 / compared.max(1) as f64 * 100.0,
         worst.0,
         worst.1,
         worst.2,
         sh_stats.vgeom_level_sum as f64 / sh_stats.vgeom_casters.max(1) as f64,
+        sh_stats.vgeom_casters as f64 / sh_stats.frames.max(1) as f64,
+        sh_stats.draws_vgeom as f64 / sh_stats.frames.max(1) as f64,
         fi_stats.vgeom_level_sum as f64 / fi_stats.vgeom_casters.max(1) as f64,
+        fi_stats.vgeom_casters as f64 / fi_stats.frames.max(1) as f64,
+    );
+
+    // **THE GROUP MULTIPLICATION, MEASURED** (the I8c audit). The wave's carried
+    // item 4 says an asset "can now hold up to one group per clipmap level" and
+    // that "on the island every bucket picks the same level, so it costs exactly
+    // one; a scene with many assets close to the camera could multiply". This
+    // fixture is one asset at 9 m through a six-level clipmap and it **does**
+    // multiply — so the item is a measurement rather than a possibility, and the
+    // ceiling it presses on (`VSM_MAX_GROUPS`, 1 024) is worth the counter beside
+    // it. `dropped_groups` is the refusal and it is silent here, which is the
+    // other half of the claim.
+    assert!(
+        sh_stats.vgeom_casters > sh_stats.frames,
+        "one asset through a six-level clipmap packed one caster record a frame, \
+         so the buckets all picked one level and carried item 4's multiplication \
+         is not exercised here: {sh_stats:?}"
+    );
+    assert_eq!(
+        (sh_stats.dropped_groups, sh_stats.dropped_casters),
+        (0, 0),
+        "the group ceiling refused something in a two-group fixture: {sh_stats:?}"
     );
 }
 
