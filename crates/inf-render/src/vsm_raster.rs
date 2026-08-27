@@ -2784,6 +2784,7 @@ fn pack_casters(
         crate::passes::scatter::bucket_center(scatter_eye),
         &caster_settings,
         crate::passes::scatter::MAX_CPU_SCATTER_INSTANCES,
+        crate::passes::scatter::PackPurpose::Casters,
     );
     // **How many rigid instances each bucket holds**, kept before the merge because
     // `merge_bucketed` concatenates `rigid[k] ++ scatter[k]` — so inside a merged

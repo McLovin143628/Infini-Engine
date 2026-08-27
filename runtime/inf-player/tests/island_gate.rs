@@ -1807,6 +1807,7 @@ fn the_scattered_cover_draws_its_authored_meshes() {
             eye,
             &caster_settings,
             inf_render::MAX_CPU_SCATTER_INSTANCES,
+            inf_render::PackPurpose::Casters,
         )
     };
     let quiet = pack(&scene.scatter);
@@ -2470,12 +2471,17 @@ fn walk_into_a_building(
         )
     };
     // **The walk arrives from the STREET**, which is the side away from the room
-    // the wall serves. That is not decoration: `DoorSpec::lock_side` is `Inside`
-    // for a grammar door, and `use_door` pressed from the lock side on a shut,
-    // unlocked leaf **locks it** rather than opening it — "locked from the
-    // inside" has to mean something for the person who locked it. The first
-    // draft of this walk stood on `prompt_position`, pressed, and got a verdict
-    // that did not move: it had bolted the front door from the hall.
+    // the wall serves — the way a person reaches a front door, and the side the
+    // gate wants to prove is walkable.
+    //
+    // It used to be load-bearing for a second reason that is no longer true, and
+    // the sentence is corrected rather than deleted because the trap it names is
+    // worth remembering: before island wave I8b, `use_door` pressed from the
+    // LOCK side (`DoorSpec::lock_side` is `Inside` for a grammar door) on a shut
+    // unlocked leaf **locked** it instead of opening it, and the first draft of
+    // this walk stood on `prompt_position`, pressed, and got a verdict that did
+    // not move — it had bolted the front door from the hall. E means open or
+    // close on either face now; the bolt is `lock_door` and its own control.
     let prompt = inf_ecs::door::prompt_position(&placement);
     let approach = slot.hinge - inside_dir * 1.2;
 

@@ -509,6 +509,7 @@ impl ShadowNode {
             super::scatter::bucket_center(scatter_eye),
             &caster_settings,
             super::scatter::MAX_CPU_SCATTER_INSTANCES,
+            super::scatter::PackPurpose::Casters,
         );
         if pack.clamped {
             // Reported, not swallowed — the P18.2 streaming-report discipline. A
@@ -746,6 +747,7 @@ mod tests {
             super::super::scatter::bucket_center(eye),
             &cs,
             super::super::scatter::MAX_CPU_SCATTER_INSTANCES,
+            super::super::scatter::PackPurpose::Casters,
         );
         let pb = super::super::scatter::pack_fallback(
             &b,
@@ -753,6 +755,7 @@ mod tests {
             super::super::scatter::bucket_center(eye),
             &cs,
             super::super::scatter::MAX_CPU_SCATTER_INSTANCES,
+            super::super::scatter::PackPurpose::Casters,
         );
         assert_eq!(pa.instances.len(), 1, "the fixture packs its one instance");
         assert_ne!(

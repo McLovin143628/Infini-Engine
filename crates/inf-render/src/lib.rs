@@ -278,7 +278,7 @@ pub use wetness::{
 // free when off) and the pure band rule both the compute pass and the CPU
 // fallback derive their distances from.
 pub use passes::scatter::{
-    effective_bands, pack_fallback, shadow_caster_settings, ScatterAudit, ScatterPack,
+    effective_bands, pack_fallback, shadow_caster_settings, PackPurpose, ScatterAudit, ScatterPack,
     MAX_CPU_SCATTER_INSTANCES, SHADOW_CASTER_MARGIN,
 };
 // The GPU meshlet cull readback (P13.1b) — the CPU-vs-GPU parity gate + the

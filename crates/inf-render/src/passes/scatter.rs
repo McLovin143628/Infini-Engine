@@ -1005,11 +1005,33 @@ pub fn scatter_caster_fold(batches: &[ScatterBatch]) -> u128 {
     xxhash_rust::xxh3::xxh3_128(&bytes)
 }
 
+/// **What a [`pack_fallback`] is FOR** (island wave I8b audit).
+///
+/// `pack_fallback` has two consumers and they are not interchangeable: the
+/// shadow caster set (the cascade and the virtual shadow map) and the **visible
+/// CPU raster**, which is what draws every scattered instance on a tier where
+/// `ScatterSettings::gpu` is off — `RenderTier::Medium` and below.
+///
+/// [`ScatterBatch::casts_shadows`] is a statement about *shadows* only, so only
+/// one of the two may read it. The wave that added the field passed it through
+/// the shared body, which took the settlements' parts out of the Medium-tier
+/// **picture** as well as out of the caster set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackPurpose {
+    /// The visible CPU raster. Draws every batch in band, including the ones
+    /// that have opted out of casting.
+    Raster,
+    /// The shadow caster set. Skips a batch whose geometry another batch's
+    /// contains ([`ScatterBatch::casts_shadows`]).
+    Casters,
+}
+
 /// Pack a scene's scatter batches into `InstanceRaw`s — for the CPU fallback and
 /// for the shadow caster set — bucketed by primitive kind exactly as
 /// `mesh::pack_bucketed` does.
 ///
-/// Pure: a function of `(origin, batches, eye, settings, limit)` alone. The caller
+/// Pure: a function of `(origin, batches, eye, settings, limit, purpose)` alone.
+/// The caller
 /// snaps `eye` onto [`FALLBACK_EYE_BUCKET_M`] first and keys its cache on the
 /// snapped value, which is what stops a walking camera from re-packing every
 /// frame; the cull radius is widened by the bucket's own half-diagonal so a snapped
@@ -1021,12 +1043,20 @@ pub fn scatter_caster_fold(batches: &[ScatterBatch]) -> u128 {
 /// `bands.y == 0`. So a host that wound the band to zero got an empty frame on the
 /// GPU path and every instance in the world packed on the CPU one. The shader's
 /// reading wins: a cull distance of zero means nothing draws.
+///
+/// **The three scales are all packed** (island wave I8b audit). A
+/// `ScatterInstance::scale` has been a `Vec3` since IB-2b and this function read
+/// only its `x`, which was invisible while the one non-uniform instance in the
+/// engine — a structure **shell** — was one caster among millions that the
+/// ceiling threw away. I8b made the shell the *only* caster a building has, so
+/// a building's whole shadow became a cube of twice its `x` half-extent.
 pub fn pack_fallback(
     origin: &FloatingOrigin,
     batches: &[ScatterBatch],
     eye_world: DVec3,
     settings: &crate::settings::ScatterSettings,
     limit: usize,
+    purpose: PackPurpose,
 ) -> ScatterPack {
     let slack = FALLBACK_EYE_BUCKET_M * 0.5 * 3f64.sqrt();
     // (distance^2, kind, raw) — the distance rides along so an over-limit pack can
@@ -1041,7 +1071,12 @@ pub fn pack_fallback(
         // it because their own shell is in the same scene and casts already.
         // See `ScatterBatch::casts_shadows` for why that is a statement about
         // the content and not a quality knob.
-        if !b.casts_shadows {
+        //
+        // **And only when this pack is a caster set** (I8b audit). The visible
+        // CPU raster runs through this same body on every tier below High, so
+        // reading the field here unconditionally deleted the settlements from
+        // the Medium-tier picture as well as from the shadow.
+        if purpose == PackPurpose::Casters && !b.casts_shadows {
             continue;
         }
         let (mesh_end, cull, _, _) = effective_bands(settings, b.draw_distance);
@@ -1065,10 +1100,18 @@ pub fn pack_fallback(
                 continue;
             }
             let rot = glam::Quat::from_array(inst.rotation);
-            let model = origin.model_matrix(world, rot, Vec3::splat(inst.scale));
-            let n = (Mat3::from_quat(rot)
-                * Mat3::from_diagonal(Vec3::splat(1.0 / inst.scale.abs().max(1e-6))))
-            .to_cols_array_2d();
+            // **All three scales** (I8b audit): `ScatterInstanceRaw` splits the
+            // vector across `scale` and `scale_yz`, and reading only the first
+            // draws a shell — a building's whole shadow since I8b — as a cube
+            // of twice its `x` half-extent.
+            let s = Vec3::new(inst.scale, inst.scale_yz[0], inst.scale_yz[1]);
+            let model = origin.model_matrix(world, rot, s);
+            let inv = Vec3::new(
+                1.0 / s.x.abs().max(1e-6),
+                1.0 / s.y.abs().max(1e-6),
+                1.0 / s.z.abs().max(1e-6),
+            );
+            let n = (Mat3::from_quat(rot) * Mat3::from_diagonal(inv)).to_cols_array_2d();
             kept.push((
                 d2,
                 kind,
@@ -1238,6 +1281,10 @@ impl ScatterNode {
                 bucket_to_world(bucket),
                 &frame.settings.scatter,
                 MAX_CPU_SCATTER_INSTANCES,
+                // **The visible raster** (I8b audit). This is the picture on
+                // every tier below High, so a batch that has opted out of
+                // CASTING still draws here.
+                PackPurpose::Raster,
             );
             if pack.clamped {
                 tracing::warn!(
@@ -1925,6 +1972,7 @@ mod tests {
             DVec3::ZERO,
             &s,
             MAX_CPU_SCATTER_INSTANCES,
+            PackPurpose::Casters,
         );
         // The band plus the eye-lattice slack, and nothing beyond it.
         let slack = FALLBACK_EYE_BUCKET_M * 0.5 * 3f64.sqrt();
@@ -1989,6 +2037,7 @@ mod tests {
             DVec3::ZERO,
             &settings,
             MAX_CPU_SCATTER_INSTANCES,
+            PackPurpose::Casters,
         );
         assert!(
             hot.considered > 3_000,
@@ -2004,6 +2053,7 @@ mod tests {
             DVec3::ZERO,
             &settings,
             MAX_CPU_SCATTER_INSTANCES,
+            PackPurpose::Casters,
         );
         assert_eq!(cold.instances.len(), 0, "a non-casting batch cast");
         assert_eq!(
@@ -2012,6 +2062,101 @@ mod tests {
              exists for is the walk, not the keep"
         );
         assert!(!cold.clamped);
+
+        // **…AND IT STILL DRAWS** (island wave I8b audit). The same body serves
+        // the visible CPU raster on every tier below High, so a field about
+        // shadows read unconditionally here takes the settlements out of the
+        // Medium-tier PICTURE. The falsifier is the pair: same batches, same
+        // settings, two purposes, two answers.
+        let seen = pack_fallback(
+            &origin,
+            &quiet,
+            DVec3::ZERO,
+            &settings,
+            MAX_CPU_SCATTER_INSTANCES,
+            PackPurpose::Raster,
+        );
+        assert_eq!(
+            seen.considered, hot.considered,
+            "a batch that opted out of CASTING stopped being DRAWN by the CPU \
+             fallback — that is the Medium-tier picture, not a shadow"
+        );
+        assert!(!seen.instances.is_empty());
+    }
+
+    /// **A NON-UNIFORM INSTANCE PACKS ALL THREE OF ITS SCALES** (island wave I8b
+    /// audit).
+    ///
+    /// `ScatterInstance::scale` has been a `Vec3` since IB-2b — a structure
+    /// shell's three half-extents — and this function read only `x`, because
+    /// `ScatterInstanceRaw` splits the vector across `scale` and `scale_yz`. It
+    /// was invisible while a shell was one caster among millions the ceiling
+    /// threw away; wave I8b made the shell the **only** caster a building has,
+    /// which turned every building's shadow into a cube of twice its `x`
+    /// half-extent.
+    ///
+    /// The three axis lengths of the packed model matrix are the assertion,
+    /// because that is the thing the shadow raster and the CPU fallback both
+    /// consume. A `Vec3::splat(scale.x)` fails all three.
+    #[test]
+    fn a_non_uniform_instance_packs_all_three_scales() {
+        let origin = FloatingOrigin::new(DVec3::ZERO);
+        let want = Vec3::new(3.0, 11.0, 27.0);
+        let batch = crate::scene::ScatterBatch::lit(
+            std::sync::Arc::new(crate::scene::ScatterData::build(
+                PrimMesh::Cube,
+                DVec3::ZERO,
+                [crate::scene::ScatterInstance {
+                    position: DVec3::ZERO,
+                    rotation: glam::Quat::IDENTITY,
+                    scale: want,
+                    color: [1.0; 4],
+                }],
+            )),
+            DVec3::ZERO,
+            0.8,
+            1,
+        );
+        let base = crate::RenderSettings::default().scatter;
+        let s = shadow_caster_settings(&base, 400.0);
+        let pack = pack_fallback(
+            &origin,
+            &[batch],
+            DVec3::ZERO,
+            &s,
+            MAX_CPU_SCATTER_INSTANCES,
+            PackPurpose::Casters,
+        );
+        assert_eq!(
+            pack.instances.len(),
+            1,
+            "the fixture packs its one instance"
+        );
+        let m = glam::Mat4::from_cols_array(&pack.instances[0].model);
+        let got = Vec3::new(
+            m.x_axis.truncate().length(),
+            m.y_axis.truncate().length(),
+            m.z_axis.truncate().length(),
+        );
+        assert!(
+            (got - want).abs().max_element() < 1e-4,
+            "the caster was packed at {got:?} for an instance scaled {want:?} — \
+             a shell's shadow is a cube of its x extent"
+        );
+        // …and the normal matrix inverts the same three, not one of them.
+        let n = pack.instances[0].normal_mat;
+        let cols = [
+            Vec3::new(n[0], n[1], n[2]).length(),
+            Vec3::new(n[4], n[5], n[6]).length(),
+            Vec3::new(n[8], n[9], n[10]).length(),
+        ];
+        for (k, r) in cols.iter().enumerate() {
+            assert!(
+                (r - 1.0 / want[k]).abs() < 1e-4,
+                "normal-matrix column {k} is {r}, not {}",
+                1.0 / want[k]
+            );
+        }
     }
 
     /// A **zero** shadow range packs no casters, and a zero band packs nothing at
@@ -2035,6 +2180,7 @@ mod tests {
             DVec3::ZERO,
             &none,
             MAX_CPU_SCATTER_INSTANCES,
+            PackPurpose::Casters,
         );
         assert_eq!(
             pack.instances.len(),
@@ -2052,6 +2198,7 @@ mod tests {
             DVec3::ZERO,
             &real,
             MAX_CPU_SCATTER_INSTANCES,
+            PackPurpose::Casters,
         );
         assert!(
             pack.instances.len() > 100,
@@ -2069,11 +2216,25 @@ mod tests {
         s.impostors = false;
         s.cull_distance_m = 10_000.0;
 
-        let all = pack_fallback(&origin, &batches, DVec3::ZERO, &s, usize::MAX);
+        let all = pack_fallback(
+            &origin,
+            &batches,
+            DVec3::ZERO,
+            &s,
+            usize::MAX,
+            PackPurpose::Casters,
+        );
         assert_eq!(all.instances.len(), 4_000);
         assert!(!all.clamped);
 
-        let capped = pack_fallback(&origin, &batches, DVec3::ZERO, &s, 100);
+        let capped = pack_fallback(
+            &origin,
+            &batches,
+            DVec3::ZERO,
+            &s,
+            100,
+            PackPurpose::Casters,
+        );
         assert!(capped.clamped);
         assert_eq!(capped.instances.len(), 100);
         assert_eq!(capped.considered, 4_000);
@@ -2089,7 +2250,14 @@ mod tests {
             "the ceiling did not keep the NEAREST hundred in pack order"
         );
         // Deterministic across calls.
-        let again = pack_fallback(&origin, &batches, DVec3::ZERO, &s, 100);
+        let again = pack_fallback(
+            &origin,
+            &batches,
+            DVec3::ZERO,
+            &s,
+            100,
+            PackPurpose::Casters,
+        );
         assert_eq!(bytes(&capped.instances), bytes(&again.instances));
         assert_eq!(capped.ranges, again.ranges);
     }

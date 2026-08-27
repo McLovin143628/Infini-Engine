@@ -802,6 +802,16 @@ pub struct ScatterBatch {
     /// It is not "cast no shadow": the shell casts. Setting it on a batch that
     /// nothing contains would be, and that is the one thing this field must not
     /// be used for.
+    ///
+    /// # It is read by the CASTER pack alone (island wave I8b audit)
+    ///
+    /// `pack_fallback` has two consumers, and the other one is the **visible**
+    /// CPU raster — the picture on every tier below `RenderTier::High`, where
+    /// `ScatterSettings::gpu` is off. The first cut read this field in the
+    /// shared body, so the settlements stopped being *drawn* on a Medium
+    /// machine as well as ceasing to cast. The purpose is an argument now
+    /// (`passes::scatter::PackPurpose`), and a batch that opts out of casting
+    /// still draws.
     pub casts_shadows: bool,
 }
 
