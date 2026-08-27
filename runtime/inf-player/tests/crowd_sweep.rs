@@ -258,7 +258,7 @@ struct TraceSections {
 }
 
 impl TraceSections {
-    fn of(sim: &mut RuntimeSim, total: usize) -> Self {
+    fn of(sim: &RuntimeSim, total: usize) -> Self {
         let w = sim.world();
         let deform = inf_ecs::deform::deform_state_bytes(w).len();
         let pose = inf_ecs::pose::pose_state_bytes(w).len();
@@ -372,7 +372,7 @@ fn measure(pack: &Path, n: usize, banded: bool) -> Row {
     // a factor of six. Every section is read separately here, and whatever the
     // nine of them do not account for is the bincode snapshot, printed as a
     // residue rather than assumed to be one.
-    let sections = TraceSections::of(&mut fx.sim, trace_bytes);
+    let sections = TraceSections::of(&fx.sim, trace_bytes);
     let posed = sections.pose;
 
     // The projection, measured the way `projection_budget.rs` measures it: no
@@ -943,16 +943,16 @@ fn the_parallel_map_over_agent_decisions_is_priced_before_it_is_prescribed() {
         let plan_one =
             |x: &(Uuid, CrowdRecord, DVec3)| inf_ecs::crowd::plan_agent(&band, x.0, &x.1, x.2, t_s);
         // MIN of three, the instrument's discipline.
+        let serial_out: Vec<_> = inputs.iter().map(plan_one).collect();
+        let par_out = inf_core::parallel_map_ref(&inputs, plan_one);
         let mut serial_ms = f64::INFINITY;
         let mut par_ms = f64::INFINITY;
-        let mut serial_out = Vec::new();
-        let mut par_out = Vec::new();
         for _ in 0..3 {
             let t = std::time::Instant::now();
-            serial_out = inputs.iter().map(plan_one).collect();
+            std::hint::black_box(inputs.iter().map(plan_one).collect::<Vec<_>>());
             serial_ms = serial_ms.min(t.elapsed().as_secs_f64() * 1000.0);
             let t = std::time::Instant::now();
-            par_out = inf_core::parallel_map_ref(&inputs, plan_one);
+            std::hint::black_box(inf_core::parallel_map_ref(&inputs, plan_one));
             par_ms = par_ms.min(t.elapsed().as_secs_f64() * 1000.0);
         }
         assert_eq!(

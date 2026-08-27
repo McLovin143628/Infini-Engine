@@ -72,6 +72,8 @@
 //! **scene v26 does not move**. That is correct for NPC1a — a test population is
 //! transient — and it is the shape NPC1d inherits: a population is *data in the
 //! recipe*, and bodies materialize by tier.
+//!
+//! [`StreamingSource`]: crate::components::StreamingSource
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -470,7 +472,15 @@ impl CrowdRoute {
     pub fn position_at(&self, t_s: f64, phase_m: f64) -> DVec3 {
         let d = self.to - self.from;
         let len = (d.x * d.x + d.y * d.y + d.z * d.z).sqrt();
-        if !(len > 0.0) || !(self.speed_mps > 0.0) || !t_s.is_finite() {
+        // Spelled as one conjunction rather than as three negated comparisons:
+        // `!(len > 0.0)` reads NaN correctly and reads as a clippy lint, and a
+        // route with a NaN end has to answer `from` rather than wander.
+        let walkable = len.is_finite()
+            && len > 0.0
+            && self.speed_mps.is_finite()
+            && self.speed_mps > 0.0
+            && t_s.is_finite();
+        if !walkable {
             return self.from;
         }
         let period = 2.0 * len;
@@ -738,9 +748,9 @@ pub fn clear_crowd(world: &mut EcsWorld) {
 /// After cell + terrain streaming and the sky, **before** the physics sync, the
 /// character step and the animation: the bridge has to see this step's bodies,
 /// and [`crate::pose::step_pose_evaluation`] has to see this step's tiers. Its
-/// own phase ([`STEP_PHASES`] 24 → 25) rather than a corner of an existing one,
-/// because a step that cannot say where its milliseconds went is the defect wave
-/// I4b existed to remove.
+/// own phase (`inf_player::step_profile::STEP_PHASES` 24 to 25) rather than a
+/// corner of an existing one, because a step that cannot say where its
+/// milliseconds went is the defect wave I4b existed to remove.
 ///
 /// # The hero is untouched
 ///
@@ -753,7 +763,6 @@ pub fn clear_crowd(world: &mut EcsWorld) {
 /// [`Full`]: CrowdTier::Full
 /// [`Near`]: CrowdTier::Near
 /// [`StreamingSource`]: crate::components::StreamingSource
-/// [`STEP_PHASES`]: https://docs.rs/inf-player
 pub fn step_crowd(world: &mut EcsWorld, dt: f64) -> CrowdStats {
     step_crowd_banded(world, dt, DEFAULT_CROWD_RADII)
 }
@@ -766,8 +775,10 @@ pub fn step_crowd(world: &mut EcsWorld, dt: f64) -> CrowdStats {
 /// The step below is three things in a trench coat: a world read (where is this
 /// agent), a decision (`band.tier` + `route(clock)`), and a world write
 /// (spawn/despawn/transform). Only the middle one is a pure function, and only a
-/// pure function can go through [`inf_core::parallel_map`]'s deterministic
-/// in-order map — the ECS mutation cannot, it needs `&mut World`.
+/// pure function can go through `inf_core::job`'s deterministic in-order map —
+/// the ECS mutation cannot, it needs `&mut World`. (Named in prose rather than
+/// linked: `inf-ecs` does not depend on `inf-core`, and this wave's measurement
+/// says it should not start.)
 ///
 /// So the decision lives here, the step calls it, and the sweep instrument times
 /// **this exact function** serially and in parallel at N ∈ {1, 10, 100, 1 000}.
@@ -1023,9 +1034,26 @@ pub fn crowd_stats(world: &EcsWorld) -> CrowdStats {
 /// and the cached digest of the pose it last published (8).
 ///
 /// That is the whole re-shape: at N = 100 agents all Far the crowd costs
-/// `100 × 49 = 4 900` B a step against `100 × 6 476 = 647 600` B — **132×** —
-/// and the trace still distinguishes two agents frozen mid-stride in different
-/// poses, which a section that emitted only a tier could not.
+/// `100 × 49 = 4 900` B a step against `100 × 6 476 = 647 600` B — **132×**.
+///
+/// # What the DIGEST buys, precisely
+///
+/// A demoted agent's pose is not merely small in the trace; it is **gone** —
+/// [`crate::pose::step_pose_evaluation`] rebuilds its store from scratch each
+/// step, so an agent that stopped posing has no entry and no current pose to
+/// describe. The digest is therefore not a summary of live state; it is a fold of
+/// the last pose the agent published, carried as **history**.
+///
+/// That is what makes it worth eight bytes: it puts the *step at which an agent
+/// left the pose path* into the trace. Without it, a host that demoted one agent
+/// a single step early would produce identical bytes until the two hosts happened
+/// to run a pose that differed — which on a stationary crowd could be never. With
+/// it, the two diverge on the step they disagreed, which is the step a reader
+/// needs.
+///
+/// A section that emitted only the tier would nearly do the same job and would
+/// lose one case: two runs that demoted the same agent on the same step from
+/// *different* poses. That is the case a mid-trace start produces.
 ///
 /// The position is folded even for materialized agents, where the sim snapshot
 /// already carries it. That is 24 duplicated bytes an agent, spent on purpose: a

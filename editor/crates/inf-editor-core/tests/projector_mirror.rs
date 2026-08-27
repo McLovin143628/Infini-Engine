@@ -2497,7 +2497,14 @@ fn both_fixed_steps_tier_the_crowd_before_the_passes_that_read_a_tier() {
             src.find(needle)
                 .unwrap_or_else(|| panic!("the {label} fixed step does not call `{needle}`"))
         };
-        let crowd = at("inf_ecs::crowd::step_crowd(");
+        // No trailing paren, deliberately: the shipped player calls
+        // `step_crowd_banded` (it carries the level's own radii) and the editor
+        // calls `step_crowd`, and both are the same Ring-0 door. What this arm
+        // is about is WHEN the tier is decided, not which of the door's two
+        // spellings a host reaches for -- and the paren version of this needle
+        // went red the moment the player took the radii seam, which is the arm
+        // failing on a rename rather than on the property it names.
+        let crowd = at("inf_ecs::crowd::step_crowd");
         let bridge = at("sync_from_world_sim(");
         let mover = at("step_character_movement(");
         let pose = at("advance_state_machines(");

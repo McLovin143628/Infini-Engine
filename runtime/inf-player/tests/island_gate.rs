@@ -380,6 +380,23 @@ fn pie_sim(proj: &Path) -> RuntimeSim {
 /// two hosts growing different forests. It is folded here instead, which is
 /// where the claim belongs: **the vegetation is a function of the resident
 /// ground, and the resident ground is sim state.**
+///
+/// # Why it RETAINS every step, and what that costs (re-aimed, wave NPC1a)
+///
+/// `states` holds all 900 steps rather than folding them into a running hash,
+/// and that is load-bearing rather than lazy: the anti-vacuity arm below asks how
+/// many of the 900 are DISTINCT, which is a question about a set and cannot be
+/// asked of a hash chain. A gate that compared two rolling digests would pass
+/// perfectly on two hosts that both recorded nothing happening.
+///
+/// The cost is a function of the crowd, which is why this paragraph is dated:
+/// a state is 403 B before the hero was a character, 6 879 B after it (SK1c), and
+/// **35 366 B with NPC1a's 24-agent crowd standing beside it** — 31.8 MB retained
+/// per host, 63.6 MB for the pair. That is affordable and it does not scale: at
+/// the thousand agents `crowd_sweep.rs` measures, a state is about 1.1 MB and
+/// 900 of them is a gigabyte. **A crowd gate at N in the hundreds folds instead
+/// of retaining, and keeps a separate distinctness reading over a sampled
+/// prefix** — stated here rather than discovered by an out-of-memory run.
 struct Trace {
     states: Vec<Vec<u8>>,
     /// Per step: a digest of every instance's position bits and kind.
@@ -915,11 +932,25 @@ fn pie_equals_shipping_with_a_crowd_across_tier_transitions() {
     let occupied = |i: usize| a.crowd.iter().any(|c| c[i] > 0);
     let names = ["full", "near", "far", "dormant"];
     let seen: Vec<&str> = (0..4).filter(|i| occupied(*i)).map(|i| names[i]).collect();
+    // The FIRST step re-tiers everything, because every record starts `Dormant`
+    // and the band classifies it — so a `max` over the whole run would be
+    // satisfied by that initial classification alone and would say nothing about
+    // a transition. The claim is about the DRIVE, so the count is taken over the
+    // steps after the crowd has settled.
+    const SETTLED: usize = 10;
     let transitions = *a.retiered.iter().max().expect("900 steps");
+    let on_the_drive = a
+        .retiered
+        .iter()
+        .skip(SETTLED)
+        .copied()
+        .max()
+        .expect("900 steps");
+    let moved = a.retiered.iter().skip(SETTLED).filter(|r| **r > 0).count();
     let peak_full = a.crowd.iter().map(|c| c[0]).max().unwrap_or(0);
     let peak_dormant = a.crowd.iter().map(|c| c[3]).max().unwrap_or(0);
     println!(
-        "CROWD over the drive: {CROWD_N} agents, tiers occupied {seen:?}, {transitions} re-tierings, peak {peak_full} full / {peak_dormant} dormant"
+        "CROWD over the drive: {CROWD_N} agents, tiers occupied {seen:?}, {transitions} re-tierings at peak ({on_the_drive} after the first {SETTLED} steps, on {moved} steps of {STEPS}), peak {peak_full} full / {peak_dormant} dormant"
     );
     assert_eq!(
         seen.len(),
@@ -927,9 +958,13 @@ fn pie_equals_shipping_with_a_crowd_across_tier_transitions() {
         "only {seen:?} of the four tiers were ever occupied - the drive does not walk the ladder, so the transition this arm is about never happens"
     );
     assert!(
-        transitions > 0,
-        "no agent changed tier over {STEPS} steps of a {:.0} m drive",
+        on_the_drive > 0,
+        "no agent changed tier after step {SETTLED} of a {:.0} m drive - every re-tiering this run saw was the initial classification, and the transition case is untested",
         2.0 * STEPS as f64 * STEP_M
+    );
+    assert!(
+        moved > 1,
+        "the crowd re-tiered on {moved} step(s) after settling - one is a single boundary crossing and the arm wants a drive"
     );
 
     // ── and the two hosts agree, step for step ──────────────────────────────
@@ -993,6 +1028,30 @@ fn pie_equals_shipping_with_a_crowd_across_tier_transitions() {
         "{posed_agents} of {} characters were posed - the ladder decided nothing",
         CROWD_N + 1
     );
+
+    // ── THE CACHED DIGEST IS NOT DEAD CODE ─────────────────────────────────
+    //
+    // A demoted agent's pose is GONE from the store, so the eight bytes
+    // `CrowdRecord::pose_digest` contributes are a fold of the last pose it
+    // published, carried as history — and history nothing reads is a field that
+    // could be permanently zero with every other arm in this file green. This
+    // says it moves: at least one agent walked down off the pose path over the
+    // drive and took a non-zero digest with it, and both hosts agree on which.
+    let digests = |sim: &RuntimeSim| -> Vec<(Uuid, u64)> {
+        sim.world()
+            .world()
+            .get_resource::<inf_ecs::crowd::CrowdPopulationRes>()
+            .map(|p| p.records.iter().map(|(g, r)| (*g, r.pose_digest)).collect())
+            .unwrap_or_default()
+    };
+    let (ds, dp) = (digests(&ship), digests(&pie));
+    let carried = ds.iter().filter(|(_, d)| *d != 0).count();
+    println!("CACHED DIGESTS: {carried} of {CROWD_N} agents carry one");
+    assert!(
+        carried > 0,
+        "no agent carries a cached pose digest after {STEPS} steps - either nothing was ever demoted out of a posing tier, or the capture is dead code and the eight bytes it folds are permanently zero"
+    );
+    assert_eq!(ds, dp, "the two hosts cached different pose digests");
 
     // ── AND THE ISLAND ITSELF DID NOT MOVE ──────────────────────────────────
     //

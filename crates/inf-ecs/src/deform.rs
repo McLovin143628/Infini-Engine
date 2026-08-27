@@ -252,7 +252,15 @@ pub fn ground_contacts(world: &EcsWorld) -> Vec<GroundContact> {
         // The rule is the general one and not a crowd special case: **a thing
         // with no rapier body presses no ground.** For a crowd agent the tier is
         // the authority on that; for everything else `pressure_of` already was.
-        if crate::crowd::agent_tier(world, e.id()).is_some_and(|t| !t.has_body()) {
+        // Read off the `EntityRef` this walk already holds rather than through
+        // `crowd::agent_tier`, which would re-resolve the entity: the loop is
+        // `O(entities)` and this sits after the collider and sensor filters, so
+        // it is `O(non-sensor colliders)` and one lookup on a level with no
+        // crowd. The predicate is `CrowdTier::has_body` — the same one the 3D
+        // bridge gates its bodies on, so the two cannot answer differently.
+        if e.get::<crate::crowd::CrowdAgent>()
+            .is_some_and(|a| !a.tier.has_body())
+        {
             continue;
         }
         let Some(pressure) = pressure_of(
