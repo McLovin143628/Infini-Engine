@@ -12230,3 +12230,419 @@ re-measured — the wave read 5.853 with the same 17 289 admitted colliders and
 * **A prompt that promises a verb its handler does not offer is a defect even
   when the handler is correct.** `door_label` said "alongside"; `use_door` means
   "instead of". The behaviour is deliberate and pinned; the sentence was not.
+
+
+## Wave I8b — the buildings stop being cubes (2026-08-27)
+
+Base `670f0d7c`. Five clauses, four taken and one **stopped with its route and
+its measurement**. The headline is not the one the brief expected: the wave's
+own first act was to find that *the settlements were never drawing wall-sized
+boxes at all*, and its largest number came from the shadow path rather than from
+the raster.
+
+> **`LIT+VIS` went from 15.4 fps p50 to 33.0, and its pipelined estimate from
+> 29.5 fps to 55.6.** `vsm raster` — the single dearest thing the CPU did in a
+> lit frame — went **16.672 → 0.652 ms**. ≥ 60 fps p50 is still **NOT MET**
+> (30.305 ms against 16.6) and stays the carried headline.
+
+### THE FINDING THE WAVE OPENED WITH
+
+Wave I8a's ledger reads *"365 545 **wall-sized** opaque boxes"*, and the law it
+minted reads *"a placeholder is only cheap when it is small"*. Both are about a
+size the engine was never drawing.
+
+`inf_pcg::PcgInstance::scale` — and its ECS mirror — is **one uniform `f64`**,
+and every module the building assembler places carries `1.0`. A 0.12 × 3.5 ×
+1.5 m curtain-wall panel, a 10 × 0.2 × 10 m floor slab and a 0.9 m desk
+therefore all drew as the **same one-metre cube**, while their *colliders* were
+exactly the size the palette and the plan said. A building has never once been
+drawn at the dimensions it is built at: what the island rendered was a lattice
+of 365 545 one-metre cubes at the module positions.
+
+So this wave ships two things where the brief asked for one — a **size** and a
+**mesh** — and they are the same commit.
+
+### Clause 1 — a module draws its own shape, at its own size
+
+`inf_pcg::building::modules`, Ring 0. **Twelve shape families**, each authored in
+the unit box `[-0.5, 0.5]³` as a small union of axis-aligned boxes with flat
+normals, scaled onto the instance's own half-extents at projection:
+
+| family | what it is | boxes | triangles | palette modules |
+|---|---|---|---|---|
+| `panel` | a leaf with a border proud on both faces | 5 | 60 | Spandrel, Wall, Balcony, Partition, Cladding, Brick, Ashlar, Panelled, Solid |
+| `glazing` | a frame around a recessed pane | 5 | 60 | **Pane**, Glazing, Shopfront |
+| `column` | a shaft with a base and a cap | 3 | 36 | Mullion, Pier, Column, Quoin, Pilaster, Stall |
+| `deck` | a plate with a fascia lip on four rims | 5 | 60 | Slab, Roof |
+| `tread` | a tread with a nosing | 2 | 24 | Step |
+| `course` | a band with a drip course | 2 | 24 | Lintel, Parapet |
+| `legged` | a top on four legs | 5 | 60 | Desk, Table, Bench |
+| `carcass` | a body on a recessed plinth with a rail | 3 | 36 | Cabinet, Locker, Wardrobe, Units, Shelf, Rack, Counter, Basin |
+| `soft` | a base, a back and two arms | 4 | 48 | Sofa, Bed |
+| `planter` | a pot, a stem, a canopy | 3 | 36 | Plant |
+| `crate` | a body with four corner battens | 5 | 60 | Crate |
+| `shutter` | a leaf with five horizontal ribs | 6 | 72 | RollDoor |
+
+**A family and not a mesh per palette entry**, because a module's *dimensions*
+live on the instance now: an office mullion and a house quoin are the same shape
+at two sizes, and a mesh each would put two identical uploads in the GPU cache
+under two ids. Every feature is **proportional** — a frame rail is a fraction of
+the panel, never a fixed 40 mm — because one mesh is stretched onto a 0.3 m
+mullion and a 12 m slab alike.
+
+**The GUIDs are content-derived** from the family's own name under a private
+salt: the synthetic-guid rule this repository already uses for door leaves, PCG
+doorways, structure colliders and fracture chunks. No `.inf_mesh` file exists for
+any of them, so neither host's asset scan can find them and **both hosts add the
+table by hand**, from one Ring-0 source through one Ring-0 flattener, behind a
+`building_module_table` fence and a new mirror arm. An authored asset under one
+of these ids **wins**.
+
+**Where the stamping happens is the whole of the "one door" argument.**
+`BuildingArchetype::grammar()` is the one place a palette becomes a `Grammar`,
+so it is the one place `ModuleDef::mesh` is filled — and `expand_span`'s
+`place_module` and the assembler both read that one field rather than each
+deriving an id. The palette *text* stays free of GUIDs, which is what keeps
+`palettes.rs` readable.
+
+**Two defects in the box builder, both caught by their own arms** before
+anything drew:
+
+* a crate's corner battens reached **0.52** out of a unit box, so the mesh would
+  have scaled past its own collider;
+* **every ±Z face was wound inside out.** The first draft used one axis pair per
+  face and flipped the winding on the sign, which is right for four faces and
+  wrong for two, because `ê_x × ê_y` is `+ê_z` while `ê_z × ê_y` and `ê_x × ê_z`
+  are both negative. The symmetry a reader expects is not there; the fix is a
+  per-face axis pair chosen so `ê_u × ê_v == n` always, and one winding.
+
+### Clause 3 — the windows are glass, and they light up
+
+A window was a **hole**. `opening_trim` put a lintel above it and a parapet
+below and nothing in it, so a building's façade was perforated and you could see
+straight through the storey.
+
+Every palette now declares a **`Pane`**, hung in the window void by the
+assembler exactly like the lintel — and, unlike the lintel, **with no collider**:
+a window you cannot see through is a wall, and `opening_is_clear` is an assertion
+about *solids*. That costs one invariant and replaces it with a checkable one:
+
+> the first `colliders.len()` instances are the solid ones, and everything after
+> them is decoration (`GrammarOutput::decor`, folded in **once**, by
+> `assemble_in`).
+
+`inf_editor_core::bake` splits its two doors on exactly that: a **building** may
+have a decoration tail, the generic `expand_span` path may not — where a longer
+instance list still means a module that declared no collider, which is the drift
+its refusal was always about. One argument, two callers, and the refusal keeps
+its meaning on both.
+
+**The glow is emission, and the 16-light ceiling is untouched.** A glazed module
+carries an authored multiplier; the **hour** is applied once, by the projector,
+from the sun height `project_sky` has just written — so there is no second read
+of the clock and no analytic light. Two consequences, both load-bearing:
+
+* `ScatterBatch::emissive` is one value for a whole batch, so instances bucket on
+  **(mesh, glow)** rather than on mesh alone. That is what the +33 batches on the
+  island are.
+* the emission is **not** part of `ScatterData`, so a carried batch would keep
+  the hour it was packed in — *a city lit at noon*, and invisible to every other
+  field of the scatter memo's key. `ScatterSource` grows `glow_step`, quantized
+  to sixteen by `inf_render::night_glow_step`, which makes a whole sunset sixteen
+  re-packs instead of one per frame.
+
+### Clause 2 — the performance clause, and where its milliseconds actually were
+
+**The brief's mechanism was half right and its magnitude was in the wrong pass.**
+
+The instrument's own vsm line said it, and wave I8a's audit quoted it without
+following it: *"7 831 552 casters, every one of them scattered, 17 721 930
+dropped"* — and **16 384 casters per rastering frame**, which is
+`VSM_MAX_CASTERS` exactly, hit on every frame of the flight.
+`passes::scatter::pack_fallback` walks **every instance of every batch** to
+distance-test it and then truncates the survivors to that ceiling. A city was
+walked to keep four percent of it, at **16.672 ms a frame — 70.2 % of the whole
+record stage**.
+
+The content already had the answer. A building's parts stand inside its own
+**shell**, the shell is in the same scene, and `pack_fallback` reads
+`draw_distance` and ignores `near_distance` — so the shell is packed as a caster
+from zero metres out and casts the building's whole silhouette already. Fifteen
+hundred interior boxes contribute nothing to it.
+
+So `ScatterBatch` grows `casts_shadows`, `true` everywhere it predates the field,
+and `push_pcg_scatter` sets it **`false` on the parts batch alone**: loose content
+(a fence, a scatter) has no shell standing in for it and keeps casting, and the
+shell batch is the one that must always be true. `pack_fallback` skips a
+non-casting batch in `O(1)` instead of `O(instances)`. The arm measures the
+**walk** and not the keep — `considered`, the count *before* the ceiling bites,
+must be zero — which is what says the instances were never touched rather than
+packed and thrown away.
+
+**And it gave the island back a shadow it had lost without anyone noticing.**
+Before: 7 831 552 casters, **every one scattered**, 0 terrain, 17 721 930
+dropped. After: 111 370 casters — **18 638 scattered, 91 776 terrain**, 478
+meshlet-asset, 478 skinned — and **0 dropped**. The settlements were not merely
+expensive; they were crowding the *terrain* out of the caster budget entirely, so
+the island's own ground had stopped casting.
+
+### THE ARMS, and what each one measures
+
+All three live in `the_scattered_cover_draws_its_authored_meshes` — wave TER2b's
+own arm, and the one place a **real cooked pack** is already booted, driven until
+its ground is resident and projected through `project_scene_full`, which is the
+function the windowed player calls.
+
+| arm | measured |
+|---|---|
+| **zero placeholder batches** | **33 batches, 29 carry geometry, 4 are shell boxes, 0 are placeholders.** "Placeholder" means one thing exactly: a batch whose `geometry` is `None`, drawing `PrimMesh::Cube` for content that is not a cube. The shell is counted apart rather than waved through — a shell *is* an oriented box by definition — and asserted non-empty, so the zero cannot be a zero over nothing |
+| **zero walked casters** | the caster pack considered **132** instances where the same scene with every batch casting — the pre-I8b engine exactly, built by **mutating a clone** — considered **23 121**. `considered` is the count *before* `VSM_MAX_CASTERS` bites, so it says the parts were never touched rather than packed and thrown away |
+| **night windows** | nothing emits by day (asserted **first**, or the comparison below is vacuous); the world's own `TimeOfDay` is then wound to local midnight and the **same** projection re-runs: sun `y = −0.303` → glow step **16**, **4 of 33 batches emit over 2 122 of 2 122 glazed instances**, every one warm (`r > g > b`) and every one carrying real geometry — a glowing cube would be worse than a dark window |
+
+The I4 audit deleted the first attempt at the placeholder arm as a **fixture
+tautology** (*"the scene is hand-built with `..Default::default()`, so
+`scatter.is_empty()` asserted that `Vec::new()` is empty"*); this one runs on a
+pack, and the caster half carries its own falsifier rather than a bound.
+
+Beside them, `night_glow_step` is unit-armed for a ramp that **passes through
+its middle** rather than switching, for a daytime step of exactly zero — which
+is what keeps a level with no night byte-identical to the pre-I8b engine — and
+for a non-finite sun direction reading as day.
+
+### BOTH FRAME TABLES
+
+RTX 4070 Ti, Windows/Vulkan, **release**, 1080p, MIN of 3 rounds × 120 frames,
+the same 40 m-high flight east from Harbour City every island wave has flown.
+"Before" is this wave's own re-run of the arm at `670f0d7c` on this machine
+(SHIPPED p50 23.268 against the I8a audit's 22.703 — the same content, a
+different day's clocks).
+
+**`SHIPPED` — the configuration that ships.**
+
+| | before | after modules | **after I8b** |
+|---|---|---|---|
+| p50 / p95 | 23.268 / 25.326 ms (43.0 fps) | 23.624 / 25.215 (42.3) | **23.575 / 25.585 ms (42.4 fps)** |
+| GPU frame | 12.204 ms | 12.179 | **12.204 ms** |
+| `scatter` | 3.747 ms | 4.682 | **4.683 ms** |
+| `terrain` | 6.120 ms | 5.358 | **5.359 ms** |
+| cpu projection | 0.673 ms | 0.712 | **0.684 ms** |
+| cpu render (record) | 3.501 ms | 3.739 | **3.748 ms** |
+| pipelined estimate | 12.204 ms (81.9 fps) | 12.179 (82.1) | **12.204 ms (81.9 fps)** |
+
+**`LIT+VIS` — everything on.**
+
+| | before | after modules | **after I8b** |
+|---|---|---|---|
+| p50 / p95 | 64.821 / 86.262 ms (**15.4 fps**) | 65.064 / 85.783 (15.4) | **30.305 / 57.339 ms (33.0 fps)** |
+| GPU frame | 33.450 ms | 33.861 | **17.972 ms** |
+| `scatter` | 13.327 ms | 16.871 | **7.028 ms** |
+| `terrain` | 11.139 ms | 9.134 | **3.077 ms** |
+| `gi` | 2.578 ms | — | **0.781 ms** |
+| cpu render (record) | 23.739 ms | 23.746 | **6.303 ms** |
+| — of which `vsm raster` | **16.672 ms (70.2 %)** | 16.672 | **0.652 ms (10.4 %)** |
+| cpu projection | 0.738 ms | 0.734 | **0.788 ms** |
+| **pipelined estimate** | 33.861 ms (29.5 fps) | 33.861 (29.5) | **17.972 ms (55.6 fps)** |
+| content | 69 batches / 365 545 instances | 102 / 389 793 | **102 / 389 793** |
+| vsm casters (run) | 7 831 552, all scattered, 17.7 M dropped | unmoved | **111 370 (18 638 scattered, 91 776 terrain), 0 dropped** |
+| vsm casters / rastering frame | **16 384 — the ceiling** | 16 384 | **233** |
+
+The other three: `LIT` 67.045 → **29.976**, `LIT+SSR` 66.124 → **29.922**,
+`LIT-COARSE-CLIPMAP` 66.430 → **25.026**. The fixed step is unmoved and inside
+its ratchet: **5.670 ms** against 6.0, on the same 17 823 bodies, 17 289 admitted
+structure colliders and 58 582 contact pairs — the wave adds nothing to the sim.
+
+> **≥ 60 fps p50 `LIT+VIS` is STILL NOT MET.** 30.305 ms against 16.6 — a
+> distance of **+13.705 ms**, where wave I8a's was +48.221. The pipelined
+> estimate is **55.6 fps** and is within a millisecond and a half of the budget.
+
+**Read the middle column as a price, not a regression.** Real module geometry
+costs **+0.94 ms of `SHIPPED` scatter and +3.5 ms of `LIT+VIS` scatter** at the
+same instance count plus 24 248 window panes — the I4 measurement ("real geometry
+costs more, +0.32..1.4 ms per config") met again at settlement scale. The frame
+did not move for it, because the CPU record stage was the bottleneck in every lit
+configuration until the caster clause took it away.
+
+### Clause 2, the half that was STOPPED — with its route and its price
+
+**The routed project — "a runtime vgeom asset per archetype, one door" — is
+phase-sized, and this wave has the number that says so.** Measured on this
+machine, release, `inf_vgeom::build_vgeom` over a disjoint box soup:
+
+| boxes | vertices / triangles | levels | build |
+|---|---|---|---|
+| 400 | 3 200 / 4 800 | 1 | **7.2 ms** |
+| 1 600 | 12 800 / 19 200 | 1 | **41.3 ms** |
+| 6 000 | 48 000 / 72 000 | 6 | **301.4 ms** |
+
+A real settlement building is **~1 551 solids** (the I8a battery's own
+per-archetype counts), so it is the middle row: **41 ms of meshlet build per
+building**, and about **450 buildings are resident** at Harbour City — 18.5
+seconds of build, on a path that runs at *cell activation*. Worse, `levels = 1`:
+a soup of **disjoint** boxes does not coarsen at all, so the DAG a per-building
+bake produces has no LOD in it and the meshlet path would draw every interior
+box at every distance.
+
+The **per-module** alternative is refused with its own mechanism rather than a
+guess: `RenderScene::vgeom_instances` has **no memo** — `VgeomNode::run` and
+`plan_cluster_pages` each call `pack_instance` over every instance every frame,
+`vsm_raster::pack_casters` walks them twice more with **no distance cull at
+all**, and the caster ceiling is the same `VSM_MAX_CASTERS = 16 384`. 365 545
+vgeom instances would re-create the cost this wave just removed, one subsystem
+over.
+
+**What is left is the shape that fits, and it is named here for the next
+implementer**: *one vgeom instance per BUILDING SHELL*, drawing one of seven
+per-archetype façade assets under a non-uniform scale — ~450 instances, 7 assets,
+a few milliseconds of `build_vgeom` at load, HZB-occlusion-culled in the main
+raster and per-page GPU-culled in the VSM. It was not taken here because of what
+the wave found while pricing it, which is the next section.
+
+### THE SECOND FINDING: a building is a BILLBOARD from 120 m, and its shell can never be a mesh
+
+`STRUCTURE_LOD_M` is **192 m** and `ScatterSettings::default().mesh_distance_m`
+is **120 m**. `effective_bands` computes `mesh_end = min(mesh_distance_m, cull)`,
+so:
+
+| distance | what a building draws |
+|---|---|
+| 0 – 120 m | its parts, as real geometry |
+| 120 – 217 m | its parts, as **hundreds of impostor billboards each** |
+| 192 – 400 m | its shell, as **one impostor billboard** — never as a mesh |
+
+The shell's band starts *after* the renderer's mesh band ends, so **a shell has
+never once been rasterized as geometry**, at any distance, on any island. Giving
+it a façade mesh would therefore have changed exactly nothing on screen, and the
+100 m annulus in which a city is a cloud of billboards is where a large part of
+the remaining 7.028 ms of `scatter` lives.
+
+That is a **band ordering** defect, not a geometry one, and the repair is one
+comparison: the structure swap must happen at or below the scatter path's own
+mesh band, so a building becomes its shell *before* its parts degrade to cards.
+`inf_pcg::building::lod::DEFAULT_STRUCTURE_LOD_M` is already **96 m** — the two
+constants disagree by a factor of two and only the render one is past
+`mesh_distance_m`. It is not taken here because `structure_lod_pop` is a
+perceptual gate built *around* the 192 m reading (its own note says *"at the
+192 m structure swap the scatter path is ALREADY in its impostor band"*), and
+re-aiming a golden-adjacent perceptual gate is a slice of its own. **Both halves
+— the band fix and the façade that becomes visible once it lands — belong to one
+next wave, in that order.**
+
+### Clause 4 — the two gameplay findings
+
+**(a) A door pressed from the lock side now opens.** The I8a audit's MED-5,
+carried by name and closed. `door_label` said the lock verb was offered
+*"alongside the open/close, because a door you can lock is still a door you can
+walk through"*; `use_door` meant *instead*. From the lock side a **shut** leaf
+took the lock verb whatever its bolt was doing, so pressing E cycled
+lock → unlock → lock and **never opened** — and a character who closed the front
+door behind them could not open it again, 2 070 doorways at a time.
+
+One control cannot carry two verbs that are both wanted in the same state, so the
+bolt gets its own. `use_door` always means open or close, on either face (a
+locked door still answers `Locked` and does not move); `lock_door` is offered on
+the owner's face alone, **refused on an open leaf** (a door standing open with
+its bolt thrown is a lock nobody can see — the one part of the old behaviour
+worth keeping), and toggles, because a key in a hand does both. `actions::LOCK`
+is bound to **L** and to the gamepad's East, reaches the fixed step as an edge on
+`MovementIntent` and `MovementRuntime` like every other, and is consumed through
+the **same `interact::resolve`** the open verb uses — so the prompt, the open and
+the lock cannot come apart about which door is meant. No schema moves.
+
+`every_movement_action_the_intent_reads_is_bound` did its job twice on the way:
+it caught the unbound action, and then it caught that `KeyL` had no winit
+keycode behind it — *"the binding is unreachable from a keyboard"*.
+
+**(b) The stair-core finding is CLOSED, and it was never a world defect.** Wave
+I8a's own laws section records the disposition: *"A stair core is full of stairs.
+'No solid is here' aimed at a stairwell measures the treads. Ask reachability of
+the stair and standability of the room."* A flight is a solid stepped ramp by
+construction — tread `k` spans from the lower floor's surface to its own top — so
+a point test aimed at the core reads the treads because the treads are what is
+there. `a_flight_lands_exactly_on_the_floor_above` pins the landing, the stairwell
+is asserted open above floor 0
+(`floors_are_slabs_and_the_stairwell_is_a_void`), and the settlement gate's
+123-step walk climbs one. Verified open in the memo, verified closed in the tree,
+and **nothing was changed**.
+
+### Clause 5 — sidewalks and kerbs: ROUTED, by name
+
+Not taken, and the reason is the budget rather than the difficulty: the wave
+closed at **30.305 ms p50 `LIT+VIS` against a 16.6 ms frame**, so there is no
+measured headroom to spend on new committed surface. It joins wave I8a's carried
+item 3 (*the settlement streets are a plan, not a surface*) as one item with one
+shape: **a second road surface at a coarse ground step**, since a settlement
+street sits on a levelled pad where the chord error is 0.000000 m at any step,
+and `roads::build_mesh` takes one `ground_step_m` for one layer. 60.88 km of
+centreline at a 7 m carriageway is ~426 000 m², which would roughly double the
+island road mesh's 517 086 vertices. Street furniture (lamps, kerbs, bollards)
+would ride the same pass as a `grammar.expand` fence, which already exists.
+
+### Counts
+
+| | before (`670f0d7c`) | **after I8b** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 328 / 6 232 / 0 / 19 | **328 / 6 246 / 0 / 19** — `cargo test --workspace -j 3`, **+14 arms and no new block**, every one attributed: **7** in `inf-pcg`'s new `building/modules.rs`, **4** in its `building/assemble.rs`, 1 in `inf-render`'s `passes/scatter.rs`, 1 in its `scene.rs`, 1 in `inf-editor-core`'s `projector_mirror` |
+| goldens | 58 | **58** — none added, none re-blessed; `INF_GOLDEN_STRICT=1` green over **117 arms, 0 failed**, and `git status` over `tests/goldens` empty afterwards |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — 404 `^warning` lines minus 30 per-crate summaries, after `cargo clean --doc`. **The wave adds zero**: it opened five (a mirror named instead of the type, a method without its type, a private salt linked from a public item, a test path rustdoc cannot see, and `super::assemble`, which is both a function and a module) and closed all five. Headroom **76** |
+| `clippy --workspace --all-targets -D warnings` | 0 | **0** (local toolchain, run LAST per the rmeta law). **Two findings, both this wave's, and one was the hazard the last wave paid for**: `!(glow > 0.0)` is a negated comparison on a partially ordered type, and the obvious rewrite `glow <= 0.0` is **false for a NaN** — which would have multiplied straight through into an emissive a batch then carries for ever. It is `!is_finite() \|\| <= 0.0` now, exactly as the I8a zone pick. The other was a redundant closure around `door::toggle` |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved.** `PcgInstance`/`ScatteredInstance` grew `extent` and `glow` and both live only inside `#[serde(skip)]` caches (`PcgVolume::evaluated`, `Terrain::biome_population`) — the TER2b precedent exactly; `ModuleDef::glow` is derived and never parsed; `ScatterBatch`, `ScatterSource` and `RenderScene` are render-side and are serialized nowhere; `MovementRuntime::press_lock` is a runtime component |
+| committed levels (`EXPECTED_LEVELS`) | 23 | **23** |
+| committed content | — | **two files, 6 additive lines each**: `samples/phase29-locomotion/input.toml` and `samples/starter-character/input.toml` take the `lock` binding, regenerated from `default_map` through their own generator (which is what `committed_sample_matches_generators` exists to force). The two `.inf_lvl`s are **byte-unmoved** (49 625 B and 9 990 B), and **no new `.inf_mesh`** — a module's geometry is a function of its own name |
+| new crates / external dependencies | — | **none**. `Cargo.lock` moves by **one line**: `inf-viewport` names `inf-pcg`, which `inf-editor-core` already linked. One new Ring-0 module (`inf_pcg::building::modules`) |
+| frontend | untouched | **untouched and not run** (`git diff -- editor/studio/src` is empty; the only Ring-2 change is `commands/pcg.rs`, which is Rust) |
+
+### Carried, by name
+
+1. **≥ 60 fps p50 `LIT+VIS` is not met**: 30.305 ms against 16.6, +13.705.
+   Pipelined 55.6 fps. Still the headline, and it is now one pass — `scatter`, at
+   7.028 ms — rather than three costs.
+2. **A building is a billboard from 120 m and its shell can never be a mesh.**
+   The band-ordering finding above, with its one-comparison repair and the reason
+   it was not taken.
+3. **The routed vgeom project, re-priced with numbers**: per-building is 41 ms of
+   `build_vgeom` each and produces `levels = 1`; per-module re-creates the cost
+   this wave removed; per-shell is the shape that fits.
+4. **The shell casts a BOX.** The parts no longer cast and the shell casts for
+   them, which is correct at the silhouette; what the shell casts is the proxy
+   cube, because the caster pack binds one shared vertex buffer for the whole
+   frame. That is TER2b's own carried bound, unmoved, and the shell is a derived
+   oriented box rather than a placeholder — but a façade that draws and a box
+   that casts are two silhouettes, and the day item 3 lands they become one.
+5. **The impostor card is still sized from a bounding sphere** (IP item 5's
+   remainder), which is now more visible: a module mesh's own radius is what the
+   card takes, and a wall panel's bounding sphere is 1.9× its silhouette.
+6. **A module mesh is stretched, not tiled.** A 12 m slab and a 0.2 m mullion
+   share one `deck`/`column` mesh under a non-uniform scale, so a slab's fascia
+   is 12 m of fascia rather than a repeated profile. Proportional features are
+   what make that acceptable; a tiling parameterization is what would make it
+   right.
+7. **The scatter pull buffer is position + normal**, so a module mesh has no UVs
+   and no material — the TER2b bound, unmoved. The panes glow by *emission on the
+   batch*, which is why they are a bucket rather than a texture.
+
+### The laws this wave paid for
+
+* **A ledger can be wrong about the thing it measured.** "365 545 wall-sized
+  boxes" was 365 545 **one-metre** boxes, because the drawn scale and the collider
+  extent were never the same number. Two waves reasoned about overdraw from a
+  size nothing in the tree produced.
+* **The instrument printed the answer for two waves before anybody read it.**
+  *"16 384 casters, 17 721 930 dropped"* is `VSM_MAX_CASTERS` hit on every frame
+  with a city's worth of instances thrown away — an `O(instances)` walk feeding an
+  `O(1)` ceiling. The number was in the I8a ledger, quoted, and read as a fact
+  about content rather than as a shape.
+* **A cost that starves a budget hides a second cost.** The settlements were not
+  only paying 16.7 ms; they were spending the whole caster budget, so the island's
+  *terrain* cast nothing at all. Removing them did not just save time — it turned
+  a system back on.
+* **A face's winding follows `ê_u × ê_v`, not the sign of its normal.** Four of
+  six faces agree with the intuition and two do not, so a "flip on the negative
+  side" builder is right often enough to look correct.
+* **Two constants that both name a distance must be compared.**
+  `STRUCTURE_LOD_M` (192) and `mesh_distance_m` (120) were each defended in their
+  own doc comment, and their *order* is what decides whether a shell is ever
+  rasterized. Nothing owned the comparison.
+* **One control cannot carry two verbs that are wanted in the same state.** The
+  lock and the open were both right on a shut door from the owner's face, so one
+  key made the other unreachable for ever.
