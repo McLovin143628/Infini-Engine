@@ -110,7 +110,35 @@ pub const TERRAIN_LOD_COUNT: u32 = 4;
 /// Grid cells per patch side at LOD 0 (halved each coarser level, min 1). The
 /// patch mesh density — decoupled from the (usually finer) height-texture
 /// resolution, which is sampled for the actual displacement.
-pub const TERRAIN_BASE_CELLS: u32 = 32;
+///
+/// # 32 → 64 (wave TER2b), and the measurement that bought it
+///
+/// At 32 over a 256 m tile the finest ring is **8 m a vertex** over height data
+/// at **1 m a sample**: seven of every eight surveyed metres never reached a
+/// silhouette, and the ground's only fine signal was the 1 m central-difference
+/// shading normal. Wave TER2a measured what the density costs, twice — once at
+/// its base commit and once, independently, on its shipped tree, where the
+/// fragment half was a third dearer — and both runs said the same thing: **four
+/// times the triangles at every ring costs about 22.6 % more terrain time,
+/// because the pass is 92.5 % fragment-bound.**
+///
+/// 64 is **4 m a vertex** at ring 0. That is the density at which the 1 m survey
+/// and wave TER2b's detail band — whose coarse octave sits at the source's own
+/// Nyquist — first reach a silhouette rather than only a shading normal.
+///
+/// **What does NOT move with it.** [`lod_thresholds`] is a function of the tile
+/// span and [`TERRAIN_LOD_SCALE`] alone, so the ring radii are unchanged;
+/// [`patch_mesh_lod`]'s ring↔asset-LOD pairing is a difference of two indices and
+/// knows nothing about the density; and the skirt is
+/// `max(|hmax − hmin|, 0.05 · span, 1 m)`, a function of a tile's own span and
+/// height RANGE rather than of its cell count, so it is the same wall it was.
+/// Seams seal by construction and get *safer*, not riskier: the module header's
+/// argument is that either side's skirt already spans the worst-case gap between
+/// two LODs, and a finer fine side deviates from the coarse one by less.
+///
+/// The one thing that does move is how many height texels a mesh cell spans —
+/// 8 → 4 at every ring — which is the whole point.
+pub const TERRAIN_BASE_CELLS: u32 = 64;
 /// LOD-0 ring radius as a multiple of the tile span; each coarser ring doubles.
 pub const TERRAIN_LOD_SCALE: f64 = 1.5;
 /// Fraction of a LOD band (nearest the far edge) over which the morph ramps 0→1.
@@ -188,9 +216,12 @@ pub fn ring_source_lod(ring: u32, max_lod: u32) -> u32 {
 /// The asset LOD already supplies `2^lod` of the decimation (a coarse page covers
 /// `2^lod ×` the span at the same sample count), so the mesh only has to supply
 /// the rest. Ring 2 sampling a level-2 page therefore draws the *full-density*
-/// 32-cell grid over its 4× footprint — the same screen-space triangle size as
-/// ring 0 over a level-0 page — instead of a 4-cell grid that would throw the
-/// page's detail away. For a level-0 tile this is just `ring`, unchanged.
+/// [`TERRAIN_BASE_CELLS`]-cell grid over its 4× footprint — the same screen-space
+/// triangle size as ring 0 over a level-0 page — instead of a
+/// `TERRAIN_BASE_CELLS >> 2`-cell grid that would throw the page's detail away.
+/// For a level-0 tile this is just `ring`, unchanged. (Spelled as the constant
+/// rather than as `32` since wave TER2b moved it; the argument never depended on
+/// the number.)
 #[inline]
 pub fn patch_mesh_lod(ring: u32, lod: u32) -> u32 {
     ring.saturating_sub(lod).min(TERRAIN_LOD_COUNT - 1)
@@ -1830,12 +1861,21 @@ mod tests {
 
     #[test]
     fn cells_halve_per_lod() {
-        assert_eq!(cells_at_lod(0), 32);
-        assert_eq!(cells_at_lod(1), 16);
-        assert_eq!(cells_at_lod(2), 8);
-        assert_eq!(cells_at_lod(3), 4);
+        // Re-blessed for wave TER2b's density raise, 32 → 64. The ladder is the
+        // same ladder — each ring halves the last — and what moved is where it
+        // starts: ring 0 is 4 m a vertex over a 256 m tile instead of 8.
+        assert_eq!(cells_at_lod(0), 64);
+        assert_eq!(cells_at_lod(1), 32);
+        assert_eq!(cells_at_lod(2), 16);
+        assert_eq!(cells_at_lod(3), 8);
         // Beyond the coarsest level clamps.
-        assert_eq!(cells_at_lod(99), 4);
+        assert_eq!(cells_at_lod(99), 8);
+        // …and the ladder is DERIVED rather than transcribed, so a future raise
+        // moves the constant and the four literals above and nothing else. The
+        // four are exactly the kind of table that goes stale silently.
+        for lod in 0..TERRAIN_LOD_COUNT {
+            assert_eq!(cells_at_lod(lod), TERRAIN_BASE_CELLS >> lod);
+        }
     }
 
     #[test]
