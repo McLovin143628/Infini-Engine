@@ -10812,7 +10812,24 @@ fn golden_ground_close() {
     );
     // …and it is not merely noise: the frame must still be recognisably ground
     // rather than a spray of texels, so the two frames' MEAN luminance stays
-    // close. A material that resolved to garbage would move it.
+    // close. A material that resolved to garbage would move it — and so would
+    // the wave's own second finding, which is what this tolerance is set from.
+    //
+    // **THE TOLERANCE IS 20 %, AND THAT NUMBER IS A MUTATION** (TER2a audit).
+    // It was 50 %, and at 50 % this arm does not catch the defect it is cited
+    // for. Restoring the `vt_surface` factor bug — a terrain layer's scalar
+    // passed as a glTF `baseColorFactor` instead of as the no-texture fallback —
+    // renders this frame at a mean luminance of **48.6 against 95.5**, a gap of
+    // 46.9 against a 50 % allowance of 47.75. It passed **by 0.85 of a level**,
+    // and the `steps` arm above does not see it at all (a multiply darkens the
+    // texel variation without removing it: 13 214 steps against 175, still 75×).
+    // The only thing that caught it was the committed image under
+    // `INF_GOLDEN_STRICT=1` — which **CI never sets**, so on every leg CI
+    // actually runs, the wave's own finding was unpinned.
+    //
+    // 20 % separates the two by an order of magnitude in both directions: the
+    // real signal is **1.0 level, 1.1 %** (94.5 textured against 95.5), and the
+    // defect is 49 %. Mutation-verified in both directions.
     let mean = |img: &[u8]| -> f64 {
         let s: f64 = img
             .chunks_exact(4)
@@ -10821,10 +10838,20 @@ fn golden_ground_close() {
         s / f64::from(W * H)
     };
     let (ma, mb) = (mean(&img), mean(&flat));
-    eprintln!("ground_close: mean luma {ma:.1} textured against {mb:.1} untextured");
+    eprintln!(
+        "ground_close: mean luma {ma:.1} textured against {mb:.1} untextured \
+         ({:+.1} %, allowance ±20 %)",
+        (ma - mb) / mb * 100.0
+    );
     assert!(
-        (ma - mb).abs() < mb * 0.5,
-        "the textured frame's mean luminance ({ma:.1}) is nowhere near the \
-         untextured one's ({mb:.1}) — the materials did not resolve to ground"
+        (ma - mb).abs() < mb * 0.20,
+        "the textured frame's mean luminance ({ma:.1}) is {:.0} % from the \
+         untextured one's ({mb:.1}). A terrain layer's albedo is the NO-TEXTURE \
+         FALLBACK, not a glTF `baseColorFactor`: if `terrain_layers` passes it \
+         into `vt_surface` as a factor, a bound ground shades at the product of \
+         its own colour and itself and the frame comes out about twice too dark. \
+         That is the wave-TER2a finding this tolerance is set from, and at the \
+         50 % it was first written with this arm passed with the defect in place.",
+        (ma - mb).abs() / mb * 100.0
     );
 }
