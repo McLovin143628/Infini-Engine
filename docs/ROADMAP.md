@@ -27387,4 +27387,10 @@ decides where the blocks are and carries the join, and drawing them wants a seco
 coarse step (a settlement street sits on a levelled pad where the chord error is 0.000000 m at any
 step, while the island's road mesh is draped at the terrain's own 1 m pitch and `roads::build_mesh`
 takes one step for one layer); at 1 m the grid is 60.88 km of centreline and would roughly double the
-mesh's 517 086 vertices. Routed beside I8b's sidewalk/kerb item. 
+mesh's 517 086 vertices. Routed beside I8b's sidewalk/kerb item.
+
+**Counts**: battery **328 / 6 228 / 0 / 19** (+17 arms, no new block), goldens **58** with none added
+or re-blessed and `INF_GOLDEN_STRICT=1` green over 117 arms, rustdoc **374 over 30 crates** cold
+(the wave adds zero; headroom 76), clippy **0**, `fmt` clean, `EXPECTED_LEVELS` **23**, schemas all
+four unmoved, **no new crate or external dependency** (one new Ring-1 module, `Cargo.lock` unmoved),
+frontend untouched and not run (`git diff -- editor/studio` is empty). 

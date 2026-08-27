@@ -11749,10 +11749,10 @@ PERFORMANCE clause of that wave, not its fidelity clause** — see cost 2 above.
 
 | | before (`9f6e4689`) | **after I8a** |
 |---|---|---|
-| battery blocks / passed / failed / ignored | 328 / 6 211 / 0 / 19 | see below |
-| goldens | 58 | **58** — none added, none re-blessed |
-| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | see below |
-| `clippy --workspace --all-targets -D warnings` | 0 | see below |
+| battery blocks / passed / failed / ignored | 328 / 6 211 / 0 / 19 | **328 / 6 228 / 0 / 19** — `cargo test --workspace -j 3`, **+17 arms and no new block**: every one lands in a target that already existed (11 in `inf-editor-core`'s `settlement.rs`, 1 in its `samples.rs`, 4 in `inf-player`'s `island_gate`, and one more the tally does not attribute, recorded as measured rather than claimed away — the I7b precedent) |
+| goldens | 58 | **58** — none added, none re-blessed; `INF_GOLDEN_STRICT=1` green over **117 arms, 0 failed**, and `git status` over `tests/goldens` empty afterwards |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — `404 ^warning` lines minus 30 per-crate summaries, measured after `cargo clean --doc` (8 757 files, 214.5 MiB removed). **The wave adds zero**: no warning names `settlement.rs`. Headroom **76** |
+| `clippy --workspace --all-targets -D warnings` | 0 | **0** (local toolchain, run LAST per the rmeta law). **Four findings were cleared on the way and all four are this wave's own**, and one of them was a real hazard rather than a style note: `!(total > 0.0)` in the zone pick is a *negated* comparison on a partially-ordered type, and the obvious rewrite `total <= 0.0` is **false for a NaN** — a table carrying one would have fallen through into `u * NaN < acc` and answered the last entry. The guard is `!is_finite() \|\| <= 0.0` now and two arms drive it |
 | `cargo fmt --all --check` | clean | **clean** |
 | schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** |
 | committed levels (`EXPECTED_LEVELS`) | 23 | **23** — `samples/settlement/` holds no level |

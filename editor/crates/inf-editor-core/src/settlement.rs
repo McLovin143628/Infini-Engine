@@ -124,7 +124,7 @@ pub const CITY_INDUSTRIAL_BLOCKS: usize = 4;
 /// Harbour City is four rings deep, so this is 2 either way; the fixture's city
 /// is two, so it is 1.
 pub fn industrial_min_ring(max_ring: u32) -> u32 {
-    ((max_ring + 1) / 2).max(1)
+    max_ring.div_ceil(2).max(1)
 }
 
 /// Grid lines a settlement may lay each way from its own centre.
@@ -566,10 +566,16 @@ pub fn zone_table(kind: SiteKind, ring: u32) -> &'static [(ArchetypeId, f64)] {
 }
 
 /// A weighted pick from `u ∈ [0, 1)`. Deterministic, and it never falls off the
-/// end: a table whose weights do not add up still answers its first entry.
+/// end: a table whose weights do not add up still answers a zone.
+///
+/// The guard is `!is_finite() || <= 0.0` rather than `!(total > 0.0)` — the
+/// negated comparison clippy refuses on a partially-ordered type — and the two
+/// are NOT interchangeable: `total <= 0.0` alone is **false** for a NaN, so a
+/// table carrying one would fall through into `u * NaN < acc` and answer the
+/// last entry. Both halves are needed and both are what the arm below drives.
 fn pick(table: &[(ArchetypeId, f64)], u: f64) -> ArchetypeId {
     let total: f64 = table.iter().map(|(_, w)| w.max(0.0)).sum();
-    if !(total > 0.0) {
+    if !total.is_finite() || total <= 0.0 {
         return ArchetypeId::House;
     }
     let mut acc = 0.0;
@@ -1335,6 +1341,16 @@ mod tests {
             pick(&[(ArchetypeId::Hotel, 0.0)], 0.5),
             ArchetypeId::House,
             "a table of zero weights has no pick to make"
+        );
+        // …and a NaN weight, which `total <= 0.0` alone would wave through.
+        assert_eq!(
+            pick(&[(ArchetypeId::Hotel, f64::NAN)], 0.5),
+            ArchetypeId::House,
+            "a NaN weight fell through the guard and picked the last entry"
+        );
+        assert_eq!(
+            pick(&[(ArchetypeId::Hotel, f64::INFINITY)], 0.5),
+            ArchetypeId::House
         );
         assert_eq!(pick(t, 0.999_999_999), ArchetypeId::Shop);
     }

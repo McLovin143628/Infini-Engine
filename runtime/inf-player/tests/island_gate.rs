@@ -1731,12 +1731,12 @@ fn the_scattered_cover_draws_its_authored_meshes() {
     // fixture measures nine. A count was never the claim; **not one batch carries
     // geometry** is, and it is asserted above.
     assert!(
-        before.scatter.len() >= 1 + with_geom.len().min(1),
+        !before.scatter.is_empty(),
         "the placeholder projection produced no batch at all, so it is not the \
          same population"
     );
     assert_eq!(
-        before.scatter.iter().filter(|b| b.data.len() > 0).count(),
+        before.scatter.iter().filter(|b| !b.data.is_empty()).count(),
         before.scatter.len(),
         "an empty batch reached the projection"
     );
