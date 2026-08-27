@@ -999,3 +999,91 @@ fn the_detail_band_fills_the_gap_under_the_survey_and_moves_nothing_designed() {
         "the band's worst displacement is zero, so nothing above measures anything"
     );
 }
+
+/// **No lake bed rises above its own water surface** (wave TER2b audit).
+///
+/// # The fifth exclusion that is not there
+///
+/// The detail stage names four exclusions and the first of them is *the sea* —
+/// at and below the waterline, fading in over six metres. An **inland lake** is
+/// none of those things: it is inside the coastline and its bed sits well above
+/// sea level, so `is_land` is true, the shore fade is fully open, and the band
+/// writes designed relief into a bed the design has already put water on top of.
+///
+/// The audit measured it rather than arguing it. On the fixture the one lake is
+/// **1.389 m deep** and its shallowest bed sample finishes **0.572 m** under the
+/// surface — so nothing pokes through today, and the margin is smaller than the
+/// stage's own `MAX_AMPLITUDE_M` ceiling. A shallower lake, or a bed the
+/// classifier calls alpine (which takes the full amplitude rather than 0.7 of
+/// it), is one that grows an island the design never drew.
+///
+/// So this is the arm that says so. It is not a tripwire: it asserts the right
+/// outcome and it is green. The day it is not, the answer is a fifth exclusion —
+/// the lake's own outline and level, on exactly the sea's rule — and that is
+/// stated in the wave's carried list rather than built here, because it moves
+/// committed bytes.
+#[test]
+fn no_lake_bed_rises_above_its_own_water_surface() {
+    /// Even–odd point-in-polygon over a lake's committed outline.
+    fn inside(poly: &[glam::DVec2], p: glam::DVec2) -> bool {
+        let mut hit = false;
+        let n = poly.len();
+        for i in 0..n {
+            let (a, b) = (poly[i], poly[(i + 1) % n]);
+            if (a.y > p.y) != (b.y > p.y) {
+                let t = (p.y - a.y) / (b.y - a.y);
+                if p.x < a.x + t * (b.x - a.x) {
+                    hit = !hit;
+                }
+            }
+        }
+        hit
+    }
+
+    let b = build();
+    assert!(!b.network.lakes.is_empty(), "the fixture derived no lake");
+    let mps = b.terrain.meters_per_sample();
+    for (n, lake) in b.network.lakes.iter().enumerate() {
+        assert!(lake.max_depth_m > 0.0, "lake {n} has no depth");
+        let lo = lake.centre - lake.half_extent;
+        let hi = lake.centre + lake.half_extent;
+        let (mut probed, mut above) = (0usize, 0usize);
+        let mut worst = f64::NEG_INFINITY;
+        let mut z = lo.y;
+        while z <= hi.y {
+            let mut x = lo.x;
+            while x <= hi.x {
+                let p = glam::DVec2::new(x, z);
+                if inside(&lake.outline, p) {
+                    if let Some(h) = b.terrain.height_at(p) {
+                        probed += 1;
+                        worst = worst.max(h - lake.level_m);
+                        if h > lake.level_m {
+                            above += 1;
+                        }
+                    }
+                }
+                x += mps;
+            }
+            z += mps;
+        }
+        println!(
+            "LAKE {n}: level {:.3} m, {:.0} m2, {:.3} m deep; {probed} bed samples \
+             read, {above} above the surface, shallowest {:.3} m under it",
+            lake.level_m, lake.area_m2, lake.max_depth_m, -worst
+        );
+        // NOT VACUOUS: the walk really read the bed.
+        assert!(
+            probed >= 16,
+            "lake {n} gave only {probed} bed samples, so the assertion below is \
+             about nothing"
+        );
+        assert_eq!(
+            above, 0,
+            "{above} of lake {n}'s {probed} bed samples finish ABOVE its {:.3} m \
+             surface after the detail band -- the band writes into lake beds and \
+             the exclusion list does not mention lakes",
+            lake.level_m
+        );
+    }
+}

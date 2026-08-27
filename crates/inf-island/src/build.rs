@@ -522,9 +522,9 @@ pub fn build_island(
         .iter()
         .map(|s| s.width_m())
         .fold(2.0f64, f64::max);
-    // Retained past this step (wave TER2b): the DETAIL step excludes the same
-    // beds this one cut, and rebuilding the index there would be the same eight
-    // lines answering the same question about the same streams.
+    // The CARVE's index, at the bed's own width. The DETAIL step excludes the
+    // same beds five steps later but needs an index that answers past them — see
+    // the note there, and `detail::fade_reach_m`.
     let channels = hydro::channel_index(&network.streams, widest);
     let cut = hydro::carve_channels(&mut data, &channels, widest, 1.25);
     say(
@@ -739,7 +739,17 @@ pub fn build_island(
     // The corridor index is rebuilt from the FINAL routes rather than reused from
     // the carve's: the carve's is `None` whenever the roads were re-planned, and
     // a re-plan is exactly the case where the corridor moved.
-    let detail_corridor = corridor_index(&routes, corridor_half);
+    //
+    // **Both of the detail stage's indices reach past the feature, not to it**
+    // (TER2b audit). A `SegmentIndex` answers `None` beyond its own reach and the
+    // mask reads `None` as "far away, take all the detail", so an index built to
+    // the half-width has no fade in it at all — the ground was measured stepping
+    // from 0.000 m of relief at 7 m from a corridor centreline to 0.127 m at 8 m,
+    // which is the crease along every road the stage exists to avoid. The CARVE
+    // keeps its own half-width index: levelling wants the feature's own width.
+    let detail_corridor = corridor_index(&routes, crate::detail::fade_reach_m(corridor_half));
+    let detail_channels =
+        hydro::channel_index(&network.streams, crate::detail::fade_reach_m(widest));
     let band = crate::detail::DetailBand::of(plan.grid_m_per_sample, plan.ground_m_per_px);
     let detail = crate::detail::apply_detail(
         &mut data,
@@ -750,7 +760,7 @@ pub fn build_island(
             coast: &coast,
             corridor: detail_corridor.as_ref(),
             corridor_half_m: corridor_half,
-            channels: Some(&channels),
+            channels: Some(&detail_channels),
             channel_half_m: widest,
             pads: &site_pads,
         },
@@ -1039,17 +1049,25 @@ pub fn player_start(recipe: &IslandRecipe, routes: &[Route], lift_m: f64) -> DVe
 
 /// **The road corridor as a queryable index** — one door, two callers.
 ///
-/// The CARVE levels the ground inside `half_m` of a route so the road has
-/// something to sit on; the DETAIL step (wave TER2b) excludes the same ground for
-/// the same reason, five steps later, and would otherwise be eight lines of
-/// transcription answering the same question. `None` when there are no routes or
-/// no width, which both callers read as "there is no corridor".
+/// The CARVE levels the ground inside the corridor so the road has something to
+/// sit on; the DETAIL step (wave TER2b) excludes the same ground for the same
+/// reason, five steps later, and would otherwise be eight lines of transcription
+/// answering the same question. `None` when there are no routes or no reach,
+/// which both callers read as "there is no corridor".
 ///
-/// The two callers pass **different route lists on purpose**: the carve sees the
-/// *committed* routes (it runs before the planner) and the detail step sees the
-/// *final* ones, which differ exactly when `--replan-roads` moved them.
-fn corridor_index(routes: &[Route], half_m: f64) -> Option<SegmentIndex> {
-    (!routes.is_empty() && half_m > 0.0).then(|| {
+/// The two callers differ in **both** arguments, on purpose:
+///
+/// * the carve sees the *committed* routes (it runs before the planner) and the
+///   detail step the *final* ones, which differ exactly when `--replan-roads`
+///   moved them;
+/// * the carve asks for the corridor's own half-width, because that is the ground
+///   it levels, and the detail step asks for
+///   [`detail::fade_reach_m`](crate::detail::fade_reach_m) of it, because an index
+///   that stops answering at the half-width turns the mask's fade into a **cut**
+///   — the query returns `None` one metre out and the mask reads `None` as "take
+///   all the detail" (the TER2b audit's measurement).
+fn corridor_index(routes: &[Route], reach_m: f64) -> Option<SegmentIndex> {
+    (!routes.is_empty() && reach_m > 0.0).then(|| {
         let lines: Vec<Vec<Vertex3>> = routes
             .iter()
             .map(|r| {
@@ -1062,7 +1080,7 @@ fn corridor_index(routes: &[Route], half_m: f64) -> Option<SegmentIndex> {
                     .collect()
             })
             .collect();
-        SegmentIndex::new(&lines, half_m)
+        SegmentIndex::new(&lines, reach_m)
     })
 }
 

@@ -344,7 +344,11 @@ fn toward(w: &mut Mix, layer: usize, t: f64) {
 /// a tile edge. A one-sided difference at the shared row would have given the
 /// two tiles two different answers for the same metre of ground, and the splat
 /// would show a one-texel line every 256 m.
-fn slope_deg_at(
+/// `pub(crate)` for one reason (wave TER2b audit): `detail::slope_deg_at` claims
+/// to answer the same rule, and a claim that two functions agree is worth nothing
+/// unless a test can call **both**. See
+/// `detail::tests::the_slope_rule_agrees_with_the_splat_walk`.
+pub(crate) fn slope_deg_at(
     data: &TerrainData,
     tile: &inf_terrain::TerrainTile,
     origin: DVec2,

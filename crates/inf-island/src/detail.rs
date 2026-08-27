@@ -15,6 +15,16 @@
 //! This stage fills that band with a portable fBm, and nothing else. It writes
 //! **nothing above the source's Nyquist**, so no survey metre is overwritten.
 //!
+//! **It fills the coarse part of the empty band, not all of it** (TER2b audit).
+//! Octaves halve from the source's Nyquist and the last one that clears the
+//! grid's is kept, so on the island the band runs 6.22 m → 3.11 m and the
+//! remaining 3.11 m → 2 m stays as empty as it was: one octave of the 1.64 the
+//! upsample opens. Filling it would mean an octave at 1.56 m against a 2 m
+//! Nyquist, which is aliasing rather than detail — the arm
+//! [`tests::the_island_band_runs_from_the_sources_nyquist_to_the_grids`] is the
+//! one that refuses it, and the honest statement is "the band is filled down to
+//! the finest octave the grid can carry".
+//!
 //! # The band, derived rather than authored
 //!
 //! [`DetailBand::of`] takes the two pitches the plan already carries and answers
@@ -81,8 +91,17 @@ pub const MAX_AMPLITUDE_M: f64 = 1.5;
 
 /// What fraction of [`MAX_AMPLITUDE_M`] the flattest ground takes.
 ///
-/// Not zero: a dead-flat plain is the one thing real ground never is, and 15 cm
-/// of undulation over six metres is the difference between a meadow and a table.
+/// Not zero: a dead-flat plain is the one thing real ground never is, and a
+/// decimetre of undulation over six metres is the difference between a meadow and
+/// a table.
+///
+/// **A decimetre and not fifteen centimetres** (TER2b audit): the slope floor is
+/// `0.10 × 1.5 m`, and then [`biome_amplitude`] multiplies it, and the least
+/// specific biome — the `_` arm every unclassified sample takes — is `0.7`. So a
+/// flat plain's ceiling is `0.105 m`, measured at **0.086 m** of actual peak
+/// displacement on a flat two-tile fixture, because a two-octave fBm does not
+/// reach its own bound. The first write-up quoted the product of two of the three
+/// terms.
 pub const AMPLITUDE_FLOOR_FRACTION: f64 = 0.10;
 
 /// Slope, in degrees, at and below which the amplitude is at its floor.
@@ -105,6 +124,24 @@ pub const SHORE_FADE_M: f64 = 6.0;
 /// width outside it. Wider would erase the ground beside every road; narrower
 /// leaves a ridge along it.
 pub const FADE_WIDTHS: f64 = 1.0;
+
+/// **How far a mask index must answer for the fade to exist at all.**
+///
+/// A [`SegmentIndex`] answers `None` past its own reach, and `None` is read here
+/// as "far away, take all the detail". So an index built to the feature's *own*
+/// half-width has no fade in it whatever [`FADE_WIDTHS`] says: the weight is `0`
+/// out to the half-width, the query stops answering one metre later, and the
+/// ground jumps to full amplitude in a single sample. That is the crease along
+/// every road this stage exists to avoid, and it is what the TER2b audit measured
+/// — `0.000 m` of relief at 7 m from a corridor centreline and `0.127 m` at 8 m,
+/// where the ramp should have given `0.007`.
+///
+/// So an index the detail stage queries is built through **this** function, and
+/// the carve keeps building its own at the half-width, which is the right reach
+/// for levelling ground.
+pub fn fade_reach_m(half_m: f64) -> f64 {
+    half_m * (1.0 + FADE_WIDTHS)
+}
 
 /// The most octaves the band may carry, whatever the pitches say.
 ///
@@ -258,14 +295,20 @@ fn ramp(lo: f64, hi: f64, v: f64) -> f64 {
 }
 
 /// The mask weight a segment index contributes at `p`: `0` inside `half`, ramping
-/// to `1` at `half · (1 + FADE_WIDTHS)`.
+/// to `1` at [`fade_reach_m(half)`](fade_reach_m).
+///
+/// **The index must answer out to `fade_reach_m(half_m)`**, because a `None` is
+/// read here as "past the fade, take everything" and a short index makes that a
+/// lie for the whole fade band. `apply_detail` debug-asserts it; `build.rs`
+/// constructs both of the detail stage's indices through `fade_reach_m` for the
+/// same reason.
 #[inline]
 fn segment_weight(index: Option<&SegmentIndex>, half_m: f64, p: DVec2) -> f64 {
     let (Some(ix), true) = (index, half_m > 0.0) else {
         return 1.0;
     };
     match ix.nearest(p) {
-        Some(n) => ramp(half_m, half_m * (1.0 + FADE_WIDTHS), n.distance_m),
+        Some(n) => ramp(half_m, fade_reach_m(half_m), n.distance_m),
         None => 1.0,
     }
 }
@@ -277,9 +320,12 @@ fn segment_weight(index: Option<&SegmentIndex>, half_m: f64, p: DVec2) -> f64 {
 /// one takes a `&TerrainTile` borrowed out of the same `TerrainData` this stage
 /// needs `&mut`, and the two walks read at different points in the build. What is
 /// shared is the *rule* — one central difference, one `patan2_64` — and the two
-/// are pinned against each other by
-/// [`tests::the_slope_rule_agrees_with_the_splat_walk`].
-fn slope_deg_at(data: &TerrainData, origin: DVec2, mps: f64, i: u32, j: u32, res: u32) -> f64 {
+/// really are compared, sample for sample and to the bit, by
+/// [`tests::the_slope_rule_agrees_with_the_splat_walk`], which calls
+/// [`crate::splat::slope_deg_at`] rather than describing it. (The TER2b audit
+/// found that arm asserting only that a 30° ramp measures 30°, which the splat
+/// walk is not needed for and cannot fail.)
+fn slope_deg_at(data: &TerrainData, origin: DVec2, mps: f64, i: u32, j: u32) -> f64 {
     let world = |di: f64, dj: f64| {
         DVec2::new(
             origin.x + (f64::from(i) + di) * mps,
@@ -288,7 +334,6 @@ fn slope_deg_at(data: &TerrainData, origin: DVec2, mps: f64, i: u32, j: u32, res
     };
     let here = data.height_at(world(0.0, 0.0)).unwrap_or(0.0);
     let h = |di: f64, dj: f64| data.height_at(world(di, dj)).unwrap_or(here);
-    let _ = res;
     let dx = (h(1.0, 0.0) - h(-1.0, 0.0)) / (2.0 * mps);
     let dz = (h(0.0, 1.0) - h(0.0, -1.0)) / (2.0 * mps);
     let g = (dx * dx + dz * dz).sqrt();
@@ -318,17 +363,116 @@ fn biome_amplitude(id: u8) -> f64 {
     }
 }
 
+/// What one sample's masks and amplitude answered — the whole of a sample's fate,
+/// so that a sample computed in one pass can be *spent* in another without
+/// recomputing it or double-counting it in the stats.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Outcome {
+    Water,
+    Road,
+    Channel,
+    Pad,
+    /// Metres to add to the sample's stored height (exactly `0.0` when the fBm is).
+    Moved(f64),
+}
+
+/// A sample on the outermost ring of its tile — the only samples whose central
+/// difference reaches across a tile border.
+///
+/// An interior sample at `i = 1` reads `i = 0` and `i = 2`, both of its own tile;
+/// only `0` and `res − 1` (in either axis) read a neighbour. That is why the ring
+/// is the exact set that has to be settled before any tile is written.
+#[inline]
+fn is_rim(i: u32, j: u32, res: u32) -> bool {
+    i == 0 || j == 0 || i + 1 == res || j + 1 == res
+}
+
+/// The masks, the amplitude and the displacement at one sample of one tile.
+///
+/// Reads `data` and never writes it, so a caller may run it over every tile
+/// before any tile has moved — which is exactly what [`apply_detail`]'s first
+/// pass does for the rim.
+#[allow(clippy::too_many_arguments)]
+fn outcome_at(
+    data: &TerrainData,
+    tile: &inf_terrain::TerrainTile,
+    plan: &DetailPlan<'_>,
+    band: DetailBand,
+    seed: u64,
+    freq: f64,
+    origin: DVec2,
+    mps: f64,
+    res: u32,
+    i: u32,
+    j: u32,
+) -> Outcome {
+    let p = DVec2::new(origin.x + f64::from(i) * mps, origin.y + f64::from(j) * mps);
+    let h = f64::from(tile.sample(res, i, j));
+
+    // ── the masks, cheapest and most decisive first ──
+    if !plan.coast.is_land(p) || h <= plan.sea_level_m {
+        return Outcome::Water;
+    }
+    let mut w = ramp(plan.sea_level_m, plan.sea_level_m + SHORE_FADE_M, h);
+    if w <= 0.0 {
+        return Outcome::Water;
+    }
+    let road = segment_weight(plan.corridor, plan.corridor_half_m, p);
+    if road <= 0.0 {
+        return Outcome::Road;
+    }
+    let chan = segment_weight(plan.channels, plan.channel_half_m, p);
+    if chan <= 0.0 {
+        return Outcome::Channel;
+    }
+    let mut pad = 1.0f64;
+    for (centre, radius, _) in plan.pads {
+        if *radius > 0.0 {
+            let d = (p - *centre).length();
+            pad = pad.min(ramp(*radius, fade_reach_m(*radius), d));
+        }
+    }
+    if pad <= 0.0 {
+        return Outcome::Pad;
+    }
+    w *= road * chan * pad;
+
+    // ── the amplitude ──
+    let slope = slope_deg_at(data, origin, mps, i, j);
+    let slope_t = ramp(SLOPE_LO_DEG, SLOPE_HI_DEG, slope);
+    let shape = AMPLITUDE_FLOOR_FRACTION + (1.0 - AMPLITUDE_FLOOR_FRACTION) * slope_t;
+    let biome = biome_amplitude(tile.biome_sample(res, i, j));
+    let amp = MAX_AMPLITUDE_M * shape * biome * w;
+    Outcome::Moved(amp * inf_terrain::fbm_signed(seed, freq, band.octaves, p.x, p.y))
+}
+
 /// **Write the detail band into every level-0 tile.**
 ///
 /// Deterministic and order-independent: the displacement at a world position is a
-/// pure function of `(seed, band, that position)` and the masks, so the tile walk
-/// order cannot reach the result. It is a *read-then-write* per tile — the slope
-/// is measured on the ground as the previous steps left it, for every sample,
-/// before any sample of that tile is moved — so a tile's own detail cannot feed
-/// back into its own slope term. Across a tile border the neighbour may already
-/// have been written; the slope term is a soft amplitude multiplier over a 32°
-/// ramp, so the difference that makes is fractions of a millimetre, and it is
-/// stated rather than hidden.
+/// pure function of `(seed, band, that position)` and the masks, so neither the
+/// tile walk order nor the tile *partition* can reach the result.
+///
+/// # Why it is two passes, and what the second one would otherwise cost
+///
+/// The amplitude reads a **slope**, and a slope is a central difference over the
+/// neighbouring metre. Inside a tile that is safe by construction — the walk is
+/// read-then-write, so a tile's own detail cannot feed its own slope term. Across
+/// a tile border it is not: adjacent tiles **share a row of samples**
+/// (`tile_span = (res − 1) · mps`), so the same world position is stored twice,
+/// and a one-pass walk computes the second copy's amplitude against a neighbour
+/// it has already displaced. The two copies then disagree, and a heightfield
+/// whose two tiles answer differently for one metre of ground is a **crack**.
+///
+/// Measured before the fix, on a two-tile ramp at 1 m a sample: **0.382 m** of
+/// disagreement on a 20° slope and **0.498 m** on 35°, against a carried note
+/// that called it "fractions of a millimetre". It is a first-class seam, not a
+/// rounding remark.
+///
+/// So pass one settles the **rim** — [`is_rim`], the only samples whose
+/// difference leaves the tile — over ground no tile has moved yet, and pass two
+/// spends those answers while computing the interiors, which cannot reach out of
+/// their tile at all. Both copies of a shared sample are computed in pass one
+/// from identical neighbourhoods, so they are identical to the bit.
 pub fn apply_detail(data: &mut TerrainData, plan: &DetailPlan<'_>) -> DetailStats {
     let mut st = DetailStats {
         band: plan.band,
@@ -337,6 +481,22 @@ pub fn apply_detail(data: &mut TerrainData, plan: &DetailPlan<'_>) -> DetailStat
     let Some(band) = plan.band else {
         return st;
     };
+    // The fade is a lie if the index stops answering inside it — see
+    // `fade_reach_m`, and the TER2b audit that measured the crease it leaves.
+    debug_assert!(
+        plan.corridor
+            .is_none_or(|ix| ix.reach_m() >= fade_reach_m(plan.corridor_half_m) - 1e-9),
+        "the corridor index answers only to {:?} m and the fade runs to {} m",
+        plan.corridor.map(|ix| ix.reach_m()),
+        fade_reach_m(plan.corridor_half_m)
+    );
+    debug_assert!(
+        plan.channels
+            .is_none_or(|ix| ix.reach_m() >= fade_reach_m(plan.channel_half_m) - 1e-9),
+        "the channel index answers only to {:?} m and the fade runs to {} m",
+        plan.channels.map(|ix| ix.reach_m()),
+        fade_reach_m(plan.channel_half_m)
+    );
     let res = data.tile_resolution();
     let mps = data.meters_per_sample();
     let n = (res * res) as usize;
@@ -350,9 +510,31 @@ pub fn apply_detail(data: &mut TerrainData, plan: &DetailPlan<'_>) -> DetailStat
     // iteration order. Nothing here depends on order, and that is exactly why it
     // must be impossible for a future term to.
     coords.sort();
+
+    // ── PASS ONE: the rim, on ground no tile has moved ──────────────────────
+    let mut rims: std::collections::BTreeMap<(i32, i32), Vec<Outcome>> =
+        std::collections::BTreeMap::new();
+    for &c in &coords {
+        let origin = data.tile_origin_xz(c);
+        let Some(tile) = data.get_tile(c) else {
+            continue;
+        };
+        let mut ring = Vec::with_capacity(4 * res as usize);
+        for j in 0..res {
+            for i in 0..res {
+                if is_rim(i, j, res) {
+                    ring.push(outcome_at(
+                        data, tile, plan, band, seed, freq, origin, mps, res, i, j,
+                    ));
+                }
+            }
+        }
+        rims.insert(c, ring);
+    }
+
+    // ── PASS TWO: the interiors, and the writes ─────────────────────────────
     let mut buf: Vec<f32> = Vec::with_capacity(n);
     let mut sum_abs = 0.0f64;
-
     for c in coords {
         let origin = data.tile_origin_xz(c);
         buf.clear();
@@ -360,69 +542,54 @@ pub fn apply_detail(data: &mut TerrainData, plan: &DetailPlan<'_>) -> DetailStat
             let Some(tile) = data.get_tile(c) else {
                 continue;
             };
+            let ring = rims.get(&c);
+            // Walked in the same `(j, i)` order pass one filled the ring in, so
+            // the cursor and the ring stay in step without storing a key.
+            let mut cursor = 0usize;
             for j in 0..res {
                 for i in 0..res {
-                    let p =
-                        DVec2::new(origin.x + f64::from(i) * mps, origin.y + f64::from(j) * mps);
-                    let h = f64::from(tile.sample(res, i, j));
                     st.samples += 1;
-
-                    // ── the masks, cheapest and most decisive first ──
-                    if !plan.coast.is_land(p) || h <= plan.sea_level_m {
-                        st.masked_water += 1;
-                        buf.push(tile.sample(res, i, j));
-                        continue;
-                    }
-                    let mut w = ramp(plan.sea_level_m, plan.sea_level_m + SHORE_FADE_M, h);
-                    if w <= 0.0 {
-                        st.masked_water += 1;
-                        buf.push(tile.sample(res, i, j));
-                        continue;
-                    }
-                    let road = segment_weight(plan.corridor, plan.corridor_half_m, p);
-                    if road <= 0.0 {
-                        st.masked_road += 1;
-                        buf.push(tile.sample(res, i, j));
-                        continue;
-                    }
-                    let chan = segment_weight(plan.channels, plan.channel_half_m, p);
-                    if chan <= 0.0 {
-                        st.masked_channel += 1;
-                        buf.push(tile.sample(res, i, j));
-                        continue;
-                    }
-                    let mut pad = 1.0f64;
-                    for (centre, radius, _) in plan.pads {
-                        if *radius > 0.0 {
-                            let d = (p - *centre).length();
-                            pad = pad.min(ramp(*radius, *radius * (1.0 + FADE_WIDTHS), d));
+                    let out = if is_rim(i, j, res) {
+                        let o = ring.and_then(|r| r.get(cursor)).copied();
+                        cursor += 1;
+                        match o {
+                            Some(o) => o,
+                            None => outcome_at(
+                                data, tile, plan, band, seed, freq, origin, mps, res, i, j,
+                            ),
+                        }
+                    } else {
+                        outcome_at(data, tile, plan, band, seed, freq, origin, mps, res, i, j)
+                    };
+                    match out {
+                        Outcome::Water => {
+                            st.masked_water += 1;
+                            buf.push(tile.sample(res, i, j));
+                        }
+                        Outcome::Road => {
+                            st.masked_road += 1;
+                            buf.push(tile.sample(res, i, j));
+                        }
+                        Outcome::Channel => {
+                            st.masked_channel += 1;
+                            buf.push(tile.sample(res, i, j));
+                        }
+                        Outcome::Pad => {
+                            st.masked_pad += 1;
+                            buf.push(tile.sample(res, i, j));
+                        }
+                        Outcome::Moved(d) => {
+                            if d != 0.0 {
+                                st.written += 1;
+                                let a = d.abs();
+                                sum_abs += a;
+                                if a > st.max_abs_m {
+                                    st.max_abs_m = a;
+                                }
+                            }
+                            buf.push((f64::from(tile.sample(res, i, j)) + d) as f32);
                         }
                     }
-                    if pad <= 0.0 {
-                        st.masked_pad += 1;
-                        buf.push(tile.sample(res, i, j));
-                        continue;
-                    }
-                    w *= road * chan * pad;
-
-                    // ── the amplitude ──
-                    let slope = slope_deg_at(data, origin, mps, i, j, res);
-                    let slope_t = ramp(SLOPE_LO_DEG, SLOPE_HI_DEG, slope);
-                    let shape =
-                        AMPLITUDE_FLOOR_FRACTION + (1.0 - AMPLITUDE_FLOOR_FRACTION) * slope_t;
-                    let biome = biome_amplitude(tile.biome_sample(res, i, j));
-                    let amp = MAX_AMPLITUDE_M * shape * biome * w;
-
-                    let d = amp * inf_terrain::fbm_signed(seed, freq, band.octaves, p.x, p.y);
-                    if d != 0.0 {
-                        st.written += 1;
-                        let a = d.abs();
-                        sum_abs += a;
-                        if a > st.max_abs_m {
-                            st.max_abs_m = a;
-                        }
-                    }
-                    buf.push((h + d) as f32);
                 }
             }
         }
@@ -544,34 +711,106 @@ mod tests {
         );
     }
 
+    /// Two tiles carrying a ramp of `grad` in +x, sharing their border column
+    /// (`tile_span = (res − 1) · mps`, so the shared metre is stored twice).
+    fn two_tiles(res: u32, mps: f64, grad: f64, base: f64) -> TerrainData {
+        let mut data = TerrainData::new(res, mps);
+        let span = (f64::from(res) - 1.0) * mps;
+        for c in [(0i32, 0i32), (1, 0)] {
+            let origin = glam::DVec3::new(f64::from(c.0) * span, 0.0, f64::from(c.1) * span);
+            let mut h = vec![0.0f32; (res * res) as usize];
+            for j in 0..res {
+                for i in 0..res {
+                    let x = origin.x + f64::from(i) * mps;
+                    h[(j * res + i) as usize] = (base + grad * x) as f32;
+                }
+            }
+            data.insert_tile(
+                (c.0, c.1),
+                inf_terrain::TerrainTile::from_heights(res, origin, h).expect("a full buffer"),
+            )
+            .expect("the tile inserts");
+        }
+        data
+    }
+
+    /// A coastline that puts everything in a large square on land.
+    fn all_land(half: f64) -> Coastline {
+        Coastline::new(
+            vec![vec![
+                DVec2::new(-half, -half),
+                DVec2::new(half, -half),
+                DVec2::new(half, half),
+                DVec2::new(-half, half),
+            ]],
+            DVec2::splat(-half * 2.0),
+            DVec2::splat(half * 2.0),
+            4.0,
+        )
+    }
+
+    fn plain_plan<'a>(coast: &'a Coastline, band: Option<DetailBand>) -> DetailPlan<'a> {
+        DetailPlan {
+            seed: 7,
+            sea_level_m: 0.0,
+            band,
+            coast,
+            corridor: None,
+            corridor_half_m: 0.0,
+            channels: None,
+            channel_half_m: 0.0,
+            pads: &[],
+        }
+    }
+
     /// The slope rule is the splat walk's rule. Both measure one central
     /// difference on the 1 m grid through `patan2_64`; if they ever disagreed,
     /// a sample could be rock in the paint and meadow in the relief.
+    ///
+    /// **It calls both** (wave TER2b audit). The arm this replaces asserted only
+    /// that a 30° ramp measures 30°, which is a fact about arithmetic that the
+    /// splat walk is not needed for and cannot falsify — a cited pin that did not
+    /// exist. The comparison below runs over **every** sample of two tiles,
+    /// including the border rows, where the two implementations differ most
+    /// (`splat` reads its own tile's buffer for interior samples and
+    /// `TerrainData::height_at` across a border; `detail` goes through `height_at`
+    /// for all four).
     #[test]
     fn the_slope_rule_agrees_with_the_splat_walk() {
         let res = 9u32;
-        let mut data = TerrainData::new(res, 1.0);
+        let mps = 1.0;
         // A 30-degree ramp along +x: dh/dx = tan(30) = 0.5773502691896257.
-        let g = 0.577_350_269_189_625_7f64;
-        let mut heights = vec![0.0f32; (res * res) as usize];
-        for j in 0..res {
-            for i in 0..res {
-                heights[(j * res + i) as usize] = (f64::from(i) * g) as f32;
+        let data = two_tiles(res, mps, 0.577_350_269_189_625_7, 100.0);
+        let mut compared = 0usize;
+        let mut border = 0usize;
+        for c in [(0i32, 0i32), (1, 0)] {
+            let origin = data.tile_origin_xz(c);
+            let tile = data.get_tile(c).expect("the tile is there");
+            for j in 0..res {
+                for i in 0..res {
+                    let mine = slope_deg_at(&data, origin, mps, i, j);
+                    let theirs = crate::splat::slope_deg_at(&data, tile, origin, res, mps, i, j);
+                    assert_eq!(
+                        mine.to_bits(),
+                        theirs.to_bits(),
+                        "tile {c:?} sample ({i}, {j}): the detail walk reads {mine} degrees \
+                         and the splat walk reads {theirs}"
+                    );
+                    compared += 1;
+                    if is_rim(i, j, res) {
+                        border += 1;
+                    }
+                }
             }
         }
-        data.insert_tile(
-            (0, 0),
-            inf_terrain::TerrainTile::from_heights(res, glam::DVec3::ZERO, heights)
-                .expect("a full height buffer builds a tile"),
-        )
-        .expect("the tile inserts");
-        let mine = slope_deg_at(&data, DVec2::ZERO, 1.0, 4, 4, res);
-        // 1e-4 and not 1e-12: a tile stores `f32`, so a 30-degree ramp built in
-        // `f64` and read back is right to about a millionth of a degree. Tighter
-        // would be asserting the storage format rather than the rule.
+        // NOT VACUOUS: the comparison covered the border rows, and the ramp is
+        // steep enough that a one-sided difference would have shown.
+        assert_eq!(compared, 2 * (res * res) as usize);
+        assert!(border > 0);
+        let mid = slope_deg_at(&data, data.tile_origin_xz((0, 0)), mps, 4, 4);
         assert!(
-            (mine - 30.0).abs() < 1e-4,
-            "the ramp measures {mine} degrees, not 30"
+            (mid - 30.0).abs() < 1e-4,
+            "the ramp measures {mid} degrees, not 30"
         );
         // Flat ground is zero, not a small number that a ramp would round up.
         let mut flat = TerrainData::new(res, 1.0);
@@ -580,6 +819,143 @@ mod tests {
             crate::terrain::flat_tile(res, glam::DVec3::ZERO, 12.0),
         )
         .expect("the tile inserts");
-        assert_eq!(slope_deg_at(&flat, DVec2::ZERO, 1.0, 4, 4, res), 0.0);
+        assert_eq!(slope_deg_at(&flat, DVec2::ZERO, 1.0, 4, 4), 0.0);
+    }
+
+    /// **A shared tile edge takes one displacement** (wave TER2b audit).
+    ///
+    /// Adjacent tiles store the same metre of ground twice, so the detail stage
+    /// has to answer identically for both copies or the heightfield has a crack
+    /// in it every 256 m. The one-pass walk did not: the second tile's rim read a
+    /// slope off a neighbour it had already displaced, and the amplitude ramp
+    /// turned that into **0.382 m** of disagreement on a 20° slope and **0.498 m**
+    /// on 35° — measured, against a carried note that said "fractions of a
+    /// millimetre".
+    ///
+    /// The anti-vacuity half is the second assertion: the stage has to have moved
+    /// the ground *at all* on this fixture, and by more than the tolerance the
+    /// first assertion allows, or agreeing at the edge is agreeing about nothing.
+    #[test]
+    fn a_shared_tile_edge_takes_one_displacement() {
+        let res = 33u32;
+        let mps = 1.0;
+        let coast = all_land(4000.0);
+        // Gradients rather than degrees, in the fixture AND in the messages: the
+        // crate's libm-ban table reads test lines too and `atan` is on it. It
+        // caught the first draft of this arm — the third unprompted catch this
+        // campaign, and the first inside an audit's own repair.
+        for (grad, deg) in [
+            (0.0f64, 0.0),
+            (0.1, 5.7),
+            (0.363_970_234_266_202_36, 20.0),
+            (0.700_207_538_209_699_5, 35.0),
+        ] {
+            let mut data = two_tiles(res, mps, grad, 100.0);
+            let st = apply_detail(&mut data, &plain_plan(&coast, DetailBand::of(mps, 3.11)));
+            let a = data.get_tile((0, 0)).expect("tile a");
+            let b = data.get_tile((1, 0)).expect("tile b");
+            let mut worst = 0.0f64;
+            for j in 0..res {
+                let ha = f64::from(a.sample(res, res - 1, j));
+                let hb = f64::from(b.sample(res, 0, j));
+                worst = worst.max((ha - hb).abs());
+            }
+            assert_eq!(
+                worst, 0.0,
+                "the shared column disagrees by {worst} m on the {deg}-degree ramp \
+                 (gradient {grad}) -- the two tiles store the same metre of ground \
+                 and must answer the same height for it"
+            );
+            // …and the stage really did displace this fixture.
+            assert!(
+                st.written > 0 && st.max_abs_m > 0.05,
+                "nothing moved on the {deg}-degree ramp ({} samples, worst {} m), \
+                 so the agreement above is vacuous",
+                st.written,
+                st.max_abs_m
+            );
+        }
+    }
+
+    /// **A mask index that stops at the half-width cuts instead of fading**
+    /// (wave TER2b audit).
+    ///
+    /// [`SegmentIndex`] answers `None` past its own reach and `segment_weight`
+    /// reads `None` as "far away, take everything". So the whole `t·t·(3−2t)` ramp
+    /// is dead unless the index answers out to [`fade_reach_m`] — which is what
+    /// the shipped build passes now, and did not before.
+    ///
+    /// Both indices are built here, so the arm carries its own mutation: the
+    /// half-width one steps a full unit in one metre and the faded one does not.
+    #[test]
+    fn a_mask_index_must_answer_past_the_fade_or_the_fade_is_a_cut() {
+        let half = 7.0f64;
+        let line = vec![vec![
+            crate::shape::Vertex3 {
+                xz: DVec2::new(-500.0, 0.0),
+                y: 0.0,
+            },
+            crate::shape::Vertex3 {
+                xz: DVec2::new(500.0, 0.0),
+                y: 0.0,
+            },
+        ]];
+        let short = SegmentIndex::new(&line, half);
+        let faded = SegmentIndex::new(&line, fade_reach_m(half));
+        let w = |ix: &SegmentIndex, d: f64| segment_weight(Some(ix), half, DVec2::new(0.0, d));
+
+        // THE DEFECT, kept as the control: dead at the half-width and full one
+        // sample later, which is a wall along every road.
+        assert_eq!(w(&short, half), 0.0);
+        assert_eq!(w(&short, half + 1.0), 1.0);
+
+        // THE RULE: zero on the half-width, one at the far edge, and no step
+        // bigger than a few per cent anywhere in between.
+        assert_eq!(w(&faded, half), 0.0);
+        assert_eq!(w(&faded, fade_reach_m(half)), 1.0);
+        let mut worst_step = 0.0f64;
+        let mut prev = w(&faded, 0.0);
+        let mut d = 0.0f64;
+        while d <= 3.0 * half {
+            d += 0.01;
+            let now = w(&faded, d);
+            worst_step = worst_step.max((now - prev).abs());
+            prev = now;
+        }
+        assert!(
+            worst_step < 0.01,
+            "the faded mask still steps by {worst_step} in one centimetre"
+        );
+    }
+
+    /// …and the stage **refuses** a short index rather than quietly cutting.
+    ///
+    /// The arm above pins the rule; this one pins the WIRING, which is where the
+    /// defect actually lived — `build.rs` handed `apply_detail` an index built to
+    /// the corridor's own half-width for a whole wave. A `debug_assert` is the
+    /// right shape for it: every CI leg builds the island fixture in `dev`, so a
+    /// build that regresses the reach fails loudly there rather than shipping a
+    /// crease.
+    #[test]
+    #[should_panic(expected = "the corridor index answers only to")]
+    fn a_short_corridor_index_is_refused_rather_than_cut() {
+        let half = 7.0f64;
+        let line = vec![vec![
+            crate::shape::Vertex3 {
+                xz: DVec2::new(-500.0, 0.0),
+                y: 0.0,
+            },
+            crate::shape::Vertex3 {
+                xz: DVec2::new(500.0, 0.0),
+                y: 0.0,
+            },
+        ]];
+        let short = SegmentIndex::new(&line, half);
+        let coast = all_land(4000.0);
+        let mut data = two_tiles(9, 1.0, 0.1, 100.0);
+        let mut plan = plain_plan(&coast, DetailBand::of(1.0, 3.11));
+        plan.corridor = Some(&short);
+        plan.corridor_half_m = half;
+        apply_detail(&mut data, &plan);
     }
 }
