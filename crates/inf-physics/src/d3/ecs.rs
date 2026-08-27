@@ -701,6 +701,20 @@ impl PhysicsBridge3D {
             .filter(|(_, s)| !s.is_intact())
             .map(|(g, _)| *g)
             .collect();
+        // **THE SIM-LOD BAND, for bodies** (NPC1a). The I3 collider band above
+        // decides which *static structural* colliders a step may hold; this
+        // decides which crowd agents are solid, and it is a different question
+        // at a different scale — a building is dozens of solids and an NPC is
+        // one capsule. A `Far` or `Dormant` agent has no rapier body at all,
+        // which is wall 9's own resolution: an NPC nobody can reach does not
+        // need to be reachable.
+        //
+        // Read through `inf_ecs::crowd`'s door rather than by a `CrowdAgent`
+        // lookup inside the walk below, because the walk is `O(entities)` over
+        // a furnished town and the population is `O(agents)`. Empty — and
+        // allocation-free — on every level with no crowd, which is every level
+        // this tree committed before NPC1a.
+        let bodiless: BTreeSet<Uuid> = inf_ecs::crowd::bodiless_agents(world);
         let mut snaps: Vec<EntitySync3D> = std::mem::take(&mut self.snaps_scratch);
         snaps.clear();
         // P20.2: the water gather rides in THIS walk rather than in a second one.
@@ -758,7 +772,12 @@ impl PhysicsBridge3D {
             // entity itself survives untouched in the scene document (it still
             // has a name, a transform and its components); it is only its
             // physical and visible representation that moved into the chunks.
-            let broken_here = broken.contains(&guid);
+            // A broken destructible and a banded-out crowd agent reach the same
+            // place by different roads: neither contributes a body or a
+            // collider, so `sync_retaining` skips it and the despawn sweep
+            // removes whatever it had. The entity itself survives untouched in
+            // both cases — it is only its physical representation that goes.
+            let broken_here = broken.contains(&guid) || bodiless.contains(&guid);
             let rb = if broken_here {
                 None
             } else {

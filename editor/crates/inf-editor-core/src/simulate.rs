@@ -359,6 +359,9 @@ pub struct SimSession {
     /// This step's gameplay report (I6) — doors moved, rounds fired, locks
     /// broken, bodies stopped. MIRROR of `RuntimeSim::gameplay`.
     gameplay: inf_physics::d3::GameplayReport,
+    /// This step's crowd counters (NPC1a) — agents per sim-LOD tier, and what
+    /// materialized or re-tiered. MIRROR of `RuntimeSim::crowd`.
+    crowd: inf_ecs::crowd::CrowdStats,
     /// The **simulation's own** voxel volumes, keyed by entity `Guid` (P21.2).
     ///
     /// Read by the `terrain.height_at` host seam so a character can stand on a
@@ -490,6 +493,13 @@ impl SimSession {
         //    would not match the shipped player's, which seeds from rest.
         inf_ecs::cloth::clear_cloth(doc.world_mut());
         inf_ecs::hair::clear_hair(doc.world_mut());
+        // -- NPC1a -- ...and on an EMPTY town, fourth time the same reason: the
+        //    population is a resource, so the snapshot cannot capture it and
+        //    `apply_to_doc` cannot restore it. Without this, run 2 would begin
+        //    with run 1's NPCs standing where run 1 left them -- and, worse,
+        //    with real entities in the author's document that no Outliner row
+        //    put there.
+        inf_ecs::crowd::clear_crowd(doc.world_mut());
         let bridge = PhysicsBridge2D::new(gravity.d2);
         // P11.3: a 3D bridge alongside the 2D one — built from the level's own
         // `gravity_3d` since P29.7 (a character still applies its own gravity
@@ -551,6 +561,7 @@ impl SimSession {
             debris_budget: DebrisBudget::default(),
             fracture_audit: FractureAudit::default(),
             gameplay: inf_physics::d3::GameplayReport::default(),
+            crowd: inf_ecs::crowd::CrowdStats::default(),
             voxels: BTreeMap::new(),
         };
 
@@ -755,6 +766,11 @@ impl SimSession {
         //    coat draped by a run is a Simulate artefact, not authored content.
         inf_ecs::cloth::clear_cloth(doc.world_mut());
         inf_ecs::hair::clear_hair(doc.world_mut());
+        // -- NPC1a -- and the crowd with them. A materialized agent is a real
+        //    entity that the snapshot never saw spawn, so leaving one behind
+        //    would put an NPC in the author's Outliner and, on the next save,
+        //    in the author's level.
+        inf_ecs::crowd::clear_crowd(doc.world_mut());
     }
 
     /// Seed the resolvable `.inf_sm` state machines (P11.2). An entity carrying an
@@ -1054,6 +1070,17 @@ impl SimSession {
         // observe ONE weather state for the step. Inert unless a transition is
         // actually in flight on an enabled weather block.
         inf_ecs::sky::advance_weather(doc.world_mut(), dt);
+        // ── NPC1a the crowd ── decide every agent's sim-LOD tier, materialize
+        //    or dematerialize it, and put it where its route says it is. ONE
+        //    Ring-0 call (`inf_ecs::crowd`) rather than a loop spelled twice —
+        //    the deform doctrine's shape — so the editor preview and the
+        //    shipped player cannot tier the same NPC differently.
+        //
+        //    HERE, and not later: the physics sync below has to see this step's
+        //    bodies (a `Far` agent has none), and `step_pose_evaluation` has to
+        //    see this step's tiers. Inert on every level with no population.
+        //    (MIRROR of `RuntimeSim::fixed_step`.)
+        self.crowd = inf_ecs::crowd::step_crowd(doc.world_mut(), dt);
         // 1. ECS → physics.
         self.bridge.sync_from_world(doc.world());
         // ── P22.3 fracture follow ── an INTACT destructible is a normal

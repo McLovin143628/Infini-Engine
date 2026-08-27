@@ -2463,6 +2463,54 @@ fn both_fixed_steps_move_the_root_before_the_pose() {
     }
 }
 
+/// **Both hosts tier the crowd, and both tier it BEFORE the three passes that
+/// read a tier** (NPC1a).
+///
+/// `inf_ecs::crowd::step_crowd` is one Ring-0 door, so the two hosts cannot
+/// disagree about *what* a tier means. What they could still disagree about is
+/// *when* it is decided, and that is not a stylistic difference: the tier gates
+/// the 3D bridge's bodies (`sync_from_world_sim` reads `bodiless_agents`), the
+/// character step and the pose evaluation. A host that tiered after its physics
+/// sync would give a `Far` agent a capsule for one step; a host that tiered
+/// after `advance_state_machines` would pose an agent it had just decided not to
+/// pose. Either is a one-step disagreement between two hosts, which is exactly
+/// what the island gate's byte compare exists to catch and exactly the kind of
+/// thing that would take a thousand steps to show up.
+///
+/// So the ordering is pinned as source text in both files, the
+/// `both_fixed_steps_move_the_root_before_the_pose` shape.
+#[test]
+fn both_fixed_steps_tier_the_crowd_before_the_passes_that_read_a_tier() {
+    for (label, path) in [
+        ("shipped player", "runtime/inf-player/src/runtime_sim.rs"),
+        (
+            "editor Simulate",
+            "editor/crates/inf-editor-core/src/simulate.rs",
+        ),
+    ] {
+        let whole = read(path).replace("\r\n", "\n");
+        let start = whole
+            .find("fn fixed_step(")
+            .expect("both hosts have a `fixed_step`");
+        let src = whole[start..].to_string();
+        let at = |needle: &str| -> usize {
+            src.find(needle)
+                .unwrap_or_else(|| panic!("the {label} fixed step does not call `{needle}`"))
+        };
+        let crowd = at("inf_ecs::crowd::step_crowd(");
+        let bridge = at("sync_from_world_sim(");
+        let mover = at("step_character_movement(");
+        let pose = at("advance_state_machines(");
+        assert!(
+            crowd < bridge && crowd < mover && crowd < pose,
+            "the {label} tiers the crowd at {crowd}, after one of the passes \
+             that reads a tier (bridge {bridge}, movement {mover}, pose {pose}) \
+             — a `Far` agent would keep a capsule, or be posed, for the step \
+             its tier said not to"
+        );
+    }
+}
+
 /// **Every pose writer runs, in a frozen order** (SK1a) — the twin of the trace
 /// law below, one level down.
 ///
@@ -2577,7 +2625,7 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
     // The sequence, in the order the bytes are concatenated. A section deleted
     // from the fold fails at its own `expect`; a section MOVED fails the
     // ordering assertion below.
-    const SECTIONS: [&str; 8] = [
+    const SECTIONS: [&str; 9] = [
         "deform::deform_state_bytes",
         "pose::pose_state_bytes",
         "cloth::cloth_state_bytes",
@@ -2586,6 +2634,12 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
         "item::item_state_bytes",
         "weapon::weapon_state_bytes",
         "weapon::health_state_bytes",
+        // NPC1a. The one section whose ABSENCE is invisible in a way the eight
+        // above are not: a `Far` agent evaluates no pose and a `Dormant` one
+        // has no entity, so a sim-LOD tier that differed between two hosts
+        // would produce two identical traces until one of them ran a pose the
+        // other did not.
+        "crowd::crowd_state_bytes",
     ];
     let at: Vec<usize> = SECTIONS
         .iter()

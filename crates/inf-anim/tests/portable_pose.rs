@@ -46,7 +46,7 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 36] = [
+const SIM_PATH: [(&str, &str, &str); 37] = [
     // ── the fixed step that PUBLISHES the pose (SK1b audit) ──
     //
     // The most surprising absence on this list. `crates/inf-ecs/src/pose.rs` is
@@ -302,6 +302,23 @@ const SIM_PATH: [(&str, &str, &str); 36] = [
         "inf_physics::d3::gameplay",
         include_str!("../../inf-physics/src/d3/gameplay.rs"),
         "step_hand_ik composes the HandIk request every posed character's hands are solved against, and those bones are folded into pose_state_bytes",
+    ),
+    // ── NPC1a: the crowd, named on DAY ONE ──
+    //
+    // Every previous entry in this list was added after the module it covers
+    // existed, and two of them were added because an audit went looking. This
+    // one arrives with its module, because the module's output is the strongest
+    // possible case for the law: `CrowdRoute::position_at` decides where a
+    // thousand NPCs stand, that lands on a `Transform`, and the transform is
+    // folded into `state_bytes` and compared between two hosts and — through
+    // the replay and net paths — two machines. The route is deliberately built
+    // out of `+ - * / sqrt %` alone for exactly this reason; the entry is what
+    // stops the next edit reaching for `.atan2(` to make an agent face where it
+    // is going.
+    (
+        "inf_ecs::crowd",
+        include_str!("../../inf-ecs/src/crowd.rs"),
+        "CrowdRoute::position_at decides where every crowd NPC stands and CrowdBand::tier decides what it costs; both reach a Transform, which state_bytes folds and two hosts compare",
     ),
 ];
 

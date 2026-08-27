@@ -43,12 +43,27 @@
 //! rule, and the conservative one: a runtime-spawned entity has no authored home
 //! to return to, so evicting it would destroy state nothing could rebuild.
 //!
-//! The corollary is honest too: a *statically-placed* entity that a blueprint
-//! moves far from its birth cell still despawns when that **birth** cell
-//! deactivates, because residency is a function of where the cook put it. Content
-//! that moves an entity across the world should mark it
-//! [`AlwaysLoaded`](inf_ecs::components::AlwaysLoaded) — that is what the marker
-//! is for.
+//! **An entity belongs to the cell it is IN** (NPC1a). Until this wave the
+//! corollary read the other way: a statically-placed entity that a blueprint
+//! moved far from its birth cell still despawned when that *birth* cell
+//! deactivated, "because residency is a function of where the cook put it", and
+//! content that moved an entity across the world was told to mark it
+//! [`AlwaysLoaded`](inf_ecs::components::AlwaysLoaded) — i.e. to opt out of
+//! streaming entirely.
+//!
+//! That was a deferral wearing a rule's clothes, and a crowd is the content that
+//! makes it untenable: an NPC walking two cells over is the *normal* case, and
+//! "mark every NPC AlwaysLoaded" is a fifty-square-kilometre world with nothing
+//! streaming in it. So [`sync_sim`](CellStreaming::sync_sim) now checks, at the
+//! moment of deactivation and only then, whether the entity is standing in a
+//! cell this sync is **keeping** — and if it is, hands it to that cell's list
+//! instead of despawning it ([`CellStreamStats::rehomed`] counts it).
+//!
+//! The conservative half is untouched, and it is what makes the change safe: an
+//! entity whose current cell is not wanted is despawned exactly as before, and a
+//! level whose streamed entities do not move produces the identical trace. The
+//! island's `rehomed` is **0**; the fixture that walks a mover across a boundary
+//! is where it is not.
 //!
 //! ## Blueprint actors, and the v1 boundary
 //!
@@ -200,6 +215,16 @@ pub struct CellStreamStats {
     /// A pure function of world state, like every other counter here, so it cannot
     /// make a run non-reproducible.
     pub unresolved_refs: usize,
+    /// **Entities re-homed** (NPC1a): streamed entities that walked out of their
+    /// birth cell into a cell this sync is keeping, and were handed to that
+    /// cell's list instead of being despawned.
+    ///
+    /// Zero for every level whose streamed entities do not move, which is every
+    /// level committed before NPC1a - and that zero is load-bearing, because it
+    /// is what says the fix costs the island nothing. A gate that asserts the
+    /// rule works needs a fixture where this is non-zero AND a control where it
+    /// is zero; both exist.
+    pub rehomed: u64,
 }
 
 impl CellStreamStats {
@@ -209,7 +234,7 @@ impl CellStreamStats {
         format!(
             "cell streaming: {} cell(s) resident ({} entities), {} loaded, {} pending, \
              {} activations / {} deactivations / {} blocking / {} failed, {:.1} KiB, \
-             {} unresolved ref(s)",
+             {} unresolved ref(s), {} re-homed",
             self.cells_resident,
             self.entities_resident,
             self.cells_loaded,
@@ -220,6 +245,7 @@ impl CellStreamStats {
             self.failed,
             self.bytes_resident as f64 / 1024.0,
             self.unresolved_refs,
+            self.rehomed,
         )
     }
 }
@@ -731,6 +757,9 @@ impl CellStreaming {
             .copied()
             .filter(|c| !activate.contains(c))
             .collect();
+        // The re-homes this reconcile performed, applied after the loop so the
+        // walk over `leaving` does not mutate the map it is reading.
+        let mut rehomed: Vec<(CellCoord, Uuid)> = Vec::new();
         for coord in leaving {
             let Some(guids) = self.resident.remove(&coord) else {
                 continue;
@@ -740,9 +769,36 @@ impl CellStreaming {
             // cell, so this is belt-and-braces against a `Guid` that is already
             // gone (handled below either way).
             for guid in guids.iter().rev() {
-                if let Some(e) = world.entity_of(*guid) {
-                    world.despawn(e);
+                let Some(e) = world.entity_of(*guid) else {
+                    continue;
+                };
+                // **AN ENTITY BELONGS TO THE CELL IT IS IN** (NPC1a). See the
+                // module header: v1's rule was that residency is a function of
+                // where the *cook* put an entity, so a mover despawned when its
+                // BIRTH cell left even though it was standing in a cell that is
+                // staying. That was a deferral, not a design, and a crowd is
+                // exactly the content that breaks it — an NPC that walks two
+                // cells over is the normal case rather than the exotic one.
+                //
+                // So: an entity whose current cell is one this sync is KEEPING
+                // is handed to that cell's list instead of being despawned. It
+                // is a pure function of sim state (the entity's own transform,
+                // the want set), it happens at the same deterministic sync
+                // point everything else here does, and it is bounded by the
+                // entities of the cells that are actually leaving — nothing on
+                // a step that deactivates nothing, which is almost all of them.
+                //
+                // The conservative half is unchanged and is what makes this
+                // safe: an entity whose current cell is NOT wanted is despawned
+                // exactly as before, so a level whose entities do not move
+                // produces the same trace it always did.
+                if let Some(now) = current_cell(world, e, self.cell_size_m) {
+                    if now != coord && activate.contains(&now) {
+                        rehomed.push((now, *guid));
+                        continue;
+                    }
                 }
+                world.despawn(e);
             }
             self.stats.deactivations += 1;
             self.events.push(CellEvent {
@@ -751,6 +807,24 @@ impl CellStreaming {
                 coord,
             });
             tracing::debug!("inf-player: cell ({},{}) deactivated", coord.0, coord.1);
+        }
+        // Apply the re-homes, ascending by (cell, guid) so the receiving lists
+        // are a function of the world's contents rather than of the order the
+        // leaving cells happened to be walked in.
+        rehomed.sort_unstable();
+        for (coord, guid) in rehomed {
+            self.stats.rehomed += 1;
+            let list = self.resident.entry(coord).or_default();
+            if !list.contains(&guid) {
+                list.push(guid);
+                list.sort_unstable();
+            }
+            tracing::debug!(
+                "inf-player: entity {guid} walked out of its birth cell and now \
+                 belongs to ({},{})",
+                coord.0,
+                coord.1
+            );
         }
 
         // 5. Activate, ascending. A cell the prefetch did not reach is loaded
@@ -1025,6 +1099,31 @@ fn pcg_volume_count(world: &EcsWorld, guids: &BTreeSet<Uuid>) -> usize {
                 .is_some_and(|v| v.graph.is_some())
         })
         .count()
+}
+
+/// **Which grid cell an entity is standing in right now** (NPC1a), or `None`
+/// when it has no usable position.
+///
+/// `GlobalTransform` is preferred and the local `Transform` is the fallback, for
+/// exactly the reason [`streaming_sources`] gives: an entity parented to
+/// something must follow it, and a world that has not propagated yet is a timing
+/// artefact rather than an authoring error. A non-finite position answers
+/// `None`, which routes it to the despawn arm — the conservative direction, and
+/// the same one [`inf_ecs::SimBand`] takes for a non-finite anchor.
+///
+/// The coordinate is `floor(x / size)`, which is the partitioner's own binning
+/// rule; deriving it here rather than importing it would be a second opinion
+/// about where a cell is, so this calls [`inf_scene::partition::cell_of`].
+fn current_cell(world: &EcsWorld, entity: inf_ecs::Entity, cell_size_m: f64) -> Option<CellCoord> {
+    let w = world.world();
+    let p = w
+        .get::<GlobalTransform>(entity)
+        .map(|g| g.translation())
+        .or_else(|| w.get::<Transform>(entity).map(|t| t.translation.to_dvec3()))?;
+    if !p.x.is_finite() || !p.z.is_finite() {
+        return None;
+    }
+    Some(inf_scene::partition::cell_of(p.x, p.z, cell_size_m))
 }
 
 /// The per-axis distance from a world XZ point to a cell — re-exported so the
@@ -1328,6 +1427,100 @@ mod tests {
             s.pcg_evaluated(),
             0,
             "a world whose cells hold no PcgVolume reported evaluating some"
+        );
+    }
+
+    /// Walk an already-spawned entity, the way a Blueprint — or a crowd agent's
+    /// route — moves one.
+    fn move_entity(world: &mut EcsWorld, g: Uuid, x: f64) {
+        let e = world.entity_of(g).expect("the entity is resident");
+        inf_ecs::sim::set_translation(world, e, inf_ecs::Vec3d::new(x, 0.0, 0.0));
+        world.propagate();
+    }
+
+    /// **AN ENTITY BELONGS TO THE CELL IT IS IN** (NPC1a) — the corollary in the
+    /// module header, killed, with its conservative half kept.
+    ///
+    /// Three claims in one fixture, because the middle one is what makes the
+    /// other two mean anything:
+    ///
+    /// 1. a mover that walked into a cell the sync is KEEPING survives its birth
+    ///    cell's deactivation and is counted in `rehomed`;
+    /// 2. the CONTROL — a mover that stayed put is despawned exactly as it was
+    ///    before this wave, and `rehomed` does not move. Without it the first
+    ///    claim is satisfied by a sync that despawns nothing at all;
+    /// 3. a re-homed entity is not immortal: when its NEW cell leaves the want
+    ///    set it goes with it, which is the difference between "residency
+    ///    follows the entity" and "walking out of a cell opts out of streaming".
+    #[test]
+    fn an_entity_that_walked_into_a_kept_cell_is_rehomed_rather_than_despawned() {
+        let (mut world, mut s) = fixture();
+        // At x = 95 the 10 m radius touches cells 0 AND 1, so both are active
+        // and the fixture can pose the problem at all.
+        move_source(&mut world, 95.0);
+        s.sync_sim(&mut world, 1);
+        assert!(
+            s.is_resident((0, 0)) && s.is_resident((1, 0)),
+            "the fixture needs two cells"
+        );
+        assert!(world.entity_of(guid(0x100)).is_some(), "cell 0's prop");
+        assert_eq!(s.stats().rehomed, 0);
+
+        // The prop born in cell 0 walks into cell 1, and then cell 0 leaves.
+        move_entity(&mut world, guid(0x100), 150.0);
+        move_source(&mut world, 150.0);
+        s.sync_sim(&mut world, 2);
+        assert!(
+            !s.is_resident((0, 0)),
+            "cell 0 did not leave — nothing is tested"
+        );
+        assert!(
+            world.entity_of(guid(0x100)).is_some(),
+            "the mover was despawned by the cell it LEFT, which is the corollary \
+             this wave exists to kill"
+        );
+        assert_eq!(s.stats().rehomed, 1, "it survived without being counted");
+
+        // …and it really is cell 1's now: when cell 1 leaves, it goes.
+        move_source(&mut world, 1000.0);
+        s.sync_sim(&mut world, 3);
+        assert!(
+            world.entity_of(guid(0x100)).is_none(),
+            "a re-homed entity became immortal — residency must follow it, not \
+             stop applying to it"
+        );
+        assert_eq!(
+            s.stats().rehomed,
+            1,
+            "the second sync re-homed something too"
+        );
+    }
+
+    /// **THE CONTROL**: an entity that did NOT move is despawned by its birth
+    /// cell exactly as before, and nothing is re-homed.
+    ///
+    /// This is the arm that says the change costs a level whose content stands
+    /// still nothing at all — which is every level this repository committed
+    /// before NPC1a, the island included.
+    #[test]
+    fn an_entity_that_stayed_put_is_despawned_and_nothing_is_rehomed() {
+        let (mut world, mut s) = fixture();
+        move_source(&mut world, 95.0);
+        s.sync_sim(&mut world, 1);
+        assert!(world.entity_of(guid(0x100)).is_some());
+
+        move_source(&mut world, 150.0);
+        s.sync_sim(&mut world, 2);
+        assert!(!s.is_resident((0, 0)));
+        assert!(
+            world.entity_of(guid(0x100)).is_none(),
+            "a stationary entity survived its own cell's deactivation — the \
+             re-home rule is admitting things it must not"
+        );
+        assert_eq!(
+            s.stats().rehomed,
+            0,
+            "a level whose entities do not move must re-home nothing"
         );
     }
 

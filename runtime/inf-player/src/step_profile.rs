@@ -41,7 +41,7 @@
 use std::time::Instant;
 
 /// How many phases one fixed step is split into.
-pub const STEP_PHASES: usize = 24;
+pub const STEP_PHASES: usize = 25;
 
 /// The phases, in the order [`RuntimeSim::fixed_step`] runs them.
 ///
@@ -65,6 +65,7 @@ pub const STEP_PHASE_NAMES: [&str; STEP_PHASES] = [
     "terrain stream",
     "biome scatter",
     "sky",
+    "crowd",
     "physics2d sync",
     "physics3d sync",
     "water forces",
@@ -99,49 +100,55 @@ pub(crate) mod phase {
     pub const BIOME_SCATTER: usize = 2;
     /// P17.1 time of day + P17.4 the weather blend.
     pub const SKY: usize = 3;
+    /// NPC1a — the sim-LOD tier decision and the crowd's own kinematic step.
+    /// HERE, after streaming (so a streamed-in agent is tiered on the step it
+    /// arrives) and before the physics sync (so the bridge sees this step's
+    /// bodies), the character step and the animation (so both read this step's
+    /// tiers). Inert — one `contains_resource` — on a level with no crowd.
+    pub const CROWD: usize = 4;
     /// The 2D bridge's ECS → rapier2d walk.
-    pub const PHYSICS2D_SYNC: usize = 4;
+    pub const PHYSICS2D_SYNC: usize = 5;
     /// The 3D bridge's walk — the I3 collider band's gather lives here, and so
     /// does the P22.3 fracture follow that precedes it.
-    pub const PHYSICS3D_SYNC: usize = 5;
+    pub const PHYSICS3D_SYNC: usize = 6;
     /// P20.2 buoyancy + hydrodynamic drag.
-    pub const WATER: usize = 6;
+    pub const WATER: usize = 7;
     /// Wave 3 input edges and the dispatches they queue.
-    pub const INPUT_EVENTS: usize = 7;
+    pub const INPUT_EVENTS: usize = 8;
     /// The Tick pass over every actor, and the dispatches it queues.
-    pub const BLUEPRINT_TICK: usize = 8;
+    pub const BLUEPRINT_TICK: usize = 9;
     /// P29.3 — the one Ring-0 movement step, plus the intent that feeds it.
-    pub const CHARACTER_MOVE: usize = 9;
+    pub const CHARACTER_MOVE: usize = 10;
     /// I6 — doors, weapons and the health they spend, plus the host's own drain
     /// of the energy they owe the P22 damage door.
-    pub const GAMEPLAY: usize = 10;
+    pub const GAMEPLAY: usize = 11;
     /// rapier2d + rapier3d.
-    pub const SOLVER: usize = 11;
+    pub const SOLVER: usize = 12;
     /// Wave 3 contacts and overlaps, and the dispatches they queue.
-    pub const COLLISION_DRAIN: usize = 12;
+    pub const COLLISION_DRAIN: usize = 13;
     /// rapier → ECS.
-    pub const WRITE_BACK: usize = 13;
+    pub const WRITE_BACK: usize = 14;
     /// The transform + visibility DFS. **Three call sites, gathered.**
-    pub const PROPAGATE: usize = 14;
+    pub const PROPAGATE: usize = 15;
     /// P22.1 — the ground remembers what stood on it.
-    pub const DEFORMATION: usize = 15;
+    pub const DEFORMATION: usize = 16;
     /// Play-heads, state machines and root motion.
-    pub const ANIMATION: usize = 16;
+    pub const ANIMATION: usize = 17;
     /// P11.3 sockets.
-    pub const ATTACHMENTS: usize = 17;
+    pub const ATTACHMENTS: usize = 18;
     /// P24.4 garments and hair.
-    pub const CLOTH_HAIR: usize = 18;
+    pub const CLOTH_HAIR: usize = 19;
     /// P14.5 WASM mods — which propagate internally, so their propagate is here
     /// rather than in [`PROPAGATE`].
-    pub const MODS: usize = 19;
+    pub const MODS: usize = 20;
     /// P22.3 fracture write-back, the structural solve and the debris budget.
-    pub const DESTRUCTION: usize = 20;
+    pub const DESTRUCTION: usize = 21;
     /// P12.3 — the audio command queue.
-    pub const AUDIO: usize = 21;
+    pub const AUDIO: usize = 22;
     /// P29.6 — the locomotion camera.
-    pub const CAMERA: usize = 22;
+    pub const CAMERA: usize = 23;
     /// The interpolation history roll and the rising-edge clear.
-    pub const POSITION_CAPTURE: usize = 23;
+    pub const POSITION_CAPTURE: usize = 24;
 }
 
 /// One fixed step's phase milliseconds — or, after
@@ -404,6 +411,7 @@ mod tests {
     fn the_names_and_the_indices_are_one_table() {
         assert_eq!(STEP_PHASE_NAMES.len(), STEP_PHASES);
         assert_eq!(STEP_PHASE_NAMES[phase::BIOME_SCATTER], "biome scatter");
+        assert_eq!(STEP_PHASE_NAMES[phase::CROWD], "crowd");
         assert_eq!(STEP_PHASE_NAMES[phase::PHYSICS3D_SYNC], "physics3d sync");
         assert_eq!(STEP_PHASE_NAMES[phase::PROPAGATE], "propagate");
         assert_eq!(STEP_PHASE_NAMES[phase::SOLVER], "solver");
@@ -437,6 +445,7 @@ mod tests {
             phase::TERRAIN_STREAM,
             phase::BIOME_SCATTER,
             phase::SKY,
+            phase::CROWD,
             phase::PHYSICS2D_SYNC,
             phase::PHYSICS3D_SYNC,
             phase::WATER,

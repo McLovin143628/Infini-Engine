@@ -1019,13 +1019,42 @@ pub fn step_pose_evaluation<'c>(
     vars: &dyn Fn(Uuid) -> BTreeMap<String, f64>,
 ) {
     // 1. Read pass — collect targets so the write-back never overlaps the query.
-    let mut targets: Vec<(Entity, Uuid, Uuid, SmRuntimeState, Option<Uuid>)> = Vec::new();
+    //
+    // **THE SIM-LOD GATE** (NPC1a). `CrowdAgent` is the tier
+    // [`crate::crowd::step_crowd`] published earlier in this same fixed step,
+    // and it decides two things here: whether the entity is a target at all
+    // (`poses()` — a Far agent evaluates nothing and therefore has no store
+    // entry, so it contributes zero of a posed character's 6 476 trace bytes),
+    // and whether the SK1b hand pass runs on it (`hand_ik()`).
+    //
+    // An entity with **no** `CrowdAgent` — every hero, every authored character,
+    // every fixture in this tree — answers `Full` and takes exactly the path it
+    // took before NPC1a. That is what makes "the hero is untouched" structural
+    // rather than a promise.
+    let mut targets: Vec<(Entity, Uuid, Uuid, SmRuntimeState, Option<Uuid>, bool)> = Vec::new();
     {
         let w = world.world_mut();
-        let mut q = w.query::<(Entity, &Guid, &AnimStateMachine, Option<&SkeletalMesh>)>();
-        for (e, g, asm, sm) in q.iter(w) {
+        let mut q = w.query::<(
+            Entity,
+            &Guid,
+            &AnimStateMachine,
+            Option<&SkeletalMesh>,
+            Option<&crate::crowd::CrowdAgent>,
+        )>();
+        for (e, g, asm, sm, agent) in q.iter(w) {
+            let tier = agent.map_or(crate::crowd::CrowdTier::Full, |a| a.tier);
+            if !tier.poses() {
+                continue;
+            }
             if let Some(sm_guid) = asm.sm {
-                targets.push((e, g.0, sm_guid, asm.runtime, sm.and_then(|s| s.skeleton)));
+                targets.push((
+                    e,
+                    g.0,
+                    sm_guid,
+                    asm.runtime,
+                    sm.and_then(|s| s.skeleton),
+                    tier.hand_ik(),
+                ));
             }
         }
     }
@@ -1068,7 +1097,7 @@ pub fn step_pose_evaluation<'c>(
         }
         return;
     }
-    targets.sort_by_key(|(_, guid, _, _, _)| *guid);
+    targets.sort_by_key(|(_, guid, _, _, _, _)| *guid);
 
     // 2. Advance + evaluate.
     //
@@ -1136,7 +1165,7 @@ pub fn step_pose_evaluation<'c>(
     // from the same `clips` the pose is sampled through, so there is exactly one
     // notion of how long a clip is.
     let clip_len = |c: ClipRef| clips(c).map(|a| a.duration as f64);
-    for (entity, guid, sm_guid, rt_state, skeleton_id) in targets {
+    for (entity, guid, sm_guid, rt_state, skeleton_id, hands_ok) in targets {
         let Some(machine) = machines(sm_guid) else {
             continue;
         };
@@ -1493,7 +1522,16 @@ pub fn step_pose_evaluation<'c>(
                         // and the hand solves against the body that stance
                         // produced. Before the re-drive below, because it is a
                         // correction and that is not.
-                        let hands = hand_requests.get(&guid);
+                        //
+                        // **The `Near` tier stops here** (NPC1a). The reach and
+                        // the finger closure are the passes a viewer cannot
+                        // resolve at distance and the only ones that need a
+                        // live `HandIk` request to do anything at all, so they
+                        // are the first rung off the ladder. `hands_ok` is the
+                        // published tier's own answer, so the editor and the
+                        // player cannot disagree about which characters have
+                        // hands this step.
+                        let hands = hands_ok.then(|| hand_requests.get(&guid)).flatten();
                         if let Some(request) = hands {
                             let report = apply_hand_ik(asset, &mut pose, request, to_world);
                             corrected |= report.wrote();

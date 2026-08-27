@@ -415,6 +415,11 @@ pub struct RuntimeSim {
     /// broken, bodies stopped. The `fracture_audit` shape one system along, and
     /// read for the same reason: it is the thing a gate asserts on.
     gameplay: inf_physics::d3::GameplayReport,
+    /// This step's crowd counters (NPC1a) — how many agents each sim-LOD tier
+    /// holds, and what materialized or re-tiered. The `fracture_audit` shape a
+    /// third time, and read for the same reason: it is the thing a gate asserts
+    /// on. All zeroes on a level with no population.
+    crowd: inf_ecs::crowd::CrowdStats,
     /// Whether [`fixed_step`](Self::fixed_step) marks its phases (island wave
     /// I4b). `false` on every shipped run; see [`crate::step_profile`] for why a
     /// stopwatch here cannot move the simulation.
@@ -560,6 +565,7 @@ impl RuntimeSim {
             fractures: BTreeMap::new(),
             debris_budget: DebrisBudget::default(),
             fracture_audit: FractureAudit::default(),
+            crowd: inf_ecs::crowd::CrowdStats::default(),
             gameplay: inf_physics::d3::GameplayReport::default(),
             voxels: BTreeMap::new(),
             profiling: false,
@@ -705,6 +711,26 @@ impl RuntimeSim {
     /// The most recent fixed step's fracture audit (P22.3).
     pub fn fracture_audit(&self) -> FractureAudit {
         self.fracture_audit
+    }
+
+    /// The most recent fixed step's crowd counters (NPC1a) — agents per
+    /// sim-LOD tier, plus what materialized, dematerialized and re-tiered.
+    ///
+    /// All zeroes on a level with no population, which is how a gate tells
+    /// "no crowd" from "a crowd that is not being tiered".
+    pub fn crowd_stats(&self) -> inf_ecs::crowd::CrowdStats {
+        self.crowd
+    }
+
+    /// **Install a crowd population** (NPC1a) — the door the sweep instrument
+    /// and the island gate spawn test NPCs through.
+    ///
+    /// Records arrive tier-less; the next fixed step's
+    /// [`inf_ecs::crowd::step_crowd`] materializes the ones the band wants. A
+    /// caller cannot pre-decide a tier, which is what keeps the decision in one
+    /// place.
+    pub fn set_crowd_population(&mut self, records: BTreeMap<Uuid, inf_ecs::crowd::CrowdRecord>) {
+        inf_ecs::crowd::set_population(&mut self.world, records);
     }
     /// Seed the simulation's voxel volumes (P21.2), keyed by entity `Guid`.
     ///
@@ -1152,6 +1178,21 @@ impl RuntimeSim {
         out.extend_from_slice(&inf_ecs::item::item_state_bytes(&self.world));
         out.extend_from_slice(&inf_ecs::weapon::weapon_state_bytes(&self.world));
         out.extend_from_slice(&inf_ecs::weapon::health_state_bytes(&self.world));
+        // NPC1a appends the crowd last, on the same argument the eight above
+        // rest on, and with one extra of its own: a `Far` agent evaluates no
+        // pose and a `Dormant` one has no entity, so **without this section the
+        // sim-LOD decision would be invisible to every trace comparison in this
+        // repository** — two hosts that tiered the same NPC differently would
+        // compare equal at every step until one of them happened to run a pose
+        // the other did not. 49 bytes an agent against a posed character's
+        // 6 476: see `inf_ecs::crowd::crowd_state_bytes` for the arithmetic.
+        //
+        // **The position is frozen**, exactly as cloth's and I6's are: this
+        // comes after the health bytes and nothing may be inserted before it,
+        // because every committed trace hash in the tree was taken over this
+        // concatenation in this order. A level with no population produces an
+        // empty vec, so every pre-NPC1a trace is byte-identical.
+        out.extend_from_slice(&inf_ecs::crowd::crowd_state_bytes(&self.world));
         out
     }
 
@@ -1287,6 +1328,22 @@ impl RuntimeSim {
         // actually in flight on an enabled weather block.
         inf_ecs::sky::advance_weather(&mut self.world, dt);
         clk.mark(phase::SKY);
+        // ── NPC1a the crowd ── decide every agent's sim-LOD tier, materialize
+        //    or dematerialize it, and put it where its route says it is. ONE
+        //    Ring-0 call (`inf_ecs::crowd`) rather than a loop spelled twice —
+        //    the deform doctrine's shape — so the editor preview and the
+        //    shipped player cannot tier the same NPC differently.
+        //
+        //    HERE, and not later: the physics sync below has to see this step's
+        //    bodies (a `Far` agent has none), and `step_pose_evaluation` has to
+        //    see this step's tiers. After the sky, because a schedule reads the
+        //    clock (NPC1d) and the crowd is what will read the schedule.
+        //
+        //    Inert — one `contains_resource` branch, no allocation — on every
+        //    level with no population, which is every level committed before
+        //    this wave. (MIRROR of `SimSession::fixed_step`.)
+        self.crowd = inf_ecs::crowd::step_crowd(&mut self.world, dt);
+        clk.mark(phase::CROWD);
         // 1. ECS → physics.
         self.bridge.sync_from_world(&self.world);
         clk.mark(phase::PHYSICS2D_SYNC);
