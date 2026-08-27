@@ -2867,17 +2867,20 @@ fn scatter_caster_stamps(
                 }
             }
         }
-        for &i in &perspective {
-            if bucket != 0 && bucket & PERSPECTIVE_BUCKET == 0 {
-                break;
-            }
-            touches += 1;
-            let p = &mut pages[i];
-            if crate::vsm::vsm_page_sees_sphere(&p.view_proj, centre, radius) {
-                fold_into(&mut p.caster_fold, hash);
-                p.casters += 1;
-                if let Some(w) = p.group_mask.get_mut(word) {
-                    *w |= bit;
+        // A caster restricted to clipmap buckets reaches no perspective page at
+        // all (island wave I8c), and the test is loop-invariant so it is asked
+        // once. The clipmap half above cannot be hoisted the same way: its bucket
+        // is the level, which that loop is over.
+        if bucket == 0 || bucket & PERSPECTIVE_BUCKET != 0 {
+            for &i in &perspective {
+                touches += 1;
+                let p = &mut pages[i];
+                if crate::vsm::vsm_page_sees_sphere(&p.view_proj, centre, radius) {
+                    fold_into(&mut p.caster_fold, hash);
+                    p.casters += 1;
+                    if let Some(w) = p.group_mask.get_mut(word) {
+                        *w |= bit;
+                    }
                 }
             }
         }

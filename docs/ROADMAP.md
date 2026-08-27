@@ -27554,4 +27554,82 @@ What is lost is self-shadowing *inside* the silhouette; the named bound is the d
 rastering frame — the HIGH-1 repair costs nothing measurable. Counts after: battery **328 / 6 249 / 0 /
 19** (+3 arms, no new block), goldens **58** with `INF_GOLDEN_STRICT=1` green over 117 arms, rustdoc
 **374 over 30 crates** cold (the audit adds zero), clippy **0**, `fmt` clean, schemas all four unmoved,
-committed content unmoved. Full ledger in `docs/memos/island-progress.md`. 
+committed content unmoved. Full ledger in `docs/memos/island-progress.md`.
+
+## Wave I8c — the city at sixty (2026-08-27)
+
+Base `daceec01`. Four clauses. The I8b audit handed this wave a target with two names on it —
+*"`scatter` 7.03 + `vsm-raster` 6.08 = 13.1 ms of an 18.0 ms GPU frame, in two passes"* — and **both
+are taken**: the lit GPU frame goes **17.982 → 10.202 ms** and the pipelined estimate **55.6 → 72.1
+fps**. **CLAUSE 2 WAS COUNTERS FIRST AND THEY CONVICTED A SUSPECT THE BRIEF DID NOT NAME.**
+`vsm-raster` was 6.087 ms of device time with 0.657 ms of recording behind it, and `pages`, `draws`
+and `casters` are three counts of *asks*; the expected culprit was the terrain, whose geometry group is
+one per resident tile at `6 × VSM_TERRAIN_CASTER_CELLS²` = 24 576 indices. So `VsmRasterStats` grew
+`indices_drawn` / `indices_terrain` / `draws_terrain` / `pages_by_level` (and printed `skipped_draws`
+and `masked_frames`, which had been in the struct and in no line), and the island answered: **156 033
+985 indices a rastering frame over 328 draws, of which terrain is 6 482 151 — 4.2 %.** The other
+**149.5 M is ONE `.inf_vmesh` instance**, 2.34 M indices a draw, submitted **whole into every one of
+56 dirty pages** at the classic level the CAMERA asked for — and the pass is triangle-bound on it
+(6.115 ms for 156.0 M against the coarse control's 2.157 for 63.4 M is **39 ps an index** either way,
+this card's depth-only rate). **The missing rule was a floor, not a ceiling.** P27.2 picks the caster's
+level off the camera because *"a page exists because a visible pixel asked for it"* — true, and only an
+upper bound; a clipmap page at level 7 is **one metre a texel** (74 % of the rastered pages) while the
+camera at 100 m asks for 0.13 m. `vgeom_caster_levels` adds the floor through arithmetic that already
+exists: a clipmap level is an **orthographic** projection with a fixed world-per-texel, which is
+exactly `passes::vgeom::lod_threshold`'s own `ortho` branch — `pixel_error × wpp / max_scale` — with
+the PAGE's texel size in place of the camera's world-per-pixel, and the camera's threshold kept
+underneath, so a shadow is never finer than the geometry it falls on **or** than the page it is written
+into. A perspective light keeps P27.2's rule outright (its pages nest in one frustum and have no
+per-level constant). An instance lands in one group per distinct classic level its buckets ask for and
+each caster carries the bucket mask that group serves in `ids[3]`; **the masks partition the buckets**,
+so a page draws the asset once rather than once per level — enforced in `vsm_cull.wgsl` against the
+page's own bucket in `info.w` and mirrored in `scatter_caster_stamps`. **AND THE FIRST CUT
+RE-INTRODUCED VSM2's CHURN**: taking the buckets from the RESIDENT page set put a residency event
+inside a content stamp, and the instrument measured it — `re-cast` **2.3 → 46.3** dirty pages a frame,
+`deferred` 15.6 → 44.7. The ladder is a property of the **light** now (one bucket per level
+`desc.levels` has, resident or not; the base off one page, since a level's world-per-texel is
+`base × 2^level` and the page matrix's first row carries no translation), and the churn is back to 2.3.
+Result: **`vsm-raster` 6.087 → 0.124 ms**, indices **156.0 M → 6.55 M a frame** (98.9 % terrain now),
+meshlet draws at **mean classic level 8.00**. **CLAUSE 1 TOOK THE BAND RE-ORDER.** `STRUCTURE_LOD_M`
+was 192 m against a 120 m `mesh_distance_m`, and `effective_bands` ends the full-mesh band at the
+smaller — so a shell batch's near edge began 72 m past it and **no shell had ever been rasterized as
+geometry**, while a building spent 120–230 m as hundreds of impostor cards. Three constraints bound the
+swap and exactly one number in the tree satisfies all three: **> 64 m** (the collider band — every
+building a body can touch is drawn as its parts), **≤ 120 m** (the scatter mesh band — a shell can be
+geometry at all) and **= `inf_pcg::DEFAULT_STRUCTURE_LOD_M`** (so the sim's band and the draw's band
+are one number). It is **96**. `the_structure_swap_sits_between_the_collider_band_and_the_mesh_band`
+is the arm that owns the ordering, in `inf-player` because that is the only crate that can see all
+three constants — *nothing owned that comparison for two waves*. Measured: `LIT+VIS` `scatter`
+**7.013 → 5.135 ms**, reproduced at 5.148. `structure_lod_pop` re-aims off the constant with its
+module doc rewritten (the I8b audit's LOW-7) and its two carried bounds moved to `2 × STRUCTURE_LOD_M`
+— which is the same 192 m — where they re-read to **I4b's own figures to the pixel** (26 792 px against
+2 903, 9.2×, 91.5 % moving); the geometry refusal survives un-re-blessed at 398 of 13 766 px (2.9 %,
+worst 29/255). The other two routes are **ROUTED with the measurements that route them**: the impostor
+card (I4b already measured that halving it *"did not move the frame"*, and the band repair shrinks the
+annulus it lives in from `[120, 230]` to `[96, 96 + reach]`) and the per-shell vgeom project, which the
+band repair makes *possible* for the first time and simultaneously makes a **fidelity** item — I8b
+priced the resident set at ~450 buildings, so the shells are ~450 of 389 793 scattered instances,
+**0.12 %** of the payload the pass spends 5.133 ms on. **CLAUSE 3
+RECONCILED THE TWO STEP CLOCKS INSIDE ONE HARNESS, AND THE ANSWER WAS NEITHER ON OFFER.**
+`step_profile`'s phases tile the step by construction, so the difference between them and the wall
+clock around the same call is measurable: **the residue is +0.002 ms**. The step is not preempted — it
+genuinely costs more inside a frame, and the extra is inside its own phases: `solver` **1.789 → 2.293
+ms (+28.2 %)**, **62 % of the growth on 22 % of the step**, and the growth tracks the render config's
+own memory traffic (SHIPPED +0.45, LIT +0.57, LIT+VIS +0.82) on an identical simulation. The isolated
+clock's own spread is **5.694 / 5.738 / 6.208 / 5.855** across four runs, so the honest sentence is
+that the island's step sits within a few tenths of its 6.0 ratchet on a clock whose spread is ±0.26,
+met in three runs of four. **CLAUSE 4 (module UVs/materials) is ROUTED by name**: no measured budget
+remains. **FRAME TABLES**: `LIT+VIS` p50 **29.886 → 24.270 ms (33.5 → 41.2 fps)**, p95 **56.774 →
+25.382**, GPU **17.982 → 10.202**, pipelined **17.982 → 13.879 ms (55.6 → 72.1 fps)**; `LIT`
+30.082 → 23.587, `LIT+SSR` 29.941 → 23.571, `LIT-COARSE-CLIPMAP` 25.111 → 22.784; `SHIPPED` p50
+24.239 → 15.424 **but that row's GPU frame read 12.505 / 5.052 / 12.237 / 4.825 ms across four runs
+over three code states and no claim rests on it**. **≥ 60 fps p50 `LIT+VIS` is STILL NOT MET** —
+24.270 against 16.6, **+7.670 where I8b left +14.149**, and **the remainder is CPU**: the harness's
+frame is serial and its 13.879 ms CPU half (48 % fixed step, 46 % record stage) exceeds its 10.202 ms
+GPU frame. Counts after: battery **328 / 6 251 / 0 / 19** (+2 arms, no new block; four existing arms
+re-aimed rather than added), goldens **58** with `INF_GOLDEN_STRICT=1` green over **117 arms, 0
+failed** and `tests/goldens` unmoved, rustdoc **374 over 30 crates** cold after `cargo clean --doc`
+(the wave adds zero, headroom 76), clippy **0**, `fmt` clean, schemas all four unmoved,
+`EXPECTED_LEVELS` **23**, committed content untouched, `Cargo.lock` unmoved, frontend untouched.
+Full ledger, both tables, the phase-by-phase clock table and the carried list in
+`docs/memos/island-progress.md`. 

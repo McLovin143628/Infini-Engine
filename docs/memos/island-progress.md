@@ -33,6 +33,8 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 
 | **I8a** | **the settlements exist** — the generator, the size raise, doors at scale, the gates | **DONE** — see *Wave I8a* at the end of this file. Seven levelled pads become **172 blocks, 60.88 km of street and about 1 800 buildings** on a zoning table, every sampled one of them enterable; the cities take their kilometre (Harbour City 1.131 km², Eastgate 1.020 km²) and the re-derived water is committed as the new design with the drift at **0.00 %**. A new settlement gate walks into a building — enter, open a door, step through, climb — **123 steps, 123 distinct states, byte-identical** between the cooked pack and the loose document, mutation-verified (removing the volumes kills six of twelve arms). The fixed step holds its ratchet at **5.853 ms of 6.0**. **AND THE FRAME DOES NOT**: the island goes **69.0 → 9.4 fps LIT+VIS**, because a settlement draws through the P18.5 GPU **scatter** path as **365 545 opaque wall-sized boxes** with no occlusion culling — *cubes are the expensive case*, which is this wave's correction to its own brief and I8b's first requirement restated as a performance clause. Three costs, three mechanisms, all routed; the projection's 20.2 ms against a 1.5 ms budget is the one an implementer can take tomorrow |
 
+| **I8c** | **the city at sixty** — the scatter band ordering, the VSM's GPU side, the two step clocks | **DONE** — see *Wave I8c* at the end of this file. The two passes the I8b audit named are both taken: `vsm-raster` **6.087 → 0.124 ms** and `scatter` **7.013 → 5.133**, so the lit GPU frame goes **17.982 → 10.202 ms** and the pipelined estimate **55.6 → 72.1 fps**; `LIT+VIS` p50 **29.886 → 24.270** and p95 **56.774 → 25.382**. The VSM clause was **counters first** and they convicted a suspect the brief did not name: **149.5 M of a 156.0 M-index frame was ONE `.inf_vmesh` instance**, submitted whole into every dirty page at the camera's LOD, where terrain — the expected culprit — was 4.2 %. P27.2's camera rule is kept as a **ceiling** and gains the floor it never had (the page's own world-per-texel through `lod_threshold`'s ortho branch), with a bucket mask that **partitions** so no page draws an asset twice. `STRUCTURE_LOD_M` **192 → 96**, the one value that is above the collider band, at or inside the scatter mesh band and equal to `inf_pcg`'s own — so **a shell is rasterized as geometry for the first time**. The two step clocks are reconciled *inside one harness*: the residue outside the step is **+0.002 ms**, so the growth is inside its own phases and **62 % of it is the solver**. **≥ 60 fps p50 `LIT+VIS` is still NOT met** (+7.670 where I8b left +14.149) and the remainder is now **CPU**: 13.879 ms serial against a 10.202 ms GPU frame |
+
 Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
 IB-8 and IB-13 forward out of I6**: both are ceilings a thousand-building fixture walks into
 on its first frame, and measuring them against a real city was cheaper than measuring them
@@ -13083,3 +13085,390 @@ enough that which one is quoted decides whether it reads as met. Carried by name
 * **Two documents, one measurement.** The ROADMAP block and the memo state
   different numbers for every row of both frame tables, minutes apart, with nothing
   saying so. The spread is small; the disagreement is what a reader cannot see.
+
+
+## Wave I8c — the city at sixty (2026-08-27)
+
+Base `daceec01`. Four clauses. The I8b audit handed this wave a target with two
+names on it — *"`scatter` 7.03 + `vsm-raster` 6.08 = 13.1 ms of an 18.0 ms GPU
+frame, in two passes"* — and both are taken.
+
+> **The lit island's GPU frame goes 17.982 → 10.202 ms and its pipelined estimate
+> 55.6 → 72.1 fps.** `vsm-raster` **6.087 → 0.124 ms**; `scatter` **7.013 →
+> 5.133**; `LIT+VIS` p50 **29.886 → 24.270** and p95 **56.774 → 25.382**.
+> **≥ 60 fps p50 `LIT+VIS` is STILL NOT MET** — the measured frame is a serial
+> CPU wall clock and its CPU half alone is 13.879 ms — and it stays the carried
+> headline, now with the remainder attributed to the processor that holds it
+> rather than to a pass.
+
+### The two clocks this wave had to separate first
+
+Every number below is one of two, and they are not the same question:
+
+* the **pipelined estimate**, `max(CPU without the wait, GPU frame)` — what a
+  host with a frame pipeline gets, and the number the GPU work moves;
+* the **p50**, which on this harness is a *serial* wall clock: step, sync,
+  project, record, then **poll until the GPU is done**. Its floor is the CPU
+  sum, and at 13.879 ms that floor is 84 % of a 16.6 ms budget before the device
+  draws anything.
+
+The wave's clauses are about the GPU, so the pipelined estimate is where they
+show. Both are printed for every row and both are below.
+
+### Clause 1 — the scatter pass, and the band-ordering repair
+
+Wave I8b left three routes and the instruction to take the **measured-best**.
+
+**(b) THE 192/120 BAND RE-ORDER — TAKEN.** `STRUCTURE_LOD_M` was 192 m and
+`ScatterSettings::mesh_distance_m` is 120, and `effective_bands` ends the
+full-mesh band at the smaller of the two. A shell batch is banded
+`[STRUCTURE_LOD_M, draw_distance)`, so its near edge began **72 m past the mesh
+band's far edge**: no shell had ever been rasterized as geometry at any distance
+on any island, and between 120 m and `STRUCTURE_LOD_M + reach` a building drew as
+*hundreds of impostor cards each* where one shell should.
+
+Three constraints bound the swap and **exactly one number in the tree satisfies
+all three**:
+
+| constraint | why | value |
+|---|---|---|
+| strictly **greater** than the collider band | every building a body can collide with is drawn as its parts | > 64 m |
+| at or **below** the scatter mesh band | a shell can be rasterized as geometry at all | ≤ 120 m |
+| the number `inf_pcg::DEFAULT_STRUCTURE_LOD_M` already is | the sim's band and the draw's band are one number, not two things called "the LOD distance" | 96 m |
+
+`the_structure_swap_sits_between_the_collider_band_and_the_mesh_band` is the arm
+that owns the ordering, and it lives in `inf-player` because that is the only
+crate that can see all three constants at once — `inf-render` is below `inf-ecs`
+and `inf-pcg` is beside both. **Nothing owned that comparison for two waves**,
+which is how 192 and 120 each stayed defensible in their own doc comment while
+their *order* decided whether a shell existed.
+
+**Measured, on the same flight:** `LIT+VIS` `scatter` **7.013 → 5.135 ms**,
+reproduced at 5.148 in a third run. The `SHIPPED` row's own delta is inside that
+row's run-to-run spread and is **not** a number — see *the spread* below.
+
+**(c) THE IMPOSTOR CARD — ROUTED, with the measurement that routes it.** The card
+is still `radius × max(sx, sy, sz)` for an authored mesh, which for a
+non-uniformly scaled module is up to 1.6× its true bounding sphere. Two
+measurements say this is a fidelity item and not this wave's millisecond: island
+wave I4b halved the card once already and recorded that *"the repair did not move
+the frame"*, and the band re-order **shrinks the annulus the card lives in** —
+the parts' impostor band was `[120, 230]` m and is now `[96, 96 + reach]`. The
+route is a `ScatterGeometry` that carries its unit half-extents instead of one
+radius, so the card is `|half_extents × scale|`.
+
+**(a) THE PER-SHELL VGEOM PROJECT — ROUTED, and it is fidelity now, not
+performance.** The band repair is what makes it *possible* (a shell rasterizes as
+geometry in `[96, 120)` at last, so a façade mesh would finally show), and the
+same repair is what makes its performance case ~zero: I8b priced the resident set
+at **about 450 buildings**, so the shells are ~450 of the frame's **389 793**
+scattered instances — **0.12 %** of the payload the pass spends 5.133 ms on. It
+belongs to a fidelity wave, with I8b's own `build_vgeom` prices beside it.
+
+### Clause 2 — the VSM's GPU side: counters first, and they named something else
+
+`vsm-raster` was **6.087 ms of an 18.0 ms GPU frame with 0.657 ms of recording
+behind it**, so the cost was on the device — and `pages`, `draws` and `casters`
+are three counts of *asks*. The brief's instruction was counters first, and the
+suspect they were expected to convict was the terrain: a geometry group is one
+per resident **terrain tile** (`sync_terrain`), 192 of them, at
+`6 × VSM_TERRAIN_CASTER_CELLS²` = 24 576 indices each.
+
+So `VsmRasterStats` grew the third question — `indices_drawn`, `indices_terrain`,
+`draws_terrain` and `pages_by_level` — and the answer was not the terrain:
+
+Read the "before" column as *after the band re-order and before this clause* — it
+is the run that carried the counters and not the VSM fix, so the page and draw
+counts are the same in both columns and only the geometry behind them moves. Its
+meshlet split is **derived** (`indices_drawn − indices_terrain`, and a per-draw
+figure over the after column's own 52 meshlet draws), because the counter that
+splits them landed with this clause; every other figure is printed:
+
+| per rastering frame, `LIT+VIS` | before this clause | **after** |
+|---|---|---|
+| pages / draws | 56.3 / 328 (264 terrain) | **56.3 / 328 (264 terrain)** |
+| **indices submitted** | **156 033 985** | **6 551 616** |
+| — of which terrain | 6 482 151 — **4.2 %** | 6 482 151 — **98.9 %** |
+| — of which **one meshlet asset** | **149 551 834 — 95.8 %** | **69 026 — 1.1 %** |
+| meshlet draws / indices a draw | ~52 / **≈2 876 000** | **52 / 1 328** |
+| meshlet mean classic level | the camera's pick | **8.00 — the coarsest of the chain** |
+| pages by clipmap level | 2:400 / 3:2 232 / 4:1 986 / 5:1 642 / 6:678 / **7:19 967** | **identical** |
+| `vsm-raster` GPU | 6.115 ms | **0.124 ms** |
+
+**The island's single `.inf_vmesh` instance was submitted whole into every dirty
+page, at the classic LOD level the CAMERA asked for.** And the pass is
+triangle-bound on it: 6.115 ms for 156.0 M indices against the coarse-clipmap
+row's 2.157 ms for 63.4 M is **39 picoseconds an index either way**, which is this
+card's depth-only triangle rate.
+
+**The rule that was missing was a floor, not a ceiling.** P27.2 rules the caster's
+level off the camera because *"a VSM page exists because a visible pixel asked for
+it, so the camera's tolerance bounds how much silhouette detail the shadow can
+possibly show"*. That is right and it is only an upper bound. A clipmap page at
+level 7 is **one metre a texel**; the camera at 100 m asks for 0.13 m; and 74 % of
+the rastered pages are level 7.
+
+`vgeom_caster_levels` adds the floor through arithmetic that already exists. A
+clipmap level is an **orthographic** projection with a fixed world-per-texel,
+which is exactly the `ortho` branch of `passes::vgeom::lod_threshold` —
+`pixel_error × wpp / max_scale` — with the **page's** texel size in place of the
+camera's world-per-pixel, and the camera's own threshold kept underneath as the
+floor. So a shadow is never drawn finer than the geometry it falls on *and* never
+finer than the page it is written into. A perspective light keeps P27.2's rule
+outright: its pages nest inside one frustum and have no per-level constant to pick
+against.
+
+An instance therefore lands in **one group per distinct classic level its page
+buckets ask for**, and each caster carries the bucket mask that group serves in
+`VsmCasterRaw::ids[3]`. **The masks partition the buckets**, which is what makes
+"every page draws the asset once, at the level that page can show" true rather
+than "at every level, once each" — enforced on the device (`vsm_cull.wgsl` tests
+the caster's mask against the page's own bucket in `info.w`) and mirrored on the
+CPU in `scatter_caster_stamps`, which has to agree or it would dirty a page for a
+caster that can never write into it.
+
+**And the first cut of it re-introduced the churn wave VSM2 removed.** Taking the
+buckets from the **resident** page set put a residency event inside a content
+stamp: a mask that lost a bit when a level's last page happened to be evicted
+moved the caster's stamp and re-rasterized every page it touches. Measured on the
+island — `re-cast` **2.3 → 46.3** dirty pages a frame, `deferred` 15.6 → 44.7. The
+ladder is a property of the **light** now (one bucket per level `desc.levels` has,
+resident or not), with the base read off one resident page because a level's
+world-per-texel is `base × 2^level` by construction and the page matrix's first
+row carries no translation.
+
+### Clause 3 — the two harnesses, reconciled, and the answer was not the one on offer
+
+The I8b audit carried it: `island_gate` and the instrument's own isolated block
+read the island's fixed step at **5.67–5.74 ms** against the 6.0 ms
+`CITY_STEP_BUDGET_MS` ratchet, while the instrument's `sim fixed step` **stage**
+reads 6.3–6.9 ms — over the ratchet in every row, across five render
+configurations whose simulation is identical. The two candidate explanations were
+*"the instrument's sim pays render-thread contention"* and *"the step really is
+over"*.
+
+**It is neither, and the measurement says so rather than an argument.**
+`step_profile`'s phases **tile the step by construction**, and `cpu_ms[0]` is a
+wall clock around the same call, so the difference between them is time the thread
+spent outside the step. It is armed for the whole measurement now (one
+`Instant::now()` per phase, 24 of them, and a profiled step is byte-identical to
+an unprofiled one), and every stage table prints the pair.
+
+> **The residue is +0.002 ms.** The step is not being preempted. It genuinely
+> costs more inside a frame than it does alone, and the extra is **inside its own
+> phases** — which is a cost a shipped game pays and a step harness on its own
+> does not.
+
+**And the isolated clock is not a constant either**, which is the other half of
+the reconciliation and the half neither document had: the same isolated block read
+**5.694 / 5.738 / 6.208 / 5.855 ms** on four runs of this machine in one
+afternoon, over three code states that touch nothing in the simulation. So the
+honest statement is not "5.67 met" and not "7.27 breached" — it is that **the
+island's step sits within a few tenths of its 6.0 ms ratchet on a clock whose own
+spread is ±0.26 ms, met in three of four runs**, and that the in-frame reading is
+that same step paying for the frame around it. Both numbers are printed side by
+side, with a phase table under each, so a reader can see which one they are
+quoting and where the difference lives. The phase-by-phase comparison is below.
+
+### Clause 4 — routed by name
+
+*Module meshes gain UVs and materials through the pull buffer* was in scope **if
+budget remained after clauses 1–3, measured**. It does not: `LIT+VIS` closes at a
+p50 of 24.3 ms against 16.6, and the CPU half alone is 13.9. The item keeps its
+mechanism — the scatter pull buffer is position + normal, so there is nowhere for
+a material to sample, and the fix is a third array plus a per-batch material — and
+joins the carried list.
+
+### BOTH FRAME TABLES
+
+RTX 4070 Ti, Windows/Vulkan, **release**, 1080p, MIN of 3 rounds × 120 frames, the
+same 40 m-high flight east from Harbour City every island wave has flown. "Before"
+is this wave's own re-run of the arm at `daceec01`; "after" is a fourth run at
+head. The island was rebuilt (≈48 s) and re-cooked (≈41 s) for each.
+
+**`LIT+VIS` — everything on, and the row both clauses aimed at.**
+
+| | before (`daceec01`) | **after I8c** |
+|---|---|---|
+| p50 / p95 | 29.886 / 56.774 ms (**33.5 fps**) | **24.270 / 25.382 ms (41.2 fps)** |
+| GPU frame | 17.982 ms | **10.202 ms** |
+| — `scatter` | 7.013 | **5.133 ms** |
+| — **`vsm-raster`** | **6.087** | **0.124 ms** |
+| — `terrain` / `gi` / `vgeom` | 3.073 / 0.780 / 0.311 | **3.106 / 0.781 / 0.313** |
+| cpu sim fixed step | 6.904 | **6.676 ms** (phases 6.673) |
+| cpu projection | 0.749 | **0.759 ms** |
+| cpu render (record) | 6.201 | **6.336 ms** |
+| cpu poll (GPU wait) | 18.222 | **10.453 ms** |
+| **pipelined estimate** | 17.982 ms (**55.6 fps**) | **13.879 ms (72.1 fps)** |
+| distance from 60 fps, p50 / p95 | +13.286 / +40.174 | **+7.670 / +8.782** |
+| content | 102 batches / 389 793 instances | **unmoved** |
+| vsm casters (run) | 111 370 (18 638 scattered, 478 meshlet-asset, 478 skinned, 91 776 terrain), 0 dropped | **identical** |
+| vsm pages / draws a rastering frame | 51.9 / 328 | **56.3 / 328** |
+| **vsm indices a rastering frame** | **156 033 985** (4.2 % terrain, 95.8 % one meshlet asset) | **6 551 616** (98.9 % terrain, 1.1 % meshlet) |
+| dirty a frame: re-slotted / moved / re-cast | 60.6 / 8.0 / 2.2 | **65.7 / 3.9 / 2.3** |
+
+The other three: `LIT` 30.082 → **23.587**, `LIT+SSR` 29.941 → **23.571**,
+`LIT-COARSE-CLIPMAP` 25.111 → **22.784**. The coarse-clipmap control — priced by
+I7b, beaten by VSM2 and kept as the honest control — led the shipped ladder by
+**4.97 ms of p50** and now leads it by **0.80**, and on the GPU frame it is
+**0.08 ms behind** (10.173 against 10.089): the resolution the control trades away
+buys nothing any more, because the thing it was trading to avoid is no longer the
+cost.
+
+**`SHIPPED` — the configuration that ships.**
+
+| | before (`daceec01`) | **after I8c** |
+|---|---|---|
+| p50 / p95 | 24.239 / 26.598 ms (41.3 fps) | **15.424 / 16.256 ms (64.8 fps)** |
+| GPU frame | 12.505 ms | **4.825 ms** |
+| `scatter` / `terrain` / `vgeom` | 4.776 / 5.533 / 1.010 | **1.688 / 2.603 / 0.307** |
+| cpu sim / projection / record | 6.584 / 0.721 / 3.847 | **6.309 / 0.661 / 3.385** |
+| pipelined estimate | 12.505 ms (80.0 fps) | **10.466 ms (95.5 fps)** |
+| distance from 60 fps, p50 / p95 | +7.639 / +9.998 | **−1.176 / −0.344** |
+
+> **AND THE `SHIPPED` ROW'S ABSOLUTE NUMBERS ARE NOT THIS WAVE'S TO CLAIM.** Its
+> GPU frame read **12.505 / 5.052 / 12.237 / 4.825 ms** across the four runs of one
+> afternoon over three code states — a 2.5× swing that alternates run to run and
+> that no change in this wave explains, on the row that is measured first, straight
+> out of a 90-second CPU-bound build and cook. Every `LIT` row reproduced within
+> 0.05 ms across the two runs that share a code state. So the `SHIPPED` row is
+> reported and the claim is not made on it; what this wave claims is measured on
+> the lit rows, which is where its clauses were aimed.
+
+> **≥ 60 fps p50 `LIT+VIS` is STILL NOT MET.** 24.270 ms against 16.6, a distance
+> of **+7.670 ms** where the I8b audit left +14.149 — **the gap is 46 % smaller and
+> the p95 gap is 78 % smaller** (+40.174 → +8.782). The pipelined estimate is
+> **72.1 fps** and clears the budget with 2.7 ms to spare.
+
+**And the remainder is now on the other processor, which is the honest reading of
+the headline.** The measured frame is a *serial* wall clock — step, sync, project,
+record, poll — so its floor is the CPU sum, and at **13.879 ms** that floor is 84 %
+of the whole budget with the GPU at 10.202. Attributed:
+
+| | ms | share of the 13.879 ms CPU frame |
+|---|---|---|
+| `sim fixed step` | 6.676 | 48.1 % |
+| `render (record)` | 6.336 | 45.7 % |
+| — of which `submit` / `vsm sync` / `cluster wants` / `graph` | ~1.7 / ~1.37 / ~1.33 / ~0.92 | |
+| `projection` | 0.759 | 5.5 % |
+| `stream sync` | 0.108 | 0.8 % |
+
+**Two passes were the target and two passes moved.** What is left of the GPU frame
+is `scatter` 5.133 (50.3 %) and `terrain` 3.106 (30.4 %) of 10.202 ms — and the GPU
+is no longer the binding half of the frame in any lit configuration.
+
+### THE FIXED STEP, AND THE RECONCILIATION IN ONE TABLE
+
+The isolated block and the in-frame stage, same simulation, same run:
+
+| phase | isolated | in frame (`LIT+VIS`) | Δ |
+|---|---|---|---|
+| `physics3d sync` | 2.862 | 3.037 | +0.175 (+6.1 %) |
+| **`solver`** | **1.789** | **2.293** | **+0.504 (+28.2 %)** |
+| `gameplay` | 0.731 | 0.783 | +0.052 |
+| `write-back` | 0.225 | 0.275 | +0.050 |
+| `character move` | 0.105 | 0.121 | +0.016 |
+| `animation` / `camera` | 0.037 / 0.029 | 0.039 / 0.031 | +0.004 |
+| **total** | **5.855** (wall 5.855) | **6.673** (wall 6.676) | **+0.818** |
+
+**The solver is 62 % of the growth on 22 % of the step**, and it is the most
+memory-bound phase in it — 17 823 bodies and 58 582 contact pairs, re-read after a
+projection has walked 389 793 instances and a record stage 192 terrain tiles. The
+growth also tracks the render configuration's own traffic: `SHIPPED` +0.45,
+`LIT` +0.57, `LIT+VIS` +0.82, on an identical simulation.
+
+**The ratchet.** The step's own clock reads **5.855 ms against 6.0** at head, and
+its run-to-run spread on this machine is **5.694 / 5.738 / 6.208 / 5.855** — so it
+is met in three runs of four and breached in one, at a margin smaller than the
+spread. That is the honest sentence, and it replaces both of the two the wave
+inherited.
+
+### Counts
+
+| | before (`daceec01`) | **after I8c** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 328 / 6 249 / 0 / 19 | **328 / 6 251 / 0 / 19** — `cargo test --workspace -j 3`, **+2 arms and no new block**, both attributed: `a_meshlet_caster_picks_one_level_per_page_bucket_and_never_two` in `inf-render`'s `vsm_raster.rs` and `the_structure_swap_sits_between_the_collider_band_and_the_mesh_band` in `inf-player`'s `city_scale`. Four existing arms were **re-aimed** rather than added: the band tripwire (which now asserts the ordering rather than the defect), `structure_lod_pop`'s two carried impostor bounds, and the two P27.2 vgeom-level arms |
+| goldens | 58 | **58** — none added, none re-blessed; `INF_GOLDEN_STRICT=1` green over **117 arms, 0 failed**, and `git status` over `tests/goldens` empty afterwards. No golden scene carries a structure group or a shadow page, so neither clause can reach one |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — 404 `^warning` lines minus 30 per-crate summaries, after `cargo clean --doc` (8 814 files, 215.7 MiB). **The wave adds zero.** Headroom **76** |
+| `clippy --workspace --all-targets -D warnings` | 0 | **0** (local toolchain, run LAST per the rmeta law) |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** — every field this wave adds is render-side (`VsmRasterStats`, `PageDraw`, `VsmCasterRaw::ids[3]`, which was already reserved) and serialized nowhere |
+| committed levels (`EXPECTED_LEVELS`) | 23 | **23** |
+| committed content | — | **none touched**; `STRUCTURE_LOD_M` is a render constant and no `.inf_lvl` or `.inf_pcg` stores it |
+| new crates / external dependencies | — | **none**; `Cargo.lock` unmoved |
+| frontend | untouched | **untouched and not run** |
+
+### Carried, by name
+
+1. **≥ 60 fps p50 `LIT+VIS` is not met**: 24.270 ms against 16.6, +7.670. The
+   pipelined estimate is 72.1 fps and clears. **The remainder is CPU**: 13.879 ms
+   of serial CPU against a 10.202 ms GPU frame, split 48 % fixed step / 46 %
+   record stage. The next wave's target list is the record stage's own four
+   (`submit` 1.7, `vsm sync` 1.37, `cluster wants` 1.33, `graph` 0.92) and the
+   step's `solver`.
+2. **`cluster wants` is 1.33 ms of CPU for ONE meshlet instance.** Named here
+   because this wave's counters are what made it visible: the island's whole
+   virtualized-geometry content is a single `.inf_vmesh`, and planning its cluster
+   pages costs more than drawing it (`vgeom` GPU 0.313 ms).
+3. **`lod_threshold` degenerates when the camera is inside the asset's bounding
+   sphere.** `d = max(|eye − centre| − radius, 1e-3)`, so an island-spanning mesh
+   gives a threshold of ~0 and always picks the finest level — which is *why* the
+   caster was at level 0. The shadow path no longer depends on it (the page's own
+   texel size is the tolerance), but `passes::classic_vgeom` still does, and so
+   does the meshlet cut it mirrors.
+4. **A meshlet asset can now hold up to one group per clipmap level.** `by_group`
+   is keyed `(asset, classic level)`, so an asset whose page buckets disagree
+   costs several groups against `VSM_MAX_GROUPS` (1 024) where it used to cost
+   one. On the island every bucket picks the same level and it costs exactly one;
+   a scene with many assets close to the camera could multiply. Never silent —
+   `dropped_groups` counts the refusal.
+5. **The level blend can lerp two different silhouettes.** A receiver in
+   `VsmSettings::level_blend`'s band resolves two clipmap levels, and those levels
+   may now draw different classic cuts of the same asset. Bounded by one texel of
+   the coarser level by construction, and unmeasured.
+6. **The impostor card is still sized `radius × max(scale)` for an authored
+   mesh** — up to 1.6× the true bounding sphere on a non-uniform module. Routed
+   above with its own mechanism.
+7. **A module mesh has no UVs and no material** (clause 4, routed): the scatter
+   pull buffer is position + normal, so the city is tinted rather than textured.
+8. **The `SHIPPED` row's GPU frame swings 2.5× run to run** on identical code, on
+   the first row measured. Nothing in this wave explains it and nothing in this
+   wave rests on it.
+9. **A shell casts its oriented box, not its façade** (I8b's item 4, unmoved) —
+   and the band repair is what makes the façade half possible for the first time.
+
+### The laws this wave paid for
+
+* **A ceiling without a floor is half a rule.** P27.2's *"the camera's tolerance
+  bounds how much silhouette detail the shadow can possibly show"* is true, was
+  never wrong, and was the only rule — so a page that could show one metre of
+  detail was handed 2 cm of it, 56 times a frame. The bound that was missing was
+  the one about the page.
+* **Counters convict the suspect you did not name.** The clause was written
+  expecting the terrain — 192 groups, 24 576 indices each, one per resident tile.
+  Terrain was **4.2 %**. One instance of one asset was 95.8 %, and no count of
+  pages, draws or casters could have said so.
+* **Two constants that both name a distance must be compared, and the comparison
+  needs an owner.** 192 and 120 were each defended in their own doc comment for
+  two waves; their *order* decided whether a shell was ever geometry. The arm that
+  owns it had to be written in a third crate, because that is the only one that
+  can see both.
+* **A residency event must never enter a content stamp.** Deriving the detail
+  buckets from the resident page set moved a caster's stamp whenever a level's
+  last page was evicted — 46.3 re-cast pages a frame for something nothing drew.
+  It is the churn wave VSM2 removed, re-introduced one field over, and the fix is
+  to key on the light's *configuration* rather than on its residency.
+* **`sum < count` is not "the finest level is in the set".** It is "the mean is
+  under one", and it read as the first while asserting the second — an arm that
+  passed on a two-record set and failed on a three-record one for no reason a
+  reader could see. Read against the chain's own length instead.
+* **A wall clock's residue is a measurement, not an attribution.** Two harnesses
+  disagreed about the fixed step and both candidate explanations were about the
+  machine. The phases tile the step, so the residue outside it is measurable — and
+  it is **+0.002 ms**. The step really is dearer inside a frame, by +28 % of its
+  solver, and neither offered explanation was the answer.
+* **A number that alternates is not a number.** The `SHIPPED` row's GPU frame
+  read 12.5, 5.1, 12.2, 4.8 ms over four runs and three code states. The I4b law
+  says to read a per-pass split *within* a run; this is the whole frame doing it,
+  on the row a harness measures first.
+

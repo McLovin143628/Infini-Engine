@@ -737,10 +737,13 @@ impl ScatterData {
 /// 96 m is the only value in the tree that satisfies all three, and island wave
 /// I8c is where the second constraint was priced: at 192 m the island's
 /// settlements drew their parts as impostor cards through the whole 120 m–230 m
-/// annulus and their shells as one card past 192, and the ledger records what
-/// the re-ordering moved. The pop the change exposes is measured in
+/// annulus and their shells as one card past 192. Re-ordering them moved the
+/// island's lit `scatter` pass **7.013 → 5.135 ms**, reproduced at 5.148 in a
+/// second run. The pop the change exposes is measured in
 /// `tests/structure_lod_pop.rs`, which reads this constant as its own camera
-/// distance and re-aims with it.
+/// distance and re-aims with it — the two carried impostor bounds move to
+/// `2 × STRUCTURE_LOD_M`, which is the same 192 m they were always measured at,
+/// and re-read to the same figures to the pixel.
 ///
 /// # Why it lives here
 ///
