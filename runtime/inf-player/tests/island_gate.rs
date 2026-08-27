@@ -1304,11 +1304,19 @@ fn the_cooked_island_carries_the_ground_its_layers_bind() {
             .collect::<Vec<_>>()
     );
 
-    // 3b. **THE GROUND COVER** (clause 5). The island's three scatter kinds bind
-    //     real meshes now — all three carried `mesh: None`, which the scatter
-    //     evaluates, the biome binding restricts and the frame counts, and which
-    //     draws nothing. The cook had no `.inf_pcg` -> scatter-mesh edge either,
-    //     so this is the arm that says both halves landed.
+    // 3b. **THE GROUND COVER, AS FAR AS THE PACK** (clause 5). The island's three
+    //     scatter kinds bind real meshes now — all three carried `mesh: None` —
+    //     and the cook had no `.inf_pcg` -> scatter-mesh edge, so this is the arm
+    //     that says both halves landed.
+    //
+    //     **It ends at the pack, and the TER2a audit made that explicit.** What
+    //     this block proves is that the bytes are cooked and reachable. It does
+    //     NOT prove anything is drawn from them, and today nothing is:
+    //     `push_scatter` builds every scattered instance as a `PrimMesh::Cube`
+    //     with a palette tint, and `PcgKind::mesh` is discarded at evaluation —
+    //     `PcgInstance` keeps a `kind_index` and no GUID. See
+    //     `the_cover_meshes_are_shipped_and_are_not_yet_drawn` below, which is
+    //     the tripwire that pins the gap so it cannot be claimed shut again.
     {
         let reader = std::sync::Arc::new(
             inf_asset::PackReader::open(&pack.join(inf_player::level::PACK_FILE))
@@ -1344,4 +1352,141 @@ fn the_cooked_island_carries_the_ground_its_layers_bind() {
             "the pack names texture {g:x} and does not carry it"
         );
     }
+}
+
+/// The body of `fn NAME(` in `src`, by brace matching. `None` when absent.
+///
+/// Deliberately crude and deliberately *scoped*: the P23 law is that a byte pin
+/// cannot see a semantic change, so a ban has to read a **block** rather than a
+/// file — a helper added elsewhere in the module would otherwise satisfy or
+/// defeat a whole-file `contains`.
+fn fn_body<'a>(src: &'a str, name: &str) -> Option<&'a str> {
+    let at = src.find(&format!("fn {name}("))?;
+    let open = at + src[at..].find('{')?;
+    let bytes = src.as_bytes();
+    let mut depth = 0usize;
+    for (i, b) in bytes.iter().enumerate().skip(open) {
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&src[open..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// **The cover meshes are shipped and are NOT yet drawn** (TER2a audit).
+///
+/// # What this arm is for
+///
+/// Wave TER2a's clause 5 authored three `.inf_mesh` cover props, bound their
+/// GUIDs to the island's three scatter kinds, closed the cook's missing
+/// `.inf_pcg` → scatter-mesh edge, and raised the island's scatter density
+/// 0.004 → 0.02 /m² on the strength of it. Every one of those is real and the
+/// arm above proves the bytes reach the pack.
+///
+/// **What none of it changed is the picture.** The scatter path has drawn a
+/// placeholder cube since P18.5 and still does:
+///
+/// * `inf_pcg::PcgKind::mesh` is read by the **packager's dependency closure**
+///   and by nothing else. `rules.rs`'s evaluation keeps `kind_index` — a palette
+///   index — and the GUID does not survive into `PcgInstance`, so no projector
+///   can see it.
+/// * `push_scatter` builds `ScatterData::build(PrimMesh::Cube, …)` and tints each
+///   instance with `pcg_kind_color(kind)`, a five-entry literal palette.
+/// * `inf_render::ScatterBatch` has no mesh field and no `VtTextureSet` at all,
+///   so there is nowhere for a material to live either — the "each shares a
+///   ground material" half of clause 5 is the sidecar edge that makes the cook
+///   ship them together, and not a texel on screen.
+///
+/// So the island draws **16 771 tinted unit cubes** where the ledger's first
+/// draft said "three kinds of ground cover standing on it", and the density
+/// raise multiplied their number by 6.25. The gap is the same documented
+/// kind→real-mesh viewport gap as sprites and tilemaps; closing it is a wave.
+///
+/// # It is a TRIPWIRE, and it is meant to fail
+///
+/// On the P22 pattern (the gate that asserts the *wrong* outcome so the day the
+/// right one arrives it goes red and the ledger gets rewritten). The day
+/// `push_scatter` uploads a real mesh, this arm fails — and what it fails with
+/// is the list of prose that has to be corrected at the same time.
+///
+/// One host is read and not two on purpose: `inf-editor-core`'s
+/// `tests/projector_mirror.rs` already pins `inf_viewport::host`'s `push_scatter`
+/// byte-identical to this one, so a divergence is that gate's failure, not a
+/// hole in this one.
+#[test]
+fn the_cover_meshes_are_shipped_and_are_not_yet_drawn() {
+    const RENDER_RS: &str = include_str!("../src/render.rs");
+    let body = fn_body(RENDER_RS, "push_scatter")
+        .expect("`fn push_scatter(` is gone from inf-player's projector");
+
+    assert!(
+        body.contains("PrimMesh::Cube"),
+        "`push_scatter` no longer builds a `PrimMesh::Cube`. If a scatter kind's \
+         `.inf_mesh` now reaches the renderer, that is the gap wave TER2a's \
+         clause 5 could not close and this tripwire exists to mark — DELETE this \
+         arm and rewrite the TER2a ledger's clause 5, the `ISLAND_SCATTER_DENSITY` \
+         note and the island-progress carried list, all of which say in as many \
+         words that the cover is committed and not drawn.\n--- push_scatter ---\n{body}"
+    );
+    assert!(
+        body.contains("pcg_kind_color(si.kind)"),
+        "`push_scatter` no longer tints by the placeholder palette; see above"
+    );
+    // …and there is nowhere for a material to go either. Read as a scope, not as
+    // a file: the `ScatterBatch` literal this function builds.
+    assert!(
+        !body.contains("vt:"),
+        "a `ScatterBatch` in `push_scatter` now carries a virtual-texture set — \
+         the other half of the same gap; see above"
+    );
+
+    // ANTI-VACUITY. A `contains` over a body that no longer holds the scatter is
+    // satisfied by nothing at all, so pin that this really is the function the
+    // island's ground cover goes through: the biome population delegates to it.
+    let pop =
+        fn_body(RENDER_RS, "push_biome_population").expect("`fn push_biome_population(` is gone");
+    assert!(
+        pop.contains("push_scatter("),
+        "the terrain biome population — which is how the island's `.inf_pcg` \
+         reaches the frame — no longer goes through `push_scatter`, so this arm \
+         is reading a function the island does not use\n--- body ---\n{pop}"
+    );
+
+    // And the GUID really is dropped before any projector sees it. Both records
+    // are pinned **field by field** as struct literals rather than by a
+    // `contains`: the day either grows a mesh reference this stops compiling,
+    // which is the strongest form this pin can take (the P22 law — a ban
+    // enumerates what you thought of, a literal enumerates what is there).
+    let placed = inf_pcg::PcgInstance {
+        pos: glam::DVec3::ZERO,
+        rotation: glam::DQuat::IDENTITY,
+        scale: 1.0,
+        kind_index: 7,
+    };
+    let mirrored = inf_ecs::components::ScatteredInstance {
+        position: placed.pos,
+        rotation: placed.rotation,
+        scale: placed.scale,
+        kind: placed.kind_index,
+    };
+    assert_eq!(
+        mirrored.kind, 7,
+        "a scattered instance's whole appearance is one u32 palette index — \
+         `PcgKind::mesh` is read by the cook's dependency closure and by nothing \
+         that draws"
+    );
+
+    println!(
+        "ISLAND COVER (TER2a audit): the three `.inf_mesh` props are cooked and \
+         reachable, and NOT drawn — every scattered instance is a \
+         `PrimMesh::Cube` tinted by `pcg_kind_color`, at the island's authored \
+         scale range 0.7..1.6 m. Closing kind -> real-mesh upload is a wave."
+    );
 }

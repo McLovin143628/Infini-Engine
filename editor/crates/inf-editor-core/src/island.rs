@@ -131,6 +131,19 @@ pub const ISLAND_SCATTER_CELL_M: f64 = 32.0;
 /// real meshes, and at one per 250 m² an island covered in them still reads as
 /// bare ground.
 ///
+/// **The TER2a audit's correction to the sentence above.** The meshes are
+/// authored, byte-locked and cooked, and **nothing draws them**: `push_scatter`
+/// builds a `PrimMesh::Cube` tinted from a five-entry palette, `ScatterBatch`
+/// has no mesh field, and `PcgKind::mesh` never survives evaluation into a
+/// `PcgInstance` — see `island_gate::the_cover_meshes_are_shipped_and_are_not_yet_drawn`.
+/// So what this raise actually multiplied, today, is the number of **placeholder
+/// cubes** in the player's ~1.3 km²: 2 681 → 16 771 at the authored 0.7–1.6 m
+/// scale range, about one every 9 m of resident ground. The number is the right
+/// one for the day the upload lands, it is measured, and it is inside every
+/// budget below — and until that day it is cubes. Reverting to 0.004 until then
+/// is the other defensible answer and is named in the wave's carried list rather
+/// than taken by the audit.
+///
 /// What bounds it is not the island's area but the **working set**, and the
 /// working set is what the instrument measures. At 0.004 the shipped island
 /// frame drew **2 681** scattered instances: the scatter evaluates only where
@@ -154,6 +167,13 @@ pub const ISLAND_SCATTER_CELL_M: f64 = 32.0;
 /// scatter path still draws every instance rather than a nearest-first subset —
 /// with room for three more raises of this size before the two tiers stop
 /// drawing the same island. At 0.1 /m² they would.
+///
+/// *The arm is tighter than that sentence, deliberately* (TER2a audit). "Three
+/// more raises" is the distance to the **real** ceiling, 65 536; the arm below
+/// trips at a **third** of it (21 845), i.e. after roughly one more raise of this
+/// size. A tripwire that only fires when the thing has already broken is not a
+/// tripwire, so the two numbers are different on purpose — and are both written
+/// down here so neither reads as the other.
 ///
 /// **The honest bound this does not fix**: the scatter is evaluated on the
 /// SIMULATION's resident set, and the renderer draws terrain far past it (the
