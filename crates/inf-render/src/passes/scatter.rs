@@ -1964,10 +1964,6 @@ mod tests {
         )
     }
 
-    /// A **zero** shadow range packs no casters, and a zero band packs nothing at
-    /// all — the sentinel the first cut got backwards.
-    ///
-
     /// **A BATCH THAT SAYS ANOTHER BATCH CONTAINS IT IS SKIPPED WHOLE** (island
     /// wave I8b), and skipping it is `O(1)` rather than `O(instances)`.
     ///
@@ -2018,6 +2014,9 @@ mod tests {
         assert!(!cold.clamped);
     }
 
+    /// A **zero** shadow range packs no casters, and a zero band packs nothing at
+    /// all — the sentinel the first cut got backwards.
+    ///
     /// `pack_fallback` read `cull <= 0` as "unlimited", which disagreed with
     /// `scatter_cull.wgsl` (whose `d >= bands.y` culls everything at `bands.y == 0`).
     /// So `shadows.max_distance = 0` — a legal setting with no cascade to receive

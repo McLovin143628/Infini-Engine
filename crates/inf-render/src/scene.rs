@@ -972,7 +972,12 @@ pub fn night_glow_step(sun_dir: Vec3) -> u16 {
 /// whatever colour the wall it sits in is tinted. Returns exactly `[0, 0, 0]`
 /// for a step of zero, so a daytime batch is byte-identical to the pre-I8b one.
 pub fn glow_emissive(glow: f32, step: u16) -> [f32; 3] {
-    if !(glow > 0.0) || step == 0 {
+    // **`!is_finite() || <= 0.0`, and not `!(glow > 0.0)`** — the island wave
+    // I8a clippy finding, one crate over. A negated comparison on a partially
+    // ordered type is the readable-looking spelling; the obvious rewrite
+    // `glow <= 0.0` is FALSE for a NaN, and a NaN glow would multiply straight
+    // through into an emissive a batch carries for ever.
+    if !glow.is_finite() || glow <= 0.0 || step == 0 {
         return [0.0; 3];
     }
     let g = glow * (step as f32 / NIGHT_GLOW_STEPS as f32);

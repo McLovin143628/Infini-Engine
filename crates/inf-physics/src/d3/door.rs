@@ -407,7 +407,7 @@ pub fn use_door(world: &mut EcsWorld, guid: Uuid, feet: DVec3) -> door::DoorVerd
     };
     // A locked door answers `Locked` and does not move — `door::toggle`'s own
     // rule, unchanged, and what the prompt already reads.
-    with_state(world, &p, |spec, state| door::toggle(spec, state))
+    with_state(world, &p, door::toggle)
 }
 
 /// **The bolt's own control** (island wave I8b) — the second half of the pair
