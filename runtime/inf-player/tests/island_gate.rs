@@ -1249,11 +1249,14 @@ fn the_cooked_island_carries_the_ground_its_layers_bind() {
         let lvl = inf_scene::decode(&raw).expect("level decodes");
         assert!(
             lvl.entities.is_empty(),
-            "the cooked island level carries {} entities — if a partitioned              level now keeps them, `material_content`'s partition walk is              double-counting and this arm's premise has changed",
+            "the cooked island level carries {} entities — if a partitioned \
+             level now keeps them, `material_content`'s partition walk is \
+             double-counting and this arm's premise has changed",
             lvl.entities.len()
         );
         println!(
-            "ISLAND GROUND: the cooked level carries 0 entities (they are in the              .inf_part), so every binding below came from the partition walk"
+            "ISLAND GROUND: the cooked level carries 0 entities (they are in the \
+             .inf_part), so every binding below came from the partition walk"
         );
     }
 
@@ -1300,6 +1303,37 @@ fn the_cooked_island_carries_the_ground_its_layers_bind() {
             .map(|g| format!("{:x}", *g as u64))
             .collect::<Vec<_>>()
     );
+
+    // 3b. **THE GROUND COVER** (clause 5). The island's three scatter kinds bind
+    //     real meshes now — all three carried `mesh: None`, which the scatter
+    //     evaluates, the biome binding restricts and the frame counts, and which
+    //     draws nothing. The cook had no `.inf_pcg` -> scatter-mesh edge either,
+    //     so this is the arm that says both halves landed.
+    {
+        let reader = std::sync::Arc::new(
+            inf_asset::PackReader::open(&pack.join(inf_player::level::PACK_FILE))
+                .expect("the pack maps"),
+        );
+        for kind in inf_editor_core::cover::CoverKind::ALL {
+            let id = inf_asset::AssetId(inf_editor_core::cover::cover_mesh_guid(kind));
+            assert!(
+                reader.contains(id),
+                "the cooked island scatters {} and the pack does not carry its \
+                 mesh -- the `.inf_pcg` -> scatter-kind-mesh edge did not close",
+                kind.label()
+            );
+            let bytes = reader.read(id).expect("the mesh reads");
+            let mesh: inf_mesh::MeshAsset =
+                inf_asset::decode(&bytes).expect("the cover mesh decodes");
+            let tris: usize = mesh.submeshes.iter().map(|s| s.triangle_count()).sum();
+            assert!(tris > 0, "{} ships an empty mesh", kind.label());
+            println!(
+                "ISLAND COVER: {} -> {tris} triangles, {:.3} m tall",
+                kind.label(),
+                mesh.bounds.max[1] - mesh.bounds.min[1]
+            );
+        }
+    }
 
     // 4. AND IT IS NOT VACUOUS. Every texture the records name really is in the
     //    pack — a record naming bytes that are absent renders untextured and the

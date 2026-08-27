@@ -1828,8 +1828,10 @@ fn unreadable_edge_advisory(db: &AssetDb, id: AssetId, kind: &str, why: &str) ->
 ///   `level → biome set → graph` chain, so an explicit-roots cook of just a level
 ///   ships the graphs its painted biomes will evaluate.
 /// * **Pcg** (`.inf_pcg`) — the `.inf_mesh` assets its **grammar modules** place
-///   (P19.4), closing `level → PcgVolume.graph → module mesh`. Grammar only; see
-///   the arm for why a scatter kind's mesh is deliberately still not an edge.
+///   (P19.4), closing `level → PcgVolume.graph → module mesh`, **and** the ones
+///   its **scatter kinds** name (TER2a), closing `level → biome set → graph →
+///   scatter mesh`. The second half was missing and read as harmless because no
+///   scatter kind in this repository named a mesh.
 fn asset_deps(db: &AssetDb, id: AssetId, unreadable: &mut BTreeSet<String>) -> Vec<AssetId> {
     let Some(entry) = db.get(id) else {
         return Vec::new();
@@ -1994,15 +1996,61 @@ fn asset_deps(db: &AssetDb, id: AssetId, unreadable: &mut BTreeSet<String>) -> V
         // existing project packs, for bytes nothing currently reads. A grammar
         // module is named in authored text and is the only thing that makes a
         // wall a wall. The scatter half is a stated remainder, not an oversight.
-        AssetKind::Pcg => match grammar_module_refs(&raw) {
-            Ok(refs) => refs.into_iter().map(AssetId).collect(),
-            Err(why) => {
-                unreadable.insert(unreadable_edge_advisory(db, id, "pcg graph", why));
-                Vec::new()
-            }
-        },
+        AssetKind::Pcg => {
+            // The grammar modules a graph declares…
+            let mut deps: Vec<AssetId> = match grammar_module_refs(&raw) {
+                Ok(refs) => refs.into_iter().map(AssetId).collect(),
+                Err(why) => {
+                    unreadable.insert(unreadable_edge_advisory(db, id, "pcg graph", why));
+                    Vec::new()
+                }
+            };
+            // **…and the meshes its SCATTER KINDS name** (TER2a, clause 5).
+            //
+            // This comment used to say a scatter kind's mesh was "deliberately
+            // still not an edge" and pointed at an arm for the reason. There is
+            // no such arm and there never was — the P20 law about a cited thing
+            // that does not exist — and the reason it read as harmless is that
+            // no scatter kind in this repository named a mesh: `phase18-scatter`
+            // and the island both shipped `mesh: None` on every kind. TER2a
+            // gives the island's three kinds real meshes, and without this edge
+            // a cooked island scatters thirteen thousand instances of an asset
+            // the pack does not contain.
+            //
+            // Off the **document**, which is where a scatter kind lives, and
+            // therefore reachable for a document-only (v1) payload — the shape
+            // every scatter `.inf_pcg` in this repository actually has.
+            deps.extend(scatter_kind_mesh_refs(&raw).into_iter().map(AssetId));
+            deps
+        }
         _ => Vec::new(),
     }
+}
+
+/// The mesh GUIDs every **scatter kind** in a `.inf_pcg` payload names, sorted
+/// and deduplicated (TER2a).
+///
+/// A `PcgKind::mesh` is the asset a scattered instance draws, and it lives in
+/// the payload's **document** — the authored layers and rules — rather than in
+/// its optional graph. An undecodable payload contributes nothing here and is
+/// reported by [`grammar_module_refs`] a line earlier, which reads the same
+/// bytes; a payload with no kinds contributes nothing because there is nothing
+/// to name.
+fn scatter_kind_mesh_refs(raw: &[u8]) -> Vec<uuid::Uuid> {
+    let Ok(payload) = inf_pcg::PcgAssetPayload::decode(raw) else {
+        return Vec::new();
+    };
+    let mut out: Vec<uuid::Uuid> = payload
+        .document
+        .layers
+        .iter()
+        .flat_map(|l| l.rules.iter())
+        .flat_map(|r| r.kinds.iter())
+        .filter_map(|k| k.mesh)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// The mesh GUIDs every grammar module in a `.inf_pcg` payload names, sorted and

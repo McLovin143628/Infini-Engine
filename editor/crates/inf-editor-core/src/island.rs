@@ -122,7 +122,38 @@ pub const ISLAND_SCATTER_CELL_M: f64 = 32.0;
 /// the I3 draw bands are sized for; the CPU fallback's own ceiling
 /// (`MAX_CPU_SCATTER_INSTANCES`, 65 536) is what a tier that cannot reach the
 /// GPU path degrades to, nearest-first.
-pub const ISLAND_SCATTER_DENSITY: f64 = 0.004;
+///
+/// # Raised at TER2a, with the arithmetic that allowed it
+///
+/// 0.004 /m² is **one thing per 250 m²** — a fifteen-metre square with a single
+/// tuft of grass in it. That number was set when a scatter kind was a bare
+/// transform and the cost of being wrong was zero; TER2a gives the three kinds
+/// real meshes, and at one per 250 m² an island covered in them still reads as
+/// bare ground.
+///
+/// What bounds it is not the island's area but the **working set**, and the
+/// working set is what the instrument measures. At 0.004 the shipped island
+/// frame drew **2 681** scattered instances: the scatter evaluates only where
+/// terrain is resident, which is `SIM_MARGIN_TILES` (2.0) of level-0 pages
+/// around each observer — about 1.3 km², of which the scattering biomes are a
+/// fraction. So the per-frame population scales with the density and nothing
+/// else, and 0.02 is **13 400** instances of 32–128 triangles: about 0.9 M
+/// triangles, against the 10 M-triangle gate P13 measured at 2.4 % cull and the
+/// 15 k instances `phase19-town` already draws.
+///
+/// The CPU fallback is what caps it: 13 400 is a fifth of
+/// `MAX_CPU_SCATTER_INSTANCES` (65 536), so a tier that cannot reach the GPU
+/// scatter path still draws every instance rather than a nearest-first subset.
+/// At 0.1 /m² it would not, which is where the next raise stops.
+///
+/// **The honest bound this does not fix**: the scatter is evaluated on the
+/// SIMULATION's resident set, and the renderer draws terrain far past it (the
+/// clipmap's outer rings are pages the sim never asked for). So ground cover
+/// stops at roughly 1.3 km² around the player and bare ground continues to the
+/// horizon. Widening `SIM_MARGIN_TILES` would move it and would also widen every
+/// physics query and every biome evaluation with it; the right fix is a scatter
+/// residency of its own, and it is a wave rather than a constant.
+pub const ISLAND_SCATTER_DENSITY: f64 = 0.02;
 
 /// A stable GUID from the island's name and a salt, mirroring
 /// `inf_island`'s own derivation so the level and the build agree about which
@@ -204,17 +235,26 @@ pub fn island_cover_document(seed: u64) -> inf_pcg::PcgDocument {
             rotation: inf_pcg::RotationMode::RandomYaw,
             altitude_offset: 0.0,
         },
+        // **The three kinds have meshes now** (TER2a, clause 5). All three
+        // carried `mesh: None` — a bare transform, which the scatter evaluates,
+        // the biome binding restricts, the residency pages and the frame counts,
+        // and which draws nothing at all. `CoverKind::ALL`'s order IS this
+        // palette's order: `kind_index` on a scattered instance indexes here.
         kinds: vec![
             PcgKind {
-                mesh: None,
+                mesh: Some(crate::cover::cover_mesh_guid(
+                    crate::cover::CoverKind::GrassTuft,
+                )),
                 weight: 4.0,
             },
             PcgKind {
-                mesh: None,
+                mesh: Some(crate::cover::cover_mesh_guid(
+                    crate::cover::CoverKind::Shrub,
+                )),
                 weight: 2.0,
             },
             PcgKind {
-                mesh: None,
+                mesh: Some(crate::cover::cover_mesh_guid(crate::cover::CoverKind::Rock)),
                 weight: 1.0,
             },
         ],
@@ -540,13 +580,23 @@ pub fn write_island_level(
         .map_err(|e| format!("encode the island's .inf_pcg: {e}"))?;
     let p = dir.join(format!("{slug}Cover.inf_pcg"));
     std::fs::write(&p, &bytes).map_err(|e| format!("write {}: {e}", p.display()))?;
-    inf_asset::AssetSidecar::new(
+    let mut side = inf_asset::AssetSidecar::new(
         inf_asset::AssetId(inf_island::cover_pcg_guid(name)),
         inf_asset::AssetKind::Pcg,
         inf_asset::ContentHash::of(&bytes),
-    )
-    .save(&p)
-    .map_err(|e| format!("write the .inf_pcg sidecar: {e}"))
+    );
+    // **The three cover meshes it scatters** (TER2a clause 5). The cook reaches
+    // them through its own implicit `Pcg` edge either way; this is the edge the
+    // ASSET DATABASE reads — the delete-with-references warning and the Content
+    // Drawer's "show references" both walk sidecars, so without it an author can
+    // delete a mesh thirteen thousand instances are standing on and be told
+    // nothing.
+    side.dependencies = crate::cover::CoverKind::ALL
+        .iter()
+        .map(|k| inf_asset::AssetId(crate::cover::cover_mesh_guid(*k)))
+        .collect();
+    side.save(&p)
+        .map_err(|e| format!("write the .inf_pcg sidecar: {e}"))
 }
 
 /// The repository's own root, from this crate's manifest.
@@ -1065,20 +1115,36 @@ mod tests {
         ));
         assert_eq!(r.kinds.len(), 3);
 
-        // **The island-scale arithmetic, printed.** 40 km2 of land at this density
-        // is the number the streaming budget has to carry, and the alternative is
-        // priced beside it.
+        // **The arithmetic that bounds this density, printed.**
+        //
+        // The island-wide candidate count is the number people reach for and it
+        // is NOT the bound: the scatter is evaluated only where terrain is
+        // resident, so what a frame pays for is the working set. The shipped
+        // instrument measured 2 681 instances at 0.004 /m2, so the working set
+        // scales linearly from a measurement rather than from an estimate. See
+        // `ISLAND_SCATTER_DENSITY`'s own note for the whole argument, including
+        // the render-vs-simulation bound it does not fix.
         let land_m2 = 40.65e6;
-        let here = land_m2 * ISLAND_SCATTER_DENSITY;
-        let phase18 = land_m2 * 0.05;
+        let island_wide = land_m2 * ISLAND_SCATTER_DENSITY;
+        const MEASURED_AT: f64 = 0.004;
+        const MEASURED_INSTANCES: f64 = 2681.0;
+        let working_set = MEASURED_INSTANCES * (ISLAND_SCATTER_DENSITY / MEASURED_AT);
         println!(
-            "SCATTER: {ISLAND_SCATTER_DENSITY} /m2 over {:.2} km2 of land is \
-             {here:.0} candidates; the phase-18 sample's own 0.05 /m2 would be \
-             {phase18:.0}",
+            "SCATTER: {ISLAND_SCATTER_DENSITY} /m2 is {island_wide:.0} candidates over {:.2} km2 of land, and -- the number that matters -- {working_set:.0} in the WORKING SET, scaled from {MEASURED_INSTANCES:.0} measured at {MEASURED_AT}",
             land_m2 / 1e6
         );
-        assert!(here < 250_000.0, "{here} candidates before any mask");
-        assert!(phase18 > 1.0e6, "the alternative must be materially worse");
+        // The CPU scatter fallback's own ceiling. A tier that cannot reach the
+        // GPU path draws a nearest-first subset past this, which is a different
+        // world from the one the GPU tier draws.
+        const MAX_CPU_SCATTER_INSTANCES: f64 = 65_536.0;
+        assert!(
+            working_set < MAX_CPU_SCATTER_INSTANCES / 4.0,
+            "{working_set:.0} instances in the working set is past a quarter of the CPU fallback's {MAX_CPU_SCATTER_INSTANCES:.0} ceiling -- the two tiers would stop drawing the same island"
+        );
+        assert!(
+            island_wide > 500_000.0,
+            "the density is back below what a walk over this island can see"
+        );
 
         // A document-only envelope: no graph, so no grammar and no buildings.
         let p = island_cover_payload(7);

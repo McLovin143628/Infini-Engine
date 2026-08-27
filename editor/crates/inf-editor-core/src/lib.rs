@@ -19,6 +19,9 @@ pub mod character;
 // live in `capture.rs`, for the intra-doc-link reason `dcc` states below.
 pub mod capture;
 pub mod collision_layers;
+// TER2a: the three ground-cover meshes the island scatters -- a tuft of grass, a
+// shrub and a stone, generated and byte-locked beside the ground library.
+pub mod cover;
 // The Model Editor's Ring-1 half (P23.4). Its docs live in `dcc.rs`: a `///`
 // here is resolved in THIS module's scope, so every intra-doc link into the
 // module would dangle (seven of the nine doc warnings the audit counted).

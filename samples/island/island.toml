@@ -74,6 +74,12 @@ content = [
   # fallback for ever. They live with the ENGINE (`samples/ground/`) rather
   # than in this folder for the starter character's reason: one copy,
   # byte-locked against its generator, referenced by both islands.
+  "../ground/Cover_GrassTuft.inf_mesh",
+  "../ground/Cover_GrassTuft.inf_mesh.toml",
+  "../ground/Cover_Rock.inf_mesh",
+  "../ground/Cover_Rock.inf_mesh.toml",
+  "../ground/Cover_Shrub.inf_mesh",
+  "../ground/Cover_Shrub.inf_mesh.toml",
   "../ground/Ground_ForestFloor.inf_mat",
   "../ground/Ground_ForestFloor.inf_mat.toml",
   "../ground/Ground_ForestFloor_Albedo.inf_tex",

@@ -10888,6 +10888,9 @@ mod tests {
             // TerrainLayers name four of these material GUIDs (TER2a clause 3).
             crate::ground::write_ground_library(&ground_dir())
                 .expect("regenerate the ground library");
+            // …and the three things that stand on it, whose GUIDs the island's
+            // committed `.inf_pcg` names (TER2a clause 5).
+            crate::cover::write_cover_library(&ground_dir()).expect("regenerate the cover library");
             write_city().expect("regenerate the island city");
             write_gameplay().expect("regenerate the island gameplay fixture");
             crate::island::write_island_levels().expect("regenerate the island levels");
@@ -11607,14 +11610,32 @@ mod tests {
                 .filter(|n| n != "README.md")
                 .collect();
             have.sort();
+            let mut names = crate::ground::ground_files();
+            names.extend(crate::cover::cover_files());
+            names.sort();
             assert_eq!(
-                have,
-                crate::ground::ground_files(),
-                "the committed ground library is not the file SET the generator \
-                 writes -- an extra file here is one the asset scan promotes \
-                 under a minted GUID, and a missing one is a terrain layer bound \
-                 to nothing"
+                have, names,
+                "the committed ground library is not the file SET the generators \
+                 write -- an extra file here is one the asset scan promotes under \
+                 a minted GUID, and a missing one is a terrain layer or a scatter \
+                 kind bound to nothing"
             );
+            for f in &crate::cover::cover_library().expect("the cover library builds") {
+                assert_eq!(
+                    std::fs::read(gdir.join(&f.name)).unwrap(),
+                    f.payload,
+                    "committed cover {} drifted from the generator",
+                    f.name
+                );
+                let side = inf_asset::AssetSidecar::load(&gdir.join(&f.name))
+                    .unwrap_or_else(|e| panic!("{} has no sidecar: {e}", f.name));
+                assert_eq!(
+                    side.to_toml().unwrap(),
+                    f.sidecar.to_toml().unwrap(),
+                    "committed cover {}'s sidecar drifted",
+                    f.name
+                );
+            }
             for f in &want {
                 assert_eq!(
                     std::fs::read(gdir.join(&f.name)).unwrap(),
