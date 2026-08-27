@@ -27793,4 +27793,39 @@ was wrong about**; **identical is a tell** (two configurations that must differ 
 exists**; **a per-entity cost comparison has to be driven, not derived**; **measure the prescription
 and be willing to land nothing**; **a conservative rule and a deferred one look identical from the
 outside — the tell is a remedy that tells content to opt out of the system**. Full ledger, both
-sweep tables and the eight carried items in `docs/memos/island-progress.md` under *"Wave NPC1a"*.
+sweep tables and the nine carried items in `docs/memos/island-progress.md` under *"Wave NPC1a"*.
+
+**NPC1a AUDIT (2026-08-27).** Five findings fixed, two arms re-aimed, one budget ratcheted; the
+mixed-tier PIE-==-shipping verdict is **GREEN and reproduced** (900 distinct states of 900, byte
+for byte, all four tiers, 17 re-tierings at peak, `rehomed == 0` on both hosts). **(1) HIGH — the
+walked-away fix could duplicate an entity.** The re-home broke the invariant activation relied on
+(*a `Guid` lives in exactly the cell the cook put it in*): a re-homed entity's **birth cell can
+come back while it is still alive**, and the payload spawned it again — `spawn_with_guid`
+overwrites the index, so the world held two entities carrying one `Guid`, one of them unreachable
+by every despawn. Measured 2-for-1 on a three-sync fixture; activation now skips a payload entity
+already in the world. **(2) HIGH — a `Dormant` walking agent could never come back**: the record
+froze at `last` and *the tier was decided from that frozen point* (measured: Dormant at step 29,
+still Dormant at 400), which also contradicted the wave's own "the position law is the same at every
+tier". `plan_agent` now answers `route(clock)` at every tier; carried item 7 is retired inverted.
+**(3) MED — the crowd phase's cost was a function of the LEVEL's poses, not the crowd**: it folded
+a digest of *every* entry in the pose store every step to serve a rare demotion. The wave's own
+table was the tell — **0.282 ms banded against 0.759 all-`Full` over the same thousand agents**.
+Per-demotion now: **0.103 and 0.109 ms**, and `NPC_STEP_BUDGET_MS` **ratchets 2.0 → 1.0** (§8's
+table in `docs/profiling.md`, which the wave had not reached). **(4) MED — the two hosts passed
+different arguments to the one door**: the player took the `crowd_radii` seam, the editor read the
+constant, and `projector_mirror` pinned only the ordering. `SimSession` mirrors the field and the
+needle is exact again. **(5) MED — `set_population` leaked the previous population's bodies**, so
+records and `CrowdAgent` components disagreed about the same entity. Re-aimed: the island arm's
+"the ladder decided something" was satisfied by the Dormant agents alone — severing the pose door's
+tier read took the drive from 35 366 to **119 554 B a state** and left it green; it now asserts
+`posed == hero + Full + Near` exactly. The 3D bridge's tier read had **no arm at all**
+(`a_banded_out_crowd_agent_gets_no_rapier_body`, mutation-verified). And the sweep's own header
+said its NPCs were the island's **161-bone** hero while its own printed line says **20 joints** —
+so its `anim` and `step ms` columns understate an island-class crowd; corrected. Also **measured
+and carried, not fixed**: refusing hysteresis costs an entity a step on the `Far`/`Dormant` line —
+**30 spawns and 30 despawns in 60 steps for one agent** whose anchor sits on a lattice line, which
+the wave's ledger had called a measured cost and had measured only as "two tiers". Battery
+**329 blocks / 6 281 passed / 0 failed / 19 ignored** (+6 arms, no new block); goldens **58** with
+**117** strict arms, none re-blessed; rustdoc **374 over 30 crates, zero added**; `clippy -D
+warnings` 0; `fmt` clean; schemas, `EXPECTED_LEVELS` and `Cargo.lock` unmoved. Full audit ledger in
+`docs/memos/island-progress.md` under *"Wave NPC1a — the audit"*.
