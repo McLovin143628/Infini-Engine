@@ -199,6 +199,78 @@ pub const VSM_RIGID_GROUPS: u32 = PrimMesh::ALL.len() as u32;
 /// same address space, so sixteen holds every level a page can carry.
 pub const VSM_LEVEL_BUCKETS: usize = 16;
 
+/// **The detail bucket every perspective page belongs to** (island wave I8c) —
+/// the top bit of a caster's level mask, reserved because a spot's or a cube
+/// face's page has no fixed world-per-texel to pick a LOD against. See
+/// [`vgeom_caster_levels`].
+pub const PERSPECTIVE_BUCKET: u32 = 1 << 31;
+
+/// **Which classic LOD a meshlet caster draws in which pages** (island wave I8c)
+/// — the pure half of this wave's VSM clause, so the rule can be driven without a
+/// device.
+///
+/// # The defect it repairs
+///
+/// P27.2 packs one caster group per `(asset, level)` and picks the level with
+/// `classic_vgeom::instance_threshold` — **the camera's**, on the memo's own
+/// reasoning that *"a VSM page exists because a visible pixel asked for it, so
+/// the camera's tolerance is the one that bounds how much silhouette detail the
+/// shadow can possibly show"*. That bound is right and it is only a **ceiling**.
+/// The floor was never asked, and island wave I8c measured what it costs: the
+/// island's one `.inf_vmesh` instance submitted **2.34 M indices into every one
+/// of 56 dirty pages a frame — 149.5 M of the frame's 156.0 M**, at a detail no
+/// page could show. A clipmap page at level 7 is **one metre a texel**; the
+/// camera at 100 m asks for 0.13 m.
+///
+/// # The rule
+///
+/// A clipmap level is an **orthographic** projection with a fixed world-per-texel,
+/// which is exactly the `ortho` branch of
+/// [`lod_threshold`](crate::passes::vgeom::lod_threshold): `pixel_error × wpp /
+/// max_scale`. So the shadow's tolerance is that formula with the *page's* texel
+/// size in place of the camera's world-per-pixel, and the camera's own threshold
+/// is kept as the **floor** — a shadow is never drawn finer than the geometry it
+/// falls on, which is P27.2's ruling restated as the half of the sandwich it
+/// always was.
+///
+/// A perspective light keeps the camera's rule outright ([`PERSPECTIVE_BUCKET`]):
+/// its pages nest inside one frustum and their texel size falls off with
+/// distance, so there is no per-level constant to pick against.
+///
+/// # What it returns
+///
+/// `(classic level, the bucket mask that level serves)`, ascending by level, and
+/// **the masks partition the buckets exactly**: every bucket in `buckets` appears
+/// in exactly one entry, so every page draws this instance once and no page draws
+/// it twice. `buckets` is `(bit mask, metres per texel)`; a zero or non-finite
+/// texel size takes the camera's threshold.
+pub fn vgeom_caster_levels(
+    errors: &[f32],
+    camera_threshold: f32,
+    pixel_error: f32,
+    max_scale: f32,
+    buckets: &[(u32, f32)],
+) -> Vec<(usize, u32)> {
+    let cam = camera_threshold.max(0.0);
+    let s = max_scale.abs().max(1e-6);
+    let mut by_level: std::collections::BTreeMap<usize, u32> = std::collections::BTreeMap::new();
+    if buckets.is_empty() {
+        by_level.insert(inf_vgeom::pick_classic_level(errors, cam), 0);
+        return by_level.into_iter().collect();
+    }
+    for &(bit, wpt) in buckets {
+        let t = if bit == PERSPECTIVE_BUCKET || !wpt.is_finite() || wpt <= 0.0 {
+            cam
+        } else {
+            (pixel_error.max(0.0) * wpt / s).max(cam)
+        };
+        *by_level
+            .entry(inf_vgeom::pick_classic_level(errors, t))
+            .or_insert(0) |= bit;
+    }
+    by_level.into_iter().collect()
+}
+
 /// The draw-args buffer's usage. `COPY_SRC` is a **gate's** flag, exactly as the
 /// atlas's is: the per-page cull's verdict lives only in these `instance_count`
 /// words, and *mirrored ≠ measured* (P26.5) means a gate has to read the GPU's own
@@ -1325,6 +1397,24 @@ impl VsmRaster {
         self.sync_vgeom(gpu, scene);
         self.sync_skinned(gpu, scene);
         self.sync_terrain(gpu, scene, view);
+        // **The frame's detail buckets** (island wave I8c): every distinct page
+        // bucket that is RESIDENT, with the finest world-per-texel any page of it
+        // carries. Taken from the whole resident set rather than from the dirty
+        // one, deliberately — a caster's level is folded into the content stamp,
+        // so keying it on which pages happened to be dirty this frame would make
+        // every cached page's stamp move whenever the dirty set changed shape.
+        let mut bucket_map: std::collections::BTreeMap<u32, f32> =
+            std::collections::BTreeMap::new();
+        for p in &pages {
+            let e = bucket_map.entry(p.level_bit).or_insert(f32::INFINITY);
+            if p.world_per_texel > 0.0 && p.world_per_texel < *e {
+                *e = p.world_per_texel;
+            }
+        }
+        let buckets: Vec<(u32, f32)> = bucket_map
+            .into_iter()
+            .map(|(b, w)| (b, if w.is_finite() { w } else { 0.0 }))
+            .collect();
         let CasterPack {
             casters,
             hashes,
@@ -1343,6 +1433,7 @@ impl VsmRaster {
             scene,
             view,
             settings,
+            &buckets,
         );
 
         // ── 1. **the content stamps**, and with them the page-exact invalidation.
@@ -1449,7 +1540,9 @@ impl VsmRaster {
                 .enumerate()
                 .map(|(i, p)| VsmPageRaw {
                     view_proj: p.view_proj.to_cols_array(),
-                    info: [i as u32 * caster_count, p.slot, p.light, 0],
+                    // `info.w` is this page's **detail bucket** (island wave I8c),
+                    // which the cull tests a caster's own bucket mask against.
+                    info: [i as u32 * caster_count, p.slot, p.light, p.level_bit],
                 })
                 .collect();
             gpu.queue
@@ -1932,6 +2025,31 @@ impl VsmRaster {
                 casters: 0,
                 caster_fold: 0,
                 group_mask: [0; VSM_GROUP_MASK_WORDS],
+                // **Which detail bucket this page belongs to** (island wave I8c).
+                // A clipmap level is a fixed world-per-texel, so it is the bucket;
+                // a perspective light's page is not (its texel size falls off with
+                // distance inside one frustum), so every one of its pages takes
+                // `PERSPECTIVE_BUCKET` and the camera's rule, exactly as P27.2
+                // shipped. See [`vgeom_caster_levels`].
+                level_bit: if matches!(desc.kind, inf_vsm::VsmTreeKind::Clipmap) {
+                    1u32 << page.level.min(30)
+                } else {
+                    PERSPECTIVE_BUCKET
+                },
+                world_per_texel: {
+                    // The page matrix maps this page's own footprint onto clip
+                    // `[-1, 1]`, so the length of its first row is NDC per world
+                    // metre and `2 / (row · side)` is metres per texel. Read off
+                    // the SHIPPED matrix rather than re-derived from
+                    // `first_level_extent_m`, which is the same rule
+                    // `scatter_caster_stamps` reads its NDC radii by.
+                    let r = view_proj.row(0).truncate().length();
+                    if r > 1.0e-12 && geometry.stored_page_size > 0 {
+                        2.0 / (r * geometry.stored_page_size as f32)
+                    } else {
+                        0.0
+                    }
+                },
             });
         }
         out
@@ -2449,6 +2567,15 @@ struct PageDraw {
     /// phase-30 city at 1080p with the lighting stack on: **8 426 indirect draws
     /// per rastering frame**, 8.66 ms of CPU *recording* against 1.08 ms of GPU.
     group_mask: [u64; VSM_GROUP_MASK_WORDS],
+    /// **The detail bucket this page belongs to**, as a one-bit mask (island wave
+    /// I8c) — `1 << level` for a clipmap page, [`PERSPECTIVE_BUCKET`] for a spot
+    /// or cube face. Travels to the cull in `VsmPageRaw::info.w` and is what a
+    /// caster's own [`VsmCasterRaw::ids`]`[3]` mask is tested against.
+    level_bit: u32,
+    /// **Metres of world per atlas texel in this page**, from the page's own
+    /// matrix (island wave I8c). Constant per clipmap level and the tolerance a
+    /// meshlet caster's LOD is picked against — see [`vgeom_caster_levels`].
+    world_per_texel: f32,
     /// The whole content stamp: `geo_key`, the caster fold and the caster count.
     /// Zero until [`scatter_caster_stamps`] finishes it.
     key: u64,
@@ -2645,6 +2772,9 @@ fn scatter_caster_stamps(
         // which is a shadow hole. One field, read twice.
         let group = c.ids[0] as usize;
         let (word, bit) = (group / 64, 1u64 << (group % 64));
+        // The caster's detail-bucket mask (island wave I8c) — see the two `bucket`
+        // tests below, which mirror `vsm_cull.wgsl`'s one.
+        let bucket = c.ids[3];
         let centre = glam::Vec3::new(c.sphere[0], c.sphere[1], c.sphere[2]);
         let radius = c.sphere[3];
         for grid in grids.values() {
@@ -2662,6 +2792,15 @@ fn scatter_caster_stamps(
                 continue;
             }
             for (&level, (nx, ny, cells)) in &grid.levels {
+                // **The detail bucket, on the CPU side of the same rule** (island
+                // wave I8c). `vsm_cull.wgsl` rejects a caster whose bucket mask
+                // excludes the page's bucket, so folding its stamp in here — or
+                // setting its group's bit — would dirty a page for a caster that
+                // can never write into it, and would issue an indirect draw the
+                // cull is guaranteed to leave empty. A zero mask is every bucket.
+                if bucket != 0 && bucket & (1u32 << level.min(30)) == 0 {
+                    continue;
+                }
                 let s = 1.0 / (1u64 << level.min(62)) as f32;
                 let off = grid
                     .offsets
@@ -2706,6 +2845,9 @@ fn scatter_caster_stamps(
             }
         }
         for &i in &perspective {
+            if bucket != 0 && bucket & PERSPECTIVE_BUCKET == 0 {
+                break;
+            }
             touches += 1;
             let p = &mut pages[i];
             if crate::vsm::vsm_page_sees_sphere(&p.view_proj, centre, radius) {
@@ -2877,6 +3019,7 @@ fn pack_casters(
     scene: &RenderScene,
     view: &RenderView,
     settings: &crate::settings::RenderSettings,
+    buckets: &[(u32, f32)],
 ) -> CasterPack {
     let origin = &view.origin;
     // Opaque + masked only. Translucent geometry does not cast — the cascade's
@@ -2977,19 +3120,25 @@ fn pack_casters(
 
     // ── virtualized geometry ─────────────────────────────────────────
     //
-    // One group per (asset, level), and the level is picked by the SAME rule the
-    // classic tier picks with — `lod_threshold` against the camera, then
-    // `pick_classic_level`. Against the camera and not against the page,
-    // deliberately: a VSM page exists because a visible pixel asked for it, so the
-    // camera's tolerance is the one that bounds how much silhouette detail the
-    // shadow can possibly show. Per-page LOD is still not this: see
-    // `docs/memos/p27-2-vgeom-casters.md`, whose "revisit at P27.3" was re-read
-    // here — caching discharges its third reason (the cost is a number now, and
-    // the number is the DIRTY page set rather than the resident one) and leaves
-    // the first two standing, because a per-page DAG cut is a second LOD policy
-    // with no receiver to tune against until P27.4 and the meshlet pools are
-    // camera-driven residency until P28.3 merges them.
-    let mut by_group: std::collections::BTreeMap<(u128, usize), Vec<usize>> =
+    // One group per (asset, level), and until island wave I8c the level was the
+    // CAMERA's — `classic_vgeom::instance_threshold`, then `pick_classic_level` —
+    // on the P27.2 memo's reasoning that a VSM page exists because a visible pixel
+    // asked for it, so the camera's tolerance bounds how much silhouette detail
+    // the shadow can possibly show. That bound is right and it is only a
+    // **ceiling**; the floor was never asked, and the island measured what that
+    // costs: **149.5 M of a 156.0 M-index frame**, one instance, submitted whole
+    // into every one of 56 dirty pages at a detail a one-metre-a-texel page cannot
+    // show. [`vgeom_caster_levels`] adds the floor — the page's own texel size
+    // through the same `lod_threshold` arithmetic — and keeps the camera's
+    // threshold underneath it, so a shadow is never finer than the geometry it
+    // falls on and never finer than the page it is written into.
+    //
+    // An instance therefore lands in ONE group per distinct classic level its
+    // buckets ask for, and each caster carries the bucket mask that group serves
+    // in `ids[3]`. The masks partition the buckets, so every page draws the
+    // instance exactly once — which is what stops the same asset being rastered
+    // twice into one page at two levels.
+    let mut by_group: std::collections::BTreeMap<(u128, usize), Vec<(usize, u32)>> =
         std::collections::BTreeMap::new();
     for (i, inst) in scene.vgeom_instances.iter().enumerate() {
         let Some(a) = vgeom.get(&inst.asset) else {
@@ -3009,8 +3158,19 @@ fn pack_casters(
             inst,
             settings.vgeom.pixel_error,
         );
-        let level = inf_vgeom::pick_classic_level(&a.errors, threshold);
-        by_group.entry((inst.asset, level)).or_default().push(i);
+        let max_scale = inst.scale.abs().max_element().max(1e-6);
+        for (level, mask) in vgeom_caster_levels(
+            &a.errors,
+            threshold,
+            settings.vgeom.pixel_error,
+            max_scale,
+            buckets,
+        ) {
+            by_group
+                .entry((inst.asset, level))
+                .or_default()
+                .push((i, mask));
+        }
     }
     for ((asset, level), members) in by_group {
         let a = &vgeom[&asset];
@@ -3026,7 +3186,7 @@ fn pack_casters(
             continue;
         }
         let mut count = 0u32;
-        for (local, &i) in members.iter().enumerate() {
+        for (local, &(i, mask)) in members.iter().enumerate() {
             if casters.len() as u32 >= VSM_MAX_CASTERS {
                 dropped += (members.len() - local) as u32;
                 break;
@@ -3042,18 +3202,21 @@ fn pack_casters(
                 // it takes the fragment-less path exactly as it does in the classic
                 // tier.
                 mat: [0.0, 0.0, 1.0, 0.0],
-                ids: [groups.len() as u32, local as u32, first, 0],
+                ids: [groups.len() as u32, local as u32, first, mask],
             };
             // The asset id AND the LOD level: a `.inf_vmesh`'s classic chain is
             // derived from a cooked DAG so the id pins the geometry, and the level
-            // is a *camera* decision (the P27.2 deviation memo) — so a caster that
-            // crosses a LOD threshold really is different geometry in the page.
+            // is a decision about the camera AND the page (island wave I8c) — so a
+            // caster that crosses either threshold really is different geometry in
+            // the page. The bucket mask rides in too, because a caster restricted
+            // to a different set of pages writes a different set of pages.
             hashes.push(caster_stamp(
                 &c,
                 Fold::new(2)
                     .u64(asset as u64)
                     .u64((asset >> 64) as u64)
-                    .u64(level as u64),
+                    .u64(level as u64)
+                    .u64(u64::from(mask)),
             ));
             casters.push(c);
             level_sum += level as u64;
@@ -3238,6 +3401,95 @@ fn caster_stamp(c: &VsmCasterRaw, geom: Fold) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A MESHLET CASTER DRAWS AT THE LEVEL ITS PAGE CAN SHOW, ONCE** (island
+    /// wave I8c) — the pure half of the wave's VSM clause.
+    ///
+    /// Four claims, and the first is the one that makes the shipped pass correct
+    /// rather than merely cheaper: **the masks partition the buckets**, so a page
+    /// draws an asset exactly once. Then the rule itself — a coarse page picks a
+    /// coarser level, the camera's threshold is a floor and never a ceiling, and a
+    /// perspective page keeps P27.2's camera rule outright.
+    #[test]
+    fn a_meshlet_caster_picks_one_level_per_page_bucket_and_never_two() {
+        // A real-shaped classic chain: errors in world metres, ascending.
+        let errors = [0.0f32, 0.02, 0.08, 0.3, 1.2, 5.0];
+        // The island's own clipmap: level L is `2 · 32 · 2^L / (64 · 128)` metres
+        // a texel, so level 2 is 3.1 cm and level 7 is a metre.
+        let wpt = |l: u32| 2.0 * 32.0 * (1u32 << l) as f32 / (64.0 * 128.0);
+        let buckets: Vec<(u32, f32)> = [2u32, 3, 4, 5, 6, 7]
+            .iter()
+            .map(|&l| (1u32 << l, wpt(l)))
+            .collect();
+        // The camera at ~100 m through the shipped focal length: 0.13 m.
+        let cam = 0.13;
+        let out = vgeom_caster_levels(&errors, cam, 1.0, 1.0, &buckets);
+
+        // (1) THE PARTITION. Every bucket is served exactly once — which is what
+        // stops one page rasterizing the same asset at two levels, and is the
+        // property `vsm_cull.wgsl`'s mask test enforces on the device.
+        let union = out.iter().fold(0u32, |a, (_, m)| a | m);
+        let sum: u32 = out.iter().map(|(_, m)| m.count_ones()).sum();
+        assert_eq!(union, buckets.iter().fold(0, |a, (b, _)| a | b), "{out:?}");
+        assert_eq!(
+            sum,
+            buckets.len() as u32,
+            "a bucket is served twice: {out:?}"
+        );
+
+        // (2) THE COARSE PAGE PICKS A COARSER LEVEL. A metre-a-texel page cannot
+        // show 2 cm of silhouette, and this is the whole 149.5 M-index finding.
+        let level_of = |bit: u32| {
+            out.iter()
+                .find(|(_, m)| m & bit != 0)
+                .map(|(l, _)| *l)
+                .expect("every bucket is served")
+        };
+        let camera_level = inf_vgeom::pick_classic_level(&errors, cam);
+        assert!(
+            level_of(1 << 7) > camera_level,
+            "the metre-a-texel page draws the camera's level {camera_level}: {out:?}"
+        );
+        // (3) THE CAMERA'S THRESHOLD IS A FLOOR. A level-2 page is 3.1 cm a texel
+        // — finer than the camera asked for — and a shadow is never drawn finer
+        // than the geometry it falls on, so it must not go below the camera's.
+        assert_eq!(
+            level_of(1 << 2),
+            camera_level,
+            "a page finer than the camera pulled the level below it: {out:?}"
+        );
+        // …and the picks are monotone in the page's coarseness.
+        for w in [2u32, 3, 4, 5, 6].windows(2) {
+            assert!(
+                level_of(1 << w[0]) <= level_of(1 << w[1]),
+                "a coarser page picked a finer level: {out:?}"
+            );
+        }
+
+        // (4) A PERSPECTIVE PAGE KEEPS THE CAMERA'S RULE, and an empty bucket list
+        // (a frame with no shadow page at all) degrades to exactly P27.2.
+        let persp = vgeom_caster_levels(&errors, cam, 1.0, 1.0, &[(PERSPECTIVE_BUCKET, 0.0)]);
+        assert_eq!(persp, vec![(camera_level, PERSPECTIVE_BUCKET)]);
+        assert_eq!(
+            vgeom_caster_levels(&errors, cam, 1.0, 1.0, &[]),
+            vec![(camera_level, 0)],
+            "a frame with no page bucket must pack the pre-I8c caster exactly"
+        );
+
+        // …and the instance's own scale divides the tolerance exactly as
+        // `lod_threshold`'s ortho branch does: a 10x instance needs a tenth of the
+        // object-space error for the same world-space one, so it can only ever
+        // pick a level at least as fine.
+        let big = vgeom_caster_levels(&errors, cam, 1.0, 10.0, &buckets);
+        for (bit, _) in &buckets {
+            let fine = big
+                .iter()
+                .find(|(_, m)| m & bit != 0)
+                .map(|(l, _)| *l)
+                .expect("served");
+            assert!(fine <= level_of(*bit), "{big:?} against {out:?}");
+        }
+    }
 
     /// **Stride is contract** (the standing law): the two WGSL files read these
     /// records out of storage buffers, where `wgpu` validates nothing, so the
@@ -3498,6 +3750,8 @@ mod tests {
             caster_fold: 0x5151,
             casters: 2,
             group_mask: [0; VSM_GROUP_MASK_WORDS],
+            level_bit: 1 << 2,
+            world_per_texel: 0.25,
             key: 0xC0FFEE,
         };
         let elsewhere = PageIdent {

@@ -1646,18 +1646,44 @@ fn a_vgeom_casters_level_is_the_one_its_pixel_error_justifies() {
     // …and a tolerance no level can miss: the coarsest.
     let coarse = at(400.0);
     assert!(
-        fine.vgeom_casters > 0 && coarse.vgeom_casters == fine.vgeom_casters,
-        "the two runs packed different caster sets ({fine:?} / {coarse:?})"
+        fine.vgeom_casters > 0 && coarse.vgeom_casters > 0,
+        "one of the two runs packed no vgeom caster at all ({fine:?} / {coarse:?})"
     );
+    // **At least one caster is the finest level**, which for integer levels is
+    // exactly `sum < count`. The equality this used to be — one caster, level 0 —
+    // stopped being the shape of the answer at island wave I8c: a meshlet caster
+    // is packed once per distinct level its resident PAGE BUCKETS ask for, so a
+    // tight tolerance splits the record and a loose one collapses it.
+    assert!(
+        fine.vgeom_level_sum < fine.vgeom_casters,
+        "no caster at a tenth of a pixel of tolerated error drew the finest level \
+         of the chain: {fine:?}"
+    );
+    // …and the tolerance is what moves it: the MEAN level rises, compared by
+    // cross-multiplication because the two runs no longer pack the same number of
+    // records.
+    assert!(
+        coarse.vgeom_level_sum * fine.vgeom_casters > fine.vgeom_level_sum * coarse.vgeom_casters,
+        "the same caster at 400 px of tolerated error drew the same mean level — \
+         the page raster is not picking through `pick_classic_level` at all \
+         ({fine:?} / {coarse:?})"
+    );
+    // **AND THE POINT OF THE PICK, IN INDICES** (island wave I8c). The level is
+    // not a label: a coarser one is less geometry submitted into the same pages
+    // over the same number of draws, which is the whole of this wave's VSM clause.
     assert_eq!(
-        fine.vgeom_level_sum, 0,
-        "a caster whose pixel error is a tenth of a pixel drew a level past the \
-         finest: {fine:?}"
+        (fine.draws_vgeom, fine.pages),
+        (coarse.draws_vgeom, coarse.pages),
+        "the two runs drew different page/draw sets, so the index comparison \
+         below is not about the level ({fine:?} / {coarse:?})"
     );
     assert!(
-        coarse.vgeom_level_sum > 0,
-        "the same caster at 400 px of tolerated error drew the same level — the \
-         page raster is not picking through `pick_classic_level` at all: {coarse:?}"
+        coarse.indices_vgeom * 4 < fine.indices_vgeom,
+        "400 px of tolerated error submitted {} indices against {} at 0.1 px over \
+         the same {} draws — the coarse level is not coarser geometry",
+        coarse.indices_vgeom,
+        fine.indices_vgeom,
+        fine.draws_vgeom
     );
 }
 
@@ -3056,10 +3082,14 @@ fn a_vgeom_caster_that_crosses_a_lod_threshold_invalidates_its_pages() {
     let (warm, after, resident) = coarsen(&s);
     // ANTI-VACUITY: the level really moved, so this is an arm about a LOD change
     // and not about a settings write.
-    assert_eq!(
-        warm.vgeom_level_sum, 0,
-        "a caster at a tenth of a pixel of error already drew past the finest \
-         level: {warm:?}"
+    // **`sum < count` is "at least one caster is level 0"** for integer levels —
+    // which is the claim, and it is the shape the claim has to take since island
+    // wave I8c: a meshlet caster is packed once per distinct level its resident
+    // PAGE BUCKETS ask for, so a tenth of a pixel of camera error puts the finest
+    // level in the set without making the set a single record.
+    assert!(
+        warm.vgeom_casters > 0 && warm.vgeom_level_sum < warm.vgeom_casters,
+        "no caster at a tenth of a pixel of error drew the finest level: {warm:?}"
     );
     assert!(
         after.vgeom_level_sum > warm.vgeom_level_sum,

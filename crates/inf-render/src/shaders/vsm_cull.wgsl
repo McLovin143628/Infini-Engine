@@ -42,7 +42,9 @@ struct VsmPage {
     // Render-local world -> this page's own clip space
     // (`inf_render::vsm::vsm_page_matrix`).
     view_proj: mat4x4<f32>,
-    // x = the page's base in the visible list, y = slot, z = light, w = flags.
+    // x = the page's base in the visible list, y = slot, z = light, w = the
+    // page's DETAIL BUCKET as a one-bit mask (island wave I8c): `1 << level` for
+    // a clipmap page, `1 << 31` for a perspective one.
     info: vec4<u32>,
 };
 @group(0) @binding(1) var<storage, read> pages: array<VsmPage>;
@@ -54,7 +56,11 @@ struct VsmCaster {
     // x = alpha cutoff, y = blend code, z = base-colour alpha, w = reserved.
     mat: vec4<f32>,
     // x = geometry group, y = the caster's index inside its group, z = the
-    // group's first caster (its base in a page's visible list), w = flags.
+    // group's first caster (its base in a page's visible list), w = the caster's
+    // DETAIL-BUCKET MASK (island wave I8c) — the set of page buckets this record
+    // is the right level for. **Zero means every bucket**, which is what every
+    // caster that is not a meshlet asset carries and what the pass did before the
+    // mask existed.
     ids: vec4<u32>,
 };
 @group(0) @binding(2) var<storage, read> casters: array<VsmCaster>;
@@ -119,6 +125,15 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let c = casters[ci];
     let p = pages[pi];
+    // **The detail bucket** (island wave I8c). A meshlet asset is packed once per
+    // classic level its resident page buckets ask for, and the masks PARTITION
+    // those buckets — so this test is what makes "every page draws the asset
+    // exactly once, at the level that page can show" true rather than "at every
+    // level, once each". A zero mask is every bucket, which is every other caster
+    // in the pass.
+    if (c.ids.w != 0u && (c.ids.w & p.info.w) == 0u) {
+        return;
+    }
     if (!page_sees_sphere(p.view_proj, c.sphere.xyz, c.sphere.w)) {
         return;
     }
