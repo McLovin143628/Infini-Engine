@@ -12,7 +12,9 @@
 //! machine-independent or structural:
 //!
 //! * **(a) zero cost when absent** — with no population the crowd phase reads
-//!   0.000 ms and the trace is byte-identical to the same scene without one;
+//!   under 0.005 ms (0.0001 measured, i.e. the clock's own resolution: the step
+//!   returns on a `contains_resource` before it allocates) and the trace is
+//!   byte-identical to the same scene without one;
 //! * **(b) the tier ladder is what makes N affordable** — the same N, banded and
 //!   all-`Full`, must not produce the same work: the banded run poses strictly
 //!   fewer characters and folds strictly fewer trace bytes;
@@ -356,12 +358,16 @@ fn measure(pack: &Path, n: usize, banded: bool) -> Row {
         .expect("at least one round");
 
     use inf_player::step_profile::STEP_PHASE_NAMES;
+    // Panics on an unknown phase rather than answering `0.0`: a misspelled name
+    // would print a column of zeroes and read as "this phase costs nothing",
+    // which is the under-attribution `step_profile` exists to remove, one level
+    // up in the instrument that reads it.
     let ms = |name: &str| {
-        STEP_PHASE_NAMES
+        let i = STEP_PHASE_NAMES
             .iter()
             .position(|n| *n == name)
-            .map(|i| prof.ms[i])
-            .unwrap_or(0.0)
+            .unwrap_or_else(|| panic!("no step phase called `{name}`"));
+        prof.ms[i]
     };
 
     let trace_bytes = fx.sim.state_bytes().len();
@@ -373,7 +379,10 @@ fn measure(pack: &Path, n: usize, banded: bool) -> Row {
     // nine of them do not account for is the bincode snapshot, printed as a
     // residue rather than assumed to be one.
     let sections = TraceSections::of(&fx.sim, trace_bytes);
-    let posed = sections.pose;
+    // Bytes, not a count. `Row::posed` beside it is the COUNT, off the pose
+    // store; the two are named apart because a reader comparing "291 posed" to
+    // "243 276 B of pose" has to know which is which.
+    let pose_bytes = sections.pose;
 
     // The projection, measured the way `projection_budget.rs` measures it: no
     // GPU at any point, into the same `RenderScene` a host reuses every frame.
@@ -420,7 +429,7 @@ fn measure(pack: &Path, n: usize, banded: bool) -> Row {
         projection_ms: best_proj,
         sections,
     }
-    .also_print(posed)
+    .also_print(pose_bytes)
 }
 
 impl Row {
@@ -450,7 +459,7 @@ impl Row {
             self.projection_ms,
         );
         println!(
-            "        sections: snapshot {} B / deform {} B / pose {} B / cloth {} B /              hair {} B / gameplay {} B / crowd {} B",
+            "      sections: snapshot {} B, deform {} B, pose {} B, cloth {} B, hair {} B, gameplay {} B, crowd {} B",
             self.sections.snapshot,
             self.sections.deform,
             self.sections.pose,
