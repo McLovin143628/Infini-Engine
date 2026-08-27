@@ -27570,8 +27570,9 @@ and `masked_frames`, which had been in the struct and in no line), and the islan
 985 indices a rastering frame over 328 draws, of which terrain is 6 482 151 — 4.2 %.** The other
 **149.5 M is ONE `.inf_vmesh` instance**, 2.34 M indices a draw, submitted **whole into every one of
 56 dirty pages** at the classic level the CAMERA asked for — and the pass is triangle-bound on it
-(6.115 ms for 156.0 M against the coarse control's 2.157 for 63.4 M is **39 ps an index** either way,
-this card's depth-only rate). **The missing rule was a floor, not a ceiling.** P27.2 picks the caster's
+(6.115 ms for 156.0 M is **39 ps an index** and the coarse control's 2.157 for 63.4 M is **34** — the
+same order, this card's depth-only rate; the audit corrected "39 either way" and notes the after
+column's 0.124 for 6.55 M is 19 ps, so the rate is not a constant of the card). **The missing rule was a floor, not a ceiling.** P27.2 picks the caster's
 level off the camera because *"a page exists because a visible pixel asked for it"* — true, and only an
 upper bound; a clipmap page at level 7 is **one metre a texel** (74 % of the rastered pages) while the
 camera at 100 m asks for 0.13 m. `vgeom_caster_levels` adds the floor through arithmetic that already
@@ -27614,8 +27615,13 @@ RECONCILED THE TWO STEP CLOCKS INSIDE ONE HARNESS, AND THE ANSWER WAS NEITHER ON
 `step_profile`'s phases tile the step by construction, so the difference between them and the wall
 clock around the same call is measurable: **the residue is +0.002 ms**. The step is not preempted — it
 genuinely costs more inside a frame, and the extra is inside its own phases: `solver` **1.789 → 2.293
-ms (+28.2 %)**, **62 % of the growth on 22 % of the step**, and the growth tracks the render config's
-own memory traffic (SHIPPED +0.45, LIT +0.57, LIT+VIS +0.82) on an identical simulation. The isolated
+ms (+28.2 %)**, **62 % of the growth on 31 % of the step** (the audit's correction — 22 % is the
+growth as a fraction of the in-frame solver, and the instrument prints the share itself at 30.2 %).
+The wave also read the growth as tracking the render config's
+own memory traffic (SHIPPED +0.45, LIT +0.57, LIT+VIS +0.82) on an identical simulation; **the audit's
+re-run does not reproduce that half** — the five in-frame steps span 6.389-6.516 ms with SHIPPED
+*above* LIT, so the growth is real and its attribution to the render configuration is not measured.
+The isolated
 clock's own spread is **5.694 / 5.738 / 6.208 / 5.855** across four runs, so the honest sentence is
 that the island's step sits within a few tenths of its 6.0 ratchet on a clock whose spread is ±0.26,
 met in three runs of four. **CLAUSE 4 (module UVs/materials) is ROUTED by name**: no measured budget
@@ -27632,4 +27638,44 @@ failed** and `tests/goldens` unmoved, rustdoc **374 over 30 crates** cold after 
 (the wave adds zero, headroom 76), clippy **0**, `fmt` clean, schemas all four unmoved,
 `EXPECTED_LEVELS` **23**, committed content untouched, `Cargo.lock` unmoved, frontend untouched.
 Full ledger, both tables, the phase-by-phase clock table and the carried list in
+`docs/memos/island-progress.md`.
+
+**THE ADVERSARIAL AUDIT (2026-08-27), range `daceec01..62fda812`: no HIGH, nine MED, eleven LOW; every
+MED fixed with an arm behind it and mutation-verified, and not one of the four clauses false at the
+level it was measured.** The wave's own numbers reproduce off a rebuild (island 40.65 km² / 948.7 m /
+25.14 km / 51 streams / 549.9 MB, battery 328 / 6 251 / 0 / 19, goldens 58 over 117 arms, the VSM
+counters identical to the digit — 6 551 616 indices a rastering frame, 52 meshlet draws at mean classic
+level 8.00, casters 111 370 with 0 dropped, churn 2.3). **MED-1: the wave's own fourth law —** *"a
+residency event must never enter a content stamp"* — **was still broken in the bucket its fix did not
+reach**: `PERSPECTIVE_BUCKET` was inserted from the RESIDENT page list, so evicting a spot's last page
+drops bit 31 from every meshlet caster's mask and re-rasterizes the *clipmap* pages that caster
+touches. It is read off `light_count`/`desc` now; the derivation is `frame_buckets`, hoisted so it can
+be driven without a device, and the arm the wave's fix never had is mutation-verified twice (the
+page-derived bit, and a ladder offering only the resident levels — which is the wave's own repair).
+**MED-2: the clause rewired shadow LOD selection and nothing looked at a shadow.** The audit measured
+it against the finest cut in every page — the geometry P27.2 submitted: **4 972 of 111 332 shared
+texels move (4.47 %) and the worst is 0.1484 m, 0.79 of ONE texel of the level-4 page it happened in.**
+The receiver's own bias is a whole normal texel plus 2.12 texels of slope, so **the coarser cut cannot
+open acne the bias does not already cover** — the shadow-quality verdict, armed at one texel of slack
+and mutation-verified at eight. **MED-3: the partition's two guards mask each other and neither had an
+arm** (delete the device test and 40 arms stay green with an identical atlas; delete the CPU mirror and
+8 pages issue 16 meshlet draws with an identical atlas) — `draws_vgeom <= pages` is the arm.
+**MED-4:** the ledger quoted the pop from the geometry row; the SHIPPED pop at the swap is **29.6 % of
+18 884 px at 159/255 against 91.5 % of 26 792 px at 172/255** at the old 192 m swap — three times
+better, in neither document, and now a tripwire. **MED-5–9:** an arm this wave wrote encodes an
+invariant this wave made false (`indices_vgeom % draws_vgeom`, which passed by arithmetic luck in a
+fixture that already packs two levels); *"62 % of the growth on 22 % of the step"* (30.2 %, and the
+instrument prints it); *"the growth tracks the render config's traffic"* does not reproduce; *"no
+golden carries a shadow page"* — four do; and two pinned records documented a live field as "flags".
+Frame tables re-run at head reproduce inside the spread (`LIT+VIS` p50 **24.063**, GPU **10.199**,
+`scatter` **5.140**, `vsm-raster` **0.124**, pipelined **13.762 ms**), and the SHIPPED row's fifth GPU
+reading is **12.303 ms** — the 2.5× alternation confirmed, so that row's "−1.176 ms, 60 fps met" does
+not reproduce (+7.282 here) and remains unclaimed. The isolated fixed step reads **5.676 ms**, met, a
+fifth reading in a 5.676–6.208 spread; the +0.002 residue is exact on all five configurations. **The
+public number is the measured p50 (41.6 fps); the 72.1 fps pipelined estimate is `max(CPU without the
+wait, GPU)` from a SERIAL harness — a lower bound on a pipelined host's frame and therefore a CEILING
+on its fps, never validated against a presenting player.** Counts after: battery **328 / 6 254 / 0 /
+19** (+3 arms, no new block), goldens **58** over **117 arms, 0 failed** with `tests/goldens` unmoved,
+rustdoc **374 over 30 crates** cold (the audit adds zero, headroom 76), clippy **0**, `fmt` clean,
+schemas unmoved, `EXPECTED_LEVELS` **23**, content and `Cargo.lock` untouched. Full audit ledger in
 `docs/memos/island-progress.md`. 

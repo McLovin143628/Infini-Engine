@@ -682,9 +682,14 @@ fn print_step_clocks(label: &str, m: &Measured) {
         return;
     }
     println!(
-        "  {label} fixed step: {phases:.3} ms in its own phases against a \
-         {CITY_STEP_BUDGET_MS} ms ratchet, inside a {wall:.3} ms wall clock \
-         ({:+.3} ms, {:.1} %, is this thread not being inside the step at all)",
+        "  {label} fixed step: {phases:.3} ms in its own phases inside a \
+         {wall:.3} ms wall clock ({:+.3} ms, {:.1} %, is this thread not being \
+         inside the step at all). REPORTED, NOT ASSERTED — the \
+         {CITY_STEP_BUDGET_MS} ms ratchet binds the ISOLATED step, which is \
+         `island_gate`'s furnish battery over the fixture and this file's own \
+         city arm; this row is that same step paying for the frame around it \
+         (the island wave I8c audit's LOW-3: the line said 'against a ratchet' \
+         on the one clock the ratchet does not bind)",
         wall - phases,
         (wall - phases) / wall.max(1.0e-9) * 100.0,
     );

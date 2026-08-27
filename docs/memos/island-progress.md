@@ -13147,6 +13147,24 @@ their *order* decided whether a shell existed.
 reproduced at 5.148 in a third run. The `SHIPPED` row's own delta is inside that
 row's run-to-run spread and is **not** a number — see *the spread* below.
 
+**And what a player sees at the swap, which this ledger first quoted from the
+geometry row alone** (the audit's addition; every figure is printed by
+`structure_lod_pop` and none of them was in this section):
+
+| at the swap distance | old swap, 192 m | **new swap, 96 m** |
+|---|---|---|
+| the SHIPPED reading — both bands as they ship | 26 792 px, **91.5 % of it moves**, worst channel **172/255** | 18 884 px, **29.6 % moves**, worst **159/255** |
+| the GEOMETRY reading — the refusal's own row | 2 903 px, 2.2 % moves, worst **18/255** | 13 766 px, 2.9 % moves, worst **29/255** |
+
+The shipped pop is **a third of what it was**, which is the band re-order's real
+dividend and is a bigger claim than the `1.37×` silhouette ratio this section
+made. The other direction is honest too and was not stated: the *geometry* pop is
+measured at a nearer distance now, so it is worse in both of its own units —
+398 px against 63, and **29/255 against 18 on an arm whose ceiling is 32**. The
+refusal stands and its headroom is three channel steps. Both rows are armed:
+`swap_pct < 50 %` is new (I4's `> 50 %` moved out to the card's distance with the
+card and left the swap asserted by nothing) and `worst <= 32` is I4's, unmoved.
+
 **(c) THE IMPOSTOR CARD — ROUTED, with the measurement that routes it.** The card
 is still `radius × max(sx, sy, sz)` for an authored mesh, which for a
 non-uniformly scaled module is up to 1.6× its true bounding sphere. Two
@@ -13197,9 +13215,13 @@ splits them landed with this clause; every other figure is printed:
 
 **The island's single `.inf_vmesh` instance was submitted whole into every dirty
 page, at the classic LOD level the CAMERA asked for.** And the pass is
-triangle-bound on it: 6.115 ms for 156.0 M indices against the coarse-clipmap
-row's 2.157 ms for 63.4 M is **39 picoseconds an index either way**, which is this
-card's depth-only triangle rate.
+triangle-bound on it: 6.115 ms for 156.0 M indices is **39 picoseconds an index**,
+and the coarse-clipmap row's 2.157 ms for 63.4 M is **34** — the same order, on
+this card's depth-only triangle rate. *(The audit's correction: the first
+write-up said "39 either way", and the two rates differ by 13 %. The after column
+is 0.124 ms for 6.55 M, which is 19 ps — so the rate is not a constant of the
+card and the argument it carries is "this pass is bound by the geometry it hands
+over", which all three rows support, rather than an equality.)*
 
 **The rule that was missing was a floor, not a ceiling.** P27.2 rules the caster's
 level off the camera because *"a VSM page exists because a visible pixel asked for
@@ -13254,7 +13276,12 @@ spent outside the step. It is armed for the whole measurement now (one
 `Instant::now()` per phase, 24 of them, and a profiled step is byte-identical to
 an unprofiled one), and every stage table prints the pair.
 
-> **The residue is +0.002 ms.** The step is not being preempted. It genuinely
+> **The residue is +0.002 ms**, and the audit re-ran it: the instrument prints
+> `+0.002 ms, 0.0 %` on **all five** configurations at head. (The frame table
+> below reads 6.676 wall against 6.673 in phases, which subtracts to 0.003; that
+> is two rounded means and not a third measurement — the residue is printed
+> directly and is the one to quote.) The step is not
+> being preempted. It genuinely
 > costs more inside a frame than it does alone, and the extra is **inside its own
 > phases** — which is a cost a shipped game pays and a step harness on its own
 > does not.
@@ -13371,11 +13398,24 @@ The isolated block and the in-frame stage, same simulation, same run:
 | `animation` / `camera` | 0.037 / 0.029 | 0.039 / 0.031 | +0.004 |
 | **total** | **5.855** (wall 5.855) | **6.673** (wall 6.676) | **+0.818** |
 
-**The solver is 62 % of the growth on 22 % of the step**, and it is the most
+**The solver is 62 % of the growth on 31 % of the step** (1.789 of 5.855
+isolated, 2.293 of 6.673 in frame — and the instrument prints the share itself:
+`step solver … (30.2 %)`). *(The audit's correction: the first write-up said
+"22 % of the step", which is neither share — it is the growth as a fraction of
+the in-frame solver, 0.504 / 2.293. The contrast the sentence draws is real and
+smaller than it read.)* It is the most
 memory-bound phase in it — 17 823 bodies and 58 582 contact pairs, re-read after a
 projection has walked 389 793 instances and a record stage 192 terrain tiles. The
 growth also tracks the render configuration's own traffic: `SHIPPED` +0.45,
-`LIT` +0.57, `LIT+VIS` +0.82, on an identical simulation.
+`LIT` +0.57, `LIT+VIS` +0.82, on an identical simulation. *(The audit re-ran
+that half and it does **not** reproduce: at head the five in-frame steps span
+**6.389–6.516 ms**, a 0.127 ms spread with `SHIPPED` at 6.446 **above** `LIT`
+at 6.389 — the ordering inverts and the spread is a third of the one this
+sentence is built on, which is itself inside the between-run movement of a
+single row. **The growth is real and its attribution to the render
+configuration is not measured.** What does reproduce, exactly, is the rest of
+the clause: residue +0.002 on every row, and the solver +0.536 of a +0.839 ms
+growth — **64 % of it**, on a phase that is 30.2 % of the isolated step.)*
 
 **The ratchet.** The step's own clock reads **5.855 ms against 6.0** at head, and
 its run-to-run spread on this machine is **5.694 / 5.738 / 6.208 / 5.855** — so it
@@ -13388,7 +13428,7 @@ inherited.
 | | before (`daceec01`) | **after I8c** |
 |---|---|---|
 | battery blocks / passed / failed / ignored | 328 / 6 249 / 0 / 19 | **328 / 6 251 / 0 / 19** — `cargo test --workspace -j 3`, **+2 arms and no new block**, both attributed: `a_meshlet_caster_picks_one_level_per_page_bucket_and_never_two` in `inf-render`'s `vsm_raster.rs` and `the_structure_swap_sits_between_the_collider_band_and_the_mesh_band` in `inf-player`'s `city_scale`. Four existing arms were **re-aimed** rather than added: the band tripwire (which now asserts the ordering rather than the defect), `structure_lod_pop`'s two carried impostor bounds, and the two P27.2 vgeom-level arms |
-| goldens | 58 | **58** — none added, none re-blessed; `INF_GOLDEN_STRICT=1` green over **117 arms, 0 failed**, and `git status` over `tests/goldens` empty afterwards. No golden scene carries a structure group or a shadow page, so neither clause can reach one |
+| goldens | 58 | **58** — none added, none re-blessed; `INF_GOLDEN_STRICT=1` green over **117 arms, 0 failed**, and `git status` over `tests/goldens` empty afterwards. No golden scene carries a structure group or a **meshlet asset**, so neither clause can reach one. *(The audit's correction: the first write-up said "or a shadow page", and **four goldens are shadow pages** — `vsm_directional`, `vsm_spot`, `vsm_point`, `vsm_bias_grazing`. They cast `MeshInstance` boxes, which is why the VSM clause cannot move them; the reason given was not the reason.)* |
 | rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — 404 `^warning` lines minus 30 per-crate summaries, after `cargo clean --doc` (8 814 files, 215.7 MiB). **The wave adds zero.** Headroom **76** |
 | `clippy --workspace --all-targets -D warnings` | 0 | **0** (local toolchain, run LAST per the rmeta law) |
 | `cargo fmt --all --check` | clean | **clean** |
@@ -13409,23 +13449,44 @@ inherited.
 2. **`cluster wants` is 1.33 ms of CPU for ONE meshlet instance.** Named here
    because this wave's counters are what made it visible: the island's whole
    virtualized-geometry content is a single `.inf_vmesh`, and planning its cluster
-   pages costs more than drawing it (`vgeom` GPU 0.313 ms).
+   pages costs more than drawing it (`vgeom` GPU 0.313 ms). *(Re-measured by the
+   audit at **1.463 ms** `LIT+VIS` / 1.391 `SHIPPED`, so the item is if anything
+   understated. And item 3 below is **why** it is that large.)*
 3. **`lod_threshold` degenerates when the camera is inside the asset's bounding
    sphere.** `d = max(|eye − centre| − radius, 1e-3)`, so an island-spanning mesh
    gives a threshold of ~0 and always picks the finest level — which is *why* the
    caster was at level 0. The shadow path no longer depends on it (the page's own
    texel size is the tolerance), but `passes::classic_vgeom` still does, and so
-   does the meshlet cut it mirrors.
+   does the meshlet cut it mirrors. *(The audit gave it a **tripwire** —
+   `an_eye_inside_the_bounding_sphere_collapses_the_threshold_onto_its_clamp`,
+   the I7b flip precedent — because the wave's most consequential carried defect
+   had nothing but this paragraph holding it. Measured: the collapsed threshold
+   is exactly `pixel_error × 1e-3 / focal`, **6.4 nanometres of object space** in
+   that fixture, and an asset four metres away asks 4 000× more from the same
+   eye. It also **prices item 2**: the cut the main raster plans for is the
+   finest one in the chain, every frame, at any distance.)*
 4. **A meshlet asset can now hold up to one group per clipmap level.** `by_group`
    is keyed `(asset, classic level)`, so an asset whose page buckets disagree
    costs several groups against `VSM_MAX_GROUPS` (1 024) where it used to cost
    one. On the island every bucket picks the same level and it costs exactly one;
    a scene with many assets close to the camera could multiply. Never silent —
-   `dropped_groups` counts the refusal.
+   `dropped_groups` counts the refusal. *(Not "could" — **measured**: one asset
+   at 9 m through a six-level clipmap packs **two** caster records a frame in
+   `inf-render`'s own P27 fixture, at a mean classic level of 2.50. The audit's
+   quality arm asserts the multiplication is exercised there, and asserts
+   `dropped_groups` and `dropped_casters` are zero beside it.)*
 5. **The level blend can lerp two different silhouettes.** A receiver in
    `VsmSettings::level_blend`'s band resolves two clipmap levels, and those levels
-   may now draw different classic cuts of the same asset. Bounded by one texel of
-   the coarser level by construction, and unmeasured.
+   may now draw different classic cuts of the same asset. *(The audit did the
+   arithmetic and measured it. **The constructive bound is 1.5 texels of the
+   coarser level, not one**: the two cuts each sit within their own page's
+   tolerance, so they differ by at most `error(L) + error(L+1)` ≤
+   `pixel_error × (wpt(L) + 2·wpt(L))` = `3 × pixel_error × wpt(L)`, which is
+   1.5 texels of the level `L+1` the blend reaches for. And it is no longer
+   unmeasured: `the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into`
+   puts the worst displacement between the shipped cut and the finest one at
+   **0.79 of one texel of its own page**, which bounds each side of the lerp.
+   Carried as a fidelity item at that size.)*
 6. **The impostor card is still sized `radius × max(scale)` for an authored
    mesh** — up to 1.6× the true bounding sphere on a non-uniform module. Routed
    above with its own mechanism.
@@ -13472,3 +13533,392 @@ inherited.
   says to read a per-pass split *within* a run; this is the whole frame doing it,
   on the row a harness measures first.
 
+
+
+## Wave I8c — the adversarial audit (2026-08-27)
+
+Range `daceec01..62fda812`, seven commits, on a clean tree. **No HIGH. Nine MED,
+eleven LOW.** Every MED is fixed with an arm behind it and mutation-verified;
+the LOWs are corrected in place above or carried by name. Nothing in the wave
+was reverted, and **not one of the wave's four clauses was found to be false at
+the level it was measured** — the band re-order, the page-LOD floor, the
+partition, the churn repair and the clock reconciliation all reproduce.
+
+**What the audit found is that the wave rewired shadow LOD selection and never
+looked at a shadow**, and that the law it wrote for itself — *"a residency event
+must never enter a content stamp"* — was still being broken in the one bucket
+its own fix did not reach.
+
+### What reproduced, off a rebuild
+
+| claim | verified |
+|---|---|
+| the island itself | land **40.65 km²**, peak **948.7 m**, shore **25.14 km**, **51** streams / **25.88 km**, **2** lakes / **0.0847 km²**, **33** waterfalls, urban **7.2 %**, drift **0.00 % / 0.00 %**, roads **5 of 2 442** over at **0.108**, terrain **549.9 MB** — built in **49.1 s**, cooked in **41.7 s**. Identical to I8b's audit to the digit |
+| the battery | **328 / 6 251 / 0 / 19** at the wave's head, exactly the ledger's tally |
+| the goldens | **58** files, **117 arms, 0 failed** under `INF_GOLDEN_STRICT=1`, `git status` over `tests/goldens` empty afterwards — twice, before and after the audit's own changes |
+| the VSM counters | **6 551 616** indices a rastering frame (6 482 151 terrain 98.9 %, 69 026 meshlet 1.1 %) over **328** draws (264 terrain, **52 meshlet at mean classic level 8.00**), **56.3** pages, dirty **65.7 / 3.9 / 2.3**, pages by level `2:400/3:2232/4:1986/5:1642/6:678/7:19967`, casters **111 370** (18 638 + 478 + 478 + 91 776 = 111 370), **0 dropped, 0 groups refused** — every figure identical to the ledger's |
+| the re-aimed impostor bounds | `at_far` is at `2 × STRUCTURE_LOD_M` = **192.0 m**, which is bit-for-bit the distance the old `at_swap` shot from, and the fixture's bands do not read `STRUCTURE_LOD_M` at all. It re-reads **26 792 px against 2 903 (9.23×), 24 525 of it moving (91.5 %)** — I4b's own pixel counts. The identity claim holds |
+| the geometry refusal | **398 of 13 766 px (2.9 %), worst channel 29/255** at 96 m, against arms that still read `<= 5 %` and `<= 32`. Un-re-blessed, as claimed |
+| the CPU remainder | step **47.3 %** / record **46.3 %** / projection 5.5 % / stream sync 0.8 % of a 13.762 ms CPU frame; the record stage's four are `submit` **1.736**, `cluster wants` **1.463**, `vsm sync` **1.395**, `graph` **0.907** (the ledger's ~1.7 / ~1.33 / ~1.37 / ~0.92, with the middle pair's order swapped) |
+| the residue | **+0.002 ms on all five configurations**, printed directly by the instrument |
+| the `chr(92)` sweep | no run of ≥ 4 interior spaces inside a literal introduced by this wave. Three hits under the pattern in `fps_instrument.rs` (two `find("…")` source needles and one padded content line) all pre-date `daceec01`. **No 32nd catch** |
+| the schemas, the content, the lock | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 unmoved; `git diff daceec01..HEAD -- samples/` empty; `Cargo.lock` unmoved; `EXPECTED_LEVELS` **23** |
+
+### MED-1 — the perspective bucket was still the residency's, which is the wave's own law
+
+*Fixed; `3868e0c7`.*
+
+The wave's fourth law is *"a residency event must never enter a content stamp"*,
+and it paid 46.3 re-cast pages a frame to learn it. The repair — one bucket per
+level `desc.levels` **has** — covered the clipmap ladder and left the other half
+of the bucket set exactly where it was:
+
+```text
+if p.level_bit == PERSPECTIVE_BUCKET { bucket_map.entry(PERSPECTIVE_BUCKET)…; }
+```
+
+`pages` is the resident page list. So a spot or a cube face whose last page is
+evicted drops bit 31 out of every meshlet caster's mask — and a caster whose
+group also serves a **clipmap** bucket has its stamp moved by that, which
+re-rasterizes the clipmap pages it touches. VSM2's churn, one bit over, in the
+bucket the fix did not reach.
+
+It is read off `light_count`/`desc` now, so the bit moves only when a light is
+registered or removed. The derivation is `frame_buckets`, hoisted out of
+`record` so it can be driven without a device, and
+`the_bucket_ladder_is_the_lights_configuration_and_not_its_residency` is the arm
+the wave's own fix never had. **Mutation-verified twice**: the page-derived
+perspective bit fails claim (2), and a ladder offering only the levels whose
+pages happen to be resident fails claim (1) — which *is* the wave's repair, and
+which nothing asserted.
+
+Also inside it: a light whose **first** page in the list carried a degenerate
+matrix was entered into `ladder_from` and then skipped, so it never received a
+ladder at all and its pages would have drawn no meshlet shadow. The two tests
+are asked in the other order.
+
+### MED-2 — the clause rewired shadow LOD selection and nothing looked at a shadow
+
+*Fixed with a measurement; `3868e0c7`.*
+
+The wave asserts the **partition** (a pure arm over `vgeom_caster_levels`) and
+the **milliseconds**. What it never asked is the question its own trade poses: a
+coarser cut in a coarser page is a blockier shadow, and *how much* blockier is a
+number.
+
+`the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into` compares the
+shipped atlas against the same scene with the tolerance collapsed — the finest
+cut in every page, which is the geometry P27.2 submitted — and reports the
+difference in metres **and in texels of the page it happened in**.
+
+> **4 972 of 111 332 shared texels move (4.47 %), and the worst is 0.1484 m —
+> 0.79 of ONE texel of the level-4 page it happened in**, against a camera
+> tolerance of 0.0381 m.
+
+Mutation-verified: a floor that tolerates **eight** texels instead of one moves
+a level-4 page by 0.7734 m and the arm names it. The pure arm gains the same
+bound as its claim (5), so the guarantee is stated in both halves.
+
+### MED-3 — the partition is enforced by the CPU mirror, and neither half had an arm
+
+*Fixed; `3868e0c7` (the arm) and measured here.*
+
+The wave says the partition is *"enforced on the device (`vsm_cull.wgsl` tests
+the caster's mask against the page's own bucket) and mirrored on the CPU in
+`scatter_caster_stamps`"*. Measured, each is masked by the other:
+
+* **delete the device test** — all 40 `vsm_raster` arms stay green, the atlas is
+  identical to the texel. The CPU group mask never issues the draw, so the
+  device test is belt over braces;
+* **delete the CPU mirror** — the atlas is *still* identical (4 972 / 111 332,
+  unchanged), because the device cull leaves the extra draws empty. What moves
+  is the count: **8 pages issue 16 meshlet draws instead of 8**, and
+  `indices_vgeom` doubles.
+
+So the invariant that makes the clause correct rather than merely cheap was
+invisible to every depth arm in the tree, and the counter that can see it is the
+one this wave minted. The quality arm asserts `draws_vgeom <= pages`, which is
+"every page draws this instance once", and the CPU mutation fails it.
+
+**The device half is still unarmed and is carried by name** (LOW-4): it matters
+only when two instances of one asset land in the same group with different
+masks, which needs a two-instance fixture nothing in the tree has.
+
+### MED-4 — the ledger quoted the pop from the geometry row and the shipped row is the one a player sees
+
+*Fixed in the ledger above, and armed.*
+
+`structure_lod_pop` prints four readings and the wave's ledger carries one of
+them. The shipped configuration's pop at the swap — the number a player actually
+gets — is **29.6 % of an 18 884 px silhouette moving, worst channel 159/255**,
+against **91.5 % of 26 792 px at 172/255** at the old 192 m swap.
+
+That is the band re-order's real dividend, it is three times better than the
+ratio the section quoted, and it was in neither document. The other direction is
+honest too: the geometry pop is measured at a nearer distance now and is worse
+in both of its own units — 398 px against 63, **29/255 against 18 on an arm
+whose ceiling is 32**. The refusal stands with three channel steps of headroom
+and the ledger now says so.
+
+I4's `> 50 %` bound on the shipped reading moved out to the card's distance with
+the card, which left the swap asserted by nothing. `swap_pct < 50 %` is the
+tripwire that turns the far row's bound around.
+
+### MED-5 — an arm this wave wrote encodes an invariant this wave made false
+
+*Fixed; `782ea2c4`.*
+
+`a_virtualized_geometry_instance_casts_into_the_pages_it_touches` gained
+`indices_vgeom % draws_vgeom == 0`, *"because every meshlet draw submits the same
+level's whole index range"*. An asset is packed once per distinct classic level
+its page buckets ask for, and **that fixture packs two** — 2 caster records a
+frame over 8 meshlet draws at a mean classic level of 2.50. The divisibility held
+over two levels' index counts by arithmetic luck; the day it did not, the arm
+would have gone red for a correct renderer. It asserts whole triangles and a
+non-empty range now.
+
+The same measurement upgrades the wave's carried item 4 from *"could multiply"*
+to a number: one asset at 9 m through a six-level clipmap multiplies already.
+
+### MED-6 — "62 % of the growth on 22 % of the step", and the instrument prints 30.2 %
+
+*Corrected in place, in the memo and the ROADMAP.*
+
+The solver is **30.2 %** of the isolated step (1.712 of 5.676, and the harness
+prints that share on its own line) and **34.5 %** in frame. 22 % is neither: it
+is `0.504 / 2.293`, the growth as a fraction of the in-frame solver. The contrast
+the sentence draws is real and about a third smaller than it read.
+
+### MED-7 — "the growth tracks the render configuration's own traffic" does not reproduce
+
+*Corrected in place.*
+
+The wave reads the in-frame step's growth as tracking the render config's memory
+traffic: `SHIPPED` +0.45, `LIT` +0.57, `LIT+VIS` +0.82 over an identical
+simulation. Re-run at head, the five in-frame steps are **6.446 / 6.389 / 6.461
+/ 6.516 / 6.471 ms** — a **0.127 ms** span with `SHIPPED` *above* `LIT`. The
+ordering inverts and the spread is a third of the one the sentence is built on,
+which is itself inside a single row's between-run movement (`SHIPPED` 6.309 →
+6.446, `LIT+VIS` 6.676 → 6.516).
+
+**The growth is real and reproduces** — 5.676 isolated against 6.516 in frame,
++0.839, of which the solver is +0.536 (**64 %**). Its attribution to the render
+configuration is not measured, and clause 3's load-bearing half (the +0.002
+residue) is exact on every row.
+
+### MED-8 — the goldens' clean bill was given for a reason that is false
+
+*Corrected in place.*
+
+*"No golden scene carries a structure group or a shadow page, so neither clause
+can reach one."* **Four goldens are shadow pages** — `vsm_directional`,
+`vsm_spot`, `vsm_point`, `vsm_bias_grazing` — and two of them are the
+perspective lights MED-1 turned out to be about. The conclusion is right and the
+reason is not: they cast `MeshInstance` boxes, so what they do not carry is a
+**meshlet asset**.
+
+### MED-9 — two pinned records documented a live field as "flags"
+
+*Fixed; `3868e0c7`.*
+
+`VsmCasterRaw::ids` and `VsmPageRaw::info` still read *"w = flags"* while their
+WGSL twins had been rewritten to the detail-bucket mask and the page bucket.
+Stride is contract in this file and so is what a field means — the two
+declarations exist precisely so they cannot disagree, and `ids.w` is the field
+the whole clause turns on.
+
+### THE SHADOW-QUALITY VERDICT
+
+The wave's assignment from the brief was *"correctness outranks the fps"*, and
+the question is whether a coarser caster in a finer page peter-pans or
+self-shadows. The answer is **no, and the size of the trade is now a number
+rather than an argument**.
+
+1. **The rule is dimensionally right.** A clipmap level is an orthographic
+   projection with a fixed world-per-texel, so `pixel_error × wpt / max_scale` is
+   `lod_threshold`'s own `ortho` branch with the page's texel in place of the
+   camera's pixel — and a receiver reads a level whose texel is about its own
+   screen footprint, so `pixel_error` shadow texels is `pixel_error` screen
+   pixels of shadow-edge error. It is the same tolerance the geometry is drawn
+   at, spent in the same units.
+2. **The camera's threshold is kept underneath, so the shadow is never finer than
+   the geometry it falls on** — P27.2's ruling, intact, and the pure arm's claim
+   (3) fails if a page finer than the camera pulls the level below it.
+3. **Measured, the floor moves the shadow surface by 0.79 of one texel of the
+   page that holds it** (worst of 111 332 shared texels; 4.47 % move at all).
+4. **The receiver's own bias is larger than that in both of its terms** — a whole
+   texel of normal offset (`VSM_NORMAL_BIAS_TEXELS = 1.0`) plus `(R + ½)·√2` =
+   **2.12** texels of slope. A sub-texel displacement cannot open acne the bias
+   does not already cover, and it cannot detach a shadow the bias does not
+   already detach.
+5. **The bound is armed, not asserted from prose**: `delta ≤ max(pixel_error ×
+   the page's texel, the camera's world tolerance) + one texel`, per page, with
+   the 8× mutation failing it at 0.7734 m against 0.7500.
+
+What the clause *does* cost is fidelity in one named place, and the wave carries
+it: a receiver in the level-blend band can lerp two different cuts. The
+constructive bound is **1.5 texels of the coarser level** (not the one the
+ledger claimed — corrected above), and the measurement puts each side of the lerp
+inside 0.79.
+
+**The P27 receiver arms, VSM2's arms and I8b's cube-shadow and Medium-tier arms
+are all green**, in a battery of 328 blocks with zero failures, and the four VSM
+goldens pass `INF_GOLDEN_STRICT=1` unchanged.
+
+### BOTH FRAME TABLES, RE-RUN AT HEAD
+
+RTX 4070 Ti, Windows/Vulkan, **release**, 1080p, MIN of 3 rounds × 120 frames,
+the same 40 m-high flight east from Harbour City. The island was rebuilt (49.1 s)
+and re-cooked (41.7 s) for it, on a tree carrying every audit fix.
+
+| | wave I8c | **after the audit** |
+|---|---|---|
+| `LIT+VIS` p50 / p95 | 24.270 / 25.382 ms (41.2 fps) | **24.063 / 25.505 ms (41.6 fps)** |
+| `LIT+VIS` GPU frame | 10.202 | **10.199 ms** |
+| — `scatter` | 5.133 | **5.140 ms** |
+| — **`vsm-raster`** | **0.124** | **0.124 ms** |
+| — `terrain` / `gi` / `vgeom` | 3.106 / 0.781 / 0.313 | **3.100 / 0.779 / 0.307** |
+| cpu step / projection / record | 6.676 / 0.759 / 6.336 | **6.516 / 0.758 / 6.377** |
+| pipelined estimate | 13.879 ms (72.1 fps) | **13.762 ms (72.7 fps)** |
+| distance from 60 fps, p50 / p95 | +7.670 / +8.782 | **+7.463 / +8.905** |
+| content | 102 / 389 793 | **102 batches / 389 793 instances, 1 vgeom, 1 skinned, 192 tiles** |
+| vsm indices a rastering frame | 6 551 616 | **6 551 616** (98.9 % terrain, 1.1 % meshlet) |
+| pages / draws / mean meshlet level | 56.3 / 328 / 8.00 | **56.3 / 328 (264 terrain, 52 meshlet) / 8.00** |
+| dirty a frame: re-slotted / moved / re-cast | 65.7 / 3.9 / **2.3** | **65.7 / 3.9 / 2.3** |
+| casters | 111 370, 0 dropped | **111 370, 0 dropped, 0 groups refused** |
+
+The other three: `LIT` 23.587 → **23.699**, `LIT+SSR` 23.571 → **23.844**,
+`LIT-COARSE-CLIPMAP` 22.784 → **22.852**. The control leads the shipped ladder by
+**0.847 ms of p50** (the ledger's 0.80) and is **0.077 ms behind on the GPU
+frame** (10.160 against 10.083; the ledger's 0.08). Everything reproduces, and
+**the audit's changes cost nothing measurable** — the caster set, the index
+split, the page histogram and the churn are identical to the digit, because the
+island registers no perspective shadow light and MED-1's repair is inert there.
+
+**`SHIPPED`, and the wave was right not to claim it.**
+
+| | wave I8c | **after the audit** |
+|---|---|---|
+| p50 / p95 | 15.424 / 16.256 ms (64.8 fps) | **23.882 / 25.687 ms (41.9 fps)** |
+| GPU frame | 4.825 | **12.303 ms** |
+| `scatter` / `terrain` / `vgeom` | 1.688 / 2.603 / 0.307 | **4.328 / 5.767 / 1.007** |
+| pipelined | 10.466 (95.5 fps) | **12.303 ms (81.3 fps)** |
+| distance from 60 fps | **−1.176** | **+7.282** |
+
+> **The fifth reading of that row's GPU frame is 12.303 ms**, joining 12.505 /
+> 5.052 / 12.237 / 4.825. The 2.5× alternation the wave carried is confirmed and
+> nothing in the audit explains it either. **The row's "−1.176 ms, 60 fps met" is
+> one of the fast readings and it does not reproduce**; the ledger's refusal to
+> claim it is correct and the bold minus sign in its table is worth reading with
+> the disclaimer beside it.
+
+**The fixed step, a fifth reading.** The isolated block reads **5.676 ms** (phases
+5.675) — met. The five readings are now **5.676 / 5.694 / 5.738 / 5.855 /
+6.208**, a 0.532 ms spread, **met in four of five**. The in-frame residue is
+`+0.002 ms` on every configuration, and the phase table reproduces: solver 1.712
+isolated → 2.248 in `LIT+VIS` (+0.536, **64 % of a +0.839 ms growth**, on a phase
+that is 30.2 % of the step).
+
+### The LOW list
+
+1. **"39 picoseconds an index either way"** is 39.2 and 34.0, and the after
+   column implies 18.9. Corrected in place: the rate is not a constant of the
+   card, and the argument it carries ("this pass is bound by the geometry it
+   hands over") survives all three rows.
+2. **The residue is +0.002 and the frame table's rounded pair subtracts to
+   +0.003.** The instrument prints the residue directly on five rows; the table
+   is two rounded means. Corrected in place.
+3. **`print_step_clocks` prints every in-frame row "against a 6 ms ratchet"** —
+   on the clock the ratchet does not bind. The reconciliation is in the doc
+   comment above it and the arm reports rather than asserts, but the line a
+   reader sees still invites the misreading that started clause 3. Reworded to
+   say which clock the 6.0 binds.
+4. **The device half of the bucket test has no arm.** Deleting
+   `vsm_cull.wgsl`'s mask test leaves all 40 `vsm_raster` arms green and the
+   atlas identical — it only matters when two instances of one asset share a
+   group with different masks, which needs a two-instance fixture nothing has.
+5. **The caster's whole bucket mask is folded into its content stamp**, so one
+   bucket crossing a LOD threshold re-rasterizes the caster's pages in *every*
+   other bucket too. Over-conservative and never wrong; the page's own fold
+   already reflects membership, so the mask adds nothing the level does not.
+   Saturated on the island (every bucket picks level 8), so it costs nothing
+   there.
+6. **Two clipmap lights share a level bit**, and the finest world-per-texel any
+   of them gives that level wins — conservative in the safe direction (a coarser
+   light's page gets geometry finer than it can show), but the minimum is still
+   taken over the *resident* light set, so a two-clipmap-light scene keeps a
+   residency term in the stamp. Named in `frame_buckets`'s own doc.
+7. **"The camera at 100 m asks for 0.13 m"** is clause 2's illustration and is
+   not the island's own camera: carried item 3 says the asset's threshold
+   degenerates to ~0, which is why the before column reads level 0 rather than
+   something near the camera's pick. The measurement is right; the illustration
+   describes a different asset.
+8. **The p50 comparison mixes baselines**: *"the gap is 46 % smaller and the p95
+   gap is 78 % smaller"* takes the p50 from the I8b audit's +14.149 and the p95
+   from this wave's own +40.174. Against its own before column the p50 gap is
+   42 % smaller. Both numbers are traceable and the sentence names one of them.
+9. **The ordering arm compares the DEFAULT collider band.**
+   `PhysicsBridge3D::set_collider_band_radii` can retune it at runtime and
+   nothing owns the ordering then. No production caller does today.
+10. **The ROADMAP block prints "pipelined … 72.1 fps" with no model attached.**
+    It is `max(CPU without the wait, GPU frame)` from a *serial* harness — a
+    lower bound on a pipelined host's frame and therefore an **upper** bound on
+    its fps, never validated against a presenting player. The memo defines it;
+    the block a certification reads did not, and now says so. **The public number
+    is the p50 (41.6 fps measured); 72.1 is the ceiling a pipelined host could
+    approach.**
+11. **The rider in `1c8d5234`.** Its message describes the ladder repair and the
+    two re-aimed arms and not the 57-line `fps_instrument.rs` change (the
+    per-phase in-frame table). Nothing else rode: `62fda812`'s two code hunks are
+    described in its own message and are semantically inert — a hoisted
+    loop-invariant test and a doc paragraph.
+
+### Counts, after the audit
+
+| | wave I8c | **after the audit** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 328 / 6 251 / 0 / 19 | **328 / 6 254 / 0 / 19** — `cargo test --workspace -j 3`, **+3 arms and no new block**, every one attributed: `the_bucket_ladder_is_the_lights_configuration_and_not_its_residency` in `inf-render`'s `vsm_raster.rs`, `an_eye_inside_the_bounding_sphere_collapses_the_threshold_onto_its_clamp` in `passes/vgeom.rs`, and `the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into` in `tests/vsm_raster.rs`. Three existing arms were **strengthened** rather than added: the pure partition arm gained its quality bound as claim (5), `structure_lod_pop` gained the shipped pop at the swap, and the meshlet-index arm's false divisibility became whole triangles |
+| goldens | 58 | **58** — none added, none re-blessed; `INF_GOLDEN_STRICT=1` green over **117 arms, 0 failed**, `git status` over `tests/goldens` empty afterwards. Run twice, before and after every audit change, including the four VSM goldens MED-8 is about |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — 404 `^warning` lines minus 30 per-crate summaries, after `cargo clean --doc` (8 818 files, 215.7 MiB). **The audit adds zero.** Headroom **76** |
+| `clippy --workspace --all-targets -D warnings` | 0 | **0** (local toolchain, run LAST per the rmeta law) |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** — the audit's only production changes are `frame_buckets` (a hoist plus the perspective bit's source) and two doc comments, none of which reaches a serialized format |
+| committed levels (`EXPECTED_LEVELS`) | 23 | **23** |
+| committed content | none touched | **unmoved by the audit** — its whole `samples/` diff is empty |
+| new crates / external dependencies | none | **none**; `Cargo.lock` unmoved |
+| frontend | untouched | **untouched and not run** |
+
+### The laws this audit paid for
+
+* **A law is only kept in the places you looked.** *"A residency event must never
+  enter a content stamp"* is this wave's own fourth law, written the same
+  afternoon, and the fix that earned it covered the clipmap ladder and left the
+  perspective bit reading the resident page list. A law with one worked example
+  is a worked example.
+* **A clause that rewires quality must measure quality.** The wave asserted the
+  partition (a pure function), the milliseconds and the churn, and never asked
+  what the shadow looked like. It is 0.79 of a texel — a good answer, arrived at
+  after the fact, on a claim that was already in the ledger.
+* **Two guards that mask each other are one guard and no arm.** The device
+  bucket test and its CPU mirror each leave the atlas identical when deleted
+  alone; the invariant they exist for was invisible to every depth arm in the
+  file. The counter this wave minted is what can see it.
+* **An arm written in the wave that breaks its premise is the easiest one to get
+  wrong.** `indices_vgeom % draws_vgeom == 0` was added by the clause that made
+  one asset hold two levels, in a fixture that already holds two, and it passed
+  because two index counts happened to sum evenly.
+* **A percentage the harness already prints is not a percentage to derive.** The
+  instrument's own line reads `step solver … (30.2 %)` and the ledger says 22 %
+  of the step, which is the growth over the in-frame solver wearing the wrong
+  denominator.
+* **A per-configuration difference must clear the between-run movement of one
+  row before it is an attribution.** "The growth tracks the render config's own
+  traffic" spans 0.37 ms in one run and 0.13 in the next, with the order
+  inverted; the +0.002 residue beside it is exact on ten rows across two runs.
+* **The reason a gate cannot see a change has to be the real reason.** "No golden
+  carries a shadow page" was given for four goldens that are shadow pages; what
+  they do not carry is a meshlet asset, which is the same verdict off a premise
+  that is true.
+* **A row a document refuses to claim is still a row a reader quotes.** The
+  `SHIPPED` table prints a bold `−1.176 ms` — 60 fps met — under a paragraph
+  saying the row is not this wave's to claim. The fifth reading is +7.282.

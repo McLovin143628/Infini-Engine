@@ -3301,6 +3301,59 @@ mod tests {
         assert!(near > 0.0);
     }
 
+    /// **AN EYE INSIDE THE ASSET'S BOUNDING SPHERE ASKS FOR THE FINEST CUT** —
+    /// island wave I8c's carried item 3, kept as a **tripwire** rather than as a
+    /// sentence in a ledger (the I7b tripwire-flip precedent; the I8c audit added
+    /// it because the item had none).
+    ///
+    /// The perspective branch is `d = max(|eye − centre| − radius, 1e-3)`, so an
+    /// island-spanning mesh whose sphere contains the camera collapses `d` onto
+    /// the clamp and the threshold onto `pixel_error × 1e-3 / (focal × scale)` —
+    /// about **6.4 nanometres of object space** in this fixture. `pick_classic_level`
+    /// then picks level 0 whatever the chain holds, which is *why* the island's
+    /// one `.inf_vmesh` caster sat at the finest cut and submitted 149.5 M indices
+    /// a frame into the shadow atlas.
+    ///
+    /// I8c took the shadow path off it — a page's own texel size is the tolerance
+    /// there now — but `passes::classic_vgeom` still picks with it and so does the
+    /// meshlet cut this same function feeds ([`pack_instance`]), which is why the
+    /// island's `cluster wants` is 1.4 ms of CPU for one instance.
+    ///
+    /// **This arm asserts the DEFECT.** The day the branch grows a bound that does
+    /// not degenerate, it goes red — and that is the signal to rewrite the carried
+    /// item rather than to relax the assertion.
+    #[test]
+    fn an_eye_inside_the_bounding_sphere_collapses_the_threshold_onto_its_clamp() {
+        let v = view();
+        let eye = v.eye_local();
+        let focal = v.height as f32 / (2.0 * (v.fov_y * 0.5).tan());
+        // Two island-scale radii, an order of magnitude apart. The eye is 5 m from
+        // the centre and inside both.
+        let big = lod_threshold(eye, Vec3::ZERO, 4_000.0, 1.0, &v, 1.0);
+        let bigger = lod_threshold(eye, Vec3::ZERO, 40_000.0, 1.0, &v, 1.0);
+        assert_eq!(
+            big, bigger,
+            "an asset ten times the size asks for a different tolerance, so the \
+             `max(…, 1e-3)` clamp is no longer what decides it — island wave I8c's \
+             carried item 3 is repaired and the ledger needs rewriting"
+        );
+        assert!(
+            (big - 1.0e-3 / focal).abs() < 1.0e-12,
+            "the collapsed threshold is {big} and the clamp's own value is {}, so \
+             the degeneracy has a different shape than the carried item describes",
+            1.0e-3 / focal
+        );
+        // …and it really is a collapse: an asset the camera is OUTSIDE, four
+        // metres away, asks **4 000×** the tolerance from the same eye — which is
+        // `4.0 / 1e-3`, the clamp's own ratio and nothing else.
+        let outside = lod_threshold(eye, Vec3::ZERO, 1.0, 1.0, &v, 1.0);
+        assert!(
+            outside > big * 1_000.0,
+            "the near asset's threshold {outside} is not far above the collapsed \
+             {big}, so this arm is not measuring the clamp"
+        );
+    }
+
     #[test]
     fn threshold_scales_with_pixel_error() {
         let v = view();

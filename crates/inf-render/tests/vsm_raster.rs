@@ -1917,6 +1917,29 @@ fn the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into() {
         (0, 0),
         "the group ceiling refused something in a two-group fixture: {sh_stats:?}"
     );
+
+    // **AND THE PARTITION, ON THE DRAWS THE FRAME ACTUALLY ISSUED** (the I8c
+    // audit). The wave asserts the partition over `vgeom_caster_levels` — a pure
+    // function — and says it is *"enforced on the device … and mirrored on the
+    // CPU"*. Neither of those two is armed: each is masked by the other (drop the
+    // CPU skip and the device cull leaves the extra draw empty; drop the device
+    // test and the CPU's group mask never issues the draw), so a mutation to
+    // either is invisible in the atlas.
+    //
+    // The counter this wave minted can see it. One instance in **two** groups
+    // across eight pages issues **eight** meshlet draws — at most one a page,
+    // which IS "every page draws the asset once, at the level that page can
+    // show". Without the CPU mirror it is one a page PER GROUP, and the ceiling
+    // below is the shape that survives a page the asset's sphere misses.
+    assert!(
+        sh_stats.draws_vgeom > 0 && sh_stats.draws_vgeom <= sh_stats.pages,
+        "{} pages issued {} meshlet draws over {} caster records — a page is \
+         drawing this instance once per group instead of once, so the bucket \
+         masks are not partitioning the pages: {sh_stats:?}",
+        sh_stats.pages,
+        sh_stats.draws_vgeom,
+        sh_stats.vgeom_casters,
+    );
 }
 
 /// **A frame with pages and no casters CLEARS them** (P27.2 audit).
