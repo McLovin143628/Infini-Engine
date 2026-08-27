@@ -27474,14 +27474,21 @@ everywhere it predates, and `push_pcg_scatter` sets it **false on the parts batc
 skips a non-casting batch in `O(1)`. **It also gave the island back a shadow nobody had noticed was
 gone**: casters 7 831 552 (all scattered, 0 terrain, 17.7 M dropped) → **111 370 (18 638 scattered,
 91 776 terrain), 0 dropped** — the settlements had been crowding the *terrain* out of the caster
-budget entirely. **FRAME TABLES**, same machine, same flight: `SHIPPED` p50 23.268 → **23.955 ms
-(41.7 fps)**, pipelined **12.400 (80.6 fps)**; `LIT+VIS` p50 **64.821 → 30.040 ms (15.4 → 33.3 fps)**,
-GPU **33.450 → 18.008**, `scatter` **13.327 → 7.051**, `vsm raster` **16.672 → 0.619**, record
-**23.739 → 6.196**, pipelined **33.861 → 18.008 ms (29.5 → 55.5 fps)**; `LIT` 67.045 → 30.267,
-`LIT+SSR` 66.124 → 29.624, `LIT-COARSE-CLIPMAP` 66.430 → 24.851; fixed step **5.749 ms** inside its
-6.0 ratchet on unmoved counts. **≥ 60 fps p50 LIT+VIS is STILL NOT MET** (30.040 against 16.6, +13.440
-where I8a's was +48.221) and stays the headline. Real module geometry costs **+0.94 ms of SHIPPED and
-+3.5 ms of LIT+VIS `scatter`** — the I4 measurement met again at settlement scale. **THE ARMS**, all
+budget entirely. **FRAME TABLES** — the memo ledger's own run, which is the record; this block used to
+carry a *different* run of the same arm and the I8b audit aligned it (the spread between three runs is
+±0.4 ms on a p50 and ±0.03 ms on a pass, and one repository must not state that as two measurements):
+`SHIPPED` p50 23.268 → **23.575 ms
+(42.4 fps)**, pipelined **12.204 (81.9 fps)**; `LIT+VIS` p50 **64.821 → 30.305 ms (15.4 → 33.0 fps)**,
+GPU **33.450 → 17.972**, `scatter` **13.327 → 7.028**, `vsm raster` (record) **16.672 → 0.652**, record
+**23.739 → 6.303**, pipelined **33.861 → 17.972 ms (29.5 → 55.6 fps)**; `LIT` 67.045 → 29.976,
+`LIT+SSR` 66.124 → 29.922, `LIT-COARSE-CLIPMAP` 66.430 → 25.026; fixed step **5.670 ms** inside its
+6.0 ratchet on unmoved counts (the fps instrument's own step clock reads 6.3–7.3 ms over the same
+simulation and moves with the render config beside it — the I8b audit's carried second clock).
+**≥ 60 fps p50 LIT+VIS is STILL NOT MET** (30.305 against 16.6, +13.705
+where I8a's was +48.221) and stays the headline; the GPU frame's second-dearest pass is **`vsm-raster`
+at 6.083 ms**, which the wave's table did not list (I8b audit). Real module geometry costs
+**+0.94 ms of SHIPPED `scatter`** — the I4 measurement met again at settlement scale; its LIT+VIS half
+was a cross-run per-pass read and is not a number (I8b audit MED-6). **THE ARMS**, all
 on a real cooked pack through `project_scene_full`: **33 batches, 29 carry geometry, 4 are shell
 boxes, 0 are placeholders**; the caster pack **considered 132 where the pre-I8b engine (built by
 mutating a clone) considered 23 121**; and at local midnight **4 of 33 batches emit over 2 122 of

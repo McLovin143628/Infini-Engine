@@ -12379,6 +12379,15 @@ non-casting batch in `O(1)` instead of `O(instances)`. The arm measures the
 must be zero — which is what says the instances were never touched rather than
 packed and thrown away.
 
+> **AND IT SKIPPED THE PICTURE TOO (I8b audit HIGH-2).** `pack_fallback` has two
+> consumers and only one is shadows: `ScatterNode::run_fallback` is the **visible
+> CPU raster**, which is what draws scatter whenever `ScatterSettings::gpu` is
+> off — and `RenderTier::Medium.apply(…)` sets exactly that. Measured: 0 of
+> 4 000 instances reached the raster. On a Medium or Low adapter the settlements
+> would have drawn as shell boxes and nothing else. The purpose is an argument
+> now (`PackPurpose::{Raster, Casters}`), stated at all six call sites; fixed in
+> `a2821e1a`.
+
 **And it gave the island back a shadow it had lost without anyone noticing.**
 Before: 7 831 552 casters, **every one scattered**, 0 terrain, 17 721 930
 dropped. After: 111 370 casters — **18 638 scattered, 91 776 terrain**, 478
@@ -12461,6 +12470,15 @@ same instance count plus 24 248 window panes — the I4 measurement ("real geome
 costs more, +0.32..1.4 ms per config") met again at settlement scale. The frame
 did not move for it, because the CPU record stage was the bottleneck in every lit
 configuration until the caster clause took it away.
+
+> **THE LIT HALF OF THAT PRICE IS NOT A NUMBER (I8b audit MED-6).** In this same
+> middle column `terrain` moved **−2.005 ms** with no terrain change and an
+> identical tile count while the GPU frame total moved **+0.411**, so the
+> per-pass attribution in that run carries at least 2 ms of slop; and the run's
+> CPU record stage was **23.746 ms** against a 33.861 ms GPU frame, which is
+> exactly the state the I8a audit's own law calls inflated. The `SHIPPED` delta
+> (**+0.936 ms of `scatter`**, against `terrain` moving −0.762 in the same
+> column) is the defensible bound.
 
 ### Clause 2, the half that was STOPPED — with its route and its price
 
@@ -12564,6 +12582,13 @@ is asserted open above floor 0
 123-step walk climbs one. Verified open in the memo, verified closed in the tree,
 and **nothing was changed**.
 
+> **"Climbs one" is the wrong verb (I8b audit LOW-4).** The gate `set_hero`
+> teleports to a room on floor one and asserts that the stair room is reachable
+> in the plan's room graph and that the floor is standable — wave I8a's own LOW-6
+> ("the walk's 123 steps are 123 teleports"), restated in a verb it does not
+> support. The two plan arms above are real and non-vacuous and the finding *is*
+> closed; what has not happened is a character physically walking up a flight.
+
 ### Clause 5 — sidewalks and kerbs: ROUTED, by name
 
 Not taken, and the reason is the budget rather than the difficulty: the wave
@@ -12597,9 +12622,21 @@ would ride the same pass as a `grammar.expand` fence, which already exists.
 1. **≥ 60 fps p50 `LIT+VIS` is not met**: 30.305 ms against 16.6, +13.705.
    Pipelined 55.6 fps. Still the headline, and it is now one pass — `scatter`, at
    7.028 ms — rather than three costs.
+   > **TWO passes, not one (I8b audit).** The GPU table above omits
+   > **`vsm-raster`, 6.083 ms** — 33.8 % of the 18.0 ms GPU frame and the second
+   > dearest thing in it, in a ledger whose headline clause is the shadow path.
+   > The VSM's **CPU** side went 16.672 → 0.652 ms; its **GPU** side did not
+   > move. The next wave's target is `scatter` 7.03 + `vsm-raster` 6.08 =
+   > **13.1 ms of 18.0**.
 2. **A building is a billboard from 120 m and its shell can never be a mesh.**
    The band-ordering finding above, with its one-comparison repair and the reason
    it was not taken.
+   > **Now a tripwire (I8b audit MED-4)**, not only a sentence:
+   > `the_structure_swap_still_happens_past_the_scatter_mesh_band` asserts the
+   > defect, so repairing the ordering turns it red and names this entry. And
+   > `structure_lod_pop` does not *block* the change — it reads
+   > `STRUCTURE_LOD_M` as its own camera distance and re-aims itself; what it
+   > needs is its ratio assertions re-measured at 96 m.
 3. **The routed vgeom project, re-priced with numbers**: per-building is 41 ms of
    `build_vgeom` each and produces `levels = 1`; per-module re-creates the cost
    this wave removed; per-shell is the shape that fits.
@@ -12609,6 +12646,12 @@ would ride the same pass as a `grammar.expand` fence, which already exists.
    frame. That is TER2b's own carried bound, unmoved, and the shell is a derived
    oriented box rather than a placeholder — but a façade that draws and a box
    that casts are two silhouettes, and the day item 3 lands they become one.
+   > **CORRECTED BY THE I8b AUDIT (HIGH-1).** It was not casting the shell's box:
+   > `pack_fallback` built its model matrix from `Vec3::splat(inst.scale)` — the
+   > `x` of a scale that has been a `Vec3` since IB-2b — so a building's whole
+   > shadow was a **cube of twice its `x` half-extent**, too tall on a wide
+   > building and too shallow on a deep one. Measured: a `(3, 11, 27)` instance
+   > packed as `(3, 3, 3)`. Fixed in `a2821e1a`; the sentence above is true now.
 5. **The impostor card is still sized from a bounding sphere** (IP item 5's
    remainder), which is now more visible: a module mesh's own radius is what the
    card takes, and a wall panel's bounding sphere is 1.9× its silhouette.
@@ -12646,3 +12689,382 @@ would ride the same pass as a `grammar.expand` fence, which already exists.
 * **One control cannot carry two verbs that are wanted in the same state.** The
   lock and the open were both right on a shut door from the owner's face, so one
   key made the other unreachable for ever.
+
+
+## Wave I8b — the adversarial audit (2026-08-27)
+
+Range `670f0d7c..95d92fec`, thirteen commits, on a clean tree. **Two HIGH, six
+MED, seven LOW.** Both HIGHs and all six MEDs are fixed with arms behind them and
+mutation-verified; the LOWs are corrected in place above or carried by name.
+Nothing in the wave was reverted, and **not one of the wave's five clauses was
+found to be false at the level it was measured**.
+
+**The wave's arithmetic is sound and its content reproduces exactly.** The island
+rebuilt to the digit (land 40.65 km², peak 948.7 m, coastline 25.14 km, 51
+streams / 25.88 km, 2 lakes / 0.0847 km², 33 waterfalls, urban 7.2 %, drift
+0.00 % / 0.00 %, roads 5 of 2 442 over at 0.108, terrain 549.9 MB); both frame
+tables re-ran within run-to-run noise on the same machine; the 39 palette modules
+map onto the twelve families exactly, with no family left over and no module
+unclassified; the caster arithmetic closes (18 638 + 478 + 478 + 91 776 =
+111 370); the battery tally closes (6 232 + 14 = 6 246); the rustdoc tally closes
+(404 − 30 = 374, headroom 76); `.inf_lvl` is byte-unmoved at 49 625 B and the
+whole `samples/` diff is two `input.toml`s at six additive lines each.
+
+**What the audit found is that the wave's headline clause rests on a function
+that was reading one third of its input, and that the same one-line skip took the
+settlements out of the Medium-tier picture.** Both defects were *widened* by this
+wave rather than introduced by it, which is why neither was visible before: the
+one non-uniform scatter instance in the engine has been the structure **shell**
+since IB-2b, and until I8b it was one caster among 7.8 million that the ceiling
+threw away.
+
+### HIGH-1 — the caster pack collapsed three scales into one, so a building's shadow was a CUBE
+
+*Fixed; `a2821e1a`.*
+
+`ScatterInstance::scale` has been a `Vec3` since IB-2b, and `ScatterInstanceRaw`
+splits it across two fields — `scale` (x) and `scale_yz`.
+`passes::scatter::pack_fallback` built every instance's model matrix from
+`Vec3::splat(inst.scale)` and its normal matrix from `Vec3::splat(1.0/scale)`:
+**the x half, three times.**
+
+`push_shells`'s own doc says why that matters — *"a shell is the one scatter
+instance that is not uniformly scaled … a cube of the wrong proportions is a
+different building rather than a coarser one"* — and the caster pack was making
+exactly that cube. Measured on a fixture: an instance scaled `(3, 11, 27)` packs a
+model matrix whose three axis lengths are `(3, 3, 3)`.
+
+It was invisible while a shell was one caster among 7 831 552 that
+`VSM_MAX_CASTERS` discarded. **Wave I8b made the shell the only caster a building
+has**, so the wave's carried item 4 — *"the shell casts a BOX … the shell is a
+derived oriented box rather than a placeholder"* — understated it by one word:
+what it cast was a **cube of twice its `x` half-extent**, too tall on a wide
+building and too shallow on a deep one. All three scales are packed now, and the
+normal matrix inverts all three.
+
+### HIGH-2 — `casts_shadows` deleted the settlements from the Medium-tier PICTURE
+
+*Fixed; `a2821e1a`.*
+
+`pack_fallback` has **two** consumers and only one of them is shadows:
+
+* `passes::shadow::pack_scatter_casters` and `vsm_raster::pack_casters` — the
+  caster set;
+* `ScatterNode::run_fallback` — **the visible CPU raster**, which draws every
+  scattered instance whenever `ScatterSettings::gpu` is off.
+  `RenderTier::Medium.apply(…)` sets `scatter.gpu = false`, and both hosts apply
+  the detected tier (`shipped_settings` in the player, `detect_tier` in the editor
+  viewport). So on **Medium and Low adapters the CPU fallback IS the scatter
+  path**.
+
+The wave put `if !b.casts_shadows { continue; }` in the shared body. Measured: the
+same batch, the same settings, **0 of 4 000 instances** reach the raster. On a
+Medium machine the settlements would have drawn as their shell boxes and nothing
+else — a city of grey prisms, and only past 192 m, because the parts batch was
+skipped whole.
+
+The purpose is an argument now — `PackPurpose::{Raster, Casters}` — stated at
+every one of the six call sites, and `ScatterBatch::casts_shadows`'s doc says
+which of the two reads it.
+
+### MED-1 — a mirror fence both hosts write and nothing reads
+
+*Fixed; `0e3e1598`.*
+
+`MIRROR-BEGIN scatter_mesh_buckets` has been written in **both** hosts since
+P18.5, and `projector_mirror.rs` compares four tags: `pcg_scatter_lod`,
+`pcg_shell_batch`, `pcg_scatter_memo` and (this wave) `building_module_table`. It
+has never compared this one. A delimiter that reads as a pin and is not one is
+this repository's own *"a gate must aim at the thing it names"*, wearing the shape
+of a comment.
+
+It matters now because island wave I8b put its **entire substrate** inside that
+fence: the `extent` → `ScatterInstance::scale` fold (the drawn box IS the solid
+box), the `(mesh, glow)` bucket key, the per-batch `glow_emissive`, and the
+`casts_shadows` pass-through. That is precisely the PIE == shipping surface the
+wave's clauses 1 and 3 claim. The two bodies are byte-identical today (2 466
+chars, 1 660 whitespace-stripped);
+`both_projectors_fold_an_instance_into_a_batch_the_same_way` pins them and
+**names** the four fields, because an equality pin cannot see a field deleted from
+both copies.
+
+### MED-2 — the caster fold took the compiler's answer instead of the allowlist's
+
+*Fixed; `0e3e1598`.*
+
+`the_scatter_caster_fold_moves_for_every_field_of_a_batch` is an allowlist whose
+own doc explains its mechanism: *"`ScatterBatch` has eight fields and eight rows
+below. The day a ninth is added, `..Default::default()` does not exist on this
+type — the struct literal stops compiling, which is the point."*
+
+Wave I8b added the ninth field. The eight literals duly stopped compiling and were
+repaired by writing `casts_shadows: true` into all eight of them. **The compiler
+was satisfied and the allowlist was not**: `pack_fallback` reads that field, so
+`scatter_caster_fold` — which exists to fold *"everything `pack_fallback` reads
+off the batches themselves"* — no longer covered its own contract, and a caster
+pack cached on it would serve the pre-opt-out instance set for ever. Folded, with
+a ninth row and the prose corrected to nine.
+
+### MED-3 — the sentence the whole caster clause rests on was a centre test in two axes
+
+*Fixed; `0e3e1598`.*
+
+The one arm that says *"every collider is inside its own group's shell"* was
+`inf_math::distance_xz_to_box(c.center, …)`: the collider's **centre**, in **XZ**.
+A part hanging a metre over the shell's roof passed it, and so did a slab whose
+own half-extent reached past the shell's rim.
+
+Containment does hold — `group_shell` takes the exact support bound, projecting
+each collider's own axes onto the frame's — but the arm asserting it was weaker
+than its message, and I8b made that message load-bearing: the parts stop casting
+**because the shell contains them**. It reads all eight corners on all three axes
+now; mutation-verified at **0.100 m in Y**, which the form it replaces could not
+see.
+
+### MED-4 — the band-ordering finding was an honest sentence with nothing to enforce it
+
+*Fixed; `0e3e1598`.*
+
+Carried item 2 — *"a building is a billboard from 120 m and its shell can never be
+a mesh"* — is **verified true**: `STRUCTURE_LOD_M` is 192.0, `effective_bands`
+ends the full-mesh band at `min(mesh_distance_m = 120, cull)` when impostors are
+on (the default), and `push_shells` bands the shell `[STRUCTURE_LOD_M,
+draw_distance)`. The shell's near edge starts 72 m past the mesh band's far edge,
+so no shell has ever been rasterized as geometry.
+
+It had no tripwire. `the_structure_swap_still_happens_past_the_scatter_mesh_band`
+asserts the **defect** — the I7b tripwire-flip precedent — so the day the ordering
+is repaired the arm goes red and names the ledger entry to rewrite rather than the
+assertion to relax.
+
+On the wave's stated reason for stopping: `structure_lod_pop` does **not** block
+the change. It reads `STRUCTURE_LOD_M` as its own camera distance, so moving the
+constant re-aims the fixture automatically; what it would need is its ratio
+assertions re-measured at 96 m and its module doc rewritten. That is a slice, as
+the wave says — but it is a measurement, not a wall.
+
+### MED-5 — the ROADMAP block and the memo state two different frame tables
+
+*Fixed by aligning the ROADMAP to the ledger.*
+
+`docs/ROADMAP.md`'s I8b completion block (written at `e3907a6d`) and this memo's
+ledger (written at `95d92fec`) state **different numbers for every row of both
+frame tables**, with nothing saying they are two runs:
+
+| | ROADMAP block | memo ledger | audit re-run |
+|---|---|---|---|
+| `SHIPPED` p50 | 23.955 (41.7 fps) | 23.575 (42.4) | **23.548 (42.5)** |
+| `SHIPPED` pipelined | 12.400 (80.6) | 12.204 (81.9) | **12.084 (82.8)** |
+| `LIT+VIS` p50 | 30.040 (33.3) | 30.305 (33.0) | **30.749 (32.5)** |
+| `LIT+VIS` GPU | 18.008 | 17.972 | **18.003** |
+| `scatter` | 7.051 | 7.028 | **7.026** |
+| `vsm raster` (record) | 0.619 | 0.652 | **0.657** |
+| record | 6.196 | 6.303 | **6.468** |
+| distance from 60 fps | +13.440 | +13.705 | **+14.149** |
+
+All three are the same arm on the same machine and all three agree inside the
+run-to-run spread — which is the point: the spread is **±0.4 ms on a p50 and
+±0.03 ms on a pass**, and two documents in one repository must not state it as two
+measurements. The ROADMAP now carries the ledger's table and says whose it is.
+
+### MED-6 — the module-geometry price is a cross-run per-pass read, and its LIT half is not a number
+
+*Corrected in place, with the bound.*
+
+The wave prices real module geometry at *"+0.94 ms of `SHIPPED` scatter and
++3.5 ms of `LIT+VIS` scatter at the same instance count"*, from the middle column
+of both tables. Two things are wrong with the LIT half and one of them is the I8a
+audit's own law, one wave old:
+
+* in that same middle column `terrain` moved **−2.005 ms** (11.139 → 9.134) with
+  no terrain change and an identical tile count, while the GPU frame total moved
+  **+0.411**. A per-pass attribution with 2 ms of slop cannot report a 3.5 ms
+  delta;
+* the run it was taken from had a **23.746 ms CPU record stage** against a
+  33.861 ms GPU frame. *"A per-pass GPU millisecond taken while the CPU is the
+  bottleneck is inflated"* is the I8a audit's own finding, and the middle column is
+  exactly that state.
+
+The `SHIPPED` delta (+0.936 ms of `scatter`, against `terrain` moving −0.762 in
+the same column) is the defensible bound. The honest sentence: **real module
+geometry costs about a millisecond of `SHIPPED` scatter at 389 793 instances, and
+its `LIT+VIS` cost cannot be separated from the record-stage change in the runs
+that exist.**
+
+### THE BALCONY-SHADOW VERDICT
+
+The audit's assignment was to find a silhouette the shell does not carry — *a deep
+balcony at low sun; does its shadow vanish?* The answer is **no, and for a reason
+worth writing down rather than a lucky one**.
+
+1. **No archetype in the seven palettes has geometry outside its shell.** The
+   module named `Balcony` (Apartment) is a 2.4 m **wall** module with a 0.14 m
+   collider — a wide leaf in a wall run, not a cantilever. There is no projecting
+   slab, no eave, no canopy, no coping proud of the wall, in any of the seven.
+2. **`group_shell` is the exact support bound**, not a bounding sphere and not a
+   centre bound: for each collider it projects the box's own rotated axes onto the
+   lot frame's `u`, `v` and world `y` and takes `min`/`max` of `p ± (hu, hy, hv)`.
+   Every solid part is inside by construction, and MED-3's repaired arm now says
+   so on all eight corners.
+3. **The panes are inside too.** A pane fills a window *void*, which is a hole
+   through a wall the shell already contains — bounded above by the lintel's
+   collider, below by the parapet's, and in plan by the wall run either side.
+4. **Post-HIGH-1 the shell casts its true oriented box**, which is a *superset* of
+   the building's silhouette. So a shadow can only ever be too big, never missing
+   — the conservative direction.
+
+**What IS lost is self-shadowing inside the silhouette**: façade relief, the
+window reveal, the fascia under a slab, the stair core. The shell is a solid box,
+so a building no longer shades its own front. That is the trade the clause makes
+and it is worth its 16 ms; it is not what the carried item said.
+
+**The bound, named**: the clause is safe exactly as long as every drawn thing has a
+collider inside the shell. The decoration tail is the hole — a pane is inside a
+wall today, and the first decor module placed *outside* the solid hull (a sign, a
+gutter, an awning) would draw a silhouette nothing casts. `group_shell` reads
+`colliders`, so it cannot see decor; the day the tail grows, it has to.
+
+### BOTH FRAME TABLES, RE-RUN AT HEAD
+
+RTX 4070 Ti, Windows/Vulkan, **release**, 1080p, MIN of 3 rounds × 120 frames, the
+same 40 m-high flight east from Harbour City, on a tree carrying both HIGH fixes.
+The island was rebuilt (47.3 s) and re-cooked (41.6 s) for it.
+
+| | wave I8b | **after the audit** |
+|---|---|---|
+| `SHIPPED` p50 / p95 | 23.575 / 25.585 ms (42.4 fps) | **23.548 / 25.449 ms (42.5 fps)** |
+| `SHIPPED` GPU / `scatter` / `terrain` | 12.204 / 4.683 / 5.359 | **12.084 / 4.638 / 5.301** |
+| `SHIPPED` projection / record | 0.684 / 3.748 | **0.688 / 3.766** |
+| `SHIPPED` pipelined | 12.204 (81.9 fps) | **12.084 ms (82.8 fps)** |
+| `LIT+VIS` p50 / p95 | 30.305 / 57.339 ms (33.0 fps) | **30.749 / 55.130 ms (32.5 fps)** |
+| `LIT+VIS` GPU frame | 17.972 | **18.003 ms** |
+| — `scatter` | 7.028 | **7.026 ms** |
+| — **`vsm-raster`** | *not in the wave's table* | **6.083 ms** |
+| — `terrain` / `gi` | 3.077 / 0.781 | **3.084 / 0.781** |
+| `LIT+VIS` record | 6.303 | **6.468 ms** |
+| — of which `vsm raster` | 0.652 (10.4 %) | **0.657 ms (10.2 %)** |
+| `LIT+VIS` projection | 0.788 | **0.802 ms** |
+| pipelined | 17.972 (55.6 fps) | **18.003 ms (55.5 fps)** |
+| content | 102 / 389 793 | **102 batches / 389 793 instances** |
+| vsm casters (run) | 111 370, 0 dropped | **111 370 (18 638 scattered, 478 meshlet-asset, 478 skinned, 91 776 terrain), 0 dropped** |
+| casters / rastering frame | 233 | **233** |
+
+The other three: `LIT` **29.737**, `LIT+SSR` **30.452**, `LIT-COARSE-CLIPMAP`
+**25.445**. Everything reproduces, and **the HIGH-1 repair costs nothing
+measurable** — the caster count is identical and `vsm raster` moved 0.652 → 0.657
+ms, which is inside the spread. The casters are the right shape now, for free.
+
+> **≥ 60 fps p50 `LIT+VIS` is STILL NOT MET**: 30.749 ms against 16.6, a distance
+> of **+14.149 ms**. The pipelined estimate is **55.5 fps**.
+
+**AND THE LEDGER'S PER-PASS TABLE IS MISSING THE SECOND-DEAREST PASS.** The wave's
+`LIT+VIS` GPU rows are `scatter` 7.028, `terrain` 3.077 and `gi` 0.781 — 10.886 ms
+of a 17.972 ms frame. The pass it does not list is **`vsm-raster` at 6.083 ms,
+33.8 % of the GPU frame** and the second-largest thing in it, in a ledger whose
+headline clause is about the shadow path. The CPU side of the VSM went 16.672 →
+0.652 ms; its **GPU** side did not move and was never named. For the next wave the
+target list is `scatter` 7.03 + `vsm-raster` 6.08 = **13.1 ms of an 18.0 ms GPU
+frame, in two passes.**
+
+**The fixed step, and a second clock.** The ledger reads **5.670 ms against the
+6.0 ratchet**, from `island_gate`'s own step-profile arm. The fps instrument's own
+`sim fixed step` over the *same* simulation reads **6.346 / 6.887 / 7.252 / 7.265
+/ 7.025 ms** across its five render configurations — the sim is identical in all
+five and only the renderer differs, so that clock moves +0.92 ms (+14 %) with the
+render config beside it, and every row of it is over the ratchet. Neither number
+is wrong; they are two wall clocks in two harnesses, and the ratchet is close
+enough that which one is quoted decides whether it reads as met. Carried by name.
+
+### The LOW list
+
+1. **`lock_door` answers `WrongSide` for an open leaf.** The refusal is right —
+   *"a door standing open with its bolt thrown is a lock nobody can see"* — and the
+   verdict names the wrong reason: the player is on the correct side. No consumer
+   distinguishes it today (`movement.rs` discards the verdict), so it is carried
+   rather than given an enum variant.
+2. **A module mesh has no notion of its placement's local axes at the five
+   `boxed()` sites.** `place_module` rotates a module into its slot, so a wall
+   run's panels get their authored frame (thin in `x`); `boxed` places lintels,
+   parapets, slabs, roofs and treads with `DQuat::IDENTITY` and *world*-axis
+   half-extents that `half_xz` swaps on the wall's direction. So a lintel on an
+   X-running wall and one on a Z-running wall wear their relief on different axes.
+   Cosmetic, and only on the trim.
+3. **`ModuleShape::Course`'s doc says "a band with a drip course under its outer
+   face"; the drip is inset on `z`**, which is the length rather than the thickness
+   in every frame it is placed in. Same class as 2, and it is the doc that is wrong
+   rather than the geometry.
+4. **The memo says the settlement gate's walk "climbs one" stair.** It does not:
+   the walk `set_hero`-teleports to a room on floor one and asserts the stair room
+   is reachable in the plan's room graph and that the floor is standable. That is
+   wave I8a's own LOW-6 (*"the walk's 123 steps are 123 teleports"*) restated in a
+   verb it does not support. The **finding** it closes is genuinely closed —
+   `a_flight_lands_exactly_on_the_floor_above` and
+   `floors_are_slabs_and_the_stairwell_is_a_void` are both real and both
+   non-vacuous, and the gate does assert reachability — but nothing in this engine
+   has yet walked a character up a flight.
+5. **A centre-distance band over 20 m instances.** `scatter_cull.wgsl` cuts on the
+   instance *centre* (`d >= bands.y`) with no radius widening, which was invisible
+   while every scattered instance was a metre across and is not now: a floor slab
+   spanning a whole building leaves the parts band as a unit. The complementary
+   `lod + reach` cut means the shell is already drawn where that happens, so it is
+   bounded rather than a hole — but the mesh↔impostor line at 120 m cuts through a
+   building the same way, and that one has no complement.
+6. **A user grammar module with no shape family silently draws a placeholder
+   cube.** The seven palettes are covered exhaustively and
+   `every_palette_module_has_a_shape` refuses a new one — but a *project's* own
+   `.inf_pcg` grammar naming `module Fence` gets `shape_of → None → mesh: None` and
+   the placeholder path, with no advisory. The island's own zero-placeholder arm
+   would catch it only if such a volume were resident in that fixture.
+7. **`structure_lod_pop`'s module doc is now two findings out of date** — it argues
+   the impostor sizing from `0.866 × 30` against a *hand-authored* shell and says
+   nothing about the band ordering that means the swap it measures never involves
+   geometry on one side. Left as the record of what it measured, with MED-4's
+   tripwire beside it.
+
+### What reproduced, off a rebuild
+
+| claim | verified |
+|---|---|
+| the island itself | land **40.65 km²**, peak **948.7 m**, shore **25.14 km**, **51** streams / **25.88 km**, **2** lakes / **0.0847 km²**, **33** waterfalls, urban **7.2 %**, drift **0.00 % / 0.00 %**, roads **5 of 2 442** over at **0.108**, terrain **549.9 MB** — built in 47.3 s, cooked in 41.6 s |
+| the twelve families | 5+5+3+5+2+2+5+3+4+3+5+6 = **48 boxes** × 12 triangles = **576 triangles**, and the per-family column (60/60/36/60/24/24/60/36/48/36/60/72) is exact |
+| the palette→family map | the seven palettes declare **112** module lines over **39 distinct names**; `shape_of` matches all 39 and names no module no palette declares. 3+9+6+2+1+2+3+8+2+1+1+1 = 39 |
+| the winding table | all six faces satisfy `ê_u × ê_v == n`. The quad is wound `(−u,−v) (+u,−v) (+u,+v) (−u,+v)` with triangles `012 023`, so the geometric normal is a positive multiple of `n` on every face — CCW-outside, the convention `PrimMesh::geometry` documents and the pipeline culls with |
+| the GUID's portability | `module_mesh_guid` is `rotate_left`/`xor`/`wrapping_mul` over a `u128` seeded by the family's ASCII name. No float, no hash iteration, no platform word size — the same id on every target |
+| the caster arithmetic | 18 638 + 478 + 478 + 91 776 = **111 370**, **0 dropped**, **233** per rastering frame |
+| the battery tally | 6 232 + 14 = **6 246**, and the +14 attribute exactly: 7 in `modules.rs`, 4 in `assemble.rs`, 1 in `passes/scatter.rs`, 1 in `scene.rs`, 1 in `projector_mirror.rs` |
+| the rustdoc tally | **404** `^warning` lines − **30** per-crate summaries = **374**, cold after `cargo clean --doc` (8 813 files, 215.6 MiB). Headroom **76** |
+| goldens | **58** files, **117 arms, 0 failed** under `INF_GOLDEN_STRICT=1`, and `git status` over `tests/goldens` empty afterwards |
+| committed content | `git diff 670f0d7c..HEAD -- samples/` is **two `input.toml`s, +6 lines each**; `VancouverIsland.inf_lvl` **49 625 B**, byte-unmoved; `EXPECTED_LEVELS` **23** |
+| `Cargo.lock` | **+1 line**: `inf-pcg` under `inf-viewport`'s dependency list. No new external crate |
+| the schemas | `MovementIntent` and `MovementRuntime` derive `Clone, Copy, Debug, Default, PartialEq` and **no `Serialize`/`Reflect`** — the "no schema move" claim holds for the door clause as well as for the render one |
+| the key bindings | `KeyL` and `GamepadButton::LeftBumper` are each bound **once** in `default_map`; the near miss the wave caught (East is `crouch`) is the only collision in the table |
+| the `chr(92)` sweep | no run of ≥ 4 interior spaces inside a literal in any file this wave touched; the one hit under the pattern (`projector_mirror.rs:1777`) is a deliberate source needle that predates the wave |
+
+### The laws this audit paid for
+
+* **A field that names one consumer will be read by both.** `casts_shadows` is a
+  statement about shadows and `pack_fallback` is the caster pack *and the visible
+  raster*. One `continue` in a shared body took a city off the screen on every tier
+  below High, and no arm in the workspace draws through that path.
+* **A latent defect is invisible until something makes it load-bearing.**
+  `pack_fallback` had thrown away two thirds of a shell's scale since IB-2b and it
+  did not matter, because the shell was one caster in 7.8 million that the ceiling
+  discarded. The wave that makes a thing the *only* one of its kind is the wave
+  that has to check it.
+* **An allowlist can be satisfied by making it compile.** The caster fold's own doc
+  says a ninth field will break the struct literals — and it did, and the repair
+  was to write the field into all eight of them. A refusal that can be discharged
+  by adding a line is a refusal that will be.
+* **A fence is not a pin until something compares it.** Both hosts have written
+  `MIRROR-BEGIN scatter_mesh_buckets` since P18.5 and no test ever read the tag.
+  The wave put its whole PIE == shipping surface inside it.
+* **An arm's message and an arm's assertion drift apart in the direction of the
+  message.** *"Every collider is inside its own group's shell"* was a centre test
+  in two of three axes for as long as nothing depended on it.
+* **A per-pass ledger must list the passes it did not fix.** `vsm-raster` is
+  6.083 ms of an 18.003 ms GPU frame — the second-dearest pass, immediately after a
+  clause about the shadow path — and it is not in the wave's table. A table that
+  lists only what moved reads as a frame with nothing left in it.
+* **Two documents, one measurement.** The ROADMAP block and the memo state
+  different numbers for every row of both frame tables, minutes apart, with nothing
+  saying so. The spread is small; the disagreement is what a reader cannot see.
