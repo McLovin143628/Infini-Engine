@@ -1033,6 +1033,17 @@ pub fn pack_fallback(
     // degrade nearest-first without recomputing it.
     let mut kept: Vec<(f64, usize, InstanceRaw)> = Vec::new();
     for b in batches {
+        // **A batch another batch's geometry contains is skipped whole**
+        // (island wave I8b). This is the only `O(1)` rejection in a function
+        // that is otherwise `O(instances)` in a list the caller then truncates
+        // to `VSM_MAX_CASTERS`: on the island's settlements it walked 365 545
+        // instances to keep 16 384, at 16.7 ms a frame. A building's parts set
+        // it because their own shell is in the same scene and casts already.
+        // See `ScatterBatch::casts_shadows` for why that is a statement about
+        // the content and not a quality knob.
+        if !b.casts_shadows {
+            continue;
+        }
         let (mesh_end, cull, _, _) = effective_bands(settings, b.draw_distance);
         // Neither CPU consumer draws impostors, so the band ends where the mesh
         // band does whenever impostors are notionally on.
@@ -1956,6 +1967,56 @@ mod tests {
     /// A **zero** shadow range packs no casters, and a zero band packs nothing at
     /// all — the sentinel the first cut got backwards.
     ///
+
+    /// **A BATCH THAT SAYS ANOTHER BATCH CONTAINS IT IS SKIPPED WHOLE** (island
+    /// wave I8b), and skipping it is `O(1)` rather than `O(instances)`.
+    ///
+    /// This is the mechanism behind the wave's 16.7 ms: a building's 1 500
+    /// interior boxes were walked, distance-tested and packed every frame to
+    /// contribute nothing a shell in the same scene was not already casting.
+    ///
+    /// Three claims, and the third is the one that makes the first two mean
+    /// something: the non-casting batch contributes zero; the identical casting
+    /// batch contributes its whole line; and `considered` — the count *before*
+    /// the ceiling — moves too, which is what says the instances were never
+    /// touched rather than packed and thrown away.
+    #[test]
+    fn a_batch_that_does_not_cast_is_not_walked_at_all() {
+        let origin = FloatingOrigin::new(DVec3::ZERO);
+        let base = crate::RenderSettings::default().scatter;
+        let settings = shadow_caster_settings(&base, 400.0);
+
+        let casting = [line_batch(4_000, 0.02)];
+        let hot = pack_fallback(
+            &origin,
+            &casting,
+            DVec3::ZERO,
+            &settings,
+            MAX_CPU_SCATTER_INSTANCES,
+        );
+        assert!(
+            hot.considered > 3_000,
+            "the control packed {} — the fixture is not in band",
+            hot.considered
+        );
+
+        let mut quiet = casting.clone();
+        quiet[0].casts_shadows = false;
+        let cold = pack_fallback(
+            &origin,
+            &quiet,
+            DVec3::ZERO,
+            &settings,
+            MAX_CPU_SCATTER_INSTANCES,
+        );
+        assert_eq!(cold.instances.len(), 0, "a non-casting batch cast");
+        assert_eq!(
+            cold.considered, 0,
+            "the non-casting batch was still WALKED — the saving this field              exists for is the walk, not the keep"
+        );
+        assert!(!cold.clamped);
+    }
+
     /// `pack_fallback` read `cull <= 0` as "unlimited", which disagreed with
     /// `scatter_cull.wgsl` (whose `d >= bands.y` culls everything at `bands.y == 0`).
     /// So `shadows.max_distance = 0` — a legal setting with no cascade to receive

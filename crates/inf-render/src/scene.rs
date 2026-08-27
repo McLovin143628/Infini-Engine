@@ -779,6 +779,30 @@ pub struct ScatterBatch {
     /// exceeds its outer one draws nothing, which is the honest reading of an
     /// empty interval and is what an author who inverted the two asked for.
     pub near_distance: f64,
+    /// **Whether this batch's instances are shadow casters** (island wave I8b).
+    /// `true` for everything that predates the field.
+    ///
+    /// # What it is for, and it is not an author's knob
+    ///
+    /// The CPU caster pack (`passes::scatter::pack_fallback`, which both the
+    /// cascade and the virtual shadow map draw their scatter casters from)
+    /// walks **every instance of every batch** to distance-test it, then keeps
+    /// at most `VSM_MAX_CASTERS` of them. On the island's settlements that was
+    /// 365 545 instances walked, 16 384 kept and 49 000 thrown away *per frame*
+    /// — 16.7 ms of CPU, and 70 % of the whole record stage.
+    ///
+    /// The content already had the answer. A building's parts stand inside its
+    /// own **shell**, which is in the same scene and casts already, so 1 500
+    /// interior boxes contribute nothing to a silhouette their own bounding box
+    /// draws — and being packed at all is what pushed a *forest* out of the
+    /// caster budget. A batch that another batch's geometry contains says so
+    /// here, and `pack_fallback` skips it in `O(1)` rather than in
+    /// `O(instances)`.
+    ///
+    /// It is not "cast no shadow": the shell casts. Setting it on a batch that
+    /// nothing contains would be, and that is the one thing this field must not
+    /// be used for.
+    pub casts_shadows: bool,
 }
 
 impl ScatterBatch {
@@ -793,6 +817,7 @@ impl ScatterBatch {
             id,
             draw_distance: 0.0,
             near_distance: 0.0,
+            casts_shadows: true,
         }
     }
 }

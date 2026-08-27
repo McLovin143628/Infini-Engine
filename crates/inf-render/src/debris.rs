@@ -415,6 +415,7 @@ impl DebrisCache {
             id: ID_NONE,
             draw_distance: 0.0,
             near_distance: 0.0,
+            casts_shadows: true,
         })
     }
 }
@@ -458,6 +459,7 @@ pub fn debris_batch(
         // machine it cannot see.
         draw_distance: 0.0,
         near_distance: 0.0,
+        casts_shadows: true,
     })
 }
 

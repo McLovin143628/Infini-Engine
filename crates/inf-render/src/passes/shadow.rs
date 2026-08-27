@@ -823,6 +823,7 @@ mod tests {
                     id: base.id,
                     draw_distance: base.draw_distance,
                     near_distance: base.near_distance,
+                    casts_shadows: true,
                 },
             ),
             (
@@ -836,6 +837,7 @@ mod tests {
                     id: base.id,
                     draw_distance: base.draw_distance,
                     near_distance: base.near_distance,
+                    casts_shadows: true,
                 },
             ),
             (
@@ -849,6 +851,7 @@ mod tests {
                     id: base.id,
                     draw_distance: base.draw_distance,
                     near_distance: base.near_distance,
+                    casts_shadows: true,
                 },
             ),
             (
@@ -862,6 +865,7 @@ mod tests {
                     id: base.id,
                     draw_distance: base.draw_distance,
                     near_distance: base.near_distance,
+                    casts_shadows: true,
                 },
             ),
             (
@@ -875,6 +879,7 @@ mod tests {
                     id: base.id,
                     draw_distance: base.draw_distance,
                     near_distance: base.near_distance,
+                    casts_shadows: true,
                 },
             ),
             (
@@ -888,6 +893,7 @@ mod tests {
                     id: base.id + 1,
                     draw_distance: base.draw_distance,
                     near_distance: base.near_distance,
+                    casts_shadows: true,
                 },
             ),
             (
@@ -901,6 +907,7 @@ mod tests {
                     id: base.id,
                     draw_distance: 500.0,
                     near_distance: base.near_distance,
+                    casts_shadows: true,
                 },
             ),
             (
@@ -914,6 +921,7 @@ mod tests {
                     id: base.id,
                     draw_distance: base.draw_distance,
                     near_distance: 192.0,
+                    casts_shadows: true,
                 },
             ),
         ];

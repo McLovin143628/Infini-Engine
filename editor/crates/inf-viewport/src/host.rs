@@ -2836,6 +2836,7 @@ fn push_scatter(
     near_distance: f64,
     id: u32,
     glow_step: u16,
+    casts_shadows: bool,
 ) {
     // MIRROR-BEGIN scatter_mesh_buckets
     if instances.is_empty() {
@@ -2892,6 +2893,7 @@ fn push_scatter(
             id,
             draw_distance,
             near_distance,
+            casts_shadows,
         });
     }
     // MIRROR-END scatter_mesh_buckets
@@ -2942,6 +2944,11 @@ fn push_shells(
         id,
         draw_distance,
         near_distance,
+        // **The shell is the building's shadow** (island wave I8b). Its parts
+        // are packed with `casts_shadows: false` precisely because this box
+        // contains them, so this is the one batch of a building that must
+        // always be `true`.
+        casts_shadows: true,
     });
     // MIRROR-END pcg_shell_batch
 }
@@ -3071,6 +3078,7 @@ fn push_pcg_scatter(
             0.0,
             id,
             glow_step,
+            true,
         );
         return;
     }
@@ -3100,6 +3108,9 @@ fn push_pcg_scatter(
         0.0,
         id,
         glow_step,
+        // Loose content -- a fence, a scatter -- has no shell standing in for
+        // it, so it casts its own shadow exactly as it always has.
+        true,
     );
     // **The two bands are complementary in the GROUP's distance, and the cull is
     // per INSTANCE** (I3 audit). A part sits up to its shell's own half-diagonal
@@ -3129,6 +3140,14 @@ fn push_pcg_scatter(
         0.0,
         id,
         glow_step,
+        // **THE PARTS DO NOT CAST; THEIR SHELL DOES** (island wave I8b). Every
+        // instance in this batch stands inside the oriented box `push_shells`
+        // is about to emit, and that box is packed as a caster at every
+        // distance -- `pack_fallback` reads `draw_distance` and ignores
+        // `near_distance`. So the silhouette is unchanged and the CPU caster
+        // pack stops walking a city: 365 545 instances tested to keep 16 384 of
+        // them was 16.7 ms a frame and 70 % of the record stage.
+        false,
     );
     let shells: Vec<ScatteredInstance> = vol
         .structure_groups
@@ -3192,6 +3211,7 @@ fn push_biome_population(
         0.0,
         id,
         glow_step,
+        true,
     )
 }
 
@@ -3246,6 +3266,7 @@ fn push_foliage_scatter(scene: &mut RenderScene, fol: &Foliage, translation: DVe
             id,
             draw_distance: 0.0,
             near_distance: 0.0,
+            casts_shadows: true,
         });
     }
 }
