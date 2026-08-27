@@ -20,11 +20,17 @@
 //! | [`Full`](CrowdTier::Full) | capsule | full | yes | route |
 //! | [`Near`](CrowdTier::Near) | capsule | full | **no** | route |
 //! | [`Far`](CrowdTier::Far) | **none** | **none** | no | route |
-//! | [`Dormant`](CrowdTier::Dormant) | — | — | — | the record remembers |
+//! | [`Dormant`](CrowdTier::Dormant) | — | — | — | route (no entity to write it to) |
 //!
 //! **The position law is the same at every tier**, and that is deliberate rather
 //! than unfinished: an agent's place is `route(clock)`, a pure function of its
-//! record and the step count, at Full exactly as at Far. NPC1c replaces that
+//! record and the step count, at Full exactly as at Far — and at
+//! [`Dormant`](CrowdTier::Dormant) too, where there is simply no entity to write
+//! it onto. (It was NOT so in the wave's first cut, and the audit arm
+//! `a_dormant_agent_keeps_walking_its_route_and_can_come_back` is why: a record
+//! that froze where it dematerialized was then *tiered* from that frozen point,
+//! so a walking agent whose route carried it home could never come back.) NPC1c
+//! replaces that
 //! function with a path over the road graph and steers the near tiers through
 //! `move_and_slide`; until it does, a tier transition is **invisible in the
 //! transform**, which is what makes the PIE-==-shipping-across-transitions arm a
@@ -43,6 +49,16 @@
 //! snapped to the same [`BAND_LATTICE_M`] lattice, ordered, deduplicated. There
 //! is **no camera argument** to [`step_crowd`], so a caller cannot pass one by
 //! accident.
+//!
+//! **The lattice's slop is inherited too, and it is worth stating in metres.**
+//! `SimBand`'s own module measures it: snapping an anchor to a 16 m cell centre
+//! moves it by at most `BAND_LATTICE_M · √2 / 2` ≈ **11.3 m**, so every radius
+//! below is really "that radius ± 11.3 m" — a third of the 32 m `Full` ring and
+//! a fiftieth of the 512 m one. The radii are chosen with that in mind (`Full`
+//! at half of `DEFAULT_COLLIDER_NEAR_M` still sits inside the solid world at
+//! its worst case), and the arm that bounds it is `SimBand`'s
+//! `the_lattice_slop_is_bounded_by_half_a_cell_diagonal` — one lattice, one
+//! bound, not two copies of it.
 //!
 //! # Hysteresis is REFUSED, and it is refused for the same reason
 //!
@@ -112,9 +128,10 @@ pub enum CrowdTier {
     /// the transform is `route(clock)` and the trace carries a cached digest of
     /// the last pose the agent published instead of 161 joints.
     Far,
-    /// **Data only.** The entity is despawned; [`CrowdRecord`] remembers where it
-    /// stood, what it was doing and what it looked like, and re-materializes it
-    /// the step its tier comes back.
+    /// **Data only.** The entity is despawned; [`CrowdRecord`] remembers what it
+    /// was doing and what it looked like, keeps walking its route as a pure
+    /// function of the clock (there is just nothing to write the transform
+    /// onto), and re-materializes the step its tier comes back.
     Dormant,
 }
 
@@ -646,6 +663,18 @@ pub struct CrowdStats {
     /// Records whose tier changed this step — the number the transition arm
     /// asserts is non-zero over a drive.
     pub retiered: u64,
+    /// **Poses folded into a cached digest this step** (NPC1a audit) — one per
+    /// agent that left a posing tier and had an entry in the store.
+    ///
+    /// A counter and not a clock, because the property it exists to hold is a
+    /// *shape*: the crowd phase's work must be a function of the CROWD. The
+    /// first cut folded every entry in the pose store on every step to serve
+    /// this, so the phase cost grew with the level's hero count and the wave's
+    /// budget was minted against a number that was mostly other systems' poses
+    /// (0.282 ms banded against 0.759 all-`Full`, at one thousand agents doing
+    /// identical work). This reads 0 on a settled step whatever the level's
+    /// character count, which is the machine-independent way to say so.
+    pub digests_folded: u64,
     /// The band's membership stamp (`0` = unbounded).
     pub band_stamp: u64,
 }
@@ -667,7 +696,8 @@ impl CrowdStats {
     pub fn summary(&self) -> String {
         format!(
             "crowd: {} agent(s) — {} full / {} near / {} far / {} dormant, \
-             {} spawned / {} despawned / {} re-tiered, band {:#018x}",
+             {} spawned / {} despawned / {} re-tiered, {} pose digest(s) folded, \
+             band {:#018x}",
             self.total(),
             self.at(CrowdTier::Full),
             self.at(CrowdTier::Near),
@@ -676,6 +706,7 @@ impl CrowdStats {
             self.spawned,
             self.despawned,
             self.retiered,
+            self.digests_folded,
             self.band_stamp,
         )
     }
@@ -699,7 +730,19 @@ impl CrowdStats {
 /// belongs on `spawn_with_guid` rather than here (it is the one place that could
 /// answer for *every* spawner), and it is not this wave's to build; NPC1d, which
 /// derives a population from a level's own buildings, is the wave that needs it.
+///
+/// # "Replacing" includes the BODIES (NPC1a audit)
+///
+/// A population is not only its records: a materialized agent is a real entity
+/// carrying a skeletal mesh, a machine, a capsule and a [`CrowdAgent`]. Dropping
+/// the resource alone left those standing with a tier frozen at whatever the
+/// last step decided and **no record behind them** — so [`bodiless_agents`],
+/// which reads records, and the [`CrowdAgent`] component, which the pose door
+/// and [`crate::deform::ground_contacts`] read, would answer differently about
+/// one entity. That is the same two-opinions shape as this wave's own deform
+/// finding, so the old crowd goes through [`clear_crowd`] first.
 pub fn set_population(world: &mut EcsWorld, records: BTreeMap<Uuid, CrowdRecord>) {
+    clear_crowd(world);
     world
         .world_mut()
         .insert_resource(CrowdPopulationRes { records, steps: 0 });
@@ -807,17 +850,23 @@ pub fn plan_agent(
     here: DVec3,
     t_s: f64,
 ) -> AgentPlan {
-    let tier = band.tier(here);
     AgentPlan {
-        tier,
-        // A dematerialized agent stops moving: its record remembers where it
-        // stood, and the day NPC1d gives Dormant agents an off-screen schedule
-        // is the day this line reads the schedule instead.
-        at: if tier.materialized() {
-            rec.position_at(guid, t_s)
-        } else {
-            here
-        },
+        tier: band.tier(here),
+        // **The position law does not vary with the tier, `Dormant` included**
+        // (NPC1a audit). It used to: a dematerialized record froze at `last`,
+        // the tier was then decided from that frozen point, and a walking agent
+        // whose route carried it home could never be re-admitted — it was judged
+        // for ever at the metre where it went out of range, while the next
+        // materialization would have placed it at `route(now)` somewhere else
+        // entirely. Frozen for the decision and live for the placement is two
+        // authorities over one thing, which is what this module exists to avoid.
+        //
+        // A route is a pure function of the clock and costs a handful of flops,
+        // so keeping it live while an agent has no entity costs nothing and is
+        // the only reading under which `Dormant` is a *cost* tier rather than a
+        // one-way door. The day NPC1d gives an off-screen agent a schedule is
+        // the day this line reads the schedule instead — for every tier at once.
+        at: rec.position_at(guid, t_s),
     }
 }
 
@@ -850,10 +899,6 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
         .remove_resource::<CrowdPopulationRes>()
         .unwrap_or_default();
     let t_s = pop.steps as f64 * dt;
-    // The digests of the poses published on the PREVIOUS step, read once. A
-    // demotion folds its own entry out of this map, so an agent that goes Far
-    // carries the pose it was last seen in rather than a zero.
-    let digests = published_pose_digests(world);
 
     for (guid, rec) in pop.records.iter_mut() {
         let guid = *guid;
@@ -868,10 +913,23 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
         if tier != was {
             stats.retiered += 1;
         }
-        // 3. The cached digest, taken on the way DOWN out of a posing tier.
+        // 3. The cached digest, taken on the way DOWN out of a posing tier —
+        //    from the store the PREVIOUS step published, and **only for the
+        //    agent that is demoting** (NPC1a audit).
+        //
+        //    The first cut folded every entry in the pose store into a map up
+        //    front, which made this phase `O(posed characters × joints)` a step
+        //    to serve a demotion that happens to one agent every few hundred.
+        //    The wave's own sweep table is what says so: at N = 1 000 the crowd
+        //    phase read **0.282 ms banded and 0.759 ms all-`Full`** — the same
+        //    thousand agents doing the same work, differing only in how many
+        //    characters were in the store — so most of a number minted as "what
+        //    a thousand agents cost" was a fold over other systems' poses, and
+        //    it grew with the level's hero count rather than with the crowd.
         if was.poses() && !tier.poses() {
-            if let Some(d) = digests.get(&guid) {
-                rec.pose_digest = *d;
+            if let Some(d) = published_pose_digest(world, guid) {
+                rec.pose_digest = d;
+                stats.digests_folded += 1;
             }
         }
         rec.tier = tier;
@@ -950,49 +1008,58 @@ fn materialize(world: &mut EcsWorld, guid: Uuid, rec: &CrowdRecord) -> Entity {
     e
 }
 
-/// A fold of every published pose, by entity `Guid` — the source of a record's
-/// [`CrowdRecord::pose_digest`].
+/// A fold of **one** entity's published pose — the source of a record's
+/// [`CrowdRecord::pose_digest`], and `None` for an entity the store does not
+/// hold (which is every entity, on a level with no character at all).
 ///
 /// FNV-1a over the same bytes [`crate::pose::pose_state_bytes`] emits for that
 /// entity, so "the digest of the pose the trace would have carried" is exactly
-/// what it says. Computed only for entities the population knows about would be
-/// cheaper and is not done, because this runs once per step over a map that is
-/// empty on every level with no character at all.
-fn published_pose_digests(world: &EcsWorld) -> BTreeMap<Uuid, u64> {
-    let Some(store) = world.world().get_resource::<crate::pose::PoseStoreRes>() else {
-        return BTreeMap::new();
+/// what it says.
+///
+/// # Per agent, on demand, and not a map (NPC1a audit)
+///
+/// The first cut built a `BTreeMap` of **every** entry in the store at the top
+/// of [`step_crowd_banded`], which is `O(posed characters × joints)` a step to
+/// serve a demotion that happens to one agent every few hundred steps — and it
+/// scaled with the *level's* posed characters rather than with the crowd, so a
+/// hero-heavy level paid the crowd system for poses no agent owns. Called here
+/// it is `O(demotions × joints)`, and a step on which nobody leaves a posing
+/// tier — almost all of them — does not touch the store at all.
+fn published_pose_digest(world: &EcsWorld, guid: Uuid) -> Option<u64> {
+    let store = world.world().get_resource::<crate::pose::PoseStoreRes>()?;
+    let ep = store.0.get(&guid)?;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut fold = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
     };
-    store
-        .0
-        .iter()
-        .map(|(g, ep)| {
-            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-            let mut fold = |bytes: &[u8]| {
-                for b in bytes {
-                    h ^= u64::from(*b);
-                    h = h.wrapping_mul(0x0000_0100_0000_01b3);
-                }
-            };
-            fold(ep.skeleton.as_bytes());
-            for l in &ep.pose.locals {
-                for v in l
-                    .translation
-                    .iter()
-                    .chain(l.rotation.iter())
-                    .chain(l.scale.iter())
-                {
-                    fold(&v.to_le_bytes());
-                }
-            }
-            (*g, h)
-        })
-        .collect()
+    fold(ep.skeleton.as_bytes());
+    for l in &ep.pose.locals {
+        for v in l
+            .translation
+            .iter()
+            .chain(l.rotation.iter())
+            .chain(l.scale.iter())
+        {
+            fold(&v.to_le_bytes());
+        }
+    }
+    Some(h)
 }
 
 // ── what the rest of the engine reads ───────────────────────────────────────
 
 /// The tier `entity` took this step, or `None` for anything that is not a crowd
 /// agent — which is every hero and every authored character.
+///
+/// **No production caller** (the `set_debris_budget` seam, stated the way this
+/// tree states them): the two in-engine readers of the verdict both had a
+/// cheaper door already open — the pose evaluation queries `CrowdAgent`
+/// alongside its other components, and `deform::ground_contacts` reads it off
+/// the `EntityRef` its walk already holds. This is the *ad-hoc* reader, used by
+/// the tests and by anything that has an [`Entity`] and one question.
 #[inline]
 pub fn agent_tier(world: &EcsWorld, entity: Entity) -> Option<CrowdTier> {
     world.world().get::<CrowdAgent>(entity).map(|a| a.tier)
@@ -1237,6 +1304,69 @@ mod tests {
         );
     }
 
+    /// **WHAT REFUSING HYSTERESIS ACTUALLY COSTS** (NPC1a audit) — the
+    /// boundary-thrash arm one rung further down, in the currency the thrash is
+    /// paid in.
+    ///
+    /// `an_agent_parked_on_a_tier_boundary_alternates_between_two` measures the
+    /// *bound* on the thrash: two tiers, never a wander. That is the right thing
+    /// to hold and it is not a cost, and the wave's ledger read it as one ("the
+    /// cost of refusing it is measured rather than argued"). On the `Full`/`Near`
+    /// line the cost really is nothing — the two tiers differ by a hand pass. On
+    /// the **`Far`/`Dormant`** line it is an entity **spawned and despawned every
+    /// step**: six components built and a subtree torn down, sixty times a second
+    /// per parked agent, plus a `Guid` index insert and remove. A crowd standing
+    /// near the edge of the world is the ordinary outcome rather than the exotic
+    /// one, so the number belongs in the record NPC1b and NPC1d read.
+    ///
+    /// The arm asserts the shape (every step materializes and dematerializes)
+    /// rather than a millisecond, and PRINTS the count. Fixing it is not this
+    /// audit's to do and is not hysteresis: the fixes that keep the tier a pure
+    /// function of sim state are a pooled entity or a quantized agent position,
+    /// and both belong with the wave that has a renderer in it.
+    /// # Where the thrash actually lives
+    ///
+    /// Not under a jittering source: the lattice exists precisely so that
+    /// sub-cell movement cannot move an anchor, and a source wandering inside
+    /// one 16 m cell re-tiers nothing. It lives on the **lattice line**, where a
+    /// millimetre of solver residue moves the snapped anchor a whole 16 m — the
+    /// `SimBand` arm's own mechanism, one system over, and here it is worth an
+    /// entity a step rather than a re-stamp.
+    #[test]
+    fn a_parked_agent_on_the_dormant_edge_spawns_and_despawns_every_step() {
+        let mut records = BTreeMap::new();
+        records.insert(
+            guid(0xE30),
+            CrowdRecord::standing(CrowdArchetype::default(), DVec3::ZERO),
+        );
+        let mut world = crowd_world(records);
+
+        // The line at 32 cells snaps to a centre 504 m from the agent on one
+        // side (`Far` — it exists) and 520 m on the other (`Dormant` — it does
+        // not), across the 512 m `DEFAULT_CROWD_FAR_M` boundary.
+        let line = BAND_LATTICE_M * 32.0;
+        let (mut spawned, mut despawned) = (0u64, 0u64);
+        for step in 0..60 {
+            let d = if step % 2 == 0 { -0.001 } else { 0.001 };
+            move_source(&mut world, line + d);
+            let s = step_crowd(&mut world, 1.0 / 60.0);
+            spawned += s.spawned;
+            despawned += s.despawned;
+        }
+        println!(
+            "NPC1a hysteresis cost: one agent whose anchor sits on a lattice \
+             line across the Far/Dormant boundary cost {spawned} entity \
+             spawn(s) and {despawned} despawn(s) in 60 steps — one second of \
+             wall clock, for ONE NPC"
+        );
+        assert!(
+            spawned >= 29 && despawned >= 29,
+            "the fixture is not straddling the Dormant edge: {spawned} spawn(s) \
+             / {despawned} despawn(s) in 60 steps — the arm is measuring a \
+             steady state and the cost it names is unrecorded"
+        );
+    }
+
     /// The cost ladder is monotone: every tier is cheaper than the one above it,
     /// in every dimension, and nothing costs more as it gets further away.
     #[test]
@@ -1439,6 +1569,189 @@ mod tests {
         assert_eq!(t.translation.to_dvec3(), DVec3::new(10.0, 0.0, 0.0));
     }
 
+    /// **THE CROWD PHASE'S WORK IS A FUNCTION OF THE CROWD** (NPC1a audit).
+    ///
+    /// The cached pose digest is the one thing this phase reads outside its own
+    /// population, and the first cut read **all** of it: a `BTreeMap` of every
+    /// entry in [`crate::pose::PoseStoreRes`], folded joint by joint, on every
+    /// step, to serve a demotion that happens to one agent every few hundred.
+    /// So the phase's cost scaled with the *level's* posed characters rather
+    /// than with the population, and the budget minted from it was mostly a
+    /// measurement of other systems' poses.
+    ///
+    /// The wave's own sweep table said so and nobody read it that way: at
+    /// N = 1 000 the phase charged **0.282 ms banded and 0.759 ms all-`Full`** —
+    /// the same thousand agents doing identical work, differing only in how many
+    /// characters were in the store. After the fix the two agree (0.103 and
+    /// 0.109), which is what a per-agent phase has to look like.
+    ///
+    /// This arm is a **counter, not a clock**, so it holds on any machine — and
+    /// it is worth being exact about which half of the defect it holds. It pins
+    /// the **semantics**: a digest is taken on the TRANSITION out of a posing
+    /// tier and not once per step per Far agent, and a step on which nobody
+    /// leaves a posing tier reads the store zero times however full it is.
+    /// It cannot see an implementation that computed a hundred digests and threw
+    /// ninety-nine away, because that is a cost and not a behaviour; the arm for
+    /// *that* is `crowd_sweep.rs`'s banded-vs-all-`Full` crowd-phase comparison,
+    /// which is a wall clock and is asserted where this tree asserts wall clocks
+    /// (release, off CI) and reported everywhere else.
+    #[test]
+    fn a_settled_crowd_folds_no_pose_digests_however_many_characters_pose() {
+        use crate::pose::{EvaluatedPose, PoseStoreRes};
+        use inf_anim::{JointTransform, Pose};
+
+        let agent = guid(0xF00);
+        let mut records = BTreeMap::new();
+        records.insert(
+            agent,
+            CrowdRecord::standing(CrowdArchetype::default(), DVec3::new(10.0, 0.0, 0.0)),
+        );
+        let mut world = crowd_world(records);
+
+        // A store with a hundred posed characters in it, one of which is the
+        // agent. Fabricated rather than evaluated: this arm is about how many
+        // of them the crowd phase touches, not about what a pose contains.
+        let pose = Pose {
+            locals: vec![JointTransform::IDENTITY; 32],
+        };
+        let mut store = BTreeMap::new();
+        for i in 0..100u128 {
+            store.insert(
+                guid(0x9000 + i),
+                EvaluatedPose {
+                    skeleton: guid(0x77),
+                    pose: pose.clone(),
+                    sockets: Vec::new(),
+                },
+            );
+        }
+        store.insert(
+            agent,
+            EvaluatedPose {
+                skeleton: guid(0x77),
+                pose,
+                sockets: Vec::new(),
+            },
+        );
+        world.world_mut().insert_resource(PoseStoreRes(store));
+
+        // Step 1: the agent classifies Full. Nothing leaves a posing tier.
+        let s = step_crowd(&mut world, 1.0 / 60.0);
+        assert_eq!(s.at(CrowdTier::Full), 1, "{}", s.summary());
+        assert_eq!(
+            s.digests_folded, 0,
+            "a crowd that promoted nobody folded {} digest(s) out of a \
+             101-entry store — the phase is walking the level's poses rather \
+             than its own demotions",
+            s.digests_folded
+        );
+
+        // Step 2: the source walks away and the agent demotes. Exactly one.
+        move_source(&mut world, 400.0);
+        let s = step_crowd(&mut world, 1.0 / 60.0);
+        assert_eq!(s.at(CrowdTier::Far), 1, "{}", s.summary());
+        assert_eq!(s.digests_folded, 1, "{}", s.summary());
+
+        // Step 3: it is still Far, so there is nothing to fold — the store is
+        // as full as it was and the phase does not look at it.
+        let s = step_crowd(&mut world, 1.0 / 60.0);
+        assert_eq!(
+            s.digests_folded, 0,
+            "an agent that was already Far folded another digest — the capture \
+             is on the tier rather than on the TRANSITION"
+        );
+
+        // …and the digest it took is the pose that was published, not a zero.
+        let pop = world
+            .world()
+            .get_resource::<CrowdPopulationRes>()
+            .expect("the population");
+        assert_ne!(
+            pop.records[&agent].pose_digest, 0,
+            "the demotion folded a digest and stored nothing"
+        );
+    }
+
+    /// **A DORMANT AGENT IS STILL ON ITS ROUTE** (NPC1a audit).
+    ///
+    /// The module's headline is that *the position law does not vary with the
+    /// tier* — an agent's place is `route(clock)` at `Full` exactly as at `Far`.
+    /// `Dormant` was the exception, and it was the exception in the one
+    /// direction that costs something: a dematerialized record froze at `last`,
+    /// **the tier was then decided from that frozen point**, and a walking agent
+    /// whose route carried it home could never be re-admitted — it was judged
+    /// for ever at the metre where it went out of range, while the *next*
+    /// materialization would have placed it at `route(now)` somewhere else
+    /// entirely. Frozen for the decision and live for the placement is the two
+    /// authorities this module exists to avoid.
+    ///
+    /// A route is a pure function of the clock and costs a handful of flops, so
+    /// keeping it live while an agent has no entity costs nothing and is the
+    /// only reading under which `Dormant` is a *cost* tier rather than a
+    /// one-way door.
+    #[test]
+    fn a_dormant_agent_keeps_walking_its_route_and_can_come_back() {
+        let mut records = BTreeMap::new();
+        // Out to 2 km and back, fast enough that the round trip fits in the
+        // step budget of a unit test.
+        records.insert(
+            guid(0xE00),
+            CrowdRecord::walking(
+                CrowdArchetype::default(),
+                CrowdRoute {
+                    from: DVec3::new(0.0, 0.0, 0.0),
+                    to: DVec3::new(2000.0, 0.0, 0.0),
+                    speed_mps: 1000.0,
+                },
+            ),
+        );
+        // The anchor never moves: everything below is the AGENT walking.
+        let mut world = crowd_world(records);
+
+        let mut went_dormant = None;
+        let mut came_back = None;
+        for step in 0..400u64 {
+            let s = step_crowd(&mut world, 1.0 / 60.0);
+            let dormant = s.at(CrowdTier::Dormant) == 1;
+            if dormant && went_dormant.is_none() {
+                went_dormant = Some(step);
+            }
+            if went_dormant.is_some() && !dormant && came_back.is_none() {
+                came_back = Some(step);
+            }
+        }
+        let out = went_dormant.expect(
+            "the agent never left the band, so this arm is not posing the problem — \
+             the route must reach past DEFAULT_CROWD_FAR_M",
+        );
+        let back = came_back.unwrap_or_else(|| {
+            panic!(
+                "the agent went Dormant at step {out} and never came back over 400 \
+                 steps of a route that returns to its anchor — a dematerialized \
+                 agent is being tiered from where it froze rather than from where \
+                 its route says it is"
+            )
+        });
+        println!(
+            "NPC1a dormancy: an agent walking a 2 km route went Dormant at step \
+             {out} and re-materialized at step {back}"
+        );
+
+        // …and the record's remembered place tracked the route the whole way,
+        // which is what makes the tier above a decision about the present.
+        let pop = world
+            .world()
+            .get_resource::<CrowdPopulationRes>()
+            .expect("the population");
+        let rec = pop.records[&guid(0xE00)];
+        let want = rec.position_at(guid(0xE00), (pop.steps - 1) as f64 * (1.0 / 60.0));
+        assert_eq!(
+            rec.last, want,
+            "a record's `last` diverged from its own route — the trace's 24 \
+             position bytes and the tier decision are reading different places"
+        );
+    }
+
     /// **A Far agent gets no body and no pose, and the trace says which.**
     ///
     /// The anti-vacuity half matters more than the assertion: an arm that only
@@ -1563,6 +1876,51 @@ mod tests {
         // Idempotent, and a no-op on a world that never had a population.
         clear_crowd(&mut world);
         clear_crowd(&mut EcsWorld::new());
+    }
+
+    /// **INSTALLING A POPULATION TAKES THE OLD ONE'S BODIES WITH IT** (NPC1a
+    /// audit).
+    ///
+    /// [`set_population`] says it replaces the population a world already had,
+    /// and a population is not only its records: a materialized agent is a real
+    /// entity carrying a skeletal mesh, a machine, a capsule and a
+    /// [`CrowdAgent`]. Dropping the resource alone left those standing, with a
+    /// tier frozen at whatever the last step decided and **no record behind
+    /// them** — so [`bodiless_agents`] (which reads records) and the
+    /// [`CrowdAgent`] component (which the pose door and the deform pass read)
+    /// would answer differently about the same entity, which is the two-opinions
+    /// defect this wave's own deform finding is about.
+    #[test]
+    fn installing_a_second_population_does_not_leave_the_first_standing() {
+        let mut first = BTreeMap::new();
+        for i in 0..4u128 {
+            first.insert(
+                guid(0xE10 + i),
+                CrowdRecord::standing(CrowdArchetype::default(), DVec3::new(i as f64, 0.0, 0.0)),
+            );
+        }
+        let mut world = crowd_world(first);
+        step_crowd(&mut world, 1.0 / 60.0);
+        assert_eq!(crowd_stats(&world).at(CrowdTier::Full), 4);
+
+        let mut second = BTreeMap::new();
+        second.insert(
+            guid(0xE20),
+            CrowdRecord::standing(CrowdArchetype::default(), DVec3::ZERO),
+        );
+        set_population(&mut world, second);
+        step_crowd(&mut world, 1.0 / 60.0);
+
+        for i in 0..4u128 {
+            assert!(
+                world.entity_of(guid(0xE10 + i)).is_none(),
+                "agent {i} of the replaced population is still standing in the \
+                 world with no record behind it — the crowd door and the tier \
+                 component now disagree about whether it exists"
+            );
+        }
+        assert_eq!(crowd_state_bytes(&world).len(), AGENT_TRACE_BYTES);
+        assert_eq!(crowd_stats(&world).total(), 1);
     }
 
     /// **A world with no population pays nothing** — the anti-vacuity control
