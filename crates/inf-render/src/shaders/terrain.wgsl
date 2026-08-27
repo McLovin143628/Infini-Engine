@@ -281,6 +281,27 @@ struct TerrainLayered {
     any: bool,
 };
 
+/// **The axis weight above which a fragment keeps the single planar fetch**
+/// (wave TER2a, clause 4).
+///
+/// `triplanar_weights` normalises `pow(abs(n), 4)`, so a surface at angle `t`
+/// from horizontal reads `tw.y` about `cos^4 / (cos^4 + sin^4)`: 0.995 at 15
+/// degrees, 0.983 at 20, 0.90 at 30, 0.5 at 45. At 0.98 everything flatter than
+/// about twenty degrees keeps the one fetch it has always had and pays nothing
+/// for this feature but two compares.
+///
+/// **Why a cut rather than a continuous blend.** A continuous blend is three
+/// fetches everywhere, which is the price Wave T's own comment named ("three
+/// times the fetches for the axis-weighted version") and the reason it was a
+/// follow-up rather than a feature. The cut spends them where the planar
+/// projection is visibly wrong — the alpine faces and the sea cliffs, which on
+/// this island is about a fifteenth of the ground.
+const TRIPLANAR_PLANAR_CUT: f32 = 0.98;
+
+/// A plane whose axis weight is under this cannot change a texel of an 8-bit
+/// output and is skipped. The layer weight's own 0.0039, one level up.
+const TRIPLANAR_AXIS_CUT: f32 = 0.004;
+
 /// **Weight-blend the four splat layers' virtual materials** (Wave T, §3 B).
 ///
 /// A planar XZ projection, deliberately: the shared material is authored as a
@@ -296,7 +317,7 @@ struct TerrainLayered {
 /// a value computed inside a divergent branch has no neighbour to difference
 /// against. That is the same rule `vt_surface`'s callers follow and the reason it
 /// takes its derivatives as parameters.
-fn terrain_layers(world: vec3<f32>, w: vec4<f32>, tex_scale: f32) -> TerrainLayered {
+fn terrain_layers(world: vec3<f32>, n: vec3<f32>, w: vec4<f32>, tex_scale: f32) -> TerrainLayered {
     var out: TerrainLayered;
     out.albedo = vec3<f32>(0.0);
     out.roughness = 0.0;
@@ -322,8 +343,55 @@ fn terrain_layers(world: vec3<f32>, w: vec4<f32>, tex_scale: f32) -> TerrainLaye
     // render-local and therefore *does* slide; it is a ±15 % tint and nobody has
     // seen it. A material is not.
     let uv = (world.xz - view.grid_axis_viewport.xy) * inv;
-    let ddx = dpdx(uv);
-    let ddy = dpdy(uv);
+    // **Six derivative lanes, not twelve** (TER2a). The three projections are
+    // three swizzles of one position, so their six ddx/ddy pairs are six
+    // swizzles of the position's own two — taken here, once, unconditionally.
+    //
+    // Measured on the island: with the derivatives taken per projection
+    // (dpdx(uv), dpdx(uv_x), dpdx(uv_z), and the same for dpdy) the terrain pass
+    // paid +0.252 ms even with every fragment on the planar path, against
+    // +0.126 ms for the extra fetches themselves. The derivative work was twice
+    // the price of the thing it was for.
+    let dwx = dpdx(world);
+    let dwy = dpdy(world);
+    let ddx = dwx.xz * inv;
+    let ddy = dwy.xz * inv;
+    // **THE OTHER TWO PLANES** (TER2a, clause 4). Wave T shipped the planar XZ
+    // projection with its own bound written on it: "it stretches on a cliff
+    // face — the honest bound... A triplanar layer sample is the named
+    // follow-up." This is it.
+    //
+    // A heightfield's cliff is where a horizontal projection is *worst*: the
+    // surface is nearly vertical, so a metre of face maps onto centimetres of
+    // uv and the material smears into vertical streaks. The island's showcase is
+    // the 948.7 m North Shore peak, whose faces run past sixty degrees.
+    //
+    // World-anchored on the same terms as `uv`, and derived UNCONDITIONALLY —
+    // `dpdx` of a value computed inside a divergent branch has no neighbour to
+    // difference against, which is the same rule the planar pair above follows.
+    // Six extra ALU derivatives cost nothing; the FETCHES are what is gated.
+    // World-anchored on **all three** axes. `grid_axis_viewport.xy` is
+    // `-origin.xz` and `mode_axis.y` is `-origin.y` (the same recovery
+    // `atmosphere_apply` and `cloud` already make), so the vertical projections
+    // stay put when the floating origin snaps in Y as well. Leaving `y`
+    // render-local would slide a cliff's material vertically by `10 / tex_scale`
+    // tiles every rebase — the exact defect the XZ subtraction above exists to
+    // prevent, on the axis a cliff's material actually runs along.
+    let wx = world - vec3<f32>(
+        view.grid_axis_viewport.x,
+        view.mode_axis.y,
+        view.grid_axis_viewport.y,
+    );
+    let uv_x = wx.zy * inv;
+    let uv_z = wx.xy * inv;
+    let ddx_x = dwx.zy * inv;
+    let ddy_x = dwy.zy * inv;
+    let ddx_z = dwx.xy * inv;
+    let ddy_z = dwy.xy * inv;
+    // The same axis weights the procedural grain has always used, at the same
+    // sharpness, so the grain and the material break up on the same plane.
+    let tw = triplanar_weights(n, 4.0);
+    let planar = tw.y >= TRIPLANAR_PLANAR_CUT;
     let weights = array<f32, 4>(w.x, w.y, w.z, w.w);
     for (var k = 0u; k < 4u; k = k + 1u) {
         let wk = weights[k];
@@ -364,9 +432,47 @@ fn terrain_layers(world: vec3<f32>, w: vec4<f32>, tex_scale: f32) -> TerrainLaye
         if (vt_bound(slots.z)) {
             rough = 1.0;
         }
-        let s = vt_surface(slots, uv, ddx, ddy, tint, 1.0, 0.0, rough);
-        out.albedo = out.albedo + s.albedo * wk;
-        out.roughness = out.roughness + s.roughness * wk;
+        var la = vec3<f32>(0.0);
+        var lr = 0.0;
+        if (planar) {
+            let s = vt_surface(slots, uv, ddx, ddy, tint, 1.0, 0.0, rough);
+            la = s.albedo;
+            lr = s.roughness;
+        } else {
+            // Axis-weighted over the three planes, each one skipped when it
+            // cannot contribute a texel. A vertical face is `tw.y = 0` and pays
+            // for TWO fetches, not three — the worst case is a 45-degree corner.
+            var acc = vec3<f32>(0.0);
+            var accr = 0.0;
+            var accw = 0.0;
+            if (tw.x > TRIPLANAR_AXIS_CUT) {
+                let sx = vt_surface(slots, uv_x, ddx_x, ddy_x, tint, 1.0, 0.0, rough);
+                acc = acc + sx.albedo * tw.x;
+                accr = accr + sx.roughness * tw.x;
+                accw = accw + tw.x;
+            }
+            if (tw.y > TRIPLANAR_AXIS_CUT) {
+                let sy = vt_surface(slots, uv, ddx, ddy, tint, 1.0, 0.0, rough);
+                acc = acc + sy.albedo * tw.y;
+                accr = accr + sy.roughness * tw.y;
+                accw = accw + tw.y;
+            }
+            if (tw.z > TRIPLANAR_AXIS_CUT) {
+                let sz = vt_surface(slots, uv_z, ddx_z, ddy_z, tint, 1.0, 0.0, rough);
+                acc = acc + sz.albedo * tw.z;
+                accr = accr + sz.roughness * tw.z;
+                accw = accw + tw.z;
+            }
+            // Renormalise inside the planes that fired, for the same reason the
+            // layer blend renormalises inside its own coverage: a face that
+            // skipped a plane must not go dark by however much that plane
+            // weighed.
+            let inv_w = 1.0 / max(accw, 1e-4);
+            la = acc * inv_w;
+            lr = accr * inv_w;
+        }
+        out.albedo = out.albedo + la * wk;
+        out.roughness = out.roughness + lr * wk;
         out.coverage = out.coverage + wk;
         out.any = true;
     }
@@ -513,7 +619,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     // Weight-gated per layer: a layer whose weight is zero here contributes no
     // texture fetch at all, so the cost is what is actually visible at this
     // fragment (typically one or two layers) rather than four unconditionally.
-    let layered = terrain_layers(in.world_local, w, tex_scale);
+    let layered = terrain_layers(in.world_local, n, w, tex_scale);
     if (layered.any) {
         albedo = mix(albedo, layered.albedo, layered.coverage);
         roughness = clamp(mix(roughness, layered.roughness, layered.coverage), 0.04, 1.0);

@@ -191,11 +191,39 @@ fn a_layer_uv_is_world_anchored_across_an_origin_rebase() {
         !code.contains("let uv = world.xz * inv"),
         "the render-local uv is back in `terrain_layers`"
     );
+    // **The two vertical projections are anchored on ALL THREE axes** (TER2a).
+    // `grid_axis_viewport.xy` is `-origin.xz` and `mode_axis.y` is `-origin.y`,
+    // so a `wx` built from only the first two leaves `y` render-local — and `y`
+    // is the axis a cliff's material runs along, which is the whole point of the
+    // triplanar projections. The slide would be the same `10 / tex_scale` tiles
+    // per snap the arm above measures for XZ, on the axis where it shows.
+    assert!(
+        code.contains("view.mode_axis.y,"),
+        "`terrain_layers` builds its triplanar world position without \
+         `mode_axis.y`, so the ZY and XY projections slide vertically on \
+         every origin rebase\n--- the function ---\n{code}"
+    );
+    assert!(
+        code.contains("let uv_x = wx.zy * inv;") && code.contains("let uv_z = wx.xy * inv;"),
+        "the two vertical projections are not derived from the anchored position"
+    );
+    // …and their derivatives come from ONE position derivative rather than six
+    // of their own: measured at +0.252 ms of terrain pass against +0.126 ms for
+    // the fetches they were taken for.
+    assert!(
+        code.contains("let dwx = dpdx(world);") && code.contains("let dwy = dpdy(world);"),
+        "the triplanar derivatives are taken per projection again"
+    );
+    assert!(
+        !code.contains("dpdx(uv_x)") && !code.contains("dpdx(uv_z)"),
+        "a per-projection derivative is back in `terrain_layers`"
+    );
+
     // …and the call site passes the render-local position the subtraction above
     // expects, rather than something already absolute (which would double it).
     let fs = code_of(&wgsl_fn(TERRAIN_WGSL, "fn fs("));
     assert!(
-        fs.contains("terrain_layers(in.world_local, w, tex_scale)"),
+        fs.contains("terrain_layers(in.world_local, n, w, tex_scale)"),
         "the fragment shader calls `terrain_layers` with something other than \
          `in.world_local`; the subtraction inside it undoes exactly that rebase"
     );

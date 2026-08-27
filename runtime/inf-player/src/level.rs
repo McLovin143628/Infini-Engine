@@ -2399,7 +2399,8 @@ impl PackLevelSource {
                 // which is the same picture this function produced for every
                 // partitioned level before TER2a.
                 Err(e) => tracing::warn!(
-                    "inf-player: the level's .inf_part did not open, so no material                      bound inside a streamed cell is registered: {e}"
+                    "inf-player: the level's .inf_part did not open, so no material \
+                     bound inside a streamed cell is registered: {e}"
                 ),
             }
         }

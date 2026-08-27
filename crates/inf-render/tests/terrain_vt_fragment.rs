@@ -534,3 +534,221 @@ fn the_layer_tex_scale_reaches_the_sampled_address() {
          coarser ({dc}) — tex_scale is reaching the shader but not as a tiling rate"
     );
 }
+
+// ── the cliff (wave TER2a, clause 4) ────────────────────────────────────────
+
+/// A square texture whose **red channel ramps top to bottom** — along `v`.
+///
+/// The mirror of [`ramp_container`], and the whole design of the cliff arm.
+/// `v` is the axis the two projections disagree about on a wall: the planar XZ
+/// projection puts world **Z** there, which on an X-facing wall runs
+/// *horizontally along* the face; the triplanar ZY projection puts world **Y**
+/// there, which runs *down* it. So a column of pixels down the face reads a
+/// constant under the planar projection and a ramp under the triplanar one, and
+/// that is a difference no amount of shading can manufacture.
+fn ramp_v_container(n: u32) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity((n * n * 4) as usize);
+    for y in 0..n {
+        for _x in 0..n {
+            rgba.extend_from_slice(&[(y * 255 / (n - 1)) as u8, 40, 200, 255]);
+        }
+    }
+    inf_material::build_tiled_texture(
+        rgba,
+        n,
+        n,
+        inf_material::TextureImportSettings {
+            srgb: false,
+            generate_mips: true,
+            compression: inf_material::TextureCompression::None,
+            hdr: false,
+        },
+    )
+    .expect("the fixture tiles")
+    .into_bytes()
+}
+
+/// A terrain that is **flat in the west half and a wall in the east half**.
+///
+/// The wall faces −X, so its normal is dominated by the X axis and
+/// `triplanar_weights` puts the ZY plane in charge of it. The flat half is the
+/// control in the same frame: it must keep the planar projection (its `tw.y` is
+/// 1.0, far above the cut) and therefore must NOT show the vertical ramp.
+fn wall_terrain(layers: [RenderTerrainLayer; 4]) -> RenderTerrain {
+    let res = 33u32;
+    let mps = 0.5f64;
+    let span = (res as f64 - 1.0) * mps;
+    let height = |x: f64| -> f32 {
+        // Flat to x = 8, then 8 m of rise over 1 m of ground — 83 degrees.
+        //
+        // Steep on purpose. At 83 degrees `triplanar_weights` gives the ZY plane
+        // 0.9997 and the horizontal plane 0.0003, which is under
+        // `TRIPLANAR_AXIS_CUT` — so the planar fetch is skipped entirely and the
+        // control frame below is measuring the ZY projection alone rather than a
+        // mixture. A shallower wall leaves a percent or two of the horizontal
+        // plane in the answer and the control's baseline rises with it.
+        (((x - 8.0) / 1.0).clamp(0.0, 1.0) * 8.0) as f32
+    };
+    let mut tiles = Vec::new();
+    for tx in 0..2 {
+        for tz in 0..2 {
+            let (ox, oz) = (tx as f64 * span, tz as f64 * span);
+            let n = (res * res) as usize;
+            let mut heights = vec![0f32; n];
+            let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for j in 0..res {
+                for i in 0..res {
+                    let h = height(ox + i as f64 * mps);
+                    heights[(j * res + i) as usize] = h;
+                    lo = lo.min(h);
+                    hi = hi.max(h);
+                }
+            }
+            tiles.push(RenderTerrainTile {
+                key: TerrainTileKey::lod0((tx, tz)),
+                origin: DVec3::new(ox, 0.0, oz),
+                heights,
+                weights: vec![[255u8, 0, 0, 0]; n],
+                biomes: Vec::new(),
+                height_bounds: (lo, hi),
+                holes: Vec::new(),
+                version: 1,
+            });
+        }
+    }
+    RenderTerrain {
+        id: 0,
+        tile_resolution: res,
+        meters_per_sample: mps,
+        tiles,
+        layers,
+        macro_variation: 0.0,
+        biome_palette: Vec::new(),
+    }
+}
+
+/// **Square on to the wall**, horizontally, from five metres back.
+///
+/// Horizontal on purpose: with the forward vector level the wall fills the band
+/// this arm measures from edge to edge, and the flat ground in front of it falls
+/// below the measurement.
+///
+/// The first draft looked at the wall from a metre up and *along* the ground,
+/// and the whole frame was flat ground with the wall as a band across it — every
+/// column held both, and a column statistic measured their mixture.
+fn wall_view() -> RenderView {
+    let eye = DVec3::new(3.0, 4.0, 16.0);
+    let target = DVec3::new(11.0, 4.0, 16.0001);
+    RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: eye,
+        forward: (target - eye).as_vec3().normalize(),
+        up: Vec3::Y,
+        fov_y: 60f32.to_radians(),
+        near: 0.05,
+        width: W,
+        height: H,
+        ortho: None,
+    }
+}
+
+/// **A cliff samples its material down its own face** (wave TER2a, clause 4).
+///
+/// Wave T shipped the planar XZ projection with its own bound written on it —
+/// *"it stretches on a cliff face — the honest bound... A triplanar layer sample
+/// is the named follow-up."* This is the arm that says the follow-up landed, and
+/// it is built so that shading cannot pass it.
+///
+/// # The control, and the first draft that did not have one
+///
+/// The measurement is the red spread down a **column** of the cliff face, and
+/// the two projections disagree about what a column walks:
+///
+/// | | planar XZ | triplanar (ZY on an X-facing wall) |
+/// |---|---|---|
+/// | `u` | world `x` | world `z` |
+/// | `v` | world `z` | world **`y`** |
+///
+/// A column of pixels on a near-vertical face holds `x` and `z` almost fixed and
+/// walks five metres of `y`. So a texture ramping along `v` reads **flat** under
+/// the planar projection and reads a **ramp** under the triplanar one, and a
+/// texture ramping along `u` reads flat under both.
+///
+/// That second frame is the control, and it is the whole reason this arm is
+/// trustworthy. The first draft used the flat half of the same frame instead and
+/// measured **232 against 232** — because a column of pixels on flat ground seen
+/// from a metre up walks tens of metres of world `z`, which is `v`, so the
+/// "control" was reading the ramp at full strength for a reason that has nothing
+/// to do with the projection. Same fixture, same pool, same bound slot, same
+/// camera, same light: only the texels move.
+///
+/// Mutation-verified: with `TRIPLANAR_PLANAR_CUT` raised above 1.0 — the whole
+/// feature switched off — the `v`-ramp column spread collapses onto the
+/// `u`-ramp's and the assertion below fails.
+#[test]
+fn a_cliff_samples_its_material_down_its_own_face() {
+    let Some(gpu) = gpu_or_skip("the cliff") else {
+        return;
+    };
+    // **Red spread minus BLUE spread**, down each column of the wall band.
+    //
+    // The fixture's blue channel is a constant 200 and its red is the ramp, so
+    // whatever a column's blue varies by is what the *lighting* did to it —
+    // the sun's angle down the face, the ambient term, the fog. Subtracting it
+    // leaves the texture's own contribution and nothing else, measured in the
+    // same pixels rather than against another frame. The statistic is the
+    // MEDIAN over the columns, so one stray pixel cannot carry it.
+    let texture_spread = |img: &[u8]| -> i32 {
+        let mut spreads: Vec<i32> = Vec::new();
+        for x in 16..(W - 16) {
+            let (mut rlo, mut rhi) = (255i32, 0i32);
+            let (mut blo, mut bhi) = (255i32, 0i32);
+            let mut n = 0;
+            // Rows 40..170: the wall, edge to edge. See `wall_view`.
+            for y in 40..170 {
+                let p = &img[(((y * W) + x) * 4) as usize..][..4];
+                let lum = (p[0] as u32 + p[1] as u32 + p[2] as u32) / 3;
+                if !(12..=245).contains(&lum) || p[3] == 0 {
+                    continue;
+                }
+                rlo = rlo.min(p[0] as i32);
+                rhi = rhi.max(p[0] as i32);
+                blo = blo.min(p[2] as i32);
+                bhi = bhi.max(p[2] as i32);
+                n += 1;
+            }
+            if n >= 8 {
+                spreads.push((rhi - rlo) - (bhi - blo));
+            }
+        }
+        assert!(!spreads.is_empty(), "no column of the wall is terrain");
+        spreads.sort_unstable();
+        spreads[spreads.len() / 2]
+    };
+    let frame = |guid: u128, bytes: Vec<u8>| -> Vec<u8> {
+        let (_lib, pools, set) = resident_of(&gpu, guid, bytes);
+        let target = inf_render::HeadlessTarget::new(&gpu, W, H);
+        let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+        renderer.set_vt_pools(Some(pools));
+        let scene = RenderScene {
+            grid_enabled: false,
+            terrains: vec![wall_terrain(layers_with(set, 2.0))],
+            ..Default::default()
+        };
+        renderer.render(&gpu, &scene, &wall_view(), &target.view, (W, H));
+        target.read_rgba(&gpu).expect("readback")
+    };
+    let down = texture_spread(&frame(0x_C11F_0001, ramp_v_container(256)));
+    let along = texture_spread(&frame(0x_C11F_0002, ramp_container(256)));
+    eprintln!(
+        "TRIPLANAR: median red spread down a cliff column — v-ramp {down}, \
+         u-ramp {along} ({:.1}x)",
+        down as f64 / along.max(1) as f64
+    );
+    assert!(
+        down > along * 4 && down > 60,
+        "a column of the cliff face varies by {down} under a v-ramp and {along} \
+         under a u-ramp — the face is still being sampled on the horizontal \
+         plane, which is the stretch this clause exists to remove"
+    );
+}
