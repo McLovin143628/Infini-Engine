@@ -9395,3 +9395,512 @@ it must beat, and `vis1b_post_cost` gains a control per row.
 occlusion arm could not see the occlusion test; `36f73831` a robustness arm a plain mean also
 passes, and a unit 2.83× out; `dd33d71a` the cost instrument was still measuring the GPU
 cooling down; plus the ledger commit that carries this section into the memo and the ROADMAP.
+
+
+## Wave TER2a — the ground gets its materials (2026-08-26)
+
+Base `fd4a755f`. The island's ground was **a flat colour**: no splat weights were
+ever written, so every one of its 51.4 million samples read
+`DEFAULT_WEIGHT = [255, 0, 0, 0]` and shaded as 100 % of layer 0; all four
+`TerrainLayer::material` slots were `None`, so the frame reported **0 virtual
+textures** over 51 km²; and `find . -name "*.inf_tex"` returned **nothing at
+all** — the whole virtual-texture stack was a capability with no content that
+reached it. Below about three metres there was no colour signal and no height
+signal, and the only fine detail on the ground was a 1 m central-difference
+shading normal.
+
+It now carries four PBR ground materials blended by real per-sample weights,
+sampled triplanar on its cliffs, with three kinds of ground cover standing on it.
+
+### Clause 1 — the measurements, taken first
+
+**a. The terrain pass is 93 % fragment-bound.** `TERRAIN_BASE_CELLS` 32 → 64 is
+**four times the triangles at every ring** (a patch goes from 33² to 65²
+vertices), through the shipping instrument at 1080p on the real island:
+
+| configuration | terrain @ 32 | terrain @ 64 | delta |
+|---|---|---|---|
+| `SHIPPED` | 0.510 ms | 0.640 ms | +25 % |
+| `LIT` | 1.916 | 2.331 | +22 % |
+| `LIT+SSR` | 1.904 | 2.324 | +22 % |
+| **`LIT+VIS`** | **1.912** | **2.328** | **+22 %** |
+| `LIT-COARSE-CLIPMAP` | 2.124 | 2.616 | +23 % |
+| whole GPU frame (`LIT+VIS`) | 8.440 | 8.786 | +0.346 ms |
+| p50 | 84.0 fps | 80.6 fps | −3.4 |
+
+Four times the geometry costs 22 % more time. Solving `V + F = 1.912` against
+`4V + F = 2.328` puts the vertex half at **0.139 ms** and the fragment half at
+**1.773 ms** — so the pass is **7.3 % vertex and 92.7 % fragment/bandwidth**, and
+the prediction reconstructs the measurement to a thousandth (0.139 × 4 + 1.773 =
+2.329 against 2.328).
+
+**What that buys TER2b.** Ring 0 today is 8 m per vertex over 1 m height data —
+seven of every eight survey metres never reach a silhouette. Doubling the ring-0
+density costs **0.42 ms of an 8.44 ms frame**, 5 %, against 4.5 ms of headroom.
+Mesh density is cheap on this island and the wave that wants it can have it.
+
+**b. The T44 / D-22 VT-extent exposure, re-measured — and closed.**
+`VtTextureDesc::validate` had **no extent rule at all**; what kept a pyramid
+inside an `f32` uv was that no content this project could produce came near the
+limit, and the arm that watches T44 watches the *atlas* constants and says
+outright that "it does not fire on a registration, and it cannot". D-22 says to
+re-measure before authoring island-scale materials. This is that wave, so the gap
+is closed rather than measured again: `MAX_VT_EXTENT` (`1 << 23`, the `f32`
+mantissa's integer limit — the same number the resident-side tripwire compares
+against) is enforced at the registration door, with an arm that fires it by name
+and an anti-vacuity half proving the ceiling itself is legal.
+
+The measurement it was asked for, taken before a texel was authored: the island
+is 7 168 m square about the origin and `terrain.wgsl` rebuilds an **absolute**
+`f32` world XZ for its uv (it must — a render-local one slides the material every
+time the floating origin snaps). At the far corner, 3 584 m out, the `f32`
+quantum is **0.244 mm**. The finest ground this wave authors is a 1 024² albedo
+tiled every 1.5 m — a **1.465 mm** texel — so a texel is **6.0 distinct world
+positions** wide. Under about 1.5 the two-`u32` uv path becomes real work; the arm
+asserts the ratio rather than describing it. The ground sets are **8 192×** under
+the extent ceiling.
+
+### Clause 2 — real splat weights
+
+`inf_island::splat` derives a per-sample `[u8; 4]` inside `BuildStep::Biomes` —
+the terrain-stamp step — off the same classification the ids come from. It is a
+second walk rather than a second step because the step list is frozen and the
+fixture counts one log line per step, and because the splat *is* the same decision
+expressed as a blend.
+
+**Three inputs, each at the resolution it actually has:**
+
+| input | lattice | why |
+|---|---|---|
+| biome | the classification's own **8 m** lattice, read **bilinearly** | ids stay NEAREST by ruling — a half-forest is not a biome. The weights are what blends, so the feather lives here and nowhere else. |
+| slope | the **1 m** grid, central difference | a cliff face is rock whatever grows around it, and at 8 m a 60 m cliff is eight cells wide |
+| elevation | the **1 m** grid, the sample's own height | the shore line and the treeline are the two places a metre is visible |
+
+Claiming 1 m feathering off an 8 m classification would be inventing it, so the
+boundaries feather at 8 m and the slope and shore detail is at 1 m.
+
+**The seam was the part that had to be got right.** Two tiles share a row of
+samples, so a one-sided difference there gives them two answers for one metre of
+ground and paints a line every 256 m. The border rows read the neighbour through
+`height_at`; `a_shared_tile_edge_paints_one_answer` compares the shared edge
+sample for sample, with an anti-vacuity half proving the fixture is steep enough
+for the slope term to be doing something there.
+
+Portable throughout: `f64` add / multiply / compare / `sqrt` / `floor` and exactly
+one transcendental, `inf_math::portable::patan2_64` — the same door
+`CoarseHeights::slope_deg` already goes through, so the fine rule and the coarse
+classification measure an angle the same way. The new module joined the crate's
+libm-ban table, which **caught it unprompted**
+(`the_source_table_covers_every_module` went red on the first run).
+
+**Measured on the CI fixture** (599 076 level-0 samples):
+
+| | grass | rock | forest floor | sand |
+|---|---|---|---|---|
+| dominant | 42.0 % | 6.7 % | 15.3 % | 35.9 % |
+
+**38.6 % of samples blend two layers or more**, 39 234 were pushed toward rock by
+their own slope, and **zero** fail the sum-to-255 invariant — which is now
+*blocking* rather than a tolerance, because a weight that does not sum shades that
+metre of ground by an amount no author asked for and the shader's defensive
+renormalisation hides it.
+
+Weights stay level-0. The pyramid's layer-reduction rule does not carry them and
+never did; the fixture now asserts that on the **built asset** (20 coarse tiles,
+all `weights_are_default`) rather than leaving it to `pyramid.rs`'s internal
+check.
+
+### Clause 3 — the engine's ground library, authored and bound
+
+`samples/ground/` is five PBR ground sets — grass, rock, forest floor, sand,
+soil — each a `.inf_mat` over a 1 024² albedo, a 512² tangent-space normal, a
+512² ORM, and, for grass and rock, a 512² high-frequency detail normal.
+**17 textures, 5 materials, 7.39 MB**, byte-locked beside the starter character.
+They are the first `.inf_tex` files this repository has ever held.
+
+| set | tiles every | albedo texel | detail tile | mean sRGB |
+|---|---|---|---|---|
+| `Ground_Grass` | 2.0 m | **1.953 mm** | 12.5 cm | (79.0, 90.3, 52.1) |
+| `Ground_Rock` | 3.0 m | 2.930 mm | 15.0 cm | (86.8, 82.2, 77.5) |
+| `Ground_ForestFloor` | 2.5 m | 2.441 mm | — | (73.8, 61.7, 41.3) |
+| `Ground_Sand` | 1.5 m | **1.465 mm** | — | (158.1, 148.9, 131.1) |
+| `Ground_Soil` | 2.2 m | 2.148 mm | — | (85.3, 72.1, 57.8) |
+
+**Synthesised, not baked, and that is a ruling.** The P7 material-graph path ends
+in a WGSL compute dispatch, and a compute bake's bytes are a fact about the
+adapter that ran it: WGSL pins neither float evaluation order nor its
+transcendentals, and this project's own law is that a one-platform bound turns CI
+red. A committed `.inf_tex` blessed by one GPU could not be byte-locked on every
+leg, and the lock is what stops sample content going stale. So
+`inf_material::ground` generates every texel in `f64` from a SplitMix64 lattice
+with **no transcendental in the path**: value noise and Worley smoothed by
+`t·t·(3−2t)`, ripples as triangle waves, anisotropy by per-axis frequency rather
+than rotation (a rotation would destroy the tiling), and an sRGB encode that **is**
+the IEC curve rather than an approximation — `1/2.4` is exactly `5/12`, so it is a
+twelfth root, measured against `powf` over 4 097 points at **0.000 levels of 255**.
+
+*The first draft of that root is a finding in itself.* Newton on `y¹² − x` is
+quadratically convergent near the root and violently unstable away from it: seeded
+at `x^(1/8)`, eight iterations at `x = 0.00317` landed on 0.6565 against a true
+0.6191 — an **8.2-level** error in the encoded byte, which its own arm caught. The
+seed is now four exact square roots (`1/16 + 1/64 + 1/256 + 1/1024` of the
+exponent, 0.2 % off over the whole domain) and three Newton steps.
+
+**Every map is BC1, including the normals, and that is a measurement.**
+`build_vt_level` reads the atlas format off the *stored* formats of the textures a
+level binds, and a **mixed** set demotes the whole pool to `Rgba8`: 73 984 B a page
+against BC1's 9 248, so a 24 MiB pool holds **340** pages instead of **2 721**. The
+floor fits either way (51 pages, 1.9 % of the BC1 pool); what the demotion costs is
+everything above it — **2 670 pages of camera-driven refinement against 289**, a
+9.2× cut, which over ground authored at two millimetres a texel is the difference
+between ground you can read and ground that is permanently three mips coarse. That
+is why Wave T's `PageFormat::Bc5` — shipped *for* normal maps — still has no
+consumer: the first content to use it beside a BC1 albedo takes the atlas down
+with it. The honest bound is that BC1 quantises a normal's X and Y on 5:6:5
+endpoints. The fix is a second pool or a `view_formats` reinterpretation, named in
+`vt_sample.wgsl`'s own module comment, and it is a wave.
+
+#### Binding them was four walks, not one edit
+
+Wave G added `TerrainLayer::material` and **no walk in the engine could see it**.
+Four separate places enumerate what a level binds — the viewport's VT cache key,
+the editor's material resolver, the PIE payload builder and the shipped player's
+pack reader — and every one had a rule for `Material.asset` and none for a terrain
+layer. `VtTextures::want_floor` is a pure function of the registration
+**sequence**, so four walks that disagree page four different worlds. They go
+through one door now, `inf_ecs::Terrain::layer_materials`, and the level's own
+sidecar (the edge the cook's closure follows) goes through it too.
+
+**FINDING — a cooked partitioned level binds nothing.** Its entities are all in
+the derived `.inf_part`; the level itself ships **zero** of them, which
+`resolve_cell_store`'s own doc says in those words. So `material_content`, which
+read only the level, found no bindings at all on **every partitioned world** — for
+`Material.asset` as much as for a terrain layer — and every textured surface in one
+shipped untextured. Nothing caught it because no content in this repository had a
+texture to lose: the island reported "0 virtual textures" and that read as "the
+ground names no material", which was also true. It walks the partition now, whole
+rather than resident, because the registration sequence must be a function of the
+level and not of where the camera happened to be on frame one. Measured on the
+cooked fixture island: **0 entities in the level, 4 layers → 4 materials → 14
+textures** out of the partition.
+
+**FINDING — a bound ground material rendered 2.03× too dark.** `vt_surface`
+multiplies (`out.albedo = albedo * texel`), which is right for a mesh, where
+glTF's `baseColorFactor` is a separate field from any fallback. A terrain layer has
+**one** colour and it is the no-texture fallback, so passing it as a factor shades
+grass at `0.086 × 0.078`. Measured the first time the island's layers were bound:
+mean frame luminance **56.4 textured against 114.3 untextured**. A layer's scalars
+are a fallback now (the call site's `coverage` mix still carries them), and the
+same two frames read **94.5 against 95.5** with 67× the high-frequency detail.
+
+**FINDING — `detail_scale_m` is not metres.** `vt_apply_detail` computes
+`duv = uv · scale`, so the field is **detail tiles per uv unit** and a larger
+number is a *finer* detail. It is named `_m` and was documented as "world metres
+per tile", which is backwards; the default `0.5` makes a detail layer **twice as
+coarse** as its base rather than ten times finer. The behaviour is right for a
+mesh uv, which has no metres in it at all — so the four surfaces that state the
+unit are corrected and the arithmetic is not (the VIS1b chromatic-aberration
+precedent), and there is no shipped content depending on either reading because
+before this wave there was none. The ground sets author 16 and 20.
+
+#### The island frame stops saying zero
+
+`0 virtual textures` → **14**, over 51.38 km² of ground, with the four ground
+materials the four splat channels mean.
+
+### Clause 4 — triplanar on the cliffs
+
+Wave T shipped the planar XZ projection with its own bound written on it: *"it
+stretches on a cliff face — the honest bound… A triplanar layer sample is the
+named follow-up."* `terrain_layers` now takes the fragment normal, weights the
+three planes with the **same** `triplanar_weights` at the same sharpness the
+procedural grain has always used, and gates on `tw.y ≥ 0.98` — everything flatter
+than about twenty degrees keeps its single fetch.
+
+**The cliff arm, and the control that makes it mean something.** The two
+projections disagree about what `v` is on an X-facing wall: planar puts world `z`
+there (which runs horizontally *along* the face) and triplanar puts world `y`
+(which runs *down* it). So the measurement is the red spread down a column of an
+83° face, with the **blue channel's spread subtracted** — the fixture's blue is a
+constant 200, so whatever it varies by is what the lighting did — and the control
+is the same frame with the ramp on the other axis:
+
+* v-ramp **99**, u-ramp **7** — **14.1×**.
+* Mutation (`TRIPLANAR_PLANAR_CUT` set to `-1.0`, the feature off): **7 against 34**,
+  and the arm fails.
+
+Two earlier drafts of that arm are recorded on it because both failed in ways that
+would have passed quietly: the first used the flat half of the same frame as a
+control and measured **232 against 232** (a column on flat ground seen from a metre
+up walks tens of metres of world `z`, which *is* `v`); the second measured a 68°
+wall, where 2.5 % of the horizontal plane survives the axis cut and the baseline
+rises with it.
+
+**The price, measured on the island** (`LIT+VIS` terrain pass, four
+configurations of the same tree):
+
+All four are one tree at one scatter density (0.004) with the **twelve**-lane
+derivative form, so the differences are the projection change and nothing else:
+
+| configuration | terrain | delta |
+|---|---|---|
+| no triplanar code at all | 2.179 ms | — |
+| always planar (`cut = −1`) | 2.431 ms | **+0.252 ms** — the unconditional work |
+| **gated (`cut = 0.98`)** | **2.557 ms** | +0.126 ms of fetches |
+| always triplanar (`cut = 2.0`) | 2.570 ms | +0.139 ms of fetches |
+
+**The named 3× fetch price is +0.139 ms — and the derivative work was twice it.**
+That is the wave's most useful surprise: the extra *fetches* are nearly free (the
+texture cache absorbs three taps of one tiling material), and what cost real time
+was taking six `dpdx`/`dpdy` pairs instead of two. The three projections are three
+swizzles of one position, so their derivatives are six swizzles of the position's
+own two; the shipped shader takes `dpdx(world)` once. What it saved is **not
+cleanly measured** — the shipped tree reads 2.509 ms against this table's 2.557,
+but it also carries 16 771 scattered instances against 2 681, so the 0.048 ms
+carries both changes. The clean series is the four rows above.
+
+The gate saves **0.013 ms** on this island — the fragments that dominate the
+terrain pass are mostly past twenty degrees on a world made of mountains — so the
+cut is kept for what it promises on flatter worlds and on tiers with worse texture
+caches, and is *not* what makes triplanar affordable here. Saying otherwise would
+be an argument standing where a measurement is.
+
+### Clause 5 — three things that stand on the ground
+
+The island's `.inf_pcg` declared three scatter kinds and **all three carried
+`mesh: None`** — a bare transform, which the scatter evaluates, the biome binding
+restricts, the residency pages and the frame counts, and which draws nothing.
+2 681 instances of nothing, every frame.
+
+`inf_editor_core::cover` generates three, on `block_body_mesh`'s precedent —
+`MeshAsset`s assembled from vertices and indices, in `f64`, with an integer hash
+for every random number and **no transcendental in the path** (a direction is a
+rejection-sampled point in the unit disc, the same arrangement `inf_math::unit_dir`
+uses and for the same committed-bytes reason):
+
+| kind | vertices | triangles | height | across |
+|---|---|---|---|---|
+| grass tuft | 64 | 32 | 0.307 m | 0.139 m |
+| shrub | 32 | 20 | 0.741 m | 0.203 m |
+| rock | 384 | 128 | 0.310 m | 0.242 m |
+
+Each shares a **ground material** rather than carrying textures of its own, which
+is the storage argument virtual texturing rests on, and its sidecar names it so the
+cook ships the two together.
+
+**FINDING — the cook had no scatter-kind mesh edge.** `asset_deps`' `Pcg` arm
+followed a graph's grammar modules only, and its comment said a scatter kind's mesh
+was "deliberately still not an edge… see the arm". *There is no such arm.* It read
+as harmless because no scatter kind in this repository named a mesh. Bound meshes
+without that edge would have cooked an island scattering thirteen thousand
+instances of an asset the pack does not contain. The edge is off the **document**,
+where a scatter kind lives, so it works for the document-only (v1) payloads every
+scatter `.inf_pcg` here actually is.
+
+**Density: 0.004 → 0.02 /m², with the arithmetic.** 0.004 is one thing per
+250 m² — a fifteen-metre square with a single tuft of grass in it — a number set
+when a kind was a bare transform and the cost of being wrong was zero. What bounds
+it is not the island's area but the **working set**, and the working set is
+measured, not estimated: the shipped instrument drew **2 681** instances at 0.004,
+so 0.02 was predicted at 13 405 — and **measured at 16 771**, of 32–128 triangles
+each, about 1.1 M triangles against the 10 M-triangle gate P13 took at 2.4 % cull.
+*The scaling was 20 % below what the frame drew* (equivalently, the measurement is
+25 % above the prediction), because a jittered per-cell scatter does not divide
+evenly; the prediction is kept beside the measurement rather than replaced by it,
+because the lesson is the house one — an inference dressed as a measurement is
+worse than no measurement. The cap is the **CPU fallback**: 16 771 is **25.6 %** of
+`MAX_CPU_SCATTER_INSTANCES` (65 536), so a tier that cannot reach the GPU scatter
+path still draws *every* instance rather than a nearest-first subset, with room for
+three more raises of this size. At 0.1 /m² there would not be. The island-wide
+candidate count is 813 000 and is the number people reach for; it is not the bound.
+
+And the cover is **effectively free**: the `scatter` pass went 0.125 → 0.131 ms for
+**6.25× the instances**, which is the P18.5 GPU scatter path doing what it was
+built for.
+
+**The render-vs-simulation bound, stated rather than fixed.** The scatter is
+evaluated on the *simulation's* resident set — `SIM_MARGIN_TILES` (2.0) of level-0
+pages around each observer, about **1.3 km²** — while the renderer draws terrain
+far past it, because the clipmap's outer rings are pages the sim never asked for.
+So ground cover stops at roughly 1.3 km² around the player and bare ground
+continues to the horizon. Widening `SIM_MARGIN_TILES` moves it and widens every
+physics query and every biome evaluation with it; the right fix is a scatter
+residency of its own, which is a wave.
+
+### The 58th golden
+
+`ground_close.png` — the island's own four grounds at **one metre of eye height**.
+Every terrain golden before it is an overlook, because below three metres there
+was nothing to look at. It renders the **real committed content** through the same
+`inf_material::ground` door `samples/ground/` is written from, not a fixture that
+resembles it, and the harness grew a `check_golden_vt` that can build live
+virtual-texture pools twice (the determinism gate renders twice and
+`set_vt_pools` takes them by value).
+
+Two departures from the shipped configuration are stated on it: the pool is
+`Rgba8` (a headless CI adapter need not expose `TEXTURE_COMPRESSION_BC`, and the
+residency door transcodes on the way in — the same path a mobile tier takes), and
+mip 0 is not requested (a 1 024² albedo contributes 27 pages instead of 92, and at
+320×180 with a one-metre eye a screen pixel covers several millimetres of ground,
+which mip 1 already out-resolves).
+
+The structural arm beside the pixels is a **difference**: the same scene with no
+pools installed, so `vt_active()` is false and the four layers shade off their
+scalar colours alone. **11 721 textured luminance steps against 175 untextured
+(67×)**, at a mean luminance of **94.5 against 95.5** — the same ground, with the
+texture on it.
+
+**Additive**: `GOLDENS` 57 → 58 in four gates, all three `GOLDEN_SET_DIGEST` pins
+moved by hand in the same commit (`dc695d74…` → `07cc8ae8…`), the phase18 name
+array grown, and **not one committed image changed** — `INF_GOLDEN_STRICT=1` green
+over all 58.
+
+### Routed, not taken — by name
+
+1. **A second VT pool, or a `view_formats` reinterpretation.** Wave T's
+   `PageFormat::Bc5` is the right normal-map format and cannot be used beside a
+   BC1 albedo, because the atlas format is a pool-wide decision and a mixed set
+   demotes it to RGBA8 at 8× the page bytes. Every ground normal here is BC1 and
+   its X/Y are on 5:6:5 endpoints because of it. Named in `vt_sample.wgsl`'s own
+   module comment; it is a wave.
+2. **A field whose name and unit agree, for the detail scale.** `detail_scale_m`
+   is tiles per uv unit. Documented on all four surfaces; renaming it is a wire
+   change and `DEFAULT_DETAIL_SCALE_M` (0.5) stays wrong-by-default because it is
+   what every `.inf_mat` written before TER2a decodes with.
+3. **A fifth splat channel.** The splat is four bytes wide, so the island binds
+   four of the five authored grounds and farmland is carried as grass over a
+   strong forest-floor component. `Ground_Soil` is committed and unbound on this
+   island. A per-terrain *palette* — which N of the library a terrain's four
+   channels mean — is a schema question.
+4. **A scatter residency of its own.** Ground cover is evaluated on the
+   simulation's resident set (~1.3 km²) while the renderer draws terrain far
+   past it, so bare ground continues to the horizon. Widening
+   `SIM_MARGIN_TILES` moves it and widens every physics query with it.
+5. **The P7 material graph as the ground library's source of truth.** The five
+   sets are Rust, not graphs, because a GPU compute bake's bytes are a fact about
+   the adapter. A CPU evaluator over the material registry — so a graph-authored
+   texture could be committed and byte-locked — is the honest way to have both,
+   and it is a wave.
+6. **A LOD band and an alpha cut-out for the cover meshes.** Three low-poly props
+   at 32, 20 and 128 triangles, drawn opaque at every distance. They are the
+   difference between cover and a number, not an art pass.
+7. **`RenderTier` does not clamp the triplanar cut.** The cost is 0.126 ms of
+   fetches and 0.252 ms of derivative work on a 4070 Ti; a mobile tier pays the
+   derivative half unconditionally the moment a terrain layer binds a material.
+
+### Carried, by name
+
+1. **Coarse LOD pages shade off layer 0's colour.** Weights are not carried above
+   L0 and never were — the pyramid builds a coarse tile flat. Now that layer 0 is
+   grass with a real material, a distant page is *grass-coloured* rather than
+   *the blend of what is there*, which is more visible than it was when every
+   layer was a flat colour. The fix is a filtered outer-ring pyramid, already
+   routed by the TER2 brief.
+2. **The gate does not make triplanar affordable on this island.** It saves
+   0.013 ms; what costs is the unconditional derivative work. On a flatter world
+   the gate is worth more, and that is an argument rather than a measurement
+   until somebody measures it there.
+3. **The derivative-lane halving is not cleanly attributable.** It reads
+   2.557 → 2.509 ms, but the two runs also differ in scatter population
+   (2 681 against 16 771 instances), so the difference carries both changes. The
+   A/B that *is* clean is clause 4's four-configuration series, all on one tree
+   at one density. Isolating it needs a fifth run nobody has taken.
+4. **The island's ORM occlusion and metallic reach nothing.** `terrain_layers`
+   takes albedo and roughness off `vt_surface` and drops `occlusion` and
+   `metallic`; the ground sets author all three. Correct today (ground is never
+   metal and the terrain pass has its own AO) and worth an audit the day a
+   terrain material wants either.
+5. **Farmland shares the grass channel.** See routed item 3.
+6. **The near-ground golden's pool is RGBA8 and skips mip 0.** Both stated on the
+   test, both for adapter-robustness rather than preference; a matched-adapter
+   strict leg still compares the same pixels because the transcode is the same
+   texels one format decision earlier.
+7. **Two predictions this wave made were wrong, and the instrument said so
+   both times.** The density scaling put the working set at 13 405 where the
+   frame drew **16 771** (20 % low); and the first twelfth-root seed put an sRGB
+   encode **8.2 levels** out where its own arm demanded a fraction of one. Both
+   are fixed and both are recorded with the prediction beside the measurement,
+   because the failure mode they share — an inference presented as a number — is
+   the one this repository has a law about.
+
+### The island, before and after
+
+`the_island_at_shipping_resolution` on the same machine (RTX 4070 Ti, **release**,
+1080p, 3 × 120 frames, MIN of rounds) over the same 51.38 km² island. The "before"
+column is the VIS1b audit's own re-run at `fd4a755f`.
+
+| | before (`fd4a755f`) | **after TER2a** |
+|---|---|---|
+| `SHIPPED` p50 | 3.653 ms | **5.543 ms** (180.4 fps) |
+| `LIT` p50 / GPU frame | 11.818 / 8.314 ms | 13.360 / **8.910** ms (74.9 fps) |
+| `LIT+SSR` p50 / GPU frame | 11.803 / 8.311 ms | 13.287 / **8.924** ms (75.3 fps) |
+| **`LIT+VIS` p50 / GPU frame** | **12.107 / 8.438 ms (82.6 fps)** | **13.505 / 9.042 ms (74.0 fps)** |
+| `terrain` | 1.903 ms | **2.509 ms** (+0.606) |
+| `scatter` | 0.125 ms | **0.131 ms** (+0.006) |
+| `vsm-raster` | 4.608 | 4.599 |
+| `gi` / `ssao` / `depth-prepass` | 0.782 / 0.150 / 0.059 | 0.783 / 0.150 / 0.059 |
+| `vgeom` | 0.312 | 0.311 |
+| **virtual textures** | **0** | **14** |
+| **scattered instances** | 2 681 | **16 771** |
+| `vt stream` (record stage) | — | 0.017–0.020 ms, **0.4–0.8 %** |
+| `.inf_terrain` on disk | 342 MB | **549.9 MB** |
+
+**≥ 60 fps p50 with everything on: MET, at 74.0 fps — 7.63 ms of GPU headroom.**
+Nothing in this wave ships opt-in-off for budget reasons.
+
+**The whole wave costs the lit island +0.604 ms of GPU frame** (8.438 → 9.042),
+**7.2 %**, and every millisecond of it is in one pass:
+
+| what | terrain |
+|---|---|
+| before | 1.903 ms |
+| + four bound ground materials (14 VT, planar) | 2.179 ms (+0.275) |
+| + triplanar, gated | **2.509 ms** (+0.330) |
+
+**Two numbers worth not over-reading.** The `scatter` pass took **6.25× the
+instances for +0.006 ms** — that is the P18.5 GPU scatter path doing what it was
+built for, and it means the cover meshes are effectively free at this density.
+And the derivative-lane halving reads 2.557 → 2.509 across two runs, but those
+runs also differ in scatter population, so the saving is **not cleanly
+attributable**; the A/B that *is* clean is the four-configuration series in
+clause 4, all taken on one tree at one density.
+
+The splat weights cost the **build artifact** 208 MB (51.4 M samples × 4 bytes,
+342 → 549.9 MB) and the **frame** nothing measurable: the run taken immediately
+after clause 2 read `LIT+VIS` GPU 8.440 ms against the base's 8.438.
+
+**What the instrument does and does not report about VT.** It prints the
+registered texture count (14) and the `vt stream` record-stage cost, and it has
+no admits-per-frame counter — that lives in the phase-26/28 gates over their own
+drives. What is asserted on the island itself is the *registration set*, in
+`island_gate`: 4 layers → 4 materials → **14** textures, every one present in the
+pack, in a registration order printed in full.
+
+### Counts
+
+| | before (`fd4a755f`) | **after TER2a** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 327 / 6 161 / 0 / 19 | **327 / 6 192 / 0 / 19** — **+31 arms**, and **no new block**: every one lands in a test target that already existed (`inf-island`'s lib and its fixture, `inf-material`'s lib, `inf-editor-core`'s lib, `inf-render`'s `golden` / `terrain_layers` / `terrain_vt_fragment`, `inf-player`'s `island_gate`) |
+| goldens | 57 | **58** — `ground_close.png` **added**, **none re-blessed**. Verified against git rather than prose: `git diff fd4a755f..HEAD -- tests/goldens` is exactly one **A** line, zero **M**, zero **D** |
+| `GOLDEN_SET_DIGEST` pins | `dc695d74…` | **`07cc8ae8…`** — moved by hand in all three gates, in the **same commit** as the image |
+| phase18 golden NAME array | 57 names | **58 names** (inserted in sort order — the array's own arm caught the first placement) |
+| `INF_GOLDEN_STRICT=1` | green over 57 | **green over 58**, and `git status` over `tests/goldens` is empty afterwards |
+| rustdoc individual warnings (cold, after `cargo clean --doc`) | 374 over 30 crates | **374 over 30 crates** — the wave adds **zero**, against a ceiling of 450 |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** — five of the wave's own were caught and fixed: `neg_cmp_op_on_partial_ord` ×2, `needless_range_loop`, `unusual_byte_groupings` ×2, and an `assertions_on_constants` that was worth more than a lint. The density arm compared two literals, which the compiler folds and which guards nothing; it reads the **document's** `base_density` now, so it fires the day somebody raises the density past what the CPU tier can draw |
+| `cargo fmt --all --check` | clean | **clean** |
+| the workspace eaten-`\` gate | green | **green** — and it fired on this wave **three separate times**, over scripted edits to Rust string literals in `terrain_vt_fragment.rs`, `terrain_layers.rs`, `samples.rs`, `level.rs` and `island_gate.rs`. The law keeps paying for itself: every one was a `\`-continuation eaten by a Python string, and every one would have shipped a user-facing message with a run of eighteen spaces in it |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 | **unmoved** — and so is the **island recipe** (v2). Its `island.toml` gained entries in the existing `[content]` array, which is a use of a field rather than a change to one. `inf-ecs` gained a **method**, not a field; `crates/inf-scene` is not in the wave's diff at all |
+| new crates / external dependencies | — | **none** |
+| committed content | 0 `.inf_tex` | **17 `.inf_tex` + 5 `.inf_mat` + 3 `.inf_mesh`**, 7.2 MB under `samples/ground/` |
+| frontend tests / files | 719 / 80 | **unmoved, and not run** — `git diff fd4a755f..HEAD -- editor/studio` is empty, so nothing in the frontend suite's scope moved |
+| `.inf_terrain` build artifact (outside the tree) | 342 MB | **549.9 MB** — the splat weights, 51.4 M samples × 4 B |
+
+### Commits
+
+`332d61b4` the island's ground stops being one colour (clause 2); `494343c4` the door
+D-22 said had nothing behind it (clause 1b); `ec126aa1` the first `.inf_tex` this
+repository has ever held (clause 3a); `8da363bb` the island binds its ground, and two
+things it found on the way (clause 3b + the 58th golden); `f5ff1c57` the cliffs stop
+being smeared, and the derivatives cost twice the fetches (clause 4); `5c11b1d2` 2 681
+instances of nothing get something to be (clause 5); plus the ledger commit that carries
+this section into the memo and the ROADMAP.

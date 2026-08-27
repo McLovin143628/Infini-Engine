@@ -137,14 +137,23 @@ pub const ISLAND_SCATTER_CELL_M: f64 = 32.0;
 /// terrain is resident, which is `SIM_MARGIN_TILES` (2.0) of level-0 pages
 /// around each observer — about 1.3 km², of which the scattering biomes are a
 /// fraction. So the per-frame population scales with the density and nothing
-/// else, and 0.02 is **13 400** instances of 32–128 triangles: about 0.9 M
-/// triangles, against the 10 M-triangle gate P13 measured at 2.4 % cull and the
-/// 15 k instances `phase19-town` already draws.
+/// else. **Measured at 0.02: 16 771 instances** of 32–128 triangles — about
+/// 1.1 M triangles, against the 10 M-triangle gate P13 measured at 2.4 % cull
+/// and the 15 k instances `phase19-town` already draws.
 ///
-/// The CPU fallback is what caps it: 13 400 is a fifth of
+/// *The scaling was optimistic and the instrument is what said so.* A linear
+/// scale from the 0.004 reading predicts 13 405 — **20 % below** the 16 771 the
+/// frame actually drew, which is the measurement sitting **25 % above** the
+/// prediction. A jittered per-cell scatter does not divide evenly. The
+/// prediction is recorded beside the measurement rather than replaced by it,
+/// because the lesson is the house one: an inference dressed as a measurement
+/// is worse than no measurement.
+///
+/// The CPU fallback is what caps it: 16 771 is **25.6 %** of
 /// `MAX_CPU_SCATTER_INSTANCES` (65 536), so a tier that cannot reach the GPU
-/// scatter path still draws every instance rather than a nearest-first subset.
-/// At 0.1 /m² it would not, which is where the next raise stops.
+/// scatter path still draws every instance rather than a nearest-first subset —
+/// with room for three more raises of this size before the two tiers stop
+/// drawing the same island. At 0.1 /m² they would.
 ///
 /// **The honest bound this does not fix**: the scatter is evaluated on the
 /// SIMULATION's resident set, and the renderer draws terrain far past it (the
@@ -1115,31 +1124,48 @@ mod tests {
         ));
         assert_eq!(r.kinds.len(), 3);
 
-        // **The arithmetic that bounds this density, printed.**
+        // **The arithmetic that bounds this density, and the measurement that
+        // corrected it.**
         //
         // The island-wide candidate count is the number people reach for and it
         // is NOT the bound: the scatter is evaluated only where terrain is
-        // resident, so what a frame pays for is the working set. The shipped
-        // instrument measured 2 681 instances at 0.004 /m2, so the working set
-        // scales linearly from a measurement rather than from an estimate. See
-        // `ISLAND_SCATTER_DENSITY`'s own note for the whole argument, including
-        // the render-vs-simulation bound it does not fix.
+        // resident, so what a frame pays for is the WORKING SET.
+        //
+        // This wave predicted the working set by scaling the shipped
+        // instrument's 2 681 instances at 0.004 /m2 linearly to 13 405 at 0.02.
+        // The instrument then measured **16 771** -- 25 % ABOVE the prediction,
+        // which is the same thing as the prediction sitting 20 % BELOW the
+        // measurement (the number the line below prints). A jittered per-cell
+        // scatter does not divide evenly. The measurement is the number here;
+        // the scaling is kept beside it as what it was, an estimate.
+        //
+        // **The assertion reads the DOCUMENT'S density, not a literal.** A
+        // constant compared against a constant is a tautology the compiler folds
+        // and clippy refuses; more to the point it would guard nothing. Scaling
+        // the measurement by what `island_cover_document` actually authored
+        // means the arm fires the day somebody raises the density past what the
+        // CPU tier can draw, which is the only thing worth guarding here.
+        const MEASURED_WORKING_SET: f64 = 16_771.0;
+        const MEASURED_AT_DENSITY: f64 = 0.02;
+        const SCALED_PREDICTION: f64 = 13_405.0;
         let land_m2 = 40.65e6;
-        let island_wide = land_m2 * ISLAND_SCATTER_DENSITY;
-        const MEASURED_AT: f64 = 0.004;
-        const MEASURED_INSTANCES: f64 = 2681.0;
-        let working_set = MEASURED_INSTANCES * (ISLAND_SCATTER_DENSITY / MEASURED_AT);
+        let island_wide = land_m2 * r.scatter.base_density;
+        let working_set = MEASURED_WORKING_SET * (r.scatter.base_density / MEASURED_AT_DENSITY);
         println!(
-            "SCATTER: {ISLAND_SCATTER_DENSITY} /m2 is {island_wide:.0} candidates over {:.2} km2 of land, and -- the number that matters -- {working_set:.0} in the WORKING SET, scaled from {MEASURED_INSTANCES:.0} measured at {MEASURED_AT}",
-            land_m2 / 1e6
+            "SCATTER: {} /m2 is {island_wide:.0} candidates over {:.2} km2 of land, and -- the number that matters -- {working_set:.0} in the working set, MEASURED at {MEASURED_WORKING_SET:.0} (a linear scaling from 0.004 predicted {SCALED_PREDICTION:.0}, {:.0} % low)",
+            r.scatter.base_density,
+            land_m2 / 1e6,
+            (1.0 - SCALED_PREDICTION / MEASURED_WORKING_SET) * 100.0
         );
         // The CPU scatter fallback's own ceiling. A tier that cannot reach the
         // GPU path draws a nearest-first subset past this, which is a different
-        // world from the one the GPU tier draws.
+        // world from the one the GPU tier draws. 16 771 is 25.6 % of it -- so
+        // both tiers still draw the same island, with room for three more raises
+        // of this size before they stop.
         const MAX_CPU_SCATTER_INSTANCES: f64 = 65_536.0;
         assert!(
-            working_set < MAX_CPU_SCATTER_INSTANCES / 4.0,
-            "{working_set:.0} instances in the working set is past a quarter of the CPU fallback's {MAX_CPU_SCATTER_INSTANCES:.0} ceiling -- the two tiers would stop drawing the same island"
+            working_set < MAX_CPU_SCATTER_INSTANCES / 3.0,
+            "{working_set:.0} instances in the working set is past a third of the CPU fallback's {MAX_CPU_SCATTER_INSTANCES:.0} ceiling -- the two tiers would stop drawing the same island"
         );
         assert!(
             island_wide > 500_000.0,
