@@ -677,7 +677,9 @@ impl EditorRenderAssets {
         }
         if geom.triangle_count() > inf_render::MAX_SCATTER_MESH_TRIANGLES {
             tracing::warn!(
-                "inf-editor-core: scatter mesh {mesh_id} is {} triangles, past the {} the                  scatter path draws per instance; it falls back to the placeholder primitive",
+                "inf-editor-core: scatter mesh {mesh_id} is {} triangles, past the \
+                 {} the scatter path draws per instance; it falls back to the \
+                 placeholder primitive",
                 geom.triangle_count(),
                 inf_render::MAX_SCATTER_MESH_TRIANGLES
             );

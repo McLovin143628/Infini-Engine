@@ -304,15 +304,19 @@ pub fn build_island(
         ),
         &mut log,
     );
-    if plan.upsample_ratio() > 1.05 {
+    if plan.upsample_ratio() > crate::source::UPSAMPLE_ADVISORY_RATIO {
         advisories.push(Advisory::new(
             "source.upsampled",
             format!(
                 "the world grid is {:.2} m a sample and the finest source available \
-                 is {:.2} m a pixel, so detail below {:.2} m is interpolation plus \
-                 whatever the design puts there — the carve, the road corridors and \
-                 the stream channels. It is not survey.",
-                plan.grid_m_per_sample, plan.ground_m_per_px, plan.ground_m_per_px
+                 is {:.2} m a pixel, so a feature shorter than {:.2} m is not in \
+                 the survey at all and everything below it is DESIGNED detail: \
+                 the carve, the road corridors, the stream channels, and (wave \
+                 TER2b) the fBm detail band the `detail` step writes into exactly \
+                 that gap. It is not survey, and it is no longer bilinear either.",
+                plan.grid_m_per_sample,
+                plan.ground_m_per_px,
+                2.0 * plan.ground_m_per_px
             ),
         ));
     }
@@ -410,21 +414,7 @@ pub fn build_island(
         Vec::new()
     };
     let corridor_half = recipe.roads.shoulder_mult * inf_gis::LANE_WIDTH_M * 2.0;
-    let corridor = (!committed_routes.is_empty() && corridor_half > 0.0).then(|| {
-        let lines: Vec<Vec<Vertex3>> = committed_routes
-            .iter()
-            .map(|r| {
-                r.points
-                    .iter()
-                    .map(|p| Vertex3 {
-                        xz: DVec2::new(p.x, p.z),
-                        y: p.y,
-                    })
-                    .collect()
-            })
-            .collect();
-        SegmentIndex::new(&lines, corridor_half)
-    });
+    let corridor = corridor_index(&committed_routes, corridor_half);
 
     let pads: Vec<(DVec2, f64, f64)> = recipe
         .sites
@@ -442,6 +432,10 @@ pub fn build_island(
         })
         .collect();
 
+    // Cloned, not moved: `CarvePlan` takes the pads by value and the DETAIL step
+    // (five steps later) has to exclude the same terraces the carve levelled.
+    // Seven sites, so the clone is seven tuples.
+    let site_pads = pads.clone();
     let carve = CarvePlan {
         coast: &coast,
         pads,
@@ -528,6 +522,9 @@ pub fn build_island(
         .iter()
         .map(|s| s.width_m())
         .fold(2.0f64, f64::max);
+    // Retained past this step (wave TER2b): the DETAIL step excludes the same
+    // beds this one cut, and rebuilding the index there would be the same eight
+    // lines answering the same question about the same streams.
     let channels = hydro::channel_index(&network.streams, widest);
     let cut = hydro::carve_channels(&mut data, &channels, widest, 1.25);
     say(
@@ -728,7 +725,65 @@ pub fn build_island(
         );
     }
 
-    // ── 8. PYRAMID + 9. WRITE ───────────────────────────────────────────────
+    // ── 8. DETAIL ───────────────────────────────────────────────────────────
+    // The band the survey could not carry, put there on purpose (wave TER2b).
+    //
+    // **This slot is the design.** It is after ROADS because the grade audit and
+    // the road mesh are both built up there against `data.height_at`, so nothing
+    // this step writes can move either; after HYDROLOGY because the committed
+    // water design and its drift comparison are derived three steps earlier; and
+    // before PYRAMID because the coarse levels must be built from the ground the
+    // world actually has. Every fixture arm that measures a committed number
+    // measures it before this line runs.
+    //
+    // The corridor index is rebuilt from the FINAL routes rather than reused from
+    // the carve's: the carve's is `None` whenever the roads were re-planned, and
+    // a re-plan is exactly the case where the corridor moved.
+    let detail_corridor = corridor_index(&routes, corridor_half);
+    let band = crate::detail::DetailBand::of(plan.grid_m_per_sample, plan.ground_m_per_px);
+    let detail = crate::detail::apply_detail(
+        &mut data,
+        &crate::detail::DetailPlan {
+            seed: recipe.seed,
+            sea_level_m: recipe.sea.level_m,
+            band,
+            coast: &coast,
+            corridor: detail_corridor.as_ref(),
+            corridor_half_m: corridor_half,
+            channels: Some(&channels),
+            channel_half_m: widest,
+            pads: &site_pads,
+        },
+    );
+    say(
+        BuildStep::Detail,
+        match detail.band {
+            Some(b) => format!(
+                "{} of {} samples took designed relief in a {:.2}..{:.2} m band \
+                 ({} octaves); mean {:.3} m, worst {:.3} m; excluded {} water, \
+                 {} corridor, {} channel, {} pad",
+                detail.written,
+                detail.samples,
+                b.finest_wavelength_m,
+                b.base_wavelength_m,
+                b.octaves,
+                detail.mean_abs_m,
+                detail.max_abs_m,
+                detail.masked_water,
+                detail.masked_road,
+                detail.masked_channel,
+                detail.masked_pad
+            ),
+            None => format!(
+                "skipped: the {:.2} m grid is not finer than the {:.2} m source, \
+                 so there is no band under the survey to fill",
+                plan.grid_m_per_sample, plan.ground_m_per_px
+            ),
+        },
+        &mut log,
+    );
+
+    // ── 9. PYRAMID + 10. WRITE ──────────────────────────────────────────────
     let origin = DVec3::new(
         anchor.origin_easting_m,
         anchor.origin_height_m,
@@ -980,6 +1035,35 @@ pub fn player_start(recipe: &IslandRecipe, routes: &[Route], lift_m: f64) -> DVe
         }
     }
     DVec3::new(p.x, best.map(|(_, y)| y).unwrap_or(0.0) + lift_m, p.y)
+}
+
+/// **The road corridor as a queryable index** — one door, two callers.
+///
+/// The CARVE levels the ground inside `half_m` of a route so the road has
+/// something to sit on; the DETAIL step (wave TER2b) excludes the same ground for
+/// the same reason, five steps later, and would otherwise be eight lines of
+/// transcription answering the same question. `None` when there are no routes or
+/// no width, which both callers read as "there is no corridor".
+///
+/// The two callers pass **different route lists on purpose**: the carve sees the
+/// *committed* routes (it runs before the planner) and the detail step sees the
+/// *final* ones, which differ exactly when `--replan-roads` moved them.
+fn corridor_index(routes: &[Route], half_m: f64) -> Option<SegmentIndex> {
+    (!routes.is_empty() && half_m > 0.0).then(|| {
+        let lines: Vec<Vec<Vertex3>> = routes
+            .iter()
+            .map(|r| {
+                r.points
+                    .iter()
+                    .map(|p| Vertex3 {
+                        xz: DVec2::new(p.x, p.z),
+                        y: p.y,
+                    })
+                    .collect()
+            })
+            .collect();
+        SegmentIndex::new(&lines, half_m)
+    })
 }
 
 /// A file-name slug from an island's name.

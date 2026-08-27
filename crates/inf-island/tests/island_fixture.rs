@@ -870,3 +870,132 @@ fn the_reported_start_is_the_one_the_level_spawns_at() {
     assert_eq!(lifted.y - level.y, 2.5);
     assert_eq!((lifted.x, lifted.z), (level.x, level.z));
 }
+
+/// **The detail band fills the gap under the survey, and nothing the design
+/// already decided moves** (wave TER2b).
+///
+/// # Why this arm and not the coverage arm
+///
+/// The step-coverage arm counts a log line. This one measures the *ground*: it
+/// asks the finished terrain whether the detail happened where it should have and
+/// — the load-bearing half — whether it stayed out of the four places something
+/// downstream measures.
+///
+/// The road half is the strongest of the four, and it is a **re-measurement**.
+/// `roads::grade_audit` runs inside the Roads step, one step before the detail is
+/// written, so the audit the report carries could not have seen it however wrong
+/// the mask was. This arm runs the identical audit again against `b.terrain` — the
+/// ground as the build finished it, detail and all — and demands the same answer
+/// to the last bit. Mutation: widen the corridor mask to nothing and this fails
+/// with a different worst grade.
+#[test]
+fn the_detail_band_fills_the_gap_under_the_survey_and_moves_nothing_designed() {
+    let r = recipe();
+    let b = build();
+    let note = &b
+        .log
+        .iter()
+        .find(|l| l.step == BuildStep::Detail)
+        .expect("the detail step is logged")
+        .note;
+    println!("DETAIL: {note}");
+
+    // 1. IT HAPPENED. A stage that silently did nothing would satisfy every
+    //    exclusion below perfectly.
+    assert!(
+        !note.starts_with("skipped"),
+        "the fixture is a {:.2}x upsample and got no detail band: {note}",
+        b.plan.upsample_ratio()
+    );
+    let band = inf_island::DetailBand::of(b.plan.grid_m_per_sample, b.plan.ground_m_per_px)
+        .expect("the fixture upsamples");
+    // 2. THE BAND IS UNDER THE SURVEY AND OVER THE GRID. Both ends matter: the
+    //    coarse end would overwrite surveyed relief, the fine end would alias.
+    assert!(
+        band.base_wavelength_m <= 2.0 * b.plan.ground_m_per_px + 1e-9,
+        "the base octave is {} m, coarser than the source's own {} m Nyquist -- \
+         that is overwriting survey",
+        band.base_wavelength_m,
+        2.0 * b.plan.ground_m_per_px
+    );
+    assert!(
+        band.finest_wavelength_m >= 2.0 * b.plan.grid_m_per_sample - 1e-9,
+        "the finest octave is {} m against a {} m grid -- that is aliasing",
+        band.finest_wavelength_m,
+        b.plan.grid_m_per_sample
+    );
+
+    // 3. **THE ROADS.** The same audit, re-run on the ground the build FINISHED
+    //    with. `grade_audit` ran before the detail existed, so this is the only
+    //    measurement that can see a corridor mask that leaks.
+    let before = &b.report.roads.audit;
+    let after =
+        inf_island::roads::grade_audit(&b.routes, r.roads.max_grade, r.roads.grade_step_m, |p| {
+            b.terrain.height_at(p)
+        });
+    println!(
+        "ROAD GRADE after the detail band: worst {:.6} against {:.6} before, {} \
+         over against {}, {} samples against {}",
+        after.worst,
+        before.worst,
+        after.over.len(),
+        before.over.len(),
+        after.samples,
+        before.samples
+    );
+    assert_eq!(
+        after.samples, before.samples,
+        "the audit measured a different number of stretches"
+    );
+    assert_eq!(after.off_terrain, before.off_terrain);
+    assert_eq!(
+        after.over.len(),
+        before.over.len(),
+        "the detail band pushed stretches over the grade ceiling"
+    );
+    assert_eq!(
+        after.worst.to_bits(),
+        before.worst.to_bits(),
+        "the worst grade moved from {} to {} -- the corridor mask leaked",
+        before.worst,
+        after.worst
+    );
+
+    // 4. **THE SHORE.** Every coastline vertex is still at the waterline, to the
+    //    same tolerance the carve arm holds it to and by a factor of hundreds.
+    let sea = r.sea.level_m;
+    let mut worst = 0.0f64;
+    let mut probes = 0usize;
+    for ring in b.coast.rings() {
+        for v in ring {
+            if let Some(h) = b.terrain.height_at(*v) {
+                worst = worst.max((h - sea).abs());
+                probes += 1;
+            }
+        }
+    }
+    assert!(probes >= 8);
+    println!("SHORE after the detail band: worst {worst:.4} m over {probes} vertices");
+    assert!(
+        worst < 2.5,
+        "a coastline vertex is {worst} m from the waterline after the detail band"
+    );
+
+    // 5. **THE AMPLITUDE.** Its own ceiling, read off the log rather than
+    //    re-derived, because what the ledger prints is what a reader trusts.
+    let worst_m: f64 = note
+        .split("worst ")
+        .nth(1)
+        .and_then(|s| s.split(' ').next())
+        .and_then(|s| s.parse().ok())
+        .expect("the detail note prints its worst displacement");
+    assert!(
+        worst_m <= inf_island::detail::MAX_AMPLITUDE_M,
+        "the band moved a sample {worst_m} m, past its own {} m ceiling",
+        inf_island::detail::MAX_AMPLITUDE_M
+    );
+    assert!(
+        worst_m > 0.0,
+        "the band's worst displacement is zero, so nothing above measures anything"
+    );
+}

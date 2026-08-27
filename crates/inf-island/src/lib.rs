@@ -69,6 +69,7 @@
 
 pub mod biome;
 pub mod build;
+pub mod detail;
 pub mod hydro;
 pub mod layers;
 pub mod recipe;
@@ -85,6 +86,7 @@ pub use build::{
     road_mesh_guid, slug, terrain_guid, write_content, BuildOptions, IslandBuild, IslandDesign,
     StepLog, DERIVATION_PITCH_M,
 };
+pub use detail::{apply_detail, DetailBand, DetailPlan, DetailStats};
 pub use hydro::{FlowField, HydroParams, Lake, Stream, StreamNetwork, Waterfall};
 pub use recipe::{
     AnchorSpec, BiomeSpec, GridSpec, HydroSpec, IslandRecipe, RoadSpec, SeaSpec, Site, SiteKind,
@@ -126,6 +128,9 @@ pub enum BuildStep {
     Biomes,
     /// The designed network draped and graded.
     Roads,
+    /// The fBm band below the source's own Nyquist — designed relief, in the one
+    /// slot where nothing measured earlier can move (wave TER2b).
+    Detail,
     /// The LOD ladder.
     Pyramid,
     /// The `.inf_terrain`, the road mesh and the layers.
@@ -134,7 +139,7 @@ pub enum BuildStep {
 
 impl BuildStep {
     /// Every step, in build order. The CI fixture asserts it covers all of these.
-    pub const ALL: [BuildStep; 9] = [
+    pub const ALL: [BuildStep; 10] = [
         BuildStep::Plan,
         BuildStep::Fetch,
         BuildStep::Sample,
@@ -142,6 +147,7 @@ impl BuildStep {
         BuildStep::Hydrology,
         BuildStep::Biomes,
         BuildStep::Roads,
+        BuildStep::Detail,
         BuildStep::Pyramid,
         BuildStep::Write,
     ];
@@ -156,6 +162,7 @@ impl BuildStep {
             BuildStep::Hydrology => "hydrology",
             BuildStep::Biomes => "biomes",
             BuildStep::Roads => "roads",
+            BuildStep::Detail => "detail",
             BuildStep::Pyramid => "pyramid",
             BuildStep::Write => "write",
         }

@@ -50,6 +50,7 @@
 const SOURCES: &[(&str, &str)] = &[
     ("biome.rs", include_str!("../src/biome.rs")),
     ("build.rs", include_str!("../src/build.rs")),
+    ("detail.rs", include_str!("../src/detail.rs")),
     ("hydro.rs", include_str!("../src/hydro.rs")),
     ("layers.rs", include_str!("../src/layers.rs")),
     ("lib.rs", include_str!("../src/lib.rs")),

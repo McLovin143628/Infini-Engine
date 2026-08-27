@@ -385,7 +385,7 @@ mod tests {
             "0.079",
             "0.080 ceiling",
             "arterial",
-            "plan -> fetch -> sample -> carve -> hydrology -> biomes -> roads -> pyramid -> write",
+            "plan -> fetch -> sample -> carve -> hydrology -> biomes -> roads -> detail -> pyramid -> write",
         ] {
             assert!(
                 s.contains(needle),

@@ -60,6 +60,15 @@ use crate::IslandError;
 /// with room and admits nothing that could be one of those two encodings.
 pub const PLAUSIBLE_ELEVATION_M: std::ops::RangeInclusive<f64> = -12_000.0..=12_000.0;
 
+/// The upsample ratio past which the build says so — and past which
+/// `detail::DetailBand::of` finds an empty band worth filling.
+///
+/// One number, two readers, on purpose. Below it the grid and the survey are the
+/// same resolution to within five per cent and there is nothing under the survey
+/// to invent; above it there is, and both the advisory and the detail stage are
+/// about that same fact.
+pub const UPSAMPLE_ADVISORY_RATIO: f64 = 1.05;
+
 /// One XYZ tile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TileId {
@@ -104,6 +113,12 @@ impl TilePlan {
     /// Above 1.0 the terrain grid is finer than the survey and the difference is
     /// interpolation plus whatever the design puts there — which is a true and
     /// useful thing to print, and a false and dangerous thing to leave unsaid.
+    ///
+    /// Compared against [`UPSAMPLE_ADVISORY_RATIO`] in two places now: the
+    /// `source.upsampled` advisory, and `detail::DetailBand::of`, which decides
+    /// whether there is an empty band to fill. They must agree — a build that
+    /// says "detail below X is the design's" and adds none, and one that adds
+    /// detail and never says so, are the same defect either way round.
     pub fn upsample_ratio(&self) -> f64 {
         if self.grid_m_per_sample <= 0.0 {
             return 0.0;
