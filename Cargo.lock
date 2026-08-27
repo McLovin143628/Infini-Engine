@@ -3328,6 +3328,7 @@ dependencies = [
  "image",
  "inf-asset",
  "inf-graph",
+ "inf-math",
  "inf-vt",
  "naga",
  "serde",

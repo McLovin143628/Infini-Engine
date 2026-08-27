@@ -33,6 +33,12 @@ naga = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# TER2a audit: `tests/portable_math_law.rs` reads `inf_math::libm_ban::ALL` — the
+# canonical needle list every source gate in this tree bans, plus the
+# `covers_both_spellings` meta-arm that keeps a hand-copied list from losing a
+# UFCS twin. A **dev**-dependency: `inf_material::ground` synthesises committed
+# bytes and must not grow a link-time reason to reach a math crate.
+inf-math = { workspace = true }
 # The `.inf_mat` ladder tests encode a FROZEN v2 shadow record and decode the
 # live v3 encoding through an independently-declared wire twin. Both need the
 # raw codec rather than `inf_asset::encode`, which is bounded by `AssetPayload`
