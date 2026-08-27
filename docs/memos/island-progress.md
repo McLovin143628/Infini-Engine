@@ -13021,6 +13021,21 @@ enough that which one is quoted decides whether it reads as met. Carried by name
    geometry on one side. Left as the record of what it measured, with MED-4's
    tripwire beside it.
 
+### Counts, after the audit
+
+| | wave I8b | **after the audit** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 328 / 6 246 / 0 / 19 | **328 / 6 249 / 0 / 19** — `cargo test --workspace -j 3`, **+3 arms and no new block**, every one attributed: `a_non_uniform_instance_packs_all_three_scales` and `the_structure_swap_still_happens_past_the_scatter_mesh_band` in `inf-render`'s `passes/scatter.rs`, `both_projectors_fold_an_instance_into_a_batch_the_same_way` in `inf-editor-core`'s `projector_mirror`. Three existing arms were *strengthened* rather than added: the caster-skip arm gained its Raster half, the caster fold gained its ninth row, and the shell-containment loop gained six axes |
+| goldens | 58 | **58** — none added, none re-blessed; `INF_GOLDEN_STRICT=1` green over **117 arms, 0 failed**, and `git status` over `tests/goldens` empty afterwards |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — 404 `^warning` lines minus 30 per-crate summaries, after `cargo clean --doc` (8 813 files, 215.6 MiB). **The audit adds zero.** Headroom **76** |
+| `clippy --workspace --all-targets -D warnings` | 0 | **0** (local toolchain, run LAST per the rmeta law) |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** — the audit's only production changes are `pack_fallback`'s signature and body and one byte in `scatter_caster_fold`, none of which reaches a serialized format |
+| committed levels (`EXPECTED_LEVELS`) | 23 | **23** |
+| committed content | two `input.toml`s | **unmoved by the audit** — its whole `samples/` diff is empty |
+| new crates / external dependencies | none | **none**; `Cargo.lock` unmoved by the audit |
+| frontend | untouched | **untouched and not run** (`git diff -- editor/studio/src` is empty) |
+
 ### What reproduced, off a rebuild
 
 | claim | verified |

@@ -27513,4 +27513,45 @@ means open or close on either face, and the bolt gets its own control (`lock_doo
 `interact::resolve` the open verb uses; the stair-core finding is **verified CLOSED** in the I8a memo
 and was never a world defect. **CLAUSE 5** (sidewalks/kerbs) is **ROUTED by name** with wave I8a's
 "streets are a plan, not a surface": there is no measured frame headroom to spend on new committed
-surface. Full ledger, both frame tables and the carried list in `docs/memos/island-progress.md`. 
+surface. Full ledger, both frame tables and the carried list in `docs/memos/island-progress.md`.
+
+## Wave I8b — the adversarial audit (2026-08-27)
+
+Range `670f0d7c..95d92fec`, thirteen commits, clean tree. **Two HIGH, six MED, seven LOW**; both HIGHs
+and all six MEDs fixed with arms and mutation-verified, LOWs corrected in place or carried by name.
+Nothing reverted and **no clause false at the level it was measured** — the island rebuilt to the digit
+(land 40.65 km², peak 948.7 m, shore 25.14 km, 51 streams / 25.88 km, 2 lakes / 0.0847 km², 33
+waterfalls, urban 7.2 %, drift 0.00 %/0.00 %, terrain 549.9 MB) and both frame tables re-ran within
+noise. **HIGH-1: a building's shadow was a CUBE, not its box.** `pack_fallback` built every model
+matrix from `Vec3::splat(inst.scale)` — the `x` of a scale that has been a `Vec3` since IB-2b, because
+`ScatterInstanceRaw` splits it across `scale` and `scale_yz`. Latent while a shell was one caster in
+7 831 552 the ceiling discarded; wave I8b made the shell a building's **only** caster, so its whole
+shadow became a cube of twice its `x` half-extent (measured: a `(3, 11, 27)` instance packed as
+`(3, 3, 3)`). **HIGH-2: `casts_shadows` deleted the settlements from the Medium-tier PICTURE.**
+`pack_fallback`'s other consumer is `ScatterNode::run_fallback`, the **visible** CPU raster, which is
+the scatter path whenever `ScatterSettings::gpu` is off — and `RenderTier::Medium` sets exactly that.
+Measured: **0 of 4 000 instances** drawn. The purpose is an argument now (`PackPurpose::{Raster,
+Casters}`) at all six call sites. **MED-1:** `MIRROR-BEGIN scatter_mesh_buckets` has been written in
+both hosts since P18.5 and **no arm ever compared it** — and I8b put its whole PIE == shipping surface
+(the `extent` fold, the `(mesh, glow)` key, `glow_emissive`, `casts_shadows`) inside it. **MED-2:** the
+caster fold's allowlist says "eight fields, eight rows; a ninth breaks the literals" — I8b added the
+ninth, the literals broke, and the repair wrote `casts_shadows: true` into all eight. The compiler was
+satisfied and the allowlist was not. **MED-3:** "every collider is inside its own group's shell" — the
+sentence the caster clause rests on — was a **centre** test in **two** axes; it reads all eight corners
+on three now. **MED-4:** carried item 2 (a shell is never rasterized as geometry: `STRUCTURE_LOD_M`
+192 > `mesh_distance_m` 120, verified) gains a **tripwire** that asserts the defect. **MED-5:** this
+block and the memo stated two different runs of both frame tables as one measurement; aligned, with the
+spread. **MED-6:** the "+3.5 ms of LIT+VIS scatter" module price is a cross-run per-pass read taken
+with a 23.7 ms CPU record stage, in a column where `terrain` moved −2.005 ms with no terrain change;
+the SHIPPED +0.936 ms is the defensible bound. **THE BALCONY VERDICT: nothing's shadow vanishes** — no
+palette has geometry outside its shell (`Balcony` is a 2.4 m wall leaf, not a cantilever), `group_shell`
+is the exact support bound, panes sit inside wall voids, and post-HIGH-1 the shell casts a superset.
+What is lost is self-shadowing *inside* the silhouette; the named bound is the decoration tail, which
+`group_shell` cannot see. **AND THE LEDGER'S GPU TABLE OMITS ITS SECOND-DEAREST PASS**: `vsm-raster` at
+**6.083 ms**, 33.8 % of an 18.003 ms frame — the next wave's target is `scatter` 7.03 + `vsm-raster`
+6.08 = **13.1 of 18.0 ms in two passes**. Re-run at head: `SHIPPED` **23.548 ms (42.5 fps)**, `LIT+VIS`
+**30.749 ms (32.5 fps)**, pipelined **18.003 (55.5 fps)**, 111 370 casters / 0 dropped / 233 a
+rastering frame — the HIGH-1 repair costs nothing measurable. Counts after: battery **328 / 6 249 / 0 /
+19** (+3 arms, no new block), goldens **58** with `INF_GOLDEN_STRICT=1` green over 117 arms, rustdoc
+**374 over 30 crates** cold (the audit adds zero), clippy **0**, `fmt` clean, schemas all four unmoved,
+committed content unmoved. Full ledger in `docs/memos/island-progress.md`. 
