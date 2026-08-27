@@ -457,7 +457,7 @@ fn duty_of(v: Verb) -> Duty {
         Verb::Reload => Duty::Forced("R reloads"),
         Verb::OpenDoor => Duty::Forced("E opens the front door"),
         Verb::EnterDoorway => Duty::Forced("the hero walks through it"),
-        Verb::LockFromInside => Duty::Forced("E locks it from the inside"),
+        Verb::LockFromInside => Duty::Forced("E shuts it and L locks it from the inside"),
         Verb::KickIn => Duty::Forced("LMB kicks the locked gate in"),
         Verb::SprintCrash => Duty::Forced("a sprint breaches the shed door"),
         Verb::DiveThrough => Duty::Forced("a dive goes through the hatch"),
@@ -762,22 +762,26 @@ fn run_course(sim: RuntimeSim) -> Run {
         h.frame(&[], (0.0, 0.0), 0.0, &[]);
         rec(&mut h, &mut run);
     }
-    // **Two presses, with the swing between them.** E is one verb with two
-    // meanings on the lock side: an OPEN door shuts, a SHUT one locks — because
-    // a door you can lock is still a door you can walk through, and locking one
-    // that is standing open would be a lock nobody could see. So the script
-    // closes it, waits for the leaf, and locks it.
+    // **Two presses on TWO controls, with the swing between them** (island wave
+    // I8b). E always means open or close now, on either face — it used to take
+    // the lock verb on this one, which is how a character who shut the front
+    // door behind them could never open it again — and the bolt has its own key.
+    // The bolt still refuses an OPEN leaf, because a door standing open with its
+    // bolt thrown is a lock nobody can see, so the script must still close it
+    // first and wait for the swing.
     let mut presses = 0u32;
     let mut since = 0u32;
     for _ in 0..200 {
-        let close = true;
-        let ready = close && presses < 2 && since == 0;
+        let ready = presses < 2 && since == 0;
         let keys: &[&str] = if ready {
-            &["KeyE"]
-        } else if close {
-            &[]
+            // E shuts it, then L bolts it.
+            if presses == 0 {
+                &["KeyE"]
+            } else {
+                &["KeyL"]
+            }
         } else {
-            &["KeyW"]
+            &[]
         };
         if ready {
             presses += 1;
@@ -798,7 +802,7 @@ fn run_course(sim: RuntimeSim) -> Run {
     ));
     if run.seen.contains(&Verb::LockFromInside) {
         run.notes
-            .push("E locked the front door from the inside face".into());
+            .push("E shut and L locked the front door from the inside face".into());
     }
 
     // ── 8. Back out to the yard row and kick the locked gate in ──
