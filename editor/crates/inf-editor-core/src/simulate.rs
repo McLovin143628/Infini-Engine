@@ -362,6 +362,13 @@ pub struct SimSession {
     /// This step's crowd counters (NPC1a) — agents per sim-LOD tier, and what
     /// materialized or re-tiered. MIRROR of `RuntimeSim::crowd`.
     crowd: inf_ecs::crowd::CrowdStats,
+    /// The sim-LOD ladder's three radii, metres (NPC1a). MIRROR of
+    /// `RuntimeSim::crowd_radii`, and mirrored *because* it is an argument to
+    /// the one Ring-0 door both hosts call: a host that read a constant while
+    /// the other read a field would tier the same NPC differently the day a
+    /// level's crowd block set one. Defaults to
+    /// `inf_ecs::crowd::DEFAULT_CROWD_RADII` on both sides.
+    crowd_radii: (f64, f64, f64),
     /// The **simulation's own** voxel volumes, keyed by entity `Guid` (P21.2).
     ///
     /// Read by the `terrain.height_at` host seam so a character can stand on a
@@ -562,6 +569,7 @@ impl SimSession {
             fracture_audit: FractureAudit::default(),
             gameplay: inf_physics::d3::GameplayReport::default(),
             crowd: inf_ecs::crowd::CrowdStats::default(),
+            crowd_radii: inf_ecs::crowd::DEFAULT_CROWD_RADII,
             voxels: BTreeMap::new(),
         };
 
@@ -921,6 +929,41 @@ impl SimSession {
     pub fn fracture_audit(&self) -> FractureAudit {
         self.fracture_audit
     }
+
+    /// The most recent fixed step's crowd counters (NPC1a) — agents per sim-LOD
+    /// tier, plus what materialized, dematerialized and re-tiered. MIRROR of
+    /// `RuntimeSim::crowd_stats`.
+    pub fn crowd_stats(&self) -> inf_ecs::crowd::CrowdStats {
+        self.crowd
+    }
+
+    /// **Retune the sim-LOD ladder** (NPC1a) — `(full_m, near_m, far_m)`, and
+    /// the MIRROR of `RuntimeSim::set_crowd_radii`, refusing the same inputs for
+    /// the same reason.
+    ///
+    /// **Nothing calls this**, exactly like [`set_debris_budget`](Self::set_debris_budget)
+    /// above and like its twin on the shipped player — and it exists for a
+    /// reason the debris seam does not have. The player took the radii seam so
+    /// the N-sweep could price the ladder against an all-`Full` control; this
+    /// side had none, so the two hosts' crowd calls differed in an *argument*
+    /// while `projector_mirror` pinned only their ordering. Today that is
+    /// harmless (nothing sets radii, so both hosts run
+    /// `DEFAULT_CROWD_RADII`), and the day a level's crowd block arrives it
+    /// would have been a PIE-≠-shipping bug with no door on this side to fix it
+    /// through. One door per host, both defaulted the same way.
+    pub fn set_crowd_radii(&mut self, radii: (f64, f64, f64)) -> bool {
+        let (f, n, r) = radii;
+        if !(f.is_finite() && n.is_finite() && r.is_finite()) || !(f <= n && n <= r) {
+            return false;
+        }
+        self.crowd_radii = radii;
+        true
+    }
+
+    /// The ladder this session tiers with.
+    pub fn crowd_radii(&self) -> (f64, f64, f64) {
+        self.crowd_radii
+    }
     /// Seed the simulation's voxel volumes (P21.2), keyed by entity `Guid`.
     ///
     /// Each [`VoxelData`]'s anchor must already be its **world** anchor — the
@@ -1079,8 +1122,9 @@ impl SimSession {
         //    HERE, and not later: the physics sync below has to see this step's
         //    bodies (a `Far` agent has none), and `step_pose_evaluation` has to
         //    see this step's tiers. Inert on every level with no population.
-        //    (MIRROR of `RuntimeSim::fixed_step`.)
-        self.crowd = inf_ecs::crowd::step_crowd(doc.world_mut(), dt);
+        //    (MIRROR of `RuntimeSim::fixed_step`, radii included — the argument
+        //    is mirrored as well as the call, see `set_crowd_radii`.)
+        self.crowd = inf_ecs::crowd::step_crowd_banded(doc.world_mut(), dt, self.crowd_radii);
         // 1. ECS → physics.
         self.bridge.sync_from_world(doc.world());
         // ── P22.3 fracture follow ── an INTACT destructible is a normal

@@ -2497,14 +2497,17 @@ fn both_fixed_steps_tier_the_crowd_before_the_passes_that_read_a_tier() {
             src.find(needle)
                 .unwrap_or_else(|| panic!("the {label} fixed step does not call `{needle}`"))
         };
-        // No trailing paren, deliberately: the shipped player calls
-        // `step_crowd_banded` (it carries the level's own radii) and the editor
-        // calls `step_crowd`, and both are the same Ring-0 door. What this arm
-        // is about is WHEN the tier is decided, not which of the door's two
-        // spellings a host reaches for -- and the paren version of this needle
-        // went red the moment the player took the radii seam, which is the arm
-        // failing on a rename rather than on the property it names.
-        let crowd = at("inf_ecs::crowd::step_crowd");
+        // **The spelling is pinned again** (NPC1a audit), and with the paren.
+        // The wave's own version of this arm dropped it, because the player had
+        // taken the radii seam (`step_crowd_banded`) while the editor still
+        // called `step_crowd` -- i.e. the two hosts were passing *different
+        // arguments* to one door, which is a divergence the ordering assertion
+        // below cannot see and which becomes a PIE-!=-shipping bug the day a
+        // level's crowd block sets a radius. Both hosts now carry a mirrored
+        // `crowd_radii` field and both call the banded door, so the needle can
+        // be exact again -- and being exact is what makes it catch a host that
+        // quietly reverts to the constant-radii spelling.
+        let crowd = at("inf_ecs::crowd::step_crowd_banded(");
         let bridge = at("sync_from_world_sim(");
         let mover = at("step_character_movement(");
         let pose = at("advance_state_machines(");
