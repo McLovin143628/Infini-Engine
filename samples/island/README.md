@@ -65,7 +65,10 @@ World `(0, 0, 0)` is 49.343 N, 123.102 W, in UTM zone 10N. Remember the frame:
 else: the coastline (there is no island there), the sea shelf and the beaches,
 the seven settlement sites and their terraces, the road network, and the biome
 masks. **And what stands on the terraces is a RULE** (wave I8a): the level
-carries one `PcgVolume` per settlement block — 172 of them, 201 bytes each —
+carries one `PcgVolume` per settlement block — 172 of them, **206 bytes each**
+(the fixture's level grew 1 648 B for 8 blocks and nothing else; this island's
+34 597 B is that figure less the 835 B the re-derived water splines shed in the
+same commit, so 34 597 / 172 is an average and not the price of a block) —
 naming one of seven committed zone documents in `samples/settlement/`, and the
 streets, blocks, lots and buildings are derived from the sites and the road
 layer by `inf_editor_core::settlement`. Nothing about a settlement is committed

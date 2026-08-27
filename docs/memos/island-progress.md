@@ -11513,7 +11513,13 @@ of the cheap one would have decided the ruling on the wrong building:
 **THE VERDICT, and it is not the one the ruling expected.** *Furnish is not what
 costs.* Fully furnishing every resident block of the CI fixture's settlement
 moves the fixed step **6.348 → 7.011 ms** (+0.663, +10.4 %) on 21 453 → 23 860
-solids — while the *buildings themselves* are the other 6.3 ms. The wave ships
+solids — while the *buildings themselves* are the other 6.3 ms.
+*(I8a audit, MED-1: those two milliseconds are not reproducible — the arm runs a
+wall clock inside a **parallel** test binary and the same comparison re-read
++0.821/+0.915/+0.805 ms alone, **−0.690 ms** with the whole file running, on an
+identical world. The **counts** are exact on every machine and the verdict is
+re-founded on them; the battery now carries an A/A′ noise floor. See the audit
+ledger.)* The wave ships
 `furnishes(a)` = **House, Shop, Estate**: the archetypes a player walks into on
 foot, which are also the one-to-four-storey ones. The reasoning, stated so it can
 be overturned with a number: the step is already at 97.6 % of its ratchet on the
@@ -11654,7 +11660,17 @@ mechanisms, three different owners:
    32.1 to ~13.4 ms, which is inside the 16.6 ms budget on its own. Not taken
    here because it edits a projector body pinned **character for character**
    between two hosts by `projector_mirror`, and that is a slice of its own.
-2. **The GPU: 30.4 ms shipped / 49.8 lit, of which scatter is 9.2 / 19.5.** This
+   ***TAKEN BY THE I8a AUDIT*** (HIGH-1, `ScatterMemo`): projection **20.2 →
+   0.631 ms shipped / 21.2 → 0.720 lit**, inside the 1.5 ms budget; SHIPPED p50
+   **63.102 → 22.703 ms** and pipelined **32.057 → 11.740 (85.2 fps)**; LIT+VIS
+   p50 **106.221 → 64.923** and pipelined **55.931 → 33.295 (30.0 fps)**. The
+   routed ~13.4 was conservative. Post-fix tables in the audit ledger.
+2. **The GPU: 30.4 ms shipped / 49.8 lit, of which scatter is 9.2 / 19.5.**
+   *(I8a audit, MED-2: those numbers were taken from a run whose CPU was
+   saturated by cost 1, which is the wave's own I4b law applied to itself. With
+   the projection fixed the same flight reads GPU **11.740 shipped / 33.295 lit**
+   and scatter **3.626 / 13.323** — the mechanism below is real and its
+   magnitude was overstated by about 1.5×.)* This
    is the **path**, and it is the correction this wave makes to its own brief.
    The brief read *"the buildings are still cubes this slice, which is the cheap
    case"*. It is the **expensive** case: the settlements go through the P18.5 GPU
@@ -11710,9 +11726,12 @@ PERFORMANCE clause of that wave, not its fidelity clause** — see cost 2 above.
 **Carried, by name:**
 
 1. **≥ 60 fps p50 LIT+VIS is not met and the island is at 9.4 fps.** The
-   headline. Three costs, three mechanisms, all three above.
+   headline. Three costs, three mechanisms, all three above. *(I8a audit: after
+   HIGH-1 it is **15.4 fps p50 / 30.0 fps pipelined**. Still not met, and it is
+   still the headline.)*
 2. **The projection breaches `PROJECTION_BUDGET_MS` (1.5) at 20.2 ms**, with the
    fix and its price stated. This is the one an implementer can take tomorrow.
+   *(I8a audit: **CLOSED**, HIGH-1 — 0.631 ms shipped / 0.720 lit.)*
 3. **The settlement streets are a PLAN, not a surface.** They decide where the
    blocks are and they carry the join to the island road network; they are not
    drawn. The island's road mesh is draped at the *terrain's* pitch (1 m) because
@@ -11734,7 +11753,10 @@ PERFORMANCE clause of that wave, not its fidelity clause** — see cost 2 above.
    re-derived (a new channel crosses a route and there are no bridges).
 7. **The fixture's own settlement step is 6.348 ms**, over the ratchet, because
    its 120 m reservation packs four city-core blocks into one 64 m band. A
-   fixture is not a city.
+   fixture is not a city. *(I8a audit: nor is 6.348 a number — the same world
+   reads 8.1–8.2 ms with the arm alone and 10.7 ms with the file's other eleven
+   arms on other threads. What is over the ratchet is not in doubt; the figure
+   is. MED-1.)*
 8. **`inf island build`'s default output for the CI fixture lands INSIDE the
    tree** (`samples/island-fixture/project`), because that recipe's
    `[source] cache` is `tiles/` beside itself and the default out is
@@ -11749,7 +11771,7 @@ PERFORMANCE clause of that wave, not its fidelity clause** — see cost 2 above.
 
 | | before (`9f6e4689`) | **after I8a** |
 |---|---|---|
-| battery blocks / passed / failed / ignored | 328 / 6 211 / 0 / 19 | **328 / 6 228 / 0 / 19** — `cargo test --workspace -j 3`, **+17 arms and no new block**: every one lands in a target that already existed (11 in `inf-editor-core`'s `settlement.rs`, 1 in its `samples.rs`, 4 in `inf-player`'s `island_gate`, and one more the tally does not attribute, recorded as measured rather than claimed away — the I7b precedent) |
+| battery blocks / passed / failed / ignored | 328 / 6 211 / 0 / 19 | **328 / 6 228 / 0 / 19** — `cargo test --workspace -j 3`, **+17 arms and no new block**: every one lands in a target that already existed — **12** in `inf-editor-core`'s `settlement.rs`, 1 in its `samples.rs`, 4 in `inf-player`'s `island_gate`. (The wave's own line read "11 … and one more the tally does not attribute"; the audit counted the `#[test]` attributes and it is twelve, so the +17 is fully attributed and nothing is unaccounted.) |
 | goldens | 58 | **58** — none added, none re-blessed; `INF_GOLDEN_STRICT=1` green over **117 arms, 0 failed**, and `git status` over `tests/goldens` empty afterwards |
 | rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — `404 ^warning` lines minus 30 per-crate summaries, measured after `cargo clean --doc` (8 757 files, 214.5 MiB removed). **The wave adds zero**: no warning names `settlement.rs`. Headroom **76** |
 | `clippy --workspace --all-targets -D warnings` | 0 | **0** (local toolchain, run LAST per the rmeta law). **Four findings were cleared on the way and all four are this wave's own**, and one of them was a real hazard rather than a style note: `!(total > 0.0)` in the zone pick is a *negated* comparison on a partially-ordered type, and the obvious rewrite `total <= 0.0` is **false for a NaN** — a table carrying one would have fallen through into `u * NaN < acc` and answered the last entry. The guard is `!is_finite() \|\| <= 0.0` now and two arms drive it |
@@ -11788,8 +11810,423 @@ PERFORMANCE clause of that wave, not its fidelity clause** — see cost 2 above.
 * **A stair core is full of stairs.** "No solid is here" aimed at a stairwell
   measures the treads. Ask reachability of the stair and standability of the
   room.
-* **CUBES ARE THE EXPENSIVE CASE.** The brief assumed placeholder geometry was
+* **CUBES ARE THE EXPENSIVE CASE.** *(I8a audit: **13.3 ms** after HIGH-1, not
+  19.5 — the law holds and the number was taken through this wave's own
+  projection defect. MED-2.)* The brief assumed placeholder geometry was
   cheap and real geometry dear. Measured, it is the other way round: 365 545
   wall-sized boxes through a foliage path with no occlusion culling cost 19.5 ms
   of GPU, where the same buildings as meshlets would go through a two-pass HZB
   cull the engine already ships. A placeholder is only cheap when it is *small*.
+
+
+## Wave I8a — the adversarial audit (2026-08-27)
+
+Range `9f6e4689..9f1e2bf3`, six commits, on a clean tree. **One HIGH, six MED,
+eight LOW.** The HIGH and all six MEDs are fixed with arms behind them; the LOWs
+are corrected in place above or carried by name. Nothing in the wave was
+reverted, and **not one of the wave's five clauses was found to be false at the
+level it was measured**.
+
+**The wave's arithmetic is sound and its content reproduces exactly.** Every
+zoning count, every refusal count, every street kilometre, every doorway,
+storey and flight, the road-join measurement, the 123-step byte-identical walk
+and the whole of clause 2's committed-water re-derivation re-ran to the printed
+digit — several of them off the committed files alone, with no build in the
+loop. The mutation the wave claims (delete the settlement volumes, re-bless,
+watch six of `island_gate`'s twelve arms die) reproduces as **exactly six**,
+including all four of the wave's own.
+
+**What the audit found is that the wave's headline is measured through its own
+defect.** Cost 1 — the projection — was named, priced and routed rather than
+taken, and the orchestrator ruled it into this audit's scope. Taking it moves
+the island from **9.4 to 15.4 fps p50 LIT+VIS** and from **17.9 to 30.0 fps
+pipelined**, closes the `PROJECTION_BUDGET_MS` breach outright (20.2 → 0.63 ms),
+and — the part the wave could not have known — **re-prices cost 2 as well**: the
+GPU per-pass split the wave hands I8b was taken while its own CPU was saturated,
+and the same flight over identical content now reads GPU 33.3 ms rather than
+49.8, scatter 13.3 rather than 19.5.
+
+**And two of the wave's numbers are not numbers.** The fixed-step millisecond
+the furnish verdict rests on is a wall clock running inside a test binary whose
+other eleven arms are executing on other threads; the same comparison over an
+identical world reads +0.663, +0.821, +0.915, +0.805 and **−0.690** ms depending
+on what else is running. The counts it also prints are exact everywhere, and the
+verdict is re-founded on those.
+
+### HIGH-1 — the projection rebuilt 365 545 instances a frame, and the fix was in scope
+
+*Fixed; `AUDIT1`.* The wave's own cost 1, named with its mechanism and its price
+and routed rather than taken. The orchestrator ruled it into this audit.
+
+`push_pcg_scatter` re-packs a volume's whole population on every projection:
+every `ScatteredInstance` into f32 render space, every packed byte through xxh3
+to derive the content key — which then tells the GPU cache that nothing changed.
+It is exactly the shape Hardening Wave E found in the terrain and voxel payloads
+(*"what no consumer could do is stop the payload from being **built**"*), and the
+settlements are the first content large enough for it to decide a frame:
+**365 545 instances, 20.182 ms shipped / 21.179 ms lit against a 1.5 ms
+`PROJECTION_BUDGET_MS`.**
+
+**The memo, and why it is not the obvious one.** `RenderScene::scatter_memo`
+holds the batches each memoizable source contributed last projection and OWNS
+them, so there is no list running parallel to `scatter` that can fall out of step
+with it — the scene's list is filled from the memo by `Arc` clone, which copies a
+pointer and a few scalars per batch and not one instance. The projection takes
+the memo out at the top of the walk and re-fills it as it goes; what is left at
+the end is exactly the scatter that **left** the scene, which is the terrain
+memo's own arrangement and the reason a removal is seen.
+
+**The key is `ScatterSource`, and every field of it is a way the payload can
+change without the population moving**: the volume's `Guid`; its
+`structures_gen`; the **authored** `draw_distance` (which the population stamp
+does not cover, and which decides both LOD bands, so an author dragging it in the
+Details panel must re-pack); `scatter_table_stamp` over the host's resolved mesh
+table (which decides which bucket each instance packs into — and which the editor
+rebuilds every projection); and the world **anchor** (the packed offsets are
+relative to it, so carrying a batch whose anchor moved would translate the whole
+population).
+
+**AND THE STAMP WAS NOT SOUND TO KEY ON.** `PcgVolume::structures_gen` was a
+per-component `wrapping_add(1)`, so the **first write of every volume in the
+world was `1`**. Both consumers key their memo by the volume's `Guid`, and a cell
+deactivation destroys the component while a reactivation builds a fresh one under
+the same guid — whose first write is `1` again, over ground that may have been
+re-paged in between. Same guid, same stamp, different content: a stale hit, and
+the *common* case rather than an exotic one, because `evaluate_pcg_volumes_in`
+calls `set_population` exactly once per activation.
+
+This repository already states the rule the fix needs, one field over: the
+physics bridge's *terrain-tile* stamp is documented as *"a **process-global
+monotone counter** minted on every mutating touch … which is exactly what a
+retention stamp needs"*. `structures_gen` now draws from `NEXT_STRUCTURES_GEN`,
+an `AtomicU64` starting at 1, with `0` still meaning "never written". Its only
+production reader compares it for equality and is unaffected; what changed is
+that **nothing may read it as a count**, and the three unit assertions that did
+(`== 1`, `== 2`, `== 3`) now assert that it moved and that a *reincarnated*
+component never lands on a stamp its predecessor used. The physics bridge gets
+the same guarantee for free — its own `retain` on disappearance only saves it
+because a gather runs between two projections, and on the render path multiple
+sim steps run between two frames.
+
+**The mirror pin moves, with its purpose stated** (the `apply_record_mirror`
+precedent). `carry_or_push_pcg_scatter` is a new mirrored free function with a
+`MIRROR-BEGIN/END pcg_scatter_memo` fence, character-identical in both hosts (507
+chars, whitespace-stripped), and `projector_mirror`'s new
+`both_projectors_memoize_pcg_scatter_the_same_way` pins it. `fenced` was hoisted
+out of the structure-LOD arm rather than copied — two nested readers of one
+delimiter is how two fences come to be read by two rules. The arm makes three
+claims and each is separately falsifiable, which is the `apply_record_mirror`
+audit's own lesson that an equality pin cannot see a field deleted from *both*
+copies: the fenced bodies are equal; each of the five key fields is *named*; and
+`push_pcg_scatter(` appears exactly four times in each host, read through the
+comment stripper.
+
+**Mutation-verified, six ways.** On the pin: dropping `stamp:` from the player's
+key fails the equality (1); replacing the editor's `carry_or_push_pcg_scatter(`
+call with a direct `push_pcg_scatter(` fails the door count (3); replacing the
+player's `std::mem::take` with a `clone` fails the take assertion (2). On the
+memo: a `ScatterMemo::take` that compares only `source.entity` leaves the
+carry-forward arm **green** and fails both falsifiers —
+`a_carried_scatter_still_sees_a_new_population` and
+`a_reincarnated_volume_never_serves_the_old_population`.
+
+**Three new arms in `projection_budget.rs`, on their own fixture.** They do not
+grow `fixture()`, deliberately: `projection_stays_under_budget` pins a RATCHET,
+and a ratchet re-measured over a different world is a ratchet nobody minted. The
+hit arm asserts the carried batch list `==` the cold one **and** that each
+`Arc` is pointer-identical — `ScatterData::key` would have made the two *equal*
+either way, which is exactly why it asserts the pointer. Measured on that fixture
+(20 020 instances, dev profile): **cold 2.713 ms, carried 0.008 ms.**
+
+### MED-1 — the fixed-step millisecond is measured inside a parallel test binary
+
+*Fixed (a noise floor and a re-founded verdict); `AUDIT2`.*
+
+`the_furnish_battery_prices_a_city_block_at_island_scale` separates its A and its
+B by one variable and by a stretch of wall clock — and the wall clock runs inside
+a test binary whose **other eleven arms are executing on other threads**.
+`cargo test` runs a file's tests concurrently and nothing here asks it not to.
+
+Measured, over an identical world of 21 453 solids:
+
+| regime | as shipped | fully furnished | delta |
+|---|---|---|---|
+| the wave's own run | 6.348 ms | 7.011 ms | **+0.663** |
+| this arm ALONE, three runs | 8.231 / 8.116 / 8.192 | 9.052 / 9.031 / 8.997 | +0.821 / +0.915 / +0.805 |
+| the whole file running | 10.693 ms | 10.003 ms | **−0.690 — the opposite sign** |
+
+The step itself moves 6.3 → 10.7 ms across those regimes with nothing about the
+engine or the world different, so **neither the delta nor the step is a fact
+about the engine**, and the wave's carried item 7 ("the fixture's own settlement
+step is 6.348 ms, over the ratchet") states a figure that is 8.1 alone and 10.7
+under load. That it is over the ratchet is not in doubt; the number is.
+
+The arm now measures the shipped configuration **twice with nothing changed
+between them** and prints `|A' − A|` as that run's own noise floor beside
+`B − A'`, saying in words whether the difference is one — *"a difference"* or
+*"INSIDE the floor, i.e. no measurement at all"*. Isolated it reads a 0.389 ms
+floor against a +1.195 ms cost. And the verdict `furnishes = House | Shop |
+Estate` is re-founded on the half a machine cannot move: the **counts**
+(21 453 → 23 860 solids, 1.11×, and the per-archetype 1.07–1.43× the battery
+already prints), which are the same integers on every machine.
+
+### MED-2 — the GPU split handed to I8b was measured under HIGH-1's own defect
+
+*Corrected in place with the post-fix numbers.*
+
+The wave's cost 2 is *"the GPU: 30.4 ms shipped / 49.8 lit, of which scatter is
+9.2 / 19.5"*, and it is the number I8b's brief is re-framed around. It was taken
+from a run whose CPU frame was 63 ms — which is the wave's own restatement of
+I4b's law (*"read the per-pass GPU split WITHIN a run and not across the two …
+two different device states"*) applied to everything except its own conclusion.
+
+With the projection fixed and the **content identical** (69 batches, 365 545
+instances, 192 terrain tiles, 14 virtual textures — printed by both runs), the
+same flight reads:
+
+| | wave I8a | after HIGH-1 |
+|---|---|---|
+| `SHIPPED` GPU frame / scatter / terrain | 30.404 / 9.202 / 15.788 | **11.740 / 3.626 / 5.787** |
+| `LIT+VIS` GPU frame / scatter / terrain | 49.834 / 19.490 / 15.977 | **33.295 / 13.323 / 11.081** |
+
+A GPU that spends most of a frame waiting on a starved CPU does not hold its
+clocks, so a per-pass GPU millisecond taken in that state is inflated — about
+1.5× here. **The mechanism the wave found is real and its magnitude was
+overstated**: `scatter` is still the dearest pass in the frame — ahead of
+`terrain` at 11.081 and of everything else by a factor of five (`gi` is 2.622) —
+cubes are still the expensive case, and the number I8b should carry is **13.3 ms
+of LIT+VIS scatter**, not 19.5.
+
+### MED-3 — the brace-import fix could not see a brace import that WRAPS
+
+*Fixed; `AUDIT2`.* The wave's own headline defect in clause 1 was that the
+committed-design allowlist took the identifier after `inf_island::` and stopped,
+so `use inf_island::{A, B};` recorded nothing. The fix reads a brace group **to
+the `}` on the same line** — and the form `rustfmt` produces the moment an import
+list is long enough to wrap still recorded nothing:
+
+```text
+use inf_island::{
+    IslandDesign, Route, Site, SiteKind, sample_terrain,
+};
+```
+
+The first line's `{` opens a group with nothing after it and the following lines
+never say `inf_island::` at all. That is not hypothetical: `settlement.rs`'s own
+import is four names and 48 characters, and the fifth door anybody adds wraps it
+— i.e. the hole was one line down from where the wave closed it, in the exact
+place the next author will stand. A group now stays open across lines until its
+`}`, every name in it is recorded against the line the group **opened** on, and
+both modules' anti-vacuity probes drive the wrapped form.
+
+### MED-4 — the scan follows one spelling, and a rename walks past it
+
+*Fixed by refusal; `AUDIT2`.* The extractor is an allowlist over what it can
+read, and what it can read is the literal `inf_island::`. `use inf_island as
+isl;` — or `use inf_island::sample_terrain as h;` — renames the door and the
+whole gate goes quiet. There is no cheap way to follow an alias without parsing,
+so the alias is **refused**: `island::scan::aliases` flags `use` lines that
+rename anything in the crate, both arms assert it is empty, and the probe checks
+that `inf_island::clamp(x as i32)` is not mistaken for one. A module authored
+from committed design alone has no reason to want an alias, and a refusal is a
+rule an author meets immediately rather than a hole nobody meets at all.
+
+### MED-5 — a door's own prompt promises a verb its handler does not offer
+
+*Doc corrected; the behaviour carried by name.*
+
+The wave's finding — *"a door pressed from the LOCK SIDE while shut and unlocked
+LOCKS rather than opens"* — is true, is deliberate, and is pinned by
+`a_sprint_through_an_unlocked_door_leaves_a_lock_that_still_works`. What the wave
+did not follow through is that `door_label`'s own comment says the opposite:
+*"the lock verb … is offered **alongside** the open/close rather than instead of
+it, because a door you can lock is still a door you can walk through."* Read
+`use_door`'s branch order: from the lock side, a **shut** leaf takes the lock
+verb whatever its bolt is doing, so pressing E from inside cycles
+lock → unlock → lock and **never opens**. A character who closes the front door
+behind them cannot open it again from that side — which wave I8a is the first
+wave to make a thing a player can actually do, 2 070 doorways at a time.
+
+The comment is corrected to say what the code does, and the behaviour is
+**carried**: giving the two verbs separate inputs is a gameplay change and not an
+audit's. It is not in the wave's carried list and it should be.
+
+### MED-6 — the editor's copy of the scatter projector documents the band the I3 audit deleted
+
+*Fixed.* `push_pcg_scatter` is pinned by a fence that starts **inside** the
+function body, so the two hosts' doc blocks are free to drift, and they had: the
+player's carries the parts/shells table and the `reach` paragraph, while the
+editor's still said *"the parts take `[0, lod)` and the shells take
+`[lod, draw_distance)`"* — the complementary-cut arrangement the I3 audit found
+leaves a hole through the back of every building and replaced with `lod + reach`.
+A reader of the editor's copy is told the engine does the thing an audit already
+proved wrong. Brought forward.
+
+### The LOW list
+
+1. **The battery tally did not attribute its own +17** — *"11 in `settlement.rs`
+   … and one more the tally does not attribute"*. Counting `#[test]` attributes
+   it is **twelve**, and the seventeen are fully accounted. Corrected in place.
+2. **`samples/island/README.md` prices a settlement block at 201 bytes** where
+   the ledger and the ROADMAP say 206. 201 is `34 597 / 172`, i.e. an average
+   that includes the −835 B the re-derived water splines shed in the same commit.
+   Corrected in place, with the arithmetic beside it.
+3. **The shipped island's terrain is 549.9 MB, not 342.7.** The wave restated
+   I7's figure in new prose (`island_gate`'s own module doc and the settlement
+   gate's header); wave TER2b's detail band moved it. Re-measured off
+   `build.report.summary()` and corrected in the three live comments that carry
+   it; the dated I7 tables are left as the record of what was true then.
+4. **`refused_off_land` is 0 on both islands**, so the coastline refusal — one of
+   the wave's two headline proofs — is exercised only by a synthetic fixture and
+   never by committed data. Carried; the proof is sound and the arm is honest
+   about being a proof rather than a sample.
+5. **`a_reprojection_is_byte_identical_to_a_cold_one` compared the scatter list
+   by LENGTH**, over a fixture with no scatter in it — doubly vacuous on the one
+   list a memo was about to be built for. Now covered by
+   `a_carried_scatter_is_the_same_payload_and_is_not_re_packed`, which compares
+   the batches and the pointers over a fixture that has some.
+6. **The walk's 123 steps are 123 `set_hero` teleports**, one fortieth of the
+   approach each. The doc says *"one step at a time, so the trace is a walk and
+   not a teleport"*, which is true of the *trace* and not of the locomotion. The
+   claim the gate makes — two hosts fold identical bytes over a scripted path —
+   does not need physical locomotion, and nothing rests on it. Carried.
+7. **MED-3's open-group reader could be opened by a struct literal**, not only by
+   an import: `inf_island::BuildOptions {` at the end of a line would put the
+   following lines' fields through the name recorder and the arm would fail
+   naming `a: 1`. Neither module writes one today (every `inf_island::` in
+   `island.rs`'s scanned code is a path, and the only brace after one is a
+   function signature's), and the failure is **loud and immediate** rather than
+   silent — which is the safe direction for a scan. Restricting the open to
+   `use` lines is four characters and is carried rather than taken, because the
+   battery below was already running when it was found and a scan is not worth a
+   second one.
+8. **The 172 block seeds are 32-bit and the gate asserts they are distinct.**
+   The collision probability for this design is ~3e-6, but the failure mode of a
+   collision is *two blocks that look alike* — cosmetic — and the gate treats it
+   as fatal. A future recipe that draws one would go red for a coincidence.
+   Carried by name.
+
+### What reproduced, off the committed files and off a rebuild
+
+Every one of these was re-derived rather than read back from the wave's prose.
+
+| claim | verified |
+|---|---|
+| zoning per settlement, 172 blocks, 208 refused off-pad, 0 off-land, 60.88 km | the arithmetic closes: HC 6+2+13+13+9+5+4 = 52, Eastgate 52, towns 16/16/12/12/12; refusals 48+48+20+20+24+24+24 = 208; street 20.88+19.80+4.28+4.28+3.88+3.88+3.88 |
+| the grid's own geometry | HC r=600 → buildable 580, reach 5, **100 candidate cells = 52 + 48**; Eastgate 100 = 52 + 48; towns 36 = 16 + 20 and 36 = 12 + 24. Streets: 9 lines × 2 × 1 160 m = 20.88 km, and so on for all seven |
+| the four accepted rings | corner distances {110, 230, 350, 470, 590} m against 580 give ring counts 4 / 12 / 20 / 16 = **52**, and `industrial_min_ring(3) = 2` makes 36 blocks eligible → `min(4, 36/4)` = **4 Industrial** |
+| "about 1 800 buildings" | 1 814 by the wave's own per-archetype lot table |
+| committed water, re-derived | `streams.geojson` **51 features, 25 878.3 m = 25.88 km**; `lakes.geojson` **2 features, 84 736 m² = 0.0847 km²**; at `9f6e4689` **50 / 26.318 km** and **0.070784 km²**. Every figure in clause 2's table, from the files alone |
+| the island build | land 40.65 km², peak 948.7 m, shore 25.14 km, 51 streams / 25.88 km, 2 lakes / 0.0847 km², 33 waterfalls, **urban 7.2 %**, **drift 0.00 % / 0.00 %**, roads **5 of 2 442 over, worst 0.108** |
+| the real island's fixed step | **5.673 ms**, 17 823 bodies, **17 289** admitted, **58 582** pairs (**2 055** touching); `physics3d sync` 48.1 %, `solver` 31.0 %, `gameplay` 13.2 % |
+| enterability | 42 buildings / 120 storeys / 78 flights / **2 070 doorways**; 852 of 1 297 (**65.69 %**) and 446 of 773 (**57.70 %**) banded; by zone Hotel 4 + Office 8 + Shop 6 and House 18 + Shop 6 |
+| the settlement gate | **123 steps, 123 DISTINCT states, byte-identical**, both hosts finding the same door guid, the same prompt to the centimetre and the same 3.60 m storey |
+| the `is_open` walk | 1 297 doorways over 4 resident blocks, **22.6 µs near / 22.8 µs far** (the wave read 21.3 / 21.8) |
+| the road join | 22 endpoints inside all 7 settlements, worst **2.000 m** against a 16 m reserve |
+| the mutation | deleting the settlement volumes and re-blessing kills **exactly six of twelve** `island_gate` arms — all four new ones, the 900-step drive and the biome-binding arm |
+| the committed library | 7 `.inf_pcg` of **1 349–1 363 B**, `samples/settlement/` **11.9 KB**, fixture level 8 342 → **9 990 B** (+1 648 = 8 × 206), island 15 028 → **49 625 B** (+34 597 = 172 × 206 − 835) |
+
+### THE POST-FIX FRAME TABLES
+
+RTX 4070 Ti, Windows/Vulkan, **release**, 1080p, MIN of 3 rounds × 120 frames,
+the same 40 m-high flight east from Harbour City the wave flew. "Wave I8a" is the
+wave's own run of the same arm on the same machine; the content counts are
+identical between the two runs, which is what makes them comparable at all.
+
+**`SHIPPED` — the configuration that ships.**
+
+| | wave I8a | **after HIGH-1** |
+|---|---|---|
+| p50 / p95 | 63.102 / 67.855 ms (15.8 fps) | **22.703 / 24.607 ms (44.0 fps)** |
+| GPU frame | 30.404 ms | **11.740 ms** |
+| `scatter` | 9.202 ms | **3.626 ms** |
+| `terrain` | 15.788 ms | **5.787 ms** |
+| **cpu projection** | **20.182 ms** | **0.631 ms** — inside the 1.5 ms budget |
+| cpu sim fixed step | 8.070 ms | 6.292 ms |
+| cpu render (record) | 3.695 ms | 3.416 ms |
+| cpu poll (GPU wait) | — | 12.422 ms |
+| **pipelined estimate** | 32.057 ms (31.2 fps) | **11.740 ms (85.2 fps)** |
+
+**`LIT+VIS` — everything on.**
+
+| | wave I8a | **after HIGH-1** |
+|---|---|---|
+| p50 / p95 | 106.221 / 131.490 ms (**9.4 fps**) | **64.923 / 79.619 ms (15.4 fps)** |
+| GPU frame | 49.834 ms | **33.295 ms** |
+| `scatter` | 19.490 ms | **13.323 ms** |
+| `terrain` | 15.977 ms | **11.081 ms** |
+| **cpu projection** | **21.179 ms** | **0.720 ms** |
+| cpu render (record) | 23.336 ms (`vsm raster` 16.5) | 23.689 ms (`vsm raster` **16.673**) |
+| cpu sim fixed step | 11.303 ms | 8.275 ms |
+| **pipelined estimate** | 55.931 ms (17.9 fps) | **33.295 ms (30.0 fps)** |
+| content | 69 batches / 365 545 instances | **69 / 365 545 — unmoved** |
+
+The other three: `LIT` 107.399 → **63.176**, `LIT+SSR` 106.887 → **65.202**,
+`LIT-COARSE-CLIPMAP` 108.659 → **63.719**.
+
+> **≥ 60 fps p50 `LIT+VIS` is STILL NOT MET.** 64.923 ms against 16.6. The wave's
+> headline stands; it is 15.4 fps rather than 9.4, and the pipelined estimate is
+> 30.0 fps rather than 17.9.
+
+**AND THE HAND-OFF TO I8b CHANGES SHAPE.** With the projection out of the way the
+frame has two costs and neither is the one the wave routed:
+
+1. **The GPU, 33.295 ms**, of which `scatter` **13.323** and `terrain` **11.081**.
+   The wave's mechanism is intact — 365 545 wall-sized opaque boxes through the
+   P18.5 *foliage* raster with no occlusion cull behind it — and its magnitude is
+   MED-2's correction: 13.3 ms, not 19.5. Cubes are still the expensive case.
+2. **The CPU record stage, 23.689 ms, of which `vsm raster` is 16.673 (70.4 %)**
+   — and this is now the single dearest thing the CPU does in a lit frame. The
+   instrument says why: **7 831 552 casters, every one of them scattered**, 17.7 M
+   dropped, 27 470 pages cleared over the run. The settlements do not only draw
+   through the un-culled foliage path; they *cast* through it into the virtual
+   shadow map. Whatever I8b does about `push_pcg_scatter`'s raster it has to do
+   about `vsm_raster`'s caster list, and the two are the same instance list.
+
+The fixed step is unchanged and inside its ratchet (**5.673 ms** against 6.0,
+re-measured — the wave read 5.853 with the same 17 289 admitted colliders and
+58 582 contact pairs).
+
+### Counts, after the audit
+
+| | wave I8a | **after the audit** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 328 / 6 228 / 0 / 19 | **328 / 6 232 / 0 / 19** — `cargo test --workspace -j 3`, **+4 arms and no new block**: three in `inf-player`'s `projection_budget` (the carry, and its two falsifiers) and one in `inf-editor-core`'s `projector_mirror` (the memo pin) |
+| goldens | 58 | **58** — none added, none re-blessed; `INF_GOLDEN_STRICT=1` green over **117 arms, 0 failed**, and `git status` over `tests/goldens` empty afterwards |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — 404 `^warning` lines minus 30 per-crate summaries, measured after `cargo clean --doc` (8 788 files, 215.0 MiB removed). **The audit adds zero.** Headroom **76** |
+| `clippy --workspace --all-targets -D warnings` | 0 | **0** (local toolchain, run LAST per the rmeta law) |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved.** `PcgVolume::structures_gen` is `#[serde(skip)]`, so changing where it draws its value from reaches no byte of any format; `RenderScene` and `ScatterBatch` are render-side and are serialized nowhere |
+| committed levels (`EXPECTED_LEVELS`) | 23 | **23** |
+| committed content | — | **unmoved** — the whole `samples/` diff of this audit is one paragraph of `island/README.md`; the two `.inf_lvl`s were re-blessed under the mutation and restored byte-for-byte (`git diff -- samples/` shows only the README) |
+| new crates / external dependencies | none | **none**; `Cargo.lock` unmoved |
+| frontend | untouched | **untouched and not run** (`git diff -- editor/studio` is empty) |
+
+### The laws this audit paid for
+
+* **A retention stamp must be process-global, or "the same guid" is not the same
+  thing.** `PcgVolume::structures_gen` counted per component, so the first write
+  of every volume was `1` — and a streamed world destroys and rebuilds a volume
+  under its own guid every time a cell cycles. This repository already had the
+  rule written down one field over, on the physics bridge's terrain-tile stamp;
+  the PCG stamp was the one that had not read it.
+* **A memo must OWN what it remembers.** A list running parallel to the thing it
+  indexes is the `StructureGroup` hazard one subsystem over: `set_population`
+  exists because a range that outlives its list names somebody else's walls. The
+  scatter memo holds its own batches and the scene's list is filled from it.
+* **A wall clock inside a parallel test binary measures the test runner.** The
+  same comparison over an identical world read +0.663, +0.821, +0.915, +0.805 and
+  **−0.690** ms. `cargo test` runs a file's arms concurrently, and an A-then-B
+  measurement with no A′ cannot tell a cost from its neighbours.
+* **A per-pass GPU millisecond taken while the CPU is the bottleneck is
+  inflated.** The wave restated I4b's law and then read its own hand-off to the
+  next wave through the defect it was routing. Identical content, 1.5× the
+  number.
+* **A hole moves one line down.** Reading a brace group to the `}` *on the same
+  line* closed the form the author wrote and left the form `rustfmt` writes —
+  which is the form the next door added to that module will take.
+* **An allowlist over one spelling is a ban list wearing an allowlist's name.**
+  Following an alias needs a parser; refusing one needs four lines.
+* **A prompt that promises a verb its handler does not offer is a defect even
+  when the handler is correct.** `door_label` said "alongside"; `use_door` means
+  "instead of". The behaviour is deliberate and pinned; the sentence was not.

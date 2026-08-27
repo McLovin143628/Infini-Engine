@@ -27393,4 +27393,40 @@ mesh's 517 086 vertices. Routed beside I8b's sidewalk/kerb item.
 or re-blessed and `INF_GOLDEN_STRICT=1` green over 117 arms, rustdoc **374 over 30 crates** cold
 (the wave adds zero; headroom 76), clippy **0**, `fmt` clean, `EXPECTED_LEVELS` **23**, schemas all
 four unmoved, **no new crate or external dependency** (one new Ring-1 module, `Cargo.lock` unmoved),
-frontend untouched and not run (`git diff -- editor/studio` is empty). 
+frontend untouched and not run (`git diff -- editor/studio` is empty).
+
+**THE I8a ADVERSARIAL AUDIT (2026-08-27).** **One HIGH, six MED, eight LOW**; the HIGH and all six
+MEDs fixed with arms, nothing reverted, and **no clause found false at the level it was measured**.
+Every zoning count, refusal count, street kilometre, doorway, storey and flight re-derived — several
+off the committed files with no build in the loop (`streams.geojson` is **51 features / 25 878.3 m**
+and `lakes.geojson` **2 / 84 736 m²**, against **50 / 26 318 m** and **70 784 m²** at the base commit,
+so clause 2's whole drift table checks from git alone); the island rebuild reproduced land 40.65 km²,
+peak 948.7 m, shore 25.14 km, **urban 7.2 %**, **drift 0.00 % / 0.00 %** and roads **5 of 2 442 over,
+worst 0.108**; and the wave's own mutation (delete the volumes, re-bless) kills **exactly six of
+`island_gate`'s twelve arms**. **HIGH-1: the projection defect was TAKEN** (the orchestrator's scope
+ruling). `RenderScene::scatter_memo` + `ScatterSource` carry a volume's packed batches forward on the
+Hardening-Wave-E pattern, and `PcgVolume::structures_gen` — a **per-component** counter, so every
+volume's first write was `1`, and a cell cycle rebuilds a volume under its own guid — now draws from
+a **process-global** monotone atomic, which is the rule this repository already states for its
+terrain-tile stamp. Result, on identical content: projection **20.182 → 0.631 ms** shipped and
+**21.179 → 0.720** lit against a 1.5 ms budget; `SHIPPED` p50 **63.102 → 22.703 ms (15.8 → 44.0 fps)**
+and pipelined **32.057 → 11.740 (85.2 fps)**; `LIT+VIS` p50 **106.221 → 64.923 (9.4 → 15.4 fps)** and
+pipelined **55.931 → 33.295 (30.0 fps)**. **≥ 60 fps p50 LIT+VIS is still NOT met**, and the frame's
+two remaining costs are the GPU (33.3 ms, `scatter` 13.3) and the **`vsm raster` record stage at
+16.673 ms over 7 831 552 scattered casters** — a sharper hand-off to I8b than the one the wave wrote.
+**MED-1: the fixed-step millisecond is a wall clock inside a PARALLEL test binary** — the same
+comparison over an identical world reads +0.663 / +0.821 / +0.915 / +0.805 and **−0.690 ms**
+depending on what else is running, so the furnish verdict is re-founded on the **counts**
+(21 453 → 23 860 solids, 1.11×) and the battery now prints an A/A′ noise floor. **MED-2: the GPU
+split the wave handed I8b was measured under HIGH-1's own defect** (49.8 → 33.3 lit, scatter
+19.5 → 13.3) — the mechanism is real, the magnitude was ~1.5× over. **MED-3/4: the brace-import fix
+could not see a brace import that WRAPS** (the form `rustfmt` writes, i.e. the one the next door
+added to `settlement.rs` will take), and the scan follows one spelling, so an alias is now
+**refused**. **MED-5: `door_label` promises the lock verb is offered "alongside" the open/close and
+`use_door` offers it instead** — from the lock side a shut door cycles lock/unlock and never opens,
+so a character who shuts the front door behind them is in. Deliberate, pinned, and the comment was
+wrong; carried by name. **MED-6:** the editor's `push_pcg_scatter` doc still described the
+complementary `[0, lod)` parts band the I3 audit replaced. Counts after: battery **328 / 6 232 / 0 /
+19** (+4 arms, no new block), goldens **58** with `INF_GOLDEN_STRICT=1` green over 117 arms, rustdoc
+**374 over 30 crates** cold (the audit adds zero), clippy **0**, `fmt` clean, schemas all four
+unmoved, committed content unmoved. Full ledger in `docs/memos/island-progress.md`. 

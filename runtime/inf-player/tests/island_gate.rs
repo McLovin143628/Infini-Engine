@@ -2,8 +2,10 @@
 //!
 //! # What this gate is and what it is not
 //!
-//! It runs the **CI-scale island**, because the shipped one's terrain is 342.7 MB
-//! and is not committed. Everything else is the shipped path: the same recipe
+//! It runs the **CI-scale island**, because the shipped one's terrain is 549.9 MB
+//! and is not committed (342.7 MB was wave I7's figure; wave TER2b's detail band
+//! moved it, and the I8a audit re-measured it off `build.report.summary()`).
+//! Everything else is the shipped path: the same recipe
 //! format, the same scene generator, the same `.inf_terrain`, the same
 //! partition, the same water and the same biome binding — so a change that
 //! breaks the island breaks this.
@@ -1781,7 +1783,7 @@ fn the_scattered_cover_draws_its_authored_meshes() {
 // whether a player can walk in through one and go upstairs.
 //
 // It runs on the CI-scale fixture for the same reason the drive above does — the
-// shipped island's terrain is 342.7 MB and is not committed — and it measures a
+// shipped island's terrain is 549.9 MB and is not committed — and it measures a
 // SHIPPED-ISLAND city block directly where the block's own size is what is being
 // priced (the fixture's reservations take the town's 76 m grid; a Harbour City
 // core block is 100 m, and a battery about a city block has to be about one).
@@ -2739,6 +2741,22 @@ fn the_furnish_battery_prices_a_city_block_at_island_scale() {
     }
     let shipped_solids = resident_solids(&sim).len();
     println!("FIXED STEP at {} (release asserts nothing here — this REPORTS, on this module's own law that a millisecond is a fact about the machine):", plan.name);
+    // **THE SAME CONFIGURATION, TWICE, BEFORE ANYTHING IS CHANGED** (island wave
+    // I8a audit). This arm's `A` and `B` are separated by one variable and by a
+    // stretch of wall clock, and the wall clock is running **inside a test binary
+    // whose other eleven arms are executing on other threads** — `cargo test`
+    // runs a file's tests concurrently, and nothing here asks it not to.
+    //
+    // Measured: this same comparison read **+0.663 ms** in the wave's own run,
+    // **+0.821 / +0.915 / +0.805 ms** in three runs of this arm ALONE, and
+    // **−0.690 ms** — the opposite sign — in a run of the whole file. The step
+    // itself read 6.348, 8.1–8.2 and 10.693 ms in those three regimes over an
+    // identical world of 21 453 solids.
+    //
+    // So the first measurement is repeated with nothing changed between them,
+    // and `|A' − A|` is printed beside `B − A'` as this run's own noise floor. A
+    // difference inside the floor is not a measurement, and a reader who is
+    // handed one number cannot tell.
     let (shipped_ms, shipped_prof) = step_profile_of(&mut sim, 60, 90);
     print_step(
         "as shipped",
@@ -2747,6 +2765,16 @@ fn the_furnish_battery_prices_a_city_block_at_island_scale() {
         shipped_solids,
         &sim,
     );
+    let (control_ms, control_prof) = step_profile_of(&mut sim, 10, 90);
+    print_step(
+        "as shipped (again)",
+        control_ms,
+        &control_prof,
+        shipped_solids,
+        &sim,
+    );
+    let floor = (control_ms - shipped_ms).abs();
+    println!("  NOISE FLOOR: the same configuration twice differs by {floor:.3} ms");
 
     // …and again with every resident block's population replaced by the fully
     // furnished one, through the same door the host writes it with.
@@ -2821,10 +2849,17 @@ fn the_furnish_battery_prices_a_city_block_at_island_scale() {
         furnished_solids,
         &sim,
     );
+    let cost = furnished_ms - control_ms;
     println!(
-        "  {replaced} volume(s) swapped; furnishing costs {:+.3} ms a step \
-         ({:.2}x the solids)",
-        furnished_ms - shipped_ms,
+        "  {replaced} volume(s) swapped; furnishing moves the step {cost:+.3} ms \
+         against a {floor:.3} ms noise floor — {}. **The COUNT is the half a \
+         machine cannot move**: {shipped_solids} -> {furnished_solids} solids \
+         ({:.2}x), and that is what the `furnishes` verdict rests on",
+        if cost.abs() > floor * 2.0 {
+            "a difference"
+        } else {
+            "INSIDE the floor, i.e. no measurement at all"
+        },
         furnished_solids as f64 / shipped_solids.max(1) as f64
     );
     println!("LOAD: build + cook of the whole fixture project took {build_ms:.0} ms against a {LOAD_BUDGET_MS} ms load budget");
@@ -2839,7 +2874,7 @@ fn the_furnish_battery_prices_a_city_block_at_island_scale() {
     // a wall clock. What IS asserted is the solid count, which is the same
     // integer everywhere.
     assert!(
-        shipped_ms.is_finite() && furnished_ms.is_finite(),
+        shipped_ms.is_finite() && control_ms.is_finite() && furnished_ms.is_finite(),
         "the step clock produced no number"
     );
 }
