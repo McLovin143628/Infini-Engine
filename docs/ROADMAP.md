@@ -27098,7 +27098,8 @@ shared vertex buffer for the frame), and the impostor is at least *sized* off th
 `MAX_SCATTER_MESH_TRIANGLES` (4 096) lives in Ring 0 so both hosts refuse the same content. **The
 audit's tripwire went red in the strongest form it named** — its two struct literals stopped
 *compiling* — and is replaced by `the_scattered_cover_draws_its_authored_meshes`, which cooks the
-island, drives the shipping sim until the cover scatters and projects it through `project_scene_full`:
+**fixture** island (`island_gate`'s own recipe, not `samples/island` — corrected by the TER2b audit),
+drives the shipping sim until the cover scatters and projects it through `project_scene_full`:
 **14 643 instances → 3 batches → 3 distinct geometry uploads** (grass tuft 32 tri / r 0.338 m, shrub
 20 / 0.754, rock 128 / 0.328), against **1 placeholder batch** under an empty table, which is the
 pre-TER2b engine exactly. `veg_digest` folds the mesh GUID now.
@@ -27111,9 +27112,12 @@ libm ban list and this writes committed bytes. **No recipe field, priced before 
 v2 → v3 refuses every committed recipe on disk — for three numbers that are a pure function of two the
 recipe already states. `UPSAMPLE_ADVISORY_RATIO` is one constant with two readers so the advisory and
 the band cannot disagree. **Four exclusions, every one a fade** (shore band, road corridor, stream
-channels, site pads) on a `t·t·(3−2t)` ramp, because a hard mask edge is a crease along every road.
-Measured on the CI fixture: **362 636 of 599 076 samples** took relief in a 6.22–24.89 m band over 3
-octaves, mean **0.060 m**, worst **1.315 m** against a 1.5 m ceiling, excluding 213 984 water / 7 535
+channels, site pads) on a `t·t·(3−2t)` ramp, because a hard mask edge is a crease along every road —
+**two of the four were cuts until the TER2b audit fixed them** (the mask indices' *reach* was the
+feature's own half-width, so the query answered `None` one micron out and the ramp never ran).
+Measured on the CI fixture, after that repair: **362 636 of 599 076 samples** took relief in a
+6.22–24.89 m band over 3 octaves, mean **0.059 m** (0.060 before it), worst **1.315 m** against a
+1.5 m ceiling, excluding 213 984 water / 7 535
 corridor / 1 647 channel / 13 274 pad. Every fixture arm holds — byte-identity green, shoreline
 **0.0038 m** from the waterline, start gap **0.008 m**, frozen step order at ten — and one is new:
 `grade_audit` runs *inside* the Roads step, so the report's audit could not have seen a leaking mask,
@@ -27179,3 +27183,85 @@ added or re-blessed and all three `GOLDEN_SET_DIGEST` pins unmoved, `INF_GOLDEN_
 eaten-`\` gate green at **31** catches, schemas **all four unmoved**, no new crate or external
 dependency, committed content unmoved, frontend untouched and not run
 (`git diff -- editor/studio/src` is empty). Ledger in `docs/memos/island-progress.md`.
+
+## Wave TER2b — the adversarial audit (2026-08-26)
+
+Range `17c47da6..9513c3ca`, four commits, clean tree. **Two HIGH, three MED, seven LOW**; both HIGHs
+and all three MEDs fixed with arms behind them, the LOWs corrected in place or carried by name,
+nothing reverted. Every frame number, coverage percentage and fixture count in the wave re-ran and
+reproduced. What the audit found is **two seams in the ground the detail stage writes**, both of
+which clause 1's own prose says cannot be there.
+
+**HIGH-1 — two of the four "fades" are CUTS.** `segment_weight` ramps `0 → 1` over
+`[half, 2·half]` and reads `SegmentIndex::nearest`'s `None` as *"far away, take all the detail"* —
+and the build handed it indices whose **reach IS the half-width**, so the query answers `None` one
+micron past the mask and the ramp's input never leaves the interval where the ramp is zero. Measured
+on the world at a 7 m corridor over a 20° ramp: **0.0000 m of relief at 7 m and 0.1274 m at 8 m**,
+where the ramp asks for 0.007 — an arbitrary fBm draw times the *full* modulated amplitude, along
+every road in the design and every stream bed. Fixed by `detail::fade_reach_m`, one function with the
+rule in its name; the carve keeps its own half-width index, which is the right reach for levelling
+ground. `apply_detail` `debug_assert!`s the invariant, so a build that regresses the reach fails in
+every CI leg. Mutation-verified in both directions inside one arm (the defect kept as its control)
+plus a `should_panic` arm on the guard, because the defect lived in the **wiring**. Fixture cost:
+the exclusion counts and the worst displacement do not move at all; the mean falls 0.060 → 0.059 m.
+
+**HIGH-2 — a shared tile edge took two different displacements.** The wave's carried item 5 called
+the cross-border slope feedback *"fractions of a millimetre"*. It is **0.382 m on a 20° slope and
+0.498 m on 35°** — three orders of magnitude out, and a **crack in the committed heightfield**:
+adjacent tiles share a row (`tile_span = (res − 1)·mps`), so one metre of ground is stored twice, and
+the one-pass walk computed the second copy's amplitude off a neighbour it had already displaced.
+On the island that is 1 512 shared edges × 257 samples = **388 k duplicated samples** free to
+disagree. The render half is largely hidden by the ≥ 1 m skirt — which is why nothing caught it —
+but `height_at` resolves a boundary to the `+X/+Z` tile, so the **ground query** and the per-tile
+heightfield colliders step by up to half a metre as a character crosses a tile line. Fixed by making
+`apply_detail` two passes over one settled ground: pass one settles the **rim** (the only samples
+whose central difference leaves the tile) while nothing has moved, pass two spends those answers and
+computes interiors, which cannot reach out of their tile at all. Mutation-verified: forcing pass two
+to recompute the rim fails `a_shared_tile_edge_takes_one_displacement` by name.
+
+**MED-3 — a cited pin that could not fail.** `detail::slope_deg_at` said it was "pinned against"
+`splat::slope_deg_at` by a test that never called it and asserted only that a 30° ramp measures 30°.
+`splat::slope_deg_at` is `pub(crate)` now and the arm compares **both** over every sample of two
+tiles, rim included, `to_bits`-equal. **MED-4 — a doc comment slid onto the wrong function**: clause
+0 inserted `sync_scatter_meshes` *between* `sync_vt_bindings`'s forty-line header and
+`sync_vt_bindings`, so the P26.4/P26.5 finding became a wave-TER2b scatter walk's documentation and
+the function it was written about had none. **MED-5 — the editor's negative cache was discarded every
+projection**: the live-asset audit keyed on the resolved table rather than on what the instances
+*named*, so a scatter kind past `MAX_SCATTER_MESH_TRIANGLES` re-opened and re-decoded its `.inf_mesh`
+on every document version — once per input event during a gizmo drag.
+
+**The LOWs**, all corrected in place: `run_pie` named the three closed instances of the placeholder
+class and not the open fourth (written there now, with the no-schema-move route); the recipe-bump
+pricing was in `detail.rs` and the memo and **not** on `RECIPE_SCHEMA_VERSION`, where the next bump
+will look; "a flat plain gets fifteen centimetres" is **10.5 cm** (the biome multiplier applies too)
+and measures 0.086 m; "this stage fills that band" fills **one octave of the 1.64** the upsample
+opens, because the finer half would alias; the `MIRROR-BEGIN scatter_mesh_buckets` fence has no
+reader (harmless — `push_scatter` is already compared whole — and carried); "14 643 instances over
+the real cooked island" is the **fixture** island; and the +10-arm target list names `inf-render`,
+which gained none.
+
+**Carried with a measurement rather than an argument.** *Inland lakes are not in the exclusion
+list*: a lake is inside the coastline with its bed above sea level, so the shore fade is fully open
+and designed relief is written into a bed the design has already put water on. Measured: the
+fixture's lake is **1.389 m deep** and its shallowest bed sample finishes **0.572 m under the
+surface** — nothing pokes through, and the margin is smaller than the stage's own 1.5 m ceiling.
+Armed by `no_lake_bed_rises_above_its_own_water_surface` rather than fixed, because a fifth exclusion
+moves committed bytes. Also carried: the density raise is paid at **every** ring (the thresholds did
+not move), and the two hosts build their scatter-mesh tables from different questions (the player's
+set is a superset of the editor's).
+
+**Counts after the audit**: battery **328 / 6 211 / 0 / 19** (+5 arms, no new block — the wave's own
+6 206 confirmed by subtraction), goldens **58** with none added or re-blessed and the 13-image
+blessing claim reproduced-and-reverted (exactly 13, exactly the 13 named),
+`INF_GOLDEN_STRICT=1` green over 58, rustdoc **374 over 30 crates** (the audit's own repairs added
+three in `inf-island`, which had never had one, and they are fixed), clippy **0**, `fmt` clean, the
+eaten-`\` gate green at **31** with no thirty-second in the range or in the audit's own edits, the
+`inf-island` libm-ban table green over 13 and red a **third** time on the audit's own repair, schemas
+all four unmoved, no new dependency, `samples/` untouched (the real-island probe ran `dry_run`).
+Frame tables re-run on the repaired tree, which shows the repairs cost nothing: `SHIPPED` p50
+**6.323 ms**, GPU **2.670**, terrain **2.077** at 77.8 % of it; `LIT+VIS` p50 **14.502 ms (69.0 fps)**,
+GPU **9.580**, terrain **3.130**, scatter **0.141** in **3** batches over **16 771** instances and
+**14** virtual textures. And the real island's own detail line, which no wave had printed:
+**37 675 364 of 51 782 416 samples** took relief in a 3.11–6.23 m band over 2 octaves, mean
+**0.093 m**, worst **1.493 m** — 99.5 % of the stage's own 1.5 m ceiling, where the CI fixture only
+reaches 1.315. Ledger in `docs/memos/island-progress.md`. 

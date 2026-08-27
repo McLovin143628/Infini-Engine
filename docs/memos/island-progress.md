@@ -10380,7 +10380,7 @@ visible from its own ledger. The three pieces of ground cover TER2a authored,
 byte-locked and cooked were **not drawn** — the wave shipped 16 771 tinted cubes
 and its own audit said so. And the ground under six metres was not merely coarse
 but **empty**: a z15 terrarium pixel is 3.11 m at 49.34 N, a raster at that pitch
-cannot represent a feature shorter than 6.22 m, and every metre below that line
+cannot represent a feature shorter than 6.23 m, and every metre below that line
 was a bilinear plane through four survey samples.
 
 Both are closed. The cover draws its authored meshes, the empty band carries
@@ -10499,7 +10499,7 @@ apart.
 `source.upsampled` advisory has said since wave I7 that detail below the source
 pitch is "interpolation plus whatever the design puts there". The precise shape
 of that interpolation is bilinear, and bilinear interpolation of a 3.11 m raster
-contains **nothing** between 2 m (the world grid's own Nyquist) and 6.22 m (the
+contains **nothing** between 2 m (the world grid's own Nyquist) and 6.23 m (the
 source's). `DetailBand::of` takes the two pitches the plan already carries and
 answers a base wavelength at the source's Nyquist, a finest octave that never
 crosses the grid's, and an octave count arrived at **by halving** — `log2` is on
@@ -10536,19 +10536,37 @@ ramp so the derivative a shading normal reads is continuous at both ends.
 *committed* routes because it runs before the planner, the detail stage from the
 *final* ones, which differ exactly when `--replan-roads` moved them.
 
+> **CORRECTED BY THE AUDIT (HIGH-1).** Two of the four were **cuts** as this wave
+> shipped them: `SegmentIndex::new`'s second argument is the index's *reach*, and
+> the build passed the corridor's and the channel's own half-widths — so
+> `nearest` answered `None` one micron past the mask, `segment_weight` read that
+> as "take all the detail", and the ramp's input never left the interval where
+> the ramp is zero. **0.0000 m of relief at 7 m from a corridor centreline and
+> 0.1274 m at 8 m**, where the ramp asks for 0.007. Fixed by
+> `detail::fade_reach_m`; the paragraph above is true now. Two callers, **two
+> reaches**, and the carve keeps the half-width.
+
 The amplitude is `1.5 m × (0.10 + 0.90 · slope_ramp(3°..35°)) × biome × mask`, so
 a ploughed field takes a quarter of what an alpine scree face does and a flat
-plain still gets fifteen centimetres of undulation — a dead-flat plain being the
-one thing real ground never is.
+plain still gets **ten and a half centimetres** of undulation — a dead-flat plain
+being the one thing real ground never is. (Fifteen in the first draft: the
+`biome` term applies to a plain too, and its least-specific arm is 0.7. Measured
+peak on a flat two-tile fixture: **0.086 m**, because a two-octave fBm does not
+reach its own bound.)
 
 **Measured on the CI fixture** (a 2 m grid over a 12.45 m z13 pixel — a 6.22×
-upsample, so a wider band than the shipped island's):
+upsample, so a wider band than the shipped island's), after the audit's two
+repairs:
 
 ```
 [   detail] 362636 of 599076 samples took designed relief in a 6.22..24.89 m band
-           (3 octaves); mean 0.060 m, worst 1.315 m; excluded 213984 water,
+           (3 octaves); mean 0.059 m, worst 1.315 m; excluded 213984 water,
            7535 corridor, 1647 channel, 13274 pad
 ```
+
+The wave's own line read `mean 0.060 m` and is otherwise identical to the digit:
+restoring the fade band is the whole difference, and it moves nothing else —
+which is the shape a mask repair should have.
 
 **Every fixture arm holds, and one is new.** `two_builds_of_one_recipe_produce_the_same_terrain`
 is green — the stage is a pure function of `(seed, band, world position)` and its
@@ -10571,7 +10589,7 @@ and the finest no finer than the grid's (that would be aliasing) — and reads t
 worst displacement out of the ledger line rather than re-deriving it, because
 what the ledger prints is what a reader trusts.
 
-**The advisory says what it now means**: *"a feature shorter than 6.22 m is not
+**The advisory says what it now means**: *"a feature shorter than 6.23 m is not
 in the survey at all and everything below it is DESIGNED detail: the carve, the
 road corridors, the stream channels, and the fBm detail band the `detail` step
 writes into exactly that gap. It is not survey, and it is no longer bilinear
@@ -10585,6 +10603,12 @@ workspace's eaten-`\` gate fired **twice** on this wave's own scripted edits, in
 runs of eighteen spaces inside user-facing literals, both from a non-raw Python
 string eating the Rust continuation. The remedy is the one the gate's own doc
 gives: `chr(92)` or an unquoted heredoc, and neither of these two used one.
+
+*And a third time for the libm table, inside the audit's own repair*: the first
+draft of `a_shared_tile_edge_takes_one_displacement` printed its ramp angle as
+`grad.atan().to_degrees()` in an assertion message, and `inf-island`'s table
+reads test lines too. Caught on the first battery, before a single number was
+written down. The arm carries gradients and their degrees as a pair now.
 
 ### Clause 2 — the mesh reaches the survey
 
@@ -10769,6 +10793,10 @@ again and named the same way).
    here rather than taken because this wave's slice closed at three clauses.
    `pie_equals_shipping_on_an_island_drive` is unaffected and green — it compares
    **simulation** state, and its vegetation fold now carries the mesh GUID.
+   **Named at `run_pie` since the audit** (LOW-1): the three comments closing
+   P21.4, P24.1 and P26.4 sit on consecutive lines there and the open fourth was
+   not among them, and that function is the one place a reader looks to find out
+   which of the class are shut.
 4. **The scatter proxy: impostors, the CPU fallback and cascade shadow casters
    still draw a cube.** All three bind one shared vertex buffer for the whole
    frame, so a per-batch mesh does not fit in them; the fix is a shared scatter
@@ -10810,12 +10838,16 @@ again and named the same way).
    2.0) while the renderer draws terrain to the horizon. TER2a's routed item 4,
    untouched: now that the cover is real geometry rather than cubes, the edge is
    more visible, not less.
-5. **The detail band's slope term reads a tile's neighbours across a border after
-   the neighbour may already have been written.** Within a tile the walk is
-   read-then-write, so a tile's own detail cannot feed its own slope; across a
-   border it can, by the amount a soft 32°-wide amplitude ramp moves — fractions
-   of a millimetre. Stated on `apply_detail` rather than hidden, and the
-   byte-identity arm is green either way because the tile walk is sorted.
+5. ~~**The detail band's slope term reads a tile's neighbours across a border
+   after the neighbour may already have been written.** … by the amount a soft
+   32°-wide amplitude ramp moves — fractions of a millimetre.~~
+   **STRUCK BY THE AUDIT (HIGH-2), AND IT WAS NOT A FRACTION OF A MILLIMETRE.**
+   Measured at **0.382 m on a 20° slope and 0.498 m on 35°** — a crack in the
+   committed heightfield, because adjacent tiles *share* a row of samples and the
+   two copies took different displacements. `apply_detail` is two passes now: the
+   rim is settled for every tile before any tile is written, so both copies of a
+   shared sample are computed from identical neighbourhoods and are identical to
+   the bit. Armed by `a_shared_tile_edge_takes_one_displacement`.
 6. **Thirteen goldens move under a blessing run and none is re-blessed**, because
    every one is inside the strict tolerance. The next wave that touches terrain
    shading will move them out of it, and that will be a stated-purpose re-bless.
@@ -10828,7 +10860,7 @@ again and named the same way).
 
 | | before (`17c47da6`) | **after TER2b** |
 |---|---|---|
-| battery blocks / passed / failed / ignored | 328 / 6 196 / 0 / 19 | **328 / 6 206 / 0 / 19** — **+10 arms** and **no new block**: every one lands in a target that already existed (`inf-island`'s lib and its fixture, `inf-player`'s lib and its `island_gate`, `inf-render`'s lib) |
+| battery blocks / passed / failed / ignored | 328 / 6 196 / 0 / 19 | **328 / 6 206 / 0 / 19** — **+10 arms** and **no new block**: every one lands in a target that already existed — seven in `inf-island`'s lib (`detail.rs`), one in its fixture, two in `inf-player`'s lib (`scatter_mesh.rs`), and `island_gate` nets zero by replacing its tripwire. (The first draft of this row also listed `inf-render`'s lib, which gained no arm: it re-blessed `cells_halve_per_lod` and grew a derived assertion *inside* it — TER2b audit LOW.) |
 | goldens | 58 | **58** — none added, **none re-blessed**, and that is a *measurement*: a blessing run moves **13** terrain-bearing images and every one is inside the strict tolerance. `git diff 17c47da6..HEAD -- crates/inf-render/tests/goldens` is empty |
 | `GOLDEN_SET_DIGEST` pins | `07cc8ae8…` ×3 | **`07cc8ae8…` ×3, unmoved** — the digest is over content, and no content moved |
 | `INF_GOLDEN_STRICT=1` | green over 58 | **green over 58** (117 arms in the golden target, 0 failed), and `git status` over `tests/goldens` is empty afterwards |
@@ -10881,3 +10913,383 @@ the ROADMAP.
 * **"The gate is green" and "nothing moved" are different claims.** Thirteen
   goldens move under this wave and the strict gate cannot see any of them.
   Blessing and reverting is how that was learned, and it cost one run.
+
+---
+
+## Wave TER2b — the adversarial audit (2026-08-26)
+
+Range `17c47da6..9513c3ca`, four commits, on a clean tree. **Two HIGH, three MED,
+seven LOW.** Both HIGHs and all three MEDs are fixed with arms behind them; the
+LOWs are corrected in place above or carried by name. Nothing in the wave was
+reverted, and none of the three clauses' headline claims was found to be false at
+the level it was measured.
+
+**The wave's arithmetic is sound and its measurements reproduce.** Every frame
+number, coverage percentage and fixture count re-ran to the printed decimal, the
+VT-pool and triangle-ceiling prices check out against the code they cite, and the
+wave's two self-corrections — that a millisecond cost does not travel between
+configurations, and that thirteen goldens move under a blessing run the strict
+gate cannot see — are the kind this campaign exists to produce.
+
+**What the audit found is two seams in the ground the detail stage writes.** One
+runs along every road and every stream bed; one runs down every tile border. Both
+are things clause 1's own prose says cannot be there, and one of them the wave's
+carried list quantified at a **thousandth** of its measured size.
+
+### HIGH-1 — every mask is called a fade and two of the four were CUTS
+
+*Fixed; `21922f2a`.*
+
+Clause 1's design sentence: *"Four exclusions, and every one is a fade. A hard
+mask edge is a visible crease, and a crease along every road is worse than no
+detail at all."* The road corridor and the stream channels were hard cuts.
+
+`segment_weight` ramps `0 → 1` over `[half, half·(1+FADE_WIDTHS)]` and reads a
+`None` from `SegmentIndex::nearest` as **"far away, take all the detail"**. The
+build handed it `SegmentIndex::new(&lines, corridor_half)` and
+`channel_index(&streams, widest)` — and that second argument **is the index's
+reach**. So the query answers `Some` out to exactly the half-width and `None` one
+micron later, the ramp's input never leaves `[0, half]`, where the ramp is
+identically zero, and the weight steps `0 → 1` in a single sample.
+
+Measured on the world rather than argued — a 7 m corridor across a 20° ramp on a
+1 m grid, displacement read out of the finished tile:
+
+| distance from the centreline | relief written | what the ramp asks for |
+|---|---|---|
+| 7.0 m | **0.0000 m** | 0.000 |
+| 8.0 m | **0.1274 m** | 0.007 |
+| 10.0 m | 0.4320 m | 0.126 |
+| 14.0 m | 0.1286 m | 0.129 |
+
+The step at the mask edge is an arbitrary fBm draw times the **full** modulated
+amplitude — up to `MAX_AMPLITUDE_M` on steep ground — repeated along every route
+in the design and every stream bed. The index's own probe shows the mechanism
+directly: `reach_m = 7`, `Some(7.000)` at seven metres, `None` at 7.001.
+
+**Fixed** by `detail::fade_reach_m`, one function with the rule in its name. The
+detail stage's two indices are built through it and the **carve keeps its own at
+the half-width**, which is the right reach for levelling ground and is exactly
+why the two cannot share one index — so `corridor_index` is still one door, and
+its two callers now differ in *both* arguments rather than one. `apply_detail`
+`debug_assert!`s the invariant for both indices, and every CI leg builds the
+fixture island in `dev`, so a build that regresses the reach fails loudly.
+
+Mutation-verified in both directions inside one arm:
+`a_mask_index_must_answer_past_the_fade_or_the_fade_is_a_cut` builds **both**
+indices and keeps the defect as its control — `0.0` at the half-width and `1.0`
+one metre later — then walks the fixed one in centimetres and demands no step
+above 0.01. Beside it, `a_short_corridor_index_is_refused_rather_than_cut` is a
+`should_panic` arm on the guard itself, because the defect lived in the *wiring*
+and a rule with no wiring check is how it got there.
+
+Cost to the fixture: the exclusion counts do not move at all (213 984 water,
+7 535 corridor, 1 647 channel, 13 274 pad — identical), the worst displacement
+does not move (1.315 m), the sample count does not move (362 636 of 599 076), and
+the mean falls **0.060 → 0.059 m**. Restoring a fade band should move the mean and
+nothing else, and it did.
+
+### HIGH-2 — a shared tile edge took two different displacements
+
+*Fixed; `21922f2a`.*
+
+The wave's carried item 5: *"across a border it can, by the amount a soft 32°-wide
+amplitude ramp moves — **fractions of a millimetre**."*
+
+It is **0.382 m on a 20° slope and 0.498 m on a 35° one** — three orders of
+magnitude out, and not a rounding remark but a **crack in the committed
+heightfield**.
+
+The note has the mechanism right and the magnitude wrong. Adjacent tiles *share* a
+row of samples (`tile_span = (res − 1) · mps`), so one metre of ground is stored
+twice. The one-pass walk wrote tile A, then computed tile B's rim amplitude from a
+central difference reading A — now displaced by up to the full amplitude one metre
+away, which moves the measured slope by tens of degrees, which moves `shape` from
+0.10 toward 1.0, which multiplies the amplitude by up to seven. The two copies of
+one sample then disagree by most of an amplitude.
+
+On the island that is **784 tiles, 1 512 shared edges, 388 k duplicated samples**,
+every one free to disagree. The *visual* half is largely covered by the skirt —
+`max(|hmax − hmin|, 0.05·span, 1 m)`, always at least a metre, which is why
+nothing caught it by looking — but `TerrainData::height_at` resolves a boundary to
+the `+X/+Z` tile, so the **ground query** steps by up to half a metre as a
+character crosses a tile line, and the per-tile heightfield colliders carry the
+same step.
+
+**Fixed** by making `apply_detail` two passes over one settled ground. Pass one
+computes the **rim** — `is_rim`, the only samples whose central difference leaves
+the tile, because an interior sample at `i = 1` reads `i = 0` and `i = 2` and both
+are its own — for every tile while nothing has moved. Pass two computes the
+interiors, which cannot reach out of their tile at all, and spends pass one's
+answers. Both copies of a shared sample are therefore computed from identical
+neighbourhoods and are identical to the bit. The refactor lifts the per-sample
+decision into one `outcome_at`, so a sample computed in one pass and spent in
+another cannot be counted twice in the stats.
+
+Mutation-verified: forcing pass two to recompute the rim — the one-pass engine
+exactly — fails `a_shared_tile_edge_takes_one_displacement` by name, at 0.0179 m
+on the *gentlest* of its four ramps. The arm carries its own anti-vacuity half:
+the stage must have moved that fixture by more than the tolerance it then demands
+zero of. The "fractions of a millimetre" sentence is replaced by the measurement,
+on `apply_detail` itself.
+
+### MED-3 — a cited pin that could not fail, and never called what it named
+
+*Fixed; `21922f2a`.* `detail::slope_deg_at`'s header said the two slope rules "are
+pinned against each other by `tests::the_slope_rule_agrees_with_the_splat_walk`".
+That test never called `splat::slope_deg_at`. What it asserted is that a 30° ramp
+measures 30°, which is a fact about `patan2_64` that the splat walk is not needed
+for and **cannot** falsify — the TER2a-audit law (*a cited gate that does not
+exist is worse than no claim*) met inside the wave that quotes it.
+
+`splat::slope_deg_at` is `pub(crate)` now, with the reason on it, and the arm
+compares **both** implementations over every sample of two tiles — 162 samples,
+rim included, `to_bits`-equal — which is where the two differ most (`splat` reads
+its own tile's buffer for interior samples and `height_at` across a border;
+`detail` goes through `height_at` for all four). The old assertions are kept as
+its tail.
+
+### MED-4 — a doc comment slid onto the wrong function
+
+*Fixed; `f7605ced`.* Clause 0 inserted `sync_scatter_meshes` **between**
+`sync_vt_bindings`'s forty-line doc comment and `sync_vt_bindings` itself. It
+compiles, rustdoc renders it, nothing warns — and the P26.4/P26.5 finding
+(*"nothing in the codebase ever cleared the binding set"*, with the two tests that
+now hold it) became the header of a wave-TER2b scatter walk, while the function it
+was written about was left undocumented.
+
+Put back, with a line saying what happened, because a doc block that slides is
+silent in a way a moved function is not.
+
+### MED-5 — the editor's negative cache was thrown away every projection
+
+*Fixed; `f7605ced`.* `sync_scatter_meshes`'s own doc says the loads "happen once
+each, because `resolve_scatter_geometry` caches its misses as well as its hits".
+It does — and the live-asset audit two hundred lines later read
+`self.scatter_meshes.keys()`, which holds only the **hits**, so `retain_only`
+evicted every miss on the very projection that took it.
+
+The consequence lands on the wave's own carried item 7: a scatter kind naming a
+prop past `MAX_SCATTER_MESH_TRIANGLES` re-opened and re-decoded that `.inf_mesh`
+on **every document version**, which during a gizmo drag is once per input event.
+The audit is keyed on what the instances *named* now (`scatter_wanted`) — the
+question rather than the answer.
+
+### The LOWs, corrected in place
+
+1. **`run_pie` names three closed gaps and not the open fourth.** The wave's
+   loudest carried item — *a windowed PIE session still draws the cover as
+   placeholder cubes, the fourth instance of the class P21.4 / P24.1 / P26.4 each
+   closed* — was in the memo and the ROADMAP and **not at `run_pie`**, where the
+   three comments closing the other three sit on consecutive lines and where a
+   reader goes to find out which are open. Written there now, with the
+   no-schema-move route and with why the PIE gate cannot see it.
+2. **The recipe-bump pricing was not where the next recipe bump will look.**
+   Clause 1's best decision — v3 refuses every committed recipe because the check
+   is exact equality and there is no migrate function — lived in `detail.rs`'s
+   module doc and in the memo. It is on `RECIPE_SCHEMA_VERSION` now, with the rule
+   the next author needs: *bump it when a recipe must state something it cannot
+   derive, and add a migrate function in the same commit, or the bump is a
+   breaking change wearing a version number.*
+3. **"A flat plain still gets fifteen centimetres."** It gets **10.5 cm**:
+   `AMPLITUDE_FLOOR_FRACTION × MAX_AMPLITUDE_M` is 0.15 m and then
+   `biome_amplitude`'s `_` arm — which every unclassified sample takes —
+   multiplies by 0.7. Measured peak on a flat two-tile fixture: **0.086 m**,
+   because a two-octave fBm does not reach its own bound.
+4. **"This stage fills that band" fills one octave of the 1.64 it names.** The
+   empty band is 2 m → 6.23 m; octaves halve from 6.23 and stop before crossing
+   the grid's Nyquist, so 3.11 m → 2 m stays exactly as empty as it was. Filling
+   it would be aliasing, and
+   `the_island_band_runs_from_the_sources_nyquist_to_the_grids` is the arm that
+   refuses it. The module doc states the bound now.
+5. **The `MIRROR-BEGIN scatter_mesh_buckets` fence has no reader.**
+   `projector_mirror` compares two tags by fence (`pcg_scatter_lod`,
+   `pcg_shell_batch`) and this is not one of them. Nothing is lost — the whole
+   `push_scatter` body is already compared by `extract_fn`, which is strictly
+   stronger — but a fence that looks like a pin and is not is the shape this
+   campaign keeps paying for. Carried rather than fixed: the remedy would compare
+   something already compared.
+6. **"14 643 instances → 3 batches … over the real cooked island."** It is the
+   **fixture** island: `island_gate::build_project` loads the fixture recipe, not
+   `samples/island/island.toml`. The memo's own table says "the fixture island"
+   and is right; the ROADMAP block read as the 51 km² one and now says which.
+7. **The +10-arm target list names a crate that gained none.** The count is right
+   — `git diff` over the range adds exactly ten `#[test]`s: seven in `detail.rs`,
+   one in the fixture, two in `scatter_mesh.rs`, and `island_gate` nets zero by
+   replacing its tripwire. The parenthetical also listed `inf-render`'s lib, which
+   added no arm: it re-blessed `cells_halve_per_lod` and grew a derived assertion
+   *inside* it.
+
+### Carried by name, with a measurement rather than an argument
+
+1. **Inland lakes are not in the exclusion list.** The four exclusions name the
+   *sea*. A lake is inside the coastline with its bed well above sea level, so
+   `is_land` is true, the shore fade is fully open, and designed relief is written
+   into a bed the design has already put water on. Measured on the fixture: the
+   one lake is **1.389 m deep** and its shallowest bed sample finishes **0.572 m
+   under the surface** — nothing pokes through today, and the margin is *smaller*
+   than the stage's own 1.5 m ceiling. A shallower lake, or a bed the classifier
+   calls alpine (full amplitude rather than 0.7 of it), grows an island the design
+   never drew. Not fixed, because a fifth exclusion moves committed bytes;
+   **armed** by `no_lake_bed_rises_above_its_own_water_surface`, which asserts the
+   right outcome and prints the margin. The day it goes red the fix is the lake's
+   own outline and level, on exactly the sea's rule.
+2. **The density raise is paid at every ring, not only at ring 0.**
+   `lod_thresholds` is a function of the tile span and `TERRAIN_LOD_SCALE` alone,
+   so the ring radii did not move and every ring took four times the triangles —
+   which is what the 22.6 % is. "Ring 0 at 64 with the rings pulled in" is a
+   different way to spend the same budget and was not measured.
+3. **The two hosts build their scatter-mesh tables from different questions.**
+   The player enumerates `.inf_pcg` documents and takes every GUID their kinds
+   name; the editor walks the evaluated instances and takes the GUIDs they carry.
+   The player's set is a superset, so a mesh in the pack and absent from the
+   editor's content root draws in a shipped build and not in the viewport. The
+   projector *body* is pinned character for character; the two table builders are
+   not, and cannot be — they read different stores.
+
+### What was re-run, and what it said
+
+Every load-bearing number in the wave was re-measured on the same machine
+(RTX 4070 Ti, Windows/Vulkan, release, 1080p, 3 × 120 frames, MIN of rounds), on
+the tree **after** the audit's two repairs — which is the stronger experiment,
+because it shows the repairs cost nothing.
+
+| claim | wave | audit re-run |
+|---|---|---|
+| `SHIPPED` p50 | 6.236 ms (160.3 fps) | **6.323 ms (158.2 fps)** |
+| `SHIPPED` GPU frame / `terrain` / share | 2.676 / 2.086 / 78 % | **2.670 / 2.077 / 77.8 %** |
+| `LIT+VIS` p50 | 14.499 ms (69.0 fps) | **14.502 ms (69.0 fps)** |
+| `LIT+VIS` GPU frame / `terrain` | 9.561 / 3.122 | **9.580 / 3.130** |
+| `LIT` GPU frame @ 64 | 9.465 | **9.456** |
+| `LIT+SSR` GPU frame @ 64 | 9.480 | **9.471** |
+| `LIT-COARSE-CLIPMAP` GPU frame @ 64 | 5.798 | **5.789** |
+| `scatter` pass | 0.140 ms | **0.138–0.141 ms**, every configuration |
+| scatter **batches** / instances / virtual textures | 3 / 16 771 / 14 | **3 / 16 771 / 14**, every configuration |
+| ≥ 60 fps p50 `LIT+VIS` with everything on | MET at 69.0 | **MET at 69.0** |
+| fixture `[detail]` line | 362 636 of 599 076, 6.22–24.89 m, 3 octaves, worst 1.315 m, 213 984 / 7 535 / 1 647 / 13 274 excluded | **identical to the digit**, except the mean, which the HIGH-1 repair moves 0.060 → **0.059** |
+| `two_builds_of_one_recipe_produce_the_same_terrain` | green | **green** (7 043 328 B, 56 tiles, 3 LODs) |
+| road grade re-run on the finished terrain | 0.099370 `to_bits`-equal, 144 / 144, 0 over | **identical** |
+| shoreline / start gap | 0.0038 m / 0.008 m | **identical** |
+| goldens under `INF_GOLDEN_STRICT=1` | green over 58 | **green over 58** (117 arms, 0 failed), `git status` over `tests/goldens` empty |
+| "a blessing run moves **thirteen**" | 13, named | **exactly 13, and exactly the 13 named** — `terrain`, `terrain_lod`, `terrain_splat`, `gi_terrain`, `ground_close`, `cave_mouth`, `biomes`, `deform` and the five `water_*`. Blessed, counted, reverted |
+| `MAX_SCATTER_MESH_TRIANGLES` arithmetic | 16 771 × 4 096 = 68.7 M | **68 694 016** |
+| the POM VT-pool price | 24 MiB / 9 248 B = 2 721 pages, / 73 984 B = 340 | **2 721 / 340**, and `build_vt_level` really does drop a *mixed* set to `Rgba8` |
+| z15 at 49.34 N | 3.11 m/px | **3.112555851873068**, so the island's base octave is **6.23 m**, not 6.22 |
+| schemas | scene v26 / recipe v2, `inf-scene` untouched | **confirmed by diff** — `crates/inf-scene` is not in the wave's diff, and `Terrain::biome_population` is `#[serde(skip)]` in the live component *and* in the frozen `TerrainV23`, so the two records that grew a field really do move no bytes. `PcgInstance` has no `Serialize` derive at all |
+| `Cargo.lock` / committed content / goldens | unmoved / unmoved / 58 | **all three confirmed** |
+| frontend | `git diff -- editor/studio/src` empty | **confirmed** |
+
+**And the real island's own detail line**, which the wave measured on the CI
+fixture and never printed for the world it ships (`--dry-run`, so nothing under
+`samples/` moved):
+
+```
+[   detail] 37675364 of 51782416 samples took designed relief in a 3.11..6.23 m
+           band (2 octaves); mean 0.093 m, worst 1.493 m; excluded 11129344
+           water, 661345 corridor, 166728 channel, 2149635 pad
+```
+
+Two things a reader should take from it. **72.8 % of the island took relief**,
+and its **worst displacement is 1.493 m against the stage's own 1.5 m ceiling** —
+99.5 % of it, where the CI fixture only reaches 1.315 m. So the ceiling is a
+real bound on the shipped world and not a theoretical one, and the fixture does
+not prove it. And the corridor exclusion (661 345 samples) agrees with the
+carve's own corridor count (661 290) to 0.008 %, which is what "one door, two
+route lists" should look like. The advisory reads back exactly as clause 1 says
+it does, with `6.23 m` in it.
+
+### The audit's own counts
+
+| | after TER2b (`9513c3ca`) | **after the audit** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 328 / 6 206 / 0 / 19 | **328 / 6 211 / 0 / 19** — **+5 arms, no new block**: three in `inf-island`'s lib, one in its fixture, one in `inf-pcg`'s lib. The wave's own 6 206 is confirmed by subtraction rather than taken on trust — this run measured 6 211 and the audit added exactly five |
+| goldens | 58 | **58** — none added, none re-blessed, no image moved. The 13-image blessing claim was reproduced and reverted |
+| `INF_GOLDEN_STRICT=1` | green over 58 | **green over 58**, 117 arms, 0 failed |
+| rustdoc individual warnings (cold, after `cargo clean --doc`) | 374 over 30 crates | **374 over 30 crates** — the audit's own repairs first added **three** in `inf-island`, which had never had one, and they are fixed (`404 − 30`, the TER2a method) |
+| `clippy --workspace --all-targets` `-D warnings` | 0 | **0** |
+| `cargo fmt --all --check` | clean | **clean** |
+| the workspace eaten-`\` gate | green, 31 catches | **green, still 31** — swept independently over the wave's range and over every `.rs` the audit itself touched, with the gate's own rule (interior run ≥ 8 inside a line carrying a quote, comments excluded). The only hits in the range are the three pre-existing `ALIGNED_ON_PURPOSE` sites in `inf-island`'s report table. No thirty-second |
+| the `inf-island` libm-ban table | green over 13 modules | **green over 13** — and it went red a **third** time, on the audit's own repair: the first draft of `a_shared_tile_edge_takes_one_displacement` printed `grad.atan().to_degrees()` in an assertion message |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** |
+| new crates / external dependencies | none | **none** — `Cargo.lock` does not move |
+| committed content / `samples/island` | unmoved | **unmoved** — the real-island probe ran `dry_run` with `rederive_layers: false`, so not a byte under `samples/` was written |
+| frontend | untouched, not run | **untouched, not run** |
+
+### The audit's commits
+
+`21922f2a` the detail band's two seams — a mask that cut and an edge that split
+(HIGH-1, HIGH-2, MED-3, the lake arm and two LOW corrections); `f7605ced`
+clause 0's three — a doc that slid, a cache thrown away, a claim with no arm
+(MED-4, MED-5, the collision arm); `7b61d574` two prices stated where the next
+reader will look for them (LOW-1, LOW-2); `f946b8b1` three rustdoc links the
+repairs added, and the real island's own detail line; plus the ledger commit
+carrying this section and the corrections above into the memo and the ROADMAP.
+
+### What the audit did NOT find
+
+Stated because an audit that lists only what it broke is not a reading of the
+wave.
+
+* **Clause 0 is sound end to end, and its central finding is right.** The GUID
+  really is the only thing that could have worked: `kind_index` is rule-local and
+  `evaluate_with_in`, `BiomeBinding::evaluate_in` and `compose_volume` all
+  concatenate without offsetting it. Neither container that grew a field reaches
+  a wire — `PcgInstance` has no `Serialize` derive and `Terrain::biome_population`
+  is `#[serde(skip)]` in the live component *and* in `inf-scene`'s frozen
+  `TerrainV23`, which the audit checked because a mirror is exactly where that
+  claim would fail. Batch order is a `BTreeMap` in both hosts, so it is a function
+  of the mesh set and not of a hash seed; the geometry cache is content-keyed and
+  retained to the frame's live set on the same rule as the instance uploads; and
+  an unresolvable GUID buckets with the meshless ones, so it degrades to the
+  placeholder rather than to an empty batch.
+* **"The cover meshes are free" is true and the frame agrees with it.** All five
+  configurations report **3 batches / 16 771 instances / 14 virtual textures**, and
+  the `scatter` pass costs 0.138–0.141 ms in every one of them — so the batches
+  are not culled to nothing, and the instance count in the measured frame is the
+  one the claim is about.
+* **Clause 2's "nothing else moved" holds by construction, not by luck.**
+  `lod_thresholds` reads the tile span and `TERRAIN_LOD_SCALE`; `patch_mesh_lod`
+  is a difference of two indices; the skirt is `max(|hmax − hmin|, 0.05·span, 1 m)`
+  — a tile's own span and height *range*, with no cell count in it. The patch
+  index buffer is `Vec<u32>`, so 65² + skirt has no ceiling near it.
+* **Both routed prices are real.** `MaterialAsset` has no height or displacement
+  slot (read field by field), and `build_vt_level` genuinely drops a **mixed**
+  stored-format set to `Rgba8` for the whole pool — the demotion is about the
+  *set*, not about the height channel, which is the part the clause could have
+  got wrong and did not.
+* **The recipe-bump refusal is real.** `IslandRecipe::validate` compares
+  `schema_version` for exact equality, there is no migrate function anywhere in
+  the crate, and every struct is `deny_unknown_fields`.
+* **The tripwire's replacement is not vacuous.** It drives the shipped
+  `project_scene_full` with the table `load_scatter_meshes` builds at boot, checks
+  each batch's cull radius against its *own* geometry, and its anti-vacuity half
+  (the same projection under an empty table → one meshless batch) is the pre-wave
+  engine exactly.
+* **The `MIRROR-BEGIN scatter_mesh_buckets` region is compared** — not by that
+  fence, which no gate reads, but by `extract_fn` over the whole `push_scatter`
+  body, which is stronger.
+
+### The laws this audit paid for
+
+* **The reach of an index is part of the rule it answers.** A mask that ramps over
+  `[half, 2·half]` and an index that stops at `half` are each reasonable alone and
+  together are a hard cut. Neither file is wrong on its own; the defect lives in
+  the argument passed between them, which is why the fix is a named function and a
+  `debug_assert` rather than a corrected literal.
+* **"Fractions of a millimetre" is a measurement, and it needs measuring.** The
+  wave described the cross-border feedback exactly right and guessed its size
+  three orders of magnitude low. An honest note about a hazard is worth less than
+  the same note with a number somebody actually took.
+* **A shared sample is one sample.** Wherever tiles overlap by a row, a per-sample
+  walk that reads a neighbourhood is a two-pass problem, and the set that has to
+  be settled first is exactly the rim.
+* **A doc comment can move without moving.** Inserting a function between a header
+  and its body reattaches forty lines of hard-won finding to something else, and
+  no compiler, linter or rustdoc run says a word.
+* **A cache is invalidated by the question, not by the answer.** Keying a live-set
+  audit on what resolved throws away precisely the entries whose whole purpose is
+  to remember that they did not.
+* **A ceiling the fixture cannot reach is not a ceiling the fixture tests.** The
+  detail band's worst displacement is 1.315 m on CI and 1.493 m on the world that
+  ships — 99.5 % of its own bound. The number that matters was one `--dry-run`
+  away and no wave had taken it.
