@@ -173,3 +173,90 @@ fn two_identical_scenes_step_byte_identical() {
         "two identical ECS scenes diverged after 300 steps"
     );
 }
+
+/// **THE SIM-LOD TIER REACHES THE BRIDGE** (NPC1a audit).
+///
+/// `inf_ecs::crowd` publishes its verdict twice — onto the entity as
+/// `CrowdAgent` (which the pose door and `deform::ground_contacts` read) and
+/// into `bodiless_agents` (which this bridge reads) — and the wave shipped an
+/// arm for the door's *output* and none for this consumption. Severing
+/// `|| bodiless.contains(&guid)` in `sync_from_world_sim` left every arm in the
+/// tree green: a crowd agent is a KINEMATIC body, so the solver never moves it
+/// and its transform (which `step_crowd` rewrites every step anyway) is the only
+/// thing a trace can see. A `Far` agent would silently keep a capsule, and wall
+/// 9's whole resolution — *an NPC nobody can reach does not need to be
+/// reachable* — would be a comment.
+///
+/// Three claims, because the first two are satisfied by a bridge that tracks
+/// nothing: the `Full` agent has a body, the `Far` one does not, and the
+/// **transition** takes the body away from an agent that had one.
+#[test]
+fn a_banded_out_crowd_agent_gets_no_rapier_body() {
+    use inf_ecs::crowd::{
+        step_crowd, CrowdArchetype, CrowdRecord, CrowdTier, DEFAULT_CROWD_FULL_M,
+    };
+    use std::collections::BTreeMap;
+
+    const NEAR: u128 = 0xC0DE_0001;
+    const FAR: u128 = 0xC0DE_0002;
+
+    let mut w = EcsWorld::new();
+    let src = w.spawn_with_guid(Uuid::from_u128(0xF1), "Player", None);
+    w.world_mut()
+        .entity_mut(src)
+        .insert(inf_ecs::components::StreamingSource { radius_m: 0.0 });
+    w.propagate();
+
+    let arch = CrowdArchetype::humanoid(None, None, None);
+    let mut records = BTreeMap::new();
+    records.insert(
+        Uuid::from_u128(NEAR),
+        CrowdRecord::standing(arch, DVec3::new(10.0, 0.0, 0.0)),
+    );
+    records.insert(
+        Uuid::from_u128(FAR),
+        CrowdRecord::standing(arch, DVec3::new(200.0, 0.0, 0.0)),
+    );
+    inf_ecs::crowd::set_population(&mut w, records);
+    step_crowd(&mut w, DT);
+    w.propagate();
+
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync_from_world(&w);
+    assert_eq!(
+        inf_ecs::crowd::agent_tier(&w, w.entity_of(Uuid::from_u128(NEAR)).expect("near")),
+        Some(CrowdTier::Full),
+        "the fixture did not put an agent inside the Full radius"
+    );
+    assert!(
+        bridge.body_of(Uuid::from_u128(NEAR)).is_some(),
+        "a Full crowd agent got no rapier body — the bridge is refusing every \
+         agent and the Far assertion below would be vacuous"
+    );
+    assert!(
+        bridge.body_of(Uuid::from_u128(FAR)).is_none(),
+        "a Far crowd agent kept its capsule: the tier reached the pose door and \
+         the trace and did not reach the bridge, so wall 9's resolution is a \
+         comment"
+    );
+
+    // THE TRANSITION: the near agent demotes, and the body it already had has
+    // to go with it — a tier that only gated CREATION would leave every agent
+    // that was ever close solid for ever.
+    let e = w.entity_of(Uuid::from_u128(0xF1)).expect("the source");
+    inf_ecs::sim::set_translation(&mut w, e, Vec3d::new(6.0 * DEFAULT_CROWD_FULL_M, 0.0, 0.0));
+    w.propagate();
+    step_crowd(&mut w, DT);
+    w.propagate();
+    bridge.sync_from_world(&w);
+    assert_eq!(
+        inf_ecs::crowd::agent_tier(&w, w.entity_of(Uuid::from_u128(NEAR)).expect("near")),
+        Some(CrowdTier::Far),
+        "the source did not move far enough to demote the agent"
+    );
+    assert!(
+        bridge.body_of(Uuid::from_u128(NEAR)).is_none(),
+        "an agent demoted to Far kept the rapier body it had while it was Full — \
+         the despawn sweep is not reaching a banded-out agent"
+    );
+}

@@ -1004,8 +1004,13 @@ fn pie_equals_shipping_with_a_crowd_across_tier_transitions() {
     let stats = ship.crowd_stats();
     let not_posing =
         stats.at(inf_ecs::crowd::CrowdTier::Far) + stats.at(inf_ecs::crowd::CrowdTier::Dormant);
+    // The two counts are named apart on purpose (NPC1a audit): `not_posing` is
+    // what the ladder SAVED, and the crowd section is what EVERY agent pays at
+    // every tier — the first draft of this line multiplied the saving by 49 and
+    // printed the section's total beside it, so it read as an identity that is
+    // off by the agents still posing (20 x 49 = 980, and the section is 1 176).
     println!(
-        "THE RE-SHAPE at the end of the drive: {posed_agents} posed x {POSED_BYTES} B = {posed} B of pose, {not_posing} agents off the pose path x {} B = {crowd_bytes} B of crowd section. Had they all been Full the pose section would have been {} B.",
+        "THE RE-SHAPE at the end of the drive: {posed_agents} posed x {POSED_BYTES} B = {posed} B of pose; {not_posing} of {CROWD_N} agents are off the pose path, and all {CROWD_N} pay {} B each = {crowd_bytes} B of crowd section. Had they all been Full the pose section would have been {} B.",
         inf_ecs::crowd::AGENT_TRACE_BYTES,
         (CROWD_N + 1) * POSED_BYTES
     );
@@ -1023,10 +1028,21 @@ fn pie_equals_shipping_with_a_crowd_across_tier_transitions() {
         not_posing > 0,
         "every agent was posed at the end of the drive, so the re-shape saved nothing and this arm is measuring the pre-NPC1a engine"
     );
-    assert!(
-        posed_agents < CROWD_N + 1,
-        "{posed_agents} of {} characters were posed - the ladder decided nothing",
-        CROWD_N + 1
+    // **EXACTLY the posing tiers, plus the hero** (NPC1a audit). The wave's
+    // version of this line asserted `posed_agents < CROWD_N + 1`, which is
+    // satisfied by the *Dormant* agents alone — a Dormant agent has no entity,
+    // so it cannot be posed however broken the pose door is. Measured: severing
+    // `if !tier.poses() { continue; }` in `step_pose_evaluation` took this
+    // drive's state from 35 366 B to 119 554 B a step and left every assertion
+    // in this arm green. The equality is what falsifies, because it is the pose
+    // store's own count against the ladder's own verdict.
+    let hero_and_posing =
+        1 + stats.at(inf_ecs::crowd::CrowdTier::Full) + stats.at(inf_ecs::crowd::CrowdTier::Near);
+    assert_eq!(
+        posed_agents, hero_and_posing,
+        "{posed_agents} characters were posed against {hero_and_posing} the ladder admits (the hero plus {} Full and {} Near of {CROWD_N} agents) - the pose door is not reading the tier",
+        stats.at(inf_ecs::crowd::CrowdTier::Full),
+        stats.at(inf_ecs::crowd::CrowdTier::Near),
     );
 
     // ── THE CACHED DIGEST IS NOT DEAD CODE ─────────────────────────────────
