@@ -59,16 +59,20 @@
 //!   is the same restriction [`footprint_perimeter`](crate::footprint_perimeter)
 //!   already has. A rotated or L-shaped lot needs an oriented rect type
 //!   throughout and was not taken for a v1.
-//! * **Modules are primitives.** The seven palettes declare modules with no mesh
-//!   GUID, so a building needs no imported art to exist: it is boxes with real
-//!   dimensions and real colliders. A palette entry gains a mesh the day the
-//!   project has one, with no code change (`module Panel = mesh <guid> …`).
+//! * **Modules draw their shape family** (island wave I8b). The seven palettes
+//!   still declare no mesh GUID and still need no imported art; what a module
+//!   draws is a derived, unit-space mesh chosen by its name (see [`modules`]),
+//!   scaled onto the half-extents the palette or the plan gives it. An authored
+//!   `module Panel = mesh <guid> …` still overrides it.
 
 pub mod assemble;
 // I6: where a building's DOORS go - the openings the grammar already plans,
 // turned into hinges a door system can hang a leaf on.
 pub mod doorway;
 pub mod lod;
+// I8b: what a module LOOKS like -- the shape families, their content-derived
+// GUIDs and the unit-space meshes both hosts register under them.
+pub mod modules;
 pub mod palettes;
 pub mod partition;
 pub mod pass;

@@ -74,6 +74,8 @@ mod tests {
             scale: 1.0,
             kind_index: i,
             mesh: None,
+            extent: None,
+            glow: 0.0,
         }
     }
     fn col(i: u32) -> PcgCollider {
@@ -100,6 +102,7 @@ mod tests {
                 inst_len: 4,
             }],
             doorways: Vec::new(),
+            decor: Vec::new(),
         };
         let scatter: Vec<PcgInstance> = (0..7).map(inst).collect();
         let out = compose_volume(scatter, grammar);

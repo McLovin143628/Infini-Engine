@@ -184,6 +184,12 @@ pub fn assemble_in(
     }
     ctx.roof(&mut out);
     ctx.stairs(&mut out);
+    // **The decoration tail, folded in exactly once** (island wave I8b). Every
+    // instance up to this point has a collider beside it at the same index;
+    // everything appended here has none. Doing it before `place_in_frame` is
+    // what puts the panes in the lot's world frame with the rest.
+    let decor = std::mem::take(&mut out.decor);
+    out.instances.extend(decor);
     place_in_frame(&mut out, plan.frame);
     out
 }
@@ -256,9 +262,13 @@ impl Ctx<'_> {
     ///
     /// Structural pieces — slabs, stairs, lintels — are dimensioned by the
     /// *plan*, not by the palette, so their collider is computed here and the
-    /// module's own `collider` attribute is not consulted. The instance still
-    /// carries the module's palette index, which is what a real modular mesh
-    /// will hang off when kind→mesh upload lands (the standing P19.4 gap).
+    /// module's own `collider` attribute is not consulted.
+    ///
+    /// **The standing P19.4 gap closes here** (island wave I8b). The instance
+    /// carries the module's mesh GUID *and* the half-extents the plan just
+    /// computed, so a 10 m slab is drawn as a 10 m slab. Before this it carried
+    /// `scale: 1.0` and a uniform-scale primitive, which is why a settlement
+    /// drew as a cloud of one-metre cubes whatever its colliders said.
     fn boxed(&self, out: &mut GrammarOutput, module: &str, center: DVec3, half: DVec3) {
         let Some(kind) = self.grammar.module_index(module) else {
             return;
@@ -266,18 +276,67 @@ impl Ctx<'_> {
         if !(half.x > 0.0 && half.y > 0.0 && half.z > 0.0) {
             return;
         }
-        out.instances.push(PcgInstance {
-            pos: center,
-            rotation: glam::DQuat::IDENTITY,
-            scale: 1.0,
-            kind_index: kind,
-            mesh: None,
-        });
+        out.instances
+            .push(self.instance(kind, center, glam::DQuat::IDENTITY, half));
         out.colliders.push(PcgCollider {
             center,
             half_extents: half,
             rotation: glam::DQuat::IDENTITY,
         });
+    }
+
+    /// One placed instance of palette module `kind`, drawn at `half`.
+    ///
+    /// The one place the assembler builds a [`PcgInstance`], so the mesh, the
+    /// extent and the glow are read off the module in one statement rather than
+    /// at each of the five sites that place something.
+    fn instance(
+        &self,
+        kind: u32,
+        center: DVec3,
+        rotation: glam::DQuat,
+        half: DVec3,
+    ) -> PcgInstance {
+        let def = self.grammar.modules().get(kind as usize);
+        PcgInstance {
+            pos: center,
+            rotation,
+            scale: 1.0,
+            kind_index: kind,
+            mesh: def.and_then(|m| m.mesh),
+            extent: Some([half.x as f32, half.y as f32, half.z as f32]),
+            glow: def.map_or(0.0, |m| m.glow),
+        }
+    }
+
+    /// **The glazed leaf in a window void** (island wave I8b clause 3).
+    ///
+    /// Pushed onto [`GrammarOutput::decor`] and **not** beside a collider, for
+    /// the reason [`super::palettes::BuildingArchetype::pane`] gives: a pane you
+    /// cannot see through is a wall, and `opening_is_clear` is an assertion
+    /// about solids. It fills the void exactly — the same rectangle the
+    /// enterability invariant tests — so a window reads as glass rather than as
+    /// a hole, and it is what carries the night glow.
+    fn pane(&self, out: &mut GrammarOutput, op: &Opening) {
+        if op.kind != OpeningKind::Window {
+            return;
+        }
+        let Some(kind) = self.grammar.module_index(self.arch.pane) else {
+            return;
+        };
+        let Some((rect, (y0, y1))) = self.plan.opening_void(op) else {
+            return;
+        };
+        if !(rect.is_positive() && y1 > y0) {
+            return;
+        }
+        let c = rect.center();
+        out.decor.push(self.instance(
+            kind,
+            DVec3::new(c.x, (y0 + y1) * 0.5, c.y),
+            glam::DQuat::IDENTITY,
+            DVec3::new(rect.size_x() * 0.5, (y1 - y0) * 0.5, rect.size_z() * 0.5),
+        ));
     }
 
     /// Everything on one storey: its slabs, its walls (with openings) and its
@@ -418,6 +477,9 @@ impl Ctx<'_> {
                 DVec3::new(h.x, head_to_ceiling * 0.5, h.z),
             );
         }
+        // The pane, before the parapet, so the decoration tail is in opening
+        // order whatever the trim does.
+        self.pane(out, op);
         // Parapet: the solid wall below a window's sill.
         if op.kind == OpeningKind::Window && op.sill > 0.0 {
             let h = half_xz(half_len, half_t);
@@ -646,17 +708,22 @@ impl Ctx<'_> {
                     continue;
                 }
                 placed.push((p, def.clearance));
-                out.instances.push(PcgInstance {
-                    pos: DVec3::new(p.x, y, p.y),
-                    rotation: yaw_onto(DVec3::new(normal.x, 0.0, normal.y)),
-                    scale: 1.0,
-                    kind_index: kind,
-                    mesh: None,
-                });
+                let rot = yaw_onto(DVec3::new(normal.x, 0.0, normal.y));
+                // **The instance sits on the collider's centre now** (I8b).
+                // It used to sit on the FLOOR while the box was centred half a
+                // height above it, so a desk was drawn with its middle at ankle
+                // level — invisible while the drawn thing was a unit cube and
+                // very visible the moment it is the size of the desk.
+                out.instances.push(self.instance(
+                    kind,
+                    DVec3::new(p.x, y + half.y, p.y),
+                    rot,
+                    half,
+                ));
                 out.colliders.push(PcgCollider {
                     center: DVec3::new(p.x, y + half.y, p.y),
                     half_extents: half,
-                    rotation: yaw_onto(DVec3::new(normal.x, 0.0, normal.y)),
+                    rotation: rot,
                 });
             }
         }
@@ -707,13 +774,12 @@ impl Ctx<'_> {
                     continue;
                 }
                 placed.push((p, def.clearance));
-                out.instances.push(PcgInstance {
-                    pos: DVec3::new(p.x, y, p.y),
-                    rotation: glam::DQuat::IDENTITY,
-                    scale: 1.0,
-                    kind_index: kind,
-                    mesh: None,
-                });
+                out.instances.push(self.instance(
+                    kind,
+                    DVec3::new(p.x, y + half.y, p.y),
+                    glam::DQuat::IDENTITY,
+                    half,
+                ));
                 out.colliders.push(PcgCollider {
                     center: DVec3::new(p.x, y + half.y, p.y),
                     half_extents: half,
@@ -1126,6 +1192,147 @@ mod tests {
                 "{}: more solids than instances",
                 arch.display
             );
+        }
+    }
+
+    /// **THE ZERO-PLACEHOLDER ARM, at the source** (island wave I8b).
+    ///
+    /// Every instance a building emits names a mesh and states the size of the
+    /// box it occupies. A projector cannot draw authored geometry for something
+    /// that names none, so this is where "a shipped city draws zero placeholder
+    /// batches" begins — and it is a claim about *all* of them, which is what
+    /// makes it falsifiable: dropping the stamp from one shape family, or the
+    /// extent from one of the assembler's placement sites, fails here.
+    #[test]
+    fn every_building_instance_names_a_mesh_and_its_own_size() {
+        for arch in archetypes() {
+            let out = built(arch.id, 3, 91);
+            assert!(!out.instances.is_empty(), "{}: nothing built", arch.display);
+            for (i, inst) in out.instances.iter().enumerate() {
+                assert!(
+                    inst.mesh.is_some(),
+                    "{}: instance {i} (module {}) draws a placeholder",
+                    arch.display,
+                    inst.kind_index
+                );
+                let e = inst
+                    .extent
+                    .unwrap_or_else(|| panic!("{}: instance {i} has no extent", arch.display));
+                assert!(
+                    e.iter().all(|c| c.is_finite() && *c > 0.0),
+                    "{}: instance {i} extent {e:?}",
+                    arch.display
+                );
+            }
+        }
+    }
+
+    /// **The drawn box IS the solid box**, for every module that has one — the
+    /// defect this wave exists to close, asserted directly rather than through
+    /// its consequences. Before I8b the instance carried `scale: 1.0` and no
+    /// extent, so a 10 m slab and a 0.3 m mullion drew identically.
+    #[test]
+    fn the_drawn_extent_matches_the_collider_it_was_placed_with() {
+        for arch in archetypes() {
+            let out = built(arch.id, 2, 12);
+            let n = out.colliders.len();
+            assert!(n > 0);
+            assert!(
+                out.instances.len() >= n,
+                "{}: {} instances for {n} colliders — the aligned prefix is gone",
+                arch.display,
+                out.instances.len()
+            );
+            for (i, (inst, solid)) in out.instances.iter().zip(&out.colliders).enumerate() {
+                let e = inst.extent.expect("an extent");
+                let h = solid.half_extents;
+                for (k, want) in [h.x, h.y, h.z].into_iter().enumerate() {
+                    assert!(
+                        (f64::from(e[k]) - want).abs() < 1e-3,
+                        "{}: instance {i} axis {k} drawn {} vs solid {want}",
+                        arch.display,
+                        e[k]
+                    );
+                }
+                assert!(
+                    (inst.pos - solid.center).length() < 1e-9,
+                    "{}: instance {i} is not on its own box",
+                    arch.display
+                );
+            }
+        }
+    }
+
+    /// **The decoration tail** (I8b): a pane per window, after the aligned
+    /// prefix, glowing, and carrying no collider — so the enterability
+    /// invariant is untouched by it.
+    #[test]
+    fn every_window_gets_a_pane_and_no_pane_is_solid() {
+        for arch in archetypes() {
+            let out = built(arch.id, 3, 44);
+            let windows = out
+                .plan
+                .openings
+                .iter()
+                .filter(|o| o.kind == OpeningKind::Window)
+                .count();
+            assert!(windows > 0, "{}: no windows at all", arch.display);
+            let decor = &out.instances[out.colliders.len()..];
+            assert_eq!(
+                decor.len(),
+                windows,
+                "{}: {} panes for {windows} windows",
+                arch.display,
+                decor.len()
+            );
+            let pane_kind = archetype(arch.id)
+                .grammar()
+                .expect("parses")
+                .module_index(arch.pane)
+                .expect("the palette declares its pane");
+            for p in decor {
+                assert_eq!(p.kind_index, pane_kind, "{}: not a pane", arch.display);
+                assert!(p.glow > 0.0, "{}: a pane that does not glow", arch.display);
+            }
+            // …and nothing in the aligned prefix glows, so "the windows light
+            // up" is a statement about windows.
+            for s in &out.instances[..out.colliders.len()] {
+                let is_glazed = super::super::modules::shape_of(
+                    &archetype(arch.id).grammar().expect("parses").modules()[s.kind_index as usize]
+                        .name,
+                )
+                .is_some_and(super::super::modules::ModuleShape::is_glazing);
+                assert_eq!(
+                    s.glow > 0.0,
+                    is_glazed,
+                    "{}: a solid module's glow disagrees with its family",
+                    arch.display
+                );
+            }
+        }
+    }
+
+    /// A pane fills its window void exactly — the same rectangle
+    /// `opening_is_clear` tests, so a window is glazed rather than approximately
+    /// glazed.
+    #[test]
+    fn a_pane_fills_the_void_it_was_hung_in() {
+        let out = built(ArchetypeId::House, 2, 7);
+        let decor = &out.instances[out.colliders.len()..];
+        let windows: Vec<&Opening> = out
+            .plan
+            .openings
+            .iter()
+            .filter(|o| o.kind == OpeningKind::Window)
+            .collect();
+        assert_eq!(decor.len(), windows.len());
+        for (pane, w) in decor.iter().zip(windows) {
+            let (rect, (y0, y1)) = out.plan.opening_void(w).expect("a void");
+            let e = pane.extent.expect("an extent");
+            assert!((f64::from(e[0]) - rect.size_x() * 0.5).abs() < 1e-6);
+            assert!((f64::from(e[1]) - (y1 - y0) * 0.5).abs() < 1e-6);
+            assert!((f64::from(e[2]) - rect.size_z() * 0.5).abs() < 1e-6);
+            assert!((pane.pos.y - (y0 + y1) * 0.5).abs() < 1e-6);
         }
     }
 

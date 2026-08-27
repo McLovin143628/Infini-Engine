@@ -197,9 +197,39 @@ pub struct PcgInstance {
     /// thing carried.
     ///
     /// `None` for a bare transform (a kind with no mesh) and for every placement
-    /// that does not come from a scatter palette — the grammar and building
-    /// paths, whose `kind_index` names a module and which draw as boxes.
+    /// that does not come from a scatter palette — a rule that names none.
+    ///
+    /// **Wave I8b**: a *building module* now names one too. The palettes declare
+    /// no `.inf_mesh` file; the GUID is minted from the module's shape family by
+    /// [`crate::building::modules::module_guid_for`] and both hosts register the
+    /// same table under it.
     pub mesh: Option<Uuid>,
+    /// **The half-extents of the box this instance occupies**, metres, in the
+    /// instance's own rotated frame — `None` for "draw the unit primitive at
+    /// [`scale`](Self::scale)", which is every placement before island wave I8b.
+    ///
+    /// # The defect this closes
+    ///
+    /// [`scale`](Self::scale) is one uniform `f64` and every module the building
+    /// assembler places carries `1.0`. A 0.12 × 3.5 × 1.5 m curtain-wall panel,
+    /// a 10 × 0.2 × 10 m floor slab and a 0.9 m desk therefore all *drew* as the
+    /// same one-metre cube, while their colliders were the size the palette and
+    /// the plan said. A building has never been drawn at the dimensions it is
+    /// built at, and this is the field that says what those dimensions are.
+    ///
+    /// `f32` because it is render data and nothing derived from it is committed;
+    /// carried beside `scale` rather than replacing it because a scattered rock
+    /// really does want one uniform number, and the day a *shell* wants three is
+    /// already served by [`crate::building::StructureGroup`].
+    pub extent: Option<[f32; 3]>,
+    /// **How brightly this instance emits at night**, as a multiplier on its own
+    /// colour — `0.0` for everything that does not (island wave I8b clause 3).
+    ///
+    /// Authored, not resolved: the projector multiplies it by a time-of-day
+    /// factor, so a window pane carries `1.0` here whatever the hour is and the
+    /// hour is applied once, at the one place that knows it. The 16-light
+    /// ceiling is untouched — this is emission, not a light.
+    pub glow: f32,
 }
 
 /// One placed **collision box** — the solid half of a placement, beside
@@ -381,6 +411,8 @@ fn scatter_cell(
                 scale,
                 kind_index: 0,
                 mesh: None,
+                extent: None,
+                glow: 0.0,
             });
         }
     }

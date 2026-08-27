@@ -129,6 +129,9 @@ fn module_def() -> impl Strategy<Value = ModuleDef> {
             scale,
             size,
             collider: collider.map(|c| DVec3::new(c.0, c.1, c.2)),
+            // I8b: derived by `Grammar::stamp_module_meshes`, never parsed, so
+            // the DSL round-trip generator produces the parser's own value.
+            glow: 0.0,
         })
 }
 

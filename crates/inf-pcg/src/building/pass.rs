@@ -369,6 +369,10 @@ pub fn evaluate_buildings_in(
             colliders: out.colliders,
             groups,
             doorways,
+            // `build_in` has already folded the assembler's decoration tail
+            // into `instances` (I8b), so a building's panes are inside its own
+            // group's instance range and there is nothing left here.
+            decor: Vec::new(),
         }
     });
     let mut out = GrammarOutput::default();

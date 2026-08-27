@@ -13,14 +13,25 @@
 //!   opening dimensions, the weighted room-type table and the per-room-type
 //!   furniture set.
 //!
-//! # Primitives, deliberately
+//! # No imported art, and no longer any cubes either
 //!
-//! Every module here declares **no mesh GUID**. A building therefore needs no
-//! imported art to exist: it is boxes with honest dimensions and honest
-//! colliders, which is what "enterable" requires and what an engine can ship
-//! without a licence question. The `collider` attribute (P19.5's one DSL
-//! addition) is what makes them solid; the day a project has real modular
-//! meshes, a palette entry gains `mesh <guid>` and nothing else changes.
+//! Every module here declares **no mesh GUID in its text**, and it never will:
+//! a building must need no imported art to exist, which is what "enterable"
+//! requires and what an engine can ship without a licence question. The
+//! `collider` attribute (P19.5's one DSL addition) is what makes a module
+//! solid.
+//!
+//! What island wave I8b changed is what a module *draws*. [`grammar`] stamps
+//! each module with the GUID of its **shape family**
+//! ([`super::modules`]) — a framed panel, a glazed leaf, a fascia'd deck, a
+//! legged table — and the assembler writes the module's own half-extents onto
+//! the instance, so the drawn thing is the size of the solid thing. The text
+//! stays free of GUIDs, an authored `mesh <guid>` still wins over the derived
+//! one, and a palette that adds a module and forgets to classify it fails
+//! `modules::tests::every_palette_module_has_a_shape` rather than silently
+//! going back to a box.
+//!
+//! [`grammar`]: BuildingArchetype::grammar
 //!
 //! # Why constants and not assets
 //!
@@ -127,6 +138,16 @@ pub struct BuildingArchetype {
     pub exterior_axiom: &'static str,
     /// The rule an **interior** wall run expands from.
     pub interior_axiom: &'static str,
+    /// **The glazed leaf hung in every window void** (island wave I8b).
+    ///
+    /// Declared by the palette and placed by the assembler exactly like the
+    /// lintel and the parapet — and, unlike them, placed **without a collider**:
+    /// a window you cannot see through is a wall, and
+    /// [`BuildingPlan::opening_is_clear`](super::BuildingPlan::opening_is_clear)
+    /// is an assertion about *solids*, which a pane is not. It is the reason
+    /// the assembler's instance list is now one aligned prefix plus a decoration
+    /// tail (see [`super::assemble`]).
+    pub pane: &'static str,
     /// The header placed over every opening.
     pub lintel: &'static str,
     /// The solid wall placed under a window (`sill` metres tall).
@@ -200,7 +221,16 @@ impl BuildingArchetype {
     /// caller may treat a failure here as a programming error in a *new*
     /// palette rather than as authored input.
     pub fn grammar(&self) -> Result<crate::grammar::Grammar, crate::grammar::GrammarError> {
-        crate::grammar::Grammar::parse(self.rules)
+        let mut g = crate::grammar::Grammar::parse(self.rules)?;
+        // **The one place a palette becomes a grammar**, so it is the one place
+        // module meshes are stamped (island wave I8b). The palette text declares
+        // no GUIDs — see `super::modules` for why a derived id is right for
+        // geometry that is a function of the module's own name — and every
+        // consumer downstream reads `ModuleDef::mesh` rather than deriving it,
+        // which is what keeps the assembler and `expand_span` from growing two
+        // answers.
+        g.stamp_module_meshes();
+        Ok(g)
     }
 
     /// The furniture set for `kind`, or an empty slice.
@@ -264,6 +294,7 @@ module Mullion  = size 0.3 offset 0,1.75,0.15 collider 0.15,1.75,0.15
 module Glazing  = size 1.5 offset 0,1.75,0.75 collider 0.06,1.75,0.75
 module Spandrel = size 1.5 offset 0,1.75,0.75 collider 0.09,1.75,0.75
 module Partition= size 1.2 offset 0,1.6,0.6   collider 0.06,1.6,0.6
+module Pane     = size 1   offset 0,0,0
 module Lintel   = size 1   offset 0,0,0       collider 0.09,0.2,0.5
 module Parapet  = size 1   offset 0,0,0       collider 0.09,0.5,0.5
 module Slab     = size 1   offset 0,0,0       collider 1,0.1,1
@@ -282,6 +313,7 @@ Inner  -> Partition+
 ",
     exterior_axiom: "Facade",
     interior_axiom: "Inner",
+    pane: "Pane",
     lintel: "Lintel",
     parapet: "Parapet",
     slab: "Slab",
@@ -410,6 +442,7 @@ module Pier     = size 0.4 offset 0,1.4,0.2  collider 0.14,1.4,0.2
 module Wall     = size 1.2 offset 0,1.4,0.6  collider 0.14,1.4,0.6
 module Balcony  = size 2.4 offset 0,1.4,1.2  collider 0.14,1.4,1.2
 module Partition= size 1.0 offset 0,1.3,0.5  collider 0.06,1.3,0.5
+module Pane     = size 1   offset 0,0,0
 module Lintel   = size 1   offset 0,0,0      collider 0.14,0.2,0.5
 module Parapet  = size 1   offset 0,0,0      collider 0.14,0.5,0.5
 module Slab     = size 1   offset 0,0,0      collider 1,0.11,1
@@ -429,6 +462,7 @@ Inner  -> Partition+
 ",
     exterior_axiom: "Facade",
     interior_axiom: "Inner",
+    pane: "Pane",
     lintel: "Lintel",
     parapet: "Parapet",
     slab: "Slab",
@@ -562,6 +596,7 @@ module Column   = size 0.6 offset 0,3.2,0.3  collider 0.3,3.2,0.3
 module Cladding = size 3.0 offset 0,3.2,1.5  collider 0.12,3.2,1.5
 module RollDoor = size 4.0 offset 0,3.2,2.0  collider 0.12,3.2,2.0
 module Partition= size 2.0 offset 0,1.6,1.0  collider 0.1,1.6,1.0
+module Pane     = size 1   offset 0,0,0
 module Lintel   = size 1   offset 0,0,0      collider 0.12,0.3,0.5
 module Parapet  = size 1   offset 0,0,0      collider 0.12,0.5,0.5
 module Slab     = size 1   offset 0,0,0      collider 1,0.2,1
@@ -578,6 +613,7 @@ Inner  -> Partition+
 ",
     exterior_axiom: "Facade",
     interior_axiom: "Inner",
+    pane: "Pane",
     lintel: "Lintel",
     parapet: "Parapet",
     slab: "Slab",
@@ -682,6 +718,7 @@ const HOUSE: BuildingArchetype = BuildingArchetype {
 module Quoin    = size 0.35 offset 0,1.3,0.175 collider 0.125,1.3,0.175
 module Brick    = size 1.0  offset 0,1.3,0.5   collider 0.125,1.3,0.5
 module Partition= size 0.9  offset 0,1.25,0.45 collider 0.05,1.25,0.45
+module Pane     = size 1   offset 0,0,0
 module Lintel   = size 1    offset 0,0,0       collider 0.125,0.2,0.5
 module Parapet  = size 1    offset 0,0,0       collider 0.125,0.5,0.5
 module Slab     = size 1    offset 0,0,0       collider 1,0.1,1
@@ -700,6 +737,7 @@ Inner  -> Partition+
 ",
     exterior_axiom: "Facade",
     interior_axiom: "Inner",
+    pane: "Pane",
     lintel: "Lintel",
     parapet: "Parapet",
     slab: "Slab",
@@ -829,6 +867,7 @@ module Pier     = size 0.6 offset 0,2.0,0.3  collider 0.2,2.0,0.3
 module Ashlar   = size 1.4 offset 0,2.0,0.7  collider 0.2,2.0,0.7
 module Pilaster = size 0.5 offset 0,2.0,0.25 collider 0.24,2.0,0.25
 module Partition= size 1.1 offset 0,1.9,0.55 collider 0.07,1.9,0.55
+module Pane     = size 1   offset 0,0,0
 module Lintel   = size 1   offset 0,0,0      collider 0.2,0.25,0.5
 module Parapet  = size 1   offset 0,0,0      collider 0.2,0.5,0.5
 module Slab     = size 1   offset 0,0,0      collider 1,0.14,1
@@ -849,6 +888,7 @@ Inner  -> Partition+
 ",
     exterior_axiom: "Facade",
     interior_axiom: "Inner",
+    pane: "Pane",
     lintel: "Lintel",
     parapet: "Parapet",
     slab: "Slab",
@@ -997,6 +1037,7 @@ module Pier     = size 0.35 offset 0,1.55,0.175 collider 0.125,1.55,0.175
 module Wall     = size 1.3  offset 0,1.55,0.65  collider 0.125,1.55,0.65
 module Panelled = size 1.3  offset 0,1.55,0.65  collider 0.14,1.55,0.65
 module Partition= size 1.0  offset 0,1.5,0.5    collider 0.06,1.5,0.5
+module Pane     = size 1   offset 0,0,0
 module Lintel   = size 1    offset 0,0,0        collider 0.125,0.2,0.5
 module Parapet  = size 1    offset 0,0,0        collider 0.125,0.5,0.5
 module Slab     = size 1    offset 0,0,0        collider 1,0.12,1
@@ -1016,6 +1057,7 @@ Inner  -> Partition+
 ",
     exterior_axiom: "Facade",
     interior_axiom: "Inner",
+    pane: "Pane",
     lintel: "Lintel",
     parapet: "Parapet",
     slab: "Slab",
@@ -1135,6 +1177,7 @@ module Stall    = size 0.3 offset 0,1.6,0.15 collider 0.12,1.6,0.15
 module Shopfront= size 1.8 offset 0,1.6,0.9  collider 0.05,1.6,0.9
 module Solid    = size 1.2 offset 0,1.6,0.6  collider 0.12,1.6,0.6
 module Partition= size 1.0 offset 0,1.5,0.5  collider 0.06,1.5,0.5
+module Pane     = size 1   offset 0,0,0
 module Lintel   = size 1   offset 0,0,0      collider 0.12,0.25,0.5
 module Parapet  = size 1   offset 0,0,0      collider 0.12,0.5,0.5
 module Slab     = size 1   offset 0,0,0      collider 1,0.12,1
@@ -1151,6 +1194,7 @@ Inner  -> Partition+
 ",
     exterior_axiom: "Facade",
     interior_axiom: "Inner",
+    pane: "Pane",
     lintel: "Lintel",
     parapet: "Parapet",
     slab: "Slab",

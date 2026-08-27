@@ -863,6 +863,22 @@ pub struct GrammarOutput {
     /// concatenation needs no re-basing: a doorway is located in the world and
     /// names nothing.
     pub doorways: Vec<crate::building::PcgDoorway>,
+    /// **Instances that have no collider beside them** (island wave I8b) — a
+    /// window pane, and nothing else today.
+    ///
+    /// # Why a second list and not a longer first one
+    ///
+    /// `instances` and `colliders` are **index-aligned for a building**: the
+    /// assembler pushes both at every site, and `inf_editor_core::bake` reads
+    /// the pair to give each baked part the material slot its module names. An
+    /// instance pushed without a collider breaks that alignment in the middle
+    /// of the list, where nothing can recover it.
+    ///
+    /// So decoration is collected apart and appended **after** the aligned pair
+    /// (`assemble_in`, once, at the end). The invariant that replaces the old
+    /// one is stated in one line and is checkable: *the first `colliders.len()`
+    /// instances are the solid ones; everything after them is decoration.*
+    pub decor: Vec<PcgInstance>,
 }
 
 impl GrammarOutput {
@@ -879,6 +895,10 @@ impl GrammarOutput {
         self.instances.extend(other.instances);
         self.colliders.extend(other.colliders);
         self.doorways.extend(other.doorways);
+        // Decoration concatenates like everything else and is folded into
+        // `instances` exactly once, by `assemble_in`, so the aligned prefix
+        // survives every intermediate `extend`.
+        self.decor.extend(other.decor);
         self.groups.extend(other.groups.into_iter().map(|mut g| {
             g.start += ci;
             g.inst_start += ii;
@@ -927,10 +947,41 @@ fn place_module(
             rotation: yaw * super::span::euler_deg_to_quat(module.rotation_deg),
             scale: module.scale,
             kind_index: kind,
-            mesh: None,
+            // **Wave I8b: the module's mesh, at the module's size.** The GUID is
+            // whatever the palette stamped (a shape family, or an authored
+            // asset); the extent is the module's own collider box, which is the
+            // only statement of size a `ModuleDef` makes.
+            mesh: module.mesh,
+            extent: drawn_extent(module),
+            glow: module.glow,
         },
         solid,
     ))
+}
+
+/// The half-extents a module is **drawn** at, or `None` for "the unit
+/// primitive" (island wave I8b).
+///
+/// Three conditions, and each one is a way the drawn box and the solid box
+/// would otherwise disagree:
+///
+/// * the module must declare a `collider` — that is the only place a
+///   [`ModuleDef`] says how big it is; a module that declares none is a marker
+///   and keeps the pre-I8b unit primitive;
+/// * its authored euler must be **zero** — the collider is oriented by the slot
+///   yaw alone (see [`ModuleDef::collider`]) while the instance also carries the
+///   authored rotation, so a turned module's half-extents are stated in a frame
+///   the instance is not in. None of the seven palettes turns a module; a fence
+///   author may, and gets the primitive rather than a stretched mesh;
+/// * the extents must be finite and positive, because a zero half-extent scales
+///   the mesh flat.
+fn drawn_extent(module: &ModuleDef) -> Option<[f32; 3]> {
+    if module.rotation_deg != DVec3::ZERO {
+        return None;
+    }
+    let h = module.collider? * module.scale;
+    let e = [h.x as f32, h.y as f32, h.z as f32];
+    e.iter().all(|c| c.is_finite() && *c > 0.0).then_some(e)
 }
 
 /// Expand `pass` along one span and place the result.
@@ -955,6 +1006,9 @@ pub fn expand_span(
         // …and no notion of a room either, so it plans no doors (I6). Empty is
         // the correct answer here, not a missing one.
         doorways: Vec::new(),
+        // A 1-D expansion places no window panes: it has no openings to hang
+        // one in (I8b).
+        decor: Vec::new(),
     };
     for (i, slot) in lay.slots.iter().enumerate() {
         let Some(kind) = slot.module else { continue };

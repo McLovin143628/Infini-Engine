@@ -256,6 +256,15 @@ pub struct ModuleDef {
     /// slot-aligned collider, which is the predictable reading and the one a
     /// wall wants.
     pub collider: Option<DVec3>,
+    /// **How brightly this module emits at night** (island wave I8b), as a
+    /// multiplier on its own colour. `0.0` for everything that does not glow.
+    ///
+    /// **Derived, not parsed.** There is no `glow` keyword: the DSL describes
+    /// where a module goes, and *what a module is* is the palette's business.
+    /// [`Grammar::stamp_module_meshes`] sets it from the module's shape family,
+    /// so a window is a window in every archetype by one rule rather than by
+    /// seven authored numbers that can disagree.
+    pub glow: f32,
 }
 
 impl ModuleDef {
@@ -268,6 +277,7 @@ impl ModuleDef {
             scale: 1.0,
             size: None,
             collider: None,
+            glow: 0.0,
         }
     }
 }
@@ -313,6 +323,33 @@ impl Grammar {
     /// The module palette, in declaration order (index == `kind_index`).
     pub fn modules(&self) -> &[ModuleDef] {
         &self.modules
+    }
+
+    /// **Give every unassigned module its shape family's mesh and glow**
+    /// (island wave I8b).
+    ///
+    /// A module that already names a `mesh` — an author who typed
+    /// `module Panel = mesh <guid>` — is left alone: an authored asset always
+    /// wins over a derived one, which is what makes this safe to run over any
+    /// grammar rather than only over the seven palettes.
+    ///
+    /// Idempotent, and a pure function of the module NAMES, so two grammars that
+    /// declare the same vocabulary stamp the same ids. Called by
+    /// [`BuildingArchetype::grammar`](crate::building::palettes::BuildingArchetype::grammar)
+    /// — the one place a palette becomes a grammar — so `place_module` and the
+    /// building assembler read one field instead of each deriving an id.
+    pub fn stamp_module_meshes(&mut self) {
+        for m in &mut self.modules {
+            let Some(shape) = crate::building::modules::shape_of(&m.name) else {
+                continue;
+            };
+            if m.mesh.is_none() {
+                m.mesh = Some(crate::building::modules::module_mesh_guid(shape));
+            }
+            if shape.is_glazing() {
+                m.glow = crate::building::modules::GLAZING_GLOW;
+            }
+        }
     }
 
     /// The rule for `symbol`, if it is a non-terminal.

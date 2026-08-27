@@ -321,7 +321,13 @@ fn parts_from_pairs(
     colliders: &[inf_pcg::PcgCollider],
     grammar: &Grammar,
 ) -> Result<BakeInput, BakeError> {
-    if instances.len() != colliders.len() {
+    // **The aligned PREFIX, not the whole list** (island wave I8b). The
+    // assembler now appends decoration — a window pane, which has no collider
+    // because a pane is not solid — *after* every aligned pair, and states that
+    // invariant in `GrammarOutput::decor`. So a longer instance list is legal
+    // and a shorter one is still the defect this refusal names: a part whose
+    // material slot cannot be known. `zip` below takes the prefix.
+    if instances.len() < colliders.len() {
         return Err(BakeError::Unaligned {
             instances: instances.len(),
             colliders: colliders.len(),
