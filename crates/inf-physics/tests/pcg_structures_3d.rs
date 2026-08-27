@@ -174,16 +174,25 @@ fn an_unchanged_volume_is_retained_across_syncs() {
 
 /// The setter is what bumps the stamp; a raw assignment does not, which is why
 /// it is documented as unsupported.
+///
+/// The stamp is drawn from a **process-global** counter (island wave I8a audit),
+/// so what is asserted is that it moves and never repeats — never that it counts.
 #[test]
 fn the_setter_bumps_the_change_stamp() {
     let mut v = PcgVolume::default();
     assert_eq!(v.structures_gen, 0);
     v.set_structures(vec![solid(DVec3::ZERO, DVec3::splat(1.0))]);
-    assert_eq!(v.structures_gen, 1);
+    let first = v.structures_gen;
+    assert_ne!(first, 0);
     assert_eq!(v.structures.len(), 1);
     v.set_structures(Vec::new());
-    assert_eq!(v.structures_gen, 2);
+    assert!(v.structures_gen > first);
     assert!(v.structures.is_empty());
+    // …and a NEW volume — which is what a cell reactivation builds under the
+    // same guid — never lands back on a stamp this one already used.
+    let mut reborn = PcgVolume::default();
+    reborn.set_structures(vec![solid(DVec3::ZERO, DVec3::splat(1.0))]);
+    assert!(reborn.structures_gen > v.structures_gen);
 }
 
 /// **The mirror pin.** `inf_ecs::ScatteredSolid` and `inf_pcg::PcgCollider` are

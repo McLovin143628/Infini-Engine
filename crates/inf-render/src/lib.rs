@@ -140,17 +140,17 @@ pub use renderer::{
 pub use scene::{
     apply_seam, box_uv, deformed_skinned_mesh, RenderFractureChunk, RenderFractureVertex,
     RenderTilemap, RenderVoxelChunk, RenderVoxelVertex, RenderVoxelVolume, ScatterBatch,
-    ScatterData, ScatterGeometry, ScatterInstance, ScatterInstanceRaw, ScatterMeshes,
-    SkinnedInstance, SkinnedMeshData, SkinnedVertex, SkyParams, SpriteInstance,
+    ScatterData, ScatterGeometry, ScatterInstance, ScatterInstanceRaw, ScatterMemo, ScatterMeshes,
+    ScatterSource, SkinnedInstance, SkinnedMeshData, SkinnedVertex, SkyParams, SpriteInstance,
     SpriteTextureUpload, SunParams, TerrainTileKey, TextureHandle, TilemapParams, VgeomAsset,
     VgeomInstance, VgeomMesh, VoxelChunkKey, CLOTH_TINT, DEFAULT_SUN_DIR, HAIR_TINT, ID_GIZMO_BASE,
     ID_NONE, MAX_SCATTER_MESH_TRIANGLES, STRUCTURE_LOD_M,
 };
 pub use scene::{
-    detail_scale_q8, take_unchanged_terrain, take_unchanged_voxel, terrain_id_from_guid, Ambient2D,
-    LightKind, MeshInstance, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D, RenderScene,
-    RenderTerrain, RenderTerrainLayer, RenderTerrainTile, SeamSample, VtTextureSet,
-    DEFAULT_SEAM_BAND_M,
+    detail_scale_q8, scatter_table_stamp, take_unchanged_terrain, take_unchanged_voxel,
+    terrain_id_from_guid, Ambient2D, LightKind, MeshInstance, PrebatchedRun, RenderChunk,
+    RenderLight, RenderLight2D, RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile,
+    SeamSample, VtTextureSet, DEFAULT_SEAM_BAND_M,
 };
 pub use settings::{
     adapt_exposure_ev, exposure_bin, exposure_bin_luminance, exposure_compensation_factor,

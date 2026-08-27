@@ -3431,9 +3431,10 @@ pub struct PcgVolume {
     #[serde(skip)]
     #[reflect(ignore)]
     pub doorways: Vec<DoorwaySlot>,
-    /// Bumped every time [`structures`](Self::structures) is replaced through
-    /// [`set_structures`](Self::set_structures) — the **change stamp** the
-    /// physics bridge reconciles against.
+    /// Bumped every time the derived population is replaced through
+    /// [`set_structures`](Self::set_structures) or
+    /// [`set_population`](Self::set_population) — the **change stamp** the
+    /// physics bridge and the sim→render projection reconcile against.
     ///
     /// Without it the bridge would rebuild a descriptor for every solid on every
     /// fixed step: a furnished town is ~13 000 immovable boxes, and re-describing
@@ -3442,9 +3443,28 @@ pub struct PcgVolume {
     /// measurement. This is the same version-stamp shape `SceneDoc::version` and
     /// `Terrain`'s tile stamps already use.
     ///
-    /// `#[serde(skip)]` like the cache it stamps. Starting at `0` on a fresh
-    /// component and at `1` after the first write is what makes an
-    /// unseen-by-the-bridge volume always resync.
+    /// # It is drawn from a PROCESS-GLOBAL counter, and that is load-bearing
+    ///
+    /// (Island wave I8a audit.) It used to be a per-volume `wrapping_add(1)`, so
+    /// the first write of *every* volume produced `1`. Both consumers key their
+    /// memo by the volume's `Guid`, and a cell that deactivates and reactivates
+    /// destroys the component and builds a fresh one — whose first write is `1`
+    /// again, over ground that may have been re-paged in between. Same guid, same
+    /// stamp, different content: a stale hit, and the common case rather than an
+    /// exotic one.
+    ///
+    /// Drawn from a process-global `NEXT_STRUCTURES_GEN` a stamp is unique
+    /// across every volume,
+    /// every level and every incarnation in the process, which is exactly the
+    /// argument `inf_terrain`'s `NEXT_TILE_VERSION` and `inf_voxel`'s
+    /// `NEXT_MESH_VERSION` already make for the terrain and voxel carry-forwards
+    /// (see `inf_render::take_unchanged_terrain`'s memo). **Read it as an
+    /// identity, never as a count**: nothing may assume the second write of a
+    /// volume is `2`, or that two stamps taken from one volume differ by one.
+    ///
+    /// `#[serde(skip)]` like the cache it stamps. `0` means "never written" on a
+    /// fresh or freshly-decoded component and is a forced miss for every
+    /// consumer, which is what makes an unseen volume always resync.
     #[serde(skip)]
     #[reflect(ignore)]
     pub structures_gen: u64,
@@ -3486,6 +3506,26 @@ impl Default for PcgVolume {
     }
 }
 
+/// **The process-global source of [`PcgVolume::structures_gen`]** (island wave
+/// I8a audit).
+///
+/// Starts at `1` because `0` is reserved for "never written" on both sides of
+/// every consumer. Monotone and never reset: a stamp names one population of one
+/// volume in this process for the life of the process, so a memo keyed on
+/// `(guid, stamp)` cannot serve a previous incarnation's payload for a volume a
+/// cell destroyed and rebuilt. The twin of `inf_terrain`'s `NEXT_TILE_VERSION`
+/// and `inf_voxel`'s `NEXT_MESH_VERSION`, for the same reason and with the same
+/// rule.
+static NEXT_STRUCTURES_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The next population change stamp.
+///
+/// `Relaxed` is enough: the value is compared for equality only and never orders
+/// anything, and the atomic's own read-modify-write is what makes it unique.
+fn next_structures_gen() -> u64 {
+    NEXT_STRUCTURES_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl PcgVolume {
     /// Replace the derived solid cache and **bump its change stamp**, with no
     /// grouping — every solid stands on its own.
@@ -3499,7 +3539,7 @@ impl PcgVolume {
     pub fn set_structures(&mut self, solids: Vec<ScatteredSolid>) {
         self.structures = solids;
         self.structure_groups = Vec::new();
-        self.structures_gen = self.structures_gen.wrapping_add(1);
+        self.structures_gen = next_structures_gen();
     }
 
     /// Replace a volume's **whole derived population** — instances, solids and
@@ -3551,7 +3591,7 @@ impl PcgVolume {
                 ok
             })
             .collect();
-        self.structures_gen = self.structures_gen.wrapping_add(1);
+        self.structures_gen = next_structures_gen();
     }
 }
 
@@ -6328,16 +6368,24 @@ mod tests {
         assert_eq!(v.structure_groups.len(), 1, "{:?}", v.structure_groups);
         assert_eq!(v.structure_groups[0].range(), 0..3);
         assert_eq!(v.structure_groups[0].instance_range(), 0..4);
-        assert_eq!(v.structures_gen, 1, "one write is one stamp");
+        // **The stamp is an IDENTITY, not a count** (island wave I8a audit): it
+        // is drawn from a process-global counter, so what a write guarantees is
+        // that the value moved and that no other volume in this process — or
+        // this volume's own next incarnation — ever holds it. Asserting `1` here
+        // would pin the exact property that made a memo keyed on
+        // `(guid, stamp)` able to serve a destroyed volume's payload.
+        let first = v.structures_gen;
+        assert_ne!(first, 0, "one write is one stamp");
 
-        // The three-list write is one stamp, and re-writing bumps it once more.
+        // The three-list write is one stamp, and re-writing takes a fresh one.
         v.set_population(
             vec![inst; 1],
             vec![solid; 1],
             vec![group(0, 1, 0, 1)],
             Vec::new(),
         );
-        assert_eq!(v.structures_gen, 2);
+        let second = v.structures_gen;
+        assert!(second > first, "{first} then {second}");
         assert_eq!(v.evaluated.len(), 1);
 
         // `set_structures` still means "no grouping", and clears a stale one.
@@ -6346,7 +6394,21 @@ mod tests {
             v.structure_groups.is_empty(),
             "a stale range must not survive"
         );
-        assert_eq!(v.structures_gen, 3);
+        assert!(v.structures_gen > second);
+
+        // **And a fresh component never repeats a stamp**, which is the whole
+        // point: a cell that deactivates and reactivates builds a new
+        // `PcgVolume` under the SAME guid, and a per-volume counter gave both
+        // incarnations `1` on their first write.
+        let mut reborn = PcgVolume::default();
+        assert_eq!(reborn.structures_gen, 0, "a fresh component is unwritten");
+        reborn.set_structures(vec![solid; 1]);
+        assert!(
+            reborn.structures_gen > v.structures_gen,
+            "a reincarnated volume repeated a stamp ({} against {})",
+            reborn.structures_gen,
+            v.structures_gen
+        );
 
         // **And the ORDER is part of the contract**, because the bridge finds
         // the ungrouped solids with a single forward cursor: an overlapping or

@@ -1512,10 +1512,11 @@ impl EngineHost {
         self.scene.vgeom_instances.clear();
         self.scene.skinned_meshes.clear();
         self.scene.skinned.clear();
-        // P18.5: GPU-instanced scatter (PCG volumes + painted foliage), rebuilt
-        // from scratch like everything else. The payload behind each batch is
-        // content-keyed, so re-projecting an unchanged scatter re-uses its GPU
-        // buffers even though the list itself is rebuilt.
+        // P18.5 + island wave I8a's audit: the scatter LIST is rebuilt from
+        // scratch every projection, and the PAYLOADS behind it are not. The memo
+        // itself is taken out further down — AFTER `sync_scatter_meshes`, because
+        // this host rebuilds its mesh table per projection and the table's stamp
+        // is part of the memo's key.
         self.scene.scatter.clear();
         // P20.1: water bodies are rebuilt from scratch every projection, like
         // `scatter` — a body's whole state is a pure function of its component, its
@@ -1591,6 +1592,14 @@ impl EngineHost {
         // shipped player's projector runs per frame and must not open a file, and
         // the two projectors are pinned character for character.
         self.sync_scatter_meshes(doc);
+        // …and now the scatter memo, whose key folds that table's own stamp
+        // (island wave I8a audit). Last projection's payloads are taken out here
+        // and re-filled by `carry_or_push_pcg_scatter` as the walk goes; what is
+        // left at the end is exactly the scatter that left the scene, and it is
+        // dropped. MIRROR: `inf_player::render::project_scene_full` takes the same
+        // two locals under the same names.
+        let mut prev_scatter = std::mem::take(&mut self.scene.scatter_memo);
+        let scatter_table = inf_render::scatter_table_stamp(&self.scatter_meshes);
         let w = world.world();
         // The live registry, borrowed for the whole projection: every instance's
         // texture set is a lookup in it (P26.4). `None` on a level with no
@@ -1854,7 +1863,16 @@ impl EngineHost {
                         .unwrap_or(DVec3::ZERO);
                     let id = next_id;
                     next_id += 1;
-                    push_pcg_scatter(&mut self.scene, vol, &self.scatter_meshes, translation, id);
+                    carry_or_push_pcg_scatter(
+                        &mut self.scene,
+                        &mut prev_scatter,
+                        scatter_table,
+                        guid,
+                        vol,
+                        &self.scatter_meshes,
+                        translation,
+                        id,
+                    );
                     // ONE row per batch, not one per instance: a pick anywhere in
                     // the scatter selects the owning volume, and the map stops
                     // carrying 100k rows to say the same thing.
@@ -2868,6 +2886,76 @@ fn push_shells(
     // MIRROR-END pcg_shell_batch
 }
 
+/// **Carry a volume's scatter batches forward, or pack them** (island wave I8a
+/// audit) — [`push_pcg_scatter`] behind the projection's own change stamp.
+///
+/// # The defect this closes
+///
+/// `push_pcg_scatter` re-packs a volume's whole population every frame: every
+/// instance to f32 render space and every packed byte through xxh3 to derive the
+/// content key. The key then tells the GPU cache nothing changed. That is
+/// precisely the shape Hardening Wave E found in the terrain and voxel payloads
+/// — *"what no consumer could do is stop the payload from being built"* — and on
+/// the island's 172 settlement blocks it was **365 545 instances and 20.2 ms a
+/// projection against a 1.5 ms `PROJECTION_BUDGET_MS`.**
+///
+/// # Why the key is sound
+///
+/// [`ScatterSource`](inf_render::ScatterSource) carries the volume's `Guid`, its
+/// **process-global** `structures_gen`, the authored `draw_distance` the stamp
+/// does not cover, the mesh table's own stamp and the world anchor the offsets
+/// were packed against. The population stamp is drawn from a process-global
+/// monotone counter (`inf_ecs`'s `NEXT_STRUCTURES_GEN`), so it names one
+/// population of one volume for the life of the process — including across the
+/// destroy-and-rebuild a cell deactivation and reactivation performs under the
+/// same guid, which is what a per-volume counter could not do. `0` is "never
+/// written" and is a forced miss.
+///
+/// A hit copies an `Arc` and a handful of scalars per batch and not one instance;
+/// a miss packs exactly what it packed before. **The two produce byte-identical
+/// scenes**, which is what `a_reprojection_is_byte_identical_to_a_cold_one`
+/// already exists to say.
+///
+/// The pick `id` is rewritten on a carried batch, deliberately: it is the
+/// projection's own numbering of this frame's entities and not content.
+///
+/// MIRROR: identical in `inf_viewport::host` and `inf_player::render`, pinned by
+/// `inf-editor-core`'s `tests/projector_mirror.rs`.
+#[allow(clippy::too_many_arguments)]
+fn carry_or_push_pcg_scatter(
+    scene: &mut RenderScene,
+    prev: &mut inf_render::ScatterMemo,
+    table: u64,
+    guid: Uuid,
+    vol: &PcgVolume,
+    meshes: &inf_render::ScatterMeshes,
+    translation: DVec3,
+    id: u32,
+) {
+    // MIRROR-BEGIN pcg_scatter_memo
+    let source = inf_render::ScatterSource {
+        entity: guid.as_u128(),
+        stamp: vol.structures_gen,
+        draw_distance_bits: vol.draw_distance.to_bits(),
+        table,
+        anchor: translation,
+    };
+    if let Some(batches) = prev.take(source) {
+        for b in &batches {
+            scene
+                .scatter
+                .push(inf_render::ScatterBatch { id, ..b.clone() });
+        }
+        scene.scatter_memo.insert(source, batches);
+        return;
+    }
+    let at = scene.scatter.len();
+    push_pcg_scatter(scene, vol, meshes, translation, id);
+    let packed = scene.scatter[at..].to_vec();
+    scene.scatter_memo.insert(source, packed);
+    // MIRROR-END pcg_scatter_memo
+}
+
 /// Project a [`PcgVolume`]'s evaluated cache into GPU-instanced scatter batches
 /// (P18.5), anchored at the volume entity's world `translation`, carrying the
 /// volume's authored content draw distance.
@@ -2876,10 +2964,19 @@ fn push_shells(
 ///
 /// A volume that grew **buildings** carries `structure_groups`, and its parts are
 /// swapped for one **shell** box per building past
-/// [`STRUCTURE_LOD_M`](inf_render::STRUCTURE_LOD_M). That is three batches, not
-/// one, and their distance bands are *complementary*: ungrouped content keeps
-/// `[0, draw_distance)`, the parts take `[0, lod)` and the shells take
-/// `[lod, draw_distance)`.
+/// [`STRUCTURE_LOD_M`](inf_render::STRUCTURE_LOD_M).
+///
+/// | batch | band | what it holds |
+/// |---|---|---|
+/// | ungrouped | `[0, draw_distance)` | scatter and fences — content that has no shell to stand in for it |
+/// | parts | `[0, lod + reach)` | every building's own boxes |
+/// | shells | `[lod, draw_distance)` | one oriented box per building |
+///
+/// **The two bands overlap by `reach`, and that is the I3 audit's own
+/// correction** (met here as a stale doc block, island wave I8a audit): a part
+/// sits up to its shell's half-diagonal nearer the eye than the shell's centre
+/// does, so cutting both at `lod` leaves a hole through the back of a building
+/// rather than a level of detail.
 ///
 /// **The camera is nowhere in this function**, which is the whole point: a
 /// selection made on the CPU would put the eye inside a batch's *content key*,

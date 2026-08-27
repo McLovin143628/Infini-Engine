@@ -228,6 +228,32 @@ fn read(rel: &str) -> String {
 const VIEWPORT: &str = "editor/crates/inf-viewport/src/host.rs";
 const PLAYER: &str = "runtime/inf-player/src/render.rs";
 
+/// One `// MIRROR-BEGIN <tag>` … `// MIRROR-END <tag>` region, with every
+/// whitespace character filtered out.
+///
+/// The fences are **counted**, not just found: a `contains` needle that is a
+/// prefix of a declaration can never fail, and neither can a second fence (the
+/// I1 audit's law, applied to a delimiter).
+///
+/// Hoisted out of `both_projectors_band_a_structure_lod_the_same_way` when the
+/// scatter-memo arm below joined it (island wave I8a audit) — two nested copies
+/// of a delimiter reader is how two fences come to be read by two different
+/// rules.
+fn fenced(src: &str, tag: &str, who: &str) -> String {
+    let (b, e) = (
+        format!("// MIRROR-BEGIN {tag}"),
+        format!("// MIRROR-END {tag}"),
+    );
+    assert_eq!(src.matches(&b).count(), 1, "{who}: {tag} begin fences");
+    assert_eq!(src.matches(&e).count(), 1, "{who}: {tag} end fences");
+    let (i, j) = (
+        src.find(&b).expect("checked"),
+        src.find(&e).expect("checked"),
+    );
+    assert!(j > i, "{who}: the {tag} fence is inverted");
+    src[i..j].chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 /// The editor's loose-file render-asset store (P18.3) — where the *skeletal*
 /// resolution + pose rule lives on the editor side.
 const EDITOR_ASSETS: &str = "editor/crates/inf-editor-core/src/render_assets.rs";
@@ -782,20 +808,6 @@ fn both_projectors_scatter_pcg_and_foliage_the_same_way() {
 /// law, applied to a delimiter).
 #[test]
 fn both_projectors_band_a_structure_lod_the_same_way() {
-    fn fenced(src: &str, tag: &str, who: &str) -> String {
-        let (b, e) = (
-            format!("// MIRROR-BEGIN {tag}"),
-            format!("// MIRROR-END {tag}"),
-        );
-        assert_eq!(src.matches(&b).count(), 1, "{who}: {tag} begin fences");
-        assert_eq!(src.matches(&e).count(), 1, "{who}: {tag} end fences");
-        let (i, j) = (
-            src.find(&b).expect("checked"),
-            src.find(&e).expect("checked"),
-        );
-        assert!(j > i, "{who}: the {tag} fence is inverted");
-        src[i..j].chars().filter(|c| !c.is_whitespace()).collect()
-    }
     for tag in ["pcg_scatter_lod", "pcg_shell_batch"] {
         let editor = fenced(&read(VIEWPORT), tag, "the editor viewport");
         let player = fenced(&read(PLAYER), tag, "the shipped player");
@@ -840,6 +852,115 @@ fn both_projectors_band_a_structure_lod_the_same_way() {
         "`push_shells` has drifted between the editor viewport and the shipped \
          player"
     );
+}
+
+/// **THE SCATTER CARRY-FORWARD IS ONE MEMO, KEYED THE SAME WAY IN BOTH HOSTS**
+/// (island wave I8a audit).
+///
+/// # Why this pin exists, stated so it can be argued with
+///
+/// The wave I8a ledger routed a defect with its price: `push_pcg_scatter` re-packs
+/// a volume's whole population every frame — on the island's 172 settlement
+/// blocks, **365 545 instances and 20.2 ms of projection against a 1.5 ms
+/// `PROJECTION_BUDGET_MS`** — for content that changes only when a cell
+/// activates. The fix is Hardening Wave E's own terrain pattern one subsystem
+/// over, and the wave declined to take it *because the projector body it edits is
+/// pinned character for character by this file*. So the pin moves, and this is
+/// the arm that says what it now covers.
+///
+/// # What a divergence here would be
+///
+/// A memo is a decision about **what a host draws**, so two hosts memoizing on
+/// different keys is the same class of failure the file already guards: one host
+/// carrying a stale population forward while the other re-packs is a preview and
+/// a shipped build showing two different cities, and — unlike a band drift — it
+/// would show only after a cell moved, i.e. never in a screenshot.
+///
+/// Three claims:
+///
+/// 1. the memo body is **character-identical** between fences;
+/// 2. both hosts **take last projection's memo out** and stamp the mesh table,
+///    rather than one of them keeping it and the other clearing it;
+/// 3. neither host reaches `push_pcg_scatter` from its entity walk **except**
+///    through the memo — read through the comment stripper, because a sentence
+///    naming the function satisfies a raw `contains` (the `.apply(` precedent).
+///
+/// Mutation-verified while it was written: dropping `stamp:` from either copy's
+/// key fails (1); replacing `carry_or_push_pcg_scatter(` with a direct
+/// `push_pcg_scatter(` call in either walk fails (3); and deleting the
+/// `std::mem::take` from either host fails (2) — while deleting it from *both*
+/// leaves them identical and is caught by (2) rather than by (1), which is the
+/// `apply_record_mirror` audit's own lesson about equality pins.
+#[test]
+fn both_projectors_memoize_pcg_scatter_the_same_way() {
+    let editor = fenced(&read(VIEWPORT), "pcg_scatter_memo", "the editor viewport");
+    let player = fenced(&read(PLAYER), "pcg_scatter_memo", "the shipped player");
+    assert!(
+        editor.len() > 300,
+        "the `pcg_scatter_memo` fence is {} chars — an empty fence would make \
+         this gate vacuous",
+        editor.len()
+    );
+    assert_eq!(
+        editor, player,
+        "the scatter carry-forward has drifted between the editor viewport and \
+         the shipped player. A host that carries a population its twin re-packs \
+         is a preview and a shipped build drawing two different cities, and it \
+         shows only after a cell moves."
+    );
+    // The key's own fields, named here so dropping one from BOTH copies — which
+    // the equality above cannot see — still fails.
+    for field in [
+        "entity:",
+        "stamp:",
+        "draw_distance_bits:",
+        "table,",
+        "anchor:",
+    ] {
+        assert!(
+            editor.contains(
+                &field
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect::<String>()
+            ),
+            "the memo key no longer carries `{field}` — every one of the five is \
+             a way the payload can change without the population stamp moving"
+        );
+    }
+    for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
+        let raw = read(path).replace("\r\n", "\n");
+        let src = support::strip_comments_and_strings(&raw);
+        assert!(
+            src.contains("std::mem::take(&mut self.scene.scatter_memo)")
+                || src.contains("std::mem::take(&mut scene.scatter_memo)"),
+            "the {label} no longer takes last projection's scatter memo out — a \
+             memo that is never taken never sees a removal"
+        );
+        assert!(
+            src.contains("inf_render::scatter_table_stamp("),
+            "the {label} no longer folds the resolved mesh table into the memo \
+             key — a mesh swapped under an existing GUID would be memoized away"
+        );
+        // …and the ONLY reach into the packer is the memo's own. Four
+        // occurrences, exactly: `fn push_pcg_scatter(`, the miss branch's call to
+        // it, `fn carry_or_push_pcg_scatter(` and the entity walk's one call to
+        // THAT (the last two match as substrings, which is why the count is four
+        // and not two).
+        assert_eq!(
+            src.matches("push_pcg_scatter(").count(),
+            4,
+            "the {label} names `push_pcg_scatter(` {} times, not 4 — a second, \
+             unmemoized call site is the defect this arm exists to hold shut",
+            src.matches("push_pcg_scatter(").count()
+        );
+        assert_eq!(
+            src.matches("carry_or_push_pcg_scatter(").count(),
+            2,
+            "the {label} no longer reaches the packer through exactly one \
+             memoized door"
+        );
+    }
 }
 
 /// This is exactly the shape of divergence this file exists to catch. A population

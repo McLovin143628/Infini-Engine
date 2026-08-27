@@ -797,6 +797,159 @@ impl ScatterBatch {
     }
 }
 
+/// **The identity of the thing a [`ScatterBatch`] was packed out of** — the key
+/// the sim→render projection's scatter carry-forward reads (island wave I8a
+/// audit).
+///
+/// # Why the projection needed one
+///
+/// `RenderTerrainTile::version` and `ScatterData::key` both gate the GPU
+/// *upload*, and Hardening Wave E's memo already says what that is not enough
+/// for: *"what no consumer could do is stop the payload from being built."* The
+/// scatter path was the one large payload left rebuilding every frame — a
+/// settled city block's instances re-packed to f32 and re-hashed sixty times a
+/// second for content that changes only when a cell activates. Measured on the
+/// island at 172 settlement blocks: **365 545 instances, ~20.2 ms a projection
+/// against a 1.5 ms budget.**
+///
+/// # What is in the key, and why each half is
+///
+/// * `entity` + `stamp` are the volume's `Guid` and its
+///   `PcgVolume::structures_gen`. The stamp is drawn from a **process-global**
+///   monotone counter, so `(entity, stamp)` names one population of one volume
+///   for the life of the process — including across the destroy/rebuild a cell
+///   deactivation and reactivation performs under the same guid. `0` in either
+///   field means "not in the ledger" and is a forced miss, exactly as `0` is for
+///   the terrain and voxel stamps.
+/// * `draw_distance_bits` is `PcgVolume::draw_distance`'s bit pattern. It is
+///   **authored**, so the population stamp does not cover it, and it decides
+///   both of a volume's LOD bands: an author dragging it in the Details panel
+///   must re-pack.
+/// * `table` is [`scatter_table_stamp`] over the host's resolved mesh table,
+///   which decides which bucket each instance packs into and therefore how many
+///   batches a volume becomes.
+///
+/// The world anchor is part of the key: the packed offsets are relative to it,
+/// so a carried batch whose anchor moved would translate its whole population.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ScatterSource {
+    /// The projecting entity's `Guid` as `u128`; `0` ⇒ not memoizable.
+    pub entity: u128,
+    /// The source's process-global population stamp; `0` ⇒ forced miss.
+    pub stamp: u64,
+    /// The authored draw distance's bit pattern (not covered by `stamp`).
+    pub draw_distance_bits: u64,
+    /// [`scatter_table_stamp`] of the mesh table the batch was bucketed against.
+    pub table: u64,
+    /// The world anchor the payload's offsets were packed against.
+    pub anchor: DVec3,
+}
+
+impl ScatterSource {
+    /// A source nothing may carry forward — painted foliage and a terrain's
+    /// biome population.
+    ///
+    /// Those are not memo-hostile by nature; they simply have no monotone stamp
+    /// today, and a memo with no stamp behind it is the stale hit this type
+    /// exists to make unreachable.
+    pub const NONE: Self = Self {
+        entity: 0,
+        stamp: 0,
+        draw_distance_bits: 0,
+        table: 0,
+        anchor: DVec3::ZERO,
+    };
+
+    /// Is this a key a carry-forward may match on at all?
+    pub fn is_memoizable(&self) -> bool {
+        self.entity != 0 && self.stamp != 0
+    }
+}
+
+/// A stamp over the host's resolved scatter-mesh table.
+///
+/// Order-independent (the table is a `HashMap`), and sensitive to a geometry
+/// being *replaced* under an existing GUID as well as to one being added or
+/// removed — each entry folds its own map key together with its geometry's
+/// content key, so a swap between two GUIDs moves the stamp too.
+///
+/// It is a 64-bit digest rather than an identity, which is the same argument
+/// `ScatterData::key` already makes one word wider; the table is a handful of
+/// entries and is rebuilt at most once per projection, so this is O(table) once
+/// a frame and never per volume.
+pub fn scatter_table_stamp(meshes: &ScatterMeshes) -> u64 {
+    let mut acc = meshes.len() as u64;
+    for (k, g) in meshes {
+        let key = g.key();
+        let e = (*k as u64)
+            ^ ((*k >> 64) as u64).rotate_left(17)
+            ^ (key as u64).rotate_left(31)
+            ^ ((key >> 64) as u64).rotate_left(43);
+        acc ^= e.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    acc
+}
+
+/// **The scatter carry-forward memo** — the scatter twin of what
+/// [`take_unchanged_terrain`] does for a terrain (island wave I8a audit).
+///
+/// Held on [`RenderScene`] rather than beside `scatter`, so there is no parallel
+/// list to fall out of step with: the memo OWNS the batches it remembers and the
+/// scene's `scatter` list is filled from it by `Arc` clone, which copies a
+/// pointer and a handful of scalars per batch and not one instance.
+///
+/// # How a projection uses it
+///
+/// Take it out at the top of the walk, ask it for each memoizable source, and
+/// build the new one as you go. What is left in the taken-out copy when the walk
+/// ends is exactly the scatter that **left** the scene — the terrain memo's own
+/// arrangement, and the reason a removal is seen at all.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScatterMemo {
+    by_entity: std::collections::BTreeMap<u128, (ScatterSource, Vec<ScatterBatch>)>,
+}
+
+impl ScatterMemo {
+    /// The batches this source contributed last projection, removed from the
+    /// memo — or `None` when the key does not match exactly.
+    ///
+    /// A key that differs in any field is a miss, and a miss is silent: the
+    /// caller packs the population as it always did.
+    pub fn take(&mut self, source: ScatterSource) -> Option<Vec<ScatterBatch>> {
+        if !source.is_memoizable() {
+            return None;
+        }
+        match self.by_entity.get(&source.entity) {
+            Some((k, _)) if *k == source => self.by_entity.remove(&source.entity).map(|(_, b)| b),
+            _ => None,
+        }
+    }
+
+    /// Remember this source's batches for the next projection.
+    ///
+    /// A source that is not memoizable is dropped on the floor rather than
+    /// stored under a key nothing can ever match.
+    pub fn insert(&mut self, source: ScatterSource, batches: Vec<ScatterBatch>) {
+        if source.is_memoizable() {
+            self.by_entity.insert(source.entity, (source, batches));
+        }
+    }
+
+    /// How many sources are remembered.
+    pub fn len(&self) -> usize {
+        self.by_entity.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_entity.is_empty()
+    }
+
+    /// Every batch the memo holds, for a caller that wants to price it.
+    pub fn batches(&self) -> impl Iterator<Item = &ScatterBatch> {
+        self.by_entity.values().flat_map(|(_, b)| b.iter())
+    }
+}
+
 /// One vertex of a [`SkinnedMeshData`] — position + normal + **uv** in **bind
 /// (rest) space**, plus the four joint influences that deform it. `#[repr(C)]` +
 /// `Pod` so it uploads straight to a GPU vertex buffer (64 bytes, no padding).
@@ -2432,6 +2585,20 @@ pub struct RenderScene {
     /// batch's own [`ScatterData::key`] instead: a projection that rebuilds the
     /// list without the scatter changing re-uses the GPU buffers.
     pub scatter: Vec<ScatterBatch>,
+    /// **The carry-forward memo behind [`scatter`](Self::scatter)** (island wave
+    /// I8a audit) — the batches each memoizable source contributed last
+    /// projection, so a settled city is not re-packed sixty times a second.
+    ///
+    /// `ScatterData::key` gates the *upload*, and Hardening Wave E's own memo
+    /// says why that is not enough: *"what no consumer could do is stop the
+    /// payload from being built."* On the island's 172 settlement blocks the
+    /// payload was 365 545 instances re-packed to f32 and re-hashed every frame —
+    /// **20.2 ms of projection against a 1.5 ms budget** — for content that
+    /// changes only when a cell activates.
+    ///
+    /// Read and written by the two MIRROR projectors and by nobody else; a
+    /// renderer pass must keep reading [`scatter`](Self::scatter).
+    pub scatter_memo: ScatterMemo,
     /// Water bodies (P20.1) — oceans, lakes and spline rivers. Empty ⇒ the
     /// [`crate::passes::water`] node returns before touching the encoder, so every
     /// scene without water (including all 42 pre-P20.1 goldens) records the exact

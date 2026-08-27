@@ -440,3 +440,239 @@ fn a_carried_projection_sees_a_tile_leave() {
         "the removed tile is still being drawn"
     );
 }
+
+// ── the SCATTER carry-forward (island wave I8a audit) ───────────────────────
+//
+// Wave E carried terrain tiles and voxel chunks forward and left the third heavy
+// payload alone: a `PcgVolume`'s scatter was re-packed to f32 and re-hashed every
+// frame. On the island's 172 settlement blocks that was 365 545 instances and
+// **20.2 ms a projection against the 1.5 ms budget above** — a defect the wave's
+// own ledger routed with its price.
+//
+// The arms below have their OWN fixture rather than growing `fixture()`, and that
+// is deliberate: `projection_stays_under_budget` pins a RATCHET, and a ratchet
+// re-measured over a different world is a ratchet nobody minted.
+
+const VOLUME_GUID: u128 = 0x1E00_0003;
+/// Instances in the fixture volume. Enough that a re-pack is a measurable
+/// allocation and a carry is not, small enough that this runs on a CI runner.
+const SCATTER_N: usize = 20_000;
+
+/// One volume's population — `n` instances in twenty buildings, so the projection
+/// takes the grouped path (loose + parts + shells) rather than the flat one.
+#[allow(clippy::type_complexity)]
+fn population(
+    n: usize,
+    lift: f64,
+) -> (
+    Vec<inf_ecs::components::ScatteredInstance>,
+    Vec<inf_ecs::components::ScatteredSolid>,
+    Vec<inf_ecs::components::StructureGroup>,
+) {
+    let mut inst = Vec::with_capacity(n);
+    let mut solid = Vec::with_capacity(n);
+    for i in 0..n {
+        let (x, z) = ((i % 200) as f64 * 0.5, (i / 200) as f64 * 0.5);
+        inst.push(inf_ecs::components::ScatteredInstance {
+            position: DVec3::new(x, lift, z),
+            rotation: glam::DQuat::IDENTITY,
+            scale: 1.0,
+            kind: (i % 5) as u32,
+            mesh: None,
+        });
+        solid.push(inf_ecs::components::ScatteredSolid {
+            center: DVec3::new(x, lift, z),
+            half_extents: DVec3::splat(0.25),
+            rotation: glam::DQuat::IDENTITY,
+        });
+    }
+    let per = (n / 20) as u32;
+    let groups = (0..20u32)
+        .map(|g| inf_ecs::components::StructureGroup {
+            shell: inf_ecs::components::ScatteredSolid {
+                center: DVec3::new(g as f64 * 5.0, lift, 0.0),
+                half_extents: DVec3::splat(4.0),
+                rotation: glam::DQuat::IDENTITY,
+            },
+            start: g * per,
+            len: per,
+            inst_start: g * per,
+            inst_len: per,
+        })
+        .collect();
+    (inst, solid, groups)
+}
+
+/// A sim holding one `PcgVolume` with a real population, and nothing else heavy.
+fn scatter_fixture() -> RuntimeSim {
+    let mut world = EcsWorld::new();
+    let e = world.spawn_with_guid(Uuid::from_u128(VOLUME_GUID), "Blocks", None);
+    let mut vol = inf_ecs::components::PcgVolume::default();
+    let (inst, solid, groups) = population(SCATTER_N, 0.0);
+    vol.set_population(inst, solid, groups, Vec::new());
+    world
+        .world_mut()
+        .entity_mut(e)
+        .insert(Transform::default())
+        .insert(vol);
+    world.propagate();
+    let mut sim = RuntimeSim::new(world, Vec::new(), DVec2::ZERO, 60.0);
+    sim.step_once(RuntimeInput::default());
+    sim
+}
+
+fn project_scatter(scene: &mut RenderScene, sim: &RuntimeSim) {
+    project(scene, sim, &VoxelVolumes::new());
+}
+
+/// The volume's entity, for a test that wants to rewrite its population.
+fn volume_of(sim: &RuntimeSim) -> inf_ecs::Entity {
+    sim.world()
+        .entity_of(Uuid::from_u128(VOLUME_GUID))
+        .expect("the fixture's volume")
+}
+
+/// **(e) A CARRIED SCATTER IS THE SAME PAYLOAD, AND IT IS NOT RE-PACKED.**
+///
+/// Two claims, and the second is what makes the fix a fix rather than a comment:
+///
+/// * the batches a second projection produces `==` the first's, field for field —
+///   which is (d) restated for the list (d) only counted; and
+/// * the `Arc` behind each is **pointer-identical**, which no re-pack can
+///   produce. `ScatterData::key` would have made the two *equal* either way,
+///   which is exactly why this asserts the pointer.
+///
+/// The wall clock is printed and not asserted (this module's own law), but the
+/// ratio is the whole point: a hit is a pointer copy.
+#[test]
+fn a_carried_scatter_is_the_same_payload_and_is_not_re_packed() {
+    let sim = scatter_fixture();
+    let mut scene = RenderScene::default();
+
+    let t = std::time::Instant::now();
+    project_scatter(&mut scene, &sim);
+    let cold_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let first: Vec<inf_render::ScatterBatch> = scene.scatter.clone();
+    let packed: usize = first.iter().map(|b| b.data.len()).sum();
+    assert!(
+        !first.is_empty() && packed == SCATTER_N + 20,
+        "the fixture volume projected {} batches / {packed} instances — this arm \
+         is over the wrong world",
+        first.len()
+    );
+
+    let t = std::time::Instant::now();
+    project_scatter(&mut scene, &sim);
+    let warm_ms = t.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "SCATTER MEMO: {} batches / {packed} instances; cold {cold_ms:.3} ms, \
+         carried {warm_ms:.3} ms; the memo holds {} source(s)",
+        first.len(),
+        scene.scatter_memo.len()
+    );
+    assert_eq!(
+        scene.scatter, first,
+        "a carried batch list is not the cold one"
+    );
+    for (a, b) in first.iter().zip(&scene.scatter) {
+        assert!(
+            std::sync::Arc::ptr_eq(&a.data, &b.data),
+            "the carried projection re-packed a payload it already had — the \
+             batches are equal, so only the POINTER can say so"
+        );
+    }
+    // …and a cold scene reaches the same answer, which is (d) for this list.
+    let mut cold = RenderScene::default();
+    project_scatter(&mut cold, &sim);
+    assert_eq!(
+        cold.scatter, scene.scatter,
+        "a re-projected scatter list differs from a cold one"
+    );
+}
+
+/// **The falsifier.** A carried scatter must still see a new population.
+///
+/// Mutation-verified: a `ScatterMemo::take` that ignored `source.stamp` leaves
+/// the arm above green and fails here.
+#[test]
+fn a_carried_scatter_still_sees_a_new_population() {
+    let mut sim = scatter_fixture();
+    let mut scene = RenderScene::default();
+    project_scatter(&mut scene, &sim);
+    let before = scene.scatter.clone();
+
+    let e = volume_of(&sim);
+    {
+        let (inst, solid, groups) = population(SCATTER_N, 7.0);
+        let world = sim.world_mut();
+        let mut vol = world
+            .world_mut()
+            .get_mut::<inf_ecs::components::PcgVolume>(e)
+            .expect("the fixture's volume component");
+        vol.set_population(inst, solid, groups, Vec::new());
+    }
+
+    project_scatter(&mut scene, &sim);
+    assert_eq!(
+        before.len(),
+        scene.scatter.len(),
+        "the edit must not change the batch count"
+    );
+    for (b, a) in before.iter().zip(&scene.scatter) {
+        assert_ne!(
+            b.data.key(),
+            a.data.key(),
+            "the carried projection served a stale population — every instance \
+             moved seven metres up"
+        );
+    }
+}
+
+/// **The stale hit a per-volume counter could not stop** (island wave I8a audit).
+///
+/// A cell deactivation destroys the `PcgVolume` and a reactivation builds a fresh
+/// one **under the same guid**. `structures_gen` used to be a per-component
+/// `wrapping_add(1)`, so the first write of both incarnations was `1` — same
+/// guid, same stamp, different content, and a memo keyed on the pair would serve
+/// the dead volume's instances.
+///
+/// This is that sequence exactly: project, replace the component with a NEW one
+/// carrying a different population, project again. The stamp is drawn from a
+/// process-global counter now, so it is a miss.
+#[test]
+fn a_reincarnated_volume_never_serves_the_old_population() {
+    let mut sim = scatter_fixture();
+    let mut scene = RenderScene::default();
+    project_scatter(&mut scene, &sim);
+    let before = scene.scatter.clone();
+    let e = volume_of(&sim);
+    let old_stamp = sim
+        .world()
+        .world()
+        .get::<inf_ecs::components::PcgVolume>(e)
+        .expect("the volume")
+        .structures_gen;
+
+    // The reincarnation: a brand-new component, same guid, different content.
+    {
+        let mut fresh = inf_ecs::components::PcgVolume::default();
+        assert_eq!(fresh.structures_gen, 0, "a fresh component is unwritten");
+        let (inst, solid, groups) = population(SCATTER_N, 13.0);
+        fresh.set_population(inst, solid, groups, Vec::new());
+        assert_ne!(
+            fresh.structures_gen, old_stamp,
+            "a reincarnated volume took the dead one's stamp — the memo would \
+             serve its instances"
+        );
+        sim.world_mut().world_mut().entity_mut(e).insert(fresh);
+    }
+
+    project_scatter(&mut scene, &sim);
+    for (b, a) in before.iter().zip(&scene.scatter) {
+        assert_ne!(
+            b.data.key(),
+            a.data.key(),
+            "the memo served the destroyed volume's population to its successor"
+        );
+    }
+}
