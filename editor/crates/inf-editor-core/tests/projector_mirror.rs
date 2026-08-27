@@ -955,6 +955,77 @@ fn both_hosts_register_the_building_module_meshes() {
     }
 }
 
+/// **Both projectors fold an instance into a batch the same way** (island wave
+/// I8b audit) — the `scatter_mesh_buckets` fence.
+///
+/// # A fence nothing read
+///
+/// Both hosts have written `// MIRROR-BEGIN scatter_mesh_buckets` around the
+/// body of `push_scatter` since P18.5, and **no arm in this file compared it**.
+/// The delimiter reads as a pin and was not one, which is this repository's own
+/// "a gate must aim at the thing it names" wearing the shape of a comment.
+///
+/// It matters now because island wave I8b put its whole substrate inside that
+/// fence: the `extent` → `ScatterInstance::scale` fold (the drawn box IS the
+/// solid box), the `(mesh, glow)` bucket key, the per-batch `glow_emissive`, and
+/// the `casts_shadows` pass-through. A host that folded any one of them
+/// differently would preview a city the shipped build does not draw — a window
+/// lit in one and dark in the other, or a wall at one metre in one and ten in
+/// the other.
+///
+/// Three claims, on the `apply_record_mirror` pattern: the fence is non-empty,
+/// the two bodies are character-identical, and each load-bearing field is
+/// **named** — because an equality pin cannot see a field deleted from *both*
+/// copies.
+#[test]
+fn both_projectors_fold_an_instance_into_a_batch_the_same_way() {
+    let editor = fenced(
+        &read(VIEWPORT),
+        "scatter_mesh_buckets",
+        "the editor viewport",
+    );
+    let player = fenced(&read(PLAYER), "scatter_mesh_buckets", "the shipped player");
+    assert!(
+        editor.len() > 600,
+        "the `scatter_mesh_buckets` fence is {} chars — an empty fence would \
+         make this gate vacuous",
+        editor.len()
+    );
+    assert_eq!(
+        editor, player,
+        "the scatter bucket fold has drifted between the editor viewport and the \
+         shipped player. This is the body that decides how big a module draws, \
+         which batch it lands in and how brightly it emits: a drift here is a \
+         preview and a shipped build drawing two different cities."
+    );
+    for (field, why) in [
+        (
+            "si.extent",
+            "the drawn box stops being the solid box — a 10 m slab draws as a \
+             one-metre cube again",
+        ),
+        (
+            "si.glow.to_bits()",
+            "two instances that glow differently share one batch, and \
+             `ScatterBatch::emissive` is one value for the whole of it",
+        ),
+        (
+            "inf_render::glow_emissive(",
+            "the hour stops reaching the batch and the city never lights up",
+        ),
+        (
+            "casts_shadows,",
+            "the parts stop opting out and the caster pack walks a city again",
+        ),
+    ] {
+        let needle: String = field.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            editor.contains(&needle),
+            "the scatter fold no longer carries `{field}`: {why}"
+        );
+    }
+}
+
 #[test]
 fn both_projectors_memoize_pcg_scatter_the_same_way() {
     let editor = fenced(&read(VIEWPORT), "pcg_scatter_memo", "the editor viewport");

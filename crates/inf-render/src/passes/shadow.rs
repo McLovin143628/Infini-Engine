@@ -791,10 +791,18 @@ mod tests {
     /// world positions, a batch whose bands moved keeps the wrong instance set,
     /// a batch whose material moved casts with the wrong `InstanceRaw`.
     ///
-    /// `ScatterBatch` has eight fields and eight rows below. The day a ninth is
+    /// `ScatterBatch` has nine fields and nine rows below. The day a tenth is
     /// added, `..Default::default()` does not exist on this type — the struct
     /// literal in `mutate` stops compiling, which is the point of writing it as a
     /// literal rather than a `let mut b = base; b.x = …`.
+    ///
+    /// **And satisfying the compiler is not satisfying this arm** (island wave
+    /// I8b audit). Wave I8b added the ninth field, `casts_shadows`; the literals
+    /// duly stopped compiling and were repaired by writing `casts_shadows: true`
+    /// into all eight of them — which is exactly what an allowlist must not be
+    /// able to absorb. `pack_fallback` reads that field, so the fold has to see
+    /// it or a cached caster pack serves the pre-opt-out instance set for ever.
+    /// It is folded now, and this is its row.
     #[test]
     fn the_scatter_caster_fold_moves_for_every_field_of_a_batch() {
         use crate::passes::scatter::scatter_caster_fold;
@@ -804,7 +812,7 @@ mod tests {
 
         // Every field, one at a time, spelled out as a whole literal so a new
         // field cannot be added without this list refusing to compile.
-        let variants: [(&str, ScatterBatch); 8] = [
+        let variants: [(&str, ScatterBatch); 9] = [
             (
                 "data (the payload's own content key)",
                 ScatterBatch {
@@ -925,6 +933,20 @@ mod tests {
                     draw_distance: base.draw_distance,
                     near_distance: 192.0,
                     casts_shadows: true,
+                },
+            ),
+            (
+                "casts_shadows (the I8b opt-out `pack_fallback` skips on)",
+                ScatterBatch {
+                    data: base.data.clone(),
+                    anchor: base.anchor,
+                    metallic: base.metallic,
+                    roughness: base.roughness,
+                    emissive: base.emissive,
+                    id: base.id,
+                    draw_distance: base.draw_distance,
+                    near_distance: base.near_distance,
+                    casts_shadows: false,
                 },
             ),
         ];

@@ -1001,6 +1001,14 @@ pub fn scatter_caster_fold(batches: &[ScatterBatch]) -> u128 {
             bytes.extend_from_slice(&v.to_bits().to_le_bytes());
         }
         bytes.extend_from_slice(&b.id.to_le_bytes());
+        // **The I8b opt-out** (island wave I8b audit). `pack_fallback` skips a
+        // non-casting batch whole, so this is a field it "reads off the batches
+        // themselves" and a fold that ignored it would serve a cached caster
+        // pack containing instances the batch has since opted out of. The wave
+        // that added the field repaired the eight struct literals in
+        // `the_scatter_caster_fold_moves_for_every_field_of_a_batch` and did not
+        // add a ninth row — satisfying the compiler rather than the allowlist.
+        bytes.push(u8::from(b.casts_shadows));
     }
     xxhash_rust::xxh3::xxh3_128(&bytes)
 }
@@ -1886,6 +1894,41 @@ mod tests {
     /// became inert for shadows. A Medium-tier machine told to draw 240 m of
     /// foliage still rasterized full primitive meshes for 600 m of it into three
     /// cascades.
+    /// **A SHELL HAS NEVER ONCE BEEN RASTERIZED AS GEOMETRY** — island wave
+    /// I8b's band-ordering finding, kept as a **tripwire** rather than as a
+    /// sentence in a ledger (the I7b tripwire-flip precedent).
+    ///
+    /// [`crate::STRUCTURE_LOD_M`] is 192 m and `ScatterSettings::mesh_distance_m`
+    /// is 120 m, and `effective_bands` ends the full-mesh band at the smaller of
+    /// `mesh_distance_m` and the cull. A building's **shell** batch is banded
+    /// `[STRUCTURE_LOD_M, draw_distance)`, so its near edge starts *after* the
+    /// mesh band ends and every shell that has ever drawn has drawn as an
+    /// impostor card. Two consequences the next wave needs:
+    ///
+    /// * giving a shell a façade mesh changes **nothing on screen** until this
+    ///   ordering is repaired, so the two halves are one project in that order;
+    /// * between 120 m and `STRUCTURE_LOD_M + reach` a building is *hundreds of
+    ///   billboards each*, which is where a large part of the scatter pass lives.
+    ///
+    /// **This arm asserts the DEFECT.** The day the structure swap moves at or
+    /// below the scatter path's own mesh band — `inf_pcg`'s own
+    /// `DEFAULT_STRUCTURE_LOD_M` is already 96 m — this goes red, and that is the
+    /// signal to rewrite the carried item rather than to relax the assertion.
+    #[test]
+    fn the_structure_swap_still_happens_past_the_scatter_mesh_band() {
+        let s = crate::RenderSettings::default().scatter;
+        let (mesh_end, cull, _, impostors) = effective_bands(&s, 0.0);
+        assert!(impostors, "the default configuration draws impostors");
+        assert!(
+            (crate::STRUCTURE_LOD_M as f32) > mesh_end,
+            "the structure swap ({} m) is now at or inside the scatter mesh band \
+             ({mesh_end} m of a {cull} m cull) — a shell can be rasterized as \
+             geometry at last. Rewrite island wave I8b's carried item 2 and the \
+             façade-per-shell route with it; do not relax this assertion",
+            crate::STRUCTURE_LOD_M
+        );
+    }
+
     #[test]
     fn shadow_casters_cannot_escape_the_clamps() {
         use crate::caps::RenderTier;

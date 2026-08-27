@@ -838,16 +838,38 @@ mod tests {
         }
         assert_eq!(inst, out.instances.len());
 
-        // Every collider is inside its own group's shell.
+        // **Every collider is inside its own group's shell — every CORNER of it,
+        // on all three axes** (island wave I8b audit).
+        //
+        // This used to read `distance_xz_to_box(c.center, …)`, which is a
+        // *centre* test in *two* axes: a part hanging a metre over the shell's
+        // roof, or a slab whose own half-extent reached past the shell's rim,
+        // both passed. It became load-bearing in wave I8b, which stopped the
+        // parts casting shadows **because the shell contains them** — so the
+        // sentence the caster clause rests on is now the sentence this arm
+        // actually checks. `group_shell` takes the exact support bound, so the
+        // corners are inside by construction and this is the arm that says so.
         for g in &out.groups {
+            let inv = g.shell.rotation.inverse();
             for c in &out.colliders[g.range()] {
-                let d = inf_math::distance_xz_to_box(
-                    c.center,
-                    g.shell.center,
-                    g.shell.half_extents,
-                    g.shell.rotation,
-                );
-                assert!(d < 1e-6, "a part sits {d} m outside its own shell");
+                let ch = c.half_extents;
+                for k in 0..8u32 {
+                    let s = DVec3::new(
+                        if k & 1 == 0 { -1.0 } else { 1.0 },
+                        if k & 2 == 0 { -1.0 } else { 1.0 },
+                        if k & 4 == 0 { -1.0 } else { 1.0 },
+                    );
+                    let corner = c.center + c.rotation * (s * ch);
+                    let local = inv * (corner - g.shell.center);
+                    let over = local.abs() - g.shell.half_extents;
+                    assert!(
+                        over.max_element() < 1e-6,
+                        "a part's corner sits {} m outside its own shell (local \
+                         {local:?} against half-extents {:?})",
+                        over.max_element(),
+                        g.shell.half_extents
+                    );
+                }
             }
         }
 
