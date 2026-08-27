@@ -515,4 +515,20 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
         swap_ratio < 2.0 && swap_ratio < far_ratio * 0.5,
         "the shipped silhouette at the {STRUCTURE_LOD_M} m swap is {swap_ratio:.2}x the geometry's against {far_ratio:.1}x at twice the distance — the swap is drawing a card again, so island wave I8b's band-ordering defect has returned"
     );
+
+    // **AND THE SHIPPED POP AT THE SWAP, ARMED** (the island wave I8c audit).
+    //
+    // I4 armed `imp_pct > 50` on the shipped reading at the swap, and I8c moved
+    // that bound out to `2 x STRUCTURE_LOD_M` with the card — which left the
+    // number a *player* sees at the swap distance asserted by nothing at all. It
+    // is the ordering's own dividend and it is worth a tripwire: **91.5 % of a
+    // 26 792 px silhouette moved at the old 192 m swap and 29.6 % of an 18 884 px
+    // one moves at 96 m**, worst channel 172/255 against 159/255. The bound is
+    // the far row's own `> 50 %` turned around, so the two arms cannot both be
+    // satisfied by a renderer that has stopped distinguishing the bands.
+    let swap_pct = imp_moved as f64 / imp_covered.max(1) as f64 * 100.0;
+    assert!(
+        swap_pct < 50.0,
+        "the SHIPPED parts->shell swap at {STRUCTURE_LOD_M} m moves {swap_pct:.1} % of the building's {imp_covered} px silhouette, against the 29.6 % island wave I8c's band re-order left it at and the 91.5 % it was at the 192 m swap. The swap has drifted back out past the scatter mesh band, or the mesh band has been narrowed under it"
+    );
 }

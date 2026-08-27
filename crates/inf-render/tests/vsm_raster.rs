@@ -1701,6 +1701,184 @@ fn a_vgeom_casters_level_is_the_one_its_pixel_error_justifies() {
     );
 }
 
+/// **WHAT THE PAGE-LOD FLOOR COSTS A SHADOW, IN METRES OF THE SURFACE THAT CASTS
+/// IT** (the island wave I8c audit) — the arm the wave's VSM clause did not have.
+///
+/// I8c stopped submitting a meshlet asset at the camera's classic level into
+/// every page and started picking the level each page's own world-per-texel
+/// justifies. That is 149.5 M indices a frame saved and it is also, by
+/// construction, **a coarser silhouette written into a coarser page**. The wave
+/// measured the milliseconds and asserted the *partition* (a page draws the asset
+/// once); nothing measured the picture.
+///
+/// This does, against the only reference that exists: the same scene with the
+/// tolerance collapsed, which is the finest cut of the chain in every page — the
+/// geometry P27.2 submitted. The difference between the two atlases is the depth
+/// the floor moved, and it is reported in metres **and in texels of the page it
+/// happened in**, because "one texel of the page it is written into" is the whole
+/// claim.
+///
+/// The bound asserted is that claim plus the camera's own term, which was always
+/// there: a page's tolerance is `max(pixel_error × its texel, the camera's world
+/// tolerance)`, so a shadow surface can move by that and no more — with **one**
+/// texel of slack on top, for the rasterizer's own half-texel at each of the two
+/// cuts.
+///
+/// **Measured on an RTX 4070 Ti** (the I8c audit): 4 972 of 111 332 shared
+/// texels move (4.47 %) and the worst is **0.1484 m — 0.79 of one texel of the
+/// level-4 page it happened in**. Which is the verdict the wave's ledger did not
+/// have: the floor moves a shadow by under a texel of the page that holds it,
+/// and the receiver's own bias is a whole normal texel plus `(R + ½)·√2` of
+/// slope, so the coarser cut cannot open acne the bias does not already cover.
+/// Mutation-verified: a floor that tolerates **eight** texels instead of one
+/// moves a level-4 page by 0.7734 m and this arm names it.
+#[test]
+fn the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into() {
+    let Some(gpu) = gpu_or_skip("the VSM page-LOD floor's shadow quality") else {
+        return;
+    };
+    let mesh = std::sync::Arc::new(inf_vgeom::test_support::dense_grid_mesh(24));
+    let asset = inf_render::VgeomAsset::from_mesh(0x5150, &mesh).expect("index the vmesh");
+    let bounds = asset.bounds();
+    let mut s = RenderScene {
+        grid_enabled: false,
+        vgeom_assets: vec![asset],
+        ..Default::default()
+    };
+    let rot = glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+    let scale = glam::Vec3::splat(3.0);
+    s.vgeom_instances.push(inf_render::VgeomInstance::lit(
+        0x5150,
+        glam::DVec3::ZERO,
+        rot,
+        scale,
+        [0.8, 0.8, 0.8, 1.0],
+        1,
+    ));
+    s.instances.push(backdrop());
+    s.lights.push(inf_render::RenderLight {
+        kind: inf_render::LightKind::Directional,
+        direction: glam::Vec3::Z,
+        cast_shadows: true,
+        ..Default::default()
+    });
+    s.mark_dirty();
+
+    let set = settings_with(64);
+    let v = view(9.0);
+    let at = |pixel_error: f32| {
+        run_tuned(&gpu, &[(&s, 6)], &v, &set, move |rs| {
+            rs.vgeom.pixel_error = pixel_error;
+        })
+    };
+    // The shipped tolerance — the floor engages — and a tolerance so tight that
+    // every bucket and the camera alike resolve the finest cut, which is what
+    // P27.2 submitted into every page.
+    let shipped = at(1.0);
+    let finest = at(1.0e-3);
+    let (sh_stats, fi_stats) = (
+        shipped.vsm_raster_stats().expect("stats"),
+        finest.vsm_raster_stats().expect("stats"),
+    );
+    // ANTI-VACUITY (1): the two runs really drew different cuts, so what follows
+    // is a measurement of the floor and not of the renderer's repeatability.
+    assert!(
+        sh_stats.vgeom_casters > 0 && fi_stats.vgeom_casters > 0,
+        "one of the two runs packed no meshlet caster ({sh_stats:?} / {fi_stats:?})"
+    );
+    assert!(
+        sh_stats.vgeom_level_sum * fi_stats.vgeom_casters
+            > fi_stats.vgeom_level_sum * sh_stats.vgeom_casters,
+        "the shipped run drew no coarser than the collapsed-tolerance one, so the \
+         page-LOD floor never engaged and this arm measures nothing \
+         ({sh_stats:?} / {fi_stats:?})"
+    );
+
+    // The camera's own world tolerance, through the door the caster pack picks
+    // with — it was the whole rule before I8c and it is still the floor.
+    let max_scale = scale.abs().max_element();
+    let model = v.origin.model_matrix(glam::DVec3::ZERO, rot, scale);
+    let camera_world = inf_render::passes::vgeom::lod_threshold(
+        v.eye_local(),
+        model.transform_point3(glam::Vec3::from(bounds.0)),
+        bounds.1 * max_scale,
+        max_scale,
+        &v,
+        1.0,
+    ) * max_scale;
+
+    let (sh_atlas, fi_atlas) = (read_atlas(&gpu, &shipped), read_atlas(&gpu, &finest));
+    let fi_rects: std::collections::BTreeMap<(u32, VsmPage), (u32, u32, u32)> =
+        resident_pages(&finest)
+            .into_iter()
+            .map(|(l, p, r)| ((l, p), r))
+            .collect();
+    let mut compared = 0usize;
+    let mut moved_texels = 0usize;
+    let mut worst = (0.0f64, 0.0f64, 0u32); // metres, texels of its page, level
+    for (light, page, rect) in resident_pages(&shipped) {
+        let Some(&other) = fi_rects.get(&(light, page)) else {
+            continue;
+        };
+        let vp = page_vp(&shipped, light, page);
+        let ndc_per_m = vp.row(2).truncate().length();
+        let wpt = 2.0 / (vp.row(0).truncate().length() * rect.2 as f32);
+        if ndc_per_m <= 0.0 || !wpt.is_finite() || wpt <= 0.0 {
+            continue;
+        }
+        for dy in 0..rect.2 {
+            for dx in 0..rect.2 {
+                let a = sh_atlas.2[((rect.1 + dy) * sh_atlas.0 + rect.0 + dx) as usize];
+                let b = fi_atlas.2[((other.1 + dy) * fi_atlas.0 + other.0 + dx) as usize];
+                if a == inf_render::VSM_DEPTH_CLEAR || b == inf_render::VSM_DEPTH_CLEAR {
+                    continue;
+                }
+                compared += 1;
+                if a == b {
+                    continue;
+                }
+                moved_texels += 1;
+                let m = f64::from((a - b).abs() / ndc_per_m);
+                if m > worst.0 {
+                    worst = (m, m / f64::from(wpt), page.level);
+                }
+                // **The bound, per page.** A page's tolerance is one of its own
+                // texels or the camera's world tolerance, whichever is coarser.
+                let tolerated = f64::from(wpt.max(camera_world)) + f64::from(wpt);
+                assert!(
+                    m <= tolerated,
+                    "a level-{} page's shadow surface moved {m:.4} m when the \
+                     page-LOD floor picked its cut, against the {tolerated:.4} m \
+                     that page tolerates ({wpt:.4} m a texel, camera \
+                     {camera_world:.4} m). The floor is drawing a cut coarser \
+                     than the page it is written into, which is the one thing \
+                     island wave I8c's VSM clause is not allowed to do",
+                    page.level
+                );
+            }
+        }
+    }
+    // ANTI-VACUITY (2): the atlases really were compared.
+    assert!(
+        compared > 1_000,
+        "only {compared} texels were written by both runs — the comparison is \
+         between two empty atlases"
+    );
+    println!(
+        "THE PAGE-LOD FLOOR'S SHADOW PRICE: {moved_texels} of {compared} shared \
+         texels moved ({:.2} %); the worst is {:.4} m — {:.2} texels of the \
+         level-{} page it happened in — against a camera tolerance of \
+         {camera_world:.4} m. Shipped mean classic level {:.2} against {:.2} at a \
+         collapsed tolerance.",
+        moved_texels as f64 / compared.max(1) as f64 * 100.0,
+        worst.0,
+        worst.1,
+        worst.2,
+        sh_stats.vgeom_level_sum as f64 / sh_stats.vgeom_casters.max(1) as f64,
+        fi_stats.vgeom_level_sum as f64 / fi_stats.vgeom_casters.max(1) as f64,
+    );
+}
+
 /// **A frame with pages and no casters CLEARS them** (P27.2 audit).
 ///
 /// The pass used to return early when nothing packed, on the reasoning that "the

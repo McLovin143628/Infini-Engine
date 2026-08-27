@@ -271,6 +271,76 @@ pub fn vgeom_caster_levels(
     by_level.into_iter().collect()
 }
 
+/// **The frame's detail buckets** (island wave I8c) — the input
+/// [`vgeom_caster_levels`] picks against, as `(bit mask, metres per texel)`
+/// ascending by bit.
+///
+/// One bucket per clipmap level each shadow-casting light *has*, plus
+/// [`PERSPECTIVE_BUCKET`] when any registered light is a spot or a cube.
+///
+/// # Why it is the LIGHT's ladder and not the resident half of it
+///
+/// A caster's bucket mask rides in its content stamp, so a mask that lost a bit
+/// whenever a level's last page happened to be evicted would move the stamp —
+/// and re-rasterize every page that caster touches — for a residency event
+/// nothing drew. Island wave I8c's first cut did exactly that and the island
+/// measured it: `re-cast` **2.3 → 46.3** dirty pages a frame. `desc.levels` is a
+/// property of the light's configuration, so the ladder moves only when the light
+/// does.
+///
+/// The clipmap base is read off one resident page of that light, because a
+/// level's world-per-texel is `base × 2^level` by construction and the page
+/// matrix's first row carries no translation — so it does not move with the
+/// clipmap snap, and reading it from a *different* page of the same light gives
+/// the same number bit for bit.
+///
+/// **The perspective bit is read off the LIGHT LIST, not off the resident pages**
+/// (the I8c audit): taking it from `pages` left the same defect in the one bucket
+/// the wave's fix did not cover — a spot whose last page is evicted drops bit 31
+/// out of every meshlet caster's mask, which moves the stamp of a group that also
+/// serves a *clipmap* bucket and re-rasterizes the clipmap pages it touches.
+///
+/// Two lights of the same kind share a bit, and the **finest** world-per-texel
+/// any of them gives a level wins — conservative in the only safe direction, so a
+/// coarser light's page is handed geometry finer than it can show rather than
+/// coarser. See the carried item in `docs/memos/island-progress.md`.
+fn frame_buckets(residency: &VsmResidency, pages: &[PageDraw]) -> Vec<(u32, f32)> {
+    let mut bucket_map: std::collections::BTreeMap<u32, f32> = std::collections::BTreeMap::new();
+    for i in 0..residency.light_count() {
+        let Some(desc) = residency.desc(VsmLightHandle(i as u32)) else {
+            continue;
+        };
+        if desc.kind != VsmTreeKind::Clipmap {
+            bucket_map.insert(PERSPECTIVE_BUCKET, 0.0);
+            break;
+        }
+    }
+    let mut ladder_from: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for p in pages {
+        if p.level_bit == PERSPECTIVE_BUCKET || p.world_per_texel <= 0.0 {
+            continue;
+        }
+        if !ladder_from.insert(p.light) {
+            continue;
+        }
+        let Some(desc) = residency.desc(VsmLightHandle(p.light)) else {
+            continue;
+        };
+        let base = p.world_per_texel / (1u64 << u64::from(p.page.level.min(30))) as f32;
+        for l in 0..desc.levels.len().min(31) {
+            let w = base * (1u64 << l) as f32;
+            let e = bucket_map.entry(1u32 << l).or_insert(f32::INFINITY);
+            if w > 0.0 && w < *e {
+                *e = w;
+            }
+        }
+    }
+    bucket_map
+        .into_iter()
+        .map(|(b, w)| (b, if w.is_finite() { w } else { 0.0 }))
+        .collect()
+}
+
 /// The draw-args buffer's usage. `COPY_SRC` is a **gate's** flag, exactly as the
 /// atlas's is: the per-page cull's verdict lives only in these `instance_count`
 /// words, and *mirrored ≠ measured* (P26.5) means a gate has to read the GPU's own
@@ -300,7 +370,17 @@ pub struct VsmCasterRaw {
     /// colour alpha, w = reserved.
     pub mat: [f32; 4],
     /// x = geometry group, y = the caster's index inside its group, z = the
-    /// group's first caster — its base in a page's visible list — w = flags.
+    /// group's first caster — its base in a page's visible list — **w = the
+    /// caster's detail-bucket mask** (island wave I8c): the set of page buckets
+    /// this record is the right classic level for, `1 << level` per clipmap level
+    /// and [`PERSPECTIVE_BUCKET`] for a spot or a cube face. **Zero is every
+    /// bucket**, which is what every caster that is not a meshlet asset carries.
+    /// `vsm_cull.wgsl` tests it against [`VsmPageRaw::info`]`.w` and
+    /// `scatter_caster_stamps` mirrors that test on the CPU.
+    ///
+    /// The WGSL twin's own comment says the same thing, and it has to: the field
+    /// was `reserved` until I8c and a doc that still said so would be the one
+    /// declaration of two disagreeing about what a live field means.
     pub ids: [u32; 4],
 }
 
@@ -315,7 +395,10 @@ const _: () = assert!(std::mem::offset_of!(VsmCasterRaw, ids) == 96);
 struct VsmPageRaw {
     view_proj: [f32; 16],
     /// x = the page's base in the visible list, y = the atlas slot, z = the light
-    /// handle, w = flags.
+    /// handle, **w = the page's detail bucket** as a one-bit mask (island wave
+    /// I8c) — `1 << level` for a clipmap page, [`PERSPECTIVE_BUCKET`] for a spot
+    /// or a cube face. It is [`PageDraw::level_bit`], and the cull tests a
+    /// caster's own [`VsmCasterRaw::ids`]`.w` against it.
     info: [u32; 4],
 }
 
@@ -1397,47 +1480,7 @@ impl VsmRaster {
         self.sync_vgeom(gpu, scene);
         self.sync_skinned(gpu, scene);
         self.sync_terrain(gpu, scene, view);
-        // **The frame's detail buckets** (island wave I8c): one per clipmap level
-        // each shadow-casting light *has*, plus [`PERSPECTIVE_BUCKET`] if any
-        // perspective light is resident, with the level's own world-per-texel.
-        //
-        // **The whole ladder and not the resident half of it**, which is the
-        // difference between a stable key and a churning one. A caster's bucket
-        // mask rides in its content stamp, so a mask that lost a bit whenever a
-        // level's last page happened to be evicted would move the stamp — and
-        // re-rasterize every page that caster touches — for a residency event
-        // nothing drew. `desc.levels` is a property of the light's configuration,
-        // so the ladder moves only when the light does. The base is read off one
-        // resident page of that light: a clipmap level's world-per-texel is
-        // `base × 2^level` by construction, and the page matrix's first row
-        // carries no translation, so it does not move with the snap.
-        let mut bucket_map: std::collections::BTreeMap<u32, f32> =
-            std::collections::BTreeMap::new();
-        let mut ladder_from: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-        for p in &pages {
-            if p.level_bit == PERSPECTIVE_BUCKET {
-                bucket_map.entry(PERSPECTIVE_BUCKET).or_insert(0.0);
-                continue;
-            }
-            if !ladder_from.insert(p.light) || p.world_per_texel <= 0.0 {
-                continue;
-            }
-            let Some(desc) = residency.desc(VsmLightHandle(p.light)) else {
-                continue;
-            };
-            let base = p.world_per_texel / (1u64 << u64::from(p.page.level.min(30))) as f32;
-            for l in 0..desc.levels.len().min(31) {
-                let w = base * (1u64 << l) as f32;
-                let e = bucket_map.entry(1u32 << l).or_insert(f32::INFINITY);
-                if w > 0.0 && w < *e {
-                    *e = w;
-                }
-            }
-        }
-        let buckets: Vec<(u32, f32)> = bucket_map
-            .into_iter()
-            .map(|(b, w)| (b, if w.is_finite() { w } else { 0.0 }))
-            .collect();
+        let buckets = frame_buckets(residency, &pages);
         let CasterPack {
             casters,
             hashes,
@@ -3515,6 +3558,136 @@ mod tests {
                 .expect("served");
             assert!(fine <= level_of(*bit), "{big:?} against {out:?}");
         }
+
+        // (5) **THE QUALITY BOUND — WHAT "A COARSER CUT IN THAT PAGE" COSTS**
+        // (the I8c audit). The whole clause trades silhouette detail for
+        // triangles, so the size of the trade has to be a claim rather than a
+        // hope: the cut a page draws has an error its OWN tolerance admits — one
+        // texel of that page, or the camera's world tolerance, whichever is
+        // coarser. `pick_classic_level` only ever falls back to level 0, so the
+        // finest cut is the one escape.
+        for &(bit, wpt) in &buckets {
+            let level = level_of(bit);
+            let tolerated = (1.0f32 * wpt / 1.0).max(cam);
+            assert!(
+                level == 0 || errors[level] <= tolerated,
+                "the level-{level} cut's error {} exceeds the {tolerated} a \
+                 {wpt} m-a-texel page tolerates, so this page's shadow is \
+                 blockier than one of its own texels: {out:?}",
+                errors[level]
+            );
+        }
+    }
+
+    /// **THE BUCKET LADDER IS THE LIGHT'S CONFIGURATION, NOT ITS RESIDENCY**
+    /// (the island wave I8c audit) — the arm the wave's own law needed.
+    ///
+    /// The wave's fourth law is *"a residency event must never enter a content
+    /// stamp"*, and it earned it: taking the buckets from the resident page set
+    /// cost 46.3 re-cast pages a frame. The fix — one bucket per level
+    /// `desc.levels` has — landed with **no arm**, and the half of the bucket set
+    /// it did not cover kept the defect: [`PERSPECTIVE_BUCKET`] was still derived
+    /// from whether a perspective page happened to be resident, so a spot whose
+    /// last page is evicted drops bit 31 from every meshlet caster's mask and
+    /// re-rasterizes the *clipmap* pages that caster touches.
+    ///
+    /// Three claims, and each fails under the state it names.
+    #[test]
+    fn the_bucket_ladder_is_the_lights_configuration_and_not_its_residency() {
+        let cfg = inf_vsm::VsmAtlasConfig {
+            budget_bytes: 64 * 64 * 1024,
+            ..Default::default()
+        };
+        let (mut res, _) = VsmResidency::new(cfg);
+        let sun = res
+            .register_light(inf_vsm::VsmLightDesc::clipmap(6, 8))
+            .expect("register the clipmap");
+        let spot = res
+            .register_light(inf_vsm::VsmLightDesc::quadtree(4))
+            .expect("register the spot");
+        assert_eq!((sun.0, spot.0), (0, 1), "handles index the light list");
+
+        // ONE resident page, of the clipmap's COARSEST level. A ladder read off
+        // the resident set would offer exactly this one bucket.
+        let page = |light: u32, level: u32, bit: u32, wpt: f32| PageDraw {
+            view_proj: Mat4::IDENTITY,
+            rect: (0, 0, 128),
+            slot: 0,
+            light,
+            page: VsmPage::flat(level, 0, 0),
+            ident: PageIdent {
+                light,
+                face: 0,
+                level,
+                cell: (0, 0),
+            },
+            geo_key: 0,
+            caster_fold: 0,
+            casters: 0,
+            group_mask: [0; VSM_GROUP_MASK_WORDS],
+            level_bit: bit,
+            world_per_texel: wpt,
+            key: 0,
+        };
+        // Level 5 at 0.1875 m a texel — the fixture ladder's coarsest, so the base
+        // it implies is 0.1875 / 32 = 5.859 mm.
+        let one = [page(sun.0, 5, 1 << 5, 0.1875)];
+        let got = frame_buckets(&res, &one);
+
+        // (1) THE WHOLE CLIPMAP LADDER, from one page of it. Six levels, each at
+        // `base × 2^level`, exactly — powers of two are exact in binary f32, which
+        // is what makes reading the base off *any* page of the light give one
+        // answer.
+        let levels: Vec<(u32, f32)> = (0..6)
+            .map(|l| (1u32 << l, 0.1875 / 32.0 * (1u64 << l) as f32))
+            .collect();
+        for &(bit, wpt) in &levels {
+            assert_eq!(
+                got.iter().find(|(b, _)| *b == bit).map(|(_, w)| *w),
+                Some(wpt),
+                "level {} of a six-level clipmap is not in the ladder read off one \
+                 page of level 5: {got:?}",
+                bit.trailing_zeros()
+            );
+        }
+
+        // (2) THE PERSPECTIVE BIT IS THERE WITH NO PERSPECTIVE PAGE RESIDENT.
+        // This is the arm the audit added: `one` holds a clipmap page and nothing
+        // else, and the spot is registered. Derive the bit from `pages` instead
+        // and this is the assertion that goes red.
+        assert!(
+            got.iter().any(|(b, _)| *b == PERSPECTIVE_BUCKET),
+            "a registered spot with no resident page left its bucket out of the \
+             ladder, so evicting its last page moves every meshlet caster's \
+             stamp: {got:?}"
+        );
+
+        // (3) …and a residency's own churn cannot move the answer: the same
+        // light's pages, at a different level and in a different order, give the
+        // ladder bit for bit.
+        let many = [
+            page(sun.0, 0, 1, 0.1875 / 32.0),
+            page(sun.0, 3, 1 << 3, 0.1875 / 4.0),
+            page(sun.0, 5, 1 << 5, 0.1875),
+        ];
+        assert_eq!(
+            frame_buckets(&res, &many),
+            got,
+            "the ladder moved with the resident set"
+        );
+
+        // …and with no perspective light registered at all the bit is absent, so
+        // (2) is a claim about the light list rather than a constant.
+        let (mut sun_only, _) = VsmResidency::new(cfg);
+        sun_only
+            .register_light(inf_vsm::VsmLightDesc::clipmap(6, 8))
+            .expect("register the clipmap");
+        let no_spot = frame_buckets(&sun_only, &one);
+        assert!(
+            !no_spot.iter().any(|(b, _)| *b == PERSPECTIVE_BUCKET),
+            "the perspective bucket is in a ladder with no perspective light: {no_spot:?}"
+        );
+        assert_eq!(no_spot.len() + 1, got.len(), "{no_spot:?} against {got:?}");
     }
 
     /// **Stride is contract** (the standing law): the two WGSL files read these
