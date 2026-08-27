@@ -1366,15 +1366,44 @@ fn the_frame_at_shipping_resolution() {
                 m.gpu_frame_ms,
                 m.gpu_frame_ms - base_gpu,
             );
-            // Anti-vacuity: the two configurations really are different renderers.
-            // A GPU frame that did not move is a price printed for nothing — and
-            // unlike the tier clamp above, that is a defect rather than a machine.
+            // **Anti-vacuity, re-aimed onto counters** (island wave I8b).
+            //
+            // This used to assert `m.gpu_frame_ms > base_gpu` — the lit frame
+            // must be *dearer* than the shipped one — and it stopped being
+            // true, on a fixture whose content did not change: with the
+            // settlements' parts out of the caster set (`ScatterBatch::
+            // casts_shadows`) the lit configuration reads **4.775 ms of GPU
+            // against the shipped 8.278**, and its p50 is **14.088 ms against
+            // 17.044**. The lighting stack is cheaper than the frame it is
+            // added to.
+            //
+            // Two things are wrong with the old assertion and only one of them
+            // is this wave's. The first is I4b's own law, applied to this file:
+            // the two figures come from **two different runs**, minutes apart,
+            // at two device states, and a GPU that has been boosting for a
+            // minute is not the one that measured the first row. The second is
+            // that "did the stack run" is a question about *engagement*, not
+            // about a clock (the P20.3 law) — and the stack publishes counters
+            // that say so exactly.
+            //
+            // So the arm asserts that the lit configuration DID THE WORK: the
+            // VSM opened its page pass, packed casters and issued draws. A
+            // renderer that came back with the stack silently clamped off
+            // produces zeros here, which is the defect the old comparison was
+            // reaching for. The price stays reported and never asserted.
+            let vsm = m
+                .vsm
+                .as_ref()
+                .expect("the lit configuration publishes VSM raster stats");
             assert!(
-                m.gpu_frame_ms > base_gpu,
-                "the lit frame's GPU time ({:.3} ms) is no dearer than the shipped \
-             one's ({base_gpu:.3} ms) — shadows, GI and VSM came back enabled and \
-             cost nothing, so the price printed above is the price of nothing",
-                m.gpu_frame_ms
+                vsm.frames > 0 && vsm.casters > 0 && vsm.draws > 0,
+                "the lit configuration rastered no virtual shadow map at all \
+                 ({} frames, {} casters, {} draws) — shadows, GI and VSM came \
+                 back enabled and did nothing, so the price printed above is \
+                 the price of nothing",
+                vsm.frames,
+                vsm.casters,
+                vsm.draws
             );
         }
     }
