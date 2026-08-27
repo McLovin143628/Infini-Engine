@@ -24,6 +24,7 @@ recipe reads — and runs the whole pipeline over them.
 | terrain | 36 level-0 tiles of 129², 56 in the catalog, 3 LOD levels, 4.6 MB |
 | water | 9 reaches / 1.25 km, 1 lake, **4 waterfall sites** |
 | roads | 1.37 km, worst grade 0.099 against a 0.100 ceiling, **0 stretches over** |
+| settlements | 2 sites, **8 blocks, 42 buildings, 2 070 doorways**, all enterable (wave I8a) |
 
 ## The provenance of the committed bytes
 

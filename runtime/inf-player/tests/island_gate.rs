@@ -731,6 +731,34 @@ fn pie_equals_shipping_on_an_island_drive() {
         STEPS as f64 * STEP_M,
         recipe.grid.tile_span_m()
     );
+
+    // **AND THE DRIVE IS THROUGH A SETTLEMENT NOW** (island wave I8a), which is
+    // what re-prices this trace: the design's start is the first site's own
+    // centre (`player_start` reads the committed road layer, and the routes run
+    // centre to centre), so the 900 steps leave a settlement, cross its edge and
+    // come back. Stated with the numbers rather than left as a change in what
+    // the world holds.
+    let solids = resident_solids(&ship);
+    let doorways = inf_ecs::door::volume_doorways(ship.world());
+    let volumes = resident_volumes(&ship);
+    println!(
+        "SETTLEMENT ON THE DRIVE: {} resident volume(s), {} solids, {} doorways \
+         after {:.0} m out and back from {}",
+        volumes.len(),
+        solids.len(),
+        doorways.len(),
+        STEPS as f64 * STEP_M,
+        recipe
+            .sites
+            .first()
+            .map(|s| s.name.as_str())
+            .unwrap_or("the start")
+    );
+    assert!(
+        !volumes.is_empty() && !solids.is_empty() && !doorways.is_empty(),
+        "the 900-step drive ended holding no settlement at all — this trace is \
+         no longer over a world with a city in it"
+    );
 }
 
 /// **A `ScenePayload` CARRIES NO PARTITION**, so a PIE preview of the island

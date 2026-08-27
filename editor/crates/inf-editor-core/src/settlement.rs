@@ -72,8 +72,8 @@
 //! layer. Settlement streets sit on a levelled pad, where the chord error is
 //! zero at any step (the `phase30-city` measurement: 0.000000 m), so drawing
 //! them honestly wants a *second* surface at a coarse step. At the island's 1 m
-//! pitch the grid below is [`street_km`] of centreline, and that is what the
-//! wave's routed list carries beside I8b's sidewalk/kerb item.
+//! pitch the grid below is [`Settlement::street_km`] of centreline, and that is
+//! what the wave's routed list carries beside I8b's sidewalk/kerb item.
 
 use glam::DVec2;
 use inf_pcg::hash::Hash64;
@@ -126,6 +126,16 @@ pub const CITY_INDUSTRIAL_BLOCKS: usize = 4;
 pub fn industrial_min_ring(max_ring: u32) -> u32 {
     ((max_ring + 1) / 2).max(1)
 }
+
+/// Grid lines a settlement may lay each way from its own centre.
+///
+/// A ceiling rather than a preference, on `subdivide_block`'s own
+/// `MAX_LOTS_PER_AXIS` precedent: `Site::radius_m` is author-supplied and the
+/// recipe checks it only for finiteness, so a mis-typed `600000` would ask the
+/// cell loop for a hundred million candidates before the pad test refused every
+/// one of them. Sixty-four lines is 7.7 km at the city pitch — wider than any
+/// world this recipe format can describe.
+pub const MAX_GRID_LINES: u32 = 64;
 
 /// The most blocks one city's industrial cluster may take, as a share of the
 /// blocks it is allowed to sit on.
@@ -368,7 +378,17 @@ fn plan_site(design: &IslandDesign, site: usize, s: &Site, land: &Land) -> Settl
     // How many grid lines fit each way. A line at `k·pitch` from the centre is
     // useful while the block inside it can still fit, so the line count is the
     // block count plus one.
-    let reach = (buildable / pitch).floor() as i32 + 1;
+    //
+    // **Bounded, on `subdivide_block`'s own `MAX_LOTS_PER_AXIS` precedent.**
+    // `radius_m` is an author-supplied number that the recipe checks only for
+    // finiteness, and a mis-typed `600000` would ask this loop for a hundred
+    // million cells before the pad test refused every one of them. The clamp is
+    // a *ceiling* rather than a preference: the widest reservation any committed
+    // island holds is 600 m, which is five lines at the city pitch.
+    let reach = ((buildable / pitch)
+        .floor()
+        .clamp(0.0, f64::from(MAX_GRID_LINES)) as i32)
+        + 1;
 
     // The lines, and both ends of every one, stop at the buildable radius: a
     // street plan that ran on past the reservation would be a plan for ground
@@ -1215,6 +1235,35 @@ mod tests {
         );
         assert_eq!(grid_for(SiteKind::Town, 0.0), None);
         assert_eq!(grid_for(SiteKind::Town, f64::NAN), None);
+    }
+
+    /// Author input cannot make the planner misbehave — the subdivider's own
+    /// `hostile_rules_resolve_rather_than_propagate`, one level up.
+    #[test]
+    fn a_hostile_radius_resolves_rather_than_propagating() {
+        assert_eq!(
+            grid_for(SiteKind::City, f64::INFINITY).map(|g| g.0),
+            Some(120.0)
+        );
+        assert_eq!(grid_for(SiteKind::City, f64::NAN), None);
+        assert_eq!(grid_for(SiteKind::Town, -5.0), None);
+        // …and the cell loop is bounded whatever the radius: the reach is
+        // `floor(buildable / pitch)` clamped to `MAX_GRID_LINES`, so an absurd
+        // reservation asks for `(2 * 64)^2` candidates rather than for a
+        // hundred million.
+        let huge = 600_000.0f64;
+        let (pitch, street, buildable) = grid_for(SiteKind::City, huge).expect("a grid");
+        assert_eq!(buildable, huge - street);
+        let raw = (buildable / pitch).floor();
+        assert!(raw > f64::from(MAX_GRID_LINES), "the fixture is not absurd");
+        let reach = (raw.clamp(0.0, f64::from(MAX_GRID_LINES)) as i32) + 1;
+        assert_eq!(reach, MAX_GRID_LINES as i32 + 1);
+        println!(
+            "GRID CLAMP: a {huge:.0} m reservation asks for {raw:.0} lines and \
+             takes {}, i.e. {} candidate cells",
+            MAX_GRID_LINES,
+            (2 * reach) * (2 * reach)
+        );
     }
 
     #[test]

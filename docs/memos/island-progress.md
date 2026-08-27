@@ -31,6 +31,8 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **I7b** | **the island lives at 60** — the vegetation through the shipped boot, the VSM caster pack, `render (record)` attributed | **DONE + AUDITED** — see *Done — wave I7b* and *The I7b audit* at the end of this file. The shipped island frame goes **41.5 → ~277 fps** (p50 24.080 → 3.56–3.62 ms, **13 ms inside** the 60 fps budget where it opened 7.5 ms outside) and grows **2 681 instances** of vegetation where it grew none; PIE == shipping on the forest as well as the state fold. Battery 319 / **5 971** / 0 / 16 at the audited head, goldens 54 strict, clippy 0, rustdoc 374 unmoved, **no schema moved**, no new crate or dependency. Clause 2's routed prescription was **measured and retired** and the real fix routed by name. The audit reproduced every headline number on the same machine and found **no HIGH** — four MEDs, all the same shape: *a claim that is true and a gate that cannot tell* |
 | **VSM2** | **the lit island at 60** — world-cell-keyed shadow-page residency, the wave I7b routed by name | **DONE** — see *Wave VSM2* at the end of this file. The LIT island goes **22.4 → 85.4 fps** (p50 44.570 → **11.65–11.73 ms**), its GPU frame **33.334 → 8.13–8.15 ms** and `vsm-raster` **29.799 → 4.58–4.61 ms**; `vsm sync` **3.247 → 1.36–1.40 ms**. The dirty split's `moved` bucket — I7b's 532.0 a frame — collapses to **2.2**, and the deferral backlog I7b measured at *677 a frame for ever* falls to **14.2**, all of it bursts that drain in four frames. The shipped ladder now beats I7b's priced-never-shipped first-level-×4 control (15.931 ms) by **3.5×** at level 0's full resolution, so the resolution trade is not needed. Goldens **54 byte-identical**, no schema moved, no new crate or dependency. **AUDITED** — every headline number reproduced exactly on the same machine (including `88 entered == 88 arrived` and the label control's 1 323), **no HIGH**, seven MEDs fixed and ten LOWs carried; the traded bound was measured between adjacent frames and is now measured over the **life of a cached page** — 10.8 km, 9 102 frames of separation, **0.0449 of a texel**, bounded by `REBASE_DISTANCE` and **not** cumulative. Battery **321 / 6 082 / 0 / 16**, goldens 54 strict (101 arms), clippy 0, rustdoc 374, no schema moved |
 
+| **I8a** | **the settlements exist** — the generator, the size raise, doors at scale, the gates | **DONE** — see *Wave I8a* at the end of this file. Seven levelled pads become **172 blocks, 60.88 km of street and about 1 800 buildings** on a zoning table, every sampled one of them enterable; the cities take their kilometre (Harbour City 1.131 km², Eastgate 1.020 km²) and the re-derived water is committed as the new design with the drift at **0.00 %**. A new settlement gate walks into a building — enter, open a door, step through, climb — **123 steps, 123 distinct states, byte-identical** between the cooked pack and the loose document, mutation-verified (removing the volumes kills six of twelve arms). The fixed step holds its ratchet at **5.853 ms of 6.0**. **AND THE FRAME DOES NOT**: the island goes **69.0 → 9.4 fps LIT+VIS**, because a settlement draws through the P18.5 GPU **scatter** path as **365 545 opaque wall-sized boxes** with no occlusion culling — *cubes are the expensive case*, which is this wave's correction to its own brief and I8b's first requirement restated as a performance clause. Three costs, three mechanisms, all routed; the projection's 20.2 ms against a 1.5 ms budget is the one an implementer can take tomorrow |
+
 Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
 IB-8 and IB-13 forward out of I6**: both are ceilings a thousand-building fixture walks into
 on its first frame, and measuring them against a real city was cheaper than measuring them
@@ -11293,3 +11295,501 @@ wave.
   detail band's worst displacement is 1.315 m on CI and 1.493 m on the world that
   ships — 99.5 % of its own bound. The number that matters was one `--dry-run`
   away and no wave had taken it.
+
+---
+
+## Wave I8a — the settlements exist (2026-08-27)
+
+Base `9f6e4689`. Five clauses. Wave I7's own carried remainder 12 read: *"the
+site pads are terraces, not settlements. Seven sites, 2.34 km² of levelled
+ground and 5.8 % of the land reserved urban — and nothing standing on any of
+it."* Something stands on all seven now: **172 blocks and 60.88 km of street**, about **1 800 buildings**, and a walk
+into one of them that the shipped player and the editor's document agree on
+**byte for byte**. (1 800 is a DERIVATION — 172 blocks times the furnish
+battery's own measured per-archetype block counts — where the enterability
+invariants are a MEASUREMENT over 42 sampled buildings and, through
+`phase19_gate`, over all seven archetypes.)
+
+**And the headline is the price.** The island went from **69.0 fps LIT+VIS to
+9.4**, and the mechanism is not what the brief assumed: a settlement draws
+through the P18.5 GPU **scatter** path — a foliage path — as **365 545 opaque,
+wall-sized boxes** with no occlusion culling behind them. *Cubes are the
+EXPENSIVE case, not the cheap one*, which is the correction this wave makes to
+its own brief and the single most useful thing it hands I8b.
+
+### Clause 1 — the settlement generator
+
+`inf_editor_core::settlement`, Ring 1, beside `island_scene`, a **pure function
+of `IslandDesign`**: the sites, the committed road routes and the coastline
+rings, and no elevation anywhere in it. The building datum is resolved at
+*evaluation* time from the terrain under each lot's own centre
+(`Ground::Terrain`), which is the one place the ground is allowed to be asked.
+
+```text
+  site (centre, radius) ─▶ street GRID on the world axes, a line through the
+                           site's own centre on both axes
+                        ─▶ BLOCKS between the lines, refused when they leave the
+                           reservation circle or the coastline crosses them
+                        ─▶ ZONE per block (Chebyshev ring + the highway cluster)
+                        ─▶ one PcgVolume naming that zone's committed `.inf_pcg`
+                             ─▶ `building.lots` cuts the block into lots (IB-2c)
+                             ─▶ `building.plan` stands one building on each
+```
+
+**THE ZONING TABLE.** "Districts" are deterministic rules, not a new type. A
+zone is a weighted archetype list; the pick is a counter hash of the block's own
+grid position, so it is a pure function of the design.
+
+| site | ring | zone | archetypes (weights) |
+|---|---|---|---|
+| city | 0 | core | Office 5, Hotel 2, Shop 3 |
+| city | 1 | inner | Office 3, Apartment 3, Shop 2, Hotel 1 |
+| city | 2 | ring | Apartment 4, Shop 1 |
+| city | ≥ 3 | edge | House 3, Estate 1 |
+| city | (cluster) | industrial | Industrial — 4 blocks, ring ≥ half the depth, nearest the point the highway leaves the city |
+| town | 0 | high street | Shop 3, House 1 |
+| town | ≥ 1 | outskirt | House 4, Estate 1 |
+
+**And the lot rules per archetype**, which is the other half of what a zone
+means (lots on a 100 m city block, by `subdivide_block`'s own round-to-nearest
+rule): Office 30 × 34 m → 9, Hotel 36 × 36 → 9, Shop 20 × 28 → 20, Apartment
+26 × 30 → 12, House 18 × 26 → 24, Estate 40 × 44 → 6, Industrial 48 × 48 → 4.
+`floors` is **0** — drawn from the archetype's own storey range per lot seed —
+so a street of houses is one to three storeys rather than a terrace of identical
+boxes.
+
+**Two refusals, and both are VALUES.** A block whose corner leaves the
+reservation circle, and a block the coastline crosses. Both are **proofs rather
+than samples**:
+
+* the pad test — a disc is convex and a rectangle is the convex hull of its
+  corners, so four corners inside the circle put every *lot* the subdivider cuts
+  inside it too (the same argument `subdivide_block` makes one level down);
+* the land test — **no ring edge crossing the rectangle plus an inside centre
+  means the whole rectangle is inland**, because a region whose boundary misses
+  a connected set is either wholly in or wholly out of it. A corner test alone
+  admits a block with a sea inlet through the middle of it, and
+  `a_block_that_straddles_the_shore_is_refused` is the fixture that says so.
+
+**The grid runs on the world axes**, and that is a stated bound rather than a
+choice: a `PcgVolume` is a centre and an axis-aligned half-extent
+(`GrammarContext` carries no rotation), so a settlement with its own bearing
+needs either an oriented volume — an engine schema move — or one committed block
+polygon per block, which is committing *geometry* where the small-committed-
+folder law says commit *rules*.
+
+**How the grid joins the island's road network.** It does not stitch anything:
+`plan_network` routes **centre to centre**, so every highway and arterial that
+reaches a settlement terminates at the site's own `(x, z)`, and the grid puts a
+street line through that point on both axes. Measured: **22 route endpoints land
+inside all 7 settlements, worst 2.000 m from a street centreline** against a
+narrowest street reserve of 16 m — the arriving road ends on the carriageway it
+hands over to. (The 2 m is the derivation lattice: the router works at 8 m and
+the drape is at 1 m.)
+
+**THE GRID LADDER, and the step it removed.** The first draft was one grid per
+kind, and it made a settlement's existence a *step function of its radius*: a
+city block's far corner is **155.6 m** from the crossroads, so a 150 m city
+reservation held **zero** blocks and built nothing at all, silently. A
+settlement takes the **coarsest grid of its kind's ladder that fits**
+(`grid_for`), so the CI fixture's 120 m city takes the town's 76 m grid; a
+reservation that fits neither builds nothing *and counts every cell it refused*.
+
+**The zone library** is seven `.inf_pcg` documents in `samples/settlement/`,
+**1 349–1 363 bytes each** — a footprint span over the volume's own extent,
+IB-2c's subdivision, a palette choice. Engine content on the
+`samples/ground` / `samples/starter-character` pattern: one copy, byte-locked
+against its generator, named by both islands' recipes under `[content]` and by
+every block's `PcgVolume.graph`. Committing a document per block would have been
+committing geometry; **what makes 172 volumes 172 different blocks is the
+seed.**
+
+**AND THE SOURCE SCAN COULD NOT SEE A BRACE IMPORT.** `island.rs`'s
+committed-design allowlist took the identifier after `inf_island::` and stopped,
+so `use inf_island::{A, B};` read an **empty name and recorded nothing** — a
+module importing every door in the crate on one line scanned clean. Found
+because the settlement module's own anti-vacuity arm fired on its first run. The
+extractor is shared now (`island::scan`), it reads brace groups, and **both**
+modules run it.
+
+### Clause 2 — the size raise, and the drift measured
+
+Harbour City **520 → 600 m** (0.849 → **1.131 km²**) and Eastgate **480 → 570 m**
+(0.724 → **1.020 km²**) — the brief of record's "≥ 1 km² each", and at a 120 m
+block pitch the fourth ring the zoning table's House/Estate edge lives on. What
+the wider pads moved, measured on the shipped island:
+
+| | before (520/480) | after (600/570) |
+|---|---|---|
+| pad samples | 2 338 632 (2.339 km²) | **2 922 662 (2.923 km²), +25.0 %** |
+| urban share of land | 5.8 % | **7.2 %** |
+| reserved cells (8 m lattice) | 36 260 | **45 288, +24.9 %** |
+| land / shore / peak | 40.653 km² / 25.14 km / 948.7 m | **all three unmoved** |
+| reaches / lakes / waterfalls | 50 / 2 / 33 | **unmoved** |
+| road grade audit | worst 0.118, 7 of 2 442 over | **bit-unmoved** |
+| **stream drift** vs committed | 50 vs 51, **0.31 %** of length | 50 vs 51, **1.67 %** |
+| **lake drift** | 2 vs 2, **16.47 %** of area | **16.47 %, unmoved** |
+| detail band | 37 675 364 samples | 37 114 597 (the wider pad exclusion) |
+
+**Then the re-derived layers are committed as the new design** — the I7
+third-route precedent, and its carried remainder 6 closed. **51 reaches /
+25.88 km and 2 lakes / 0.0847 km²** replace 50 / 26.32 km and 2 / 0.0708 km²;
+the drift goes to **0.00 % / 0.00 %**; and the road audit **improves**: worst
+0.118 → **0.108**, 7 over → **5 of 2 442** (0.29 % → 0.20 %).
+
+**The fixture's camp grew and its town did not, and the difference is a
+measurement.** `Fixture Camp` 90 → 130 m, because a 76 m town grid's first block
+reaches 96.2 m and a 90 m reservation held zero. `Fixture Town` stays at 120 m,
+because **a pad's rim is steeper than the hillside it is cut into by
+construction**: `flatten_sample` eases with `smooth01`, whose derivative peaks at
+1.5, so the rim's gradient is about **1.25× the local slope whatever the
+radius**. Widening this pad walks that rim onto the road. Measured against a
+0.100 ceiling on 144 stretches:
+
+| Fixture Town radius | worst grade | stretches over |
+|---|---|---|
+| 120 m | **0.099** | **0** |
+| 240 m | 0.110 | 1 |
+| 280 m | 0.118 | 4 |
+| 340 m | 0.125 | 5 — **3.47 %, BLOCKING** |
+
+Re-planning the network first (`inf island route`) took 3.47 % to **3.08 %** and
+no further. And past 140 m the pad fills this island's one lake and the derived
+lake layer goes from one to none. So the recipe holds and the *generator* adapts
+— which is where the grid ladder came from.
+
+**The fixture's own water layers are NOT re-derived, and the refusal has its
+number**: a fresh derivation finds 9 reaches of 1.33 km where the committed layer
+has 9 of 1.25 km, and one of the new channels crosses a route — the audit goes
+from **worst 0.099 / zero over to worst 0.239 / five**, because `carve_channels`
+cuts a trench and this generator builds no bridges (the I7 refusal). The
+committed layers stay and the drift stays at **5.43 %** of stream length with the
+lake exact.
+
+### Clause 3 — doors and enterability at settlement scale
+
+`every_settlement_building_is_enterable` walks the hero to **each settlement in
+turn** — they are kilometres apart and the partition holds one neighbourhood at
+once, so "per settlement" is what that means — lets its cells activate,
+re-derives every resident block's plans through `plans_of` (the same resolution
+the shipped evaluation runs), and puts the three phase-19 invariants on each one
+against **the solids the shipped world actually built**.
+
+| settlement | buildings | storeys | flights | doorways | banded at 64 m |
+|---|---|---|---|---|---|
+| Fixture Town (city core: Hotel 4, Office 8, Shop 6) | 18 | 77 | 59 | 1 297 | 852 (**65.69 %**) |
+| Fixture Camp (town: House 18, Shop 6) | 24 | 43 | 19 | 773 | 446 (**57.70 %**) |
+| **total** | **42** | **120** | **78** | **2 070** | — |
+
+The vacuity control comes with it: a slab through each building must read the
+door **blocked**, or "no collider is in the void" is an assertion that cannot say
+no (phase 19's own lesson, met at settlement scale).
+
+**THE `is_open` WALK, RE-MEASURED — and the number that changed is the N, not the
+constant.** The I6 audit found `door.is_open` walking all **19 790** doorways of
+an *unstreamed* city to answer a question about one, and fixed it by checking the
+reach before building a placement. On a streamed island the walk is over the
+doorways the **simulation holds**: measured at **1 297 doorways over 4 resident
+blocks, 21.3 µs a call beside a door and 21.8 µs a call five kilometres from
+one** (~16 ns a doorway). The far call is not the dear one, which is the I6 fix
+still holding, and the arm goes red if it stops.
+
+**THE FURNISH BATTERY** (ruling 3: measure, then decide, default ON). One real
+**100 × 100 m Harbour City block**, priced for **every archetype** rather than
+for the one that happens to be zoned there — because `Shop` is one to two
+storeys and `Hotel` is four to ten, furniture is per **room**, and a measurement
+of the cheap one would have decided the ruling on the wrong building:
+
+| archetype | storeys | buildings | doorways | bare solids | furnished | ratio |
+|---|---|---|---|---|---|---|
+| Office | 3–8 | 9 | 776 | 13 960 | 16 228 | 1.16× |
+| Apartment | 3–6 | 12 | 1 580 | 18 440 | 19 712 | 1.07× |
+| Industrial | 1–2 | 4 | 27 | 1 023 | 1 465 | **1.43×** |
+| House | 1–3 | 24 | 559 | 8 292 | 8 840 | 1.07× |
+| Estate | 2–4 | 6 | 290 | 5 948 | 6 715 | 1.13× |
+| Hotel | 4–10 | 9 | 2 462 | 30 561 | 33 446 | 1.09× |
+| Shop | 1–2 | 20 | 266 | 5 721 | 6 212 | 1.09× |
+
+**THE VERDICT, and it is not the one the ruling expected.** *Furnish is not what
+costs.* Fully furnishing every resident block of the CI fixture's settlement
+moves the fixed step **6.348 → 7.011 ms** (+0.663, +10.4 %) on 21 453 → 23 860
+solids — while the *buildings themselves* are the other 6.3 ms. The wave ships
+`furnishes(a)` = **House, Shop, Estate**: the archetypes a player walks into on
+foot, which are also the one-to-four-storey ones. The reasoning, stated so it can
+be overturned with a number: the step is already at 97.6 % of its ratchet on the
+real island *without* furniture, so spending 10 % more of a nearly-full budget on
+rooms nobody has walked into is the wrong trade — not because furniture is
+expensive, but because it is the only part of the bill that is optional today.
+
+Load: build + cook of the whole fixture project, **1 573–2 376 ms** against a
+5 000 ms `LOAD_BUDGET_MS`.
+
+### Clause 4 — the gates and the budgets
+
+**THE URBAN-BARE TRIPWIRE FLIPPED.** `island_gate.rs`'s
+*"urban must stay bare for wave I8"* was an assertion about a wave that has now
+happened. What is still true is that urban binds no **vegetation** graph, and the
+reason is no longer "nobody has built the settlements yet" — it is that a
+settlement is a `PcgVolume` in the LEVEL, not a biome binding, so the two
+authorities never meet. Urban reserving the ground buys exactly what wave I7 said
+it would: the generator finds bare ground rather than a forest to clear. The arm
+asserts the settlements now — every block inside a reservation, every zone
+document resolvable in the built project.
+
+**AND THE GATE'S ZERO CONTROL STOPPED BEING ZERO, CORRECTLY.**
+`the_biome_binding_scatters_when_its_ground_is_resident_and_not_before` asserted
+that a world with cell streaming and no terrain streamer holds no tiles. It holds
+one now, and the cause is IB-1's own rule that **PCG pages its own ground**: a
+settlement block is a `Ground::Terrain` volume, so activating its cell pages the
+page it needs. The true zero moved to a world with **neither** streamer (0 tiles,
+0 instances); the cell-only world became what it is (**1 tile, 376 instances**
+against the shipped boot's **16 and 14 636**). Likewise the scatter-mesh arm's
+"one placeholder batch" is **nine** now, one per resident block — the claim was
+never a count, it is that none carries geometry.
+
+**THE NEW SETTLEMENT GATE.** `pie_equals_shipping_on_a_walk_into_a_building`:
+enter the city, find a door, open it, step through, go upstairs — **123 steps,
+123 DISTINCT states, byte-identical between the cooked pack and the loose
+document.** Coverage first, on each host separately, because two empty worlds
+agree perfectly: doorways resident, solids built, the door shut before and open
+after, the doorway walkable, the first floor standable, the storey a real
+**3.60 m**. The walk **discovers its own targets** — which door is nearest, which
+building it belongs to, where that building's first floor is — so two hosts
+holding different worlds disagree about the targets as well as about the folds.
+
+Two findings inside it. **A door pressed from the LOCK SIDE while shut and
+unlocked LOCKS rather than opens** ("locked from the inside" has to mean
+something for whoever locked it), so the first draft stood on `prompt_position`,
+pressed, and got a verdict that did not move: it had bolted the front door from
+the hall. And **a stair core is full of treads at the floor above** — that is
+what a flight IS — so a "no solid is here" test aimed at the core reads
+blocked-by-2; the walk stands in the first non-stair room on floor one instead,
+and the stair's own part is asserted as *reachability*.
+
+**Mutation-verified**: deleting the settlement volumes from the level and
+re-blessing kills **six of island_gate's twelve arms**, including all four new
+ones.
+
+**THE 900-STEP DRIVE, re-priced.** `pie_equals_shipping_on_an_island_drive` is
+unmoved and green with the settlements standing: 900 steps, 900 distinct states,
+byte-identical, and the drive now starts inside Fixture Town rather than on bare
+ground. `city_scale` (11), `phase19_gate` (12) and `phase30_gameplay_gate` (6)
+are all green and untouched.
+
+**THE FIXED STEP, ON THE REAL ISLAND.** The instrument's island arm measures it
+now, with the hero in Harbour City so the blocks around it are activated and
+their parts banded:
+
+> **5.853 ms/step against the 6.0 ms `CITY_STEP_BUDGET_MS` ratchet — INSIDE it,
+> at 97.6 %.** 17 823 bodies, **17 289 ADMITTED structure colliders**, 58 582
+> contact pairs (2 055 touching). `physics3d sync` 2.821 (48.2 %), `solver`
+> 1.826 (31.2 %), `gameplay` 0.755 (12.9 %).
+
+The ratchet is **not raised and not breached**. (The CI fixture's own settlement
+reads 6.348 ms, over it, and that is a fact about the *fixture*: its 120 m
+reservation takes the town's 76 m grid, so four blocks of city-core archetypes
+sit inside one 64 m band. A number about a city has to come from a city, which is
+why the instrument's arm exists.)
+
+### BOTH FRAME TABLES, AND THE REQUIREMENT THAT IS NOT MET
+
+RTX 4070 Ti, Windows/Vulkan, **release**, 1080p, MIN of 3 rounds × 120 frames,
+the same 40 m-high flight east from Harbour City every island wave has flown.
+"Before" is wave TER2b's audit re-run at `9f6e4689`.
+
+**`SHIPPED` — the configuration that ships.**
+
+| | before | **after I8a** |
+|---|---|---|
+| p50 / p95 | 6.323 / — ms (158.2 fps) | **63.102 / 67.855 ms (15.8 fps)** |
+| GPU frame | 2.670 ms | **30.404 ms** |
+| `scatter` | 0.138 ms | **9.202 ms** |
+| `terrain` | 2.077 ms | 15.788 ms |
+| cpu projection | — | **20.182 ms** |
+| cpu sim fixed step | — | 8.070 ms |
+| cpu render (record) | — | 3.695 ms |
+| pipelined estimate | — | **32.057 ms (31.2 fps)** |
+
+**`LIT+VIS` — everything on.**
+
+| | before | **after I8a** |
+|---|---|---|
+| p50 / p95 | 14.502 / — ms (**69.0 fps**) | **106.221 / 131.490 ms (9.4 fps)** |
+| GPU frame | 9.580 ms | **49.834 ms** |
+| `scatter` | 0.141 ms | **19.490 ms** |
+| `terrain` | 3.130 ms | 15.977 ms |
+| cpu projection | — | **21.179 ms** |
+| cpu render (record) | — | 23.336 ms (of which `vsm raster` 16.5) |
+| cpu sim fixed step | — | 11.303 ms |
+| pipelined estimate | — | **55.931 ms (17.9 fps)** |
+| **content** | **3 batches / 16 771 instances** | **69 batches / 365 545 instances** |
+
+The other three rows for completeness: `LIT` 107.399 ms, `LIT+SSR` 106.887,
+`LIT-COARSE-CLIPMAP` 108.659 — the lighting stack is no longer what decides this
+frame.
+
+> **≥ 60 fps p50 `LIT+VIS` is NOT MET.** 106.221 ms against 16.6, where TER2b
+> left 2.10 ms of headroom. This is the wave's headline and it is stated as a
+> breach rather than a nuance.
+
+**Read the per-pass GPU split WITHIN a run and not across the two**, which is
+I4b's own law: the CPU frame went 6.3 → 63 ms between them, so `terrain`'s
+2.077 → 15.788 is not a terrain regression — nothing about the terrain changed —
+it is two different device states. Within the after-run the split is honest:
+scatter 19.490, terrain 15.977, gi 3.465, vgeom 2.003.
+
+**WHERE THE MILLISECONDS ARE, and what each one wants.** Three costs, three
+mechanisms, three different owners:
+
+1. **The projection: 20.2–21.7 ms against `PROJECTION_BUDGET_MS` = 1.5.** This is
+   a **defect, not a content problem**. `push_pcg_scatter` rebuilds a volume's
+   `loose` / `parts` / `shells` instance vectors **every frame** — 365 545
+   `ScatteredInstance` copies, ~32 MB of memcpy at 60 Hz — for content that
+   changes only when a cell activates. `PcgVolume::structures_gen` exists
+   precisely to say "this did not change", and nothing on the projection path
+   reads it. **The fix is Hardening Wave E's own pattern, one subsystem over**:
+   `project_scene_full` already takes the *previous* frame's `RenderScene`, which
+   is how terrain tiles are carried forward instead of deep-copied (6.370 →
+   0.041 ms, 155×). Routed with its price: it takes the island's CPU frame from
+   32.1 to ~13.4 ms, which is inside the 16.6 ms budget on its own. Not taken
+   here because it edits a projector body pinned **character for character**
+   between two hosts by `projector_mirror`, and that is a slice of its own.
+2. **The GPU: 30.4 ms shipped / 49.8 lit, of which scatter is 9.2 / 19.5.** This
+   is the **path**, and it is the correction this wave makes to its own brief.
+   The brief read *"the buildings are still cubes this slice, which is the cheap
+   case"*. It is the **expensive** case: the settlements go through the P18.5 GPU
+   **scatter** raster, which is a *foliage* path — no occlusion culling, no LOD
+   below the per-building shell, and its instances here are not 0.3 m grass tufts
+   but **wall-sized opaque boxes** that overdraw the screen many times over. The
+   meshlet/vgeom path I8b is about already has the **two-pass HZB occlusion cull**
+   P18 shipped and on by default. So *"a shipped city draws zero placeholder
+   batches"* — I8b's own first requirement — is not a fidelity item. **It is the
+   performance fix.**
+3. **The fixed step: 5.853 ms, inside its ratchet**, and named here only so it is
+   not mistaken for one of the two above.
+
+**What was NOT done, and why.** Thinning the settlements was priced and refused:
+to bring 365 545 instances inside the frame by design numbers alone needs a **10×
+cut** — one or two buildings per 100 m block at one or two storeys — which is a
+suburb, not a city, and it would trade a measured engine defect for a permanently
+worse world. Cutting `ISLAND_ACTIVATION_M` 256 → 128 was priced too (~2.8× fewer
+resident blocks) and refused for a different reason: cell activation is what
+*spawns* the entities, so a shorter radius means distant districts do not exist
+to draw their shells, and a city you cannot see from 300 m is not a city.
+
+### Clause 5 — the honest ledger
+
+**Per settlement, on the shipped island** (`settlement::settlements`, printed by
+`the_committed_island_plans_two_cities_and_five_towns`):
+
+| settlement | kind | r | blocks | zoning | refused off-pad | street |
+|---|---|---|---|---|---|---|
+| Harbour City | city | 600 m | **52** | 6 Office, 2 Hotel, 13 Shop, 13 Apartment, 9 House, 5 Estate, 4 Industrial | 48 | 20.88 km |
+| Eastgate | city | 570 m | **52** | 8 Office, 3 Shop, 24 Apartment, 9 House, 4 Estate, 4 Industrial | 48 | 19.80 km |
+| Cedar Cove | town | 230 m | 16 | 10 House, 3 Estate, 3 Shop | 20 | 4.28 km |
+| Millbrook | town | 230 m | 16 | 12 House, 4 Shop | 20 | 4.28 km |
+| Fernhill | town | 210 m | 12 | 9 House, 3 Shop | 24 | 3.88 km |
+| Alder Bay | town | 210 m | 12 | 8 House, 1 Estate, 3 Shop | 24 | 3.88 km |
+| Stonewater | town | 210 m | 12 | 9 House, 1 Estate, 2 Shop | 24 | 3.88 km |
+| **total** | | | **172** | | **208** | **60.88 km** |
+
+**0 blocks were refused off-land** on either island — every reservation the
+recipe places is wholly inland at its new radius, which the coastline test
+proves rather than samples.
+
+**What a block becomes**, from the battery's own 100 × 100 m Harbour City block:
+between **1 023 solids** (Industrial, 4 buildings) and **30 561** (Hotel, 9
+buildings), averaging ~12 000. **The resident set at Harbour City is 365 545
+instances and 17 289 admitted colliders**, which is ~30 blocks.
+
+**WHAT DRAWS: STILL CUBES.** Every one of the 365 545 is a `PrimMesh::Cube`
+tinted from `kind_index`. **I8b's first requirement is named here and it is not
+what it looks like: *a shipped city draws zero placeholder batches* is the
+PERFORMANCE clause of that wave, not its fidelity clause** — see cost 2 above.
+
+**Carried, by name:**
+
+1. **≥ 60 fps p50 LIT+VIS is not met and the island is at 9.4 fps.** The
+   headline. Three costs, three mechanisms, all three above.
+2. **The projection breaches `PROJECTION_BUDGET_MS` (1.5) at 20.2 ms**, with the
+   fix and its price stated. This is the one an implementer can take tomorrow.
+3. **The settlement streets are a PLAN, not a surface.** They decide where the
+   blocks are and they carry the join to the island road network; they are not
+   drawn. The island's road mesh is draped at the *terrain's* pitch (1 m) because
+   a road over real ground has chord error at any coarser step, and
+   `roads::build_mesh` takes **one** `ground_step_m` for one layer — while a
+   settlement street sits on a levelled pad, where the chord error is
+   **0.000000 m at any step** (the `phase30-city` measurement). Drawing them
+   honestly wants a *second* surface at a coarse step. At the island's 1 m pitch
+   the grid is **60.88 km** of centreline, which at a 7 m single-carriageway
+   width is ~426 000 m² and would roughly double the road mesh's 517 086
+   vertices. Routed beside I8b's sidewalk/kerb item.
+4. **A settlement's grid runs on the world axes.** No bearing per site — see
+   clause 1 for the two costs of giving it one.
+5. **`ISLAND_ACTIVATION_M` puts a whole city in memory at once.** 256 m
+   activation + 256 m prefetch over a 600 m city is ~25 cells and ~30 blocks
+   resident. That is what makes 365 545 instances a *per-frame* number; it is
+   also what makes the city visible. Both halves are above.
+6. **The fixture's water layers drift 5.43 %** and are deliberately not
+   re-derived (a new channel crosses a route and there are no bridges).
+7. **The fixture's own settlement step is 6.348 ms**, over the ratchet, because
+   its 120 m reservation packs four city-core blocks into one 64 m band. A
+   fixture is not a city.
+8. **`inf island build`'s default output for the CI fixture lands INSIDE the
+   tree** (`samples/island-fixture/project`), because that recipe's
+   `[source] cache` is `tiles/` beside itself and the default out is
+   `cache_dir()/../project`. Gitignored; the gate builds into a temp dir and
+   never touches it.
+9. **The vacuous-by-construction half of the `is_open` walk**: the arm bounds the
+   far call against the near one, which catches the reach check being lost, and
+   does **not** bound either against an absolute microsecond figure, because a
+   microsecond is a fact about the machine.
+
+### Counts
+
+| | before (`9f6e4689`) | **after I8a** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 328 / 6 211 / 0 / 19 | see below |
+| goldens | 58 | **58** — none added, none re-blessed |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | see below |
+| `clippy --workspace --all-targets -D warnings` | 0 | see below |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** |
+| committed levels (`EXPECTED_LEVELS`) | 23 | **23** — `samples/settlement/` holds no level |
+| new crates / external dependencies | — | **none**; one new Ring-1 module (`inf_editor_core::settlement`) |
+| `samples/island-fixture/IslandFixture.inf_lvl` | 8 342 B | **9 990 B** — +1 648 over 8 blocks and NOTHING else changed in it, so a settlement block is **206 B** of committed level |
+| `samples/island/VancouverIsland.inf_lvl` | 15 028 B | **49 625 B** — +34 597, of which 172 x 206 = **35 432 is the blocks**; the balance (-835 B) is the re-derived water's ten river splines, which moved in the same commit |
+| `samples/settlement/` | — | **7 `.inf_pcg` + 7 sidecars + README, 11.9 KB** |
+
+### The laws this wave paid for
+
+* **A scan that stops at one file stops at the file somebody wrote first.** The
+  committed-design allowlist was `island.rs`'s alone, and the settlement
+  generator's block positions reach the same committed `.inf_lvl`. It is a shared
+  door now — and the sharing is what exposed that the extractor could not read a
+  brace import at all.
+* **A containment test over a non-convex region is a boundary test.** Four
+  corners inside a coastline ring prove nothing; *no ring edge crossing the
+  rectangle* plus one inside point proves everything. The convex case (the pad
+  circle) really is corners.
+* **A rule with a hard threshold makes existence a step function.** One grid per
+  site kind meant a 150 m city built nothing, silently, and the one settlement CI
+  ever builds sat on the wrong side of the step. A ladder with a refusal at the
+  bottom is the shape that says so.
+* **A pad's rim is steeper than the hill it is cut into**, by the ratio of
+  `smooth01`'s peak derivative — about 1.25×, independent of radius. A bigger
+  terrace does not make gentler ground; it moves the crease.
+* **A zero control stops being zero when a feature arrives, and that can be
+  correct.** The settlements page their own ground (IB-1), so "cells but no
+  terrain streamer" is no longer empty. The fix is a *second* control, not a
+  weakened assertion.
+* **A door pressed from the lock side locks.** A gate that presses a door and
+  asks "did it open" has to know which side it is standing on.
+* **A stair core is full of stairs.** "No solid is here" aimed at a stairwell
+  measures the treads. Ask reachability of the stair and standability of the
+  room.
+* **CUBES ARE THE EXPENSIVE CASE.** The brief assumed placeholder geometry was
+  cheap and real geometry dear. Measured, it is the other way round: 365 545
+  wall-sized boxes through a foliage path with no occlusion culling cost 19.5 ms
+  of GPU, where the same buildings as meshlets would go through a two-pass HZB
+  cull the engine already ships. A placeholder is only cheap when it is *small*.

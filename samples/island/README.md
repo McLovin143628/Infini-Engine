@@ -49,9 +49,10 @@ Everything in the second table is rebuilt by the one command above and lives
 | coastline | **25.14 km** |
 | terrain | 784 level-0 tiles of 257², 1 064 in the catalog, 5 LOD levels |
 | source | 156 terrarium tiles at z15 = **3.11 m/px**, upsampled 3.11× onto a 1 m grid |
-| water | **50 reaches / 26.32 km**, 2 lakes, **33 waterfall sites** (biggest a 29.5 m drop) |
-| biomes | forest 38.5 %, plain 20.8 %, meadow 13.5 %, alpine 8.6 %, beach 6.8 %, farmland 6.1 %, urban 5.8 % |
-| roads | **33.74 km** over 11 links and 7 junctions; worst grade 0.118 against a 0.080 ceiling, 7 of 2 442 stretches over |
+| water | **51 reaches / 25.88 km**, 2 lakes / 0.0847 km², **33 waterfall sites** (biggest a 29.5 m drop) |
+| biomes | forest 38.2 %, plain 20.1 %, meadow 13.5 %, alpine 8.6 %, beach 6.5 %, farmland 5.9 %, urban **7.2 %** |
+| roads | **33.74 km** over 11 links and 7 junctions; worst grade 0.108 against a 0.080 ceiling, 5 of 2 442 stretches over |
+| settlements | **2 cities of 1.131 and 1.020 km² and 5 towns; 172 blocks, 60.88 km of street, about 1 800 buildings** (wave I8a) |
 
 ## The elevation is real and the shape is designed
 
@@ -63,7 +64,12 @@ World `(0, 0, 0)` is 49.343 N, 123.102 W, in UTM zone 10N. Remember the frame:
 **What the survey gives is the relief.** What the design gives is everything
 else: the coastline (there is no island there), the sea shelf and the beaches,
 the seven settlement sites and their terraces, the road network, and the biome
-masks. The build says so every run — `[source.upsampled]` is a standing
+masks. **And what stands on the terraces is a RULE** (wave I8a): the level
+carries one `PcgVolume` per settlement block — 172 of them, 201 bytes each —
+naming one of seven committed zone documents in `samples/settlement/`, and the
+streets, blocks, lots and buildings are derived from the sites and the road
+layer by `inf_editor_core::settlement`. Nothing about a settlement is committed
+geometry. The build says so every run — `[source.upsampled]` is a standing
 advisory, because a 1 m grid over a 3.11 m survey is 3.11× of interpolation and
 pretending otherwise would be the most flattering lie this folder could tell.
 
