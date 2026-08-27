@@ -146,7 +146,7 @@ pub struct BuildingArchetype {
     /// [`BuildingPlan::opening_is_clear`](super::BuildingPlan::opening_is_clear)
     /// is an assertion about *solids*, which a pane is not. It is the reason
     /// the assembler's instance list is now one aligned prefix plus a decoration
-    /// tail (see [`super::assemble`]).
+    /// tail (see [`super::assemble`](mod@super::assemble)).
     pub pane: &'static str,
     /// The header placed over every opening.
     pub lintel: &'static str,

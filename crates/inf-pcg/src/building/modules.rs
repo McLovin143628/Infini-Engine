@@ -4,7 +4,7 @@
 //! # What was actually wrong, and it is not what the ledger said
 //!
 //! Wave I8a recorded the settlements as *"365 545 wall-sized opaque boxes"*.
-//! They were not wall-sized. [`crate::scatter::ScatteredInstance::scale`] — and
+//! They were not wall-sized. [`crate::scatter::PcgInstance::scale`] — and
 //! its ECS mirror — is **one uniform `f64`**, and every module the assembler
 //! places carries `scale: 1.0`, so a 0.12 × 3.5 × 1.5 m curtain-wall panel, a
 //! 10 × 0.2 × 10 m floor slab and a 0.9 m desk all drew as the **same one-metre
@@ -26,7 +26,7 @@
 //! onto its instance's extent at projection. Two consequences, both deliberate:
 //!
 //! * a module's mesh is a function of its *shape family* and nothing else, so
-//!   there are 21 meshes rather than one per palette entry;
+//!   there are twelve meshes rather than one per palette entry;
 //! * every feature is **proportional** — a frame rail is a fraction of the
 //!   panel, never a fixed 40 mm — because the same mesh is stretched onto a
 //!   0.3 m mullion and a 12 m slab. A fixed-size chamfer would be invisible on
@@ -34,8 +34,8 @@
 //!
 //! # Boxes, composed
 //!
-//! Every shape is a small union of axis-aligned boxes with flat normals: 3 to 6
-//! of them, 36 to 72 triangles. No half-edge kernel (`inf-dcc` is a **dev**
+//! Every shape is a small union of axis-aligned boxes with flat normals: two to
+//! six of them, 24 to 72 triangles. No half-edge kernel (`inf-dcc` is a **dev**
 //! dependency of the shipped player and this code is Ring 0 on its draw path),
 //! no trigonometry (the P14 law — these vertices are a pure function of
 //! constants and reach a content hash), and no boolean. The relief is in the
@@ -47,7 +47,7 @@
 //! # The GUIDs are content-derived
 //!
 //! A palette module names no asset — there is no `.inf_mesh` file to point at,
-//! and inventing one per module would put 21 files in `samples/` to express
+//! and inventing one per module would put twelve files in `samples/` to express
 //! what a function already answers. [`module_mesh_guid`] mints one from the
 //! shape family's own name under a private salt, which is the synthetic-guid
 //! rule this repository already uses for door leaves, PCG doorways, structure
@@ -133,7 +133,7 @@ impl ModuleMesh {
     }
 }
 
-/// The shape families the 21 module meshes come in.
+/// The twelve shape families a palette module draws as.
 ///
 /// A family and not a per-module mesh, because a palette entry's *dimensions*
 /// live on the instance now: an office mullion and a house quoin are the same
@@ -144,7 +144,8 @@ pub enum ModuleShape {
     /// A solid wall panel: a leaf with a raised border on both faces.
     Panel,
     /// A **glazed** panel: a rectangular frame standing proud of a thin,
-    /// recessed pane. The one family [`is_glazing`] answers `true` for.
+    /// recessed pane. The one family
+    /// [`ModuleShape::is_glazing`] answers `true` for.
     Glazing,
     /// A vertical member: a shaft with a base and a cap.
     Column,
@@ -323,7 +324,7 @@ impl ModuleShape {
 /// The GUID a module of `shape` draws under.
 ///
 /// A pure function of the family's [`name`](ModuleShape::name) under
-/// [`MODULE_MESH_SALT`], so the id is the same in every process, on every
+/// `MODULE_MESH_SALT`, so the id is the same in every process, on every
 /// platform and in both hosts, and is derived from *what the mesh is* rather
 /// than from where it happens to sit in a table.
 pub fn module_mesh_guid(shape: ModuleShape) -> Uuid {
@@ -340,7 +341,7 @@ pub fn module_mesh_guid(shape: ModuleShape) -> Uuid {
 /// An exhaustive match over every module the seven palettes declare, with no
 /// wildcard arm: a palette that adds a module and forgets to classify it gets a
 /// `None` here and fails
-/// [`every_palette_module_has_a_shape`](tests::every_palette_module_has_a_shape)
+/// `tests::every_palette_module_has_a_shape`
 /// rather than silently drawing a rectangular prism again.
 pub fn shape_of(module: &str) -> Option<ModuleShape> {
     Some(match module {
