@@ -116,7 +116,7 @@ pub const MAX_OCTAVES: u32 = 6;
 
 /// Salt mixed into the recipe seed, so the detail band is decorrelated from every
 /// other hashed decision the build makes off the same number.
-const DETAIL_SALT: u64 = 0x7E7A_11_D3;
+const DETAIL_SALT: u64 = 0x7E7A_11D3;
 
 /// **The band this build writes into** — derived from the two pitches, never
 /// authored.
@@ -141,7 +141,16 @@ impl DetailBand {
     /// `source.upsampled` advisory makes, at the same threshold, so a build that
     /// prints the advisory is exactly a build that gets detail.
     pub fn of(grid_m_per_sample: f64, source_m_per_px: f64) -> Option<Self> {
-        if !(grid_m_per_sample > 0.0) || !(source_m_per_px > 0.0) {
+        // `is_finite` first, then an ordinary comparison. Written this way rather
+        // than as `!(x > 0.0)` because clippy is right that a negated comparison
+        // on a partially-ordered type hides the third case — and here the third
+        // case is real: a recipe whose grid or source pitch decodes as NaN or as
+        // infinity must get no band rather than an infinite one.
+        if !grid_m_per_sample.is_finite()
+            || !source_m_per_px.is_finite()
+            || grid_m_per_sample <= 0.0
+            || source_m_per_px <= 0.0
+        {
             return None;
         }
         if source_m_per_px / grid_m_per_sample <= crate::source::UPSAMPLE_ADVISORY_RATIO {
@@ -236,7 +245,12 @@ impl DetailStats {
 /// reads, and a linear ramp puts a visible crease at both ends of every mask.
 #[inline]
 fn ramp(lo: f64, hi: f64, v: f64) -> f64 {
-    if !(hi > lo) {
+    // A degenerate or unordered band is a STEP at `hi`, not a divide by zero.
+    // Spelled positively (clippy's `neg_cmp_op_on_partial_ord`) because the case
+    // it makes visible — one of the three being NaN — is one this really has to
+    // answer: a mask width that arrived as NaN must exclude nothing rather than
+    // silently multiplying the whole island's amplitude by NaN.
+    if !(lo.is_finite() && hi.is_finite()) || hi <= lo {
         return if v >= hi { 1.0 } else { 0.0 };
     }
     let t = ((v - lo) / (hi - lo)).clamp(0.0, 1.0);

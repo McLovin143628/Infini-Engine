@@ -27068,3 +27068,114 @@ and +0.499 ms of a 9.051 ms frame (5.5 %)**, not the wave's +0.42 of 8.44 from a
 exists. Counts after the audit: battery **328 / 6 196 / 0 / 19**, goldens **58** none re-blessed,
 `INF_GOLDEN_STRICT=1` green, rustdoc **374 over 30 crates** unmoved, clippy **0**, fmt clean, schemas
 unmoved, no external dependency. Ledger in `docs/memos/island-progress.md`.
+
+## Wave TER2b — the ground gets its shape (2026-08-26)
+
+**Two things were true of the island's ground and neither was visible from its own ledger.** Base
+`17c47da6`; RTX 4070 Ti, Windows/Vulkan. TER2a's three ground-cover props were authored, byte-locked,
+cooked and reachable in the pack, and **nothing drew them** — the wave shipped 16 771 tinted cubes and
+its own audit's HIGH said so. And the ground under six metres was not merely coarse but **empty**: a
+z15 terrarium pixel is 3.11 m at 49.34 N, a raster at that pitch cannot represent a feature shorter
+than 6.22 m, and every metre below that line was a bilinear plane through four survey samples. **No
+engine schema moves** (scene v26, payload v11, `.inf_sm` v3 stand) **and neither does the island
+recipe** (v2) — the recipe bump was priced and refused, and the two records that grew fields live only
+inside `#[serde(skip)]` containers. Full ledger in `docs/memos/island-progress.md` under *Wave TER2b*.
+
+**Clause 0 — the scattered cover draws its meshes (the TER2a audit's HIGH, closed at the frame).**
+`PcgKind::mesh` was read by the packager's dependency closure and by nothing on the draw path. **The
+GUID had to survive evaluation and an index could not have**, which is a finding: `kind_index` is
+*rule-local*, `evaluate_with_in` concatenates every rule of every layer with no run boundaries,
+`BiomeBinding::evaluate_in` concatenates one such list per biome graph, and `compose_volume`
+interleaves **grammar module** indices into the same `u32` — so two instances carrying `0` may be a
+grass tuft and a wall panel. `PcgInstance` and its ECS mirror `ScatteredInstance` each carry an
+`Option<Uuid>` now. The renderer needed a **payload, not a pipeline**: the P18.5 scatter raster pulls
+`vertices[idx * 6u + k]` out of a storage buffer, so an authored mesh is the same two flat arrays
+`PrimStorage` holds for the built-ins — `ScatterGeometry`, content-keyed and folded into
+`ScatterData::key`, with a `geoms` map retained to the frame's live set. The cube stays as the
+**proxy** for the impostor card, the CPU fallback and the shadow-caster pack (all three bind one
+shared vertex buffer for the frame), and the impostor is at least *sized* off the authored radius now
+— a 0.307 m tuft was taking a unit cube's `0.866` and getting a billboard three times its own height.
+`MAX_SCATTER_MESH_TRIANGLES` (4 096) lives in Ring 0 so both hosts refuse the same content. **The
+audit's tripwire went red in the strongest form it named** — its two struct literals stopped
+*compiling* — and is replaced by `the_scattered_cover_draws_its_authored_meshes`, which cooks the
+island, drives the shipping sim until the cover scatters and projects it through `project_scene_full`:
+**14 643 instances → 3 batches → 3 distinct geometry uploads** (grass tuft 32 tri / r 0.338 m, shrub
+20 / 0.754, rock 128 / 0.328), against **1 placeholder batch** under an empty table, which is the
+pre-TER2b engine exactly. `veg_digest` folds the mesh GUID now.
+
+**Clause 1 — the recipe detail stage.** `BuildStep::Detail` between **Roads** and **Pyramid**;
+`BuildStep::ALL` is **ten**. The band is *derived*, not authored: base wavelength at the SOURCE's
+Nyquist, finest octave never under the GRID's, octave count by **halving** because `log2` is on the
+libm ban list and this writes committed bytes. **No recipe field, priced before it was decided**:
+`IslandRecipe` is `deny_unknown_fields` with an exact-equality version check and **no migrate fn**, so
+v2 → v3 refuses every committed recipe on disk — for three numbers that are a pure function of two the
+recipe already states. `UPSAMPLE_ADVISORY_RATIO` is one constant with two readers so the advisory and
+the band cannot disagree. **Four exclusions, every one a fade** (shore band, road corridor, stream
+channels, site pads) on a `t·t·(3−2t)` ramp, because a hard mask edge is a crease along every road.
+Measured on the CI fixture: **362 636 of 599 076 samples** took relief in a 6.22–24.89 m band over 3
+octaves, mean **0.060 m**, worst **1.315 m** against a 1.5 m ceiling, excluding 213 984 water / 7 535
+corridor / 1 647 channel / 13 274 pad. Every fixture arm holds — byte-identity green, shoreline
+**0.0038 m** from the waterline, start gap **0.008 m**, frozen step order at ten — and one is new:
+`grade_audit` runs *inside* the Roads step, so the report's audit could not have seen a leaking mask,
+and the new arm **re-runs it against the finished terrain** for a `to_bits`-equal worst grade
+(**0.099370**), 144 stretches against 144, zero over against zero. Mutation-verified (`corridor: None`
+fails it). The advisory now says the band is designed detail and "no longer bilinear either".
+
+**Clause 2 — the mesh reaches the survey.** `TERRAIN_BASE_CELLS` **32 → 64**: ring 0 goes from 8 m a
+vertex to **4 m** over 1 m data. TER2a told TER2b to plan with +0.569 ms terrain / +0.499 ms frame;
+re-measured on a **third** tree (this one, carrying real scatter geometry and a rewritten heightfield):
+**+0.587 ms terrain / +0.477 ms frame** at `LIT+VIS`. **≥ 60 fps p50 `LIT+VIS` with everything on: MET
+at 69.0 fps**, 2.10 ms of p50 headroom and 7.04 ms of GPU headroom. **And the delta is NOT a constant
+number of milliseconds** — the same doubling costs **+0.306 ms in `SHIPPED` and +0.587 in `LIT`** — so
+it is not a fixed vertex cost beside an unchanged fragment half: a finer mesh packs smaller triangles
+into the same 2×2 quads and that work is dearer where a fragment is dearer. TER2a listed exactly this
+as its second *unverified* assumption; it is measured now. Nothing else moves — `lod_thresholds` is a
+function of the span and `TERRAIN_LOD_SCALE`, `patch_mesh_lod` is a difference of two indices, and the
+skirt is a function of a tile's span and height **range** rather than of its cell count, so seams seal
+by construction and get *safer* (a finer fine side deviates from the coarse one by less). **Goldens:
+measured rather than assumed** — a blessing run moves **thirteen** terrain-bearing images and **every
+one sits inside the strict tolerance**, so `INF_GOLDEN_STRICT=1` is green against the committed images
+and **none is re-blessed**; the count stays **58**.
+
+**Clauses 3 and 4 — routed, and priced.** POM is refused on three counts and the first is fatal alone:
+`MaterialAsset` has **no height slot** to march (adding one is an engine schema move), a
+single-channel height map beside four BC1 maps **demotes the whole VT pool to `Rgba8`** (2 721 pages →
+340, TER2a's own measurement), and a per-fragment ray march spends in the **92.5 % fragment-bound**
+half that clause 2 just made 23 % dearer. Erosion micro-detail is refused on the committed-water
+consequence, stated both ways: in the detail slot it cuts channels the committed streams do not
+follow; before the hydrology step it rewrites a committed water design already drifting 16.47 % in
+lake area — plus an iterative droplet sim over 51.4 M samples on the byte-identity path, every build.
+
+**THE ISLAND, BOTH TABLES.** `LIT+VIS`: p50 13.522 → **14.499 ms (74.0 → 69.0 fps)**, GPU frame
+9.051 → **9.561 ms (+0.510, +5.6 %)**, terrain 2.515 → **3.122**, scatter 0.131 → **0.140** in **3**
+batches instead of 1, 14 virtual textures, 16 771 instances. `SHIPPED` — the configuration that ships:
+p50 5.421 → **6.236 ms (184.5 → 160.3 fps)**, GPU frame 2.244 → **2.676 ms (+0.432, +19.3 %)**,
+terrain 1.667 → **2.086** and its share of the shipped frame **74 % → 78 %**, against 38 % of
+`SHIPPING_FRAME_BUDGET_MS`. Both printed because a lit frame has 4.5 ms of `vsm-raster` to hide a
+terrain pass behind and a shipped one has nothing — the TER2a audit's rule. **The cover meshes are
+free**: 16 771 authored meshes (32/20/128 triangles) for **+0.009 ms** over 16 771 twelve-triangle
+cubes. The clause-0-and-1 half of the terrain move (+0.113 ms shipped, +0.020 lit) is **not cleanly
+attributable** — those two runs differ in both the geometry and the heightfield; the clean A/B is
+clause 2's, one tree and one constant.
+
+**TWO LAWS PAID FOR THEMSELVES INSIDE THE WAVE.** `inf-island`'s libm-ban table went red on the first
+run because `detail.rs` had not joined it — the second time this campaign it has caught a new module
+unprompted. And the workspace's eaten-`\` gate fired **twice** on this wave's own scripted edits, in
+`build.rs` and `render_assets.rs`: catches **thirty and thirty-one**, both runs of eighteen spaces
+inside user-facing literals, both from a non-raw Python string eating a Rust continuation. Only
+`chr(92)` and an unquoted heredoc are remedies, and neither of these two used one.
+
+**Carried by name** (full list in the memo): a windowed PIE session still draws the cover as
+placeholder cubes — the fourth instance of the class P21.4, P24.1 and P26.4 each closed, and the fix
+needs **no** schema move because `ScenePayload::meshes` is already a general `.inf_mesh` slot;
+`kind_index` still collides for the *tint*; a scattered mesh is tinted and not textured (the pull
+buffer is position + normal and has no uv); the impostor / CPU-fallback / shadow-caster paths still
+draw the cube proxy; coarse LOD pages still shade off layer 0; the detail band is invisible past the
+LOD-0 ring because a pyramid can only decimate; ground cover still stops at ~1.3 km².
+
+Counts: battery **328 / 6 206 / 0 / 19** (+10 arms, no new block), goldens **58** with **none**
+added or re-blessed and all three `GOLDEN_SET_DIGEST` pins unmoved, `INF_GOLDEN_STRICT=1` green over
+58, rustdoc **374 over 30 crates** unmoved against a ceiling of 450, clippy **0**, `fmt` clean, the
+eaten-`\` gate green at **31** catches, schemas **all four unmoved**, no new crate or external
+dependency, committed content unmoved, frontend untouched and not run
+(`git diff -- editor/studio/src` is empty). Ledger in `docs/memos/island-progress.md`.
