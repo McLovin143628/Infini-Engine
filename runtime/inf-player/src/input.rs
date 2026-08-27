@@ -155,6 +155,9 @@ pub fn keycode_to_code(code: KeyCode) -> Option<&'static str> {
         KeyCode::Tab => "Tab",
         KeyCode::KeyI => "KeyI",
         KeyCode::KeyZ => "KeyZ",
+        // I8b: the door bolt's own key, so `actions::LOCK` is reachable from a
+        // keyboard and not only from a gamepad.
+        KeyCode::KeyL => "KeyL",
         _ => return None,
     })
 }
@@ -405,7 +408,7 @@ mod tests {
             .filter(|n| n.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
             .collect();
         assert!(
-            read.len() >= 19,
+            read.len() >= 20,
             "only {} action constants were extracted from `from_actions` — the \
              extraction broke, and an arm that greps nothing passes everything: \
              {read:?}",
@@ -426,6 +429,8 @@ mod tests {
                 "AIM" => a::AIM,
                 "JUMP" => a::JUMP,
                 "CROUCH" => a::CROUCH,
+                // I8b: the bolt's own control.
+                "LOCK" => a::LOCK,
                 "PRONE" => a::PRONE,
                 "ROLL" => a::ROLL,
                 "DIVE" => a::DIVE,
@@ -518,6 +523,7 @@ mod tests {
             KeyCode::KeyE,
             KeyCode::KeyF,
             KeyCode::KeyI,
+            KeyCode::KeyL,
             KeyCode::KeyQ,
             KeyCode::KeyR,
             KeyCode::KeyS,

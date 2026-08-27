@@ -539,6 +539,12 @@ fn the_shipped_projection_emits_complementary_parts_and_shell_batches() {
     let (mut parts, mut shells, mut loose) = (0usize, 0usize, 0usize);
     let (mut part_inst, mut shell_inst) = (0usize, 0usize);
     let mut worst_reach = 0.0f64;
+    // **The BLOCKS a parts band was emitted for**, which is the claim; the batch
+    // COUNT stopped being it in island wave I8b. `push_scatter` buckets on
+    // (mesh, glow) now, so a block whose modules include a glazed one emits two
+    // parts batches over the same band from the same anchor - one lit, one not.
+    // Counting batches would make this arm a statement about the palette.
+    let mut part_blocks: std::collections::BTreeSet<[u64; 3]> = std::collections::BTreeSet::new();
     for b in &scene.scatter {
         let n = b.data.instances.len();
         assert!(
@@ -577,6 +583,7 @@ fn the_shipped_projection_emits_complementary_parts_and_shell_batches() {
             );
             worst_reach = worst_reach.max(reach);
             parts += 1;
+            part_blocks.insert(key);
             part_inst += n;
         } else {
             loose += n;
@@ -586,14 +593,24 @@ fn the_shipped_projection_emits_complementary_parts_and_shell_batches() {
         "IB-2b (shipped projection): {parts} parts batches ({part_inst} instances) \
          bounded above at {lod} m + a reach of at most {worst_reach:.3} m, {shells} \
          shell batches ({shell_inst} instances) bounded below at {lod} m, {loose} \
-         ungrouped instances"
+         ungrouped instances; the parts batches cover {} blocks",
+        part_blocks.len()
     );
     assert_eq!(
-        parts,
+        part_blocks.len(),
         (CITY_BLOCKS * CITY_BLOCKS) as usize,
-        "one parts batch per block"
+        "every block must contribute a parts band"
     );
-    assert_eq!(shells, parts, "every parts batch needs its complement");
+    assert!(
+        parts >= part_blocks.len(),
+        "{parts} parts batches over {} blocks",
+        part_blocks.len()
+    );
+    assert_eq!(
+        shells,
+        part_blocks.len(),
+        "every block's parts band needs its shell complement"
+    );
     // **The reduction, measured**: one instance a building against ~370 a
     // building. Without it the far field is the whole city's geometry.
     assert_eq!(

@@ -1664,11 +1664,11 @@ fn the_scattered_cover_draws_its_authored_meshes() {
         );
     }
 
-    let project = |table: &inf_render::ScatterMeshes| {
+    let project = |sim: &RuntimeSim, table: &inf_render::ScatterMeshes| {
         let mut scene = inf_render::RenderScene::default();
         inf_player::render::project_scene_full(
             &mut scene,
-            &sim,
+            sim,
             1.0,
             &inf_player::vmesh::VmeshRegistry::new(),
             &inf_player::skinned::SkinnedRegistry::new(),
@@ -1680,7 +1680,22 @@ fn the_scattered_cover_draws_its_authored_meshes() {
         scene
     };
 
-    let scene = project(&meshes);
+    // **The table the SHIPPED boot actually builds** (island wave I8b):
+    // `load_scatter_meshes` is `from_pack` *plus* the twelve building module
+    // families, which name no file and are minted from their own names. The
+    // cover assertions above deliberately run on `meshes` alone — they are about
+    // the `.inf_pcg` -> scatter-kind-mesh edge and adding twelve engine defaults
+    // to that count would make them a statement about the palette.
+    let shipped = {
+        let mut t = meshes.clone();
+        inf_player::scatter_mesh::add_building_modules(&mut t);
+        assert!(
+            t.len() > meshes.len(),
+            "the module families added nothing to the table"
+        );
+        t
+    };
+    let scene = project(&sim, &shipped);
     let with_geom: Vec<&inf_render::ScatterBatch> = scene
         .scatter
         .iter()
@@ -1690,14 +1705,22 @@ fn the_scattered_cover_draws_its_authored_meshes() {
         .iter()
         .filter_map(|b| b.data.geometry.as_ref().map(|g| g.key()))
         .collect();
-    assert_eq!(
-        drawn.len(),
-        3,
+    // **Three, AMONG the settlements' own** (island wave I8b). This used to be
+    // `drawn.len() == 3`, and it could be: the island's whole mesh-carrying
+    // population was the biome-bound cover. A settlement block's grammar modules
+    // draw their own shape families now, through the same bucketing, so the
+    // distinct-upload count is the cover's three plus whichever of the twelve
+    // families the resident blocks used. Three distinct uploads FOR THE COVER is
+    // still the claim, and the loop below asserts it by name rather than through
+    // a total.
+    assert!(
+        drawn.len() >= 3,
         "the island's three cover meshes must reach three DISTINCT geometry \
          uploads; the projection produced {} of {} scatter batches carrying \
-         geometry",
+         geometry and {} distinct uploads",
         with_geom.len(),
-        scene.scatter.len()
+        scene.scatter.len(),
+        drawn.len()
     );
     for kind in inf_editor_core::cover::CoverKind::ALL {
         let id = inf_editor_core::cover::cover_mesh_guid(kind);
@@ -1705,10 +1728,209 @@ fn the_scattered_cover_draws_its_authored_meshes() {
         assert!(drawn.contains(&key), "{} is not drawn", kind.label());
     }
     let instances: usize = with_geom.iter().map(|b| b.data.len()).sum();
-    assert_eq!(
-        instances, placed,
-        "{instances} of {placed} scattered instances reached a mesh-carrying batch"
+    assert!(
+        instances >= placed,
+        "{instances} of {placed} scattered instances reached a mesh-carrying \
+         batch — the vegetation alone is {placed}"
     );
+
+    // ── 3b. THE ZERO-PLACEHOLDER ARM (island wave I8b) ──
+    //
+    // *"A shipped city draws zero placeholder batches"* — the routed project's
+    // own first requirement, as a measurement over a real cooked pack rather
+    // than over a hand-built fixture. (The I4 audit deleted the first attempt at
+    // it as a tautology: that scene was built with `..Default::default()`, so
+    // `scatter.is_empty()` asserted that `Vec::new()` is empty.)
+    //
+    // "Placeholder" means exactly one thing here: a batch whose `geometry` is
+    // `None`, which is a batch drawing `PrimMesh::Cube` for content that is not
+    // a cube. The **shell** batch is the one thing that legitimately is one — a
+    // shell is an oriented box by definition (`push_shells`) — so it is counted
+    // apart and asserted non-empty rather than waved through.
+    let shells: Vec<&inf_render::ScatterBatch> = scene
+        .scatter
+        .iter()
+        .filter(|b| b.near_distance > 0.0)
+        .collect();
+    let placeholder: Vec<&inf_render::ScatterBatch> = scene
+        .scatter
+        .iter()
+        .filter(|b| b.data.geometry.is_none() && b.near_distance == 0.0)
+        .collect();
+    println!(
+        "ZERO PLACEHOLDER: {} batches, {} carry geometry, {} are shell boxes, \
+         {} are placeholders",
+        scene.scatter.len(),
+        with_geom.len(),
+        shells.len(),
+        placeholder.len()
+    );
+    assert!(
+        placeholder.is_empty(),
+        "{} of {} scatter batches draw a placeholder cube for content that is \
+         not one",
+        placeholder.len(),
+        scene.scatter.len()
+    );
+    assert!(
+        !shells.is_empty(),
+        "no shell batch at all, so the count above is not measuring a city"
+    );
+
+    // …and the CASTER half. Every settlement PARTS batch says it does not cast,
+    // because its own shell does — so the CPU caster pack walks none of them.
+    // The number asserted is `considered`, the count BEFORE the ceiling bites,
+    // which is what says the instances were never touched rather than packed
+    // and thrown away.
+    let caster_settings =
+        inf_render::shadow_caster_settings(&inf_render::RenderSettings::default().scatter, 400.0);
+    // **The eye stands in a settlement**, not at the world origin: a pack taken
+    // from a kilometre away considers nothing, and the comparison below would be
+    // two zeros.
+    let eye = {
+        // Standing ON a building part, so the pack has something to consider:
+        // a settlement pad sits a couple of hundred metres up and the batch
+        // anchor's own Y is the volume entity's, which is zero.
+        let b = scene
+            .scatter
+            .iter()
+            .find(|b| !b.casts_shadows && !b.data.instances.is_empty())
+            .expect("a settlement parts batch");
+        let o = b.data.instances[0].offset;
+        b.anchor + glam::DVec3::new(o[0] as f64, o[1] as f64, o[2] as f64)
+    };
+    let origin = inf_math::FloatingOrigin::new(eye);
+    let pack = |batches: &[inf_render::ScatterBatch]| {
+        inf_render::pack_fallback(
+            &origin,
+            batches,
+            eye,
+            &caster_settings,
+            inf_render::MAX_CPU_SCATTER_INSTANCES,
+        )
+    };
+    let quiet = pack(&scene.scatter);
+    // **THE FALSIFIER**: the same scene with every batch casting — which is the
+    // pre-I8b engine exactly — walks the settlements' parts and considers an
+    // order of magnitude more.
+    let loud_batches: Vec<inf_render::ScatterBatch> = scene
+        .scatter
+        .iter()
+        .map(|b| inf_render::ScatterBatch {
+            casts_shadows: true,
+            ..b.clone()
+        })
+        .collect();
+    let loud = pack(&loud_batches);
+    let total_instances: usize = scene.scatter.iter().map(|b| b.data.len()).sum();
+    let casting: usize = scene
+        .scatter
+        .iter()
+        .filter(|b| b.casts_shadows)
+        .map(|b| b.data.len())
+        .sum();
+    println!(
+        "ZERO PLACEHOLDER CASTERS: {casting} of {total_instances} instances sit \
+         in a casting batch; the pack considered {} where the pre-I8b engine \
+         considered {}",
+        quiet.considered, loud.considered
+    );
+    assert!(
+        casting < total_instances,
+        "every one of {total_instances} instances is still a caster — the parts \
+         batches did not opt out"
+    );
+    assert!(
+        loud.considered > 0,
+        "the control pack considered nothing, so the comparison is two zeros"
+    );
+    assert!(
+        quiet.considered * 4 < loud.considered,
+        "the caster pack considered {} of the control's {} — the parts are still \
+         being walked",
+        quiet.considered,
+        loud.considered
+    );
+
+    // ── 3c. THE NIGHT WINDOWS (island wave I8b clause 3) ──
+    //
+    // Every scene projected so far was projected at the island's committed
+    // hour, and **not one batch emits** — which is the first half of the claim
+    // and the reason a level with no night in it is byte-identical to the
+    // pre-I8b engine. Then the clock is wound to midnight through the world's
+    // own `TimeOfDay`, the SAME projection runs, and the panes light up.
+    //
+    // Wound in the world rather than passed to the projector, because the hour
+    // reaches the projection through `project_sky` -> `scene.sun.direction` and
+    // that is the seam a shipped build uses.
+    assert!(
+        scene.scatter.iter().all(|b| b.emissive == [0.0; 3]),
+        "something emits by day, so the night comparison below would be vacuous"
+    );
+    let glowing_instances: usize = {
+        let w = sim.world().world();
+        let mut n = 0usize;
+        for e in w.iter_entities() {
+            if let Some(v) = e.get::<inf_ecs::components::PcgVolume>() {
+                n += v.evaluated.iter().filter(|i| i.glow > 0.0).count();
+            }
+        }
+        n
+    };
+    assert!(
+        glowing_instances > 0,
+        "the settlements hold no glazed module at all, so nothing could light up"
+    );
+    {
+        let w = sim.world_mut().world_mut();
+        let mut q = w.query::<&mut inf_ecs::components::TimeOfDay>();
+        let mut wound = 0usize;
+        for mut tod in q.iter_mut(w) {
+            // Local midnight at this island's longitude.
+            tod.seconds = (86_400.0 - tod.longitude_deg * 240.0).rem_euclid(86_400.0);
+            wound += 1;
+        }
+        assert!(wound > 0, "the island carries no clock to wind");
+    }
+    let night = project(&sim, &shipped);
+    let lit: Vec<&inf_render::ScatterBatch> = night
+        .scatter
+        .iter()
+        .filter(|b| b.emissive != [0.0; 3])
+        .collect();
+    let lit_instances: usize = lit.iter().map(|b| b.data.len()).sum();
+    println!(
+        "NIGHT WINDOWS: sun y {:.3} -> glow step {}; {} of {} batches emit, over \
+         {lit_instances} of {glowing_instances} glazed instances; brightest {:?}",
+        night.sun.direction.y,
+        inf_render::night_glow_step(night.sun.direction),
+        lit.len(),
+        night.scatter.len(),
+        lit.iter().map(|b| b.emissive[0]).fold(0.0_f32, f32::max)
+    );
+    assert!(
+        night.sun.direction.y < 0.0,
+        "the clock did not put the sun below the horizon: y = {}",
+        night.sun.direction.y
+    );
+    assert!(!lit.is_empty(), "no batch emits at midnight");
+    assert_eq!(
+        lit_instances, glowing_instances,
+        "{lit_instances} instances reached a lit batch of {glowing_instances} \
+         that carry a glow"
+    );
+    for b in &lit {
+        assert!(
+            b.emissive[0] > b.emissive[1] && b.emissive[1] > b.emissive[2],
+            "a lit window is not warm: {:?}",
+            b.emissive
+        );
+        assert!(
+            b.data.geometry.is_some(),
+            "a lit batch draws a placeholder — a glowing cube is worse than a \
+             dark window"
+        );
+    }
     // Every batch's cull radius is its OWN geometry's, not the proxy's — the one
     // place the proxy must not be used, because a radius that is too small
     // deletes instances at the frustum edge.
@@ -1718,7 +1940,7 @@ fn the_scattered_cover_draws_its_authored_meshes() {
     }
 
     // ── 4. …and the anti-vacuity half: the pre-TER2b engine, exactly ──
-    let before = project(&inf_render::ScatterMeshes::new());
+    let before = project(&sim, &inf_render::ScatterMeshes::new());
     assert!(
         before.scatter.iter().all(|b| b.data.geometry.is_none()),
         "an empty scatter-mesh table must produce the placeholder path -- if it \

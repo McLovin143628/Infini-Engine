@@ -2841,6 +2841,49 @@ impl RenderScene {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The night glow is a ramp on the sun's own height, quantized** (island
+    /// wave I8b clause 3).
+    ///
+    /// Four claims, and the first is the one the memo key rests on: a daytime
+    /// step is EXACTLY zero and a daytime emission is exactly `[0, 0, 0]`, so a
+    /// level with no night in it packs the bytes it packed before this feature
+    /// existed.
+    #[test]
+    fn the_night_glow_ramps_on_the_sun_and_quantizes() {
+        use glam::Vec3;
+        // High noon: nothing glows, and nothing about the batch moves.
+        assert_eq!(night_glow_step(Vec3::new(0.0, 1.0, 0.0)), 0);
+        assert_eq!(glow_emissive(1.6, 0), [0.0; 3]);
+        // Deep night: the full step.
+        assert_eq!(night_glow_step(Vec3::new(0.0, -1.0, 0.0)), NIGHT_GLOW_STEPS);
+        // Monotone through dusk, and it really does pass through the middle
+        // rather than switching: a ramp that only ever answered 0 or 16 would
+        // satisfy the two ends above.
+        let mut seen_middle = false;
+        let mut last = 0u16;
+        for k in 0..=40 {
+            let y = 0.15 - 0.01 * k as f32;
+            let step = night_glow_step(Vec3::new(0.0, y, 0.0));
+            assert!(step >= last, "the ramp went backwards at y = {y}");
+            if step > 0 && step < NIGHT_GLOW_STEPS {
+                seen_middle = true;
+            }
+            last = step;
+        }
+        assert!(seen_middle, "the glow switches rather than ramping");
+        // A non-finite direction reads as day — the answer that changes nothing.
+        assert_eq!(night_glow_step(Vec3::new(0.0, f32::NAN, 0.0)), 0);
+        // And the emission is a warm white scaled by both terms.
+        let half = glow_emissive(1.0, NIGHT_GLOW_STEPS / 2);
+        let full = glow_emissive(1.0, NIGHT_GLOW_STEPS);
+        assert!(full[0] > half[0] && half[0] > 0.0);
+        assert!(
+            full[1] < full[0] && full[2] < full[1],
+            "{full:?} is not warm"
+        );
+        assert_eq!(glow_emissive(0.0, NIGHT_GLOW_STEPS), [0.0; 3]);
+    }
     use super::*;
 
     /// **A deformed garment carries a uv, and it is the box projection** (P26.5).
