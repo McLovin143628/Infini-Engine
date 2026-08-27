@@ -233,10 +233,20 @@ fn a_grammar_building_bakes_into_one_mesh_that_fractures_and_cooks() {
             .expect("the palette parses");
         let names: Vec<&str> = grammar.modules().iter().map(|m| m.name.as_str()).collect();
         let input = bake::parts_from_building(&out, &grammar).expect("aligned");
+        // **The aligned PREFIX** (island wave I8b): a building's instance list is
+        // `colliders.len()` solid parts followed by a decoration tail — the
+        // window panes, which are drawn and are not solid, so there is no
+        // `ScatteredSolid` for the bake to make a box out of. A bake that
+        // produced one part per INSTANCE would be inventing geometry for glass.
         assert_eq!(
             input.parts.len(),
-            out.instances.len(),
+            out.colliders.len(),
             "the bake dropped or invented a part"
+        );
+        assert!(
+            out.instances.len() > out.colliders.len(),
+            "the fixture house hung no panes, so the prefix rule above is not \
+             being tested"
         );
         let mut checked = 0usize;
         for (part, inst) in input.parts.iter().zip(&out.instances) {
