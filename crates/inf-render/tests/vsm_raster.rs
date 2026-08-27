@@ -853,9 +853,11 @@ fn a_virtualized_geometry_instance_casts_into_the_pages_it_touches() {
     // version of this arm asserted that, on the reasoning that "every meshlet
     // draw submits the same level's whole index range" — which stopped being
     // true in the same wave that wrote it: an asset is packed once per distinct
-    // classic level its page buckets ask for, and **this fixture packs two**
+    // classic level its page buckets ask for, and **this fixture packs several**
     // (`the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into`
-    // measures 2 caster records over 8 meshlet draws). The divisibility held by
+    // measures 3 caster records over 8 meshlet draws at the tolerance it centres
+    // on, and 2 at a flat 1 px — which is the point: the count is a property of
+    // the tolerance and the chain, not a constant). The divisibility held by
     // arithmetic luck over two levels' index counts. What is true of every
     // meshlet draw is that it submits whole triangles of a real level.
     assert_eq!(
@@ -1716,6 +1718,103 @@ fn a_vgeom_casters_level_is_the_one_its_pixel_error_justifies() {
     );
 }
 
+/// **THE TOLERANCE A PAGE-QUALITY ARM MEASURES AT, READ OFF THE DAG IT ACTUALLY
+/// BUILT** (the island wave I8c CI-red fix, 2026-08-27).
+///
+/// # The macOS red this exists to close
+///
+/// `the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into` bounds a
+/// shadow's displacement in **texels of the page it is written into**, which is
+/// the claim; the number it compares is the deviation of whichever classic cut
+/// the page drew, which is **`meshopt`'s**. The P18 law says that output is not
+/// cross-platform, and here is what that cost: at a flat `pixel_error` of 1.0
+/// this fixture's level-3 page had a tolerance of `0.031250` of object space
+/// against a chain whose level-3 error is `0.031951` — **2.2 % apart**. On
+/// x86_64 the page drew cut 2 and moved 0.79 of a texel; on aarch64 the same
+/// 2.2 % went the other way, the page drew cut **3**, and it moved **2.05**.
+/// The renderer was right in both runs. The *fixture* was standing on a pick
+/// boundary, which is `test_support`'s own documented failure — *"a flythrough
+/// tuned clear of an error boundary on Windows landed on the far side of it on
+/// macOS"* — one suite over.
+///
+/// # The remedy, which is `budget_for_pages`'s
+///
+/// A test budget is *"counted in pages read off the live page directory, never
+/// in bytes measured somewhere else"*, and it *"sits at the midpoint of the open
+/// interval … so a platform whose page bytes differ moves both endpoints **and**
+/// the midpoint together"*. This is that rule for a tolerance instead of a
+/// budget. `pixel_error` scales every bucket's threshold linearly, so the pick
+/// boundaries are the values `error / unit` — one per (chain error, page) pair —
+/// and the tolerance to measure at is the **geometric midpoint of the widest
+/// interval between two consecutive boundaries over which the pages still draw
+/// more than one distinct cut**. Both endpoints are read off the chain this
+/// platform built, so the midpoint moves with them.
+///
+/// `units` is one entry per distinct page, already reduced to what multiplies
+/// `pixel_error`: `max(the page's world-per-texel / max_scale, the camera's own
+/// threshold per pixel)` — the caster pack's `max(page term, camera floor)` with
+/// the linear factor divided out. Returns `(pixel_error, margin)`, the margin
+/// being the multiplicative distance to the nearest boundary on **either** side
+/// (so `1.414` means every threshold can move 41 % in either direction before a
+/// page changes cut). Measured on this fixture: **`0.723`, at a margin of
+/// `1.414`**, against the `1.022` the flat 1.0 px stood at.
+///
+/// The window is a factor of four either side of the shipped 1 px: a tolerance
+/// outside it is not the setting a shipped frame uses, and an arm that wandered
+/// there would be measuring a different question.
+fn centred_pixel_error(errors: &[f32], units: &[f32]) -> (f32, f32) {
+    const LO: f64 = 0.25;
+    const HI: f64 = 4.0;
+    let mut crit = vec![LO, HI];
+    for &u in units {
+        for &b in errors.iter().skip(1) {
+            let pe = f64::from(b) / f64::from(u);
+            if pe > LO && pe < HI {
+                crit.push(pe);
+            }
+        }
+    }
+    crit.sort_by(|a, b| a.partial_cmp(b).expect("the boundaries are finite"));
+    // (margin, pixel_error) of the best interval seen.
+    let mut best: Option<(f64, f64)> = None;
+    for w in crit.windows(2) {
+        let (lo, hi) = (w[0], w[1]);
+        if hi <= lo {
+            continue;
+        }
+        let mid = (lo * hi).sqrt();
+        // **The interval has to be one the arm can measure anything in.** Every
+        // page drawing the SAME cut is a legal renderer and a vacuous arm: the
+        // atlas then shows no per-page differentiation at all, which is the one
+        // thing the page-LOD floor exists to produce.
+        let picks: std::collections::BTreeSet<usize> = units
+            .iter()
+            .map(|&u| inf_vgeom::pick_classic_level(errors, (mid * f64::from(u)) as f32))
+            .collect();
+        if picks.len() < 2 {
+            continue;
+        }
+        let margin = (hi / lo).sqrt();
+        let better = match best {
+            None => true,
+            // Ties break toward the shipped 1.0 px, so the arm measures as close
+            // to the real setting as the chain allows.
+            Some((m, p)) => {
+                margin - m > 1e-9 || ((m - margin).abs() <= 1e-9 && mid.ln().abs() < p.ln().abs())
+            }
+        };
+        if better {
+            best = Some((margin, mid));
+        }
+    }
+    let (margin, pe) = best.expect(
+        "no tolerance within a factor of four of 1 px makes these pages draw two \
+         different cuts of this chain — the fixture cannot exercise a page-LOD \
+         floor at all, which is a broken premise and not a bound to widen",
+    );
+    (pe as f32, margin as f32)
+}
+
 /// **WHAT THE PAGE-LOD FLOOR COSTS A SHADOW, IN METRES OF THE SURFACE THAT CASTS
 /// IT** (the island wave I8c audit) — the arm the wave's VSM clause did not have.
 ///
@@ -1739,14 +1838,29 @@ fn a_vgeom_casters_level_is_the_one_its_pixel_error_justifies() {
 /// texel of slack on top, for the rasterizer's own half-texel at each of the two
 /// cuts.
 ///
-/// **Measured on an RTX 4070 Ti** (the I8c audit): 4 972 of 111 332 shared
-/// texels move (4.47 %) and the worst is **0.1484 m — 0.79 of one texel of the
-/// level-4 page it happened in**. Which is the verdict the wave's ledger did not
-/// have: the floor moves a shadow by under a texel of the page that holds it,
-/// and the receiver's own bias is a whole normal texel plus `(R + ½)·√2` of
-/// slope, so the coarser cut cannot open acne the bias does not already cover.
-/// Mutation-verified: a floor that tolerates **eight** texels instead of one
-/// moves a level-4 page by 0.7734 m and this arm names it.
+/// **The tolerance is not a constant, and that was a macOS red** (the I8c CI-red
+/// fix, 2026-08-27). A flat 1.0 px put this fixture's level-3 page 2.2 % away
+/// from a pick boundary of the chain `meshopt` happened to build, so the same
+/// correct renderer drew cut 2 there on x86_64 and cut 3 on aarch64 — 0.79 of a
+/// texel against 2.05, against a bound of two. The bound and the property are
+/// right; what was measured on somebody's machine was the *pick*. The tolerance
+/// now comes from [`centred_pixel_error`], which reads the boundaries off the
+/// chain this platform built and sits at the midpoint between them — the
+/// `budget_for_pages` doctrine, applied to a tolerance. On x86_64 that is
+/// **0.723 px at a margin of 1.414**, and it reproduces the picks (cut 2 into a
+/// level-3 page, cut 3 into a level-4 one) the flat 1.0 px reached by luck.
+///
+/// **Measured on an RTX 4070 Ti** (the I8c audit, unmoved by the fix): 4 972 of
+/// 111 332 shared texels move (4.47 %) and the worst is **0.1484 m — 0.79 of one
+/// texel of the level-4 page it happened in**. Which is the verdict the wave's
+/// ledger did not have: the floor moves a shadow by under a texel of the page
+/// that holds it, and the receiver's own bias is a whole normal texel plus
+/// `(R + ½)·√2` of slope, so the coarser cut cannot open acne the bias does not
+/// already cover. Mutation-verified, and harder at the centred tolerance than at
+/// the flat one it replaced: a floor that tolerates **eight** texels instead of
+/// one moves a level-4 page by **1.0572 m — 5.64 texels — against the 0.3231 m
+/// that page tolerates**, a 3.3× overshoot where the flat 1 px gave 0.7734
+/// against 0.3750 (2.06×). This arm names it either way.
 #[test]
 fn the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into() {
     let Some(gpu) = gpu_or_skip("the VSM page-LOD floor's shadow quality") else {
@@ -1786,11 +1900,61 @@ fn the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into() {
             rs.vgeom.pixel_error = pixel_error;
         })
     };
-    // The shipped tolerance — the floor engages — and a tolerance so tight that
-    // every bucket and the camera alike resolve the finest cut, which is what
-    // P27.2 submitted into every page.
-    let shipped = at(1.0);
+    // The reference: a tolerance so tight that every bucket and the camera alike
+    // resolve the finest cut, which is what P27.2 submitted into every page. It
+    // runs first because its page directory is the ladder the shipped run's
+    // tolerance is chosen against.
     let finest = at(1.0e-3);
+
+    // The camera's own world tolerance, through the door the caster pack picks
+    // with — it was the whole rule before I8c and it is still the floor. Taken
+    // PER PIXEL of tolerated error, because `lod_threshold` is linear in
+    // `pixel_error` and one call then carries every tolerance below.
+    let max_scale = scale.abs().max_element();
+    let model = v.origin.model_matrix(glam::DVec3::ZERO, rot, scale);
+    let camera_unit = inf_render::passes::vgeom::lod_threshold(
+        v.eye_local(),
+        model.transform_point3(glam::Vec3::from(bounds.0)),
+        bounds.1 * max_scale,
+        max_scale,
+        &v,
+        1.0,
+    );
+    // **The tolerance, read off the DAG this platform built** (the I8c CI-red
+    // fix) — see [`centred_pixel_error`]. The units are the caster pack's own
+    // `max(pixel_error × wpt / max_scale, camera threshold)` with the linear
+    // factor divided out, one per resident page.
+    let errs = inf_vgeom::VgeomMesh::classic_lod_errors(&mesh);
+    let mut units: Vec<f32> = Vec::new();
+    for (light, page, rect) in resident_pages(&finest) {
+        let vp = page_vp(&finest, light, page);
+        let wpt = 2.0 / (vp.row(0).truncate().length() * rect.2 as f32);
+        if wpt.is_finite() && wpt > 0.0 {
+            units.push((wpt / max_scale).max(camera_unit));
+        }
+    }
+    assert!(
+        !units.is_empty(),
+        "the reference run holds no resident page, so there is no ladder to \
+         choose a tolerance against"
+    );
+    units.sort_by(|a, b| a.partial_cmp(b).expect("a page's texel is finite"));
+    units.dedup();
+    let (pixel_error, pick_margin) = centred_pixel_error(&errs, &units);
+    // ANTI-FLAKE: the tolerance has to stand clear of every pick boundary, or the
+    // arm is back on the knife edge the macOS red came off. 1.414 is what this
+    // fixture affords; a chain that affords under 1.25 is one whose bands are
+    // narrower than the page ladder's own factor of two, and the honest answer is
+    // to say so rather than to measure at a boundary.
+    assert!(
+        pick_margin >= 1.25,
+        "the nearest pick boundary of this chain is only {pick_margin:.3}× from \
+         the best tolerance in the window ({pixel_error:.4} px) — a DAG whose \
+         errors move by less than that changes which cut a page draws, which is \
+         exactly the macOS red this arm was rewritten to close. Chain: {errs:?}"
+    );
+    // The shipped tolerance — the floor engages.
+    let shipped = at(pixel_error);
     let (sh_stats, fi_stats) = (
         shipped.vsm_raster_stats().expect("stats"),
         finest.vsm_raster_stats().expect("stats"),
@@ -1809,18 +1973,7 @@ fn the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into() {
          ({sh_stats:?} / {fi_stats:?})"
     );
 
-    // The camera's own world tolerance, through the door the caster pack picks
-    // with — it was the whole rule before I8c and it is still the floor.
-    let max_scale = scale.abs().max_element();
-    let model = v.origin.model_matrix(glam::DVec3::ZERO, rot, scale);
-    let camera_world = inf_render::passes::vgeom::lod_threshold(
-        v.eye_local(),
-        model.transform_point3(glam::Vec3::from(bounds.0)),
-        bounds.1 * max_scale,
-        max_scale,
-        &v,
-        1.0,
-    ) * max_scale;
+    let camera_world = camera_unit * pixel_error * max_scale;
 
     let (sh_atlas, fi_atlas) = (read_atlas(&gpu, &shipped), read_atlas(&gpu, &finest));
     let fi_rects: std::collections::BTreeMap<(u32, VsmPage), (u32, u32, u32)> =
@@ -1857,17 +2010,18 @@ fn the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into() {
                 if m > worst.0 {
                     worst = (m, m / f64::from(wpt), page.level);
                 }
-                // **The bound, per page.** A page's tolerance is one of its own
-                // texels or the camera's world tolerance, whichever is coarser.
-                let tolerated = f64::from(wpt.max(camera_world)) + f64::from(wpt);
+                // **The bound, per page.** A page's tolerance is `pixel_error` of
+                // its own texels or the camera's world tolerance, whichever is
+                // coarser — the two terms the caster pack itself picks against.
+                let tolerated = f64::from((pixel_error * wpt).max(camera_world)) + f64::from(wpt);
                 assert!(
                     m <= tolerated,
                     "a level-{} page's shadow surface moved {m:.4} m when the \
                      page-LOD floor picked its cut, against the {tolerated:.4} m \
-                     that page tolerates ({wpt:.4} m a texel, camera \
-                     {camera_world:.4} m). The floor is drawing a cut coarser \
-                     than the page it is written into, which is the one thing \
-                     island wave I8c's VSM clause is not allowed to do",
+                     that page tolerates ({wpt:.4} m a texel at {pixel_error:.4} \
+                     px, camera {camera_world:.4} m). The floor is drawing a cut \
+                     coarser than the page it is written into, which is the one \
+                     thing island wave I8c's VSM clause is not allowed to do",
                     page.level
                 );
             }
@@ -1883,8 +2037,10 @@ fn the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into() {
         "THE PAGE-LOD FLOOR'S SHADOW PRICE: {moved_texels} of {compared} shared \
          texels moved ({:.2} %); the worst is {:.4} m — {:.2} texels of the \
          level-{} page it happened in — against a camera tolerance of \
-         {camera_world:.4} m. Shipped mean classic level {:.2} over {} caster \
-         records a frame ({} meshlet draws), against {:.2} over {} at a collapsed \
+         {camera_world:.4} m. Measured at {pixel_error:.4} px, the midpoint \
+         between this chain's own pick boundaries ({pick_margin:.3}× clear of \
+         the nearest). Shipped mean classic level {:.2} over {} caster records a \
+         frame ({} meshlet draws), against {:.2} over {} at a collapsed \
          tolerance.",
         moved_texels as f64 / compared.max(1) as f64 * 100.0,
         worst.0,
@@ -1915,7 +2071,7 @@ fn the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into() {
     assert_eq!(
         (sh_stats.dropped_groups, sh_stats.dropped_casters),
         (0, 0),
-        "the group ceiling refused something in a two-group fixture: {sh_stats:?}"
+        "the group ceiling refused something in a three-group fixture: {sh_stats:?}"
     );
 
     // **AND THE PARTITION, ON THE DRAWS THE FRAME ACTUALLY ISSUED** (the I8c
@@ -1926,7 +2082,7 @@ fn the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into() {
     // test and the CPU's group mask never issues the draw), so a mutation to
     // either is invisible in the atlas.
     //
-    // The counter this wave minted can see it. One instance in **two** groups
+    // The counter this wave minted can see it. One instance in **three** groups
     // across eight pages issues **eight** meshlet draws — at most one a page,
     // which IS "every page draws the asset once, at the level that page can
     // show". Without the CPU mirror it is one a page PER GROUP, and the ceiling

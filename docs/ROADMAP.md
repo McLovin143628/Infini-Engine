@@ -27678,4 +27678,27 @@ on its fps, never validated against a presenting player.** Counts after: battery
 19** (+3 arms, no new block), goldens **58** over **117 arms, 0 failed** with `tests/goldens` unmoved,
 rustdoc **374 over 30 crates** cold (the audit adds zero, headroom 76), clippy **0**, `fmt` clean,
 schemas unmoved, `EXPECTED_LEVELS` **23**, content and `Cargo.lock` untouched. Full audit ledger in
-`docs/memos/island-progress.md`. 
+`docs/memos/island-progress.md`.
+
+**THE CI RED, AND ITS FIX (2026-08-27).** The pushed range went red on two jobs and green on the other
+six. **(1) `cargo-deny`:** upstream yanked `chacha20 0.10.1` (pulled by `quinn-proto → rand 0.10.2`, so
+`inf-net`'s optional `quic` feature and the `--all-features` graph alone). A **named** `cargo update -p
+chacha20` moves `0.10.1 → 0.10.2` and **drags nothing** — the whole lock diff is one version and one
+checksum — and the 2026-08-20 `arrayref` ruling's generalizable half was applied before accepting it:
+the successor's **dependency list** is identical to the yanked one's, where `arrayref@0.3.10`'s grew a
+runtime dep on a crate that does not exist. That exemption is untouched. `deny --all-features check`
+is green on all four gates. **(2) macOS only:** the audit's own shadow-quality arm
+(`the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into`) was standing on a **pick
+boundary** — at a flat `pixel_error` of 1.0 the fixture's level-3 page tolerated `0.031250` of object
+space against a `meshopt` chain whose level-3 error is `0.031951`, **2.2 % apart**, so the same correct
+renderer drew cut 2 on x86_64 (0.79 of a texel) and cut 3 on aarch64 (2.05, against a bound of two).
+**The P18 law reaches LOD selection, not only geometry.** The tolerance is now read off the chain this
+platform built and placed at the midpoint between its own pick boundaries (`centred_pixel_error`, the
+`budget_for_pages` doctrine applied to a tolerance): **0.7230 px, 1.414× clear of the nearest boundary
+against the 1.022× it stood at**, same cuts, and **every published number of the verdict is unmoved**
+(4 972 of 111 332 shared texels, 4.47 %, worst 0.1484 m = **0.79 of one texel**). The eight-texel
+mutation now fails it by **3.3×** (1.0572 m against 0.3231) where it failed by 2.06×, and the fixture's
+group multiplication reads **3 caster records at mean classic level 2.00** — carried item 4 was
+understated. Sibling arms swept by name (the pixel-error level arm, the partition arm, `structure_lod_pop`,
+the band-ordering arm, the `lod_threshold` tripwire): **none carries the same exposure**. Details in
+`docs/memos/island-progress.md`'s *"Wave I8c — the CI red"*. 

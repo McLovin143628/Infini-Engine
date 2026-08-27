@@ -13922,3 +13922,170 @@ that is 30.2 % of the step).
 * **A row a document refuses to claim is still a row a reader quotes.** The
   `SHIPPED` table prints a bold `−1.176 ms` — 60 fps met — under a paragraph
   saying the row is not this wave's to claim. The fifth reading is +7.282.
+
+
+
+## Wave I8c — the CI red (2026-08-27)
+
+`daceec01..a1bf3106` went red on **two** jobs; `windows`, `ubuntu`, `frontend`,
+`wasm`, `docs` and `bindings` were green. Both are fixed at the root, and
+**neither is a claim of the wave falling over** — the shadow-quality verdict's
+own numbers (4 972 of 111 332, 0.1484 m, 0.79 of a texel) reproduce unmoved
+after the repair.
+
+### RED 1 — `chacha20 0.10.1` was yanked under the lock
+
+`cargo-deny` reds on `error[yanked]` and this was one: `Cargo.lock` pinned
+`chacha20 0.10.1`, which upstream yanked (0.10.0 with it). Path in:
+`quinn-proto 0.11.16 → rand 0.10.2 → chacha20`, so it is `inf-net`'s optional
+`quic` feature — off by default, and inside `cargo deny`'s `--all-features`
+graph, which is the only place it is built.
+
+**The remedy is the narrow one, and the 2026-08-20 supply-chain ruling is why
+it is narrow: name the crate.** `cargo update -p chacha20` moves **one version
+and one checksum** — `0.10.1 → 0.10.2`, `d524…a81 → 65c3…b06` — and **drags
+nothing**: `--dry-run` prints *"Locking 1 package to latest compatible
+version"* with 188 dependencies unchanged, and the whole `Cargo.lock` diff is
+`2 insertions(+), 2 deletions(-)`. The **dragged-crate list is empty**.
+
+The `arrayref` entry in `deny.toml` is **untouched**, and the half of its
+reasoning that generalizes was applied before accepting the bump: read the
+successor's **dependency list** out of cargo's index cache, not just its version
+number. `chacha20 0.10.2` is not yanked and its dependencies are **identical to
+0.10.1's** — `cfg-if ^1`, `cpufeatures ^0.3`, optional `cipher ^0.5` /
+`rand_core ^0.10` / `zeroize ^1.8.1`, dev `hex-literal ^1`. No new runtime
+dependency at a patch bump, which is the exact shape `arrayref@0.3.10` failed
+on. So this is a maintenance release and that one was not, and the two are told
+apart by the same test rather than by how the version numbers look.
+
+Verified: `cargo deny --all-features check` → **advisories ok, bans ok, licenses
+ok, sources ok**, and `cargo check -p inf-net --features quic --all-targets`
+clean. *(`cargo-deny` now also prints `warning[yanked-not-detected]` against the
+`arrayref@0.3.9` exemption — that yank has been lifted upstream. It is a
+warning, not an error, and the exemption stays until its own retirement clause
+is worked: re-read the dependency list at the next sweep.)*
+
+### RED 2 — the shadow-quality arm was standing on a pick boundary
+
+macOS only, and **the renderer was right in both runs**:
+
+```text
+a level-3 page's shadow surface moved 0.1926 m … against the 0.1875 m that
+page tolerates (0.0938 m a texel, camera 0.0381 m)
+```
+
+`the_page_lod_floor_moves_a_shadow_by_the_texel_it_is_written_into` is the arm
+MED-2 added. It bounds the displacement in **texels of the page it is written
+into**, which is the claim and is right. What it compares is the deviation of
+whichever classic cut the page drew — and **that cut is `meshopt`'s**, which
+the P18 law says is not cross-platform.
+
+**The measurement, which is what makes this a diagnosis rather than a story.**
+The fixture's classic chain on x86_64 is `[0, 0.004458, 0.011060, 0.031951,
+0.332437]` of object space, and at a flat `pixel_error` of 1.0 its level-3
+page's tolerance is `wpt / max_scale = 0.09375 / 3 = 0.031250`. **That is 2.2 %
+below `errors[3]`.** So the page drew cut 2 here and moved 0.0613 m — 0.65 of a
+texel — and on aarch64 the same 2.2 % went the other way, the page drew cut
+**3**, and it moved **2.05** texels against a bound of two. Only two page levels
+are compared at all (3 and 4, 65 536 + 45 796 = the whole 111 332), and the
+admissible tolerance window that reproduces the x86_64 picks is `[0.870, 1.022)`
+— **17 % wide**. The arm was passing by luck, on both machines, and the luck
+ran out on one of them.
+
+**The fix is `budget_for_pages`'s rule, applied to a tolerance instead of a
+budget.** `test_support`'s own doctrine is *"a test budget is counted in pages
+read off the live page directory, never in bytes measured somewhere else"*, and
+that budget *"sits at the midpoint of the open interval … so a platform whose
+page bytes differ moves both endpoints **and** the midpoint together"*. Here
+`pixel_error` scales every bucket's threshold linearly, so the pick boundaries
+are the values `error / unit` — one per (chain error, page) pair — and
+`centred_pixel_error` takes the **geometric midpoint of the widest interval
+between two consecutive boundaries over which the pages still draw more than one
+distinct cut**, inside a window a factor of four either side of the shipped 1 px.
+Both endpoints are read off the chain *this* platform built.
+
+Which of the two routes the brief offered this is, and why: **(b), the cut's own
+metric — not (a), a hand-authored DAG.** (a) does not survive contact with this
+tree. `test_support` is deliberately *"the **one** place a displaced-grid fixture
+is generated"* because nine copies of one had already drifted, and a hand-built
+`VgeomMesh` means authoring meshlets, groups, parents, cone bounds, `LevelRange`s
+and a classic chain that `VgeomSource::from_mesh` will page and the streamer will
+read — a second fixture surface, in a test file, to dodge a two-percent margin.
+And the P18 "build once, mutate a clone" pattern does not reach this: it makes
+two DAGs *equal to each other*, and this arm compares two runs over **one** DAG
+already. What was platform-dependent was never the comparison — it was the
+**pick**, which is a pure function of the chain's error values, and the chain is
+readable at runtime. So the bound derives from the cut the page's own rule
+justifies, on the numbers this platform produced.
+
+Measured on the RTX 4070 Ti, at head:
+
+| | flat 1.0 px (as pushed) | **centred (this fix)** |
+|---|---|---|
+| tolerance | 1.0 px | **0.7230 px**, the midpoint of `[0.5112, 1.0224)` |
+| distance to the nearest pick boundary | **1.022×** | **1.414×** |
+| cuts drawn | 2 into a level-3 page, 3 into a level-4 one | **identical** |
+| texels moved | 4 972 of 111 332 (4.47 %) | **4 972 of 111 332 (4.47 %)** |
+| the worst | 0.1484 m, **0.79** of a level-4 texel | **0.1484 m, 0.79** — unmoved |
+
+**The verdict's own numbers are untouched**, which is the point of centring
+rather than widening: MED-2's paragraph, the shadow-quality verdict's item 3,
+carried item 5's *"0.79 of one texel"* and the ROADMAP block all still read
+true. Two secondary figures **do** move, both in the direction that strengthens
+what they were cited for, and they are corrected here rather than in place
+because they are measurements at a tolerance this fix changed:
+
+* **the group multiplication** (carried item 4, and MED-5's premise): the
+  fixture packs **3** caster records a frame at a mean classic level of **2.00**,
+  where the audit measured 2 at 2.50. One asset at 9 m through a six-level
+  clipmap holds *three* groups, not two — carried item 4 is understated, not
+  overstated, and MED-5's ruling (that `indices_vgeom % draws_vgeom == 0` was
+  luck) is if anything more obviously right at three levels than at two;
+* **the mutation's size**: the eight-texel floor now moves a level-4 page by
+  **1.0572 m — 5.64 texels — against a bound of 0.3231 m**, a **3.3×**
+  overshoot, where at the flat 1 px it was 0.7734 against 0.3750 (2.06×). The
+  arm kills the mutation harder than it did.
+
+Re-verified after the fix: `vsm_raster` **40 / 40**, `structure_lod_pop` green,
+`inf-render --lib` **500 / 500**, `cargo fmt --all --check` clean, and
+`clippy -p inf-render --all-targets` under `-D warnings` at **0**.
+
+**The sibling sweep, by name.** Every other arm the I8c range added or re-aimed
+was read for the same exposure and none of them has it:
+
+| arm | exposure |
+|---|---|
+| `a_vgeom_casters_level_is_the_one_its_pixel_error_justifies` | none — it measures at 0.1 px and 400 px and asserts *relations against the chain's own length* (`sum < casters × coarsest`, `sum == casters × coarsest`), which the audit already made shape-only. Its nearest boundary at 0.1 px is 1.13× and every flip it admits leaves all three assertions true |
+| `a_virtualized_geometry_instance_casts_into_the_pages_it_touches` | none — `> 0`, `% 3 == 0`, `>= draws × 3`, `< indices_drawn` and a zeroed control. No magnitude and no pick boundary. Its **prose** carried the stale cross-reference to "2 caster records" and now says three, and says why the count is not a constant |
+| `structure_lod_pop` (the swap tripwire, `swap_pct < 50 %` / `worst <= 32`) | none — the fixture is `ScatterData::build(PrimMesh::Cube, …)`. No `.inf_vmesh`, no `meshopt`, no DAG anywhere in the file |
+| `the_structure_swap_sits_between_the_collider_band_and_the_mesh_band` | none — a pure arm over three constants; it cooks nothing and boots nothing |
+| `an_eye_inside_the_bounding_sphere_collapses_the_threshold_onto_its_clamp` | none — pure `lod_threshold` arithmetic, no mesh |
+| `the_bucket_ladder_is_the_lights_configuration_and_not_its_residency` | none — driven off `desc`/`light_count` without a device or an asset |
+
+### The laws this red paid for
+
+* **A yank is a supply-chain event and the fix is still a NAMED update.** The
+  2026-08-20 ruling was *"do not move forward"*; this one moves forward, and the
+  two agree because the test is the same in both — read the successor's
+  **dependency list**, not its version number. `arrayref@0.3.10` grew a runtime
+  dependency on a crate that does not exist; `chacha20 0.10.2` grew nothing.
+  Same question, opposite answers, one line of lock either way.
+* **A bound measured in the units of the thing you control can still be
+  calibrated against the thing you do not.** The bound was texels of a page —
+  ours, exact, portable. The number it compared was the deviation of a cut
+  `meshopt` chose, and the *choice* was two percent from flipping. The P18 law
+  reaches selection, not only geometry: **a threshold that lands near an error
+  of the chain is a platform-dependent test even when every constant in it is
+  yours.**
+* **`budget_for_pages` was a rule about budgets and it is a rule about
+  tolerances.** "Read the boundary off the live build and sit in the middle of
+  it" generalizes to anything a fixture picks against a `meshopt`-derived
+  number. The tell is the same one: an interval **17 %** wide that nobody had
+  measured, because nobody had asked how wide it was.
+* **Centring beats widening.** The alternative was a looser constant, which
+  would have bought macOS at the cost of the verdict: at the flat 1 px a
+  three-texel bound is 0.5625 m and the 8× mutation reaches 0.7734, so the arm
+  would have kept its teeth by **37 %** and lost the sentence *"under one texel
+  of the page that holds it"* on the way. Moving the *measurement point*
+  instead left all four published numbers identical and made the mutation fail
+  by **3.3×** instead of 2.06×.
