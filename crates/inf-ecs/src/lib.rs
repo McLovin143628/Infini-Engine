@@ -25,6 +25,10 @@ pub mod camera;
 // P24.4: the fixed-step slot that turns a `ClothSim` into moving cloth.
 pub mod cloth;
 pub mod components;
+// NPC1a: the sim-LOD tier system — what a crowd NPC costs this step, decided in
+// ONE door both hosts call, keyed on `StreamingSource` distance and never on a
+// camera. `band`'s shape with a fourth rung.
+pub mod crowd;
 pub mod deform;
 // I6: doors — a leaf on a hinge, a lock priced as one P22 bond, and the sparse
 // resource that holds what a player has done to them.
