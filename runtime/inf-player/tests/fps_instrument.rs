@@ -1930,13 +1930,18 @@ fn the_island_at_shipping_resolution() {
                 // much world each of those rectangles covers.
                 println!(
                     "  {label} submitted per rastering frame: {:.0} indices \
-                     ({:.0} terrain, {:.1} %) over {:.0} draws ({:.0} terrain); \
-                     pages by level {}",
+                     ({:.0} terrain, {:.1} %; {:.0} meshlet-asset, {:.1} %) over \
+                     {:.0} draws ({:.0} terrain, {:.0} meshlet at mean classic \
+                     level {:.2}); pages by level {}",
                     v.indices_drawn as f64 / v.frames as f64,
                     v.indices_terrain as f64 / v.frames as f64,
                     v.indices_terrain as f64 / (v.indices_drawn.max(1)) as f64 * 100.0,
+                    v.indices_vgeom as f64 / v.frames as f64,
+                    v.indices_vgeom as f64 / (v.indices_drawn.max(1)) as f64 * 100.0,
                     v.draws as f64 / v.frames as f64,
                     v.draws_terrain as f64 / v.frames as f64,
+                    v.draws_vgeom as f64 / v.frames as f64,
+                    v.vgeom_level_sum as f64 / v.vgeom_casters.max(1) as f64,
                     v.levels_summary(),
                 );
             }

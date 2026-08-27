@@ -832,10 +832,38 @@ fn a_virtualized_geometry_instance_casts_into_the_pages_it_touches() {
         control_texels, 0,
         "the backdrop alone wrote {control_texels} texels past its own depth"
     );
+    let bare_stats = control.vsm_raster_stats().expect("stats");
     assert_eq!(
-        control.vsm_raster_stats().expect("stats").vgeom_casters,
-        0,
+        bare_stats.vgeom_casters, 0,
         "a scene with no vmesh instance packed a vmesh caster"
+    );
+
+    // **WHAT THE ASSET HANDS OVER** (island wave I8c). The counter that answered
+    // this wave's VSM clause: an asset's caster group is submitted WHOLE into
+    // every page it reaches, so its index count multiplies by the page count.
+    // Measured on the island: 149.5 M of a 156.0 M-index frame, from ONE
+    // instance. Here it is asserted as a shape rather than as a magnitude —
+    // meshlet indices are a real fraction of the load, they scale with the draws
+    // that carry them, and a scene with no asset submits none.
+    assert!(
+        stats.draws_vgeom > 0 && stats.indices_vgeom > 0,
+        "the vmesh cast and no meshlet indices were submitted: {stats:?}"
+    );
+    assert_eq!(
+        stats.indices_vgeom % stats.draws_vgeom,
+        0,
+        "every meshlet draw submits the same level's whole index range, so the \
+         two counters must divide: {stats:?}"
+    );
+    assert!(
+        stats.indices_vgeom < stats.indices_drawn,
+        "the backdrop casts too, so the asset cannot be the whole index load: \
+         {stats:?}"
+    );
+    assert_eq!(
+        (bare_stats.draws_vgeom, bare_stats.indices_vgeom),
+        (0, 0),
+        "a scene with no vmesh instance submitted meshlet indices: {bare_stats:?}"
     );
 }
 

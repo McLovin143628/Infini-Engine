@@ -599,8 +599,20 @@ pub struct VsmRasterStats {
     /// heightfield, so a terrain group's whole mesh is submitted into every page
     /// its bounding sphere touches.
     pub indices_terrain: u64,
+    /// Of [`indices_drawn`](Self::indices_drawn), the ones belonging to a
+    /// **virtualized-geometry** group — the counter that answered island wave
+    /// I8c's VSM clause.
+    ///
+    /// A `.inf_vmesh`'s caster is one group per (asset, classic level) and the
+    /// level is the **camera's**, so an island-spanning asset is submitted whole
+    /// into every dirty page at the detail a screen pixel asked for. Measured on
+    /// the island: **149.5 M of the frame's 156.0 M indices**, one instance,
+    /// 2.34 M indices a draw, 56 pages a frame.
+    pub indices_vgeom: u64,
     /// Of [`draws`](Self::draws), the ones that were a terrain tile.
     pub draws_terrain: u64,
+    /// Of [`draws`](Self::draws), the ones that were virtualized geometry.
+    pub draws_vgeom: u64,
     /// **Rasterized pages by clipmap level**, `[0]` finest — summed over frames.
     ///
     /// The companion of the dirty split: `dirty_slot` says a page was re-slotted
@@ -616,8 +628,9 @@ impl VsmRasterStats {
     /// A one-line human summary, in the shape the other streamers ship.
     pub fn summary(&self) -> String {
         format!(
-            "vsm raster: {} frames, {} pages, {} draws ({} terrain, {} skipped), \
-             {} indices ({} terrain), {} casters ({} scattered, \
+            "vsm raster: {} frames, {} pages, {} draws ({} terrain, {} meshlet, \
+             {} skipped), {} indices ({} terrain, {} meshlet at level sum {}), \
+             {} casters ({} scattered, \
              {} meshlet-asset, {} skinned, {} terrain), {} pages deferred, \
              {} casters dropped, {} groups refused, {} pages cached / {} dirty \
              ({} re-slotted, {} moved, {} re-cast) / {} cleared, {} invalidation \
@@ -626,9 +639,12 @@ impl VsmRasterStats {
             self.pages,
             self.draws,
             self.draws_terrain,
+            self.draws_vgeom,
             self.skipped_draws,
             self.indices_drawn,
             self.indices_terrain,
+            self.indices_vgeom,
+            self.vgeom_level_sum,
             self.casters,
             self.scatter_casters,
             self.vgeom_casters,
@@ -1522,8 +1538,10 @@ impl VsmRaster {
         // Island wave I8c's three: what the frame HANDS OVER, not what it asks
         // for. See `VsmRasterStats::indices_drawn`.
         let mut draws_terrain = 0u64;
+        let mut draws_vgeom = 0u64;
         let mut indices_drawn = 0u64;
         let mut indices_terrain = 0u64;
+        let mut indices_vgeom = 0u64;
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("vsm-pages"),
@@ -1659,9 +1677,16 @@ impl VsmRaster {
                         pass.draw_indexed_indirect(&self.args, slot * VSM_ARG_WORDS * 4);
                         draws += 1;
                         indices_drawn += u64::from(geo.index_count);
-                        if matches!(geo.source, GroupSource::Terrain { .. }) {
-                            draws_terrain += 1;
-                            indices_terrain += u64::from(geo.index_count);
+                        match geo.source {
+                            GroupSource::Terrain { .. } => {
+                                draws_terrain += 1;
+                                indices_terrain += u64::from(geo.index_count);
+                            }
+                            GroupSource::Vgeom { .. } => {
+                                draws_vgeom += 1;
+                                indices_vgeom += u64::from(geo.index_count);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1685,8 +1710,10 @@ impl VsmRaster {
         self.stats.cleared_pages += u64::from(page_count);
         self.stats.draws += draws;
         self.stats.draws_terrain += draws_terrain;
+        self.stats.draws_vgeom += draws_vgeom;
         self.stats.indices_drawn += indices_drawn;
         self.stats.indices_terrain += indices_terrain;
+        self.stats.indices_vgeom += indices_vgeom;
         self.stats.skipped_draws += skipped;
         for p in pages.iter() {
             let b = (p.page.level as usize).min(VSM_LEVEL_BUCKETS - 1);
@@ -3600,7 +3627,9 @@ mod tests {
             cut_flushes: 41,
             indices_drawn: 59,
             indices_terrain: 61,
+            indices_vgeom: 83,
             draws_terrain: 67,
+            draws_vgeom: 89,
             pages_by_level: [71, 0, 0, 73, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         }
         .summary();
@@ -3619,7 +3648,7 @@ mod tests {
         // of its own here so the list can see it.
         for n in [
             "3", "17", "51", "9", "2", "1", "4", "6", "23", "29", "31", "37", "41", "43", "47",
-            "53", "59", "61", "67", "71", "73", "79",
+            "53", "59", "61", "67", "71", "73", "79", "83", "89",
         ] {
             assert!(s.contains(n), "{n} is missing from {s:?}");
         }
