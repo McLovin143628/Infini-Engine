@@ -2012,7 +2012,8 @@ mod tests {
         assert_eq!(cold.instances.len(), 0, "a non-casting batch cast");
         assert_eq!(
             cold.considered, 0,
-            "the non-casting batch was still WALKED — the saving this field              exists for is the walk, not the keep"
+            "the non-casting batch was still WALKED — the saving this field \
+             exists for is the walk, not the keep"
         );
         assert!(!cold.clamped);
     }

@@ -919,16 +919,19 @@ fn both_hosts_register_the_building_module_meshes() {
     );
     assert!(
         editor.len() > 200,
-        "the `building_module_table` fence is {} chars — an empty fence would          make this gate vacuous",
+        "the `building_module_table` fence is {} chars — an empty fence would \
+         make this gate vacuous",
         editor.len()
     );
     assert_eq!(
         editor, player,
-        "the building module table has drifted between the editor viewport and          the shipped player."
+        "the building module table has drifted between the editor viewport and \
+         the shipped player."
     );
     assert!(
         editor.contains("inf_pcg::building::modules::module_meshes()"),
-        "the table is no longer built from the Ring-0 source — a host-local list          of ids is the drift this arm exists to prevent"
+        "the table is no longer built from the Ring-0 source — a host-local list \
+         of ids is the drift this arm exists to prevent"
     );
     for (label, path, call) in [
         (
@@ -942,15 +945,12 @@ fn both_hosts_register_the_building_module_meshes() {
             "scatter_mesh::add_building_modules(&mut table)",
         ),
     ] {
-        let raw = read(path).replace(
-            "
-", "
-",
-        );
+        let raw = read(path).replace("\r\n", "\n");
         let src = support::strip_comments_and_strings(&raw);
         assert!(
             src.contains(call),
-            "the {label} builds its scatter-mesh table without the building              modules, so every wall it draws is a placeholder"
+            "the {label} builds its scatter-mesh table without the building \
+             modules, so every wall it draws is a placeholder"
         );
     }
 }
