@@ -495,6 +495,65 @@ fn a_near_building_is_whole_and_a_far_one_is_one_box() {
     );
 }
 
+/// **THE THREE BANDS ARE ORDERED, AND THREE CRATES HOLD THEM** (island wave
+/// I8c).
+///
+/// Nothing owned the comparison between `inf_render::STRUCTURE_LOD_M` and
+/// `ScatterSettings::mesh_distance_m` — each was defended in its own doc comment
+/// and their *order* is what decides whether a shell is ever rasterized as
+/// geometry. It was 192 against 120 for two waves, which meant every shell that
+/// had ever drawn drew as an impostor card and a building spent the whole
+/// 120–230 m annulus as hundreds of them. That is island wave I8b's
+/// band-ordering finding.
+///
+/// This is the arm that owns the ordering, and it lives here because this is the
+/// only crate that can see all three constants at once: `inf-render` is below
+/// `inf-ecs`, and `inf-pcg` is beside both.
+///
+/// ```text
+///   collider band  <  structure swap  <=  scatter mesh band  <  cull
+///        64 m            96 m                 120 m             400 m
+/// ```
+///
+/// * **collider < swap** keeps "what I can touch" and "what I can see" the same
+///   building: every structure a body can collide with is drawn as its parts.
+/// * **swap <= mesh band** is what lets a shell rasterize as geometry at all —
+///   the I8c repair.
+/// * **the swap is `inf_pcg`'s own default**, so the sim's band and the draw's
+///   band are one number rather than two things called "the LOD distance".
+///
+/// A pure arm: it cooks nothing and boots nothing, because every term in it is a
+/// constant and a cook would only make it slow enough to be skipped.
+#[test]
+fn the_structure_swap_sits_between_the_collider_band_and_the_mesh_band() {
+    let lod = inf_render::STRUCTURE_LOD_M;
+    let near = inf_ecs::band::DEFAULT_COLLIDER_NEAR_M;
+    let s = inf_render::RenderSettings::default().scatter;
+    let (mesh_end, cull, _, impostors) = inf_render::passes::scatter::effective_bands(&s, 0.0);
+    assert!(
+        impostors,
+        "the default configuration draws impostors, or the mesh band below is \
+         the cull distance and the ordering means something else"
+    );
+    assert!(
+        near < lod,
+        "the structure swap ({lod} m) is at or inside the collider band \
+         ({near} m) — a body would collide with a building drawn as one box"
+    );
+    assert!(
+        lod <= mesh_end as f64,
+        "the structure swap ({lod} m) is past the scatter mesh band ({mesh_end} m \
+         of a {cull} m cull): a shell can never be rasterized as geometry and its \
+         parts draw as hundreds of impostor cards through the annulus between \
+         them. That is island wave I8b's band-ordering defect"
+    );
+    assert_eq!(
+        lod,
+        inf_pcg::DEFAULT_STRUCTURE_LOD_M,
+        "the draw band and the sim band are two numbers again"
+    );
+}
+
 /// **The DRAW side, through the shipped projection** (IB-2b).
 ///
 /// `both_projectors_band_a_structure_lod_the_same_way` compares the two hosts'

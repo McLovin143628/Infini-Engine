@@ -715,22 +715,40 @@ impl ScatterData {
 /// parts (IB-2b) — the draw-side twin of `inf_ecs::DEFAULT_COLLIDER_NEAR_M`, and
 /// deliberately a *different* number.
 ///
-/// The collider band is bounded by what a 4.0 ms fixed step affords (measured:
-/// 64 m); a draw band is bounded by what a silhouette can get away with, and a
-/// shell swapped in at 64 m would be visible from the pavement. 192 m is three
-/// times the collider band, which puts the swap well past the range at which a
-/// two-storey building's parts are a pixel wide — and, being strictly larger,
-/// guarantees that **every building a body can collide with is drawn as its
-/// parts**, which is the invariant that keeps "what I can touch" and "what I can
-/// see" the same building.
+/// # The three constraints, and why exactly one number satisfies all three
 ///
-/// Here, in `inf-render`, because **both hosts' projections need it and neither
-/// can see the other's crate**: the shipped player links `inf-pcg` and the editor
+/// * **Strictly greater than the collider band** (`DEFAULT_COLLIDER_NEAR_M`,
+///   64 m — what a 4.0 ms fixed step affords). That is the invariant that keeps
+///   "what I can touch" and "what I can see" the same building: every structure
+///   a body can collide with is drawn as its parts.
+/// * **At or below the scatter path's own mesh band**
+///   (`ScatterSettings::mesh_distance_m`, 120 m). A shell batch is banded
+///   `[STRUCTURE_LOD_M, draw_distance)` and `effective_bands` ends the
+///   full-mesh band at `min(mesh_distance_m, cull)`, so a swap distance past
+///   that band means **a shell is never rasterized as geometry at any
+///   distance** — it is a billboard from the moment it exists — while the parts
+///   it replaces go on drawing as hundreds of billboards each through the whole
+///   annulus in between.
+/// * **The same number `inf_pcg::building::DEFAULT_STRUCTURE_LOD_M` already
+///   is** (96 m), because the sim's band and the draw's band naming different
+///   distances is how a building comes to draw as a shell it can still be walked
+///   into.
+///
+/// 96 m is the only value in the tree that satisfies all three, and island wave
+/// I8c is where the second constraint was priced: at 192 m the island's
+/// settlements drew their parts as impostor cards through the whole 120 m–230 m
+/// annulus and their shells as one card past 192, and the ledger records what
+/// the re-ordering moved. The pop the change exposes is measured in
+/// `tests/structure_lod_pop.rs`, which reads this constant as its own camera
+/// distance and re-aims with it.
+///
+/// # Why it lives here
+///
+/// In `inf-render`, because **both hosts' projections need it and neither can
+/// see the other's crate**: the shipped player links `inf-pcg` and the editor
 /// viewport does not (it hand-mirrors `pcg_kind_color` for exactly that reason),
-/// so a constant in `inf-pcg` would have to be duplicated — and two numbers named
-/// "the LOD distance" is how a building comes to draw as a shell it can still be
-/// walked into.
-pub const STRUCTURE_LOD_M: f64 = 192.0;
+/// so a constant in `inf-pcg` would have to be duplicated.
+pub const STRUCTURE_LOD_M: f64 = 96.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScatterBatch {

@@ -65,6 +65,34 @@
 //! here, not a performance one, because this scene's scatter cost is its mesh
 //! band rather than impostor overdraw.
 //!
+//! # THE SWAP MOVED, AND WITH IT WHAT EACH ROW MEANS (island wave I8c)
+//!
+//! Everything above was measured at **192 m**, because that is what
+//! [`STRUCTURE_LOD_M`] was — and the I8b audit's LOW-7 records that this file's
+//! own note ("at the 192 m structure swap the scatter path is ALREADY in its
+//! impostor band") had become the *record of a defect* rather than a caveat: the
+//! swap sat 72 m past `ScatterSettings::mesh_distance_m`, so a shell was a
+//! billboard from the moment it existed and a building spent the whole
+//! 120–230 m annulus as hundreds of cards. Island wave I8c re-ordered the two —
+//! the swap is `inf_pcg`'s own 96 m against a 120 m mesh band — and every row
+//! below re-aims off the constant.
+//!
+//! Neither carried bound was ever a claim about the *swap*: both are claims about
+//! what a bounding-sphere **card** looks like beside the geometry it stands in
+//! for, and the swap merely happened to sit inside the impostor band. They move
+//! to `2 × STRUCTURE_LOD_M`, which is the same 192 m, and re-read to **26 792 px
+//! against 2 903 (9.2×), 91.5 % moving** — I4b's own figures to the pixel.
+//!
+//! What is new is the third arm, and it is the ordering's own consequence in
+//! pixels: at the swap the shipped picture is **1.37×** the geometry picture
+//! rather than 9.2×. The residue above 1.00 is this fixture rather than the band
+//! — the building is 30 m deep, so a shot from 96 m spans 81 m to 111 m and its
+//! far wall is already inside the 100–120 m mesh→impostor fade.
+//!
+//! The geometry refusal survived the move on its own numbers and nothing was
+//! re-blessed for it: **398 of 13 766 px move (2.9 %), worst channel 29/255** at
+//! 96 m, against the 5 % and 32/255 the arms have held since I4.
+//!
 //! # The fixture is hand-authored, and that is a bound
 //!
 //! `parts()` and `shell()` are `ScatterInstance` literals shaped like what
@@ -289,11 +317,15 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
         "two fresh renderers drew the same scene differently ({noise} px mesh / {noise_imp} px impostor) — the frame is no longer bit-deterministic, and every 'pixels moved' number below is measuring the renderer's repeatability as well as the swap"
     );
     println!(
-        "  NOTE: `ScatterSettings::default().mesh_distance_m` is {} m, so at the {STRUCTURE_LOD_M} m structure swap the scatter path is ALREADY in its impostor band. Both readings are given.",
+        "  NOTE: `ScatterSettings::default().mesh_distance_m` is {} m and the swap is at {STRUCTURE_LOD_M} m, so the shipped configuration is in its MESH band at the swap and in its IMPOSTOR band at 2x it (island wave I8c re-ordered the two). All four readings are given.",
         inf_render::RenderSettings::default().scatter.mesh_distance_m
     );
+    let mut at_near = None;
+    let mut at_near_mesh = None;
     let mut at_swap = None;
     let mut at_swap_mesh = None;
+    let mut at_far = None;
+    let mut at_far_mesh = None;
     for impostors in [true, false] {
         let label = if impostors {
             "impostors ON (shipped)"
@@ -321,20 +353,48 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
                 covered as f64 / f64::from(W * H) * 100.0,
                 differing as f64 / covered.max(1) as f64 * 100.0,
             );
-            if (d - STRUCTURE_LOD_M).abs() < 1.0e-9 {
-                let row = (mean, max, differing, covered, worst, bw, bh);
+            let row = (mean, max, differing, covered, worst, bw, bh);
+            let slot = if (d - STRUCTURE_LOD_M).abs() < 1.0e-9 {
                 if impostors {
-                    at_swap = Some(row);
+                    &mut at_swap
                 } else {
-                    at_swap_mesh = Some(row);
+                    &mut at_swap_mesh
                 }
-            }
+            } else if (d - STRUCTURE_LOD_M * 2.0).abs() < 1.0e-9 {
+                // **The impostor band, which is now PAST the swap** (island wave
+                // I8c). The carried bound about a bounding-sphere card did not
+                // stop being true when the bands were re-ordered; it moved to the
+                // distances where a card is what draws.
+                if impostors {
+                    &mut at_far
+                } else {
+                    &mut at_far_mesh
+                }
+            } else if impostors {
+                &mut at_near
+            } else {
+                &mut at_near_mesh
+            };
+            *slot = Some(row);
         }
     }
 
     let (imp_mean, imp_max, imp_moved, imp_covered, imp_worst, imp_w, imp_h) =
         at_swap.expect("the impostor row ran");
     let (mean, max, differing, covered, worst, bw, bh) = at_swap_mesh.expect("the mesh row ran");
+    let (_, _, far_moved, far_covered, _, _, _) = at_far.expect("the far impostor row ran");
+    let (_, _, _, far_mesh_covered, _, _, _) = at_far_mesh.expect("the far mesh row ran");
+
+    // **THE TWO CONFIGURATIONS ARE ONE PIPELINE, WELL INSIDE THE MESH BAND.**
+    // At half the swap distance nothing is near any band edge, so `impostors`
+    // must make no difference at all — and it makes none, to the pixel. Without
+    // this the ratios below could be reading two renderers rather than two bands.
+    assert_eq!(
+        at_near.expect("the near impostor row ran"),
+        at_near_mesh.expect("the near mesh row ran"),
+        "at {:.1} m — half the swap and far inside the mesh band — the shipped configuration and the impostor-free one drew different pictures, so every comparison below is between two renderers rather than between two bands",
+        STRUCTURE_LOD_M * 0.5
+    );
 
     // ANTI-VACUITY (1): the building is really on screen at the swap distance.
     assert!(
@@ -358,10 +418,12 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
         inf_render::golden::GOLDEN_MEAN_TOLERANCE,
     );
     println!(
-        "  …and the finding beside it: with the SHIPPED impostor band on (`mesh_distance_m` {} m < {STRUCTURE_LOD_M} m), the same building's silhouette is {imp_w} x {imp_h} px / {imp_covered} px — {:.1}x the mesh's {covered} px — and {imp_moved} of it ({:.1} %) moves at the swap, worst channel {imp_worst}/255, mean {imp_mean:.5} / max {imp_max:.5}. Both frames there are impostors, so the CHANGE is still the band pair's; what the impostor owns is its SIZE — a billboard sized from the instance's bounding sphere. The repair that comes first is the sizing, not the fade.",
+        "  …and the finding beside it, RE-AIMED (island wave I8c): the swap is at {STRUCTURE_LOD_M} m and `mesh_distance_m` is {} m, so the SHIPPED configuration meets the swap inside its MESH band — its silhouette there is {imp_w} x {imp_h} px / {imp_covered} px against the mesh reading's {covered} px ({:.2}x rather than the 9.2x it was), {imp_moved} px move ({:.1} %), worst {imp_worst}/255, mean {imp_mean:.5} / max {imp_max:.5}. The residue above 1.00x is this 30 m-deep FIXTURE, whose far wall sits at 111 m and is therefore already inside the 100-120 m fade. The bounding-sphere card is still what an impostor is; it lives PAST the swap now, and at {:.1} m the same building's shipped silhouette is {far_covered} px against the mesh band's {far_mesh_covered} px ({:.1}x), of which {far_moved} px move.",
         inf_render::RenderSettings::default().scatter.mesh_distance_m,
         imp_covered as f64 / covered.max(1) as f64,
         imp_moved as f64 / imp_covered.max(1) as f64 * 100.0,
+        STRUCTURE_LOD_M * 2.0,
+        far_covered as f64 / far_mesh_covered.max(1) as f64,
     );
 
     // **THE REFUSAL, ARMED — AT THE BUILDING'S OWN SCALE.**
@@ -399,44 +461,58 @@ fn the_parts_to_shell_swap_measured_at_1080p() {
         "the parts->shell swap now moves the frame by mean {mean:.5} / max {max:.5}, past the golden harness's own re-render tolerance — which for an object this small takes a change far larger than the LOD swap itself."
     );
 
-    // **THE CARRIED BOUND, ARMED.** The impostor silhouette being many times the
-    // mesh's is a measured fact this wave records rather than fixes — a scatter
-    // impostor is sized from the instance's bounding sphere, and a 20 x 30 x 7.4 m
-    // box's sphere is much wider than the box. The day that changes, this arm
-    // says so instead of the ledger quietly going stale.
+    // **THE TWO CARRIED BOUNDS, RE-AIMED AT THE DISTANCE THEY WERE ALWAYS
+    // MEASURED AT** (island wave I8c).
     //
-    // *The attribution, corrected by the I4 audit.* Both frames in the shipped
-    // reading are drawn as impostors, so the change between them is the **band
-    // pair's** — parts against shell — seen through a billboard. What the
-    // impostor owns is the change's SIZE, not its cause: it is what turns a
-    // 2 903-pixel difference into a 26 792-pixel one. The first write-up said the
-    // discontinuity "belongs to the impostor band rather than to the structure
-    // band pair", which sends the next reader to the wrong repair.
+    // I4 and I4b armed two claims about the *shipped* reading — a silhouette
+    // `> 4x` the mesh's, and `> 50 %` of it moving — and both were measured at
+    // **192 m**, because that is what `STRUCTURE_LOD_M` was. Neither was ever a
+    // claim about the swap: they are claims about what a **bounding-sphere card**
+    // looks like beside the geometry it stands in for, and the swap merely
+    // happened to be inside the impostor band. I8c re-ordered the bands (96 m
+    // against a 120 m `mesh_distance_m`), so the swap is now inside the *mesh*
+    // band and the card lives past it. The two bounds move to `2 x
+    // STRUCTURE_LOD_M`, which is the same 192 m, and re-read to the same numbers:
+    // **26 792 px against 2 903 (9.2x), 91.5 % moving** — I4b's own figures, to
+    // the pixel.
     //
-    // **The bound is `> 4x` and the measurement is 9.2x** (island wave I4b sized
-    // the card to the instance's own bounding sphere and halved it from 19.2x).
-    // It stays at 4x because what the arm is about is "a billboard is much bigger
-    // than the silhouette it stands in for", which is still true and is what an
-    // impostor is; a bound re-tightened to 9x would go red for an *improvement*.
+    // The `> 4x` bound stays at four for I4b's reason: the arm is about "a
+    // billboard is much bigger than the silhouette it stands in for", which is
+    // what an impostor *is*, and a bound re-tightened onto today's ratio would go
+    // red for an improvement.
     assert!(
-        imp_covered > covered * 4,
-        "the impostor silhouette ({imp_covered} px) is no longer far larger than the mesh's ({covered} px) — island wave I4 carried that ratio as the reason the discontinuity at {STRUCTURE_LOD_M} m is so much bigger than the geometry reading, and the ledger needs re-reading"
+        far_covered > far_mesh_covered * 4,
+        "at {:.1} m the shipped impostor silhouette ({far_covered} px) is no longer far larger than the same building's mesh silhouette ({far_mesh_covered} px) — island wave I4 carried that ratio as a bound on the impostor's SIZING and I8c moved it to this distance; the ledger needs re-reading",
+        STRUCTURE_LOD_M * 2.0
     );
-    // **AND THE SHIPPED POP IS NOT SMALL, ARMED AS THE REFUSAL'S CONDITION.**
-    // The refusal above is a statement about geometry; the configuration that
-    // ships draws both sides as impostors and moves 91.6 % of a silhouette 9.2x
-    // the mesh's.
-    //
-    // **The condition FIRED and the refusal was re-taken** (island wave I4b).
-    // I4 wrote this arm so that repairing the billboard's sizing would turn the
-    // file red and force clause 6 to be re-decided. I4b repaired it — the ratio
-    // went 19.2x -> 9.2x — and the re-decision is: the refusal STANDS, because
-    // the geometry reading it rests on did not move at all (63 of 2 903 px), and
-    // what remains is a bounding-sphere card, which is what an impostor is rather
-    // than a defect it has. So the arm is kept, aimed at the repaired numbers.
-    let imp_pct = imp_moved as f64 / imp_covered.max(1) as f64 * 100.0;
+    let far_pct = far_moved as f64 / far_covered.max(1) as f64 * 100.0;
     assert!(
-        imp_pct > 50.0,
-        "the SHIPPED parts->shell swap now moves only {imp_pct:.1} % of the building's impostor silhouette, against the 91.6 % island wave I4b measured after re-sizing the card. The band pair has gained a fade, or the impostor has become something other than a bounding-sphere billboard; either way the refusal of a band-pair cross-fade was conditional on this number and has to be re-taken."
+        far_pct > 50.0,
+        "at {:.1} m the parts->shell swap now moves only {far_pct:.1} % of the building's impostor silhouette, against the 91.6 % island wave I4b measured after re-sizing the card. The band pair has gained a fade, or the impostor has become something other than a bounding-sphere billboard; either way the refusal of a band-pair cross-fade was conditional on this number and has to be re-taken.",
+        STRUCTURE_LOD_M * 2.0
+    );
+    // …and the far row is a real reading rather than an empty frame.
+    assert!(
+        far_mesh_covered > 100,
+        "only {far_mesh_covered} px of building at {:.1} m — the far comparison is between two skies",
+        STRUCTURE_LOD_M * 2.0
+    );
+
+    // **AND THE ORDERING, IN PIXELS** — the claim island wave I8c earns, which no
+    // arm above makes.
+    //
+    // `the_structure_swap_happens_inside_the_scatter_mesh_band` compares two
+    // constants; this is the claim that the renderer *acts* on them, which is the
+    // P21.4 law this file exists under. At the swap the shipped picture is close
+    // to the geometry picture; at twice it, it is the `> 4x` card above. The
+    // bound is `< 2x` and the measurement is **1.37x**, and the gap between 1.0
+    // and 1.37 is the FIXTURE rather than the band: this building is 30 m deep,
+    // so a shot from 96 m spans 81 m to 111 m and its far wall is already inside
+    // the 100–120 m mesh→impostor fade. A shallower building would read 1.00.
+    let swap_ratio = imp_covered as f64 / covered.max(1) as f64;
+    let far_ratio = far_covered as f64 / far_mesh_covered.max(1) as f64;
+    assert!(
+        swap_ratio < 2.0 && swap_ratio < far_ratio * 0.5,
+        "the shipped silhouette at the {STRUCTURE_LOD_M} m swap is {swap_ratio:.2}x the geometry's against {far_ratio:.1}x at twice the distance — the swap is drawing a card again, so island wave I8b's band-ordering defect has returned"
     );
 }
