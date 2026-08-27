@@ -27429,4 +27429,81 @@ wrong; carried by name. **MED-6:** the editor's `push_pcg_scatter` doc still des
 complementary `[0, lod)` parts band the I3 audit replaced. Counts after: battery **328 / 6 232 / 0 /
 19** (+4 arms, no new block), goldens **58** with `INF_GOLDEN_STRICT=1` green over 117 arms, rustdoc
 **374 over 30 crates** cold (the audit adds zero), clippy **0**, `fmt` clean, schemas all four
-unmoved, committed content unmoved. Full ledger in `docs/memos/island-progress.md`. 
+unmoved, committed content unmoved. Full ledger in `docs/memos/island-progress.md`.
+
+## Wave I8b — the buildings stop being cubes (2026-08-27)
+
+Base `670f0d7c`. Five clauses, four taken and one **stopped with its route and its measurement**.
+**THE FINDING THE WAVE OPENED WITH:** wave I8a's ledger says *"365 545 **wall-sized** opaque boxes"*
+and mints the law *"a placeholder is only cheap when it is small"* — and both are about a size the
+engine was never drawing. `PcgInstance::scale` is **one uniform `f64`** and every module the building
+assembler places carries `1.0`, so a 0.12 × 3.5 × 1.5 m curtain-wall panel, a 10 × 0.2 × 10 m floor
+slab and a 0.9 m desk all *drew* as the **same one-metre cube** while their colliders were exactly
+what the palette and the plan said. A building had never once been drawn at the dimensions it is
+built at. **Clause 1** therefore ships a *size* and a *mesh* together: `PcgInstance`/`ScatteredInstance`
+grow `extent` and `glow` (both inside `#[serde(skip)]` caches — the TER2b precedent, no schema move),
+and `inf_pcg::building::modules` gives every palette module **one of twelve shape families** — a
+framed panel, a glazed leaf, a fascia'd deck, a legged table, a carcass on a plinth — authored in the
+unit box as a small union of boxes with flat normals, **24–72 triangles**, no half-edge kernel (the
+shipped player does not link `inf-dcc`) and no trigonometry. The GUIDs are **content-derived from the
+family's own name** under a private salt, so no `.inf_mesh` exists and **both hosts register the table
+by hand** from one Ring-0 source behind a `building_module_table` fence and a new mirror arm; an
+authored asset under one of those ids wins. `BuildingArchetype::grammar()` is the one place they are
+stamped, so `place_module` and the assembler read one field instead of deriving two answers. Two
+defects were caught by their own arms before anything drew: a crate's battens reached 0.52 out of a
+unit box, and **every ±Z face was wound inside out** (`ê_x × ê_y` is `+ê_z` while `ê_z × ê_y` and
+`ê_x × ê_z` are both negative, so a "flip on the sign" builder is right for four faces of six).
+**Clause 3:** a window was a **hole** — every palette now declares a `Pane`, hung in the void by the
+assembler and carrying **no collider**, because a window you cannot see through is a wall and
+`opening_is_clear` is an assertion about solids. That replaces one invariant with a checkable one
+(*the first `colliders.len()` instances are the solid ones, everything after is decoration*), and
+`inf_editor_core::bake` splits its two doors on it. The glow is **emission, never a light** (MAX_LIGHTS
+untouched): the hour is applied once by the projector from the sun height `project_sky` just wrote,
+instances bucket on **(mesh, glow)**, and `ScatterSource` grows a **quantized** `glow_step` because the
+emission is not part of `ScatterData` and a carried batch would otherwise keep the hour it was packed
+in — *a city lit at noon*. **CLAUSE 2, AND ITS MILLISECONDS WERE IN THE OTHER PASS.** The instrument
+had printed the answer for two waves: *"7 831 552 casters, every one scattered, 17 721 930 dropped"*
+and **16 384 per rastering frame — `VSM_MAX_CASTERS` exactly, hit every frame**.
+`passes::scatter::pack_fallback` walks every instance of every batch to distance-test it and then
+truncates to that ceiling: a city walked to keep four percent of it, **16.672 ms a frame, 70.2 % of
+the record stage**. The content already had the answer — a building's parts stand inside its own
+shell, and the shell is packed as a caster from zero metres out (`pack_fallback` reads
+`draw_distance` and ignores `near_distance`), so 1 500 interior boxes contribute nothing to a
+silhouette their own bounding box already draws. `ScatterBatch` grows `casts_shadows`, `true`
+everywhere it predates, and `push_pcg_scatter` sets it **false on the parts batch alone**; the pack
+skips a non-casting batch in `O(1)`. **It also gave the island back a shadow nobody had noticed was
+gone**: casters 7 831 552 (all scattered, 0 terrain, 17.7 M dropped) → **111 370 (18 638 scattered,
+91 776 terrain), 0 dropped** — the settlements had been crowding the *terrain* out of the caster
+budget entirely. **FRAME TABLES**, same machine, same flight: `SHIPPED` p50 23.268 → **23.955 ms
+(41.7 fps)**, pipelined **12.400 (80.6 fps)**; `LIT+VIS` p50 **64.821 → 30.040 ms (15.4 → 33.3 fps)**,
+GPU **33.450 → 18.008**, `scatter` **13.327 → 7.051**, `vsm raster` **16.672 → 0.619**, record
+**23.739 → 6.196**, pipelined **33.861 → 18.008 ms (29.5 → 55.5 fps)**; `LIT` 67.045 → 30.267,
+`LIT+SSR` 66.124 → 29.624, `LIT-COARSE-CLIPMAP` 66.430 → 24.851; fixed step **5.749 ms** inside its
+6.0 ratchet on unmoved counts. **≥ 60 fps p50 LIT+VIS is STILL NOT MET** (30.040 against 16.6, +13.440
+where I8a's was +48.221) and stays the headline. Real module geometry costs **+0.94 ms of SHIPPED and
++3.5 ms of LIT+VIS `scatter`** — the I4 measurement met again at settlement scale. **THE ARMS**, all
+on a real cooked pack through `project_scene_full`: **33 batches, 29 carry geometry, 4 are shell
+boxes, 0 are placeholders**; the caster pack **considered 132 where the pre-I8b engine (built by
+mutating a clone) considered 23 121**; and at local midnight **4 of 33 batches emit over 2 122 of
+2 122 glazed instances**, warm and all carrying real geometry, with *nothing emitting by day* asserted
+first so the comparison cannot be vacuous. **CLAUSE 2's OTHER HALF WAS STOPPED WITH NUMBERS.**
+`build_vgeom` measured on this machine: **7.2 ms at 400 boxes, 41.3 ms at 1 600, 301.4 ms at 6 000** —
+and a real settlement building is ~1 551 solids, so a per-building runtime bake is **41 ms each over
+~450 resident buildings**, at `levels = 1` (a soup of disjoint boxes does not coarsen, so the DAG has
+no LOD in it). The per-module alternative is refused by mechanism: `vgeom_instances` has **no memo**,
+`pack_instance` runs over every instance 2–6× a frame and `pack_casters` walks them with **no distance
+cull at all** under the same 16 384 ceiling. The shape that fits — **one vgeom instance per building
+SHELL over seven per-archetype façade assets** — is named for the next implementer. **AND A SECOND
+FINDING BLOCKS IT:** `STRUCTURE_LOD_M` is **192 m** while `ScatterSettings::mesh_distance_m` is
+**120 m**, so a building draws its parts as geometry to 120 m, as **hundreds of impostor billboards
+each** from 120 to 217 m, and its shell as **one billboard** from 192 m — **a shell has never once
+been rasterized as geometry**, so a façade mesh on it would change nothing on screen. `inf-pcg`'s own
+`DEFAULT_STRUCTURE_LOD_M` is already 96 m; the two constants disagree by a factor of two and only the
+render one is past the mesh band. Not taken because `structure_lod_pop` is a perceptual gate built
+*around* the 192 m reading. **CLAUSE 4:** the I8a audit's MED-5 closed — `use_door` now **always**
+means open or close on either face, and the bolt gets its own control (`lock_door`, `actions::LOCK` on
+**L**, offered on the owner's face alone and refused on an open leaf), consumed through the same
+`interact::resolve` the open verb uses; the stair-core finding is **verified CLOSED** in the I8a memo
+and was never a world defect. **CLAUSE 5** (sidewalks/kerbs) is **ROUTED by name** with wave I8a's
+"streets are a plan, not a surface": there is no measured frame headroom to spend on new committed
+surface. Full ledger, both frame tables and the carried list in `docs/memos/island-progress.md`. 

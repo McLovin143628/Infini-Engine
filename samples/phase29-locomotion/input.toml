@@ -63,6 +63,12 @@ Key = "KeyA"
 [[actions.left]]
 Key = "ArrowLeft"
 
+[[actions.lock]]
+Key = "KeyL"
+
+[[actions.lock]]
+GamepadButton = "LeftBumper"
+
 [[actions.menu]]
 Key = "Tab"
 

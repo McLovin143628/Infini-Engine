@@ -590,7 +590,10 @@ pub fn default_map() -> InputMap {
         // undo: the same press could never open it again. E opens, L locks, and
         // the prompt names both.
         .bind_key("lock", "KeyL")
-        .bind_button("lock", GamepadButton::East)
+        // The left bumper and not East: East is `crouch`, and a control that
+        // shares a button with a stance would lock a door every time the player
+        // ducked.
+        .bind_button("lock", GamepadButton::LeftBumper)
         .bind_key("fly", "KeyV")
         .bind_button("fly", GamepadButton::West)
         .bind_key("handbrake", "Space")
