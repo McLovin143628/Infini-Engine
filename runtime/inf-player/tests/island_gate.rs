@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
+use inf_player::budget::{CITY_STEP_BUDGET_MS, LOAD_BUDGET_MS};
 use inf_player::runtime_sim::RuntimeSim;
 use inf_project::ProjectManifest;
 
@@ -866,6 +867,78 @@ fn the_cooked_level_still_knows_where_on_earth_it_is() {
     assert_eq!(lon, geo.origin_longitude_deg);
 }
 
+/// **The settlements stand on the ground urban reserves** (island wave I8a) —
+/// the flipped half of the tripwire above.
+///
+/// Three claims, all of them about the built project rather than about the
+/// generator that wrote it:
+///
+/// * every block a settlement plans sits inside its own site's reservation
+///   circle, so it is on ground the carve levelled and the biome map painted
+///   urban — which is what makes the vegetation and the buildings disjoint by
+///   construction rather than by luck;
+/// * every zone document a block names is **in the project**, resolvable by
+///   GUID out of the content root the recipe's `[content]` list filled. A
+///   `PcgVolume` whose graph does not resolve evaluates to nothing and says
+///   nothing, which is the failure this catches;
+/// * a settlement that plans no block at all is named, not skipped.
+fn the_settlements_stand_where_urban_is_reserved(
+    content: &Path,
+    recipe: &inf_island::IslandRecipe,
+) {
+    let design = inf_island::read_design(recipe).expect("the committed design reads");
+    let plans = inf_editor_core::settlement::settlements(&design);
+    let assets = content_assets(content);
+    let mut blocks = 0usize;
+    for p in &plans {
+        let site = &recipe.sites[p.site];
+        assert!(site.kind.reserves_urban());
+        println!(
+            "SETTLEMENT {} ({}): {} blocks inside a {:.0} m reservation, {} refused \
+             off-pad, {} refused off-land",
+            p.name,
+            p.kind.label(),
+            p.blocks.len(),
+            p.radius_m,
+            p.refused_off_pad,
+            p.refused_off_land
+        );
+        for b in &p.blocks {
+            for c in b.corners() {
+                assert!(
+                    (c - p.centre).length() <= site.radius_m,
+                    "{}'s block {:?} reaches outside the reservation the biome map \
+                     paints urban — its buildings would stand in a forest",
+                    p.name,
+                    (b.col, b.row)
+                );
+            }
+            let g = inf_editor_core::settlement::zone_guid(b.archetype);
+            assert!(
+                assets.contains_key(&g),
+                "{}'s {} block names zone document {g}, which is not in the built \
+                 project — the volume would evaluate to nothing, silently",
+                p.name,
+                b.archetype.name()
+            );
+        }
+        blocks += p.blocks.len();
+    }
+    println!(
+        "SETTLEMENTS: {blocks} blocks over {} settlements, {} distinct zone \
+         documents in the project",
+        plans.len(),
+        inf_pcg::ArchetypeId::ALL
+            .iter()
+            .filter(|a| assets.contains_key(&inf_editor_core::settlement::zone_guid(**a)))
+            .count()
+    );
+    assert!(
+        blocks > 0,
+        "the committed design plans no settlement block at all"
+    );
+}
+
 /// **THE VEGETATION SCATTERS ON THE GROUND THAT IS RESIDENT, AND NOT BEFORE.**
 ///
 /// # What this arm used to say
@@ -914,10 +987,24 @@ fn the_biome_binding_scatters_when_its_ground_is_resident_and_not_before() {
         6,
         "every biome but urban binds cover: {bound:?}"
     );
+    // **THE TRIPWIRE FLIPPED, AND THE SENTENCE IT CARRIED IS SPENT** (island
+    // wave I8a). This read *"urban must stay bare for wave I8"* — a wave that
+    // has now happened. What is still true is that urban binds no VEGETATION
+    // graph, and the reason is no longer "nobody has built the settlements yet":
+    // it is that a settlement is a `PcgVolume` in the LEVEL, not a biome
+    // binding, so the two authorities never meet. What urban reserving the
+    // ground buys is exactly what wave I7 said it would — the settlement
+    // generator finds bare ground rather than a forest to clear.
+    //
+    // So the arm asserts the settlements instead, on the world: the level
+    // carries one volume per block, every one of them names a committed zone
+    // document, and every one of them sits inside a site's own reservation.
     assert!(
         !bound.contains(&"urban"),
-        "urban must stay bare for wave I8"
+        "urban binds a cover graph — the settlements stand on reserved ground \
+         and the vegetation must not grow through them"
     );
+    the_settlements_stand_where_urban_is_reserved(&content, &recipe);
 
     let pcg_bytes = std::fs::read(content.join(format!("{slug}Cover.inf_pcg")))
         .expect("the cover graph is written");
@@ -1656,5 +1743,1241 @@ fn the_scattered_cover_draws_its_authored_meshes() {
          themselves; proxy primitive still a cube for the impostor / \
          CPU-fallback / shadow-caster paths.",
         with_geom.len()
+    );
+}
+
+// ── THE SETTLEMENT GATE (island wave I8a) ───────────────────────────────────
+//
+// Everything below is about the thing wave I8a put on the island's seven pads:
+// the blocks, the buildings they stand, the doors those buildings offer, and
+// whether a player can walk in through one and go upstairs.
+//
+// It runs on the CI-scale fixture for the same reason the drive above does — the
+// shipped island's terrain is 342.7 MB and is not committed — and it measures a
+// SHIPPED-ISLAND city block directly where the block's own size is what is being
+// priced (the fixture's reservations take the town's 76 m grid; a Harbour City
+// core block is 100 m, and a battery about a city block has to be about one).
+
+/// The band radius the collider band admits solids inside, for the numbers the
+/// furnish battery prints. `inf_ecs::band`'s own default, named here so the
+/// battery cannot drift from the thing it prices.
+const BAND_NEAR_M: f64 = inf_ecs::band::DEFAULT_COLLIDER_NEAR_M;
+
+/// An archetype whose own storey range starts at two or more — a building that
+/// is guaranteed to have a stair whatever seed it draws.
+///
+/// The walk needs one: `Shop` is `(1, 2)` and `House` is `(1, 3)`, so half the
+/// buildings in a town have no flight at all and "climb a stair" would be a
+/// claim about which seed came up.
+fn always_multistorey(a: inf_pcg::ArchetypeId) -> bool {
+    inf_pcg::archetype(a).floors.0 >= 2
+}
+
+/// Where a settlement walk goes: the settlement holding the most blocks that are
+/// **guaranteed** multi-storey, tie-broken by block count and then by name.
+///
+/// A pure function of the committed design, so both hosts are handed the same
+/// number and nothing else.
+fn walk_target_settlement(
+    design: &inf_island::IslandDesign,
+) -> inf_editor_core::settlement::Settlement {
+    let tall = |s: &inf_editor_core::settlement::Settlement| {
+        s.blocks
+            .iter()
+            .filter(|b| always_multistorey(b.archetype))
+            .count()
+    };
+    let mut plans = inf_editor_core::settlement::settlements(design);
+    plans.sort_by(|a, b| {
+        tall(b)
+            .cmp(&tall(a))
+            .then(b.blocks.len().cmp(&a.blocks.len()))
+            .then(a.name.cmp(&b.name))
+    });
+    let best = plans
+        .into_iter()
+        .next()
+        .expect("the design has a settlement");
+    assert!(
+        tall(&best) > 0,
+        "no settlement on this island has a block that is guaranteed \
+         multi-storey, so a walk that climbs a stair has nowhere to go"
+    );
+    best
+}
+
+/// Every `PcgVolume` the simulation currently holds: `(guid, centre, extent,
+/// seed)`, in `Guid` order so nothing downstream depends on an archetype walk.
+fn resident_volumes(sim: &RuntimeSim) -> Vec<(Uuid, glam::DVec3, glam::DVec2, u32)> {
+    let w = sim.world().world();
+    let mut out = Vec::new();
+    for e in w.iter_entities() {
+        let (Some(g), Some(v), Some(t)) = (
+            e.get::<inf_ecs::Guid>(),
+            e.get::<inf_ecs::components::PcgVolume>(),
+            e.get::<inf_ecs::components::GlobalTransform>(),
+        ) else {
+            continue;
+        };
+        out.push((
+            g.0,
+            t.translation(),
+            glam::DVec2::new(v.extent.x, v.extent.y),
+            v.seed,
+        ));
+    }
+    out.sort_by_key(|(g, _, _, _)| *g);
+    out
+}
+
+/// Every solid box the simulation currently holds, in `inf_pcg`'s own
+/// vocabulary — the one `opening_is_clear` reads.
+fn resident_solids(sim: &RuntimeSim) -> Vec<inf_pcg::PcgCollider> {
+    let w = sim.world().world();
+    let mut out = Vec::new();
+    for e in w.iter_entities() {
+        let Some(v) = e.get::<inf_ecs::components::PcgVolume>() else {
+            continue;
+        };
+        for s in &v.structures {
+            out.push(inf_pcg::PcgCollider {
+                center: s.center,
+                half_extents: s.half_extents,
+                rotation: s.rotation,
+            });
+        }
+    }
+    out
+}
+
+/// The lowered building passes of one zone document, read out of the built
+/// project exactly as the shipped host reads it.
+fn zone_passes(content: &Path, a: inf_pcg::ArchetypeId) -> Vec<inf_pcg::BuildingPass> {
+    let p = content.join(inf_editor_core::settlement::zone_file_name(a));
+    let bytes = std::fs::read(&p).unwrap_or_else(|e| panic!("no {}: {e}", p.display()));
+    let payload = inf_pcg::PcgAssetPayload::decode(&bytes).expect("the zone document decodes");
+    let graph = payload.graph().expect("the graph is the source of truth");
+    let lowered = inf_pcg::lower_graph(&graph, &inf_pcg::pcg_registry());
+    assert!(lowered.ok, "{}: {:?}", a.name(), lowered.issues);
+    assert_eq!(
+        lowered.buildings.len(),
+        1,
+        "{} lowers to one building pass",
+        a.name()
+    );
+    lowered.buildings
+}
+
+/// **EVERY SETTLEMENT BUILDING IS ENTERABLE, AT SETTLEMENT SCALE** (island wave
+/// I8a, clause 3).
+///
+/// The three phase-19 invariants — `rooms_connected`, `floors_reachable`,
+/// `opening_is_clear` — run per **sampled building** over the blocks the
+/// simulation is actually holding, against the solids the shipped world
+/// actually built. Phase 19 ran them over seven hand-placed lots; this runs them
+/// over a settlement.
+///
+/// It also prints what clause 3 asks for: the doorways per settlement, and the
+/// share of them the collider band makes solid.
+#[test]
+fn every_settlement_building_is_enterable() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let proj = build_project(tmp.path());
+    let content = proj.join("Content");
+    let pack = cook(tmp.path());
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let design = inf_island::read_design(&recipe).expect("the design reads");
+    let mut sim = pack_sim(&pack);
+    let hero = hero_entity(&sim).expect("a hero");
+    let mut total_buildings = 0usize;
+    let mut total_doorways = 0usize;
+
+    // **Every settlement, one at a time.** They are kilometres apart and the
+    // partition holds one neighbourhood at once, so "per settlement" is what the
+    // hero walking to each of them means.
+    for plan in inf_editor_core::settlement::settlements(&design) {
+        set_hero(
+            &mut sim,
+            hero,
+            glam::DVec3::new(plan.centre.x, 0.0, plan.centre.y),
+        );
+        for _ in 0..8 {
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        }
+
+        let volumes = resident_volumes(&sim);
+        let solids = resident_solids(&sim);
+        let doorways = inf_ecs::door::volume_doorways(sim.world());
+        println!(
+            "SETTLED at {} ({:.0}, {:.0}): {} resident volume(s), {} solids, {} doorways",
+            plan.name,
+            plan.centre.x,
+            plan.centre.y,
+            volumes.len(),
+            solids.len(),
+            doorways.len()
+        );
+        assert!(
+            !volumes.is_empty(),
+            "no settlement volume is resident — the battery below would be over bare ground"
+        );
+        assert!(
+            !solids.is_empty(),
+            "the resident settlement blocks built no solid at all"
+        );
+        assert!(
+            !doorways.is_empty(),
+            "the resident settlement blocks planned no doorway — nothing is enterable"
+        );
+
+        // **The band, measured rather than described.** A doorway is SOLID when the
+        // band admits the building it belongs to; everything past the near radius
+        // simulates as a shell, which is the I3 ruling ("doors and walls cannot be
+        // solid at different distances").
+        let band = inf_ecs::band::SimBand::from_world(
+            sim.world(),
+            BAND_NEAR_M,
+            inf_ecs::band::DEFAULT_COLLIDER_FAR_M,
+        );
+        let banded = doorways
+            .iter()
+            .filter(|(_, _, d)| {
+                band.tier(
+                    d.hinge,
+                    glam::DVec3::splat(d.width_m.max(d.height_m) * 0.5),
+                    glam::DQuat::IDENTITY,
+                ) == inf_math::Tier::Near
+            })
+            .count();
+        println!(
+            "DOORWAYS: {} planned, {banded} inside the {BAND_NEAR_M:.0} m collider band ({:.2} %)",
+            doorways.len(),
+            100.0 * banded as f64 / doorways.len() as f64
+        );
+
+        // ── the three invariants, per building ──
+        let by_guid: std::collections::BTreeMap<Uuid, inf_editor_core::settlement::Block> = plan
+            .blocks
+            .iter()
+            .map(|b| {
+                (
+                    inf_editor_core::settlement::block_guid(&recipe.name, b.site, b.col, b.row),
+                    *b,
+                )
+            })
+            .collect();
+
+        let mut buildings = 0usize;
+        let mut floors_total = 0u32;
+        let mut stairs_total = 0usize;
+        let mut doors_total = 0usize;
+        let mut by_zone: std::collections::BTreeMap<&'static str, usize> = Default::default();
+        for (guid, centre, extent, seed) in &volumes {
+            let Some(block) = by_guid.get(guid) else {
+                continue;
+            };
+            let passes = zone_passes(&content, block.archetype);
+            let plans = {
+                let w = sim.world().world();
+                let terrain = w
+                    .iter_entities()
+                    .find_map(|e| e.get::<inf_ecs::components::Terrain>())
+                    .expect("the island has ground");
+                let height = inf_pcg::FnHeight::new(|x: f64, z: f64| {
+                    terrain.data.height_at(glam::DVec2::new(x, z))
+                });
+                let cx = inf_pcg::GrammarContext {
+                    entity: Some(*guid),
+                    center: *centre,
+                    extent: *extent,
+                    seed_offset: u64::from(*seed),
+                };
+                inf_pcg::plans_of(&passes, &inf_pcg::NoSplines, &height, &cx)
+            };
+            assert!(
+                !plans.is_empty(),
+                "{}'s {} block resolved no building at all — a `Ground::Terrain` lot \
+             over unpaged ground fails closed, which is right, but this block's \
+             ground IS resident",
+                plan.name,
+                block.archetype.name()
+            );
+            *by_zone.entry(block.archetype.name()).or_default() += plans.len();
+            buildings += plans.len();
+            for p in &plans {
+                floors_total += p.floors;
+                stairs_total += p.stairs.len();
+                // 1. every floor's room graph is connected through doors.
+                for f in 0..p.floors {
+                    assert!(
+                        p.rooms_connected(f),
+                        "{} {}: floor {f}'s room graph is not connected",
+                        plan.name,
+                        block.archetype.name()
+                    );
+                }
+                // 3. and every floor is reachable from OUTSIDE.
+                assert!(
+                    p.entrance.is_some(),
+                    "{} {}: no entrance — the building is sealed",
+                    plan.name,
+                    block.archetype.name()
+                );
+                assert!(
+                    p.floors_reachable(),
+                    "{} {}: a floor cannot be reached from outside",
+                    plan.name,
+                    block.archetype.name()
+                );
+                assert_eq!(
+                    p.stairs.len(),
+                    (p.floors - 1) as usize,
+                    "{} {}: wrong flight count for {} floors",
+                    plan.name,
+                    block.archetype.name(),
+                    p.floors
+                );
+                // 2. no solid the SHIPPED world built intrudes into a door's void.
+                let doors: Vec<&inf_pcg::Opening> = p
+                    .openings
+                    .iter()
+                    .filter(|o| o.kind == inf_pcg::OpeningKind::Door)
+                    .collect();
+                doors_total += doors.len();
+                for (i, d) in doors.iter().enumerate() {
+                    assert!(
+                        p.opening_is_clear(d, &solids, 0.02),
+                        "{} {}: door {i} on wall {} is blocked by a collider the \
+                     shipped world built",
+                        plan.name,
+                        block.archetype.name(),
+                        d.wall
+                    );
+                }
+                // **THE CONTROL.** Every assertion above is "no solid is here", and
+                // such an assertion passes trivially if the predicate cannot say no.
+                // A slab through the whole building must read BLOCKED.
+                let f = p.footprint;
+                let top = p.floor_y(p.floors);
+                let slab = [inf_pcg::PcgCollider {
+                    center: glam::DVec3::new(f.center().x, (p.base_y + top) * 0.5, f.center().y),
+                    half_extents: glam::DVec3::new(
+                        f.size_x(),
+                        (top - p.base_y) * 0.5 + 2.0,
+                        f.size_z(),
+                    ),
+                    rotation: glam::DQuat::IDENTITY,
+                }];
+                for d in &doors {
+                    assert!(
+                        !p.opening_is_clear(d, &slab, 0.02),
+                        "a door reads CLEAR through a solid building — the \
+                     enterability predicate is vacuous at settlement scale"
+                    );
+                }
+            }
+        }
+        println!(
+            "ENTERABILITY {}: {buildings} buildings over {} resident blocks, \
+         {floors_total} storeys, {stairs_total} flights, {doors_total} door \
+         openings; by zone {by_zone:?}",
+            plan.name,
+            volumes.len()
+        );
+        assert!(
+            buildings >= 8,
+            "only {buildings} buildings resident at {} — this is not a \
+         settlement-scale sample",
+            plan.name
+        );
+        assert!(
+            stairs_total > 0,
+            "not one building at {} has a stair — 'climb a stair' has nothing to climb",
+            plan.name
+        );
+        total_buildings += buildings;
+        total_doorways += doorways.len();
+    }
+    println!(
+        "ENTERABILITY TOTAL: {total_buildings} buildings and {total_doorways} \
+         doorways over every settlement of this island, all enterable"
+    );
+    assert!(total_buildings > 0);
+}
+
+/// Does any solid contain `p`?
+///
+/// The blocks a settlement plans are axis-aligned, so a solid's XZ bounds are
+/// exact rather than conservative — `PcgCollider::xz_half_extents` is the same
+/// door `solid_bounds` uses and it needs no trigonometry.
+fn solid_contains(solids: &[inf_pcg::PcgCollider], p: glam::DVec3) -> usize {
+    solids
+        .iter()
+        .filter(|s| {
+            let (ex, ez) = s.xz_half_extents();
+            let (lo, hi) = s.y_band();
+            p.x >= s.center.x - ex
+                && p.x <= s.center.x + ex
+                && p.z >= s.center.z - ez
+                && p.z <= s.center.z + ez
+                && p.y >= lo
+                && p.y <= hi
+        })
+        .count()
+}
+
+/// One host's reading of the walk: the state fold per step, and everything the
+/// walk **discovered** rather than was told.
+///
+/// The discovery is deliberately part of the trace. Two hosts handed a
+/// hard-coded door guid would agree about it whatever their worlds held; two
+/// hosts each asked *"which door is nearest"* agree only if their worlds are the
+/// same world.
+struct Walk {
+    states: Vec<Vec<u8>>,
+    door: Uuid,
+    prompt: glam::DVec3,
+    open_before: bool,
+    open_after: bool,
+    verdict_moved: bool,
+    inside: glam::DVec3,
+    upstairs: glam::DVec3,
+    inside_blocked: usize,
+    upstairs_blocked: usize,
+    doorways: usize,
+    solids: usize,
+    climb_m: f64,
+}
+
+/// Steps spent walking from the settlement's centre to the door.
+const WALK_STEPS: usize = 40;
+/// Steps spent waiting for the leaf to swing after `use_door`.
+const SWING_STEPS: usize = 45;
+/// Steps spent standing inside, and then upstairs.
+const DWELL_STEPS: usize = 15;
+
+/// **THE WALK**: enter the city, find a door, open it, step through, go up.
+///
+/// Every target is computed from the host's OWN world; nothing is passed in but
+/// the settlement's centre, which is a committed number.
+fn walk_into_a_building(
+    sim: &mut RuntimeSim,
+    content: &Path,
+    recipe: &inf_island::IslandRecipe,
+    plan: &inf_editor_core::settlement::Settlement,
+) -> Walk {
+    let hero = hero_entity(sim).expect("a hero");
+    let centre = glam::DVec3::new(plan.centre.x, 0.0, plan.centre.y);
+    let mut states: Vec<Vec<u8>> = Vec::new();
+
+    // ── 1. ENTER THE CITY ── stand at the crossroads and let the cells activate.
+    set_hero(sim, hero, centre);
+    for _ in 0..8 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        states.push(sim.state_bytes());
+    }
+
+    // ── 2. FIND A DOOR ── the EXTERIOR doorway on the ground floor nearest the
+    //    crossroads, over the doorways the simulation is holding, **on a block
+    //    whose archetype is guaranteed multi-storey**. The last clause is not
+    //    fussiness: a `Shop` is one or two storeys and a `House` is one to
+    //    three, so on any other block "climb a stair" would be a claim about
+    //    which seed came up. Ties break on `(volume guid, index)`, which
+    //    `volume_doorways` already walks in.
+    let tall_blocks: std::collections::BTreeSet<Uuid> = plan
+        .blocks
+        .iter()
+        .filter(|b| always_multistorey(b.archetype))
+        .map(|b| inf_editor_core::settlement::block_guid(&recipe.name, b.site, b.col, b.row))
+        .collect();
+    let doorways = inf_ecs::door::volume_doorways(sim.world());
+    let solids = resident_solids(sim);
+    let (vol, idx, slot) = doorways
+        .iter()
+        .filter(|(v, _, d)| d.exterior && d.floor == 0 && tall_blocks.contains(v))
+        .min_by(|a, b| {
+            (a.2.hinge - centre)
+                .length_squared()
+                .total_cmp(&(b.2.hinge - centre).length_squared())
+        })
+        .copied()
+        .expect("a resident multi-storey block offers an exterior door");
+    let door = inf_physics::d3::door::pcg_doorway_guid(vol, idx);
+    let placement = inf_physics::d3::door::placement_of(sim.world(), door)
+        .expect("the doorway the walk found resolves to a placement");
+    let inside_dir = {
+        let yaw = slot.inside_yaw_deg.to_radians();
+        // `+Z` at zero, `+X` at +90 — the compass the doorway carries. The
+        // PORTABLE trig, not `std`'s: this reaches a position two hosts compare,
+        // and the P14 law does not stop at a file that happens to be a test.
+        glam::DVec3::new(
+            inf_math::portable::psin64(yaw),
+            0.0,
+            inf_math::portable::pcos64(yaw),
+        )
+    };
+    // **The walk arrives from the STREET**, which is the side away from the room
+    // the wall serves. That is not decoration: `DoorSpec::lock_side` is `Inside`
+    // for a grammar door, and `use_door` pressed from the lock side on a shut,
+    // unlocked leaf **locks it** rather than opening it — "locked from the
+    // inside" has to mean something for the person who locked it. The first
+    // draft of this walk stood on `prompt_position`, pressed, and got a verdict
+    // that did not move: it had bolted the front door from the hall.
+    let prompt = inf_ecs::door::prompt_position(&placement);
+    let approach = slot.hinge - inside_dir * 1.2;
+
+    // ── 3. WALK TO IT ── straight from the crossroads, one step at a time, so
+    //    the trace is a walk and not a teleport.
+    for k in 1..=WALK_STEPS {
+        let t = k as f64 / WALK_STEPS as f64;
+        set_hero(sim, hero, centre + (approach - centre) * t);
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        states.push(sim.state_bytes());
+    }
+
+    // ── 4. OPEN IT ── through `use_door`, which is the function the interact
+    //    button and the `door.use` node both dispatch to, pressed from the feet
+    //    the hero is standing on.
+    let feet = glam::DVec3::new(approach.x, approach.y - slot.height_m * 0.5, approach.z);
+    let open_before = inf_physics::d3::door::is_open_near(sim.world(), approach);
+    let verdict = inf_physics::d3::door::use_door(sim.world_mut(), door, feet);
+    for _ in 0..SWING_STEPS {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        states.push(sim.state_bytes());
+    }
+    let open_after = inf_physics::d3::door::is_open_near(sim.world(), approach);
+
+    // ── 5. STEP THROUGH ── a metre and a half along the inside face's own
+    //    normal, at knee height, which is where a body would be.
+    let inside = slot.hinge + inside_dir * 1.5;
+    for _ in 0..DWELL_STEPS {
+        set_hero(
+            sim,
+            hero,
+            glam::DVec3::new(inside.x, inside.y - 1.0, inside.z),
+        );
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        states.push(sim.state_bytes());
+    }
+    let inside_blocked = solid_contains(&solids, inside);
+
+    // ── 6. CLIMB ── the building this door belongs to, its stair core, at floor
+    //    one's own walking height. Found by re-deriving the block's plans and
+    //    matching the doorway's hinge BIT FOR BIT against the derivation the
+    //    shipped host itself ran — not by a search radius.
+    let block = plan
+        .blocks
+        .iter()
+        .find(|b| {
+            inf_editor_core::settlement::block_guid(&recipe.name, b.site, b.col, b.row) == vol
+        })
+        .copied()
+        .expect("the doorway's volume is a settlement block");
+    let passes = zone_passes(content, block.archetype);
+    let (upstairs, climb_m) = {
+        let volumes = resident_volumes(sim);
+        let (_, vcentre, vextent, vseed) = volumes
+            .iter()
+            .find(|(g, _, _, _)| *g == vol)
+            .copied()
+            .expect("the volume is resident");
+        let w = sim.world().world();
+        let terrain = w
+            .iter_entities()
+            .find_map(|e| e.get::<inf_ecs::components::Terrain>())
+            .expect("the island has ground");
+        let height =
+            inf_pcg::FnHeight::new(|x: f64, z: f64| terrain.data.height_at(glam::DVec2::new(x, z)));
+        let cx = inf_pcg::GrammarContext {
+            entity: Some(vol),
+            center: vcentre,
+            extent: vextent,
+            seed_offset: u64::from(vseed),
+        };
+        let plans = inf_pcg::plans_of(&passes, &inf_pcg::NoSplines, &height, &cx);
+        let mut found = None;
+        for p in &plans {
+            let mut ds = inf_pcg::building::doorways_of(p);
+            inf_pcg::building::place_doorways_in_frame(&mut ds, p.frame);
+            if ds.iter().any(|d| {
+                d.hinge.x.to_bits() == slot.hinge.x.to_bits()
+                    && d.hinge.y.to_bits() == slot.hinge.y.to_bits()
+                    && d.hinge.z.to_bits() == slot.hinge.z.to_bits()
+            }) {
+                found = Some(p.clone());
+                break;
+            }
+        }
+        let p = found.expect(
+            "the doorway the world offered is not in any plan the same resolution \
+             derives — the shipped population and `plans_of` disagree",
+        );
+        assert!(
+            p.floors >= 2,
+            "the building this walk entered is single-storey, so there is no stair \
+             to climb"
+        );
+        // **The stair is what got the hero up; the ROOM is where the hero
+        // stands.** The core's own footprint is full of treads at floor one's
+        // height — that is what a flight from one to two IS — so a "no solid is
+        // here" test aimed at the core measures the staircase and reads
+        // blocked-by-2. The claim the walk is making is that a floor above the
+        // ground is *reachable and standable*, so the point is the first
+        // non-stair room on floor one, and the stair's part is asserted
+        // separately: its room on floor one must be in the set reachable from
+        // outside.
+        assert!(p.core.is_some(), "a multi-storey plan has a stair core");
+        let reach = p.reachable_rooms();
+        let up = p
+            .stair_room(1)
+            .expect("a multi-storey plan has a stair room on floor one");
+        assert!(
+            reach.get(up).copied().unwrap_or(false),
+            "the stair room on floor one is not reachable from outside — the \
+             flight lands nowhere"
+        );
+        let (ri, room) = p
+            .rooms_on(1)
+            .find(|(i, r)| r.kind != inf_pcg::RoomType::Stair && reach[*i])
+            .expect("floor one has a room that is not the stairwell");
+        assert!(reach[ri]);
+        let c = p.frame.to_world(room.rect.center());
+        // Floor one's walking surface, plus a knee — the point a body standing on
+        // the first floor occupies.
+        let y = p.floor_y(1) + 0.5;
+        (glam::DVec3::new(c.x, y, c.y), p.floor_y(1) - p.floor_y(0))
+    };
+    for _ in 0..DWELL_STEPS {
+        set_hero(
+            sim,
+            hero,
+            glam::DVec3::new(upstairs.x, upstairs.y - 0.5, upstairs.z),
+        );
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        states.push(sim.state_bytes());
+    }
+    let upstairs_blocked = solid_contains(&solids, upstairs);
+
+    Walk {
+        states,
+        door,
+        prompt,
+        open_before,
+        open_after,
+        verdict_moved: verdict.moved(),
+        inside,
+        upstairs,
+        inside_blocked,
+        upstairs_blocked,
+        doorways: doorways.len(),
+        solids: solids.len(),
+        climb_m,
+    }
+}
+
+/// **THE SETTLEMENT GATE** (island wave I8a, clause 4): the shipped player and
+/// the editor's document walk into the same building, open the same door and
+/// climb the same stair, **byte for byte**.
+///
+/// # Coverage first, because two empty worlds agree perfectly
+///
+/// Every claim below is asserted on each host *separately* before the two are
+/// compared: the settlement is resident, it built solids, it planned doorways,
+/// the door the walk found was shut and is open, the doorway is walkable and the
+/// first floor is standable. A gate that compared folds alone would certify two
+/// hosts that both found nothing — which is exactly the failure the I7 audit
+/// found in the drive gate one file up.
+///
+/// # Why the walk discovers its own target
+///
+/// Nothing is passed in but the settlement's centre, which is a committed
+/// number. Which door is nearest, which building it belongs to and where that
+/// building's stair core is are all read out of the host's own world, so two
+/// hosts holding different worlds disagree about the targets as well as about
+/// the folds.
+#[test]
+fn pie_equals_shipping_on_a_walk_into_a_building() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let proj = build_project(tmp.path());
+    let content = proj.join("Content");
+    let pack = cook(tmp.path());
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let slug = inf_island::slug(&recipe.name);
+    let design = inf_island::read_design(&recipe).expect("the design reads");
+    let plan = walk_target_settlement(&design);
+
+    let mut ship = pack_sim(&pack);
+    let mut editor = loose_sim(&content, &slug);
+    let a = walk_into_a_building(&mut ship, &content, &recipe, &plan);
+    let b = walk_into_a_building(&mut editor, &content, &recipe, &plan);
+
+    for (label, w) in [("shipping", &a), ("document", &b)] {
+        println!(
+            "WALK ({label}) at {}: {} doorways / {} solids resident; door {} at \
+             ({:.2}, {:.2}, {:.2}); shut {} -> open {}; inside ({:.2}, {:.2}, \
+             {:.2}) blocked by {}; upstairs ({:.2}, {:.2}, {:.2}) blocked by {}; \
+             climbed {:.2} m",
+            plan.name,
+            w.doorways,
+            w.solids,
+            w.door,
+            w.prompt.x,
+            w.prompt.y,
+            w.prompt.z,
+            !w.open_before,
+            w.open_after,
+            w.inside.x,
+            w.inside.y,
+            w.inside.z,
+            w.inside_blocked,
+            w.upstairs.x,
+            w.upstairs.y,
+            w.upstairs.z,
+            w.upstairs_blocked,
+            w.climb_m
+        );
+        // ── coverage, on each host, before either is compared to the other ──
+        assert!(w.doorways > 0, "{label}: no doorway was resident at all");
+        assert!(w.solids > 0, "{label}: the settlement built no solid");
+        assert!(
+            !w.open_before,
+            "{label}: the door was already open, so opening it proves nothing"
+        );
+        assert!(
+            w.verdict_moved,
+            "{label}: `use_door` refused — the door the walk found is not usable"
+        );
+        assert!(
+            w.open_after,
+            "{label}: the door did not open in {SWING_STEPS} steps"
+        );
+        assert_eq!(
+            w.inside_blocked, 0,
+            "{label}: a solid stands where the walk stepped through the doorway — \
+             the door opens onto a wall"
+        );
+        assert_eq!(
+            w.upstairs_blocked, 0,
+            "{label}: a solid stands in the stair core on the first floor — the \
+             stairwell is filled in"
+        );
+        assert!(
+            w.climb_m > 2.0,
+            "{label}: the first floor is {:.2} m up, which is not a storey",
+            w.climb_m
+        );
+        assert_eq!(
+            w.states.len(),
+            8 + WALK_STEPS + SWING_STEPS + 2 * DWELL_STEPS,
+            "{label}: the walk did not run its whole script"
+        );
+    }
+
+    // ── and the two hosts agree, about the targets and about every step ──
+    assert_eq!(a.door, b.door, "the two hosts found different doors");
+    assert_eq!(
+        a.prompt.x.to_bits(),
+        b.prompt.x.to_bits(),
+        "the two hosts put the same door in different places"
+    );
+    assert_eq!(a.upstairs.y.to_bits(), b.upstairs.y.to_bits());
+    assert_eq!(a.doorways, b.doorways);
+    assert_eq!(a.solids, b.solids);
+    let mut distinct: std::collections::BTreeSet<&Vec<u8>> = Default::default();
+    for (i, (x, y)) in a.states.iter().zip(&b.states).enumerate() {
+        assert_eq!(
+            x,
+            y,
+            "the shipping player and the editor's document diverged at step {i} \
+             of the walk ({} against {} bytes)",
+            x.len(),
+            y.len()
+        );
+        distinct.insert(x);
+    }
+    println!(
+        "SETTLEMENT GATE: {} steps, {} DISTINCT states, byte-identical between \
+         the cooked pack and the loose document",
+        a.states.len(),
+        distinct.len()
+    );
+    // Anti-vacuity on the fold itself: a walk that never changed the world would
+    // produce one state repeated, and comparing it to itself proves nothing.
+    assert!(
+        distinct.len() > a.states.len() / 2,
+        "only {} of {} states are distinct — the walk is not moving the world",
+        distinct.len(),
+        a.states.len()
+    );
+}
+
+/// One furnish configuration's price for one block, in counts a machine cannot
+/// inflate.
+#[derive(Debug, Clone, Copy, Default)]
+struct BlockPrice {
+    buildings: usize,
+    solids: usize,
+    instances: usize,
+    doorways: usize,
+    /// Solids the collider band would admit with an anchor at the block's own
+    /// centre — the number a fixed step pays for.
+    banded: usize,
+}
+
+/// Evaluate one settlement block with `furnish` forced, and price it.
+///
+/// The ground is held **flat at the site's own datum**, and that is the honest
+/// choice for a price rather than a shortcut: a site pad is levelled toward its
+/// datum, so a block near a settlement's centre sits on ground that is nearly
+/// flat, and holding it exactly flat makes the comparison between three
+/// configurations have one variable. What it is NOT is a claim about the
+/// island's own relief.
+fn price_block(
+    passes: &[inf_pcg::BuildingPass],
+    furnish: Option<bool>,
+    centre: glam::DVec3,
+    extent: glam::DVec2,
+    seed: u32,
+) -> BlockPrice {
+    let passes: Vec<inf_pcg::BuildingPass> = passes
+        .iter()
+        .cloned()
+        .map(|mut p| {
+            if let Some(f) = furnish {
+                p.furnish = f;
+            }
+            p
+        })
+        .collect();
+    let cx = inf_pcg::GrammarContext {
+        entity: None,
+        center: centre,
+        extent,
+        seed_offset: u64::from(seed),
+    };
+    let height = inf_pcg::FnHeight::new(move |_, _| Some(centre.y));
+    let out = inf_pcg::evaluate_buildings(&passes, &inf_pcg::NoSplines, &height, &cx);
+    let band = inf_ecs::band::SimBand::from_anchors(
+        [centre],
+        BAND_NEAR_M,
+        inf_ecs::band::DEFAULT_COLLIDER_FAR_M,
+    );
+    BlockPrice {
+        buildings: out.groups.len(),
+        solids: out.colliders.len(),
+        instances: out.instances.len(),
+        doorways: out.doorways.len(),
+        banded: out
+            .colliders
+            .iter()
+            .filter(|c| band.tier(c.center, c.half_extents, c.rotation) == inf_math::Tier::Near)
+            .count(),
+    }
+}
+
+/// **THE FURNISH BATTERY** (island wave I8a, clause 3 / ruling 3).
+///
+/// The ruling was *measure, then decide, default ON*. This is the measurement,
+/// and it has three legs because "furnish=true holds" is three different claims:
+///
+/// 1. **What a city block costs, three ways.** One real **Harbour City** core
+///    block — a 100 m block on the shipped island's own grid, not the fixture's
+///    76 m one, because a battery about a city block has to be about one —
+///    evaluated with furnish off, with furnish as shipped, and with furnish
+///    forced on. Counts, which are the same integer on every machine.
+/// 2. **What the fixed step pays.** The fixture's own settled world, stepped
+///    with the shipped population and again with every resident volume's
+///    population replaced by the fully-furnished one, against
+///    [`CITY_STEP_BUDGET_MS`]. Same world, same anchors, one variable.
+/// 3. **What a load pays**, against [`LOAD_BUDGET_MS`].
+///
+/// The verdict it produced is `inf_editor_core::settlement::furnishes`, and it
+/// is stated in the wave's ledger with these numbers beside it.
+#[test]
+fn the_furnish_battery_prices_a_city_block_at_island_scale() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let started = std::time::Instant::now();
+    let proj = build_project(tmp.path());
+    let content = proj.join("Content");
+    let pack = cook(tmp.path());
+    let build_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+    // ── 1. one REAL Harbour City block, three ways ──
+    let shipped_recipe =
+        inf_editor_core::island::repo_root().join(inf_editor_core::island::ISLAND_RECIPES[0]);
+    if shipped_recipe.exists() {
+        let recipe =
+            inf_island::IslandRecipe::load(&shipped_recipe).expect("the island recipe loads");
+        let design = inf_island::read_design(&recipe).expect("the island design reads");
+        let city = inf_editor_core::settlement::settlements(&design)
+            .into_iter()
+            .find(|s| s.kind == inf_island::SiteKind::City)
+            .expect("the island has a city");
+        // The core block's own geometry, priced for **every archetype** rather
+        // than for the one that happens to be zoned there. That is what makes
+        // this a battery: `Shop` is one to two storeys and `Hotel` is four to
+        // ten, furniture is per ROOM, and a measurement of the cheap one would
+        // have decided the ruling on the wrong building.
+        let block = city
+            .blocks
+            .iter()
+            .find(|b| b.ring == 0)
+            .copied()
+            .expect("a city has a ring-0 block");
+        let centre = glam::DVec3::new(block.centre.x, 0.0, block.centre.y);
+        let extent = glam::DVec2::new(block.half.x, block.half.y);
+        println!(
+            "FURNISH BATTERY on a {:.0} x {:.0} m {} block at ({:.0}, {:.0}), \
+             every archetype:",
+            block.half.x * 2.0,
+            block.half.y * 2.0,
+            city.name,
+            block.centre.x,
+            block.centre.y
+        );
+        let mut worst = 1.0f64;
+        let mut worst_name = "";
+        for a in inf_pcg::ArchetypeId::ALL {
+            let passes = zone_passes(&content, a);
+            let off = price_block(&passes, Some(false), centre, extent, block.seed);
+            let on = price_block(&passes, Some(true), centre, extent, block.seed);
+            let ratio = on.solids as f64 / off.solids.max(1) as f64;
+            println!(
+                "  {:>10} ({}-{} storeys): {} buildings, {} doorways; bare {} \
+                 solids ({} banded, {} drawn instances) -> furnished {} solids \
+                 ({} banded, {} drawn), {ratio:.2}x{}",
+                a.name(),
+                inf_pcg::archetype(a).floors.0,
+                inf_pcg::archetype(a).floors.1,
+                off.buildings,
+                off.doorways,
+                off.solids,
+                off.banded,
+                off.instances,
+                on.solids,
+                on.banded,
+                on.instances,
+                if inf_editor_core::settlement::furnishes(a) {
+                    "  <- SHIPS FURNISHED"
+                } else {
+                    ""
+                }
+            );
+            assert_eq!(
+                off.buildings,
+                on.buildings,
+                "{}: furnishing changed how many BUILDINGS a block stands, which \
+                 it must not — furniture is what goes inside them",
+                a.name()
+            );
+            assert_eq!(
+                off.doorways,
+                on.doorways,
+                "{}: furnishing changed the doorway count",
+                a.name()
+            );
+            assert!(
+                on.solids > off.solids,
+                "{}: furnishing added no solid at all — the battery is measuring \
+                 nothing",
+                a.name()
+            );
+            if ratio > worst {
+                worst = ratio;
+                worst_name = a.name();
+            }
+        }
+        println!("  WORST: {worst_name} at {worst:.2}x the solids of a bare block");
+    } else {
+        println!("SKIP the shipped-island half: no committed island recipe");
+    }
+
+    // ── 2. what the fixed step pays, on a settled world ──
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let design = inf_island::read_design(&recipe).expect("the design reads");
+    let plan = walk_target_settlement(&design);
+    let mut sim = pack_sim(&pack);
+    let hero = hero_entity(&sim).expect("a hero");
+    set_hero(
+        &mut sim,
+        hero,
+        glam::DVec3::new(plan.centre.x, 0.0, plan.centre.y),
+    );
+    for _ in 0..12 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let shipped_solids = resident_solids(&sim).len();
+    println!("FIXED STEP at {} (release asserts nothing here — this REPORTS, on this module's own law that a millisecond is a fact about the machine):", plan.name);
+    let (shipped_ms, shipped_prof) = step_profile_of(&mut sim, 60, 90);
+    print_step(
+        "as shipped",
+        shipped_ms,
+        &shipped_prof,
+        shipped_solids,
+        &sim,
+    );
+
+    // …and again with every resident block's population replaced by the fully
+    // furnished one, through the same door the host writes it with.
+    let by_guid: std::collections::BTreeMap<Uuid, inf_editor_core::settlement::Block> = plan
+        .blocks
+        .iter()
+        .map(|b| {
+            (
+                inf_editor_core::settlement::block_guid(&recipe.name, b.site, b.col, b.row),
+                *b,
+            )
+        })
+        .collect();
+    let mut replaced = 0usize;
+    for (guid, centre, extent, seed) in resident_volumes(&sim) {
+        let Some(block) = by_guid.get(&guid) else {
+            continue;
+        };
+        let passes: Vec<inf_pcg::BuildingPass> = zone_passes(&content, block.archetype)
+            .into_iter()
+            .map(|mut p| {
+                p.furnish = true;
+                p
+            })
+            .collect();
+        let out = {
+            let w = sim.world().world();
+            let terrain = w
+                .iter_entities()
+                .find_map(|e| e.get::<inf_ecs::components::Terrain>())
+                .expect("the island has ground");
+            let height = inf_pcg::FnHeight::new(|x: f64, z: f64| {
+                terrain.data.height_at(glam::DVec2::new(x, z))
+            });
+            let cx = inf_pcg::GrammarContext {
+                entity: Some(guid),
+                center: centre,
+                extent,
+                seed_offset: u64::from(seed),
+            };
+            inf_pcg::compose_volume(
+                Vec::new(),
+                inf_pcg::evaluate_buildings(&passes, &inf_pcg::NoSplines, &height, &cx),
+            )
+        };
+        let (baked, solid, groups, doorways) = inf_player::level::population_of(out);
+        let e = sim
+            .world()
+            .entity_of(guid)
+            .expect("the volume the walk found is in the world");
+        if let Some(mut v) = sim
+            .world_mut()
+            .world_mut()
+            .get_mut::<inf_ecs::components::PcgVolume>(e)
+        {
+            v.set_population(baked, solid, groups, doorways);
+            replaced += 1;
+        }
+    }
+    // Two steps for the physics bridge to reconcile the new change stamp before
+    // the clock starts — the cost being measured is the STEADY step, not the
+    // rebuild the swap itself forces.
+    for _ in 0..2 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let furnished_solids = resident_solids(&sim).len();
+    let (furnished_ms, furnished_prof) = step_profile_of(&mut sim, 60, 90);
+    print_step(
+        "fully furnished",
+        furnished_ms,
+        &furnished_prof,
+        furnished_solids,
+        &sim,
+    );
+    println!(
+        "  {replaced} volume(s) swapped; furnishing costs {:+.3} ms a step \
+         ({:.2}x the solids)",
+        furnished_ms - shipped_ms,
+        furnished_solids as f64 / shipped_solids.max(1) as f64
+    );
+    println!("LOAD: build + cook of the whole fixture project took {build_ms:.0} ms against a {LOAD_BUDGET_MS} ms load budget");
+    assert!(
+        furnished_solids > shipped_solids,
+        "the swap changed nothing — the step comparison is between one \
+         configuration and itself"
+    );
+    // **Reported, not asserted, and the reason is this module's own law**: a
+    // millisecond is a fact about the machine, `[profile.dev]` is `opt-level = 1`
+    // with debug assertions, and every CI runner reports rather than asserts on
+    // a wall clock. What IS asserted is the solid count, which is the same
+    // integer everywhere.
+    assert!(
+        shipped_ms.is_finite() && furnished_ms.is_finite(),
+        "the step clock produced no number"
+    );
+}
+
+/// The mean fixed-step time over `n` steps, milliseconds, **with the step's own
+/// phase breakdown beside it**.
+///
+/// A step that cannot say where its milliseconds went is the CPU twin of the
+/// frame that could not say where its GPU milliseconds went — wave I4b's own
+/// finding, and the reason `RuntimeSim` carries a step clock at all. The first
+/// draft of this battery printed one number and a reader could not tell a
+/// physics regression from a paging one.
+///
+/// A discarded warm-up pass first: the first steps after a population swap seat
+/// the collider band and take every `structure_stamps` miss there is, and
+/// measuring them is measuring a step that happens once.
+fn step_profile_of(
+    sim: &mut RuntimeSim,
+    warmup: usize,
+    n: usize,
+) -> (f64, inf_player::step_profile::StepProfile) {
+    for _ in 0..warmup {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    sim.set_step_profiling(true);
+    let mut acc = inf_player::step_profile::StepProfile::default();
+    let t = std::time::Instant::now();
+    for _ in 0..n {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        acc.accumulate(&sim.step_profile());
+    }
+    let wall = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+    acc.scale(1.0 / n as f64);
+    sim.set_step_profiling(false);
+    (wall, acc)
+}
+
+/// Print one step profile, dearest phase first, **with what the physics world
+/// actually admitted beside it**.
+///
+/// A step whose dearest phase is the solver over a world with one moving thing
+/// in it is a step paying for its own STATIC geometry, and the admitted-collider
+/// count is the evidence — the fps instrument's own arrangement, met on a
+/// settlement.
+fn print_step(
+    label: &str,
+    wall: f64,
+    prof: &inf_player::step_profile::StepProfile,
+    solids: usize,
+    sim: &RuntimeSim,
+) {
+    let (tracked, touching) = sim.bridge3d().world().contact_pair_counts();
+    println!(
+        "  {label:<18} {wall:7.3} ms/step over {solids} resident solids (phases \
+         sum to {:.3} ms; the ratchet is {CITY_STEP_BUDGET_MS} ms). Physics: {} \
+         bodies, {} ADMITTED structure colliders, {tracked} contact pairs \
+         tracked ({touching} touching)",
+        prof.total_ms(),
+        sim.bridge3d().body_count(),
+        sim.bridge3d().admitted_structures(),
+    );
+    for (n, ms) in prof.dearest_first() {
+        if ms <= 0.02 {
+            continue;
+        }
+        println!(
+            "      {n:<18} {ms:7.3} ms ({:4.1} %)",
+            ms / prof.total_ms().max(1.0e-9) * 100.0
+        );
+    }
+}
+
+/// **THE `is_open` WALK, RE-MEASURED AT SETTLEMENT SCALE** (island wave I8a,
+/// clause 3).
+///
+/// The I6 audit found `door.is_open` walking **all 19 790 doorways** of the
+/// composed city to answer a question about one, and fixed it by checking the
+/// reach *before* building a placement — so the walk is still `O(doorways)` and
+/// the allocation is not. Wave I8a is the first content in this repository that
+/// puts real doorways on a streamed world, so the cost class is re-measured
+/// here rather than assumed.
+///
+/// **The number that changed is not the constant, it is the N.** The walk is
+/// over the doorways the SIMULATION holds, and a streamed island holds one
+/// neighbourhood: the whole island plans two orders of magnitude more doorways
+/// than any step ever walks.
+#[test]
+fn the_is_open_walk_costs_what_it_costs_at_settlement_scale() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    build_project(tmp.path());
+    let pack = cook(tmp.path());
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let design = inf_island::read_design(&recipe).expect("the design reads");
+    let plan = walk_target_settlement(&design);
+    let mut sim = pack_sim(&pack);
+    let hero = hero_entity(&sim).expect("a hero");
+    set_hero(
+        &mut sim,
+        hero,
+        glam::DVec3::new(plan.centre.x, 0.0, plan.centre.y),
+    );
+    for _ in 0..12 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let resident = inf_ecs::door::volume_doorways(sim.world()).len();
+    let centre = glam::DVec3::new(plan.centre.x, 0.0, plan.centre.y);
+    // Two questions, and the difference between them is the whole point: one
+    // asked where there IS a door, one asked out at sea.
+    let near = {
+        let d = inf_ecs::door::volume_doorways(sim.world());
+        d.iter()
+            .map(|(_, _, s)| s.hinge)
+            .min_by(|a, b| {
+                (*a - centre)
+                    .length_squared()
+                    .total_cmp(&(*b - centre).length_squared())
+            })
+            .expect("a doorway")
+    };
+    let far = glam::DVec3::new(centre.x + 5_000.0, centre.y, centre.z);
+    const CALLS: usize = 200;
+    let mut answered = 0usize;
+    let t = std::time::Instant::now();
+    for _ in 0..CALLS {
+        if inf_physics::d3::door::is_open_near(sim.world(), near) {
+            answered += 1;
+        }
+    }
+    let near_us = t.elapsed().as_secs_f64() * 1.0e6 / CALLS as f64;
+    let t = std::time::Instant::now();
+    for _ in 0..CALLS {
+        if inf_physics::d3::door::is_open_near(sim.world(), far) {
+            answered += 1;
+        }
+    }
+    let far_us = t.elapsed().as_secs_f64() * 1.0e6 / CALLS as f64;
+    // **What the walk's N actually is.** The resident set, against the blocks
+    // this island holds in all: the ratio is the whole point of the class, and
+    // the second number is a block COUNT rather than a doorway count because
+    // nothing evaluates the far blocks and inventing a doorway figure for them
+    // would be inference dressed as measurement.
+    let resident_blocks = resident_volumes(&sim).len();
+    let island_blocks: usize = inf_editor_core::settlement::settlements(&design)
+        .iter()
+        .map(|s| s.blocks.len())
+        .sum();
+    println!(
+        "IS_OPEN WALK: {resident} doorways over {resident_blocks} resident blocks \
+         at {}, {near_us:.1} us a call beside a door and {far_us:.1} us a call \
+         five kilometres from one ({answered} of {} answered open). This island \
+         has {island_blocks} blocks in all and a step walks the resident ones \
+         only — the walk is O(RESIDENT doorways), which is what streaming buys \
+         and what the I6 measurement (19 790 doorways on an unstreamed city) did \
+         not have.",
+        plan.name,
+        2 * CALLS
+    );
+    assert!(resident > 100, "only {resident} doorways were resident");
+    // The class: the far call does the same walk and allocates nothing, so it
+    // must not be dramatically dearer than the near one. A regression that
+    // rebuilt every placement would make the far call the expensive one.
+    assert!(
+        far_us <= near_us * 4.0 + 50.0,
+        "a call with NO door in reach costs {far_us:.1} us against {near_us:.1} \
+         beside one — the reach check has stopped happening before the \
+         allocation (the I6 audit's finding, returned)"
     );
 }
