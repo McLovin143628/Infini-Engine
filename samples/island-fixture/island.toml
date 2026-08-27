@@ -112,6 +112,26 @@ content = [
   "../ground/Ground_Soil_Normal.inf_tex.toml",
   "../ground/Ground_Soil_ORM.inf_tex",
   "../ground/Ground_Soil_ORM.inf_tex.toml",
+  # THE SETTLEMENT ZONE LIBRARY (wave I8a). Every settlement block's
+  # `PcgVolume.graph` names one of these seven GUIDs, so a project built without
+  # them has a hundred and seventy blocks bound to documents nothing can
+  # resolve and a city that evaluates to nothing. They live with the ENGINE
+  # (`samples/settlement/`) for the ground library's reason: one copy,
+  # byte-locked against its generator, referenced by both islands.
+  "../settlement/Zone_Apartment.inf_pcg",
+  "../settlement/Zone_Apartment.inf_pcg.toml",
+  "../settlement/Zone_Estate.inf_pcg",
+  "../settlement/Zone_Estate.inf_pcg.toml",
+  "../settlement/Zone_Hotel.inf_pcg",
+  "../settlement/Zone_Hotel.inf_pcg.toml",
+  "../settlement/Zone_House.inf_pcg",
+  "../settlement/Zone_House.inf_pcg.toml",
+  "../settlement/Zone_Industrial.inf_pcg",
+  "../settlement/Zone_Industrial.inf_pcg.toml",
+  "../settlement/Zone_Office.inf_pcg",
+  "../settlement/Zone_Office.inf_pcg.toml",
+  "../settlement/Zone_Shop.inf_pcg",
+  "../settlement/Zone_Shop.inf_pcg.toml",
 ]
 
 # The same UTM zone and the same ground as the full island, offset to sit over
@@ -178,6 +198,42 @@ beach_m = 12.0
 classes = 3
 class_biomes = ["plain", "forest", "meadow"]
 
+# THE FIXTURE'S SITES ARE SETTLEMENTS NOW (wave I8a, clause 2), and the camp
+# grew to fit one.
+#
+# `Fixture Camp` was 90 m: a 76 m town grid's first block reaches 96.2 m from the
+# centre, so a 90 m reservation held ZERO blocks and CI's only town would have
+# built nothing. 130 m holds the first ring.
+#
+# **`Fixture Town` did NOT grow, and the reason is a measurement.** This fixture
+# is a mountain — 254.7 m of relief over 1.5 km of land — and a site pad's rim is
+# steeper than the hillside it is cut into by construction: `flatten_sample`
+# eases with `smooth01`, whose derivative peaks at 1.5, so the rim's gradient is
+# about 1.25x the local slope whatever the radius. Widening this pad walks that
+# rim onto the road. Measured on this fixture, worst grade against a 0.100
+# ceiling: **120 m -> 0.099 and zero stretches over; 240 m -> 0.110 and one;
+# 280 m -> 0.118 and four; 340 m -> 0.125 and five, which is 3.47 % of 144
+# measured stretches and BLOCKING past `ROAD_OVER_GRADE_CEILING`.** Re-planning
+# the network first (`inf island route`) took 3.47 % to 3.08 % and no further.
+# And a second cost with a different shape: past 140 m the pad fills this
+# island's one lake, and the derived lake layer goes from one to none.
+#
+# So the town keeps its radius and the GENERATOR adapts instead: a settlement
+# takes the coarsest grid of its kind's ladder that fits its own reservation, and
+# a 120 m city reservation takes the town's 76 m grid rather than the city's
+# 120 m one. See `inf_editor_core::settlement::grid_for`.
+#
+# AND THIS FIXTURE'S WATER LAYERS ARE NOT RE-DERIVED, which is a REFUSAL with a
+# measurement rather than an oversight. The full island's were (its committed
+# drift is 0.00 % now, and its worst road grade IMPROVED, 0.118 -> 0.108). Here a
+# fresh derivation finds 9 reaches of 1.33 km where the committed layer has 9 of
+# 1.25 km, and one of the new channels crosses a route: the road audit goes from
+# **worst 0.099 and zero stretches over** to **worst 0.239 and five**, because
+# `carve_channels` cuts a trench and this generator builds no bridges (the I7
+# refusal). The committed layers stay, the drift stays at 5.43 % of stream length
+# with the lake exact, and the day a bridge exists this is the paragraph to
+# delete.
+
 [[sites]]
 name = "Fixture Town"
 kind = "city"
@@ -190,4 +246,4 @@ name = "Fixture Camp"
 kind = "town"
 x = 430.0
 z = -300.0
-radius_m = 90.0
+radius_m = 130.0

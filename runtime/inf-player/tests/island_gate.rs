@@ -974,8 +974,37 @@ fn the_biome_binding_scatters_when_its_ground_is_resident_and_not_before() {
     }
 
     // ── NOT BEFORE: a world with no ground paged ──
+    //
+    // **Two controls since wave I8a, and the second one is why.** This used to be
+    // one: cell streaming attached, terrain streaming deliberately not, asserting
+    // zero tiles and zero instances. With the settlements standing that is no
+    // longer true and the reason is a *feature* — IB-1's rule that **PCG pages
+    // its own ground**. A settlement block is a `PcgVolume` with
+    // `Ground::Terrain`, so activating its cell runs `page_terrains_for_pcg`
+    // before evaluating it, and the terrain the level shipped empty now holds the
+    // page that volume needed. The vegetation then grows on it, correctly.
+    //
+    // So the true zero moves to a world with **neither** streamer (no cells, no
+    // volumes, no pre-pass, no ground), and the cell-only world becomes what it
+    // actually is: a strict, tiny subset of the shipped reading.
     let pack = cook(tmp.path());
     let source = inf_player::level::PackLevelSource::open(&pack).expect("the pack opens");
+    let mut nothing = {
+        let built = inf_player::build_world_from_pack(&source).expect("the world builds");
+        inf_player::sim_from_built(built)
+    };
+    nothing.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    let (_, nothing_pop) = veg_digest(&nothing);
+    println!(
+        "NEITHER STREAMER: {} sim tile(s), {nothing_pop} instances",
+        sim_tiles(&nothing)
+    );
+    assert_eq!(sim_tiles(&nothing), 0, "a streamed level ships no tiles");
+    assert_eq!(
+        nothing_pop, 0,
+        "the binding grew {nothing_pop} instances over ground that is not there"
+    );
+
     let mut bare = {
         let mut built = inf_player::build_world_from_pack(&source).expect("the world builds");
         let partition = built.take_partition();
@@ -986,14 +1015,16 @@ fn the_biome_binding_scatters_when_its_ground_is_resident_and_not_before() {
     };
     bare.step_once(inf_player::runtime_sim::RuntimeInput::default());
     let (_, bare_pop) = veg_digest(&bare);
+    let bare_tiles = sim_tiles(&bare);
     println!(
-        "NO GROUND PAGED: {} sim tile(s), {bare_pop} instances",
-        sim_tiles(&bare)
+        "CELLS BUT NO TERRAIN STREAMER: {bare_tiles} sim tile(s) paged by the \
+         settlements' own PCG pre-pass, {bare_pop} instances"
     );
-    assert_eq!(sim_tiles(&bare), 0, "a streamed level ships no tiles");
-    assert_eq!(
-        bare_pop, 0,
-        "the binding grew {bare_pop} instances over ground that is not there"
+    assert!(
+        bare_tiles > 0 && bare_pop > 0,
+        "the settlement volumes paged no ground of their own — IB-1's pre-pass \
+         is not running, and a building with `Ground::Terrain` over an unpaged \
+         page fails closed and builds nothing"
     );
 
     // ── AND AFTER: the shipped boot, streamer attached ──
@@ -1007,6 +1038,14 @@ fn the_biome_binding_scatters_when_its_ground_is_resident_and_not_before() {
         population > 500,
         "the streamed boot grew only {population} instances on {tiles} paged \
          tile(s) — the refresh is not reaching the resident ground"
+    );
+    // …and the terrain streamer is what did it: the settlements' own pre-pass
+    // pages a page or two, the streamer pages the neighbourhood.
+    assert!(
+        tiles > bare_tiles && population > bare_pop,
+        "the terrain streamer added nothing the settlements' PCG pre-pass had \
+         not already paged ({tiles} against {bare_tiles} tiles, {population} \
+         against {bare_pop} instances)"
     );
 
     // ── AND IT IS THE SAME FOREST ──
@@ -1568,11 +1607,29 @@ fn the_scattered_cover_draws_its_authored_meshes() {
         "an empty scatter-mesh table must produce the placeholder path -- if it \
          does not, the arm above is not measuring the table"
     );
+    // **What "the pre-TER2b engine" is, restated for a world with settlements in
+    // it** (island wave I8a). This used to assert `before.scatter.len() == 1`:
+    // the island's whole population was the biome-bound vegetation, which is one
+    // batch per terrain. Wave I8a stands 172 settlement blocks on the island, and
+    // a block's grammar modules go through the same `push_scatter` body, so the
+    // batch count is now the vegetation's one plus one per resident block — the
+    // fixture measures nine. A count was never the claim; **not one batch carries
+    // geometry** is, and it is asserted above.
+    assert!(
+        before.scatter.len() >= 1 + with_geom.len().min(1),
+        "the placeholder projection produced no batch at all, so it is not the \
+         same population"
+    );
     assert_eq!(
+        before.scatter.iter().filter(|b| b.data.len() > 0).count(),
         before.scatter.len(),
-        1,
-        "with no table the whole population is ONE placeholder batch, which is \
-         what the engine drew from P18.5 until this wave"
+        "an empty batch reached the projection"
+    );
+    println!(
+        "PLACEHOLDER PROJECTION: {} batches, none carrying geometry (the \
+         pre-TER2b engine); the settlements are {} of them",
+        before.scatter.len(),
+        before.scatter.len().saturating_sub(1)
     );
 
     // The PROXY primitive is still a cube, and that is a CARRIED BOUND rather

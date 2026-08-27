@@ -124,6 +124,26 @@ content = [
   "../ground/Ground_Soil_Normal.inf_tex.toml",
   "../ground/Ground_Soil_ORM.inf_tex",
   "../ground/Ground_Soil_ORM.inf_tex.toml",
+  # THE SETTLEMENT ZONE LIBRARY (wave I8a). Every settlement block's
+  # `PcgVolume.graph` names one of these seven GUIDs, so a project built without
+  # them has a hundred and seventy blocks bound to documents nothing can
+  # resolve and a city that evaluates to nothing. They live with the ENGINE
+  # (`samples/settlement/`) for the ground library's reason: one copy,
+  # byte-locked against its generator, referenced by both islands.
+  "../settlement/Zone_Apartment.inf_pcg",
+  "../settlement/Zone_Apartment.inf_pcg.toml",
+  "../settlement/Zone_Estate.inf_pcg",
+  "../settlement/Zone_Estate.inf_pcg.toml",
+  "../settlement/Zone_Hotel.inf_pcg",
+  "../settlement/Zone_Hotel.inf_pcg.toml",
+  "../settlement/Zone_House.inf_pcg",
+  "../settlement/Zone_House.inf_pcg.toml",
+  "../settlement/Zone_Industrial.inf_pcg",
+  "../settlement/Zone_Industrial.inf_pcg.toml",
+  "../settlement/Zone_Office.inf_pcg",
+  "../settlement/Zone_Office.inf_pcg.toml",
+  "../settlement/Zone_Shop.inf_pcg",
+  "../settlement/Zone_Shop.inf_pcg.toml",
 ]
 
 # ─── where on Earth ────────────────────────────────────────────────────────────
@@ -221,23 +241,38 @@ classes = 4
 class_biomes = ["plain", "forest", "forest", "meadow"]
 
 # ─── the settlements ──────────────────────────────────────────────────────────
-# Two cities and five towns, per the mandate. They are EMPTY sites: the roads
-# connect them and the biome map reserves their ground, and what stands on them
-# is wave I8's. Positions are world metres (+X east, -Z north).
+# Two cities and five towns, per the mandate. `radius_m` is the ground the carve
+# levels AND the circle the biome map paints urban — one number, two jobs, and
+# that is why a building inside it stands on bare reserved ground rather than in
+# a forest. Positions are world metres (+X east, -Z north).
+#
+# WHAT STANDS ON THEM IS WAVE I8a's: `inf_editor_core::settlement` cuts each
+# reservation into a street grid, the grid into blocks, and each block into lots
+# a `building.plan` stands one building on. The radii below are what that
+# generator has to work inside.
+#
+# THE CITIES ARE A KILOMETRE SQUARE (wave I8a, clause 2). 520 m and 480 m were
+# 0.849 km2 and 0.724 km2 against a brief of record that says "2 cities >= 1 km2
+# with districts", and at a 120 m block pitch a 480 m reservation is three rings
+# of blocks — enough for a core and a ring and nothing for an EDGE zone to be.
+# 600 m is 1.131 km2 and 570 m is 1.020 km2, and both carry the fourth ring the
+# zoning table's House/Estate edge lives on. The cost is measured rather than
+# assumed: a bigger pad levels more ground, which moves the water the ground
+# derives, and the wave's ledger states the drift it moved.
 
 [[sites]]
 name = "Harbour City"
 kind = "city"
 x = -1750.0
 z = 2050.0
-radius_m = 520.0
+radius_m = 600.0
 
 [[sites]]
 name = "Eastgate"
 kind = "city"
 x = 2050.0
 z = 1750.0
-radius_m = 480.0
+radius_m = 570.0
 
 [[sites]]
 name = "Cedar Cove"

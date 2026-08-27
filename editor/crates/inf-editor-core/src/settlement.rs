@@ -288,14 +288,48 @@ pub fn block_count(plans: &[Settlement]) -> usize {
     plans.iter().map(|s| s.blocks.len()).sum()
 }
 
-/// The grid pitch and street reserve for a site kind.
-fn grid_of(kind: SiteKind) -> (f64, f64) {
-    match kind {
-        SiteKind::City => (CITY_BLOCK_M + CITY_STREET_M, CITY_STREET_M),
-        // A waypoint never reaches here (see `settlements`), and answering the
-        // town's grid rather than panicking keeps this total.
-        SiteKind::Town | SiteKind::Waypoint => (TOWN_BLOCK_M + TOWN_STREET_M, TOWN_STREET_M),
-    }
+/// **The grid a site of this kind gets inside a `radius_m` reservation**, as
+/// `(pitch, street, buildable)` — or `None` when not one block of the finest
+/// grid fits.
+///
+/// `buildable` is the radius blocks are allowed inside: one street reserve in
+/// from the reservation, so the outermost street still has levelled, urban-zoned
+/// ground under it. It is part of the answer rather than a caller's arithmetic
+/// because it depends on which rung of the ladder was taken.
+///
+/// # Why a ladder and not one grid per kind
+///
+/// The first draft was one grid per kind, and it made a settlement's existence a
+/// step function of its radius: the first city block's far corner is 155.6 m
+/// from the centre, so a 150 m city reservation held **zero** blocks and built
+/// nothing at all — silently, because nothing else in the plan depends on a
+/// block existing. The CI fixture's own city is 120 m (its radius is pinned by
+/// its lake and its road grades — see `samples/island-fixture/island.toml`), so
+/// the one settlement CI ever builds was the one that fell off the step.
+///
+/// A settlement therefore takes the **coarsest grid of its kind's ladder that
+/// fits**, and a reservation that fits none builds nothing *and says so*
+/// ([`Settlement::refused_off_pad`] counts every cell it refused). A city on a
+/// town's grid is still zoned by the city's table — the ladder decides how
+/// finely the ground is cut, the kind decides what stands on it.
+///
+/// "Fits" is the first block's own far corner against the radius, in **squared**
+/// metres so no square root reaches a committed block position.
+pub fn grid_for(kind: SiteKind, radius_m: f64) -> Option<(f64, f64, f64)> {
+    let ladder: &[(f64, f64)] = match kind {
+        SiteKind::City => &[
+            (CITY_BLOCK_M + CITY_STREET_M, CITY_STREET_M),
+            (TOWN_BLOCK_M + TOWN_STREET_M, TOWN_STREET_M),
+        ],
+        // A waypoint never reaches here (see `settlements`); answering the
+        // town's ladder rather than panicking keeps this total.
+        SiteKind::Town | SiteKind::Waypoint => &[(TOWN_BLOCK_M + TOWN_STREET_M, TOWN_STREET_M)],
+    };
+    ladder.iter().copied().find_map(|(pitch, street)| {
+        let buildable = (radius_m - street).max(0.0);
+        let far = street * 0.5 + (pitch - street);
+        (2.0 * far * far <= buildable * buildable).then_some((pitch, street, buildable))
+    })
 }
 
 /// The Chebyshev ring a grid index sits in: `0` for the two indices either side
@@ -310,9 +344,25 @@ fn ring_of(i: i32) -> u32 {
 
 fn plan_site(design: &IslandDesign, site: usize, s: &Site, land: &Land) -> Settlement {
     let centre = DVec2::new(s.x, s.z);
-    let (pitch, street) = grid_of(s.kind);
+    // A reservation too small for one block of the finest grid builds nothing,
+    // and the empty plan is the value that says so.
+    let Some((pitch, street, buildable)) = grid_for(s.kind, s.radius_m) else {
+        return Settlement {
+            site,
+            name: s.name.clone(),
+            kind: s.kind,
+            centre,
+            radius_m: s.radius_m,
+            buildable_m: 0.0,
+            pitch_m: 0.0,
+            street_m: 0.0,
+            streets: Vec::new(),
+            blocks: Vec::new(),
+            refused_off_pad: 0,
+            refused_off_land: 0,
+        };
+    };
     let half_street = street * 0.5;
-    let buildable = (s.radius_m - street).max(0.0);
     let half = DVec2::splat((pitch - street) * 0.5);
 
     // How many grid lines fit each way. A line at `k·pitch` from the centre is
@@ -1127,6 +1177,46 @@ mod tests {
 
     /// The industrial floor is the settlement's outer half and never its core —
     /// including in a settlement too shallow for the constant it replaced.
+    /// **The grid ladder**, and the step it exists to remove.
+    #[test]
+    fn a_reservation_takes_the_coarsest_grid_that_fits_it() {
+        let city = CITY_BLOCK_M + CITY_STREET_M;
+        let town = TOWN_BLOCK_M + TOWN_STREET_M;
+        // A full city reservation takes the city's own grid.
+        assert_eq!(
+            grid_for(SiteKind::City, 600.0),
+            Some((city, CITY_STREET_M, 580.0))
+        );
+        // The fixture's 120 m city falls to the town's grid — and WITHOUT the
+        // ladder it would have built nothing at all, which is the step.
+        let (pitch, street, buildable) =
+            grid_for(SiteKind::City, 120.0).expect("a 120 m city still gets a grid");
+        assert_eq!((pitch, street), (town, TOWN_STREET_M));
+        assert_eq!(buildable, 104.0);
+        let far = TOWN_STREET_M * 0.5 + TOWN_BLOCK_M;
+        assert!(2.0 * far * far <= buildable * buildable);
+        // The first city block's far corner is 155.6 m out, which is what makes
+        // 120 m too small for the city's own grid — the arithmetic behind the
+        // ladder, stated rather than trusted.
+        let city_far = CITY_STREET_M * 0.5 + CITY_BLOCK_M;
+        let city_corner = (2.0 * city_far * city_far).sqrt();
+        println!(
+            "GRID LADDER: a city block's far corner is {city_corner:.1} m, a town \
+             block's {:.1} m",
+            (2.0 * far * far).sqrt()
+        );
+        assert!((city_corner - 155.563).abs() < 0.01);
+        // …and a reservation too small for either builds nothing.
+        assert_eq!(grid_for(SiteKind::City, 90.0), None);
+        assert_eq!(grid_for(SiteKind::Town, 90.0), None);
+        assert_eq!(
+            grid_for(SiteKind::Town, 130.0),
+            Some((town, TOWN_STREET_M, 114.0))
+        );
+        assert_eq!(grid_for(SiteKind::Town, 0.0), None);
+        assert_eq!(grid_for(SiteKind::Town, f64::NAN), None);
+    }
+
     #[test]
     fn the_industrial_floor_is_the_outer_half_and_never_the_core() {
         assert_eq!(industrial_min_ring(3), 2, "a four-ring city");

@@ -339,7 +339,7 @@ fn island_ground_layers() -> [inf_ecs::components::TerrainLayer; 4] {
 /// Author the island's level from its committed design.
 pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     use inf_ecs::components::{
-        AlwaysLoaded, Light, LightKind, MeshRef, SkyAtmosphere, Spline, SplineInterp,
+        AlwaysLoaded, Light, LightKind, MeshRef, PcgVolume, SkyAtmosphere, Spline, SplineInterp,
         StreamingSource, Terrain, TimeOfDay, Transform, WaterBody, WaterKind,
     };
     use inf_ecs::math::{Color, Vec2d, Vec3d};
@@ -543,6 +543,56 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     // own bounds** — so there is no `PcgVolume` here and no half-extent to keep
     // in step with the world's. That is the one door: the level names a biome
     // set, the set names a graph, and the graph is masked by the painted ids.
+
+    // ── the settlements ───────────────────────────────────────────────────────
+    //
+    // **Wave I8a: the seven pads stop being terraces.** One `PcgVolume` per block
+    // — a centre, an axis-aligned half-extent, a seed and the GUID of the zone
+    // document its archetype names. The plan is
+    // `crate::settlement::settlements`, which is a pure function of the same
+    // committed design every number above comes from.
+    //
+    // **Not `AlwaysLoaded`, deliberately.** A settlement block is exactly what
+    // the partition is for: 172 volumes over 51 km² is a thousand buildings the
+    // simulation must not hold at once, and `PcgVolume` evaluation runs on cell
+    // activation (`cell_stream::reconcile`) as well as at load. The blocks
+    // therefore stream with their cells, which is the whole reason the level can
+    // carry them at all.
+    //
+    // `draw_distance` is left at its default: the I3 structure bands
+    // (`DEFAULT_STRUCTURE_LOD_M`, 96 m) are what decide whether a building draws
+    // its parts or its shell, and a second per-volume distance cut on top of
+    // them would be a second authority on the same question.
+    for plan in crate::settlement::settlements(design) {
+        for b in &plan.blocks {
+            let g = crate::settlement::block_guid(name, b.site, b.col, b.row);
+            doc.create_with_guid(
+                g,
+                SpawnKind::Empty,
+                &format!("{} {} {},{}", plan.name, b.archetype.name(), b.col, b.row),
+                None,
+            );
+            insert!(
+                doc,
+                g,
+                Transform {
+                    translation: Vec3d::new(b.centre.x, 0.0, b.centre.y),
+                    rotation: Vec3d::ZERO,
+                    scale: Vec3d::ONE,
+                },
+            );
+            insert!(
+                doc,
+                g,
+                PcgVolume {
+                    graph: Some(crate::settlement::zone_guid(b.archetype)),
+                    extent: Vec2d::new(b.half.x, b.half.y),
+                    seed: b.seed,
+                    ..Default::default()
+                },
+            );
+        }
+    }
 
     // ── the hero ──────────────────────────────────────────────────────────────
     //

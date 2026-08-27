@@ -24,6 +24,11 @@ settings.local.*
 # in a source tree is not something to find out about from a push.
 island-build/
 samples/island/build/
+# …and the CI fixture's own. Its `[source] cache` is `tiles/` BESIDE the recipe,
+# so `inf island build`'s default output — `cache_dir()/../project` — resolves
+# INSIDE the tree for this one recipe. `island_gate` builds into a temp dir and
+# never touches it; an author running the command by hand does.
+samples/island-fixture/project/
 
 # ── Rust ──
 target/

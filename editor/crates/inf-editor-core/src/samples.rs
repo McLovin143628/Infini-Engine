@@ -10891,6 +10891,12 @@ mod tests {
             // …and the three things that stand on it, whose GUIDs the island's
             // committed `.inf_pcg` names (TER2a clause 5).
             crate::cover::write_cover_library(&ground_dir()).expect("regenerate the cover library");
+            // …and before the island for the third time (wave I8a): every
+            // settlement block's `PcgVolume.graph` names one of these seven
+            // zone GUIDs, so a level written against a stale library is 172
+            // blocks bound to nothing.
+            crate::settlement::write_settlement_library(&crate::settlement::settlement_dir())
+                .expect("regenerate the settlement zone library");
             write_city().expect("regenerate the island city");
             write_gameplay().expect("regenerate the island gameplay fixture");
             crate::island::write_island_levels().expect("regenerate the island levels");
@@ -11655,6 +11661,58 @@ mod tests {
         } else {
             eprintln!("SKIP: the ground library has not been blessed yet");
         }
+
+        // **The settlement zone library (wave I8a).** Every file, and the file
+        // SET as well as the bytes — for the ground library's own reason: an
+        // extra `.inf_pcg` here is one the asset scan promotes under a minted
+        // GUID, and a missing one is a hundred and seventy settlement blocks
+        // whose `PcgVolume.graph` resolves to nothing.
+        let sdir = crate::settlement::settlement_dir();
+        if sdir.join("Zone_Office.inf_pcg").exists() {
+            let mut have: Vec<String> = std::fs::read_dir(&sdir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n != "README.md")
+                .collect();
+            have.sort();
+            assert_eq!(
+                have,
+                crate::settlement::settlement_files(),
+                "the committed settlement library is not the file SET the \
+                 generator writes"
+            );
+            for a in inf_pcg::ArchetypeId::ALL {
+                let p = sdir.join(crate::settlement::zone_file_name(a));
+                let want = inf_asset::encode(
+                    &crate::settlement::zone_payload(a).expect("the zone document lowers"),
+                )
+                .expect("the zone document encodes");
+                assert_eq!(
+                    std::fs::read(&p).unwrap(),
+                    want,
+                    "committed {} drifted from the generator",
+                    p.display()
+                );
+                let side = inf_asset::AssetSidecar::load(&p)
+                    .unwrap_or_else(|e| panic!("{} has no sidecar: {e}", p.display()));
+                assert_eq!(
+                    side.guid.0,
+                    crate::settlement::zone_guid(a),
+                    "the {} zone's committed GUID is not the derived one — every \
+                     block's `PcgVolume.graph` names the derived one",
+                    a.name()
+                );
+            }
+            assert_eq!(
+                std::fs::read_to_string(sdir.join("README.md")).unwrap(),
+                crate::settlement::SETTLEMENT_README,
+                "committed settlement README drifted from the generator"
+            );
+        } else {
+            eprintln!("SKIP: the settlement library has not been blessed yet");
+        }
     }
 
     /// **The starter character builds, builds CLEAN, and builds the same twice.**
@@ -11786,6 +11844,53 @@ mod tests {
                 "{recipe}'s `[content]` list is not the starter character — a \
                  missing entry is an island that boots a hero whose rig resolves \
                  and whose clips do not"
+            );
+        }
+    }
+
+    /// **Both islands' recipes name the WHOLE settlement zone library** (wave
+    /// I8a) — the starter character's arm above, one library over.
+    ///
+    /// Same argument, and the consequence of a gap is louder: a `[content]` list
+    /// missing one zone document is a project where every block of that
+    /// archetype has a `PcgVolume.graph` nothing resolves, so a whole district
+    /// evaluates to nothing and no error is raised anywhere — a `PcgVolume`
+    /// whose graph is missing is a volume that scatters zero instances, which is
+    /// indistinguishable from a volume over bare ground.
+    #[test]
+    fn both_island_recipes_name_the_whole_settlement_library() {
+        let dir = crate::settlement::settlement_dir();
+        if !dir.join("Zone_Office.inf_pcg").exists() {
+            eprintln!("SKIP: the settlement library has not been blessed yet");
+            return;
+        }
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("no {}: {e}", dir.display()))
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "README.md")
+            .collect();
+        on_disk.sort();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples");
+        for recipe in ["island/island.toml", "island-fixture/island.toml"] {
+            let path = root.join(recipe);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("no {}: {e}", path.display()));
+            let mut named: Vec<String> = text
+                .lines()
+                .filter_map(|l| {
+                    let l = l.trim().trim_start_matches('"').trim_end_matches(',');
+                    let l = l.trim_end_matches('"');
+                    l.strip_prefix("../settlement/").map(str::to_string)
+                })
+                .collect();
+            named.sort();
+            assert_eq!(
+                named, on_disk,
+                "{recipe}'s `[content]` list is not the settlement zone library — \
+                 a missing entry is a district bound to a document nothing can \
+                 resolve, which evaluates to nothing and says nothing"
             );
         }
     }
