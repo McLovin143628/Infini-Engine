@@ -783,11 +783,27 @@ fn time_calls(rounds: u32, calls: u32, mut f: impl FnMut(u32)) -> f64 {
 /// mover — and each on the two half-worlds as well, because "the ground is dear"
 /// is a statement about a *cast*, not about a step.
 ///
+/// # …and the NPC1e audit's correction: a HIT is not comparable to a MISS
+///
+/// The first cut of this arm published *"the probe costs 5.6 µs against the
+/// ground and 0.07 µs against 1 849 building boxes — **75×**"*. It is not a
+/// comparison between two surfaces. On the `no ground` world the character has
+/// been **falling** since the settle loop (it is the same free fall
+/// [`the_world_under_a_character_is_where_its_milliseconds_are`] was corrected
+/// for one function above), so it stands far below every box and its probe
+/// **hits nothing at all** — 0.07 µs is a broad phase saying "no".
+///
+/// Two things close it. `probe_hit` is asserted against the world's own
+/// `ground` flag, so a row that hit nothing can never again be quoted beside a
+/// row that hit; and a **box control** drops the identical probe onto a
+/// building's roof *in the same world, the same tree and the same filter*,
+/// where it really does hit a `Collider3D` box. That is the honest ratio, and
+/// on this machine it is a **single digit**, not seventy-five.
+///
 /// **Everything here is printed. The only assertions are shapes**: that every
-/// primitive took measurable time (a zero is a timer reading its own resolution)
-/// and that the sweep really is the dearer of the two calls, which is the
-/// structural fact a lever has to be aimed at and is true by orders of magnitude
-/// rather than by a margin.
+/// primitive took measurable time (a zero is a timer reading its own
+/// resolution), that the probe hits exactly on the worlds that have ground under
+/// the character, and that the box control hits.
 #[test]
 fn where_the_movers_queries_go() {
     const ROUNDS: u32 = 5;
@@ -876,6 +892,91 @@ fn where_the_movers_queries_go() {
             );
             std::hint::black_box(hit.is_some());
         });
+        // **DID THE PROBE HIT ANYTHING?** (the NPC1e audit) — the anti-vacuity
+        // clause this table shipped without, and the one
+        // [`what_a_cast_against_the_ground_costs`] already carries: *a cast that
+        // hits nothing is a measurement of a broad phase saying "no" and not of
+        // the ground.* On the ground-free world the character has been falling
+        // since the settle loop above, so it stands a hundred-odd metres under
+        // every box and its probe reaches nothing at all. Without this column
+        // the 5.6 µs ground row and the 0.07 µs "boxes" row read as a comparison
+        // between two SURFACES, and they are a comparison between a **hit and a
+        // miss** — which is the same defect
+        // [`the_world_under_a_character_is_where_its_milliseconds_are`] was
+        // corrected for one function above.
+        let probe_hit = f
+            .bridge
+            .world_mut()
+            .cast_shape(
+                &probe_shape,
+                at,
+                DQuat::IDENTITY,
+                -DVec3::Y,
+                probe_len,
+                &exclude,
+            )
+            .is_some();
+        // **THE RAY**, from the same origin and reaching the same depth — the
+        // cheapest alternative shape for the same question, and the row the
+        // lever's remaining options are priced against. Measured here rather
+        // than quoted: a primitive with no arm behind it is a number nobody can
+        // re-run, and the ledger's first cut published a **0.18 µs** ray this
+        // file did not contain.
+        //
+        // **The reach is `probe_len` PLUS the sphere's own radius**, and that is
+        // the whole difference between a number and a miss: the shape cast's
+        // sphere starts a radius below `at` and ends a radius below `at −
+        // probe_len`, so a ray of exactly `probe_len` stops **above the ground
+        // the sphere touches** and answers `None` for free. Two casts that reach
+        // different depths are not two ways of asking one question.
+        let ray_len = probe_len + AGENT_RADIUS * 0.9;
+        let ray = time_calls(ROUNDS, CALLS, |_| {
+            let hit = f
+                .bridge
+                .world_mut()
+                .cast_ray_excluding(at, -DVec3::Y, ray_len, &exclude);
+            std::hint::black_box(hit.is_some());
+        });
+        let ray_hit = f
+            .bridge
+            .world_mut()
+            .cast_ray_excluding(at, -DVec3::Y, ray_len, &exclude)
+            .is_some();
+        // **THE BOX CONTROL, in this same world and this same broad phase**: the
+        // identical probe dropped onto a building's ROOF, where it hits a
+        // `Collider3D` box instead of a height-field tile. This is the only
+        // honest way to say "the ground is dearer than the city at the
+        // primitive", because it holds everything except the shape that answers
+        // constant — the body count, the tree, the filter and the fact that
+        // something is hit at all.
+        let roof = (spec.side > 0).then(|| {
+            let b = building_centre(0, spec.side)
+                + DVec3::new(0.0, BUILDING_HALF.y + AGENT_HALF_HEIGHT + AGENT_RADIUS, 0.0);
+            let hit = f
+                .bridge
+                .world_mut()
+                .cast_shape(
+                    &probe_shape,
+                    b,
+                    DQuat::IDENTITY,
+                    -DVec3::Y,
+                    probe_len,
+                    &exclude,
+                )
+                .is_some();
+            let us = time_calls(ROUNDS, CALLS, |_| {
+                let h = f.bridge.world_mut().cast_shape(
+                    &probe_shape,
+                    b,
+                    DQuat::IDENTITY,
+                    -DVec3::Y,
+                    probe_len,
+                    &exclude,
+                );
+                std::hint::black_box(h.is_some());
+            });
+            (hit, us)
+        });
         println!(
             "NPC1e / the mover's queries on {world_name} ({} bodies):",
             f.bodies
@@ -886,8 +987,42 @@ fn where_the_movers_queries_go() {
             ("move_character, ground snap OFF", s_off),
             ("move_character, both OFF", both_off),
             ("the section-9 ground-normal probe (one cast_shape)", probe),
+            ("the same depth as a downward RAY", ray),
         ] {
             println!("  {what:<50} {us:>8.2} us");
+        }
+        println!(
+            "  the character stands at y = {:.3} and its probe {} (the ray {}){}",
+            at.y,
+            if probe_hit {
+                "HIT"
+            } else {
+                "MISSED EVERYTHING — the microseconds above are a broad phase \
+                 saying \"no\", NOT a cast against this world's colliders"
+            },
+            if ray_hit { "hit" } else { "missed" },
+            match roof {
+                Some((true, us)) => format!(
+                    "; the same probe onto a building ROOF, which really hits a \
+                     box, costs {us:.3} us"
+                ),
+                Some((false, _)) => "; the roof control hit nothing".to_string(),
+                None => String::new(),
+            }
+        );
+        if let (true, Some((true, roof_us))) = (probe_hit, roof) {
+            println!(
+                "  HIT AGAINST HIT in one world: a height-field tile is {:.2}x a \
+                 building box at the same primitive ({probe:.3} against {roof_us:.3} us)",
+                probe / roof_us.max(1.0e-9)
+            );
+        }
+        if probe_hit && ray_hit {
+            println!(
+                "  …and a RAY to the same depth answers the same ground {:.2}x \
+                 cheaper than the swept sphere ({ray:.3} against {probe:.3} us)",
+                probe / ray.max(1.0e-9)
+            );
         }
         println!(
             "  a step is one sweep + one probe = {:.2} us; the probe is {:.1} % of it, \
@@ -905,11 +1040,47 @@ fn where_the_movers_queries_go() {
             ("the sweep without the ground snap", s_off),
             ("the sweep with neither", both_off),
             ("the ground-normal probe", probe),
+            ("the ray", ray),
         ] {
             assert!(
                 us > 0.0,
                 "{world_name}: {what} took no measurable time, so this row is a \
                  timer reading its own resolution"
+            );
+        }
+        // **AND THE SHAPE THAT STOPS THE TABLE BEING READ AS A SURFACE
+        // COMPARISON** (the NPC1e audit). A row whose probe hit nothing is a row
+        // about an empty broad phase; it is kept, because "an airborne character
+        // takes no ground probe" is itself the finding one function above, but it
+        // is pinned so nobody can quote its microseconds beside a row that hit.
+        assert_eq!(
+            probe_hit,
+            spec.ground,
+            "{world_name}: the ground-normal probe {} from y = {:.3}. A world \
+             with ground under the character must answer this probe and a world \
+             without it must not — the day that stops being true, every ratio \
+             taken off this table is a hit compared against a miss",
+            if probe_hit { "HIT" } else { "MISSED" },
+            at.y
+        );
+        // …and the ray reaches what the sphere reaches, which is the clause that
+        // makes "a ray is N times cheaper" a statement about the SHAPE. A ray of
+        // `probe_len` alone stops above the ground and answers `None`, and the
+        // ledger's first cut priced exactly that.
+        assert_eq!(
+            ray_hit,
+            probe_hit,
+            "{world_name}: the ray {} where the swept sphere {} — they are not \
+             asking the same question, so their microseconds are not comparable",
+            if ray_hit { "hit" } else { "missed" },
+            if probe_hit { "hit" } else { "missed" },
+        );
+        if let Some((hit, _)) = roof {
+            assert!(
+                hit,
+                "{world_name}: the probe dropped onto a building's roof hit \
+                 nothing, so the box control measures an empty broad phase and \
+                 cannot be compared against the ground row"
             );
         }
     }
@@ -943,19 +1114,28 @@ fn ground_only(tiles: i32, res: u32) -> PhysicsBridge3D {
 /// **WAVE NPC1e — WHY A CAST AGAINST THE GROUND IS DEAR, AND WHAT IT SCALES
 /// WITH.**
 ///
-/// [`where_the_movers_queries_go`] says a shape cast against four 257-sample
-/// tiles is ~6 µs where the same cast against 1 849 building boxes is ~0.07 —
-/// **ninety times** — which is the NPC1c audit's *"four heightfield tiles cost
-/// more than 1 849 buildings"* arriving at the primitive it is about. What that
-/// does not say is **what the number is a function of**, and a lever cannot be
-/// aimed without it: if it is the tile COUNT the answer is that the fixture parks
-/// its character on a four-way corner and the island's would touch one; if it is
-/// the RESOLUTION the cast is walking cells it does not need, which is a
-/// statement about the shape rather than about the fixture.
+/// [`where_the_movers_queries_go`] prices the mover's section-9 probe against
+/// the ground at a few microseconds, which is the NPC1c audit's *"four
+/// heightfield tiles cost more than 1 849 buildings"* arriving at the primitive
+/// it is about. What that does not say is **what the number is a function of**,
+/// and a lever cannot be aimed without it: if it is the tile COUNT the answer is
+/// that the fixture parks its character on a four-way corner and the island's
+/// would touch one; if it is the RESOLUTION the cast is walking cells it does
+/// not need, which is a statement about the shape rather than about the fixture.
 ///
 /// One capsule, one downward sweep of the mover's own probe length, against a
 /// growing grid of tiles at three resolutions. Printed; the assertions are
 /// shapes.
+///
+/// # The slab is the control, and the NPC1e audit made it one
+///
+/// A flat 512 × 512 m **box** under the same capsule answers the same question
+/// against the same tree, so it is the only thing on this table that isolates
+/// the *shape*. It was measured and printed and never compared; the ratio is
+/// now printed beside it, and it is the number *"the ground is dearer than the
+/// city at the primitive"* is actually worth — **a single digit**, where the
+/// figure the first ledger published (75×) came from dividing a cast that hit a
+/// height field by one that hit nothing at all.
 #[test]
 fn what_a_cast_against_the_ground_costs() {
     const ROUNDS: u32 = 5;
@@ -1023,6 +1203,11 @@ fn what_a_cast_against_the_ground_costs() {
     // **AND THE SAME GROUND AS A BOX**, which is the control the ratio needs: if
     // a flat box under the same capsule answers the same question in a fraction
     // of the time, the cost is the SHAPE and not the fact that there is ground.
+    //
+    // **It is now compared as well as printed** (the NPC1e audit). This is the
+    // only hit-against-hit ground/box ratio on the table, and the wave's ledger
+    // published a 75× taken instead from a cast that hit nothing.
+    let slab_us;
     {
         let mut world = EcsWorld::new();
         let e = world.spawn_with_guid(Uuid::from_u128(0x7e44_0003), "Slab", None);
@@ -1069,6 +1254,7 @@ fn what_a_cast_against_the_ground_costs() {
             std::hint::black_box(hit.is_some());
         });
         println!("  one 512 x 512 m BOX under the same capsule: {us:>8.3} us");
+        slab_us = us;
     }
     let one = rows
         .iter()
@@ -1089,6 +1275,21 @@ fn what_a_cast_against_the_ground_costs() {
         "a cast against a 4x4 grid cost {four:.3} us against {one:.3} for one \
          tile — that is 16x or worse, so the cast is walking every tile in the \
          world rather than the ones its AABB touches"
+    );
+    // **THE RATIO THAT IS ACTUALLY ABOUT THE SHAPE** (the NPC1e audit): one
+    // 257-sample tile against one flat box, both HIT by the same probe, in two
+    // one-body worlds. Single digits — and `where_the_movers_queries_go`'s own
+    // in-fixture roof control says the same thing at the mover's own station.
+    println!(
+        "  a height-field TILE is {:.2}x a BOX at the same primitive, both hit \
+         ({one:.3} against {slab_us:.3} us) — this is the shape's ratio, and it \
+         is NOT the 75x a hit-against-a-miss produces",
+        one / slab_us.max(1.0e-9)
+    );
+    assert!(
+        slab_us > 0.0,
+        "the slab control took no measurable time, so the ratio above is a timer \
+         reading its own resolution"
     );
 }
 
