@@ -2589,9 +2589,31 @@ fn structure_snaps_of(
                 out.push(EntitySync3D {
                     guid: g,
                     body: None,
-                    collider: Some(ColliderDesc3D::new(ColliderShape3D::Box {
-                        half_extents: shell.half_extents,
-                    })),
+                    // **The shell is narrowed too** (NPC1c audit). NPC1c narrowed
+                    // `solid_snap` — the ungrouped solids and the `Near` group's
+                    // parts — and left this, the THIRD place this function emits
+                    // a structural box, at `All`. The two bands do not line up:
+                    // a group shells at `DEFAULT_COLLIDER_NEAR_M` (64 m) and a
+                    // crowd agent keeps its capsule out to `Near` (96 m), so
+                    // every agent in that 32 m ring stood among un-narrowed
+                    // shells and went on paying the manifold recomputation the
+                    // whole clause exists to remove — a *penetrating* one, since
+                    // a shell is one box over a whole building group.
+                    //
+                    // Nothing loses anything, for `terrain_tile_collider`'s
+                    // reason: a DYNAMIC body still pairs, the player's own
+                    // kinematic capsule keeps `All` and rapier's union carries
+                    // that pair, a door leaf keeps `All`, and a sensor keeps
+                    // `all()` regardless. A crowd agent still *walks into* a
+                    // shell, because `move_and_slide` is a shape cast through
+                    // the query pipeline and `ActiveCollisionTypes` gates only
+                    // the narrow phase.
+                    collider: Some(
+                        ColliderDesc3D::new(ColliderShape3D::Box {
+                            half_extents: shell.half_extents,
+                        })
+                        .pairing(ColliderPairing::DynamicOnly),
+                    ),
                     translation: shell.center,
                     rotation: shell.rotation,
                     joint: None,

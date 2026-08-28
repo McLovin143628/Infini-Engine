@@ -839,3 +839,107 @@ fn the_solver_pays_for_static_pairs_the_city_can_never_move() {
          for contacts no solver can act on"
     );
 }
+
+/// **A CROWD CAPSULE PAIRS WITH NO STRUCTURAL BOX AT ANY TIER** (NPC1c audit).
+///
+/// NPC1c's clause 3 narrows "the PCG structure boxes" to
+/// [`ColliderPairing::DynamicOnly`] so a moving kinematic capsule stops having a
+/// manifold recomputed against scenery no solver can act on. `structure_snaps_of`
+/// emits a structural box in **three** places — an ungrouped solid, a `Tier::Near`
+/// group's parts, and a `Tier::Far` group's **shell** — and the wave narrowed the
+/// first two.
+///
+/// The third is not academic, because the two bands do not line up: a group
+/// shells at `DEFAULT_COLLIDER_NEAR_M` (64 m) and a crowd agent keeps its
+/// capsule out to `CrowdTier::Near` (96 m). Every agent in that 32 m ring stood
+/// among un-narrowed shells — and a shell is one box over a whole building
+/// group, so an agent inside its volume is *penetrating* it, which is the
+/// dearest manifold of the lot.
+///
+/// The arm is the shape `the_solver_pays_for_static_pairs_the_city_can_never_move`
+/// uses one tier along: a narrowed capsule dropped into a far shell computes
+/// **no** manifold, and the same capsule at the default `All` computes one —
+/// which is what stops this passing on a world where nothing overlaps anything.
+#[test]
+fn a_narrowed_capsule_computes_no_manifold_against_a_far_buildings_shell() {
+    let shell_of = |city: &City, band: &inf_ecs::SimBand| {
+        (0..BLOCKS * BLOCKS).find_map(|i| {
+            let e = city.world.entity_of(block_guid(i))?;
+            let vol = city.world.world().get::<PcgVolume>(e)?;
+            vol.structure_groups.first().and_then(|g| {
+                (band.tier(g.shell.center, g.shell.half_extents, g.shell.rotation) == Tier::Far)
+                    .then_some(g.shell)
+            })
+        })
+    };
+
+    // One measurement per pairing, on its own world, so the two cannot share a
+    // contact graph.
+    let mut counts: Vec<(inf_physics::d3::ColliderPairing, usize, usize)> = Vec::new();
+    for pairing in [
+        inf_physics::d3::ColliderPairing::DynamicOnly,
+        inf_physics::d3::ColliderPairing::All,
+    ] {
+        let city = city(DVec3::ZERO);
+        let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+        bridge.sync_from_world(&city.world);
+        let (near_m, far_m) = bridge.collider_band_radii();
+        let band = inf_ecs::SimBand::from_world(&city.world, near_m, far_m);
+        let shell = shell_of(&city, &band).expect("some block is in the far tier");
+        let before = bridge.world().contact_pair_counts().1;
+
+        // `CrowdArchetype::humanoid`'s corrected capsule, kinematic and
+        // fixed-rotation exactly as `crowd::set_tier_components` builds it,
+        // standing in the middle of the shell.
+        let body = bridge.world_mut().add_body(
+            inf_physics::BodyKind3D::Kinematic,
+            shell.center,
+            DQuat::IDENTITY,
+        );
+        bridge
+            .world_mut()
+            .try_add_collider(
+                body,
+                inf_physics::ColliderDesc3D::new(inf_physics::ColliderShape3D::Capsule {
+                    half_height: 0.6,
+                    radius: 0.3,
+                })
+                .pairing(pairing),
+            )
+            .expect("the capsule attaches");
+        // A kinematic body re-placed every step, which is what a crowd agent is
+        // and what makes its manifolds un-reusable.
+        for k in 0..30 {
+            bridge.world_mut().set_body_translation(
+                body,
+                shell.center + DVec3::new(0.0, 0.0, 0.01 * f64::from(k)),
+            );
+            bridge.step(1.0 / 60.0);
+        }
+        counts.push((pairing, before, bridge.world().contact_pair_counts().1));
+    }
+
+    let (_, narrowed_before, narrowed) = counts[0];
+    let (_, all_before, all) = counts[1];
+    println!(
+        "NPC1c audit: a crowd capsule inside a FAR building's shell computes \
+         {narrowed} manifold(s) narrowed and {all} at the default `All` \
+         (the city alone computes {narrowed_before} / {all_before})"
+    );
+    // ANTI-VACUITY first: the control has to see the shell at all, or "zero
+    // manifolds" is a statement about a capsule standing in empty air.
+    assert!(
+        all > all_before,
+        "a capsule at the default pairing, standing inside a far building's \
+         shell, computed no new manifold — this arm is not touching the shell \
+         and its narrowed half proves nothing"
+    );
+    assert_eq!(
+        narrowed, narrowed_before,
+        "a crowd-narrowed capsule computed {} new manifold(s) against a FAR \
+         building's shell — `structure_snaps_of`'s third emission site is back \
+         at `All`, and every `Near` agent in the 32 m ring between the collider \
+         band and the crowd band is paying for contacts nothing reads",
+        narrowed - narrowed_before
+    );
+}
