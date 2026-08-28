@@ -18743,10 +18743,10 @@ the 7 m lattice" is not exactly what the fixture builds at 384.
 
 | | wave NPC1e (`adce89ce`) | **audit head** |
 |---|---|---|
-| battery | 333 / 6 407 / 0 / 19 | see the closing line below — **no new block**; every fix is a clause inside an existing arm, a doc comment or a `println!` |
-| goldens | 59 | **59** — none added, none re-blessed, `INF_GOLDEN_STRICT=1` green, `git status` over `tests/goldens` empty |
-| rustdoc (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — the audit adds zero |
-| `clippy --workspace --all-targets -D warnings` | 0 | **0** (run LAST) |
+| battery | 333 / 6 407 / 0 / 19 | **333 / 6 407 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, exit 0, tallied over all 333 blocks. **The wave's figure is exactly right**, and the audit moves neither the block count nor the arm count: every fix is a clause inside an existing arm, a doc comment or a `println!` |
+| goldens | 59 | **59** — none added, none re-blessed; `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**, and `git status` over `crates/inf-render/tests/goldens` is **empty** afterwards |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — after `cargo clean --doc`: **404 `^warning` lines − 30 per-crate summaries**, cross-checked against the sum of the summaries' own counts (374 exactly). **The audit adds zero.** Headroom **76** |
+| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — exit 0, run **LAST** per the rmeta law |
 | `cargo fmt --all --check` | clean | **clean** |
 | schemas / `Cargo.lock` / goldens / committed content | unmoved | **unmoved** — every fix is a test clause, a doc comment or a `println!` |
 | trace | unmoved | **unmoved** — nothing in this audit is on a step path |

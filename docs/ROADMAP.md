@@ -28478,5 +28478,10 @@ wall 4's *"thirty-two thousand `Full` NPCs"* is 1 024, since a `Full` agent is e
 **THE BUDGET RULING:** carrying an exceeded `NPC_STEP_BUDGET_MS` is **legal** — §8's rule is a
 direction rule and re-minting upward is what it forbids — but the budget's own arm asserts over
 1 000 **unscheduled, non-steering** walkers, the one configuration that cannot produce the 1.125.
-**Re-stage, never re-mint**, routed on carried item 13. Six LOWs carried by name. Audit ledger in
-`docs/memos/island-progress.md` under *"Wave NPC1e — the adversarial audit"*.
+**Re-stage, never re-mint**, routed on carried item 13. Seven LOWs carried by name. House gates at
+the audit's head: battery **333 / 6 407 / 0 / 19** (the wave's figure exactly — the audit adds no
+block and no arm), goldens **59** with `INF_GOLDEN_STRICT=1` green over 118 arms and
+`tests/goldens` untouched, rustdoc **374 over 30 crates** cold (404 lines − 30 summaries,
+cross-checked against the per-crate sum; zero added, headroom 76), clippy **0** with
+`-D warnings` run last, fmt clean, schemas and `Cargo.lock` unmoved, no trace moved. Audit ledger
+in `docs/memos/island-progress.md` under *"Wave NPC1e — the adversarial audit"*.
