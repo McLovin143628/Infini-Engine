@@ -2661,6 +2661,43 @@ impl VehicleClass {
         }
     }
 
+    /// Lift this class back into a full
+    /// [`VehicleTuning`](crate::vehicle::VehicleTuning), taking the one field
+    /// the class deliberately does not carry — `enter_window` — from the
+    /// default.
+    ///
+    /// The inverse of [`from_tuning`](Self::from_tuning) on the fifteen fields
+    /// that exist, which is what makes [`set`](Self::set) able to reuse the
+    /// tuning door's own name list instead of restating it.
+    pub fn to_tuning(&self) -> crate::vehicle::VehicleTuning {
+        let mut t = crate::vehicle::VehicleTuning {
+            enter_window: crate::vehicle::VehicleTuning::default().enter_window,
+            ..crate::vehicle::VehicleTuning::default()
+        };
+        for (name, value) in self.settings() {
+            t.set(name, value);
+        }
+        t
+    }
+
+    /// Set one authored tunable **by name** (island wave VEH1a), answering
+    /// whether it took.
+    ///
+    /// Routed through [`to_tuning`](Self::to_tuning) and
+    /// `VehicleTuning::set` rather than matching on names here, because a second
+    /// name list is the P29.6 audit's A14 defect and this type already exists to
+    /// be the *serializable projection* of that one. The consequence worth
+    /// stating: whatever `VehicleTuning::names()` accepts, an authored catalogue
+    /// row accepts, on the day it is added and not a wave later.
+    pub fn set(&mut self, name: &str, value: f64) -> bool {
+        let mut t = self.to_tuning();
+        if !t.set(name, value) {
+            return false;
+        }
+        *self = Self::from_tuning(&t);
+        true
+    }
+
     /// This class's `(name, value)` pairs in [`VehicleTuning::names`]'s sorted
     /// order — what the bridge feeds
     /// [`Vehicle::tune`](crate::vehicle::Vehicle::tune).

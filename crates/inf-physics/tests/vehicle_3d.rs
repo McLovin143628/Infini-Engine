@@ -125,6 +125,11 @@ impl Rig {
         for _ in 0..n {
             self.bridge.sync_from_world(&self.world);
             inf_physics::d3::step_character_movement(&mut self.world, &mut self.bridge, DT);
+            // The `vehicle` phase (island wave VEH1a): the door left
+            // `step_character_movement`'s last statement for a `STEP_PHASES`
+            // row of its own, so a fixture that is standing in for a host has
+            // to call it too — in the slot both hosts call it in.
+            inf_physics::d3::step_vehicles(&mut self.world, &mut self.bridge, DT);
             self.bridge.step(DT);
             self.bridge.write_back_into(&mut self.world);
             self.world.propagate();
@@ -249,13 +254,16 @@ fn a_buoyant_vehicle_keeps_the_force_the_water_pass_owns() {
         bridge.is_buoyant(CHASSIS),
         "the fixture must opt the chassis in, or the guard is never reached"
     );
-    // The runtime's own order: sync → water → movement (which is where the
-    // vehicle door lives) → solve → write-back.
+    // The runtime's own order: sync → water → movement → **vehicle** → solve →
+    // write-back. (The vehicle step was the last statement of the movement door
+    // until island wave VEH1a gave it a `STEP_PHASES` row; both hosts now call
+    // it here, and so does every fixture that wants to be the runtime.)
     let float_y = |world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, n: u32| -> f64 {
         for _ in 0..n {
             bridge.sync_from_world(world);
             bridge.apply_water_forces(DT);
             inf_physics::d3::step_character_movement(world, bridge, DT);
+            inf_physics::d3::step_vehicles(world, bridge, DT);
             bridge.step(DT);
             bridge.write_back_into(world);
             world.propagate();

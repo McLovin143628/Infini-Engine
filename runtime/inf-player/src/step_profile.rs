@@ -41,7 +41,7 @@
 use std::time::Instant;
 
 /// How many phases one fixed step is split into.
-pub const STEP_PHASES: usize = 26;
+pub const STEP_PHASES: usize = 27;
 
 /// The phases, in the order [`RuntimeSim::fixed_step`] runs them.
 ///
@@ -73,6 +73,7 @@ pub const STEP_PHASE_NAMES: [&str; STEP_PHASES] = [
     "input events",
     "blueprint tick",
     "character move",
+    "vehicle",
     "gameplay",
     "solver",
     "collision drain",
@@ -130,36 +131,63 @@ pub(crate) mod phase {
     pub const BLUEPRINT_TICK: usize = 10;
     /// P29.3 — the one Ring-0 movement step, plus the intent that feeds it.
     pub const CHARACTER_MOVE: usize = 11;
+    /// VEH1a — `inf_physics::d3::step_vehicles`: the wheel rays, the model's
+    /// forces and the visual wheel write.
+    ///
+    /// **HERE, immediately after [`CHARACTER_MOVE`]**, which is exactly where it
+    /// ran before it had a row: a driver's controls are written by the character
+    /// step above (from the same intent), and the forces must land before
+    /// `bridge.step`. The ordering is unchanged and the trace is unmoved; what
+    /// moved is that the milliseconds are now attributed.
+    ///
+    /// # Why it left the movement door
+    ///
+    /// P29.7 put `step_vehicles` inside the last statement of
+    /// `step_character_movement` on a real argument — *"a sibling both hosts had
+    /// to call separately would be a hand-maintained mirror"* — and the price of
+    /// that argument is a phase that cannot say where its milliseconds went,
+    /// which is the defect wave I4b existed to remove. On the island a car is
+    /// not a corner of the character step: it casts four rays into a streamed
+    /// heightfield every step of the drive.
+    ///
+    /// The mirror the argument feared is paid for rather than avoided: the two
+    /// call sites are fenced (`MIRROR-BEGIN vehicle_step`) and pinned
+    /// character-for-character by `inf-editor-core`'s `fixed_step_mirror`, which
+    /// is the same instrument the projectors already use — and it is a stronger
+    /// guard than "it is one statement inside another function", because that
+    /// guarded the *call* and nothing guarded the two hosts agreeing about
+    /// **when**.
+    pub const VEHICLE: usize = 12;
     /// I6 — doors, weapons and the health they spend, plus the host's own drain
     /// of the energy they owe the P22 damage door.
-    pub const GAMEPLAY: usize = 12;
+    pub const GAMEPLAY: usize = 13;
     /// rapier2d + rapier3d.
-    pub const SOLVER: usize = 13;
+    pub const SOLVER: usize = 14;
     /// Wave 3 contacts and overlaps, and the dispatches they queue.
-    pub const COLLISION_DRAIN: usize = 14;
+    pub const COLLISION_DRAIN: usize = 15;
     /// rapier → ECS.
-    pub const WRITE_BACK: usize = 15;
+    pub const WRITE_BACK: usize = 16;
     /// The transform + visibility DFS. **Three call sites, gathered.**
-    pub const PROPAGATE: usize = 16;
+    pub const PROPAGATE: usize = 17;
     /// P22.1 — the ground remembers what stood on it.
-    pub const DEFORMATION: usize = 17;
+    pub const DEFORMATION: usize = 18;
     /// Play-heads, state machines and root motion.
-    pub const ANIMATION: usize = 18;
+    pub const ANIMATION: usize = 19;
     /// P11.3 sockets.
-    pub const ATTACHMENTS: usize = 19;
+    pub const ATTACHMENTS: usize = 20;
     /// P24.4 garments and hair.
-    pub const CLOTH_HAIR: usize = 20;
+    pub const CLOTH_HAIR: usize = 21;
     /// P14.5 WASM mods — which propagate internally, so their propagate is here
     /// rather than in [`PROPAGATE`].
-    pub const MODS: usize = 21;
+    pub const MODS: usize = 22;
     /// P22.3 fracture write-back, the structural solve and the debris budget.
-    pub const DESTRUCTION: usize = 22;
+    pub const DESTRUCTION: usize = 23;
     /// P12.3 — the audio command queue.
-    pub const AUDIO: usize = 23;
+    pub const AUDIO: usize = 24;
     /// P29.6 — the locomotion camera.
-    pub const CAMERA: usize = 24;
+    pub const CAMERA: usize = 25;
     /// The interpolation history roll and the rising-edge clear.
-    pub const POSITION_CAPTURE: usize = 25;
+    pub const POSITION_CAPTURE: usize = 26;
 }
 
 /// One fixed step's phase milliseconds — or, after
@@ -426,6 +454,13 @@ mod tests {
         assert_eq!(STEP_PHASE_NAMES[phase::PHYSICS3D_SYNC], "physics3d sync");
         assert_eq!(STEP_PHASE_NAMES[phase::PROPAGATE], "propagate");
         assert_eq!(STEP_PHASE_NAMES[phase::SOLVER], "solver");
+        // VEH1a's own two, for the reason this arm exists: `vehicle` was
+        // inserted in the MIDDLE of the table, so every constant below it moved
+        // by one, and a label that drifted would put the wave's own budget
+        // measurement against the wrong row.
+        assert_eq!(STEP_PHASE_NAMES[phase::CHARACTER_MOVE], "character move");
+        assert_eq!(STEP_PHASE_NAMES[phase::VEHICLE], "vehicle");
+        assert_eq!(STEP_PHASE_NAMES[phase::GAMEPLAY], "gameplay");
         assert_eq!(STEP_PHASE_NAMES[phase::CAMERA], "camera");
         assert_eq!(
             STEP_PHASE_NAMES[phase::POSITION_CAPTURE],
@@ -464,6 +499,7 @@ mod tests {
             phase::INPUT_EVENTS,
             phase::BLUEPRINT_TICK,
             phase::CHARACTER_MOVE,
+            phase::VEHICLE,
             phase::GAMEPLAY,
             phase::SOLVER,
             phase::COLLISION_DRAIN,

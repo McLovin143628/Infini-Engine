@@ -244,13 +244,19 @@ pub fn step_character_movement(
             out.push(o);
         }
     }
-    // **The vehicle half of the one movement door** (P29.7). Last, so a driver's
-    // controls — written by the character step above, from the same intent — are
-    // this step's; and inside this function rather than beside it, because a
-    // sibling both hosts had to call separately would be a hand-maintained
-    // mirror, which is the shape of two of this phase's own defects. `O(vehicles)`
-    // and an early return on a level with none. See `super::vehicle`.
-    super::vehicle::step_vehicles(world, bridge, dt);
+    // **The vehicle step used to be the last statement of this function**
+    // (P29.7) and is now the caller's, one line later, in its own `STEP_PHASES`
+    // row (island wave VEH1a). Nothing about the ordering changed: both hosts
+    // call `super::vehicle::step_vehicles` immediately after this returns, so a
+    // driver's controls are still this step's and the forces still land before
+    // `bridge.step`.
+    //
+    // What changed is that a car's milliseconds are now attributed. P29.7's
+    // reason for putting it inside — *"a sibling both hosts had to call
+    // separately would be a hand-maintained mirror"* — is answered by paying for
+    // the mirror instead of avoiding it: the two call sites are fenced
+    // (`MIRROR-BEGIN vehicle_step`) and pinned character-for-character by
+    // `inf-editor-core`'s `fixed_step_mirror`.
     out
 }
 

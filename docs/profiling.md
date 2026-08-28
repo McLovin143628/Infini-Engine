@@ -80,6 +80,7 @@ be lowered, never raised.** A regression must be fixed, not accommodated.
 | **Fixed step over a CITY** (the phase-30 city + streamed terrain + a character) | `CITY_STEP_BUDGET_MS` | 6.0 ms | `inf-player` · `tests/fps_instrument.rs` |
 | **The `crowd` phase alone** (the sim-LOD tier decision over `NPC_BUDGET_AGENTS` = 1 000 NPCs) | `NPC_STEP_BUDGET_MS` | 1.0 ms | `inf-player` · `tests/crowd_sweep.rs` |
 | **The `society` phase on a SETTLED level** (one entity walk that folds nothing) | `SOCIETY_STEP_BUDGET_MS` | 0.5 ms | `inf-player` · `tests/crowd_sweep.rs` |
+| **The `vehicle` phase alone** (four wheel rays a car over `VEHICLE_BUDGET_CARS` = 64 cars) | `VEHICLE_STEP_BUDGET_MS` | 0.5 ms | `inf-player` · `tests/island_gate.rs` |
 | Terrain page bytes resident (peak over the flythrough) | `TERRAIN_RESIDENT_BYTES_CEILING` | 16 MiB | `inf-player` · `tests/phase16_gate.rs` |
 | Partition cell bytes resident (peak) | `CELL_RESIDENT_BYTES_CEILING` | 256 KiB | `inf-player` · `tests/phase16_gate.rs` |
 | Partition cells active at once (peak) | `CELL_RESIDENT_CEILING` | 8 | `inf-player` · `tests/phase16_gate.rs` |

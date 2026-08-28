@@ -7,17 +7,29 @@
 //! anything. The arithmetic — the spring, the engine curve, the friction circle
 //! — is on the other side of that wall and is unit-tested without a world.
 //!
-//! # One door, inside the movement door
+//! # One door, and since island wave VEH1a its own phase
 //!
-//! [`step_vehicles`] is called from the **last statement** of
-//! [`super::movement::step_character_movement`], which is the one door both
-//! hosts already call, in the one slot they already agree on. A sibling function
-//! called separately by each host would be a hand-maintained mirror, and this
-//! phase's own ledger records two defects of exactly that shape (the intent
-//! feed and the publish order). Nothing about a vehicle needs its own slot: a
-//! driver's controls are written by the character step immediately above, and
-//! the forces must land before `bridge.step`, which is where the movement door
-//! already sits.
+//! [`step_vehicles`] used to be the **last statement** of
+//! [`super::movement::step_character_movement`]: P29.7 put it there because *"a
+//! sibling function called separately by each host would be a hand-maintained
+//! mirror"*, and that phase's own ledger records two defects of exactly that
+//! shape (the intent feed and the publish order).
+//!
+//! It is now called by each host directly, immediately after the movement door
+//! returns — **the same slot, one function up** — and it has a `STEP_PHASES` row
+//! of its own (`vehicle`, index 12). The ordering argument is untouched: a
+//! driver's controls are written by the character step above, from the same
+//! intent, and the forces must land before `bridge.step`.
+//!
+//! What was bought is attribution. On the island a car is not a corner of the
+//! character step — it casts four rays into a streamed heightfield sixty times a
+//! second — and *"a step that cannot say where its milliseconds went"* is the
+//! defect wave I4b existed to remove. What it costs is a real mirror, and the
+//! mirror is **paid for rather than avoided**: both call sites live inside
+//! `// MIRROR-BEGIN vehicle_step` fences and are pinned character-for-character
+//! by `inf-editor-core`'s `tests/fixed_step_mirror.rs`. That is a stronger guard
+//! than the old arrangement had, which pinned the *call* and left nothing at all
+//! pinning the two hosts agreeing about **when**.
 //!
 //! `O(vehicles)`, never `O(entities)`: the set is discovered inside the entity
 //! walk `sync_from_world_sim` already makes, and this function walks the map.
@@ -60,13 +72,28 @@ pub struct VehicleOutcome {
     pub load_n: f64,
     /// Forward speed, m/s, signed (negative is reversing).
     pub forward_mps: f64,
+    /// How fast the engine is turning over, `[0, 1]` — the class's own
+    /// [`Vehicle::engine_state`], island wave VEH1a.
+    ///
+    /// [`Vehicle::engine_state`]: inf_ecs::vehicle::Vehicle::engine_state
+    pub revs: f64,
+    /// How hard the driver is asking, `[0, 1]` — the other half of the same
+    /// answer.
+    ///
+    /// Published on the outcome rather than read back off the trait by the audio
+    /// step, so the engine's sound is a function of **this step's** decision and
+    /// not of whatever the vehicle map holds when a later phase gets around to
+    /// asking. That is the P12 doctrine's own shape: the command stream is a
+    /// pure function of sim state, and a report published at the moment the
+    /// state was decided is the cheapest way to keep it one.
+    pub load: f64,
 }
 
 /// **Advance every vehicle one fixed step.**
 ///
-/// Runs inside [`super::movement::step_character_movement`], after every
-/// character has moved (so a driver's controls are this step's) and before the
-/// solver.
+/// Called by each host immediately after
+/// [`super::movement::step_character_movement`] returns — after every character
+/// has moved (so a driver's controls are this step's) and before the solver.
 pub fn step_vehicles(
     world: &mut EcsWorld,
     bridge: &mut PhysicsBridge3D,
@@ -223,11 +250,15 @@ fn step_one(
         world.mark_dirty();
     }
 
+    let forward_mps = state.linvel.dot(state.basis().0);
+    let (revs, load) = bridge.vehicle_of(chassis)?.engine_state(forward_mps);
     Some(VehicleOutcome {
         chassis,
         wheels_grounded: grounded,
         load_n,
-        forward_mps: state.linvel.dot(state.basis().0),
+        forward_mps,
+        revs,
+        load,
     })
 }
 

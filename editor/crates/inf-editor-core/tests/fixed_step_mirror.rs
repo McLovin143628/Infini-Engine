@@ -1,0 +1,268 @@
+//! **THE TWO FIXED STEPS AGREE ABOUT WHEN A VEHICLE RUNS** (island wave VEH1a).
+//!
+//! P29.7 put `step_vehicles` inside the last statement of
+//! `inf_physics::d3::step_character_movement`, and its reason is on the record:
+//! *"a sibling function called separately by each host would be a hand-maintained
+//! mirror, and this phase's own ledger records two defects of exactly that
+//! shape."* It was a good reason and it bought a real thing — the two hosts could
+//! not disagree about whether a car stepped, because neither of them named it.
+//!
+//! What it cost is the thing wave I4b existed to remove: a car's milliseconds
+//! were charged to `character move`, where they could not be told from a crowd's,
+//! and *"a step that cannot say where its milliseconds went"* is the defect the
+//! whole `STEP_PHASES` instrument answers. So VEH1a gives the vehicle step its
+//! own row and **pays for the mirror instead of avoiding it**.
+//!
+//! This file is that payment. It pins the two call sites character-for-character
+//! through the same `MIRROR-BEGIN` fence instrument `projector_mirror` uses, and
+//! then pins the two *neighbourhoods* — because an identical statement in two
+//! places says nothing if one host runs it before the solver and the other after.
+//!
+//! # Why a second binary and not an arm in `projector_mirror`
+//!
+//! `projector_mirror` is about the two **projectors** (scene → `RenderScene`),
+//! which is a different pair of files and a different question. A fixed-step
+//! mirror that lived there would be found by nobody looking for it, and the day
+//! a third fixed-step statement needs fencing the file it belongs in already
+//! exists.
+
+use std::path::{Path, PathBuf};
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("..")
+}
+
+fn read(rel: &str) -> String {
+    let path = workspace_root().join(rel);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// The editor's fixed step.
+const EDITOR: &str = "editor/crates/inf-editor-core/src/simulate.rs";
+/// The shipped player's fixed step.
+const PLAYER: &str = "runtime/inf-player/src/runtime_sim.rs";
+
+/// One `// MIRROR-BEGIN <tag>` … `// MIRROR-END <tag>` region, whitespace
+/// stripped.
+///
+/// The fences are **counted**, not found — `projector_mirror::fenced`'s own rule,
+/// which is the I1 audit's law applied to a delimiter: a `contains` needle that
+/// is a prefix of a declaration can never fail, and neither can a second fence.
+/// Restated here rather than shared because the two binaries cannot see each
+/// other's helpers and a `support` module for six lines is a worse trade than
+/// six lines.
+fn fenced(src: &str, tag: &str, who: &str) -> String {
+    let (b, e) = (
+        format!("// MIRROR-BEGIN {tag}"),
+        format!("// MIRROR-END {tag}"),
+    );
+    assert_eq!(src.matches(&b).count(), 1, "{who}: {tag} begin fences");
+    assert_eq!(src.matches(&e).count(), 1, "{who}: {tag} end fences");
+    let (i, j) = (
+        src.find(&b).expect("checked"),
+        src.find(&e).expect("checked"),
+    );
+    assert!(j > i, "{who}: the {tag} fence is inverted");
+    src[i..j].chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// The byte offset of `needle`'s single occurrence in `src`.
+///
+/// Counted, for the same reason `fenced` counts: an ordering claim built on
+/// `find` would silently be about whichever of two call sites came first.
+fn only(src: &str, needle: &str, who: &str) -> usize {
+    assert_eq!(
+        src.matches(needle).count(),
+        1,
+        "{who}: expected exactly one `{needle}`"
+    );
+    src.find(needle).expect("counted")
+}
+
+/// **The two hosts run the same vehicle statement.**
+#[test]
+fn both_fixed_steps_step_their_vehicles_the_same_way() {
+    let editor = fenced(&read(EDITOR), "vehicle_step", "the editor SimSession");
+    let player = fenced(&read(PLAYER), "vehicle_step", "the shipped RuntimeSim");
+    assert!(
+        editor.len() > 40,
+        "the `vehicle_step` fence is {} chars — an empty fence would make this \
+         gate vacuous",
+        editor.len()
+    );
+    assert_eq!(
+        editor, player,
+        "the vehicle step has drifted between the editor's Simulate and the \
+         shipped player. P29.7 kept the two identical by refusing to let either \
+         host name the call; VEH1a let both name it in exchange for a phase row, \
+         and this is the whole of what that trade rests on"
+    );
+    for (needle, why) in [
+        (
+            "inf_physics::d3::step_vehicles(",
+            "the one Ring-0 vehicle door — a host that inlined the wheel rays \
+             would be a second vehicle model",
+        ),
+        (
+            "self.vehicles=",
+            "the outcomes are retained, so a two-host gate can compare what the \
+             cars DID and not only that both hosts called something",
+        ),
+    ] {
+        let n: String = needle.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            editor.contains(&n),
+            "the vehicle step no longer carries `{needle}`: {why}"
+        );
+    }
+}
+
+/// **The two hosts make the same engine noise.**
+///
+/// The audio half of the same trade. `inf_ecs::vehicle::engine_cue` is Ring 0
+/// and is the *decision*; this is the six lines of mapping onto the P12.3 queue,
+/// and there is one copy of them per host by construction.
+#[test]
+fn both_audio_steps_drive_the_engine_loop_the_same_way() {
+    let editor = fenced(
+        &read(EDITOR),
+        "vehicle_engine_audio",
+        "the editor SimSession",
+    );
+    let player = fenced(
+        &read(PLAYER),
+        "vehicle_engine_audio",
+        "the shipped RuntimeSim",
+    );
+    assert!(
+        editor.len() > 300,
+        "the `vehicle_engine_audio` fence is {} chars — an empty fence would \
+         make this gate vacuous",
+        editor.len()
+    );
+    assert_eq!(
+        editor, player,
+        "the engine loop has drifted between the editor's Simulate and the \
+         shipped player — so a PIE preview and a shipped build would make \
+         different sounds from the same drive"
+    );
+    for (needle, why) in [
+        (
+            "inf_ecs::vehicle::engine_cue(",
+            "the DECISION is Ring 0 — a host that computed a pitch itself would \
+             be the second authority the P12 doctrine exists to prevent",
+        ),
+        (
+            "out.revs,out.load",
+            "the cue is a function of THIS step's published outcome, not of \
+             whatever the vehicle map holds when a later phase asks",
+        ),
+        (
+            "src.pitch,src.volume",
+            "the emitter's authored pitch and volume are the base the cue scales \
+             — an author says a truck idles low on the `AudioSource`, not in \
+             engine code",
+        ),
+        (
+            "started.insert(out.chassis)",
+            "the Play is emitted ONCE and the latch is the same set autoplay and \
+             the despawn sweep use, or an engine would restart its clip sixty \
+             times a second",
+        ),
+        (
+            "AudioCommand::SetPitch",
+            "the loop is SetPitch/SetVolume over a P12.3 command that already \
+             existed — the wave added no audio API",
+        ),
+    ] {
+        let n: String = needle.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            editor.contains(&n),
+            "the engine loop no longer carries `{needle}`: {why}"
+        );
+    }
+    // …and it adds no COMMAND. `AudioCommand` is an enum the whole tree matches
+    // on exhaustively, and a new variant would be a new API in a wave whose
+    // audio clause is explicitly zero-new-API.
+    for forbidden in ["AudioCommand::SetPosition", "AudioCommand::Stop"] {
+        let n: String = forbidden.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            !editor.contains(&n),
+            "the engine loop reaches for `{forbidden}` — see the wave's carried \
+             item: the emitter is spatialized where its `Play` was issued, and \
+             the missing command is a decision with its own arms, not a footnote"
+        );
+    }
+}
+
+/// **…and they run it in the same PLACE.**
+///
+/// The fence pins the statement; this pins its neighbours. A vehicle step that
+/// ran after the solver on one host and before it on the other would satisfy an
+/// equality gate perfectly and diverge on the first step of a drive, because a
+/// suspension force applied after `bridge.step` is a force the solver never saw.
+///
+/// The claim is an *order*, so it is asserted as one: character move, then the
+/// vehicle step, then gameplay, then the solver — on both hosts, from their own
+/// source.
+#[test]
+fn the_vehicle_step_sits_between_the_character_step_and_the_solver_on_both_hosts() {
+    for (who, rel, solver) in [
+        ("the editor SimSession", EDITOR, "self.bridge3d.step(dt)"),
+        ("the shipped RuntimeSim", PLAYER, "self.bridge3d.step(dt)"),
+    ] {
+        let src = read(rel);
+        let mover = only(&src, "inf_physics::d3::step_character_movement(", who);
+        let vehicle = only(&src, "// MIRROR-BEGIN vehicle_step", who);
+        let gameplay = only(&src, "inf_physics::d3::step_gameplay(", who);
+        let step = only(&src, solver, who);
+        assert!(
+            mover < vehicle,
+            "{who}: the vehicle step runs BEFORE the character step, so a \
+             driver's controls would be last step's"
+        );
+        assert!(
+            vehicle < gameplay,
+            "{who}: the vehicle step runs after gameplay — the ordering P29.7 \
+             shipped put it immediately after the mover, and moving it is a \
+             behavioural change nothing here asked for"
+        );
+        assert!(
+            gameplay < step,
+            "{who}: the solver runs before gameplay, which is not this engine's \
+             fixed step at all"
+        );
+        assert!(
+            vehicle < step,
+            "{who}: the vehicle step runs AFTER the solver, so every suspension \
+             force it applies is a force the solver has already integrated past \
+             — the car would fall through its own springs for one step, every \
+             step"
+        );
+    }
+}
+
+/// **The vehicle step is not still inside the movement door.**
+///
+/// The falsifier for the trade above: if `step_character_movement` kept calling
+/// `step_vehicles` as well, both hosts would step every vehicle **twice** — two
+/// sets of suspension forces, two ray casts, and a `vehicle` row measuring half
+/// of it. An equality fence cannot see that, because the duplicate is in a third
+/// file.
+#[test]
+fn the_movement_door_no_longer_steps_the_vehicles_itself() {
+    let src = read("crates/inf-physics/src/d3/movement.rs");
+    // Read a SCOPE, not a spelling (the P23 law): the ban is on the whole
+    // module's code, and prose is allowed to name the function it stopped
+    // calling — which this module's own comment does.
+    let calls = src.matches("vehicle::step_vehicles(").count()
+        + src.matches("super::vehicle::step_vehicles(").count();
+    assert_eq!(
+        calls, 0,
+        "`inf_physics::d3::movement` calls `step_vehicles` {calls} time(s); both \
+         hosts now call it too, so every vehicle would be stepped twice a step"
+    );
+}

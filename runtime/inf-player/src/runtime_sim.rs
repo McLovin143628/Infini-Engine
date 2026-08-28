@@ -415,6 +415,12 @@ pub struct RuntimeSim {
     /// broken, bodies stopped. The `fracture_audit` shape one system along, and
     /// read for the same reason: it is the thing a gate asserts on.
     gameplay: inf_physics::d3::GameplayReport,
+    /// This step's vehicle outcomes (island wave VEH1a) — one row per chassis,
+    /// in `Guid` order: wheels grounded, suspension load, forward speed. The
+    /// `fracture_audit` shape again, and read for the same reason: a gate that
+    /// wants to know whether a car is DRIVING has to ask something other than
+    /// "did the function get called". Empty on a level with no vehicle.
+    vehicles: Vec<inf_physics::d3::VehicleOutcome>,
     /// This step's crowd counters (NPC1a) — how many agents each sim-LOD tier
     /// holds, and what materialized or re-tiered. The `fracture_audit` shape a
     /// third time, and read for the same reason: it is the thing a gate asserts
@@ -579,6 +585,7 @@ impl RuntimeSim {
             society: inf_ecs::society::SocietyStats::default(),
             crowd_radii: inf_ecs::crowd::DEFAULT_CROWD_RADII,
             gameplay: inf_physics::d3::GameplayReport::default(),
+            vehicles: Vec::new(),
             voxels: BTreeMap::new(),
             profiling: false,
             step_profile: crate::step_profile::StepProfile::default(),
@@ -1312,6 +1319,16 @@ impl RuntimeSim {
         &self.gameplay
     }
 
+    /// **What the last fixed step's vehicles did** (island wave VEH1a) — one row
+    /// per chassis in `Guid` order.
+    ///
+    /// The `gameplay()` shape one phase along, and MIRRORED by
+    /// `SimSession::vehicles`. A gate that wants to know a car is *driving* asks
+    /// this; the state it should assert on is still the world.
+    pub fn vehicles(&self) -> &[inf_physics::d3::VehicleOutcome] {
+        &self.vehicles
+    }
+
     /// The surface deformation field this sim has pressed into its terrain
     /// (P22.1), or `None` on a level where nothing has ever touched ground.
     pub fn deform_field(&self) -> Option<&inf_terrain::deform::DeformField> {
@@ -1469,6 +1486,22 @@ impl RuntimeSim {
         inf_ecs::movement::apply_intent(&mut self.world, &intent);
         inf_physics::d3::step_character_movement(&mut self.world, &mut self.bridge3d, dt);
         clk.mark(phase::CHARACTER_MOVE);
+        // ── VEH1a the vehicle step ── the wheel rays, the model's forces and
+        //    the visual wheel write, in the slot they have always run in: right
+        //    after the character step (a driver's controls were written by it,
+        //    from the same intent) and before the solver (the forces must land
+        //    for the step they belong to). What is new is the ROW: P29.7 hid it
+        //    inside `step_character_movement`'s last statement, where a car's
+        //    milliseconds were charged to `character move` and could not be
+        //    told from a crowd's.
+        //
+        //    `O(vehicles)` and an early return on a level with none.
+        //    (MIRROR of `SimSession::fixed_step`, fenced and pinned.)
+        let (w, b) = (&mut self.world, &mut self.bridge3d);
+        // MIRROR-BEGIN vehicle_step
+        self.vehicles = inf_physics::d3::step_vehicles(w, b, dt);
+        // MIRROR-END vehicle_step
+        clk.mark(phase::VEHICLE);
         // ── I6 gameplay ── doors swing, weapons cycle, health latches. HERE,
         //    between the character step and the solver, for two reasons that are
         //    both about one beat of latency:
@@ -1727,6 +1760,53 @@ impl RuntimeSim {
         if let Some(l) = listener {
             self.audio_cmds.push(AudioCommand::SetListener(l));
         }
+
+        // -- VEH1a the engine loop -- a looping spatial `Play` once, then a
+        //    `SetPitch` and a `SetVolume` every step from THIS step's outcome.
+        //    Zero new audio API: the three commands have existed since P12.3 and
+        //    the decision (`inf_ecs::vehicle::engine_cue`) is Ring 0, so the
+        //    stream stays a pure function of sim state — the P12 doctrine, met
+        //    by a system that moves.
+        //
+        //    BEFORE the autoplay walk on purpose: that walk adds anything
+        //    already in `audio_started` to `still_alive`, so a chassis latched
+        //    here is not Stopped by the despawn sweep on the step it began, and
+        //    an autoplay `AudioSource` on the same entity is skipped rather than
+        //    firing a second `Play`.
+        //
+        //    Inert on a level with no vehicle, and on a vehicle with no
+        //    `AudioSource`. (MIRROR of `SimSession::audio_step`.)
+        let (vehicles, world, started, cmds) = (
+            &self.vehicles,
+            &self.world,
+            &mut self.audio_started,
+            &mut self.audio_cmds,
+        );
+        // MIRROR-BEGIN vehicle_engine_audio
+        for out in vehicles {
+            let Some(src) = audio_source_of(world, out.chassis) else {
+                continue;
+            };
+            let key = guid_source_key(out.chassis);
+            if started.insert(out.chassis) {
+                let pos = emitter_position(world, out.chassis);
+                cmds.push(AudioCommand::Play(play_command_for(
+                    key,
+                    &src,
+                    src.spatial.then_some(pos),
+                )));
+            }
+            let cue = inf_ecs::vehicle::engine_cue(out.revs, out.load, src.pitch, src.volume);
+            cmds.push(AudioCommand::SetPitch {
+                source: key,
+                pitch: cue.pitch,
+            });
+            cmds.push(AudioCommand::SetVolume {
+                source: key,
+                volume: cue.volume,
+            });
+        }
+        // MIRROR-END vehicle_engine_audio
 
         // Autoplay once per not-yet-started `AudioSource`, plus the **started**
         // emitters still alive (for despawn pruning below).

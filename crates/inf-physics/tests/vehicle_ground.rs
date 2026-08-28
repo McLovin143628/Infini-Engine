@@ -198,6 +198,8 @@ impl Rig {
         for _ in 0..n {
             self.bridge.sync_from_world(&self.world);
             inf_physics::d3::step_character_movement(&mut self.world, &mut self.bridge, DT);
+            // The `vehicle` phase, in the slot both hosts call it in.
+            inf_physics::d3::step_vehicles(&mut self.world, &mut self.bridge, DT);
             self.bridge.step(DT);
             self.bridge.write_back_into(&mut self.world);
             self.world.propagate();
@@ -760,6 +762,132 @@ fn a_rig_parked_on_a_graded_heightfield_holds_its_own_weight() {
          handbrake — the handbrake is not what held it, so this arm proves \
          nothing about the handbrake"
     );
+}
+
+// ── clause 3: what the new phase costs ──────────────────────────────────────
+
+/// **THE `vehicle` PHASE'S OWN NUMBER** — what `step_vehicles` costs per car on
+/// a streamed-heightfield-shaped world, and the measurement
+/// `VEHICLE_STEP_BUDGET_MS` is minted from.
+///
+/// Two things are asserted and one is reported, which is this tree's own split.
+///
+/// **Asserted, as a COUNT** (the NPC1c CI-red's law): the phase asks the world
+/// exactly **four questions per car per step** — one ray per wheel — so a door
+/// that grew a second probe, or one that started walking every entity instead of
+/// the vehicle map, fails here rather than in somebody's frame six waves later.
+/// A clock cannot see the difference between four rays and eight on a fast
+/// machine; a subtraction can.
+///
+/// **Reported, as a clock**: the milliseconds. A wall clock is a fact about the
+/// machine (`[profile.dev]` is `opt-level = 1` with debug assertions), so the
+/// figure is printed with its build named and never asserted here. The budget
+/// that *is* asserted lives in `inf_player::budget` and is taken on the island.
+#[test]
+fn the_vehicle_phase_asks_four_questions_a_car_and_costs_what_it_prints() {
+    println!(
+        "THE VEHICLE PHASE ({} build):",
+        if cfg!(debug_assertions) {
+            "dev"
+        } else {
+            "release"
+        }
+    );
+    for n in [1usize, 4, 16, 64] {
+        let mut world = world_with_ground(0.0);
+        // Cars on a 12 m lattice, well inside the four-tile field.
+        for i in 0..n {
+            let (gx, gz) = ((i % 8) as f64, (i / 8) as f64);
+            let (x, z) = (24.0 + gx * 12.0, 24.0 + gz * 12.0);
+            let e = world.spawn_with_guid(Uuid::from_u128(0x7614_0100 + i as u128), "Car", None);
+            let mut t = Transform::IDENTITY;
+            t.translation = Vec3d::new(x, ground_height(x, z, 0.0) - WHEEL_Y + WHEEL_RADIUS, z);
+            world.world_mut().entity_mut(e).insert((
+                t,
+                RigidBody3D {
+                    kind: BodyKind3D::Dynamic,
+                    angular_damping: 0.5,
+                    ..Default::default()
+                },
+                Collider3D {
+                    shape_kind: ColliderShape3DKind::Box,
+                    half_extents: HALF,
+                    density: DENSITY,
+                    friction: 0.5,
+                    ..Default::default()
+                },
+            ));
+            for (k, (wx, wz)) in [(-0.9, 1.4), (0.9, 1.4), (-0.9, -1.4), (0.9, -1.4)]
+                .into_iter()
+                .enumerate()
+            {
+                let w = world.spawn_with_guid(
+                    Uuid::from_u128(0x7614_1000 + (i * 4 + k) as u128),
+                    "Wheel",
+                    Some(e),
+                );
+                let mut wt = Transform::IDENTITY;
+                wt.translation = Vec3d::new(wx, WHEEL_Y, wz);
+                world.world_mut().entity_mut(w).insert((
+                    wt,
+                    Collider3D {
+                        shape_kind: ColliderShape3DKind::Sphere,
+                        radius: WHEEL_RADIUS,
+                        sensor: true,
+                        ..Default::default()
+                    },
+                ));
+            }
+        }
+        world.mark_dirty();
+        world.propagate();
+        let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+        bridge.sync_from_world(&world);
+        assert_eq!(
+            bridge.vehicle_count(),
+            n,
+            "the fixture built {n} cars and the bridge derived {}",
+            bridge.vehicle_count()
+        );
+        // Settle, so the measurement is of a car on the ground rather than of
+        // one still falling onto its springs.
+        for _ in 0..60 {
+            bridge.sync_from_world(&world);
+            inf_physics::d3::step_vehicles(&mut world, &mut bridge, DT);
+            bridge.step(DT);
+            bridge.write_back_into(&mut world);
+            world.propagate();
+        }
+
+        // THE COUNT: one ray a wheel, four wheels a car, and nothing else.
+        let before = bridge.world().queries();
+        let out = inf_physics::d3::step_vehicles(&mut world, &mut bridge, DT);
+        let asked = bridge.world().queries() - before;
+        assert_eq!(out.len(), n, "the phase reported {} of {n} cars", out.len());
+        assert_eq!(
+            asked,
+            4 * n as u64,
+            "the vehicle phase asked the world {asked} questions for {n} cars; \
+             it casts one ray per wheel and a rig has four, so this is {} per \
+             car",
+            asked as f64 / n as f64
+        );
+
+        // THE CLOCK, reported: MIN of three rounds of forty steps.
+        let mut best = f64::MAX;
+        for _ in 0..3 {
+            let t0 = std::time::Instant::now();
+            for _ in 0..40 {
+                inf_physics::d3::step_vehicles(&mut world, &mut bridge, DT);
+            }
+            best = best.min(t0.elapsed().as_secs_f64() * 1000.0 / 40.0);
+        }
+        println!(
+            "  N = {n:>2}: {best:.4} ms a step, {:.2} us a car, {asked} world \
+             queries a step",
+            best * 1000.0 / n as f64
+        );
+    }
 }
 
 /// The seat the enter door aims at is the top of the chassis, on real ground —

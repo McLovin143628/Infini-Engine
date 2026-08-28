@@ -359,6 +359,9 @@ pub struct SimSession {
     /// This step's gameplay report (I6) — doors moved, rounds fired, locks
     /// broken, bodies stopped. MIRROR of `RuntimeSim::gameplay`.
     gameplay: inf_physics::d3::GameplayReport,
+    /// This step's vehicle outcomes (island wave VEH1a) — one row per chassis in
+    /// `Guid` order. MIRROR of `RuntimeSim::vehicles`.
+    vehicles: Vec<inf_physics::d3::VehicleOutcome>,
     /// This step's crowd counters (NPC1a) — agents per sim-LOD tier, and what
     /// materialized or re-tiered. MIRROR of `RuntimeSim::crowd`.
     crowd: inf_ecs::crowd::CrowdStats,
@@ -573,6 +576,7 @@ impl SimSession {
             debris_budget: DebrisBudget::default(),
             fracture_audit: FractureAudit::default(),
             gameplay: inf_physics::d3::GameplayReport::default(),
+            vehicles: Vec::new(),
             crowd: inf_ecs::crowd::CrowdStats::default(),
             society: inf_ecs::society::SocietyStats::default(),
             crowd_radii: inf_ecs::crowd::DEFAULT_CROWD_RADII,
@@ -919,6 +923,14 @@ impl SimSession {
         &self.gameplay
     }
 
+    /// **This step's vehicle outcomes** (island wave VEH1a) — the MIRROR of
+    /// `RuntimeSim::vehicles`, and beside `gameplay()` for its reason: a
+    /// two-host gate that wants to compare *driving* needs both hosts to be able
+    /// to say what their cars did.
+    pub fn vehicles(&self) -> &[inf_physics::d3::VehicleOutcome] {
+        &self.vehicles
+    }
+
     /// Set the level's debris limits (P22.3).
     ///
     /// **Nothing calls this yet**, and saying so is the point: the budget is data
@@ -1236,6 +1248,21 @@ impl SimSession {
         );
         inf_ecs::movement::apply_intent(doc.world_mut(), &intent);
         inf_physics::d3::step_character_movement(doc.world_mut(), &mut self.bridge3d, dt);
+        // ── VEH1a the vehicle step ── the wheel rays, the model's forces and
+        //    the visual wheel write, in the slot they have always run in: right
+        //    after the character step (a driver's controls were written by it,
+        //    from the same intent) and before the solver (the forces must land
+        //    for the step they belong to). P29.7 hid it inside
+        //    `step_character_movement`'s last statement so neither host had to
+        //    name it; `STEP_PHASES` grew a `vehicle` row instead, and the mirror
+        //    that arrangement was avoiding is paid for below rather than dodged.
+        //
+        //    `O(vehicles)` and an early return on a level with none.
+        //    (MIRROR of `RuntimeSim::fixed_step`, fenced and pinned.)
+        let (w, b) = (doc.world_mut(), &mut self.bridge3d);
+        // MIRROR-BEGIN vehicle_step
+        self.vehicles = inf_physics::d3::step_vehicles(w, b, dt);
+        // MIRROR-END vehicle_step
         // ── I6 gameplay ── doors swing, weapons cycle, health latches. HERE,
         //    between the character step and the solver: a door the E key opened
         //    THIS step starts moving this step (the press is consumed in the
@@ -1960,6 +1987,47 @@ impl SimSession {
         if let Some(l) = listener {
             self.audio_cmds.push(AudioCommand::SetListener(l));
         }
+
+        // -- VEH1a the engine loop -- a looping spatial `Play` once, then a
+        //    `SetPitch` and a `SetVolume` every step from THIS step's outcome.
+        //    Zero new audio API: the three commands have existed since P12.3 and
+        //    the decision (`inf_ecs::vehicle::engine_cue`) is Ring 0, so the
+        //    stream stays a pure function of sim state.
+        //
+        //    BEFORE the autoplay walk, so a chassis latched here reaches
+        //    `still_alive` and an autoplay `AudioSource` on the same entity does
+        //    not fire a second `Play`. (MIRROR of `RuntimeSim::audio_step`.)
+        let (vehicles, world, started, cmds) = (
+            &self.vehicles,
+            doc.world(),
+            &mut self.audio_started,
+            &mut self.audio_cmds,
+        );
+        // MIRROR-BEGIN vehicle_engine_audio
+        for out in vehicles {
+            let Some(src) = audio_source_of(world, out.chassis) else {
+                continue;
+            };
+            let key = guid_source_key(out.chassis);
+            if started.insert(out.chassis) {
+                let pos = emitter_position(world, out.chassis);
+                cmds.push(AudioCommand::Play(play_command_for(
+                    key,
+                    &src,
+                    src.spatial.then_some(pos),
+                )));
+            }
+            let cue = inf_ecs::vehicle::engine_cue(out.revs, out.load, src.pitch, src.volume);
+            cmds.push(AudioCommand::SetPitch {
+                source: key,
+                pitch: cue.pitch,
+            });
+            cmds.push(AudioCommand::SetVolume {
+                source: key,
+                volume: cue.volume,
+            });
+        }
+        // MIRROR-END vehicle_engine_audio
 
         // 2. Autoplay: enqueue a Play once per not-yet-started autoplay `AudioSource`
         //    (any entity, not just actors), in deterministic Guid order. Keyed by the

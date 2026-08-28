@@ -359,6 +359,72 @@ pub const SOCIETY_STEP_BUDGET_MS: f64 = 0.5;
 /// and certify nothing.
 pub const NPC_BUDGET_AGENTS: usize = 1000;
 
+/// **What the `vehicle` phase may cost**, milliseconds (island wave VEH1a) —
+/// `inf_physics::d3::step_vehicles` over [`VEHICLE_BUDGET_CARS`] cars.
+///
+/// # Why a phase gets its own number, again
+///
+/// [`NPC_STEP_BUDGET_MS`]'s argument, verbatim, one system along: a whole-step
+/// total is one number with its phases printed beside it, and that works while
+/// every phase is something the engine has always done. It stops working the
+/// moment a phase is *new*, because a new phase's growth is invisible inside a
+/// total that has an island in it. Before VEH1a there was no `vehicle` row —
+/// P29.7 ran `step_vehicles` inside the last statement of
+/// `step_character_movement`, where a car's milliseconds were charged to
+/// `character move` and could not be told from a crowd's.
+///
+/// # What is IN it
+///
+/// The four wheel rays, the model's `solve`, the force application and the
+/// visual wheel write — `step_vehicles`, and nothing else. A driven car also
+/// pays `solver` (its chassis is a dynamic body), `physics3d sync` and
+/// `character move` (its driver), and those stay where they are: this phase's
+/// job is the *rig*, so a budget that folded the solver in could be met by a
+/// vehicle door that did nothing.
+///
+/// # The number
+///
+/// Measured by `inf-physics`'s `the_vehicle_phase_asks_four_questions_a_car_
+/// and_costs_what_it_prints` over cars parked on a four-tile 1 m heightfield —
+/// the island's own grid — settled first, then MIN of three rounds of forty
+/// steps:
+///
+/// | cars | dev | release | per car (dev) |
+/// |---|---|---|---|
+/// | 1 | 0.0015 ms | 0.0012 | 1.51 µs |
+/// | 4 | 0.0053 | 0.0041 | 1.33 |
+/// | 16 | 0.0227 | 0.0178 | 1.42 |
+/// | **64** | **0.1101 ms** | **0.0882** | **1.72 µs** |
+///
+/// Linear in the car count, which is what an `O(vehicles)` walk over four rays
+/// each has to look like.
+///
+/// **0.5 ms is ~4.5× the 64-car `dev` measurement** and ~5.7× the release one —
+/// deliberately tighter than [`NPC_STEP_BUDGET_MS`]'s ~10×, because this phase's
+/// work is a fixed four casts a car with no tier ladder in front of it, so there
+/// is nothing here whose cost is *supposed* to vary. It is a twelfth of
+/// [`CITY_STEP_BUDGET_MS`], which is the property that makes it able to see
+/// anything: a vehicle phase that grew to a visible share of a 6 ms step trips
+/// this by an order of magnitude.
+///
+/// # A clock, so: release only, real machine only
+///
+/// [`CITY_STEP_BUDGET_MS`]'s conditioning, for its reasons — reported
+/// everywhere, asserted under `cargo test --release` off CI.
+///
+/// **RATCHET RULE (§8): this constant may only ever DECREASE.** Minted at 0.5
+/// (VEH1a).
+pub const VEHICLE_STEP_BUDGET_MS: f64 = 0.5;
+
+/// The fleet [`VEHICLE_STEP_BUDGET_MS`] is measured at.
+///
+/// [`NPC_BUDGET_AGENTS`]'s rule: a per-step millisecond without a population
+/// beside it is a number about an unnamed world. Sixty-four is far more than the
+/// island spawns (one car at each of seven settlements) and is sized for the
+/// traffic wave that follows this one, so the budget does not have to move the
+/// first time a level puts cars on its roads.
+pub const VEHICLE_BUDGET_CARS: usize = 64;
+
 /// Hard ceiling on **terrain** page bytes resident at any point of the gate
 /// flythrough (`TerrainStreamStats::bytes_resident`, summed over every streamed
 /// terrain — the camera's render cut plus the pages the sim pinned).
