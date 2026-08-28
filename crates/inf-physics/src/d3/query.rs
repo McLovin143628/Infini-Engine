@@ -55,10 +55,10 @@ pub struct ShapeHit3D {
 /// Which **class** of collider a filtered shape cast may hit (P29.4).
 ///
 /// Not a wire enum — it never reaches a file, so the freeze-pin law has nothing
-/// to say about it — and deliberately two variants rather than a matrix of every
-/// combination rapier's `QueryFilter` can express. Each one exists because a
-/// caller in this repository asks that question; the day a third does, it gets a
-/// third variant, because a knob nobody turns documents a choice nobody made.
+/// to say about it — and deliberately a variant per *question a caller in this
+/// repository actually asks* rather than a matrix of every combination rapier's
+/// `QueryFilter` can express. The day a new caller asks a new question it gets a
+/// new variant, because a knob nobody turns documents a choice nobody made.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CastTargets {
     /// Everything. What [`super::PhysicsWorld3D::cast_shape`] does, and what a
@@ -74,4 +74,22 @@ pub enum CastTargets {
     /// collapsed because a downstream check turned "the rubble is not support"
     /// into "the rubble HIDES support".
     Fixed,
+    /// Every body kind, **sensors excluded** — the third question (island wave
+    /// VEH1a), and the one a thing that must *rest* on what it hits asks.
+    ///
+    /// [`All`](Self::All) is "everything the broad phase holds", and a sensor is
+    /// in it: a trigger volume is a collider with `is_sensor` set, so a wheel ray
+    /// cast with `All` finds the top face of a checkpoint volume and the
+    /// suspension pushes off it. P29.7 carried that as a named bound — *"a car
+    /// crossing a trigger volume would ride on it"* — and this is its filter.
+    ///
+    /// It is **not** [`Fixed`](Self::Fixed): a car drives over a crate, up a
+    /// fractured chunk and onto a moving platform, and all three are dynamic. The
+    /// axis that matters to a suspension is *solid or not*, which is a different
+    /// axis from *static or not*, and rapier spells them with two different
+    /// `QueryFilterFlags`. Like `Fixed`, the exclusion is that flag and not a
+    /// downstream check — `QueryFilterFlags::test` runs as the tree is walked, so
+    /// a rejected sensor never becomes the nearest hit and the ground beneath it,
+    /// which is what the wheel was asking about, is still found.
+    AllSolid,
 }

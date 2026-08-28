@@ -145,7 +145,15 @@ fn step_one(
                 // **Everything solid**, not just static geometry: a car drives
                 // over a crate and up a fractured chunk, and a suspension ray
                 // that skipped dynamic bodies would put the wheel through them.
-                .cast_ray_where(*origin, -up, *max_toi, &exclude, CastTargets::All)
+                //
+                // `AllSolid` and not `All` (island wave VEH1a): P29.7 shipped
+                // this with `All`, which includes sensors, and carried the
+                // consequence as a named bound — *"a car crossing a trigger
+                // volume would ride on it"*. A trigger is a description of a
+                // region and exerts no force, so a suspension pushing off one is
+                // a car floating on a checkpoint. Measured before the filter:
+                // `a_wheel_does_not_ride_on_a_trigger_volume`.
+                .cast_ray_where(*origin, -up, *max_toi, &exclude, CastTargets::AllSolid)
                 .map(|hit| WheelContact {
                     point: hit.point,
                     normal: hit.normal,

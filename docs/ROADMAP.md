@@ -19323,11 +19323,15 @@ shows a one-line authoring change as a one-line diff.
 > no independent no-gravity falsifier — the arm that proves flight is not falling
 > uses the coast branch, which is the branch a released stick takes and the one
 > the claim is about; a gravity term added to the powered branch alone is within
-> the 6-DOF arm's tolerance. A wheel ray uses `CastTargets::All`, which does not
-> exclude **sensors**, so a car crossing a trigger volume would ride on it; that
-> is the pre-existing behaviour of every filtered cast in the tree (the camera
-> sweep included) and changing it is a query-layer decision with its own arms,
-> not a vehicle-wave footnote. `chassis_seats` is gathered for every dynamic body
+> the 6-DOF arm's tolerance. ~~A wheel ray uses `CastTargets::All`, which does not
+> exclude **sensors**, so a car crossing a trigger volume would ride on it~~ —
+> **CLOSED by island wave VEH1a**: the query-layer decision was taken with its own
+> arms, as this entry asked. `CastTargets::AllSolid` is the third variant (every
+> body kind, sensors excluded), the wheel ray is its only caller, and
+> `a_wheel_does_not_ride_on_a_trigger_volume` measures the car settling on the
+> ground with a sensor slab under all four wheels — against a solid slab in the
+> same place, which holds it up. No other cast changed.
+> `chassis_seats` is gathered for every dynamic body
 > in the walk, so a destruction level pays one `BTreeMap` insert per chunk per
 > sync for a map that is usually empty of vehicles; the walk was already
 > `O(entities)` and `reconcile_vehicles` still returns on one compare.

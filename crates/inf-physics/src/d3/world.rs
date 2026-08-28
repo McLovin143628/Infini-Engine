@@ -1467,6 +1467,9 @@ impl PhysicsWorld3D {
         let base = match targets {
             CastTargets::All => QueryFilter::default(),
             CastTargets::Fixed => QueryFilter::exclude_dynamic(),
+            // A wheel must rest on what it hits, and a trigger volume is a
+            // collider (island wave VEH1a) — see `CastTargets::AllSolid`.
+            CastTargets::AllSolid => QueryFilter::default().exclude_sensors(),
         };
         let filter = base.predicate(&predicate);
         let pipe = self.query_pipeline(filter);
@@ -1633,6 +1636,7 @@ impl PhysicsWorld3D {
             // The broad phase leaves dynamic bodies out entirely — see this
             // method's docs on why the check cannot be downstream of the cast.
             CastTargets::Fixed => QueryFilter::exclude_dynamic(),
+            CastTargets::AllSolid => QueryFilter::default().exclude_sensors(),
         };
         let filter = base.predicate(&predicate);
         let pipe = self.query_pipeline(filter);

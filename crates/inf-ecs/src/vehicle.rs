@@ -381,6 +381,30 @@ pub struct WheelContact {
     /// The contact point, world space.
     pub point: DVec3,
     /// The surface normal there, world space.
+    ///
+    /// # Nothing in the shipped model reads this, and that is the disposition of
+    /// the D-14 snap (island wave VEH1a)
+    ///
+    /// A ray reads the **hit triangle's own** normal. `FIX_INTERNAL_EDGES` is on
+    /// every heightfield this engine builds and it fixes *contacts*, not ray
+    /// hits, so a wheel crossing a cell diagonal sees this vector change
+    /// discontinuously — measured at **0.06°** on a levelled road corridor and
+    /// **15.69°** on open ground with a real DTM's relief
+    /// (`a_wheel_ray_normal_snaps_at_a_heightfield_cell_diagonal`).
+    ///
+    /// The obvious repair is to smooth it at the wheel. It was **not taken**,
+    /// because [`RaycastVehicle::solve`] pushes the suspension along the
+    /// **chassis up** (deliberately — see the force comment there) and takes its
+    /// friction basis from the steered wheel's own axes, so no force is a
+    /// function of this field. `the_snapped_normal_reaches_no_force_in_the_model`
+    /// says so in metres rather than by grep: two rigs driven six hundred steps
+    /// across the rough surface, one of them with every contact normal replaced
+    /// by a direction the ground could not have, end **bit-identical**.
+    ///
+    /// It stays on the struct because it is what a ray answers and an island
+    /// class may want it (a tracked vehicle's grouser, a tyre model with a
+    /// camber term). **The day one reads it, that arm goes red**, and the
+    /// smoothing question re-opens with the numbers above already measured.
     pub normal: DVec3,
     /// Distance from the mount to the contact along the suspension axis.
     pub distance_m: f64,
