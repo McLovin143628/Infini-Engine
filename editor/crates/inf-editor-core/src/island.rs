@@ -674,16 +674,18 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
         crate::vehicle::spawn_vehicle(
             &mut doc,
             guid,
-            &format!("{} Car", plan.name),
-            DVec3::new(
-                v.x,
-                crate::vehicle::resting_origin_y(def, v.y) + CAR_LIFT_M,
-                v.z,
-            ),
-            yaw_deg,
             def,
-            car_paint(plan.site),
-            None,
+            crate::vehicle::VehicleSpawn {
+                name: &format!("{} Car", plan.name),
+                at: DVec3::new(
+                    v.x,
+                    crate::vehicle::resting_origin_y(def, v.y) + CAR_LIFT_M,
+                    v.z,
+                ),
+                yaw_deg,
+                paint: car_paint(plan.site),
+                clip: None,
+            },
         );
     }
 

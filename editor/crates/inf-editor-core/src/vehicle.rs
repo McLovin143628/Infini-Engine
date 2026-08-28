@@ -76,13 +76,32 @@ macro_rules! insert {
 /// body whatever the body is painted.
 pub const TYRE_COLOR: Color = Color::new(0.07, 0.07, 0.08, 1.0);
 
+/// **Where one authored vehicle goes, and what it looks like** — the half of a
+/// spawn that is not the class.
+///
+/// A struct and not five more parameters: [`spawn_vehicle`] was eight arguments
+/// and the pairs in it (a pose, a dressing) are what a caller thinks in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VehicleSpawn<'a> {
+    /// The entity name in the outliner.
+    pub name: &'a str,
+    /// The **chassis origin** in world space.
+    pub at: DVec3,
+    /// Heading about `+Y`, degrees. `0` faces `+Z`, which is forward.
+    pub yaw_deg: f64,
+    /// The body colour. The tyres are always [`TYRE_COLOR`].
+    pub paint: Color,
+    /// The engine loop's `.inf_audio` clip. `None` is a silent voice, and the
+    /// *command stream* — which is what PIE == shipping compares — is the same
+    /// either way.
+    pub clip: Option<Uuid>,
+}
+
 /// **Author one vehicle**, returning its chassis `Guid`.
 ///
-/// `at` is the **chassis origin** in world space, `yaw_deg` its heading about
-/// `+Y`, and `paint` the body colour. Every entity the call creates has a
-/// content-derived `Guid`, so authoring the same car twice is byte-identical and
-/// re-authoring one in place replaces its own parts rather than accumulating a
-/// second set.
+/// Every entity the call creates has a content-derived `Guid`, so authoring the
+/// same car twice is byte-identical and re-authoring one in place replaces its
+/// own parts rather than accumulating a second set.
 ///
 /// What is built:
 ///
@@ -103,23 +122,19 @@ pub const TYRE_COLOR: Color = Color::new(0.07, 0.07, 0.08, 1.0);
 pub fn spawn_vehicle(
     doc: &mut SceneDoc,
     chassis: Uuid,
-    name: &str,
-    at: DVec3,
-    yaw_deg: f64,
     def: &VehicleDef,
-    paint: Color,
-    clip: Option<Uuid>,
+    spawn: VehicleSpawn<'_>,
 ) -> Uuid {
     let part_guid = |part: &str| inf_ecs::vehicle::body_part_guid(chassis, part);
     let h = def.half_extents;
 
-    doc.create_with_guid(chassis, SpawnKind::Empty, name, None);
+    doc.create_with_guid(chassis, SpawnKind::Empty, spawn.name, None);
     insert!(
         doc,
         chassis,
         Transform {
-            translation: Vec3d::from_dvec3(at),
-            rotation: Vec3d::new(0.0, yaw_deg, 0.0),
+            translation: Vec3d::from_dvec3(spawn.at),
+            rotation: Vec3d::new(0.0, spawn.yaw_deg, 0.0),
             scale: Vec3d::ONE,
         }
     );
@@ -150,7 +165,7 @@ pub fn spawn_vehicle(
         doc,
         chassis,
         AudioSource {
-            clip,
+            clip: spawn.clip,
             looping: true,
             spatial: true,
             // Not autoplay: the VEH1a engine loop emits the `Play` itself, on
@@ -198,7 +213,7 @@ pub fn spawn_vehicle(
             doc,
             guid,
             Material {
-                base_color: paint,
+                base_color: spawn.paint,
                 metallic: 0.35,
                 roughness: 0.42,
                 ..Default::default()
@@ -414,12 +429,14 @@ mod tests {
             spawn_vehicle(
                 &mut doc,
                 chassis,
-                "Car",
-                DVec3::new(10.0, resting_origin_y(def, 0.0), -4.0),
-                35.0,
                 def,
-                Color::new(0.6, 0.1, 0.1, 1.0),
-                None,
+                VehicleSpawn {
+                    name: "Car",
+                    at: DVec3::new(10.0, resting_origin_y(def, 0.0), -4.0),
+                    yaw_deg: 35.0,
+                    paint: Color::new(0.6, 0.1, 0.1, 1.0),
+                    clip: None,
+                },
             );
             doc.world_mut().propagate();
 
@@ -592,28 +609,17 @@ mod tests {
             v.sort();
             v
         };
+        let spawn = VehicleSpawn {
+            name: "Car",
+            at: DVec3::ZERO,
+            yaw_deg: 0.0,
+            paint: Color::WHITE,
+            clip: None,
+        };
         let mut a = SceneDoc::new();
-        spawn_vehicle(
-            &mut a,
-            chassis,
-            "Car",
-            DVec3::ZERO,
-            0.0,
-            &def,
-            Color::WHITE,
-            None,
-        );
+        spawn_vehicle(&mut a, chassis, &def, spawn);
         let mut b = SceneDoc::new();
-        spawn_vehicle(
-            &mut b,
-            chassis,
-            "Car",
-            DVec3::ZERO,
-            0.0,
-            &def,
-            Color::WHITE,
-            None,
-        );
+        spawn_vehicle(&mut b, chassis, &def, spawn);
         assert_eq!(ids(&a), ids(&b));
         assert_eq!(
             ids(&a).len(),

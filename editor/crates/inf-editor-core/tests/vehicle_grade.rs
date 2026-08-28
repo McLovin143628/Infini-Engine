@@ -121,16 +121,18 @@ fn ramp_world(grade: f64, id: &str) -> (SceneDoc, PhysicsBridge3D, f64) {
     inf_editor_core::vehicle::spawn_vehicle(
         &mut doc,
         CAR,
-        "Climber",
-        DVec3::new(
-            200.0,
-            inf_editor_core::vehicle::resting_origin_y(&def, ground),
-            z,
-        ),
-        0.0,
         &def,
-        Color::new(0.6, 0.1, 0.1, 1.0),
-        None,
+        inf_editor_core::vehicle::VehicleSpawn {
+            name: "Climber",
+            at: DVec3::new(
+                200.0,
+                inf_editor_core::vehicle::resting_origin_y(&def, ground),
+                z,
+            ),
+            yaw_deg: 0.0,
+            paint: Color::new(0.6, 0.1, 0.1, 1.0),
+            clip: None,
+        },
     );
     doc.world_mut().mark_dirty();
     doc.world_mut().propagate();
