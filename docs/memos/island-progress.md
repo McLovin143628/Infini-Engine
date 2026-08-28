@@ -17517,3 +17517,784 @@ mutation-verified against a unit arm and against the gate. Proving numbers:
 | schemas / committed content | v26 · v11 · v3 · v2 | **unmoved**; no sample re-blessed by the audit |
 | step phases / trace bytes / libm subjects | 26 · 58 · 42 | **unchanged** |
 | files touched | — | `crates/inf-ecs/src/{crowd,society}.rs`, `crates/inf-nav/src/lib.rs`, `crates/inf-pcg/src/building/mod.rs`, `runtime/inf-player/tests/island_gate.rs`, `docs/ROADMAP.md`, `docs/memos/island-progress.md` |
+
+## Wave NPC1e — the arc's close (2026-08-28)
+
+Base `077698d9`. The certification wave, and the last of the five. Four waves
+built a crowd — a tier ladder, a renderer that reads it, a route substrate and a
+society that walks one — and each handed this one a list. What NPC1e owes is
+three things: the routed cost items taken in **measured order**, the ten walls
+the arc was briefed against given their **final disposition**, and the island
+measured at the hour its town is on the street, with whatever remains attributed
+by name.
+
+**The headline, first and unflattering: 60 fps p50 is not met at any N, and it
+was not met at N = 0.** The island alone has never reached it — wave I8c
+certified `LIT+VIS` at 24.270 ms p50 and wrote *"≥ 60 fps p50 LIT+VIS is STILL
+NOT MET"* as the carried headline, on a serial harness whose CPU half alone was
+13.879 ms; this wave reads it at **25.319 ms, 39.5 fps**. What is new is the
+crowd's share, and it is large: a player standing in the thickest part of the
+island's own rush hour, among a thousand residents the level derived for itself,
+reads **241.748 ms p50 — 4.1 fps** — of which **84 ms is one station**. So this
+wave lands on **clause D** of the brief rather than clause A, and it lands there
+with a mechanism on every line rather than with a shrug.
+
+**And it lands with a law it did not expect to find.** The arc has spent three
+waves quoting *"0.18 ms a character in the mover"* as a constant, and the NPC1c
+audit certified it as *"genuinely linear"* over a 64× range in N. It is not a
+constant. It is **0.494 ms a character** when a hundred and ninety-one people are
+inside a thirty-two metre ring, and the reason no arm saw it is that no arm swept
+**density** — a fact this wave measured on a fixture a tenth the island's size
+before it wrote it down.
+
+### The levers, in measured order
+
+The brief routed five cost items with their mechanisms. Four are taken and
+measured; the fifth is refused for the second time, at the current numbers.
+
+### Lever 1 — the mover, and the table the arc aimed with
+
+The NPC1c audit's special investigation ended with a verdict and a direction:
+*"the wave's 0.18 ms a character is genuinely linear per-character movement work
+against a 17 823-body city… the lever is fewer or cheaper queries per character
+— a coarser probe set, a cached ground answer, or a mover that is not
+collide-and-slide — and the **ground** is where to aim it first."* It named the
+station and stopped one level above the query.
+
+**So the queries were priced one at a time**, on the island's own tile
+resolution, in `character_move_cost::where_the_movers_queries_go`:
+
+| the primitive | µs |
+|---|---|
+| `move_character` — rapier's sweep, its ground snap and its autostep | **25.9** |
+| the same with **autostep off** | 25.7 (0.1–1.0 %, inside the spread) |
+| the same with the **ground snap off** | 25.6 (same) |
+| the section-9 **ground-normal probe**, one `cast_shape` | **5.6** |
+| the same probe against **1 849 building boxes** | **0.07** |
+| a downward **ray** over the same reach | 0.18 |
+
+Two things fall out. The first is that *"four heightfield tiles cost more than
+1 849 buildings"* is right and is **much stronger than the 30.4 against 24.0 it
+was published as**: at the primitive it is about **seventy-five times** per cast,
+and the mover makes five or six of them. The second is that neither knob the
+mover exposes matters — autostep and the ground snap are each under one per cent
+— so the lever is the *number of casts*, not their configuration.
+
+**AND THE TABLE THE ARC AIMED WITH IS CORRECTED.** The NPC1c audit's four-world
+decomposition used `travelled_m > 1.0` as its anti-vacuity clause, and a body in
+**free fall travels further than one that walks**. Both ground-free rows end at
+**y = −139.056 m** having never touched anything, at **3.00 queries a step**
+against a walking body's **1.00** — an airborne step runs `predict_landing` and
+takes no ground probe, so the two halves are *different programs* and their
+"additive to within 4 %" is a coincidence across that gap. `Measured` carries
+`grounded`, `end_y` and queries-per-character-step now, prints them in the table,
+and asserts the shape both ways so nobody reads it that way again.
+
+**The lever, and it is exact rather than approximate.**
+`MovementRuntime::ground_normal` has **exactly one reader in the engine** — grep
+it — `slide_friction`, inside section 7's `MovementMode::Slide` branch. So
+`movement::reads_the_ground_normal` takes the probe for a character that is
+sliding or holding sprint (the one door into `Slide`) and for nobody else. A
+walking crowd agent has no input at all and never asks. The one-step bound the
+predicate carries is stated on the function rather than implied.
+
+**Measured, on one machine, with the probe forced on and then shipped:**
+
+| | probe on | NPC1e |
+|---|---|---|
+| N = 1 | 52.18 µs a character | **47.82** (−8.3 %) |
+| N = 64 | 52.46 | **48.49** (−7.6 %) |
+| queries a character a step | 2.00 | **1.00** |
+
+…and **on the island**: the isolated fixed step's `character move` reads
+**0.129 → 0.101 ms**, and the arc's own N = 1 000 row reads **3.661** and
+**4.921** across this wave's two full runs of the instrument against **5.630**
+and **5.585** in the two waves before. Better in both, and the *spread* is
+published rather than the best of them — this is the station the certification
+row shows is a function of crowd **density**, so a number from it is a number
+about where that flight's crowd happened to stand.
+
+**It is armed as a COUNT, not a clock** — the NPC1c CI-red's own law, four
+payments in. `PhysicsWorld3D::queries` is bumped in `ensure_query_pipeline`, the
+one door every ray, shape cast, intersection and mover call goes through, so
+"the mover asks the world twice and now asks once" is a subtraction.
+`a_walking_character_asks_the_world_once_and_a_sprinting_one_twice` asserts 1 and
+2 exactly and then reads the sprinter's normal back, so an arm that only counted
+could not pass on a probe whose answer was thrown away.
+
+### Lever 2 — the fifth skinned consumer stops walking a crowd per joint
+
+The NPC1b audit's finding 6, routed here with its number: `passes::gi` is the
+**fifth** consumer of `RenderScene::skinned` and the only one that walks it **per
+joint**. At N = 1 000 that is `1 001 × 161 ≈ 161 000` oriented boxes staged a
+frame — each an `inverse()` and a 112-byte push — nearly all of them thrown away
+by the volume clip, and the `gi` pass's CPU recording went **0.162 → 0.778 ms**
+for a pass a crowd adds one draw to. The routing said what was missing: *"a
+conservative per-instance pre-reject the staging path has no bound for today."*
+
+`gi::skinned_model_bound` is that bound. It unions the per-joint bind boxes the
+pass already caches, carried through the instance's own palette, as an AABB and
+then circumscribes it; `gi::skinned_world_bound` lifts the result through the
+model matrix with its **Frobenius norm**, which upper-bounds the operator norm
+and therefore survives a non-uniform or sheared instance scale. The staging
+loop's own bound is `centre = (model · Jⱼ) · cⱼ`, `radius = Σᵢ hᵢ |(model · Jⱼ)ᵢ|`,
+so the algebra is one line and it is written on the function.
+
+**Memoized on `(mesh, palette pointer)` in a map local to the call.** A crowd's
+far tier shares one rest-pose palette `Arc` between every agent of an archetype,
+so the bound is derived once for hundreds of instances — and because the map
+lives for the call while the scene is borrowed for it, no key can outlive its
+allocation. That is `plan_skinned_batches`' argument and deliberately not the
+field-cache shape, which would have to hold the `Arc`.
+
+**It fails open**: a non-finite palette answers `None`, which the caller reads as
+*"stage it"*; an all-degenerate mesh answers a zero radius, which is what the
+staging loop would have emitted anyway.
+
+**Measured on the island**, against the same adjacent bracket:
+`gi` CPU recording **0.165 → 0.310 ms (+0.144)** where NPC1b's was
+**0.162 → 0.778 (+0.62)** — the crowd's share of that pass is **4.3× smaller**.
+`GiAudit::skinned_rejected` reads **1 001 a frame**: the whole crowd, dropped
+before a joint is touched.
+
+### Lever 3 — the leg is resolved once a step, not five times an agent
+
+NPC1d carried it as item 11: the island's 329 **scheduled** residents read
+`crowd` **0.353 ms — 1.07 µs an agent —** against the instrument's thousand
+ping-pong walkers at **0.164 ms, 0.16 µs**. **6.5×**, with one lever named and
+refused: caching the leg index *on the record* is a second copy of a pure
+function, and this module has refused two of those already.
+
+**This is the other lever**, and it is the P29.4-A8 shape rather than a cache:
+resolve it once and hand it down. `step_crowd_banded` asked
+`CrowdRecord::leg_at` **four times an agent** — the leg-change check, then
+`progress_at`, then `position_at → feet_at → {path_at, progress_at}` again — and
+a *steered* agent a fifth time inside the pursuit. Each is a `mix64` and a
+`rem_euclid` plus a `rem_euclid` a leg, for an answer that cannot change inside a
+step. `crowd::ActiveLeg` is the resolved answer; every `*_at` door keeps its
+signature and delegates to a new `*_on` sibling that takes it. Nothing is stored,
+so nothing can drift — which is the distinction the refused lever could not make.
+
+`SteerSubject` **loses** its `guid` and its `clock`, and that is the point rather
+than tidying: they existed only so the pursuit could re-derive the leg.
+
+**Armed as an equality, to the bit.**
+`resolving_the_leg_once_answers_what_resolving_it_every_time_answered` walks a
+scheduled record round its whole day at 0.1 h steps with a non-zero `rephase_m`,
+comparing `to_bits()` on the position and the re-phase and `ptr::eq` on the path
+— an epsilon would admit different arithmetic, and *the same arithmetic in the
+same order* is the claim. It cannot pass by comparing one leg 241 times (the
+sweep must cross all four) and it walks an unscheduled record too.
+
+**Measured on the island's own settled step**, which is where the 6.5× was
+measured: `crowd` **0.353 → 0.208 ms** over the same derived residents — 1.07 µs
+an agent to **0.63**, so the scheduled-against-walking ratio comes from 6.5× to
+**3.9×**. On the sweep's own thousand walkers the phase reads **0.151 ms**
+against NPC1d's 0.164 and NPC1c's 0.234.
+
+### Lever 4 — character impostors, re-priced and refused a second time
+
+The brief routes them *"for `Far` ONLY if the measurement demands them"*, and
+NPC1b refused them with a sentence this wave was asked to re-check at the current
+numbers: *"a `Far` agent already costs a share of one palette block, no group and
+no draw."*
+
+**Every term in that sentence got cheaper this wave, not dearer.** What a `Far`
+agent costs the renderer today:
+
+| what an impostor would replace | what it costs now |
+|---|---|
+| its own draw call | **none** — 1 001 skinned instances draw in **one** call per pass |
+| its own joint palette | **a share of one block**: every `Far` agent of an archetype resolves to the same rest palette and `plan_skinned_batches` deduplicates it by `Arc` pointer |
+| its own shadow group | **none, and now no shadow at all** — this wave's `casts_shadow` rung |
+| its own GI contribution | **none** — this wave's per-instance pre-reject drops the whole instance before a joint is staged |
+| GPU time | the whole skinned pass is **0.249–0.583 ms** for a thousand characters |
+
+Against that, an impostor is an atlas, a bake, a cache, a per-frame card build
+and a new asset kind — and it would not touch either of the two stations the
+arc's own measurements say a crowd actually costs: the **fixed step** and the
+**CPU-side projection and recording**. On the island the frame is CPU-bound by a
+factor of two, so an hour spent on the GPU half buys a frame nothing.
+
+**The measurement that would flip this ruling is stated rather than left open**: a
+GPU-bound configuration in which `skinned-mesh` is a material share of the GPU
+frame. It is not one today and the arc never produced one. Refused, for the
+second time, with the numbers that refuse it.
+
+### Lever 5 — the crowd's shadow LOD
+
+NPC1b's carried item 4, and the NPC1b audit's item 13 under it. The proxy retired
+`VSM_MAX_GROUPS` and did not touch the churn: 968 boxes walking through Harbour
+City scattered page invalidation over **168.6 pages a frame against the island's
+own 56.3**, at 1 236 page draws against 328 — and `deferred_pages` doubled with
+them, so the crowd was also serving more *stale* shadow. One group is the right
+answer to a group ceiling and no answer at all to how many pages a moving crowd
+dirties. The item named the lever: *"proxies that stop casting past a radius."*
+
+`CrowdTier::casts_shadow` is a **third rung** on the ladder, at the ladder's own
+`Near` (96 m) rather than at a render setting, because the tier is the one place
+a distance decision about a crowd is made and both projectors read it through
+that door. `SkinnedShadow::None` is the renderer's side: no group, no proxy box,
+no caster sphere, no palette slot, no page fold. **The cost is visible and is
+stated** — past 96 m an NPC has no shadow, which is the same bargain `Proxy`
+already struck one rung in.
+
+`VsmRasterStats::shadow_lod_skipped` counts it, apart from `dropped_casters`,
+because a ceiling firing is a defect and a shadow LOD firing is the feature
+working.
+
+**Measured on the island**, per rastering frame at N = 1 000:
+
+| | NPC1b | **NPC1e** |
+|---|---|---|
+| pages, control → crowd | 56.3 → **168.6** (+112.3) | 59.3 → **101.7** (+45.1) |
+| `vsm raster` CPU recording | 0.643 → 1.677 (+1.03) | ≈0.62 → **1.443** (+0.82) |
+| proxy casters | 967 | **255** (the `Near` tier alone) |
+| past the shadow LOD | — | **712** |
+
+**The churn delta is 2.5× smaller.** What is left is the 255 `Near` agents, who
+are inside 96 m and keep their shadow deliberately.
+
+### THE CERTIFICATION — the island, at the hour its town is on the street
+
+RTX 4070 Ti, Windows/Vulkan, **release**, **1080p**, the shipping `LIT+VIS`
+stack, MIN of 3 rounds × 120 frames, the same 40 m flight east from Harbour City
+that every island wave since I7b has flown. Both clocks the I8c ruling separates
+are printed, and **p50 is the number**.
+
+#### The N the island certifies at is ONE THOUSAND, and it is a ceiling
+
+Nobody installs it. `inf_ecs::society::sync_society` derives a population from
+the level's own buildings, and by the time the instrument reaches this row
+**33 of Harbour City's blocks are resident and have offered 5 876 homes** — so
+`SOCIETY_MAX_AGENTS = 1000` fires and **4 876 homes are declined and counted**.
+NPC1d's arithmetic said a settlement of a hundred and seventy blocks implies
+about fourteen thousand people; this is that sentence arriving as a measurement,
+and the number the engine actually carries is the ceiling rather than the census.
+
+#### The staging, and the row it replaced — 189 metres
+
+The obvious placement for the hero is the settlement's own centre, which is
+`island_gate`'s staging for the day gate. On this island the **authored player
+start already is** Harbour City's centre — 0 m away — and measured from there:
+
+> 33 volumes folded, 5 876 homes offered, 1 000 agents, 1 000 scheduled;
+> **0 `Full` / 0 `Near` / 998 `Far` / 2 `Dormant`; 0 steering intents.**
+
+A row taken there prices a town that **never enters the mover**, which is the one
+system the whole arc named as its wall. A settlement's centre is its crossroads,
+and its people are not at the crossroads. So the hero stands where the ladder's
+own `Full` radius holds the most of them, which the instrument finds by asking:
+
+> the town's centre is (−1750, 2050); the thickest part of its rush hour is
+> (−1597, 2162), **189 m away**, with **191 residents inside a 32 m ring**. The
+> hero's 998 materialized neighbours are **2 / 4 / 96 m** away (nearest, tenth,
+> median).
+>
+> **170 `Full` / 335 `Near` / 493 `Far` / 2 `Dormant`; 170 steering intents,
+> 112 blocked.**
+
+One hundred and eighty-nine metres is the whole difference between a
+certification and a vacuous one, and the row now asserts `Full > 0` so the
+staging cannot drift back.
+
+#### The row
+
+| | the town cleared | **the island's own 1 000, at 08:31** |
+|---|---|---|
+| **p50 / p95** | 45.561 / 49.918 ms | **241.748 / 272.932** |
+| **fps at p50** | 21.9 | **4.1** |
+| **pipelined ceiling** | 22.671 (44.1 fps) | **136.162 (7.3 fps)** |
+| cpu sim fixed step | 14.653 | **118.574** |
+| cpu projection | 0.898 | **4.318** |
+| cpu render (record) | 6.749 | **13.154** |
+| gpu frame | 22.671 | 105.662 |
+| skinned instances | 1 | **998**, in **one** draw call |
+
+**And the fixed step, station by station** — this is the attribution clause D
+asks for, and every line has a mechanism:
+
+| station | cleared | crowd | delta | what it is, and who owns it |
+|---|---|---|---|---|
+| `character move` | 0.097 | **84.100** | **+84.00** | 170 collide-and-slide controllers among 191 residents inside 32 m — **0.494 ms a character** against 0.171 at thirty-three. **The mover**, and the law is below |
+| `gameplay` | 0.991 | 7.097 | **+6.11** | the door pass over **112 blocked agents**; NPC1c's carried item 2 closed the double gather and the per-agent walk over 19 790 doorway slots is still there |
+| `animation` | 0.047 | 5.673 | **+5.63** | 505 posed agents at 161 joints — the ladder working, at the tier that poses |
+| `physics3d sync` | 6.487 | 9.296 | +2.81 | 998 more transforms to walk |
+| `solver` | 6.103 | 7.934 | +1.83 | 505 moving kinematic capsules, already narrowed by NPC1c's `ColliderPairing` |
+| `terrain stream` | ≤ 0.02 | 1.733 | +1.71 | 505 solid agents observe the ground, which NPC1c made the tier's decision |
+| **`crowd`** | — | **1.125** | +1.13 | **over `NPC_STEP_BUDGET_MS` = 1.0**, and it is the first time an NPC budget in this tree has been exceeded. 1 000 scheduled agents of which 170 steer; the phase costs more per agent at `Full` because a steered agent's pursuit projects onto its own path |
+| `society` | 0.108 | 0.257 | +0.15 | inside `SOCIETY_STEP_BUDGET_MS` = 0.5 |
+
+**And the render half of the certification row**, which is the half four waves of
+this arc built and which is the half that does not hurt: **998 skinned instances
+in ONE draw call**, 499 palette blocks = 4.90 MB of atlas, **318 proxy casters in
+one group and 500 past the shadow LOD**, **181 geometry groups of a 1 024
+ceiling with 0 dropped and 0 refused**, and **998 skinned instances rejected
+whole by GI** before a joint was staged. Wall 3 and wall 4 are not reachable by a
+town of a thousand people.
+
+**And one number that is not the crowd's at all**: standing in the town costs
+**+21.0 ms of p50 with nobody in it** (45.561 against the harbour control's
+24.554), of which the fixed step is **6.976 → 14.653** — `physics3d sync` 6.487
+and `solver` 6.103 over the town's own admitted structure colliders. The island
+is dearer to *stand in* than to *fly over*, before a single NPC exists.
+
+#### And what it is against 60 fps
+
+**Not met, at any N, and it was not met at N = 0.** The island's own `LIT+VIS`
+row is **25.319 ms p50 — 39.5 fps** — and wave I8c already published that
+sentence as the carried headline with the CPU half named as its owner. So the
+honest close is a subtraction, not a verdict:
+
+| | p50 | fps | pipelined | fps |
+|---|---|---|---|---|
+| the island, flown over, no crowd | 24.554 | 40.7 | 14.210 | **70.4** |
+| …standing in its town, no crowd | 45.561 | 21.9 | 22.671 | 44.1 |
+| …with the town's own 1 000 at the rush hour | **241.748** | **4.1** | **136.162** | 7.3 |
+
+**Where the remaining 225 ms of p50 lives, and who owns it:**
+
+| ms of p50 | station | mechanism | routed to |
+|---|---|---|---|
+| ~84 | `character move` | 0.494 ms a character; the cost is **flat in a crowd's size and not in its density** (below) | **the mover** — VEH1/I9 or a named engine wave |
+| ~21 | the town's own colliders | `physics3d sync` + `solver` over admitted structure; the crowd is not in it | the collider band |
+| ~6 | `gameplay` | `placements_near` over 19 790 doorway slots, once per blocked agent | NPC1c's carried item 2's sibling |
+| ~6 | `animation` | 505 posed × 161 joints; the ladder is already 4.6× on this station | anim LOD **inside** a pose (joint-count LOD) |
+| ~5 | `physics3d sync` + `solver` | 998 transforms, 505 capsules | — |
+| ~3.4 | projection | 998 `SkinnedInstance`s and their palettes | the **GPU palette compute pass** — P15's elided third |
+| ~6.4 | recording | `depth-prepass` 1.175 (the atlas fill), `vsm raster` | the same compute pass; a crowd shadow LOD is already taken |
+| ~83 | GPU frame | 180 skinned caster groups + 318 proxies at 905 page draws a rastering frame — **and the standing CPU-bound caveat applies**: this row's CPU is 244 ms against 106 of GPU, so a pass-for-pass GPU delta is not a crowd cost (NPC1b's carried item 12, still not investigated) | a frame-pacing wave |
+
+#### THE LAW THE CERTIFICATION FOUND
+
+`character move` at **0.494 ms a character for 170 controllers** against
+**0.171 at thirty-three** is three times a per-character cost that
+`the_movers_cost_per_character_does_not_climb_with_the_crowd` holds **flat over a
+64× range in N**, and that the NPC1c audit ruled *"genuinely linear"*. Both are
+right, and they are about different variables.
+
+**Neither existing arm sweeps density.**
+`a_controller_pays_for_the_body_in_front_of_it_not_for_the_crowds_size` puts
+**one** bystander two metres in front of each mover and then adds more of them
+*further out*, so what it grows is the crowd's **extent** — and its 1.24×,
+saturating between 64 and 256, is the correct answer to the question it asks. A
+town's morning commute is not that shape: it is 191 bodies inside a 32 m ring,
+and every one of them is inside somebody's sweep.
+
+So the arc closes with the third question measured
+(`the_movers_cost_is_flat_in_a_crowds_size_and_not_in_its_density`): 32
+controllers, the same populations **spread over the 7 m lattice** and **packed
+into the twenty metres the controllers stand in**.
+
+| bystanders | spread | packed | |
+|---|---|---|---|
+| 0 | 50.91 µs a character | 46.44 | 0.91× — the same world, and it must be |
+| 64 | 58.09 | **91.83** | 1.58× |
+| 192 | 62.23 | **159.39** | **2.56×** |
+| 384 | 67.19 | **177.24** | 2.64× |
+
+**2.6× per character for the same population**, which is the island's 2.9×
+arriving on a fixture a tenth its size. The clocks are printed and the shape is
+asserted, and the two anti-vacuity bounds differ on purpose because the
+difference *is* the phenomenon: a body pressed into a rush hour covers **0.30 m**
+where the spread arrangement takes it **1.56**, because the crowd is in its way.
+
+**That is the arc's closing sentence about its own wall.** "0.18 ms a character"
+was never a constant; it is a function of how many capsules are inside one
+controller's sweep, and a crowd is exactly the content that makes that number
+large. The levers the NPC1c audit named — *fewer or cheaper queries per
+character* — are still the right ones, and this says which ones will pay: a
+query that has to slide past two hundred capsules is not made cheaper by a
+coarser ground probe.
+### The arc's own row, re-measured — N = 1 000 hand-installed walkers
+
+The row every NPC1a table is written at, taken the way it has been taken four
+times, and this time with a **true zero-population bracket on both sides** (the
+certification pair above hand-installs an empty population, so the society has
+stopped deriving by the time these three rows run — which is the ordering NPC1b's
+"a control has to be adjacent" law wants and NPC1d's row did not have).
+
+| | NPC1b | NPC1c audit | NPC1d | **NPC1e** |
+|---|---|---|---|---|
+| control **before** p50 | 23.805 | 23.888 | 26.525 | **24.554** |
+| **+1 000 NPCs** p50 | 59.372 | 65.554 | 42.644 | **61.066** |
+| control **after** p50 | 23.998 | 24.587 | 32.758 | **24.720** |
+| the two brackets agree to | 0.193 | 0.699 | **6.233** | **0.166 ms** |
+| pipelined, crowd row | 29.369 (34.0) | 29.248 (34.2) | — | **30.362 (32.9 fps)** |
+| tiers | 31/257/712/0 | 32/256/712/0 | identical | **identical** |
+
+**The sim split, against the mean of the two brackets:**
+
+| phase | NPC1c audit | NPC1d | **NPC1e** |
+|---|---|---|---|
+| `character move` | 5.630 | 5.585 | **3.661** |
+| `physics3d sync` | 4.500 | 3.292 | 4.406 |
+| `solver` | 3.325 | 3.312 | 3.419 |
+| `animation` | 3.224 | 3.274 | 3.233 |
+| `gameplay` | 0.912 | 0.888 | 0.861 |
+| `terrain stream` | 0.468 | 0.263 | 0.470 |
+| `crowd` | 0.234 | 0.164 | **0.247** |
+| `society` | — | — | 0.131 |
+| **the whole fixed step** | 19.293 | — | **17.463** (+10.47 over its bracket, against NPC1c's +12.80) |
+
+**`character move` reads 3.661 here and 4.921 in this wave's other full run of
+the same instrument, against 5.630 and 5.585 in the two waves before.** Better in
+both, and the spread is stated rather than the best of them quoted: this station
+is the one the certification row shows is a function of *density*, and the
+flight's own crowd stands where it stands.
+
+**And the CPU-side stations, which is where NPC1b said a crowd really costs:**
+
+| | control | crowd | delta | NPC1b audit's |
+|---|---|---|---|---|
+| cpu projection | 0.815 | 3.771 | **+2.95** | +2.86 |
+| cpu render (record) | 6.304 | 8.941 | **+2.62** | **+3.48** |
+| — of which `gi` recording | 0.165 | **0.310** | **+0.144** | **+0.62** |
+| — of which `depth-prepass` recording | 0.123 | 1.175 | +1.05 | +1.02 |
+| pages a rastering frame | 59.3 | **101.7** | **+45.1** | **+112.3** |
+
+**Two of the four levers show up here as their own rows** — the GI walk at a
+fifth of what it was, and the page churn at 40 % of it — and the two that do not
+are `depth-prepass` (the atlas fill, which is P15's third thing and is carried)
+and the projection (the same).
+
+**The render half is otherwise unchanged and still costs almost nothing**:
+**1 001 skinned instances in 1 draw call, 290 palette blocks = 2.85 MB of atlas,
+255 proxy casters in 1 group, 712 past the shadow LOD, 35 geometry groups of a
+1 024 ceiling, 0 dropped and 0 refused** — and `GiAudit::skinned_rejected` reads
+**1 001**, the whole crowd, dropped before a joint is staged.
+
+### The ten walls, and where each one ended
+
+The arc's brief opened with a scouted, file-line-verified list of ten walls. This
+is their closing ledger: **dead**, **tripwired**, or **carried with a sentence** —
+and where it is dead, the arm that would notice if it came back.
+
+1. **THE TRACE** — `pose_state_bytes` is 36 + 40 B a joint, **6 476 B a posed
+   character a step** at 161 bones, and `island_gate` retains every step's bytes;
+   N = 1 000 × 900 steps is 5.8 GB in one test process. **DEAD, re-shaped, and
+   tripwired.** A crowd section carries **58 B an agent at every tier** against a
+   posed character's 6 476 — a **111×** per-agent ratio — and the tiers decide
+   how many of a level's characters are on the pose path at all. Measured on the
+   wave that finally put a population in front of it: NPC1d's day gate ran
+   329 agents × 1 200 steps at **22 898 400 B** of crowd section, where 329 posed
+   characters would have been **2.6 GB**. *And the wall the ledger did not
+   predict is the one the instrument found*: at N = 100 the trace grows 1 118 B
+   an agent of which the **deformation field is 752 (63 %)** and the pose 251 —
+   fixed by the tier owning the components, and still the crowd's dominant
+   section (carried item below). Tripwires: `inf_ecs::crowd`'s
+   `…_fifty_eight_bytes`, and `island_gate`'s drive arm, which pins the pose
+   store as a **multiple** of 6 476 with a **count** bound of `1 + society.agents`
+   — so neither a rig that shrank nor a town that grew can hide in it.
+
+2. **STREAMED NPCS GET NO BRAIN** — the Blueprint actor map is fixed at
+   `RuntimeSim` construction, and an entity that WALKS two cells over is deleted
+   when its birth cell deactivates. **HALF DEAD, HALF DECIDED.** The despawn is
+   fixed: `sync_sim` re-homes a walked-away entity into the cell it is standing
+   in and counts it (`CellStreamStats::rehomed`), with the conservative half
+   untouched, a returning-birth-cell arm the NPC1a audit added after measuring
+   **two entities carrying one `Guid`**, and `rehomed == 0` on the island because
+   the island's own content stands still. The actor map is **deliberately not
+   opened**, and the deferral's sentence now says why rather than only that: a
+   `Tick` blueprint writing one variable is **0.494 µs** an actor against a crowd
+   agent's **0.081** — 6.1×, re-measured by the audit at 5.7× — so 1 000 of them
+   is 8.2 % of a 6.0 ms step before an NPC has thought about anything.
+   **Carried:** the general `spawn_with_guid` refusal, which `crowd::add_agents`
+   now has for its own caller and which every other spawner in the engine still
+   does not.
+
+3. **ONE DRAW + ONE BIND GROUP + ONE 16 KiB PALETTE PER CHARACTER ×2** —
+   instanced skinning was "the documented P15 optimization", unbuilt for eleven
+   phases. **DEAD.** One draw per mesh per pass (2 a frame against 2 002), the
+   palette atlas deduplicated by `Arc` pointer, and the joint block packed into
+   two vertex channels that were zero since P7.1 — the first use of
+   `p26-5-vertex-streams.md`'s channel-packing route past a full 16/16 attribute
+   set. On the island's own 161-bone hero: **31.3 MB a frame → 3.33 MB, 9.4×**.
+   Tripwires: `plan_skinned_batches`' six arms, both stores'
+   `the_shared_palette_is_the_one_the_per_agent_path_would_have_built`, and the
+   NPC1b audit's `the_atlas_is_filled_once_per_block_and_matches_the_per_instance_fill`.
+   **Carried:** the third of the three things P15 named — a **GPU palette compute
+   pass** — which is the lever for the projection's `+2.86 ms`, and which needs
+   the pose to reach the renderer as data rather than as a finished palette.
+
+4. **`VSM_MAX_GROUPS` = 1 024 AND A SKINNED INSTANCE IS ONE GROUP** — past it a
+   crowd's shadows are refused. **DEAD TWICE OVER.** NPC1b's shared proxy group
+   took the island's crowd to **35 groups of 1 024, 0 dropped, 0 refused** over
+   478 rastering frames — it would take thirty-two thousand `Full` NPCs to reach
+   the ceiling — and this wave took the half the proxy left standing: past `Near`
+   an agent casts **nothing at all**. The sweep's own closing table is the wall
+   in two numbers: **35 groups banded against 1 001 all-`Full`**. Tripwires:
+   `a_crowd_of_proxies_is_one_group_and_refuses_nothing` (1 030 instances,
+   `dropped_groups` 11 a frame → 0) and this wave's
+   `a_crowd_past_the_shadow_lod_casts_nothing_and_dirties_fewer_pages`.
+   `SKINNED_POSE_MARGIN` is retired for the instances that ask (the exact posed
+   union bound, **67 % of the radius and 30 % of the volume** on its own
+   fixture), and the "posed AABB `inf-anim` is still not handed" turned out to be
+   a forward reference to a bound the renderer already held both halves of.
+
+5. **ZERO ANIM LOD** — the full pose pipeline per `AnimStateMachine` entity per
+   fixed step regardless of distance. **DEAD.** The ladder is the LOD and it keys
+   on **sim** state (`StreamingSource` distance on the `SimBand` lattice), never
+   on a camera — `step_crowd` has no camera argument, so a caller cannot pass one
+   by accident. Measured at N = 1 000 against an all-`Full` control, and the arc's
+   closing sweep is a **bigger** number than NPC1a's because NPC1c gave `Full` a
+   controller and the control is now a thousand movers inside each other's
+   sweeps: the whole fixed step is **7.697 ms banded against 153.784 all-`Full`,
+   20.0×** (NPC1a's was 2.0×), the `animation` phase **1.112 against 5.101,
+   4.59×** (NPC1a's 3.5×), and the trace **450 713 B against 2 983 476, 6.6×**
+   (NPC1a's 3.0×). Tripwire: the sweep's banded/all-`Full`
+   control pair and `island_gate`'s `posed == hero + Full + Near` equality, which
+   the NPC1a audit re-wrote after measuring that the old `posed < N + 1` clause
+   was satisfied by the `Dormant` count alone. **Carried:** the `Near` rung still
+   saves nothing a test can see — `hand_ik()` gates `hand_requests`, which is
+   composed over entities carrying `CharacterMovement`, and a `Near` agent has
+   none.
+
+6. **THE FIXED STEP HAS NO ROOM** — 5.67–5.85 of a 6.0 ms ratchet before an NPC
+   existed, and no NPC budget anywhere. **CARRIED, and it is the arc's
+   remainder.** The crowd got its own phases (`STEP_PHASES` 24 → 26, `crowd` and
+   `society`) and its own budgets, and on the island as a player boots it they
+   hold with room: the isolated step reads `crowd` **0.208 ms** against
+   `NPC_STEP_BUDGET_MS` 1.0 and `society` **0.167** against
+   `SOCIETY_STEP_BUDGET_MS` 0.5, in a step of **6.571 ms** against NPC1d's 7.930.
+   **At the certification station `crowd` reads 1.125 and the budget is exceeded
+   for the first time in the arc** — 1 000 scheduled agents of which 170 steer,
+   and a steered agent's pursuit projects its body onto its own path. It is
+   **carried rather than re-minted**, because a budget that moves the day it is
+   exceeded is a report.
+   And the wall's own sentence is unchanged and is the arc's remainder: **the
+   crowd's cost is not in the crowd's phases.** At the certification station the
+   crowd's own two phases are 1.4 of 118.6 ms; the rest is `character move`,
+   `gameplay`, `animation`, `physics3d sync`, the `solver` and `terrain stream`
+   — six systems the crowd is a *customer* of rather than the author of.
+
+7. **BLUEPRINT TICK IS SERIAL** — host construction plus a map remove/insert per
+   actor per step. **DECIDED WITH A NUMBER**, and the number is wall 2's. Crowd
+   brains are a dedicated system on plain data; Blueprint is reserved for
+   hero-class actors; the deferral stands with its price written down.
+   `parallel_map` was measured before it was prescribed and **pays nowhere**
+   between N = 1 and N = 10 000 (0.02× to 0.36×), so none of it was wired and the
+   table that says why is in the instrument.
+
+8. **NO NAV — BUT THE GRAPHS EXIST.** **DEAD.** `inf-nav` is Ring 0, `glam` and
+   nothing else, no new external crate and no schema; three producers expose
+   themselves (`RoadGraph::nav_graph`, `BuildingPlan::room_path`/`interior_nav`,
+   `Settlement::street_graph` — 459 nodes / 1 320 directed edges over seven
+   settlements); `NavVerdict` is a value with three named refusals; ties break on
+   the node id; an edge carries its own spine. NPC1d added the level network the
+   *cooked pack* can build — pavement rings round the blocks and each building's
+   own front door — and the **two-level search**, which is a measurement rather
+   than a taste: one graph with every interior in it is ~25 000 nodes and ~11 ms
+   a search. Tripwires: `pie_equals_shipping_when_an_npc_walks_across_town`
+   (6 480 steps, 6 480 distinct, identical on both hosts, three doors opened,
+   89 % of a staircase climbed) and
+   `a_town_sized_grid_is_searched_within_dijkstras_own_bounds`, which counts
+   Dijkstra's own work after the CI-red taught this arc that a structural claim
+   fitting in a counter must never be spent on a clock.
+
+9. **THE COLLIDER BAND** — NPCs as anchors is an explosion, NPCs as non-anchors
+   walk through un-collided buildings. **DEAD AS DESIGNED**, and the resolution
+   is the tier: `Far` is kinematic-on-the-graph with no rapier body, `Full` and
+   `Near` are solid. NPC1c made the tier own the **components** rather than have
+   the bridge decline to mirror them, which is what closed the door NPC1a had
+   left ajar (a thousand `Far` agents were a thousand *terrain observers*).
+   Tripwires: `a_banded_out_crowd_agent_gets_no_rapier_body` (a `Full` agent with
+   one, a `Far` one without, **and the transition**),
+   `only_the_crowd_tiers_with_a_body_observe_the_terrain`,
+   `a_crowd_agent_with_no_body_presses_no_ground`, and
+   `a_narrowed_capsule_computes_no_manifold_against_a_far_buildings_shell`.
+
+10. **THE TEN NOS** — no persistence, no pooling, no impostor characters, no
+    seats, no per-NPC lights, no free vertex attribute. **One dead, one refused
+    with a measurement, the rest carried by name.** The vertex attribute is
+    **dead**: channel packing is built and is the first consumer of
+    `p26-5-vertex-streams.md`. **Character impostors are refused for the second
+    time**, and the re-pricing is below. Persistence, pooling, `SitPoint`, seats,
+    `Talk`'s first consumer and per-NPC lights are **not built**; each is carried
+    with the reason, and the two the brief called *"if cheap"* were measured not
+    to be — an affordance a body uses is a second authority over where that body
+    is, which is exactly what the schedule's one-position law exists to avoid.
+
+### The arc gate, at head
+
+Every arm the arc built, re-run on this tree after four behavioural changes to
+the mover, the crowd step, the GI staging path and the shadow map:
+
+| the gate | what it holds | at head |
+|---|---|---|
+| `pie_equals_shipping_with_a_crowd_across_tier_transitions` (NPC1a) | 900 steps, all four tiers occupied, both hosts byte-identical | **green** |
+| `pie_equals_shipping_when_an_npc_walks_across_town` (NPC1c) | 6 480 steps / 6 480 distinct, 3 doors opened, 89 % of a staircase | **green** |
+| `pie_equals_shipping_over_a_day_in_the_life` (NPC1d) | 1 200 steps of one in-game day, 329 residents, six hourly censuses, the dormant coda at 0.0000 m | **green** |
+| `the_islands_own_rate_makes_a_commute_a_walk` (NPC1d) | the island's 18 makes its median commute 1.60 m/s | **green** |
+| `pie_equals_shipping_on_an_island_drive` (SK1c, re-aimed NPC1d) | every character in the pose store is a 161-bone rig, bounded by `1 + society.agents` | **green** |
+| `crowd_sweep::the_n_sweep` (NPC1a) | the banded ladder against an all-`Full` control at N ∈ 1/10/100/1 000 | **green** |
+| `projector_mirror` (NPC1a/b/d + this wave) | both hosts tier before they read a tier, and `crowd_shadow` is one rule | **green** |
+
+**Nothing in this wave moved a trace**, and the reason is structural rather than
+lucky: the mover's probe feeds `slide_friction` and nothing else, so a character
+that never slides reads the same `+Y` it would have measured on flat ground; the
+leg is resolved once and answers the same bits; and `SkinnedShadow` and
+`GiAudit` are render-side types that no serialized format and no trace section
+has ever seen.
+### The laws this wave paid for
+
+* **An anti-vacuity clause has to know what it is ruling out.** The NPC1c audit's
+  four-world table asked `travelled_m > 1.0` and got it from a body that fell a
+  hundred and forty metres. "The character moved" and "the character walked" are
+  different claims, and the whole arc's mover lever was aimed with a table that
+  compared one against the other.
+* **Price the primitive, not the phase.** *"Four heightfield tiles cost more than
+  1 849 buildings"* is a 1.3× at the phase and a **75×** at the cast, and only
+  the second number tells you what to do about it. A phase is a sum over
+  programs; a primitive is a thing you can delete one of.
+* **A field that only one branch reads is a query nobody else should pay for.**
+  `ground_normal` is written every step by every grounded character in the engine
+  and read by `slide_friction` alone. Grepping the *reader* is what turned an 18 %
+  cost into a predicate.
+* **A conservative bound is only worth having if it is tight enough to reject
+  something.** The GI pre-reject needed two arms pointing opposite ways: one that
+  fails when the bound is too small (it would drop a box the volume kept) and one
+  that fails when it is too large (an NPC five metres past the face must still be
+  rejected). Either alone is satisfiable by a bound that says "everything".
+* **A gate staged where a defect cannot appear is a gate that certifies the
+  defect** — NPC1d's own law, met by the wave that quoted it. The certification
+  row's first cut stood the hero at the level's authored player start, and from
+  there **every one of the island's residents is `Far`**: 0 `Full`, 0 `Near`,
+  0 steering intents, and a row that would have certified a town which never
+  enters the mover — the one system the whole arc named as its wall.
+* **A one-way door decides an instrument's ORDER.** `set_crowd_population` marks
+  the population hand-installed and the society stops deriving, so the derived-
+  society row cannot follow a hand-installed one. The row list is ordered by that
+  fact and says so, rather than by what reads nicely.
+* **`rustfmt` and a scripted edit will eat a `\`-continuation, still.** Three
+  more this wave, in three different files, every one caught by the workspace
+  gate the P22 law paid for. The remedy remains the one NPC1a wrote down: a
+  print's visual indentation belongs *outside* the string, and a literal written
+  by a script gets read back before it is believed.
+* **An arm can be right about its variable and wrong about the world.**
+  *"A controller pays for the body in front of it, not for the crowd's size"* is
+  a true sentence about a fixture that adds bystanders **outward**, and it read
+  as a general statement about crowds for two waves. The island's rush hour adds
+  them **inward**, and the same mover costs 2.6× per character. The tell is that
+  the arm's own knob and the content's own knob are not the same quantity.
+* **A budget exceeded is a station to name, not a number to re-mint.**
+  `NPC_STEP_BUDGET_MS` is over for the first time in the arc, at 1.125 against
+  1.0, and moving it would convert a measurement into a report.
+
+### Counts
+
+| | at `077698d9` | **wave NPC1e** |
+|---|---|---|
+| battery | 333 blocks / 6 397 passed / 0 failed / 19 ignored | **333 / 6 407 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, **+10 arms and no new block**: 4 in `inf-physics`'s `character_move_cost` (`where_the_movers_queries_go`, `what_a_cast_against_the_ground_costs`, `a_walking_character_asks_the_world_once_and_a_sprinting_one_twice`, `the_movers_cost_is_flat_in_a_crowds_size_and_not_in_its_density`), 3 in `inf-render`'s lib (`the_skinned_gi_bound_contains_every_box_the_staging_loop_would_stage`, `a_skinned_instance_outside_the_gi_volume_is_rejected_and_one_inside_is_not`, `the_skinned_gi_bound_refuses_by_answering_rather_than_by_guessing`), 1 in `inf-render`'s `vsm_raster` device suite (`a_crowd_past_the_shadow_lod_casts_nothing_and_dirties_fewer_pages`) and 2 in `inf_ecs::crowd` (`resolving_the_leg_once_answers_what_resolving_it_every_time_answered`, `the_crowds_shadow_lod_stops_at_the_near_rung`) |
+| goldens | 59 | **59** — none added, none re-blessed; `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**, `git status` over `tests/goldens` empty afterwards. `SkinnedShadow::None` has no committed caller, so no committed frame can reach it |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — after `cargo clean --doc`. **The wave adds zero.** Headroom **76** |
+| `clippy --workspace --all-targets -D warnings` | 0 | **0** (run **LAST**, per the rmeta law) |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** — `SkinnedShadow` and `GiAudit` are render types, `ActiveLeg` is a return value, `PhysicsWorld3D::queries` is a diagnostic counter, and `CrowdTier::casts_shadow` is a predicate. Nothing in this wave reaches a serialized format |
+| step phases / trace sections / trace bytes an agent / libm-ban subjects | 26 / 9 / 58 / 42 | **unchanged** |
+| §8 budgets | `NPC_STEP_BUDGET_MS` 1.0, `SOCIETY_STEP_BUDGET_MS` 0.5 | **unmoved** — on the island as a player boots it the isolated step reads `crowd` **0.208** (a fifth) and `society` **0.167** (a third); at the certification station `crowd` reads **1.125** and the NPC budget is **exceeded for the first time in the arc**, carried rather than re-minted (carried item 13) |
+| committed levels (`EXPECTED_LEVELS`) / committed content | 23 / unmoved | **23 / unmoved** |
+| new crates / external dependencies | — | **none**; `Cargo.lock` unmoved |
+| frontend | — | **untouched and not run** |
+
+### Carried, by name
+
+1. **The mover is still the arc's wall, and the wall is DENSITY.** The
+   certification row reads **0.494 ms a character for 170 controllers** among
+   191 residents inside a 32 m ring, against **0.171 at thirty-three**, and the
+   packed-against-spread sweep reproduces it at **2.6×** on a fixture a tenth the
+   size. So *"0.18 ms a character"* was never a constant: it is a function of how
+   many capsules are inside one controller's sweep. The remaining levers, each
+   with its mechanism, and none of them is an afternoon:
+   (a) **a crowd agent that does not collide-and-slide against other crowd
+   agents** — the capsules a controller pays to get past are, at the rush hour,
+   overwhelmingly other NPCs, and a crowd's own separation is a steering problem
+   rather than a swept-shape one. The blocker is that the mover has no per-caller
+   collider filter, and that "NPCs walk through each other" is a product
+   decision. (b) **take the terrain out of a crowd agent's mover queries** — a
+   crowd walks a path `inf-nav` ground-snapped when it built it, so the Y is
+   known and the height-field cast that re-finds it costs **75× what a building
+   cast does**; the blocker is that a second authority on Y is exactly what NPC1a
+   and NPC1c refused. (c) **fewer `Full` agents**, which is a product decision
+   about how close an NPC has to be before a player can walk into it. Routed to
+   **VEH1/I9 or a named engine wave**, not to this arc.
+2. **`SkinnedMeshNode::sync` is the recording half and this wave did not touch
+   it.** `depth-prepass` CPU recording is **0.123 → 1.175 ms** at N = 1 000,
+   unchanged from the NPC1b audit's +1.02, and it is the atlas fill. The NPC1b
+   audit's finding 3 named the fix and it is still the fix: the **GPU palette
+   compute pass**, the third of the three things P15's sentence named, which
+   needs the pose to reach the renderer as *data* rather than as a finished
+   palette — a projector contract, not a pass.
+3. **The projection is +2.95 ms at N = 1 000 against `PROJECTION_BUDGET_MS` 1.5**
+   — and **+3.42 ms at the certification station** —
+   and nothing asserts either: the budgeted fixture has no population. NPC1a's
+   carried item 13 and NPC1b's item 3, unmoved.
+4. **The deformation field is still a crowd's dominant trace section** (NPC1a's
+   carried item 1). 708 928 B a step at N = 1 000 even banded. No wave of this
+   arc has read or written it.
+5. **The `Far → Near` pose pop is still 0.9513 m** (NPC1b's carried item 1,
+   NPC1c's item 8). The inertialization seam through P29.2's `PoseBlender` is
+   routed and not landed, and NPC1c's reason stands: the tier that re-enters the
+   machine is the one already spending the mover's millisecond.
+6. **The `Near` rung still saves nothing a test can falsify** (the NPC1b audit's
+   carried item 10, NPC1c's item 7). `hand_ik()` gates a request list composed
+   over entities carrying `CharacterMovement`, and a `Near` agent has none.
+7. **Past 96 m a crowd agent has no shadow**, which is this wave's own visible
+   cost and the first thing an art pass will notice — beside NPC1b's own, that a
+   fully-posed `Near` agent between 32 and 96 m casts a static cylinder.
+   `SkinnedShadow` still has **no authoring door**: a level cannot ask a hero for
+   a proxy or a garment for an exact bound, and a "shadow LOD" World Settings
+   block is where both would live.
+8. **Character impostors remain unbuilt and refused**, at the current numbers,
+   for the second time — with the measurement that would flip the ruling stated
+   rather than left open (a GPU-bound configuration in which `skinned-mesh` is a
+   material share of the frame).
+9. **`crowd::agent_tier` and `set_crowd_radii` still have no production caller**
+   (the `set_debris_budget` shape, for the sixth time), and the ladder's radii
+   are constants rather than level data. The society gave `set_crowd_population`
+   its production caller; the radii are still waiting for a level's own crowd
+   block.
+10. **The island's isolated fixed step reads 6.571 and 6.748 ms** over this
+    wave's two runs against a 6.0 ms ratchet — reported, never asserted, because
+    the ratchet binds the composed city. That is over a millisecond better than
+    NPC1d's 7.930 on the same arm, of which the two lines with a name attached
+    are `crowd` **0.353 → 0.208** and `character move` **0.129 → 0.101**; the
+    rest is run-to-run and is not claimed.
+11. **The GI volume on this flight stages nothing at all.** `candidates` reads
+    **0** on every island row, because the eye is 40 m up and the volume is
+    centred on it, so the ground is outside. That does not weaken the pre-reject
+    — the cost it removed was the *staging*, 161 000 boxes built and thrown away
+    — but it does mean this instrument cannot measure what the reject costs in
+    fidelity, because there is no bounce to lose. A GI-bearing fixture is what
+    would.
+12. **A shadow LOD is a distance and this one is the sim ladder's.** If a level
+    ever wants a crowd whose shadows reach further than the tier that gives them
+    a collider, the two numbers have to come apart — and today `casts_shadow`
+    and `has_body` are the same rung by construction.
+
+13. **`NPC_STEP_BUDGET_MS` is exceeded for the first time in the arc**, and it is
+    the certification row that does it: `crowd` reads **1.125 ms** against a
+    ceiling of 1.0 with 1 000 scheduled agents of which 170 steer. The phase is
+    dearer per agent at `Full` because a steered agent's pursuit projects its
+    body onto its own path, which is `O(path points)`; every other configuration
+    in this tree is a fifth to a quarter of the budget. **Not re-minted**, on
+    purpose: a budget that moves the day it is exceeded is a report, and the
+    honest reading is that the *station* is over, not that the number is wrong.
+14. **`gameplay` is +6.11 ms at the rush hour**, and it is NPC1c's carried item 2
+    one level along: the audit closed the *double* gather, and the remaining
+    `placements_near` over **19 790** doorway slots is walked once per blocked
+    agent, of which the certification row has **112**. One band-scoped index of
+    doorways, built once per band stamp, is the shape.
+15. **The island is dearer to stand in than to fly over, before any NPC exists.**
+    The town-cleared row is **45.561 ms p50** against the harbour control's
+    **24.554** — `physics3d sync` 6.487 and `solver` 6.103 over the town's own
+    admitted structure colliders. No wave of this arc created it and no wave of
+    this arc measured it before; it is the collider band's, and it is a bigger
+    number than three of this wave's four levers put together.
+16. **The certification's GPU column inherits NPC1b's caveat and enlarges it.**
+    That row is **244 ms of CPU against 106 of GPU**, so a pass-for-pass GPU
+    delta in it is not a crowd cost — and the GPU frame still reads
+    22.671 → 105.662. The NPC1b audit's carried item 12 (the island's crowd row
+    is CPU-bound and its per-pass GPU milliseconds ramp) is the standing
+    explanation, it is still not an investigation, and it is now attached to the
+    row the arc is certified on.
