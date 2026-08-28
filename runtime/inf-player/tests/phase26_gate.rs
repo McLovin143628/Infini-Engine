@@ -2409,7 +2409,7 @@ fn the_golden_set_is_pinned_and_additive() {
     /// it by nothing, because virtual shadows were inert until a receiver
     /// existed. Wave VIS1a's **audit** added the fifty-fifth — `water_ssr.png`,
     /// the one frame the wave's own reflection feature can be pinned by.
-    const GOLDENS: usize = 58;
+    const GOLDENS: usize = 59;
     /// `xxh3_128` over `"{file_name} {hex}\n"` for every golden, name-sorted —
     /// the CONTENT pin (P26.5 audit). Committed PNGs are `-text` in
     /// `.gitattributes`, so these bytes are the same on every checkout.
@@ -2485,7 +2485,15 @@ fn the_golden_set_is_pinned_and_additive() {
     /// vignette, the chromatic aberration and the film grain on one high-contrast
     /// scene. `GOLDENS` moves 56 -> 57, every `FilmSettings` field is zero at the
     /// default, and the tonemap's three branches are not taken there.
-    const GOLDEN_SET_DIGEST: &str = "07cc8ae8c1487c0dbc59eb995261f001";
+    ///
+    /// **Wave NPC1b adds the fifty-ninth**: `crowd_variation.png` — eight bodies
+    /// on ONE skinned mesh sharing ONE joint palette, each with its own tint and
+    /// its own build, drawn in a single instanced call from a single atlas block.
+    /// Additive: `GOLDENS` moves 58 -> 59, the digest moves with it, and **not one
+    /// committed image changed** — the instanced path draws a one-mesh scene in
+    /// the order it drew it before, which is what the stable sort in
+    /// `plan_skinned_batches` is for.
+    const GOLDEN_SET_DIGEST: &str = "1db3dd0bf5961ddbfb53aeb2b40a1697";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

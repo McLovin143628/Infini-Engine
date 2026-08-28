@@ -1261,7 +1261,7 @@ fn the_golden_set_is_pinned_and_additive_after_phase_27() {
     /// Wave VIS1a's **audit** adds the fifty-fifth, `water_ssr.png`: a new frame,
     /// so this pin and the digest below move together on the additive branch and
     /// no committed image changed. `phase26_gate`'s twin carries the reason.
-    const GOLDENS: usize = 58;
+    const GOLDENS: usize = 59;
     /// `xxh3_128` over `"{file_name} {hex}\n"` for every golden, name-sorted.
     /// **RULE: this may change only in a commit that adds a golden, or in one
     /// whose stated purpose is to change what the engine LOOKS like.**
@@ -1272,7 +1272,15 @@ fn the_golden_set_is_pinned_and_additive_after_phase_27() {
     /// count unchanged. That both pins had to move separately is the point of
     /// their being separate: a wave that re-blessed for a bad reason would have
     /// to write the reason down twice.
-    const GOLDEN_SET_DIGEST: &str = "07cc8ae8c1487c0dbc59eb995261f001";
+    ///
+    /// **Wave NPC1b adds the fifty-ninth**: `crowd_variation.png` — eight bodies
+    /// on ONE skinned mesh sharing ONE joint palette, each with its own tint and
+    /// its own build, drawn in a single instanced call from a single atlas block.
+    /// Additive: `GOLDENS` moves 58 -> 59, the digest moves with it, and **not one
+    /// committed image changed** — the instanced path draws a one-mesh scene in
+    /// the order it drew it before, which is what the stable sort in
+    /// `plan_skinned_batches` is for.
+    const GOLDEN_SET_DIGEST: &str = "1db3dd0bf5961ddbfb53aeb2b40a1697";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

@@ -1483,7 +1483,7 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 /// P20.3 also **re-blessed the three P20.1 water scenes**, deliberately: shoreline
 /// wetness is default-on and all three carry terrain, so their ground at and below
 /// the water level is now darker. Every other image is byte-identical.
-const GOLDENS: [&str; 58] = [
+const GOLDENS: [&str; 59] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
@@ -1494,6 +1494,10 @@ const GOLDENS: [&str; 58] = [
     "clouds_night.png",
     "clouds_overcast.png",
     "clouds_scattered.png",
+    // Wave NPC1b: eight bodies on ONE mesh sharing ONE joint palette, each with
+    // its own tint and its own build — the crowd's far tier drawn in one call
+    // from one atlas block. The wave's ONE new golden.
+    "crowd_variation.png",
     "csm.png",
     "cubes.png",
     // P22.1: a walked footprint trail + vehicle ruts pressed into snow, with the
