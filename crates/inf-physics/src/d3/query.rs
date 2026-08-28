@@ -63,6 +63,29 @@ pub struct ShapeHit3D {
 pub enum CastTargets {
     /// Everything. What [`super::PhysicsWorld3D::cast_shape`] does, and what a
     /// clearance probe and a camera both need.
+    ///
+    /// # Everything includes SENSORS, and that half of P29.7's bound is still open
+    ///
+    /// A trigger volume is a collider with `is_sensor` set, and
+    /// `QueryFilter::default()` does **not** carry `EXCLUDE_SENSORS` — so a
+    /// region that exerts no force can block, or hold up, any caller of this
+    /// variant. Today they are the character mover's step-up and ceiling probes
+    /// and the traversal fit check (through
+    /// [`super::PhysicsWorld3D::cast_shape`], which passes `All`), and
+    /// `super::camera`'s occlusion sweep (through
+    /// [`cast_shape_where`](super::PhysicsWorld3D::cast_shape_where)).
+    ///
+    /// Island wave VEH1a took the one caller whose consequence was measurable —
+    /// a wheel *resting* on a checkpoint — and gave it
+    /// [`AllSolid`](Self::AllSolid). It deliberately changed nothing else,
+    /// because a camera that stops at a trigger and a mover that steps onto one
+    /// are each a behaviour question with their own arms. **The record lives
+    /// here rather than in the ROADMAP entry that used to hold it**, which was
+    /// struck when the wheel half closed (VEH1a audit).
+    ///
+    /// [`Fixed`](Self::Fixed) is no escape either: `exclude_dynamic` says
+    /// nothing about `is_sensor`, so a **static** trigger is visible to the
+    /// mantle probe too.
     #[default]
     All,
     /// Static and kinematic geometry only — the broad phase leaves dynamic

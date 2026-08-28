@@ -126,6 +126,13 @@ pub fn step_locomotion_camera(
     // over would never leave the character — and `CastTargets::All` is right
     // here where the mantle wants `Fixed`: a crate you can shove is not a ledge,
     // but it is very much something to not see through.
+    //
+    // `All` includes **sensors**, so this sweep pulls in on a trigger volume
+    // (VEH1a audit). That is the surviving half of P29.7's carried bound: the
+    // wheel ray took `CastTargets::AllSolid` and this one deliberately did not,
+    // because "is a checkpoint something to not see through" is a behaviour
+    // question with its own arms and no measurement behind it yet. See
+    // `CastTargets::All`'s own doc for the enumeration.
     let mut exclude: std::collections::BTreeSet<ColliderId3D> = std::collections::BTreeSet::new();
     if let Some(c) = bridge.collider_of(subject) {
         exclude.insert(c);

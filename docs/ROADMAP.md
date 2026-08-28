@@ -19330,7 +19330,15 @@ shows a one-line authoring change as a one-line diff.
 > body kind, sensors excluded), the wheel ray is its only caller, and
 > `a_wheel_does_not_ride_on_a_trigger_volume` measures the car settling on the
 > ground with a sensor slab under all four wheels — against a solid slab in the
-> same place, which holds it up. No other cast changed.
+> same place, which holds it up. No other cast changed. **And no other cast was
+> FIXED** (VEH1a audit): the half of this entry that read *"that is the
+> pre-existing behaviour of every filtered cast in the tree (the camera sweep
+> included)"* was struck along with the wheel half and is **still open** —
+> `CastTargets::All` does not carry `EXCLUDE_SENSORS`, so the character mover's
+> step-up and ceiling probes, the traversal fit check and the camera's occlusion
+> sweep can each still be blocked or held up by a region that exerts no force.
+> That record now lives at the door, on `CastTargets::All`'s own doc and at the
+> camera's call site, where the next reader of either meets it.
 > `chassis_seats` is gathered for every dynamic body
 > in the walk, so a destruction level pays one `BTreeMap` insert per chunk per
 > sync for a map that is usually empty of vehicles; the walk was already
