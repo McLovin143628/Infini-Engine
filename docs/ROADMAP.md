@@ -28190,5 +28190,13 @@ measurement says it was not the defect is still a fix, and the measurement is wh
 reported** (waiting 120 quiet steps moved the settle 43 → 163 and changed the volume count by
 nothing — four blocks of a hundred and seventy is what a *stationary* hero pages in); **a rate
 is a measurement** (48 minutes is the nicer number and it made a commute a jog); **price the
-search before you build the network**. Details in
+search before you build the network**. Battery **333 / 6 396 / 0 / 19** (+31 arms, +0 blocks), goldens **59** unmoved with
+`INF_GOLDEN_STRICT=1` green over 118 arms, rustdoc **374 over 30 crates** (zero added),
+clippy 0, fmt clean, `Cargo.lock` +2 path edges and no new dependency. The N = 1 000 island
+row's structural half reproduces exactly (32/256/712/0 tiers, 1 001 skinned in 1 draw, 290
+palette blocks, 967 proxies in 1 group, 35 of 1 024) and `character move` reads **5.585**
+against NPC1c's 5.630 — the arc's wall is where it was, and this wave did not take the mover
+lever. Its two brackets disagree by **6.233 ms** against NPC1c's 0.699, so the delta is NOT
+published. **The island's own isolated fixed step now reads a `crowd` line of 0.353 ms and a
+`society` line of 0.205 on a level whose crowd phase read 0.000 before this wave.** Details in
 `docs/memos/island-progress.md` under *"Wave NPC1d"*.
