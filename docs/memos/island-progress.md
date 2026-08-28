@@ -16506,3 +16506,494 @@ a fact about the program and not about the machine.
 | `clippy -D warnings` / `fmt` | 0 / clean | **0 / clean** (clippy run LAST, per the rmeta law) |
 | schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** |
 | new crates or external dependencies | none | **none** — two new Ring-0 items, `SearchStats` and `route_counted`, both `inf-nav`'s own |
+
+## Wave NPC1d — the society, and the day it lives in (2026-08-28)
+
+Base `f0cfa6ec`. Five clauses. The arc's four previous waves built a crowd that
+could be *installed*: a tier ladder, a renderer that reads it, a route substrate
+and a body that walks one. Nothing had ever installed one. `set_crowd_population`
+had three callers and all three were tests — the `set_debris_budget` shape, named
+in NPC1a's carried list, in NPC1b's, and in NPC1c's, once each.
+
+This wave's whole point is that the seam gets a **production caller**, and that
+the caller is the level's own settlements. It also turns the island's clock on
+for the first time since wave I7, which retires a second thing that had been
+shipping dormant: the I8b night-window substrate had never once returned a
+non-zero glow step on the committed island, because a frozen clock at 10:30 UTC
+cannot put the sun below the horizon.
+
+### Clause 1 — the population is what the buildings already said it was
+
+`inf_pcg::building::society` asks a `BuildingPlan` who it holds, and the answer
+is a pure function of its own rooms:
+
+| room | role | rule | why that number |
+|---|---|---|---|
+| `Bedroom` | Home | **one a room** | a bedroom is a place to sleep, whatever its area |
+| `Guest` | Home | **one a room** | a hotel room holds a guest |
+| `Office` | Work | one per **12 m²** | a desk plus its share of circulation the partition puts in *other* rooms |
+| `Workshop` | Work | one per **20 m²** | a bench is wider than a desk |
+| `Retail` | Work | one per **30 m²** | a shop floor is mostly for its customers |
+| `Retail` | Errand | **one a room** | somewhere to go that is neither home nor work |
+
+The other eight of the fourteen `RoomType`s hold nobody: a corridor, a stair, a
+lobby, a riser, a living room, a kitchen, a bath and a store are places a person
+passes through rather than places a person *is* at an hour of the day, and this
+wave's schedule is about hours.
+
+**The archetype consequences are consequences, not entries.** Measured over all
+seven, three storeys on one 18 × 14 m footprint:
+
+| archetype | rooms | homes | workers | errands |
+|---|---|---|---|---|
+| `Office` | 15 | 0 | **13** | 0 |
+| `Apartment` | 37 | **13** | 0 | 0 |
+| `Industrial` | 6 | 0 | **26** | 0 |
+| `House` | 45 | **13** | 0 | 0 |
+| `Estate` | 18 | **7** | 0 | 0 |
+| `Hotel` | 31 | **12** | 0 | 0 |
+| `Shop` | 21 | 0 | **34** | **5** |
+
+Nothing in that table is written per archetype. The palette decides which rooms a
+building gets and this module decides what a room is worth, and neither has to
+know the other's business — an eighth archetype needs no line. `Industrial`'s 26
+workers out of 6 rooms is the rate table doing exactly what it says: a workshop
+is a big room and a big room is a lot of benches.
+
+**Where it lives, and why the schema does not move.** A slot rides `PcgVolume`
+as `residents`, beside `doorways`, with `#[serde(skip)] + #[reflect(ignore)]` and
+written through the same `set_population` door as the lists it indexes. It is
+derived from the graph and the terrain the loading host already has, so it
+reaches no bytes — the P19.5 argument, one wave on. The proof is not the
+sentence: the sample bless regenerated **every** committed sample and only the
+two islands moved, only in `content_hash`, over an **unchanged 49 625 bytes and
+an unchanged 189 entities at schema v26** — and the one authored change in the
+whole wave is a single float, the clock's rate.
+
+**The production wiring.** `inf_ecs::society::sync_society` runs in both fixed
+steps, folds the level's own volumes into a network, pairs a home with a
+workplace and installs the result through the new
+`inf_ecs::crowd::add_agents`. On the committed island's Harbour City that is
+**329 residents**, derived from the buildings, with nobody having installed
+anything.
+
+`projector_mirror` pins the ordering in both hosts as source text: the society
+grows **after** the sky (a schedule reads the clock) and **before** the crowd is
+tiered (a record installed after the tiering would be `Dormant` for one step on
+one host and not the other).
+
+### Clause 2 — a day is legs on the level clock, and the namespace that made it possible
+
+**The one-namespace blocker, closed.** NPC1c's carried item 6 and the NPC1c
+audit's item 15 both said a `BuildingPlan` has ONE nav id namespace and that
+folding two of them welds a bedroom to a bedroom; nothing failed the day somebody
+did it. Measured now: absorbing a second unsalted interior keeps the **first**
+building's rooms and pushes the **second's edges** — 80 + 81 nodes fuse to 81 and
+the edge count **doubles, 170 → 340**. That is not a lost building, it is a
+bedroom with a door into another building's corridor.
+
+`room_node_id_in` / `doorway_node_id_in` / `interior_nav_in` carry a **39-bit
+salt** between the index and the class bit (which moves from bit 40 to 59; a nav
+id is derived in every host and persisted nowhere, and the doorway-above-room
+ordering a Dijkstra tie-break reads is unchanged). Thirty-nine bits because the
+salt is a **hash** of `(volume Guid, building ordinal)` rather than a counter — a
+dense ordinal would have to be assigned by something that has seen the whole
+level at once, and in a streaming world nothing has. At 2³⁹ over the island's own
+buildings the birthday collision probability is about one in a million;
+nineteen bits would have collided about once per island. The society counts
+collisions anyway and the gate asserts **0**.
+
+**A schedule is a pure function of `(agent seed, clock)`.** `CrowdSchedule` is a
+list of legs, each *"leave at this hour, walk this route, stand at the far end
+until the next"*. `CrowdClock` carries the two clocks a crowd answers to: `t_s`
+for a route that ping-pongs (every NPC1a/b/c fixture) and the **local** hour for
+a schedule. Local solar rather than UTC — `inf_ecs::sky::local_hour` — because a
+working day that began at 07:00 UTC would start in the dark on Vancouver Island.
+
+**A leg's position is a fraction of its own clock WINDOW**, and that is the
+load-bearing choice of the wave. It makes the day's *shape* independent of the
+rate: the same agent is in the same place at the same hour whether the day takes
+eighty minutes or two. That is the only reason twenty-four in-game hours is
+provable in a test process at all — at the island's authored rate a day is
+**288 000 fixed steps a host**.
+
+Midnight is not a special case. The active leg is the one that started most
+recently, `(hour − start_h) mod 24` smallest — a day is a circle and the modulo
+is the circle. Driven at 8.5, 9.0, 11.0, 12.25, 13.25, 18.5, 23.9, 0.1 and 7.9 h,
+and at every one of those ± 24 h.
+
+**Nothing is stored but what a body wrote.** `rephase_m` (NPC1c's) and a new
+one-byte `leg`, folded into the trace for the same reason: a new leg drops the
+metre a body fell behind the old one, so two hosts that disagreed about the leg
+would carry different phases into the same walk and part company a step later, in
+the position. `AGENT_TRACE_BYTES` **57 → 58**, and the re-shape's ratio against a
+161-bone posed character **113× → 111×**.
+
+Per-agent jitter of ± half an hour, derived from `SALT_SCHEDULE` at `tick = 0`
+and never stored (`speed_of`'s own rule): 64 agents produce more than 50 distinct
+hours and none is shifted past the bound.
+
+**And `Dormant` re-materializes at its schedule.** NPC1c's carried sentence about
+a dormant agent coming back at `last` was already half-retired by the NPC1a
+audit (a dormant agent's place has been `route(clock)` since then); this makes
+that route a **day**. An agent with no entity at all is at work at two in the
+afternoon, because the schedule is a function and not a state machine.
+
+### Clause 2b — the network, and the search that had to be two levels
+
+**The street network is the pavement round the blocks.** A settlement's street
+grid lives in Ring 1, in the recipe, and is not in a cooked pack — so a shipped
+player has no plan to read. What every host *does* have is the blocks: a
+`PcgVolume` is a centre and an axis-aligned half-extent, and the streets are the
+gaps between them. Each volume lays a ring of **eight nodes** 2 m outside its own
+rectangle — four corners, four edge midpoints, ids hashed from their own
+quantized position so two blocks laying a node at one corner lay *one* node — and
+two rings within 40 m are joined at their nearest pair. A crossing.
+
+It closes NPC1c's defect 5 **by construction**. A settlement's grid runs out to
+its whole reservation radius while the levelled pad is smaller, so the outer
+lines lie on raw hillside and a route down one walks a body into the cut face —
+NPC1c had to refuse such routes with a ground profile. A pavement hugs its own
+block and a block stands on the pad, so no node of this network is on raw
+hillside and no profile is needed to say so. The pad itself comes from the
+level's own ground-floor exterior doorways (`hinge.y − height/2`), not from the
+volume's transform.
+
+A building joins at its own front door, which is **the doorway node with one
+edge** — the wall it stands in has no room on the far side, so `interior_nav`
+gives it exactly one link where every internal door has two. No new data was
+needed to find it.
+
+**THE SEARCH IS TWO LEVELS, and that is a measurement rather than a taste.** The
+obvious network is one graph with every interior in it. It was built that way
+first and priced: a settlement's buildings are about **25 000 nodes**, and
+`inf-nav`'s own measured **743 µs over a 1 600-node grid** extrapolates to
+roughly **11 ms a search** — four legs an agent, hundreds of agents, inside a
+fixed step. That is not a slow gate, it is a simulation that stops. So the level
+network holds the **streets and the front doors** (about 1 600 nodes, exactly the
+size `inf-nav` measured), each volume keeps its own interior, and a leg is
+`home → front door` inside, `door → door` outside, `door → work` inside, joined.
+The outer half is **memoized on its endpoint pair**, because a hundred residents
+of one block commuting to one office is a hundred agents sharing one street
+route.
+
+**Nobody plans a day while the town is still being built.** Volumes stream, and a
+resident of the first block to arrive would be paired with the only workplace it
+could see — a society that is a function of cell-activation order. So planning
+happens only on a step that folded **no** new volume, at most
+`SOCIETY_PLANS_PER_STEP = 8` agents on it. An agent's `Guid` is a hash of
+`(volume, building, room, slot)`, so folding two blocks in both orders mints the
+same people **and the same crowd trace** — the arm is
+`the_agents_are_the_levels_own_and_not_the_orders`.
+
+A refusal is a value (P21.4): no reachable work is a stay-at-home day, nothing
+reachable at all is a stand, a building with no exterior door gives its people no
+day at all, and all three are counted rather than hidden.
+
+`crowd::add_agents` is the growth door — insert, keep `steps`, leave every
+existing record's sim state alone — and it **refuses a `Guid` the world already
+holds**. That is NPC1a's carried item 9, closed for the first caller that could
+ever meet one: every previous caller drew from a namespace of its own and was
+trusted to, and a society derives its agents' ids from a level's own content. The
+general door on `spawn_with_guid` stays carried, because it answers for every
+spawner in the engine.
+
+And one rule the instruments forced: **a caller that installs a population by
+hand owns it.** `set_population` marks `CrowdPopulationRes::hand_installed`, and
+the society stops deriving. Without it an instrument that installs a measured
+`N` and then clears it would find the level's own residents walking back in on
+the next step, and every number it printed would be about a population it did
+not choose.
+
+### Clause 3 — the island gets a day, and the rate is a measurement
+
+`ISLAND_CLOCK_RATE = 18` — an **eighty-minute day**, and the number is set from
+the island rather than chosen for looks.
+
+The arithmetic is one line. A commute gets one hour of the level clock and a
+`ScheduleLeg` walks its route over that window, so the metres per second a
+commute implies is `length × rate / 3600`. Measured on the CI island's own
+derived population — 329 residents of Harbour City — the **median commute is
+320 m**, so the rate that makes a median commute a *walk* is
+`3600 × 1.65 / 320 ≈ 18.6`, and eighteen is that rounded to something a reader
+can hold.
+
+| at rate | min | **median** | max | day length |
+|---|---|---|---|---|
+| **30** (the first draft) | 1.48 | **2.67** | 3.28 m/s | 48 min |
+| **18** (shipped) | 0.89 | **1.60** | 1.97 m/s | **80 min** |
+
+The movement model's own `walk_speed_mps` is **1.65**. At thirty the median
+commute was a **jog**; at eighteen every commute on the island is a walking pace
+and the median is within three per cent of a walk. Forty-eight minutes is a nicer
+number to say and the arm is what found out — which is the NPC1c law about a
+2.4 m capsule wearing a 1.8 m comment, met from the other side: a proportion
+stated in a doc is a claim, so it is stated in a gate.
+
+**The night windows turn on, on the island, for the first time.** The I8b
+substrate (`inf_render::night_glow_step`, `ScatterSource::glow_step`, the two
+mirrored projectors) has been in the tree since wave I8b and had **never once
+returned a non-zero step in normal play**: the committed island's clock was
+frozen at 10:30 UTC, so `sun.direction.y` could not get below `+0.10`. The only
+exercise it ever had was `the_scattered_cover_draws_its_authored_meshes` winding
+the world's `TimeOfDay` by hand. It is now a property of the clock, and the day
+gate asserts the ramp on the island's own sky at three hours of one day.
+
+**D-12, re-checked against a running clock, and the answer is that a clock does
+not move it.** The bound is a *play-head* — `motion_leader` casts `state_time` to
+f32 before `resolve_time` wraps it, and markers stop separating past
+`t > 131 072 s` in ONE unbroken animation state. A play-head counts **sim**
+seconds; `TimeOfDay::rate` scales in-game hours, not sim ones, so the number does
+not move. What a running clock changes is the *shape of the content that could
+reach it*: a scheduled agent standing at its desk from nine to noon is three
+in-game hours, which at rate 18 is **600 sim seconds** in one state — 0.46 % of
+the bound. Reaching it needs **27.3 in-game days** of one unbroken state. Carried
+with the arithmetic rather than armed, because an arm for it is a 36-hour test.
+
+**The blood-red night, LOOKED AT and given the number it never had.** SKY2's
+audit LOW item 9 says `clouds_night` *"renders a saturated blood-red sky"* at
+23:30 with the sun 17° below the horizon, and notes that every arm on that golden
+is *relative* so none can see it. Measured off the committed
+`crates/inf-render/tests/goldens/clouds_night.png` (320 × 180):
+
+| reading | value |
+|---|---|
+| mean sRGB over the upper half | **(70.2, 3.4, 2.7)** |
+| its saturation | **0.962** |
+| horizon band (± 20 px) | (50.2, 3.1, 2.7) |
+| brightest pixel in the frame (a star) | (67, 67, 67) |
+
+So the night sky is **as bright as its own brightest star and twenty times
+redder than it**, at a sun elevation past the end of astronomical twilight where
+it should be near-black. That is the description SKY2 wrote, now with numbers a
+fix can be judged against.
+
+**Not fixed, and the reason is a diagnosis rather than a shrug.** The obvious
+suspect — a missing planet-occlusion test on the sun ray — is already there:
+`atmosphere.wgsl`'s `atmos_transmittance_integral` returns zero the moment
+`atmos_ray_sphere_near` hits the planet. What survives is the **in-scattering at
+high-altitude samples along the view ray**, whose own ray to the sun still grazes
+the limb; Rayleigh extinction over that path removes the blue first, which is
+exactly the sunset mechanism arriving 17° too late. Correcting it is a change to
+the sky-view LUT's parameterization — P17 territory, a golden re-bless, and a
+wave of its own. **What this wave changes is who can see it**: the island now has
+a night, so it is a thing a player meets rather than a golden nobody looks at.
+Carried, promoted, and measured.
+
+### Clause 4 — the editor door
+
+Two doors, and the smaller one is the important one.
+
+**The population installs itself.** `sync_society` runs in the editor's Simulate
+fixed step exactly as it does in the shipped player's, through the same Ring-0
+function, so pressing Simulate on a level with settlements in it populates the
+town without anybody pressing anything else. That is the smallest honest door
+there is: no World Settings row to forget to set, no wizard step to skip, and
+nothing an author can set differently from what a player will get.
+
+**And the explicit one**, for the case that door does not cover:
+`SimSession::set_crowd_population`, the mirror of `RuntimeSim`'s. Until this wave
+the editor had none at all, which is the NPC1a audit's carried item 12 — *"the
+mixed-tier equality proven here is between two `RuntimeSim`s, and the editor is
+held to the same decision by source-text mirror pins alone"*. It is a real call
+now. **No frontend moves**, and that is the point rather than an omission: a row
+in World Settings would be a knob for a thing that has no knob, since a level's
+population is derived from its own buildings.
+
+### Clause 5 — a day in the life
+
+`pie_equals_shipping_over_a_day_in_the_life` stands the hero at Harbour City's
+crossroads, waits for the settlement to stream in and its society to be derived,
+steps out to the town's edge, winds the clock to local midnight and runs
+**1 200 steps — one whole in-game day — on each host**.
+
+**The compression, and why it is exact.** The island's authored rate is an
+eighty-minute day, which at 60 Hz is **288 000 fixed steps a host**; the gate
+runs the same day at **72×**. A `ScheduleLeg`'s position is a fraction of its own
+clock *window*, so every agent is in the same place at the same **hour** at any
+rate — the compression moves no agent. What it does not preserve is the metres
+per second a leg implies, and that claim is armed separately, at the rate the
+island actually authors, by `the_islands_own_rate_makes_a_commute_a_walk`.
+
+**And it is why the hero steps out of town.** A body on a tier that *steers* is
+moved by `move_and_slide` at its own 1.65 m/s gait against a clock running 72×
+fast, so it is permanently strung out along its route — and the first cut, with
+the hero at the crossroads, ended the day with **all 329 agents inside the 32 m
+`Full` ring**, their bodies drifting toward the middle of town. A census over
+three hundred steered bodies measures the compression, not the day. From the
+edge a handful steer and the rest are moved by their clock, which is the tier
+ladder's whole point: for every tier below `Full`, `rec.last` **is**
+`route(clock)`, written into the world by the step. Steered agents are counted
+apart and reported.
+
+**The society the island derived, with nobody installing anything** (identical on
+both hosts, to the number):
+
+| | |
+|---|---|
+| settled in | **163 steps** |
+| volumes folded | **4** — the blocks whose ground had paged in around a stationary hero |
+| homes offered / agents / declined | **329 / 329 / 0** |
+| scheduled (of them, full four-leg days) | **329 (153)** |
+| homebound / housebound / doorless | **0 / 0 / 0** |
+| network | **50 nodes / 116 directed edges** |
+| frontages (refused) / crossings / salt collisions | **18 (0) / 12 / 0** |
+| street routes searched / served by the memo | **20 / 944** |
+| commute min / median / max | **177.4 / 320.1 / 393.6 m** |
+
+The network decomposes exactly: 4 pavement rings are 32 nodes and 64 directed
+edges, 18 front doors are 18 and 36, and 12 crossings dedupe to 8 distinct pairs
+and 16 — **50 and 116**. And the two-level split's whole argument is the last
+row: **twenty street searches served nine hundred and sixty-four legs**, because
+a hundred residents of one block commuting to one office share one street route.
+
+**Four blocks of a hundred and seventy is also the wave's most useful number.**
+A stationary hero pages in four of Harbour City's blocks and they offer 329
+homes — so the whole town implies something like **fourteen thousand people**,
+which is where `SOCIETY_MAX_AGENTS = 1000` comes from and why it is a decision
+rather than a default.
+
+**A day, hour by hour** — the population the CLOCK moves, which past `Full` is
+every agent. Identical on both hosts to the digit:
+
+| local hour | home | work | walking | tiers (F/N/Fa/D) | sun y | glow |
+|---|---|---|---|---|---|---|
+| 02:02 | **329** | 0 | 0 | 0/4/325/0 | −0.222 | **16** |
+| 07:02 | **329** | 0 | 0 | 0/4/325/0 | +0.456 | 0 |
+| 08:52 | 3 | 9 | **317** | 0/43/286/0 | +0.667 | 0 |
+| 10:02 | 0 | **329** | 0 | 0/17/312/0 | +0.822 | 0 |
+| 19:02 | 179 | 0 | 150 | 0/12/317/0 | +0.144 | 0 |
+| 22:02 | **329** | 0 | 0 | 0/4/325/0 | −0.222 | **16** |
+
+The town is at home at two in the morning and at seven, **three hundred and
+seventeen of it are on the street at ten to nine**, the whole of it is at work at
+ten, half of it is walking home at seven in the evening, and all of it is home by
+ten at night. Seven in the evening is *reported* rather than asserted, because
+with half an hour of jitter either way whether a given agent is home at 19:00 is
+a statement about its own seed.
+
+**The windows.** Glow step **16** at 02:02 and 22:02 with the sun at
+`y = −0.222`, and **0** at every daylight sample. That is the I8b substrate
+answering on the island's own sky, from the island's own clock, for the first
+time since it was written.
+
+**The coda: `Dormant` comes back at its schedule.** The hero walks a kilometre
+away — **329 agents lose their entity** — the clock runs on, and the hero comes
+back. The worst re-materialized agent is **0.0000 m** from where its own
+schedule says it should be at the hour the clock now reads. The tolerance in the
+arm is a *millimetre*, not a metre, because the claim is exact: the position law
+is `route(clock)` at every tier. That is NPC1c's carried item about `Dormant`
+re-materializing at `last`, closed.
+
+**The ladder, over settle + day + coda: `[27, 302, 329, 329]`** — all four rungs,
+and each because of where the hero is: the crossroads while the town streams in,
+the edge for the day, a kilometre out for the coda.
+
+**The trace arithmetic.** 329 agents × 58 B = **19 082 B a step** of crowd
+section, and 1 200 steps of one in-game day is **22 898 400 B**. Against the
+un-re-shaped alternative — 329 posed characters at the island's 161-bone rig,
+6 476 B each — one step would be **2 130 604 B** and the day **2.6 GB**, which is
+the wall NPC1a's re-shape was built against, arriving on the wave that finally
+put a population in front of it. **1 200 of 1 200 states distinct** on both
+hosts, so the day is not a world that stopped moving.
+
+**And PIE == shipping.** Every digit above is the same on the cooked pack and on
+the loose content: the same 163 settle steps, the same 50-node network, the same
+329 agents from the same 4 blocks, the same six hourly censuses, and 1 200
+step digests equal one for one.
+
+### The laws this wave paid for
+
+* **A counter that resets is a report that says a system did nothing.** The
+  fold's own counters were per-sync, so a gate reading them after the town had
+  settled printed *"0 frontages, 0 crossings"* over a network that plainly had
+  both — it decomposes exactly as 4 pavement rings (32 nodes / 64 directed
+  edges), 18 front doors (18 / 36) and 8 crossings (16), which is 50 and 116 to
+  the unit. The two counters that are honestly per-step say so in their names;
+  every other one is a total.
+* **The first quiet step is in the middle of a town, not at the end of one.** The
+  gate settled on the first step that folded no volume and measured **four
+  blocks of a hundred and seventy** — 329 residents packed into 320 m, all of
+  them `Full`, 329 controllers in a fixed step. A settlement's volumes evaluate
+  as the ground under them pages in, so "nothing arrived this step" is a
+  statement about one step.
+* **A rate is a measurement.** Forty-eight minutes is the nicer number to say and
+  it made the island's median commute a **2.67 m/s jog**. Eighteen is set from
+  the island's own 320 m median and the movement model's own 1.65 m/s, and the
+  arm holds the result inside ±25 % rather than inside a band wide enough to
+  admit the first draft.
+* **Price the search before you build the network.** One graph with every
+  interior in it is the obvious design and it is 25 000 nodes; `inf-nav`'s own
+  743 µs over 1 600 extrapolates to 11 ms a search, four legs an agent. The
+  two-level split is not an optimization, it is the difference between a
+  simulation and a stall — and the number that decided it was already in the
+  tree, measured by the wave before.
+* **A hazard written into a carried list is not a hazard handled** (NPC1a's own
+  law, met from the other side). NPC1c said twice that folding two unsalted
+  interiors welds a bedroom to a bedroom. What it actually does is keep the
+  first building's rooms and push the second's **edges** — the fused graph has
+  both buildings' connectivity on one building's metres, which is a *wrong route*
+  rather than a missing one, and nobody had run it.
+* **A ceiling is more honest than a fixed step that silently takes half a
+  second.** The island's own settlements imply about fourteen thousand people.
+  A thousand is a decision, it is stated, the declined homes are counted, and
+  which thousand a level gets is a function of its content rather than of its
+  streaming order.
+* **A caller that installs a population by hand owns it.** Without that rule an
+  instrument that installs a measured `N` and then clears it finds the level's
+  own residents walking back in on the next step, and every number it prints is
+  about a population it did not choose.
+
+### Carried, by name
+
+1. **The character mover is still the arc's wall** (NPC1c's carried item 1,
+   unmoved and now with a second face). The society's ceiling exists because of
+   it: a settlement implies ~14 000 residents and the fixed step can carry a
+   thousand. `SOCIETY_MAX_AGENTS` is where that ruling is written, and the day
+   it becomes unnecessary is the day the mover is cheaper.
+2. **An agent plans its day ONCE**, over the network as it stood when its home
+   was folded. A workplace that streams in afterwards does not re-open anybody's
+   day. Bounded and deterministic (both hosts stream identically, and the gate
+   compares the two byte for byte), but a settlement whose far half arrives late
+   gives its early residents a smaller world to choose from.
+3. **The pairing is nearest-of-kind, and nearest is not a life.** An agent works
+   at the nearest workplace to its home and shops at the nearest shop to its
+   work. That is a plausible town and it is not a *modelled* one: no capacity, no
+   trade, no household, nobody's workplace fills up. A workplace slot can hold
+   any number of agents.
+4. **The society is derived from RESIDENT volumes only.** A settlement two
+   kilometres away that has never paged in offers nobody, so a level's population
+   grows as a player walks the island rather than existing all at once. Correct
+   for a streaming world and worth stating: `SocietyRes` never shrinks, so what a
+   level has *seen* it keeps.
+5. **The blood-red night is measured, promoted and not fixed** — mean sRGB
+   (70.2, 3.4, 2.7) over the upper half of `clouds_night`, saturation 0.962, at a
+   sun 17° below the horizon, against a brightest-pixel star of (67, 67, 67). The
+   planet-occlusion test the obvious diagnosis blames is already present
+   (`atmos_transmittance_integral`); what survives is in-scattering at
+   high-altitude samples whose own sun ray grazes the limb. P17 territory, a
+   golden re-bless, and a wave of its own — but the island now has a night, so it
+   is a thing a player meets.
+6. **D-12's 36-hour f32 play-head bound does not move**, because a play-head
+   counts sim seconds and a clock rate scales in-game hours. What changes is the
+   content: an agent standing at its desk for three in-game hours is 600 sim
+   seconds in one state at rate 18, so **27.3 in-game days** of one unbroken
+   state is the distance to the bound. Re-checked with arithmetic rather than
+   armed; an arm for it is a 36-hour test.
+7. **`Talk` still has no consumer**, and `SitPoint` was not built. Both were
+   "if cheap" in the brief and neither is: an affordance an agent uses is a
+   second authority over where its body is, which is exactly what the schedule's
+   one-position law exists to avoid.
+8. **The pavement is a ring round a block, not a pavement.** Eight nodes means a
+   route across a block's frontage walks its corners rather than its face, and a
+   block with a re-entrant footprint has a ring that cuts through it. Right for a
+   settlement whose blocks are axis-aligned rectangles — which is what the
+   generator makes — and wrong for the day one is not.
+9. **A workplace's own errand is chosen at plan time and never re-chosen.** An
+   agent whose shop streams out still walks to where it was; the route is a
+   `NavPath` and the shop is not consulted again.
+10. **`SocietyRes` is a resource, so a Simulate session's society does not
+    survive its own stop** (`clear_society` beside `clear_crowd`) — and neither
+    does it survive a save, which is correct because it is derived. What that
+    means in practice is that entering Simulate twice re-derives the town, and
+    re-derives it identically.
