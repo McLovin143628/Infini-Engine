@@ -2914,6 +2914,16 @@ Both this wave's own, both found by `inf-packager`'s workspace sweep, and they a
     > committed file**; and `pie_equals_shipping_when_the_car_drives_the_circuit`
     > is a real `step_vehicles` trace (34.1 m, top 16.81 m/s, 1 018 of 1 200
     > wheel contacts, byte-identical on both hosts).
+    >
+    > **The vehicle half only** (VEH1a audit). This item's last sentence draws a
+    > line between two claims — *"the drive trace moves the streaming source at
+    > 24 m/s, which is the streaming claim; it is not a vehicle simulation"* — and
+    > the car arm answers the second. It does **not** inherit the first: 300 steps
+    > is 34 m and the streamers do not move over it (measured: `(1, 0, 1, 16, 15)`
+    > before and after, on both hosts). The paging claim stays with
+    > `pie_equals_shipping_on_an_island_drive`, which covers 360 m and asserts
+    > those counters; the car arm now asserts that the two hosts' counters **agree**,
+    > which is a comparison the byte equality cannot make.
 
     The brief asked
     for "a drivable road circuit connecting the (empty) city/town sites" and what
@@ -19181,3 +19191,229 @@ question about a fleet, and the fleet is VEH1b's.
   volume produce the same class of error and want different remedies**, so the
   order matters: check the disk, then drop incremental, and only then suspect
   the code.
+
+## Wave VEH1a — the adversarial audit (2026-08-28)
+
+Range `3b466575..6e762605`, nine commits, **not pushed**. The battery was re-run at
+the wave's head before a line was touched: **336 / 6 436 / 0 / 19, exit 0** — the
+wave's own figure, block for block and arm for arm, on a volume with 113 GB free
+and 12.3 GB of `target/debug/incremental` (the wave's `LNK1120` did not recur).
+
+**Every headline number reproduces on this machine.** 0.0643° / 15.6898° and 74 of
+800 steps over a degree; 1 860 wheel contacts and **0.000000 m** apart; the sensor
+ride at 0.9617 against springs of 0.9529 with the trigger's face 0.8000 m up;
+0.039784 m of ray-versus-`height_at`; 0.0517 m of departure at 24.00 m/s; 4.5763 m
+of free roll against 0.0554 on the handbrake; 0.1108 ms at 64 cars (the ledger's
+0.1101); 34.1 m in 300 steps at 16.81 m/s with 1 018 of 1 200 contacts and
+(1, 334, 334) of engine audio, revs 0.0000–0.4944. The two committed levels'
+entity counts are the arithmetic the ledger implies rather than an approximation of
+it: 189 → **290** is 2 cities × a 13-entity sedan + 5 towns × a 15-entity truck =
+101, and 23 → **51** is one of each = 28; the byte growth is 237.7 and 238.6 B an
+entity.
+
+**The two dispositions hold, and both were attacked rather than read.** The
+falsifier is real — making `RaycastVehicle::solve` push the suspension along
+`contact.normal` puts the two rigs **33.50 m apart** and reddens the arm with the
+message it was written for — and the sensor filter is real: reverting the wheel ray
+to `CastTargets::All` parks the car at **1.7529 m**, which is the springs' 0.9529
+plus the slab's 0.8000, exactly the difference the ledger claims. The enumeration
+behind the refusal is complete: `RayHit3D.normal` is read at **one** site in the
+tree (`d3/vehicle.rs`, copying it into `WheelContact`), `WheelContact::normal` is
+read at **none** outside this file's own scrambler, and `solve` uses
+`contact.point` and `contact.distance_m` and nothing else. What the audit found is
+in the *instruments*, not the dispositions: **three pins could not fail**, and one
+carried bound was closed by deleting the record of its other half.
+
+### HIGH — the drive gate's streaming claim was prose, and the counters say it pages nothing
+
+`pie_equals_shipping_when_the_car_drives_the_circuit` said of itself that it is
+*"a far sharper instrument for the **streaming** claim than moving a capsule at a
+constant rate"*, because *"if either host paged one tile differently, a wheel ray
+would find a different surface and the two traces would separate within a step or
+two"*; the section header added *"it is still the streaming claim as well"*, the
+drive comment added *"the ground pages under a vehicle"*, and the wave ledger and
+the ROADMAP block both repeated it. The argument is true about the **mechanism**
+and it was never measured on this **window**, which is 300 steps: five seconds, and
+**34.1 m**.
+
+Measured now, from the same `streaming_counters` the scripted 360 m arm this one
+joins already asserts — `(activations, deactivations, cells resident, sim-resident
+terrain tiles, terrain loads)`:
+
+| | before the drive | after |
+|---|---|---|
+| shipping | `(1, 0, 1, 16, 15)` | **`(1, 0, 1, 16, 15)`** |
+| PIE | `(1, 0, 1, 16, 15)` | **`(1, 0, 1, 16, 15)`** |
+
+**The car pages nothing.** Not a cell in, not a cell out, not one terrain load over
+the whole drive. So the arm is a PIE-==-shipping claim about a *vehicle
+simulation* — which is what wave I7's open item 15 asked for (*"nothing drives
+it"*), and which it delivers — and it is **not** a streaming instrument beyond the
+residency it inherited at boot. The paging half of item 15's own sentence stays
+exactly where I7 put it, on `pie_equals_shipping_on_an_island_drive`, which covers
+360 m out and back and asserts those counters.
+
+**Fixed** (`11e0cd68`) by measuring rather than by deleting: the arm now takes the
+counters before and after, prints both, asserts the two hosts' streamers **agree
+exactly** — none of those five numbers reaches `state_bytes`, so that is a
+comparison the byte equality cannot make, and it is the small real thing this arm
+adds to the streaming record — and asserts the drive ran over resident ground at
+all (16 sim tiles, not zero, or the wheels were casting into nothing). The header,
+the section comment, the drive comment and open item 15's closure box now say which
+arm owns which claim.
+
+### MED — the movement-door ban could not see the regression it names
+
+`the_movement_door_no_longer_steps_the_vehicles_itself` is the falsifier for the
+whole paid-mirror trade: if `step_character_movement` kept its P29.7 call, both
+hosts would step every vehicle **twice**, and no equality fence in two other files
+can see it. It counted two *qualified* spellings —
+
+    src.matches("vehicle::step_vehicles(") + src.matches("super::vehicle::step_vehicles(")
+
+— of which the second **contains** the first, so one call would have been reported
+as two; and it counted them over the whole file **including its comments**, so it
+passed only because this module's own prose happens not to put a paren after the
+name it stopped calling. Its doc claims to *"read a SCOPE, not a spelling (the P23
+law)"*, and it did neither.
+
+**Mutation-measured:** adding `use super::vehicle::step_vehicles;` and a bare
+`step_vehicles(world, bridge, dt);` to `step_character_movement` — which
+double-steps every vehicle on both hosts — counts **zero** under the old arm and
+**passes**.
+
+**Fixed** (`11e0cd68`): the ban is on the NAME, in CODE, however it is qualified,
+with comment lines dropped first. The mutation above now reddens it by line number.
+
+### MED — the falsifier's own scramble counter was written and never read
+
+`ScrambledNormals::scrambled` was a `usize` incremented in `solve` and read
+nowhere. The arm's anti-vacuity came instead from the **vehicle map**:
+`contacts > 1_500`, counted off `bridge.vehicle_of(CHASSIS).wheels()`. Those are two
+different claims. The map's number says *"wheels touched ground"*, and it counts
+identically if the bridge had swapped the wrapper back out for a plain
+`RaycastVehicle` — in which case the two rigs are bit-identical **because they are
+the same class**, and the falsifier certifies the refusal it exists to attack.
+
+(It does not swap: `reconcile_vehicles` calls `set_rig` on an existing entry rather
+than replacing it. That is now a *measurement* rather than a reading of the source.)
+
+**Fixed** (`11e0cd68`): the counter is an `Arc<AtomicUsize>` the test holds, and
+the arm asserts it **equals** the map's count. Mutation-measured both ways: never
+installing the wrapper reports **0 replacements against 1 860 contacts** and
+reddens; making `solve` read the normal reddens the original comparison at 33.50 m.
+
+### MED — the half of P29.7's sensor bound the strike-through took with it
+
+The P29.7 entry recorded two facts in one sentence: a wheel ray uses
+`CastTargets::All`, which does not exclude sensors — **and** *"that is the
+pre-existing behaviour of every filtered cast in the tree (the camera sweep
+included)"*. VEH1a closed the wheel half correctly and struck the **whole
+sentence**. The second fact is still true and was left recorded nowhere.
+
+Verified against rapier's own source rather than inferred: `QueryFilter::default()`
+carries no flags; `QueryFilterFlags::test` returns `true` for a sensor unless
+`EXCLUDE_SENSORS` is set; `exclude_sensors` is a builder whose only caller in this
+tree is the new `AllSolid` arm. So every caller of `CastTargets::All` can still be
+blocked or held up by a region that exerts no force — the character mover's step-up
+and ceiling probes and the traversal fit check (through `cast_shape`, which passes
+`All`), and the camera's occlusion sweep (through `cast_shape_where`). `Fixed` is
+no escape either: `exclude_dynamic` says nothing about `is_sensor`, so a **static**
+trigger is visible to the mantle probe.
+
+**Not fixed, and recorded instead** (`d33a0720`), because each is a behaviour
+question with its own arms and no measurement behind it — a camera that stops at a
+checkpoint is not the wheel's case, where the consequence was a car parked in the
+air. The record now lives on `CastTargets::All`'s own doc, at the camera's call
+site, and back in the ROADMAP entry that used to hold it. Nothing in committed
+content is affected today: the only authored sensor in this repository outside a
+wheel is the phase-12 playground's trigger, and no vehicle stands on it.
+
+### MED — the 334 was a number no reader could derive
+
+The audio clause asserted `a.audio.1 >= steps && a.audio.2 >= steps` and the ledger
+quoted **334** `SetPitch` against a 300-step drive with the mechanism explained
+(*"the window opens before the throttle"*) and the arithmetic left out.
+
+It is **34 + 300**, and the 34 is one settle step, twenty-four spent standing the
+hero beside the car, and nine of press/release for the interact edge. **Fixed**
+(`11e0cd68`): `pre_steps` is counted rather than assumed — the fixture's ground is
+sampled, so the number of enter attempts is a fact about the machine and a literal
+would be wrong elsewhere — printed beside the drive, and asserted as an
+**equality**: `pre_steps + DRIVE_STEPS` pitches and volumes, exactly one pair per
+car per step it is published on. Mutation-measured: a loop that pushed a second
+`SetVolume` a step queued `(1, 334, 668)` and the old `>=` passed it on **both**
+hosts. (`DRIVE_STEPS`' own doc said "ten seconds at 60 Hz" for 300 steps, which is
+five; corrected in the same commit.)
+
+### The pins that were attacked and held
+
+| mutation | arm | verdict |
+|---|---|---|
+| `solve` pushes along `contact.normal` | `the_snapped_normal_reaches_no_force_in_the_model` | **red**, 33.50 m apart |
+| the wrapper is never installed | the same arm's new equality | **red**, 0 against 1 860 |
+| the wheel ray reverts to `CastTargets::All` | `a_wheel_does_not_ride_on_a_trigger_volume` | **red**, 1.7529 m = 0.9529 + 0.8000 |
+| a fifth world query a car | `the_vehicle_phase_asks_four_questions_a_car_…` | **red**, 5 against 4 |
+| `dt` → `dt * 1.0` inside one host's fence | `both_fixed_steps_step_their_vehicles_the_same_way` | **red** |
+| the vehicle block moved above the mover | `the_vehicle_step_sits_between_…_on_both_hosts` | **red** |
+| `use super::vehicle::step_vehicles;` + a bare call | `the_movement_door_no_longer_steps_the_vehicles_itself` | **red** (was **green**) |
+| a second `SetVolume` a step | the drive gate's audio clause | **red** (was **green**) |
+| `PHASE29_CAR_HALF` re-proportioned | `the_phase29_courses_car_is_still_wider_than_it_is_long` | **red**, and it names the ledger item |
+| `CAR_LIFT_M` 0.15 → 0.16 | `committed_sample_matches_generators` | **red** — and `every_settlement_parks_a_car_on_the_circuit` stayed green |
+
+### The finding that was not one, and how it stopped being one
+
+The audit's fifth candidate was **"nothing byte-locks the committed island
+levels"** — read off a grep for `committed_sample_matches_generators`' own failure
+message, `"drifted from the generator"`, which returned twenty artifacts and no
+island. A duplicate lock was written and, before it was believed, the thing it
+guards was **mutated**: `CAR_LIFT_M` 0.15 → 0.16, one centimetre of authored lift.
+
+`every_settlement_parks_a_car_on_the_circuit` stayed **green** — it reads the same
+constant the generator does, so it cannot see this — and the byte lock went red at
+`samples.rs:11542`, which is **not the new block**. Wave I7 had already written
+one; its message reads *"drifted from the **island** generator"*, and the grep that
+went looking for the gate was matching the wrong five words. The duplicate was
+deleted and this is the record instead.
+
+**The law:** *look for a gate by mutating what it guards, not by grepping for its
+message.* A message is a spelling one author chose; a mutation is the question.
+
+### Carried, by name (the audit's, after the wave's eleven)
+
+1. **`CastTargets::All` still sees sensors**, for the character mover's step-up and
+   ceiling probes, the traversal fit check and the camera's occlusion sweep — and
+   `Fixed` sees static ones. Recorded at the door and at the call site; the fix for
+   any of them is a behaviour decision with its own arms.
+2. **The drive gate pages nothing.** 34 m in five seconds is not a streaming
+   window; the paging claim belongs to the 900-step scripted arm. Lengthening the
+   drive, or starting it at a cell boundary, is what would make this one carry
+   both halves.
+3. **The engine loop's `Play` skips the occlusion cut** the autoplay walk applies
+   (`AudioSource::occlusion` + `spatial` → `occlusion_gain`). Inert today —
+   `occlusion` defaults false and `spawn_vehicle` does not set it — and identical
+   in both hosts, so PIE parity is untouched. It is the same emitter the wave's own
+   carried item 1 is about.
+4. **`VehicleClass::to_tuning` sets `enter_window` to the default and then spreads
+   the default over it**, which is one redundant field initialiser. Harmless,
+   compiles, and says what it means; left alone rather than churned.
+5. **The ROADMAP block still calls the connectivity walk a *"real
+   `inf_gis::RoadGraph::from_layer`"***, which is true of the function and stale
+   about the door — `d6e517d0` routed it through `inf_island::road_graph`. The memo
+   above records the move correctly.
+
+### Counts, at the audit's head
+
+| | wave VEH1a (`6e762605`) | **audit head** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 336 / 6 436 / 0 / 19 | **336 / 6 436 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, exit 0, tallied over all 336 blocks. **The wave's figure is exactly right**, and the audit moves neither the block count nor the arm count: every fix is a clause inside an existing arm, a doc comment or a `println!` |
+| goldens | 59 | **59** — none added, none re-blessed; `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**, and `git status` over `crates/inf-render/tests/goldens` is **empty** afterwards |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — after `cargo clean --doc` (9 022 files, 221.8 MiB): **404 `^warning` lines − 30 per-crate summaries**, cross-checked against the sum of those summaries' own counts (374 exactly). **The audit adds zero**, including the twenty-three lines of new `CastTargets` doc. Headroom **76** |
+| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — exit 0, run **LAST** per the rmeta law |
+| `cargo fmt --all --check` | clean | **clean** |
+| schemas / `Cargo.lock` / committed content / goldens | unmoved | **unmoved** — the two `src` edits are doc comments and nothing on a step path changed behaviour |
+| step phases / trace | 27 / 9 sections | **27 / 9** — unmoved |
+| disk | 82.4 GB free mid-wave | 113 GB free at the audit's start, **96.5 GB** at its end; `target/debug/incremental` 12.3 GB and the wave's `LNK1120` did not recur |
+
+**Commits:** `11e0cd68` (the streaming measurement, the audio arithmetic and the two
+pins), `d33a0720` (the sensor bound's surviving half, recorded), and this ledger.

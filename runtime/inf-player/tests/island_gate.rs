@@ -5389,7 +5389,11 @@ fn the_islands_own_rate_makes_a_commute_a_walk() {
 // 34 m and the streamers do not move over it (measured in the arm's header,
 // VEH1a audit). What dies here is *"nothing drives it"*.
 
-/// How many fixed steps the car drive runs — ten seconds at 60 Hz.
+/// How many fixed steps the car drive runs — **five** seconds at 60 Hz.
+///
+/// (Its first cut said "ten seconds", which is what it would have been at 600;
+/// the wave's own carried item records the cut to five and the header's prose
+/// says five. VEH1a audit.)
 const DRIVE_STEPS: u64 = 300;
 
 /// Every chassis the **vehicle recogniser** finds in a live sim, in `Guid`

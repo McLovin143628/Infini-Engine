@@ -28578,3 +28578,49 @@ a test — since P12.3), the phase-29 car's proportions, no car golden, a car ex
 active cell, the unread normal's tripwire, the cross-section bound measured on open ground rather
 than on the circuit, traffic to VEH1b, no runtime catalogue loader, `enter_window` still absent
 from `VehicleClass`, and the drive gate's 300-step window.
+
+**VEH1a AUDIT (2026-08-28, `3b466575..6e762605`, three audit commits).** The battery was
+re-run at the wave's head before a line was touched: **336 / 6 436 / 0 / 19, exit 0** — the
+wave's own figure, block for block — and every headline number reproduces (0.0643° / 15.6898°
+with 74 of 800 steps over a degree; 1 860 contacts **0.000000 m** apart; the sensor settle
+0.9617 against springs 0.9529 with the slab's face 0.8000 m up; 0.039784 m of
+ray-versus-`height_at`; 4.5763 m of free roll against 0.0554 on the handbrake; 34.1 m /
+16.81 m/s / 1 018 of 1 200 / (1, 334, 334); 0.1108 ms at 64 cars). The committed levels' entity
+counts are the fleet's arithmetic exactly: 189 → **290** = 2 cities × 13 + 5 towns × 15, and
+23 → **51** = 13 + 15. **Both dispositions were attacked rather than read**: making
+`RaycastVehicle::solve` push along `contact.normal` puts the two rigs **33.50 m apart**, and
+reverting the wheel ray to `CastTargets::All` parks the car at **1.7529 m** = the springs' 0.9529
+plus the slab's 0.8000. **HIGH — the drive gate's streaming claim was prose.** The arm called
+itself *"a far sharper instrument for the streaming claim"* and nothing measured it: over five
+seconds and 34 m the counters move **not at all** — `(activations, deactivations, cells, sim
+tiles, terrain loads)` is `(1, 0, 1, 16, 15)` before and after, **on both hosts**. The paging half
+of I7 open item 15 therefore stays with the scripted 360 m arm that already asserts those
+counters; what the car arm closes is *"nothing drives it"*, which is the vehicle half and is real.
+It now takes the counters, prints them, asserts the two hosts agree exactly (none of them reaches
+`state_bytes`, so that is a comparison the byte equality cannot make) and asserts the wheels had
+resident ground under them. **MED ×4, every one mutation-measured.** (1) The movement-door ban
+counted a needle that **contains** another needle over a file including its comments, and
+**passed** a `use`-imported bare `step_vehicles(…)` that double-steps every vehicle on both hosts;
+it now bans the name in code however qualified. (2) The falsifier's own scramble counter was
+written and never read, so its anti-vacuity came from the vehicle map and would have survived the
+wrapper being swapped for a plain `RaycastVehicle` — two rigs of one class agree to the bit for
+free; it is an `Arc<AtomicUsize>` asserted equal to the map's count (0 against 1 860 when
+un-installed). (3) The audio clause's `>=` passed a doubled command stream, and **334** is now
+`pre_steps + 300`, counted and asserted as an equality. (4) P29.7's sensor bound was closed by
+**striking the sentence that also recorded its other half**: `CastTargets::All` still includes
+sensors for the character mover's step-up and ceiling probes, the traversal fit check and the
+camera's occlusion sweep, and `Fixed` still sees static ones — verified against rapier's
+`QueryFilterFlags::test` rather than inferred. Not fixed (each is a behaviour decision with its
+own arms, and the only authored non-wheel sensor in the tree is the phase-12 playground's trigger)
+and recorded at the door, at the call site, and in the P29.7 entry above. **A finding that was not
+one:** *"nothing byte-locks the committed island levels"* was read off a grep for the fixture
+lock's failure message; a `CAR_LIFT_M` 0.15 → 0.16 mutation reddened wave I7's own lock (whose
+message is spelled *"drifted from the **island** generator"*) while
+`every_settlement_parks_a_car_on_the_circuit` stayed green — so **look for a gate by mutating what
+it guards, not by grepping for its message**. **House gates at head:** battery
+**336 / 6 436 / 0 / 19**, goldens **59** with `INF_GOLDEN_STRICT=1` green over 118 arms and
+`tests/goldens` untouched, rustdoc **374 over 30 crates** cold after `cargo clean --doc` (404
+`^warning` lines − 30 summaries, cross-checked against their own sum; the audit adds zero, headroom
+76), clippy **0** with `-D warnings` run LAST, fmt clean, schemas / `Cargo.lock` / committed
+content / goldens / step phases **unmoved** — every fix is a test clause or a doc comment. Audit
+ledger in `docs/memos/island-progress.md` under *"Wave VEH1a — the adversarial audit"*.
