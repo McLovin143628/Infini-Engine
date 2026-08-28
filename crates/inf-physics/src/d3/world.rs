@@ -1716,9 +1716,11 @@ impl PhysicsWorld3D {
     /// fewer or cheaper queries per character, and the **ground** is where to
     /// aim it first"*. Wave NPC1e measured what a query against the ground
     /// costs: a shape cast that hits a 257-sample height-field tile is
-    /// **~5.3 µs**, where the same cast against 1 849 building boxes is
-    /// **~0.07** — so "how many queries did this step make" is the quantity a
-    /// lever moves, and the millisecond is a consequence.
+    /// **~5.6 µs**, where the same cast onto a building box in the same world is
+    /// **~0.50** — so "how many queries did this step make" is the quantity a
+    /// lever moves, and the millisecond is a consequence. *(NPC1e audit: the
+    /// figure here was first written as ~0.07 µs "against 1 849 building boxes",
+    /// which was the same cast in a world with **no ground**, hitting nothing.)*
     ///
     /// It is a count rather than a clock **because this repository has paid for
     /// that rule four times** (the NPC1c CI-red's own law: *a structural claim

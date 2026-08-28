@@ -28255,7 +28255,11 @@ disposition, and the island measured at the hour its town is on the street.
 **THE HEADLINE IS THAT 60 fps p50 IS NOT MET AT ANY N AND WAS NOT MET AT N = 0** — wave I8c
 certified the island alone at 24.270 ms p50 and made *"≥ 60 fps p50 LIT+VIS is STILL NOT
 MET"* the carried headline on a serial harness whose CPU half alone was 13.879 ms, and this
-wave reads it at **25.319 ms, 39.5 fps**. What is new is the crowd's share, and it is large:
+wave reads `LIT+VIS` at **25.319 ms, 39.5 fps** and the hand-emptied row — the only true
+N = 0 in the list — at **24.554, 40.7** *(NPC1e audit: the plain `LIT+VIS` row runs before the
+first `set_crowd_population(Default)`, so the level's own derived residents, 998 of 1 000 of
+them `Far`, are still under it; both miss 60 fps, and the emptied row is the one to quote)*.
+What is new is the crowd's share, and it is large:
 a player standing in the thickest part of the island's own rush hour, among a thousand
 residents the level derived for itself, reads **241.748 ms p50 — 4.1 fps** of which **84 ms
 is one station**. Clause D of the brief rather than clause A, with a mechanism on every line.
@@ -28266,11 +28270,18 @@ metre ring, and no arm saw it because no arm swept **density**.
 
 (1) **THE MOVER.** The NPC1c audit ended at *"fewer or cheaper queries per character, and the
 ground is where to aim it first"* and stopped one level above the query, so the queries were
-priced one at a time: `move_character` **25.9 µs**, the section-9 **ground-normal probe
-5.6 µs**, the same probe against 1 849 building boxes **0.07 µs**, a ray **0.18 µs**, and
-autostep and the ground snap each **under one per cent**. So *"four height-field tiles cost
-more than 1 849 buildings"* is right and is **~75× per cast**, not the 1.3× it was published
-as. **AND THE TABLE THE ARC AIMED WITH IS CORRECTED**: the NPC1c audit's four-world
+priced one at a time: `move_character` **25.8 µs**, the section-9 **ground-normal probe
+5.62 µs**, the same probe dropped onto a **building's roof 0.50 µs**, the same depth as a
+**ray 0.25 µs**, and autostep and the ground snap each **about one per cent**. So *"four
+height-field tiles cost more than 1 849 buildings"* is right and is **11.3× per cast** (2.9×
+on the isolated one-body control), not the 1.3× it was published as — and the *shape* is the
+bigger lever of the two, since a ray to the same depth answers the same ground **22×** cheaper
+than the swept sphere. *(NPC1e AUDIT: the wave first published this row as "0.07 µs against
+1 849 boxes → 75×" and a ray at 0.18 µs. Both were **misses** — the box world's character is
+the free-falling body the paragraph below corrects, and a ray of `probe_len` stops above the
+ground the sphere reaches; the ray had no arm behind it at all. The arm now asserts that the
+probe hits exactly on the worlds with ground and that the ray reaches what the sphere reaches.)*
+**AND THE TABLE THE ARC AIMED WITH IS CORRECTED**: the NPC1c audit's four-world
 decomposition used `travelled_m > 1.0` as anti-vacuity and **a body in free fall travels
 further than one that walks** — both ground-free rows end at **y = −139.056 m** at **3.00
 queries a step** against a walking body's **1.00**, so the two halves are different programs
@@ -28316,8 +28327,9 @@ caster sphere, no palette slot, no page fold. **The cost is visible and stated**
 NPC has no shadow. `VsmRasterStats::shadow_lod_skipped` counts it, apart from
 `dropped_casters`, because a ceiling firing is a defect and a shadow LOD firing is the feature
 working. Measured on the island: pages a rastering frame **56.3 → 168.6 (+112.3)** becomes
-**59.3 → 101.7 (+45.1)**, `vsm raster` recording **+1.03 → +0.82 ms**, 967 proxy casters → 255
-with 712 past the LOD. The **churn delta is 2.5× smaller**.
+**59.3 → 101.7 (+42.4)**, `vsm raster` recording **+1.03 → +0.82 ms**, 967 proxy casters → 255
+with 712 past the LOD. The **churn delta is 2.6× smaller** (the audit re-subtracted the row's
+own numbers: +42.4, not the +45.1 first published).
 
 (5) **CHARACTER IMPOSTORS: REFUSED, at the current numbers, for the second time.** Every term
 in NPC1b's refusal got cheaper this wave: a `Far` agent has no draw of its own (1 001
@@ -28344,8 +28356,9 @@ where a defect cannot appear is a gate that certifies the defect"*, met from the
 
 **THE ROW: p50 241.748 ms (4.1 fps), pipelined 136.162 (7.3), against the same hour with the
 town cleared at 45.561 (21.9) / 22.671 (44.1).** **60 fps p50 IS NOT MET AT ANY N, AND WAS
-NOT MET AT N = 0** — the island's own `LIT+VIS` is 25.319 ms p50 (39.5 fps) and I8c published
-that as the carried headline. So the close is a subtraction with a mechanism on every line:
+NOT MET AT N = 0** — the island's own `LIT+VIS` is 25.319 ms p50 (39.5 fps), its hand-emptied
+twin 24.554 (40.7), and I8c published that as the carried headline. So the close is a
+subtraction with a mechanism on every line:
 `character move` **+84.00** (170 controllers, **0.494 ms each**), `gameplay` **+6.11** (the
 door pass over 112 blocked agents), `animation` **+5.63** (505 posed × 161 joints),
 `physics3d sync` +2.81, `solver` +1.83, `terrain stream` +1.71, **`crowd` 1.125 — over
@@ -28372,7 +28385,7 @@ into a rush hour covers **0.30 m** where the spread arrangement takes it **1.56*
 first time since NPC1c: p50 **61.066** between **24.554** and **24.720** — the brackets agree
 to **0.166 ms**, so the delta is published: **+10.47 ms of fixed step** (NPC1c's +12.80),
 **+2.95 projection**, **+2.62 recording** (NPC1b's +3.48), of which `gi` recording is
-**+0.144** against **+0.62** and the shadow pages are **+45.1 a rastering frame** against
+**+0.144** against **+0.62** and the shadow pages are **+42.4 a rastering frame** against
 **+112.3**. The render half is otherwise unchanged: 1 001 skinned in **1 draw call**, 290
 palette blocks = 2.85 MB, 255 proxies in 1 group, **712 past the shadow LOD**, 35 groups of a
 1 024 ceiling, 0 dropped, 0 refused, and `GiAudit::skinned_rejected` = 1 001.
@@ -28400,7 +28413,10 @@ second time with the measurement**, the rest carried by name.
 
 LAWS: **an anti-vacuity clause has to know what it is ruling out** (the four-world table asked
 `travelled_m > 1.0` and got it from a body that fell 140 m); **price the primitive, not the
-phase** (1.3× at the phase, 75× at the cast); **a field only one branch reads is a query
+phase** (1.3× at the phase, 11.3× at the cast); **a ratio is only a ratio if both halves hit**
+(the NPC1e audit's, and it is the law above met by the wave that wrote it — the 75× the first
+ledger published was a cast into a height field divided by a cast that found nothing);
+**a field only one branch reads is a query
 nobody else should pay for** (grepping the *reader* turned an 18 % cost into a predicate); **a
 conservative bound is only worth having if it is tight enough to reject something** (the GI
 pre-reject needs two arms pointing opposite ways); **a gate staged where a defect cannot
@@ -28419,10 +28435,48 @@ the leg answers the same bits, and `SkinnedShadow` / `GiAudit` are render-side t
 serialized format has seen. **Carried by name** (16 items): the mover's density wall with its
 three named levers; P15's elided third (the GPU palette compute pass) for the projection and
 the atlas fill; the projection over its budget with nothing asserting it; the deformation field
-as a crowd's dominant trace section; the `Far → Near` pose pop; the unfalsifiable `Near` rung;
+as the dominant trace section **of an all-`Full` crowd** (the NPC1e audit re-measured it: at
+the banded tiers it is 75 184 B against the pose's 243 276 at N = 1 000, not the 708 928 four
+ledgers carried — NPC1c's *"the tier owns the components"* retired it and nobody re-ran it);
+the `Far → Near` pose pop; the unfalsifiable `Near` rung;
 the visible shadow-LOD cost and `SkinnedShadow`'s missing authoring door; impostors refused;
 `set_crowd_radii` still without a production caller; **`NPC_STEP_BUDGET_MS` exceeded at 1.125**;
 `gameplay` at +6.11 over 19 790 doorway slots; **+21.0 ms of p50 to stand in the town at all**,
 which is the collider band's and not the crowd's; and the CPU-bound GPU caveat, now attached to
 the row the arc is certified on. Details in `docs/memos/island-progress.md` under
 *"Wave NPC1e — the arc's close"*.
+
+**NPC1e AUDIT (2026-08-28).** One HIGH and seven MEDs; three follow-up commits; every lever
+re-verified and mutation-checked, and the density law reproduced on the same machine
+(0/64/192/384 bystanders: 1.06× / 1.61× / **2.62×** / 2.65×, against the ledger's 0.91 / 1.58 /
+2.56 / 2.64). **THE HIGH: the primitive table divided a HIT by a MISS.** The *"0.07 µs against
+1 849 building boxes"* row is the fixture's `ground(false)` world, where the character has been
+in **free fall since the settle loop** — the very body the wave corrected the four-world table
+for, one function above, in the same commit — so its probe hits nothing, and **75×** is a cast
+into a height field divided by a broad phase saying "no". It had become a closing law and a
+carried prescription. The published **0.18 µs ray had no arm in the tree at all**
+(`grep cast_ray` over the file: nothing) and was a second miss, because a ray of `probe_len`
+stops above the ground the probe sphere's radius reaches. Fixed with the anti-vacuity clause the
+sibling arm already carried (`probe_hit == spec.ground`, `ray_hit == probe_hit`), a **box control**
+that drops the identical probe onto a building's roof in the same world and tree, and a real
+ray: **a height-field cast is 11.3× a box cast in the mover's own world and 2.9× on the isolated
+one-body control**, and **a ray to the same depth is 22–45× cheaper than the swept sphere** —
+the audit's own addition to the carried levers, since the shape of the cast is a bigger lever
+than the count of them. MEDs: the NPC1c ledger was never given the correction the wave says it
+made (781 insertions, **zero deletions**) and now carries a correction box; the leg equality arm
+is a **tautology** (`position_at` *is* `position_on(leg_at(..))`) and now also asserts the
+falsifiable property — that `leg_at` does not move under the two record fields the step writes
+between the resolution and its last reader (mutation-verified, and invisible to the old half);
+**the deformation field has not been a crowd's dominant trace section since NPC1c** and four
+ledgers carried NPC1a's 708 928 B (re-measured at head: **75 184 B of deform against 243 276 of
+pose** banded, and it is still dominant all-`Full` at 2 014 000); *"not met at N = 0"* was hung
+on the `LIT+VIS` row, which runs before the first population clear and carries the level's own
+998 `Far` residents (the true N = 0 is **24.554**); the certification row's staging comment named
+*"its largest settlement's centre"*, which the code neither picks nor stands at; the **+21.0 ms**
+attributed to the collider band had no census on the row it is about (now printed per row); and
+wall 4's *"thirty-two thousand `Full` NPCs"* is 1 024, since a `Full` agent is exactly one group.
+**THE BUDGET RULING:** carrying an exceeded `NPC_STEP_BUDGET_MS` is **legal** — §8's rule is a
+direction rule and re-minting upward is what it forbids — but the budget's own arm asserts over
+1 000 **unscheduled, non-steering** walkers, the one configuration that cannot produce the 1.125.
+**Re-stage, never re-mint**, routed on carried item 13. Six LOWs carried by name. Audit ledger in
+`docs/memos/island-progress.md` under *"Wave NPC1e — the adversarial audit"*.

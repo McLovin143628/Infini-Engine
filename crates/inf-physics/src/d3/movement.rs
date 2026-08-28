@@ -417,10 +417,25 @@ fn settle_on_spawn(
 ///
 /// `character_move_cost::where_the_movers_queries_go`, on the island's own tile
 /// resolution: the probe is **5.3–5.7 µs** of a 31 µs step — **18 %** of
-/// `character move` — because a shape cast that *hits* a height-field tile costs
-/// about **5 µs** where the same cast against 1 849 building boxes costs
-/// **0.07**. The ground is not marginally dearer than the city, it is ~75× a
-/// cast, and this probe is one of about six the mover makes.
+/// `character move` — because a shape cast that *hits* a height-field tile is
+/// **11.3×** one that hits a building box, measured in the same world with the
+/// same tree and the same filter (the arm drops the identical probe onto a
+/// roof), and **2.9×** on the isolated one-body control in
+/// `what_a_cast_against_the_ground_costs`.
+///
+/// *(NPC1e audit: this paragraph first read "~75× a cast", which was this probe
+/// divided by the same probe in a world with **no ground**, where the character
+/// is in free fall and the cast hits nothing at all. The arm now asserts that
+/// the probe hits exactly on the worlds that have ground under the character.
+/// It also read "one of about six the mover makes" — `PhysicsWorld3D::queries`
+/// counts the whole `move_character` call as **one** ask, and how many casts
+/// rapier makes inside it is not something this tree measures.)*
+///
+/// **And the cheaper shape is measured too**: a downward *ray* reaching the same
+/// depth answers the same ground **22×** cheaper than this swept sphere in the
+/// fixture world and **45×** on the ground-only one. Whether a ray is good
+/// enough for a normal whose only reader is `slide_friction`'s slope is the
+/// question this predicate defers rather than answers.
 ///
 /// # Why this predicate, and the one-step bound it carries
 ///

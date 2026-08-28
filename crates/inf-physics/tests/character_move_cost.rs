@@ -797,8 +797,10 @@ fn time_calls(rounds: u32, calls: u32, mut f: impl FnMut(u32)) -> f64 {
 /// `ground` flag, so a row that hit nothing can never again be quoted beside a
 /// row that hit; and a **box control** drops the identical probe onto a
 /// building's roof *in the same world, the same tree and the same filter*,
-/// where it really does hit a `Collider3D` box. That is the honest ratio, and
-/// on this machine it is a **single digit**, not seventy-five.
+/// where it really does hit a `Collider3D` box. That is the honest ratio, and on
+/// this machine it is **11.3×** here and **2.9×** on
+/// [`what_a_cast_against_the_ground_costs`]'s one-body control — an order of
+/// magnitude, not seventy-five.
 ///
 /// **Everything here is printed. The only assertions are shapes**: that every
 /// primitive took measurable time (a zero is a timer reading its own
