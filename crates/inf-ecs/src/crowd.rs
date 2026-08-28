@@ -35,7 +35,7 @@
 //! never clamped. Measured by the NPC1b audit at **+1.16 ms of "crowd" cost that
 //! was not the crowd**.
 //!
-//! So [`set_tier_components`] puts the physical set on and takes it off with the
+//! So `set_tier_components` puts the physical set on and takes it off with the
 //! tier. A thing with no body has no body; nothing downstream has to be told,
 //! because there is nothing to see.
 //!
@@ -57,7 +57,7 @@
 //!   is moved by `inf_physics::d3::step_character_movement`, five phases later
 //!   in the same fixed step, through `move_and_slide` — the one door a character
 //!   in this engine moves through. What the crowd writes for those is an
-//!   **intent** ([`steer_agent`]), never a transform, because two writers on one
+//!   **intent** (`steer_agent`), never a transform, because two writers on one
 //!   transform is precisely what NPC1a refused a controller to avoid.
 //!
 //! The two meet at the transitions, and neither is allowed to pop:
@@ -732,7 +732,7 @@ impl CrowdRoute {
         }
     }
 
-    /// A route along a planned path — what [`inf_nav::route`] hands back.
+    /// A route along a planned path — what [`inf_nav::route()`] hands back.
     pub fn along(path: inf_nav::NavPath, speed_mps: f64, mode: RouteMode) -> Self {
         Self {
             path,
@@ -1875,7 +1875,7 @@ pub fn agent_tier(world: &EcsWorld, entity: Entity) -> Option<CrowdTier> {
 /// 7 recorded that it had no arm and could not easily get one — a crowd agent is
 /// kinematic, so severing the bridge's read changed no trace and no count this
 /// tree measures — and NPC1c retires it outright: a `Far` agent now carries no
-/// body **component** ([`set_tier_components`]), so there is nothing for the
+/// body **component** (`set_tier_components`), so there is nothing for the
 /// bridge to decline. One authority for "is this thing physically here", which
 /// is this module's own founding law, and it is the fix for the terrain-observer
 /// finding as well.

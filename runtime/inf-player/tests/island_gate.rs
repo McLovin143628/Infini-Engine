@@ -4026,7 +4026,7 @@ fn grounded_route(
     let at = nodes.iter().position(|n| *n == entrance)?;
     let outside = inf_nav::route::chain(graph, &nodes[..=at])
         .resampled(TOWN_SAMPLE_M)
-        .snapped(0.0, |xz| height(xz));
+        .snapped(0.0, height);
     let inside = inf_nav::route::chain(graph, &nodes[at..]);
     let mut rise: f64 = 0.0;
     for w in outside.points().windows(2) {

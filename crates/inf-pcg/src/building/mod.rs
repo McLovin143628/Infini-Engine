@@ -1292,12 +1292,11 @@ mod tests {
             let from = entrance_room(&plan);
             let seen = plan.reachable_rooms();
             assert_eq!(seen.len(), plan.rooms.len());
-            for i in 0..plan.rooms.len() {
+            for (i, reachable) in seen.iter().enumerate() {
                 assert_eq!(
                     plan.room_path(from, i).is_some(),
-                    seen[i],
-                    "{arch:?}: room {i} is reachable={} and has a path={}",
-                    seen[i],
+                    *reachable,
+                    "{arch:?}: room {i} is reachable={reachable} and has a path={}",
                     plan.room_path(from, i).is_some()
                 );
             }

@@ -226,7 +226,7 @@ impl NavPath {
     /// [`snapped`](Self::snapped) somewhere to ask the ground.
     pub fn resampled(&self, spacing_m: f64) -> Self {
         let pts = &self.0.points;
-        if pts.len() < 2 || !(spacing_m > 0.0) || !spacing_m.is_finite() {
+        if pts.len() < 2 || !spacing_m.is_finite() || spacing_m <= 0.0 {
             return self.clone();
         }
         let mut out: Vec<DVec3> = Vec::new();

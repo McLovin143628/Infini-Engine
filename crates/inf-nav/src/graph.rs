@@ -266,7 +266,12 @@ impl NavGraph {
     pub fn nearest_planar(&self, p: DVec3, max_dy_m: f64) -> Option<NavNodeId> {
         let mut best: Option<(f64, NavNodeId)> = None;
         for n in self.nodes.values() {
-            if !((n.position.y - p.y).abs() <= max_dy_m) {
+            // A NaN height is not "within the bound", so the comparison is
+            // written positively and the `continue` takes the else — spelling
+            // it as a negation reads the NaN the other way AND trips
+            // `neg_cmp_op_on_partial_ord`.
+            let dy = (n.position.y - p.y).abs();
+            if dy > max_dy_m || dy.is_nan() {
                 continue;
             }
             let d = DVec2::new(n.position.x - p.x, n.position.z - p.z);

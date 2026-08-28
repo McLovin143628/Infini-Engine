@@ -15566,3 +15566,390 @@ it is the thing an art pass will notice first.
 | §8 budgets | `NPC_STEP_BUDGET_MS` 1.0 | **unmoved** — the crowd phase re-measured at **0.127 ms** on the island, a tenth of it |
 | committed levels (`EXPECTED_LEVELS`) / committed content / `Cargo.lock` / frontend | 23 / unmoved / unmoved / untouched | **unchanged** |
 | new crates or external dependencies | none | **none** |
+
+## Wave NPC1c — the nav layer, and the sim wall (2026-08-27)
+
+Base `4575ddae`. Five clauses. The wave was briefed against a wall — *no nav, but
+the graphs exist* — and against a targeting package: at N = 1 000 a crowd adds
+`+8.68 ms` of fixed step, of which the solver is `+2.61` for 288 moving
+kinematic capsules, *1.6 % more bodies for 117 % more solver*, and nothing had
+looked at why.
+
+It leaves behind a route substrate, a crowd that walks rather than slides, three
+mechanisms named with numbers, five defects that only a walking body could find —
+and **one honest regression**: the island's crowd row goes from 59.4 ms to
+70.1 ms of p50, because giving an NPC a controller costs more than every
+saving this wave made put together. That is the wave's most useful sentence and
+it is measured, not argued.
+
+### Clause 1 — the route substrate
+
+`inf-nav`, Ring 0, glam + `inf-math` and nothing else: no new external crate, no
+`cargo-deny` entry, no schema. It owns no world, no entity and no file format,
+and it deliberately knows nothing about roads, streets or buildings — because
+this engine already had three navigable structures and no search to run on them.
+Each producer exposes **itself**:
+
+| producer | door | measured on the committed island |
+|---|---|---|
+| `inf_gis::RoadGraph` | `nav_graph()` | a T junction is 4 nodes / 6 directed edges; a two-segment route costs **200.000 m**, exactly the `length_m`s it names; a switchback routes **188.680 m** over a 100 m chord |
+| `inf_pcg::BuildingPlan` | `room_path()`, `interior_nav()` | a 3-storey Apartment is 55 rooms / 61 door edges / 2 stair links; entrance room 15 to room 18 upstairs is `[15,13,7,6,24,18]`, and through the graph it is 10 nodes / **27.902 m** whose kinds read `[Doorway, Stair, Doorway]` |
+| `Settlement` | `street_graph()` | **459 nodes / 1 320 directed edges** over seven settlements, every node reachable from the crossroads, the crossroads **0.000 m** from the site centre |
+
+Three properties, each with an arm rather than an argument. **A route is a
+value, and so is a refusal** — `NavVerdict` is `Found` plus three named noes
+(`Disconnected`, `OffGraph`, `EmptyGraph`), each carrying the endpoints it was
+asked about, because P21.4's ruling is that a gameplay refusal that *errors*
+takes its whole handler down. **Ties break on the node id** — a street grid
+offers six equally short corner-to-corner routes and
+`equally_short_routes_resolve_the_same_way_every_time` drives it 64 times.
+**An edge carries its own spine**, so a road that switchbacks up a face is walked
+and not cut across.
+
+Dijkstra rather than A\*, with the reason written down: the only heuristic
+available is the straight line, and `link_with_cost` exists precisely so a
+builder can say a stair is dearer than its geometry — which makes that heuristic
+inadmissible for the first graph that uses it.
+
+`NavPath` is an `Arc` over its points and their cumulative arc length, so a
+thousand agents walking one street hold one copy. Its interpolation is
+**bit-identical** to NPC1a's two-point arithmetic, asserted by `to_bits()` over
+64 samples — which is what let a population that was already walking move onto
+this substrate without moving.
+
+Two things make three producers one network: `domain::{ROAD,STREET,BUILDING,
+CALLER}`, in ONE place because a namespace agreed in three files drifts; and
+`NavGraph::weld`, which joins nodes of *different* domains that already agree
+geometrically. Plan distance with a separate Y bound, for `SNAP_TOLERANCE_M`'s
+own reason: an overpass is not a junction. A `ROAD` node dropped on each of the
+seven settlement centres welds exactly once, and re-welding adds nothing.
+
+**Snapping happens once, where the route is built**, never per step: a per-step
+ground query would make an agent's Y a function of terrain residency, and a
+position that depends on what has paged in is a position two hosts can disagree
+about.
+
+The whole crate went onto the libm ban list on day one, all three files —
+list 37 → 40.
+
+### Clause 2 — the tier owns the components
+
+NPC1a gave every materialized agent a body, a capsule and a controller at every
+tier and had the 3D bridge decline to *mirror* the ones the tier called bodiless.
+That is one system holding an opinion about another system's data, and the NPC1b
+audit measured the price: `terrain_stream::observes_terrain` picks its subjects
+**by component**, so a thousand NPCs were a thousand terrain observers — 712 of
+them `Far`, with no rapier body and no door by which to query a height.
+
+`set_tier_components` puts the physical set on and takes it off with the tier,
+**both ways**. A thing with no body has no body; nothing downstream has to be
+told. The NPC1b audit's tripwire is **flipped**:
+`only_the_crowd_tiers_with_a_body_observe_the_terrain`, which asserts the `Far`
+agent does not observe, the two solid tiers do (the anti-vacuity half), and the
+**transition** puts the observation back.
+
+Measured on the island: `terrain stream` **1.16 → 0.603 ms**. Worth reading
+twice, because it is smaller than the observer count suggests: 71 % fewer
+observers bought 48 % of the phase, so most of what is left is not per-observer.
+
+`bodiless_agents` is **retired rather than armed**. The NPC1a audit recorded that
+the bridge's tier read had no arm and could not easily get one — a crowd agent is
+kinematic, so severing it changed no trace and no count. There is now nothing to
+sever: the components are the authority. What the bridge reads instead is
+`crowd_colliders`, and that read is measurable in milliseconds (clause 3).
+
+### Clause 3 — the solver, measured, and the mover that replaced it
+
+**The solver question, answered.** `kinematic_pairing_cost.rs`: 1 849 static
+building boxes on 4 heightfield tiles at the island's own tile resolution, 288
+humanoid capsules each touching a frontage, MIN of 5 rounds × 60 steps around
+`world.step` alone.
+
+| arm (N = 288) | pairs | manifolds | ms/step | vs control |
+|---|---|---|---|---|
+| control, no capsules | 1 942 | 0 | 0.041 | — |
+| 288 standing still | 2 518 | 576 | 0.065 | +0.023 |
+| **288 moving** | 2 500 | 530 | 0.814 | **+0.773** |
+| 288 moving, capsules narrowed | 2 500 | 530 | 0.824 | +0.783 |
+| **288 moving, both sides narrowed** | 2 500 | **0** | 0.168 | **+0.127** |
+
+**The mechanism is RECOMPUTATION, not pair count.** The same capsules on the
+same 530 manifolds cost **34× less** standing still. Re-placing a kinematic body
+every step invalidates every manifold it owns, and a capsule-versus-heightfield
+manifold walks the tile's cells underneath — wave I4b's `FIXED_FIXED` finding
+with the "moving" part switched on. Three quarters of it is the ground: +0.760 ms
+with a heightfield under the crowd and +0.200 without.
+
+**And the hypothesis the measurement killed.** Narrowing the crowd's own capsule
+does *nothing* — 0 of 530 manifolds, the same +0.78 ms — because rapier tests
+`ActiveCollisionTypes` as a **union**. Both sides must be narrowed. Landing the
+obvious one-sided fix would have shipped a no-op with a confident comment on it.
+
+So `ColliderPairing::{All, DynamicOnly}`, defaulting to `All`, with the crowd
+capsule, the terrain tile and the PCG structure boxes narrowed. On the island the
+solver goes **+2.61 → +1.11 ms**. What is lost is stated exactly, the way the
+`FIXED_FIXED` block above it states its own loss: a narrowed-to-narrowed pair
+fires no `Collision` Blueprint event, which for a crowd agent has no reader. A
+sensor keeps `all()` regardless, and the player's capsule keeps `All`, so the
+union carries every pair a player is in.
+
+**The near tiers, and where the ladder actually splits.** The brief asked for
+`Full` and `Near` to gain `CharacterMovement`. They did, and the island priced
+it: `character move` went **0.132 → 92.756 ms** — 83 % of a 111 ms fixed step,
+for 291 controllers, and *super-linear* against the hero's own 0.13. A character
+in this engine is moved by collide-and-slide shape casts against a city of 17 823
+bodies, and that is not a thing 291 of anything can afford.
+
+So `CrowdTier::steers()` is `Full` alone, and the ladder splits where the
+measurement says rather than where the design hoped:
+
+| tier | solid | steered | posed |
+|---|---|---|---|
+| `Full` (≤ 32 m) | yes | **yes** | yes + hands |
+| `Near` (≤ 96 m) | yes | **no** — `route(clock)` | yes |
+| `Far` (≤ 512 m) | no | no | no |
+
+A `Near` agent is still something a player can walk into and still poses every
+joint; what it does not do is negotiate its own way past a wall. **At 32 controllers
+that is still 5.629 ms**, which is 0.18 ms a character and a whole fixed-step
+budget for thirty-two of them. The wall this arc meets next is the mover.
+
+**Steering** is pure pursuit through `move_and_slide` — the one door a character
+in this engine moves through, so an NPC is stopped by the same wall a player is.
+What the crowd writes is an **intent**, never a transform, because two writers on
+one transform is what NPC1a refused a controller to avoid. The lookahead grows
+in strides until it has a horizontal lead: a stair segment climbs 3.6 m over 1.5 m
+of run, so the ordinary lookahead sits almost directly above the agent's feet and
+a planar wish computed from it is zero.
+
+**The door verb.** `step_crowd_doors`, folded into `step_gameplay` as step 0, is
+the same `door::use_door` the interact button and the `door.use` node dispatch
+to. The trigger is the crowd's own `blocked` verdict, because an agent asking
+every step whether a door is in front of it is `O(agents × doorways)` over a city
+that plans 19 790 of them. The pause that buys is stated rather than hidden — 2 m
+of lag at a 1.65 m/s walk is about 1.2 s — and measured on the arm at **step 76,
+1.27 s**. A press is offered only to a leaf that is **shut and at rest**, and
+that clause was measured into existence: without it one door took **13 presses**
+and shut itself twice on the way.
+
+### Clause 4 — neither transition pops
+
+A **promotion** places the body at `route(clock)`, which is exactly where the
+tier below was already drawing it. A **demotion** hands the clock back the metre
+the *body* reached (`CrowdRoute::rephase_delta`), because a body that was blocked,
+or slowed on a slope, or simply walking at its own gait is not where the clock
+ran on to. Measured: a body **4.05 m** behind its own clock moves **0.0000 m**
+across `Near → Far`.
+
+`rephase_m` is genuine sim state — a body wrote it, out of everything that body
+met — so it is folded into the trace: `AGENT_TRACE_BYTES` 49 → **57**, and the
+re-shape's ratio against a 161-bone posed character 132× → **113×**.
+
+The NPC1b pose pop's routed fix (inertialization on re-entry through the P29.2
+`PoseBlender` seam) is **not** landed and is carried, for a reason this wave
+found rather than inherited: the tier that re-enters the machine is `Full`, and
+at `Full` the wave already spends 5.6 ms in the mover. A blend on top of that is
+work for the wave that makes a controller affordable.
+
+### Clause 5 — the gate, and the five things a walking body found
+
+`pie_equals_shipping_when_an_npc_walks_across_town`: **6 480 steps, 6 480
+distinct states, identical on both hosts to the byte**; a 63.0 m route over 9
+nodes whose kinds read `[Street, Doorway, Stair]`; **3 doors opened**; the body
+**0.06 m** off its own spine at the end; feet peaking **3.20 m up a 3.60 m
+storey — 89 % of the flight**.
+
+Every walk in this file before it moved its subject by writing a transform. Wave
+I8a's carried remainder read *nothing has ever walked a character up a flight of
+stairs*. Something has now, 89 % of one, under `move_and_slide` on the
+generator's real treads.
+
+Five defects, each measured before it was fixed:
+
+1. **`set_hero` does not mark the world dirty.** It writes a `Transform` through
+   bevy's `get_mut`, `propagate` skips, and the `GlobalTransform` the streaming
+   source is read off stays where it last settled. Measured: after 4 000 steps
+   the hero's local read `(-450.8, 129.3, 364.4)` and its global
+   `(-586.2, 72.1, 393.1)` — 135 m and a hillside apart — with **0** of the
+   town's 1 297 doorways inside the band. Every gate in this file that moves the
+   hero and then asserts something *unbanded* has been passing over it.
+2. **`CrowdArchetype::humanoid` was a 2.4 m capsule** wearing a comment that said
+   1.8 m. `half_height` excludes the radius — the component's own doc says so —
+   and NPC1a wrote 0.9 where `CharacterMovement`'s default for the same body is
+   0.6. No arm could see it: a tier, a trace byte and a palette do not care how
+   tall a capsule is. The first thing that did was a **2.1 m** door. It is also
+   the other half of the NPC1b audit's 1.20 m character-space gap; on the
+   corrected capsule the drop is **0.90 m**.
+3. **A crowd agent held its own door shut.** An NPC that walks up to a shut leaf
+   stops where the leaf stops it, which puts its capsule inside the arc
+   `is_blocked` sweeps. Measured: **5 278 presses over 9 000 steps at exactly
+   −3.6667 degrees**, the agent frozen at 91.60 m of a 121.27 m route. A deadlock
+   rather than a hard case — the NPC's whole plan is through that door. A leaf
+   may now sweep through a **crowd** capsule and no other; a player can still
+   hold a door shut, because a player chose to stand there.
+4. **A stair edge that named the bottom of the run first walked a climber back
+   down it.** A flight fills its core and its door opens onto the SIDE of the
+   run, so a body enters part-way up; a follower that had already climbed 3.20 m
+   went back down to reach a waypoint behind it. The edge names the TOP of the
+   run and nothing else, so the climb is monotone from any entry.
+5. **A settlement's street grid runs past its levelled pad.** The outer lines lie
+   on raw hillside and end at the cut face: an agent started on a line grounded
+   at 122.0 m against a ground floor at 128.1 m walked to within 0.7 m of its
+   waypoint and stood there for 4 400 steps. The gate ground-profiles every
+   candidate route at 2 m and refuses one whose worst rise beats the character's
+   **own** `step_height_m` — the mover was right and the route was walking it at
+   a wall.
+
+**And the remainder, measured and named.** The flight is 20 treads of 0.180 m
+rise and 0.230 m run — inside the 0.45 m autostep and the 0.15 m minimum width,
+so it is *not* refused for want of a step — and the landing all the way round the
+core is **0.20 m**, which a 0.6 m capsule cannot walk. The NPC tops out at 89 %.
+Two arms hold that shape and fail the day the generator gives a core a landing a
+body can stand on.
+
+### The N = 1 000 island row, re-measured
+
+RTX 4070 Ti, Windows/Vulkan, release, 1080p, MIN of 3 rounds × 120 frames, the
+same 40 m flight east from Harbour City, both brackets adjacent. **1 000 NPCs in
+a 320 m block: 32 `Full` / 256 `Near` / 712 `Far` / 0 `Dormant`.**
+
+| | control before | **+1 000 NPCs** | control after | NPC1b's crowd row |
+|---|---|---|---|---|
+| p50 / p95 | 24.230 / 25.463 | **70.129 / 78.993** | 24.447 / 25.795 | 59.372 / 64.469 |
+| fps at p50 | 41.3 | **14.3** | 40.9 | 16.8 |
+| cpu sim fixed step | 6.61 | **20.540** | 6.62 | 15.446 |
+| cpu render (record) | 6.49 | 10.074 | 6.43 | 9.921 |
+
+The two brackets agree to **0.217 ms**, which is what makes the delta a
+measurement.
+
+**The sim split, and what each line is:**
+
+| phase | control | crowd | delta | NPC1b's delta |
+|---|---|---|---|---|
+| character move | 0.132 | **5.629** | **+5.50** | +0.27 |
+| physics3d sync | ~3.0 | 4.810 | +1.81 | +1.10 |
+| solver | 2.28 | 3.394 | **+1.11** | **+2.61** |
+| animation | 0.040 | 3.221 | +3.18 | +3.03 |
+| gameplay | 0.79 | 1.633 | +0.84 | — |
+| terrain stream | ≤ 0.02 | **0.603** | **+0.58** | **+1.16** |
+| crowd | — | 0.275 | +0.28 | 0.13 |
+| everything else | | | +0.63 | +0.36 |
+
+**Read the middle three rows together and the wave's honest verdict is there.**
+The two lines this wave was sent to fix both moved the right way — the solver by
+**2.4×** and the terrain stream by **1.9×**, together **−2.08 ms**. The line it
+*created* is bigger than both: 32 controllers are **+5.50 ms**, and the door pass
+is another **+0.84**. So a crowd's fixed step goes 8.68 → **13.93 ms** and the
+island's crowd row goes 59.4 → **70.1 ms of p50**.
+
+That is not a regression the wave regrets: NPC1b's crowd slid along a straight
+line and could not open a door. This one walks a planned route, opens what is in
+its way and climbs 89 % of a staircase, and the bill is one number in one phase.
+But it is a regression, it is stated as one, and **NPC1e cannot certify 60 fps
+with a crowd until the character mover is cheaper** — 0.18 ms a character, on
+this world, is the whole arc's next wall.
+
+The render half is unchanged and still costs almost nothing: **1 001 skinned
+instances in 1 draw call, 290 palette blocks = 2.85 MB of atlas, 967 proxy
+casters in 1 group, 35 geometry groups of a 1 024 ceiling, 0 dropped, 0 refused**
+— every one of those identical to the NPC1b audit's.
+
+### The laws this wave paid for
+
+* **A wall you have not walked into is a wall you have not measured.** Five of
+  this wave's defects — a stale `GlobalTransform`, a 2.4 m capsule, a door an NPC
+  holds shut, a stair waypoint behind the climber, a street on raw hillside —
+  were all invisible to a tier decision, a trace byte and a palette upload.
+  They appeared in the order a body meets them, and they had been there for
+  waves.
+* **Both sides of a pair, or neither.** Narrowing the crowd's own capsule removed
+  0 of 530 manifolds and cost the same 0.78 ms, because the flags are tested as
+  a union. The one-sided fix is the one a reader would write, it looks right, and
+  it does nothing.
+* **The measurement decides where the ladder splits.** The brief put the
+  controller at `Near`; the island put it at 92.756 ms. `CrowdTier::steers()`
+  reads `Full` because 291 controllers is not a thing that exists, and the
+  predicate's doc carries the number rather than the intention.
+* **A comment that states a proportion is a claim.** *"A 1.8 m adult: 0.9 m
+  half-height, 0.3 m radius"* is 2.4 m, and it survived two waves because
+  nothing in either of them had a ceiling.
+* **A deadlock is not a hard case.** A player leaning on a door is a choice; an
+  NPC leaning on the one door its whole plan goes through is a system with no
+  exit. The two look identical to `is_blocked` and are not the same thing.
+* **A gate that plans a route should refuse one the mover cannot walk.** The
+  ground profile is not caution: it is the same `step_height_m` the character
+  is built with, asked of the route before the body is asked to walk it.
+
+### Counts
+
+| | at `4575ddae` | **wave NPC1c** |
+|---|---|---|
+| battery | 329 blocks / 6 304 passed / 0 failed / 19 ignored | **332 / 6 357 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, **+3 blocks** (`inf-nav`'s lib and its doc-test block, `inf-physics`'s `kinematic_pairing_cost`) and **+53 arms**: 25 in `inf-nav`, 9 in `inf-physics`'s new `kinematic_pairing_cost`, 6 in `inf_ecs::crowd`, 4 in `inf-gis`, 4 in `inf-pcg`, 2 in `inf-editor-core`, 2 in `door_3d` and 1 in `island_gate` — plus the NPC1b tripwire re-aimed in `inf-player`'s `terrain_stream` and the 1.20 m one re-aimed in `inf_ecs::crowd`, both net zero |
+| goldens | 59 | **59** — none added, none re-blessed, `INF_GOLDEN_STRICT=1` green and `git status` over `tests/goldens` empty afterwards |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — the wave adds a crate and zero warnings |
+| `clippy --workspace --all-targets -D warnings` | 0 | **0** (run LAST, per the rmeta law) |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** — a route is runtime state on a resource and `ColliderPairing` is an internal physics descriptor, so nothing here reaches a serialized format |
+| step phases / trace sections | 25 / 9 | **25 / 9** |
+| trace bytes an agent | 49 | **57** (`rephase_m`) |
+| libm-ban subjects | 37 | **40** (`inf_nav::{graph,path,route}`, day one) |
+| §8 budgets | `NPC_STEP_BUDGET_MS` 1.0 | **unmoved** — the crowd phase re-measured at **0.275 ms** on the island, a quarter of it |
+| committed levels (`EXPECTED_LEVELS`) / committed content | 23 / unmoved | **23 / unmoved** |
+| new crates | — | **+1** (`inf-nav`); **no new external dependency**, `Cargo.lock` moves by four path entries |
+| frontend | — | **untouched and not run** |
+
+### Carried, by name
+
+1. **The character mover is 0.18 ms a character on the island's city**, and that
+   is the arc's next wall. 32 controllers are 5.629 ms; 291 were 92.756. Until
+   `step_character_movement` is cheaper — fewer casts, a coarser probe set for a
+   crowd, or a mover that is not collide-and-slide — the crowd cannot afford to
+   steer more than a handful. NPC1e cannot certify 60 fps with a crowd over it.
+2. **`step_gameplay` gathers the band's doors TWICE a step**, once for the crowd
+   pass and once for `step_doors`, and `placements_near` walks all 19 790 of a
+   city's doorways each time. Measured as part of the `gameplay +0.84 ms` at
+   N = 1 000 with 32 blocked agents. One shared gather is the fix; it is a
+   signature change to two functions and it is not landed here.
+3. **A stair core has a 0.20 m landing**, so a body that enters from the side of
+   the flight cannot reach its bottom step and tops out at **89 %** of the
+   storey. The treads themselves are fine — 0.180 m rise, 0.230 m run, inside the
+   0.45 m autostep and the 0.15 m minimum width. Two arms pin the shape and fail
+   the day the generator gives a core a landing.
+4. **`interior_nav` routes through room CENTRES and knows nothing about
+   furniture.** The furnish pass puts a table where the nav puts a waypoint, so a
+   route that ends in a furnished room ends in something. The gate aims at the
+   stair landing for that reason, and says so.
+5. **`Settlement::street_graph` is planar** — `settlement.rs` may not name
+   `inf_terrain` under its own allowlist gate — so a caller grounds it, and the
+   grid runs to the reservation radius rather than to the levelled pad. Both are
+   the caller's problem today; a `Ground::Terrain` street graph and a pad-bounded
+   grid are the settlement generator's.
+6. **`BuildingPlan::interior_nav` has ONE id namespace**, so two buildings'
+   graphs cannot be absorbed into one network. Fine for a gate that walks into
+   one building and wrong for NPC1d, which will derive a population from a
+   level's own buildings. A per-volume salt is the fix.
+7. **The `Near` rung still saves nothing that can be falsified.** The NPC1b
+   audit's carried item 10 stands, with its reason now *measured*: the rung would
+   be falsifiable if a near agent carried `CharacterMovement`, and 291 of those
+   is 92.756 ms.
+8. **The `Far → Near` pose pop is still 0.9513 m** (NPC1b's carried item 1). The
+   inertialization seam is routed and not landed, because the tier that re-enters
+   the machine is the one already spending 5.6 ms in the mover.
+9. **`set_hero` does not mark the world dirty**, and every gate in `island_gate`
+   that moves the hero and then asserts something *unbanded* has been passing
+   over it. The town walk marks it explicitly. Auditing the other callers — and
+   deciding whether `set_hero` should mark it itself, which would move other
+   gates' traces — is not this wave's.
+10. **A locked door is retried every step** by a blocked agent, for as long as it
+    stays blocked: 124 presses on the arm. Deliberate — remembering which doors
+    an agent has tried is per-agent state that would have to ride the trace — and
+    the cost is one `toggle` refusal per blocked agent per step.
+11. **`crowd::agent_tier` and `set_crowd_radii` still have no production
+    caller** (the `set_debris_budget` shape, for the fifth time), and the crowd
+    still ships dormant: `set_crowd_population` has three callers and all three
+    are tests.
+12. **The deformation field is still a crowd's dominant trace section** (NPC1a's
+    carried item 1). Nothing in this wave reads or writes it — though a `Far`
+    agent now has no `Collider3D` either, which is one more door closed on it by
+    accident rather than by design.

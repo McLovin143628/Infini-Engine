@@ -5,7 +5,7 @@
 //! # Why this crate holds no graph of its own
 //!
 //! This engine already had three navigable structures and no navigation. The
-//! island's [`RoadGraph`] is a real adjacency graph — `BTreeMap`s, start/end
+//! island's `RoadGraph` is a real adjacency graph — `BTreeMap`s, start/end
 //! nodes, lattice-derived ids, `length_m` costs — built at bake time from the
 //! committed road layer. Every settlement is an orthogonal street grid, planned
 //! centreline by centreline and then *consumed* to place blocks. Every grammar
@@ -24,7 +24,7 @@
 //!
 //! # A route is a value, and so is a refusal
 //!
-//! [`route`] answers a [`NavVerdict`], never a `Result` and never a panic. "No
+//! [`route()`] answers a [`NavVerdict`], never a `Result` and never a panic. "No
 //! path" is a legitimate, common, *gameplay-visible* outcome — a town cut off by
 //! a landslide, a door that is not there, an agent standing off the graph — and
 //! the P21 ruling is explicit that a gameplay refusal must be a value: an

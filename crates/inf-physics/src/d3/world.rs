@@ -429,7 +429,7 @@ pub fn convex_hull_is_buildable(points: &[DVec3]) -> bool {
 
 /// **Which body-type pairings a collider takes part in** (island wave NPC1c).
 ///
-/// The knob behind [`PhysicsWorld3D::active_collision_types`], and the door for
+/// The knob behind `PhysicsWorld3D::active_collision_types`, and the door for
 /// content that is *moved by something other than the solver* and does not need
 /// the solver to notice — a crowd agent being the case it was measured for. Read
 /// that function's doc block for the whole ruling; the short version is below.
