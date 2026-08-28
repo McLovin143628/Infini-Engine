@@ -703,12 +703,17 @@ pub fn step_doors(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64) -
         .into_iter()
         .filter_map(|g| bridge.collider_of(g))
         .collect();
+    // ONE set for the whole walk. A city's band holds hundreds of leaves, so
+    // cloning the pawn set per door is hundreds of allocations a step for a
+    // membership test that never changes; the two door-specific colliders go in
+    // and come out again around each cast.
+    let mut exclude: BTreeSet<ColliderId3D> = pawns;
     let mut blocked: Vec<bool> = Vec::with_capacity(places.len());
     for p in &places {
         let state = door::door_field(world)
             .map(|f| f.get(p.guid, &p.spec))
             .unwrap_or_else(|| DoorState::fresh(&p.spec));
-        blocked.push(is_blocked(bridge, p, &state, dt, &pawns));
+        blocked.push(is_blocked(bridge, p, &state, dt, &mut exclude));
     }
     let mut poses: Vec<(Uuid, DVec3, DQuat)> = Vec::new();
     {
@@ -770,7 +775,7 @@ fn is_blocked(
     p: &DoorPlacement,
     state: &DoorState,
     dt: f64,
-    pawns: &BTreeSet<ColliderId3D>,
+    exclude: &mut BTreeSet<ColliderId3D>,
 ) -> bool {
     if !p.spec.is_usable() || !dt.is_finite() || dt <= 0.0 {
         return false;
@@ -803,22 +808,26 @@ fn is_blocked(
         ),
     };
     let rot = DQuat::from_rotation_y(r);
-    let mut exclude: BTreeSet<ColliderId3D> = pawns.clone();
-    if let Some(c) = bridge.collider_of(door_leaf_guid(p.guid)) {
-        exclude.insert(c);
-    }
-    // The door's own hinge entity, if it has a collider at all, is not something
-    // its leaf can be blocked by.
-    if let Some(c) = bridge.collider_of(p.guid) {
-        exclude.insert(c);
+    // The leaf itself, and the door's own hinge entity if it has a collider at
+    // all: neither is something its leaf can be blocked by. Added to the
+    // caller's set and taken out again below, so the walk allocates once.
+    let mut own: [Option<ColliderId3D>; 2] = [None, None];
+    own[0] = bridge.collider_of(door_leaf_guid(p.guid));
+    own[1] = bridge.collider_of(p.guid);
+    for c in own.iter().flatten() {
+        exclude.insert(*c);
     }
     // A sweep that **starts** penetrating is not a block: it is the leaf resting
     // against its own frame or standing on the floor, which is where a door
     // lives. What blocks a door is something it is about to *reach*.
-    bridge
+    let hit = bridge
         .world_mut()
-        .cast_shape(&shape, centre, rot, tangent, reach, &exclude)
-        .is_some_and(|h| !h.started_penetrating)
+        .cast_shape(&shape, centre, rot, tangent, reach, exclude)
+        .is_some_and(|h| !h.started_penetrating);
+    for c in own.iter().flatten() {
+        exclude.remove(c);
+    }
+    hit
 }
 
 /// **Every door's leaf collider**, appended to the sync's snapshot.

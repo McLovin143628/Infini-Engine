@@ -15,10 +15,10 @@
 //!
 //! So the crowd pays by **tier**, and the tier is one decision:
 //!
-//! | tier | rapier | movement model | pose | hand IK | position |
+//! | tier | rapier | controller | pose | hand IK | position |
 //! |---|---|---|---|---|---|
 //! | [`Full`](CrowdTier::Full) | capsule | yes | full | yes | **steered** |
-//! | [`Near`](CrowdTier::Near) | capsule | yes | full | **no** | **steered** |
+//! | [`Near`](CrowdTier::Near) | capsule | **no** | full | **no** | route(clock) |
 //! | [`Far`](CrowdTier::Far) | **none** | **none** | **none** | no | route(clock) |
 //! | [`Dormant`](CrowdTier::Dormant) | — | — | — | — | route(clock), with no entity to write it to |
 //!
@@ -48,10 +48,12 @@
 //!
 //! What NPC1c splits is **who advances the agent along the route**:
 //!
-//! * a tier with **no controller** ([`Far`](CrowdTier::Far),
-//!   [`Dormant`](CrowdTier::Dormant)) is `route(clock)` — a pure function of the
-//!   record, the step count and one phase, costing an interpolation;
-//! * a tier **with** one ([`Full`](CrowdTier::Full), [`Near`](CrowdTier::Near))
+//! * a tier with **no controller** ([`Near`](CrowdTier::Near),
+//!   [`Far`](CrowdTier::Far), [`Dormant`](CrowdTier::Dormant)) is `route(clock)`
+//!   — a pure function of the record, the step count and one phase, costing an
+//!   interpolation;
+//! * the one **with** it ([`Full`](CrowdTier::Full), and see
+//!   [`CrowdTier::steers`] for the 92.756 ms that decided where the line goes)
 //!   is moved by `inf_physics::d3::step_character_movement`, five phases later
 //!   in the same fixed step, through `move_and_slide` — the one door a character
 //!   in this engine moves through. What the crowd writes for those is an
@@ -188,6 +190,40 @@ impl CrowdTier {
     #[inline]
     pub fn has_body(self) -> bool {
         matches!(self, CrowdTier::Full | CrowdTier::Near)
+    }
+
+    /// **Whether this tier is STEERED** — carries a `CharacterController3D` and
+    /// a [`CharacterMovement`], and is moved by
+    /// `inf_physics::d3::step_character_movement` rather than by its route
+    /// clock. `Full` only, and the radius is 32 m.
+    ///
+    /// # It was `Full`/`Near` for one measurement
+    ///
+    /// NPC1c's first cut gave both near tiers a controller, on the reasoning
+    /// that the `Near` rung would then finally *save* something (a near agent
+    /// can carry a hand request the tier refuses). The island's own N = 1 000
+    /// row priced it: `character move` went from **0.132 ms to 92.756 ms** —
+    /// 83 % of a 111 ms fixed step, for 291 controllers, which is a quarter of a
+    /// millisecond each and **super-linear** against the hero's own 0.13.
+    ///
+    /// A character in this engine is moved by collide-and-slide shape casts
+    /// against a city of 17 823 bodies, and that is not a thing 291 of anything
+    /// can afford. So the ladder splits where the measurement says rather than
+    /// where the design hoped:
+    ///
+    /// | tier | solid | steered | posed |
+    /// |---|---|---|---|
+    /// | `Full` | yes | **yes** | yes + hands |
+    /// | `Near` | yes | **no** — `route(clock)` | yes |
+    /// | `Far` | no | no | no |
+    ///
+    /// A `Near` agent is still something a player can walk into and still poses
+    /// every joint; what it does not do is negotiate its own way past a wall.
+    /// At 32 m and out that is a difference a viewer can see only when the route
+    /// runs through something, which is the trade this rung is for.
+    #[inline]
+    pub fn steers(self) -> bool {
+        matches!(self, CrowdTier::Full)
     }
 
     /// Whether an entity exists for this tier at all (everything but `Dormant`).
@@ -1422,7 +1458,7 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
         //     one agent every few hundred steps — which is the same budget the
         //     pose digest above is taken on.
         let mut at = plan.at;
-        if was.has_body() && !tier.has_body() {
+        if was.steers() && !tier.steers() {
             let feet = here - DVec3::new(0.0, rec.archetype.feet_offset_m(), 0.0);
             let s_body = rec.route.path.project(feet).s_m;
             let travelled = rec.travelled_at(guid, t_s);
@@ -1468,7 +1504,7 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
         //    phases later, and writing a transform here as well would be the two
         //    authorities NPC1a refused a controller to avoid. What the crowd
         //    writes for those is an INTENT, and the body follows it.
-        if tier.has_body() {
+        if tier.steers() {
             rec.last = here;
             steer_agent(world, entity, rec, here, &plan, &mut stats);
         } else {
@@ -1479,7 +1515,7 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
         }
         if let Some(mut a) = world.world_mut().get_mut::<CrowdAgent>(entity) {
             a.tier = tier;
-            if !tier.has_body() {
+            if !tier.steers() {
                 // An agent the clock moves cannot fall behind the clock, and a
                 // stale `true` here would send the door pass looking for a body
                 // that is no longer standing against anything.
@@ -1614,32 +1650,39 @@ fn materialize(world: &mut EcsWorld, guid: Uuid, rec: &CrowdRecord, at: DVec3) -
 /// carrying `CharacterMovement`, so an NPC without one was drawn with its feet
 /// at its capsule's centre.
 fn set_tier_components(world: &mut EcsWorld, entity: Entity, tier: CrowdTier, a: &CrowdArchetype) {
-    let has = world.world().get::<RigidBody3D>(entity).is_some();
-    if tier.has_body() == has {
+    let has_body = world.world().get::<RigidBody3D>(entity).is_some();
+    let steers = world.world().get::<CharacterMovement>(entity).is_some();
+    if tier.has_body() == has_body && tier.steers() == steers {
         return;
     }
     let mut em = world.world_mut().entity_mut(entity);
-    if tier.has_body() {
-        em.insert((
-            RigidBody3D {
-                kind: BodyKind3D::Kinematic,
-                fixed_rotation: true,
-                ..RigidBody3D::default()
-            },
-            Collider3D {
-                shape_kind: ColliderShape3DKind::Capsule,
-                half_extents: Vec3d::new(a.radius_m, a.half_height_m, a.radius_m),
-                radius: a.radius_m,
-                ..Collider3D::default()
-            },
-            CharacterController3D::default(),
-            crowd_movement(a),
-        ));
-    } else {
-        em.remove::<RigidBody3D>();
-        em.remove::<Collider3D>();
-        em.remove::<CharacterController3D>();
-        em.remove::<CharacterMovement>();
+    if tier.has_body() != has_body {
+        if tier.has_body() {
+            em.insert((
+                RigidBody3D {
+                    kind: BodyKind3D::Kinematic,
+                    fixed_rotation: true,
+                    ..RigidBody3D::default()
+                },
+                Collider3D {
+                    shape_kind: ColliderShape3DKind::Capsule,
+                    half_extents: Vec3d::new(a.radius_m, a.half_height_m, a.radius_m),
+                    radius: a.radius_m,
+                    ..Collider3D::default()
+                },
+            ));
+        } else {
+            em.remove::<RigidBody3D>();
+            em.remove::<Collider3D>();
+        }
+    }
+    if tier.steers() != steers {
+        if tier.steers() {
+            em.insert((CharacterController3D::default(), crowd_movement(a)));
+        } else {
+            em.remove::<CharacterController3D>();
+            em.remove::<CharacterMovement>();
+        }
     }
 }
 
@@ -1877,7 +1920,7 @@ pub fn blocked_agents(world: &EcsWorld) -> Vec<Uuid> {
     };
     let mut out: Vec<Uuid> = Vec::new();
     for (guid, rec) in &pop.records {
-        if !rec.tier.has_body() {
+        if !rec.tier.steers() {
             continue;
         }
         let Some(e) = world.entity_of(*guid) else {
@@ -2632,6 +2675,20 @@ mod tests {
             has(&world),
             (true, true, true, true, true),
             "a `Full` agent must carry the whole physical set"
+        );
+
+        // **The `Near` rung, which is where the ladder splits.** A near agent
+        // keeps its body and its capsule -- it is something a player can walk
+        // into -- and loses the controller and the movement model, because the
+        // island's own N = 1 000 row priced 291 of those at 92.756 ms of
+        // `character move`. See `CrowdTier::steers`.
+        move_source(&mut world, 4.0 + DEFAULT_CROWD_FULL_M + 16.0);
+        let s = step_crowd(&mut world, 1.0 / 60.0);
+        assert_eq!(s.at(CrowdTier::Near), 1, "the fixture is not `Near`");
+        assert_eq!(
+            has(&world),
+            (true, true, false, false, true),
+            "a `Near` agent must keep its body and lose its controller"
         );
 
         move_source(&mut world, 4.0 + DEFAULT_CROWD_NEAR_M + 64.0);
