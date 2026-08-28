@@ -242,7 +242,7 @@ pub struct SkinnedRun {
 
 /// **What one frame's skinned draws are, derived from the scene alone.**
 ///
-/// Pure: no device, no adapter, no frame. [`SkinnedMeshNode::sync`] calls this
+/// Pure: no device, no adapter, no frame. `SkinnedMeshNode::sync` calls this
 /// and then executes it, so an instrument that wants the draw count or the
 /// palette bytes calls the same function the pass does rather than a
 /// re-derivation of it (the "a gate must aim at the thing it names" rule — the

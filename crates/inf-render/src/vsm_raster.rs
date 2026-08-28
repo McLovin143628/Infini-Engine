@@ -539,7 +539,7 @@ struct SkinnedCasterGeom {
 ///
 /// **Wave NPC1b built the exact bound and did not switch this default over to
 /// it**, and both halves of that are deliberate. The exact bound is
-/// [`SkinnedCasterGeom::joint_bounds`] unioned through the instance's own
+/// `SkinnedCasterGeom::joint_bounds` unioned through the instance's own
 /// palette; it is opt-in per instance
 /// ([`SkinnedShadow::Posed`](crate::scene::SkinnedShadow::Posed)) and the crowd
 /// is its only caller today. The reason it is not the default is the reason P27.3
@@ -706,7 +706,7 @@ fn posed_bound(
 ///
 /// Every non-proxy skinned instance is a group of its own, and every proxy
 /// instance in the whole scene shares one. It is the **ceiling** of what
-/// [`pack_casters`] will push rather than the count: that function additionally
+/// `pack_casters` will push rather than the count: that function additionally
 /// skips an instance whose mesh has not uploaded or has no indices, which a scene
 /// alone cannot know. Stated as a ceiling because a number that is sometimes the
 /// answer and sometimes an over-estimate has to say which — and a ceiling is the
@@ -906,8 +906,8 @@ pub struct VsmRasterStats {
     /// Skinned casters packed, summed over frames.
     pub skinned_casters: u64,
     /// **Crowd proxy casters** packed, summed over frames (wave NPC1b) — the
-    /// agents that cast a box out of the ONE shared
-    /// [`Proxy`](GroupSource::Proxy) group instead of a skinned group each.
+    /// agents that cast a box out of the ONE shared crowd-proxy group instead
+    /// of a skinned group each.
     ///
     /// Counted apart from [`skinned_casters`](Self::skinned_casters) rather than
     /// folded into it, because the two are the *ratio* this wave exists to move:

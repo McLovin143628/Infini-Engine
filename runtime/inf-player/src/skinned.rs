@@ -112,6 +112,13 @@ pub struct SkinnedDraw {
     pub key: (Uuid, Uuid),
 }
 
+/// The key a rest-pose palette is cached under: the `(mesh, skeleton)` pair.
+///
+/// A named type rather than an inline tuple because the map it keys is a
+/// `Mutex<HashMap<_, Arc<Vec<Mat4>>>>` on one side of the mirror, which is
+/// exactly the shape `clippy::type_complexity` exists to stop.
+type RestPaletteKey = (Uuid, Uuid);
+
 /// Where a registry reads payload bytes from.
 enum Content {
     /// Nothing — the `--demo` world, the PIE window, the browser player. Every
@@ -162,7 +169,7 @@ pub struct SkinnedRegistry {
     /// Keyed by the pair and not by the mesh alone, unlike `skinned` above: the
     /// value is `skinning_matrices` over a SKELETON's rest pose, so it is a
     /// property of the rig and re-binding one mesh to two rigs is two answers.
-    rest_palettes: Mutex<HashMap<(Uuid, Uuid), Arc<Vec<Mat4>>>>,
+    rest_palettes: Mutex<HashMap<RestPaletteKey, Arc<Vec<Mat4>>>>,
 }
 
 impl Default for SkinnedRegistry {
@@ -353,7 +360,7 @@ impl SkinnedRegistry {
     }
 
     /// The rest-pose palette for one `(mesh, skeleton)` pair, cached.
-    fn rest_palette(&self, skeleton: &Skeleton, key: (Uuid, Uuid)) -> Arc<Vec<Mat4>> {
+    fn rest_palette(&self, skeleton: &Skeleton, key: RestPaletteKey) -> Arc<Vec<Mat4>> {
         if let Some(hit) = lock(&self.rest_palettes).get(&key) {
             return hit.clone();
         }

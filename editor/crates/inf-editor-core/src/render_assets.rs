@@ -149,6 +149,13 @@ impl EditorMaterialContent {
     }
 }
 
+/// The key a rest-pose palette is cached under: the `(mesh, skeleton)` pair.
+///
+/// A named type rather than an inline tuple because the map it keys is a
+/// `Mutex<HashMap<_, Arc<Vec<Mat4>>>>` on one side of the mirror, which is
+/// exactly the shape `clippy::type_complexity` exists to stop.
+type RestPaletteKey = (Uuid, Uuid);
+
 /// A skeletal mesh resolved to something the skinned pass can draw.
 #[derive(Clone)]
 pub struct SkinnedDraw {
@@ -200,7 +207,7 @@ pub struct EditorRenderAssets {
     /// Keyed by the pair and not by the mesh alone, unlike `skinned` above: the
     /// value is `skinning_matrices` over a SKELETON's rest pose, so it is a
     /// property of the rig and re-binding one mesh to two rigs is two answers.
-    rest_palettes: HashMap<(Uuid, Uuid), Arc<Vec<Mat4>>>,
+    rest_palettes: HashMap<RestPaletteKey, Arc<Vec<Mat4>>>,
     /// **Scatter geometry by mesh GUID** (wave TER2b) — the flat pull arrays a
     /// `PcgKind`'s `.inf_mesh` becomes so that scattered ground cover draws its
     /// authored shape instead of the placeholder cube every instance drew from
@@ -479,7 +486,7 @@ impl EditorRenderAssets {
     }
 
     /// The rest-pose palette for one `(mesh, skeleton)` pair, cached.
-    fn rest_palette(&mut self, skeleton: &Skeleton, key: (Uuid, Uuid)) -> Arc<Vec<Mat4>> {
+    fn rest_palette(&mut self, skeleton: &Skeleton, key: RestPaletteKey) -> Arc<Vec<Mat4>> {
         if let Some(hit) = self.rest_palettes.get(&key) {
             return hit.clone();
         }

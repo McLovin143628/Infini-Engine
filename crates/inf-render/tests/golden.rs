@@ -2220,8 +2220,7 @@ fn golden_crowd_variation() {
     // (3) different COLOURS: the brightest BODY pixel of each run, quantized.
     // Eight looks must not collapse to one.
     let mut hues: Vec<[u8; 3]> = Vec::new();
-    for slot in 0..looks.len() {
-        let (lo, hi) = runs[slot];
+    for (slot, &(lo, hi)) in runs.iter().enumerate() {
         let mut best = [0u8; 3];
         let mut best_sum = 0u16;
         for y in 0..h {
