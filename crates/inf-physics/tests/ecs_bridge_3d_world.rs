@@ -174,18 +174,22 @@ fn two_identical_scenes_step_byte_identical() {
     );
 }
 
-/// **THE SIM-LOD TIER REACHES THE BRIDGE** (NPC1a audit).
+/// **THE SIM-LOD TIER REACHES THE BRIDGE** (NPC1a audit; re-aimed by NPC1c).
 ///
-/// `inf_ecs::crowd` publishes its verdict twice — onto the entity as
-/// `CrowdAgent` (which the pose door and `deform::ground_contacts` read) and
-/// into `bodiless_agents` (which this bridge reads) — and the wave shipped an
-/// arm for the door's *output* and none for this consumption. Severing
-/// `|| bodiless.contains(&guid)` in `sync_from_world_sim` left every arm in the
-/// tree green: a crowd agent is a KINEMATIC body, so the solver never moves it
-/// and its transform (which `step_crowd` rewrites every step anyway) is the only
-/// thing a trace can see. A `Far` agent would silently keep a capsule, and wall
-/// 9's whole resolution — *an NPC nobody can reach does not need to be
-/// reachable* — would be a comment.
+/// The NPC1a audit wrote this arm because the bridge's tier read had none:
+/// `inf_ecs::crowd` published its verdict onto the entity as `CrowdAgent` AND
+/// into a `bodiless_agents` set the bridge consulted, and severing the bridge's
+/// half left every arm in the tree green — a crowd agent is KINEMATIC, so the
+/// solver never moves it and its transform (which `step_crowd` rewrote every
+/// step anyway) is the only thing a trace can see.
+///
+/// **NPC1c retired the set rather than arming it.** A `Far` agent now carries no
+/// `RigidBody3D` component at all (`crowd::set_tier_components`), so there is
+/// nothing left for the bridge to decline: one authority for "is this thing
+/// physically here", and the fix for the terrain-observer finding in the same
+/// move. So this arm no longer aims at a line in `sync_from_world_sim`; it aims
+/// at the property both waves care about, which is what rapier ends up holding —
+/// and it is now falsified by severing the component ladder instead.
 ///
 /// Three claims, because the first two are satisfied by a bridge that tracks
 /// nothing: the `Full` agent has a body, the `Far` one does not, and the

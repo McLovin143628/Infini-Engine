@@ -476,10 +476,12 @@ mod tests {
             (CrowdTier::Far, 0),
             (CrowdTier::Dormant, 0),
         ] {
-            world
-                .world_mut()
-                .entity_mut(walker)
-                .insert(CrowdAgent { tier, guid });
+            world.world_mut().entity_mut(walker).insert(CrowdAgent {
+                tier,
+                guid,
+                feet_offset_m: 1.2,
+                blocked: false,
+            });
             let n = ground_contacts(&world).len();
             assert_eq!(
                 n,

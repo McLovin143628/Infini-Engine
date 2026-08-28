@@ -824,11 +824,42 @@ pub fn model_to_world(world: &EcsWorld, entity: Entity) -> glam::DAffine3 {
         .get::<crate::components::GlobalTransform>(entity)
         .map(|g| g.0)
         .unwrap_or(glam::DAffine3::IDENTITY);
-    let Some(cm) = w.get::<crate::components::CharacterMovement>(entity) else {
+    let Some(drop) = character_drop(world, entity) else {
         return global;
     };
-    let drop = crate::movement::feet_offset_m(cm, w.get::<crate::components::Collider3D>(entity));
     global * glam::DAffine3::from_translation(glam::DVec3::new(0.0, -drop, 0.0))
+}
+
+/// **How far below its transform this entity's feet are**, or `None` for a thing
+/// whose origin is its transform — every prop, every non-character skeletal
+/// mesh and every committed sample this tree had before P29.6.
+///
+/// Two sources, in one place, and they are not two opinions:
+///
+/// * a character carrying [`CharacterMovement`](crate::components::CharacterMovement)
+///   is measured by [`crate::movement::feet_offset_m`], off its live collider —
+///   the general rule, and the one that follows a crouch;
+/// * a **crowd agent** publishes its archetype's own offset on
+///   [`crate::crowd::CrowdAgent`], because the [`Far`] tier deliberately carries
+///   neither a `CharacterMovement` nor a `Collider3D` and its feet are in the
+///   same place regardless.
+///
+/// The first wins where both are present, so a `Full` agent is measured exactly
+/// as a hero is; `the_crowds_foot_offset_is_the_one_the_movement_model_computes`
+/// is the arm that holds the two to the same number, which is what stops this
+/// being a fork.
+///
+/// [`Far`]: crate::crowd::CrowdTier::Far
+fn character_drop(world: &EcsWorld, entity: Entity) -> Option<f64> {
+    let w = world.world();
+    if let Some(cm) = w.get::<crate::components::CharacterMovement>(entity) {
+        return Some(crate::movement::feet_offset_m(
+            cm,
+            w.get::<crate::components::Collider3D>(entity),
+        ));
+    }
+    w.get::<crate::crowd::CrowdAgent>(entity)
+        .map(|a| a.feet_offset_m)
 }
 
 /// [`model_to_world`] by GUID — the door a caller outside the fixed step reaches
@@ -863,10 +894,9 @@ pub fn model_to_world_of(world: &EcsWorld, guid: Uuid) -> Option<glam::DAffine3>
 /// prop in the tree, so nothing that existed before this moves.
 pub fn model_offset_world(world: &EcsWorld, entity: Entity) -> glam::DVec3 {
     let w = world.world();
-    let Some(cm) = w.get::<crate::components::CharacterMovement>(entity) else {
+    let Some(drop) = character_drop(world, entity) else {
         return glam::DVec3::ZERO;
     };
-    let drop = crate::movement::feet_offset_m(cm, w.get::<crate::components::Collider3D>(entity));
     let m = w
         .get::<crate::components::GlobalTransform>(entity)
         .map(|g| g.0.matrix3)

@@ -43,7 +43,7 @@ use super::water::{
     self, BodyState, BuoyancyDesc3D, BuoyantMap, SampleGeometry, WaterEvent3D, WaterIndex,
     WaterProbe, WaterStamp,
 };
-use super::world::{BodyKind3D, ColliderDesc3D, ColliderShape3D, PhysicsWorld3D};
+use super::world::{BodyKind3D, ColliderDesc3D, ColliderPairing, ColliderShape3D, PhysicsWorld3D};
 use super::{BodyId3D, ColliderId3D};
 use crate::filtering::{CollisionLayers, CombineRule};
 
@@ -701,20 +701,28 @@ impl PhysicsBridge3D {
             .filter(|(_, s)| !s.is_intact())
             .map(|(g, _)| *g)
             .collect();
-        // **THE SIM-LOD BAND, for bodies** (NPC1a). The I3 collider band above
-        // decides which *static structural* colliders a step may hold; this
-        // decides which crowd agents are solid, and it is a different question
-        // at a different scale — a building is dozens of solids and an NPC is
-        // one capsule. A `Far` or `Dormant` agent has no rapier body at all,
-        // which is wall 9's own resolution: an NPC nobody can reach does not
-        // need to be reachable.
+        // **THE CROWD'S COLLIDERS** (NPC1c). Not a set of things to *exclude* —
+        // a `Far` agent carries no `RigidBody3D` component at all now, so the
+        // walk below never sees one — but the set whose colliders take the
+        // **narrowed pairing**.
+        //
+        // The measurement that put this here: 288 moving kinematic capsules over
+        // a streamed heightfield cost **+0.773 ms** of `world.step` against
+        // **+0.023 ms** for the same 288 capsules standing on the same
+        // manifolds. Re-placing a kinematic body every step invalidates every
+        // manifold it owns, and a capsule-versus-heightfield manifold walks the
+        // tile's cells underneath — wave I4b's `FIXED_FIXED` finding with the
+        // "moving" part switched on. Narrowing the crowd capsule AND the scenery
+        // it stands on removed all 530 manifolds and recovered 84 % of the cost;
+        // narrowing only the capsule removed **none**, because rapier tests the
+        // flags as a union.
         //
         // Read through `inf_ecs::crowd`'s door rather than by a `CrowdAgent`
         // lookup inside the walk below, because the walk is `O(entities)` over
         // a furnished town and the population is `O(agents)`. Empty — and
         // allocation-free — on every level with no crowd, which is every level
         // this tree committed before NPC1a.
-        let bodiless: BTreeSet<Uuid> = inf_ecs::crowd::bodiless_agents(world);
+        let crowd: BTreeSet<Uuid> = inf_ecs::crowd::crowd_colliders(world);
         let mut snaps: Vec<EntitySync3D> = std::mem::take(&mut self.snaps_scratch);
         snaps.clear();
         // P20.2: the water gather rides in THIS walk rather than in a second one.
@@ -777,7 +785,7 @@ impl PhysicsBridge3D {
             // collider, so `sync_retaining` skips it and the despawn sweep
             // removes whatever it had. The entity itself survives untouched in
             // both cases — it is only its physical representation that goes.
-            let broken_here = broken.contains(&guid) || bodiless.contains(&guid);
+            let broken_here = broken.contains(&guid);
             let rb = if broken_here {
                 None
             } else {
@@ -813,7 +821,19 @@ impl PhysicsBridge3D {
             let snap = EntitySync3D {
                 guid,
                 body: rb.map(body_desc),
-                collider: col.as_ref().map(collider_desc),
+                collider: col.as_ref().map(|c| {
+                    let d = collider_desc(c);
+                    // A crowd agent's capsule pairs with dynamic bodies only —
+                    // see the `crowd` set above for the measurement. A `Full`
+                    // agent is still something a player can walk into: the
+                    // player's own capsule keeps `All`, and rapier's union rule
+                    // means that pair survives.
+                    if crowd.contains(&guid) {
+                        d.pairing(ColliderPairing::DynamicOnly)
+                    } else {
+                        d
+                    }
+                }),
                 translation: transform.translation.to_dvec3(),
                 rotation: transform.quat(),
                 joint: joint.and_then(joint_sync),
@@ -2444,13 +2464,29 @@ pub fn terrain_tile_collider(
     } else {
         Vec::new()
     };
-    Some(ColliderDesc3D::new(ColliderShape3D::Heightfield {
-        samples_x: resolution,
-        samples_z: resolution,
-        heights: tile.heights().to_vec(),
-        removed_cells,
-        span: DVec2::splat(span),
-    }))
+    // **The other half of the crowd's narrowed pair** (NPC1c). rapier tests
+    // `ActiveCollisionTypes` as a union, so narrowing the agent's capsule alone
+    // removes nothing — measured, 0 of 530 manifolds — and the ground is where
+    // three quarters of the cost is (a moving crowd cost +0.760 ms/step over a
+    // heightfield and +0.200 without one).
+    //
+    // Nothing that exists today loses anything: a DYNAMIC body still pairs
+    // (`DYNAMIC_FIXED` is in the narrowed set), the player's own kinematic
+    // capsule keeps `All` and the union carries its pair, and a sensor keeps
+    // `all()` regardless. What goes away is the manifold between this ground and
+    // a *crowd agent*, which nothing reads: an NPC's ground contact is a
+    // `move_and_slide` shape cast through the query pipeline, and a crowd agent
+    // has no Blueprint to receive a `Collision` event.
+    Some(
+        ColliderDesc3D::new(ColliderShape3D::Heightfield {
+            samples_x: resolution,
+            samples_z: resolution,
+            heights: tile.heights().to_vec(),
+            removed_cells,
+            span: DVec2::splat(span),
+        })
+        .pairing(ColliderPairing::DynamicOnly),
+    )
 }
 
 /// One static box collider per [`PcgVolume::structures`] entry (P19.5).
@@ -2504,9 +2540,15 @@ fn structure_snaps_of(
     let solid_snap = |i: usize, solid: &inf_ecs::ScatteredSolid| EntitySync3D {
         guid: pcg_structure_guid(guid, i),
         body: None,
-        collider: Some(ColliderDesc3D::new(ColliderShape3D::Box {
-            half_extents: solid.half_extents,
-        })),
+        // Narrowed for the same reason the terrain tile above is: a moving crowd
+        // capsule against a city's static structural boxes is a manifold nothing
+        // reads, recomputed every step because the capsule moved.
+        collider: Some(
+            ColliderDesc3D::new(ColliderShape3D::Box {
+                half_extents: solid.half_extents,
+            })
+            .pairing(ColliderPairing::DynamicOnly),
+        ),
         translation: solid.center,
         rotation: solid.rotation,
         joint: None,

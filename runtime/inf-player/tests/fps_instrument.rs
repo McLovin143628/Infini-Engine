@@ -1675,11 +1675,7 @@ fn island_population(
             uuid::Uuid::from_u128(NAMESPACE | i as u128),
             inf_ecs::crowd::CrowdRecord::walking(
                 archetype,
-                inf_ecs::crowd::CrowdRoute {
-                    from,
-                    to: from + DVec3::new(0.0, 0.0, 6.0),
-                    speed_mps: 1.4,
-                },
+                inf_ecs::crowd::CrowdRoute::between(from, from + DVec3::new(0.0, 0.0, 6.0), 1.4),
             ),
         );
     }

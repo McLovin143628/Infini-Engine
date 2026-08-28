@@ -252,14 +252,12 @@ fn population(n: usize, archetype: CrowdArchetype) -> BTreeMap<Uuid, CrowdRecord
             Uuid::from_u128(NAMESPACE | i as u128),
             CrowdRecord::walking(
                 archetype,
-                CrowdRoute {
-                    from,
-                    // Six metres across the street and back — long enough that
-                    // an agent crosses a tier boundary over a sweep, short
-                    // enough that the block stays a block.
-                    to: from + DVec3::new(0.0, 0.0, 6.0),
-                    speed_mps: 1.4,
-                },
+                // Six metres across the street and back — long enough that
+                // an agent crosses a tier boundary over a sweep, short enough
+                // that the block stays a block. `between` is NPC1a's own
+                // two-point ping-pong, kept by name so this sweep measures the
+                // route it always measured.
+                CrowdRoute::between(from, from + DVec3::new(0.0, 0.0, 6.0), 1.4),
             ),
         );
     }
@@ -1207,11 +1205,11 @@ fn a_crowd_agent_is_cheaper_per_entity_than_a_blueprint_actor() {
                 // blueprint SYSTEM, and a rig on one side and not the other
                 // would be measuring the pose pipeline.
                 CrowdArchetype::default(),
-                CrowdRoute {
-                    from: DVec3::new(i as f64 * 0.5, 0.0, 0.0),
-                    to: DVec3::new(i as f64 * 0.5, 0.0, 6.0),
-                    speed_mps: 1.4,
-                },
+                CrowdRoute::between(
+                    DVec3::new(i as f64 * 0.5, 0.0, 0.0),
+                    DVec3::new(i as f64 * 0.5, 0.0, 6.0),
+                    1.4,
+                ),
             ),
         );
     }
@@ -1305,11 +1303,7 @@ fn the_parallel_map_over_agent_decisions_is_priced_before_it_is_prescribed() {
                     Uuid::from_u128(0x2000 + i as u128),
                     CrowdRecord::walking(
                         CrowdArchetype::default(),
-                        CrowdRoute {
-                            from: at,
-                            to: at + DVec3::new(0.0, 0.0, 6.0),
-                            speed_mps: 1.4,
-                        },
+                        CrowdRoute::between(at, at + DVec3::new(0.0, 0.0, 6.0), 1.4),
                     ),
                     at,
                 )

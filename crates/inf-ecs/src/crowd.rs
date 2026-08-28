@@ -15,26 +15,57 @@
 //!
 //! So the crowd pays by **tier**, and the tier is one decision:
 //!
-//! | tier | rapier | pose | hand IK | position |
-//! |---|---|---|---|---|
-//! | [`Full`](CrowdTier::Full) | capsule | full | yes | route |
-//! | [`Near`](CrowdTier::Near) | capsule | full | **no** | route |
-//! | [`Far`](CrowdTier::Far) | **none** | **none** | no | route |
-//! | [`Dormant`](CrowdTier::Dormant) | — | — | — | route (no entity to write it to) |
+//! | tier | rapier | movement model | pose | hand IK | position |
+//! |---|---|---|---|---|---|
+//! | [`Full`](CrowdTier::Full) | capsule | yes | full | yes | **steered** |
+//! | [`Near`](CrowdTier::Near) | capsule | yes | full | **no** | **steered** |
+//! | [`Far`](CrowdTier::Far) | **none** | **none** | **none** | no | route(clock) |
+//! | [`Dormant`](CrowdTier::Dormant) | — | — | — | — | route(clock), with no entity to write it to |
 //!
-//! **The position law is the same at every tier**, and that is deliberate rather
-//! than unfinished: an agent's place is `route(clock)`, a pure function of its
-//! record and the step count, at Full exactly as at Far — and at
-//! [`Dormant`](CrowdTier::Dormant) too, where there is simply no entity to write
-//! it onto. (It was NOT so in the wave's first cut, and the audit arm
-//! `a_dormant_agent_keeps_walking_its_route_and_can_come_back` is why: a record
-//! that froze where it dematerialized was then *tiered* from that frozen point,
-//! so a walking agent whose route carried it home could never come back.) NPC1c
-//! replaces that
-//! function with a path over the road graph and steers the near tiers through
-//! `move_and_slide`; until it does, a tier transition is **invisible in the
-//! transform**, which is what makes the PIE-==-shipping-across-transitions arm a
-//! test of the tier machinery rather than of the route.
+//! # The tier owns the COMPONENTS (wave NPC1c)
+//!
+//! NPC1a gave every materialized agent a body, a capsule and a controller at
+//! every tier and had the 3D bridge decline to *mirror* the ones the tier called
+//! bodiless. That is one system holding an opinion about another system's data,
+//! and it cost what this module's own founding law predicts:
+//! `terrain_stream::observes_terrain` picks its subjects **by component**, so a
+//! thousand NPCs were a thousand terrain observers — 712 of them `Far`, with no
+//! rapier body and no door by which to query a height — each pulling a
+//! `SIM_MARGIN_TILES` neighbourhood of level-0 pages into a want set that is
+//! never clamped. Measured by the NPC1b audit at **+1.16 ms of "crowd" cost that
+//! was not the crowd**.
+//!
+//! So [`set_tier_components`] puts the physical set on and takes it off with the
+//! tier. A thing with no body has no body; nothing downstream has to be told,
+//! because there is nothing to see.
+//!
+//! **Every agent is somewhere on its own route at every tier**, and that is
+//! deliberate rather than unfinished. A record that froze where it
+//! dematerialized was then *tiered* from that frozen point, so a walking agent
+//! whose route carried it home could never come back — the NPC1a audit's
+//! `a_dormant_agent_keeps_walking_its_route_and_can_come_back` is why the law
+//! reads this way.
+//!
+//! What NPC1c splits is **who advances the agent along the route**:
+//!
+//! * a tier with **no controller** ([`Far`](CrowdTier::Far),
+//!   [`Dormant`](CrowdTier::Dormant)) is `route(clock)` — a pure function of the
+//!   record, the step count and one phase, costing an interpolation;
+//! * a tier **with** one ([`Full`](CrowdTier::Full), [`Near`](CrowdTier::Near))
+//!   is moved by `inf_physics::d3::step_character_movement`, five phases later
+//!   in the same fixed step, through `move_and_slide` — the one door a character
+//!   in this engine moves through. What the crowd writes for those is an
+//!   **intent** ([`steer_agent`]), never a transform, because two writers on one
+//!   transform is precisely what NPC1a refused a controller to avoid.
+//!
+//! The two meet at the transitions, and neither is allowed to pop:
+//! a **promotion** places the body at `route(clock)`, which is exactly where the
+//! tier below was already drawing it; a **demotion** hands the clock back the
+//! metre the *body* reached ([`CrowdRoute::rephase_delta`],
+//! [`CrowdRecord::rephase_m`]), because a body that was blocked, or slowed on a
+//! slope, or simply walking at its own gait, is not where the clock ran on to.
+//! Measured: a body 4.05 m behind its own clock moves **0.0000 m** across the
+//! transition.
 //!
 //! # THE VISIBILITY LAW: the tier never reads a camera
 //!
@@ -99,8 +130,8 @@ use uuid::Uuid;
 
 use crate::band::{streaming_sources, BAND_LATTICE_M};
 use crate::components::{
-    AnimStateMachine, BodyKind3D, CharacterController3D, Collider3D, ColliderShape3DKind,
-    RigidBody3D, SkeletalMesh, Transform,
+    AnimStateMachine, BodyKind3D, CharacterController3D, CharacterMovement, Collider3D,
+    ColliderShape3DKind, Gait, RigidBody3D, RotationMode, SkeletalMesh, Transform,
 };
 use crate::math::Vec3d;
 use crate::world::EcsWorld;
@@ -563,63 +594,233 @@ impl CrowdLook {
 
 // ── the route ───────────────────────────────────────────────────────────────
 
-/// **Where an agent is at a given sim time** — a pure function of the record and
-/// the clock, which is the substrate NPC1c's path-follower replaces.
+/// What an agent does when it runs out of route (wave NPC1c).
 ///
-/// A straight there-and-back between two points at a fixed speed. Deliberately
-/// the simplest thing that moves: NPC1a's job is the *tier system*, and a route
-/// with a graph search in it would make every tier measurement a measurement of
-/// the search. `from == to` is a **stand**, which is legal and is what most of a
-/// town's population does at any instant.
+/// Not a wire enum and not persisted — a route is runtime state on a resource,
+/// so this costs no schema ladder and no freeze pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RouteMode {
+    /// There and back for ever. NPC1a's only behaviour, and what a patrol,
+    /// a fixture and a stand all are.
+    #[default]
+    PingPong,
+    /// Walk it once and **arrive** — the shape a real errand takes, and the one
+    /// [`RouteProgress::arrived`] is about.
+    Once,
+    /// Round and round: a chain whose ends coincide, walked for ever forwards.
+    Loop,
+}
+
+/// **Where an agent is along its route** — [`CrowdRoute::progress_at`]'s answer,
+/// in metres of arc length rather than in a normalized `t`.
+///
+/// Arc length is what makes a *speed* in m/s mean what it says on an uneven
+/// polyline, and it is the currency the near tiers' pursuit and the demotion
+/// re-phase are both expressed in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RouteProgress {
+    /// Metres along the path, clamped into `[0, length]`.
+    pub s_m: f64,
+    /// Whether arc length is increasing this step. Always `true` for
+    /// [`RouteMode::Once`] and [`RouteMode::Loop`]; a ping-pong on its way home
+    /// answers `false`, and that is what tells the near tiers' pursuit which way
+    /// to look.
+    pub forward: bool,
+    /// Whether a [`RouteMode::Once`] route has run out. Never `true` for the
+    /// other two — they do not end.
+    pub arrived: bool,
+}
+
+/// **Where an agent is at a given sim time** — a pure function of the record, the
+/// clock and one phase, over an [`inf_nav::NavPath`].
+///
+/// # What NPC1c changed, and what it deliberately did not
+///
+/// NPC1a's route was a straight there-and-back between two `DVec3`s, chosen so
+/// that a tier measurement measured the *tier* and not a graph search. NPC1c
+/// replaces the two points with a **path** — a shared, arc-length-parameterized
+/// polyline that a Dijkstra over the road network, a settlement's street grid or
+/// a building's own corridors produced — and adds a [`RouteMode`] so a route can
+/// end.
+///
+/// What did not change is the arithmetic. A two-point [`RouteMode::PingPong`]
+/// route computes the **same bits** it computed before this wave:
+/// `inf_nav::NavPath::position_at` interpolates `from + (to - from) · (s / len)`
+/// with `len` built out of the same three multiplies and one `sqrt`, and the
+/// fold below is the same `rem_euclid`. `a_two_point_path_interpolates_exactly_as_the_npc1a_route_did`
+/// pins it by `to_bits()`. That is what let a population that was already
+/// walking move onto this substrate without moving.
+///
+/// The path is an `Arc`, so a thousand agents sent down one street hold one copy
+/// of it and cloning a record is a refcount bump.
 ///
 /// Every operation is IEEE-exact (`+ - * / sqrt %`), so two machines derive the
 /// same metre — the P14 portable-math law, which binds here because this output
 /// reaches a `Transform` and therefore the sim trace.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CrowdRoute {
-    /// One end, world metres.
-    pub from: DVec3,
-    /// The other end, world metres.
-    pub to: DVec3,
+    /// The spine, in world metres, ground-snapped **when it was built**.
+    pub path: inf_nav::NavPath,
     /// Metres per second along it. Non-positive is a stand.
+    ///
+    /// This is the speed the tiers with **no controller** walk at. A `Full` or
+    /// `Near` agent walks at its [`crate::components::CharacterMovement`]'s own
+    /// gait speed instead, because a body integrated by the movement model is
+    /// the movement model's to move — and the difference between the two is
+    /// exactly what [`CrowdRecord::rephase_m`] absorbs on the way back down.
     pub speed_mps: f64,
+    /// What happens at the end.
+    pub mode: RouteMode,
 }
 
 impl CrowdRoute {
     /// A route that stands still at `p`.
     pub fn standing(p: DVec3) -> Self {
         Self {
-            from: p,
-            to: p,
+            path: inf_nav::NavPath::single(p),
             speed_mps: 0.0,
+            mode: RouteMode::PingPong,
         }
     }
 
-    /// The agent's position at sim time `t_s`, ping-ponging between the ends.
+    /// NPC1a's route: a straight there-and-back between two points.
     ///
-    /// `phase_m` shifts the agent along the path so a population drawn from one
-    /// route does not march in lockstep; it is the agent's own
-    /// [`agent_unit`] draw scaled by the path length, which is why it is a
-    /// distance and not an angle.
-    pub fn position_at(&self, t_s: f64, phase_m: f64) -> DVec3 {
-        let d = self.to - self.from;
-        let len = (d.x * d.x + d.y * d.y + d.z * d.z).sqrt();
-        // Spelled as one conjunction rather than as three negated comparisons:
-        // `!(len > 0.0)` reads NaN correctly and reads as a clippy lint, and a
-        // route with a NaN end has to answer `from` rather than wander.
-        let walkable = len.is_finite()
-            && len > 0.0
-            && self.speed_mps.is_finite()
-            && self.speed_mps > 0.0
-            && t_s.is_finite();
-        if !walkable {
-            return self.from;
+    /// Kept as a named constructor rather than as the only shape, because it is
+    /// what every fixture and every tier measurement in this tree is written
+    /// against and its bytes must not move.
+    pub fn between(from: DVec3, to: DVec3, speed_mps: f64) -> Self {
+        Self {
+            path: inf_nav::NavPath::new([from, to]),
+            speed_mps,
+            mode: RouteMode::PingPong,
         }
-        let period = 2.0 * len;
-        let travelled = self.speed_mps * t_s + phase_m;
-        let u = travelled.rem_euclid(period);
-        let along = if u <= len { u } else { period - u };
-        self.from + d * (along / len)
+    }
+
+    /// A route along a planned path — what [`inf_nav::route`] hands back.
+    pub fn along(path: inf_nav::NavPath, speed_mps: f64, mode: RouteMode) -> Self {
+        Self {
+            path,
+            speed_mps,
+            mode,
+        }
+    }
+
+    /// Where the route starts. A stand's own place.
+    pub fn origin(&self) -> DVec3 {
+        self.path.points()[0]
+    }
+
+    /// Where the route ends.
+    pub fn destination(&self) -> DVec3 {
+        let pts = self.path.points();
+        pts[pts.len() - 1]
+    }
+
+    /// Total arc length, metres.
+    pub fn length_m(&self) -> f64 {
+        self.path.length_m()
+    }
+
+    /// Whether this route goes anywhere at all — a finite positive speed over a
+    /// path with length in it.
+    ///
+    /// Spelled as one conjunction rather than as negated comparisons: `!(len >
+    /// 0.0)` reads NaN correctly and reads as a clippy lint, and a route with a
+    /// NaN end has to answer its origin rather than wander.
+    pub fn is_walkable(&self) -> bool {
+        let len = self.length_m();
+        len.is_finite() && len > 0.0 && self.speed_mps.is_finite() && self.speed_mps > 0.0
+    }
+
+    /// Metres travelled by sim time `t_s`, before the fold — the scalar every
+    /// other question here is asked of.
+    pub fn travelled_at(&self, t_s: f64, phase_m: f64) -> f64 {
+        self.speed_mps * t_s + phase_m
+    }
+
+    /// **How far along the path the clock says the agent is**, folded by the
+    /// route's own [`RouteMode`].
+    pub fn progress_at(&self, t_s: f64, phase_m: f64) -> RouteProgress {
+        let len = self.length_m();
+        if !self.is_walkable() || !t_s.is_finite() || !phase_m.is_finite() {
+            return RouteProgress {
+                s_m: 0.0,
+                forward: true,
+                // A stand has nowhere to get to, so it is always there. Reading
+                // it the other way would make every idle NPC in a town
+                // permanently *en route*.
+                arrived: true,
+            };
+        }
+        let travelled = self.travelled_at(t_s, phase_m);
+        match self.mode {
+            RouteMode::PingPong => {
+                let period = 2.0 * len;
+                let u = travelled.rem_euclid(period);
+                let forward = u <= len;
+                RouteProgress {
+                    s_m: if forward { u } else { period - u },
+                    forward,
+                    arrived: false,
+                }
+            }
+            RouteMode::Loop => RouteProgress {
+                s_m: travelled.rem_euclid(len),
+                forward: true,
+                arrived: false,
+            },
+            RouteMode::Once => RouteProgress {
+                s_m: travelled.clamp(0.0, len),
+                forward: true,
+                arrived: travelled >= len,
+            },
+        }
+    }
+
+    /// The agent's position at sim time `t_s`.
+    pub fn position_at(&self, t_s: f64, phase_m: f64) -> DVec3 {
+        self.path.position_at(self.progress_at(t_s, phase_m).s_m)
+    }
+
+    /// **The phase change that puts `route(clock)` at `s_m`** — the arithmetic
+    /// that makes a demotion continuous.
+    ///
+    /// A `Near` agent's body is moved by the movement model, so by the time it
+    /// drops to `Far` the clock and the body disagree: the body was blocked by a
+    /// wall, or slowed on a slope, or simply walks at its own gait rather than
+    /// at [`speed_mps`](Self::speed_mps). Snapping to `route(clock)` would
+    /// teleport it by however much it had lagged — measured on a blocked agent,
+    /// metres. So the *clock* is moved onto the body instead, once, at the
+    /// transition, and everything downstream stays a pure function of the route
+    /// and the clock.
+    ///
+    /// The branch matters: on a ping-pong's return leg the same `s_m` is a
+    /// different `travelled`, so the leg the clock is *currently* on is what the
+    /// solution is taken on.
+    pub fn rephase_delta(&self, travelled_now: f64, s_m: f64) -> f64 {
+        let len = self.length_m();
+        if !self.is_walkable() || !travelled_now.is_finite() || !s_m.is_finite() {
+            return 0.0;
+        }
+        let s = s_m.clamp(0.0, len);
+        let want = match self.mode {
+            RouteMode::Once => s,
+            RouteMode::Loop => {
+                let k = (travelled_now / len).floor();
+                k * len + s
+            }
+            RouteMode::PingPong => {
+                let period = 2.0 * len;
+                let k = (travelled_now / period).floor();
+                let u = travelled_now - k * period;
+                if u <= len {
+                    k * period + s
+                } else {
+                    k * period + (period - s)
+                }
+            }
+        };
+        want - travelled_now
     }
 }
 
@@ -649,6 +850,23 @@ pub struct CrowdArchetype {
 }
 
 impl CrowdArchetype {
+    /// **How far below its transform this archetype's feet are**, metres.
+    ///
+    /// P29.6's ruling, applied to a crowd: a rig is authored with its feet at the
+    /// origin and a character's entity transform is its capsule **centre**, so
+    /// the two differ by `half_height + radius` — 1.20 m on the humanoid. It is
+    /// spelled here rather than only in `movement::feet_offset_m` because a
+    /// `Far` agent has no `CharacterMovement` and no `Collider3D` for that
+    /// function to read, and it still has feet.
+    ///
+    /// The two must agree for the tiers that have both, and
+    /// `the_crowds_foot_offset_is_the_one_the_movement_model_computes` is the
+    /// arm that says so.
+    #[inline]
+    pub fn feet_offset_m(&self) -> f64 {
+        self.half_height_m + self.radius_m
+    }
+
     /// The starter character's proportions — a 1.8 m adult: 0.9 m half-height,
     /// 0.3 m radius, which is the capsule `inf_anim::template` fits a rig to.
     pub fn humanoid(mesh: Option<Uuid>, skeleton: Option<Uuid>, sm: Option<Uuid>) -> Self {
@@ -672,7 +890,7 @@ impl CrowdArchetype {
 ///
 /// [`Dormant`]: CrowdTier::Dormant
 /// [`Far`]: CrowdTier::Far
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CrowdRecord {
     /// What it is made of.
     pub archetype: CrowdArchetype,
@@ -685,6 +903,22 @@ pub struct CrowdRecord {
     /// A fold of the last pose it published, carried while it is not evaluating
     /// one. `0` for an agent that has never posed.
     pub pose_digest: u64,
+    /// **What the near tiers did to the clock** (wave NPC1c), in metres of
+    /// phase.
+    ///
+    /// Zero for an agent that has never carried a controller, which is what
+    /// makes every NPC1a fixture reproduce exactly. It moves once per demotion,
+    /// by [`CrowdRoute::rephase_delta`], so the route clock lands where the
+    /// *body* actually got to — see that function for why the alternative is a
+    /// teleport.
+    ///
+    /// This is genuine sim state and not a cached pure function, which is why it
+    /// is stored where the derived speed and phase draws deliberately are not:
+    /// it is produced by the simulation — by a body being blocked, or slowed on
+    /// a slope, or simply walking at its own gait — and two hosts that produced
+    /// different values have diverged. It is folded into [`crowd_state_bytes`]
+    /// for exactly that reason.
+    pub rephase_m: f64,
 }
 
 impl CrowdRecord {
@@ -696,39 +930,79 @@ impl CrowdRecord {
             tier: CrowdTier::Dormant,
             last: p,
             pose_digest: 0,
+            rephase_m: 0.0,
         }
     }
 
-    /// A record walking `route`, starting at its `from` end.
+    /// A record walking `route`, starting at its origin.
     pub fn walking(archetype: CrowdArchetype, route: CrowdRoute) -> Self {
+        let last = route.origin();
         Self {
             archetype,
             route,
             tier: CrowdTier::Dormant,
-            last: route.from,
+            last,
             pose_digest: 0,
+            rephase_m: 0.0,
         }
     }
 
-    /// **Where this agent is at sim time `t_s`** — the record's authored route
-    /// plus the two per-agent draws, in the one place that decides them.
+    /// **The agent's own speed**: `0.85 … 1.15` of its route's, so a population
+    /// sharing one route does not march in lockstep.
     ///
-    /// The variation is DERIVED and never stored, which is what keeps it honest:
-    /// a jitter written into the record at spawn time would be a second copy of
-    /// a pure function, and the copy is the thing that drifts. Both draws are
-    /// taken at `tick = 0`, so they are constants of the agent rather than of
-    /// the step — a per-step draw uses the same door with the live tick.
+    /// DERIVED and never stored, and drawn at `tick = 0` so it is a constant of
+    /// the agent rather than of the step: a jitter written into the record at
+    /// spawn time would be a second copy of a pure function, and the copy is the
+    /// thing that drifts. A per-step draw uses the same door with the live tick.
+    pub fn speed_of(&self, guid: Uuid) -> f64 {
+        self.route.speed_mps * (0.85 + 0.3 * agent_unit(guid, 0, SALT_SPEED))
+    }
+
+    /// **The agent's own phase**: up to 8 m of derived head start along the
+    /// path, so they do not all turn round together, plus whatever the near
+    /// tiers have put into [`rephase_m`](Self::rephase_m).
+    pub fn phase_of(&self, guid: Uuid) -> f64 {
+        agent_unit(guid, 0, SALT_PHASE) * 8.0 + self.rephase_m
+    }
+
+    /// The record's route wearing this agent's own speed — the one place the
+    /// draws are applied, so nothing downstream can apply them twice.
+    fn walked(&self, guid: Uuid) -> CrowdRoute {
+        CrowdRoute {
+            path: self.route.path.clone(),
+            speed_mps: self.speed_of(guid),
+            mode: self.route.mode,
+        }
+    }
+
+    /// **How far along its route this agent is at sim time `t_s`.**
+    pub fn progress_at(&self, guid: Uuid, t_s: f64) -> RouteProgress {
+        self.walked(guid).progress_at(t_s, self.phase_of(guid))
+    }
+
+    /// **Where this agent's FEET are at sim time `t_s`** — the point on the
+    /// route itself, with no body geometry in it.
+    pub fn feet_at(&self, guid: Uuid, t_s: f64) -> DVec3 {
+        self.route.path.position_at(self.progress_at(guid, t_s).s_m)
+    }
+
+    /// **Where this agent's TRANSFORM is at sim time `t_s`** — the record's
+    /// route plus the two per-agent draws plus its own capsule, in the one place
+    /// that decides them.
     ///
-    /// * **speed** — `0.85 … 1.15` of the authored speed, so a population sharing
-    ///   one route does not march in lockstep;
-    /// * **phase** — up to 8 m of head start along the path, so they do not all
-    ///   turn round together either.
+    /// The lift is here and nowhere else. A nav path is the ground a body walks
+    /// on and an entity's transform is its capsule's centre (P29.6), so the two
+    /// differ by [`CrowdArchetype::feet_offset_m`] — and a wave that computed
+    /// that difference in two places got it 1.20 m wrong in one of them, which
+    /// is what `a_demotion_hands_the_clock_the_metre_the_body_reached` caught.
     pub fn position_at(&self, guid: Uuid, t_s: f64) -> DVec3 {
-        let route = CrowdRoute {
-            speed_mps: self.route.speed_mps * (0.85 + 0.3 * agent_unit(guid, 0, SALT_SPEED)),
-            ..self.route
-        };
-        route.position_at(t_s, agent_unit(guid, 0, SALT_PHASE) * 8.0)
+        self.feet_at(guid, t_s) + DVec3::new(0.0, self.archetype.feet_offset_m(), 0.0)
+    }
+
+    /// Metres of route travelled by `t_s`, before the fold — what a re-phase is
+    /// computed against.
+    pub fn travelled_at(&self, guid: Uuid, t_s: f64) -> f64 {
+        self.walked(guid).travelled_at(t_s, self.phase_of(guid))
     }
 }
 
@@ -756,7 +1030,7 @@ pub struct CrowdPopulationRes {
 /// Written only by [`step_crowd`]. Not reflected and not serialized: it is a
 /// *published verdict*, like `AnimStateMachine::runtime`, and an authored one
 /// would be a second opinion about a thing that has one door.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct CrowdAgent {
     /// This step's tier.
     pub tier: CrowdTier,
@@ -764,6 +1038,29 @@ pub struct CrowdAgent {
     /// argument, cached on the entity so a consumer does not have to look the
     /// `Guid` up again.
     pub guid: Uuid,
+    /// **How far below this entity's transform its feet are**, metres — the
+    /// archetype's [`CrowdArchetype::feet_offset_m`], published so
+    /// [`crate::pose::model_to_world`] can answer for a tier that carries no
+    /// `CharacterMovement`.
+    ///
+    /// Without it a `Far` agent is drawn with its feet at its capsule's centre:
+    /// **1.20 m** into the air on the humanoid archetype, measured by the NPC1b
+    /// audit's own tripwire the step this wave gave the near tiers a controller.
+    pub feet_offset_m: f64,
+    /// **This agent is further than [`BLOCKED_LAG_M`] behind its own route
+    /// clock** — its body has stopped making progress along the path while the
+    /// clock has run on.
+    ///
+    /// Published rather than kept in [`CrowdStats`] alone because it has a
+    /// *reader*: `inf_physics::d3::gameplay::step_crowd_doors` opens the door a
+    /// blocked agent is standing against, and it needs to know **which** agent
+    /// rather than how many. Reading it that way is also what keeps that pass
+    /// cheap — a doorway scan per agent would be `O(agents x doorways)` over a
+    /// city that plans 19 790 of them, and the blocked set is a handful.
+    ///
+    /// Always `false` on a tier with no controller: an agent the clock moves
+    /// cannot fall behind the clock.
+    pub blocked: bool,
 }
 
 /// What one [`step_crowd`] did — the instrument's read, and the gate's.
@@ -790,6 +1087,25 @@ pub struct CrowdStats {
     /// identical work). This reads 0 on a settled step whatever the level's
     /// character count, which is the machine-independent way to say so.
     pub digests_folded: u64,
+    /// **Clocks re-phased onto a body this step** (NPC1c) — one per agent that
+    /// left a tier with a controller, so this is a *transition* counter beside
+    /// [`digests_folded`](Self::digests_folded) and for the same reason: both
+    /// are the work a hand-off costs, and both must read 0 on a settled step.
+    pub rephased: u64,
+    /// **Agents steered this step**: on a tier with a controller, wanting to
+    /// move, with somewhere to go. The falsifier for the near tiers' whole
+    /// clause — a crowd that walked by teleporting would read 0 here.
+    pub steered: u64,
+    /// **Agents that have arrived** — on a [`RouteMode::Once`] route, within
+    /// [`ARRIVE_M`] of its end. Counted every step they stand there, not once,
+    /// so it is a census and not an event.
+    pub arrived: u64,
+    /// **Agents further than [`BLOCKED_LAG_M`] behind their own route clock** —
+    /// a body against a shut door, or wedged. Reported rather than corrected:
+    /// what to *do* about one is the door pass's job and NPC1d's, and a per-step
+    /// correction would be the second authority over a transform this design
+    /// exists without.
+    pub blocked: u64,
     /// The band's membership stamp (`0` = unbounded).
     pub band_stamp: u64,
 }
@@ -812,7 +1128,7 @@ impl CrowdStats {
         format!(
             "crowd: {} agent(s) — {} full / {} near / {} far / {} dormant, \
              {} spawned / {} despawned / {} re-tiered, {} pose digest(s) folded, \
-             band {:#018x}",
+             {} re-phased, {} steered / {} arrived / {} blocked, band {:#018x}",
             self.total(),
             self.at(CrowdTier::Full),
             self.at(CrowdTier::Near),
@@ -822,6 +1138,10 @@ impl CrowdStats {
             self.despawned,
             self.retiered,
             self.digests_folded,
+            self.rephased,
+            self.steered,
+            self.arrived,
+            self.blocked,
             self.band_stamp,
         )
     }
@@ -851,7 +1171,7 @@ impl CrowdStats {
 /// A population is not only its records: a materialized agent is a real entity
 /// carrying a skeletal mesh, a machine, a capsule and a [`CrowdAgent`]. Dropping
 /// the resource alone left those standing with a tier frozen at whatever the
-/// last step decided and **no record behind them** — so [`bodiless_agents`],
+/// last step decided and **no record behind them** — so [`crowd_colliders`],
 /// which reads records, and the [`CrowdAgent`] component, which the pose door
 /// and [`crate::deform::ground_contacts`] read, would answer differently about
 /// one entity. That is the same two-opinions shape as this wave's own deform
@@ -965,23 +1285,40 @@ pub fn plan_agent(
     here: DVec3,
     t_s: f64,
 ) -> AgentPlan {
+    // **The position law does not vary with the tier, `Dormant` included**
+    // (NPC1a audit). It used to: a dematerialized record froze at `last`, the
+    // tier was then decided from that frozen point, and a walking agent whose
+    // route carried it home could never be re-admitted — it was judged for ever
+    // at the metre where it went out of range, while the next materialization
+    // would have placed it at `route(now)` somewhere else entirely. Frozen for
+    // the decision and live for the placement is two authorities over one thing,
+    // which is what this module exists to avoid.
+    //
+    // A route is a pure function of the clock and costs a handful of flops, so
+    // keeping it live while an agent has no entity costs nothing and is the only
+    // reading under which `Dormant` is a *cost* tier rather than a one-way door.
+    // The day NPC1d gives an off-screen agent a schedule is the day this line
+    // reads the schedule instead — for every tier at once.
+    //
+    // NPC1c adds the second half of the same sentence: for a tier that carries a
+    // controller the clock decides the agent's *heading*, and the body decides
+    // where it is. The plan still answers `route(clock)` for both, because the
+    // near tiers' pursuit is a lookahead ALONG this path and the demotion
+    // re-phase is what keeps the two answers from parting company.
+    //
+    // **The path is a WALKING SURFACE and a transform is a capsule centre**, so
+    // the agent's own `feet_offset_m` is added here — once, in the one place the
+    // place is decided. A nav path is the ground a body walks on (a road's
+    // surveyed spine, a street's centreline, a room's floor), and an entity's
+    // transform is its capsule's middle: P29.6's ruling, met by a tier that has
+    // no `CharacterMovement` for `movement::feet_offset_m` to read. Keeping the
+    // lift out of the path is also what lets a tall agent and a short one share
+    // one `Arc`.
+    let progress = rec.progress_at(guid, t_s);
     AgentPlan {
         tier: band.tier(here),
-        // **The position law does not vary with the tier, `Dormant` included**
-        // (NPC1a audit). It used to: a dematerialized record froze at `last`,
-        // the tier was then decided from that frozen point, and a walking agent
-        // whose route carried it home could never be re-admitted — it was judged
-        // for ever at the metre where it went out of range, while the next
-        // materialization would have placed it at `route(now)` somewhere else
-        // entirely. Frozen for the decision and live for the placement is two
-        // authorities over one thing, which is what this module exists to avoid.
-        //
-        // A route is a pure function of the clock and costs a handful of flops,
-        // so keeping it live while an agent has no entity costs nothing and is
-        // the only reading under which `Dormant` is a *cost* tier rather than a
-        // one-way door. The day NPC1d gives an off-screen agent a schedule is
-        // the day this line reads the schedule instead — for every tier at once.
         at: rec.position_at(guid, t_s),
+        progress,
     }
 }
 
@@ -990,8 +1327,11 @@ pub fn plan_agent(
 pub struct AgentPlan {
     /// What it costs this step.
     pub tier: CrowdTier,
-    /// Where it is this step.
+    /// Where the route's clock says it is this step.
     pub at: DVec3,
+    /// How far along the route that is, which way it is going, and whether it
+    /// has run out.
+    pub progress: RouteProgress,
 }
 
 /// [`step_crowd`] with explicit radii — the seam the sweep instrument drives to
@@ -1050,8 +1390,31 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
         rec.tier = tier;
         stats.per_tier[tier.as_u8() as usize] += 1;
 
+        // 3a. **THE HAND-OFF DOWN** (NPC1c). An agent leaving a tier that had a
+        //     controller hands the clock back the metre its BODY reached, not
+        //     the metre the clock had run on to. Without it, an agent that had
+        //     been blocked by a wall for ten seconds teleports 16 m the step it
+        //     drops to `Far`; with it, the transition is invisible in the
+        //     transform, which is the property NPC1a's whole gate rests on.
+        //
+        //     `project` is `O(path points)` and runs on a *transition* only —
+        //     one agent every few hundred steps — which is the same budget the
+        //     pose digest above is taken on.
+        let mut at = plan.at;
+        if was.has_body() && !tier.has_body() {
+            let feet = here - DVec3::new(0.0, rec.archetype.feet_offset_m(), 0.0);
+            let s_body = rec.route.path.project(feet).s_m;
+            let travelled = rec.travelled_at(guid, t_s);
+            let delta = rec.route.rephase_delta(travelled, s_body);
+            if delta != 0.0 {
+                rec.rephase_m += delta;
+                stats.rephased += 1;
+                at = rec.position_at(guid, t_s);
+            }
+        }
+
         if !tier.materialized() {
-            rec.last = plan.at;
+            rec.last = at;
             if let Some(e) = entity {
                 world.despawn(e);
                 stats.despawned += 1;
@@ -1062,19 +1425,45 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
             Some(e) => e,
             None => {
                 stats.spawned += 1;
-                materialize(world, guid, rec)
+                // **THE HAND-OFF UP**: a materializing agent is placed at
+                // `route(clock)`, which is exactly where the tier below it was
+                // already drawn — so a promotion moves nothing. (NPC1a's
+                // promotion-teleport arm class; NPC1c keeps the property while
+                // adding a controller under it.)
+                materialize(world, guid, rec, at)
             }
         };
-        // 5. Where the route says it is, for every tier — see the module docs
-        //    for why the position law does not vary with the tier in NPC1a.
-        let p = plan.at;
-        rec.last = p;
-        let w = world.world_mut();
-        if let Some(mut t) = w.get_mut::<Transform>(entity) {
-            t.translation = Vec3d::new(p.x, p.y, p.z);
+        // 4a. **THE COMPONENTS ARE THE TIER'S** (NPC1c). A `Far` agent carries
+        //     no body, no collider, no controller and no movement model — not
+        //     "a body the bridge declines to mirror", which is what NPC1a
+        //     shipped and what made every one of a thousand agents a terrain
+        //     observer at every tier (`terrain_stream::observes_terrain` picks
+        //     its subjects by COMPONENT). One authority for "is this thing
+        //     physically here", which is this module's own founding law.
+        set_tier_components(world, entity, tier, &rec.archetype);
+
+        // 5. Where the route says it is — for the tiers that have no controller.
+        //    A tier that HAS one is moved by `step_character_movement` five
+        //    phases later, and writing a transform here as well would be the two
+        //    authorities NPC1a refused a controller to avoid. What the crowd
+        //    writes for those is an INTENT, and the body follows it.
+        if tier.has_body() {
+            rec.last = here;
+            steer_agent(world, entity, rec, here, &plan, &mut stats);
+        } else {
+            rec.last = at;
+            if let Some(mut t) = world.world_mut().get_mut::<Transform>(entity) {
+                t.translation = Vec3d::new(at.x, at.y, at.z);
+            }
         }
-        if let Some(mut a) = w.get_mut::<CrowdAgent>(entity) {
+        if let Some(mut a) = world.world_mut().get_mut::<CrowdAgent>(entity) {
             a.tier = tier;
+            if !tier.has_body() {
+                // An agent the clock moves cannot fall behind the clock, and a
+                // stale `true` here would send the door pass looking for a body
+                // that is no longer standing against anything.
+                a.blocked = false;
+            }
         }
     }
 
@@ -1083,18 +1472,53 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
     stats
 }
 
-/// Build the entity a record describes.
+/// How far ahead along its own path a steered agent aims, metres.
 ///
-/// The component set is fixed and small: a skeletal mesh, a machine, a kinematic
-/// body with a capsule, a controller and the [`CrowdAgent`] verdict. **No
-/// `CharacterMovement`**, deliberately — a crowd agent's position is its route
-/// (module docs), and giving it the player's controller as well would be two
-/// authorities writing one transform. NPC1c is where the near tiers start
-/// steering, and it is where that component arrives.
-fn materialize(world: &mut EcsWorld, guid: Uuid, rec: &CrowdRecord) -> Entity {
+/// One stride. Pure pursuit with too short a lookahead oscillates about the
+/// spine (the target is behind the character's own turn rate); with too long a
+/// one it cuts corners, which on a street grid means walking through the
+/// building on the inside of the turn. 1.5 m is a little under the 1.65 m/s the
+/// movement model's `walk_speed_mps` covers in a second, so at a walk the agent
+/// is aiming about where it will be next second.
+pub const PURSUIT_LOOKAHEAD_M: f64 = 1.5;
+
+/// How close a steered agent has to get to the end of a [`RouteMode::Once`]
+/// route to have arrived, metres.
+///
+/// Half a metre is one capsule radius plus the mover's own skin, which is as
+/// close as a body with a 0.3 m radius can get to a point without standing on
+/// it.
+pub const ARRIVE_M: f64 = 0.5;
+
+/// How far a steered agent may fall behind its own route clock before it is
+/// counted **blocked**, metres.
+///
+/// Two metres is a little over one second of walking, so a body slowed by a
+/// slope or squeezing past another agent is not blocked and a body standing
+/// against a shut door is. Reported in [`CrowdStats::blocked`] rather than
+/// acted on here: what to *do* about a blocked agent is the door pass's job
+/// (`inf_physics::d3::gameplay`, which can open the door in its way) and,
+/// beyond that, NPC1d's.
+pub const BLOCKED_LAG_M: f64 = 2.0;
+
+/// Build the entity a record describes, at `at`.
+///
+/// The component set is fixed and small: a skeletal mesh, a machine, the
+/// [`CrowdAgent`] verdict — and then whatever the tier says
+/// ([`set_tier_components`]), which is where the body, the capsule, the
+/// controller and the movement model arrive.
+///
+/// Placed at `route(clock)` rather than at the record's remembered `last`,
+/// because that is exactly where the tier below was already drawing it: a
+/// promotion must move nothing.
+fn materialize(world: &mut EcsWorld, guid: Uuid, rec: &CrowdRecord, at: DVec3) -> Entity {
     let e = world.spawn_with_guid(guid, "Crowd NPC", None);
     let a = rec.archetype;
     world.world_mut().entity_mut(e).insert((
+        Transform {
+            translation: Vec3d::new(at.x, at.y, at.z),
+            ..Transform::IDENTITY
+        },
         SkeletalMesh {
             mesh: a.mesh,
             skeleton: a.skeleton,
@@ -1103,24 +1527,185 @@ fn materialize(world: &mut EcsWorld, guid: Uuid, rec: &CrowdRecord) -> Entity {
             sm: a.sm,
             ..AnimStateMachine::default()
         },
-        RigidBody3D {
-            kind: BodyKind3D::Kinematic,
-            fixed_rotation: true,
-            ..RigidBody3D::default()
-        },
-        Collider3D {
-            shape_kind: ColliderShape3DKind::Capsule,
-            half_extents: Vec3d::new(a.radius_m, a.half_height_m, a.radius_m),
-            radius: a.radius_m,
-            ..Collider3D::default()
-        },
-        CharacterController3D::default(),
         CrowdAgent {
             tier: rec.tier,
             guid,
+            feet_offset_m: a.feet_offset_m(),
+            blocked: false,
         },
     ));
+    set_tier_components(world, e, rec.tier, &a);
     e
+}
+
+/// **The physical half of the tier, as COMPONENTS** (wave NPC1c).
+///
+/// # Why this is not the bridge's job
+///
+/// NPC1a gave every materialized agent a [`RigidBody3D`], a [`Collider3D`] and a
+/// [`CharacterController3D`] at every tier, and had the 3D bridge decline to
+/// mirror the ones the tier said were bodiless. That is one system holding an
+/// opinion about another system's data, and it cost exactly what this module's
+/// own founding law predicts: `terrain_stream::observes_terrain` picks its
+/// subjects **by component**, so a thousand NPCs were a thousand terrain
+/// observers — including the 712 `Far` ones that had no rapier body and no door
+/// by which to query a height — and each pulled a `SIM_MARGIN_TILES`
+/// neighbourhood of level-0 pages into a want set that is never clamped.
+/// Measured by the NPC1b audit at **+1.16 ms of "crowd" cost that was not the
+/// crowd**.
+///
+/// So the tier owns the components. A thing with no body has no body: nothing
+/// downstream has to be told, because there is nothing to see.
+///
+/// # What each tier carries
+///
+/// | tier | body + capsule + controller | `CharacterMovement` |
+/// |---|---|---|
+/// | [`Full`](CrowdTier::Full) / [`Near`](CrowdTier::Near) | yes | yes |
+/// | [`Far`](CrowdTier::Far) | **no** | **no** |
+///
+/// The movement model rides with the body rather than a rung below it, and that
+/// is what finally makes the `Near` rung *save* something: `movement_targets`
+/// is the set carrying [`CharacterMovement`], `step_hand_ik` composes its
+/// requests over that set, and the tier's [`hand_ik`](CrowdTier::hand_ik)
+/// predicate then refuses them for `Near`. Before this wave no crowd agent
+/// could have a hand request at all, so severing the hand gate changed nothing
+/// any arm could see (the NPC1b audit's carried item 10).
+///
+/// It is also what closes the **1.20 m** gap the same audit measured:
+/// `pose::model_to_world` applies P29.6's character-space drop only to an entity
+/// carrying `CharacterMovement`, so an NPC without one was drawn with its feet
+/// at its capsule's centre.
+fn set_tier_components(world: &mut EcsWorld, entity: Entity, tier: CrowdTier, a: &CrowdArchetype) {
+    let has = world.world().get::<RigidBody3D>(entity).is_some();
+    if tier.has_body() == has {
+        return;
+    }
+    let mut em = world.world_mut().entity_mut(entity);
+    if tier.has_body() {
+        em.insert((
+            RigidBody3D {
+                kind: BodyKind3D::Kinematic,
+                fixed_rotation: true,
+                ..RigidBody3D::default()
+            },
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Capsule,
+                half_extents: Vec3d::new(a.radius_m, a.half_height_m, a.radius_m),
+                radius: a.radius_m,
+                ..Collider3D::default()
+            },
+            CharacterController3D::default(),
+            crowd_movement(a),
+        ));
+    } else {
+        em.remove::<RigidBody3D>();
+        em.remove::<Collider3D>();
+        em.remove::<CharacterController3D>();
+        em.remove::<CharacterMovement>();
+    }
+}
+
+/// The movement model a crowd agent walks with.
+///
+/// Defaults everywhere except the four things a *pedestrian* is:
+///
+/// * **`player_controlled: false`** — so `movement::apply_intent`, which is the
+///   local player's path into the runtime intent, walks past it. An NPC's intent
+///   is written by [`step_crowd`], five phases earlier in the same step;
+/// * **`Gait::Walk`** — a town is people walking, and the gait is the difference
+///   between 1.65 m/s and 3.75;
+/// * **`RotationMode::VelocityDirection`** (the default, stated) — the body
+///   faces where it is going, because a crowd agent has no camera to face;
+/// * the archetype's own **capsule**, so the drawn body and the thing you can
+///   walk into are one shape.
+fn crowd_movement(a: &CrowdArchetype) -> CharacterMovement {
+    CharacterMovement {
+        player_controlled: false,
+        gait: Gait::Walk,
+        rotation_mode: RotationMode::VelocityDirection,
+        stand_half_height_m: a.half_height_m,
+        ..CharacterMovement::default()
+    }
+}
+
+/// **Steer one agent along its own path** — pure pursuit, written as an intent.
+///
+/// The body is the movement model's to move, so what the crowd writes is
+/// `intent_move`: the planar direction of a point [`PURSUIT_LOOKAHEAD_M`] ahead
+/// of the agent's own projection on the spine, expressed in the aim frame the
+/// model reads it in. `step_character_movement` consumes it five phases later,
+/// through `move_and_slide`, which is the one door a character in this engine
+/// moves through — so an NPC is stopped by the same wall the player is, steps up
+/// the same stair with the same `step_height_m`, and slides along the same
+/// slope.
+///
+/// **The clock decides the direction and the body decides the place.** The
+/// lookahead is taken from `project(here)` rather than from the clock's own
+/// `s_m`, so an agent that was held up follows the spine from where it actually
+/// is instead of cutting across the block towards where it should have been;
+/// the clock contributes [`RouteProgress::forward`], which is what tells a
+/// ping-pong agent on its way home to look the other way.
+fn steer_agent(
+    world: &mut EcsWorld,
+    entity: Entity,
+    rec: &CrowdRecord,
+    here: DVec3,
+    plan: &AgentPlan,
+    stats: &mut CrowdStats,
+) {
+    let path = &rec.route.path;
+    let len = path.length_m();
+    // The path is the ground; the transform is the capsule's centre. Projecting
+    // the centre would work on the flat and would find the wrong leg on a stair,
+    // where 1.2 m of Y is most of a storey.
+    let feet = here - DVec3::new(0.0, rec.archetype.feet_offset_m(), 0.0);
+    let on = path.project(feet);
+    // How far behind (or ahead of) its own clock the body is. Reported, not
+    // corrected: the correction is the demotion re-phase, once, and a per-step
+    // one would be the second authority this whole design exists without.
+    let blocked = (plan.progress.s_m - on.s_m).abs() > BLOCKED_LAG_M;
+    if blocked {
+        stats.blocked += 1;
+    }
+    if let Some(mut agent) = world.world_mut().get_mut::<CrowdAgent>(entity) {
+        agent.blocked = blocked;
+    }
+    let arrived = rec.route.mode == RouteMode::Once && on.s_m >= len - ARRIVE_M;
+    if arrived {
+        stats.arrived += 1;
+    }
+    let wish = if arrived || !rec.route.is_walkable() {
+        DVec3::ZERO
+    } else {
+        let ahead = if plan.progress.forward {
+            (on.s_m + PURSUIT_LOOKAHEAD_M).min(len)
+        } else {
+            (on.s_m - PURSUIT_LOOKAHEAD_M).max(0.0)
+        };
+        let target = path.position_at(ahead);
+        let d = crate::math::Vec2d::new(target.x - feet.x, target.z - feet.z);
+        let m = (d.x * d.x + d.y * d.y).sqrt();
+        if m > 1.0e-6 {
+            DVec3::new(d.x / m, 0.0, d.y / m)
+        } else {
+            DVec3::ZERO
+        }
+    };
+    let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(entity) else {
+        return;
+    };
+    // Into the AIM frame, through the model's own door. A crowd agent never
+    // looks anywhere, so its aim yaw stays where `step_one` seeded it and this
+    // is the identity today — spelled through `rotate_into_frame` anyway,
+    // because the day an NPC turns its head is the day an inlined `(x, z)`
+    // would send it walking sideways.
+    let aim = cm.runtime.aim_yaw_deg;
+    cm.runtime.intent_move =
+        crate::movement::rotate_into_frame(crate::math::Vec2d::new(wish.x, wish.z), aim);
+    if wish != DVec3::ZERO {
+        stats.steered += 1;
+    }
 }
 
 /// A fold of **one** entity's published pose — the source of a record's
@@ -1180,23 +1765,77 @@ pub fn agent_tier(world: &EcsWorld, entity: Entity) -> Option<CrowdTier> {
     world.world().get::<CrowdAgent>(entity).map(|a| a.tier)
 }
 
-/// **Every agent the 3D bridge must give no body to this step** — the
-/// `Guid`s whose tier is not [`CrowdTier::has_body`].
+/// **Every agent that has a collider in rapier this step** — the `Guid`s whose
+/// tier [`has_body`](CrowdTier::has_body).
+///
+/// # What this replaced, and why the replacement is the falsifiable one
+///
+/// NPC1a's door here was `bodiless_agents`: the set the 3D bridge used to
+/// *decline* to mirror a `Far` agent's `RigidBody3D`. The NPC1a audit's finding
+/// 7 recorded that it had no arm and could not easily get one — a crowd agent is
+/// kinematic, so severing the bridge's read changed no trace and no count this
+/// tree measures — and NPC1c retires it outright: a `Far` agent now carries no
+/// body **component** ([`set_tier_components`]), so there is nothing for the
+/// bridge to decline. One authority for "is this thing physically here", which
+/// is this module's own founding law, and it is the fix for the terrain-observer
+/// finding as well.
+///
+/// What the bridge reads instead is this: which colliders belong to a crowd, so
+/// they can be given the **narrowed pairing** the NPC1c solver measurement
+/// named. Unlike its predecessor, that read is measurable in milliseconds —
+/// 288 moving kinematic capsules over a heightfield were **+0.773 ms** of
+/// `world.step` against **+0.023** for the same capsules standing still, and
+/// narrowing both sides of those pairs recovers 84 % of it.
 ///
 /// Returned as a set rather than read per entity inside the bridge's walk
 /// because that walk is `O(entities)` over a furnished town and this is
-/// `O(agents)`; an empty set costs one branch per body, which is what a level
-/// with no crowd pays. Empty — and allocation-free — when there is no
-/// population at all.
-pub fn bodiless_agents(world: &EcsWorld) -> BTreeSet<Uuid> {
+/// `O(agents)`. Empty — and allocation-free — when there is no population at
+/// all, which is every level committed before NPC1a.
+pub fn crowd_colliders(world: &EcsWorld) -> BTreeSet<Uuid> {
     let Some(pop) = world.world().get_resource::<CrowdPopulationRes>() else {
         return BTreeSet::new();
     };
     pop.records
         .iter()
-        .filter(|(_, r)| r.tier.materialized() && !r.tier.has_body())
+        .filter(|(_, r)| r.tier.has_body())
         .map(|(g, _)| *g)
         .collect()
+}
+
+/// **Every agent that is standing against something**, in `Guid` order — the
+/// `Guid`s whose [`CrowdAgent::blocked`] verdict is set.
+///
+/// The reader is `inf_physics::d3::gameplay::step_crowd_doors`, which opens the
+/// door a blocked agent is leaning on. It reads this rather than scanning every
+/// agent for a doorway because the alternative is `O(agents x doorways)` over a
+/// city that plans 19 790 of them, and the blocked set on a settled town is a
+/// handful.
+///
+/// Off the records rather than off a component query, for
+/// [`crowd_colliders`]'s reason: `O(agents)` rather than `O(entities)`, and
+/// allocation-free on a level with no crowd.
+pub fn blocked_agents(world: &EcsWorld) -> Vec<Uuid> {
+    let Some(pop) = world.world().get_resource::<CrowdPopulationRes>() else {
+        return Vec::new();
+    };
+    let mut out: Vec<Uuid> = Vec::new();
+    for (guid, rec) in &pop.records {
+        if !rec.tier.has_body() {
+            continue;
+        }
+        let Some(e) = world.entity_of(*guid) else {
+            continue;
+        };
+        if world
+            .world()
+            .get::<CrowdAgent>(e)
+            .map(|a| a.blocked)
+            .unwrap_or(false)
+        {
+            out.push(*guid);
+        }
+    }
+    out
 }
 
 /// This step's crowd counters, or the zero stats on a world with no population.
@@ -1222,12 +1861,23 @@ pub fn crowd_stats(world: &EcsWorld) -> CrowdStats {
 /// 161 bones. A [`Far`](CrowdTier::Far) agent evaluates no pose, so it
 /// contributes **nothing** there; a [`Dormant`](CrowdTier::Dormant) one has no
 /// entity, so it contributes nothing to the sim snapshot either. What would then
-/// be invisible is the thing that decided it, so this section carries **49 bytes
-/// an agent at every tier**: the `Guid` (16), the tier (1), where it stands (24)
-/// and the cached digest of the pose it last published (8).
+/// be invisible is the thing that decided it, so this section carries **57 bytes
+/// an agent at every tier**: the `Guid` (16), the tier (1), where it stands (24),
+/// the cached digest of the pose it last published (8) and, since NPC1c, the
+/// phase the near tiers handed back to the clock (8).
 ///
 /// That is the whole re-shape: at N = 100 agents all Far the crowd costs
-/// `100 × 49 = 4 900` B a step against `100 × 6 476 = 647 600` B — **132×**.
+/// `100 × 57 = 5 700` B a step against `100 × 6 476 = 647 600` B — **114×**.
+///
+/// # Why the RE-PHASE is folded (NPC1c)
+///
+/// [`CrowdRecord::rephase_m`] is the one field here that a *body* wrote. It is
+/// set when an agent leaves a tier with a controller, from where that body
+/// actually got to — which is a function of everything the body met on the way:
+/// a wall, a slope, a shut door, another agent. Two hosts whose bodies met
+/// different worlds diverge here first and in the position a step later, and the
+/// step a reader needs is the first one. Eight bytes for that is the same trade
+/// the pose digest above makes.
 ///
 /// # What the DIGEST buys, precisely
 ///
@@ -1270,17 +1920,18 @@ pub fn crowd_state_bytes(world: &EcsWorld) -> Vec<u8> {
         out.extend_from_slice(&rec.last.y.to_le_bytes());
         out.extend_from_slice(&rec.last.z.to_le_bytes());
         out.extend_from_slice(&rec.pose_digest.to_le_bytes());
+        out.extend_from_slice(&rec.rephase_m.to_le_bytes());
     }
     out
 }
 
 /// Bytes one agent contributes to [`crowd_state_bytes`]: 16 `Guid` + 1 tier +
-/// 24 position + 8 digest.
+/// 24 position + 8 digest + 8 re-phase.
 ///
 /// Pinned as a constant because the gates quote it: the re-shape's whole claim
 /// is a ratio between this number and a posed character's 6 476, and a ratio
 /// with a drifting denominator is not a claim.
-pub const AGENT_TRACE_BYTES: usize = 16 + 1 + 24 + 8;
+pub const AGENT_TRACE_BYTES: usize = 16 + 1 + 24 + 8 + 8;
 
 #[cfg(test)]
 mod tests {
@@ -1482,34 +2133,30 @@ mod tests {
         );
     }
 
-    /// **A CROWD AGENT'S DRAWN BODY AND ITS CAPSULE DISAGREE BY THE WHOLE
-    /// CHARACTER DROP** (NPC1b audit) — and this arm is a **tripwire**, not an
-    /// endorsement.
+    /// **THE 1.20 m GAP, CLOSED** — the NPC1b audit's tripwire, met.
     ///
-    /// P29.6's ruling is that a rig's origin is its **feet** and a character's
-    /// entity transform is its capsule **centre**, and both projectors lift the
-    /// pose through the one door that knows the difference,
-    /// [`crate::pose::model_to_world`]. That door is gated on
-    /// [`CharacterMovement`](crate::components::CharacterMovement) — and a crowd
-    /// agent deliberately has none (see [`materialize`]), so the drop it applies
-    /// is **zero** and an NPC is drawn with its feet where its capsule's middle
-    /// is.
+    /// That audit's finding 5 measured a crowd agent's drawn body against its
+    /// capsule and found them **1.20 m** apart: P29.6's ruling is that a rig's
+    /// origin is its **feet** and a character's entity transform is its capsule
+    /// **centre**, both projectors lift the pose through
+    /// [`crate::pose::model_to_world`], and that door was gated on
+    /// [`CharacterMovement`](crate::components::CharacterMovement) — which a
+    /// crowd agent deliberately did not carry. So the drop was zero and an NPC
+    /// was drawn with its feet where its capsule's middle is. The arm it left
+    /// behind asserted the zero and said in its own message that it would fail
+    /// the day NPC1c gave a near agent a controller.
     ///
-    /// Wave NPC1b's clause 3 measured the disagreement between the drawn body and
-    /// the collider as the build multiplier's **±8 %, up to 7 cm**, "inside the
-    /// slack a capsule already has around a humanoid mesh". On the humanoid
-    /// archetype the same pair already disagrees by `half_height + radius` =
-    /// **1.2 m**, which is seventeen times the bound that sentence argues, and it
-    /// has nothing to do with the build.
+    /// It did, at `DVec3(0.0, -1.2, 0.0)`, and this is its successor. Two
+    /// halves, because the fix has two halves:
     ///
-    /// Not fixed here: giving a crowd agent a `CharacterMovement` is NPC1c's
-    /// (it is the component that brings a controller, and NPC1a refused it on
-    /// purpose — two authorities writing one transform), and moving the gate
-    /// would move every published foot in the engine. So the arm **pins the
-    /// present** and fails the day a near agent gets a controller, which is the
-    /// day this ledger sentence has to be rewritten.
+    /// * a `Full`/`Near` agent carries a `CharacterMovement` and a capsule, so
+    ///   the **general** rule measures it, exactly as it measures the hero;
+    /// * a `Far` agent carries neither and its feet are in the same place, so it
+    ///   publishes [`CrowdAgent::feet_offset_m`] instead — and the two numbers
+    ///   are asserted **equal**, which is what stops the second source being a
+    ///   second opinion.
     #[test]
-    fn a_crowd_agent_publishes_no_character_space_drop() {
+    fn the_crowds_foot_offset_is_the_one_the_movement_model_computes() {
         let mut records = BTreeMap::new();
         records.insert(
             guid(0xC5A),
@@ -1526,37 +2173,63 @@ mod tests {
         let e = world
             .entity_of(guid(0xC5A))
             .expect("the agent materialized");
-        let w = world.world();
-        let placed = w
+        let placed = world
+            .world()
             .get::<crate::components::GlobalTransform>(e)
             .expect("a transform")
             .translation();
         let drawn = crate::pose::model_to_world(&world, e).translation;
-        let col = *w.get::<Collider3D>(e).expect("a capsule");
-        let capsule_drop = crate::movement::feet_offset_m(
-            &crate::components::CharacterMovement::default(),
-            Some(&col),
+        let gap = placed - drawn;
+        assert!(
+            (gap.y - 1.2).abs() < 1e-9,
+            "a `Full` crowd agent must publish the humanoid capsule's own              0.9 + 0.3 m drop; it published {gap:?}"
         );
 
+        // The two sources, held to one number. `feet_offset_m` off the live
+        // collider, and the archetype's own published offset.
+        let col = *world.world().get::<Collider3D>(e).expect("a capsule");
+        let cm = world
+            .world()
+            .get::<crate::components::CharacterMovement>(e)
+            .expect("a `Full` agent carries the movement model")
+            .clone();
+        let measured = crate::movement::feet_offset_m(&cm, Some(&col));
+        let published = world
+            .world()
+            .get::<CrowdAgent>(e)
+            .expect("a crowd agent")
+            .feet_offset_m;
         assert_eq!(
-            drawn, placed,
-            "a crowd agent now publishes a character-space drop — it has grown a \
-             `CharacterMovement`, which is NPC1c's change, and the NPC1b ledger's \
-             clause-3 sentence about the build multiplier has to be rewritten \
-             against the new number"
+            measured, published,
+            "the crowd's published foot offset and the movement model's measured              one have parted company — they are two sources for ONE number"
         );
+
+        // …and the `Far` tier, which has neither component, publishes the same
+        // drop through the other half of the door.
+        move_source(&mut world, 4.0 + DEFAULT_CROWD_NEAR_M + 64.0);
+        let stats = step_crowd(&mut world, 1.0 / 60.0);
+        assert_eq!(stats.per_tier[2], 1, "the fixture agent is not `Far`");
+        let e = world.entity_of(guid(0xC5A)).expect("still materialized");
         assert!(
-            (capsule_drop - 1.2).abs() < 1e-9,
-            "the humanoid archetype's capsule is no longer 0.9 + 0.3: {capsule_drop}"
+            world
+                .world()
+                .get::<crate::components::CharacterMovement>(e)
+                .is_none(),
+            "a `Far` agent must carry no movement model"
         );
-        println!(
-            "NPC1b audit — the crowd's character-space gap: the drawn rig origin \
-             sits at the CAPSULE CENTRE, {capsule_drop:.2} m from where a \
-             `CharacterMovement` character's feet would be published. The build \
-             multiplier's own disagreement (CROWD_BUILD_RANGE, +/-8 % of a 1.8 m \
-             adult) is 0.07 m of shoulder, {:.0}x smaller.",
-            capsule_drop / 0.07
+        let placed = world
+            .world()
+            .get::<crate::components::GlobalTransform>(e)
+            .expect("a transform")
+            .translation();
+        let drawn = crate::pose::model_to_world(&world, e).translation;
+        assert!(
+            ((placed - drawn).y - 1.2).abs() < 1e-9,
+            "a `Far` agent must publish the same drop as a `Full` one; it              published {:?}",
+            placed - drawn
         );
+        println!("NPC1c: the 1.20 m gap is closed at every tier. Measured {measured:.2} m.");
+        println!("NPC1c: the archetype publishes {published:.2} m for the tiers with no capsule.");
     }
 
     /// The cost ladder is monotone: every tier is cheaper than the one above it,
@@ -1604,13 +2277,16 @@ mod tests {
         set_population(&mut world, records);
         let bytes = crowd_state_bytes(&world);
         assert_eq!(bytes.len(), 7 * AGENT_TRACE_BYTES);
-        assert_eq!(AGENT_TRACE_BYTES, 49);
+        // 49 at NPC1a; NPC1c adds the eight bytes of `rephase_m`, which is the
+        // one field here a BODY wrote and therefore the one a divergence shows
+        // up in first.
+        assert_eq!(AGENT_TRACE_BYTES, 57);
         // The claim the ledger quotes: a 161-bone posed character is 6 476 B.
         const POSED: usize = 36 + 161 * 40;
-        assert_eq!(POSED / AGENT_TRACE_BYTES, 132);
+        assert_eq!(POSED / AGENT_TRACE_BYTES, 113);
         println!(
-            "NPC1a trace: {AGENT_TRACE_BYTES} B an agent against {POSED} B a posed \
-             character — {}x",
+            "NPC1c trace: {AGENT_TRACE_BYTES} B an agent against {POSED} B a posed \
+             character — {}x (49 B and 132x at NPC1a, before the re-phase)",
             POSED / AGENT_TRACE_BYTES
         );
 
@@ -1739,11 +2415,7 @@ mod tests {
     /// when it has nowhere to go.
     #[test]
     fn a_route_is_a_pure_function_of_route_and_clock() {
-        let r = CrowdRoute {
-            from: DVec3::new(0.0, 0.0, 0.0),
-            to: DVec3::new(10.0, 0.0, 0.0),
-            speed_mps: 1.0,
-        };
+        let r = CrowdRoute::between(DVec3::new(0.0, 0.0, 0.0), DVec3::new(10.0, 0.0, 0.0), 1.0);
         assert_eq!(r.position_at(0.0, 0.0).x, 0.0);
         assert_eq!(r.position_at(5.0, 0.0).x, 5.0);
         assert_eq!(r.position_at(10.0, 0.0).x, 10.0);
@@ -1759,12 +2431,12 @@ mod tests {
         assert_eq!(
             CrowdRoute {
                 speed_mps: 0.0,
-                ..r
+                ..r.clone()
             }
             .position_at(9.0, 0.0),
-            r.from
+            r.origin()
         );
-        assert_eq!(r.position_at(f64::NAN, 0.0), r.from);
+        assert_eq!(r.position_at(f64::NAN, 0.0), r.origin());
     }
 
     /// A world holding a source and a population, with the source at `x`.
@@ -1784,6 +2456,339 @@ mod tests {
         let e = world.entity_of(guid(0xF1)).expect("the source");
         crate::sim::set_translation(world, e, Vec3d::new(x, 0.0, 0.0));
         world.propagate();
+    }
+
+    // -- NPC1c: the route, the components and the two hand-offs --------------
+
+    /// **A route mode is a rule about the end of a path**, and each of the three
+    /// is a different answer.
+    #[test]
+    fn the_three_route_modes_fold_the_clock_three_ways() {
+        let path = inf_nav::NavPath::new([DVec3::ZERO, DVec3::new(10.0, 0.0, 0.0)]);
+        let ping = CrowdRoute::along(path.clone(), 1.0, RouteMode::PingPong);
+        let once = CrowdRoute::along(path.clone(), 1.0, RouteMode::Once);
+        let round = CrowdRoute::along(path, 1.0, RouteMode::Loop);
+
+        // Ping-pong turns round, and says which way it is going -- which is what
+        // the near tiers' pursuit reads.
+        assert_eq!(ping.progress_at(4.0, 0.0).s_m, 4.0);
+        assert!(ping.progress_at(4.0, 0.0).forward);
+        assert_eq!(ping.progress_at(15.0, 0.0).s_m, 5.0);
+        assert!(!ping.progress_at(15.0, 0.0).forward);
+        assert!(
+            !ping.progress_at(1e6, 0.0).arrived,
+            "a patrol never arrives"
+        );
+
+        // Once stops at the end and SAYS it stopped.
+        assert_eq!(once.progress_at(4.0, 0.0).s_m, 4.0);
+        assert!(!once.progress_at(4.0, 0.0).arrived);
+        assert_eq!(once.progress_at(15.0, 0.0).s_m, 10.0);
+        assert!(once.progress_at(15.0, 0.0).arrived);
+        assert_eq!(once.position_at(1e6, 0.0), once.destination());
+
+        // A loop wraps and never turns round.
+        assert_eq!(round.progress_at(15.0, 0.0).s_m, 5.0);
+        assert!(round.progress_at(15.0, 0.0).forward);
+
+        // A stand is ALWAYS arrived: reading it the other way would make every
+        // idle NPC in a town permanently en route.
+        assert!(
+            CrowdRoute::standing(DVec3::ZERO)
+                .progress_at(9.0, 0.0)
+                .arrived
+        );
+    }
+
+    /// **The re-phase is an inverse**: after it, the clock is where the body is,
+    /// on the leg the clock was already on.
+    #[test]
+    fn a_rephase_puts_the_clock_exactly_where_the_body_is() {
+        let path = inf_nav::NavPath::new([DVec3::ZERO, DVec3::new(10.0, 0.0, 0.0)]);
+        for mode in [RouteMode::PingPong, RouteMode::Once, RouteMode::Loop] {
+            let r = CrowdRoute::along(path.clone(), 1.0, mode);
+            // Three clocks: one on each leg of a ping-pong, one well past both.
+            for t in [4.0, 15.0, 33.0] {
+                // Not the far END for a `Loop`: `rem_euclid(len)` folds it to
+                // zero, which is the same PLACE and a different arc length, and
+                // an arm that demanded 10 would be demanding a representation
+                // rather than a position.
+                let ends: &[f64] = match mode {
+                    RouteMode::Loop => &[0.0, 2.5, 7.25],
+                    _ => &[0.0, 2.5, 7.25, 10.0],
+                };
+                for &want in ends {
+                    let travelled = r.travelled_at(t, 0.0);
+                    let d = r.rephase_delta(travelled, want);
+                    let after = r.progress_at(t, d);
+                    assert!(
+                        (after.s_m - want).abs() < 1e-9,
+                        "{mode:?} at t = {t}: re-phasing to {want} landed on {}",
+                        after.s_m
+                    );
+                }
+            }
+        }
+        // A stand cannot be re-phased, and answers a zero rather than a NaN.
+        assert_eq!(
+            CrowdRoute::standing(DVec3::ZERO).rephase_delta(3.0, 1.0),
+            0.0
+        );
+    }
+
+    /// **A `Far` agent carries NO body, NO collider, NO controller and NO
+    /// movement model** -- the NPC1b audit's finding 4, closed at the source.
+    ///
+    /// Its tripwire, `every_materialized_crowd_agent_observes_the_terrain_at_every_tier`,
+    /// is the other half of this and lives in `inf-player` where the predicate
+    /// does. Here is where the components go on and come off, and the transition
+    /// is asserted **both ways**: a tier that gated only materialization would
+    /// leave every agent that was ever close solid for ever, which is the shape
+    /// the NPC1a audit's finding 7 found in the bridge.
+    #[test]
+    fn a_far_agent_carries_no_body_no_controller_and_no_movement_model() {
+        let mut records = BTreeMap::new();
+        records.insert(
+            guid(0xD10),
+            CrowdRecord::standing(
+                CrowdArchetype::humanoid(None, None, None),
+                DVec3::new(4.0, 0.0, 0.0),
+            ),
+        );
+        let mut world = crowd_world(records);
+
+        let has = |w: &EcsWorld| {
+            let e = w.entity_of(guid(0xD10)).expect("materialized");
+            let ww = w.world();
+            (
+                ww.get::<RigidBody3D>(e).is_some(),
+                ww.get::<Collider3D>(e).is_some(),
+                ww.get::<CharacterController3D>(e).is_some(),
+                ww.get::<CharacterMovement>(e).is_some(),
+                ww.get::<SkeletalMesh>(e).is_some(),
+            )
+        };
+
+        move_source(&mut world, 4.0);
+        step_crowd(&mut world, 1.0 / 60.0);
+        assert_eq!(
+            has(&world),
+            (true, true, true, true, true),
+            "a `Full` agent must carry the whole physical set"
+        );
+
+        move_source(&mut world, 4.0 + DEFAULT_CROWD_NEAR_M + 64.0);
+        let s = step_crowd(&mut world, 1.0 / 60.0);
+        assert_eq!(s.at(CrowdTier::Far), 1);
+        assert_eq!(
+            has(&world),
+            (false, false, false, false, true),
+            "a `Far` agent must carry NONE of the physical set -- and keep its \
+             mesh, because the renderer still draws it"
+        );
+
+        // ...and back. The transition is the half a materialization-only gate
+        // would miss.
+        move_source(&mut world, 4.0);
+        step_crowd(&mut world, 1.0 / 60.0);
+        assert_eq!(
+            has(&world),
+            (true, true, true, true, true),
+            "a promoted agent did not get its body back"
+        );
+    }
+
+    /// **The near tiers are STEERED, not teleported.** The crowd writes an
+    /// intent and the movement step owns the transform, which is the
+    /// one-authority rule NPC1a refused a controller to keep.
+    ///
+    /// The falsifier is the pair: the intent points along the route AND the
+    /// transform did not move to where the clock says. An implementation that
+    /// wrote both would pass the first assertion and fail the second, and one
+    /// that wrote neither would fail the first.
+    #[test]
+    fn a_near_agent_is_steered_rather_than_teleported() {
+        let mut records = BTreeMap::new();
+        records.insert(
+            guid(0xD20),
+            CrowdRecord::walking(
+                CrowdArchetype::humanoid(None, None, None),
+                CrowdRoute::between(DVec3::ZERO, DVec3::new(100.0, 0.0, 0.0), 1.4),
+            ),
+        );
+        let mut world = crowd_world(records);
+        move_source(&mut world, 0.0);
+
+        let s = step_crowd(&mut world, 1.0 / 60.0);
+        assert_eq!(s.at(CrowdTier::Full), 1);
+        assert_eq!(s.steered, 1, "a `Full` agent was not steered");
+        let e = world.entity_of(guid(0xD20)).expect("materialized");
+        let placed = world
+            .world()
+            .get::<Transform>(e)
+            .expect("a transform")
+            .translation
+            .to_dvec3();
+
+        // The route runs +X, which at yaw 0 is the aim frame's own right --
+        // through `rotate_into_frame`, so this is a claim about the door and not
+        // about a coincidence of signs.
+        let cm = world
+            .world()
+            .get::<CharacterMovement>(e)
+            .expect("the movement model")
+            .clone();
+        assert!(
+            cm.runtime.intent_move.x > 0.99,
+            "the intent does not point down the route: {:?}",
+            cm.runtime.intent_move
+        );
+        assert!(!cm.player_controlled, "a crowd agent is not the player");
+
+        // Fifty steps later the CLOCK has moved metres and the transform has
+        // not, because nothing in a unit world runs the mover.
+        for _ in 0..50 {
+            step_crowd(&mut world, 1.0 / 60.0);
+        }
+        let after = world
+            .world()
+            .get::<Transform>(e)
+            .expect("a transform")
+            .translation
+            .to_dvec3();
+        assert_eq!(
+            placed, after,
+            "the crowd step wrote a near agent's transform -- that is the second \
+             authority this design exists without"
+        );
+        let pop = world
+            .world()
+            .get_resource::<CrowdPopulationRes>()
+            .expect("the population");
+        let rec = &pop.records[&guid(0xD20)];
+        let clock = rec.position_at(guid(0xD20), (pop.steps - 1) as f64 / 60.0);
+        assert!(
+            (clock.x - after.x) > 0.5,
+            "the route clock did not run on while the body stood still, so this \
+             arm is not posing the problem"
+        );
+    }
+
+    /// **A demotion hands the clock the metre the body reached** -- clause 4's
+    /// continuity, measured as the size of the pop it removes.
+    #[test]
+    fn a_demotion_hands_the_clock_the_metre_the_body_reached() {
+        let mut records = BTreeMap::new();
+        records.insert(
+            guid(0xD30),
+            CrowdRecord::walking(
+                CrowdArchetype::humanoid(None, None, None),
+                CrowdRoute::between(DVec3::ZERO, DVec3::new(400.0, 0.0, 0.0), 4.0),
+            ),
+        );
+        let mut world = crowd_world(records);
+        move_source(&mut world, 0.0);
+        step_crowd(&mut world, 1.0 / 60.0);
+        let e = world.entity_of(guid(0xD30)).expect("materialized");
+
+        // Sixty steps of clock while the body -- which nothing moves in a unit
+        // world -- stands where it was placed. That is the worst case a blocked
+        // agent produces, and it is exactly what the re-phase is for.
+        for _ in 0..60 {
+            step_crowd(&mut world, 1.0 / 60.0);
+        }
+        let body = world
+            .world()
+            .get::<Transform>(e)
+            .expect("a transform")
+            .translation
+            .to_dvec3();
+        let lag = {
+            let pop = world
+                .world()
+                .get_resource::<CrowdPopulationRes>()
+                .expect("the population");
+            let rec = &pop.records[&guid(0xD30)];
+            rec.position_at(guid(0xD30), pop.steps as f64 / 60.0).x - body.x
+        };
+        assert!(
+            lag > 3.0,
+            "the fixture has not built a lag to close: {lag:.3} m"
+        );
+
+        // Now demote it. Without the re-phase the transform would jump `lag`
+        // metres this step.
+        move_source(&mut world, DEFAULT_CROWD_NEAR_M + 64.0);
+        let s = step_crowd(&mut world, 1.0 / 60.0);
+        assert_eq!(s.at(CrowdTier::Far), 1);
+        assert_eq!(s.rephased, 1, "the demotion did not re-phase the clock");
+        let after = world
+            .world()
+            .get::<Transform>(e)
+            .expect("a transform")
+            .translation
+            .to_dvec3();
+        let jump = (after - body).length();
+        assert!(
+            jump < 0.2,
+            "a demotion moved the body {jump:.3} m -- the clock was not handed \
+             the metre the body reached (the lag it had built was {lag:.3} m)"
+        );
+        println!(
+            "NPC1c demotion continuity: a body {lag:.2} m behind its own clock \
+             moved {jump:.4} m across the `Near` -> `Far` transition"
+        );
+    }
+
+    /// **A materialization moves nothing**: an agent's first entity is placed
+    /// exactly where the tier below it was already being drawn.
+    #[test]
+    fn a_promotion_places_the_agent_where_the_clock_already_had_it() {
+        let mut records = BTreeMap::new();
+        records.insert(
+            guid(0xD40),
+            CrowdRecord::walking(
+                CrowdArchetype::humanoid(None, None, None),
+                CrowdRoute::between(
+                    DVec3::new(900.0, 0.0, 0.0),
+                    DVec3::new(1000.0, 0.0, 0.0),
+                    1.4,
+                ),
+            ),
+        );
+        let mut world = crowd_world(records);
+        // Far enough away to be Dormant: no entity at all.
+        move_source(&mut world, 0.0);
+        for _ in 0..30 {
+            step_crowd(&mut world, 1.0 / 60.0);
+        }
+        let drawn = {
+            let pop = world
+                .world()
+                .get_resource::<CrowdPopulationRes>()
+                .expect("the population");
+            assert_eq!(pop.records[&guid(0xD40)].tier, CrowdTier::Dormant);
+            pop.records[&guid(0xD40)].last
+        };
+
+        move_source(&mut world, 900.0);
+        let s = step_crowd(&mut world, 1.0 / 60.0);
+        assert_eq!(s.spawned, 1);
+        let e = world.entity_of(guid(0xD40)).expect("materialized");
+        let placed = world
+            .world()
+            .get::<Transform>(e)
+            .expect("a transform")
+            .translation
+            .to_dvec3();
+        // One step of clock is 1.4 / 60 = 23 mm; the claim is that the promotion
+        // itself moved nothing, not that time stopped.
+        assert!(
+            (placed - drawn).length() < 0.05,
+            "a promotion teleported the agent {:.3} m from where the tier below \
+             was drawing it",
+            (placed - drawn).length()
+        );
     }
 
     /// **The step materializes what the band wants and dematerializes what it
@@ -1964,17 +2969,25 @@ mod tests {
     #[test]
     fn a_dormant_agent_keeps_walking_its_route_and_can_come_back() {
         let mut records = BTreeMap::new();
-        // Out to 2 km and back, fast enough that the round trip fits in the
-        // step budget of a unit test.
+        // Out to 2 km and back, fast enough that the round trip fits in the step
+        // budget of a unit test — and starting at 150 m, **outside the `Near`
+        // ring**, which is NPC1c's constraint on this fixture rather than a
+        // detail. From this wave a `Full`/`Near` agent's transform belongs to
+        // `step_character_movement`, five phases later in a real host's fixed
+        // step; there is no such step in a unit world, so an agent that came
+        // within 96 m of the anchor here would simply stand. The tiers this arm
+        // is about — `Far` and `Dormant` — are the clock's, and it stays in
+        // them. `a_near_agent_is_steered_rather_than_teleported` is the arm for
+        // the other half.
         records.insert(
             guid(0xE00),
             CrowdRecord::walking(
                 CrowdArchetype::default(),
-                CrowdRoute {
-                    from: DVec3::new(0.0, 0.0, 0.0),
-                    to: DVec3::new(2000.0, 0.0, 0.0),
-                    speed_mps: 1000.0,
-                },
+                CrowdRoute::between(
+                    DVec3::new(150.0, 0.0, 0.0),
+                    DVec3::new(2000.0, 0.0, 0.0),
+                    1000.0,
+                ),
             ),
         );
         // The anchor never moves: everything below is the AGENT walking.
@@ -2015,7 +3028,7 @@ mod tests {
             .world()
             .get_resource::<CrowdPopulationRes>()
             .expect("the population");
-        let rec = pop.records[&guid(0xE00)];
+        let rec = &pop.records[&guid(0xE00)];
         let want = rec.position_at(guid(0xE00), (pop.steps - 1) as f64 * (1.0 / 60.0));
         assert_eq!(
             rec.last, want,
@@ -2043,16 +3056,16 @@ mod tests {
         let mut world = crowd_world(records);
         step_crowd(&mut world, 1.0 / 60.0);
 
-        let bodiless = bodiless_agents(&world);
+        let solid = crowd_colliders(&world);
         assert_eq!(
-            bodiless.len(),
+            solid.len(),
             1,
-            "exactly the Far agent loses its body — {bodiless:?}"
+            "exactly the near agent keeps its body — {solid:?}"
         );
-        assert!(bodiless.contains(&guid(0xB01)));
+        assert!(solid.contains(&guid(0xB00)));
         assert!(
-            !bodiless.contains(&guid(0xB00)),
-            "the near agent lost its body too, so the tier is doing nothing"
+            !solid.contains(&guid(0xB01)),
+            "the far agent kept its body, so the tier is doing nothing"
         );
 
         // The published verdict is on the entity, which is what the pose door
@@ -2085,11 +3098,11 @@ mod tests {
                     guid(0xC00 + i),
                     CrowdRecord::walking(
                         CrowdArchetype::default(),
-                        CrowdRoute {
-                            from: DVec3::new(i as f64 * 20.0, 0.0, 0.0),
-                            to: DVec3::new(i as f64 * 20.0 + 40.0, 0.0, 0.0),
-                            speed_mps: 1.4,
-                        },
+                        CrowdRoute::between(
+                            DVec3::new(i as f64 * 20.0, 0.0, 0.0),
+                            DVec3::new(i as f64 * 20.0 + 40.0, 0.0, 0.0),
+                            1.4,
+                        ),
                     ),
                 );
             }
@@ -2158,7 +3171,7 @@ mod tests {
     /// entity carrying a skeletal mesh, a machine, a capsule and a
     /// [`CrowdAgent`]. Dropping the resource alone left those standing, with a
     /// tier frozen at whatever the last step decided and **no record behind
-    /// them** — so [`bodiless_agents`] (which reads records) and the
+    /// them** — so [`crowd_colliders`] (which reads records) and the
     /// [`CrowdAgent`] component (which the pose door and the deform pass read)
     /// would answer differently about the same entity, which is the two-opinions
     /// defect this wave's own deform finding is about.
@@ -2202,7 +3215,8 @@ mod tests {
         let mut world = EcsWorld::new();
         let s = step_crowd(&mut world, 1.0 / 60.0);
         assert_eq!(s, CrowdStats::default());
-        assert!(bodiless_agents(&world).is_empty());
+        assert!(crowd_colliders(&world).is_empty());
+        assert!(blocked_agents(&world).is_empty());
         assert!(crowd_state_bytes(&world).is_empty());
         assert!(
             !world.world().contains_resource::<CrowdPopulationRes>(),
