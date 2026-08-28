@@ -1320,10 +1320,15 @@ fn the_crowd_shadow_door_is_identical_in_both_projectors() {
     );
     // …and it reads the TIER rather than hard-coding one answer: a door that
     // returned `Proxy` for everything is identical on both sides and wrong.
+    // …and since island wave NPC1e it reads the tier TWICE: `skinned_caster`
+    // decides its own silhouette against the shared proxy, and `casts_shadow`
+    // decides whether it casts at all. A host that dropped the second arm would
+    // put 712 walking proxy boxes back into the page cache in the preview only.
     for fragment in [
         "None => inf_render::SkinnedShadow::BindSphere,",
         "Some(a) if a.tier.skinned_caster() => inf_render::SkinnedShadow::Posed,",
-        "Some(_) => inf_render::SkinnedShadow::Proxy,",
+        "Some(a) if a.tier.casts_shadow() => inf_render::SkinnedShadow::Proxy,",
+        "Some(_) => inf_render::SkinnedShadow::None,",
     ] {
         assert!(
             theirs.contains(fragment),

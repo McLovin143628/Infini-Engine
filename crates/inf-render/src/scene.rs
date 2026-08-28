@@ -1275,6 +1275,26 @@ pub enum SkinnedShadow {
     /// **No skinned caster at all.** This instance casts from the crowd's shared
     /// box proxy, which is ONE group however many agents are in it.
     Proxy,
+    /// **This instance casts nothing** — the crowd's shadow LOD (island wave
+    /// NPC1e).
+    ///
+    /// [`Proxy`](Self::Proxy) answered `VSM_MAX_GROUPS` and did not answer the
+    /// other half of what a moving crowd costs the shadow map: NPC1b's carried
+    /// item 4 measured 968 proxy boxes scattering page invalidation over
+    /// **168.6 pages a frame against the island's own 56.3**, at 1 236 page
+    /// draws against 328, and the NPC1b audit added that
+    /// `VsmRasterStats::deferred_pages` doubled with it — so the crowd was not
+    /// only re-rasterizing more, it was serving more *stale* shadow. One group
+    /// is the right answer to a group ceiling and is no answer at all to *how
+    /// many pages a moving crowd dirties*. That item named the lever —
+    /// *"proxies that stop casting past a radius"* — and this is it.
+    ///
+    /// The radius is the sim ladder's own: an agent past `CrowdTier::Near`
+    /// (96 m) casts nothing. It is a **visible** cost and is stated as one — a
+    /// person a hundred metres off loses their shadow — which is the same trade
+    /// `Proxy` already makes one rung in (an NPC's arms and legs do not move its
+    /// shadow past 32 m).
+    None,
 }
 
 /// **The one-entry identity palette**, shared process-wide.

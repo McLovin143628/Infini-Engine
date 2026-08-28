@@ -716,7 +716,12 @@ pub fn skinned_caster_groups(scene: &RenderScene) -> usize {
     let own = scene
         .skinned
         .iter()
-        .filter(|i| i.shadow != crate::scene::SkinnedShadow::Proxy)
+        .filter(|i| {
+            !matches!(
+                i.shadow,
+                crate::scene::SkinnedShadow::Proxy | crate::scene::SkinnedShadow::None
+            )
+        })
         .count();
     let proxied = scene
         .skinned
@@ -924,6 +929,16 @@ pub struct VsmRasterStats {
     /// Their casters are in [`dropped_casters`](Self::dropped_casters) too; this
     /// says *which* ceiling refused them.
     pub dropped_groups: u64,
+    /// **Skinned instances the crowd shadow LOD dropped whole**, summed over
+    /// frames (island wave NPC1e): `SkinnedShadow::None`.
+    ///
+    /// Counted apart from [`dropped_casters`](Self::dropped_casters) because it
+    /// is not a refusal — the scene asked for it, and the two must not be read
+    /// as one number: a ceiling firing is a defect and a shadow LOD firing is
+    /// the feature working. It is the engagement counter for that feature, and
+    /// without it "the page churn came down" and "there was no crowd" produce
+    /// the same table.
+    pub shadow_lod_skipped: u64,
 
     // ── P27.3: the cache's own counters ──────────────────────────────────────
     /// **Resident pages the frame did not touch because their content stamp had
@@ -1036,7 +1051,8 @@ impl VsmRasterStats {
              {} skipped), {} indices ({} terrain, {} meshlet at level sum {}), \
              {} casters ({} scattered, \
              {} meshlet-asset, {} skinned, {} crowd-proxy, {} terrain), {} pages deferred, \
-             {} casters dropped, {} groups refused, {} pages cached / {} dirty \
+             {} casters dropped, {} groups refused, {} shadow-LOD skipped, \
+             {} pages cached / {} dirty \
              ({} re-slotted, {} moved, {} re-cast) / {} cleared, {} invalidation \
              touches, {} cut flushes, {} masked frames, pages by level {}",
             self.frames,
@@ -1058,6 +1074,7 @@ impl VsmRasterStats {
             self.deferred_pages,
             self.dropped_casters,
             self.dropped_groups,
+            self.shadow_lod_skipped,
             self.cached_pages,
             self.dirty_pages,
             self.dirty_slot,
@@ -1743,6 +1760,7 @@ impl VsmRaster {
             scattered,
             dropped,
             dropped_groups,
+            shadow_lod_skipped,
             level_sum,
         } = pack_casters(
             &self.prim,
@@ -2153,6 +2171,7 @@ impl VsmRaster {
         self.stats.masked_frames += u64::from(masked);
         self.stats.dropped_casters += u64::from(dropped);
         self.stats.dropped_groups += u64::from(dropped_groups);
+        self.stats.shadow_lod_skipped += u64::from(shadow_lod_skipped);
         self.stats.vgeom_level_sum += level_sum;
         if dropped > 0 {
             tracing::warn!(
@@ -2570,7 +2589,12 @@ impl VsmRaster {
             // one bind group for it would be paying the cost this clause exists
             // to remove. Cleared rather than left standing, because a slot that
             // outlives the instance that filled it is the P27.3 stale-slot defect.
-            if inst.shadow == crate::scene::SkinnedShadow::Proxy {
+            // …and an instance that casts nothing at all (island wave NPC1e's
+            // crowd shadow LOD) needs one even less.
+            if matches!(
+                inst.shadow,
+                crate::scene::SkinnedShadow::Proxy | crate::scene::SkinnedShadow::None
+            ) {
                 self.skinned_palettes[i] = None;
                 continue;
             }
@@ -3353,6 +3377,10 @@ struct CasterPack {
     dropped: u32,
     /// Geometry groups [`VSM_MAX_GROUPS`] refused.
     dropped_groups: u32,
+    /// Skinned instances the **crowd shadow LOD** dropped whole (island wave
+    /// NPC1e): `SkinnedShadow::None`, which is not a refusal — the scene asked
+    /// for it. Counted apart from `dropped` for exactly that reason.
+    shadow_lod_skipped: u32,
     /// The classic LOD level each packed vgeom caster drew at, summed.
     level_sum: u64,
 }
@@ -3417,6 +3445,7 @@ fn pack_casters(
     // far half stopped casting.
     let mut dropped = 0u32;
     let mut dropped_groups = 0u32;
+    let mut shadow_lod_skipped = 0u32;
     // The clipmap level each vgeom caster drew at, summed — the counter that makes
     // "vgeom casts at the CAMERA's LOD" a measurement (P27.2 audit). Nothing else
     // can see it: a shadow drawn from the coarsest level of the chain is still a
@@ -3606,6 +3635,17 @@ fn pack_casters(
             continue;
         };
         if mesh.index_count == 0 {
+            continue;
+        }
+        // **The crowd's shadow LOD, first** (island wave NPC1e): an instance
+        // that casts nothing takes no group, no proxy box, no caster sphere and
+        // no page invalidation. Before the mesh checks would be cheaper by a
+        // hair and would put the LOD inside a filter that skips a mesh which has
+        // not uploaded, which is a different reason for the same outcome; it is
+        // here so `casters_skipped` counts an instance the scene really asked to
+        // be dropped.
+        if inst.shadow == crate::scene::SkinnedShadow::None {
+            shadow_lod_skipped += 1;
             continue;
         }
         if inst.shadow == crate::scene::SkinnedShadow::Proxy {
@@ -3802,6 +3842,7 @@ fn pack_casters(
         scattered,
         dropped,
         dropped_groups,
+        shadow_lod_skipped,
         level_sum,
     }
 }
@@ -4583,6 +4624,7 @@ mod tests {
             terrain_casters: 2,
             dropped_casters: 6,
             dropped_groups: 1,
+            shadow_lod_skipped: 101,
             cached_pages: 23,
             dirty_pages: 29,
             dirty_slot: 43,
@@ -4614,7 +4656,7 @@ mod tests {
         // of its own here so the list can see it.
         for n in [
             "3", "17", "51", "9", "2", "1", "4", "6", "23", "29", "31", "37", "41", "43", "47",
-            "53", "59", "61", "67", "71", "73", "79", "83", "89", "97",
+            "53", "59", "61", "67", "71", "73", "79", "83", "89", "97", "101",
         ] {
             assert!(s.contains(n), "{n} is missing from {s:?}");
         }

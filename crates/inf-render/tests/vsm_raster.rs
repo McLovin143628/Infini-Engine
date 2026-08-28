@@ -2251,6 +2251,153 @@ fn the_group_ceiling_counts_the_groups_it_refuses() {
     );
 }
 
+/// **ISLAND WAVE NPC1e: the crowd's SHADOW LOD, which the proxy did not give.**
+///
+/// The arm above retires `VSM_MAX_GROUPS` and NPC1b's own carried item 4 says
+/// what it left standing: 968 proxy boxes walking through Harbour City scattered
+/// page invalidation over **168.6 pages a frame against the island's own 56.3**,
+/// at 1 236 page draws against 328, and the NPC1b audit measured the *deferred*
+/// pages doubling with them. One group is the right answer to a group ceiling and
+/// no answer at all to how many pages a moving crowd dirties.
+///
+/// So `SkinnedShadow::None` — the tier's own answer past `CrowdTier::Near` — and
+/// what this arm holds is that it is a **whole** drop: no caster, no group, no
+/// palette slot, and the pages it would have dirtied are not dirtied.
+///
+/// **Three claims, and each falsifies a different wrong fix**: the counter
+/// counts (a silent skip would read zero and look like an empty scene); the
+/// proxy casters really fall away (a `None` treated as a `Proxy` keeps them);
+/// and the pages a rastering frame touches really come down against the same
+/// population asking for proxies, which is the number the ledger is about.
+#[test]
+fn a_crowd_past_the_shadow_lod_casts_nothing_and_dirties_fewer_pages() {
+    let Some(gpu) = gpu_or_skip("the VSM crowd shadow LOD") else {
+        return;
+    };
+    let v = |x: f32, y: f32| inf_render::SkinnedVertex {
+        pos: [x, y, 0.0],
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0, 0.0],
+        joints: [0, 0, 0, 0],
+        weights: [1.0, 0.0, 0.0, 0.0],
+    };
+    let mesh = std::sync::Arc::new(inf_render::SkinnedMeshData {
+        vertices: vec![v(-0.1, -0.1), v(0.1, -0.1), v(0.1, 0.1), v(-0.1, 0.1)],
+        indices: vec![0, 1, 2, 0, 2, 3],
+    });
+    const CROWD: u32 = 240;
+    let build = |shadow: inf_render::SkinnedShadow| {
+        let mut s = RenderScene {
+            grid_enabled: false,
+            skinned_meshes: vec![mesh.clone()],
+            ..Default::default()
+        };
+        for i in 0..CROWD {
+            s.skinned.push(inf_render::SkinnedInstance {
+                translation: glam::DVec3::new(
+                    (i % 16) as f64 * 0.4 - 3.2,
+                    (i / 16) as f64 * 0.4,
+                    0.0,
+                ),
+                rotation: glam::Quat::IDENTITY,
+                scale: glam::Vec3::ONE,
+                color: [1.0, 1.0, 1.0, 1.0],
+                metallic: 0.0,
+                roughness: 1.0,
+                emissive: [0.0; 3],
+                id: 2_000 + i,
+                mesh: 0,
+                palette: inf_render::identity_palette(),
+                shadow,
+                vt: inf_render::VtTextureSet::NONE,
+            });
+        }
+        s.instances.push(backdrop());
+        s.lights.push(inf_render::RenderLight {
+            kind: inf_render::LightKind::Directional,
+            direction: glam::Vec3::Z,
+            cast_shadows: true,
+            ..Default::default()
+        });
+        s.mark_dirty();
+        s
+    };
+
+    let proxied = run(
+        &gpu,
+        &build(inf_render::SkinnedShadow::Proxy),
+        &view(6.0),
+        &settings(),
+        3,
+    );
+    let proxied = proxied.vsm_raster_stats().expect("stats");
+    let lodded = run(
+        &gpu,
+        &build(inf_render::SkinnedShadow::None),
+        &view(6.0),
+        &settings(),
+        3,
+    );
+    let summary = lodded.vsm_summary().expect("a summary");
+    let lodded = lodded.vsm_raster_stats().expect("stats");
+
+    assert!(
+        proxied.frames > 0 && lodded.frames > 0,
+        "the pass never opened"
+    );
+    // 1. The counter counts, and it is the whole crowd.
+    assert_eq!(
+        lodded.shadow_lod_skipped,
+        u64::from(CROWD) * lodded.frames,
+        "the shadow LOD did not skip the crowd: {lodded:?}"
+    );
+    assert_eq!(
+        proxied.shadow_lod_skipped, 0,
+        "a crowd asking for proxies was counted as skipped: {proxied:?}"
+    );
+    assert!(
+        summary.contains("shadow-LOD skipped"),
+        "the counter is not in the summary: {summary:?}"
+    );
+    // 2. It is a WHOLE drop, not a cheaper caster.
+    assert_eq!(lodded.proxy_casters, 0, "{lodded:?}");
+    assert_eq!(lodded.skinned_casters, 0, "{lodded:?}");
+    assert!(
+        proxied.proxy_casters > 0,
+        "the control cast no proxies, so there was nothing to save: {proxied:?}"
+    );
+    // 3. …and the **invalidation** work those casters did is not done. This is
+    //    the quantity the churn is made of: `invalidation_touches` is the number
+    //    of (caster, page) folds the stamp scatter performs, so a caster that is
+    //    not packed cannot touch a page.
+    //
+    //    **The PAGE count is measured on the island and not here**, deliberately.
+    //    On this fixture the whole crowd and the backdrop share eight pages, so
+    //    the page count is the backdrop's and reads 8.0 either way — a bound on
+    //    it would be a gate that passes for the wrong reason. What a toy fixture
+    //    can hold is the work per caster; what a city holds is the page spread,
+    //    and the ledger's 168.6-against-56.3 comes from the island instrument.
+    let per = |n: u64, s: &inf_render::VsmRasterStats| n as f64 / s.frames.max(1) as f64;
+    println!(
+        "NPC1e / crowd shadow LOD, per rastering frame: {:.1} invalidation touches \
+         and {:.1} pages with {CROWD} proxies; {:.1} and {:.1} with none",
+        per(proxied.invalidation_touches, &proxied),
+        per(proxied.pages, &proxied),
+        per(lodded.invalidation_touches, &lodded),
+        per(lodded.pages, &lodded),
+    );
+    assert!(
+        lodded.invalidation_touches < proxied.invalidation_touches,
+        "the shadow LOD folded as many caster-page touches as {CROWD} proxy \
+         casters did ({} against {}), so nothing was skipped where it counts",
+        lodded.invalidation_touches,
+        proxied.invalidation_touches
+    );
+    // …and the frame still rastered a shadow map, so "fewer touches" is not
+    // "nothing drawn".
+    assert!(lodded.draws > 0 && lodded.pages > 0, "{lodded:?}");
+}
+
 /// **THE CROWD PROXY RETIRES THE GROUP CEILING** (wave NPC1b).
 ///
 /// The arm above is this file's statement of wall 4: a skinned instance is one

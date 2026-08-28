@@ -250,6 +250,30 @@ impl CrowdTier {
         matches!(self, CrowdTier::Full)
     }
 
+    /// **Whether this tier casts a shadow AT ALL** — the crowd's shadow LOD
+    /// (island wave NPC1e).
+    ///
+    /// [`skinned_caster`](Self::skinned_caster) answered *"its own silhouette or
+    /// the shared proxy"*, and NPC1b's carried item 4 measured what the proxy did
+    /// not fix: 968 boxes walking through Harbour City scattered shadow-page
+    /// invalidation over **168.6 pages a frame against the island's own 56.3**,
+    /// at 1 236 page draws against 328, and the NPC1b audit added that the
+    /// *deferred* pages doubled with them — so the crowd was also serving more
+    /// stale shadow. One group is the right answer to `VSM_MAX_GROUPS` and no
+    /// answer at all to how many pages a moving crowd dirties. That item named
+    /// the lever as *"proxies that stop casting past a radius"*, and this is the
+    /// radius: the ladder's own [`Near`](CrowdTier::Near), 96 m.
+    ///
+    /// **The cost is visible and is stated rather than hidden**, which is the
+    /// same bargain the proxy already struck one rung in: past 96 m an NPC has no
+    /// shadow. It is chosen at the tier rather than as a render setting because
+    /// the tier is the one place a distance decision about a crowd is made, and
+    /// both projectors read it through this door.
+    #[inline]
+    pub fn casts_shadow(self) -> bool {
+        matches!(self, CrowdTier::Full | CrowdTier::Near)
+    }
+
     /// The byte the trace folds. Frozen: these discriminants are compared
     /// between two hosts and, through the replay path, two machines.
     #[inline]
@@ -3493,6 +3517,41 @@ mod tests {
         // …and it is the same rung as the collider, not a second opinion: a tier
         // that keeps a body is not automatically a tier that keeps a silhouette.
         assert!(CrowdTier::Near.has_body() && !CrowdTier::Near.skinned_caster());
+    }
+
+    /// **The shadow LOD is a THIRD rung, and it lands where the ladder already
+    /// splits** (island wave NPC1e).
+    ///
+    /// `skinned_caster` chooses between a silhouette and the shared proxy;
+    /// `casts_shadow` chooses whether there is a caster at all. `Near` keeps a
+    /// proxy — it is inside 96 m, where a person's shadow on the pavement is
+    /// something a player reads — and `Far` casts nothing, which is NPC1b's
+    /// carried item 4 ("proxies that stop casting past a radius").
+    #[test]
+    fn the_crowds_shadow_lod_stops_at_the_near_rung() {
+        assert!(CrowdTier::Full.casts_shadow() && CrowdTier::Near.casts_shadow());
+        for t in [CrowdTier::Far, CrowdTier::Dormant] {
+            assert!(!t.casts_shadow(), "{t:?} still casts a shadow");
+        }
+        // The two predicates are ordered, not independent: anything that casts
+        // its own silhouette casts *something*. A ladder where they crossed
+        // would ask the raster for a skinned caster it had already been told to
+        // drop.
+        for t in [
+            CrowdTier::Full,
+            CrowdTier::Near,
+            CrowdTier::Far,
+            CrowdTier::Dormant,
+        ] {
+            assert!(
+                !t.skinned_caster() || t.casts_shadow(),
+                "{t:?} casts its own silhouette and no shadow at once"
+            );
+            // …and a tier with no entity cannot cast: `Dormant` is not drawn at
+            // all, so a `true` here would be an opinion about something that is
+            // not in the world.
+            assert!(t.materialized() || !t.casts_shadow(), "{t:?}");
+        }
     }
 
     /// A route is a pure function of the clock, ping-pongs, and stands still

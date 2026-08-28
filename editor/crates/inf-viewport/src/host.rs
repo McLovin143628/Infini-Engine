@@ -7780,11 +7780,17 @@ impl EngineHost {
 /// An entity with no `CrowdAgent` — every hero, every garment, every hair ribbon,
 /// every authored character in this tree — answers `BindSphere`, which is exactly
 /// what it was before this wave.
+///
+/// **And past `Near` it casts nothing** (island wave NPC1e): the proxy answered
+/// the group ceiling and not the page churn — 968 boxes walking through Harbour
+/// City dirtied 168.6 shadow pages a frame against the island's own 56.3 — so
+/// `CrowdTier::casts_shadow` is the radius NPC1b's carried item 4 asked for.
 fn crowd_shadow(agent: Option<inf_ecs::crowd::CrowdAgent>) -> inf_render::SkinnedShadow {
     match agent {
         None => inf_render::SkinnedShadow::BindSphere,
         Some(a) if a.tier.skinned_caster() => inf_render::SkinnedShadow::Posed,
-        Some(_) => inf_render::SkinnedShadow::Proxy,
+        Some(a) if a.tier.casts_shadow() => inf_render::SkinnedShadow::Proxy,
+        Some(_) => inf_render::SkinnedShadow::None,
     }
 }
 
