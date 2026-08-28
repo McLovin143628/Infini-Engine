@@ -4398,9 +4398,24 @@ mod tests {
     /// arithmetic in the same order" is what is being claimed and a tolerance
     /// would admit a different one.
     ///
-    /// It is not a tautology: the `*_at` doors are the ones every caller outside
-    /// this module still uses, and the day somebody changes one of the pair the
-    /// two answers part company here.
+    /// # What that half is worth, honestly (the NPC1e audit)
+    ///
+    /// Each `*_at` door is now **implemented as** `*_on(self.leg_at(..))`, so
+    /// the equality sweep below is a **tautology up to `leg_at` being a pure
+    /// function of its arguments** — it fails only if somebody re-writes an
+    /// `*_at` door to stop delegating. It is kept for exactly that, and the
+    /// claim the refactor really makes is the one under it: *the leg cannot
+    /// change inside a step*, so the answer resolved at the top of
+    /// [`step_crowd_banded`] is still the right answer at the fifth site that
+    /// reads it.
+    ///
+    /// That is falsifiable, and the second half of this arm holds it: the step
+    /// writes exactly two record fields between the resolution and the last use
+    /// — `leg` (the leg-change check) and `rephase_m` (the demotion re-phase) —
+    /// and `leg_at` must not read either. A `leg_at` that consulted `self.leg`
+    /// as a hint, or that folded `rephase_m` into the hour, would hand every
+    /// downstream `*_on` call a stale answer the pre-wave code could never have
+    /// produced, and nothing else in this tree would notice.
     #[test]
     fn resolving_the_leg_once_answers_what_resolving_it_every_time_answered() {
         let guid = Uuid::from_u128(0x1e9);
@@ -4460,6 +4475,32 @@ mod tests {
             "the sweep only ever saw legs {legs:?}, so it compared one leg 241 times"
         );
         assert_eq!(checked, 241);
+
+        // **THE HALF THE DELEGATION CANNOT SHOW** (the NPC1e audit): the leg
+        // does not move under the two fields the step writes while it is being
+        // used. `step_crowd_banded` resolves it once, then writes `rec.leg` in
+        // the leg-change check and `rec.rephase_m` in the demotion re-phase, and
+        // hands the SAME resolved value to the plan, the re-phase and the
+        // pursuit after both writes. A `leg_at` that read either — as a hint, or
+        // folded into the hour — would make the handed-down answer stale in a
+        // way the pre-wave code could not produce, and no other arm in this tree
+        // would see it.
+        for hour in [0.0_f64, 5.5, 9.25, 13.0, 18.75, 23.9] {
+            let clock = CrowdClock { t_s: 41.0, hour };
+            let before = rec.leg_at(guid, clock);
+            let mut moved = rec.clone();
+            moved.leg = moved.leg.wrapping_add(3);
+            moved.rephase_m += 137.5;
+            moved.tier = CrowdTier::Full;
+            moved.last = DVec3::new(11.0, 2.0, -7.0);
+            assert_eq!(
+                moved.leg_at(guid, clock),
+                before,
+                "the leg moved under the step's own writes at {hour} h, so a leg \
+                 resolved at the top of a step is not the leg its fifth reader \
+                 needs"
+            );
+        }
 
         // And an UNSCHEDULED record, where the leg is `None` and the `*_on`
         // doors must fall through to the route exactly as the `*_at` ones do.

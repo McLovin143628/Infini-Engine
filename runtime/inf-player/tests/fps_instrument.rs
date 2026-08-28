@@ -2070,10 +2070,18 @@ fn the_island_at_shipping_resolution() {
         // So this row does exactly two things, and neither of them installs
         // anything: it winds the level's own `TimeOfDay` to **08:30 local**,
         // leaving the island's authored rate alone, and it stands the hero at
-        // its largest settlement's centre, which is `island_gate`'s own staging
-        // for the day gate. The population is the one
+        // **the thickest part of that town's rush hour** — the resident with the
+        // most neighbours inside the ladder's own `Full` radius, derived from the
+        // level below rather than chosen. The population is the one
         // `inf_ecs::society::sync_society` derives from the level's own
         // buildings; the clock is the one the recipe ships.
+        //
+        // *(The NPC1e audit corrected this paragraph: it read "its largest
+        // settlement's centre, which is `island_gate`'s own staging", and the
+        // code below does neither. `island_town_centre` picks the **nearest**
+        // settlement and says why in its own doc — the largest is 3.8 km off the
+        // flight — and the centre is only ever REPORTED, because standing there
+        // is exactly the vacuous staging this row's own finding is about.)*
         //
         // **It comes FIRST of the four**, before the arc's own crowd rows, and
         // that ordering is forced rather than chosen: `set_crowd_population`
@@ -2348,6 +2356,25 @@ fn the_island_at_shipping_resolution() {
         }
         println!("  cpu {:>16}: {cpu_sum:.3} ms", "TOTAL");
         print_step_clocks(label, &m);
+        // **WHAT THE STEP IS PAYING FOR, PER ROW** (the NPC1e audit). The island
+        // printed this census once, in the isolated fixed-step block above, at
+        // the hero's authored start — and then the wave attributed **+21.0 ms of
+        // p50** to *"the town's own admitted structure colliders"* on a row taken
+        // 189 m away, where nothing had counted them. `physics3d sync` and
+        // `solver` climbing is a measurement; *which bodies* did it is a claim,
+        // and this is the counter that carries it. It is printed for every row so
+        // the collider band's share is a subtraction between two of them rather
+        // than an inference from one.
+        {
+            let (tracked, touching) = fx.sim.bridge3d().world().contact_pair_counts();
+            println!(
+                "  physics {:>14}: {} bodies, {} ADMITTED structure colliders, \
+                 {tracked} contact pairs ({touching} touching)",
+                "world",
+                fx.sim.bridge3d().body_count(),
+                fx.sim.bridge3d().admitted_structures(),
+            );
+        }
         print_record_profile(label, &m);
         println!("  gpu {:>16}: {:.3} ms", "frame", m.gpu_frame_ms);
         let mut passes = m.passes.clone();
