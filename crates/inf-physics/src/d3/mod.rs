@@ -67,7 +67,8 @@ pub use water::{
     BuoyancyDesc3D, SampleGeometry, WaterEvent3D, WaterEventKind3D, WaterIndex, WaterProbe,
 };
 pub use world::{
-    convex_hull_is_buildable, BodyKind3D, ColliderDesc3D, ColliderShape3D, PhysicsWorld3D,
+    convex_hull_is_buildable, BodyKind3D, ColliderDesc3D, ColliderPairing, ColliderShape3D,
+    PhysicsWorld3D,
 };
 
 // `ContactPhase` (Started/Stopped) is dimension-agnostic, so `d3` reuses the one

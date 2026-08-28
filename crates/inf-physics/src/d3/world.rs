@@ -427,6 +427,44 @@ pub fn convex_hull_is_buildable(points: &[DVec3]) -> bool {
     hull_shape(points).is_some()
 }
 
+/// **Which body-type pairings a collider takes part in** (island wave NPC1c).
+///
+/// The knob behind [`PhysicsWorld3D::active_collision_types`], and the door for
+/// content that is *moved by something other than the solver* and does not need
+/// the solver to notice — a crowd agent being the case it was measured for. Read
+/// that function's doc block for the whole ruling; the short version is below.
+///
+/// Not serialized, not a scene component: this is a facade-local description of
+/// what to build, chosen by whoever describes the collider.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ColliderPairing {
+    /// **Every pairing this engine allows** — today's behaviour, and the default,
+    /// so a caller that does not think about this gets exactly what the tree has
+    /// always had: `ActiveCollisionTypes::all()`, less `FIXED_FIXED` on a solid
+    /// (island wave I4b).
+    #[default]
+    All,
+    /// **Only pairings that involve a dynamic body** —
+    /// `DYNAMIC_DYNAMIC | DYNAMIC_KINEMATIC | DYNAMIC_FIXED`, which is rapier's
+    /// own default. A collider marked this way computes no manifold against
+    /// static scenery and none against another kinematic body.
+    ///
+    /// # It takes TWO to drop a pair
+    ///
+    /// rapier tests the flags as a **union** — `!a.test(..) && !b.test(..)` is
+    /// what skips a pair — so marking one side `DynamicOnly` while the other side
+    /// is [`All`](Self::All) changes **nothing at all**. Measured, and it is the
+    /// hypothesis NPC1c's measurement killed: 288 moving capsules narrowed on
+    /// their own kept every one of their manifolds, because the ground and the
+    /// buildings they stand on carry `all() - FIXED_FIXED`, which contains
+    /// `KINEMATIC_FIXED`. Both sides of a pair must refuse it before it goes.
+    ///
+    /// That union is also the safety rail: leave the *player's* capsule
+    /// [`All`](Self::All) and it keeps every contact against narrowed scenery,
+    /// because its own flags carry the pair.
+    DynamicOnly,
+}
+
 /// Description of a collider to attach to a body. Build with [`ColliderDesc3D::new`]
 /// and the fluent setters. Every collider the facade creates has collision-event
 /// reporting enabled so the [`PhysicsWorld3D::drain_contact_events`] drain sees it.
@@ -453,6 +491,9 @@ pub struct ColliderDesc3D {
     pub friction_combine: CombineRule,
     /// How this collider's restitution combines with a contacting collider's.
     pub restitution_combine: CombineRule,
+    /// Which body-type pairings this collider takes part in (island wave NPC1c).
+    /// Default [`ColliderPairing::All`] — today's behaviour.
+    pub pairing: ColliderPairing,
 }
 
 impl ColliderDesc3D {
@@ -469,6 +510,7 @@ impl ColliderDesc3D {
             layers: CollisionLayers::default(),
             friction_combine: CombineRule::default(),
             restitution_combine: CombineRule::default(),
+            pairing: ColliderPairing::default(),
         }
     }
 
@@ -510,6 +552,13 @@ impl ColliderDesc3D {
     /// Set the restitution combine rule.
     pub fn restitution_combine(mut self, rule: CombineRule) -> Self {
         self.restitution_combine = rule;
+        self
+    }
+    /// Narrow (or restore) which body-type pairings this collider takes part in.
+    /// See [`ColliderPairing`] — and note that **both** sides of a pair must be
+    /// narrowed before the pair goes away.
+    pub fn pairing(mut self, pairing: ColliderPairing) -> Self {
+        self.pairing = pairing;
         self
     }
 }
@@ -1123,11 +1172,94 @@ impl PhysicsWorld3D {
     /// later reader re-derives wrongly. This crate's `step_cost_3d.rs` holds both
     /// halves: no manifold on a solid pair, an event on a sensor one.
     ///
-    /// The 2D world mirrors this exactly — see `d2::world`'s twin.
-    fn active_collision_types(sensor: bool) -> ActiveCollisionTypes {
-        match sensor {
-            true => ActiveCollisionTypes::all(),
-            false => ActiveCollisionTypes::all() - ActiveCollisionTypes::FIXED_FIXED,
+    /// # The SECOND pairing, opted into rather than removed (island wave NPC1c)
+    ///
+    /// I4b removed `FIXED_FIXED` because nothing could ever move on such a pair.
+    /// `KINEMATIC_FIXED` and `KINEMATIC_KINEMATIC` are not that: a kinematic body
+    /// moves, and a dynamic body resting against it must be pushed. So they stay
+    /// on by default and a caller *asks* for them to go, with
+    /// [`ColliderPairing::DynamicOnly`].
+    ///
+    /// **What it costs to leave them on, measured.** A crowd agent is a moving
+    /// kinematic capsule, and NPC1b measured 288 of them among the island's
+    /// 17 823 bodies taking the `solver` phase from 2.233 to 4.844 ms — 1.6 %
+    /// more bodies for 117 % more solver. `crates/inf-physics/tests/
+    /// kinematic_pairing_cost.rs` reproduces the mechanism on a controlled fixture
+    /// — 1 849 static building boxes on four 257² heightfield tiles, 1 853 bodies,
+    /// 288 capsules walking their frontages — in this crate's **dev** profile
+    /// (dependencies build at `opt-level = 2`) on a Windows RTX 4070 Ti dev box:
+    ///
+    /// | 288 kinematic capsules | pairs | manifolds | ms/step | vs control |
+    /// |---|---|---|---|---|
+    /// | none (control) | 1 942 | 0 | 0.041 | — |
+    /// | standing still | 2 518 | 576 | 0.065 | **+0.023** |
+    /// | **moving** | 2 500 | 530 | 0.814 | **+0.773** |
+    /// | moving, capsules narrowed only | 2 500 | 530 | 0.824 | +0.783 |
+    /// | **moving, BOTH sides narrowed** | 2 500 | **0** | 0.168 | **+0.127** |
+    ///
+    /// **The mechanism is recomputation, not count.** The still row and the
+    /// moving row hold the *same* manifolds and differ by **34×**. A kinematic
+    /// body that is re-placed every step invalidates every manifold it owns, so
+    /// each one is rebuilt from scratch at 60 Hz — and a capsule-versus-
+    /// heightfield manifold walks the tile's cells underneath, which is precisely
+    /// the I4b mechanism with the "moving" part switched on. Removing the ground
+    /// and leaving the buildings drops the moving crowd's cost from +0.760 to
+    /// +0.200, so **three quarters of it is the terrain**.
+    ///
+    /// Per agent per step: **2.68 µs** moving, **0.44 µs** narrowed, 0.08 µs
+    /// standing still — linear in N across 32 / 128 / 288, and climbing with the
+    /// world *around* the crowd (2.68 → 2.82 → 3.33 µs at 1 853 → 7 405 → 16 916
+    /// bodies), which is the broad-phase share and is why the island's own
+    /// 9.06 µs/agent is larger than this fixture's.
+    ///
+    /// **And it takes two to drop a pair.** rapier's test is a union — the
+    /// `!a && !b` quoted above — so narrowing the capsule while the ground and
+    /// the buildings keep `all() - FIXED_FIXED` (which contains
+    /// `KINEMATIC_FIXED`) changes nothing: row four **is** row three, measured,
+    /// and it removed exactly **0** of the 530 manifolds. Both sides must refuse.
+    /// That is why this is a per-collider description and not a body flag, and it
+    /// is the prescription this wave's measurement killed before it shipped.
+    ///
+    /// # What is lost, stated exactly
+    ///
+    /// The same single loss the `FIXED_FIXED` removal states, one pairing over:
+    /// a narrowed pair fires **no `Collision` Blueprint event**, because
+    /// `ActiveEvents::COLLISION_EVENTS` is on every collider here and both hosts'
+    /// `drain_collisions` turns a `Started` contact into one. So a crowd agent
+    /// narrowed against narrowed scenery cannot be the subject of an
+    /// `OnCollision`, and two narrowed agents cannot collide-event each other.
+    /// Nothing else changes: no solver could act on the pair (a kinematic body is
+    /// not pushed, and the thing that moves it is the ECS), and character
+    /// movement in this engine is `move_and_slide` **shape casts through the query
+    /// pipeline** (`d3::character`, `d3::movement`), which read the collider set
+    /// and never the contact graph — so a narrowed agent still walks, still
+    /// slides along walls, and still stands on the ground.
+    ///
+    /// # …and a SENSOR still keeps all of them
+    ///
+    /// Unchanged, and for the reason above it: the sensor rule wins over
+    /// `pairing`. A trigger volume is the thing the flags were widened for, the
+    /// union means a sensor's own `all()` is what carries a static-over-static or
+    /// kinematic-over-static overlap, and a caller who narrows a sensor is asking
+    /// for the one configuration that silently stops reporting. `DynamicOnly` on
+    /// a sensor is therefore **ignored**, deliberately — `step_cost_3d.rs` and
+    /// `kinematic_pairing_cost.rs` both arm it.
+    ///
+    /// The 2D world mirrors the `FIXED_FIXED` half of this exactly — see
+    /// `d2::world`'s twin. It does **not** mirror `pairing`: there is no 2D crowd,
+    /// `ColliderDesc2D` has no such field, and a knob with no caller and no
+    /// measurement behind it is the thing this wave's own law is against.
+    fn active_collision_types(sensor: bool, pairing: ColliderPairing) -> ActiveCollisionTypes {
+        if sensor {
+            return ActiveCollisionTypes::all();
+        }
+        match pairing {
+            ColliderPairing::All => ActiveCollisionTypes::all() - ActiveCollisionTypes::FIXED_FIXED,
+            ColliderPairing::DynamicOnly => {
+                ActiveCollisionTypes::DYNAMIC_DYNAMIC
+                    | ActiveCollisionTypes::DYNAMIC_KINEMATIC
+                    | ActiveCollisionTypes::DYNAMIC_FIXED
+            }
         }
     }
 
@@ -1151,7 +1283,7 @@ impl PhysicsWorld3D {
             .friction_combine_rule(to_combine_rule(desc.friction_combine))
             .restitution_combine_rule(to_combine_rule(desc.restitution_combine))
             .active_events(ActiveEvents::COLLISION_EVENTS)
-            .active_collision_types(Self::active_collision_types(desc.sensor))
+            .active_collision_types(Self::active_collision_types(desc.sensor, desc.pairing))
             .build();
         let handle = self
             .colliders
