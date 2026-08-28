@@ -344,7 +344,17 @@ pub fn evaluate_buildings_in(
     if jobs.is_empty() {
         return GrammarOutput::default();
     }
-    let per: Vec<GrammarOutput> = pool.parallel_map(jobs, |job| {
+    // **The building ordinal is the job index** (NPC1d), zipped on before the
+    // map rather than counted after it: `parallel_map` is a deterministic
+    // in-order map, so a job's position IS its building's name for the whole
+    // call, and a slot can carry that name without anything downstream having to
+    // re-derive it from a list length.
+    let indexed: Vec<(u32, BuildJob)> = jobs
+        .into_iter()
+        .enumerate()
+        .map(|(i, j)| (i as u32, j))
+        .collect();
+    let per: Vec<GrammarOutput> = pool.parallel_map(indexed, |(ordinal, job)| {
         let out = build_in(&job.params, job.frame, job.seed, job.furnish);
         // **One building is one group** (IB-2b): the shell is derived here,
         // where the lot frame is in hand, and the ranges are local to this
@@ -364,11 +374,17 @@ pub fn evaluate_buildings_in(
         // doorway that was not taken now can never be taken at all.
         let mut doorways = super::doorway::doorways_of(&out.plan);
         super::doorway::place_doorways_in_frame(&mut doorways, job.frame);
+        // NPC1d: and the people, derived from the same plan in the same place —
+        // a slot is already in world metres because `interior_nav` and
+        // `slots_of` both go through the plan's own frame, which is why there is
+        // no `place_slots_in_frame` beside the doorway call above.
+        let slots = super::society::slots_of(&out.plan, ordinal);
         GrammarOutput {
             instances: out.instances,
             colliders: out.colliders,
             groups,
             doorways,
+            slots,
             // `build_in` has already folded the assembler's decoration tail
             // into `instances` (I8b), so a building's panes are inside its own
             // group's instance range and there is nothing left here.

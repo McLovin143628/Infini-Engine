@@ -65,10 +65,11 @@ pub use binding::{
     BiomeScatterCache, DEFAULT_BIOME_FEATHER,
 };
 pub use building::{
-    archetype, archetypes, evaluate_buildings, evaluate_buildings_in, plans_of, subdivide_block,
-    ArchetypeId, BlockLot, BlockSubdivision, BuildingArchetype, BuildingOutput, BuildingParams,
-    BuildingPass, BuildingPlan, LotRules, Opening, OpeningKind, Rect2, Room, RoomType, Stair,
-    StructureGroup, StructureTier, Wall, DEFAULT_STRUCTURE_LOD_M,
+    archetype, archetypes, evaluate_buildings, evaluate_buildings_in, plans_of,
+    society::{PcgSlot, SlotRole},
+    subdivide_block, ArchetypeId, BlockLot, BlockSubdivision, BuildingArchetype, BuildingOutput,
+    BuildingParams, BuildingPass, BuildingPlan, LotRules, Opening, OpeningKind, Rect2, Room,
+    RoomType, Stair, StructureGroup, StructureTier, Wall, DEFAULT_STRUCTURE_LOD_M,
 };
 pub use fields::{NoFields, OffsetTerrain, TerrainFields};
 pub use grammar::{

@@ -879,6 +879,20 @@ pub struct GrammarOutput {
     /// one is stated in one line and is checkable: *the first `colliders.len()`
     /// instances are the solid ones; everything after them is decoration.*
     pub decor: Vec<PcgInstance>,
+    /// **Every place a person can be in this output's buildings** (NPC1d) — the
+    /// homes, workplaces and errands their own rooms imply.
+    ///
+    /// Emitted only by
+    /// [`evaluate_buildings_in`](crate::building::evaluate_buildings_in), for
+    /// the reason [`doorways`](Self::doorways) is: it is the one pass with a
+    /// [`BuildingPlan`](crate::BuildingPlan) in hand, and a `grammar.expand`
+    /// pass has no notion of a room. Empty is the correct answer for a fence,
+    /// not a missing one.
+    ///
+    /// Like a doorway and unlike a group these carry **no index ranges** — a
+    /// slot is located in the world and names its own building's ordinal — so
+    /// concatenation needs no re-basing.
+    pub slots: Vec<crate::building::society::PcgSlot>,
 }
 
 impl GrammarOutput {
@@ -895,6 +909,10 @@ impl GrammarOutput {
         self.instances.extend(other.instances);
         self.colliders.extend(other.colliders);
         self.doorways.extend(other.doorways);
+        // A slot names a building ordinal the evaluator already made unique
+        // across the whole call, and world metres, so concatenation is the
+        // whole of it (NPC1d).
+        self.slots.extend(other.slots);
         // Decoration concatenates like everything else and is folded into
         // `instances` exactly once, by `assemble_in`, so the aligned prefix
         // survives every intermediate `extend`.
@@ -1009,6 +1027,8 @@ pub fn expand_span(
         // A 1-D expansion places no window panes: it has no openings to hang
         // one in (I8b).
         decor: Vec::new(),
+        // …and nobody lives in a fence (NPC1d).
+        slots: Vec::new(),
     };
     for (i, slot) in lay.slots.iter().enumerate() {
         let Some(kind) = slot.module else { continue };

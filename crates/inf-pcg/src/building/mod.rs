@@ -77,6 +77,8 @@ pub mod palettes;
 pub mod partition;
 pub mod pass;
 pub mod plan;
+// NPC1d: who a building HOLDS -- the residents and workers its own rooms imply.
+pub mod society;
 pub mod subdivide;
 
 use glam::{DVec2, DVec3};
@@ -856,20 +858,41 @@ impl BuildingPlan {
     /// | bits | meaning |
     /// |---|---|
     /// | 60–63 | [`inf_nav::domain::BUILDING`] — who minted the id |
-    /// | 40–59 | the class: `0` a room, `1` a doorway |
-    /// | 0–39 | the index into [`rooms`](Self::rooms) or [`openings`](Self::openings) |
+    /// | 59 | the class: `0` a room, `1` a doorway |
+    /// | 20–58 | the **salt**: which building (NPC1d; `0` here) |
+    /// | 0–19 | the index into [`rooms`](Self::rooms) or [`openings`](Self::openings) |
     ///
-    /// See [`room_node_id`] and [`doorway_node_id`], which are the only two
-    /// places the layout is written. A caller folding several buildings into one
-    /// network must offset the ids itself — this plan does not know which
-    /// building it is, and inventing an identity here would be a second opinion
-    /// about a thing the level already knows.
+    /// See [`room_node_id_in`] and [`doorway_node_id_in`], which are the only
+    /// two places the layout is written. This plan does not know which building
+    /// it is, and inventing an identity here would be a second opinion about a
+    /// thing the level already knows — so a caller folding several buildings
+    /// into one network passes its own salt through
+    /// [`interior_nav_in`](Self::interior_nav_in). This entry point is that call
+    /// with a salt of zero, which is right for the one-building case and
+    /// **wrong, silently, for two** — which is why it is not the only door.
     pub fn interior_nav(&self) -> inf_nav::NavGraph {
+        self.interior_nav_in(0)
+    }
+
+    /// **This building's interior as a graph, in `salt`'s own namespace**
+    /// (NPC1d).
+    ///
+    /// Identical to [`interior_nav`](Self::interior_nav) except that every node
+    /// id carries `salt` in bits 20–58, so two buildings' graphs
+    /// [`absorb`](inf_nav::NavGraph::absorb) into one network without room 5 of
+    /// the first becoming room 5 of the second. Before this wave that hazard was
+    /// written into a doc and a carried list and armed nowhere; the arm is
+    /// `two_buildings_absorb_into_one_network_only_when_they_are_salted_apart`.
+    ///
+    /// The salt is masked to thirty-nine bits and otherwise uninterpreted: a
+    /// dense ordinal and a hash are equally welcome, and the width is chosen so
+    /// a hash is safe (see [`NAV_SALT_MASK`]).
+    pub fn interior_nav_in(&self, salt: u64) -> inf_nav::NavGraph {
         let mut g = inf_nav::NavGraph::new();
         for (i, r) in self.rooms.iter().enumerate() {
             let c = self.frame.to_world(r.rect.center());
             g.add_node(
-                room_node_id(i),
+                room_node_id_in(salt, i),
                 DVec3::new(c.x, self.floor_y(r.floor), c.y),
                 inf_nav::NavKind::Room,
             );
@@ -883,7 +906,7 @@ impl BuildingPlan {
                 continue;
             };
             let c = self.frame.to_world(void.center());
-            let door = doorway_node_id(i);
+            let door = doorway_node_id_in(salt, i);
             g.add_node(
                 door,
                 DVec3::new(c.x, self.floor_y(w.floor), c.y),
@@ -892,7 +915,7 @@ impl BuildingPlan {
             // A link naming a room this plan does not have is ignored by the
             // graph itself, which is why there is no second filter here.
             g.link(
-                room_node_id(w.inside),
+                room_node_id_in(salt, w.inside),
                 door,
                 inf_nav::NavKind::Doorway,
                 Vec::new(),
@@ -900,7 +923,7 @@ impl BuildingPlan {
             if let Some(other) = w.outside {
                 g.link(
                     door,
-                    room_node_id(other),
+                    room_node_id_in(salt, other),
                     inf_nav::NavKind::Doorway,
                     Vec::new(),
                 );
@@ -940,8 +963,8 @@ impl BuildingPlan {
             let via = vec![self.floor_point(hi, f.to.max(f.from))];
             let (from, to) = if f.from < f.to { (a, b) } else { (b, a) };
             g.link(
-                room_node_id(from),
-                room_node_id(to),
+                room_node_id_in(salt, from),
+                room_node_id_in(salt, to),
                 inf_nav::NavKind::Stair,
                 via,
             );
@@ -1010,20 +1033,44 @@ impl BuildingPlan {
     }
 }
 
-/// The class bit that separates a **doorway** node's id from a room's — bit 40.
+/// The class bit that separates a **doorway** node's id from a room's — bit 59.
 /// See [`BuildingPlan::interior_nav`] for the whole layout.
 ///
-/// A room takes class `0`, so a room node's id is the domain tag and its index
-/// and nothing else. That is not a shortcut: it means the low forty bits of a
-/// room node are its `rooms` index verbatim, which is what makes a node id
-/// readable in a trace without a decoder.
-const NAV_DOORWAY_CLASS: u64 = 1 << 40;
-
-/// The index field of an interior node's id — the low forty bits.
+/// A room takes class `0`, so an unsalted room node's id is the domain tag and
+/// its index and nothing else. That is not a shortcut: it means the low twenty
+/// bits of an unsalted room node are its `rooms` index verbatim, which is what
+/// makes a node id readable in a trace without a decoder.
 ///
-/// A trillion rooms; the mask is here so a caller that hands in a nonsense index
-/// corrupts its own node rather than the class or the domain tag above it.
-const NAV_INDEX_MASK: u64 = NAV_DOORWAY_CLASS - 1;
+/// **NPC1d moved this bit from 40 to 59** to open the salt field between it and
+/// the index. Nothing persists a nav node id — the graph is derived on demand in
+/// every host — so the move is invisible outside a single process, and the
+/// *relative* order of ids is unchanged (every doorway still sorts above every
+/// room of the same building), which is what a Dijkstra tie-break reads.
+const NAV_DOORWAY_CLASS: u64 = 1 << 59;
+
+/// The index field of an interior node's id — the low twenty bits.
+///
+/// A million rooms or openings in one building, against a
+/// [`MAX_FLOORS`](plan::MAX_FLOORS) of 400; the mask is here so a caller that
+/// hands in a nonsense index corrupts its own node rather than the salt, the
+/// class or the domain tag above it.
+const NAV_INDEX_MASK: u64 = (1 << 20) - 1;
+
+/// How far up an interior node's id the **salt** starts — bit 20, immediately
+/// above the index.
+const NAV_SALT_SHIFT: u32 = 20;
+
+/// The salt field of an interior node's id — thirty-nine bits, between the index
+/// and the class bit.
+///
+/// Wide on purpose. The salt exists so several buildings' graphs can be folded
+/// into one network, and a caller with no dense ordinal to hand will hash
+/// something into it — at 2³⁹ the birthday collision probability over the
+/// island's own thousand buildings is about one in a million, where a
+/// nineteen-bit field would have collided about once per island. A collision is
+/// not a slow route, it is a bedroom welded to a bedroom in a different
+/// building, so the field is sized for that rather than for the counter.
+const NAV_SALT_MASK: u64 = (1 << 39) - 1;
 
 /// **The two ends of a flight's run**, in the plan's own XZ, quarter-inset.
 ///
@@ -1049,20 +1096,55 @@ fn flight_run(rect: Rect2) -> (glam::DVec2, glam::DVec2) {
     }
 }
 
-/// **The nav-graph id of room `i`.** See [`BuildingPlan::interior_nav`] for the
-/// bit layout and why the namespace exists.
+/// **The nav-graph id of room `i`** in the unsalted namespace. See
+/// [`BuildingPlan::interior_nav`] for the bit layout and why the namespace
+/// exists.
+///
+/// Equivalent to [`room_node_id_in(0, i)`](room_node_id_in), and kept as the
+/// short spelling because a caller that folds exactly one building into a
+/// network needs no salt.
 pub fn room_node_id(i: usize) -> inf_nav::NavNodeId {
-    inf_nav::domain::BUILDING | (i as u64 & NAV_INDEX_MASK)
+    room_node_id_in(0, i)
 }
 
-/// **The nav-graph id of the doorway standing in opening `i`.**
+/// **The nav-graph id of the doorway standing in opening `i`** in the unsalted
+/// namespace.
 ///
 /// The index is into [`BuildingPlan::openings`] — *all* of them, windows
 /// included — rather than into the doors alone, so an opening's node id does not
 /// move when a window is added beside it. Only doors get a node; a window is an
 /// opening you look through.
 pub fn doorway_node_id(i: usize) -> inf_nav::NavNodeId {
-    inf_nav::domain::BUILDING | NAV_DOORWAY_CLASS | (i as u64 & NAV_INDEX_MASK)
+    doorway_node_id_in(0, i)
+}
+
+/// **The nav-graph id of room `i` of the building `salt` names** (NPC1d).
+///
+/// The salt is the caller's word for *which building this is*; a plan does not
+/// know, and inventing an identity inside it would be a second opinion about a
+/// thing the level already holds. See [`BuildingPlan::interior_nav_in`].
+pub fn room_node_id_in(salt: u64, i: usize) -> inf_nav::NavNodeId {
+    inf_nav::domain::BUILDING
+        | ((salt & NAV_SALT_MASK) << NAV_SALT_SHIFT)
+        | (i as u64 & NAV_INDEX_MASK)
+}
+
+/// **The nav-graph id of the doorway in opening `i` of the building `salt`
+/// names** (NPC1d).
+pub fn doorway_node_id_in(salt: u64, i: usize) -> inf_nav::NavNodeId {
+    inf_nav::domain::BUILDING
+        | NAV_DOORWAY_CLASS
+        | ((salt & NAV_SALT_MASK) << NAV_SALT_SHIFT)
+        | (i as u64 & NAV_INDEX_MASK)
+}
+
+/// **Which building an interior node belongs to** — the salt back out of an id.
+///
+/// The inverse of the field [`room_node_id_in`] writes, so a caller holding a
+/// route can say which building each of its interior nodes was in without
+/// carrying a second map.
+pub fn node_salt(id: inf_nav::NavNodeId) -> u64 {
+    (id >> NAV_SALT_SHIFT) & NAV_SALT_MASK
 }
 
 /// The XZ rectangle a stretch `[from, to]` of `w` occupies at `thickness`
@@ -1427,5 +1509,138 @@ mod tests {
             plan.openings.len() - sealed.openings.len(),
             verdict.reason()
         );
+    }
+}
+
+#[cfg(test)]
+mod nav_namespace_tests {
+    use super::*;
+    use crate::building::plan::{plan_building, BuildingParams};
+
+    fn plan_of(seed: u64) -> BuildingPlan {
+        let footprint = Rect2::new(DVec2::new(-9.0, -7.0), DVec2::new(9.0, 7.0));
+        let mut params =
+            BuildingParams::new(palettes::ArchetypeId::Apartment, footprint, 0.0, seed);
+        params.floors = 3;
+        plan_building(&params)
+    }
+
+    /// **The one-namespace blocker, armed** (NPC1d). NPC1c's carried item 6 and
+    /// the NPC1c audit's carried item 15 both say a plan has ONE id namespace and
+    /// that folding two of them welds a bedroom to a bedroom; nothing failed the
+    /// day somebody did it. This does.
+    #[test]
+    fn two_buildings_absorb_into_one_network_only_when_they_are_salted_apart() {
+        let a = plan_of(0xA11);
+        let b = plan_of(0xB22);
+        assert!(a.rooms.len() > 3 && b.rooms.len() > 3, "thin fixture");
+
+        // Unsalted, and the damage is worse than "the second one is lost":
+        // `absorb` keeps the FIRST graph's node record but pushes the second
+        // graph's EDGES, so B's doors are hung on A's rooms. The fused graph is
+        // A's metres wearing A's and B's connectivity — a bedroom with a door
+        // into a corridor in another building.
+        let (mut fused, ga, gb) = (a.interior_nav(), a.interior_nav(), b.interior_nav());
+        fused.absorb(&gb);
+        assert!(
+            fused.len() < ga.len() + gb.len(),
+            "two unsalted interiors are supposed to collide id for id: {} + {} \
+             fused to {}",
+            ga.len(),
+            gb.len(),
+            fused.len()
+        );
+        assert_eq!(
+            fused.edge_count(),
+            ga.edge_count() + gb.edge_count(),
+            "the fused graph should carry BOTH buildings' edges on ONE \
+             building's rooms -- that is the defect, and it is what makes the \
+             collision a wrong route rather than a missing one"
+        );
+
+        // And the collision is not benign: the node that answers for B's room 0
+        // stands where A's room 0 stands, metres away in another building.
+        let a0 = a
+            .interior_nav()
+            .node(room_node_id(0))
+            .expect("a room")
+            .position;
+        let b0 = b
+            .interior_nav()
+            .node(room_node_id(0))
+            .expect("a room")
+            .position;
+        let fused0 = fused.node(room_node_id(0)).expect("a room").position;
+        assert_eq!(fused0, a0);
+        // (Same footprint, different seed -- the partition differs, so the two
+        // room 0s are not the same point. If they ever were this arm is vacuous.)
+        assert_ne!(a0, b0, "the two fixtures partition identically");
+
+        // Salted: every node of both survives, and B's room 0 is B's own place.
+        let mut apart = a.interior_nav_in(1);
+        let n_a = apart.len();
+        apart.absorb(&b.interior_nav_in(2));
+        assert_eq!(
+            apart.len(),
+            n_a + b.interior_nav_in(2).len(),
+            "a salted absorb lost nodes"
+        );
+        assert_eq!(
+            apart.node(room_node_id_in(1, 0)).expect("a room").position,
+            a0
+        );
+        assert_eq!(
+            apart.node(room_node_id_in(2, 0)).expect("a room").position,
+            b0
+        );
+    }
+
+    /// The salt is recoverable, the fields do not overlap, and a salt of zero is
+    /// the pre-NPC1d id verbatim.
+    #[test]
+    fn an_interior_node_id_decomposes_into_its_own_fields() {
+        assert_eq!(room_node_id(7), room_node_id_in(0, 7));
+        assert_eq!(doorway_node_id(7), doorway_node_id_in(0, 7));
+        assert_eq!(room_node_id(7), inf_nav::domain::BUILDING | 7);
+        assert_eq!(node_salt(room_node_id(7)), 0);
+
+        for salt in [1u64, 2, 1_000, 1 << 20, NAV_SALT_MASK] {
+            for i in [0usize, 1, 4095, NAV_INDEX_MASK as usize] {
+                let r = room_node_id_in(salt, i);
+                let d = doorway_node_id_in(salt, i);
+                assert_eq!(inf_nav::domain::of(r), inf_nav::domain::BUILDING);
+                assert_eq!(inf_nav::domain::of(d), inf_nav::domain::BUILDING);
+                assert_eq!(node_salt(r), salt, "the salt did not survive its own id");
+                assert_eq!(node_salt(d), salt);
+                assert_eq!(r & NAV_INDEX_MASK, i as u64);
+                assert_eq!(d & NAV_INDEX_MASK, i as u64);
+                assert_ne!(r, d, "a room and a doorway share an id");
+                assert!(d > r, "a doorway must sort above its own room");
+            }
+        }
+    }
+
+    /// A salted graph is the unsalted one with every id shifted and **nothing
+    /// else** — same node count, same edge count, same positions, same kinds.
+    #[test]
+    fn salting_moves_the_ids_and_no_metres() {
+        let p = plan_of(0xC33);
+        let zero = p.interior_nav();
+        let salted = p.interior_nav_in(0x7F_FFFF_FFFF);
+        assert_eq!(zero.len(), salted.len());
+        assert_eq!(zero.edge_count(), salted.edge_count());
+        for n in zero.nodes() {
+            let mate = salted
+                .node(n.id | (0x7F_FFFF_FFFF << NAV_SALT_SHIFT))
+                .expect("every node has a salted twin");
+            assert_eq!(mate.position, n.position);
+            assert_eq!(mate.kind, n.kind);
+            assert_eq!(
+                salted.edges_from(mate.id).len(),
+                zero.edges_from(n.id).len(),
+                "the salted twin of {} has a different degree",
+                n.id
+            );
+        }
     }
 }
