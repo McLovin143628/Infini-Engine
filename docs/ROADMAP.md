@@ -1492,6 +1492,22 @@ atmosphere, fog, cloud, or TOD code exists anywhere.
 > weather blend *feels* like weather changing at the default 8 s; and the Phase 17 demo
 > recording.
 >
+> **CARRIED INTO A FUTURE SKY WAVE, with numbers (island wave NPC1d + its audit, 2026-08-28).**
+> `clouds_night` renders a **saturated blood-red sky** at 23:30 with the sun 17° below the
+> horizon — past the end of astronomical twilight, where it should be near-black. Measured off
+> the committed 320×180 golden: mean sRGB over the upper half **(70.2, 3.4, 2.7)**, saturation
+> **0.962**, horizon band (50.2, 3.1, 2.7), against a brightest-pixel star of (67, 67, 67) — so
+> the night sky is as bright as its own brightest star and twenty times redder than it. Every arm
+> on that golden is *relative*, so none can see it (SKY2's audit, LOW item 9). The obvious
+> suspect is already present: `atmosphere.wgsl`'s `atmos_transmittance_integral` returns zero the
+> moment `atmos_ray_sphere_near` hits the planet. What survives is **in-scattering at
+> high-altitude samples along the view ray**, whose own ray to the sun still grazes the limb;
+> Rayleigh extinction over that path removes the blue first, which is the sunset mechanism
+> arriving 17° too late. Correcting it is a change to the sky-view LUT's parameterization, a
+> golden re-bless, and a wave of its own. **It is here rather than only in a wave memo because
+> NPC1d turned the island's clock on** (`ISLAND_CLOCK_RATE = 18`), so the island now has a night
+> and this is a thing a player meets rather than a golden nobody looks at.
+>
 > **Deferred, with where each is tracked.** Hillaire's 32×32 **multiple-scattering LUT** (the
 > single `ATMOS_MULTI_SCATTER` constant stands in — `crates/inf-render/src/atmosphere.rs`) and
 > his 3D **froxel aerial-perspective LUT** (the homogeneous v1 with a horizon-clamped in-scatter
@@ -28145,7 +28161,9 @@ seven archetypes at three storeys, homes/workers: Office 0/13, Apartment 13/0, I
 0/26, House 13/0, Estate 7/0, Hotel 12/0, Shop 0/34 + 5 errands). A slot rides
 `PcgVolume::residents` beside `doorways` with `#[serde(skip)] + #[reflect(ignore)]`, so
 **no schema moves** — the bless regenerated every committed sample and only the two islands
-changed, only in `content_hash`, over unchanged bytes and entity counts at scene v26, and the
+changed, only in `content_hash`, over an unchanged byte COUNT and entity count at scene v26 (the
+payloads differ in exactly two bytes each — the `f64` `TimeOfDay::rate`, 0.0 → 18.0 — which is why
+the hash moves; NPC1d audit), and the
 one authored change in the whole wave is a single float. (2) `inf_ecs::society` is the
 level-scale half: it lays a **pavement ring** of eight nodes 2 m outside each block (a
 settlement's street grid lives in the recipe and is not in a cooked pack; the blocks are, and
@@ -28157,7 +28175,7 @@ node is on raw hillside and no ground profile is needed to say so.
 **THE ONE-NAMESPACE BLOCKER IS CLOSED** (NPC1c carried item 6, NPC1c-audit item 15):
 `interior_nav_in` carries a **39-bit salt**, hashed from `(volume Guid, building ordinal)`
 because a dense ordinal needs something that has seen the whole level and in a streaming
-world nothing has; the defect it retires is measured — two unsalted interiors fuse 80 + 81
+world nothing has; the defect it retires is measured — two unsalted interiors fuse 80 + 79
 nodes to 81 and **double** the edge count, 170 → 340, which is a bedroom with a door into
 another building's corridor rather than a missing building. **THE SEARCH IS TWO LEVELS, and
 that is a measurement**: one graph with every interior in it is ~25 000 nodes, and `inf-nav`'s
@@ -28190,7 +28208,7 @@ measurement says it was not the defect is still a fix, and the measurement is wh
 reported** (waiting 120 quiet steps moved the settle 43 → 163 and changed the volume count by
 nothing — four blocks of a hundred and seventy is what a *stationary* hero pages in); **a rate
 is a measurement** (48 minutes is the nicer number and it made a commute a jog); **price the
-search before you build the network**. Battery **333 / 6 396 / 0 / 19** (+31 arms, +0 blocks), goldens **59** unmoved with
+search before you build the network**. Battery **333 / 6 397 / 0 / 19** (+32 arms, +0 blocks), goldens **59** unmoved with
 `INF_GOLDEN_STRICT=1` green over 118 arms, rustdoc **374 over 30 crates** (zero added),
 clippy 0, fmt clean, `Cargo.lock` +2 path edges and no new dependency. The N = 1 000 island
 row's structural half reproduces exactly (32/256/712/0 tiers, 1 001 skinned in 1 draw, 290
@@ -28198,5 +28216,16 @@ palette blocks, 967 proxies in 1 group, 35 of 1 024) and `character move` reads 
 against NPC1c's 5.630 — the arc's wall is where it was, and this wave did not take the mover
 lever. Its two brackets disagree by **6.233 ms** against NPC1c's 0.699, so the delta is NOT
 published. **The island's own isolated fixed step now reads a `crowd` line of 0.353 ms and a
-`society` line of 0.205 on a level whose crowd phase read 0.000 before this wave.** Details in
+`society` line of 0.205 on a level whose crowd phase read 0.000 before this wave.** **AND THE DEFECT IT ALMOST SHIPPED**, found after the gate was green: `steer_agent` gated a
+scheduled agent's whole wish on `rec.route.is_walkable()`, which asks for a **speed** — and a
+schedule has none, so its diagnostic route is 0.0 m/s and **every scheduled agent that reached
+`Full` wished ZERO and stood still while its clock walked on**; it also steered along
+`rec.route.path`, which for a schedule is *leg 0*, so a body walked towards its office at six
+in the evening. **Not one claim in the day gate would have failed**, because from the town's
+edge nothing is `Full`. Fixed (`path_at(guid, clock)` + a walkability test that asks a leg for
+its LENGTH), mutation-verified in both a unit arm and the gate, and the gate gained an 08:30
+**rush-hour coda** — the settle cannot be the arm, because the island's committed clock reads
+02:18 local and the town is correctly asleep. **4 197 steering intents, 71 agents `Full`**, and
+`rush` asserted beside it so the claim cannot go vacuous. LAW: **a gate staged where a defect
+cannot appear is a gate that certifies the defect.** Details in
 `docs/memos/island-progress.md` under *"Wave NPC1d"*.

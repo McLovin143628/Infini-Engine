@@ -647,8 +647,16 @@ fn pie_equals_shipping_on_an_island_drive() {
     // capsule still fails, and which a crowd of them cannot satisfy by accident.
     const POSED_BYTES: usize = 36 + 161 * 40;
     let mut posed_counts = Vec::new();
+    let mut posed_ceilings = Vec::new();
     for (who, sim) in [("shipping", &mut ship), ("pie", &mut pie)] {
         let bytes = inf_ecs::pose::pose_state_bytes(sim.world());
+        // **And the multiple is bounded by something that knows what it is**
+        // (NPC1d audit). A multiple alone says "every character in the store has
+        // the island's rig" and nothing about how MANY there should be, so an
+        // unexplained doubling of the pose store would sail through it. The
+        // hero plus the society the level derived is the only source of
+        // characters on this level, and that is the ceiling.
+        posed_ceilings.push(1 + sim.society_stats().agents);
         assert!(
             bytes.len() >= POSED_BYTES,
             "{who} published {} bytes of pose, less than one 161-bone character's \
@@ -670,11 +678,22 @@ fn pie_equals_shipping_on_an_island_drive() {
         "shipping posed {} characters and PIE posed {}",
         posed_counts[0], posed_counts[1]
     );
+    assert!(
+        posed_counts[0] <= posed_ceilings[0] && posed_counts[1] <= posed_ceilings[1],
+        "the pose store holds {} / {} characters against a hero plus a derived \
+         society of {} / {} — something is posing that neither the level nor \
+         its own buildings put there",
+        posed_counts[0],
+        posed_counts[1],
+        posed_ceilings[0],
+        posed_ceilings[1]
+    );
     println!(
         "POSE: {} x {POSED_BYTES} B a step on both hosts — the hero and the \
-         island's own residents (403 B a state before the hero was a character, \
-         {} now)",
+         island's own residents, of a possible {} (403 B a state before the \
+         hero was a character, {} now)",
         posed_counts[0],
+        posed_ceilings[0],
         a.states[0].len()
     );
 
@@ -4489,7 +4508,10 @@ const DAY_STEPS: usize = 1_200;
 /// for one arm, in a battery that has to finish.
 ///
 /// So a day is `DAY_STEPS`, fifty steps an in-game hour, and the rate is
-/// whatever makes those two agree.
+/// whatever makes those two agree — **4 320 clock-seconds a sim second, which
+/// is 240× the island's own 18**. *(The first write-up of this said 72×, which
+/// is the number of clock-SECONDS one fixed step advances — 86 400 / 1 200 —
+/// rather than a ratio between two rates. NPC1d audit.)*
 ///
 /// So it runs the SAME day faster, and the compression is exact rather than
 /// approximate: a `ScheduleLeg`'s position is a *fraction of its own clock
@@ -4543,7 +4565,7 @@ struct DaySample {
     at_work: usize,
     walking: usize,
     /// Agents on a tier that steers. Their bodies walk at their own gait
-    /// against a clock this gate runs 72x fast, so where they are is a
+    /// against a clock this gate runs 240x fast, so where they are is a
     /// statement about the compression rather than about the day.
     steered: usize,
     tiers: [usize; 4],
@@ -4565,6 +4587,15 @@ struct DayRun {
     /// The coda: how many agents went `Dormant`, and how far the furthest of
     /// them was from where its own schedule says it should be when it came back.
     coda: (usize, f64),
+    /// **Steering intents written over the whole gate** — the settle, the day
+    /// and the coda. Non-zero is the falsifier for the NPC1d-audit defect: a
+    /// scheduled agent that reached `Full` used to wish `ZERO` on every step and
+    /// stand still, because the walkability test asked its diagnostic route for
+    /// a SPEED and a schedule has none.
+    steered_ever: u64,
+    /// The most agents that were `Full` at once during the rush-hour coda — the
+    /// anti-vacuity half of [`steered_ever`](Self::steered_ever).
+    rush: usize,
     /// Commute lengths over the whole population, metres: min / median / max.
     commute_m: (f64, f64, f64),
     /// Scheduled agents, and of those, agents with a full four-leg day.
@@ -4593,13 +4624,15 @@ fn glow_now(sim: &RuntimeSim) -> (u16, f64) {
 /// settlement's volumes evaluate as the ground under them pages in, so the first
 /// step that folds nothing is somewhere in the middle of a town rather than at
 /// the end of one.
-fn settle_the_society(sim: &mut RuntimeSim, peak: &mut [usize; 4]) -> usize {
+fn settle_the_society(sim: &mut RuntimeSim, peak: &mut [usize; 4], steered: &mut u64) -> usize {
     let mut quiet = 0usize;
     for i in 0..SETTLE_STEPS {
         sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
-        for (t, n) in sim.crowd_stats().per_tier.iter().enumerate() {
+        let st = sim.crowd_stats();
+        for (t, n) in st.per_tier.iter().enumerate() {
             peak[t] = peak[t].max(*n);
         }
+        *steered += st.steered;
         let s = sim.society_stats();
         if s.folded_now > 0 || s.planned_now > 0 || s.pending > 0 {
             quiet = 0;
@@ -4676,7 +4709,7 @@ fn sample_town(sim: &RuntimeSim, hour: f64) -> DaySample {
         };
         // **A steered body is not a census.** A tier with a controller is moved
         // by `move_and_slide` at its own 1.65 m/s gait, and this gate runs the
-        // day 72x fast -- so a `Full` agent is permanently strung out along its
+        // day 240x fast -- so a `Full` agent is permanently strung out along its
         // route and where it stands says how compressed the clock is, not what
         // time it is. Counted, reported, and kept out of the town's census;
         // every other tier's position IS `route(clock)`, which is the schedule's
@@ -4751,7 +4784,8 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
         set_hero(sim, hero, centre);
         sim.world_mut().mark_dirty();
         let mut tier_peak = [0usize; 4];
-        let settle_steps = settle_the_society(sim, &mut tier_peak);
+        let mut steered_ever = 0u64;
+        let settle_steps = settle_the_society(sim, &mut tier_peak, &mut steered_ever);
         let society = sim.society_stats();
         let (commute_m, scheduled) = read_schedules(sim);
         let glazed = {
@@ -4767,7 +4801,8 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
         println!(
             "NPC1d {label}: settled in {settle_steps} steps -- {} volume(s), {} \
              home(s), {} agent(s) ({} declined), {} scheduled ({} full days), \
-             {} homebound, {} housebound, {} doorless",
+             {} homebound, {} housebound, {} doorless, {} with no walk home, \
+             {} with no errand",
             society.volumes,
             society.homes,
             society.agents,
@@ -4776,7 +4811,9 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
             scheduled.1,
             society.homebound,
             society.housebound,
-            society.doorless
+            society.doorless,
+            society.no_return,
+            society.errandless
         );
         println!(
             "NPC1d {label}: network {} nodes / {} edges, {} frontage(s) ({} \
@@ -4840,6 +4877,8 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
             samples: Vec::new(),
             tier_peak,
             coda: (0, 0.0),
+            steered_ever,
+            rush: 0,
             commute_m,
             scheduled,
             glazed,
@@ -4855,6 +4894,7 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
             for (t, n) in st.per_tier.iter().enumerate() {
                 run.tier_peak[t] = run.tier_peak[t].max(*n);
             }
+            run.steered_ever += st.steered;
             if next < hours.len() && i >= (hours[next] / 24.0 * DAY_STEPS as f64) as usize {
                 let s = sample_town(sim, local_hour(sim));
                 println!(
@@ -4928,12 +4968,52 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
             }
             worst
         };
+        // ── the rush-hour coda: somebody actually STEERS ────────────────────
+        //
+        // **Every reading above is of a town the CLOCK moves**, because from the
+        // town's edge nothing is `Full`. That is the right way to census a day
+        // and it is blind to the one tier that walks its body: a scheduled agent
+        // that reached `Full` used to wish ZERO on every step — the walkability
+        // test asked its *diagnostic* route for a speed and a schedule has none
+        // — and stood perfectly still while its clock walked on. Not one claim
+        // this gate makes would have failed.
+        //
+        // It is also why the settle cannot be the arm: the island's committed
+        // clock reads **02:18 local**, so the residents nearest the crossroads
+        // are `Full`, on their last leg, and correctly standing at home asleep.
+        // So the hero comes back to the crossroads at half past eight in the
+        // morning, which is the middle of the commute, and the bodies there have
+        // somewhere to be.
+        {
+            let w = sim.world_mut().world_mut();
+            let mut q = w.query::<&mut inf_ecs::components::TimeOfDay>();
+            for mut tod in q.iter_mut(w) {
+                let local = (8.5 * 3600.0 - tod.longitude_deg * 240.0).rem_euclid(86_400.0);
+                tod.seconds = local;
+                tod.rate = 0.0;
+            }
+        }
+        set_hero(sim, hero, centre);
+        sim.world_mut().mark_dirty();
+        for _ in 0..60 {
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+            let st = sim.crowd_stats();
+            for (t, n) in st.per_tier.iter().enumerate() {
+                run.tier_peak[t] = run.tier_peak[t].max(*n);
+            }
+            run.steered_ever += st.steered;
+            run.rush = run.rush.max(st.per_tier[0]);
+        }
         run.coda = (dormant, worst);
         println!(
             "NPC1d {label}: coda -- {dormant} agent(s) went dormant at \
              {TOWN_AWAY_M:.0} m; back at {:.2} h the worst re-materialized agent \
-             is {worst:.4} m from its own schedule's answer",
-            local_hour(sim)
+             is {worst:.4} m from its own schedule's answer; {} steering \
+             intent(s) over the whole gate, {} agent(s) `Full` at the 08:30 \
+             rush hour",
+            local_hour(sim),
+            run.steered_ever,
+            run.rush
         );
 
         println!(
@@ -4975,6 +5055,29 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
             "{label}: {} agent(s) are scheduled and NONE has a full four-leg day \
              -- nobody commutes",
             r.scheduled.0
+        );
+        // **NOBODY GOES TO WORK AND STAYS THERE** (NPC1d audit). An agent whose
+        // walk home does not route leaves at eight and stands at its desk
+        // through the night; `DayKind::Full` is returned the moment the
+        // OUTBOUND commute routes, so before this counter existed the report
+        // called that a full day. The difference between `scheduled` and
+        // `full four-leg` is `errandless`, which is carried item 2 in numbers
+        // and is reported rather than asserted.
+        assert_eq!(
+            r.society.no_return, 0,
+            "{label}: {} agent(s) have a workplace and no walk home",
+            r.society.no_return
+        );
+        assert_eq!(
+            r.scheduled.0 - r.scheduled.1,
+            r.society.errandless + r.society.homebound,
+            "{label}: {} of {} scheduled agents have fewer than four legs, \
+             against {} errandless + {} homebound -- with no_return at zero \
+             those are the only two ways to be short of a leg",
+            r.scheduled.0 - r.scheduled.1,
+            r.scheduled.0,
+            r.society.errandless,
+            r.society.homebound
         );
         assert!(
             r.society.crossings > 0 && r.society.frontages > 0,
@@ -5110,6 +5213,27 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
             r.coda.0 > 0,
             "{label}: nobody went dormant a kilometre from the town"
         );
+        // **AND SOMEBODY ACTUALLY STEERED** (NPC1d audit). While the town streams
+        // in the hero stands at the crossroads and the nearest residents are
+        // `Full`, which is the tier that walks its body through
+        // `move_and_slide`. A scheduled agent that reached `Full` used to wish
+        // ZERO on every step — the walkability test asked its *diagnostic* route
+        // for a speed, and a schedule has none — so it stood perfectly still
+        // while its clock walked on. Every claim this gate makes about the day
+        // was true of that build too, because from the town's edge nothing
+        // steers; this is the reading that would not have been.
+        assert!(
+            r.rush > 0,
+            "{label}: nobody was `Full` at the crossroads at half past eight, so \
+             the steering claim below would be vacuous"
+        );
+        assert!(
+            r.steered_ever > 0,
+            "{label}: not one steering intent over the whole gate, with {} agent(s) \
+             `Full` in the middle of the morning commute — every scheduled agent \
+             that got a controller stood still",
+            r.rush
+        );
         // **A dormant agent comes back at its SCHEDULE, not at `last`.** The
         // tolerance is a millimetre rather than a metre because the claim is
         // exact: the position law is `route(clock)` at every tier, so a
@@ -5188,7 +5312,7 @@ fn the_islands_own_rate_makes_a_commute_a_walk() {
     let centre = glam::DVec3::new(settlement.centre.x, 0.0, settlement.centre.y);
     set_hero(&mut sim, hero, centre);
     sim.world_mut().mark_dirty();
-    settle_the_society(&mut sim, &mut [0usize; 4]);
+    settle_the_society(&mut sim, &mut [0usize; 4], &mut 0u64);
 
     let rate = inf_editor_core::island::ISLAND_CLOCK_RATE;
     assert!(

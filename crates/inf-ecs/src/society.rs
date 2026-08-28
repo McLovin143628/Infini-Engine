@@ -243,6 +243,25 @@ pub struct SocietyStats {
     /// Agents with nowhere at all to go — no reachable work and no reachable
     /// errand. They stand at home.
     pub housebound: usize,
+    /// **Agents with a workplace whose walk HOME did not route** (NPC1d audit).
+    ///
+    /// A day is not a day if it only goes one way: such an agent leaves at
+    /// eight, arrives at nine and stands at its desk through the night, because
+    /// the leg that would take it home is not in its schedule. It used to be
+    /// counted as a full day — [`DayKind::Full`](DayKind) is returned the
+    /// moment the outbound commute routes — so the one number that would have
+    /// said so was invisible. Zero on the island, and the gate asserts it.
+    pub no_return: usize,
+    /// **Agents with a workplace and no errand** (NPC1d audit) — the difference
+    /// between "scheduled" and "a full four-leg day" in the wave ledger, given
+    /// a name.
+    ///
+    /// Not a defect: it is carried item 2 in the units the report is written
+    /// in. An agent is planned on the first step that folds nothing, which in a
+    /// streaming town is a *gap* rather than the end, so an agent planned early
+    /// chooses its shop from the shops that had folded by then and never
+    /// re-opens the question.
+    pub errandless: usize,
     /// Nodes in the network.
     pub nodes: usize,
     /// Directed edges in the network.
@@ -257,6 +276,25 @@ pub struct SocietyStats {
     /// **Interior node ids that were already in the network when their building
     /// was absorbed** — a building salt collision, which welds one building's
     /// room to another's. Zero is the expectation and the arm.
+    ///
+    /// # What it can and cannot see (NPC1d audit)
+    ///
+    /// It sees a collision **between two volumes**: the second volume's front
+    /// door is already a node of the level network, and that is the check
+    /// below. It does **not** see one between two buildings *of the same
+    /// volume*, because their interiors are folded into one graph by
+    /// `inf_pcg::GrammarOutput::absorb` — whose own rule is that the first
+    /// record wins — long before this module is handed the result. Such a pair
+    /// arrives here as one building wearing both sets of doors and is
+    /// indistinguishable from a building that always had them.
+    ///
+    /// The width is what makes that acceptable rather than the counter: at 2³⁹
+    /// over an island's thousand buildings the birthday probability is about one
+    /// in a million, and the number is sized for the intra-volume case as much
+    /// as for the other one. Making it visible needs a counter minted where the
+    /// salts are — `inf_pcg::building::evaluate_buildings_in` — and carried out
+    /// through `GrammarOutput`, which is the mirror-fenced path two hosts
+    /// compare character for character. Carried, named, and not built.
     pub salt_collisions: usize,
     /// **Homes the level offered and the society declined**, because it had
     /// already reached [`SOCIETY_MAX_AGENTS`]. Non-zero is not a defect — it is
@@ -303,7 +341,10 @@ pub struct SocietyRes {
     /// **The outer half of a leg, memoized on its endpoint pair.** A hundred
     /// residents of one block commuting to one office share one street route,
     /// and this is what makes them pay for it once. `None` records a pair the
-    /// network cannot join, so a refusal is not re-searched either.
+    /// network cannot join, so a refusal is not re-searched either — **and the
+    /// `None`s are dropped on any step that folds a volume** (NPC1d audit),
+    /// because the network only ever grows and a pair that could not be joined
+    /// before the bridging block arrived can be joined after it.
     pub legs: BTreeMap<(NavNodeId, NavNodeId), Option<inf_nav::NavPath>>,
     /// Volumes already folded in, by `Guid`.
     pub folded: BTreeSet<Uuid>,
@@ -552,6 +593,8 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
         guid_refusals: soc.stats.guid_refusals,
         homebound: soc.stats.homebound,
         housebound: soc.stats.housebound,
+        no_return: soc.stats.no_return,
+        errandless: soc.stats.errandless,
         doorless: soc.stats.doorless,
         outer_searches: soc.stats.outer_searches,
         outer_cached: soc.stats.outer_cached,
@@ -711,6 +754,19 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
         }
         soc.folded.insert(f.guid);
     }
+    // **A refusal the network has outgrown is not a refusal** (NPC1d audit).
+    // [`SocietyRes::legs`] caches `None` for an endpoint pair the level network
+    // could not join, so a refusal is not re-searched — and the network only
+    // ever GROWS, so a pair refused before the block that bridges it had folded
+    // would stay refused for ever and every agent planned afterwards would
+    // inherit a verdict about a town that no longer exists. Cleared on a step
+    // that folded something, which is rare and bounded. The POSITIVE half is
+    // kept: nothing is ever removed from the network, so a path found over it
+    // is still walkable, and keeping those is the whole measurement the
+    // two-level split rests on.
+    if !fresh.is_empty() {
+        soc.legs.retain(|_, v| v.is_some());
+    }
     stats.folded_now = fresh.len();
     stats.volumes = soc.folded.len();
     stats.works = soc.work.len();
@@ -776,7 +832,11 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
 
 /// What kind of day one agent got.
 enum DayKind {
-    /// Home, work, an errand and home again.
+    /// **The agent has a workplace it can reach**, which is what this kind
+    /// names and all it names (NPC1d audit — it used to read "home, work, an
+    /// errand and home again", which is the *best* case rather than the test).
+    /// Whether the errand and the walk home are in the schedule as well is
+    /// [`SocietyStats::errandless`] and [`SocietyStats::no_return`].
     Full,
     /// No reachable workplace — an errand out and back, and home the rest of the
     /// day.
@@ -877,6 +937,7 @@ fn plan_day(
             }];
             // The errand is nearest the WORKPLACE, because that is where the
             // agent is standing at noon.
+            let mut got_errand = false;
             if let Some(e) = nearest(&soc.errand, w.at) {
                 if let (Some(to_shop), Some(to_work)) =
                     (leg(soc, &w, &e, stats), leg(soc, &e, &w, stats))
@@ -891,14 +952,22 @@ fn plan_day(
                         travel_h: ERRAND_H,
                         path: to_work,
                     });
+                    got_errand = true;
                 }
             }
-            if let Some(back) = back {
-                legs.push(ScheduleLeg {
+            if !got_errand {
+                stats.errandless += 1;
+            }
+            // **A day that only goes one way is counted** (NPC1d audit). Before
+            // it was, an agent whose walk home did not route left at eight and
+            // stood at its desk for ever, and the report called it a full day.
+            match back {
+                Some(back) => legs.push(ScheduleLeg {
                     start_h: HOME_H,
                     travel_h: COMMUTE_H,
                     path: back,
-                });
+                }),
+                None => stats.no_return += 1,
             }
             if let Some(sched) = CrowdSchedule::new(legs) {
                 return (CrowdRecord::scheduled(archetype, sched), DayKind::Full);

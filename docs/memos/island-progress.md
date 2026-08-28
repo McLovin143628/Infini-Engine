@@ -16566,9 +16566,20 @@ written through the same `set_population` door as the lists it indexes. It is
 derived from the graph and the terrain the loading host already has, so it
 reaches no bytes — the P19.5 argument, one wave on. The proof is not the
 sentence: the sample bless regenerated **every** committed sample and only the
-two islands moved, only in `content_hash`, over an **unchanged 49 625 bytes and
-an unchanged 189 entities at schema v26** — and the one authored change in the
-whole wave is a single float, the clock's rate.
+two islands moved, only in `content_hash`, over an **unchanged 49 625-byte
+payload and an unchanged 189 entities at schema v26** — and the one authored
+change in the whole wave is a single float, the clock's rate.
+
+*(NPC1d audit, because the first phrasing read as "the bytes did not change" and
+they did — which is the only reason `content_hash` could move at all, since it is
+a hash of the payload. Counted: `VancouverIsland.inf_lvl` differs from its
+`f0cfa6ec` self in exactly **two bytes**, at offsets 213 and 214, and
+`IslandFixture.inf_lvl` in exactly two, at 211 and 212. Both pairs are `0x32
+0x40` where `0x00 0x00` stood — bytes 6 and 7 of the little-endian `f64`
+`0x4032_0000_0000_0000`, which is **18.0**. That is `TimeOfDay::rate` going from
+frozen to an eighty-minute day and nothing else in either file. What is unchanged
+is the byte COUNT, the entity count and the schema; what moved is one authored
+number, and the sidecar's hash is doing exactly what a content hash is for.)*
 
 **The production wiring.** `inf_ecs::society::sync_society` runs in both fixed
 steps, folds the level's own volumes into a network, pairs a home with a
@@ -16588,7 +16599,7 @@ one host and not the other).
 audit's item 15 both said a `BuildingPlan` has ONE nav id namespace and that
 folding two of them welds a bedroom to a bedroom; nothing failed the day somebody
 did it. Measured now: absorbing a second unsalted interior keeps the **first**
-building's rooms and pushes the **second's edges** — 80 + 81 nodes fuse to 81 and
+building's rooms and pushes the **second's edges** — 80 + 79 nodes fuse to 81 and
 the edge count **doubles, 170 → 340**. That is not a lost building, it is a
 bedroom with a door into another building's corridor.
 
@@ -16813,14 +16824,17 @@ steps out to the town's edge, winds the clock to local midnight and runs
 
 **The compression, and why it is exact.** The island's authored rate is an
 eighty-minute day, which at 60 Hz is **288 000 fixed steps a host**; the gate
-runs the same day at **72×**. A `ScheduleLeg`'s position is a fraction of its own
+runs the same day at **240×** — its clock rate is 4 320 against the island's 18.
+*(An earlier draft of this section said 72×, which is the number of clock-SECONDS
+one fixed step advances, 86 400 / 1 200, and not a ratio between two rates.
+Corrected.)* A `ScheduleLeg`'s position is a fraction of its own
 clock *window*, so every agent is in the same place at the same **hour** at any
 rate — the compression moves no agent. What it does not preserve is the metres
 per second a leg implies, and that claim is armed separately, at the rate the
 island actually authors, by `the_islands_own_rate_makes_a_commute_a_walk`.
 
 **And it is why the hero steps out of town.** A body on a tier that *steers* is
-moved by `move_and_slide` at its own 1.65 m/s gait against a clock running 72×
+moved by `move_and_slide` at its own 1.65 m/s gait against a clock running 240×
 fast, so it is permanently strung out along its route — and the first cut, with
 the hero at the crossroads, ended the day with **all 329 agents inside the 32 m
 `Full` ring**, their bodies drifting toward the middle of town. A census over
@@ -16839,11 +16853,20 @@ both hosts, to the number):
 | volumes folded | **4** — the blocks whose ground had paged in around a stationary hero |
 | homes offered / agents / declined | **329 / 329 / 0** |
 | scheduled (of them, full four-leg days) | **329 (153)** |
+| of the other 176: no walk home / no errand | **0 / 176** |
 | homebound / housebound / doorless | **0 / 0 / 0** |
 | network | **50 nodes / 116 directed edges** |
 | frontages (refused) / crossings / salt collisions | **18 (0) / 12 / 0** |
 | street routes searched / served by the memo | **20 / 944** |
 | commute min / median / max | **177.4 / 320.1 / 393.6 m** |
+| steering intents over the whole gate / `Full` at the 08:30 rush hour | **4 197 / 71** |
+
+**Every one of the 329 gets home**, and the 176 that are not four-leg days are
+short an *errand* rather than a commute: their nearest shop **is** their own
+workplace, so the lunch leg is a stand and `CrowdSchedule::new` drops it. That is
+the generator being honest about a block whose only retail is the building its
+residents work in, and `SocietyStats::{no_return, errandless}` is what says so
+rather than a reader inferring it from `153 of 329`.
 
 The network decomposes exactly: 4 pavement rings are 32 nodes and 64 directed
 edges, 18 front doors are 18 and 36, and 12 crossings dedupe to 8 distinct pairs
@@ -16860,23 +16883,30 @@ rather than a default.
 **A day, hour by hour** — the population the CLOCK moves, which past `Full` is
 every agent. Identical on both hosts to the digit:
 
+*(The hour column is **decimal hours**, which is what the gate prints and what
+`local_hour` returns — `8.52 h` is half past eight, not eight fifty-two. An
+earlier draft of this table set them as clock times; NPC1d audit. The
+two-minute-looking offsets are one sample step: 24 h / 1 200 steps is 0.02 h.)*
+
 | local hour | home | work | walking | tiers (F/N/Fa/D) | sun y | glow |
 |---|---|---|---|---|---|---|
-| 02:02 | **329** | 0 | 0 | 0/4/325/0 | −0.222 | **16** |
-| 07:02 | **329** | 0 | 0 | 0/4/325/0 | +0.456 | 0 |
-| 08:52 | 3 | 9 | **317** | 0/43/286/0 | +0.667 | 0 |
-| 10:02 | 0 | **329** | 0 | 0/17/312/0 | +0.822 | 0 |
-| 19:02 | 179 | 0 | 150 | 0/12/317/0 | +0.144 | 0 |
-| 22:02 | **329** | 0 | 0 | 0/4/325/0 | −0.222 | **16** |
+| 2.02 h (02:01) | **329** | 0 | 0 | 0/4/325/0 | −0.222 | **16** |
+| 7.02 h (07:01) | **329** | 0 | 0 | 0/4/325/0 | +0.456 | 0 |
+| 8.52 h (08:31) | 3 | 9 | **317** | 0/43/286/0 | +0.667 | 0 |
+| 10.02 h (10:01) | 0 | **329** | 0 | 0/17/312/0 | +0.822 | 0 |
+| 19.02 h (19:01) | 179 | 0 | 150 | 0/12/317/0 | +0.144 | 0 |
+| 22.02 h (22:01) | **329** | 0 | 0 | 0/4/325/0 | −0.222 | **16** |
 
 The town is at home at two in the morning and at seven, **three hundred and
-seventeen of it are on the street at ten to nine**, the whole of it is at work at
-ten, half of it is walking home at seven in the evening, and all of it is home by
-ten at night. Seven in the evening is *reported* rather than asserted, because
-with half an hour of jitter either way whether a given agent is home at 19:00 is
-a statement about its own seed.
+seventeen of it are on the street at half past eight**, the whole of it is at
+work at ten, half of it is walking home at seven in the evening, and all of it is
+home by ten at night. Seven in the evening is *reported* rather than asserted,
+because with half an hour of jitter either way whether a given agent is home at
+19:00 is a statement about its own seed. (The 2.02 h and 22.02 h readings are the
+same `sun y` to three decimals because both are 9.98 h from local solar noon,
+which is the arithmetic saying `local_hour` is doing what it says.)
 
-**The windows.** Glow step **16** at 02:02 and 22:02 with the sun at
+**The windows.** Glow step **16** at 2.02 h and 22.02 h with the sun at
 `y = −0.222`, and **0** at every daylight sample. That is the I8b substrate
 answering on the island's own sky, from the island's own clock, for the first
 time since it was written.
@@ -16889,9 +16919,13 @@ arm is a *millimetre*, not a metre, because the claim is exact: the position law
 is `route(clock)` at every tier. That is NPC1c's carried item about `Dormant`
 re-materializing at `last`, closed.
 
-**The ladder, over settle + day + coda: `[27, 302, 329, 329]`** — all four rungs,
+**The ladder, over settle + day + coda: `[71, 316, 329, 329]`** — all four rungs,
 and each because of where the hero is: the crossroads while the town streams in,
-the edge for the day, a kilometre out for the coda.
+the edge for the day, a kilometre out for the coda, and the crossroads again at
+half past eight for the rush-hour station the audit added. *(`[27, 302, 329,
+329]` before that station existed; NPC1d audit. The `Full` rung reads 71 because
+the hero now stands in the middle of a town whose bodies are walking, rather than
+only in one that is asleep.)*
 
 **The trace arithmetic.** 329 agents × 58 B = **19 082 B a step** of crowd
 section, and 1 200 steps of one in-game day is **22 898 400 B**. Against the
@@ -16978,6 +17012,56 @@ is a multiply and a `rem_euclid`. Both are far inside `NPC_STEP_BUDGET_MS`; the
 ratio is the thing to watch when a settlement is a thousand people rather than
 three hundred.
 
+### THE DEFECT THIS WAVE ALMOST SHIPPED — a scheduled agent that reached `Full` stood still
+
+Found after the gate was green, and it is the most useful thing in this section.
+
+`steer_agent` did two wrong things to a **scheduled** record, and the second is
+severe:
+
+1. It read `rec.route.path`. For a scheduled record `route` is the **first leg**,
+   carried as a diagnostic so a reader of `route` sees something true — so a body
+   steered towards its office at six in the evening and never home.
+2. It gated the entire wish on `rec.route.is_walkable()`, which asks the route
+   for a **speed**. A schedule has none: a leg is a fraction of its own clock
+   window, so `CrowdRecord::scheduled` builds its diagnostic route at `0.0` m/s.
+   **Every scheduled agent that reached `Full` therefore wished `ZERO` on every
+   step and stood perfectly still while its clock walked on without it.**
+
+**Not one claim in the day gate would have failed.** From the town's edge nothing
+is `Full` (`+0 steered` at all six hours), the census is of the population the
+*clock* moves, and the clock was never wrong. The gate was measuring the half of
+the system that worked.
+
+The fix is `rec.path_at(guid, clock)` and a walkability test that asks a schedule
+for the thing it has — a leg with **length** in it. Both halves are
+mutation-verified twice over:
+
+| mutation | unit arm | island gate |
+|---|---|---|
+| steer along `rec.route.path` (leg 0) | **fails** — wishes +X while the clock is on the +Z leg | — |
+| gate the wish on `rec.route.is_walkable()` | **fails** — `steered: 0` with the agent `Full` | **fails** — *"not one steering intent over the whole gate, with 71 agents `Full` in the middle of the morning commute"* |
+| unmutated | green | green — **4 197 intents, 71 `Full` at 08:30** |
+
+**And the gate needed a new coda to see it at all**, which is its own small
+lesson. The settle cannot be the arm: the island's committed clock reads **02:18
+local**, so the residents nearest the crossroads are `Full`, on their last leg,
+and *correctly* standing at home asleep. Zero steering at two in the morning is
+right. So the hero comes back to the crossroads at **half past eight**, which is
+the middle of the commute, and the bodies there have somewhere to be — with
+`rush` (agents `Full` at that moment) asserted beside `steered_ever` so the claim
+cannot go vacuous the day the staging drifts.
+
+**The law**: *a gate staged where a defect cannot appear is a gate that certifies
+the defect.* Standing the hero at the town's edge is right for censusing a day
+and it removed the only tier that walks a body; the wave had to add a station
+where the thing it was not measuring happens.
+
+The pose arm gained the same shape while I was there: a **multiple** says every
+character in the store has the island's rig and says nothing about how many, so
+it is now bounded by `1 + society.agents` — the hero plus the population the
+level derived, which is the only source of characters this level has.
+
 ### What the battery said, and the one red that is the wave working
 
 Three arms went red on the first full run, and the interesting one is the first.
@@ -17059,12 +17143,12 @@ that wrote the literal.
 
 | | at `f0cfa6ec` | **wave NPC1d** |
 |---|---|---|
-| battery | 333 blocks / 6 365 passed / 0 failed / 19 ignored | **333 / 6 396 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, **+0 blocks and +31 arms**: 14 in `inf_pcg::building::society` and its namespace module, 13 in `inf_ecs::{crowd, society}`, 2 in `island_gate` (`pie_equals_shipping_over_a_day_in_the_life`, `the_islands_own_rate_makes_a_commute_a_walk`), and two doc-tests; plus assertions added to `projector_mirror`'s existing crowd-ordering arm and to `island_gate`'s pose arm, both net zero |
+| battery | 333 blocks / 6 365 passed / 0 failed / 19 ignored | **333 / 6 397 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, **+0 blocks and +32 arms**: 14 in `inf_pcg::building::society` and its namespace module, 13 in `inf_ecs::{crowd, society}`, 2 in `island_gate` (`pie_equals_shipping_over_a_day_in_the_life`, `the_islands_own_rate_makes_a_commute_a_walk`), 1 for the audit's steering defect (`a_scheduled_agent_at_full_steers_along_the_leg_the_clock_names`), and two doc-tests; plus assertions added to `projector_mirror`'s existing crowd-ordering arm and to `island_gate`'s pose arm, both net zero |
 | goldens | 59 | **59** — none added, none re-blessed; `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**, `git status` over `tests/goldens` empty afterwards. Nothing in this wave touches render code |
 | rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — 404 `^warning` lines minus 30 per-crate summaries after `cargo clean --doc`. **The wave adds zero**, after fixing the two it did add (a public doc linking a private constant, and a doc block that a scripted insert had spliced into the middle of its neighbour's). Headroom **76** |
 | `clippy --workspace --all-targets -D warnings` | 0 | **0** (run **LAST**, per the rmeta law) |
 | `cargo fmt --all --check` | clean | **clean** |
-| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** — `residents` and `interior_nav` are `#[serde(skip)]` on `PcgVolume`, `SocietyRes` is a bevy resource, and a schedule is runtime state on a record. The bless regenerated **every** committed sample and only the two islands moved, only in `content_hash`, over an unchanged 49 625 bytes and 189 entities |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** — `residents` and `interior_nav` are `#[serde(skip)]` on `PcgVolume`, `SocietyRes` is a bevy resource, and a schedule is runtime state on a record. The bless regenerated **every** committed sample and only the two islands moved, only in `content_hash`, over an unchanged 49 625-**byte** payload and 189 entities — the payload itself differs in exactly **two bytes** on each island, the `f64` `TimeOfDay::rate` going 0.0 → 18.0, which is why the hash moves at all (NPC1d audit) |
 | step phases | 25 | **26** (`society`, index 4) |
 | trace sections | 9 | **9** — the leg byte rides the crowd section |
 | trace bytes an agent | 57 | **58** (`leg`) |
@@ -17160,9 +17244,276 @@ that wrote the literal.
     residents on a level whose crowd phase read 0.000 before this wave); the rest
     is three waves and an arc since the last recorded reading of **5.673 ms**,
     and this run is not a before/after of any of them.
-15. **A society only ever grows.** `SocietyRes` keeps every ring, interior and
+15. **`salt_collisions` cannot see a collision between two buildings of the
+    SAME volume.** It checks whether a front door is already a node of the level
+    network, which catches the inter-volume case; two buildings of one volume
+    have their interiors folded together by `inf_pcg::GrammarOutput::absorb`
+    (whose rule is that the first record wins) long before this module is handed
+    the result, so such a pair arrives as one building wearing both sets of
+    doors. The 39-bit width is what makes that acceptable — about one in a
+    million over an island's thousand buildings — rather than the counter.
+    Making it visible needs a counter minted where the salts are, in
+    `evaluate_buildings_in`, carried out through the mirror-fenced
+    `GrammarOutput`. Named and not built.
+16. **A society only ever grows.** `SocietyRes` keeps every ring, interior and
     slot it has ever folded, so a level's population is a function of what a
     player has *walked past* rather than of what is resident now. That is right
     for a streaming world and it means memory grows with exploration: 170 blocks
     of one settlement is about 1 400 pavement nodes and 170 interiors, which is
     small, and fifty square kilometres of settlements has never been walked.
+
+## Wave NPC1d — the adversarial audit (2026-08-28)
+
+Range `f0cfa6ec..b107b8f2`, eleven commits. The wave's own battery was reproduced
+first, cold and unmodified: **333 blocks / 6 396 passed / 0 failed / 19 ignored**,
+which is the ledger's number to the digit. Everything below was then re-derived
+or re-run rather than read.
+
+### What re-ran, and what it said
+
+`pie_equals_shipping_over_a_day_in_the_life` and
+`the_islands_own_rate_makes_a_commute_a_walk`, both hosts, whole binary green
+(**16 / 16**):
+
+| | re-run |
+|---|---|
+| settled in / volumes folded | **163 steps / 4** |
+| homes offered / agents / declined | **329 / 329 / 0** |
+| scheduled (full four-leg days) | **329 (153)** |
+| homebound / housebound / doorless | **0 / 0 / 0** |
+| no walk home / no errand *(new counters)* | **0 / 176** |
+| network | **50 nodes / 116 directed edges** |
+| frontages (refused) / crossings / salt collisions | **18 (0) / 12 / 0** |
+| street routes searched / served by the memo | **20 / 944** |
+| commute min / median / max | **177.4 / 320.1 / 393.6 m** |
+| implied speed at rate 18 | **0.89 / 1.60 / 1.97 m/s**; a day is **80.0 min** |
+| census, home/work/walking | 2.02 h **329/0/0** · 7.02 h **329/0/0** · 8.52 h **3/9/317** · 10.02 h **0/329/0** · 19.02 h **179/0/150** · 22.02 h **329/0/0** |
+| sun y / glow at 2.02 h and 22.02 h | **−0.222 / 16**, and **0** at every daylight sample |
+| coda | **329** dormant, worst re-materialized agent **0.0000 m** |
+| the day | **1 200 steps, 1 200 distinct, identical on both hosts to the byte** |
+
+Every one of those is the wave's own number. Three moved, and each because the
+audit changed something: the ladder is **`[71, 316, 329, 329]`** against
+`[27, 302, 329, 329]` (the rush-hour station), the pose store is now bounded as
+well as multiplied (**330 of a possible `1 + society.agents` = 330**), and the
+two new counters have names for the ledger's previously unexplained
+`329 scheduled, 153 full days`.
+
+The archetype table was re-run and is the wave's, row for row: Office 15 rooms
+→ 0/13/0, Apartment 37 → 13/0/0, Industrial 6 → 0/26/0, House 45 → 13/0/0,
+Estate 18 → 7/0/0, Hotel 31 → 12/0/0, Shop 21 → 0/34/5. Nothing in it is
+authored per archetype.
+
+### HIGH — a scheduled agent that reached `Full` stood perfectly still
+
+Written up above under *"THE DEFECT THIS WAVE ALMOST SHIPPED"*. In one line:
+`steer_agent` steered along `rec.route.path` — leg 0 for a scheduled record —
+and gated the whole wish on `rec.route.is_walkable()`, which asks a route for a
+**speed** that `CrowdRecord::scheduled` sets to `0.0`. So this wave's flagship —
+a town of people walking — was a town of statues at the one tier a player stands
+among, and not one claim in the day gate would have failed. Fixed, both halves
+mutation-verified against a unit arm and against the gate. Proving numbers:
+**4 197 steering intents and 71 agents `Full`** at the 08:30 rush hour, against
+**0 and 27**.
+
+### MED, fixed
+
+1. **The negative street-route memo was never invalidated.** `SocietyRes::legs`
+   caches `None` for an endpoint pair the level network could not join, and that
+   network **only ever grows** — so a pair refused before its bridging block
+   folded stayed refused for the life of the session, and every agent planned
+   afterwards inherited a verdict about a town that no longer existed. Now
+   `soc.legs.retain(|_, v| v.is_some())` on any step that folds a volume, which
+   is rare and bounded. The positive half — the whole two-level argument — is
+   untouched, and the proof is that the island still reads **20 searched / 944
+   cached** to the unit.
+2. **`DayKind::Full` was returned for an agent whose walk home did not route.**
+   It is handed back the moment the *outbound* commute routes, so an agent that
+   went to work and stood at its desk through the night was reported as a full
+   day and appeared in no counter. `SocietyStats::no_return` counts it and the
+   gate asserts **0**; `SocietyStats::errandless` gives `329 scheduled, 153 full
+   days` its missing name — **176** — asserted as the identity
+   `scheduled − full4 == errandless + homebound` rather than left for a reader to
+   infer.
+3. **The one-byte leg index had no enforcement.** `AGENT_TRACE_BYTES`' doc said
+   *"a schedule with more than 255 legs is not a day"* and nothing refused one —
+   leg 256 would wear leg 0's number and the step's "a new leg starts clean"
+   comparison would read *no change* across the wrap and keep a phase it exists
+   to drop. `MAX_SCHEDULE_LEGS = 256`, refused whole by `CrowdSchedule::new`
+   (refused rather than clipped: a caller silently given the first 256 of its 300
+   legs has a day that ends at teatime), and armed.
+4. **A third doc-block splice, of exactly the shape this wave's own commit
+   named.** `3bc5a044` found two and missed the third:
+   `inf_nav::domain::CALLER` had lost its doc comment to `PAVEMENT`, which
+   opened with a sentence describing `CALLER`; the module doc still said *"Three
+   producers mint node ids"* over four. Both fixed. **A scripted insert that has
+   done this three times in one wave is a tool, not an accident.**
+5. **The gate's compression factor was wrong by 3.3×**, and a rate-30 number
+   survived the rate change. "72×" is 86 400 / 1 200 — the clock-SECONDS one
+   fixed step advances — not a ratio; the real compression is `GATE_CLOCK_RATE`
+   4 320 against `ISLAND_CLOCK_RATE` 18 = **240×**. `ScheduleLeg`'s doc also
+   still carried **172 800 fixed steps**, which is the first draft's figure where
+   the shipped island is **288 000**.
+6. **The hourly census table set decimal hours as clock times.** The gate prints
+   `local_hour` as `{:.2}`, so `8.52 h` is **08:31** and the prose *"on the
+   street at ten to nine"* was twenty-one minutes out. Corrected — and the true
+   reading is the better one, because half past eight is exactly the rush hour
+   the new gate station stands in.
+7. **The blood-red night was "promoted" only inside this memo.** `docs/ROADMAP.md`
+   is the authoritative plan and neither its Phase 17 block nor its NPC1d entry
+   carried a word of it, so the sky wave that would fix it could not find it. The
+   measurement (mean sRGB **(70.2, 3.4, 2.7)** over the upper half of
+   `clouds_night`, saturation **0.962**, horizon band (50.2, 3.1, 2.7), against a
+   brightest-pixel star of (67, 67, 67), at a sun 17° below the horizon) and the
+   in-scattering-at-the-limb diagnosis are now in the Phase 17 STATUS block under
+   a heading a sky wave reads.
+8. **`salt_collisions` cannot see the collision the 39 bits are sized for** —
+   the wave's carried item 15, found here and written into the counter's own doc
+   as well as the list, because a counter whose doc says "zero is the
+   expectation" and whose blind spot lives three sections away is a counter a
+   reader will over-trust.
+9. **The bless's "unchanged bytes", and the content-hash verdict.** The payloads
+   **did** change — which is the only reason `content_hash` could move, since it
+   is a hash of the payload. Counted: `VancouverIsland.inf_lvl` differs from its
+   `f0cfa6ec` self in exactly **two bytes** (offsets 213, 214) and
+   `IslandFixture.inf_lvl` in exactly two (211, 212); both pairs are `0x32 0x40`
+   where `0x00 0x00` stood, which is bytes 6–7 of the little-endian `f64`
+   `0x4032_0000_0000_0000` = **18.0**. That is `TimeOfDay::rate` and nothing else
+   in either file. **The bless is honest; the sentence was not.** What is
+   unchanged is the byte COUNT (49 625), the entity count (189) and the schema
+   (v26).
+10. **The fused-interior measurement was quoted and printed by nothing**, and one
+    of its four numbers was wrong. A `println!` now makes it reproducible, and it
+    reads **80 + 79 nodes → 81; 170 + 170 directed edges → 340** — the ledger
+    said "80 + 81", which happens to equal the fused total and is not the second
+    graph's count. The edge doubling, which is the actual defect, is exactly as
+    claimed.
+
+### Verified as claimed — what survived being attacked
+
+* **One occupancy table.** `inf_pcg::building::society::occupancy` is the only
+  place in the workspace a `RoomType` becomes a number of people; `palettes.rs`
+  decides which rooms a building *gets* and never how many it holds.
+* **The 39-bit salt's arithmetic.** Birthday over 2³⁹ at n ≈ 1 000 is
+  ~1 × 10⁻⁶; at 2¹⁹ it is ~0.95, i.e. *about once per island*. Both claims hold.
+* **The ceiling is loud, counted and ordered by content.** 200 blocks × 8 homes =
+  **1 600 offered, 1 000 taken, 600 declined and counted**, with
+  `pop.records.len() == 1000` asserted in the **world** rather than in the
+  report. The declined set is the tail of a `BTreeMap` keyed on `agent_guid`, a
+  hash of `(volume, building, room, slot)` — so *given the pending set*, which
+  thousand is a pure function of the level's content and not of iteration order.
+  **The qualifier is load-bearing and is now carried**: in a streaming world the
+  pending set at the moment the ceiling fires is exactly a function of what has
+  paged in.
+* **The schema really does not move.** `PcgVolume::{residents, interior_nav}` are
+  `#[serde(skip)] + #[reflect(ignore)]`, the round-trip arm asserts both absent
+  from the serialized form *and* empty on decode, and scene v26 / payload v11 /
+  `.inf_sm` v3 / recipe v2 are unmoved in the diff.
+* **`sync_society` in both fixed steps**, pinned as source text by
+  `projector_mirror` in the order `sky < society < crowd`.
+* **The two-level pricing.** 743 µs over 1 600 nodes extrapolated to ~11 ms at
+  25 000 and REFUSED; **20 searched / 944 cached** reproduces exactly.
+* **The rate is a measurement.** 3 600 × 1.65 / 320.1 = 18.56 → 18, and the
+  ±25 % band (1.2375–2.0625 m/s) excludes the rate-30 median of 2.67, so the arm
+  really would have rejected the first draft.
+* **D-12.** Three in-game hours at rate 18 is 600 sim s, 0.458 % of 131 072; the
+  distance to the bound is **27.31 in-game days**. Both figures check.
+* **The network decomposes.** 4 rings × 8 = 32 nodes plus 18 front doors = **50**;
+  4 × 16 + 18 × 2 + 8 × 2 = **116**. The 12 *counted* crossings are 6 block pairs
+  each seen from both fresh rings; the 8 *distinct* links are those 6 with two
+  pairs picking a different nearest node from each side — which is why 12 counted
+  and 16 directed edges are both right.
+* **The drive-gate re-aim is stronger, not weaker — for the RIG.** With 330
+  characters in the store, `330 × (36 + 40 R) ≡ 0 (mod 6 476)` has **R = 161** as
+  its only solution under ~1 700 joints, and any *single* deviant rig leaves a
+  remainder (a 20-joint hero among 329 full ones leaves 836) and fails — so a
+  20-joint rig cannot hide inside the multiple. What the multiple did **not** pin
+  was the COUNT, and that is the half the audit added: bounded by
+  `1 + society.agents`, measured at **330 of a possible 330**.
+* **The honest numbers are honest.** The N = 1 000 row's 6.233 ms bracket
+  disagreement is stated as a refusal to publish the delta in three places. The
+  island's own step reads `society` **0.205 ms** against `SOCIETY_STEP_BUDGET_MS`
+  0.5 (41 % of it) and `crowd` **0.353** against `NPC_STEP_BUDGET_MS` 1.0 (35 %);
+  the sweep's settled fixture re-measures the phase at **0.086 ms** against the
+  same 0.5. Both budgets hold, and the 6.5× per-agent cost of a scheduled agent
+  over a walking one is carried as item 11 with its lever named and refused.
+* **`+31` is exact.** Counted by diffing `#[test]` names across the range:
+  +12 `inf_pcg::building::society`, +3 the namespace module, +8 −1
+  `inf_ecs::crowd`, +7 `inf_ecs::society`, +2 `island_gate` = **31 net**.
+
+### Carried, by name (the audit's, after the wave's sixteen)
+
+1. **The `+31` sub-breakdown does not add up the way it is written** — "14 pcg /
+   13 ecs / 2 gate / **two doc-tests**". The real split is 15 / 14 / 2 / **0**;
+   there are no new doc-tests in the wave. Two compensating errors and one
+   invented category, summing to the right total.
+2. **`Cargo.lock` moved by one line, not "two path edges".** A lock file does not
+   distinguish a dev dependency from a real one, so promoting `inf-player`'s
+   `inf-nav` is invisible in it; only `inf-studio`'s new edge shows.
+3. **`AGENT_TRACE_BYTES`' doc quotes 112× where its own arm asserts 111.**
+   6 476 / 58 is 111.66; both roundings are stated and they disagree in adjacent
+   paragraphs.
+4. **`occupancy` answers `(SlotRole::Home, 0)` for the eight room types that hold
+   nobody** — a role that means nothing, in a tuple a caller must know to ignore
+   — and a `Retail` room with a degenerate area still emits an `Errand` slot,
+   because the `n == 0` guard exempts `Retail` unconditionally.
+5. **`hand_installed` clears `soc.pending` silently.** A hand-installed
+   population makes a level's own offered homes vanish from `stats.homes` instead
+   of being declined and counted, which is the one place in this module a number
+   goes away without a counter.
+6. **`SOCIETY_MAX_AGENTS`' doc claims more than the code guarantees** — "which
+   thousand a level gets is a function of its own content and not of the order
+   its cells activated". True given the pending set, and the arm exercises the
+   all-at-once case; in a streaming world the pending set at the moment the
+   ceiling fires is a function of what has paged in, which is the wave's own
+   carried items 2 and 4 one level up. Both hosts still agree, so it is a
+   *design* limit rather than a determinism one.
+7. **A volume that is re-evaluated after it has been folded is never re-folded.**
+   `soc.folded` is keyed on `Guid`, so a Simulate session that edits a settlement
+   keeps the society derived from the settlement as it was. Bounded by
+   `clear_society` on stop, and worth stating because P23 proved editing during
+   Simulate.
+8. **`crowd_sweep`'s society-budget comment over-describes what it measures.**
+   "the sweep's fixture derives its population once and folds nothing again" —
+   the sweep installs a hand population, so the derivation is switched *off* by
+   `hand_installed` and the number asserted is the walk. The budget is right; the
+   sentence is bigger than it.
+9. **`soc.pending.entry(g).or_insert(place)` drops a colliding home silently.**
+   112 bits of `agent_guid` makes it negligible and nothing counts it.
+
+### The laws this audit paid for
+
+* **A gate staged where a defect cannot appear is a gate that certifies the
+  defect.** Standing the hero at the town's edge is exactly right for censusing a
+  day — every agent there is moved by its clock, which is what makes `rec.last`
+  the schedule's own answer — and it removes the only tier that walks a body. The
+  wave read `+0 steered` at all six hours and took it as staging working. It was
+  also the whole of the blind spot.
+* **A diagnosis offered for a symptom must be measured before the staging moves
+  to avoid it.** "All 329 agents inside the `Full` ring, their bodies drifting
+  toward the middle of town" was read as the compression and answered by moving
+  the hero. The drift was a defect, and the number that would have said so —
+  `stats.steered` — was already being computed and was never looked at.
+* **A field that means nothing for a variant is not neutral, it is a trap.**
+  `CrowdRecord::scheduled` sets `route.speed_mps = 0.0` because a schedule has no
+  speed, and one existing reader asks the route whether it is *walkable* by
+  asking for exactly that. The variant was added and every reader of the old
+  field was not re-read.
+* **A ledger number nobody prints is a sentence.** Two of this wave's quoted
+  measurements had no arm behind them; one of the four numbers in one of them
+  was wrong, and the `println!` that fixed it took three lines.
+* **A doc comment has no closing brace, so a scripted insert can only be caught
+  by reading.** This wave repaired two spliced doc blocks and shipped a third.
+
+### Counts
+
+| | wave `b107b8f2` | **after the audit** |
+|---|---|---|
+| battery | 333 / 6 396 / 0 / 19 | **333 / 6 397 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`; **+1 arm, +0 blocks** (`a_scheduled_agent_at_full_steers_along_the_leg_the_clock_names`; the `MAX_SCHEDULE_LEGS` refusal and the two new society counters ride existing arms) |
+| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**, `git status` over `tests/goldens` empty afterwards |
+| rustdoc (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — zero added |
+| `clippy --workspace --all-targets -D warnings` | 0 | **0** (run LAST, per the rmeta law) |
+| `cargo fmt --all --check` | clean | **clean** |
+| schemas / committed content | v26 · v11 · v3 · v2 | **unmoved**; no sample re-blessed by the audit |
+| step phases / trace bytes / libm subjects | 26 · 58 · 42 | **unchanged** |
+| files touched | — | `crates/inf-ecs/src/{crowd,society}.rs`, `crates/inf-nav/src/lib.rs`, `crates/inf-pcg/src/building/mod.rs`, `runtime/inf-player/tests/island_gate.rs`, `docs/ROADMAP.md`, `docs/memos/island-progress.md` |

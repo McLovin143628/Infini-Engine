@@ -1543,6 +1543,18 @@ mod nav_namespace_tests {
         // into a corridor in another building.
         let (mut fused, ga, gb) = (a.interior_nav(), a.interior_nav(), b.interior_nav());
         fused.absorb(&gb);
+        // Printed because the wave ledger quotes these four numbers, and a
+        // measurement no arm reproduces is a sentence (NPC1d audit).
+        println!(
+            "NPC1d fused interiors: {} + {} nodes -> {}; {} + {} directed edges \
+             -> {}",
+            ga.len(),
+            gb.len(),
+            fused.len(),
+            ga.edge_count(),
+            gb.edge_count(),
+            fused.edge_count()
+        );
         assert!(
             fused.len() < ga.len() + gb.len(),
             "two unsalted interiors are supposed to collide id for id: {} + {} \

@@ -72,10 +72,11 @@ pub use route::{route, route_counted, NavRoute, NavVerdict, SearchStats};
 
 /// **The id namespace**, because [`NavGraph::absorb`] joins on id equality.
 ///
-/// Three producers mint node ids independently and their graphs are folded into
+/// Four producers mint node ids independently and their graphs are folded into
 /// one before an agent walks it, so two of them handing out the same number
 /// would silently weld a road junction to a bedroom. The top four bits name who
-/// minted an id; the low sixty are the producer's own.
+/// minted an id; the low sixty are the producer's own. *(Three until NPC1d
+/// added [`domain::PAVEMENT`].)*
 ///
 /// This lives here rather than three times over for the reason this tree keeps
 /// re-learning: a namespace agreed in three files is a namespace that drifts.
@@ -88,8 +89,6 @@ pub mod domain {
     pub const STREET: u64 = 2 << 60;
     /// `inf_pcg::BuildingPlan::interior_nav` — rooms, doorways and stairs.
     pub const BUILDING: u64 = 3 << 60;
-    /// Reserved for a caller composing nodes of its own — a gate placing a
-    /// destination, a level naming a spawn point.
     /// **A block's own pavement** (NPC1d) — the ring of nodes
     /// `inf_ecs::society` lays round a `PcgVolume`, and the crossings between
     /// two of them.
@@ -103,6 +102,8 @@ pub mod domain {
     /// they get a tag each.
     pub const PAVEMENT: u64 = 4 << 60;
 
+    /// Reserved for a caller composing nodes of its own — a gate placing a
+    /// destination, a level naming a spawn point.
     pub const CALLER: u64 = 15 << 60;
     /// The mask that recovers a producer's own id from a tagged one.
     pub const LOCAL_MASK: u64 = (1 << 60) - 1;

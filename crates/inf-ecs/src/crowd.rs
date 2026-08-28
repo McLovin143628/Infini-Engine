@@ -926,6 +926,17 @@ pub const SALT_SCHEDULE: u64 = 0x5343_4845_4400_0005;
 /// copy is what drifts.
 pub const SCHEDULE_JITTER_H: f64 = 0.5;
 
+/// **The most legs one day may have** (NPC1d audit) — 256, the range of the
+/// one byte of a schedule that reaches the replay trace.
+///
+/// [`CrowdRecord::leg`] is a `u8` because a day is four legs and a byte holds
+/// two hundred and fifty-six of them. That sentence was a doc comment and
+/// nothing else until this audit: a 300-leg schedule would have aliased leg 0
+/// with leg 256, and the step's "a new leg starts clean" comparison would have
+/// read *no change* across the wrap and carried a phase it exists to drop.
+/// [`CrowdSchedule::new`] refuses past it.
+pub const MAX_SCHEDULE_LEGS: usize = 256;
+
 /// **One leg of an agent's day**: leave at an hour, walk a route, and stand at
 /// the far end until the next leg begins.
 ///
@@ -934,9 +945,11 @@ pub const SCHEDULE_JITTER_H: f64 = 0.5;
 /// A leg's position is `length` times `(elapsed / travel_h)`, clamped — so an
 /// agent is at the same *place* at the same *hour* whatever rate the level's
 /// clock runs at. That is what makes a day in the life provable in a test
-/// process at all: twenty-four hours of the island's own authored rate is
-/// 172 800 fixed steps a host, and the same day compressed is the same day,
-/// arriving sooner.
+/// process at all: twenty-four hours of the island's own authored rate — 18, an
+/// eighty-minute day — is **288 000** fixed steps a host, and the same day
+/// compressed is the same day, arriving sooner. *(172 800 until the NPC1d
+/// audit, which is the number for the rate-30 first draft the wave measured its
+/// way off.)*
 ///
 /// The price is stated rather than hidden: at a compressed rate the implied
 /// walking speed is not a walking speed, and a [`Full`](CrowdTier::Full) body —
@@ -995,6 +1008,16 @@ impl CrowdSchedule {
     /// value (P21.4), and a leg that cannot be walked is not a leg. The order
     /// the caller gives is kept: [`at`](Self::at) picks by clock rather than by
     /// index, so nothing here needs sorting.
+    ///
+    /// **And more than [`MAX_SCHEDULE_LEGS`] walkable legs is refused whole**
+    /// (NPC1d audit) rather than truncated. [`CrowdRecord::leg`] is the one
+    /// byte of this that reaches the replay trace, so a schedule past the byte
+    /// would alias leg 0 with leg 256 — the step would read "no change" across
+    /// that boundary and keep a phase it is meant to drop. The doc on
+    /// [`AGENT_TRACE_BYTES`] said "a schedule with more than 255 legs is not a
+    /// day"; a hazard written into a doc is not a hazard handled, so it is a
+    /// value now. Refused rather than clipped because a caller silently given
+    /// the first 256 of its 300 legs has a day that ends at teatime.
     pub fn new(legs: Vec<ScheduleLeg>) -> Option<Self> {
         let legs: Vec<ScheduleLeg> = legs
             .into_iter()
@@ -1005,7 +1028,7 @@ impl CrowdSchedule {
                     && l.path.length_m().is_finite()
             })
             .collect();
-        (!legs.is_empty()).then_some(Self { legs })
+        (!legs.is_empty() && legs.len() <= MAX_SCHEDULE_LEGS).then_some(Self { legs })
     }
 
     /// The legs, in the order they were given.
@@ -1873,7 +1896,18 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
         //    writes for those is an INTENT, and the body follows it.
         if tier.steers() {
             rec.last = here;
-            steer_agent(world, entity, rec, here, &plan, &mut stats);
+            steer_agent(
+                world,
+                entity,
+                SteerSubject {
+                    guid,
+                    rec,
+                    clock,
+                    here,
+                },
+                &plan,
+                &mut stats,
+            );
         } else {
             rec.last = at;
             if let Some(mut t) = world.world_mut().get_mut::<Transform>(entity) {
@@ -2089,6 +2123,21 @@ fn crowd_movement(a: &CrowdArchetype) -> CharacterMovement {
     }
 }
 
+/// **Who is being steered, and when** — the four things [`steer_agent`] needs
+/// about the *agent* rather than about the world.
+///
+/// A struct rather than four parameters because `clippy::too_many_arguments` is
+/// right: `(guid, rec, clock, here)` are one subject read from one record on one
+/// step, and a call site that got `here` and `clock` the wrong way round would
+/// still compile.
+struct SteerSubject<'a> {
+    guid: Uuid,
+    rec: &'a CrowdRecord,
+    clock: CrowdClock,
+    /// Where the body is **now** — its live transform, not the clock's answer.
+    here: DVec3,
+}
+
 /// **Steer one agent along its own path** — pure pursuit, written as an intent.
 ///
 /// The body is the movement model's to move, so what the crowd writes is
@@ -2106,15 +2155,37 @@ fn crowd_movement(a: &CrowdArchetype) -> CharacterMovement {
 /// is instead of cutting across the block towards where it should have been;
 /// the clock contributes [`RouteProgress::forward`], which is what tells a
 /// ping-pong agent on its way home to look the other way.
+///
+/// # The path is the one the CLOCK names (NPC1d audit)
+///
+/// [`CrowdRecord::path_at`], not `rec.route.path`. For an unscheduled record
+/// those are the same object and this reads identically; for a **scheduled**
+/// one `route` is the *first leg*, carried as a diagnostic so a reader of
+/// `route` sees something true, and steering along it walks a body towards its
+/// office at six in the evening and never home.
+///
+/// The walkability test moved with it, for the same reason and with a sharper
+/// edge: [`CrowdRoute::is_walkable`] asks the route for a **speed**, and a
+/// schedule has none — a leg is a fraction of its own clock window, so
+/// `CrowdRecord::scheduled` builds its diagnostic route at `0.0` m/s. Every
+/// scheduled agent that reached [`Full`](CrowdTier::Full) therefore wished
+/// `ZERO` on every step and stood exactly still while its clock walked on
+/// without it. What a schedule has instead of a speed is a leg with *length* in
+/// it, which is what is asked here.
 fn steer_agent(
     world: &mut EcsWorld,
     entity: Entity,
-    rec: &CrowdRecord,
-    here: DVec3,
+    who: SteerSubject<'_>,
     plan: &AgentPlan,
     stats: &mut CrowdStats,
 ) {
-    let path = &rec.route.path;
+    let SteerSubject {
+        guid,
+        rec,
+        clock,
+        here,
+    } = who;
+    let path = rec.path_at(guid, clock);
     let len = path.length_m();
     // The path is the ground; the transform is the capsule's centre. Projecting
     // the centre would work on the flat and would find the wrong leg on a stair,
@@ -2131,11 +2202,25 @@ fn steer_agent(
     if let Some(mut agent) = world.world_mut().get_mut::<CrowdAgent>(entity) {
         agent.blocked = blocked;
     }
-    let arrived = rec.route.mode == RouteMode::Once && on.s_m >= len - ARRIVE_M;
+    // A scheduled agent has arrived when its leg's own clock window has run out
+    // (it stands at the far end until the next leg begins) or when its body has
+    // reached the end of the leg, whichever comes first. An unscheduled one
+    // keeps NPC1c's rule to the letter, so nothing written before this wave
+    // moves by a bit.
+    let (arrived, walkable) = match &rec.schedule {
+        Some(_) => (
+            plan.progress.arrived || on.s_m >= len - ARRIVE_M,
+            len.is_finite() && len > 0.0,
+        ),
+        None => (
+            rec.route.mode == RouteMode::Once && on.s_m >= len - ARRIVE_M,
+            rec.route.is_walkable(),
+        ),
+    };
     if arrived {
         stats.arrived += 1;
     }
-    let wish = if arrived || !rec.route.is_walkable() {
+    let wish = if arrived || !walkable {
         DVec3::ZERO
     } else {
         // **The lookahead grows until it has a HORIZONTAL lead** (NPC1c).
@@ -2421,7 +2506,9 @@ pub fn crowd_state_bytes(world: &EcsWorld) -> Vec<u8> {
 /// hosts that disagreed about which leg an agent is on would carry different
 /// phases into the same walk and part company a step later, in the position —
 /// so the byte that decides it goes in the trace, on `rephase_m`'s own terms.
-/// One byte holds a day; a schedule with more than 255 legs is not a day.
+/// One byte holds a day, and [`CrowdSchedule::new`] refuses a schedule longer
+/// than [`MAX_SCHEDULE_LEGS`] rather than letting leg 256 wear leg 0's number
+/// (NPC1d audit — the sentence used to live here and nowhere else).
 pub const AGENT_TRACE_BYTES: usize = 16 + 1 + 24 + 8 + 8 + 1;
 
 #[cfg(test)]
@@ -2938,6 +3025,21 @@ mod tests {
         .expect("one leg survives");
         assert_eq!(mixed.legs().len(), 1);
         assert_eq!(mixed.legs()[0].start_h, 9.0);
+        // **And a day longer than the trace byte is refused whole** (NPC1d
+        // audit): the byte is what the step compares to decide "a new leg
+        // starts clean", so leg 256 wearing leg 0's number is a phase that is
+        // never dropped.
+        let many = |n: usize| -> Vec<ScheduleLeg> {
+            (0..n)
+                .map(|i| leg(24.0 * i as f64 / n as f64, 0.1, a, b))
+                .collect()
+        };
+        assert!(CrowdSchedule::new(many(MAX_SCHEDULE_LEGS)).is_some());
+        assert!(
+            CrowdSchedule::new(many(MAX_SCHEDULE_LEGS + 1)).is_none(),
+            "a {}-leg schedule was accepted against a one-byte leg index",
+            MAX_SCHEDULE_LEGS + 1
+        );
     }
 
     /// **The whole reason a leg is a fraction of its window**: the day has the
@@ -3053,6 +3155,91 @@ mod tests {
         // same shift, whatever the level hour.
         let g = guid(0x5001);
         assert_eq!(rec.hour_of(g, 8.0) - 8.0, rec.hour_of(g, 15.0) - 15.0);
+    }
+
+    /// **A SCHEDULED agent at `Full` actually steers, and steers along the leg
+    /// the clock names** (NPC1d audit).
+    ///
+    /// Two defects in one arm, and the second is the severe one.
+    ///
+    /// `steer_agent` read `rec.route.path`, which for a scheduled record is the
+    /// **first leg** — carried as a diagnostic so a reader of `route` sees
+    /// something true — so a body walked towards its office at six in the
+    /// evening and never home. And it gated the whole wish on
+    /// `rec.route.is_walkable()`, which asks the route for a **speed**: a
+    /// schedule has none (a leg is a fraction of its own clock window, and
+    /// `CrowdRecord::scheduled` builds its diagnostic route at `0.0` m/s), so
+    /// **every scheduled agent that reached `Full` wished `ZERO` on every step
+    /// and stood exactly still** while its clock walked on without it.
+    ///
+    /// Neither was visible to the island gate, because from the town's edge
+    /// nothing steers at all (`+0 steered` at every one of its six hours). This
+    /// is the arm that sees them: an unbounded band, so the agent is `Full`; a
+    /// day whose second leg runs the other way, so "the active leg" and "leg 0"
+    /// are different directions rather than different distances.
+    #[test]
+    fn a_scheduled_agent_at_full_steers_along_the_leg_the_clock_names() {
+        let g = guid(0xDA4);
+        // Leg 0 runs +X from the origin; leg 1 runs +Z from where leg 0 ended.
+        // A body steering along leg 0 while the clock is on leg 1 wishes +X;
+        // one steering along the leg the clock names wishes +Z.
+        let home = DVec3::new(0.0, 0.0, 0.0);
+        let work = DVec3::new(100.0, 0.0, 0.0);
+        let shop = DVec3::new(100.0, 0.0, 100.0);
+        let sched = CrowdSchedule::new(vec![leg(8.0, 1.0, home, work), leg(12.0, 1.0, work, shop)])
+            .expect("two walkable legs");
+        let mut records = BTreeMap::new();
+        records.insert(
+            g,
+            CrowdRecord::scheduled(CrowdArchetype::humanoid(None, None, None), sched),
+        );
+
+        let mut world = EcsWorld::new();
+        set_population(&mut world, records);
+        // A clock parked in the middle of leg 1, at THIS agent's own hour.
+        let own = {
+            let j = SCHEDULE_JITTER_H * (2.0 * agent_unit(g, 0, SALT_SCHEDULE) - 1.0);
+            (12.5 + j).rem_euclid(24.0)
+        };
+        world.spawn_with_guid(guid(0xC10CD), "clock", None);
+        let e = world.entity_of(guid(0xC10CD)).expect("a clock");
+        world
+            .world_mut()
+            .entity_mut(e)
+            .insert(crate::components::TimeOfDay {
+                seconds: own * 3600.0,
+                rate: 0.0,
+                longitude_deg: 0.0,
+                ..Default::default()
+            });
+
+        // No streaming source anywhere, so the band is unbounded and the agent
+        // materializes `Full` — which is the tier that steers.
+        let first = step_crowd(&mut world, 1.0 / 60.0);
+        assert_eq!(first.per_tier[0], 1, "the agent is not `Full`: {first:?}");
+        // The materialization step places the body; the NEXT one steers it.
+        let stats = step_crowd(&mut world, 1.0 / 60.0);
+        assert_eq!(
+            stats.steered, 1,
+            "a scheduled `Full` agent wrote no steering intent — it is standing \
+             still while its clock walks on ({stats:?})"
+        );
+
+        // …and the intent points along leg 1 (+Z), not leg 0 (+X).
+        let ent = world.entity_of(g).expect("a materialized agent");
+        let cm = world
+            .world()
+            .get::<CharacterMovement>(ent)
+            .expect("a `Full` agent carries the movement model");
+        let m = cm.runtime.intent_move;
+        assert!(
+            m.y.abs() > m.x.abs(),
+            "the agent wishes ({:.3}, {:.3}) — mostly along leg 0's +X, which is \
+             the leg its clock is NOT on",
+            m.x,
+            m.y
+        );
+        assert!(m.y > 0.0, "the agent walks away from its own destination");
     }
 
     /// **A new leg starts clean**: the metre a body fell behind one leg is not
