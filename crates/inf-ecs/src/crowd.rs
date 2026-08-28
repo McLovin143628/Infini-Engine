@@ -1634,21 +1634,34 @@ fn materialize(world: &mut EcsWorld, guid: Uuid, rec: &CrowdRecord, at: DVec3) -
 ///
 /// | tier | body + capsule + controller | `CharacterMovement` |
 /// |---|---|---|
-/// | [`Full`](CrowdTier::Full) / [`Near`](CrowdTier::Near) | yes | yes |
+/// | [`Full`](CrowdTier::Full) | yes | **yes** |
+/// | [`Near`](CrowdTier::Near) | yes | **no** |
 /// | [`Far`](CrowdTier::Far) | **no** | **no** |
 ///
-/// The movement model rides with the body rather than a rung below it, and that
-/// is what finally makes the `Near` rung *save* something: `movement_targets`
-/// is the set carrying [`CharacterMovement`], `step_hand_ik` composes its
-/// requests over that set, and the tier's [`hand_ik`](CrowdTier::hand_ik)
-/// predicate then refuses them for `Near`. Before this wave no crowd agent
-/// could have a hand request at all, so severing the hand gate changed nothing
-/// any arm could see (the NPC1b audit's carried item 10).
+/// *(The NPC1c audit's correction. This table read "`Full` / `Near` | yes |
+/// yes", which is the ladder this wave **started** with: the brief put a
+/// controller on both near tiers, the island priced 291 of them at 92.756 ms,
+/// and [`steers`](CrowdTier::steers) moved to `Full` alone — while this table
+/// and the two paragraphs under it stayed in the first draft. A doc that
+/// describes the component ladder wrongly, in the function that **is** the
+/// component ladder, is the worst place in the crate for it to be wrong.)*
 ///
-/// It is also what closes the **1.20 m** gap the same audit measured:
-/// `pose::model_to_world` applies P29.6's character-space drop only to an entity
-/// carrying `CharacterMovement`, so an NPC without one was drawn with its feet
-/// at its capsule's centre.
+/// Two consequences, as they actually stand:
+///
+/// * **the `Near` rung still saves nothing that can be falsified** — the NPC1b
+///   audit's carried item 10, and this wave's own carried item 7.
+///   `movement_targets` is the set carrying [`CharacterMovement`] and
+///   `step_hand_ik` composes its requests over that set, so a `Near` agent —
+///   which has none — can no more hold a hand request than it could before this
+///   wave, and severing [`hand_ik`](CrowdTier::hand_ik) still changes nothing
+///   any arm can see. The rung becomes falsifiable the day a near agent carries
+///   a controller, and 291 of those is 92.756 ms;
+/// * **the 1.20 m gap is closed by the POSE door, not by this ladder.**
+///   `pose::model_to_world` was gated on `CharacterMovement`, so an NPC without
+///   one was drawn with its feet at its capsule's centre; it now falls back to
+///   [`CrowdAgent::feet_offset_m`] through `pose::character_drop`, which is what
+///   covers `Near` and `Far` — the two tiers that deliberately carry no
+///   movement model and still have feet.
 fn set_tier_components(world: &mut EcsWorld, entity: Entity, tier: CrowdTier, a: &CrowdArchetype) {
     let has_body = world.world().get::<RigidBody3D>(entity).is_some();
     let steers = world.world().get::<CharacterMovement>(entity).is_some();
@@ -2230,6 +2243,113 @@ mod tests {
             "the fixture is not straddling the Dormant edge: {spawned} spawn(s) \
              / {despawned} despawn(s) in 60 steps — the arm is measuring a \
              steady state and the cost it names is unrecorded"
+        );
+    }
+
+    /// **AND ON THE `Full`/`Near` LINE IT IS A MOVEMENT MODEL A STEP** (NPC1c
+    /// audit) — the arm above's own sentence, falsified by the clause this wave
+    /// is proudest of.
+    ///
+    /// The NPC1a audit wrote *"On the `Full`/`Near` line the cost really is
+    /// nothing — the two tiers differ by a hand pass"*, and it was true: the two
+    /// rungs differed by [`CrowdTier::hand_ik`] and nothing else. NPC1c made the
+    /// tier own the **components** and put [`CrowdTier::steers`] on `Full`
+    /// alone, so crossing that line now removes
+    /// [`CharacterMovement`](crate::components::CharacterMovement) and
+    /// `CharacterController3D` and inserts **fresh defaults** on the way back —
+    /// and every field of `MovementRuntime` goes with them: the velocity, the
+    /// mode, the smoothed body yaw, `grounded`, the landing clocks, and the
+    /// `seeded` latch that takes the authored facing and runs `settle_on_spawn`
+    /// exactly once.
+    ///
+    /// Hysteresis is refused by design and the thrash is not a jitter: it lives
+    /// on the 16 m lattice line, where a millimetre of solver residue moves the
+    /// snapped anchor a whole cell (`SimBand`'s own mechanism). So an agent
+    /// parked there is a character whose mover starts from nothing sixty times a
+    /// second — it can never accumulate a fall, never finish a gait ramp, and
+    /// re-settles its feet every step.
+    ///
+    /// **The arm reads the STATE, not the component count**, because "the
+    /// component was replaced" and "the state was lost" are different facts and
+    /// only the second one costs anything: a marker is written into the runtime
+    /// on every step the model exists and read back on the next one.
+    ///
+    /// Not fixed here, and it is not hysteresis' to fix — the remedies that keep
+    /// the tier a pure function of sim state are the same two the arm above
+    /// names (a quantized agent position, or carrying the runtime across the
+    /// rung) and both are a policy decision about what a demoted body remembers.
+    #[test]
+    fn a_parked_agent_on_the_full_edge_gets_a_new_movement_model_every_step() {
+        /// A yaw no default ever holds, written into the runtime and looked for
+        /// again on the next step the model exists.
+        const MARK: f64 = 123.456;
+
+        let mut records = BTreeMap::new();
+        records.insert(
+            guid(0xE31),
+            CrowdRecord::standing(CrowdArchetype::humanoid(None, None, None), DVec3::ZERO),
+        );
+        let mut world = crowd_world(records);
+
+        // The line at two cells: cell 1's centre is 24 m from the agent (`Full`,
+        // inside the 32 m radius) and cell 2's is 40 m (`Near`).
+        let line = BAND_LATTICE_M * 2.0;
+        let (mut steered, mut bodiless_of_model, mut wiped) = (0u64, 0u64, 0u64);
+        let mut tiers: BTreeSet<CrowdTier> = BTreeSet::new();
+        for step in 0..60 {
+            let d = if step % 2 == 0 { -0.001 } else { 0.001 };
+            move_source(&mut world, line + d);
+            step_crowd(&mut world, 1.0 / 60.0);
+            let e = world
+                .entity_of(guid(0xE31))
+                .expect("both tiers are materialized");
+            tiers.insert(
+                world
+                    .world()
+                    .get::<CrowdAgent>(e)
+                    .expect("the tier verdict")
+                    .tier,
+            );
+            match world
+                .world_mut()
+                .get_mut::<crate::components::CharacterMovement>(e)
+            {
+                Some(mut cm) => {
+                    steered += 1;
+                    if cm.runtime.body_yaw_deg != MARK {
+                        wiped += 1;
+                    }
+                    cm.runtime.body_yaw_deg = MARK;
+                }
+                None => bodiless_of_model += 1,
+            }
+        }
+
+        println!(
+            "NPC1c hysteresis cost: one agent whose anchor sits on a lattice \
+             line across the Full/Near boundary carried a `CharacterMovement` on \
+             {steered} of 60 steps and lost its runtime {wiped} times — the \
+             NPC1a audit's \"the two tiers differ by a hand pass\" is retired"
+        );
+        assert_eq!(
+            tiers.len(),
+            2,
+            "the fixture is not straddling the Full/Near edge: {tiers:?}"
+        );
+        assert!(
+            steered >= 29 && bodiless_of_model >= 29,
+            "the model is not being taken off and put back: {steered} step(s) \
+             with one, {bodiless_of_model} without"
+        );
+        // Every step the model exists it is a fresh default, so the marker
+        // written on the previous such step is never there. The first one has no
+        // marker to lose, which is the one this bound allows for.
+        assert!(
+            wiped >= steered - 1,
+            "the runtime survived {} of {steered} promotions — if a demoted \
+             agent now KEEPS its movement state, this cost is paid and the \
+             ledger sentence has to say so",
+            steered - wiped
         );
     }
 

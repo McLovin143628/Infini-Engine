@@ -369,4 +369,85 @@ mod tests {
             vec![NavKind::Street, NavKind::Doorway, NavKind::Stair]
         );
     }
+
+    /// **THE MEASUREMENT THIS MODULE'S OWN DOC CLAIMS** (NPC1c audit).
+    ///
+    /// The header argues Dijkstra over A\* and closes with: *"a search over that
+    /// is microseconds, and the measurement is in this module's own arms rather
+    /// than in an argument."* It was in an argument. Every arm above runs on a
+    /// nine-node lattice, and the two graphs the sentence is about — an island's
+    /// whole road network and a town's street grid — are three orders of
+    /// magnitude apart from it. A cited gate that does not exist is worse than no
+    /// claim (the P20 law), so here is the gate.
+    ///
+    /// A 40 x 40 street lattice is **1 600 nodes / 6 240 directed edges**, which
+    /// is comfortably past the 459 / 1 320 `Settlement::street_graph` builds over
+    /// all seven of the island's settlements, and it is the worst shape for this
+    /// search: a uniform grid has no dear edges to prune with and offers the
+    /// frontier a fresh tie at every step.
+    ///
+    /// The clock is **printed** and the bound asserted is deliberately loose —
+    /// this file's own standing rule, and the margin is stated rather than
+    /// implied: a corner-to-corner search over a 1 600-node grid is expected in
+    /// the tens of microseconds and the ceiling is a **millisecond**, which is
+    /// a factor of tens. What that bound is really for is the day somebody makes
+    /// `edges_from` allocate or `Ordered` compare through a `String`: it catches
+    /// a change of shape, not a change of machine.
+    #[test]
+    fn a_town_sized_grid_is_searched_in_microseconds() {
+        const SIDE: u64 = 40;
+        let mut g = NavGraph::new();
+        for r in 0..SIDE {
+            for c in 0..SIDE {
+                g.add_node(r * SIDE + c, p(c as f64 * 20.0, r as f64 * 20.0), NavKind::Street);
+            }
+        }
+        for r in 0..SIDE {
+            for c in 0..SIDE {
+                let id = r * SIDE + c;
+                if c + 1 < SIDE {
+                    g.link(id, id + 1, NavKind::Street, vec![]);
+                }
+                if r + 1 < SIDE {
+                    g.link(id, id + SIDE, NavKind::Street, vec![]);
+                }
+            }
+        }
+        assert_eq!(g.len() as u64, SIDE * SIDE);
+        assert_eq!(g.edge_count() as u64, 4 * SIDE * (SIDE - 1));
+
+        let (from, to) = (0u64, SIDE * SIDE - 1);
+        // MIN of five rounds of twenty searches, the shape every other clock in
+        // this tree is taken with.
+        let mut best = f64::INFINITY;
+        let mut nodes = 0usize;
+        let mut cost = 0.0;
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            for _ in 0..20 {
+                let r = route(&g, from, to).route().expect("a corner-to-corner route");
+                nodes = r.nodes.len();
+                cost = r.cost_m;
+            }
+            best = best.min(t.elapsed().as_secs_f64() * 1.0e6 / 20.0);
+        }
+        // The world first, then the clock: a search that answered nothing would
+        // be the fastest of all.
+        assert_eq!(nodes as u64, 2 * SIDE - 1, "the route is not a monotone staircase");
+        assert!(
+            (cost - 2.0 * (SIDE - 1) as f64 * 20.0).abs() < 1.0e-9,
+            "the route costs {cost} m and the grid's Manhattan distance is {} m",
+            2.0 * (SIDE - 1) as f64 * 20.0
+        );
+        println!(
+            "NPC1c audit / inf-nav: {} nodes / {} directed edges; corner to corner in {best:.1} us ({nodes} nodes, {cost:.0} m)",
+            g.len(),
+            g.edge_count()
+        );
+        assert!(
+            best > 0.0 && best < 1000.0,
+            "a corner-to-corner search over {} nodes took {best:.1} us; the module's own claim is microseconds, and a millisecond means the frontier or the adjacency changed shape",
+            g.len()
+        );
+    }
 }

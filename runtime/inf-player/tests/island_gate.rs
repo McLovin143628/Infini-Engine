@@ -2535,6 +2535,22 @@ fn every_settlement_building_is_enterable() {
             doorways.len(),
             100.0 * banded as f64 / doorways.len() as f64
         );
+        // **AND IT IS AN ARM, NOT A PRINT** (NPC1c audit). This is the one
+        // reading in this file that is derived from the hero's own
+        // `GlobalTransform` and asserted nowhere — the exact number wave NPC1c
+        // reported as **0 of 1 297** when it found `set_hero` leaving the
+        // streaming anchor stale. A share of zero here means the hero the band
+        // is anchored on is somewhere else entirely, and the loop above would
+        // still be green: it asks whether the blocks are *resident*, which is
+        // cell activation, not whether anything near them is *solid*.
+        assert!(
+            banded > 0,
+            "{}: 0 of {} doorways are inside the {BAND_NEAR_M:.0} m band — the \
+             band's anchor is not where this loop just put the hero, so every \
+             band-derived claim in this file is about a different place",
+            plan.name,
+            doorways.len()
+        );
 
         // ── the three invariants, per building ──
         let by_guid: std::collections::BTreeMap<Uuid, inf_editor_core::settlement::Block> = plan
