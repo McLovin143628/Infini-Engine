@@ -336,6 +336,14 @@ impl EditorRenderAssets {
         self.skeletons.retain(|id, _| live.contains(id));
         self.clips.retain(|id, _| live.contains(id));
         self.scatter.retain(|mesh, _| live.contains(mesh));
+        // **The crowd's shared rest palette is a cache like the others** (NPC1b
+        // audit). Wave NPC1b added `rest_palettes` and wired it into none of this
+        // store's three eviction doors, so it was the one map a session could
+        // only grow — the P21 "a pin with no release is a leak with a deadline"
+        // shape, and here also a *staleness*: a re-import drops the decoded
+        // skeleton and the palette derived from it would have survived.
+        self.rest_palettes
+            .retain(|(mesh, skel), _| live.contains(mesh) && live.contains(skel));
     }
 
     /// Forget one mesh asset's opened payloads (a targeted re-import invalidation).
@@ -352,6 +360,14 @@ impl EditorRenderAssets {
         self.skeletons.clear();
         self.clips.clear();
         self.scatter.clear();
+        // The rest palette is DERIVED from a skeleton this line just dropped
+        // (NPC1b audit). Left standing it would outlive the bytes it was built
+        // from: `rescan` calls this, so a re-imported `.inf_skel` would give the
+        // per-agent path the new rig and the crowd's shared path the old one —
+        // which is exactly the disagreement
+        // `the_shared_palette_is_the_one_the_per_agent_path_would_have_built`
+        // asserts cannot happen, from the one direction that arm cannot see.
+        self.rest_palettes.clear();
     }
 
     // ── resolution ──────────────────────────────────────────────────────────
@@ -1391,6 +1407,90 @@ mod tests {
         assert!(
             !Arc::ptr_eq(&shared.palette, &per_agent.palette),
             "the per-agent path handed back the shared block, so this arm proves nothing"
+        );
+    }
+
+    /// **THE SHARED REST PALETTE IS EVICTED BY THE DOORS THAT EVICT THE SKELETON
+    /// IT CAME FROM** (NPC1b audit).
+    ///
+    /// Wave NPC1b added `rest_palettes` and wired it into **none** of this
+    /// store's three eviction doors — `drop_loaded` (which `clear`,
+    /// `set_content_root` and `refresh_index` all reach), and `retain_only`. That
+    /// is two defects in one omission:
+    ///
+    /// * **stale.** `refresh_index`'s own doc says it drops what it holds because
+    ///   *"a payload rewritten under the same GUID would otherwise be served from
+    ///   the old mapping forever"*. The rest palette is `skinning_matrices` over a
+    ///   **skeleton** that line drops, so after a re-import the per-agent path
+    ///   would read the new rig and the crowd's shared path the old one — the
+    ///   exact disagreement the arm above asserts cannot happen, arriving from the
+    ///   one direction that arm cannot see.
+    /// * **a leak.** `retain_only` is the only place that knows which assets are
+    ///   live, so a map missing from it is a map a session can only grow (P21's
+    ///   "a pin with no release is a leak with a deadline").
+    ///
+    /// The arm holds both doors *and* that it is still a cache in between, so a
+    /// "fix" that stopped caching altogether fails it too.
+    #[test]
+    fn the_shared_rest_palette_is_dropped_with_the_skeleton_it_was_derived_from() {
+        let (_dir, root, mesh, skel, _clip) = project_with_character();
+        let mut store = EditorRenderAssets::new();
+        store.set_content_root(Some(root));
+        let sm = SkeletalMesh {
+            mesh: Some(mesh),
+            skeleton: Some(skel),
+        };
+
+        let first = store.resolve_skinned_shared(&sm).unwrap();
+        // …and it really is a cache, so the two negatives below mean something.
+        assert!(
+            Arc::ptr_eq(
+                &first.palette,
+                &store.resolve_skinned_shared(&sm).unwrap().palette
+            ),
+            "the rest palette is not cached at all, so nothing below is a test of \
+             eviction"
+        );
+
+        // Door 1: `clear` / `set_content_root` / `refresh_index`, all through
+        // `drop_loaded`. The old `Arc` is still held here, so its allocation
+        // cannot be recycled under the new one — the pointer inequality is real.
+        store.clear();
+        let after_clear = store.resolve_skinned_shared(&sm).unwrap();
+        assert!(
+            !Arc::ptr_eq(&first.palette, &after_clear.palette),
+            "`clear` kept the rest palette, so it outlives the skeleton bytes it \
+             was derived from"
+        );
+        assert_eq!(*after_clear.palette, *first.palette, "the rig changed");
+
+        // Door 2: `retain_only`, with the skeleton no longer referenced.
+        assert!(
+            Arc::ptr_eq(
+                &after_clear.palette,
+                &store.resolve_skinned_shared(&sm).unwrap().palette
+            ),
+            "the cache stopped caching after `clear`"
+        );
+        store.retain_only([mesh]);
+        assert!(
+            !Arc::ptr_eq(
+                &after_clear.palette,
+                &store.resolve_skinned_shared(&sm).unwrap().palette
+            ),
+            "`retain_only` kept a rest palette whose skeleton left the document"
+        );
+        // …and the mesh half of the key counts too: an entry survives only while
+        // BOTH halves are live.
+        let held = store.resolve_skinned_shared(&sm).unwrap();
+        store.retain_only([skel]);
+        assert!(
+            !Arc::ptr_eq(
+                &held.palette,
+                &store.resolve_skinned_shared(&sm).unwrap().palette
+            ),
+            "`retain_only` keyed on the skeleton alone, so a deleted mesh's entry \
+             lives for ever"
         );
     }
 
