@@ -2601,6 +2601,26 @@ fn both_fixed_steps_tier_the_crowd_before_the_passes_that_read_a_tier() {
              — a `Far` agent would keep a capsule, or be posed, for the step \
              its tier said not to"
         );
+        // **And the society grows BEFORE the crowd is tiered** (NPC1d). A host
+        // that installed a level's residents after the tiering would leave every
+        // one of them `Dormant` — the tier a `CrowdRecord` is built with — for
+        // exactly one step, and the OTHER host would not. That is a one-step
+        // disagreement in the crowd trace section on the step a settlement
+        // finishes streaming, which is the shape this whole arm exists for.
+        let society = at("inf_ecs::society::sync_society(");
+        assert!(
+            society < crowd,
+            "the {label} grows its society at {society}, AFTER it tiers the \
+             crowd at {crowd}"
+        );
+        // The clock is advanced before both, because a schedule reads it.
+        let sky = at("advance_time_of_day(");
+        assert!(
+            sky < society,
+            "the {label} advances its clock at {sky}, after it grows its \
+             society at {society} — a day's first step would be planned against \
+             yesterday's hour"
+        );
     }
 }
 

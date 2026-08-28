@@ -50,6 +50,8 @@ pub mod registry;
 pub mod schedule;
 pub mod sim;
 pub mod sky;
+// NPC1d: the level's own buildings, turned into people with days.
+pub mod society;
 pub mod transform;
 // P29.7: the raycast vehicle model — the `movement` of vehicles, with the
 // fixed-step door in `inf_physics::d3::vehicle`.

@@ -90,6 +90,19 @@ pub mod domain {
     pub const BUILDING: u64 = 3 << 60;
     /// Reserved for a caller composing nodes of its own — a gate placing a
     /// destination, a level naming a spawn point.
+    /// **A block's own pavement** (NPC1d) — the ring of nodes
+    /// `inf_ecs::society` lays round a `PcgVolume`, and the crossings between
+    /// two of them.
+    ///
+    /// A separate tag from [`STREET`] although it is a street, because the two
+    /// mint their low sixty bits differently: a settlement's grid uses a
+    /// structured (site, column, row) layout it can name a node by, and a
+    /// pavement ring uses a hash of its own quantized position, which is the
+    /// only key a level with no settlement plan in it has. Two id LAYOUTS in one
+    /// tag is exactly the collision this module's domains exist to prevent, so
+    /// they get a tag each.
+    pub const PAVEMENT: u64 = 4 << 60;
+
     pub const CALLER: u64 = 15 << 60;
     /// The mask that recovers a producer's own id from a tagged one.
     pub const LOCAL_MASK: u64 = (1 << 60) - 1;

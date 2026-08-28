@@ -420,6 +420,10 @@ pub struct RuntimeSim {
     /// third time, and read for the same reason: it is the thing a gate asserts
     /// on. All zeroes on a level with no population.
     crowd: inf_ecs::crowd::CrowdStats,
+    /// This step's society counters (NPC1d) — how much of the level's own
+    /// population has been derived, and what its network holds. MIRROR of
+    /// `SimSession::society`.
+    society: inf_ecs::society::SocietyStats,
     /// The sim-LOD ladder's three radii, metres (NPC1a). Data rather than a
     /// constant `step_crowd` reads for itself, for `debris_budget`'s reason one
     /// system over: a level's own crowd block will set it, and the sweep
@@ -572,6 +576,7 @@ impl RuntimeSim {
             debris_budget: DebrisBudget::default(),
             fracture_audit: FractureAudit::default(),
             crowd: inf_ecs::crowd::CrowdStats::default(),
+            society: inf_ecs::society::SocietyStats::default(),
             crowd_radii: inf_ecs::crowd::DEFAULT_CROWD_RADII,
             gameplay: inf_physics::d3::GameplayReport::default(),
             voxels: BTreeMap::new(),
@@ -727,6 +732,17 @@ impl RuntimeSim {
     /// "no crowd" from "a crowd that is not being tiered".
     pub fn crowd_stats(&self) -> inf_ecs::crowd::CrowdStats {
         self.crowd
+    }
+
+    /// **The most recent fixed step's society counters** (NPC1d) — how many of
+    /// the level's own buildings have been folded into a walkable network, how
+    /// many residents they imply, how many have a day, and the two numbers a
+    /// gate asserts are zero (`salt_collisions`, `guid_refusals`).
+    ///
+    /// All zeroes on a level whose volumes offer no resident, which is how a
+    /// gate tells "no society" from "a society that is not being derived".
+    pub fn society_stats(&self) -> inf_ecs::society::SocietyStats {
+        self.society
     }
 
     /// **Install a crowd population** (NPC1a) — the door the sweep instrument
@@ -1375,6 +1391,16 @@ impl RuntimeSim {
         //    Inert — one `contains_resource` branch, no allocation — on every
         //    level with no population, which is every level committed before
         //    this wave. (MIRROR of `SimSession::fixed_step`.)
+        // ── NPC1d THE SOCIETY ── grow the level's own population before it is
+        //    tiered. One Ring-0 door both hosts call, keyed on the level's own
+        //    `PcgVolume::residents` and never on anything a host knows privately
+        //    — the `set_crowd_population` seam finally has a PRODUCTION caller,
+        //    and it is the level's own buildings.
+        //
+        //    Inert on every level whose volumes offer no resident, which is
+        //    every level committed before this wave: one entity walk that finds
+        //    nothing and inserts no resource.
+        self.society = inf_ecs::society::sync_society(&mut self.world);
         self.crowd = inf_ecs::crowd::step_crowd_banded(&mut self.world, dt, self.crowd_radii);
         clk.mark(phase::CROWD);
         // 1. ECS → physics.

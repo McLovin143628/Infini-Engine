@@ -1538,6 +1538,43 @@ pub fn set_population(world: &mut EcsWorld, records: BTreeMap<Uuid, CrowdRecord>
         .insert_resource(CrowdPopulationRes { records, steps: 0 });
 }
 
+/// **Add agents to the population without disturbing the ones already in it**
+/// (NPC1d) — the door a society grows a level's crowd through.
+///
+/// [`set_population`] REPLACES: it despawns every materialized body and restarts
+/// the route clock at zero, which is right for an instrument installing a
+/// measured crowd and wrong for a settlement whose blocks stream in over a
+/// hundred steps. This inserts, keeps `steps` where it is, and leaves every
+/// existing record's sim state alone.
+///
+/// # It refuses a `Guid` the world already holds
+///
+/// NPC1a's carried item 9: `EcsWorld::spawn_with_guid` does not refuse a key the
+/// world already has — it overwrites the index entry and leaves the level's own
+/// entity unreachable by `Guid` while it still exists. Every caller so far drew
+/// from a namespace of its own and was trusted to; a society derives its agents'
+/// ids from a level's own content, so it is the first caller that *could* meet
+/// one. The check is here rather than on `spawn_with_guid` because that door
+/// answers for every spawner in the engine and moving it is a decision of its
+/// own; this closes the hazard for the one caller that has it. Returns how many
+/// were refused, which is a number a gate can assert is zero.
+pub fn add_agents(world: &mut EcsWorld, records: BTreeMap<Uuid, CrowdRecord>) -> usize {
+    let mut refused = 0usize;
+    let mut pop = world
+        .world_mut()
+        .remove_resource::<CrowdPopulationRes>()
+        .unwrap_or_default();
+    for (guid, rec) in records {
+        if pop.records.contains_key(&guid) || world.entity_of(guid).is_some() {
+            refused += 1;
+            continue;
+        }
+        pop.records.insert(guid, rec);
+    }
+    world.world_mut().insert_resource(pop);
+    refused
+}
+
 /// **Forget the crowd**: despawn every materialized agent and remove the
 /// resource, so the world is byte-for-byte one that never had a population.
 ///

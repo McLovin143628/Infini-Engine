@@ -362,6 +362,10 @@ pub struct SimSession {
     /// This step's crowd counters (NPC1a) — agents per sim-LOD tier, and what
     /// materialized or re-tiered. MIRROR of `RuntimeSim::crowd`.
     crowd: inf_ecs::crowd::CrowdStats,
+    /// This step's society counters (NPC1d) — how much of the level's own
+    /// population has been derived, and what its network holds. MIRROR of
+    /// `RuntimeSim::society`.
+    society: inf_ecs::society::SocietyStats,
     /// The sim-LOD ladder's three radii, metres (NPC1a). MIRROR of
     /// `RuntimeSim::crowd_radii`, and mirrored *because* it is an argument to
     /// the one Ring-0 door both hosts call: a host that read a constant while
@@ -507,6 +511,7 @@ impl SimSession {
         //    with real entities in the author's document that no Outliner row
         //    put there.
         inf_ecs::crowd::clear_crowd(doc.world_mut());
+        inf_ecs::society::clear_society(doc.world_mut());
         let bridge = PhysicsBridge2D::new(gravity.d2);
         // P11.3: a 3D bridge alongside the 2D one — built from the level's own
         // `gravity_3d` since P29.7 (a character still applies its own gravity
@@ -569,6 +574,7 @@ impl SimSession {
             fracture_audit: FractureAudit::default(),
             gameplay: inf_physics::d3::GameplayReport::default(),
             crowd: inf_ecs::crowd::CrowdStats::default(),
+            society: inf_ecs::society::SocietyStats::default(),
             crowd_radii: inf_ecs::crowd::DEFAULT_CROWD_RADII,
             voxels: BTreeMap::new(),
         };
@@ -779,6 +785,7 @@ impl SimSession {
         //    would put an NPC in the author's Outliner and, on the next save,
         //    in the author's level.
         inf_ecs::crowd::clear_crowd(doc.world_mut());
+        inf_ecs::society::clear_society(doc.world_mut());
     }
 
     /// Seed the resolvable `.inf_sm` state machines (P11.2). An entity carrying an
@@ -935,6 +942,42 @@ impl SimSession {
     /// `RuntimeSim::crowd_stats`.
     pub fn crowd_stats(&self) -> inf_ecs::crowd::CrowdStats {
         self.crowd
+    }
+
+    /// **The most recent fixed step's society counters** (NPC1d) — how many of
+    /// the level's own buildings have been folded into a walkable network, how
+    /// many residents they imply, how many have a day, and the two numbers a
+    /// gate asserts are zero (`salt_collisions`, `guid_refusals`).
+    ///
+    /// All zeroes on a level whose volumes offer no resident, which is how a
+    /// gate tells "no society" from "a society that is not being derived".
+    pub fn society_stats(&self) -> inf_ecs::society::SocietyStats {
+        self.society
+    }
+
+    /// **Install a crowd population** (NPC1d) — the MIRROR of
+    /// `RuntimeSim::set_crowd_population`, and the editor's own door onto the
+    /// tier system.
+    ///
+    /// Until this wave the editor had no such door at all: `RuntimeSim` had one
+    /// and `SimSession` did not, so the NPC1a audit's carried item 12 read *"the
+    /// mixed-tier equality proven here is between two `RuntimeSim`s, and the
+    /// editor is held to the same decision by source-text mirror pins alone"*.
+    /// It is a real call now, and the reason it can be is that a level's own
+    /// society installs itself: `inf_ecs::society::sync_society` runs in both
+    /// fixed steps, so a settlement in the editor's Simulate is populated by the
+    /// same door the shipped player uses, without anybody pressing anything.
+    ///
+    /// This is what remains for the case that door does not cover — a tool, a
+    /// wizard or a test that wants to place a crowd of its own. It REPLACES, on
+    /// `set_population`'s own terms; a caller adding to a level's derived society
+    /// wants `inf_ecs::crowd::add_agents`.
+    pub fn set_crowd_population(
+        &mut self,
+        doc: &mut SceneDoc,
+        records: std::collections::BTreeMap<Uuid, inf_ecs::crowd::CrowdRecord>,
+    ) {
+        inf_ecs::crowd::set_population(doc.world_mut(), records);
     }
 
     /// **Retune the sim-LOD ladder** (NPC1a) — `(full_m, near_m, far_m)`, and
@@ -1124,6 +1167,16 @@ impl SimSession {
         //    see this step's tiers. Inert on every level with no population.
         //    (MIRROR of `RuntimeSim::fixed_step`, radii included — the argument
         //    is mirrored as well as the call, see `set_crowd_radii`.)
+        // ── NPC1d THE SOCIETY ── grow the level's own population before it is
+        //    tiered. One Ring-0 door both hosts call, keyed on the level's own
+        //    `PcgVolume::residents` and never on anything a host knows privately
+        //    — the `set_crowd_population` seam finally has a PRODUCTION caller,
+        //    and it is the level's own buildings.
+        //
+        //    Inert on every level whose volumes offer no resident, which is
+        //    every level committed before this wave: one entity walk that finds
+        //    nothing and inserts no resource.
+        self.society = inf_ecs::society::sync_society(doc.world_mut());
         self.crowd = inf_ecs::crowd::step_crowd_banded(doc.world_mut(), dt, self.crowd_radii);
         // 1. ECS → physics.
         self.bridge.sync_from_world(doc.world());

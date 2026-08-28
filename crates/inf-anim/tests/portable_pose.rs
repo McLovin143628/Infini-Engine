@@ -46,7 +46,7 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 40] = [
+const SIM_PATH: [(&str, &str, &str); 42] = [
     // ── the fixed step that PUBLISHES the pose (SK1b audit) ──
     //
     // The most surprising absence on this list. `crates/inf-ecs/src/pose.rs` is
@@ -344,6 +344,25 @@ const SIM_PATH: [(&str, &str, &str); 40] = [
         "inf_nav::route",
         include_str!("../../inf-nav/src/route.rs"),
         "the Dijkstra whose tie-break makes two hosts pick the same one of a grid's six equally short routes",
+    ),
+    // ── NPC1d: the society, BOTH halves, on DAY ONE ──
+    //
+    // The third wave running to name its modules with them, and the case is the
+    // same one NPC1a made: a slot's metres become a nav node's position, the
+    // node becomes a leg of a schedule, and the leg is where a scheduled agent's
+    // `Transform` is read off. `inf_pcg`'s half decides WHERE a room's people
+    // stand, `inf_ecs`'s decides where the pavement between two blocks runs and
+    // which workplace is nearest — and a nearest-of is a comparison between two
+    // distances, which is exactly the arithmetic the law is about.
+    (
+        "inf_pcg::building::society",
+        include_str!("../../inf-pcg/src/building/society.rs"),
+        "slots_of puts a room's people on the room's own nav node, and that node's metres become a schedule leg an agent's Transform is read off",
+    ),
+    (
+        "inf_ecs::society",
+        include_str!("../../inf-ecs/src/society.rs"),
+        "the pavement ring's corners, the nearest-workplace pairing and the frontage join are all distances, and every one of them decides a metre a scheduled agent stands on",
     ),
 ];
 
