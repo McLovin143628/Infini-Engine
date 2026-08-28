@@ -5872,3 +5872,98 @@ fn every_settlement_is_reachable_from_every_other_over_the_built_road_graph() {
         );
     }
 }
+
+/// **WHAT A CAR COSTS THE ISLAND'S STEP** (island wave VEH1a) — the `vehicle`
+/// phase's first numbers on real content, and where `VEHICLE_STEP_BUDGET_MS` is
+/// asserted.
+///
+/// The phase is new, so the whole-step total cannot see it: `CITY_STEP_BUDGET_MS`
+/// is one number with an island inside it, and a row that appeared this wave
+/// would have to grow to a visible share of six milliseconds before it moved.
+/// That is [`NPC_STEP_BUDGET_MS`]'s argument verbatim and it is why this phase
+/// carries its own ceiling.
+///
+/// # A clock, so: release only, real machine only
+///
+/// `CITY_STEP_BUDGET_MS`'s conditioning, for its reasons — `[profile.dev]` is
+/// `opt-level = 1` with debug assertions, and a shared CI runner's milliseconds
+/// are a fact about the runner. Reported everywhere; asserted under
+/// `cargo test --release` off CI.
+///
+/// [`NPC_STEP_BUDGET_MS`]: inf_player::budget::NPC_STEP_BUDGET_MS
+#[test]
+fn the_vehicle_phase_costs_what_it_costs_on_the_island() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let pack = cook(tmp.path());
+    let mut sim = pack_sim(&pack);
+    sim.set_step_profiling(true);
+    let trace = drive_a_car(&mut sim);
+    assert!(
+        trace.entered,
+        "the hero did not get in, so this is a profile of a parked car"
+    );
+
+    // MIN of rounds is the discipline everywhere else in this tree; a step
+    // profile is one step, so the mean over the drive's own last quarter is what
+    // stands in for it — by then the ground has paged and the suspension has
+    // settled, which is the state a shipped frame is in.
+    let mut mean = inf_player::step_profile::StepProfile::default();
+    let rounds = 90u32;
+    for _ in 0..rounds {
+        sim.step_once(
+            inf_player::runtime_sim::RuntimeInput::default()
+                .axis_at(inf_ecs::movement::actions::MOVE_Y, 1.0),
+        );
+        mean.accumulate(&sim.step_profile());
+    }
+    mean.scale(1.0 / rounds as f64);
+    let vehicle = mean.ms[inf_player::step_profile::STEP_PHASE_NAMES
+        .iter()
+        .position(|n| *n == "vehicle")
+        .expect("the `vehicle` phase exists")];
+
+    println!(
+        "\nTHE ISLAND'S STEP WITH A CAR IN IT ({} build), {:.4} ms total over \
+         {rounds} driving steps:",
+        if cfg!(debug_assertions) {
+            "dev"
+        } else {
+            "release"
+        },
+        mean.total_ms()
+    );
+    for (name, ms) in mean.dearest_first() {
+        if ms > 0.0005 {
+            println!("  {name:>18}  {ms:.4} ms");
+        }
+    }
+    println!(
+        "  the `vehicle` row: {vehicle:.4} ms for {} car(s) against a \
+         {:.1} ms budget at {} cars",
+        cars(&sim).len(),
+        inf_player::budget::VEHICLE_STEP_BUDGET_MS,
+        inf_player::budget::VEHICLE_BUDGET_CARS
+    );
+
+    // The phase really ran: a budget met by a door that returned early is a
+    // budget about nothing.
+    assert!(
+        !sim.vehicles().is_empty(),
+        "the `vehicle` phase reported no vehicle at all on a level that parks \
+         one at every settlement"
+    );
+    if cfg!(debug_assertions) {
+        eprintln!("dev build: the vehicle phase is reported, not asserted");
+        return;
+    }
+    if std::env::var_os("CI").is_some() {
+        eprintln!("CI: the vehicle phase is reported, not asserted (shared runner)");
+        return;
+    }
+    assert!(
+        vehicle <= inf_player::budget::VEHICLE_STEP_BUDGET_MS,
+        "the `vehicle` phase cost {vehicle:.4} ms against a {} ms ceiling {}",
+        inf_player::budget::VEHICLE_STEP_BUDGET_MS,
+        inf_player::budget::RATCHET_NOTE
+    );
+}
