@@ -390,7 +390,7 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
         sun,
         TimeOfDay {
             seconds: 10.5 * 3600.0,
-            rate: 0.0,
+            rate: ISLAND_CLOCK_RATE,
             ..TimeOfDay::default()
         },
     );
@@ -687,6 +687,27 @@ pub fn repo_root() -> std::path::PathBuf {
 ///
 /// Exhaustive by hand and in one place, so adding an island is a decision taken
 /// once rather than three times (the bless, the byte lock and the level count).
+/// **How fast the island's day runs** — clock-seconds per simulated second, the
+/// [`TimeOfDay::rate`] the level authors (island wave NPC1d).
+///
+/// Thirty is a **forty-eight-minute day**, and it is derived from the walk
+/// rather than chosen for looks. `inf_ecs::society` gives a commute one hour of
+/// the level clock, so the metres per second a commute implies is
+/// `length x rate / 3600`; the island's own settlements put a home about
+/// a couple of hundred metres from its work, and at thirty that is a walking pace. The
+/// exact figure this constant was set from is in the wave ledger's rate row,
+/// measured over the committed island's own population rather than estimated —
+/// and `inf_ecs::crowd::ScheduleLeg::implied_speed_mps` is the function that
+/// bridges the two, so the arithmetic is checkable rather than asserted here.
+///
+/// It was **zero** — a frozen clock at 10:30 UTC — from wave I7 until this one,
+/// which is why the I8b night-window substrate (`inf_render::night_glow_step`)
+/// had never once returned a non-zero step on the shipped island: the sun could
+/// not get below the horizon. Turning it on is the whole of clause 3, and the
+/// blood-red night the SKY2 audit's LOW item 9 names is now something a player
+/// can see rather than a golden nobody looks at.
+pub const ISLAND_CLOCK_RATE: f64 = 30.0;
+
 pub const ISLAND_RECIPES: [&str; 2] = [
     "samples/island/island.toml",
     "samples/island-fixture/island.toml",

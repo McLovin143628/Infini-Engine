@@ -35,6 +35,23 @@
 //! node of this network is on ground a body can walk, without a ground profile
 //! and without a terrain query.
 //!
+//! # THE SEARCH IS TWO LEVELS, and that is a measurement rather than a taste
+//!
+//! The obvious network is one graph with every building's whole interior in it.
+//! It was built that way first and priced: a settlement's own buildings are
+//! about **25 000 nodes**, and `inf-nav`'s own measured 743 µs over a 1 600-node
+//! grid extrapolates to roughly **11 ms a search** — four legs an agent, four
+//! hundred agents, inside a fixed step. That is not a slow gate, it is a
+//! simulation that stops.
+//!
+//! So the level network holds the **streets and the front doors** — about
+//! 1 600 nodes, which is exactly the size `inf-nav` measured — and a building's
+//! interior is searched *inside the building*, over the hundred-odd nodes it has
+//! of its own. A leg is `home → front door` (inside), `front door → front door`
+//! (outside), `front door → work` (inside), joined. The outer half is memoized
+//! on its endpoint pair, because a hundred residents of one block commuting to
+//! one office is a hundred agents sharing one street route.
+//!
 //! # A building joins at its own front door
 //!
 //! Each volume's [`PcgVolume::interior_nav`] is already salted per building
@@ -160,8 +177,14 @@ pub struct SocietyPlace {
     pub role: SlotRole,
     /// Where it is, world metres.
     pub at: DVec3,
-    /// The node of [`SocietyRes::network`] it stands on.
+    /// The node of its own building's interior it stands on — a node of
+    /// [`SocietyRes::interiors`]`[volume]`, **not** of the level network.
     pub node: NavNodeId,
+    /// The volume whose interior graph holds [`node`](Self::node).
+    pub volume: Uuid,
+    /// Its building's front door, which IS a node of the level network — the
+    /// join between the two levels of the search.
+    pub door: NavNodeId,
 }
 
 /// What one [`sync_society`] did, and what the society holds after it.
@@ -206,8 +229,18 @@ pub struct SocietyStats {
     /// was absorbed** — a building salt collision, which welds one building's
     /// room to another's. Zero is the expectation and the arm.
     pub salt_collisions: usize,
+    /// Slots in a building with no exterior door — nobody can walk in, so
+    /// nobody living there gets a day. Zero on a settlement.
+    pub doorless: usize,
     /// Agent `Guid`s `add_agents` refused because the world already held them.
     pub guid_refusals: usize,
+    /// Street routes searched over the level network so far — the outer halves
+    /// that were NOT served by the memo.
+    pub outer_searches: usize,
+    /// Outer halves served by the memo. The ratio of this to
+    /// [`outer_searches`](Self::outer_searches) is what the two-level split buys
+    /// on a real settlement.
+    pub outer_cached: usize,
 }
 
 /// **The level's society** — its walkable network, the places it offers, and the
@@ -218,9 +251,18 @@ pub struct SocietyStats {
 /// makes "a level with no population costs one `contains_resource`" structural.
 #[derive(Resource, Debug, Clone, Default)]
 pub struct SocietyRes {
-    /// Every block's pavement, every slot-bearing building's interior, and the
-    /// links that make them one network.
+    /// **The level network**: every block's pavement, every slot-bearing
+    /// building's front door, the frontage links between them and the crossings
+    /// between blocks. About 1 600 nodes on a settlement — see the module docs
+    /// for why the interiors are not in it.
     pub network: NavGraph,
+    /// **Each volume's own interior**, searched inside the building.
+    pub interiors: BTreeMap<Uuid, NavGraph>,
+    /// **The outer half of a leg, memoized on its endpoint pair.** A hundred
+    /// residents of one block commuting to one office share one street route,
+    /// and this is what makes them pay for it once. `None` records a pair the
+    /// network cannot join, so a refusal is not re-searched either.
+    pub legs: BTreeMap<(NavNodeId, NavNodeId), Option<inf_nav::NavPath>>,
     /// Volumes already folded in, by `Guid`.
     pub folded: BTreeSet<Uuid>,
     /// Every workplace, in the order the volumes were folded.
@@ -275,6 +317,17 @@ pub fn pavement_node_id(p: DVec2) -> NavNodeId {
     };
     let h = mix64((q(p.x) as u64) ^ mix64(q(p.y) as u64));
     inf_nav::domain::PAVEMENT | (h & inf_nav::domain::LOCAL_MASK)
+}
+
+/// **Which building an interior node belongs to** — the salt out of its id.
+///
+/// The mirror of `inf_pcg::building::node_salt`, spelled here because `inf-ecs`
+/// does not depend on `inf-pcg` (the P19.5 dependency-light mirror ruling, which
+/// is also why [`crate::components::ResidentSlot`] exists at all). The layout is
+/// frozen by `inf_pcg::building::interior_nav_in`'s own doc table: domain in
+/// 60–63, class in 59, salt in 20–58, index in 0–19.
+fn node_salt(id: NavNodeId) -> u64 {
+    (id >> 20) & ((1 << 39) - 1)
 }
 
 /// One volume's own eight pavement points, world metres, in a walking order
@@ -416,6 +469,9 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
         guid_refusals: soc.stats.guid_refusals,
         homebound: soc.stats.homebound,
         housebound: soc.stats.housebound,
+        doorless: soc.stats.doorless,
+        outer_searches: soc.stats.outer_searches,
+        outer_cached: soc.stats.outer_cached,
         ..SocietyStats::default()
     };
 
@@ -481,15 +537,12 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
         }
     }
 
-    // ── 2. absorb each fresh volume's interiors and join its front doors ───
+    // ── 2. keep each fresh volume's interior, and put its FRONT DOORS on the
+    //       level network ───────────────────────────────────────────────────
+    let mut doors: BTreeMap<Uuid, BTreeMap<u64, NavNodeId>> = BTreeMap::new();
     for f in &fresh {
-        for n in f.interior.nodes() {
-            if soc.network.contains(n.id) {
-                stats.salt_collisions += 1;
-            }
-        }
-        soc.network.absorb(&f.interior);
         let ring = &known[&f.guid].2;
+        let mut mine: BTreeMap<u64, NavNodeId> = BTreeMap::new();
         for n in f.interior.nodes() {
             // A building's EXTERIOR door is the doorway with one edge: the wall
             // it stands in has no room on the far side, so `interior_nav` links
@@ -497,6 +550,16 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
             if n.kind != NavKind::Doorway || f.interior.edges_from(n.id).len() != 1 {
                 continue;
             }
+            // **A salt collision is two buildings claiming one id.** Checked on
+            // the door, which is the node that reaches the shared network, and
+            // counted rather than papered over: a collision welds one
+            // building's front door to another's, which is a route that walks
+            // into the wrong house.
+            if soc.network.contains(n.id) {
+                stats.salt_collisions += 1;
+            }
+            soc.network.add_node(n.id, n.position, NavKind::Doorway);
+            mine.insert(node_salt(n.id), n.id);
             let mut best: Option<(f64, NavNodeId)> = None;
             for (id, p) in ring {
                 let d = (*p - n.position).length();
@@ -512,6 +575,8 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
                 _ => stats.frontages_refused += 1,
             }
         }
+        doors.insert(f.guid, mine);
+        soc.interiors.insert(f.guid, f.interior.clone());
     }
 
     // ── 3. register the fresh volumes' slots ───────────────────────────────
@@ -520,10 +585,26 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
             if !s.at.is_finite() {
                 continue;
             }
+            // The building this slot is in, by the salt its own node carries —
+            // the same word `interior_nav_in` wrote and `building_salt` minted.
+            let Some(door) = doors
+                .get(&f.guid)
+                .and_then(|m| m.get(&node_salt(s.node)))
+                .copied()
+            else {
+                // A building with no exterior door is one nobody can walk into.
+                // Its people are not people this society can give a day to, and
+                // saying so is better than giving them one that starts inside a
+                // sealed box.
+                stats.doorless += 1;
+                continue;
+            };
             let place = SocietyPlace {
                 role: s.role,
                 at: s.at,
                 node: s.node,
+                volume: f.guid,
+                door,
             };
             match s.role {
                 SlotRole::Home => {
@@ -553,7 +634,7 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
         let mut records: BTreeMap<Uuid, CrowdRecord> = BTreeMap::new();
         for g in batch {
             let home = soc.pending.remove(&g).expect("a key we just read");
-            let (rec, kind) = plan_day(&soc, archetype, home);
+            let (rec, kind) = plan_day(&mut soc, archetype, home, &mut stats);
             match kind {
                 DayKind::Full => {}
                 DayKind::Homebound => stats.homebound += 1,
@@ -608,65 +689,109 @@ fn nearest(places: &[SocietyPlace], from: DVec3) -> Option<SocietyPlace> {
     best.map(|(_, p)| p)
 }
 
-/// A route between two nodes of the society's network, or `None`.
-fn leg(network: &NavGraph, from: NavNodeId, to: NavNodeId) -> Option<inf_nav::NavPath> {
-    match inf_nav::route(network, from, to) {
-        inf_nav::NavVerdict::Found(r) if !r.is_stand() => Some(r.path),
+/// A route between two nodes of one graph, or `None`. A search whose two ends
+/// are the same node answers an empty contribution rather than a refusal.
+fn hop(graph: &NavGraph, from: NavNodeId, to: NavNodeId) -> Option<Vec<DVec3>> {
+    if from == to {
+        return graph.node(from).map(|n| vec![n.position]);
+    }
+    match inf_nav::route(graph, from, to) {
+        inf_nav::NavVerdict::Found(r) => Some(r.path.points().to_vec()),
         _ => None,
     }
 }
 
+/// **A leg from one place to another**, over the two levels of the search — the
+/// one door every leg of every day goes through.
+///
+/// Same building: one search inside it. Different buildings: out to the front
+/// door, along the street (memoized), and in through the other front door. The
+/// three point lists are joined by `NavPath::new`, which drops the coincident
+/// ends for us.
+fn leg(
+    soc: &mut SocietyRes,
+    from: &SocietyPlace,
+    to: &SocietyPlace,
+    stats: &mut SocietyStats,
+) -> Option<inf_nav::NavPath> {
+    if from.volume == to.volume {
+        let g = soc.interiors.get(&from.volume)?;
+        let pts = hop(g, from.node, to.node)?;
+        return (pts.len() > 1).then(|| inf_nav::NavPath::new(pts));
+    }
+    let inside_a = hop(soc.interiors.get(&from.volume)?, from.node, from.door)?;
+    let inside_b = hop(soc.interiors.get(&to.volume)?, to.door, to.node)?;
+    let key = (from.door, to.door);
+    let street = match soc.legs.get(&key) {
+        Some(hit) => {
+            stats.outer_cached += 1;
+            hit.clone()
+        }
+        None => {
+            stats.outer_searches += 1;
+            let found = match inf_nav::route(&soc.network, key.0, key.1) {
+                inf_nav::NavVerdict::Found(r) => Some(r.path),
+                _ => None,
+            };
+            soc.legs.insert(key, found.clone());
+            found
+        }
+    }?;
+    let mut pts = inside_a;
+    pts.extend_from_slice(street.points());
+    pts.extend_from_slice(&inside_b);
+    let path = inf_nav::NavPath::new(pts);
+    (path.length_m() > 0.0).then_some(path)
+}
+
 /// **Plan one agent's day** — the four legs, and the two honest fall-backs.
 fn plan_day(
-    soc: &SocietyRes,
+    soc: &mut SocietyRes,
     archetype: CrowdArchetype,
     home: SocietyPlace,
+    stats: &mut SocietyStats,
 ) -> (CrowdRecord, DayKind) {
-    let work = nearest(&soc.work, home.at)
-        .and_then(|w| leg(&soc.network, home.node, w.node).map(|p| (w, p)));
-    if let Some((w, out)) = work {
-        let back = leg(&soc.network, w.node, home.node);
-        let mut legs = vec![ScheduleLeg {
-            start_h: WORK_START_H,
-            travel_h: COMMUTE_H,
-            path: out,
-        }];
-        // The errand is nearest the WORKPLACE, because that is where the agent
-        // is standing at noon.
-        if let Some(e) = nearest(&soc.errand, w.at) {
-            if let (Some(to_shop), Some(to_work)) = (
-                leg(&soc.network, w.node, e.node),
-                leg(&soc.network, e.node, w.node),
-            ) {
+    if let Some(w) = nearest(&soc.work, home.at) {
+        if let Some(out) = leg(soc, &home, &w, stats) {
+            let back = leg(soc, &w, &home, stats);
+            let mut legs = vec![ScheduleLeg {
+                start_h: WORK_START_H,
+                travel_h: COMMUTE_H,
+                path: out,
+            }];
+            // The errand is nearest the WORKPLACE, because that is where the
+            // agent is standing at noon.
+            if let Some(e) = nearest(&soc.errand, w.at) {
+                if let (Some(to_shop), Some(to_work)) =
+                    (leg(soc, &w, &e, stats), leg(soc, &e, &w, stats))
+                {
+                    legs.push(ScheduleLeg {
+                        start_h: ERRAND_OUT_H,
+                        travel_h: ERRAND_H,
+                        path: to_shop,
+                    });
+                    legs.push(ScheduleLeg {
+                        start_h: ERRAND_BACK_H,
+                        travel_h: ERRAND_H,
+                        path: to_work,
+                    });
+                }
+            }
+            if let Some(back) = back {
                 legs.push(ScheduleLeg {
-                    start_h: ERRAND_OUT_H,
-                    travel_h: ERRAND_H,
-                    path: to_shop,
-                });
-                legs.push(ScheduleLeg {
-                    start_h: ERRAND_BACK_H,
-                    travel_h: ERRAND_H,
-                    path: to_work,
+                    start_h: HOME_H,
+                    travel_h: COMMUTE_H,
+                    path: back,
                 });
             }
-        }
-        if let Some(back) = back {
-            legs.push(ScheduleLeg {
-                start_h: HOME_H,
-                travel_h: COMMUTE_H,
-                path: back,
-            });
-        }
-        if let Some(sched) = CrowdSchedule::new(legs) {
-            return (CrowdRecord::scheduled(archetype, sched), DayKind::Full);
+            if let Some(sched) = CrowdSchedule::new(legs) {
+                return (CrowdRecord::scheduled(archetype, sched), DayKind::Full);
+            }
         }
     }
     // No workplace. An errand out and back is still a day.
     if let Some(e) = nearest(&soc.errand, home.at) {
-        if let (Some(out), Some(back)) = (
-            leg(&soc.network, home.node, e.node),
-            leg(&soc.network, e.node, home.node),
-        ) {
+        if let (Some(out), Some(back)) = (leg(soc, &home, &e, stats), leg(soc, &e, &home, stats)) {
             if let Some(sched) = CrowdSchedule::new(vec![
                 ScheduleLeg {
                     start_h: 10.0,
@@ -839,38 +964,67 @@ mod tests {
             "the commute is {:.1} m, which is not across a street",
             commute.path.length_m()
         );
-        // The route's own nodes: two buildings and a pavement between them.
-        let net = &world
+        // **The commute crosses all three, asserted on the PATH the agent
+        // walks** rather than on a search a reader could re-run differently.
+        // The network holds streets and front doors; a leg is joined from an
+        // inside hop, a street route and another inside hop, so the claim has to
+        // be made of the joined thing.
+        let soc = world
             .world()
             .get_resource::<SocietyRes>()
-            .expect("a society")
-            .network;
-        let home_node = domain::BUILDING | 1 | (0x11u64 << 20);
-        let work_node = domain::BUILDING | 1 | (0x22u64 << 20);
-        let inf_nav::NavVerdict::Found(r) = inf_nav::route(net, home_node, work_node) else {
-            panic!("the two buildings are not one network");
-        };
-        let mut seen = BTreeSet::new();
-        for n in &r.nodes {
-            seen.insert(domain::of(*n));
+            .expect("a society");
+        let home_at = DVec3::new(0.0, 0.0, 2.0);
+        let work_at = DVec3::new(28.0, 0.0, 2.0);
+        let pts = commute.path.points();
+        assert!(
+            (pts[0] - home_at).length() < 1e-9,
+            "the commute starts at {:?} and the home is at {home_at:?}",
+            pts[0]
+        );
+        assert!(
+            (pts[pts.len() - 1] - work_at).length() < 1e-9,
+            "the commute ends at {:?} and the work is at {work_at:?}",
+            pts[pts.len() - 1]
+        );
+        // It goes out through ONE block's pavement and in through the other's.
+        let mut on_pavement: BTreeSet<NavNodeId> = BTreeSet::new();
+        for n in soc.network.nodes() {
+            if domain::of(n.id) != domain::PAVEMENT {
+                continue;
+            }
+            if pts.iter().any(|p| (*p - n.position).length() < 1e-6) {
+                on_pavement.insert(n.id);
+            }
         }
         assert!(
-            seen.contains(&domain::BUILDING) && seen.contains(&domain::PAVEMENT),
-            "the route's domains are {seen:?} -- it never left the buildings"
+            on_pavement.len() >= 2,
+            "the commute touches {} pavement node(s) -- it never crossed a \
+             street",
+            on_pavement.len()
         );
-        // Two DISTINCT buildings, which is the half a single-namespace network
-        // could never make true.
-        let salts: BTreeSet<u64> = r
-            .nodes
+        // And the two ends are in two DIFFERENT buildings, which is the half a
+        // single-namespace network could never make true. The salt is what says
+        // so, read off the nodes the two places name.
+        let salts: BTreeSet<u64> = soc
+            .work
             .iter()
-            .filter(|n| domain::of(**n) == domain::BUILDING)
-            .map(|n| (n >> 20) & ((1 << 39) - 1))
+            .map(|w| super::node_salt(w.node))
+            .chain(soc.pending.values().map(|h| super::node_salt(h.node)))
+            .chain(std::iter::once(super::node_salt(
+                soc.interiors[&Uuid::from_u128(1)]
+                    .nodes()
+                    .next()
+                    .expect("a node")
+                    .id,
+            )))
             .collect();
-        assert_eq!(
-            salts.len(),
-            2,
-            "the route stayed in one building: {salts:?}"
+        assert!(
+            salts.contains(&0x11) && salts.contains(&0x22),
+            "the two buildings' salts are {salts:?}"
         );
+        // The memo did its job: four legs, and the second commute of the day is
+        // a different pair, so both searched once and neither twice.
+        assert!(b.outer_searches > 0, "no street route was ever searched");
     }
 
     /// A resident with no reachable workplace still gets a day, and the counter
