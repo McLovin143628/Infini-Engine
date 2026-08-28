@@ -28129,3 +28129,64 @@ second finding: **ceilings alone would have been vacuous** — a max-heap fronti
 every ceiling *and* answers correctly, so the fixture is pinned at the floor its geometry forces.
 Battery, goldens, rustdoc, schemas and `Cargo.lock` all unmoved (one arm renamed, net zero). Details
 in `docs/memos/island-progress.md` under *"Wave NPC1c — the CI red"*.
+
+## Wave NPC1d — the society, and the day it lives in (2026-08-28)
+
+Base `f0cfa6ec`, five clauses. The arc's first four waves built a crowd that could be
+*installed* and never installed one: `set_crowd_population` had three callers and all three
+were tests — the `set_debris_budget` shape, named once in each of NPC1a's, NPC1b's and
+NPC1c's carried lists. **The seam has a production caller now and it is the level's own
+settlements.** (1) `inf_pcg::building::society` derives who a `BuildingPlan` holds from its
+own rooms — a `Bedroom`/`Guest` is one home, an `Office`/`Workshop`/`Retail` room is workers
+per 12/20/30 m², a `Retail` room is also one errand, the other eight `RoomType`s hold nobody
+— so *"a House holds a household, an Apartment one per dwelling floor, a Shop staff by
+area"* are **consequences of the room table rather than entries in it** (measured over all
+seven archetypes at three storeys, homes/workers: Office 0/13, Apartment 13/0, Industrial
+0/26, House 13/0, Estate 7/0, Hotel 12/0, Shop 0/34 + 5 errands). A slot rides
+`PcgVolume::residents` beside `doorways` with `#[serde(skip)] + #[reflect(ignore)]`, so
+**no schema moves** — the bless regenerated every committed sample and only the two islands
+changed, only in `content_hash`, over unchanged bytes and entity counts at scene v26, and the
+one authored change in the whole wave is a single float. (2) `inf_ecs::society` is the
+level-scale half: it lays a **pavement ring** of eight nodes 2 m outside each block (a
+settlement's street grid lives in the recipe and is not in a cooked pack; the blocks are, and
+the streets are the gaps between them), joins two rings within 40 m at their nearest pair, and
+hangs each building on its own **front door** — the doorway node with a single edge, armed
+over all seven archetypes at one, two and three storeys. That closes NPC1c's defect 5 *by
+construction*: a pavement hugs its own block and a block stands on the levelled pad, so no
+node is on raw hillside and no ground profile is needed to say so.
+**THE ONE-NAMESPACE BLOCKER IS CLOSED** (NPC1c carried item 6, NPC1c-audit item 15):
+`interior_nav_in` carries a **39-bit salt**, hashed from `(volume Guid, building ordinal)`
+because a dense ordinal needs something that has seen the whole level and in a streaming
+world nothing has; the defect it retires is measured — two unsalted interiors fuse 80 + 81
+nodes to 81 and **double** the edge count, 170 → 340, which is a bedroom with a door into
+another building's corridor rather than a missing building. **THE SEARCH IS TWO LEVELS, and
+that is a measurement**: one graph with every interior in it is ~25 000 nodes, and `inf-nav`'s
+own 743 µs over 1 600 nodes extrapolates to ~11 ms a search inside a fixed step, so the level
+network holds streets and front doors (~1 600 nodes) and a building's interior is searched
+inside the building, with the street half memoized on its endpoint pair. (3) `CrowdSchedule`
+is a day as legs on the **level clock** — `CrowdClock` carries `t_s` and the LOCAL hour
+(`inf_ecs::sky::local_hour`, solar not UTC) — and **a leg's position is a fraction of its own
+clock window**, which makes the day's shape independent of the rate and is the only reason
+24 in-game hours is provable in a test process. Nothing is stored but what a body wrote:
+`rephase_m` and a new one-byte `leg`, `AGENT_TRACE_BYTES` **57 → 58** (ratio 113× → 111×).
+Midnight is not a special case (the active leg is `(hour − start_h) mod 24` smallest).
+**The island's clock is on**: `ISLAND_CLOCK_RATE = 18`, an **eighty-minute day**, and the
+number is *set from the island* — the median commute is 320 m, and at 18 the island's
+commutes imply 0.89 / **1.60** / 1.97 m/s against a 1.65 m/s walk, where the first draft of 30
+made the median a 2.67 m/s **jog**. Turning it on retires a second dormant thing: the I8b
+night-window substrate had never once returned a non-zero glow step on the shipped island,
+because a clock frozen at 10:30 UTC cannot put the sun below the horizon. (4) The editor door
+is that the population **installs itself** — `sync_society` runs in Simulate's fixed step
+through the same Ring-0 door — plus `SimSession::set_crowd_population`, which closes the
+NPC1a audit's carried item 12; no frontend moves, because a level's population is derived
+rather than authored. (5) `pie_equals_shipping_over_a_day_in_the_life`. **The society gets its
+own step phase** (`STEP_PHASES` 25 → 26, `society` at index 4) and its own
+`SOCIETY_STEP_BUDGET_MS = 0.5` for the settled cost, and a **`SOCIETY_MAX_AGENTS = 1000`
+ceiling** — four blocks of Harbour City alone offer 329 homes, so its hundred and seventy
+imply ~14 000 people, and a thousand is the N every wave of this arc is quoted at. LAWS:
+**a counter that resets is a report that says a system did nothing** (the fold's counters read
+`0 frontages, 0 crossings` over a network that decomposes exactly as 32 + 18 + 8); **the first
+quiet step is in the middle of a town, not at the end of one** (the settle read four blocks of
+a hundred and seventy); **a rate is a measurement** (48 minutes is the nicer number and it made
+a commute a jog); **price the search before you build the network**. Details in
+`docs/memos/island-progress.md` under *"Wave NPC1d"*.

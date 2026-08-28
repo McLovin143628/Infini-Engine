@@ -4453,14 +4453,17 @@ fn pie_equals_shipping_when_an_npc_walks_across_town() {
 
 /// How many fixed steps of ONE host the day-in-the-life gate runs — one whole
 /// in-game day.
-const DAY_STEPS: usize = 2_400;
+const DAY_STEPS: usize = 1_200;
 
 /// **The rate the gate compresses the island's own day to.**
 ///
 /// The island authors `inf_editor_core::island::ISLAND_CLOCK_RATE = 18`, an
 /// eighty-minute day. At 60 Hz that is `4 800 x 60 = 288 000` fixed steps a
 /// host, and this gate runs two of them — better than two hours of test process
-/// for one arm.
+/// for one arm, in a battery that has to finish.
+///
+/// So a day is `DAY_STEPS`, fifty steps an in-game hour, and the rate is
+/// whatever makes those two agree.
 ///
 /// So it runs the SAME day faster, and the compression is exact rather than
 /// approximate: a `ScheduleLeg`'s position is a *fraction of its own clock
@@ -4490,13 +4493,33 @@ const QUIET_STEPS: usize = 120;
 /// metres in plan.
 const THERE_M: f64 = 4.0;
 
+/// How far the hero walks away for the gate's `Dormant` coda, metres.
+///
+/// Past `CrowdTier::Far`'s own 512 m from every corner of a town about 320 m
+/// across, so the whole population loses its entity.
+const TOWN_AWAY_M: f64 = 1_000.0;
+
+/// How far from the settlement's crossroads the hero stands for the day.
+///
+/// Far enough that most of the town is outside the 32 m `Full` ring and is
+/// therefore moved by its clock rather than by a controller; near enough that
+/// the ladder still has somebody on its top two rungs. The town's own blocks
+/// span about 320 m, so this is its edge.
+const TOWN_EDGE_M: f64 = 150.0;
+
 /// One reading of the town, at one hour.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct DaySample {
     hour: f64,
+    /// Of the agents the CLOCK moves — see `sample_town` for why the ones a
+    /// controller moves are counted apart.
     at_home: usize,
     at_work: usize,
     walking: usize,
+    /// Agents on a tier that steers. Their bodies walk at their own gait
+    /// against a clock this gate runs 72x fast, so where they are is a
+    /// statement about the compression rather than about the day.
+    steered: usize,
     tiers: [usize; 4],
     glow_step: u16,
     sun_y: f64,
@@ -4509,8 +4532,13 @@ struct DayRun {
     settle_steps: usize,
     society: inf_ecs::society::SocietyStats,
     samples: Vec<DaySample>,
-    /// The highest count each tier ever reached over the whole day.
+    /// The highest count each tier ever reached — over the settle, the day and
+    /// the coda together, because the ladder is exercised by where the hero is
+    /// and the hero is in three places over this gate.
     tier_peak: [usize; 4],
+    /// The coda: how many agents went `Dormant`, and how far the furthest of
+    /// them was from where its own schedule says it should be when it came back.
+    coda: (usize, f64),
     /// Commute lengths over the whole population, metres: min / median / max.
     commute_m: (f64, f64, f64),
     /// Scheduled agents, and of those, agents with a full four-leg day.
@@ -4539,10 +4567,13 @@ fn glow_now(sim: &RuntimeSim) -> (u16, f64) {
 /// settlement's volumes evaluate as the ground under them pages in, so the first
 /// step that folds nothing is somewhere in the middle of a town rather than at
 /// the end of one.
-fn settle_the_society(sim: &mut RuntimeSim) -> usize {
+fn settle_the_society(sim: &mut RuntimeSim, peak: &mut [usize; 4]) -> usize {
     let mut quiet = 0usize;
     for i in 0..SETTLE_STEPS {
         sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        for (t, n) in sim.crowd_stats().per_tier.iter().enumerate() {
+            peak[t] = peak[t].max(*n);
+        }
         let s = sim.society_stats();
         if s.folded_now > 0 || s.planned_now > 0 || s.pending > 0 {
             quiet = 0;
@@ -4605,6 +4636,7 @@ fn sample_town(sim: &RuntimeSim, hour: f64) -> DaySample {
         at_home: 0,
         at_work: 0,
         walking: 0,
+        steered: 0,
         tiers: [0; 4],
         glow_step: 0,
         sun_y: 0.0,
@@ -4616,6 +4648,17 @@ fn sample_town(sim: &RuntimeSim, hour: f64) -> DaySample {
         let Some(sched) = rec.schedule.as_ref() else {
             continue;
         };
+        // **A steered body is not a census.** A tier with a controller is moved
+        // by `move_and_slide` at its own 1.65 m/s gait, and this gate runs the
+        // day 72x fast -- so a `Full` agent is permanently strung out along its
+        // route and where it stands says how compressed the clock is, not what
+        // time it is. Counted, reported, and kept out of the town's census;
+        // every other tier's position IS `route(clock)`, which is the schedule's
+        // own answer written into the world by the step.
+        if rec.tier.steers() {
+            s.steered += 1;
+            continue;
+        }
         let first = &sched.legs()[0];
         let home = first.path.points()[0];
         let work = first.path.points()[first.path.points().len() - 1];
@@ -4681,7 +4724,8 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
         let centre = glam::DVec3::new(settlement.centre.x, 0.0, settlement.centre.y);
         set_hero(sim, hero, centre);
         sim.world_mut().mark_dirty();
-        let settle_steps = settle_the_society(sim);
+        let mut tier_peak = [0usize; 4];
+        let settle_steps = settle_the_society(sim, &mut tier_peak);
         let society = sim.society_stats();
         let (commute_m, scheduled) = read_schedules(sim);
         let glazed = {
@@ -4732,6 +4776,20 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
         );
 
         // ── the day itself ──────────────────────────────────────────────────
+        //
+        // **The hero steps to the town's edge**, and that is not staging. Standing
+        // at the crossroads puts every one of the town's agents inside the 32 m
+        // `Full` ring within a few in-game hours -- their bodies, strung out along
+        // their routes by the compression, drift toward the middle -- and a census
+        // taken over three hundred steered bodies measures the compression rather
+        // than the day. From the edge a handful steer and the rest are moved by
+        // their clock, which is the tier ladder's whole point and is what makes
+        // `rec.last` the schedule's own answer.
+        set_hero(sim, hero, centre + glam::DVec3::new(TOWN_EDGE_M, 0.0, 0.0));
+        sim.world_mut().mark_dirty();
+        for _ in 0..8 {
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        }
         // Wind the clock to local midnight and compress it, so `DAY_STEPS` is
         // exactly one turn and step `i` is hour `24 i / DAY_STEPS`.
         {
@@ -4751,7 +4809,8 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
             settle_steps,
             society,
             samples: Vec::new(),
-            tier_peak: [0; 4],
+            tier_peak,
+            coda: (0, 0.0),
             commute_m,
             scheduled,
             glazed,
@@ -4770,15 +4829,84 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
             if next < hours.len() && i >= (hours[next] / 24.0 * DAY_STEPS as f64) as usize {
                 let s = sample_town(sim, local_hour(sim));
                 println!(
-                    "NPC1d {label}: {:>5.2} h -- {} home / {} work / {} walking; \
-                     tiers {:?}; sun y {:+.3} -> glow {}",
-                    s.hour, s.at_home, s.at_work, s.walking, s.tiers, s.sun_y, s.glow_step
+                    "NPC1d {label}: {:>5.2} h -- {} home / {} work / {} walking \
+                     (+{} steered); tiers {:?}; sun y {:+.3} -> glow {}",
+                    s.hour,
+                    s.at_home,
+                    s.at_work,
+                    s.walking,
+                    s.steered,
+                    s.tiers,
+                    s.sun_y,
+                    s.glow_step
                 );
                 run.samples.push(s);
                 next += 1;
             }
         }
         run.distinct = seen.len();
+
+        // ── the coda: the hero leaves, and the town keeps its day ───────────
+        //
+        // **`Dormant` is a cost tier, not a one-way door.** Past 512 m every
+        // agent loses its entity; the schedule is a pure function, so when the
+        // hero comes back each one is where its CLOCK says rather than where it
+        // was when it went away. That sentence is NPC1c's carried item about
+        // `Dormant` re-materializing at `last`, and this is the arm for it.
+        set_hero(
+            sim,
+            hero,
+            centre + glam::DVec3::new(TOWN_AWAY_M, 0.0, TOWN_AWAY_M),
+        );
+        sim.world_mut().mark_dirty();
+        let mut dormant = 0usize;
+        for _ in 0..30 {
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+            let st = sim.crowd_stats();
+            for (t, n) in st.per_tier.iter().enumerate() {
+                run.tier_peak[t] = run.tier_peak[t].max(*n);
+            }
+            dormant = dormant.max(st.per_tier[3]);
+        }
+        // …and back. The clock has run on while nobody was watching.
+        set_hero(sim, hero, centre + glam::DVec3::new(TOWN_EDGE_M, 0.0, 0.0));
+        sim.world_mut().mark_dirty();
+        for _ in 0..30 {
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+            for (t, n) in sim.crowd_stats().per_tier.iter().enumerate() {
+                run.tier_peak[t] = run.tier_peak[t].max(*n);
+            }
+        }
+        // Every re-materialized agent stands where its own schedule puts it at
+        // the hour the clock now reads — asserted as the WORST agent's distance
+        // from its own clock answer, over the whole population.
+        let worst = {
+            let hour = local_hour(sim);
+            let pop = sim
+                .world()
+                .world()
+                .get_resource::<inf_ecs::crowd::CrowdPopulationRes>()
+                .expect("a population");
+            let t_s = pop.steps as f64 * (1.0 / 60.0);
+            let clock = inf_ecs::crowd::CrowdClock::new(t_s, hour);
+            let mut worst = 0.0f64;
+            for (g, rec) in &pop.records {
+                if rec.tier.steers() {
+                    continue;
+                }
+                let want = rec.position_at(*g, clock);
+                worst = worst.max((rec.last - want).length());
+            }
+            worst
+        };
+        run.coda = (dormant, worst);
+        println!(
+            "NPC1d {label}: coda -- {dormant} agent(s) went dormant at \
+             {TOWN_AWAY_M:.0} m; back at {:.2} h the worst re-materialized agent \
+             is {worst:.4} m from its own schedule's answer",
+            local_hour(sim)
+        );
+
         println!(
             "NPC1d {label}: {DAY_STEPS} steps, {} distinct states; tier peaks \
              {:?}; crowd trace {} B a step over {} agent(s) = {} B a day",
@@ -4887,12 +5015,22 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
             commuting.at_home,
             commuting.at_work
         );
+        // **AND IT EMPTIES.** By ten at night every clock-driven agent is home
+        // -- the last leg starts at six and takes an hour, jitter included.
         assert!(
-            evening.at_home >= night.at_home / 2,
-            "{label}: the town has not started going home by {:.2} h ({} of {})",
-            evening.hour,
-            evening.at_home,
-            total(evening)
+            late.at_home * 2 > total(late),
+            "{label}: at {:.2} h only {} of {} are home",
+            late.hour,
+            late.at_home,
+            total(late)
+        );
+        // Seven in the evening is the middle of the walk home and is reported
+        // rather than asserted: with half an hour of jitter either way, whether
+        // a given agent is home at 19:00 is a statement about its own seed.
+        println!(
+            "NPC1d {label}: at {:.2} h the town is {} home / {} work / {} \
+             walking (+{} steered)",
+            evening.hour, evening.at_home, evening.at_work, evening.walking, evening.steered
         );
 
         // **THE WINDOWS.** The island has always had glazed modules and its
@@ -4931,10 +5069,27 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
         // because whether a settlement is wider than `Dormant`'s radius is a
         // property of the recipe rather than of this system.
         let rungs = r.tier_peak.iter().filter(|n| **n > 0).count();
-        assert!(
-            rungs >= 3,
-            "{label}: only {rungs} of the four tiers ever carried an agent: {:?}",
+        assert_eq!(
+            rungs, 4,
+            "{label}: only {rungs} of the four tiers ever carried an agent: {:?} \
+             -- the hero stands at the crossroads while the town streams in, at \
+             the town's edge for the day and a kilometre away for the coda, \
+             which is the whole ladder",
             r.tier_peak
+        );
+        assert!(
+            r.coda.0 > 0,
+            "{label}: nobody went dormant a kilometre from the town"
+        );
+        // **A dormant agent comes back at its SCHEDULE, not at `last`.** The
+        // tolerance is a millimetre rather than a metre because the claim is
+        // exact: the position law is `route(clock)` at every tier, so a
+        // re-materialized agent's transform IS its clock's answer.
+        assert!(
+            r.coda.1 < 1.0e-3,
+            "{label}: the worst re-materialized agent is {:.4} m from where its \
+             own schedule says it should be",
+            r.coda.1
         );
         assert!(
             r.distinct > DAY_STEPS / 2,
@@ -4974,7 +5129,7 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
     assert_eq!(a.distinct, b.distinct);
     println!(
         "NPC1d GATE: {DAY_STEPS} steps a host, {} distinct states, identical on \
-         both hosts to the byte; {} agents from {} homes over {} buildings",
+         both hosts to the byte; {} agents from {} homes over {} block(s),",
         a.distinct, a.society.agents, a.society.homes, a.society.volumes
     );
 }
@@ -5004,7 +5159,7 @@ fn the_islands_own_rate_makes_a_commute_a_walk() {
     let centre = glam::DVec3::new(settlement.centre.x, 0.0, settlement.centre.y);
     set_hero(&mut sim, hero, centre);
     sim.world_mut().mark_dirty();
-    settle_the_society(&mut sim);
+    settle_the_society(&mut sim, &mut [0usize; 4]);
 
     let rate = inf_editor_core::island::ISLAND_CLOCK_RATE;
     assert!(

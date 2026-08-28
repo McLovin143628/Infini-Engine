@@ -215,7 +215,8 @@ pub struct SocietyStats {
     /// Volumes folded on THIS step. Non-zero means the town is still building,
     /// and nothing plans a day on such a step.
     pub folded_now: usize,
-    /// Homes the level has offered.
+    /// Homes the level has offered — the people it HAS, plus the ones still
+    /// waiting for a day, plus the ones the ceiling declined.
     pub homes: usize,
     /// Workplaces the level has offered.
     pub works: usize,
@@ -283,6 +284,14 @@ pub struct SocietyRes {
     pub network: NavGraph,
     /// **Each volume's own interior**, searched inside the building.
     pub interiors: BTreeMap<Uuid, NavGraph>,
+    /// **Every block's pavement ring, kept**: its rectangle and its eight nodes.
+    ///
+    /// Kept rather than re-derived from the resident volumes, because a volume
+    /// that has streamed OUT still has its ring in the network and a block
+    /// folded later must still be able to cross to it. Deriving the crossing
+    /// candidates from residency alone would make the network a function of what
+    /// had paged in when — the hazard NPC1c named about positions, one level up.
+    pub rings: BTreeMap<Uuid, (DVec3, DVec2, Vec<(NavNodeId, DVec3)>)>,
     /// **The outer half of a leg, memoized on its endpoint pair.** A hundred
     /// residents of one block commuting to one office share one street route,
     /// and this is what makes them pay for it once. `None` records a pair the
@@ -573,19 +582,13 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
         }
         rings.insert(f.guid, ids);
     }
-    // The rings a crossing may reach: the ones just laid, plus every one already
-    // in the society, re-derived from the volumes that are still resident.
-    let mut known: BTreeMap<Uuid, (DVec3, DVec2, Vec<(NavNodeId, DVec3)>)> = BTreeMap::new();
-    for f in &sites {
-        let ids = match rings.get(&f.guid) {
-            Some(v) => v.clone(),
-            None => ring_points(f.centre, f.extent, f.pad_y)
-                .iter()
-                .map(|p| (pavement_node_id(DVec2::new(p.x, p.z)), *p))
-                .collect(),
-        };
-        known.insert(f.guid, (f.centre, f.extent, ids));
+    for f in &fresh {
+        let ids = rings[&f.guid].clone();
+        soc.rings.insert(f.guid, (f.centre, f.extent, ids));
     }
+    // The rings a crossing may reach: **every ring this society has ever laid**,
+    // whether or not its volume is resident now.
+    let known = std::mem::take(&mut soc.rings);
     for f in &fresh {
         let (ac, ae, a_ids) = &known[&f.guid];
         for (other, (bc, be, b_ids)) in &known {
@@ -613,6 +616,8 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
 
     // ── 2. keep each fresh volume's interior, and put its FRONT DOORS on the
     //       level network ───────────────────────────────────────────────────
+    soc.rings = known;
+    let known = &soc.rings;
     let mut doors: BTreeMap<Uuid, BTreeMap<u64, NavNodeId>> = BTreeMap::new();
     for f in &fresh {
         let Some(hf) = heavy.get(&f.guid) else {
@@ -750,7 +755,9 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
         stats.guid_refusals += refused;
     }
 
-    stats.homes = stats.agents + soc.pending.len();
+    // Every home the level has OFFERED, which is not the same as the people
+    // it has: the ceiling declines some and a doorless building's are refused.
+    stats.homes = stats.agents + soc.pending.len() + stats.homes_declined;
     stats.pending = soc.pending.len();
     stats.nodes = soc.network.len();
     stats.edges = soc.network.edge_count();
@@ -1161,6 +1168,70 @@ mod tests {
             .as_ref()
             .expect("a stay-at-home day is still a day");
         assert_eq!(sched.legs().len(), 2);
+    }
+
+    /// **The ceiling fires, and the homes past it are counted rather than
+    /// dropped on the floor.**
+    ///
+    /// `SOCIETY_MAX_AGENTS` is a decision about what a fixed step can carry, and
+    /// on the island it has never fired — a stationary hero pages in four blocks
+    /// and they offer 329 homes against a ceiling of a thousand. A ceiling with
+    /// no arm is the `set_debris_budget` shape this arc has named four times, so
+    /// this is the arm: enough blocks to go past it, driven until the society
+    /// stops planning, with the declined count asserted rather than the
+    /// remainder assumed.
+    #[test]
+    fn the_population_ceiling_fires_and_says_how_far_past_it_the_level_went() {
+        let mut world = EcsWorld::new();
+        // Each block offers 8 homes and one workplace; 200 of them is 1 600
+        // homes against a thousand-agent ceiling.
+        const BLOCKS: usize = 200;
+        let roles: Vec<SlotRole> = std::iter::repeat_n(SlotRole::Home, 8)
+            .chain(std::iter::once(SlotRole::Work))
+            .collect();
+        for i in 0..BLOCKS {
+            block(
+                &mut world,
+                Uuid::from_u128(100 + i as u128),
+                DVec3::new((i % 20) as f64 * 28.0, 0.0, (i / 20) as f64 * 28.0),
+                10.0,
+                0x1000 + i as u64,
+                &roles,
+            );
+        }
+        let mut last = sync_society(&mut world);
+        for _ in 0..(BLOCKS * 8 / SOCIETY_PLANS_PER_STEP + 8) {
+            last = sync_society(&mut world);
+            if last.pending == 0 && last.planned_now == 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            last.agents, SOCIETY_MAX_AGENTS,
+            "the society took {} people against a {SOCIETY_MAX_AGENTS} ceiling",
+            last.agents
+        );
+        assert_eq!(
+            last.homes_declined,
+            BLOCKS * 8 - SOCIETY_MAX_AGENTS,
+            "{} of {} homes were declined",
+            last.homes_declined,
+            BLOCKS * 8
+        );
+        assert_eq!(
+            last.homes,
+            BLOCKS * 8,
+            "the level offered {} homes and the report says {}",
+            BLOCKS * 8,
+            last.homes
+        );
+        // And the population really is that size, in the world rather than in
+        // the report.
+        let pop = world
+            .world()
+            .get_resource::<crate::crowd::CrowdPopulationRes>()
+            .expect("a population");
+        assert_eq!(pop.records.len(), SOCIETY_MAX_AGENTS);
     }
 
     /// A block a kilometre away is a different town, and the pavements do not
