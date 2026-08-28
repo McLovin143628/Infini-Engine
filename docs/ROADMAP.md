@@ -28546,9 +28546,20 @@ out at 26.19 m/s (94 km/h)** against a 0.60-grade control at **−54.0 m**. *Cla
 the island's step with a car driving it is **13.6109 ms** (solver 6.8826, animation 3.4523,
 physics3d sync 2.1954) and the **`vehicle` row is 0.0070 ms for one car** against a 0.5 ms
 ceiling at sixty-four; the frame is not re-measured because the wave adds no pass, no batch and no
-draw-call kind. Schemas unmoved (scene v26 / payload v11 / `.inf_sm` v3 / recipe v2), goldens
-**59** with none added or re-blessed, `Cargo.lock` moves for one **dev**-dependency (`inf-gis`,
-which `inf-island` already links). LAWS: **a field nothing reads is a repair nobody needs**;
+draw-call kind. **House gates at head:** battery **336 / 6 436 / 0 / 19** against `3b466575`'s 333 / 6 407 / 0 / 19
+(+3 blocks, +29 arms, every one attributed in the memo), goldens **59** with `INF_GOLDEN_STRICT=1`
+green over 118 arms and `tests/goldens` untouched (no car golden: a car has no committed frame),
+rustdoc **374 over 30 crates** cold after `cargo clean --doc` — three opened and three closed, so
+the wave adds **zero**, headroom 76 — clippy **0** with `-D warnings` run LAST, fmt clean, schemas
+unmoved (scene v26 / payload v11 / `.inf_sm` v3 / recipe v2), `EXPECTED_LEVELS` 23, and
+**`Cargo.lock` byte-unmoved**: the one manifest edit attempted (`inf-gis` as a dev-dependency of
+`inf-player`) was REFUSED by `inf-gis`'s own portability gate — a manifest ban does not read
+`[dev-dependencies]` as an exception — and the graph reaches the walk through
+`inf_island::road_graph` instead. Two operational laws paid for: **a dev-dependency is still a
+dependency to a manifest ban**, and **a link error is read against `df` first and against
+`target/debug/incremental` second** (the battery's first pass died on a hundred
+`LNK2019: unresolved external symbol anon.*.llvm.*` in a file this wave never touched, with
+82.4 GB free; deleting 40.36 GB of stale CGUs cleared it without a `cargo clean`). LAWS: **a field nothing reads is a repair nobody needs**;
 **a gate's window has to open where the thing it counts happens** (the engine's one `Play` is
 emitted on the step the rig is *derived*, and a window that opened at the throttle convicted a
 working feature); **two hosts agreeing about WHAT is not two hosts agreeing about WHEN**; **a

@@ -987,8 +987,8 @@ pub trait Vehicle: Send + Sync + 'static {
     /// driver is asking (`load`) and how fast it is turning over (`revs`).
     ///
     /// Island wave VEH1a — the input to [`engine_cue`], and the whole of what a
-    /// vehicle tells the audio queue. On the trait rather than derived from
-    /// [`VehicleOutcome`] because *what counts as revs* is a class's business: a
+    /// vehicle tells the audio queue. On the trait rather than derived from the
+    /// door's `VehicleOutcome` because *what counts as revs* is a class's business: a
     /// road car's is its speed against its own top speed, an electric one has no
     /// idle, a helicopter's is its collective and has nothing to do with how
     /// fast it is going. The door hands in the forward speed it has already

@@ -14,7 +14,8 @@
 //!   long**, because `+Z` is forward in this engine. It stood across a 2.8 m
 //!   wheelbase on a 1.8 m track. Nothing saw it, because nothing drew it.
 //!
-//! So a car is authored here, from one [`VehicleDef`], and the drawn thing is
+//! So a car is authored here, from one [`VehicleDef`](inf_ecs::vehicle::VehicleDef),
+//! and the drawn thing is
 //! the same size and shape as the solid thing by construction.
 //!
 //! # Why child entities and not a scatter batch
@@ -107,7 +108,8 @@ pub struct VehicleSpawn<'a> {
 ///
 /// * the **chassis** — a `Dynamic` `RigidBody3D`, a box `Collider3D` at the
 ///   def's half-extents and density, and the def's
-///   [`VehicleClass`] (scene v25, applied once at creation by the bridge);
+///   [`VehicleClass`](inf_ecs::components::VehicleClass) (scene v25, applied
+///   once at creation by the bridge);
 /// * the **body** — one child per [`BodyPart`] of the def's family, drawing its
 ///   own primitive at its own size;
 /// * the **wheels** — four sphere **sensors** with no body of their own, which

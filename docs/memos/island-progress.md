@@ -19067,6 +19067,23 @@ instances. Seven cars is fifty-six instances against that, and the projector
 walks them in the loop it already walks. What a car *would* cost a frame is a
 question about a fleet, and the fleet is VEH1b's.
 
+### Counts
+
+| | at `3b466575` | **wave VEH1a** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 333 / 6 407 / 0 / 19 | **336 / 6 436 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, **+3 blocks and +29 arms**, every one attributed: **8** in `inf-physics`'s new `tests/vehicle_ground.rs`, **4** in `inf-editor-core`'s new `tests/fixed_step_mirror.rs`, **2** in its new `tests/vehicle_grade.rs`, **7** in `inf_ecs::vehicle` (the two engine-cue arms, the engine-state one, the silhouette, the part guid, the catalogue and the default def), **4** in `inf_editor_core::vehicle`, **1** in its `island` (`every_settlement_parks_a_car_on_the_circuit`) and **3** in `island_gate` (16 → 19 arms). The 24 vehicle arms of `vehicle_3d` are 23 + 1 ignored and green |
+| goldens | 59 | **59** — none added, none re-blessed, and the four ADDITIVE pins deliberately unmoved: a car has no committed frame. `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**, and `git status` over `tests/goldens` empty afterwards |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — 404 `^warning` lines minus 30 per-crate summaries, after `cargo clean --doc`. **The wave adds zero**: it opened three (a `VehicleOutcome` that lives in `inf-physics` and cannot be linked from `inf-ecs`, and two `VehicleClass`/`VehicleDef` links from Ring 1) and closed all three. Headroom **76** |
+| `clippy --workspace --all-targets -D warnings` | 0 | **0** (local toolchain, run **LAST** per the rmeta law). One finding, this wave's own and caught before the run: `spawn_vehicle` was eight parameters against `too_many_arguments`' seven, and the pairs in it are a pose and a dressing — `VehicleSpawn` |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved.** `VehicleBody`/`BodyPart`/`VehicleDef`/`VehicleDefs`/`EngineCue` derive **no `Serialize`** (the `WeaponDef` precedent); `VehicleOutcome` is a report; `CastTargets` never reaches a file; `VehicleClass::set`/`to_tuning` add no field. The fleet reaches the level as ordinary entities and the `VehicleClass` v25 already carried |
+| step phases / trace sections / trace bytes an agent / libm-ban subjects | 26 / 9 / 58 / 42 | **27** / 9 / 58 / 42 — `vehicle` at index 12; nothing else moved, and **no trace moved**: `step_vehicles` runs in the slot it always ran in |
+| §8 budgets | — | **one minted**: `VEHICLE_STEP_BUDGET_MS` **0.5** at `VEHICLE_BUDGET_CARS` **64**, from a measured 0.1101 ms dev / 0.0882 release. Every other budget unmoved, and the new one is direction-only like the rest |
+| committed levels (`EXPECTED_LEVELS`) | 23 | **23** |
+| committed content | — | **two `.inf_lvl`s regenerated and their sidecars** — `VancouverIsland` 49 625 → **73 633 B** (7 cars, 38 drawn body parts), `IslandFixture` 9 990 → **16 671 B** (2 cars, 10 parts). **No new file**: no `.inf_mesh`, no asset kind, no `.toml` beside the level. The catalogue is a `&str` this crate reads at generation time |
+| new crates / external dependencies | — | **none**, and **`Cargo.lock` is byte-unmoved from `3b466575`**. The one manifest edit that was attempted — `inf-gis` as a dev-dependency of `inf-player` — was **refused by `inf-gis`'s own portability gate** and reverted; the graph reaches the walk through `inf_island::road_graph` instead |
+| frontend | untouched | **untouched and not run** (`git diff -- editor/studio/src` is empty) |
+
 ### Carried, by name
 
 1. **The engine's emitter does not MOVE.** `AudioCommand` has no `SetPosition`,
@@ -19106,7 +19123,16 @@ question about a fleet, and the fleet is VEH1b's.
    item, unmoved — it needs a trait setter first).
 10. **The drive gate is 300 steps and the island drive is 900.** Ten seconds of
     driving was cut to five to keep the arm inside a sensible CI slot; the
-    distinctness clause is over the shorter run.
+    distinctness clause is over the shorter run. Its distance clause is **15 m
+    against a measured 34.1** for a stated reason: the fixture's terrain is
+    *sampled*, and the sampling step is the one this repository's portability law
+    exempts by name, so the ground a wheel finds is a fact about the machine that
+    built it.
+11. **`inf-gis` is reached only through `inf-island`.** `inf_island::road_graph`
+    and the `RoadGraph` / `DEFAULT_ROAD_LIFT_M` re-exports exist because a
+    manifest ban forbids `inf-player` from naming the crate at all. That is the
+    right shape and it is also a **coupling**: the day a gate outside the island
+    wants a `RoadGraph`, it needs its own door or the exemption needs re-taking.
 
 ### The laws this wave paid for
 
@@ -19134,3 +19160,24 @@ question about a fleet, and the fleet is VEH1b's.
   heading would have put the platform's libm into `VancouverIsland.inf_lvl`; the
   crate's own `portable_math_law` scans every `.rs` under `src/` and would have
   caught it, which is the gate paying for itself a fourth time.
+* **A DEV-dependency is still a dependency to a manifest ban.** `inf-gis`'s
+  transcendental exemption is kept by a gate that refuses to let
+  `runtime/inf-player/Cargo.toml` name the crate in *any* dependency section, and
+  the argument written beside `inf-island`'s own dev-dep — *"a dev-dependency
+  does not reach the shipped player"* — is true and is **not what that gate
+  checks**. Adding one for the connectivity walk turned it red on the battery's
+  first pass. The fix is not an exemption: the graph arrives through
+  `inf_island::road_graph`, a door on a crate the ban already governs, and the
+  player's manifest is back where it was. *A gate you agree with is still a gate;
+  route around it through something it already trusts.*
+* **A link error is read against `df` FIRST and against `incremental` SECOND.**
+  The battery's first run died on `link.exe exit code 1120` — a hundred
+  `LNK2019: unresolved external symbol anon.<hash>.llvm.<n>` in
+  `inf-editor-core`'s test binary, in `sequencer::tests`, which this wave never
+  touched. P26.2's law says read it against the disk, and the disk was **82.4 GB
+  free**, so it was not that; the Wave-G half applies instead. Deleting
+  `target/debug/incremental` alone — **40.36 GB** — cleared it, and the battery
+  went 336 / 6 436 / 0 / 19 without a `cargo clean`. **A stale CGU and a full
+  volume produce the same class of error and want different remedies**, so the
+  order matters: check the disk, then drop incremental, and only then suspect
+  the code.
