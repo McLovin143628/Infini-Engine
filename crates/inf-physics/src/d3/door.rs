@@ -668,6 +668,30 @@ const BLOCK_SKIN_M: f64 = 0.02;
 pub fn step_doors(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64) -> DoorReport {
     let band = bridge.sim_band(world);
     let places = placements_near(world, &band);
+    step_doors_with(world, bridge, dt, places)
+}
+
+/// [`step_doors`] over a placement list the **caller** gathered.
+///
+/// # One gather, because a gather is not free (NPC1c audit)
+///
+/// [`placements_near`] visits every `DoorwaySlot` a level plans — 19 790 of them
+/// on the shipped city — to keep the 234 the band admits, and NPC1c added a
+/// second per-step caller (`gameplay::step_crowd_doors`) beside this one. The
+/// wave measured the pair inside its `gameplay 0.79 → 1.633 ms` row and carried
+/// the fix by name: *"`step_gameplay` gathers the band's doors TWICE a step…
+/// one shared gather is the fix; it is a signature change to two functions and
+/// it is not landed here."* This is that signature.
+///
+/// The list is a **value taken by move**, not a borrow: this function needs
+/// `&mut EcsWorld` to swing the leaves, and a slice borrowed out of the world
+/// would keep it alive across that.
+pub(crate) fn step_doors_with(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    dt: f64,
+    places: Vec<DoorPlacement>,
+) -> DoorReport {
     let mut report = DoorReport {
         doors: places.len() as u32,
         ..Default::default()

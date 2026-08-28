@@ -1365,3 +1365,95 @@ fn a_locked_door_refuses_a_crowd_agent_exactly_as_it_refuses_a_player() {
     assert!(!door_is_open(&world));
     println!("NPC1c door verb: {pressed} press(es) at a locked door, 0 opened");
 }
+
+/// **WHAT A CITY'S DOORWAY GATHER COSTS, AND WHY THE PHASE PAYS IT ONCE**
+/// (NPC1c audit — the wave's own carried item 2, priced and closed).
+///
+/// `placements_near` visits **every** `DoorwaySlot` a level plans and keeps the
+/// handful the band admits. That visit is not free: the shipped city plans
+/// 19 790 doorways, and NPC1c added a second per-step caller
+/// (`gameplay::step_crowd_doors`) beside `step_doors`. Its own ledger carried
+/// the arithmetic:
+///
+/// > *"`step_gameplay` gathers the band's doors TWICE a step … measured as part
+/// > of the `gameplay +0.84 ms` at N = 1 000 with 32 blocked agents. One shared
+/// > gather is the fix; it is a signature change to two functions and it is not
+/// > landed here."*
+///
+/// It is landed now, and the guarantee is **structural rather than a clock**:
+/// `step_crowd_doors` no longer takes a `PhysicsBridge3D`, so it has nothing to
+/// derive a band from and cannot gather at all — the list is a parameter, taken
+/// once by `step_gameplay` and handed to both passes. A future edit that gave it
+/// a bridge back would have to say so in its signature.
+///
+/// What this arm adds is the **price of one gather** at city scale, printed, so
+/// the saving has a number beside it rather than a ratio. The clock is printed
+/// and the *shape* is asserted, per this crate's standing rule.
+#[test]
+fn a_citys_doorway_gather_is_paid_once_a_gameplay_step() {
+    use std::time::Instant;
+
+    // The shipped city's own order of magnitude — 19 790 doorway slots — as one
+    // volume, so the arm measures the VISIT rather than the entity walk.
+    const SLOTS: usize = 19_790;
+    let mut w = EcsWorld::new();
+    let src = w.spawn_with_guid(Uuid::from_u128(0x1600_00F1), "Player", None);
+    w.world_mut().entity_mut(src).insert((
+        Transform::IDENTITY,
+        inf_ecs::components::StreamingSource { radius_m: 256.0 },
+    ));
+    let e = w.spawn_with_guid(Uuid::from_u128(0x1600_00F2), "City", None);
+    // Spread over 1.26 km, the shipped city's own span, so the band admits a
+    // fraction rather than all or nothing.
+    let slots: Vec<inf_ecs::DoorwaySlot> = (0..SLOTS)
+        .map(|i| {
+            let a = i as f64 * 0.7;
+            inf_ecs::DoorwaySlot {
+                hinge: DVec3::new(a % 1260.0 - 630.0, 0.0, (a * 1.7) % 1260.0 - 630.0),
+                closed_yaw_deg: 0.0,
+                width_m: 0.9,
+                height_m: 2.1,
+                thickness_m: 0.05,
+                inside_yaw_deg: 90.0,
+                exterior: i % 40 == 0,
+                floor: 0,
+            }
+        })
+        .collect();
+    let mut vol = inf_ecs::PcgVolume::default();
+    vol.set_population(Vec::new(), Vec::new(), Vec::new(), slots);
+    w.world_mut()
+        .entity_mut(e)
+        .insert((Transform::IDENTITY, vol));
+    w.mark_dirty();
+    w.propagate();
+
+    let mut bridge = PhysicsBridge3D::new(GRAVITY);
+    bridge.sync_from_world(&w);
+    let band = bridge.sim_band(&w);
+
+    // MIN of five rounds of twenty gathers, the `kinematic_pairing_cost` shape.
+    let mut near = 0usize;
+    let mut best = f64::INFINITY;
+    for _ in 0..5 {
+        let t = Instant::now();
+        for _ in 0..20 {
+            near = d3::door::placements_near(&w, &band).len();
+        }
+        best = best.min(t.elapsed().as_secs_f64() * 1000.0 / 20.0);
+    }
+    println!(
+        "NPC1c audit: one `placements_near` over {SLOTS} doorway slots is \
+         {best:.4} ms and keeps {near} ({:.2} % of them); `step_gameplay` paid \
+         it TWICE a step with a blocked crowd and now pays it once",
+        100.0 * near as f64 / SLOTS as f64
+    );
+    // ANTI-VACUITY: a gather that admitted nothing would be the cheapest of all,
+    // and a gather that admitted everything would not be a band.
+    assert!(best > 0.0, "the gather took no measurable time");
+    assert!(near > 0, "the band admitted no doorway at all");
+    assert!(
+        near < SLOTS / 4,
+        "the band admitted {near} of {SLOTS} slots, which is not a band"
+    );
+}

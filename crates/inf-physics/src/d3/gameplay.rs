@@ -185,15 +185,24 @@ pub fn step_gameplay(
     if !dt.is_finite() || dt <= 0.0 {
         return report;
     }
-    // 0. **An NPC opens the door in its way** (island wave NPC1c). Before the
+    // 0. **ONE band and ONE placement gather for the whole phase** (NPC1c
+    //    audit, closing the wave's own carried item 2). `placements_near` visits
+    //    every `DoorwaySlot` a level plans — 19 790 on the shipped city — to
+    //    keep the 234 the band admits, and NPC1c gave it a second per-step
+    //    caller in `step_crowd_doors`. Gathering twice is the same walk twice;
+    //    the placements are a function of the level's geometry and the band, and
+    //    nothing between the two calls moves either.
+    let band = bridge.sim_band(world);
+    let places = super::door::placements_near(world, &band);
+    // 0a. **An NPC opens the door in its way** (island wave NPC1c). Before the
     //    leaves move, so a crowd agent's press has the same immediacy the
     //    player's E already has -- that one is consumed in
     //    `step_character_movement`, a phase earlier than this whole function.
     //    Inert on every level with no crowd: one absent-resource read.
-    report.crowd_doors = step_crowd_doors(world, bridge);
+    report.crowd_doors = step_crowd_doors(world, &places);
     // 1. The doors move first, because a kick armed on a previous step lands in
     //    step 3 and must find the leaf where this step's solver will.
-    let doors = super::door::step_doors(world, bridge, dt);
+    let doors = super::door::step_doors_with(world, bridge, dt, places);
     report.doors = doors;
     // 2. Every character with a weapon: the trigger, the reload, the clocks.
     step_weapons(world, bridge, dt, &mut report);
@@ -258,18 +267,22 @@ pub struct CrowdDoorReport {
 /// `door::toggle` refusal per blocked agent per step, which is a state lookup;
 /// the benefit is that the counters say `pressed` without `opened`, which is
 /// the number a designer wants when a district stops working.
-pub fn step_crowd_doors(world: &mut EcsWorld, bridge: &PhysicsBridge3D) -> CrowdDoorReport {
+///
+/// `placements` is the phase's **one** gather — [`step_gameplay`] takes it once
+/// and hands the same list to this pass and to `step_doors` (the NPC1c audit;
+/// the wave gathered twice and carried the fix by name). It is the same door
+/// `candidates` and the player's prompt read, so an NPC cannot reach a door the
+/// player is told is out of reach.
+pub fn step_crowd_doors(
+    world: &mut EcsWorld,
+    placements: &[inf_ecs::door::DoorPlacement],
+) -> CrowdDoorReport {
     let mut report = CrowdDoorReport::default();
     let blocked = inf_ecs::crowd::blocked_agents(world);
     if blocked.is_empty() {
         return report;
     }
     report.considered = blocked.len();
-    // ONE band and ONE placement gather for the whole pass. `placements_near`
-    // is the same door `candidates` and the player's prompt read, so an NPC
-    // cannot reach a door the player is told is out of reach.
-    let band = bridge.sim_band(world);
-    let placements = super::door::placements_near(world, &band);
     if placements.is_empty() {
         return report;
     }
@@ -282,7 +295,7 @@ pub fn step_crowd_doors(world: &mut EcsWorld, bridge: &PhysicsBridge3D) -> Crowd
         // through `placements_near`'s own ascending order, so two agents at one
         // threshold press the same leaf.
         let mut best: Option<(f64, Uuid)> = None;
-        for p in &placements {
+        for p in placements {
             let state = field
                 .map(|f| f.get(p.guid, &p.spec))
                 .unwrap_or_else(|| door::DoorState::fresh(&p.spec));
