@@ -90,6 +90,9 @@ pub mod thumbnail;
 // P29.5 pillar S4: the queue a live tuning edit lands on, drained at the top of
 // the next fixed step. Ring 1 ONLY -- the shipped player has no such door.
 pub mod tuning;
+/// Island wave VEH1a: the one door that authors a car — geometry, wheels, a
+/// drawn body and the class it is tuned with, from one `VehicleDef`.
+pub mod vehicle;
 // Wave E: the drag-to-viewport payload contract, parsed here rather than in
 // `inf_viewport::host` so the Linux CI leg exercises it (the `render_assets`
 // reason).

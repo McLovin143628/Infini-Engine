@@ -65,6 +65,32 @@ macro_rules! insert {
     }};
 }
 
+/// How far above its resting height a car is authored (island wave VEH1a).
+///
+/// [`START_LIFT_M`]'s argument for a vehicle: the resting origin is *the springs
+/// solved*, and solving them at author time would put a committed number in the
+/// level that the first fixed step then re-derives. A hand's lift is a tenth of
+/// a second of fall and lets the suspension settle it, which is what an author
+/// does.
+pub const CAR_LIFT_M: f64 = 0.15;
+
+/// The paint a settlement's car wears.
+///
+/// A small fixed wheel rather than a random colour: the level is a committed
+/// document and a colour drawn from a generator's own RNG state is a byte that
+/// moves when anything upstream of it changes. Seven sites, five colours, and
+/// the index is the site's own.
+fn car_paint(site: usize) -> inf_ecs::math::Color {
+    const PAINT: [inf_ecs::math::Color; 5] = [
+        inf_ecs::math::Color::new(0.62, 0.10, 0.11, 1.0),
+        inf_ecs::math::Color::new(0.12, 0.24, 0.52, 1.0),
+        inf_ecs::math::Color::new(0.86, 0.86, 0.88, 1.0),
+        inf_ecs::math::Color::new(0.16, 0.17, 0.19, 1.0),
+        inf_ecs::math::Color::new(0.20, 0.45, 0.30, 1.0),
+    ];
+    PAINT[site % PAINT.len()]
+}
+
 /// How far above the ground a hero is spawned.
 ///
 /// A character placed exactly on the surface is one the first ground snap has to
@@ -563,7 +589,8 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     // (`DEFAULT_STRUCTURE_LOD_M`, 96 m) are what decide whether a building draws
     // its parts or its shell, and a second per-volume distance cut on top of
     // them would be a second authority on the same question.
-    for plan in crate::settlement::settlements(design) {
+    let plans = crate::settlement::settlements(design);
+    for plan in &plans {
         for b in &plan.blocks {
             let g = crate::settlement::block_guid(name, b.site, b.col, b.row);
             doc.create_with_guid(
@@ -592,6 +619,72 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
                 },
             );
         }
+    }
+
+    // ── the fleet ─────────────────────────────────────────────────────────────
+    //
+    // **One car where the circuit passes each settlement** (island wave VEH1a).
+    // Wave I7 shipped 33.74 km of graded, audited road and left open item 15 on
+    // the record: *"THE CIRCUIT IS DRAWN AND AUDITED, AND NOTHING DRIVES IT"* —
+    // and the reason it gave was content, *"a vehicle needs a chassis mesh and a
+    // tuning block that would be the fourth committed asset in a folder whose
+    // whole argument is that it is small."*
+    //
+    // It needs neither. The body is a union of built-in primitives derived from
+    // one Ring-0 table (`inf_ecs::vehicle::VehicleBody`), so **no mesh file is
+    // committed**; the tuning is a `VehicleClass`, which the scene has carried
+    // since v25; and the fleet is a TOML catalogue this crate holds as a `&str`
+    // and reads at generation time, on the `GAMEPLAY_ITEMS_TOML` precedent, so
+    // **no schema moves and no asset kind is added**.
+    //
+    // WHERE: the nearest *planned route vertex* to each settlement's centre —
+    // which is the point at which the drivable circuit passes the town, and the
+    // only place on this island where a committed number says what the ground
+    // height is (`inf_island::roads::nearest_route_vertex`, the same door
+    // `player_start` uses). Nothing here reads an elevation, and the level stays
+    // authorable without the terrain.
+    //
+    // NOT `AlwaysLoaded`: a car streams with its partition cell exactly as a
+    // settlement block does, so a level with seven of them holds however many
+    // are near the simulation and no more.
+    let fleet = crate::vehicle::island_vehicles();
+    for plan in &plans {
+        // A city gets the saloon and a town the pickup — the two rows the
+        // catalogue declares, chosen by the site's own kind rather than by an
+        // index into a list.
+        let id = match plan.kind {
+            inf_island::SiteKind::City => "sedan",
+            _ => "truck",
+        };
+        let Some(def) = fleet.get(id) else { continue };
+        let Some((v, dir)) = inf_island::nearest_route_vertex(&design.routes, plan.centre) else {
+            continue;
+        };
+        let guid = derived(name, &format!("island.car.{}", plan.site));
+        // Nose along the road, and a hand's lift over it: the suspension settles
+        // the rest on the first step, which is what an author does rather than
+        // solving the spring at author time.
+        //
+        // `patan2_64` and not `f64::atan2` — this yaw is serialized into a
+        // committed `.inf_lvl`, which is the P14 law's first class exactly
+        // (`portable_math_law` scans every `.rs` under this crate's `src/`).
+        // A yaw of θ about `+Y` takes `+Z` to `(sin θ, 0, cos θ)`, so facing a
+        // direction `d` is `atan2(d.x, d.z)`.
+        let yaw_deg = inf_math::patan2_64(dir.x, dir.y).to_degrees();
+        crate::vehicle::spawn_vehicle(
+            &mut doc,
+            guid,
+            &format!("{} Car", plan.name),
+            DVec3::new(
+                v.x,
+                crate::vehicle::resting_origin_y(def, v.y) + CAR_LIFT_M,
+                v.z,
+            ),
+            yaw_deg,
+            def,
+            car_paint(plan.site),
+            None,
+        );
     }
 
     // ── the hero ──────────────────────────────────────────────────────────────
@@ -929,9 +1022,17 @@ mod tests {
         const ALLOWED: &[&str] = &[
             "IslandDesign",   // the committed design, read by `read_design`
             "IslandRecipe",   // the committed recipe
+            "SiteKind",       // a site's own kind, off the committed recipe
             "biome_set_guid", // …and five GUIDs derived from the island's name
             "cover_pcg_guid",
             "level_guid",
+            // The nearest vertex of the committed ROAD LAYER, and the direction
+            // the route runs there (island wave VEH1a). The routes are the one
+            // committed thing on this island that carries a ground height —
+            // `player_start` has read them for exactly that since I7 — so a car
+            // parked on the circuit is placed from the design and not from a
+            // tile. It opens nothing.
+            "nearest_route_vertex",
             "read_design", // the one door onto the committed layers
             "road_mesh_guid",
             "slug",
@@ -1089,6 +1190,124 @@ mod tests {
         }
         assert_eq!(sun_guid(a), sun_guid(a));
         assert_ne!(sun_guid(a), sun_guid("Other Island"));
+    }
+
+    /// **THE CIRCUIT HAS SOMETHING ON IT** (island wave VEH1a) — I7's open item
+    /// 15, *"the circuit is drawn and audited, and nothing drives it"*, as an
+    /// assertion.
+    ///
+    /// One car per settlement, standing on the drivable circuit at the point it
+    /// passes the town, derivable as a rig by the same recogniser the physics
+    /// bridge uses, and — the clause the committed car could never have met —
+    /// **drawn at the size of its own collider**.
+    ///
+    /// Run against both committed islands, because "the fixture is what CI
+    /// exercises" is only true while the fixture and the shipped island are the
+    /// same generator.
+    #[test]
+    fn every_settlement_parks_a_car_on_the_circuit() {
+        for recipe in ISLAND_RECIPES {
+            let Some(d) = design(recipe) else {
+                println!("SKIP: no {recipe} in this tree");
+                continue;
+            };
+            let doc = island_scene(&d);
+            let name = d.recipe.name.as_str();
+            let plans = crate::settlement::settlements(&d);
+            assert!(!plans.is_empty(), "{recipe}: no settlements to park at");
+            let fleet = crate::vehicle::island_vehicles();
+
+            let mut drawn_parts = 0usize;
+            for plan in &plans {
+                let guid = derived(name, &format!("island.car.{}", plan.site));
+                let rig = inf_ecs::vehicle::rig_of(doc.world(), guid).unwrap_or_else(|| {
+                    panic!("{recipe}: {} has no car the recogniser finds", plan.name)
+                });
+                assert_eq!(rig.wheels.len(), 4, "{recipe}: {}", plan.name);
+                assert_eq!(
+                    rig.wheels.iter().filter(|w| w.steered()).count(),
+                    2,
+                    "{recipe}: {} — the front pair steers",
+                    plan.name
+                );
+
+                // It stands ON the circuit, at the vertex the design commits.
+                let (v, _) = inf_island::nearest_route_vertex(&d.routes, plan.centre)
+                    .expect("the island has routes");
+                let e = doc.entity_of(guid).expect("the chassis");
+                let t = doc
+                    .world()
+                    .world()
+                    .get::<inf_ecs::components::Transform>(e)
+                    .expect("its transform");
+                let def = fleet
+                    .get(match plan.kind {
+                        inf_island::SiteKind::City => "sedan",
+                        _ => "truck",
+                    })
+                    .expect("the catalogue row");
+                assert!(
+                    (t.translation.x - v.x).abs() < 1e-9 && (t.translation.z - v.z).abs() < 1e-9,
+                    "{recipe}: {}'s car is at ({}, {}) and the circuit is at \
+                     ({}, {})",
+                    plan.name,
+                    t.translation.x,
+                    t.translation.z,
+                    v.x,
+                    v.z
+                );
+                // …and its wheels reach the road: the origin is the springs'
+                // resting height plus the authored lift, no more.
+                let want = crate::vehicle::resting_origin_y(def, v.y) + CAR_LIFT_M;
+                assert!(
+                    (t.translation.y - want).abs() < 1e-9,
+                    "{recipe}: {}'s car sits at {} against a resting {want}",
+                    plan.name,
+                    t.translation.y
+                );
+
+                // THE CLAUSE THE COMMITTED CAR COULD NOT MEET: every drawn part
+                // is inside the collider it is drawn on, and none of them is the
+                // unit primitive.
+                for part in def.body.parts() {
+                    let pe = doc
+                        .entity_of(inf_ecs::vehicle::body_part_guid(guid, part.name))
+                        .unwrap_or_else(|| panic!("{recipe}: no `{}` part", part.name));
+                    let pt = doc
+                        .world()
+                        .world()
+                        .get::<inf_ecs::components::Transform>(pe)
+                        .expect("a part transform");
+                    assert_ne!(
+                        pt.scale,
+                        inf_ecs::math::Vec3d::ONE,
+                        "{recipe}: `{}` is drawn at scale one — the I8b defect, \
+                         on a car",
+                        part.name
+                    );
+                    for (c, s, hull) in [
+                        (pt.translation.x, pt.scale.x, def.half_extents.x),
+                        (pt.translation.y, pt.scale.y, def.half_extents.y),
+                        (pt.translation.z, pt.scale.z, def.half_extents.z),
+                    ] {
+                        assert!(c.abs() + s / 2.0 <= hull + 1e-9);
+                    }
+                    drawn_parts += 1;
+                }
+            }
+            // Anti-vacuity: the loop really walked cars, and it walked one per
+            // settlement rather than one that happened to exist.
+            assert!(
+                drawn_parts >= 4 * plans.len(),
+                "{recipe}: {drawn_parts} drawn parts over {} settlements",
+                plans.len()
+            );
+            println!(
+                "{recipe}: {} settlements, {} cars, {drawn_parts} drawn body parts",
+                plans.len(),
+                plans.len()
+            );
+        }
     }
 
     /// The fixture's level really is a level: it names the terrain, the biome

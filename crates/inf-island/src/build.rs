@@ -1035,16 +1035,12 @@ pub fn player_start(recipe: &IslandRecipe, routes: &[Route], lift_m: f64) -> DVe
         .next()
         .or_else(|| recipe.sites.first());
     let p = site.map(|s| DVec2::new(s.x, s.z)).unwrap_or(DVec2::ZERO);
-    let mut best: Option<(f64, f64)> = None;
-    for r in routes {
-        for v in &r.points {
-            let d = (DVec2::new(v.x, v.z) - p).length_squared();
-            if best.is_none_or(|(bd, _)| d < bd) {
-                best = Some((d, v.y));
-            }
-        }
-    }
-    DVec3::new(p.x, best.map(|(_, y)| y).unwrap_or(0.0) + lift_m, p.y)
+    // ONE door for "the nearest ground the design commits" (island wave VEH1a):
+    // the fleet the level parks at each settlement and the connectivity walk ask
+    // the same question, and three copies of this walk is three chances for one
+    // of them to break the tie differently.
+    let y = crate::roads::nearest_route_vertex(routes, p).map_or(0.0, |(v, _)| v.y);
+    DVec3::new(p.x, y + lift_m, p.y)
 }
 
 /// **The road corridor as a queryable index** — one door, two callers.

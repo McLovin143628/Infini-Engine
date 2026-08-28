@@ -93,7 +93,7 @@ pub use recipe::{
     SourceSpec, ANCHOR_AGREEMENT_DEG, RECIPE_SCHEMA_VERSION,
 };
 pub use report::{IslandReport, LayerDrift};
-pub use roads::{grade_audit, plan_network, GradeAudit, RoadReport, Route};
+pub use roads::{grade_audit, nearest_route_vertex, plan_network, GradeAudit, RoadReport, Route};
 pub use shape::{
     carve_sample, flatten_sample, smooth01, Coastline, Field, SegmentIndex, ShapeStats, Vertex3,
 };

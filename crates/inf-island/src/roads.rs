@@ -380,6 +380,50 @@ impl PartialOrd for OrderedF64 {
     }
 }
 
+/// **The nearest planned route vertex to `p`, and the direction the route runs
+/// there** (island wave VEH1a) — one door, three callers.
+///
+/// The routes are the only *committed* thing on this island that carries a
+/// ground height ([`player_start`](crate::build::player_start)'s own argument:
+/// the terrain is a build artifact and the design is not), so anything that
+/// wants to put something **on the ground** at author time asks here. Its
+/// callers are the player start, the fleet the level parks at each settlement,
+/// and the connectivity walk.
+///
+/// The walk is over routes in order with a **strict `<`** on the squared
+/// distance, so a tie between two vertices at the same distance is broken by the
+/// earlier route rather than by a float comparison's mood. The direction is the
+/// segment the vertex belongs to, normalized in XZ; a single-vertex route
+/// answers `+Z`, which is this engine's forward.
+pub fn nearest_route_vertex(routes: &[Route], p: DVec2) -> Option<(DVec3, DVec2)> {
+    let mut best: Option<(f64, DVec3, DVec2)> = None;
+    for r in routes {
+        for (i, v) in r.points.iter().enumerate() {
+            let d = (DVec2::new(v.x, v.z) - p).length_squared();
+            if best.is_some_and(|(bd, _, _)| d >= bd) {
+                continue;
+            }
+            // The segment this vertex belongs to: the one ahead of it, or the
+            // one behind it at the end of the line.
+            let (a, b) = if i + 1 < r.points.len() {
+                (r.points[i], r.points[i + 1])
+            } else if i > 0 {
+                (r.points[i - 1], r.points[i])
+            } else {
+                (*v, *v + DVec3::Z)
+            };
+            let dir = DVec2::new(b.x - a.x, b.z - a.z);
+            let dir = if dir.length_squared() > 0.0 {
+                dir.normalize()
+            } else {
+                DVec2::new(0.0, 1.0)
+            };
+            best = Some((d, *v, dir));
+        }
+    }
+    best.map(|(_, v, d)| (v, d))
+}
+
 /// Plan every link the recipe's sites imply.
 ///
 /// The topology is the design and it is stated here rather than in the recipe,
