@@ -1222,3 +1222,146 @@ fn a_sprint_through_an_unlocked_door_leaves_a_lock_that_still_works() {
         "a broken lock re-engaged"
     );
 }
+
+// -- NPC1c: the crowd's own door verb -----------------------------------------
+
+/// **AN NPC OPENS THE DOOR IN ITS WAY** (island wave NPC1c, clause 3).
+///
+/// The verb is `d3::door::use_door` -- the same function the interact button and
+/// the `door.use` node dispatch to, so a crowd agent cannot open a door the
+/// player could not. What is new is the TRIGGER: a crowd agent whose body has
+/// fallen `BLOCKED_LAG_M` behind its own route clock, which is what standing
+/// against a shut leaf makes it.
+///
+/// Three claims and a control, because "the pass ran" and "a door opened" are
+/// different facts:
+///
+/// * an agent that is not yet blocked presses **nothing** -- the pass is not a
+///   per-step door-mash;
+/// * once blocked, it presses once and the **world** says the leaf moved (the
+///   door's own `DoorField` state, never the pass's report -- this file's own
+///   header rule);
+/// * a **locked** door is pressed and refuses, exactly as it refuses a player,
+///   and the counters say `pressed` without `opened` -- which is the number a
+///   designer wants when a district stops working.
+fn crowd_at_the_door(locked: bool) -> (EcsWorld, PhysicsBridge3D) {
+    use inf_ecs::crowd::{CrowdArchetype, CrowdRecord, CrowdRoute};
+    use std::collections::BTreeMap;
+
+    let mut world = EcsWorld::new();
+    spawn_ground(&mut world);
+    spawn_door(&mut world, locked);
+    // The streaming source stands ON the doorway, so the agent beside it is
+    // `Full` -- a tier with a body, a controller and a movement model, which is
+    // what `feet_of` and the blocked verdict both need.
+    let src = world.spawn_with_guid(Uuid::from_u128(0xF1), "Player", None);
+    let mut t = Transform::IDENTITY;
+    t.translation = Vec3d::new(0.0, 0.0, 4.0);
+    world
+        .world_mut()
+        .entity_mut(src)
+        .insert((inf_ecs::components::StreamingSource { radius_m: 0.0 }, t));
+    world.mark_dirty();
+    world.propagate();
+
+    // One agent standing a stride outside the doorway, on a route that walks
+    // straight through it. Nothing in this test runs `step_character_movement`,
+    // so the body stands where it is placed while the clock runs on -- which is
+    // exactly the state a body wedged against a shut leaf is in.
+    let mut records = BTreeMap::new();
+    records.insert(
+        Uuid::from_u128(0xC0DE_1C01),
+        CrowdRecord::walking(
+            CrowdArchetype::humanoid(None, None, None),
+            CrowdRoute::between(DVec3::new(0.0, 0.0, 3.0), DVec3::new(0.0, 0.0, 8.0), 1.4),
+        ),
+    );
+    inf_ecs::crowd::set_population(&mut world, records);
+
+    let mut bridge = PhysicsBridge3D::new(GRAVITY);
+    inf_ecs::crowd::step_crowd(&mut world, DT);
+    world.propagate();
+    bridge.sync_from_world(&world);
+    (world, bridge)
+}
+
+fn door_is_open(world: &EcsWorld) -> bool {
+    let p = d3::door::placement_of(world, DOOR).expect("the fixture door");
+    inf_ecs::door::door_field(world)
+        .map(|f| f.get(DOOR, &p.spec))
+        .unwrap_or_else(|| DoorState::fresh(&p.spec))
+        .is_open(&p.spec)
+}
+
+#[test]
+fn a_blocked_crowd_agent_opens_the_door_it_is_standing_against() {
+    let (mut world, mut bridge) = crowd_at_the_door(false);
+
+    // The control: on the step it materializes, the agent is not behind its own
+    // clock and the pass does nothing at all.
+    let first = d3::step_gameplay(&mut world, &mut bridge, DT).crowd_doors;
+    assert_eq!(
+        (first.considered, first.pressed),
+        (0, 0),
+        "an unblocked agent pressed a door -- the trigger is not the lag"
+    );
+    assert!(!door_is_open(&world), "the fixture starts with a shut door");
+
+    // Now let the clock run on while the body stands. `BLOCKED_LAG_M` is 2 m and
+    // the agent walks 1.4 m/s, so this is about 1.2 s of leaning on the door.
+    let mut opened_at = None;
+    let mut pressed_total = 0usize;
+    for step in 0..200u32 {
+        inf_ecs::crowd::step_crowd(&mut world, DT);
+        world.propagate();
+        // Through the WHOLE gameplay step, not the pass alone: the leaf has to
+        // swing, and `step_doors` is what swings it. That ordering -- press
+        // first, swing second -- is the reason this pass runs where it does.
+        let r = d3::step_gameplay(&mut world, &mut bridge, DT).crowd_doors;
+        pressed_total += r.pressed;
+        if r.opened > 0 && opened_at.is_none() {
+            opened_at = Some(step);
+        }
+        if door_is_open(&world) {
+            break;
+        }
+    }
+    let at = opened_at.expect(
+        "a blocked crowd agent standing at a shut door never opened it over 200 \
+         steps -- the door verb has no caller",
+    );
+    assert!(
+        door_is_open(&world),
+        "the report moved and the WORLD did not"
+    );
+    assert!(
+        pressed_total <= 2,
+        "the pass pressed {pressed_total} times to open one door"
+    );
+    println!(
+        "NPC1c door verb: a blocked agent opened its door at step {at} ({:.2} s)",
+        f64::from(at) * DT
+    );
+}
+
+#[test]
+fn a_locked_door_refuses_a_crowd_agent_exactly_as_it_refuses_a_player() {
+    let (mut world, mut bridge) = crowd_at_the_door(true);
+    let mut pressed = 0usize;
+    let mut opened = 0usize;
+    for _ in 0..200 {
+        inf_ecs::crowd::step_crowd(&mut world, DT);
+        world.propagate();
+        let r = d3::step_gameplay(&mut world, &mut bridge, DT).crowd_doors;
+        pressed += r.pressed;
+        opened += r.opened;
+    }
+    assert!(
+        pressed > 0,
+        "the agent never reached the locked door, so this arm is not posing the \
+         problem"
+    );
+    assert_eq!(opened, 0, "a locked door let a crowd agent through");
+    assert!(!door_is_open(&world));
+    println!("NPC1c door verb: {pressed} press(es) at a locked door, 0 opened");
+}

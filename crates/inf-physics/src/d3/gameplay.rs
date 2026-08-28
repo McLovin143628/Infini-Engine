@@ -127,6 +127,11 @@ pub struct WeaponHit {
 pub struct GameplayReport {
     /// The door system's own numbers.
     pub doors: super::door::DoorReport,
+    /// **What the crowd did to the doors** this step (island wave NPC1c) — an
+    /// engagement counter, because "the pass ran" and "an NPC opened
+    /// something" are different facts and a gate that cannot tell them apart
+    /// certifies a no-op.
+    pub crowd_doors: CrowdDoorReport,
     /// Rounds fired this step.
     pub shots: u32,
     /// Reloads that finished this step.
@@ -180,6 +185,12 @@ pub fn step_gameplay(
     if !dt.is_finite() || dt <= 0.0 {
         return report;
     }
+    // 0. **An NPC opens the door in its way** (island wave NPC1c). Before the
+    //    leaves move, so a crowd agent's press has the same immediacy the
+    //    player's E already has -- that one is consumed in
+    //    `step_character_movement`, a phase earlier than this whole function.
+    //    Inert on every level with no crowd: one absent-resource read.
+    report.crowd_doors = step_crowd_doors(world, bridge);
     // 1. The doors move first, because a kick armed on a previous step lands in
     //    step 3 and must find the leaf where this step's solver will.
     let doors = super::door::step_doors(world, bridge, dt);
@@ -203,6 +214,101 @@ pub fn step_gameplay(
     //    bridge's own door, whose doc has named "a damage system" as its
     //    intended caller since it was written.
     step_deaths(world, bridge, &mut report);
+    report
+}
+
+/// What [`step_crowd_doors`] did this step.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CrowdDoorReport {
+    /// Blocked agents this pass looked at.
+    pub considered: usize,
+    /// Presses made -- one per agent that found a shut door in reach.
+    pub pressed: usize,
+    /// Presses that moved a leaf. `pressed - opened` is the locked ones, which
+    /// is the number a designer wants when a district stops working.
+    pub opened: usize,
+}
+
+/// **A crowd agent opens the door it is standing against** -- clause 3's door
+/// verb, through the same [`super::door::use_door`] the interact button and the
+/// `door.use` node dispatch to.
+///
+/// # Why "blocked" is the trigger, and what it costs in seconds
+///
+/// The alternative -- every agent asking every step whether a door is in front
+/// of it -- is `O(agents x doorways)` over a city that plans 19 790 doorways,
+/// and 288 near agents would pay it every fixed step for the handful of doors
+/// anybody is actually at. So the trigger is the crowd's own
+/// [`CrowdAgent::blocked`](inf_ecs::crowd::CrowdAgent::blocked) verdict: an
+/// agent whose body has fallen [`BLOCKED_LAG_M`] behind its own route clock.
+///
+/// [`BLOCKED_LAG_M`]: inf_ecs::crowd::BLOCKED_LAG_M
+///
+/// That is 2 m of lag, which at a 1.65 m/s walk is about **1.2 seconds** of
+/// standing at the door before the handle turns. It is stated rather than
+/// hidden, and it reads as a pause rather than as a bug -- a person does pause
+/// at a door -- but it is a tuning constant and not a design: lowering the lag
+/// shortens the pause and widens this pass's subject set in the same move.
+///
+/// A **locked** door is pressed and refuses, exactly as it refuses a player, and
+/// the agent goes on trying the handle for as long as it stays blocked. That is
+/// deliberate rather than unfinished: remembering which doors an agent has
+/// already tried is per-agent state, and per-agent state on this path has to
+/// ride the crowd's own trace section or two hosts diverge. The cost is one
+/// `door::toggle` refusal per blocked agent per step, which is a state lookup;
+/// the benefit is that the counters say `pressed` without `opened`, which is
+/// the number a designer wants when a district stops working.
+pub fn step_crowd_doors(world: &mut EcsWorld, bridge: &PhysicsBridge3D) -> CrowdDoorReport {
+    let mut report = CrowdDoorReport::default();
+    let blocked = inf_ecs::crowd::blocked_agents(world);
+    if blocked.is_empty() {
+        return report;
+    }
+    report.considered = blocked.len();
+    // ONE band and ONE placement gather for the whole pass. `placements_near`
+    // is the same door `candidates` and the player's prompt read, so an NPC
+    // cannot reach a door the player is told is out of reach.
+    let band = bridge.sim_band(world);
+    let placements = super::door::placements_near(world, &band);
+    if placements.is_empty() {
+        return report;
+    }
+    for guid in blocked {
+        let Some(feet) = feet_of(world, guid) else {
+            continue;
+        };
+        let field = door::door_field(world);
+        // The nearest SHUT door within reach. Ties break on the door's guid,
+        // through `placements_near`'s own ascending order, so two agents at one
+        // threshold press the same leaf.
+        let mut best: Option<(f64, Uuid)> = None;
+        for p in &placements {
+            let state = field
+                .map(|f| f.get(p.guid, &p.spec))
+                .unwrap_or_else(|| door::DoorState::fresh(&p.spec));
+            // Shut **and at rest**. Without the second half an agent presses
+            // again on the next step while the leaf is still swinging, and
+            // `use_door` toggles -- measured, thirteen presses to open one door
+            // and it shut itself twice on the way.
+            if state.is_open(&p.spec) || !state.is_at_rest() {
+                continue;
+            }
+            let d = (door::prompt_position(p) - feet).length();
+            if d > door::DOOR_REACH_M {
+                continue;
+            }
+            if best.map(|(bd, _)| d < bd).unwrap_or(true) {
+                best = Some((d, p.guid));
+            }
+        }
+        let Some((_, door_guid)) = best else {
+            continue;
+        };
+        report.pressed += 1;
+        if super::door::use_door(world, door_guid, feet).moved() {
+            report.opened += 1;
+        }
+    }
     report
 }
 
