@@ -255,14 +255,36 @@ fn the_vehicle_step_sits_between_the_character_step_and_the_solver_on_both_hosts
 #[test]
 fn the_movement_door_no_longer_steps_the_vehicles_itself() {
     let src = read("crates/inf-physics/src/d3/movement.rs");
-    // Read a SCOPE, not a spelling (the P23 law): the ban is on the whole
-    // module's code, and prose is allowed to name the function it stopped
-    // calling — which this module's own comment does.
-    let calls = src.matches("vehicle::step_vehicles(").count()
-        + src.matches("super::vehicle::step_vehicles(").count();
-    assert_eq!(
-        calls, 0,
-        "`inf_physics::d3::movement` calls `step_vehicles` {calls} time(s); both \
-         hosts now call it too, so every vehicle would be stepped twice a step"
+    // Read a SCOPE, not a spelling (the P23 law) — and the first cut of this arm
+    // did neither (VEH1a audit). It counted two *qualified* spellings,
+    // `vehicle::step_vehicles(` plus `super::vehicle::step_vehicles(`, of which
+    // the second **contains** the first, so one call would have been reported as
+    // two; and it counted them over the whole file INCLUDING its comments, so it
+    // passed only because this module's own prose happens not to put a paren
+    // after the name it stopped calling. Neither of those is the failure that
+    // matters. The cheapest way this regression actually comes back is
+    // `use super::vehicle::step_vehicles;` at the top and a bare
+    // `step_vehicles(world, bridge, dt);` in the body, and the old arm could not
+    // see it at all.
+    //
+    // So the ban is on the NAME, in CODE, however it is qualified — with comment
+    // lines dropped first, because a module is allowed to say what it stopped
+    // calling and this one does.
+    let hits: Vec<(usize, String)> = src
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            let t = l.trim_start();
+            !t.starts_with("//") && !t.starts_with('*')
+        })
+        .filter(|(_, l)| l.contains("step_vehicles"))
+        .map(|(i, l)| (i + 1, l.trim().to_string()))
+        .collect();
+    assert!(
+        hits.is_empty(),
+        "`inf_physics::d3::movement` names `step_vehicles` in code at {hits:?}; \
+         both hosts now call it too, so every vehicle would be stepped twice a \
+         step — two sets of suspension forces, two sets of rays, and a `vehicle` \
+         row measuring half of it"
     );
 }

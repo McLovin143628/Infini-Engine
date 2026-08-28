@@ -5383,9 +5383,11 @@ fn the_islands_own_rate_makes_a_commute_a_walk() {
 // The first is `pie_equals_shipping_when_the_car_drives_the_circuit`, which
 // replaces the scripted teleport with a real `step_vehicles` trace: the hero
 // walks to a car, presses the interact the seat door already listens for, and
-// holds the throttle. It is still the streaming claim as well — the hero is the
-// `StreamingSource` and the seat step carries it — so the source is now a car
-// that is *driving*, and it is still sim state and never a camera.
+// holds the throttle. The `StreamingSource` is carried by the car rather than
+// by a script — still sim state and never a camera — but the PAGING half of
+// item 15's sentence stays with the scripted 360 m arm above: this window is
+// 34 m and the streamers do not move over it (measured in the arm's header,
+// VEH1a audit). What dies here is *"nothing drives it"*.
 
 /// How many fixed steps the car drive runs — ten seconds at 60 Hz.
 const DRIVE_STEPS: u64 = 300;
@@ -5431,6 +5433,16 @@ struct CarTrace {
     at: Vec<glam::DVec3>,
     /// The audio commands the drive queued, by kind: Play, SetPitch, SetVolume.
     audio: (usize, usize, usize),
+    /// Fixed steps taken **before** the drive loop — the settle step, the ones
+    /// the hero spends being stood beside the car, and the press/release pairs
+    /// the interact edge needs (VEH1a audit).
+    ///
+    /// Counted rather than known, because it is the other half of the audio
+    /// arithmetic: the window below opens before all of them, so the engine's
+    /// pitch/volume pair count is `pre_steps + DRIVE_STEPS` and not
+    /// `DRIVE_STEPS`. A ledger that quotes 334 against a 300-step drive without
+    /// this is a number no reader can check.
+    pre_steps: usize,
     entered: bool,
 }
 
@@ -5476,7 +5488,13 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
     // One step first: the bridge derives its vehicle map inside its own
     // `sync_from_world_sim`, so a seat asked for before the sim has stepped is a
     // seat on a rig nothing has recognised yet.
+    //
+    // Every `step_once` from here to the drive loop is COUNTED, because the
+    // audio window opened above and so the engine's pitch/volume pair count is
+    // this number plus the drive's (VEH1a audit).
+    let mut pre_steps = 0usize;
     sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    pre_steps += 1;
     let seat = inf_physics::d3::vehicle::seat_pose(sim.bridge3d(), car)
         .expect("the car has a seat once the bridge has derived its rig")
         .0;
@@ -5487,6 +5505,7 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
     for _ in 0..24 {
         set_hero(sim, hero, beside);
         sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        pre_steps += 1;
     }
     let mode_before = sim
         .world()
@@ -5504,6 +5523,7 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
             inf_player::runtime_sim::RuntimeInput::default()
                 .press(inf_ecs::movement::actions::INTERACT),
         );
+        pre_steps += 1;
         entered = sim
             .world()
             .world()
@@ -5513,6 +5533,7 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
             break;
         }
         sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        pre_steps += 1;
     }
     if !entered {
         // Say WHY, in the units the door decides in — a gate that reports
@@ -5539,7 +5560,10 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
 
     // ── 3. DRIVE ── the throttle held, and NOTHING teleported: from here the
     //    hero's transform is written by the seat step, so the `StreamingSource`
-    //    is carried by the car and the ground pages under a vehicle.
+    //    is carried by the car rather than by a script. Carried, not exercised:
+    //    the drive covers 34 m and the streamers do not move over it — see the
+    //    arm's own header for the measurement and for which arm owns the paging
+    //    claim (VEH1a audit).
     let mut t = CarTrace {
         states: Vec::with_capacity(DRIVE_STEPS as usize),
         wheels: Vec::with_capacity(DRIVE_STEPS as usize),
@@ -5548,6 +5572,7 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
         load: Vec::with_capacity(DRIVE_STEPS as usize),
         at: Vec::with_capacity(DRIVE_STEPS as usize),
         audio: (0, 0, 0),
+        pre_steps,
         entered,
     };
     for step in 0..DRIVE_STEPS {
@@ -5596,12 +5621,28 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
 ///
 /// This is `pie_equals_shipping_on_an_island_drive` with the scripted teleport
 /// replaced by a car. What it adds over that arm is that the thing moving is
-/// **simulated**: four wheel rays a step into a streamed heightfield, a
-/// suspension, a friction circle and an engine curve, all of which are floating
-/// point over content that pages in as the car reaches it. If either host paged
-/// one tile differently, a wheel ray would find a different surface and the two
-/// traces would separate within a step or two — which makes this a far sharper
-/// instrument for the streaming claim than moving a capsule at a constant rate.
+/// **simulated**: four wheel rays a step into the resident heightfield, a
+/// suspension, a friction circle and an engine curve, every one of them floating
+/// point over content the two hosts derived separately.
+///
+/// # What it is NOT, measured rather than argued (VEH1a audit)
+///
+/// The first cut of this header called it *"a far sharper instrument for the
+/// **streaming** claim"*, on the argument that a tile arriving on one host and
+/// not the other would separate the traces within a step. The argument is true
+/// about the mechanism and false about this window: 300 steps at 60 Hz is five
+/// seconds and **34 metres**, and the counters say the drive pages **nothing**
+/// — `(activations, deactivations, cells, sim tiles, terrain loads)` is
+/// `(1, 0, 1, 16, 15)` before it and `(1, 0, 1, 16, 15)` after, on both hosts.
+/// The paging half of the streaming claim therefore stays exactly where wave I7
+/// put it, on the scripted 360-metre out-and-back
+/// (`pie_equals_shipping_on_an_island_drive`, which asserts those same
+/// counters), and wave I7's open item 15 — *"nothing drives it"* — is closed by
+/// the **vehicle** half, which is what this arm actually proves.
+///
+/// What it does add to the streaming record is small and real: the two hosts'
+/// streaming counters are asserted **equal**, and none of them reaches
+/// `state_bytes`, so that is a comparison the byte equality below cannot make.
 ///
 /// Coverage first, then the comparison (the NPC1d law: a gate staged where a
 /// defect cannot appear certifies the defect).
@@ -5631,6 +5672,11 @@ fn pie_equals_shipping_when_the_car_drives_the_circuit() {
         "the two hosts disagree about which cars exist"
     );
 
+    // What the two had paged before anybody got in, so the numbers below are
+    // what the DRIVE did rather than what the boot did — `streaming_counters`'s
+    // own rule, borrowed from the scripted arm this one joins.
+    let (ship0, pie0) = (streaming_counters(&ship), streaming_counters(&pie));
+
     let a = drive_a_car(&mut ship);
     let b = drive_a_car(&mut pie);
 
@@ -5653,9 +5699,11 @@ fn pie_equals_shipping_when_the_car_drives_the_circuit() {
     println!(
         "THE DRIVE: {travelled:.1} m in {DRIVE_STEPS} steps, top {top:.2} m/s, \
          {grounded} wheel contacts of a possible {}, engine \
-         Play/SetPitch/SetVolume = {:?}",
+         Play/SetPitch/SetVolume = {:?} over {} pre-drive steps + {steps} \
+         driving ones",
         steps * 4,
-        a.audio
+        a.audio,
+        a.pre_steps
     );
     // 15 m against a measured 34.1 on the authoring machine. The margin is
     // deliberate and it is not slack: the fixture's terrain is SAMPLED, and the
@@ -5684,12 +5732,27 @@ fn pie_equals_shipping_when_the_car_drives_the_circuit() {
          ONCE and then addressed, or the clip restarts sixty times a second",
         a.audio.0
     );
-    assert!(
-        a.audio.1 >= steps && a.audio.2 >= steps,
-        "the engine loop queued {:?} (Play, SetPitch, SetVolume) over {steps} \
-         driving steps — a loop that is a function of sim state emits a pair a \
-         step",
-        a.audio
+    // …and the count is ARITHMETIC, not a floor (VEH1a audit). The window opens
+    // before the hero has even walked to the car, so it also holds the settle
+    // step, the twenty-four the hero spends standing beside it and the
+    // press/release pairs the interact edge needs — `pre_steps`, counted rather
+    // than assumed, because the fixture's ground is sampled and the number of
+    // enter attempts is a fact about the machine.
+    //
+    // An equality rather than `>= steps` because equality is the claim: ONE car
+    // is being addressed, on EVERY step it is in an outcome, exactly once each.
+    // `>=` passed a second resident car paging in halfway and doubling the
+    // stream, and it also passed the 334 in the ledger without anybody being
+    // able to derive it.
+    assert_eq!(
+        (a.audio.1, a.audio.2),
+        (a.pre_steps + steps, a.pre_steps + steps),
+        "the engine loop queued {:?} (Play, SetPitch, SetVolume) over \
+         {} pre-drive steps plus {steps} driving ones — a loop that is a pure \
+         function of sim state emits exactly one pair per car per step it is \
+         published on",
+        a.audio,
+        a.pre_steps
     );
     assert_eq!(
         a.audio, b.audio,
@@ -5740,6 +5803,64 @@ fn pie_equals_shipping_when_the_car_drives_the_circuit() {
             "forward speed at step {i}"
         );
     }
+
+    // ── WHAT THE DRIVE STREAMED ── measured, because the claim was made
+    //    (VEH1a audit). This arm's own header called itself *"a far sharper
+    //    instrument for the streaming claim"* on the argument that four wheel
+    //    rays read whatever ground has paged in — which is true of the
+    //    MECHANISM and says nothing about whether this 34-metre, five-second
+    //    window pages anything at all. The scripted arm it joins covers 360 m
+    //    and asserts its counters; this one has to print its own or the
+    //    sentence is prose ahead of the arm.
+    //
+    //    The counters are `(cell activations, cell deactivations, cells
+    //    resident, sim-resident terrain tiles, terrain loads)` and **none of
+    //    them is in `state_bytes`** — which is what makes the equality below a
+    //    claim the byte compare cannot make, and the same argument the scripted
+    //    arm gives for asserting them at all.
+    let (ship1, pie1) = (streaming_counters(&ship), streaming_counters(&pie));
+    println!(
+        "THE DRIVE'S STREAMING (activations, deactivations, cells, sim tiles, \
+         terrain loads):\n  shipping {ship0:?} -> {ship1:?}\n  PIE      {pie0:?} \
+         -> {pie1:?}"
+    );
+    assert_eq!(
+        ship1, pie1,
+        "the two hosts' streamers disagree after the same drive — and none of \
+         these counters reaches `state_bytes`, so the byte comparison above is \
+         blind to it"
+    );
+    assert_eq!(
+        ship0, pie0,
+        "the two hosts had paged differently before anybody moved"
+    );
+    // …and the honest reading of the deltas. A five-second drive over 34 m is
+    // NOT the scripted arm's 360 m out-and-back, and this says which of the two
+    // claims it can carry: the residency it inherited, or a page that arrived
+    // under a moving car.
+    let paged = ship1.0 > ship0.0 || ship1.1 > ship0.1 || ship1.4 > ship0.4;
+    println!(
+        "THE DRIVE'S STREAMING: the car {} over its 34-metre window — the \
+         PAGING half of the streaming claim is the scripted 360 m arm's \
+         (`pie_equals_shipping_on_an_island_drive`), and what THIS arm adds is \
+         that the two hosts' streamers agree exactly while a simulated body \
+         reads the ground they hold",
+        if paged {
+            "moved a page"
+        } else {
+            "paged nothing new"
+        }
+    );
+    // Whatever it paged, it must be standing on ground that is really resident:
+    // a drive over zero sim-resident terrain tiles is a car falling through a
+    // world neither host has.
+    assert!(
+        ship1.3 > 0 && pie1.3 > 0,
+        "the drive ran with {} / {} sim-resident terrain tiles — the wheels were \
+         casting into nothing",
+        ship1.3,
+        pie1.3
+    );
 
     // ── THE SINK, ON THE REAL CIRCUIT ── the ~2 cm clause 1 priced on a
     //    fixture, named where the road actually is. Roads carry NO colliders

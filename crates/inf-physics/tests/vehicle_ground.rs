@@ -21,6 +21,9 @@
 //! so in metres rather than by grep, and it is what turns red the day a class
 //! starts reading it.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
 use glam::{DQuat, DVec2, DVec3};
 use uuid::Uuid;
 
@@ -376,7 +379,23 @@ fn a_wheel_ray_normal_snaps_at_a_heightfield_cell_diagonal() {
 /// metres, through the shipped door, over a real drive.
 struct ScrambledNormals {
     inner: RaycastVehicle,
-    scrambled: usize,
+    /// How many contact normals this class has actually replaced — behind an
+    /// `Arc` so the **test** can read it (VEH1a audit).
+    ///
+    /// The first cut kept a plain `usize` that nothing ever read, and took the
+    /// falsifier's anti-vacuity from the *vehicle map*'s wheel contacts instead.
+    /// Those are two different claims. The map's count says "wheels touched
+    /// ground", and it would go on saying so if the bridge had swapped this
+    /// wrapper back out for a plain [`RaycastVehicle`] — in which case the two
+    /// rigs would be bit-identical **because they were the same class**, and the
+    /// falsifier would certify the refusal it exists to attack.
+    /// (`reconcile_vehicles` calls `set_rig` on an existing entry rather than
+    /// replacing it, so it does not; this is what makes that a measurement
+    /// rather than a reading of the source.)
+    ///
+    /// `Vehicle` is `Send + Sync + 'static` and there is no downcast through
+    /// `&dyn Vehicle`, so the counter leaves through an `Arc`.
+    scrambled: Arc<AtomicUsize>,
 }
 
 impl Vehicle for ScrambledNormals {
@@ -415,7 +434,7 @@ impl Vehicle for ScrambledNormals {
                     1 => DVec3::NEG_Y,
                     _ => DVec3::new(0.0, 0.6, 0.8).normalize(),
                 };
-                self.scrambled += 1;
+                self.scrambled.fetch_add(1, Ordering::Relaxed);
             }
         }
         self.inner.solve(chassis, dt, out);
@@ -456,11 +475,12 @@ fn the_snapped_normal_reaches_no_force_in_the_model() {
         .expect("the car was derived")
         .rig()
         .clone();
+    let replaced = Arc::new(AtomicUsize::new(0));
     scrambled.bridge.install_vehicle(
         CHASSIS,
         Box::new(ScrambledNormals {
             inner: RaycastVehicle::new(derived),
-            scrambled: 0,
+            scrambled: Arc::clone(&replaced),
         }),
     );
 
@@ -488,6 +508,20 @@ fn the_snapped_normal_reaches_no_force_in_the_model() {
         "only {contacts} wheel contacts over 600 steps (of a possible 2 400) — \
          the car spent the drive in the air at {end}, so there were no normals \
          to scramble and this arm compares two falling boxes"
+    );
+    // **…and the class that was installed is the class that ran.** The count
+    // above is the vehicle map's, and a map full of plain `RaycastVehicle`s
+    // reports exactly the same number — two rigs of the same class agree to the
+    // bit for free, which is the one way this whole arm could certify the
+    // refusal it exists to attack. This is the wrapper's own tally, and it must
+    // be the same number (VEH1a audit).
+    let replaced = replaced.load(Ordering::Relaxed);
+    assert_eq!(
+        replaced, contacts,
+        "the wrapper replaced {replaced} contact normals while the vehicle map \
+         reports {contacts} wheel contacts over the same drive — the class being \
+         stepped is not the one this test installed, so the comparison below is \
+         between two plain rigs and proves nothing"
     );
     let grounded = contacts;
     let travelled = (end - plain.chassis().translation.to_dvec3()).length();
