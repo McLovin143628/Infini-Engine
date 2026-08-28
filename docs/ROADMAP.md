@@ -28114,3 +28114,18 @@ un-armed interior id namespace, the door-sweep exemption armed only by the 82 s 
 "four path entries" (it is five), the "without moving" sentence (the population moved 0.90 m), the
 ground profile that refuses nothing, and `blocked` being the steady state (6 247 of 6 480 steps) — in
 `docs/memos/island-progress.md` under *"Wave NPC1c — the adversarial audit"*.
+
+**Then CI went red on ubuntu and windows**, on **one** arm — finding 4's own gate, which asserted a
+**wall clock** (`< 1000 µs`) and read **1 398.2** and **1 722.7 µs** on the runners for a search
+nobody had touched; it had 1.33× of headroom on the dev box while its comment promised "a factor of
+tens". The house law again (I7 `step_profile`, I4b, VIS1b), with a new face: **an arm written during
+an audit is subject to every law a wave's arm is** — and the same audit stated the rule correctly in
+`character_move_cost.rs` ("the shape is asserted, the clocks are printed"). Repaired **clock-free**:
+`inf_nav::SearchStats` + `route_counted` (the same search with its work counted; `route` is it with
+the counters dropped), and the arm now pins `(settled, stale_pops, scanned, pushed)` =
+**(1 600, 0, 6 238, 1 600)** against Dijkstra's own ceilings `V = 1 600` / `E = 4 × 40 × 39 = 6 240`,
+with the microseconds **printed**. Mutation-verified both ways, and the mutation run turned up a
+second finding: **ceilings alone would have been vacuous** — a max-heap frontier settles 79, passes
+every ceiling *and* answers correctly, so the fixture is pinned at the floor its geometry forces.
+Battery, goldens, rustdoc, schemas and `Cargo.lock` all unmoved (one arm renamed, net zero). Details
+in `docs/memos/island-progress.md` under *"Wave NPC1c — the CI red"*.

@@ -16374,3 +16374,135 @@ both are a policy decision about what a demoted body remembers.
 | committed levels (`EXPECTED_LEVELS`) / committed content / frontend | 23 / unmoved / untouched | **unchanged** |
 | `Cargo.lock` | +1 package, 5 path entries | **one edge fewer** — `inf-nav` no longer names `inf-math` |
 | new crates or external dependencies | none | **none** |
+
+## Wave NPC1c — the CI red (2026-08-28)
+
+`4575ddae..843d3fb8` went red on **ubuntu and windows**; `macos`, `frontend`, `wasm`
+and `deny` were green. **One arm**, and it is the audit's own MED-4 fix:
+
+```text
+ubuntu   a corner-to-corner search over 1600 nodes took 1398.2 us; …
+windows  a corner-to-corner search over 1600 nodes took 1722.7 us; …
+         crates/inf-nav/src/route.rs:457
+```
+
+`route::tests::a_town_sized_grid_is_searched_in_microseconds`, written *by this
+audit*, three days old, asserting `best < 1000.0` µs. Nothing about the search
+changed between green and red; nextest fell over at the first failure on both
+runners (2 810 of 6 330 run on ubuntu, 2 831 of 6 363 on windows), so the two
+logs report `1 failed` and nothing else.
+
+### The diagnosis is the house law, wearing its newest face
+
+**A structural property must never be asserted through a wall clock** — the I7
+`step_profile` red, the I4b calibration incident, the VIS1b frozen-eye fixture,
+and now this. The arm's own message names the property it was defending —
+*"the frontier or the adjacency changed shape"* — and a millisecond ceiling
+cannot tell that from a busy runner, which is the one distinction it existed to
+draw.
+
+Two things make this worse than the usual shape and worth the entry:
+
+**It had no margin, and its own doc said it had one.** The arm's comment
+promised *"the tens of microseconds and the ceiling is a millisecond, which is a
+factor of tens."* Measured on the dev box the wave was written on: **753.2 µs**.
+The headroom was **1.33×**, not tens, and the sentence claiming otherwise was
+never checked against the number the arm prints. This is the audit's own
+*"a doc that cites its own arms is checkable"* law turned back on the audit.
+
+**The wave stated the correct rule three files away, in the same audit.**
+`crates/inf-physics/tests/character_move_cost.rs`'s module doc, added in the
+same range, reads: *"**The shape is asserted, the clocks are printed** — a
+wall-clock assertion on a shared runner is a statement about one dev box."*
+Every clock in that file, in `city_collider_band`, in `kinematic_pairing_cost`
+and in `door_3d` asserts only `> 0.0` ("took no measurable time"). The one file
+that broke the rule is the one whose fix was a *documentation* finding, where
+the reviewer's attention was on the sentence rather than on the arm under it.
+**A law written into one arm is not a law applied to its siblings.**
+
+### The repair: the shape is countable, so it is counted
+
+`inf_nav::route::SearchStats` — `settled`, `stale_pops`, `scanned`, `pushed` —
+and `route_counted`, the same search with its own work tallied. `route` is now
+`route_counted(..).0`, so there is **no second loop to drift** and an arm that
+drives the counted door drives the shipped one. Ring 0, no dependency, no
+schema, nothing serialized.
+
+`a_town_sized_grid_is_searched_within_dijkstras_own_bounds` keeps the same 40 × 40
+fixture (**1 600 nodes / 6 240 directed edges**) and asserts Dijkstra's own
+ceilings, with the arithmetic in each message: `settled ≤ V = 1 600`;
+`scanned ≤ E = 4 × 40 × 39 = 6 240`; `pushed ≤ 1 + scanned`;
+`settled + stale_pops ≤ pushed`. The microseconds are **printed** beside them and
+asserted nowhere.
+
+### And the ceilings alone would have been a vacuous gate
+
+Found while mutation-verifying, which is the whole point of doing it: **a broken
+frontier does LESS work, so it passes every ceiling.** Dropping the `Reverse` so
+the heap pops the largest key settles **79** nodes and reads **232** edge
+records — inside all four bounds — *and still answers the right route at the
+right cost*, because on a uniform grid any monotone staircase costs the
+Manhattan distance, so the arm's world assertions pass too. The old wall clock
+did not catch it either: it ran **faster**, 32.1 µs against 753.2.
+
+So the fixture is pinned at the **floor its own geometry forces**. The
+destination is the *unique* node at the maximum cost `78 × 20 = 1 560` m, so a
+frontier popping in non-decreasing key order must decide all 1 599 others before
+it can pop the destination and break:
+
+| | value | forced by |
+|---|---|---|
+| `settled` | **1 600** = V | the destination is the unique furthest node; fewer means the frontier is not a min-priority queue, more means a node was decided twice |
+| `scanned` | **6 238** = E − deg(to) | every settled node but the destination reads its whole adjacency; the destination's pop **breaks** before its own 2 edges are read |
+| `stale_pops` | **0** | every edge costs the same 20 m, so a node is never reached more cheaply after discovery |
+| `pushed` | **1 600** = V | the same equal-weight fact: one push per node, none improved |
+
+The equality is deliberate, and it means the day somebody adds the A\* term this
+module's header leaves a door for, the arm goes red. That is right: the header's
+Dijkstra-over-A\* argument is what the arm holds, and a heuristic rewrites the
+argument rather than passing under it.
+
+### Mutations run
+
+| mutation | result |
+|---|---|
+| relax over every node of the graph instead of `graph.edges_from(node)` (*the adjacency changed shape*) | `scanned` **2 558 400** against the 6 240 ceiling — **410×** — while the route, its node count and its cost stay correct. The count catches it; nothing else in the file does |
+| drop the `Reverse` so the frontier is a max-heap (*the frontier changed shape*) | fails the floor at `(79, 0, 232, 155)` against `(1 600, 0, 6 238, 1 600)`. **Passes every ceiling and every world assertion**, and the old clock got faster |
+| relax on `nd <= *best` instead of `<` | does not terminate — equal-cost re-pushes re-settle, which re-push. Recorded because it shows the `<` is load-bearing; not usable as evidence for a *bound*, because a hang is not an assertion |
+| the unmutated arm | green, and prints `1600 settled / 0 stale / 6238 scanned / 1600 pushed; 743.5 us on this machine, REPORTED not asserted` |
+
+### The sweep
+
+`inf-nav` had **exactly one** clock and it is the one repaired: the only
+`Instant`/`elapsed` left in the crate is the `println!` inside this arm. The
+wave's other new arms were read for the same exposure and carry none — every
+clock in `character_move_cost` (4 arms), `city_collider_band`, `door_3d` and
+`kinematic_pairing_cost` is either printed or asserted `> 0.0`, and
+`character_move_cost`'s quadratic bound is a **ratio** with a 4× band, which is
+a fact about the program and not about the machine.
+
+### The law this red paid for
+
+* **A structural claim that fits in a counter must never be spent on a clock.**
+  "The frontier or the adjacency changed shape" is `settled`, `scanned` and
+  `pushed`. Once they are counted the ceiling needs no margin, no MIN-of-rounds
+  and no runner.
+* **An arm written during an AUDIT is subject to every law an arm written during
+  a wave is.** The clock law has been paid for three times in this file and the
+  fourth payment was made by a fix for a *documentation* finding, in a wave whose
+  own physics arms state the rule correctly.
+* **A ceiling is not a gate if the defect makes the number go down.** Both
+  mutations this arm exists for move the counts in *opposite* directions, and
+  only one of them is a ceiling. Where a fixture forces its counts exactly, pin
+  them exactly and say what forces each one.
+
+### Counts
+
+| | audit `843d3fb8` | **CI-red fix** |
+|---|---|---|
+| battery | 333 / 6 365 / 0 / 19 | **unmoved** — `cargo test -p inf-nav -j 3` 26 passed; one arm **renamed** (`…_in_microseconds` → `…_within_dijkstras_own_bounds`), none added, none removed |
+| goldens | 59 | **59** — nothing here reaches render code |
+| rustdoc | 374 over 30 crates | **zero added** — `cargo doc -p inf-nav --no-deps` warns 0 |
+| `clippy -D warnings` / `fmt` | 0 / clean | **0 / clean** (clippy run LAST, per the rmeta law) |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** |
+| new crates or external dependencies | none | **none** — two new Ring-0 items, `SearchStats` and `route_counted`, both `inf-nav`'s own |
