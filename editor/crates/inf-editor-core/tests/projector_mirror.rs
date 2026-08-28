@@ -1277,13 +1277,13 @@ fn the_shared_tier_pose_is_identical_in_both_stores() {
     assert_eq!(
         raw.matches("&mut self").count(),
         1,
-        "`resolve_skinned_shared` contains more than one `&mut self`; the receiver          normalization below would erase the others too"
+        "`resolve_skinned_shared` has a second `&mut self`; the normalization below would erase it"
     );
     let mine = raw.replace("&mut self", "&self");
     let theirs = extract_method_with_doc(&read(PLAYER_ASSETS), "resolve_skinned_shared");
     assert_eq!(
         mine, theirs,
-        "the editor's and the player's `resolve_skinned_shared` have drifted — the          two hosts would draw a far crowd differently, so PIE would stop matching          shipping"
+        "the two `resolve_skinned_shared` have drifted, so the hosts draw a far crowd differently"
     );
     // …and not a stub: it resolves a real rig and goes through the cache door,
     // rather than returning `None` and quietly leaving every far agent a
@@ -1316,7 +1316,7 @@ fn the_crowd_shadow_door_is_identical_in_both_projectors() {
     let theirs = extract_fn(&read(PLAYER), "crowd_shadow");
     assert_eq!(
         mine, theirs,
-        "the two `crowd_shadow` doors have drifted — a crowd would cast          differently in the editor viewport than in the shipped player"
+        "the two `crowd_shadow` doors have drifted, so a crowd casts differently in the two hosts"
     );
     // …and it reads the TIER rather than hard-coding one answer: a door that
     // returned `Proxy` for everything is identical on both sides and wrong.

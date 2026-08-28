@@ -42,6 +42,13 @@
 //! every clip (the renderer `Arc`-dedupes by `(mesh, skeleton)`); a thousand of
 //! them cost one of each.
 //!
+//! **The GPU columns are NPC1b's** (`draws` / `blocks` / `groups` / `palette`).
+//! They are read off the projected `RenderScene` through the renderer's own
+//! planners — `plan_skinned_batches` and `skinned_caster_groups`, the functions
+//! the passes themselves call — so the palette column is a measurement rather
+//! than the multiplication it was in NPC1a. No GPU is involved: both planners are
+//! pure functions of a scene.
+//!
 //! **And that character is a 20-joint rig, not the island's 161-bone hero**
 //! (NPC1a audit — this paragraph said "161-bone" while the sweep's own `(c)`
 //! line printed "this scene rigs its character at 20 joints", which is derived
@@ -54,6 +61,13 @@
 //! skinned character whatever its joint count. **A thousand island-class NPCs
 //! cost more than the 6.8 ms step measured here**, and the ladder is worth
 //! correspondingly more than the 2.0× this table prices it at.
+//!
+//! The **palette** column is the one exception and it is worth being explicit
+//! about, because NPC1a's version of this paragraph got it backwards: wall 3's
+//! block was one 16 KiB power-of-two allocation per skinned character whatever
+//! its joint count, so the column did NOT understate a 161-bone crowd. NPC1b's
+//! atlas packs tightly, so it does now — 20 joints is 1 280 B a block where the
+//! island's hero is 10 304.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -316,19 +330,90 @@ struct Row {
     skinned: usize,
     projection_ms: f64,
     sections: TraceSections,
+    gpu: GpuCost,
+}
+
+/// **What the crowd costs the RENDERER**, measured off the projected scene
+/// through the renderer's own planners rather than multiplied out (wave NPC1b).
+///
+/// Every field here used to be one line of arithmetic in `Row::palette_mb`, and
+/// its comment said the palette was "uploaded twice per frame (the main pass and
+/// the prepass)". The prepass half was wrong — `SkinnedMeshNode::sync` is keyed
+/// on `(scene.version, origin)` and is free the second time a frame calls it —
+/// and the second upload it should have named is the SHADOW path, which keeps its
+/// own per-caster palette buffers. Both are read separately now.
+#[derive(Debug, Clone, Copy, Default)]
+struct GpuCost {
+    /// Draw calls the skinned pass issues — one per `(mesh)` run.
+    draws: usize,
+    /// Distinct palette blocks in the atlas. Fewer than `skinned` is the crowd's
+    /// sharing arriving at the renderer.
+    blocks: usize,
+    /// Bytes the skinned pass uploads a frame: the whole atlas, once.
+    atlas_bytes: usize,
+    /// Bytes the page raster uploads a frame: one power-of-two block per
+    /// non-proxy skinned caster, which is what `vsm_raster::sync_skinned` writes.
+    vsm_palette_bytes: usize,
+    /// Geometry groups the scene's skinned content asks the page raster for,
+    /// against a `VSM_MAX_GROUPS` of 1 024.
+    vsm_groups: usize,
+    /// Instances casting through the crowd's ONE shared proxy group.
+    proxies: usize,
+    /// **What the pre-NPC1b renderer would have uploaded on this same scene**:
+    /// one power-of-two palette block per instance, on the lit path AND on the
+    /// shadow path.
+    ///
+    /// Computed here rather than quoted from NPC1a's table, because NPC1a's
+    /// 31.28 MB was `skinned x 16 KiB x 2` — a 161-bone block against a scene
+    /// whose character is rigged at 20 joints. A before/after has to be computed
+    /// the same way on the same content or it is two different questions.
+    legacy_bytes: usize,
+}
+
+impl GpuCost {
+    /// Read one projected scene, through the same planners the passes call.
+    fn of(scene: &RenderScene) -> Self {
+        let plan = inf_render::plan_skinned_batches(scene);
+        let vsm_palette_bytes = scene
+            .skinned
+            .iter()
+            .filter(|i| i.shadow != inf_render::SkinnedShadow::Proxy)
+            .map(|i| (i.palette.len().max(1) * 64).next_power_of_two().max(64))
+            .sum();
+        let legacy_bytes: usize = scene
+            .skinned
+            .iter()
+            .map(|i| 2 * (i.palette.len().max(1) * 64).next_power_of_two().max(64))
+            .sum();
+        Self {
+            legacy_bytes,
+            draws: plan.runs.len(),
+            blocks: plan.blocks,
+            atlas_bytes: plan.matrices * 64,
+            vsm_palette_bytes,
+            vsm_groups: inf_render::skinned_caster_groups(scene),
+            proxies: scene
+                .skinned
+                .iter()
+                .filter(|i| i.shadow == inf_render::SkinnedShadow::Proxy)
+                .count(),
+        }
+    }
+
+    /// Palette megabytes a frame, both paths summed — the column wall 3 is about.
+    fn palette_mb(&self) -> f64 {
+        (self.atlas_bytes + self.vsm_palette_bytes) as f64 / (1024.0 * 1024.0)
+    }
 }
 
 impl Row {
-    /// The palette bytes a frame uploads for this row's skinned characters.
+    /// The palette megabytes a frame uploads for this row's skinned characters.
     ///
-    /// Wall 3's arithmetic, stated rather than measured, because it is a
-    /// *structural* consequence of the renderer as it stands today: one 16 KiB
-    /// power-of-two joint palette per skinned character, uploaded twice per
-    /// frame (the main pass and the prepass). NPC1b's instanced skinning is the
-    /// wave that makes this a measurement instead of a multiplication, and this
-    /// column is the number it has to beat.
+    /// **Measured, since NPC1b** — through `plan_skinned_batches`, the function
+    /// the pass itself calls. It used to be `skinned x 16 KiB x 2`: wall 3's
+    /// arithmetic, stated rather than measured, and the number NPC1b had to beat.
     fn palette_mb(&self) -> f64 {
-        self.skinned as f64 * 16.0 * 1024.0 * 2.0 / (1024.0 * 1024.0)
+        self.gpu.palette_mb()
     }
 }
 
@@ -441,6 +526,7 @@ fn measure(pack: &Path, n: usize, banded: bool) -> Row {
         skinned: scene.skinned.len(),
         projection_ms: best_proj,
         sections,
+        gpu: GpuCost::of(&scene),
     }
     .also_print(pose_bytes)
 }
@@ -450,7 +536,8 @@ impl Row {
         println!(
             "N={:<5} {:<9} step {:7.3} ms (crowd {:6.3} / anim {:6.3} / phys3d {:6.3} / \
              solver {:6.3})  trace {:>9} B (pose {:>9} B, {} posed)  tiers {}F/{}N/{}Fa/{}D  \
-             draws {} inst + {} scatter, {} skinned, palette {:.2} MB  projection {:.3} ms",
+             draws {} inst + {} scatter, {} skinned in {} calls ({} blocks, {} \
+             proxies, {} vsm groups), palette {:.2} MB  projection {:.3} ms",
             self.n,
             if self.banded { "banded" } else { "all-Full" },
             self.step_ms,
@@ -468,6 +555,10 @@ impl Row {
             self.instances,
             self.scatter_batches,
             self.skinned,
+            self.gpu.draws,
+            self.gpu.blocks,
+            self.gpu.proxies,
+            self.gpu.vsm_groups,
             self.palette_mb(),
             self.projection_ms,
         );
@@ -660,12 +751,23 @@ fn the_n_sweep() {
     for (label, rows) in [("BANDED", &banded), ("ALL-FULL", &full)] {
         println!("\n{label}");
         println!(
-            "  {:>5} | {:>8} | {:>7} | {:>7} | {:>10} | {:>6} | {:>7} | {:>8} | {:>10}",
-            "N", "step ms", "crowd", "anim", "trace B", "posed", "skinned", "palette", "proj ms"
+            "  {:>5} | {:>8} | {:>7} | {:>7} | {:>10} | {:>6} | {:>7} | {:>5} | {:>6} | {:>6} | {:>8} | {:>10}",
+            "N",
+            "step ms",
+            "crowd",
+            "anim",
+            "trace B",
+            "posed",
+            "skinned",
+            "draws",
+            "blocks",
+            "groups",
+            "palette",
+            "proj ms"
         );
         for r in rows.iter() {
             println!(
-                "  {:>5} | {:>8.3} | {:>7.3} | {:>7.3} | {:>10} | {:>6} | {:>7} | {:>7.2}M | {:>10.3}",
+                "  {:>5} | {:>8.3} | {:>7.3} | {:>7.3} | {:>10} | {:>6} | {:>7} | {:>5} | {:>6} | {:>6} | {:>7.2}M | {:>10.3}",
                 r.n,
                 r.step_ms,
                 r.crowd_ms,
@@ -673,10 +775,104 @@ fn the_n_sweep() {
                 r.trace_bytes,
                 r.posed,
                 r.skinned,
+                r.gpu.draws,
+                r.gpu.blocks,
+                r.gpu.vsm_groups,
                 r.palette_mb(),
                 r.projection_ms
             );
         }
+    }
+
+    // ── (d) THE RENDERER READS THE TIER (wave NPC1b) ────────────────────────
+    //
+    // Structural, not statistical, and the three claims are the three things the
+    // crowd renderer is: ONE draw for a whole crowd on one mesh, ONE palette
+    // block for every agent the ladder took off the pose path, and ONE geometry
+    // group for every agent that casts through the proxy.
+    //
+    // The all-`Full` control is what makes it falsifiable. The same thousand
+    // agents on the same mesh, banded and unbanded, must differ HERE — a
+    // renderer that ignored the tier would report the same blocks and the same
+    // groups in both columns, which is exactly what it did before this wave.
+    {
+        let g = b.gpu;
+        let gf = f.gpu;
+        println!(
+            "\n(d) THE CROWD RENDERER at N={}: {} skinned instances draw in {} call(s)",
+            b.n, b.skinned, g.draws
+        );
+        println!(
+            "    from {} palette block(s) = {:.2} MB of atlas; {} of them cast through {} shared proxy group(s).",
+            g.blocks,
+            g.atlas_bytes as f64 / (1024.0 * 1024.0),
+            g.proxies,
+            usize::from(g.proxies > 0),
+        );
+        println!(
+            "    The scene asks the page raster for {} groups of a {} ceiling and uploads {:.2} MB of caster palette.",
+            g.vsm_groups,
+            inf_render::VSM_MAX_GROUPS,
+            g.vsm_palette_bytes as f64 / (1024.0 * 1024.0),
+        );
+        println!(
+            "    ALL-FULL control: {} call(s), {} blocks, {} groups, {:.2} MB atlas.",
+            gf.draws,
+            gf.blocks,
+            gf.vsm_groups,
+            gf.atlas_bytes as f64 / (1024.0 * 1024.0),
+        );
+        println!(
+            "    THE PALETTE, BEFORE AND AFTER ON THIS SCENE: the pre-NPC1b renderer uploaded one",
+        );
+        println!(
+            "    power-of-two block per instance on each of the two paths = {:.2} MB a frame; the atlas",
+            g.legacy_bytes as f64 / (1024.0 * 1024.0),
+        );
+        println!(
+            "    plus the caster palettes are {:.2} MB, {:.1}x. (NPC1a's table said 31.28 MB, which is",
+            g.palette_mb(),
+            g.legacy_bytes as f64 / (g.atlas_bytes + g.vsm_palette_bytes).max(1) as f64,
+        );
+        println!(
+            "    the same arithmetic at a 161-bone block against a rig this scene carries at {} joints;",
+            g.atlas_bytes / 64 / g.blocks.max(1),
+        );
+        println!(
+            "    on the island's own hero the before really is {:.1} MB.)",
+            (b.skinned * 2 * 16 * 1024) as f64 / (1024.0 * 1024.0),
+        );
+        assert!(
+            g.legacy_bytes > 4 * (g.atlas_bytes + g.vsm_palette_bytes),
+            "the atlas uploads {} B where the per-instance path uploaded {} B, under 4x",
+            g.atlas_bytes + g.vsm_palette_bytes,
+            g.legacy_bytes
+        );
+        assert!(
+            g.draws <= 2,
+            "a crowd of {} on one mesh drew in {} calls, so the batching is not grouping by mesh",
+            b.skinned,
+            g.draws
+        );
+        assert!(
+            g.blocks < b.skinned / 2,
+            "{} skinned instances produced {} palette blocks: the shared pose is not reaching the atlas",
+            b.skinned,
+            g.blocks
+        );
+        assert!(
+            g.blocks < gf.blocks,
+            "banded produced {} palette blocks and all-Full {}: the renderer is not reading the tier",
+            g.blocks,
+            gf.blocks
+        );
+        assert!(
+            g.vsm_groups < gf.vsm_groups && (g.vsm_groups as u32) < inf_render::VSM_MAX_GROUPS,
+            "banded asks for {} shadow groups and all-Full for {}, against a {} ceiling",
+            g.vsm_groups,
+            gf.vsm_groups,
+            inf_render::VSM_MAX_GROUPS
+        );
     }
 
     // The per-agent cost of the crowd phase itself — the number

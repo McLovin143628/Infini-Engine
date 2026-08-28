@@ -683,7 +683,7 @@ mod tests {
         );
         assert!(
             !std::sync::Arc::ptr_eq(&shared.palette, &per_agent.palette),
-            "the per-agent path handed back the shared block, so this arm cannot              tell the two derivations apart"
+            "the per-agent path handed back the shared block, so this arm proves nothing"
         );
     }
 

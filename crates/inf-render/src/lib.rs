@@ -207,9 +207,9 @@ pub use vsm::{
 pub use vsm_atlas::{VsmApplyReport, VsmPools, VSM_PAGE_FORMAT};
 pub use vsm_mark::{VsmMarker, VsmStreamStats, VsmSystem, VSM_PROJECTION_CAP};
 pub use vsm_raster::{
-    PageGeometry, VsmCasterRaw, VsmRaster, VsmRasterStats, SKINNED_POSE_MARGIN, VSM_ARG_WORDS,
-    VSM_LEVEL_BUCKETS, VSM_MAX_CASTERS, VSM_MAX_GROUPS, VSM_MAX_RASTER_PAGES, VSM_PAGE_DRAW_STRIDE,
-    VSM_RIGID_GROUPS, VSM_TERRAIN_CASTER_CELLS,
+    skinned_caster_groups, PageGeometry, VsmCasterRaw, VsmRaster, VsmRasterStats,
+    SKINNED_POSE_MARGIN, VSM_ARG_WORDS, VSM_LEVEL_BUCKETS, VSM_MAX_CASTERS, VSM_MAX_GROUPS,
+    VSM_MAX_RASTER_PAGES, VSM_PAGE_DRAW_STRIDE, VSM_RIGID_GROUPS, VSM_TERRAIN_CASTER_CELLS,
 };
 // P27.4 the receiver: the pure half (the address walk, the clamped kernel, the
 // level blend, the two derived bias terms) plus the resources the shared

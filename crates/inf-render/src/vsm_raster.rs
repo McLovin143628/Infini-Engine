@@ -700,6 +700,31 @@ fn posed_bound(
     }
 }
 
+/// **The geometry groups a scene's SKINNED content asks the page raster for** —
+/// pure, so an instrument can read the number wall 4 is about without a device
+/// (wave NPC1b).
+///
+/// Every non-proxy skinned instance is a group of its own, and every proxy
+/// instance in the whole scene shares one. It is the **ceiling** of what
+/// [`pack_casters`] will push rather than the count: that function additionally
+/// skips an instance whose mesh has not uploaded or has no indices, which a scene
+/// alone cannot know. Stated as a ceiling because a number that is sometimes the
+/// answer and sometimes an over-estimate has to say which — and a ceiling is the
+/// right shape for the question it is asked, which is "can this crowd overrun
+/// [`VSM_MAX_GROUPS`]".
+pub fn skinned_caster_groups(scene: &RenderScene) -> usize {
+    let own = scene
+        .skinned
+        .iter()
+        .filter(|i| i.shadow != crate::scene::SkinnedShadow::Proxy)
+        .count();
+    let proxied = scene
+        .skinned
+        .iter()
+        .any(|i| i.shadow == crate::scene::SkinnedShadow::Proxy);
+    own + usize::from(proxied)
+}
+
 /// One skinned caster's joint palette on the page-raster path.
 struct SkinnedPaletteSlot {
     buffer: wgpu::Buffer,
