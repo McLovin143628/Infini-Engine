@@ -399,7 +399,11 @@ mod tests {
         let mut g = NavGraph::new();
         for r in 0..SIDE {
             for c in 0..SIDE {
-                g.add_node(r * SIDE + c, p(c as f64 * 20.0, r as f64 * 20.0), NavKind::Street);
+                g.add_node(
+                    r * SIDE + c,
+                    p(c as f64 * 20.0, r as f64 * 20.0),
+                    NavKind::Street,
+                );
             }
         }
         for r in 0..SIDE {
@@ -425,7 +429,9 @@ mod tests {
         for _ in 0..5 {
             let t = std::time::Instant::now();
             for _ in 0..20 {
-                let r = route(&g, from, to).route().expect("a corner-to-corner route");
+                let r = route(&g, from, to)
+                    .route()
+                    .expect("a corner-to-corner route");
                 nodes = r.nodes.len();
                 cost = r.cost_m;
             }
@@ -433,7 +439,11 @@ mod tests {
         }
         // The world first, then the clock: a search that answered nothing would
         // be the fastest of all.
-        assert_eq!(nodes as u64, 2 * SIDE - 1, "the route is not a monotone staircase");
+        assert_eq!(
+            nodes as u64,
+            2 * SIDE - 1,
+            "the route is not a monotone staircase"
+        );
         assert!(
             (cost - 2.0 * (SIDE - 1) as f64 * 20.0).abs() < 1.0e-9,
             "the route costs {cost} m and the grid's Manhattan distance is {} m",

@@ -446,8 +446,15 @@ fn the_movers_cost_per_character_does_not_climb_with_the_crowd() {
         );
     }
     let one = rows[0].1.us_per_character(1);
-    let many = rows.last().unwrap().1.us_per_character(rows.last().unwrap().0);
-    println!("  per-character 1 -> 64: {one:.2} -> {many:.2} us  ({:.2}x)", many / one);
+    let many = rows
+        .last()
+        .unwrap()
+        .1
+        .us_per_character(rows.last().unwrap().0);
+    println!(
+        "  per-character 1 -> 64: {one:.2} -> {many:.2} us  ({:.2}x)",
+        many / one
+    );
     // A real `O(N²)` term is 64x here. The bound is 4x, which noise cannot reach
     // and a quadratic cannot meet.
     assert!(

@@ -935,7 +935,8 @@ fn a_narrowed_capsule_computes_no_manifold_against_a_far_buildings_shell() {
          and its narrowed half proves nothing"
     );
     assert_eq!(
-        narrowed, narrowed_before,
+        narrowed,
+        narrowed_before,
         "a crowd-narrowed capsule computed {} new manifold(s) against a FAR \
          building's shell — `structure_snaps_of`'s third emission site is back \
          at `All`, and every `Near` agent in the 32 m ring between the collider \

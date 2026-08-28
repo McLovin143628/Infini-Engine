@@ -28056,3 +28056,61 @@ routing through furnished room centres, the planar street graph, the single inte
 the `Near` rung still unfalsifiable, the 0.9513 m pose pop, `set_hero`'s missing dirty mark, the
 locked-door retry, the still-callerless crowd seams, and the deformation field — in
 `docs/memos/island-progress.md` under *"Wave NPC1c"*.
+
+## Wave NPC1c — the audit (2026-08-28)
+
+The wave's headline is an honest **regression** — `character move` +5.50 ms at N = 1 000, *"0.18 ms a
+character in the mover"*, named as the arc's next wall — so that number got its own investigation
+before NPC1d plans a wave around it.
+
+**THE MOVER, DECOMPOSED** (`crates/inf-physics/tests/character_move_cost.rs`, four arms on
+`kinematic_pairing_cost`'s own fixture with the timer around `step_character_movement`). **There is
+no `O(N²)` term**: the per-character cost is **52.14 → 51.19 µs from N = 1 to N = 64 (0.98×)**, so
+the P29.4 audit's A8 defect has not re-appeared at crowd N and no sibling of it has. **The constant
+is the world**: a character with nothing to collide with is **1.9 µs**, 1 849 boxes make it 24.0,
+four heightfield tiles alone make it 30.4, and both make it **50.7** — 96 % queries, additive, and
+the *ground* is dearer than 1 849 buildings. **And it scales with the world**: 174 → 3 726 bodies is
+30.80 → **73.49 µs**, a log-log slope of **0.284**, extrapolating to **0.115 ms** at the island's
+17 823 bodies. **A crowd around costs 1.24× and saturates** (49.69 → 60.00 → 61.87 µs at 0 / 64 / 256
+bystanders): a controller pays for the body in front of it, not for the population. `0.115 × 1.24 =
+0.143` against the island's re-measured **0.171** — the same number on a different profile. **So the
+wall is real and it is linear per-character world-query work**; the lever is fewer or cheaper queries
+per character, aimed at the ground first. **And NPC1d must not plan from the `92.756 ms / 291
+controllers` number**: it is 2.2× what this law predicts, unbracketed, on a configuration the wave
+reverted.
+
+Six findings, five fixed. **(1)** `structure_snaps_of` emits a structural box in **three** places and
+the wave narrowed two — the `Tier::Far` **shell** stayed at `All`, and the bands do not line up
+(shells at 64 m, crowd capsules to 96 m), so the 256-member `Near` tier stood among un-narrowed —
+and *penetrating* — shells; fixed, arm mutation-verified 1-against-0, **and worth nothing measurable
+on this world**, which is said in the ledger rather than in the commit. **(2)** the band's doors were
+gathered **twice** a step and one gather over 19 790 doorway slots is **0.5892 ms**; fixed
+structurally (`step_crowd_doors` no longer takes a bridge), and the island's `gameplay` delta goes
+**+0.84 → +0.16 ms**. **(3)** `inf-nav` depended on `inf-math` and never named it, under a sentence
+that read as a determinism guarantee. **(4)** `route.rs` cites *"the measurement is in this module's
+own arms"* and every arm ran on a nine-node lattice; a 1 600-node grid search is the gate now.
+**(5)** the one band reading in `island_gate` that was printed and never asserted is an arm, at
+**852 of 1 297 (65.69 %)**. **(6) corrected, not fixed:** `set_hero`'s missing dirty mark is a
+**one-step ordering lag**, not a frozen anchor — `step_one` calls `world.mark_dirty()` unconditionally
+for every character and `fixed_step` propagates unconditionally, so a hero cannot stay stale for
+4 000 steps; what is true is that the propagate runs *after* all five band readers. The carried
+item's sweeping half is not supported: no gate in the file asserts a band-derived quantity a
+one-step lag could make vacuous.
+
+**The bracket and the gate both re-run.** p50 **23.888 → 65.554 → 24.587** (15.3 fps, fixed step
+19.293 ms), tiers 32/256/712/0 and every render figure identical; `character move` **5.630** against
+the wave's 5.629. `pie_equals_shipping_when_an_npc_walks_across_town`: **6 480 steps, 6 480 distinct
+states, identical on both hosts**, 3 doors opened, 0.06 m off the spine, **89 %** of the flight —
+every figure reproduced. Measured and not fixed: **the `Full`/`Near` boundary is no longer free** —
+crossing it now removes `CharacterMovement` and puts a fresh default back, losing the velocity, the
+mode, the smoothed yaw, `grounded` and the `seeded` latch, sixty times a second for an agent parked
+on the lattice line, which retires the NPC1a audit's *"the two tiers differ by a hand pass"*.
+
+Battery **333 / 6 365 / 0 / 19** (+1 block, +8 arms); goldens **59** over 118 arms, none re-blessed;
+rustdoc **374 over 30 crates, zero added**; `clippy -D warnings` 0; `fmt` clean; schemas,
+`EXPECTED_LEVELS`, committed content and the frontend unmoved; `Cargo.lock` **one edge fewer**. Eight
+more carried items — the `Full`/`Near` runtime reset, `nav_graph`'s missing island-scale arm, the
+un-armed interior id namespace, the door-sweep exemption armed only by the 82 s gate, the ledger's
+"four path entries" (it is five), the "without moving" sentence (the population moved 0.90 m), the
+ground profile that refuses nothing, and `blocked` being the steady state (6 247 of 6 480 steps) — in
+`docs/memos/island-progress.md` under *"Wave NPC1c — the adversarial audit"*.

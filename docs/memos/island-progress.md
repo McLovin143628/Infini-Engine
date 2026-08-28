@@ -15953,3 +15953,424 @@ casters in 1 group, 35 geometry groups of a 1 024 ceiling, 0 dropped, 0 refused*
     carried item 1). Nothing in this wave reads or writes it — though a `Far`
     agent now has no `Collider3D` either, which is one more door closed on it by
     accident rather than by design.
+
+## Wave NPC1c — the adversarial audit (2026-08-28)
+
+Range `4575ddae..ea59aefd`, eight commits, unpushed. The wave's own headline is a
+**regression** — `character move` +5.50 ms at N = 1 000, *"0.18 ms a character in
+the mover"*, named as the arc's next wall — so the audit's first job was that
+number, before NPC1d plans a wave around it. It gets its own section and it is
+the most useful thing here.
+
+The wave's structural claims hold. The route substrate answers a value with three
+named refusals and a tie-break driven 64 times; `NavPath`'s bit-identity to
+NPC1a's arithmetic is a real `to_bits()` pin; the tier really does own the
+components and the NPC1b terrain tripwire is really flipped (the `Far` clause and
+the *transition* both fail on a severed ladder); the solver mechanism is measured
+rather than argued, and the union rule that killed the one-sided fix is the most
+useful sentence in clause 3. **The narrowing is safe**, checked exhaustively:
+`All` has excluded `FIXED_FIXED` since wave I4b, so the only bits a narrowed pair
+can lose are `KINEMATIC_FIXED` and `KINEMATIC_KINEMATIC`; the only narrowed
+kinematic collider in the tree is the crowd capsule; the hero's capsule, every
+door leaf, every authored scene collider and every sensor keep `All`, which
+rapier's union carries. Both `FIX_INTERNAL_EDGES` trampoline arms drive
+**dynamic** bodies and cannot be silenced by it, and the two `Collision`-event
+drains fire only for guids in the session's actor list, which a runtime-spawned
+crowd agent is not in.
+
+Six findings. Five are fixed here; the sixth is a correction to the wave's own
+*diagnosis* of a defect it fixed.
+
+### THE SPECIAL INVESTIGATION — the mover, decomposed
+
+`crates/inf-physics/tests/character_move_cost.rs`, four arms, built on
+`kinematic_pairing_cost`'s own fixture one phase over: the same 43 × 43 = 1 849
+static boxes at a 7 m pitch on the island's own tile resolution (257 samples at
+1 m), the same frontage lattice, the crowd's own component set — and the timer
+around `step_character_movement` rather than `world.step`. Dev profile, MIN of
+five rounds of sixty steps.
+
+**1. There is no `O(N²)` term. The per-character cost is flat in the crowd.**
+
+| N controllers | ms/step | µs a character |
+|---|---|---|
+| 1 | 0.0521 | **52.14** |
+| 2 | 0.1000 | 50.00 |
+| 4 | 0.1872 | 46.80 |
+| 8 | 0.3823 | 47.79 |
+| 16 | 0.7935 | 49.59 |
+| 32 | 1.5951 | 49.85 |
+| 64 | 3.2761 | **51.19** |
+
+**0.98× from N = 1 to N = 64**, where a genuine quadratic is 64×. So the P29.4
+audit's A8 defect — `try_mantle` asking `movement_targets` for its own copy of
+the character list — has **not** re-appeared at crowd N, and neither has any
+sibling of it: `movement_targets`, `overlay_registry`, `occupied_seats` and the
+threaded `characters` slice are all `O(N)` for the whole step, once. The arm
+holds the ratio under a 4× bound, which noise cannot reach and a quadratic
+cannot meet.
+
+**2. The per-character constant is the WORLD, not the character.** The same one
+character on four worlds:
+
+| world | ms/step | bodies |
+|---|---|---|
+| nothing at all | **0.0019** | 1 |
+| 1 849 boxes, no ground | 0.0240 | 1 850 |
+| 4 heightfield tiles, no boxes | 0.0304 | 5 |
+| both (the fixture) | **0.0507** | 1 854 |
+
+A character with nothing to collide with costs **1.9 µs**; 96 % of the rest is
+the collide-and-slide queries, and the two halves are additive to within 4 %.
+**Four heightfield tiles cost more than 1 849 buildings** — which is the sentence
+clause 3 wrote about the solver, arriving independently at the *query* pipeline.
+
+**3. And it grows with the size of the world, at a measured slope.** One
+character, a growing block field:
+
+| boxes | bodies | µs a character |
+|---|---|---|
+| 169 | 174 | 30.80 |
+| 625 | 630 | 37.91 |
+| 1 849 | 1 854 | 50.29 |
+| 3 721 | 3 726 | **73.49** |
+
+**21× the bodies costs 2.39× the millisecond** — a log-log slope of **0.284**,
+i.e. `cost ∝ bodies^0.28`. Extrapolated to the island's **17 823** bodies that is
+**0.115 ms a character**.
+
+**4. A controller pays for the body in front of it, not for the crowd's size.**
+32 controllers, with 0 / 64 / 256 kinematic capsules standing two metres in front
+of them — the island's `Near` tier, which the mover never visits and every one of
+its queries has to get past:
+
+| bystanders | ms/step | µs a character |
+|---|---|---|
+| 0 | 1.5902 | 49.69 |
+| 64 | 1.9201 | 60.00 |
+| 256 | 1.9798 | **61.87** |
+
+**1.24×, and it saturates between 64 and 256.** The cost is the capsule a
+controller has to slide around; a second capsule behind the first is free.
+
+**THE VERDICT.** `0.115 ms` (the island's world size) × `1.24` (a crowd to get
+past) = **0.143 ms a character** against the island's re-measured **0.171**
+(5.630 ms over 33 controllers). On a different profile, over a real heightfield
+rather than a flat one, that is the same number. **The wave's "0.18 ms a
+character" is genuinely linear per-character movement work against a 17 823-body
+city.** Nothing is quadratic, nothing is a list walk, and there is no defect of a
+known-fixed class to retire here. The lever NPC1d needs is *fewer or cheaper
+queries per character* — a coarser probe set for a crowd, a cached ground answer
+instead of a heightfield sweep, or a mover that is not collide-and-slide — and
+the **ground** is where to aim it first.
+
+**AND ONE NUMBER NPC1d MUST NOT PLAN FROM.** The wave's `character move
+0.132 → 92.756 ms` for **291** controllers is 0.319 ms each, which is **2.2×**
+what the law above predicts (291 × 0.143 = 41.6 ms). It is a single unbracketed
+reading of a configuration the wave then reverted, and its own ledger quotes it
+as evidence of *super-linearity*. It is not evidence of that: the sweep holds the
+per-character cost flat over a 64× range in N. Read the ladder split as *"291
+controllers is at least 40 ms and we did not need to know more"* — which is a
+decision the measurement fully supports.
+
+### The findings
+
+**1 — MED, fixed. The THIRD place a structural box is emitted was left at
+`All`.** Clause 3's whole finding is that the flags are a **union**, so both
+sides of a pair must be narrowed or nothing changes. `structure_snaps_of` emits a
+structural box in three places — an ungrouped solid, a `Tier::Near` group's
+parts, and a `Tier::Far` group's **shell** — and the wave narrowed the first two.
+The gap is not academic, because the two bands do not line up: a group shells at
+`DEFAULT_COLLIDER_NEAR_M` (64 m) and a crowd agent keeps its capsule out to
+`CrowdTier::Near` (96 m), so every agent in that 32 m ring stood among
+un-narrowed shells — and a shell is one box over a whole building group, so an
+agent inside its volume is *penetrating* it, which is the dearest manifold of the
+lot. On the island's own 32 `Full` / 256 `Near` split that is the tier with two
+hundred and fifty-six members in it.
+`a_narrowed_capsule_computes_no_manifold_against_a_far_buildings_shell` is the
+arm, shaped like `the_solver_pays_for_static_pairs_the_city_can_never_move` one
+tier along: **0** manifolds narrowed, **1** at the default `All` — the
+anti-vacuity half, because zero is also what a capsule standing in empty air
+reports. Mutation-verified 1-against-0. *What it was worth on the island is
+measured below and it is nothing; that is said there rather than here.*
+
+**2 — MED, fixed, and worth 0.68 ms. The band's doors were gathered twice a
+step.** The wave's carried item 2, closed with the measurement it was missing:
+one `placements_near` over **19 790** doorway slots is **0.5892 ms** and keeps
+161 of them (0.81 %). Placements are a function of the level's geometry and the
+band, and nothing between the two calls moves either. `step_gameplay` takes the
+band and the list once and hands the same slice to both passes; the guarantee is
+**structural rather than a clock**, because `step_crowd_doors` no longer takes a
+`PhysicsBridge3D` and so has nothing to derive a band from — a future edit that
+gave it one would have to say so in its signature. On the island the `gameplay`
+delta goes **+0.84 → +0.16 ms**.
+
+**3 — MED, fixed. `inf-nav` depended on `inf-math` and never named it**, under a
+sentence that reads as a determinism guarantee: *"costs are built out of
+`+ - * / sqrt` alone … and headings go through `inf_math::portable`"*, with the
+`Cargo.toml` calling it *"the bit-portable trig a heading is taken with"*. Grep
+over all four source files: zero references. There is no trigonometry in the
+crate to route — a cost is arithmetic and a heading is a normalize. The guarantee
+is real and comes from `portable_pose.rs`'s ban list, which the wave did add on
+day one. The dependency is gone and the crate is `glam` and nothing else, which
+is a **stronger** claim than the one the wave wrote.
+
+**4 — MED, fixed. `route.rs` cites a measurement its own arms do not make.** Its
+header closes the Dijkstra-over-A\* argument with *"a search over that is
+microseconds, and the measurement is in this module's own arms rather than in an
+argument."* It was in an argument: every arm in the file runs on a **nine-node**
+lattice, three orders of magnitude from the two graphs the sentence is about. A
+cited gate that does not exist is worse than no claim (the P20 law).
+`a_town_sized_grid_is_searched_in_microseconds` is the gate — a 40 × 40 grid,
+**1 600 nodes / 6 240 directed edges**, comfortably past the 459 / 1 320
+`Settlement::street_graph` builds over all seven settlements, and the worst shape
+for this search: a uniform grid has no dear edges to prune with and offers the
+frontier a fresh tie at every step.
+
+**5 — MED, fixed. The one band reading in `island_gate` that was asserted
+nowhere.** `every_settlement_building_is_enterable` prints *"{n} planned,
+{banded} inside the {BAND_NEAR_M} m collider band"* — the exact quantity the wave
+reported at **0 of 1 297** when it found `set_hero` leaving the streaming anchor
+stale — and asserted nothing about it. A share of zero left every other claim in
+that loop green, because those ask whether the blocks are **resident** (cell
+activation) and not whether anything near them is **solid**. It asserts
+`banded > 0` now, and at head it reads **852 of 1 297 (65.69 %)** and **446 of
+773 (57.70 %)**.
+
+**6 — MED, corrected rather than fixed. `set_hero`'s missing dirty mark is a
+ONE-STEP LAG, not a frozen anchor, and the sweep carried item 9 asks for finds
+nothing vacuous.** The wave's mechanism reads: *"It writes a `Transform` through
+bevy's `get_mut`, `propagate` skips, and the `GlobalTransform` the streaming
+source is read off stays where it last settled."* On the path it names,
+`propagate` does not skip: `d3::movement::step_one` ends with an
+**unconditional** `world.mark_dirty()` for **every** entity carrying
+`CharacterMovement`, and `RuntimeSim::fixed_step` calls `self.world.propagate()`
+unconditionally after write-back and four more times after that. The island hero
+carries `CharacterMovement` — that is how `hero_entity` finds it — and carries
+the `StreamingSource` both bands are anchored on, so its global is refreshed once
+per fixed step and cannot stay stale for 4 000 of them.
+
+What the ordering *does* guarantee is real and worth stating in its own terms:
+the propagate runs **after every band reader in the step** — cell activation,
+terrain streaming, the crowd tiering, the structural gather and the door pass —
+so a teleport is invisible to all five for exactly the step it happens on, and
+from then on the anchor is where the *mover* left the hero rather than where the
+teleport put it. That is a two-authorities-on-one-transform shape, not a missing
+mark.
+
+And the carried item's sweeping half — *"every gate in this file that moves the
+hero and then asserts something unbanded has been passing over it"* — is not
+supported. Of the twelve `set_hero` call sites two already mark dirty (the wave's
+own town walk), and of the remaining ten none asserts a band-derived quantity a
+one-step lag could make vacuous: the residency claims are **floors** a ghost
+anchor would fail, and the door-swing claims are self-protecting (a stale band
+means the leaf never swings and `open_after` fails). The one genuinely un-armed
+reading was finding 5, it is armed now, and it is not zero. Making `set_hero`
+mark dirty itself stays the wave's call to carry — it would move other gates'
+traces, and this audit did not find a gate that needs it.
+
+### The N = 1 000 island row, re-run — and what the two fixes were worth
+
+Same RTX 4070 Ti, same Windows/Vulkan, same release build, same 1080p flight,
+same MIN of 3 × 120 frames, both brackets adjacent, re-run at the audit's head:
+
+| | wave `ea59aefd` | **audit** |
+|---|---|---|
+| control **before** p50 / p95 | 24.230 / 25.463 | **23.888 / 25.632** |
+| **+1 000 NPCs** p50 / p95 | 70.129 / 78.993 | **65.554 / 72.127** |
+| control **after** p50 | 24.447 | **24.587** |
+| the two brackets agree to | 0.217 ms | **0.699 ms** |
+| fps at p50, crowd row | 14.3 | **15.3** |
+| cpu sim fixed step, crowd row | 20.540 | **19.293** |
+| tiers | 32 F / 256 N / 712 Fa / 0 D | **identical** |
+| skinned instances / draws / palette blocks / atlas | 1 001 / 1 / 290 / 2.85 MB | **identical** |
+| proxy casters / groups / of ceiling / dropped / refused | 967 / 35 / 1 024 / 0 / 0 | **identical** |
+
+**The sim split, re-measured:**
+
+| phase | control | crowd | delta | the wave's delta |
+|---|---|---|---|---|
+| character move | 0.132 | **5.630** | **+5.50** | +5.50 |
+| physics3d sync | 3.001 | 4.500 | +1.50 | +1.81 |
+| solver | 2.184 | 3.325 | +1.14 | +1.11 |
+| animation | 0.042 | 3.224 | +3.18 | +3.18 |
+| **gameplay** | 0.748 | **0.912** | **+0.16** | **+0.84** |
+| terrain stream | ≤ 0.02 | 0.468 | +0.45 | +0.58 |
+| crowd | — | 0.234 | +0.23 | +0.28 |
+| **the whole fixed step** | 6.492 | **19.293** | **+12.80** | +13.93 |
+
+**`character move` reproduces to the third digit** — 5.630 against 5.629, which
+is 0.171 ms for 33 controllers — so the wall the wave named is exactly where it
+said, and the decomposition above is about a number that reproduces.
+
+**What finding 2 was worth: 0.68 ms, on the one line it aimed at.** The
+`gameplay` delta goes **+0.84 → +0.16**, which is the 0.5892 ms gather plus the
+per-agent walk over it that is no longer duplicated. The whole fixed step is
+1.13 ms cheaper and this is most of it.
+
+**What finding 1 was worth on THIS world: nothing measurable, and it is said here
+rather than in its commit message.** The `solver` delta is **+1.14** against the
+wave's **+1.11** — inside the run-to-run spread, in the wrong direction. The fix
+is right (the arm's 0 against the control's 1 is not a judgement call) and this
+world barely exercises it: the crowd stands in Harbour City with the hero driving
+through it, so most of what a `Near` agent is beside is inside the 64 m collider
+band and is therefore a `Tier::Near` group whose parts the wave had already
+narrowed. The ring where it pays is a crowd standing 64–96 m from the streaming
+source, which is a schedule NPC1d writes and not a drive line this instrument
+flies. **A structural `O()` correction with an armed invariant, and not a
+millisecond** — the same sentence the NPC1b audit had to write about its own
+finding 1, for the same reason.
+
+**The render half is unchanged**, which is what a sim-side audit has to look
+like: 1 001 skinned instances in one draw call, 290 palette blocks, 967 proxy
+casters in one group, 35 of a 1 024 ceiling, 0 dropped and 0 refused — every one
+identical to the wave's and to the NPC1b audit's before it.
+
+### The gate, re-run — every number, and two things its own prints say
+
+`pie_equals_shipping_when_an_npc_walks_across_town`, at the audit's head:
+**6 480 steps, 6 480 distinct states, identical on both hosts to the byte**; a
+63.0 m route over 9 nodes with 30 spine points whose kinds read `[Street,
+Doorway, Stair]`; **3 doors pressed and 3 opened** on each host; the body
+**0.06 m** off its own spine at 53.25 m of 60.42; feet peaking **3.20 m up a
+3.60 m storey — 89 %**; the flight 20 treads of 0.180 m rise and 0.230 m run on a
+0.20 m landing. Every figure the wave's ledger quotes, reproduced to the digit.
+The whole battery is green with it (below), so the determinism claim is not a
+one-off either.
+
+Two of its own prints are worth reading against the ledger's prose, and both are
+carried below: the **ground profile refuses nothing** (item 19) and **`blocked`
+is the steady state rather than an event** (item 20).
+
+### Measured, named, and deliberately NOT fixed
+
+**The `Full`/`Near` boundary is no longer free, and the sentence that says it is
+belongs to this file.** The NPC1a audit priced refusing hysteresis at *"an entity
+a step"* on the `Far`/`Dormant` line and wrote, of the rung above it: *"On the
+`Full`/`Near` line the cost really is nothing — the two tiers differ by a hand
+pass."* That was true when they did. NPC1c made the tier own the **components**
+and put `steers()` on `Full` alone, so crossing that line now removes
+`CharacterMovement` and `CharacterController3D` and puts **fresh defaults** back
+— and every field of `MovementRuntime` goes with them: the velocity, the mode,
+the smoothed body yaw, `grounded`, the landing clocks, and the `seeded` latch
+that takes the authored facing and runs `settle_on_spawn` exactly once. The
+thrash is not a jitter: it lives on the 16 m lattice line, where a millimetre of
+solver residue moves the snapped anchor a whole cell. So an agent parked at 32 m
+on that line is a character whose mover starts from nothing sixty times a second
+— it can never accumulate a fall, never finish a gait ramp, and re-settles its
+feet every step.
+`a_parked_agent_on_the_full_edge_gets_a_new_movement_model_every_step` measures
+it by writing a marker into the runtime and reading it back, so the claim is
+about the **state** and not about the component count. Not fixed, for the arm
+above it's own reason: the remedies that keep the tier a pure function of sim
+state are a quantized agent position or carrying the runtime across the rung, and
+both are a policy decision about what a demoted body remembers.
+
+### Carried, by name (the audit's, after the wave's twelve)
+
+13. **The `Full`/`Near` boundary costs a movement model a step**, and every field
+    of `MovementRuntime` with it — the section above. The remedy is a policy
+    decision, and it belongs with the wave that makes a controller affordable.
+14. **`RoadGraph::nav_graph` has no island-scale arm at all.** Its two arms are a
+    **four-node** `t_junction` fixture and a three-point switchback, and the
+    ledger's headline for that producer — 188.680 m over a 100 m chord — is
+    measured on the second of them. The committed island's own road layer
+    (`samples/island/layers/roads.geojson`, 151 KB) is never turned into a
+    `NavGraph` by any test, so the size of the thing the module doc calls *"a few
+    hundred nodes"* is stated and never counted. Finding 4's arm bounds the
+    **search** at 1 600 nodes; nothing bounds the **graph**.
+15. **`BuildingPlan::interior_nav`'s single id namespace is stated in two places
+    and armed in none.** The doc says it (*"a caller folding several buildings
+    into one network must offset the ids itself"*) and the wave's carried item 6
+    says it blocks NPC1d. Nothing fails the day somebody absorbs two plans: a
+    room node's id is `BUILDING | index`, so two buildings' room 5 are one node
+    and the second `absorb` silently welds a bedroom to a bedroom. This is the
+    NPC1a audit's own law — *a hazard written into a carried list is not a hazard
+    handled* — and NPC1d is the wave that reaches it. A per-volume salt plus one
+    tripwire is the shape.
+16. **The crowd's door-sweep exemption is armed only by the 82-second island
+    gate.** `step_doors` lets a leaf sweep through **every** crowd capsule, not
+    just the one that pressed; `door_3d`'s two new arms cover the *verb* and not
+    the *exemption*, and that fixture's agent stands a metre clear of the swing
+    arc. The town walk does catch it — remove the `pawns` set and the NPC
+    deadlocks at 91.60 m, which fails both `reached_m` and `climbed` — so the
+    rule is covered, expensively and indirectly. A unit arm in `door_3d` costs a
+    second.
+17. **The wave's ledger says `Cargo.lock` "moves by four path entries".** It is
+    five — `inf-ecs`, `inf-editor-core`, `inf-gis`, `inf-pcg`, `inf-player` —
+    plus the new package block. (This audit removes one edge again: `inf-nav` no
+    longer names `inf-math`.)
+18. **"Which is what let a population that was already walking move onto this
+    substrate without moving" is true of the interpolation and not of the
+    population.** `NavPath::position_at` really is bit-identical to NPC1a's
+    arithmetic and the `to_bits()` pin is real. But `CrowdRecord::position_at`
+    gained `+ feet_offset_m` in the same wave and the humanoid capsule went from
+    0.9 to 0.6 m of half-height, so every crowd agent's transform moved —
+    deliberately, correctly, and by 0.90 m. No committed level carries a crowd,
+    so nothing shipped moved; the sentence is still wider than its arm.
+19. **The gate's ground profile refuses nothing.** `0 start(s) refused for an
+    unclimbable step` on the committed island. Defect 5's remedy has two halves —
+    a **pad-storey** filter (`|y − pad_y| ≤ 2.0`) and a **ground profile** against
+    the character's own `step_height_m` — and the first does all the work. The
+    wave's clause-5 sentence credits the second. The counter is printed, so this
+    is a mis-attribution rather than a hidden no-op, and the profile is the half
+    that would survive a settlement whose pad and grid agree — but as it stands
+    it is an unexercised path with an engagement counter reading zero.
+20. **`blocked` is the steady state, not an event.** The agent is blocked on
+    **6 247 of 6 480 steps — 96 %**, and the door pass looks at a placement list
+    on every one of them. The wave frames the trigger as *"2 m of lag, which at a
+    1.65 m/s walk is about 1.2 s of standing at the door"*, which is right about
+    the first door and wrong about the walk: the body covers 53.25 m while its
+    clock runs about 151 m, so it is permanently behind and never stops being
+    blocked. That makes carried item 10 (*"a locked door is retried every
+    step"*) the **normal** case rather than an edge one, and it is why finding 2's
+    saving is as large as it is — the second gather was paid on nearly every step
+    of every steered agent's life.
+
+### The laws this audit paid for
+
+* **A union rule has to be applied to every member of the union.** Clause 3's own
+  finding is that narrowing one side of a pair removes nothing; the fix then
+  narrowed two of the three places its own function emits the other side. A
+  ruling about a *class* of collider is falsified by grepping for the
+  constructor, not by re-reading the clause that announces it.
+* **A dependency is a claim.** `inf-nav`'s `Cargo.toml` said `inf-math` was *"the
+  bit-portable trig a heading is taken with"* and nothing in the crate imported
+  it. An unused edge is cheap; a sentence explaining why it is there is not,
+  because the next reader believes the determinism comes from the import.
+* **A doc that cites its own arms is checkable.** *"The measurement is in this
+  module's own arms rather than in an argument"* is a statement about a file, and
+  the file had a nine-node lattice in it.
+* **A print is not an arm, and the number a wave measured at zero is the one to
+  arm.** The band share `every_settlement_building_is_enterable` prints is exactly
+  the quantity the wave found at 0 of 1 297, and it was the one reading in the
+  file nothing asserted.
+* **A mechanism is a claim too, and it is checkable against the call graph.**
+  *"`propagate` skips"* is falsified by one unconditional `mark_dirty` in the
+  character step. The symptom was real and the diagnosis named the wrong seam,
+  which matters because the remedy the carried item proposes follows from the
+  diagnosis.
+* **A cost sentence expires when the thing it prices changes.** *"The two tiers
+  differ by a hand pass"* was true of NPC1a's ladder and false of NPC1c's, and
+  the same wave rewrote the ladder and not the sentence — in a doc table in the
+  function that **is** the ladder.
+* **A saving has to be measured on the world it is claimed for.** Finding 1's arm
+  is unambiguous and its island row moved by nothing, because the island's crowd
+  does not stand where the fix applies. Both halves are true and only saying the
+  first would be the "unmeasured prescription" this tree keeps paying for.
+
+### Counts
+
+| | wave `ea59aefd` | **audit** |
+|---|---|---|
+| battery | 332 blocks / 6 357 passed / 0 failed / 19 ignored | **333 / 6 365 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, **+1 block** (`inf-physics`'s `character_move_cost`) and **+8 arms**: 4 in it, 1 in `city_collider_band`, 1 in `door_3d`, 1 in `inf_ecs::crowd` and 1 in `inf_nav::route`; plus one arm **renamed** (`…_forty_nine_bytes` → `…_fifty_seven_bytes`, net zero) and one assertion added to `island_gate`'s existing settlement arm |
+| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**, `git status` over `tests/goldens` empty afterwards. Nothing here touches render code |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — 404 `^warning` lines minus 30 per-crate summaries after `cargo clean --doc`. **The audit adds zero.** Headroom **76** |
+| `clippy --workspace --all-targets -D warnings` | 0 | **0** (run **LAST**, per the rmeta law) |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** — nothing here reaches a serialized format |
+| step phases / trace sections / libm-ban subjects | 25 / 9 / 40 | **25 / 9 / 40** |
+| §8 budgets | `NPC_STEP_BUDGET_MS` 1.0 | **unmoved** — the crowd phase re-measured at **0.234 ms** on the island, a quarter of it |
+| committed levels (`EXPECTED_LEVELS`) / committed content / frontend | 23 / unmoved / untouched | **unchanged** |
+| `Cargo.lock` | +1 package, 5 path entries | **one edge fewer** — `inf-nav` no longer names `inf-math` |
+| new crates or external dependencies | none | **none** |
