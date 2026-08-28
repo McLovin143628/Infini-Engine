@@ -16906,6 +16906,108 @@ the loose content: the same 163 settle steps, the same 50-node network, the same
 329 agents from the same 4 blocks, the same six hourly censuses, and 1 200
 step digests equal one for one.
 
+### The N = 1 000 island row, re-measured — and the island's own step, which now carries a town
+
+RTX 4070 Ti, Windows/Vulkan, release, 1080p, MIN of 3 rounds × 120 frames, the
+same 40 m flight east from Harbour City, both brackets adjacent.
+**1 000 NPCs in a 320 m block: 32 `Full` / 256 `Near` / 712 `Far` / 0 `Dormant`
+— identical to NPC1c's and to the NPC1b audit's before it.**
+
+| | NPC1c audit | **NPC1d** |
+|---|---|---|
+| control **before** p50 | 23.888 | **26.525** |
+| **+1 000 NPCs** p50 / p95 | 65.554 / 72.127 | **42.644 / 48.388** |
+| control **after** p50 | 24.587 | **32.758** |
+| the two brackets agree to | 0.699 ms | **6.233 ms** |
+| tiers | 32/256/712/0 | **identical** |
+| skinned instances / draws / palette blocks / atlas | 1 001 / 1 / 290 / 2.85 MB | **identical** |
+| proxy casters / groups / of ceiling / dropped / refused | 967 / 35 / 1 024 / 0 / 0 | **identical** |
+
+**The row is reported and the delta is NOT, and the reason is the last line of
+that table.** NPC1c's two brackets agreed to 0.699 ms, which is what made its
+`+12.80 ms` a measurement; this run's disagree by **6.233 ms** — a quarter of the
+crowd's own row — so subtracting either one produces a number the other
+contradicts. The instrument's own caveat (the NPC1b audit's carried item 12: the
+island's crowd row is CPU-bound and its per-pass GPU milliseconds ramp over a
+five-minute run) is the standing explanation and it is not a licence to publish
+the difference anyway. **What reproduces exactly is every structural number**,
+and those are the rows above with "identical" in them.
+
+**The sim phases in the crowd row, against NPC1c's:**
+
+| phase | NPC1c audit | **NPC1d** |
+|---|---|---|
+| character move | 5.630 | **5.585** |
+| solver | 3.325 | **3.312** |
+| physics3d sync | 4.500 | **3.292** |
+| animation | 3.224 | **3.274** |
+| gameplay | 0.912 | **0.888** |
+| terrain stream | 0.468 | **0.263** |
+| crowd | 0.234 | **0.164** |
+| **society** | — | **0.104** |
+
+`character move` reproduces to **5.585 against 5.630**, so the arc's wall is
+exactly where NPC1c's audit left it, and this wave did not take the mover lever
+(see the carried list).
+
+**And the island's own isolated fixed step now carries a town.** The instrument's
+`THE REAL ISLAND'S FIXED STEP` arm runs *before* any crowd is installed by hand —
+so what it measures is the island as a player boots it:
+
+> **7.930 ms/step**; 17 823 bodies, 17 289 admitted structure colliders, 58 582
+> contact pairs (2 055 touching). `physics3d sync` 3.026 (38.2 %), `solver` 2.783
+> (35.1 %), `gameplay` 0.777 (9.8 %), **`crowd` 0.353 (4.5 %)**, `write-back`
+> 0.329, **`society` 0.205 (2.6 %)**, `character move` 0.129, everything else
+> under 0.1.
+
+**A `crowd` line of 0.353 ms on a level whose crowd phase read 0.000 before this
+wave** is the clause-1 claim in the units the budget is written in: the shipped
+island has a population now. The arm reports and never asserts (it is
+`#[ignore]`d and needs the fetched tile cache), and the honest caveat is that the
+last recorded reading of this number is wave I8b's **5.673 ms** — three waves and
+an arc ago — so the 7.930 is not a before/after of anything this wave alone did.
+What is attributable is the two lines with this wave's names on them, **0.353 +
+0.205 = 0.558 ms**.
+
+**And one number worth carrying: a SCHEDULED agent is dearer than a walking
+one.** The island's 329 scheduled residents cost `crowd` **0.353 ms**
+(1.07 µs an agent) where the instrument's thousand ping-pong walkers cost
+**0.164** (0.16 µs an agent) — **6.5× per agent**. A schedule asks its legs which
+one the hour is on and then interpolates over that leg's own path, where a route
+is a multiply and a `rem_euclid`. Both are far inside `NPC_STEP_BUDGET_MS`; the
+ratio is the thing to watch when a settlement is a thousand people rather than
+three hundred.
+
+### What the battery said, and the one red that is the wave working
+
+Three arms went red on the first full run, and the interesting one is the first.
+
+**`pie_equals_shipping_on_an_island_drive` published 2 137 080 bytes of pose
+against a pinned 6 476.** That is exactly **330 × 6 476** — the island's hero
+plus Harbour City's 329 residents, every one of them a 161-bone character. The
+arm was written by wave SK1c when the island's pose store held exactly one
+character, and it pinned the *store*; the island derives a population from its
+own settlements now, so the store is a town.
+
+It is re-aimed from a **number** to a **multiple**, which is the same claim made
+stronger: not *"the store holds one 161-bone character"* but *"**every**
+character in the store is a 161-bone character"*, plus the two hosts agreeing on
+how many. A hero that quietly went back to being a capsule still fails it, and a
+crowd cannot satisfy it by accident.
+
+It is also a cost the ledger should carry plainly: **the island's own drive gate
+now poses a town.** 2 137 080 B a step of pose section against the crowd
+section's 329 × 58 = 19 082 B is the NPC1a re-shape's whole argument in one line
+— the pose is **112×** the crowd, and the ladder is what decides how many of
+those 330 are on the pose path at all.
+
+The other two are arms doing their job. `the_phase_indices_are_a_permutation_of_
+the_slots` caught `phase::SOCIETY` being minted and not added to the list the
+permutation is checked against; `no_string_literal_in_the_workspace_carries_an_
+eaten_continuation` caught a 22-space run inside one of this wave's own assertion
+messages, which is the workspace gate the P22 law paid for, working on the wave
+that wrote the literal.
+
 ### The laws this wave paid for
 
 * **A counter that resets is a report that says a system did nothing.** The
@@ -16952,6 +17054,28 @@ step digests equal one for one.
   instrument that installs a measured `N` and then clears it finds the level's
   own residents walking back in on the next step, and every number it prints is
   about a population it did not choose.
+
+### Counts
+
+| | at `f0cfa6ec` | **wave NPC1d** |
+|---|---|---|
+| battery | 333 blocks / 6 365 passed / 0 failed / 19 ignored | **333 / 6 396 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, **+0 blocks and +31 arms**: 14 in `inf_pcg::building::society` and its namespace module, 13 in `inf_ecs::{crowd, society}`, 2 in `island_gate` (`pie_equals_shipping_over_a_day_in_the_life`, `the_islands_own_rate_makes_a_commute_a_walk`), and two doc-tests; plus assertions added to `projector_mirror`'s existing crowd-ordering arm and to `island_gate`'s pose arm, both net zero |
+| goldens | 59 | **59** — none added, none re-blessed; `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**, `git status` over `tests/goldens` empty afterwards. Nothing in this wave touches render code |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — 404 `^warning` lines minus 30 per-crate summaries after `cargo clean --doc`. **The wave adds zero**, after fixing the two it did add (a public doc linking a private constant, and a doc block that a scripted insert had spliced into the middle of its neighbour's). Headroom **76** |
+| `clippy --workspace --all-targets -D warnings` | 0 | **0** (run **LAST**, per the rmeta law) |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** — `residents` and `interior_nav` are `#[serde(skip)]` on `PcgVolume`, `SocietyRes` is a bevy resource, and a schedule is runtime state on a record. The bless regenerated **every** committed sample and only the two islands moved, only in `content_hash`, over an unchanged 49 625 bytes and 189 entities |
+| step phases | 25 | **26** (`society`, index 4) |
+| trace sections | 9 | **9** — the leg byte rides the crowd section |
+| trace bytes an agent | 57 | **58** (`leg`) |
+| libm-ban subjects | 40 | **42** (`inf_pcg::building::society`, `inf_ecs::society`, day one) |
+| `inf_nav::domain` tags | 4 | **5** (`PAVEMENT`) |
+| §8 budgets | `NPC_STEP_BUDGET_MS` 1.0 | **+1**: `SOCIETY_STEP_BUDGET_MS = 0.5`, in `docs/profiling.md` §2's table. The island measures the phase at **0.102–0.205 ms**, a fifth to two fifths of it; the crowd phase re-measures at **0.164** (instrument crowd) and **0.353** (the island's own scheduled residents), a sixth and a third of `NPC_STEP_BUDGET_MS` |
+| committed levels (`EXPECTED_LEVELS`) | 23 | **23** |
+| committed content | — | the two island `.inf_lvl`s re-blessed, **`content_hash` only** |
+| new crates | — | **none** |
+| new external dependencies | — | **none**; `Cargo.lock` moves by two path edges (`inf-player`'s `inf-nav` promoted dev → real, `inf-studio` gains it) |
+| frontend | — | **untouched and not run** — a level's population is derived, so there is no knob for a World Settings row to hold |
 
 ### Carried, by name
 
@@ -17006,3 +17130,39 @@ step digests equal one for one.
     does it survive a save, which is correct because it is derived. What that
     means in practice is that entering Simulate twice re-derives the town, and
     re-derives it identically.
+11. **A SCHEDULED agent costs 6.5× a walking one in the crowd phase.** The
+    island's 329 residents read `crowd` **0.353 ms** (1.07 µs an agent) where the
+    instrument's thousand ping-pong walkers read **0.164** (0.16 µs). A schedule
+    asks its legs which one the hour is on and then interpolates over that leg's
+    own path; a route is a multiply and a `rem_euclid`. Both are far inside
+    `NPC_STEP_BUDGET_MS`, and the ratio is the thing to watch on the day a
+    settlement is a thousand people rather than three hundred. The obvious
+    lever — cache the leg index on the record and invalidate it on the leg
+    change the step already detects — is **not taken**, because a cached index
+    is a second copy of a pure function and this module has refused two of
+    those already.
+12. **The N = 1 000 island row's two brackets disagree by 6.233 ms**, against
+    NPC1c's 0.699, so **the delta is not published**. Every structural number
+    reproduces exactly (32/256/712/0 tiers, 1 001 skinned in 1 draw, 290 palette
+    blocks, 967 proxies in 1 group, 35 of 1 024, 0 dropped, 0 refused) and
+    `character move` reproduces to 5.585 against 5.630 — the arc's wall is where
+    NPC1c's audit left it. The NPC1b audit's carried item 12 (the island's crowd
+    row is CPU-bound and its per-pass GPU milliseconds ramp over a five-minute
+    run) is the standing explanation and it is still not an investigation.
+13. **The mover lever was NOT taken.** The NPC1c audit's decomposition points at
+    *fewer or cheaper ground queries per character* — four heightfield tiles cost
+    more than 1 849 buildings — and this wave spent its slice on the society
+    instead. `character move` is unchanged at 5.585 ms for 33 controllers, and
+    NPC1e still cannot certify 60 fps with a crowd until it is cheaper.
+14. **The island's isolated fixed step reads 7.930 ms** against a 6.0 ms ratchet
+    the arm reports and never asserts. **0.558 ms of it has this wave's names on
+    it** (`society` 0.205 + `crowd` 0.353, the second being the island's own
+    residents on a level whose crowd phase read 0.000 before this wave); the rest
+    is three waves and an arc since the last recorded reading of **5.673 ms**,
+    and this run is not a before/after of any of them.
+15. **A society only ever grows.** `SocietyRes` keeps every ring, interior and
+    slot it has ever folded, so a level's population is a function of what a
+    player has *walked past* rather than of what is resident now. That is right
+    for a streaming world and it means memory grows with exploration: 170 blocks
+    of one settlement is about 1 400 pavement nodes and 170 interiors, which is
+    small, and fifty square kilometres of settlements has never been walked.

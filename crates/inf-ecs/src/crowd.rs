@@ -2867,8 +2867,6 @@ mod tests {
     /// **57**. A test's name is the sentence a reader takes away from a green
     /// run, and this tree's own law is that a gate must aim at the thing it
     /// names.)*
-    // ── NPC1d: the day ──────────────────────────────────────────────────────
-
     fn leg(start_h: f64, travel_h: f64, from: DVec3, to: DVec3) -> ScheduleLeg {
         ScheduleLeg {
             start_h,

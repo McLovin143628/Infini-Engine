@@ -885,8 +885,9 @@ impl BuildingPlan {
     /// `two_buildings_absorb_into_one_network_only_when_they_are_salted_apart`.
     ///
     /// The salt is masked to thirty-nine bits and otherwise uninterpreted: a
-    /// dense ordinal and a hash are equally welcome, and the width is chosen so
-    /// a hash is safe (see [`NAV_SALT_MASK`]).
+    /// dense ordinal and a hash are equally welcome, and the width is
+    /// thirty-nine bits, which is chosen so a hash is safe (see the private
+    /// `NAV_SALT_MASK` for the arithmetic).
     pub fn interior_nav_in(&self, salt: u64) -> inf_nav::NavGraph {
         let mut g = inf_nav::NavGraph::new();
         for (i, r) in self.rooms.iter().enumerate() {

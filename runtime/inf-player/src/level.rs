@@ -1402,6 +1402,18 @@ pub fn evaluate_pcg_volumes_in(
     }
 }
 
+/// What one volume's evaluation becomes in the ECS's own mirror types -- the
+/// return of [`population_of`], named because a six-tuple in a signature is a
+/// puzzle and because `clippy::type_complexity` says so.
+pub type VolumePopulation = (
+    Vec<ScatteredInstance>,
+    Vec<inf_ecs::components::ScatteredSolid>,
+    Vec<inf_ecs::StructureGroup>,
+    Vec<inf_ecs::components::DoorwaySlot>,
+    Vec<inf_ecs::components::ResidentSlot>,
+    inf_nav::NavGraph,
+);
+
 /// A [`VolumeOutput`](inf_pcg::VolumeOutput) in the ECS's own dependency-light
 /// mirror types.
 ///
@@ -1421,16 +1433,7 @@ pub fn evaluate_pcg_volumes_in(
 /// therefore fenced by `MIRROR-BEGIN`/`MIRROR-END` markers and compared
 /// character for character against the editor's copy by
 /// `inf-editor-core`'s `biome_binding_mirror::the_population_mapping_is_one_body`.
-pub fn population_of(
-    out: inf_pcg::VolumeOutput,
-) -> (
-    Vec<ScatteredInstance>,
-    Vec<inf_ecs::components::ScatteredSolid>,
-    Vec<inf_ecs::StructureGroup>,
-    Vec<inf_ecs::components::DoorwaySlot>,
-    Vec<inf_ecs::components::ResidentSlot>,
-    inf_nav::NavGraph,
-) {
+pub fn population_of(out: inf_pcg::VolumeOutput) -> VolumePopulation {
     // MIRROR-BEGIN population_of
     let interior = out.interior;
     let instances = out

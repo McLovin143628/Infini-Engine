@@ -683,12 +683,8 @@ pub fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }
 
-/// Every committed island recipe, as repo-relative paths.
-///
-/// Exhaustive by hand and in one place, so adding an island is a decision taken
-/// once rather than three times (the bless, the byte lock and the level count).
 /// **How fast the island's day runs** — clock-seconds per simulated second, the
-/// [`TimeOfDay::rate`] the level authors (island wave NPC1d).
+/// `inf_ecs::components::TimeOfDay::rate` the level authors (island wave NPC1d).
 ///
 /// Eighteen is an **eighty-minute day**, and it is set from a measurement rather
 /// than chosen for looks. `inf_ecs::society` gives a commute one hour of the
@@ -714,6 +710,10 @@ pub fn repo_root() -> std::path::PathBuf {
 /// not get below the horizon. Turning it on is the whole of clause 3.
 pub const ISLAND_CLOCK_RATE: f64 = 18.0;
 
+/// Every committed island recipe, as repo-relative paths.
+///
+/// Exhaustive by hand and in one place, so adding an island is a decision taken
+/// once rather than three times (the bless, the byte lock and the level count).
 pub const ISLAND_RECIPES: [&str; 2] = [
     "samples/island/island.toml",
     "samples/island-fixture/island.toml",

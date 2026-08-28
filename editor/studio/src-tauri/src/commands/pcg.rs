@@ -181,6 +181,18 @@ fn page_terrains_for_pcg(
     paged
 }
 
+/// What one volume's evaluation becomes in the ECS's own mirror types -- the
+/// return of [`population_of`], named because a six-tuple in a signature is a
+/// puzzle and because `clippy::type_complexity` says so.
+pub type VolumePopulation = (
+    Vec<ScatteredInstance>,
+    Vec<inf_ecs::components::ScatteredSolid>,
+    Vec<inf_ecs::StructureGroup>,
+    Vec<inf_ecs::components::DoorwaySlot>,
+    Vec<inf_ecs::components::ResidentSlot>,
+    inf_nav::NavGraph,
+);
+
 /// A [`VolumeOutput`](inf_pcg::VolumeOutput) in the ECS's own dependency-light
 /// mirror types.
 ///
@@ -190,16 +202,7 @@ fn page_terrains_for_pcg(
 /// mirror ruling) and what specifically goes wrong when it drifts: `start` and
 /// `inst_start` are both `u32`, so swapping them compiles and silently draws one
 /// distant building with another's walls.
-fn population_of(
-    out: inf_pcg::VolumeOutput,
-) -> (
-    Vec<ScatteredInstance>,
-    Vec<inf_ecs::components::ScatteredSolid>,
-    Vec<inf_ecs::StructureGroup>,
-    Vec<inf_ecs::components::DoorwaySlot>,
-    Vec<inf_ecs::components::ResidentSlot>,
-    inf_nav::NavGraph,
-) {
+fn population_of(out: inf_pcg::VolumeOutput) -> VolumePopulation {
     // MIRROR-BEGIN population_of
     let interior = out.interior;
     let instances = out

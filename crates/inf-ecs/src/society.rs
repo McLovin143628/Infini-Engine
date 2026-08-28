@@ -190,6 +190,14 @@ const SALT_AGENT: u64 = 0x4147_454E_5400_0001;
 /// `crate::crowd::add_agents`' own refusal, which asks the world.
 const AGENT_TAG: u128 = 0x4E50;
 
+/// **A block's pavement ring**: where the block is, how big it is, and the
+/// eight nodes laid round it.
+///
+/// Named because it is three things a reader has to keep together and because
+/// `clippy::type_complexity` is right that a bare tuple in a public map is a
+/// puzzle.
+pub type BlockRing = (DVec3, DVec2, Vec<(NavNodeId, DVec3)>);
+
 /// **One place a level offers**, with the node a route reaches it by.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SocietyPlace {
@@ -291,7 +299,7 @@ pub struct SocietyRes {
     /// folded later must still be able to cross to it. Deriving the crossing
     /// candidates from residency alone would make the network a function of what
     /// had paged in when — the hazard NPC1c named about positions, one level up.
-    pub rings: BTreeMap<Uuid, (DVec3, DVec2, Vec<(NavNodeId, DVec3)>)>,
+    pub rings: BTreeMap<Uuid, BlockRing>,
     /// **The outer half of a leg, memoized on its endpoint pair.** A hundred
     /// residents of one block commuting to one office share one street route,
     /// and this is what makes them pay for it once. `None` records a pair the
@@ -588,7 +596,7 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
     }
     // The rings a crossing may reach: **every ring this society has ever laid**,
     // whether or not its volume is resident now.
-    let known = std::mem::take(&mut soc.rings);
+    let known: BTreeMap<Uuid, BlockRing> = std::mem::take(&mut soc.rings);
     for f in &fresh {
         let (ac, ae, a_ids) = &known[&f.guid];
         for (other, (bc, be, b_ids)) in &known {

@@ -5184,7 +5184,7 @@ fn the_islands_own_rate_makes_a_commute_a_walk() {
     let settlement = walk_target_settlement(&design);
 
     let mut sim = loose_sim(&content, &slug);
-    let hero = hero_entity(&mut sim).expect("a hero");
+    let hero = hero_entity(&sim).expect("a hero");
     let centre = glam::DVec3::new(settlement.centre.x, 0.0, settlement.centre.y);
     set_hero(&mut sim, hero, centre);
     sim.world_mut().mark_dirty();
