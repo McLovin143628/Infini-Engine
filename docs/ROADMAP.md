@@ -27829,3 +27829,79 @@ the wave's ledger had called a measured cost and had measured only as "two tiers
 **117** strict arms, none re-blessed; rustdoc **374 over 30 crates, zero added**; `clippy -D
 warnings` 0; `fmt` clean; schemas, `EXPECTED_LEVELS` and `Cargo.lock` unmoved. Full audit ledger in
 `docs/memos/island-progress.md` under *"Wave NPC1a — the audit"*.
+
+
+## Wave NPC1b — the crowd renderer (2026-08-27)
+
+**COMPLETE.** Base `c4ff27ff`. NPC1a's closing sentence was *"the renderer does not read the tier
+at all, which is NPC1b's whole subject"*. It reads it now, in four places.
+
+**INSTANCED SKINNING — the P15 optimization, unbuilt since P11.1.** `passes/skinned.rs` allocated
+one storage buffer **and** one bind group per skinned instance, wrote each palette with its own
+`write_buffer`, and issued one `draw_indexed` each — twice a frame, because the depth prepass walks
+the same list — while `vsm_raster` kept a second set on its own path. Now: `SkinnedInstance::palette`
+is an `Arc`, `resolve_skinned_shared` derives the far tier's rest palette **once per
+`(mesh, skeleton)`** (bit-identical to what the per-agent path returned, because a `Far` agent has
+no `EvaluatedPose` and no `AnimPlayer` — armed as an equality in both stores), and
+`plan_skinned_batches` — pure, public, the function the pass itself calls — deduplicates blocks by
+`Arc` pointer into ONE atlas and groups instances into **one draw per mesh** on a stable sort. The
+block's `(offset, joint count)` rides `emissive.w` and `pbr.z`, two channels reserved-zero since
+P7.1, because this pipeline is at `max_vertex_attributes: 16` **exactly** and there is no
+seventeenth address (`docs/memos/p26-5-vertex-streams.md`'s wall, and its named route past it). The
+R2-6 tail rule moved with it: a power-of-two tail in an atlas is the *next character's* palette, so
+the clamp is in the shader (`palette[base + min(j, count-1)]`) where it is exact and needs no
+padding; `pad_palette` moved to `vsm_raster`, its one remaining caller, with its arm. **Measured at
+N = 1 000**: draws **2 002 → 2**, palette blocks **1 001 → 292**, and the palette upload **3.91 MB →
+0.42 MB (9.3×)** on the sweep's own scene, **31.3 → 3.33 MB (9.4×)** on the island's 161-bone hero.
+
+**VSM — wall 4 retired.** `SkinnedShadow::Proxy` casts from ONE shared `GroupSource::Proxy` group
+(the prim cylinder scaled to the agent's bind box) instead of a geometry group per instance;
+`SkinnedShadow::Posed` culls on the **exact** bound of the pose — the union of the mesh's per-joint
+bind spheres carried through the instance's own palette, sound because linear blend skinning is a
+convex combination, measured at **67 % of the radius and 30 % of the volume**.
+`SKINNED_POSE_MARGIN` said the exact bound *"needs the posed AABB the renderer is still not handed,
+which is `inf-anim`'s to produce"* — **the renderer was handed it all along**, in the bind geometry
+and the palette it already holds, so the briefed hand-off is deliberately not built and `inf-anim`
+is untouched. Both modes are **opt-in**, for P27.3's reason: a tighter sphere changes which pages a
+mover invalidates, which is what `phase27_gate`'s arm (c) is measured against. On the island at
+N = 1 000: **968 proxy casters in one group + 31 skinned = 32 groups of a 1 024 ceiling, 0 casters
+dropped, 0 groups refused** over 478 rastering frames.
+
+**CROWD VARIATION.** `inf_ecs::crowd::agent_look(guid)` — one of eight `CROWD_LOOKS` palette-swap
+*multipliers* and a build inside `CROWD_BUILD_RANGE` (±8 %, a bound argued against the capsule it
+does **not** move). Derived and never stored (NPC1a's rule about the speed multiplier), not a
+component, so **no trace byte and no schema moves** and the mixed-tier PIE-==-shipping gate is
+untouched. `golden_crowd_variation` is the wave's **one** new golden (58 → 59, additive, every
+committed image byte-identical): eight bodies on one mesh sharing one palette `Arc`, asserted as one
+draw from one block and then read off the IMAGE against a crowd-less control.
+
+**THE HEADLINE, and it is not the one the brief hoped for.** The island's own arm grows a bracketed
+trio — `LIT+VIS`, the crowd row, `LIT+VIS` again with the population cleared — and the brackets
+agree to **0.19 ms** of p50. A thousand island-class NPCs take the island from **42.0 fps p50 /
+74.3 fps pipelined** to **16.8 / 34.0**, and the render half is a small part of it: **+9.09 ms** of
+fixed step (the crowd's own phase is **0.13**), **+3.67 ms** of CPU-side recording, **+2.95 ms** of
+projection, against one draw call and **0.249 ms** of skinned GPU. **N = 1 000 at 60 fps is not met,
+and the wall is not the renderer.** NPC1c and NPC1e inherit that with the numbers attached.
+Character impostors are **not** built and the measurement says why: a `Far` agent already costs a
+*share* of one palette block, no group and no draw.
+
+**THE POP, MEASURED.** NPC1a carried it as a sentence; it is **0.9513 m of worst-joint displacement
+in one step against an ordinary step's 0.0010 m**, and it is the whole distance from the bind pose
+to the pose the machine is in. Pre-existing (a `Far` agent drew its rest pose before this wave too)
+and **not fixed** — the fix is an inertialization on re-entry through the P29.2 `PoseBlender` seam,
+which is sim state on the crowd's own trace section.
+
+LAWS: **a wall can be a sentence somebody wrote about the future** (the P15 optimization sat
+unbuilt through eleven phases and thirteen island waves because nothing had read the draw count at
+N = 1 000); **a forward reference outlives the thing it points at** (`SKINNED_POSE_MARGIN`'s
+`inf-anim` hand-off, which the renderer never needed); **a before/after must be computed the same
+way on the same content** (NPC1a's 31.28 MB is `N × 16 KiB × 2` at 161 bones, quoted against a table
+whose scene rigs at 20); **a control has to be adjacent — and bracketed** (the island's rows are
+taken back to back on one adapter and the last one is CPU-bound, so passes a crowd cannot touch read
+2.4–2.8× their brackets); **the brightest thing in the frame is not the subject** (the crowd
+golden's first draft found row 0 in every column, because the sky is up there). Battery
+**329 blocks / 6 299 passed / 0 failed / 19 ignored** (+18 arms, no new block); goldens **59** with
+**118** strict arms, **none re-blessed**; rustdoc **374 over 30 crates, zero added**; `clippy -D
+warnings` 0; `fmt` clean; schemas, `EXPECTED_LEVELS`, `Cargo.lock` and the frontend unmoved. Full
+ledger, both tables and the twelve carried items in `docs/memos/island-progress.md` under
+*"Wave NPC1b"*.

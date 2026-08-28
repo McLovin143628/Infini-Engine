@@ -34,6 +34,8 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 | **I8a** | **the settlements exist** — the generator, the size raise, doors at scale, the gates | **DONE** — see *Wave I8a* at the end of this file. Seven levelled pads become **172 blocks, 60.88 km of street and about 1 800 buildings** on a zoning table, every sampled one of them enterable; the cities take their kilometre (Harbour City 1.131 km², Eastgate 1.020 km²) and the re-derived water is committed as the new design with the drift at **0.00 %**. A new settlement gate walks into a building — enter, open a door, step through, climb — **123 steps, 123 distinct states, byte-identical** between the cooked pack and the loose document, mutation-verified (removing the volumes kills six of twelve arms). The fixed step holds its ratchet at **5.853 ms of 6.0**. **AND THE FRAME DOES NOT**: the island goes **69.0 → 9.4 fps LIT+VIS**, because a settlement draws through the P18.5 GPU **scatter** path as **365 545 opaque wall-sized boxes** with no occlusion culling — *cubes are the expensive case*, which is this wave's correction to its own brief and I8b's first requirement restated as a performance clause. Three costs, three mechanisms, all routed; the projection's 20.2 ms against a 1.5 ms budget is the one an implementer can take tomorrow |
 
 | **I8c** | **the city at sixty** — the scatter band ordering, the VSM's GPU side, the two step clocks | **DONE** — see *Wave I8c* at the end of this file. The two passes the I8b audit named are both taken: `vsm-raster` **6.087 → 0.124 ms** and `scatter` **7.013 → 5.133**, so the lit GPU frame goes **17.982 → 10.202 ms** and the pipelined estimate **55.6 → 72.1 fps**; `LIT+VIS` p50 **29.886 → 24.270** and p95 **56.774 → 25.382**. The VSM clause was **counters first** and they convicted a suspect the brief did not name: **149.5 M of a 156.0 M-index frame was ONE `.inf_vmesh` instance**, submitted whole into every dirty page at the camera's LOD, where terrain — the expected culprit — was 4.2 %. P27.2's camera rule is kept as a **ceiling** and gains the floor it never had (the page's own world-per-texel through `lod_threshold`'s ortho branch), with a bucket mask that **partitions** so no page draws an asset twice. `STRUCTURE_LOD_M` **192 → 96**, the one value that is above the collider band, at or inside the scatter mesh band and equal to `inf_pcg`'s own — so **a shell is rasterized as geometry for the first time**. The two step clocks are reconciled *inside one harness*: the residue outside the step is **+0.002 ms**, so the growth is inside its own phases and **62 % of it is the solver**. **≥ 60 fps p50 `LIT+VIS` is still NOT met** (+7.670 where I8b left +14.149) and the remainder is now **CPU**: 13.879 ms serial against a 10.202 ms GPU frame |
+| **NPC1a** | **the sim foundations of a crowd** — the `Full`/`Near`/`Far`/`Dormant` sim-LOD ladder, the trace re-shape riding it, the crowd-agent door, the N-sweep | **DONE + AUDITED** — see *Wave NPC1a* and *Wave NPC1a — the audit* at the end of this file |
+| **NPC1b** | **the crowd renderer** — instanced skinning over a palette atlas, VSM proxy casters, crowd variation, the headline at N = 1 000 | **DONE** — see *Wave NPC1b* at the end of this file. The renderer reads the tier: draws **2 002 → 2**, palette blocks **1 001 → 292**, palette upload **9.3–9.4×** smaller, shadow groups **1 001 → 32** of a 1 024 ceiling (wall 4 retired), a crowd golden that is not eight clones, and the exact posed caster bound at **67 % of the margin's radius**. **A thousand island-class NPCs do NOT fit the island's headroom** (42.0 → 16.8 fps p50, 74.3 → 34.0 pipelined) **and the wall is not the renderer**: +9.09 ms of fixed step, +3.67 of CPU-side recording, +2.95 of projection, against one draw call and 0.249 ms of skinned GPU. The `Far → Near` pop is measured at **0.95 m in one step** and routed |
 
 Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
 IB-8 and IB-13 forward out of I6**: both are ceilings a thousand-building fixture walks into
@@ -14765,3 +14767,368 @@ prints it.
 | §8 budgets | `NPC_STEP_BUDGET_MS` 2.0, absent from the table | **1.0**, and in `docs/profiling.md` §2's table |
 | step phases / trace sections / libm subjects | 25 / 9 / 37 | **25 / 9 / 37** |
 | new crates or external dependencies | none | **none** |
+
+## Wave NPC1b — the crowd renderer (2026-08-27)
+
+Base `c4ff27ff`. Five clauses, and the wave's subject is one sentence NPC1a
+handed it: **the renderer does not read the tier.** At N = 1 000 the ladder had
+decided that 710 agents would evaluate no pose at all, and the renderer went on
+deriving, allocating and uploading a private joint palette for every one of
+them, drawing each in its own call, and asking the virtual shadow map for a
+geometry group each against a ceiling of 1 024.
+
+It reads the tier now, in four places, and the four are the four clauses.
+
+### Clause 1 — instanced skinning, which is the P15 optimization
+
+`passes/skinned.rs` has carried the sentence *"a shared palette atlas + instanced
+draw … is the documented P15 optimization"* since P11.1. What it did instead was
+one `wgpu::Buffer` **and** one `wgpu::BindGroup` per skinned instance, one
+`write_buffer` each, and one `draw_indexed` each — twice over, because the depth
+prepass walks the same list. `vsm_raster` kept a second set of the same buffers
+on its own path.
+
+Three changes, in the order they depend on each other.
+
+**The palette is shared.** `SkinnedInstance::palette` and `SkinnedDraw::palette`
+are `Arc<Vec<Mat4>>`. That is not a micro-optimization, it is the tier arriving:
+a crowd agent the ladder took off the pose path has **no `EvaluatedPose`** —
+`step_pose_evaluation` rebuilds its store from the tier's own target set, so a
+`Far` agent has no entry — and carries no `AnimPlayer`, so `resolve_skinned`
+already fell through rules 2 and 4 to rule 3 and returned the **rest** pose for
+every one of them. `resolve_skinned_shared` derives that once per
+`(mesh, skeleton)` and hands one `Arc` to the whole bucket.
+`the_shared_palette_is_the_one_the_per_agent_path_would_have_built` is the arm
+that keeps the two answers equal, in both stores, and it also asserts that the
+shared one is *shared* — an equality that held while every call allocated a fresh
+`Vec` would satisfy the first half and buy nothing.
+
+**The atlas.** `plan_skinned_batches` is pure, public and the function the pass
+itself calls: it deduplicates palette blocks by `Arc` pointer, lays them out in
+one storage buffer at matrix granularity, and groups instances into **one draw
+per mesh** with a *stable* sort — so a one-mesh scene keeps exactly the instance
+order it had and draws exactly the pixels it drew. `identity_palette()` gives
+every CPU-deformed garment and hair ribbon in a level ONE block instead of one
+each.
+
+**The channel packing, because there is no seventeenth attribute.** The block's
+`(offset, joint count)` rides `emissive.w` and `pbr.z`, two channels the skinned
+path has packed as zero since P7.1 and neither vertex stage reads. This pipeline
+is at `max_vertex_attributes: 16` *exactly* — `docs/memos/p26-5-vertex-streams.md`
+measures that wall and names channel packing as the route past it, and this is
+its first use. Both values are small integers, so the `f32` round trip is exact
+rather than approximately exact, and `skinned_mesh.wgsl` drops `pbr.zw` on the
+way to the fragment so a future alpha test cannot read a joint count as a cutoff.
+
+**And the R2-6 tail rule moved with it.** `pad_palette` filled a power-of-two
+tail with the last live matrix so that a vertex whose joint index ran past its own
+skeleton read something of its own rig. In an atlas that vertex would read the
+**next character's** palette — the same defect made worse — so the clamp is in
+the shader now (`palette[base + min(j, count - 1)]`), where it is exact, needs no
+padding at all, and holds for a packed atlas that padding cannot. `pad_palette`
+moved to `vsm_raster`, its one remaining caller, with its arm.
+
+**Measured, N = 1 000 banded on the phase-30 city, against the all-`Full`
+control:**
+
+| | banded | all-`Full` |
+|---|---|---|
+| skinned draw calls (per pass) | **1** | 1 |
+| palette blocks | **292** | 1 001 |
+| atlas | **0.36 MB** | 1.22 MB |
+| VSM caster palettes | **0.06 MB** | 1.96 MB |
+| shadow groups (ceiling 1 024) | **34** | 1 001 |
+
+The draw count is 1 per pass and 2 a frame, against **2 002** before. The 292
+blocks are the 291 posed characters plus the one the 710 `Far` agents share.
+
+**And the before/after is computed the same way on the same content**, which
+NPC1a's headline figure was not: **31.28 MB** is `skinned × 16 KiB × 2`, a
+161-bone power-of-two block against a scene whose character is rigged at 20
+joints. On this scene the pre-NPC1b renderer really uploaded **3.91 MB** a frame
+and the atlas uploads **0.42 MB** — **9.3×**. On the *island's* own hero, which
+really is 161 bones, the before really is **31.3 MB** and the after is
+**3.33 MB** — **9.4×**.
+
+### Clause 2 — the crowd casts from one proxy, and the near few get an exact bound
+
+Wall 4: `VSM_MAX_GROUPS` is 1 024, a skinned instance is one group, and past the
+ceiling a crowd's shadows are refused — counted, but refused.
+
+**`SkinnedShadow::Proxy`** skips the per-instance group entirely and lands in ONE
+`GroupSource::Proxy` group holding a box caster per agent, drawing the shared
+unit **cylinder** out of the prim buffers scaled to the agent's own bind box. A
+cylinder because a standing person's shadow reads as a person and a box reads as
+a crate; the cost is stated rather than hidden — an NPC's arms and legs do not
+move its shadow, and at the tiers that take it (32 m and out) that shadow is a
+handful of page texels. A proxy also gets **no palette buffer and no bind group**
+on the page-raster path, which is the same saving on the other half of the frame.
+
+**`SkinnedShadow::Posed`** culls on the exact bound of the pose it is drawing:
+the union of the mesh's per-joint bind spheres carried through the instance's own
+palette. It is sound because linear blend skinning is a convex combination — a
+skinned vertex is `Σ wᵢ (Mᵢ · v)` with `Σ wᵢ = 1`, each term is inside joint `i`'s
+transformed sphere, and a sphere containing all of them contains their hull.
+Measured on the margin arm's own fixture: **67 % of the radius, 30 % of the
+volume**.
+
+`SKINNED_POSE_MARGIN`'s doc said the exact bound *"needs the posed AABB the
+renderer is still not handed, which is `inf-anim`'s to produce"*. **It turns out
+the renderer is handed it, twice over** — it holds the bind geometry and it holds
+the palette. What it lacked was a caller who wanted the exact one. So the
+hand-off this wave was briefed to build is not built, deliberately, and the
+reason is that building it would have been a second derivation of a bound one
+crate already has both halves of. `inf-anim` is untouched by this wave.
+
+**It is opt-in, and that is P27.3's reason rather than caution.** A tighter caster
+sphere changes which pages the cull keeps and therefore which pages a mover
+invalidates, which is the exact quantity `phase27_gate`'s arm (c) and the
+page-cache arms are measured against. The crowd's `Full` tier asks for it; nothing
+else in the tree does; every existing arm and every golden is byte-identical.
+
+**Measured**: `a_crowd_of_proxies_is_one_group_and_refuses_nothing` is the same
+1 030-instance fixture `the_group_ceiling_counts_the_groups_it_refuses` drives,
+asking for the proxy — `dropped_groups` **11 a frame → 0**, `proxy_casters`
+1 030, `skinned_casters` 0. The two arms together are what makes the claim
+falsifiable: a proxy that dropped the casters instead of grouping them passes one
+and fails the other.
+
+### Clause 3 — a crowd that is not a thousand clones
+
+`inf_ecs::crowd::agent_look(guid)` is a pure function of the agent's `Guid`: one
+of eight `CROWD_LOOKS` palette-swap **multipliers** (so a character with an
+authored material keeps its material and takes the variation on top) and a build
+inside `CROWD_BUILD_RANGE`.
+
+**Derived and never stored**, for NPC1a's own reason about the speed multiplier
+and the route phase: a stored look is a second copy of a pure function, and the
+copy is what drifts. It is not a component either, so **nothing here reaches
+`state_bytes`** — both projectors call the one door with the same `Guid` and the
+mixed-tier PIE-==-shipping gate is untouched.
+
+**±8 %, and the bound is a physics bound rather than a taste one.** The build
+multiplies the *drawn* scale and does not reach the rapier capsule, so every
+centimetre of it is a centimetre of disagreement between what a player sees and
+what they can walk into. Eight per cent of a 1.8 m adult is 14 cm of height and
+2.4 cm of radius — inside the slack a capsule already has around a humanoid mesh.
+Stated on the field, and carried.
+
+`golden_crowd_variation` (**golden 59**, additive) is eight bodies on one mesh
+sharing ONE palette `Arc` — the far tier's exact shape. It asserts the planner
+puts them in **one draw from one atlas block**, and then reads the **image**: the
+1.08 build's silhouette starts higher up the frame than the 0.92's, and eight
+looks produce at least six distinct sampled colours. Both against a **control**
+frame with the crowd removed, and that is the load-bearing part: the sky is the
+brightest thing in the frame, so "the topmost lit row" is row 0 in every column
+and would have read as eight identical heights however wrong the scale was.
+
+### Clause 4 — the headline: a thousand NPCs at Harbour City
+
+`the_island_at_shipping_resolution` grows three rows: `LIT+VIS` again immediately
+before the population goes in, the crowd row, and `LIT+VIS` again immediately
+after `set_crowd_population` clears it (asserted clear, so the after-bracket
+cannot quietly still hold one). The crowd's cost is a row against **two**
+brackets, and the brackets agree to **0.19 ms** of p50 — which is what makes the
+delta a measurement rather than a drift down the list.
+
+RTX 4070 Ti, Windows/Vulkan, **release**, 1080p, MIN of 3 rounds × 120 frames,
+the same 40 m flight east from Harbour City. **1 000 NPCs in a 320 m block: 31
+`Full` / 257 `Near` / 712 `Far` / 0 `Dormant`.**
+
+| | control before | **+1 000 NPCs** | control after |
+|---|---|---|---|
+| p50 / p95 | 23.805 / 25.275 ms | **59.372 / 64.469** | 23.998 / 25.787 |
+| fps at p50 | 42.0 | **16.8** | 41.7 |
+| pipelined ceiling | 13.451 (74.3 fps) | **29.369 (34.0 fps)** | 13.771 (72.6) |
+| cpu sim fixed step | 6.353 | **15.446** | 6.526 |
+| cpu projection | 0.733 | **3.680** | 0.756 |
+| cpu render (record) | 6.256 | **9.921** | 6.380 |
+| gpu frame | 10.203 | 29.369 | 10.221 |
+| skinned instances | 1 | **1 001** | 1 |
+
+**What the crowd costs the renderer, structurally:**
+
+* **one draw call** for 1 001 skinned instances, from **290 palette blocks** =
+  **2.85 MB** of atlas (the island's hero is a real 161-bone rig, so a block is
+  10 304 B; the pre-NPC1b path would have uploaded one 16 KiB power-of-two block
+  per instance on each of two paths — **31.3 MB** — against **3.33 MB** now,
+  **9.4×**);
+* **968–970 proxy casters in ONE group** plus 31 real skinned casters =
+  **32 geometry groups of a 1 024 ceiling**, with **0 casters dropped and 0
+  groups refused** over 478 rastering frames. Wall 4 is not reachable by a crowd
+  any more: it would take thirty-two thousand `Full`-tier NPCs;
+* the skinned pass's own GPU time is **0.249 ms** in the least-inflated of the
+  three runs taken (0.56 in the two dearest — see the caveat below) — a thousand
+  characters, one call, about a quarter of a millisecond.
+
+**And the honest verdict, which is not the one the brief hoped for.** The crowd's
+frame cost is **+35.4 ms of p50** and the render half is a small part of it:
+
+| | delta | what it is |
+|---|---|---|
+| cpu sim fixed step | **+9.09 ms** | solver +2.67, animation +3.05, physics3d sync +1.15, terrain stream +1.26, crowd phase **0.13** |
+| cpu render (record) | **+3.67 ms** | `graph` +1.77, `vsm raster` +1.00 — recording 1 236 page draws a frame against 328 |
+| cpu projection | **+2.95 ms** | building 1 001 `SkinnedInstance`s and their palettes |
+| gpu frame | +19.17 ms | **not comparable pass for pass — see below** |
+
+**The GPU column of that row does not mean what it looks like**, and the wave
+found that out by bracketing rather than by reasoning. Every pass in the crowd
+row inflates by roughly 2.4–2.8×, `scatter` (5.152 → 12.102) and `terrain`
+(3.105 → 8.758) included — and a crowd adds no scatter and no terrain. The frame
+is CPU-bound (59.6 ms of CPU against 29.4 of GPU), so the device is idle for half
+of it. Whatever the mechanism, a pass-for-pass difference against a bracket is
+not a crowd cost, and the instrument now prints that caveat itself. The first two
+unbracketed runs read 38.4 and 59.4 ms for the same row, and "a thermal ramp down
+the list" was the obvious story; the after-bracket returns to baseline in 0.19 ms,
+so it is not a ramp.
+
+**Against the island's own headroom**, stated for both clocks as the brief asks:
+the island alone is **42.0 fps p50 on the serial harness and a 74.3 fps pipelined
+ceiling**; with a thousand NPCs it is **16.8 fps p50 and a 34.0 fps ceiling**. A
+thousand island-class NPCs do **not** fit the island's headroom today. What this
+wave establishes is *where they do not fit*: **not in the renderer.** The draw
+call is one, the palette is 2.85 MB, the shadow groups are 32 of 1 024, and the
+skinned pass is a quarter of a millisecond. The wall is the fixed step (+9.1 ms,
+of which the crowd's own phase is 0.13) and the CPU-side projection and
+recording (+6.6 ms together). NPC1c and NPC1e inherit that with the numbers
+attached.
+
+**Character impostors are NOT built, and the measurement is why.** The brief
+routes them "for `Far` ONLY if the measurement demands them". `Far` agents cost
+the renderer one shared palette block between all 712 of them, no shadow group of
+their own and no draw of their own — they are already inside one instanced call.
+An impostor would replace geometry the GPU draws in 0.25 ms with an atlas, a bake
+and a cache, and would not touch either of the two stations that actually cost.
+Routed by name to NPC1e, which is where a certification pass can price it against
+a measured GPU budget rather than against this one.
+
+### Clause 5 — the pop, measured
+
+NPC1a carried it as a sentence. `the_far_to_near_promotion_pop_is_measured` gives
+it a size, and the size is larger than the sentence: a `Far` agent is drawn in
+its rig's **rest** pose, and the step it is promoted the machine's pose arrives
+whole. Worst joint over 60 steps: **0.9513 m against an ordinary step's
+0.0010 m**. The fixture's character is nearly still, so read the ratio as a floor
+and the metre as the fact — the pop is the whole distance from the bind pose to
+the pose the machine is in.
+
+**It is not new and it is not this wave's.** A `Far` agent drew its rest pose
+before NPC1b too, for the same two reasons (no `EvaluatedPose`, no `AnimPlayer`);
+nothing had ever measured it. **Not fixed**: the fix is an inertialization on
+re-entry through the P29.2 `PoseBlender` seam, which is *sim* state on the
+crowd's own trace section, and it belongs with the wave that gives a near agent a
+controller and can re-enter the machine from a real pose rather than from rest.
+
+### The laws this wave paid for
+
+* **A wall can be a sentence somebody wrote about the future.** "A shared palette
+  atlas + instanced draw is the documented P15 optimization" sat in
+  `passes/skinned.rs` through eleven phases and thirteen island waves. It is 200
+  lines, and the reason it survived is that nothing had ever put a thousand
+  characters in a scene and read the draw count.
+* **A forward reference outlives the thing it points at.** `SKINNED_POSE_MARGIN`
+  said the exact bound *"needs the posed AABB the renderer is still not handed,
+  which is `inf-anim`'s to produce"*, and the renderer held both halves of it the
+  whole time. The brief inherited that sentence and asked for the hand-off. Read
+  a forward reference as a hypothesis, not as a fact.
+* **A before/after must be computed the same way on the same content.** NPC1a's
+  31.28 MB was `N × 16 KiB × 2` at a 161-bone block, quoted against a table whose
+  scene rigs at 20 joints. Both numbers are right about the world they name and
+  their ratio is about neither.
+* **A control has to be adjacent.** The island's rows are taken in order over a
+  world that keeps streaming, so the `LIT+VIS` row at the top of the list has seen
+  less of the island than a crowd row at the bottom — its scatter count and its
+  terrain residency are different numbers. A delta across that gap attributes the
+  streaming to the crowd.
+* **The brightest thing in the frame is not the subject.** The crowd golden's
+  first draft looked for "the topmost lit row" in each column band and found row
+  0 eight times, because the sky is up there. A control frame is what turns a
+  brightness threshold into a silhouette.
+* **`rustfmt` eats a `\`-continuation inside a `println!`, still.** NPC1a paid for
+  this law and this wave paid for it twice more, in the file NPC1a minted it in.
+  The remedy is not to escape better — it is that a print's visual indentation
+  belongs *outside* the string, so there is nothing to eat.
+
+### Counts
+
+| | at `c4ff27ff` (the NPC1a audit) | **wave NPC1b** |
+|---|---|---|
+| battery | 329 blocks / 6 281 passed / 0 failed / 19 ignored | **329 / 6 299 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, **+18 arms and no new block**, every one attributed: **8** net in `inf-render`'s lib (6 `plan_skinned_batches` arms; 3 in `vsm_raster` — the `pad_palette` arm that moved with its subject, the pure posed-union bound and the per-joint bind spheres — less the one that left `passes::skinned`), **2** in `inf-render`'s `vsm_raster` device suite (the crowd proxy group, the exact bound against the margin), **1** golden (`golden_crowd_variation`), **2** in `inf_ecs::crowd` (the look, the caster rung), **1** in each of the two skinned stores (`the_shared_palette_is_the_one_the_per_agent_path_would_have_built`), **2** in `projector_mirror` (the shared-pose door, the `crowd_shadow` door) and **1** in `crowd_sweep` (the promotion pop) |
+| goldens | 58 | **59** — `crowd_variation.png`, **additive**: all four inventory pins (`phase18_gate`'s name list, `phase26/27/28_gate`'s count and content digest) moved in the same commit, `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**, and **not one committed image changed**. The instanced path draws a one-mesh scene in the order it drew it before, which is what the stable sort in `plan_skinned_batches` is for |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — 404 `^warning` lines minus 30 per-crate summaries, cold, after `cargo clean --doc` (8 873 files, 218.8 MiB). **The wave adds zero.** Headroom **76**. It added four on the way, all of the same kind — a public doc linking a private item (`SkinnedMeshNode::sync`, `SkinnedCasterGeom::joint_bounds`, `pack_casters`, `GroupSource::Proxy`) — dropped to plain code spans |
+| `clippy --workspace --all-targets -D warnings` | 0 | **0** (local toolchain, run **LAST** per the rmeta law; it asked for two shapes — a range loop in the crowd golden and a `Mutex<HashMap<(Uuid, Uuid), Arc<Vec<Mat4>>>>` that `type_complexity` is exactly about — and the battery was re-run after them) |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** — nothing in this wave reaches a serialized format. `SkinnedShadow` and the shared palette are `RenderScene` fields, and the crowd's look is a function, not a component |
+| step phases / trace sections / libm-ban subjects | 25 / 9 / 37 | **25 / 9 / 37** — the wave adds no sim phase, folds no trace section and touches no module that was not already on the ban list (`inf_ecs::crowd` joined it on NPC1a's day one) |
+| §8 budgets | `NPC_STEP_BUDGET_MS` 1.0 | **unmoved**; `SKINNED_PALETTE_MATRICES` (`1 << 18`) and `VSM_MAX_GROUPS` are render ceilings, not step budgets |
+| committed levels (`EXPECTED_LEVELS`) / committed content | 23 / unmoved | **23 / unmoved** — the crowd is spawned by tests and by the island instrument, never by a level |
+| new crates / external dependencies | — | **none**; `Cargo.lock` unmoved. `inf-anim` is **untouched** (see clause 2) |
+| frontend | — | **untouched and not run** |
+| render scene | — | `SkinnedInstance::palette` → `Arc<Vec<Mat4>>`, plus `shadow: SkinnedShadow`; `SkinnedDraw::palette` → `Arc` in both stores. 17 construction sites, all updated; `struct_literal_fields` in `projector_mirror` pins the two projectors' field-for-field |
+
+### Carried, by name
+
+1. **A `Far` agent is drawn in its rig's BIND pose, and the promotion pop is
+   0.9513 m** against an ordinary step's 0.0010. Pre-existing and now measured
+   (clause 5). The fix is an inertialization on re-entry through the P29.2
+   `PoseBlender` seam, which is **sim state on the crowd's own trace section**;
+   it belongs with the wave that gives a near agent a controller and can re-enter
+   the machine from a real pose rather than from rest. NPC1a's carried item 4 is
+   superseded by this one, which is larger than it and names the bigger half.
+2. **A crowd's frame cost is the fixed step and the CPU-side recording, not the
+   renderer.** At N = 1 000 on the island: **+9.09 ms** of fixed step (solver
+   +2.67, animation +3.05, physics3d sync +1.16, terrain stream +1.26 — the crowd
+   phase itself is **0.13**), **+3.67 ms** of recording and **+2.95 ms** of
+   projection, against a render half that is one draw call and 0.25 ms of GPU.
+   NPC1c and NPC1e inherit this with the numbers attached; NPC1a's carried item 2
+   is **closed** by clause 1.
+3. **The projection is 3.680 ms at N = 1 000 against `PROJECTION_BUDGET_MS`
+   1.5** — worse than NPC1a's 1.136 ms because the island's rig is 161 joints and
+   its hero is not the sweep's. NPC1a's carried item 13 stands unchanged and gets
+   a bigger number: the budgeted fixture has no population, so **nothing asserts
+   this**.
+4. **The proxy retired the group ceiling and did not touch the page churn.**
+   `vsm raster` recording is **+1.00 ms** at N = 1 000, because 968 proxies
+   scatter shadow-page invalidation over **168.6 pages a frame against 56.3**, at
+   1 236 page draws against 328. One group is the right answer to `VSM_MAX_GROUPS`
+   and is not an answer to *how many pages a moving crowd dirties*. A crowd
+   shadow LOD — proxies that stop casting past a radius, or a coarser page level
+   for the crowd bucket — is the next lever and is not built.
+5. **The exact posed bound is opt-in and the crowd is its only caller.** Making
+   `SkinnedShadow::Posed` the default is a re-measurement of `phase27_gate`'s arm
+   (c) and the P27.3 page-cache arms, not a constant change. Stated on
+   `SKINNED_POSE_MARGIN`.
+6. **The build multiplier does not reach the collider.** ±8 % of *drawn* scale
+   over an unchanged archetype capsule, so a tall NPC's shoulders are outside the
+   thing you can walk into by up to 7 cm. Bounded deliberately against that (the
+   `CROWD_BUILD_RANGE` doc); a per-agent collider is sim state and a schema
+   question, and belongs with NPC1c.
+7. **`SKINNED_PALETTE_MATRICES` has no production caller that can reach it.**
+   1 628 *distinct* island-class poses in one frame; the island's own crowd fills
+   290 blocks. The refusal is armed and has never fired outside its arm — the
+   `set_debris_budget` shape, stated the same way.
+8. **`SkinnedShadow` has no authoring door.** Only the two crowd projectors set
+   anything but `BindSphere`; a level cannot ask a hero for a proxy shadow or a
+   garment for an exact bound. Correct for this wave (the tier is the only
+   consumer that exists) and the first thing a "shadow LOD" World Settings block
+   would need.
+9. **`skinned_caster_groups` is a CEILING and says so.** It cannot see a mesh
+   that has not uploaded or has no indices, which `pack_casters` skips — so it is
+   right for the question it is asked ("can this crowd overrun the ceiling") and
+   an over-estimate for "how many groups did the frame push".
+10. **The deformation field is still a crowd's dominant trace section** (NPC1a's
+    carried item 1, untouched by this wave: 708 928 B a step at N = 1 000 even
+    banded). Nothing here reads or writes it.
+11. **Character impostors are not built**, and the measurement is the reason. A
+    `Far` agent already costs the renderer a *share* of one palette block, no
+    shadow group of its own and no draw of its own — it is inside one instanced
+    call. An impostor would replace geometry the GPU draws in 0.25 ms with an
+    atlas, a bake and a cache, and would touch neither of the two stations that
+    actually cost. Routed to NPC1e, which is where a certification pass can price
+    it against a measured GPU budget rather than against this one.
+12. **The island's crowd row is CPU-bound, so its per-pass GPU milliseconds are
+    not comparable pass-for-pass with its brackets.** Measured rather than
+    assumed: `scatter` and `terrain` — which a crowd adds nothing to — read 2.35×
+    and 2.82× their brackets in that row. The instrument prints the caveat; what
+    it does not do is *explain* it, and a frame-pacing or clock investigation is
+    a wave of its own.
