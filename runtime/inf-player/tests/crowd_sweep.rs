@@ -352,8 +352,16 @@ struct GpuCost {
     blocks: usize,
     /// Bytes the skinned pass uploads a frame: the whole atlas, once.
     atlas_bytes: usize,
-    /// Bytes the page raster uploads a frame: one power-of-two block per
-    /// non-proxy skinned caster, which is what `vsm_raster::sync_skinned` writes.
+    /// Bytes the page raster uploads a frame: one power-of-two block per skinned
+    /// caster that really gets one, which is what `vsm_raster::sync_skinned`
+    /// writes.
+    ///
+    /// **The filter has to name every mode that gets no slot** (island wave
+    /// NPC1e). It read `!= Proxy` when `Proxy` was the only mode without a
+    /// palette; `SkinnedShadow::None` is a second, and a mirror that lists the
+    /// exceptions it knew about drifts the moment a third arrives. The arm below
+    /// caught it as a **ratio that went the wrong way** — 2.2× where the pass
+    /// itself uploads less than it did — which is what a mirror is for.
     vsm_palette_bytes: usize,
     /// Geometry groups the scene's skinned content asks the page raster for,
     /// against a `VSM_MAX_GROUPS` of 1 024.
@@ -378,7 +386,12 @@ impl GpuCost {
         let vsm_palette_bytes = scene
             .skinned
             .iter()
-            .filter(|i| i.shadow != inf_render::SkinnedShadow::Proxy)
+            .filter(|i| {
+                !matches!(
+                    i.shadow,
+                    inf_render::SkinnedShadow::Proxy | inf_render::SkinnedShadow::None
+                )
+            })
             .map(|i| (i.palette.len().max(1) * 64).next_power_of_two().max(64))
             .sum();
         let legacy_bytes: usize = scene
