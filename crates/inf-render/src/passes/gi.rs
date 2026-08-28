@@ -841,13 +841,51 @@ impl RenderNode for GiNode {
             }
         }
 
-        // Skinned instances, as per-joint boxes carried by the live palette.
+        // Skinned instances, as per-joint boxes carried by the live palette —
+        // **behind a whole-instance reject** (island wave NPC1e).
+        //
+        // The NPC1b audit's finding 6: this is the fifth consumer of
+        // `scene.skinned` and the only one that walks it PER JOINT, so a
+        // thousand island-class NPCs staged 1 001 × 161 ≈ 161 000 oriented boxes
+        // a frame — each an `inverse()` and a 112-byte push — and the volume
+        // clip below threw nearly all of them away. `gi`'s CPU recording went
+        // 0.162 → 0.778 ms on the island's crowd row, for a pass a crowd adds
+        // one draw to. It was routed here with the words *"making it cheap needs
+        // a conservative per-instance pre-reject the staging path has no bound
+        // for today"*, and that bound is `gi::skinned_model_bound`.
+        //
+        // **Memoized on `(mesh, palette pointer)`, and the map is a LOCAL.** A
+        // crowd's far tier shares one rest-pose palette `Arc` between every
+        // agent of an archetype (NPC1b's clause 1), so the bound is derived once
+        // for hundreds of instances; and because the map lives for this call and
+        // the scene is borrowed for it, no key can outlive its allocation — the
+        // same argument `plan_skinned_batches` rests on, and deliberately not
+        // the field-cache shape, which would need the `Arc` held.
+        //
+        // **It fails open**: a bound that cannot be computed (`None`) stages the
+        // instance exactly as before. What is dropped is only an instance whose
+        // *whole* conservative extent misses the volume, which the per-joint
+        // clip would have dropped box by box.
+        let mut skinned_bounds: HashMap<(usize, usize), Option<crate::gi::GiBounds>> =
+            HashMap::new();
+        let mut skinned_rejected = 0_u32;
         for inst in &frame.scene.skinned {
             let Some(mesh) = frame.scene.skinned_meshes.get(inst.mesh) else {
                 continue;
             };
             let boxes = self.joint_boxes_for(mesh);
             let model = origin.model_matrix(inst.translation, inst.rotation, inst.scale);
+            let key = (inst.mesh, Arc::as_ptr(&inst.palette) as usize);
+            let bound = *skinned_bounds
+                .entry(key)
+                .or_insert_with(|| crate::gi::skinned_model_bound(&boxes, &inst.palette));
+            if let Some(b) = bound {
+                let world = crate::gi::skinned_world_bound(model, b);
+                if b.radius <= 0.0 || !intersects_volume(&world, vol_min, extent) {
+                    skinned_rejected += 1;
+                    continue;
+                }
+            }
             for (j, (center, half)) in boxes.iter().enumerate() {
                 if half.max_element() <= 0.0 {
                     continue;
@@ -1041,6 +1079,7 @@ impl RenderNode for GiNode {
                 terrain_columns,
                 probes_updated: probe_count,
                 probe_cursor: self.schedule.cursor(),
+                skinned_rejected,
             };
         }
 

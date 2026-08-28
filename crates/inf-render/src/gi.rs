@@ -43,7 +43,7 @@
 //!    P18.4 — a **specular** term reconstructs radiance along the reflection vector
 //!    ([`sh_radiance`]), optionally re-anchored at a screen-space ray hit (SSR v1).
 
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 
 use crate::caps::RenderTier;
 use crate::scene::{RenderTerrain, RenderTerrainLayer};
@@ -490,6 +490,105 @@ pub struct GiAudit {
     /// frame (the raw-`f32`-sun bug [`sun_bucket`] exists to prevent) pins this at
     /// `probe_budget` forever, and nothing in a rendered frame would say so.
     pub probe_cursor: u32,
+    /// **Skinned instances rejected whole, before a single joint was staged**
+    /// (island wave NPC1e) — see [`skinned_model_bound`].
+    ///
+    /// The NPC1b audit's finding 6: `passes::gi` is the *fifth* consumer of
+    /// `RenderScene::skinned` and the only one that walks it **per joint**, so a
+    /// thousand island-class NPCs staged `1 001 × 161 ≈ 161 000` oriented boxes
+    /// a frame and the volume clip threw nearly all of them away — `gi`'s CPU
+    /// recording went **0.162 → 0.778 ms** on the island's crowd row for a pass
+    /// a crowd adds one draw to.
+    ///
+    /// Counted rather than inferred, because "the pre-reject is working" and
+    /// "there was nothing to reject" produce the same millisecond.
+    pub skinned_rejected: u32,
+}
+
+/// **A skinned instance's whole posed extent, in MODEL space** (island wave
+/// NPC1e) — the conservative bound the GI staging path did not have.
+///
+/// `boxes` are the per-joint bind-space `(centre, half-extent)` pairs
+/// `passes::gi` already caches per mesh; `palette` is the instance's own
+/// skinning palette. The answer is a sphere that **contains every box the
+/// per-joint staging loop would produce**, so a caller may reject the instance
+/// outright when it misses the volume.
+///
+/// # Why it is sound, in one line of algebra
+///
+/// The staging loop's own bound for joint `j` is
+/// `centre = (model · Jⱼ) · cⱼ` and `radius = Σᵢ hᵢ |(model · Jⱼ)ᵢ|`
+/// (`stage_box` over `box_radius`). Dropping `model` gives exactly this
+/// function's per-joint sphere; the union is taken as an **AABB** and then
+/// circumscribed, which contains each sphere because each sphere is inside the
+/// box. Lifting the result back through `model` is the caller's job and needs
+/// one more factor — see [`skinned_world_bound`].
+///
+/// # Two refusals, both failing OPEN
+///
+/// * a non-finite centre or radius answers `None`, which a caller must read as
+///   *"stage it"* rather than *"skip it"*: a bound that cannot be computed is
+///   not a bound that says the instance is elsewhere;
+/// * an instance whose every joint box is degenerate (a mesh with no dominant
+///   vertex anywhere) answers a **zero-radius** sphere, which is the honest
+///   answer — the staging loop would emit nothing for it either.
+pub fn skinned_model_bound(boxes: &[(Vec3, Vec3)], palette: &[Mat4]) -> Option<GiBounds> {
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for (j, (centre, half)) in boxes.iter().enumerate() {
+        if half.max_element() <= 0.0 {
+            continue;
+        }
+        let Some(joint) = palette.get(j) else {
+            continue;
+        };
+        let c = joint.transform_point3(*centre);
+        let r = half.x * joint.x_axis.truncate().length()
+            + half.y * joint.y_axis.truncate().length()
+            + half.z * joint.z_axis.truncate().length();
+        if !c.is_finite() || !r.is_finite() {
+            return None;
+        }
+        lo = lo.min(c - Vec3::splat(r));
+        hi = hi.max(c + Vec3::splat(r));
+    }
+    if lo.x > hi.x {
+        return Some(GiBounds {
+            center: Vec3::ZERO,
+            radius: 0.0,
+        });
+    }
+    let center = 0.5 * (lo + hi);
+    Some(GiBounds {
+        center,
+        radius: (hi - center).length(),
+    })
+}
+
+/// [`skinned_model_bound`]'s answer placed by an instance's model matrix.
+///
+/// The radius is scaled by the model's **Frobenius norm**, which is an upper
+/// bound on its operator norm — so the lifted sphere still contains every joint
+/// sphere the staging loop would emit, including under a non-uniform or sheared
+/// instance scale. Over-conservative by at most √3 on a uniform scale, which
+/// costs a handful of instances staged that need not have been and never costs
+/// a bounce.
+///
+/// **How loose that leaves it, measured by mutation rather than claimed.** The
+/// containment arm's slack is the √3 here plus whatever the model-space union's
+/// AABB-then-circumscribe adds, so shrinking this factor to `min(1.0)` still
+/// passes and shrinking it to a fifth fails. The tightness half of the claim is
+/// the *other* arm's: an instance five metres outside the volume must be
+/// rejected, which a bound several times too large cannot satisfy.
+pub fn skinned_world_bound(model: Mat4, bound: GiBounds) -> GiBounds {
+    let f = (model.x_axis.truncate().length_squared()
+        + model.y_axis.truncate().length_squared()
+        + model.z_axis.truncate().length_squared())
+    .sqrt();
+    GiBounds {
+        center: model.transform_point3(bound.center),
+        radius: bound.radius * f,
+    }
 }
 
 /// Whether a bounding sphere intersects the axis-aligned volume `[min, min+extent]`.
@@ -1565,5 +1664,157 @@ mod tests {
         assert!((half[0] - 0.5).abs() < 0.02 && (half[1] - 0.5).abs() < 0.02);
         // An all-zero weight sample falls back to layer 0 rather than to black.
         assert_eq!(blend_layer_albedo(&layers, [0; 4]), [1.0, 0.0, 0.0]);
+    }
+
+    // -- island wave NPC1e: the skinned pre-reject -----------------------------
+
+    /// The staging loop's own bound for one joint, spelled here so the arm below
+    /// compares against the thing `passes::gi` really emits rather than against a
+    /// restatement of the function under test.
+    fn staged_joint_bound(model: Mat4, joint: Mat4, centre: Vec3, half: Vec3) -> GiBounds {
+        let local = Mat4::from_scale_rotation_translation(half * 2.0, glam::Quat::IDENTITY, centre);
+        let m = model * joint * local;
+        GiBounds {
+            center: m.w_axis.truncate(),
+            radius: 0.5
+                * (m.x_axis.truncate().length()
+                    + m.y_axis.truncate().length()
+                    + m.z_axis.truncate().length()),
+        }
+    }
+
+    /// A posed palette with a bit of everything a real one has: a translation
+    /// away from the origin, a rotation, and a scaled joint.
+    fn posed_palette() -> Vec<Mat4> {
+        vec![
+            Mat4::from_translation(Vec3::new(0.0, 0.9, 0.0)),
+            Mat4::from_scale_rotation_translation(
+                Vec3::splat(1.3),
+                glam::Quat::from_rotation_z(0.9),
+                Vec3::new(0.4, 1.4, -0.2),
+            ),
+            Mat4::from_rotation_x(-1.2) * Mat4::from_translation(Vec3::new(-0.5, 1.1, 0.3)),
+        ]
+    }
+
+    fn posed_boxes() -> Vec<(Vec3, Vec3)> {
+        vec![
+            (Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.18, 0.35, 0.12)),
+            (Vec3::new(0.05, 0.2, 0.0), Vec3::new(0.09, 0.28, 0.09)),
+            (Vec3::new(0.0, -0.1, 0.0), Vec3::new(0.22, 0.14, 0.2)),
+            // A joint no vertex dominates: the staging loop skips it, so the
+            // bound must not be inflated by it either.
+            (Vec3::ZERO, Vec3::ZERO),
+        ]
+    }
+
+    /// **THE SOUNDNESS ARM.** The pre-reject may only skip an instance whose
+    /// every staged box would have missed the volume, so the bound has to
+    /// CONTAIN every one of those boxes' own bounds — under a model matrix with
+    /// rotation and scale in it, which is where a naive "radius times the largest
+    /// scale" answer stops being an upper bound.
+    #[test]
+    fn the_skinned_gi_bound_contains_every_box_the_staging_loop_would_stage() {
+        let boxes = posed_boxes();
+        let palette = posed_palette();
+        let bound = skinned_model_bound(&boxes, &palette).expect("a finite bound");
+        assert!(bound.radius > 0.0, "the bound collapsed to a point");
+
+        for model in [
+            Mat4::IDENTITY,
+            Mat4::from_translation(Vec3::new(120.0, -3.0, 45.0)),
+            Mat4::from_scale_rotation_translation(
+                Vec3::new(1.08, 1.08, 1.08),
+                glam::Quat::from_rotation_y(2.1),
+                Vec3::new(-40.0, 12.0, 7.5),
+            ),
+            // A non-uniform scale, which is what the Frobenius factor is for.
+            Mat4::from_scale_rotation_translation(
+                Vec3::new(0.9, 1.2, 1.05),
+                glam::Quat::from_rotation_x(0.7) * glam::Quat::from_rotation_z(-0.4),
+                Vec3::new(3.0, 0.0, -2.0),
+            ),
+        ] {
+            let world = skinned_world_bound(model, bound);
+            for (j, (centre, half)) in boxes.iter().enumerate() {
+                if half.max_element() <= 0.0 {
+                    continue;
+                }
+                let staged = staged_joint_bound(model, palette[j], *centre, *half);
+                let gap = (staged.center - world.center).length() + staged.radius;
+                assert!(
+                    gap <= world.radius + 1.0e-4,
+                    "joint {j}'s staged sphere reaches {gap:.4} m from the \
+                     instance bound's centre against its {:.4} m radius — the \
+                     pre-reject would drop a box the volume clip would have kept",
+                    world.radius
+                );
+            }
+        }
+    }
+
+    /// **THE ANTI-VACUITY ARM.** A bound that swallowed the world would contain
+    /// every box and reject nothing, which is the shape the arm above cannot
+    /// see: the reject has to actually fire on an instance that is elsewhere and
+    /// must not fire on one standing in the volume.
+    #[test]
+    fn a_skinned_instance_outside_the_gi_volume_is_rejected_and_one_inside_is_not() {
+        let boxes = posed_boxes();
+        let palette = posed_palette();
+        let bound = skinned_model_bound(&boxes, &palette).expect("a finite bound");
+        let extent = 64.0_f32;
+        let vol_min = Vec3::splat(-0.5 * extent);
+
+        let here = skinned_world_bound(Mat4::from_translation(Vec3::new(2.0, 0.0, -3.0)), bound);
+        assert!(
+            intersects_volume(&here, vol_min, extent),
+            "an NPC standing in the middle of the GI volume was rejected"
+        );
+        // **Five metres past the face, not four hundred.** A bound that
+        // swallowed the world would still reject something at 400 m and would
+        // save nothing on a crowd standing in the next street; the reject has to
+        // fire at the scale a crowd actually stands at. A posed humanoid's model
+        // bound is under a metre, so 5 m of clearance is loose enough not to be
+        // a knife edge and tight enough that a factor several times too large
+        // fails here.
+        let away = skinned_world_bound(
+            Mat4::from_translation(Vec3::new(0.5 * extent + 5.0, 0.0, 0.0)),
+            bound,
+        );
+        assert!(
+            !intersects_volume(&away, vol_min, extent),
+            "an NPC 5 m outside a {extent} m volume was NOT rejected — its bound \
+             reads {:.3} m, so the pre-reject saves nothing on a crowd standing \
+             in the next street",
+            away.radius
+        );
+        // And the boundary is the volume's, not a guess: an instance whose bound
+        // just touches the face is kept.
+        let edge = skinned_world_bound(
+            Mat4::from_translation(Vec3::new(0.5 * extent + here.radius - 0.05, 0.0, 0.0)),
+            bound,
+        );
+        assert!(
+            intersects_volume(&edge, vol_min, extent),
+            "an NPC touching the volume's face was rejected"
+        );
+    }
+
+    /// A degenerate mesh — every joint box empty — answers a zero radius, which
+    /// the staging loop reads as "there was nothing to stage anyway", and a
+    /// non-finite palette answers `None`, which it must read as "stage it".
+    #[test]
+    fn the_skinned_gi_bound_refuses_by_answering_rather_than_by_guessing() {
+        let empty = vec![(Vec3::ZERO, Vec3::ZERO); 4];
+        let b = skinned_model_bound(&empty, &posed_palette()).expect("degenerate is still a value");
+        assert_eq!(b.radius, 0.0, "an empty mesh claimed an extent");
+
+        let mut broken = posed_palette();
+        broken[0] = Mat4::from_translation(Vec3::new(f32::NAN, 0.0, 0.0));
+        assert!(
+            skinned_model_bound(&posed_boxes(), &broken).is_none(),
+            "a non-finite palette produced a bound, which a caller would trust \
+             and use to skip an instance"
+        );
     }
 }
