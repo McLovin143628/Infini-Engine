@@ -21,6 +21,7 @@ members = [
     "crates/inf-terrain",
     "crates/inf-voxel",
     "crates/inf-water",
+    "crates/inf-nav",
     "crates/inf-gis",
     "crates/inf-island",
     "crates/inf-photo",
@@ -460,6 +461,13 @@ inf-terrain = { path = "crates/inf-terrain" }
 # volumetric terrain adds NO new external crate to the tree or to cargo-deny.
 inf-voxel = { path = "crates/inf-voxel" }
 inf-water = { path = "crates/inf-water" }
+# inf-nav = the NPC1c route substrate: a deterministic weighted graph, Dijkstra
+# answering a VALUE, and arc-length paths. Ring 0 and deliberately as thin as
+# `inf-water` — glam + inf-math, both already pinned above — so navigation adds
+# NO new external crate to the tree or to cargo-deny. It knows nothing about
+# roads, settlements or buildings: each of those three exposes ITSELF as a
+# `NavGraph`, which keeps "what a street is" in the crate that planned it.
+inf-nav = { path = "crates/inf-nav" }
 # inf-gis = the Wave-G GIS facade: the ONE crate naming proj4rs/shapefile/
 # geojson/geo-types/spade. HOST-ONLY by rule — it runs at import and cook time
 # and nothing in the shipped player links it, the same discipline `inf-mesh`

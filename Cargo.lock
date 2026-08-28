@@ -3369,6 +3369,14 @@ name = "inf-mod"
 version = "0.1.0"
 
 [[package]]
+name = "inf-nav"
+version = "0.1.0"
+dependencies = [
+ "glam 0.33.2",
+ "inf-math",
+]
+
+[[package]]
 name = "inf-net"
 version = "0.1.0"
 dependencies = [

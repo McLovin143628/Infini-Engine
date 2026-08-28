@@ -1,0 +1,16 @@
+[package]
+name = "inf-nav"
+description = "Navigation: a deterministic weighted graph, Dijkstra routes as values, and arc-length paths (pure f64, bit-portable)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+glam = { workspace = true }
+# The bit-portable trig a heading is taken with, and nothing else. Ring-0 →
+# Ring-0; `inf-math` names nothing, so there is no cycle — the same argument
+# that put it under `inf-water` and `inf-terrain`.
+inf-math = { workspace = true }

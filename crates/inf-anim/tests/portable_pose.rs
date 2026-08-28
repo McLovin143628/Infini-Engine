@@ -46,7 +46,7 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 37] = [
+const SIM_PATH: [(&str, &str, &str); 40] = [
     // ── the fixed step that PUBLISHES the pose (SK1b audit) ──
     //
     // The most surprising absence on this list. `crates/inf-ecs/src/pose.rs` is
@@ -319,6 +319,31 @@ const SIM_PATH: [(&str, &str, &str); 37] = [
         "inf_ecs::crowd",
         include_str!("../../inf-ecs/src/crowd.rs"),
         "CrowdRoute::position_at decides where every crowd NPC stands and CrowdBand::tier decides what it costs; both reach a Transform, which state_bytes folds and two hosts compare",
+    ),
+    // ── NPC1c: the nav layer, all three of its files, on DAY ONE ──
+    //
+    // NPC1a's crowd entry arrived with its module and this is the same
+    // discipline one wave on. The reason is stronger here, not weaker: a route
+    // is the thing an agent's `Transform` is READ OFF, so every metre `inf-nav`
+    // computes is a metre `state_bytes` folds — and unlike a pose, a route is
+    // also compared BETWEEN the two graphs two hosts derived separately. Three
+    // entries rather than one because the ban reads a file, and the arithmetic
+    // is spread over three of them: the graph builds the costs, the path
+    // interpolates along them and the search orders them.
+    (
+        "inf_nav::graph",
+        include_str!("../../inf-nav/src/graph.rs"),
+        "polyline_length is the cost every route is ordered by, and `nearest` is how an agent finds the node it starts from",
+    ),
+    (
+        "inf_nav::path",
+        include_str!("../../inf-nav/src/path.rs"),
+        "position_at is where a Far agent's Transform comes from — one interpolation between two metres — and `project` is what a demotion re-phases against",
+    ),
+    (
+        "inf_nav::route",
+        include_str!("../../inf-nav/src/route.rs"),
+        "the Dijkstra whose tie-break makes two hosts pick the same one of a grid's six equally short routes",
     ),
 ];
 
