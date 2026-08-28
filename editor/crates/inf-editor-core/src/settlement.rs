@@ -75,7 +75,7 @@
 //! pitch the grid below is [`Settlement::street_km`] of centreline, and that is
 //! what the wave's routed list carries beside I8b's sidewalk/kerb item.
 
-use glam::DVec2;
+use glam::{DVec2, DVec3};
 use inf_pcg::hash::Hash64;
 use inf_pcg::{ArchetypeId, LotRules};
 use uuid::Uuid;
@@ -136,6 +136,34 @@ pub fn industrial_min_ring(max_ring: u32) -> u32 {
 /// one of them. Sixty-four lines is 7.7 km at the city pitch — wider than any
 /// world this recipe format can describe.
 pub const MAX_GRID_LINES: u32 = 64;
+
+/// The furthest grid line [`Settlement::street_graph`] will mint an index for,
+/// either way from the centre.
+///
+/// One past [`MAX_GRID_LINES`], which is what `plan_site`'s own `reach` is at
+/// its widest. A ceiling on an id field rather than a preference — the same role
+/// the line count's own clamp plays one level down, and for the same reason:
+/// `Site::radius_m` is author input.
+const MAX_LINE_INDEX: i64 = MAX_GRID_LINES as i64 + 1;
+
+/// What a signed grid line index is shifted by to become a non-negative id
+/// field.
+///
+/// One past [`MAX_LINE_INDEX`], so index `0` sits free below the range of real
+/// lines and [`AXIS_MAX_INDEX`] sits free above it — which is where a street's
+/// two **ends** go, since a line stops at `±buildable_m` and that is a whole
+/// number of blocks from the centre only by coincidence.
+const LATTICE_BIAS: i64 = MAX_LINE_INDEX + 1;
+
+/// The index of a street's low end — below every grid line's own index.
+const AXIS_MIN_INDEX: u64 = 0;
+
+/// The index of a street's high end — above every grid line's own index.
+const AXIS_MAX_INDEX: u64 = (2 * LATTICE_BIAS + 1) as u64;
+
+/// One field of a street node's id: twenty bits. See
+/// [`Settlement::street_graph`] for the layout.
+const NODE_FIELD_MASK: u64 = (1 << 20) - 1;
 
 /// The most blocks one city's industrial cluster may take, as a share of the
 /// blocks it is allowed to sit on.
@@ -273,6 +301,204 @@ impl Settlement {
     pub fn blocks_of(&self, a: ArchetypeId) -> usize {
         self.blocks.iter().filter(|b| b.archetype == a).count()
     }
+
+    /// The node id of the grid crossing at `(col, row)`. The layout table is on
+    /// [`street_graph`](Self::street_graph) and this is the one place it is
+    /// written.
+    fn street_node_id(&self, col: u64, row: u64) -> inf_nav::NavNodeId {
+        inf_nav::domain::STREET
+            | ((self.site as u64 & NODE_FIELD_MASK) << 40)
+            | ((col & NODE_FIELD_MASK) << 20)
+            | (row & NODE_FIELD_MASK)
+    }
+
+    /// **The id of this settlement's central crossroads** — the node every
+    /// arriving island route lands on.
+    ///
+    /// `plan_network` routes centre to centre, so a highway that reaches this
+    /// town terminates on the site's own `(x, z)`, and the grid puts a line
+    /// through that point on both axes (the module docs say so and
+    /// `the_settlement_grid_meets_the_island_road_network` measures how close to
+    /// it the routes really end). This is the id of the node there, so a caller
+    /// folding the island's road graph and this one into one network can join
+    /// them by **name** rather than by a nearest-node query.
+    ///
+    /// It is an id, not a promise that the node exists: a reservation too small
+    /// for one block plans no streets at all and
+    /// [`street_graph`](Self::street_graph) is empty for it. Ask the graph.
+    pub fn centre_node_id(&self) -> inf_nav::NavNodeId {
+        let mid = LATTICE_BIAS as u64;
+        self.street_node_id(mid, mid)
+    }
+
+    /// **The street grid as an [`inf_nav::NavGraph`]** (NPC1c) — the plan that
+    /// decided where the blocks are, exposed as something a body can walk.
+    ///
+    /// Until this wave the streets were *consumed*: they cut the ground into
+    /// blocks, they carried the join to the island's road network, and then they
+    /// were a `Vec<Street>` nothing asked a question of. They are still a plan
+    /// and not a surface (see the module docs for why the drawing is routed
+    /// rather than taken), but a plan is exactly what a route wants.
+    ///
+    /// # The shape
+    ///
+    /// The grid is orthogonal and axis-aligned — a bound this module already
+    /// states and takes on purpose, because a `PcgVolume` is a centre and an
+    /// axis-aligned half-extent — so every line that runs along world X crosses
+    /// every line that runs along world Z, and the crossings are the junctions.
+    /// A node stands at each of them, plus one at each street's two ends (the
+    /// outermost line stops at `buildable_m`, which is not a crossing), and
+    /// consecutive nodes along one line are linked. That is `L² + 4L` nodes for
+    /// `L` lines each way, which
+    /// `a_street_grids_node_count_is_its_crossing_arithmetic` asserts rather
+    /// than assumes.
+    ///
+    /// # The id layout
+    ///
+    /// | bits | meaning |
+    /// |---|---|
+    /// | 60–63 | [`inf_nav::domain::STREET`] — who minted the id |
+    /// | 40–59 | the site index: **which settlement** |
+    /// | 20–39 | the column: the world-X grid line |
+    /// | 0–19 | the row: the world-Z grid line |
+    ///
+    /// The column and row are lattice indices — `round(offset / pitch)` shifted
+    /// non-negative, the same rounding [`Block::col`]/[`Block::row`]
+    /// state — so a node's id is a function of the **design** and not of the
+    /// order `plan_site` happened to push its streets. That matters because
+    /// `NavGraph::absorb` joins on id equality: two towns folded into one island
+    /// network must not share a crossroads, and the site field is what keeps
+    /// them apart.
+    ///
+    /// # Every node sits at `y = 0`, and that is the honest answer here
+    ///
+    /// A settlement plan carries no elevation at all — the module's own first
+    /// law, enforced by
+    /// `the_settlement_generator_is_authored_from_committed_design_alone` — and
+    /// the pad's real datum is resolved at *evaluation* time from the terrain
+    /// under each lot. So the grid is planar, and a caller that wants a route on
+    /// the ground puts it there once with `NavPath::snapped`, which is where
+    /// that query belongs anyway: `snapped`'s own doctrine is that a per-step
+    /// ground query makes a position depend on streaming residency.
+    pub fn street_graph(&self) -> inf_nav::NavGraph {
+        let mut g = inf_nav::NavGraph::new();
+        if !(self.pitch_m.is_finite() && self.pitch_m > 0.0) {
+            // A reservation too small for one block of the finest grid planned
+            // no streets, and an empty graph is the value that says so.
+            return g;
+        }
+        // The two families of centreline, keyed by their own lattice index: the
+        // world X of every line running along Z, the world Z of every line
+        // running along X. `BTreeMap`, so the walk below is a function of the
+        // indices and not of the plan's push order.
+        let mut cols: std::collections::BTreeMap<u64, f64> = Default::default();
+        let mut rows: std::collections::BTreeMap<u64, f64> = Default::default();
+        for s in &self.streets {
+            if runs_along_z(s) {
+                cols.insert(lattice_index(s.a.x - self.centre.x, self.pitch_m), s.a.x);
+            } else if runs_along_x(s) {
+                rows.insert(lattice_index(s.a.y - self.centre.y, self.pitch_m), s.a.y);
+            }
+        }
+
+        for s in &self.streets {
+            let z_run = runs_along_z(s);
+            if !(z_run || runs_along_x(s)) {
+                // A street with no length is not a run: there are no two ends to
+                // link and no crossing it can carry.
+                continue;
+            }
+            let (lo, hi, fixed, origin) = if z_run {
+                (s.a.y.min(s.b.y), s.a.y.max(s.b.y), s.a.x, self.centre.x)
+            } else {
+                (s.a.x.min(s.b.x), s.a.x.max(s.b.x), s.a.y, self.centre.y)
+            };
+            let fixed_index = lattice_index(fixed - origin, self.pitch_m);
+            // The crossings this line carries, and then its two ends — an end
+            // being its own node only when no crossing already stands there.
+            // The equality is exact and can be: both coordinates are the site's
+            // centre plus an offset, so two that name one point are one `f64`,
+            // and two that do not are a whole block apart.
+            let crossings = if z_run { &rows } else { &cols };
+            let mut on: Vec<(f64, u64)> = crossings
+                .iter()
+                .filter(|(_, v)| **v >= lo && **v <= hi)
+                .map(|(i, v)| (*v, *i))
+                .collect();
+            for (end, index) in [(lo, AXIS_MIN_INDEX), (hi, AXIS_MAX_INDEX)] {
+                if !on.iter().any(|(v, _)| *v == end) {
+                    on.push((end, index));
+                }
+            }
+            on.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+            let mut prev: Option<inf_nav::NavNodeId> = None;
+            for (along, index) in on {
+                let (id, p) = if z_run {
+                    (
+                        self.street_node_id(fixed_index, index),
+                        DVec3::new(fixed, 0.0, along),
+                    )
+                } else {
+                    (
+                        self.street_node_id(index, fixed_index),
+                        DVec3::new(along, 0.0, fixed),
+                    )
+                };
+                // Re-adding a crossing the other family already placed is the
+                // same node, by id — which is exactly how the two families
+                // become one grid.
+                g.add_node(id, p, inf_nav::NavKind::Street);
+                if let Some(a) = prev {
+                    g.link(a, id, inf_nav::NavKind::Street, Vec::new());
+                }
+                prev = Some(id);
+            }
+        }
+        g
+    }
+}
+
+/// A street whose world X is constant — it runs along Z.
+///
+/// The grid is axis-aligned by the module's own bound, so this and
+/// [`runs_along_x`] are exhaustive over everything `plan_site` plans, and an
+/// exact comparison is the right test: a line's two ends are written from one
+/// coordinate.
+fn runs_along_z(s: &Street) -> bool {
+    s.a.x == s.b.x && s.a.y != s.b.y
+}
+
+/// A street whose world Z is constant — it runs along X.
+fn runs_along_x(s: &Street) -> bool {
+    s.a.y == s.b.y && s.a.x != s.b.x
+}
+
+/// **Which grid line a coordinate belongs to**, as the non-negative id field
+/// [`Settlement::street_graph`] writes.
+///
+/// `off_m` is the signed distance from the site's centre along one world axis
+/// and `pitch_m` is the centre-to-centre street spacing, so a line sits at an
+/// exact multiple of the pitch and its index is `round(off / pitch)` shifted by
+/// [`LATTICE_BIAS`] — the same rounding [`Block::col`] and [`Block::row`] state.
+///
+/// **Rounded rather than compared exactly, on purpose.** A line's world
+/// coordinate is `centre + k · pitch`, and subtracting a five-figure easting
+/// back out of it does not return `k · pitch` to the bit. Rounding to the
+/// nearest line is immune to that — the residual is picometres against a
+/// sixty-metre pitch — and an equality test would have quietly given a whole
+/// family of lines the wrong index on any site whose centre is not a small
+/// number.
+///
+/// Clamped, because `Site::radius_m` is author input: a nonsense reservation
+/// must corrupt nothing above the twenty bits this is written into.
+fn lattice_index(off_m: f64, pitch_m: f64) -> u64 {
+    let k = off_m / pitch_m;
+    if !k.is_finite() {
+        return LATTICE_BIAS as u64;
+    }
+    let max = MAX_LINE_INDEX as f64;
+    (k.round().clamp(-max, max) as i64 + LATTICE_BIAS) as u64
 }
 
 /// **Every settlement the committed design implies.**
@@ -1465,6 +1691,254 @@ mod tests {
         assert_eq!(
             p.distance_to(DVec2::new(0.0, 5.0)),
             (100.0f64 + 25.0).sqrt()
+        );
+    }
+
+    // ── the grid as a route (NPC1c) ─────────────────────────────────────────
+
+    /// A settlement written by hand, so the grid arithmetic is measured even in
+    /// a tree whose samples have not been blessed.
+    ///
+    /// The lines are laid out the way `plan_site` lays its own out — a line
+    /// every `pitch` from the centre, both ends stopping at `buildable` — at the
+    /// CI fixture city's own numbers. It is a fixture and not a second planner:
+    /// [`check_grid_arithmetic`] is run over it *and* over every committed
+    /// settlement, so the claim it pins is the claim the real ones satisfy.
+    fn hand_grid() -> Settlement {
+        let centre = DVec2::new(1000.0, -500.0);
+        let (pitch, street, buildable) = (TOWN_BLOCK_M + TOWN_STREET_M, TOWN_STREET_M, 104.0);
+        let mut streets = Vec::new();
+        for k in -1..=1i32 {
+            let off = f64::from(k) * pitch;
+            streets.push(Street {
+                a: DVec2::new(centre.x + off, centre.y - buildable),
+                b: DVec2::new(centre.x + off, centre.y + buildable),
+                main: k == 0,
+            });
+            streets.push(Street {
+                a: DVec2::new(centre.x - buildable, centre.y + off),
+                b: DVec2::new(centre.x + buildable, centre.y + off),
+                main: k == 0,
+            });
+        }
+        Settlement {
+            site: 3,
+            name: "Handgrid".into(),
+            kind: SiteKind::Town,
+            centre,
+            radius_m: buildable + street,
+            buildable_m: buildable,
+            pitch_m: pitch,
+            street_m: street,
+            streets,
+            blocks: Vec::new(),
+            refused_off_pad: 0,
+            refused_off_land: 0,
+        }
+    }
+
+    /// **The node and edge counts are the crossing arithmetic**: `L` lines each
+    /// way cross at `L²` junctions, stop at `4L` ends, and chain `L + 1` links
+    /// along each of `2L` lines.
+    fn check_grid_arithmetic(plan: &Settlement) {
+        let g = plan.street_graph();
+        let lines = plan.streets.iter().filter(|s| runs_along_z(s)).count();
+        assert_eq!(
+            lines,
+            plan.streets.iter().filter(|s| runs_along_x(s)).count(),
+            "{}: the grid is not square",
+            plan.name
+        );
+        // A reservation that is a whole number of blocks deep would put the
+        // outermost line exactly ON the end, and then the ends ARE crossings and
+        // there are fewer nodes than the formula says. No committed settlement
+        // is one; the assert is here so that the day one is, this arm fails
+        // loudly rather than quietly measuring something else.
+        assert!(
+            !plan
+                .streets
+                .iter()
+                .any(|s| runs_along_z(s) && (s.a.x - plan.centre.x).abs() == plan.buildable_m),
+            "{}: its outermost street line lands exactly on the buildable radius, \
+             so this arm's node count no longer holds",
+            plan.name
+        );
+        assert_eq!(
+            g.len(),
+            lines * lines + 4 * lines,
+            "{}: {lines} lines each way",
+            plan.name
+        );
+        assert_eq!(
+            g.edge_count(),
+            4 * lines * (lines + 1),
+            "{}: {lines} lines each way",
+            plan.name
+        );
+        for n in g.nodes() {
+            assert_eq!(inf_nav::domain::of(n.id), inf_nav::domain::STREET);
+            assert_eq!(
+                (n.id >> 40) & NODE_FIELD_MASK,
+                plan.site as u64,
+                "a node of {} carries another site's id field",
+                plan.name
+            );
+            assert_eq!(n.kind, inf_nav::NavKind::Street);
+            // The plan carries no elevation — the module's own first law.
+            assert_eq!(n.position.y, 0.0);
+            assert!(n.position.is_finite());
+        }
+    }
+
+    /// **A hand-laid grid is exactly its arithmetic**, and its ids are the
+    /// documented layout rather than an iteration order.
+    #[test]
+    fn a_street_grids_node_count_is_its_crossing_arithmetic() {
+        let plan = hand_grid();
+        check_grid_arithmetic(&plan);
+        let g = plan.street_graph();
+        assert_eq!(g.len(), 3 * 3 + 4 * 3);
+        // The crossroads is at the site's own centre, and its id is the one the
+        // layout table describes: site 3, both fields on the bias.
+        let mid = LATTICE_BIAS as u64;
+        assert_eq!(
+            plan.centre_node_id(),
+            inf_nav::domain::STREET | (3 << 40) | (mid << 20) | mid
+        );
+        let node = g.node(plan.centre_node_id()).expect("the crossroads");
+        assert_eq!(node.position, DVec3::new(plan.centre.x, 0.0, plan.centre.y));
+        // …and the id really is a function of the design: the same plan built
+        // with its streets in the reverse order is the same graph, node for node
+        // and edge for edge.
+        let mut reversed = plan.clone();
+        reversed.streets.reverse();
+        assert_eq!(reversed.street_graph(), g);
+        // A settlement whose reservation planned no grid answers an empty graph
+        // rather than dividing by a zero pitch.
+        let empty = Settlement {
+            pitch_m: 0.0,
+            streets: Vec::new(),
+            ..plan.clone()
+        };
+        assert!(empty.street_graph().is_empty());
+        println!(
+            "NPC1c streets: a 3-line town grid is {} nodes / {} directed edges, \
+             crossroads {:#x}",
+            g.len(),
+            g.edge_count(),
+            plan.centre_node_id()
+        );
+    }
+
+    /// **A settlement's grid is one connected network**, its centre really is
+    /// the site's own, and an arriving island road **welds** onto it — the join
+    /// the module docs claim, as a route rather than as a distance.
+    #[test]
+    fn a_settlements_street_grid_is_one_network_the_island_road_welds_onto() {
+        let Some(d) = crate::island::committed_design(crate::island::ISLAND_RECIPES[0]) else {
+            eprintln!("SKIP: no committed island design");
+            return;
+        };
+        let plans = settlements(&d);
+        assert!(!plans.is_empty());
+        let mut nodes = 0usize;
+        let mut edges = 0usize;
+        for plan in &plans {
+            check_grid_arithmetic(plan);
+            let g = plan.street_graph();
+            let centre = plan.centre_node_id();
+            let at = g
+                .node(centre)
+                .unwrap_or_else(|| panic!("{} has no central crossroads", plan.name));
+            let off = (DVec2::new(at.position.x, at.position.z) - plan.centre).length();
+            assert!(
+                off <= 1.0,
+                "{}'s crossroads sits {off:.3} m off the site's own centre — an \
+                 island route lands there and would hand over to nothing",
+                plan.name
+            );
+
+            // Connected, the strong way: every node is reachable from the
+            // crossroads. `L² + 4L` searches over a graph of the same size, which
+            // for the widest committed settlement is a few hundred microseconds.
+            let ids: Vec<(inf_nav::NavNodeId, DVec3)> =
+                g.nodes().map(|n| (n.id, n.position)).collect();
+            for (id, _) in &ids {
+                let v = inf_nav::route(&g, centre, *id);
+                assert!(
+                    v.is_found(),
+                    "{}: {} from the crossroads to node {id:#x}",
+                    plan.name,
+                    v.reason()
+                );
+            }
+            // …and the two most distant nodes really do join, which is the
+            // corner-to-corner claim rather than the spoke-to-hub one.
+            let mut far = (0.0f64, ids[0].0, ids[0].0);
+            for (a, pa) in &ids {
+                for (b, pb) in &ids {
+                    let d = (*pb - *pa).length();
+                    if d > far.0 {
+                        far = (d, *a, *b);
+                    }
+                }
+            }
+            let v = inf_nav::route(&g, far.1, far.2);
+            let r = v
+                .route()
+                .unwrap_or_else(|| panic!("{}: its two most distant nodes do not join", plan.name));
+            assert!(
+                r.cost_m >= far.0 - 1e-9,
+                "a route shorter than its own chord"
+            );
+
+            // **THE JOIN.** An island highway terminates on the site's own
+            // (x, z); dropping a road-domain node there and welding must make
+            // one network. 2 m is `inf_gis::SNAP_TOLERANCE_M`, the tolerance the
+            // road layer already derives its own junctions at.
+            let mut joined = g.clone();
+            let arrival = inf_nav::domain::ROAD | plan.site as u64;
+            joined.add_node(
+                arrival,
+                DVec3::new(plan.centre.x, 0.0, plan.centre.y),
+                inf_nav::NavKind::Road,
+            );
+            let welded = joined.weld(2.0, 1.0);
+            assert_eq!(
+                welded, 1,
+                "{}: an arriving road welded to {welded} street nodes rather \
+                 than to the one crossroads",
+                plan.name
+            );
+            // …and welding again adds nothing, so a caller may fold the same two
+            // graphs twice without doubling the frontier.
+            assert_eq!(joined.weld(2.0, 1.0), 0);
+            let v = inf_nav::route(&joined, arrival, far.2);
+            assert!(
+                v.is_found(),
+                "{}: an arriving island road cannot reach the far corner of the \
+                 grid it landed on ({})",
+                plan.name,
+                v.reason()
+            );
+            println!(
+                "NPC1c streets: {:>13} ({:>4}) {} nodes / {} edges, crossroads \
+                 {off:.3} m off centre, corner-to-corner {:.1} m of route over a \
+                 {:.1} m chord, 1 weld onto the arriving road",
+                plan.name,
+                plan.kind.label(),
+                g.len(),
+                g.edge_count(),
+                r.cost_m,
+                far.0
+            );
+            nodes += g.len();
+            edges += g.edge_count();
+        }
+        println!(
+            "NPC1c streets TOTAL: {} settlements, {nodes} nodes, {edges} directed \
+             edges",
+            plans.len()
         );
     }
 }

@@ -282,13 +282,58 @@ impl NavGraph {
         best.map(|(_, id)| id)
     }
 
+    /// **Join every pair of nodes closer than `tolerance_m` in plan**, with a
+    /// zero-cost edge — how three producers' graphs become one network.
+    ///
+    /// The island's road planner routes **centre to centre**, so every highway
+    /// that reaches a settlement terminates on the site's own `(x, z)`; the
+    /// settlement's grid puts a street line through that same point. Two
+    /// producers, two id domains, one place. The same is true of a lot's
+    /// frontage and the street outside it, and of a building's entrance and its
+    /// lot. Rather than teach any of the three about the other two, they are
+    /// welded here, on the geometry they already agree about.
+    ///
+    /// **Plan distance, and a separate Y bound**, for `SNAP_TOLERANCE_M`'s own
+    /// reason one level down: two points at the same plan position and different
+    /// heights are an overpass, not a junction.
+    ///
+    /// `O(n²)` over the nodes and it says so: an island's whole network is a few
+    /// hundred of them. It is deterministic because the walk is `BTreeMap` order
+    /// twice over, and it never welds two nodes of the same domain — a producer
+    /// that wanted them joined would have linked them.
+    pub fn weld(&mut self, tolerance_m: f64, max_dy_m: f64) -> usize {
+        let ids: Vec<(NavNodeId, DVec3)> =
+            self.nodes.values().map(|n| (n.id, n.position)).collect();
+        let t2 = tolerance_m * tolerance_m;
+        let mut welded = 0;
+        for (i, (a, pa)) in ids.iter().enumerate() {
+            for (b, pb) in ids.iter().skip(i + 1) {
+                if crate::domain::of(*a) == crate::domain::of(*b) {
+                    continue;
+                }
+                if (pa.y - pb.y).abs() > max_dy_m {
+                    continue;
+                }
+                let d = DVec2::new(pa.x - pb.x, pa.z - pb.z);
+                if d.x * d.x + d.y * d.y <= t2 {
+                    let before = self.edges_from(*a).len();
+                    self.link_with_cost(*a, *b, NavKind::Street, vec![], 0.0);
+                    if self.edges_from(*a).len() != before {
+                        welded += 1;
+                    }
+                }
+            }
+        }
+        welded
+    }
+
     /// **Fold `other` into this graph**, node ids and all.
     ///
     /// The caller owns the id namespaces and this does not check them: two
     /// producers that hand out the same id mean one node, which is exactly how a
     /// settlement's central crossroads and the highway that terminates on it
     /// become one place. Every builder in this tree derives its ids from a
-    /// namespace of its own for that reason — see `nav_ids` on each of them.
+    /// namespace of its own for that reason — see [`crate::domain`].
     pub fn absorb(&mut self, other: &NavGraph) {
         for n in other.nodes.values() {
             self.nodes.entry(n.id).or_insert(*n);
@@ -403,6 +448,46 @@ mod tests {
         // The shared node keeps the FIRST graph's own record — the road's — so
         // absorbing is not a way to overwrite a node behind a builder's back.
         assert_eq!(a.node(1).unwrap().kind, NavKind::Road);
+    }
+
+    /// Two producers' graphs meet where their geometry already agrees, and an
+    /// overpass is not a junction.
+    #[test]
+    fn weld_joins_two_domains_where_they_touch_and_never_a_flyover() {
+        let mut g = NavGraph::new();
+        g.add_node(crate::domain::ROAD, p(0.0, 0.0), NavKind::Road);
+        g.add_node(crate::domain::ROAD | 1, p(500.0, 0.0), NavKind::Road);
+        g.link(
+            crate::domain::ROAD,
+            crate::domain::ROAD | 1,
+            NavKind::Road,
+            vec![],
+        );
+        // The settlement's crossroads, one metre off the road's terminus…
+        g.add_node(crate::domain::STREET, p(500.5, 0.0), NavKind::Street);
+        // …and a footbridge over it, at the same plan position, six metres up.
+        g.add_node(
+            crate::domain::STREET | 1,
+            DVec3::new(500.5, 6.0, 0.0),
+            NavKind::Street,
+        );
+        assert_eq!(g.weld(2.0, 1.0), 1);
+        assert!(crate::route(&g, crate::domain::ROAD, crate::domain::STREET).is_found());
+        assert!(!crate::route(&g, crate::domain::ROAD, crate::domain::STREET | 1).is_found());
+        // Idempotent: welding twice adds no second edge.
+        assert_eq!(g.weld(2.0, 1.0), 0);
+    }
+
+    /// Two nodes of ONE producer are never welded — a producer that wanted them
+    /// joined would have linked them, and a street grid's parallel lines are
+    /// metres apart on purpose.
+    #[test]
+    fn weld_never_joins_a_domain_to_itself() {
+        let mut g = NavGraph::new();
+        g.add_node(crate::domain::STREET, p(0.0, 0.0), NavKind::Street);
+        g.add_node(crate::domain::STREET | 1, p(0.5, 0.0), NavKind::Street);
+        assert_eq!(g.weld(2.0, 1.0), 0);
+        assert_eq!(g.edge_count(), 0);
     }
 
     /// A negative cost would break Dijkstra's "first pop is final" invariant and

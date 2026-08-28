@@ -23,6 +23,12 @@ glam = { workspace = true }
 # authored euler rotation goes through — `std` trig is not bit-identical across
 # platforms (the P14 law) and grammar placement is committed content.
 inf-math = { workspace = true }
+# NPC1c: a building already knows its own door edges, its stair core and which
+# rooms are reachable from outside, and had no search over them.
+# `BuildingPlan::interior_nav` exposes that interior as an `inf_nav::NavGraph`,
+# which keeps "what a doorway is" here and the Dijkstra there. Ring 0 → Ring 0
+# leaf (glam + inf-math, both already pinned above), so no new external crate.
+inf-nav = { workspace = true }
 serde = { workspace = true }
 # The editor graph is embedded in the `.inf_pcg` payload as a JSON string (the
 # `inf-graph` model's `skip_serializing_if` fields are not bincode-safe).

@@ -590,6 +590,50 @@ impl BuildingPlan {
         out.into_iter().collect()
     }
 
+    /// The undirected room-to-room edges the **stairs** create: the two stair
+    /// rooms every [`Stair`] joins, ascending and deduplicated.
+    ///
+    /// The twin of [`door_edges`](Self::door_edges) for the other axis — a door
+    /// joins two rooms across a wall, a stair joins two across a slab — and
+    /// together they are [`room_links`](Self::room_links), which is the graph
+    /// every walk over this plan uses.
+    fn stair_links(&self) -> Vec<(usize, usize)> {
+        let mut out: std::collections::BTreeSet<(usize, usize)> = Default::default();
+        for s in &self.stairs {
+            if let (Some(a), Some(b)) = (self.stair_room(s.from), self.stair_room(s.to)) {
+                if a != b {
+                    out.insert((a.min(b), a.max(b)));
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// **Every edge of the room graph**: [`door_edges`](Self::door_edges) within
+    /// a floor plus `stair_links` between them, ascending and deduplicated.
+    ///
+    /// One derivation with three readers — [`reachable_rooms`](Self::reachable_rooms),
+    /// [`room_path`](Self::room_path) and the arm that checks
+    /// they agree. The reachability walk carried its own inline copy of the
+    /// stair rule until the room-path search needed the same edges, and two
+    /// copies of one rule is the pair this tree keeps watching drift apart (the
+    /// P22 "one door for three paths" ruling).
+    ///
+    /// An edge naming a room this plan does not have is dropped rather than
+    /// indexed: `Wall::inside`/`outside` are indices, a plan that produced a bad
+    /// one is a builder defect, and a walk that panicked on it would take the
+    /// whole population pass down with it.
+    fn room_links(&self) -> Vec<(usize, usize)> {
+        let n = self.rooms.len();
+        let mut out: std::collections::BTreeSet<(usize, usize)> = Default::default();
+        for (a, b) in self.door_edges().into_iter().chain(self.stair_links()) {
+            if a < n && b < n && a != b {
+                out.insert((a.min(b), a.max(b)));
+            }
+        }
+        out.into_iter().collect()
+    }
+
     /// **Invariant 1**: every room on `floor` is reachable from every other
     /// through doors.
     pub fn rooms_connected(&self, floor: u32) -> bool {
@@ -624,6 +668,10 @@ impl BuildingPlan {
     ///
     /// This is the graph the Phase 19 gate walks. Returns one flag per room, in
     /// [`rooms`](Self::rooms) order.
+    ///
+    /// The edges are `room_links` — doors within a floor, stairs between them —
+    /// so this and [`room_path`](Self::room_path) walk one graph and cannot
+    /// disagree about which rooms a building offers.
     pub fn reachable_rooms(&self) -> Vec<bool> {
         let mut seen = vec![false; self.rooms.len()];
         // Seed: whichever room the entrance door's wall belongs to.
@@ -631,14 +679,13 @@ impl BuildingPlan {
             .entrance
             .and_then(|w| self.walls.get(w))
             .map(|w| w.inside)
+            .filter(|i| *i < seen.len())
         else {
             return seen;
         };
-        let edges = self.door_edges();
+        let edges = self.room_links();
         let mut stack = vec![start];
-        if start < seen.len() {
-            seen[start] = true;
-        }
+        seen[start] = true;
         while let Some(cur) = stack.pop() {
             for &(a, b) in &edges {
                 let next = if a == cur {
@@ -651,25 +698,6 @@ impl BuildingPlan {
                 if !seen[next] {
                     seen[next] = true;
                     stack.push(next);
-                }
-            }
-            // A stair links the two stair rooms of the storeys it joins.
-            if self.rooms[cur].kind == RoomType::Stair {
-                let f = self.rooms[cur].floor;
-                for s in &self.stairs {
-                    let other = if s.from == f {
-                        self.stair_room(s.to)
-                    } else if s.to == f {
-                        self.stair_room(s.from)
-                    } else {
-                        None
-                    };
-                    if let Some(n) = other {
-                        if !seen[n] {
-                            seen[n] = true;
-                            stack.push(n);
-                        }
-                    }
                 }
             }
         }
@@ -691,6 +719,202 @@ impl BuildingPlan {
     /// outside.
     pub fn fully_reachable(&self) -> bool {
         !self.rooms.is_empty() && self.reachable_rooms().iter().all(|&b| b)
+    }
+
+    /// **The way from one room to another, as a sequence** — the room indices
+    /// to walk, `from` first and `to` last.
+    ///
+    /// [`reachable_rooms`](Self::reachable_rooms) answers *whether* a room can
+    /// be got to; this answers *how*, over exactly the same graph
+    /// (`room_links`: doors within a floor, stairs between
+    /// them), so the two can never disagree — the arm
+    /// `a_room_path_agrees_with_reachability` asserts that room by room on a
+    /// real plan.
+    ///
+    /// Breadth-first, so the answer is the route through the fewest **doors**
+    /// rather than the shortest walk. That is the right measure for this plan:
+    /// a room here is one hop wide and has no interior circulation of its own,
+    /// so metres inside a room are not a thing the plan knows. When metres are
+    /// what a caller wants, [`interior_nav`](Self::interior_nav) prices the same
+    /// interior in them and `inf_nav::route` searches it.
+    ///
+    /// # Determinism: ties break on the lower room index
+    ///
+    /// A floor plate is symmetric by construction — a corridor with rooms either
+    /// side offers two equally short ways round — so a search that resolved ties
+    /// on an insertion order would hand two hosts two different routes through
+    /// one building. The frontier is a `BTreeSet` expanded a level at a time in
+    /// ascending index order, and each room's neighbours are ascending too, so a
+    /// room is first reached from the **lowest-indexed** room of the previous
+    /// level and the answer is a function of the plan alone. Same rule, one
+    /// crate up, that `inf_nav::route` states about its `(cost, id)` frontier.
+    ///
+    /// `Some(vec![from])` for a room to itself; `None` for a room this one
+    /// cannot reach and for an index this plan does not have. A refusal is a
+    /// value (the P21 ruling), never a panic — "can this NPC get to the back
+    /// room" is a question with a legitimate no.
+    pub fn room_path(&self, from: usize, to: usize) -> Option<Vec<usize>> {
+        if from >= self.rooms.len() || to >= self.rooms.len() {
+            return None;
+        }
+        if from == to {
+            return Some(vec![from]);
+        }
+        // Adjacency once, ascending both ways — a `BTreeMap` of `BTreeSet`s, so
+        // neither the neighbour order nor the frontier order can depend on how
+        // the plan was built.
+        let mut adj: std::collections::BTreeMap<usize, std::collections::BTreeSet<usize>> =
+            Default::default();
+        for (a, b) in self.room_links() {
+            adj.entry(a).or_default().insert(b);
+            adj.entry(b).or_default().insert(a);
+        }
+        let mut prev: std::collections::BTreeMap<usize, usize> = Default::default();
+        let mut seen = vec![false; self.rooms.len()];
+        seen[from] = true;
+        let mut frontier: std::collections::BTreeSet<usize> = [from].into_iter().collect();
+        while !frontier.is_empty() && !seen[to] {
+            let mut next: std::collections::BTreeSet<usize> = Default::default();
+            for cur in &frontier {
+                for n in adj.get(cur).into_iter().flatten() {
+                    if !seen[*n] {
+                        seen[*n] = true;
+                        prev.insert(*n, *cur);
+                        next.insert(*n);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        if !seen[to] {
+            return None;
+        }
+        // Unwind. `prev` is a tree rooted at `from`, so this ends in at most one
+        // step per room; the bound is a loop guard rather than a trust, exactly
+        // as `inf_nav::route`'s own unwind states — a corrupted predecessor map
+        // must not hang a fixed step.
+        let mut out = vec![to];
+        let mut cur = to;
+        for _ in 0..self.rooms.len() {
+            if cur == from {
+                break;
+            }
+            let p = *prev.get(&cur)?;
+            out.push(p);
+            cur = p;
+        }
+        if cur != from {
+            return None;
+        }
+        out.reverse();
+        Some(out)
+    }
+
+    /// **The interior as an [`inf_nav::NavGraph`]** (NPC1c): a node standing in
+    /// every room, a node in every doorway, and the stair between the storeys.
+    ///
+    /// # A doorway is a node, not an edge label
+    ///
+    /// A wall lets a body through at exactly one place, and a room-to-room edge
+    /// that named only the two rooms would draw a straight line between their
+    /// centres — through the wall. So every door opening becomes a node at its
+    /// own threshold and the room graph goes `room → doorway → room`, which is
+    /// the geometry the assembly already built: an opening is a place no wall
+    /// run covers (the module's own "never a boolean cut" doctrine), and its
+    /// threshold is [`opening_void`](Self::opening_void)'s rectangle centre —
+    /// the one derivation of an opening's world rectangle, reused rather than
+    /// written a second time.
+    ///
+    /// An **exterior** door — the entrance — gets a doorway node with only one
+    /// room on it. That leaf is the point an outside caller welds to: a street
+    /// graph and an interior graph meet on the geometry they already agree
+    /// about, which is what `NavGraph::weld` is for, and neither has to be
+    /// taught about the other.
+    ///
+    /// # Positions
+    ///
+    /// Every node is placed through [`LotFrame::to_world`] and lifted to
+    /// [`floor_y`](Self::floor_y), because the whole plan is computed in the
+    /// lot's own frame and turned into the world at one place (the IB-6 ruling).
+    /// A room's node is its rectangle's **centre**, which is an honest limit
+    /// worth naming: a route through this graph is centre to centre and knows
+    /// nothing about the furniture the same plan scatters into the room. Avoiding
+    /// a table is a body's problem, not a plan's.
+    ///
+    /// # A stair costs its own rise
+    ///
+    /// The two stair rooms of a flight share one rectangle — that is what makes
+    /// the stack line up — so the link between them is vertical and `link`
+    /// prices it at exactly one `floor_height`. It is deliberately *not* marked
+    /// up: `NavGraph::link_with_cost` is the door for saying a metre of stair is
+    /// dearer than a metre of corridor, and nothing in this tree has measured
+    /// what that multiplier should be. An unmeasured prescription can be
+    /// backwards (the P25 law), so the geometry stands until somebody measures.
+    ///
+    /// # The id layout
+    ///
+    /// | bits | meaning |
+    /// |---|---|
+    /// | 60–63 | [`inf_nav::domain::BUILDING`] — who minted the id |
+    /// | 40–59 | the class: `0` a room, `1` a doorway |
+    /// | 0–39 | the index into [`rooms`](Self::rooms) or [`openings`](Self::openings) |
+    ///
+    /// See [`room_node_id`] and [`doorway_node_id`], which are the only two
+    /// places the layout is written. A caller folding several buildings into one
+    /// network must offset the ids itself — this plan does not know which
+    /// building it is, and inventing an identity here would be a second opinion
+    /// about a thing the level already knows.
+    pub fn interior_nav(&self) -> inf_nav::NavGraph {
+        let mut g = inf_nav::NavGraph::new();
+        for (i, r) in self.rooms.iter().enumerate() {
+            let c = self.frame.to_world(r.rect.center());
+            g.add_node(
+                room_node_id(i),
+                DVec3::new(c.x, self.floor_y(r.floor), c.y),
+                inf_nav::NavKind::Room,
+            );
+        }
+        for (i, o) in self.openings.iter().enumerate() {
+            if o.kind != OpeningKind::Door {
+                continue;
+            }
+            let (Some(w), Some((void, _band))) = (self.walls.get(o.wall), self.opening_void(o))
+            else {
+                continue;
+            };
+            let c = self.frame.to_world(void.center());
+            let door = doorway_node_id(i);
+            g.add_node(
+                door,
+                DVec3::new(c.x, self.floor_y(w.floor), c.y),
+                inf_nav::NavKind::Doorway,
+            );
+            // A link naming a room this plan does not have is ignored by the
+            // graph itself, which is why there is no second filter here.
+            g.link(
+                room_node_id(w.inside),
+                door,
+                inf_nav::NavKind::Doorway,
+                Vec::new(),
+            );
+            if let Some(other) = w.outside {
+                g.link(
+                    door,
+                    room_node_id(other),
+                    inf_nav::NavKind::Doorway,
+                    Vec::new(),
+                );
+            }
+        }
+        for (a, b) in self.stair_links() {
+            g.link(
+                room_node_id(a),
+                room_node_id(b),
+                inf_nav::NavKind::Stair,
+                Vec::new(),
+            );
+        }
+        g
     }
 
     /// The world-space void an opening carves: its XZ rectangle (widened by
@@ -746,6 +970,37 @@ impl BuildingPlan {
             hi > y0 && lo < y1 && solid_bounds(s).overlaps(&rect)
         })
     }
+}
+
+/// The class bit that separates a **doorway** node's id from a room's — bit 40.
+/// See [`BuildingPlan::interior_nav`] for the whole layout.
+///
+/// A room takes class `0`, so a room node's id is the domain tag and its index
+/// and nothing else. That is not a shortcut: it means the low forty bits of a
+/// room node are its `rooms` index verbatim, which is what makes a node id
+/// readable in a trace without a decoder.
+const NAV_DOORWAY_CLASS: u64 = 1 << 40;
+
+/// The index field of an interior node's id — the low forty bits.
+///
+/// A trillion rooms; the mask is here so a caller that hands in a nonsense index
+/// corrupts its own node rather than the class or the domain tag above it.
+const NAV_INDEX_MASK: u64 = NAV_DOORWAY_CLASS - 1;
+
+/// **The nav-graph id of room `i`.** See [`BuildingPlan::interior_nav`] for the
+/// bit layout and why the namespace exists.
+pub fn room_node_id(i: usize) -> inf_nav::NavNodeId {
+    inf_nav::domain::BUILDING | (i as u64 & NAV_INDEX_MASK)
+}
+
+/// **The nav-graph id of the doorway standing in opening `i`.**
+///
+/// The index is into [`BuildingPlan::openings`] — *all* of them, windows
+/// included — rather than into the doors alone, so an opening's node id does not
+/// move when a window is added beside it. Only doors get a node; a window is an
+/// opening you look through.
+pub fn doorway_node_id(i: usize) -> inf_nav::NavNodeId {
+    inf_nav::domain::BUILDING | NAV_DOORWAY_CLASS | (i as u64 & NAV_INDEX_MASK)
 }
 
 /// The XZ rectangle a stretch `[from, to]` of `w` occupies at `thickness`
@@ -875,5 +1130,241 @@ mod tests {
         assert_eq!(d.length(), 0.0);
         assert_eq!(d.point_at(1.0), d.a);
         assert!(d.direction().is_finite());
+    }
+
+    // ── the interior as a route (NPC1c) ─────────────────────────────────────
+
+    /// **A real three-storey plan**, built through the same door `doorway.rs`'s
+    /// own arms use — so what these tests walk is the interior the generator
+    /// actually produces, not a hand-drawn graph that agrees with itself.
+    fn storeys() -> BuildingPlan {
+        plan_building(&BuildingParams {
+            archetype: ArchetypeId::Apartment,
+            footprint: Rect2::new(DVec2::new(0.0, 0.0), DVec2::new(24.0, 16.0)),
+            base_y: 0.0,
+            seed: 7,
+            floors: 3,
+        })
+    }
+
+    /// The room the entrance door opens into — the seed of every walk.
+    fn entrance_room(plan: &BuildingPlan) -> usize {
+        plan.entrance
+            .and_then(|w| plan.walls.get(w))
+            .map(|w| w.inside)
+            .expect("a plan with an entrance")
+    }
+
+    /// **A room path is a sequence of REAL doors and stairs**, not a list of
+    /// rooms that happen to be reachable.
+    #[test]
+    fn a_room_path_walks_only_doors_and_stairs() {
+        let plan = storeys();
+        assert_eq!(plan.floors, 3);
+        assert!(plan.fully_reachable(), "the fixture is not enterable");
+        let from = entrance_room(&plan);
+        let (to, _) = plan
+            .rooms_on(1)
+            .find(|(i, _)| *i != from)
+            .expect("a room on the first floor");
+
+        let path = plan
+            .room_path(from, to)
+            .expect("the first floor is reachable from the front door");
+        assert_eq!(path.first(), Some(&from));
+        assert_eq!(path.last(), Some(&to));
+        let doors = plan.door_edges();
+        let stairs = plan.stair_links();
+        let mut used_stair = 0usize;
+        for w in path.windows(2) {
+            let pair = (w[0].min(w[1]), w[0].max(w[1]));
+            let is_door = doors.contains(&pair);
+            let is_stair = stairs.contains(&pair);
+            assert!(
+                is_door || is_stair,
+                "the path steps {pair:?}, which is neither a door nor a stair"
+            );
+            if is_stair {
+                used_stair += 1;
+            }
+        }
+        assert!(
+            used_stair > 0,
+            "a route to the first floor that climbed no stair walked through a slab"
+        );
+        // A room to itself is a stand, and an index this plan does not have is a
+        // refusal rather than a panic.
+        assert_eq!(plan.room_path(from, from), Some(vec![from]));
+        assert_eq!(plan.room_path(from, plan.rooms.len()), None);
+        assert_eq!(plan.room_path(plan.rooms.len(), from), None);
+        // …and the answer is a function of the plan, not of a hash order.
+        for _ in 0..16 {
+            assert_eq!(plan.room_path(from, to).as_deref(), Some(path.as_slice()));
+        }
+        println!(
+            "NPC1c interior: {} rooms over {} floors, {} door edges + {} stair \
+             links; entrance room {from} -> room {to} on floor 1 is {} rooms \
+             ({used_stair} of them a stair): {path:?}",
+            plan.rooms.len(),
+            plan.floors,
+            doors.len(),
+            stairs.len(),
+            path.len()
+        );
+    }
+
+    /// **The path and the reachability answer one graph** — every room a path
+    /// reaches is reachable and every reachable room has a path. Two walks over
+    /// two copies of one rule is the drift the shared `room_links` exists to
+    /// stop, and this is the arm that would see it.
+    #[test]
+    fn a_room_path_agrees_with_reachability() {
+        for arch in ArchetypeId::ALL {
+            let plan = plan_building(&BuildingParams {
+                archetype: arch,
+                footprint: Rect2::new(DVec2::new(0.0, 0.0), DVec2::new(26.0, 18.0)),
+                base_y: 12.5,
+                seed: 3,
+                floors: 2,
+            });
+            let from = entrance_room(&plan);
+            let seen = plan.reachable_rooms();
+            assert_eq!(seen.len(), plan.rooms.len());
+            for i in 0..plan.rooms.len() {
+                assert_eq!(
+                    plan.room_path(from, i).is_some(),
+                    seen[i],
+                    "{arch:?}: room {i} is reachable={} and has a path={}",
+                    seen[i],
+                    plan.room_path(from, i).is_some()
+                );
+            }
+            assert!(plan.fully_reachable(), "{arch:?} is not fully enterable");
+        }
+    }
+
+    /// **The interior routes up the stairs**, in metres, over the same rooms
+    /// `room_path` names.
+    #[test]
+    fn the_interior_nav_graph_routes_between_storeys() {
+        let plan = storeys();
+        let g = plan.interior_nav();
+        let doors = plan
+            .openings
+            .iter()
+            .filter(|o| o.kind == OpeningKind::Door)
+            .count();
+        assert_eq!(
+            g.len(),
+            plan.rooms.len() + doors,
+            "a node per room and a node per door opening"
+        );
+        for n in g.nodes() {
+            assert_eq!(inf_nav::domain::of(n.id), inf_nav::domain::BUILDING);
+            assert!(n.position.is_finite());
+        }
+        // A doorway node really stands in its own opening's threshold, at the
+        // walking surface of the floor the wall is on.
+        for (i, o) in plan.openings.iter().enumerate() {
+            if o.kind != OpeningKind::Door {
+                continue;
+            }
+            let node = g.node(doorway_node_id(i)).expect("every door is a node");
+            let w = &plan.walls[o.wall];
+            assert_eq!(node.kind, inf_nav::NavKind::Doorway);
+            assert_eq!(node.position.y, plan.floor_y(w.floor));
+            let (void, _) = plan.opening_void(o).expect("a door has a void");
+            let want = plan.frame.to_world(void.center());
+            assert!((node.position.x - want.x).abs() < 1e-12);
+            assert!((node.position.z - want.y).abs() < 1e-12);
+        }
+
+        let from = entrance_room(&plan);
+        let (to, _) = plan
+            .rooms_on(1)
+            .find(|(i, _)| *i != from)
+            .expect("a room on the first floor");
+        let r = inf_nav::route(&g, room_node_id(from), room_node_id(to))
+            .route()
+            .expect("the first floor is reachable from the front door");
+        let kinds = inf_nav::route::kinds_of(&g, &r.nodes);
+        assert!(
+            kinds.contains(&inf_nav::NavKind::Stair),
+            "a route between storeys that walked no stair went through a slab: \
+             {kinds:?}"
+        );
+        assert!(kinds.contains(&inf_nav::NavKind::Doorway));
+        assert_eq!(r.nodes.first(), Some(&room_node_id(from)));
+        assert_eq!(r.nodes.last(), Some(&room_node_id(to)));
+        // The route really climbs: it ends on the first floor's walking surface.
+        assert_eq!(
+            r.path.points()[r.path.points().len() - 1].y,
+            plan.floor_y(1)
+        );
+        assert!(r.cost_m >= plan.floor_height, "{} m", r.cost_m);
+        println!(
+            "NPC1c interior: {} nodes / {} directed edges ({} rooms + {doors} \
+             doorways); entrance -> floor 1 is {} nodes, {:.3} m, kinds {kinds:?}",
+            g.len(),
+            g.edge_count(),
+            plan.rooms.len(),
+            r.nodes.len(),
+            r.cost_m
+        );
+    }
+
+    /// **A sealed room is a refusal, not a route** — `None` from the sequence
+    /// and a `Disconnected` verdict from the search, both naming the same fact.
+    #[test]
+    fn a_sealed_room_answers_a_refusal_rather_than_a_route() {
+        let plan = storeys();
+        let from = entrance_room(&plan);
+        // A room on the ground floor that is not the entrance room and not the
+        // stair core — sealing a stair room would only prove that a stair is a
+        // stair.
+        let (target, _) = plan
+            .rooms_on(0)
+            .find(|(i, r)| *i != from && r.kind != RoomType::Stair)
+            .expect("a ground-floor room besides the entrance and the core");
+        assert!(
+            plan.room_path(from, target).is_some(),
+            "the fixture is sealed already"
+        );
+
+        // Brick up every door on a wall that touches it.
+        let mut sealed = plan.clone();
+        sealed.openings.retain(|o| {
+            let Some(w) = plan.walls.get(o.wall) else {
+                return true;
+            };
+            o.kind != OpeningKind::Door || (w.inside != target && w.outside != Some(target))
+        });
+        assert!(
+            sealed.openings.len() < plan.openings.len(),
+            "the fixture's own room had no doors to brick up"
+        );
+        assert_eq!(sealed.room_path(from, target), None);
+        assert!(!sealed.reachable_rooms()[target]);
+
+        let g = sealed.interior_nav();
+        let verdict = inf_nav::route(&g, room_node_id(from), room_node_id(target));
+        assert_eq!(
+            verdict,
+            inf_nav::NavVerdict::Disconnected {
+                from: room_node_id(from),
+                to: room_node_id(target),
+            },
+            "a sealed room answered {}",
+            verdict.reason()
+        );
+        // …and the room is still a node: it is unreachable, not absent, which is
+        // the distinction `OffGraph` exists to keep.
+        assert!(g.contains(room_node_id(target)));
+        println!(
+            "NPC1c interior: sealing room {target} removed {} door openings and \
+             left it a node with no route: \"{}\"",
+            plan.openings.len() - sealed.openings.len(),
+            verdict.reason()
+        );
     }
 }

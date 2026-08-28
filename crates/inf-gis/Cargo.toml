@@ -22,6 +22,11 @@ inf-math = { workspace = true }
 # a host crate depending on a runtime crate, which is the safe direction, and
 # `inf-mesh` has no edge back here.
 inf-mesh = { workspace = true }
+# NPC1c: the road network already IS an adjacency graph — junctions, start/end
+# nodes, `length_m` costs — and had no search. `RoadGraph::nav_graph` exposes it
+# as an `inf_nav::NavGraph`, which keeps "what a road is" in this crate and the
+# Dijkstra in that one. Ring 0 → Ring 0 leaf (glam + inf-math), no cycle.
+inf-nav = { workspace = true }
 
 # ── THE FACADE (architecture rule: one crate names each heavy dependency) ────
 # This crate is the ONLY one in the workspace that names proj4rs, shapefile,

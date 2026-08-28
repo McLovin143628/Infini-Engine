@@ -482,6 +482,76 @@ impl RoadGraph {
         }
         best
     }
+
+    /// **The road network as an [`inf_nav::NavGraph`]** — the same adjacency
+    /// this struct has always been, in the one shape a search runs on.
+    ///
+    /// Nothing here is re-derived. An intersection is already a node with a
+    /// world position; a segment is already an edge naming two of them and
+    /// carrying a surveyed centreline. All this does is tag the ids into
+    /// `inf-nav`'s namespace ([`inf_nav::domain::ROAD`], which exists because
+    /// three producers mint ids independently and `NavGraph::absorb` joins on id
+    /// *equality*) and hand each segment's **interior** spine points over as the
+    /// edge's `via`, so a route across a switchback climbs it rather than
+    /// cutting the corner. The spine is stored in the source's own vertex order
+    /// and `from_layer` derives `start_node` from `spine[0]`, so `via` is
+    /// already in `start → end` order and needs no reversal;
+    /// `NavGraph::link_with_cost` reverses it for the other half of the link.
+    ///
+    /// The graph stays **derived and never persisted**, exactly as this one is —
+    /// so exposing it costs no schema ladder either (see the module docs).
+    ///
+    /// # The cost is `length_m`, which is the PLAN length
+    ///
+    /// [`RoadSegment::length_m`] measures on the XZ plane, and the spine it
+    /// measures is three-dimensional — so a road climbing a grade is priced
+    /// here slightly under the chain a body actually walks. That is deliberate
+    /// and it is why this uses `link_with_cost` rather than `link`, which would
+    /// measure the chain: `length_m` is the number this layer reports
+    /// everywhere else — `total_length_m`, the import report, the wizard's
+    /// preview — and a route whose `cost_m` did not add up to the lengths of the
+    /// segments it names would be a second opinion about the same road. The
+    /// geometry is still carried, so `NavRoute::path.length_m()` is the number
+    /// to read when the climb is what matters, and the two are the same on the
+    /// flat.
+    ///
+    /// # A segment that begins and ends at one junction carries no route
+    ///
+    /// A loop — a roundabout digitised as one closed feature, a cul-de-sac ring
+    /// — snaps both of its endpoints into the same lattice cell and therefore
+    /// onto the same node, and `link_with_cost` refuses `a == b` because a
+    /// self-edge can only ever lengthen a route. Its *geometry* is untouched: it
+    /// still builds a ribbon and still paves ground. What it cannot do is be
+    /// walked, and splitting it would need a second node this layer gave it no
+    /// endpoint for — a named limit rather than a silent one, pinned by
+    /// `a_self_looping_segment_carries_no_route`.
+    pub fn nav_graph(&self) -> inf_nav::NavGraph {
+        let mut g = inf_nav::NavGraph::new();
+        for n in self.intersections.values() {
+            g.add_node(
+                inf_nav::domain::ROAD | n.id,
+                n.position,
+                inf_nav::NavKind::Road,
+            );
+        }
+        for s in self.segments.values() {
+            // The points strictly BETWEEN the two junctions. A two-point spine
+            // has none, which costs a `Vec` header and no allocation.
+            let via: Vec<DVec3> = if s.spine.len() > 2 {
+                s.spine[1..s.spine.len() - 1].to_vec()
+            } else {
+                Vec::new()
+            };
+            g.link_with_cost(
+                inf_nav::domain::ROAD | s.start_node,
+                inf_nav::domain::ROAD | s.end_node,
+                inf_nav::NavKind::Road,
+                via,
+                s.length_m(),
+            );
+        }
+        g
+    }
 }
 
 /// A quad-ribbon mesh generated along a road spine.
@@ -2187,5 +2257,142 @@ mod tests {
         assert!(g.skipped[0].contains("point"), "{:?}", g.skipped);
         assert!(g.skipped[1].contains("at least 2"), "{:?}", g.skipped);
         assert!(g.skipped[2].contains("non-finite"), "{:?}", g.skipped);
+    }
+
+    // ── the network as a NavGraph (NPC1c) ───────────────────────────────────
+
+    /// **One node per junction, one link per segment** — the road network handed
+    /// to the search unchanged, not a second graph derived beside it.
+    #[test]
+    fn the_road_network_is_a_nav_graph_junction_for_junction() {
+        let graph = t_junction();
+        let nav = graph.nav_graph();
+        assert_eq!(
+            nav.len(),
+            graph.intersections.len(),
+            "a junction that is not a node is a place no route can turn at"
+        );
+        // `edge_count` counts directed halves and a link adds both, so three
+        // segments between three distinct pairs are six halves.
+        assert_eq!(nav.edge_count(), 2 * graph.segments.len());
+        for n in graph.intersections.values() {
+            let id = inf_nav::domain::ROAD | n.id;
+            assert!(nav.contains(id), "junction {} is missing", n.id);
+            assert_eq!(nav.node(id).unwrap().position, n.position);
+            assert_eq!(nav.node(id).unwrap().kind, inf_nav::NavKind::Road);
+        }
+        // Every id belongs to the road domain, which is the whole reason
+        // `absorb` can fold a town's grid into an island's roads without welding
+        // a junction to a bedroom.
+        for n in nav.nodes() {
+            assert_eq!(inf_nav::domain::of(n.id), inf_nav::domain::ROAD);
+        }
+        println!(
+            "NPC1c roads: {} junctions ({} of degree 3+), {} segments -> {} nodes / \
+             {} directed edges",
+            graph.intersections.len(),
+            graph.junctions().count(),
+            graph.segments.len(),
+            nav.len(),
+            nav.edge_count()
+        );
+    }
+
+    /// **A route's cost is the layer's own `length_m`, summed** — the claim
+    /// `link_with_cost` is used for, measured rather than argued.
+    #[test]
+    fn a_route_across_a_chain_costs_the_segments_own_lengths() {
+        let graph = t_junction();
+        let nav = graph.nav_graph();
+        let west = nav.nearest(DVec3::ZERO).expect("Broadway's west end");
+        let east = nav
+            .nearest(DVec3::new(200.0, 0.0, 0.0))
+            .expect("Broadway's east end");
+        let r = inf_nav::route(&nav, west, east)
+            .route()
+            .expect("Broadway is one street in two features");
+        // Three nodes: the two ends and the junction the two features share.
+        assert_eq!(r.nodes.len(), 3, "{:?}", r.nodes);
+        let want: f64 = graph
+            .segments
+            .values()
+            .filter(|s| s.name.starts_with("Broadway"))
+            .map(RoadSegment::length_m)
+            .sum();
+        assert!(
+            (r.cost_m - want).abs() < 1e-9,
+            "the route cost {} m and the two segments are {want} m",
+            r.cost_m
+        );
+        assert!((want - 200.0).abs() < 1e-9, "the fixture moved: {want} m");
+        println!(
+            "NPC1c roads: Broadway west->east is {} nodes, {:.3} m of cost against \
+             {:.3} m of `length_m`, {:.3} m of walked chain",
+            r.nodes.len(),
+            r.cost_m,
+            want,
+            r.path.length_m()
+        );
+    }
+
+    /// **The spine is spliced into the route**, so an agent handed a switchback
+    /// climbs it instead of walking through the hill it goes round.
+    #[test]
+    fn a_switchbacks_spine_is_spliced_into_the_route() {
+        let graph = RoadGraph::from_layer(&layer(vec![GeoFeature::new(line(&[
+            (0.0, 0.0),
+            (50.0, 80.0),
+            (100.0, 0.0),
+        ]))]));
+        assert_eq!(graph.segments.len(), 1);
+        let nav = graph.nav_graph();
+        let a = nav.nearest(DVec3::ZERO).unwrap();
+        let b = nav.nearest(DVec3::new(100.0, 0.0, 0.0)).unwrap();
+        let r = inf_nav::route(&nav, a, b).route().expect("one segment");
+        assert_eq!(r.path.points().len(), 3, "the bend was dropped");
+        assert_eq!(r.path.points()[1], DVec3::new(50.0, 0.0, 80.0));
+        let chord = 100.0;
+        assert!(
+            r.path.length_m() > chord * 1.8,
+            "THE CHORD MUST BE PRICED: a route that cut this corner would be \
+             {chord} m and the survey is {} m",
+            r.path.length_m()
+        );
+        // …and the cost the search reports is the segment's own length, which on
+        // a flat spine is the chain it walked.
+        let seg = graph.segments.values().next().unwrap();
+        assert!((r.cost_m - seg.length_m()).abs() < 1e-9);
+        assert!((r.cost_m - r.path.length_m()).abs() < 1e-9);
+        println!(
+            "NPC1c roads: a switchback is {:.3} m of route against a {chord} m chord",
+            r.path.length_m()
+        );
+    }
+
+    /// **A loop carries no route** — both of its endpoints snap onto one
+    /// junction, and a self-edge can only ever lengthen a walk. The geometry
+    /// survives; only the link is refused.
+    #[test]
+    fn a_self_looping_segment_carries_no_route() {
+        let graph = RoadGraph::from_layer(&layer(vec![GeoFeature::new(line(&[
+            (0.0, 0.0),
+            (50.0, 0.0),
+            (50.0, 50.0),
+            (0.0, 0.0),
+        ]))]));
+        assert_eq!(graph.segments.len(), 1, "the loop is still a road");
+        let seg = graph.segments.values().next().unwrap();
+        assert_eq!(
+            seg.start_node, seg.end_node,
+            "the fixture must really close on itself or this arm proves nothing"
+        );
+        assert!(seg.length_m() > 0.0);
+        let nav = graph.nav_graph();
+        assert_eq!(nav.len(), 1);
+        assert_eq!(nav.edge_count(), 0, "a self-edge reached the graph");
+        println!(
+            "NPC1c roads: a {:.1} m closed loop is 1 node and 0 edges",
+            seg.length_m()
+        );
     }
 }

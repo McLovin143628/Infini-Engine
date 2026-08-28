@@ -30,6 +30,15 @@ inf-terrain = { workspace = true }
 # frames carry, and the curve that does it lives once, in `inf_water::river`,
 # rather than being spelt again in each of the two scene projectors.
 inf-water = { workspace = true }
+# The route substrate a crowd agent walks (NPC1c). Ring-0 → Ring-0: `inf-nav`
+# names only glam + inf-math, so there is no cycle. It is here for ONE thing —
+# `CrowdRoute` holds a `NavPath`, so an agent's place is an interpolation along a
+# shared arc-length polyline rather than a straight line between two points, and
+# a thousand agents sent down one street hold one copy of it. This crate does NOT
+# name a road, a street or a building plan: the three producers of those live in
+# `inf-gis`, `inf-editor-core` and `inf-pcg`, and each hands this crate a
+# finished path.
+inf-nav = { workspace = true }
 # The pose pipeline a `.inf_sm` machine evaluates into (P24.1). Ring-0 → Ring-0:
 # `inf-anim` names only glam/serde/thiserror/inf-asset, so there is no cycle.
 #

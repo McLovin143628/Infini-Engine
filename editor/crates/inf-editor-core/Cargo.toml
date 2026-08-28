@@ -39,6 +39,12 @@ inf-math = { workspace = true }
 # crate is the editor, and nothing in the shipped player links it.
 inf-gis = { workspace = true }
 inf-island = { workspace = true }
+# NPC1c: a settlement's streets were planned, used to place blocks and then
+# never asked a question of. `Settlement::street_graph` exposes the grid as an
+# `inf_nav::NavGraph`, so an island route arriving on the central crossroads has
+# a local network to hand over to. Ring 1 -> Ring 0 leaf; the search lives there
+# and the knowledge of what a street is stays here.
+inf-nav = { workspace = true }
 inf-asset = { workspace = true }
 # The embedded DCC's half-edge mesh kernel (P23.3/P23.4): the Model Editor edits
 # a `MeshSession` and previews it through `crate::dcc`. Ring 1 -> Ring 0.

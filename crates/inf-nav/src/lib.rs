@@ -62,6 +62,36 @@ pub use graph::{NavEdge, NavGraph, NavKind, NavNode, NavNodeId};
 pub use path::{NavPath, PathProjection};
 pub use route::{route, NavRoute, NavVerdict};
 
+/// **The id namespace**, because [`NavGraph::absorb`] joins on id equality.
+///
+/// Three producers mint node ids independently and their graphs are folded into
+/// one before an agent walks it, so two of them handing out the same number
+/// would silently weld a road junction to a bedroom. The top four bits name who
+/// minted an id; the low sixty are the producer's own.
+///
+/// This lives here rather than three times over for the reason this tree keeps
+/// re-learning: a namespace agreed in three files is a namespace that drifts.
+/// It is not a claim that `inf-nav` knows what a road is — it does not, and
+/// nothing in this crate reads these constants. It knows that ids collide.
+pub mod domain {
+    /// `inf_gis::RoadGraph::nav_graph` — island roads.
+    pub const ROAD: u64 = 1 << 60;
+    /// `inf_editor_core::settlement::Settlement::street_graph` — town streets.
+    pub const STREET: u64 = 2 << 60;
+    /// `inf_pcg::BuildingPlan::interior_nav` — rooms, doorways and stairs.
+    pub const BUILDING: u64 = 3 << 60;
+    /// Reserved for a caller composing nodes of its own — a gate placing a
+    /// destination, a level naming a spawn point.
+    pub const CALLER: u64 = 15 << 60;
+    /// The mask that recovers a producer's own id from a tagged one.
+    pub const LOCAL_MASK: u64 = (1 << 60) - 1;
+
+    /// Which domain minted `id`, as the tag alone.
+    pub fn of(id: u64) -> u64 {
+        id & !LOCAL_MASK
+    }
+}
+
 /// An `f64` ordered by [`f64::total_cmp`], so a cost can key a `BinaryHeap`.
 ///
 /// `total_cmp` rather than a partial compare with an `unwrap`: a NaN cost is a
