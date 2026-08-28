@@ -3506,6 +3506,92 @@ pub struct PcgVolume {
     #[serde(skip)]
     #[reflect(ignore)]
     pub structure_groups: Vec<StructureGroup>,
+    /// **Every place a person can be in this volume's buildings** (NPC1d) — a
+    /// dependency-light mirror of `inf_pcg::PcgSlot`, on exactly the terms
+    /// [`DoorwaySlot`] mirrors `inf_pcg::building::PcgDoorway`.
+    ///
+    /// `#[serde(skip)]` + `#[reflect(ignore)]` for the reason
+    /// [`doorways`](Self::doorways) is, and **that is why the wave that puts a
+    /// population on an island bumps no schema**: a slot is derived from the
+    /// graph and the terrain, both of which the loading host already has, so it
+    /// reaches no bytes.
+    ///
+    /// Located in the world and naming only its own building's ordinal, so
+    /// nothing here has to be re-based when populations are concatenated.
+    ///
+    /// Read by `inf_ecs::society`, which is the one thing that knows the whole
+    /// level and can therefore pair a home with a work.
+    #[serde(skip)]
+    #[reflect(ignore)]
+    pub residents: Vec<ResidentSlot>,
+    /// **The walkable interior of this volume's slot-bearing buildings**
+    /// (NPC1d), in the level's own nav namespace.
+    ///
+    /// Derived with [`residents`](Self::residents) and written through the same
+    /// door, because a slot names a node *in this graph* and a graph that
+    /// outlived the slots that index it would answer for somebody else's rooms.
+    /// `#[serde(skip)]` + `#[reflect(ignore)]` on the same terms as everything
+    /// else here — `inf_nav::NavGraph` is not even `Serialize`, which is the
+    /// point rather than an obstacle.
+    #[serde(skip)]
+    #[reflect(ignore)]
+    pub interior_nav: inf_nav::NavGraph,
+}
+
+/// **One place one person can be** (NPC1d): a dependency-light mirror of
+/// `inf_pcg::building::society::PcgSlot`, on the P19.5 mirror terms
+/// ([`ScatteredSolid`], [`DoorwaySlot`]). Derived, never serialized, never
+/// reflected.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResidentSlot {
+    /// What this place is for.
+    pub role: SlotRole,
+    /// The room's centre on its own walking surface, world metres.
+    pub at: DVec3,
+    /// Index into the plan's rooms — what a caller turns into an `inf_nav` node
+    /// id once it has minted the building's salt.
+    pub room: u32,
+    /// Which of the volume's own buildings this belongs to.
+    pub building: u32,
+    /// The storey, 0-based.
+    pub floor: u32,
+    /// Which of the room's own slots this is.
+    pub index: u32,
+    /// The node of [`PcgVolume::interior_nav`] this slot stands on.
+    pub node: inf_nav::NavNodeId,
+}
+
+/// **What a room offers a person** — the mirror of `inf_pcg::SlotRole`, and the
+/// vocabulary `inf_ecs::society`'s schedules are written in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SlotRole {
+    /// Somewhere to sleep.
+    Home,
+    /// Somewhere to work.
+    Work,
+    /// Somewhere to go that is neither — a shop.
+    Errand,
+}
+
+impl SlotRole {
+    /// A stable short name for diagnostics and gate traces.
+    pub fn name(self) -> &'static str {
+        match self {
+            SlotRole::Home => "home",
+            SlotRole::Work => "work",
+            SlotRole::Errand => "errand",
+        }
+    }
+
+    /// The byte this role folds into a trace. Frozen: `Home` 0, `Work` 1,
+    /// `Errand` 2.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            SlotRole::Home => 0,
+            SlotRole::Work => 1,
+            SlotRole::Errand => 2,
+        }
+    }
 }
 
 fn default_pcg_extent() -> Vec2d {
@@ -3527,6 +3613,8 @@ impl Default for PcgVolume {
             doorways: Vec::new(),
             structures_gen: 0,
             structure_groups: Vec::new(),
+            residents: Vec::new(),
+            interior_nav: inf_nav::NavGraph::new(),
         }
     }
 }
@@ -3598,8 +3686,12 @@ impl PcgVolume {
         solids: Vec<ScatteredSolid>,
         groups: Vec<StructureGroup>,
         doorways: Vec<DoorwaySlot>,
+        residents: Vec<ResidentSlot>,
+        interior_nav: inf_nav::NavGraph,
     ) {
         self.doorways = doorways;
+        self.residents = residents;
+        self.interior_nav = interior_nav;
         let (ns, ni) = (solids.len(), instances.len());
         self.evaluated = instances;
         self.structures = solids;
@@ -6326,6 +6418,28 @@ mod tests {
                 inst_start: 0,
                 inst_len: 1,
             }],
+            // NPC1d's population rides the same way, and **that is the whole
+            // schema answer for the wave that puts a society on an island**: a
+            // level's residents are derived from its own buildings, so they
+            // reach no bytes and force no bump.
+            residents: vec![ResidentSlot {
+                role: SlotRole::Home,
+                at: DVec3::new(4.0, 5.0, 6.0),
+                room: 3,
+                building: 1,
+                floor: 2,
+                index: 0,
+                node: 0x3000_0000_0000_0003,
+            }],
+            interior_nav: {
+                let mut g = inf_nav::NavGraph::new();
+                g.add_node(
+                    0x3000_0000_0000_0003,
+                    DVec3::new(4.0, 5.0, 6.0),
+                    inf_nav::NavKind::Room,
+                );
+                g
+            },
         };
         let json = serde_json::to_string(&v).unwrap();
         // The skipped caches are absent from the serialized form …
@@ -6333,11 +6447,15 @@ mod tests {
         assert!(!json.contains("structures"));
         assert!(!json.contains("structures_gen"));
         assert!(!json.contains("structure_groups"));
+        assert!(!json.contains("residents"));
+        assert!(!json.contains("interior_nav"));
         let back: PcgVolume = serde_json::from_str(&json).unwrap();
         // … and decode empty, while the persisted fields round-trip.
         assert!(back.evaluated.is_empty());
         assert!(back.structures.is_empty());
         assert!(back.structure_groups.is_empty());
+        assert!(back.residents.is_empty());
+        assert!(back.interior_nav.is_empty());
         assert_eq!(back.structures_gen, 0, "the change stamp is derived too");
         assert_eq!(back.graph, v.graph);
         assert_eq!(back.extent, v.extent);
@@ -6393,6 +6511,8 @@ mod tests {
                 group(2, 1, 3, 2), // one instance past the end
             ],
             Vec::new(),
+            Vec::new(),
+            Default::default(),
         );
         assert_eq!(v.structure_groups.len(), 1, "{:?}", v.structure_groups);
         assert_eq!(v.structure_groups[0].range(), 0..3);
@@ -6412,6 +6532,8 @@ mod tests {
             vec![solid; 1],
             vec![group(0, 1, 0, 1)],
             Vec::new(),
+            Vec::new(),
+            Default::default(),
         );
         let second = v.structures_gen;
         assert!(second > first, "{first} then {second}");
@@ -6455,6 +6577,8 @@ mod tests {
                 group(0, 1, 0, 1), // backwards
             ],
             Vec::new(),
+            Vec::new(),
+            Default::default(),
         );
         assert_eq!(w.structure_groups.len(), 2, "{:?}", w.structure_groups);
         assert_eq!(w.structure_groups[0].range(), 0..2);

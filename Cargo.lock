@@ -3665,6 +3665,7 @@ dependencies = [
  "inf-material",
  "inf-math",
  "inf-mesh",
+ "inf-nav",
  "inf-packager",
  "inf-pcg",
  "inf-physics",

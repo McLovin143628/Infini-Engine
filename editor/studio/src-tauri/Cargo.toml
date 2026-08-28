@@ -49,6 +49,9 @@ inf-packager = { workspace = true }
 inf-graph = { workspace = true }
 inf-ecs = { workspace = true }
 inf-pcg = { workspace = true }
+# NPC1d: `commands::pcg`'s `population_of` mirror carries a volume's own interior
+# nav graph out of the evaluation, exactly as the shipped player's twin does.
+inf-nav = { workspace = true }
 # The Terrain Import wizard commands read a produced `.inf_terrain` header back
 # (grid config for the spawned component, tile counts for the done state) and
 # name the lattice type the plan command computes with (P16.4a).

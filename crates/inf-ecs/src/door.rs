@@ -1632,7 +1632,14 @@ mod tests {
             let mut vol = PcgVolume::default();
             let slots: Vec<DoorwaySlot> =
                 (0..n).map(|i| slot(guid as f64 + i as f64 * 0.1)).collect();
-            vol.set_population(Vec::new(), Vec::new(), Vec::new(), slots);
+            vol.set_population(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                slots,
+                Vec::new(),
+                Default::default(),
+            );
             w.world_mut().entity_mut(e).insert(vol);
         }
         w.mark_dirty();

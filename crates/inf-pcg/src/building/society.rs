@@ -51,6 +51,40 @@
 
 use super::{BuildingPlan, RoomType};
 use glam::DVec3;
+use uuid::Uuid;
+
+/// **The nav-namespace salt of one building** — which building this is, in a
+/// level's whole network (NPC1d).
+///
+/// `(volume, ordinal)` is the level's own name for a building: a `PcgVolume`'s
+/// `Guid` and the position `plans_of` returned the plan in. Both halves are
+/// needed — one volume grows many buildings and one level holds many volumes —
+/// and neither is dense across a level, so the pair is *hashed* into the
+/// thirty-nine-bit field rather than counted into it. A counter would have to be
+/// assigned by something that has seen the whole level at once, and in a
+/// streaming world nothing has.
+///
+/// A volume with no `Guid` (`None`) salts on the ordinal alone, which is right
+/// for the one-volume case a unit fixture is.
+///
+/// Collisions are the hazard this width exists for: two buildings sharing a salt
+/// weld a bedroom to a bedroom, silently. At 2³⁹ over the island's own thousand
+/// buildings that is about one time in a million, and
+/// `inf_ecs::society` counts them anyway.
+pub fn building_salt(volume: Option<Uuid>, ordinal: u32) -> u64 {
+    let (lo, hi) = match volume {
+        Some(v) => {
+            let b = v.as_u128();
+            (b as u64, (b >> 64) as u64)
+        }
+        None => (0, 0),
+    };
+    crate::hash::Hash64::new(lo)
+        .mix_u64(hi)
+        .mix_u64(u64::from(ordinal))
+        .finish()
+        & super::NAV_SALT_MASK
+}
 
 /// Square metres of office floor a worker takes.
 ///
@@ -133,6 +167,12 @@ pub struct PcgSlot {
     /// stand on the same node and differ only here, which is what makes a slot's
     /// identity stable when the room's area changes by a rounding.
     pub index: u32,
+    /// **The nav node this slot stands on**, in the level's own namespace —
+    /// `room_node_id_in(building_salt(volume, building), room)`.
+    ///
+    /// Carried rather than re-derived because the salt is the *level's* word and
+    /// a consumer holding a slot may not hold the volume it came from.
+    pub node: inf_nav::NavNodeId,
 }
 
 /// **How many people a room of this kind and area holds**, and in which role.
@@ -174,7 +214,7 @@ pub fn occupancy(kind: RoomType, area_m2: f64) -> (SlotRole, usize) {
 /// Deterministic by construction: it walks [`BuildingPlan::rooms`], which is
 /// floor-major then partition order, and appends in that order. No sort, no map,
 /// no seed.
-pub fn slots_of(plan: &BuildingPlan, building: u32) -> Vec<PcgSlot> {
+pub fn slots_of(plan: &BuildingPlan, building: u32, salt: u64) -> Vec<PcgSlot> {
     let mut out = Vec::new();
     for (i, room) in plan.rooms.iter().enumerate() {
         let (role, n) = occupancy(room.kind, room.rect.area());
@@ -186,6 +226,7 @@ pub fn slots_of(plan: &BuildingPlan, building: u32) -> Vec<PcgSlot> {
         if !at.is_finite() {
             continue;
         }
+        let node = super::room_node_id_in(salt, i);
         for k in 0..n {
             out.push(PcgSlot {
                 role,
@@ -194,6 +235,7 @@ pub fn slots_of(plan: &BuildingPlan, building: u32) -> Vec<PcgSlot> {
                 building,
                 floor: room.floor,
                 index: k as u32,
+                node,
             });
         }
         // **A shop is one errand however many people staff it.** The visit slot
@@ -207,6 +249,7 @@ pub fn slots_of(plan: &BuildingPlan, building: u32) -> Vec<PcgSlot> {
                 building,
                 floor: room.floor,
                 index: n as u32,
+                node,
             });
         }
     }
@@ -283,7 +326,7 @@ mod tests {
     #[test]
     fn a_house_holds_a_household_and_an_office_holds_workers() {
         let house = plan_of(ArchetypeId::House, 2);
-        let hs = slots_of(&house, 0);
+        let hs = slots_of(&house, 0, 0);
         let homes = hs.iter().filter(|s| s.role == SlotRole::Home).count();
         let works = hs.iter().filter(|s| s.role == SlotRole::Work).count();
         assert!(
@@ -299,7 +342,7 @@ mod tests {
         assert_eq!(works, 0, "a House holds workers");
 
         let office = plan_of(ArchetypeId::Office, 3);
-        let os = slots_of(&office, 0);
+        let os = slots_of(&office, 0, 0);
         assert_eq!(
             os.iter().filter(|s| s.role == SlotRole::Home).count(),
             0,
@@ -313,11 +356,11 @@ mod tests {
 
     #[test]
     fn an_apartment_holds_more_people_than_a_house_on_the_same_lot() {
-        let house = slots_of(&plan_of(ArchetypeId::House, 2), 0)
+        let house = slots_of(&plan_of(ArchetypeId::House, 2), 0, 0)
             .iter()
             .filter(|s| s.role == SlotRole::Home)
             .count();
-        let flats = slots_of(&plan_of(ArchetypeId::Apartment, 4), 0)
+        let flats = slots_of(&plan_of(ArchetypeId::Apartment, 4), 0, 0)
             .iter()
             .filter(|s| s.role == SlotRole::Home)
             .count();
@@ -331,7 +374,7 @@ mod tests {
     #[test]
     fn a_shop_offers_an_errand_as_well_as_its_jobs() {
         let shop = plan_of(ArchetypeId::Shop, 2);
-        let ss = slots_of(&shop, 7);
+        let ss = slots_of(&shop, 7, 0);
         let errands: Vec<_> = ss.iter().filter(|s| s.role == SlotRole::Errand).collect();
         let retail = shop
             .rooms
@@ -358,7 +401,7 @@ mod tests {
         let plan = plan_of(ArchetypeId::Apartment, 3);
         let g = plan.interior_nav();
         let mut checked = 0usize;
-        for s in slots_of(&plan, 0) {
+        for s in slots_of(&plan, 0, 0) {
             let node = g
                 .node(crate::building::room_node_id(s.room as usize))
                 .expect("every slot names a room the interior graph has");
@@ -375,13 +418,37 @@ mod tests {
         assert!(checked > 0, "the plan offered no slot to check");
     }
 
+    /// The slot's node id is the level's word for that room, and two buildings
+    /// salted apart never share one.
+    #[test]
+    fn a_slots_node_is_its_own_buildings_room_in_the_levels_namespace() {
+        let plan = plan_of(ArchetypeId::House, 2);
+        let v = Uuid::from_u128(0x50C1_E7A0);
+        let (s0, s1) = (building_salt(Some(v), 0), building_salt(Some(v), 1));
+        assert_ne!(s0, s1, "two buildings of one volume share a salt");
+        assert_ne!(
+            building_salt(Some(v), 0),
+            building_salt(Some(Uuid::from_u128(0x50C1_E7A1)), 0),
+            "two volumes' first buildings share a salt"
+        );
+        assert_eq!(building_salt(Some(v), 0), building_salt(Some(v), 0));
+        assert!(s0 <= super::super::NAV_SALT_MASK);
+        for slot in slots_of(&plan, 0, s0) {
+            assert_eq!(
+                slot.node,
+                crate::building::room_node_id_in(s0, slot.room as usize)
+            );
+            assert_eq!(crate::building::node_salt(slot.node), s0);
+        }
+    }
+
     #[test]
     fn slots_are_a_pure_function_of_the_plan() {
         let plan = plan_of(ArchetypeId::Hotel, 4);
-        assert_eq!(slots_of(&plan, 3), slots_of(&plan, 3));
+        assert_eq!(slots_of(&plan, 3, 5), slots_of(&plan, 3, 5));
         // The ordinal is the only thing a caller can change.
-        let a = slots_of(&plan, 0);
-        let b = slots_of(&plan, 1);
+        let a = slots_of(&plan, 0, 0);
+        let b = slots_of(&plan, 1, 0);
         assert_eq!(a.len(), b.len());
         assert!(a.iter().zip(&b).all(|(x, y)| x.role == y.role
             && x.room == y.room

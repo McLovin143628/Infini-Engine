@@ -511,7 +511,14 @@ fn scatter_fixture() -> RuntimeSim {
     let e = world.spawn_with_guid(Uuid::from_u128(VOLUME_GUID), "Blocks", None);
     let mut vol = inf_ecs::components::PcgVolume::default();
     let (inst, solid, groups) = population(SCATTER_N, 0.0);
-    vol.set_population(inst, solid, groups, Vec::new());
+    vol.set_population(
+        inst,
+        solid,
+        groups,
+        Vec::new(),
+        Vec::new(),
+        Default::default(),
+    );
     world
         .world_mut()
         .entity_mut(e)
@@ -611,7 +618,14 @@ fn a_carried_scatter_still_sees_a_new_population() {
             .world_mut()
             .get_mut::<inf_ecs::components::PcgVolume>(e)
             .expect("the fixture's volume component");
-        vol.set_population(inst, solid, groups, Vec::new());
+        vol.set_population(
+            inst,
+            solid,
+            groups,
+            Vec::new(),
+            Vec::new(),
+            Default::default(),
+        );
     }
 
     project_scatter(&mut scene, &sim);
@@ -660,7 +674,14 @@ fn a_reincarnated_volume_never_serves_the_old_population() {
         let mut fresh = inf_ecs::components::PcgVolume::default();
         assert_eq!(fresh.structures_gen, 0, "a fresh component is unwritten");
         let (inst, solid, groups) = population(SCATTER_N, 13.0);
-        fresh.set_population(inst, solid, groups, Vec::new());
+        fresh.set_population(
+            inst,
+            solid,
+            groups,
+            Vec::new(),
+            Vec::new(),
+            Default::default(),
+        );
         assert_ne!(
             fresh.structures_gen, old_stamp,
             "a reincarnated volume took the dead one's stamp — the memo would \

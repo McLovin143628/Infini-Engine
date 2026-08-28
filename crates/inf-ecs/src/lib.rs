@@ -76,12 +76,12 @@ pub use components::{
     ComputedVisibility, Destructible, DoorwaySlot, Gait, GlobalTransform, Guid, HairGuides,
     IkGoalRecord, IkTarget, Joint2D, Joint3D, JointKind2D, JointKind3D, LandingKind, Light,
     LightKind, Material, MeshRef, MovementDirection, MovementMode, MovementRefusal,
-    MovementRuntime, Name, PcgVolume, Primitive, RigidBody2D, RigidBody3D, RootMotion,
-    RootMotionMode, RotationMode, ScatteredInstance, ScatteredSolid, SkeletalMesh, SkyAtmosphere,
-    SmRuntimeState, SpeedCurve, Sprite, StructureGroup, Terrain, TileBounds, TileChunk, Tilemap,
-    TimeOfDay, Transform, VehicleClass, Visibility, VoxelVolume, CHUNK_DIM, CHUNK_TILES,
-    CRACK_OPENING_M, DEFAULT_DESTRUCTIBLE_CHUNKS, DEFAULT_DESTRUCTIBLE_DENSITY,
-    DEFAULT_STRENGTH_PA,
+    MovementRuntime, Name, PcgVolume, Primitive, ResidentSlot, RigidBody2D, RigidBody3D,
+    RootMotion, RootMotionMode, RotationMode, ScatteredInstance, ScatteredSolid, SkeletalMesh,
+    SkyAtmosphere, SlotRole, SmRuntimeState, SpeedCurve, Sprite, StructureGroup, Terrain,
+    TileBounds, TileChunk, Tilemap, TimeOfDay, Transform, VehicleClass, Visibility, VoxelVolume,
+    CHUNK_DIM, CHUNK_TILES, CRACK_OPENING_M, DEFAULT_DESTRUCTIBLE_CHUNKS,
+    DEFAULT_DESTRUCTIBLE_DENSITY, DEFAULT_STRENGTH_PA,
 };
 // P24.2: the IK write door. `pose` and `deform` are otherwise spelled in full
 // by callers (the source-text mirror gates key on that), but a *write door* a

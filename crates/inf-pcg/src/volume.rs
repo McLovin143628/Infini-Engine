@@ -36,6 +36,9 @@ pub struct VolumeOutput {
     /// Located in the world and naming only its own building's ordinal, so
     /// composition neither shifts nor re-bases them.
     pub slots: Vec<crate::building::society::PcgSlot>,
+    /// **The walkable interior of this volume's slot-bearing buildings**
+    /// (NPC1d), already in the level's own namespace.
+    pub interior: inf_nav::NavGraph,
 }
 
 /// Join a volume's scatter instances with its grammar/building output.
@@ -54,6 +57,7 @@ pub fn compose_volume(scatter: Vec<PcgInstance>, grammar: GrammarOutput) -> Volu
         colliders: grammar.colliders,
         doorways: grammar.doorways,
         slots: grammar.slots,
+        interior: grammar.interior,
         groups: grammar
             .groups
             .into_iter()
@@ -109,6 +113,7 @@ mod tests {
             doorways: Vec::new(),
             decor: Vec::new(),
             slots: Vec::new(),
+            interior: inf_nav::NavGraph::new(),
         };
         let scatter: Vec<PcgInstance> = (0..7).map(inst).collect();
         let out = compose_volume(scatter, grammar);

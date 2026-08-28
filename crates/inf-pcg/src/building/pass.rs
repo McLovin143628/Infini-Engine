@@ -378,13 +378,23 @@ pub fn evaluate_buildings_in(
         // a slot is already in world metres because `interior_nav` and
         // `slots_of` both go through the plan's own frame, which is why there is
         // no `place_slots_in_frame` beside the doorway call above.
-        let slots = super::society::slots_of(&out.plan, ordinal);
+        let salt = super::society::building_salt(cx.entity, ordinal);
+        let slots = super::society::slots_of(&out.plan, ordinal, salt);
+        // A building nobody lives or works in contributes no interior: a
+        // route's endpoints are slots, and carrying a warehouse's corridors
+        // into a level's network is nodes nothing ever asks for.
+        let interior = if slots.is_empty() {
+            inf_nav::NavGraph::new()
+        } else {
+            out.plan.interior_nav_in(salt)
+        };
         GrammarOutput {
             instances: out.instances,
             colliders: out.colliders,
             groups,
             doorways,
             slots,
+            interior,
             // `build_in` has already folded the assembler's decoration tail
             // into `instances` (I8b), so a building's panes are inside its own
             // group's instance range and there is nothing left here.

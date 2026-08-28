@@ -883,7 +883,14 @@ fn spawn_house(w: &mut EcsWorld, guid: Uuid, at: DVec3) -> usize {
     let mut t = Transform::IDENTITY;
     t.translation = Vec3d::from_dvec3(at);
     let mut vol = inf_ecs::PcgVolume::default();
-    vol.set_population(Vec::new(), solids, Vec::new(), slots);
+    vol.set_population(
+        Vec::new(),
+        solids,
+        Vec::new(),
+        slots,
+        Vec::new(),
+        Default::default(),
+    );
     w.world_mut().entity_mut(e).insert((t, vol));
     w.mark_dirty();
     w.propagate();
@@ -1421,7 +1428,14 @@ fn a_citys_doorway_gather_is_paid_once_a_gameplay_step() {
         })
         .collect();
     let mut vol = inf_ecs::PcgVolume::default();
-    vol.set_population(Vec::new(), Vec::new(), Vec::new(), slots);
+    vol.set_population(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        slots,
+        Vec::new(),
+        Default::default(),
+    );
     w.world_mut()
         .entity_mut(e)
         .insert((Transform::IDENTITY, vol));

@@ -51,6 +51,13 @@ inf-terrain = { workspace = true }
 # P21.1: the sparse SDF chunk volumes that locally extend the heightfield.
 inf-voxel = { workspace = true }
 inf-pcg = { workspace = true }
+# NPC1d: a REAL dependency, and it was already in this binary's tree -- `inf-ecs`
+# names `inf-nav` for `CrowdRoute`'s `NavPath`, so the NPC1c comment this line
+# replaces ("the shipped player does NOT link this") was only ever true of the
+# crate's own *name*. It is named now because `level::population_of` carries a
+# volume's own interior graph out of the PCG evaluation, which is what lets a
+# society route from one building to another without re-planning them.
+inf-nav = { workspace = true }
 inf-blueprint = { workspace = true }
 # P12.3 audio: the runtime sim holds a long-lived `AudioEngine` host resource and
 # drains the audio command queue (cooked scenes with AudioSources play on a device
@@ -153,12 +160,6 @@ winit = { workspace = true, features = ["android-native-activity"] }
 
 [dev-dependencies]
 inf-editor-core = { workspace = true }
-# NPC1c: `island_gate`'s town walk plans its route over the three graphs the
-# island publishes -- the settlement's streets, the target building's interior,
-# and the search that joins them. The shipped player does NOT link this: a
-# route is data a level hands the crowd, and `CrowdRoute` carries the finished
-# `NavPath` rather than the graph it came from.
-inf-nav = { workspace = true }
 # I7: `island_gate` builds the CI-scale island through `inf island build`'s own
 # door and drives it on both hosts. **Dev-only, and the portability gate in
 # `inf-island/tests/portable_math_law.rs` asserts it stays that way**: linking

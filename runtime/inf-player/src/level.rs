@@ -1393,11 +1393,11 @@ pub fn evaluate_pcg_volumes_in(
                 (v, g)
             }
         };
-        let (baked, solid, groups, doorways) =
+        let (baked, solid, groups, doorways, residents, interior) =
             population_of(inf_pcg::compose_volume(scatter, grammar));
 
         if let Some(mut vol) = world.world_mut().get_mut::<PcgVolume>(job.entity) {
-            vol.set_population(baked, solid, groups, doorways);
+            vol.set_population(baked, solid, groups, doorways, residents, interior);
         }
     }
 }
@@ -1428,8 +1428,11 @@ pub fn population_of(
     Vec<inf_ecs::components::ScatteredSolid>,
     Vec<inf_ecs::StructureGroup>,
     Vec<inf_ecs::components::DoorwaySlot>,
+    Vec<inf_ecs::components::ResidentSlot>,
+    inf_nav::NavGraph,
 ) {
     // MIRROR-BEGIN population_of
+    let interior = out.interior;
     let instances = out
         .instances
         .into_iter()
@@ -1481,7 +1484,24 @@ pub fn population_of(
             floor: d.floor,
         })
         .collect();
-    (instances, solids, groups, doorways)
+    let residents = out
+        .slots
+        .iter()
+        .map(|s| inf_ecs::components::ResidentSlot {
+            role: match s.role {
+                inf_pcg::SlotRole::Home => inf_ecs::components::SlotRole::Home,
+                inf_pcg::SlotRole::Work => inf_ecs::components::SlotRole::Work,
+                inf_pcg::SlotRole::Errand => inf_ecs::components::SlotRole::Errand,
+            },
+            at: s.at,
+            room: s.room,
+            building: s.building,
+            floor: s.floor,
+            index: s.index,
+            node: s.node,
+        })
+        .collect();
+    (instances, solids, groups, doorways, residents, interior)
     // MIRROR-END population_of
 }
 

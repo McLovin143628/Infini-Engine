@@ -893,6 +893,21 @@ pub struct GrammarOutput {
     /// slot is located in the world and names its own building's ordinal — so
     /// concatenation needs no re-basing.
     pub slots: Vec<crate::building::society::PcgSlot>,
+    /// **The walkable interior of every building that holds somebody** (NPC1d),
+    /// as one graph in the LEVEL's namespace.
+    ///
+    /// Each contributing building is
+    /// [`interior_nav_in`](crate::BuildingPlan::interior_nav_in)'d under its own
+    /// [`building_salt`](crate::building::society::building_salt), so folding
+    /// this graph into a level's network cannot weld two buildings' room 5
+    /// together. Only slot-bearing buildings contribute: a route's endpoints are
+    /// slots, and a warehouse nobody works in is somewhere the street network
+    /// already walks past.
+    ///
+    /// Emitted only by
+    /// [`evaluate_buildings_in`](crate::building::evaluate_buildings_in), like
+    /// [`doorways`](Self::doorways) and [`slots`](Self::slots).
+    pub interior: inf_nav::NavGraph,
 }
 
 impl GrammarOutput {
@@ -913,6 +928,10 @@ impl GrammarOutput {
         // across the whole call, and world metres, so concatenation is the
         // whole of it (NPC1d).
         self.slots.extend(other.slots);
+        // The interiors are salted apart building by building, so absorbing is
+        // the union it looks like — and `absorb`'s "the first record wins" rule
+        // never fires, which is exactly what the salt is for.
+        self.interior.absorb(&other.interior);
         // Decoration concatenates like everything else and is folded into
         // `instances` exactly once, by `assemble_in`, so the aligned prefix
         // survives every intermediate `extend`.
@@ -1029,6 +1048,7 @@ pub fn expand_span(
         decor: Vec::new(),
         // …and nobody lives in a fence (NPC1d).
         slots: Vec::new(),
+        interior: inf_nav::NavGraph::new(),
     };
     for (i, slot) in lay.slots.iter().enumerate() {
         let Some(kind) = slot.module else { continue };
