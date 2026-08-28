@@ -167,6 +167,14 @@ inf-editor-core = { workspace = true }
 # modules are exempt from the libm ban on the grounds that nothing which cooks or
 # ships re-derives a coordinate through them. A dev-dependency does not.
 inf-island = { workspace = true }
+# VEH1a: `island_gate`'s connectivity walk builds a REAL `inf_gis::RoadGraph`
+# from the committed roads layer — the same `RoadGraph::from_layer` the island's
+# own mesh builder uses, on the same bytes — because wave I7 open item 16 is a
+# claim about the graph's derived JUNCTIONS and the route list it is derived
+# from cannot falsify one. Dev-only, on `inf-island`'s argument directly above:
+# `inf-island` already links this crate, so the shipped player's dependency set
+# is unchanged.
+inf-gis = { workspace = true }
 # `grammar_bake` re-opens the baked `.inf_mesh` through the DCC kernel's own
 # reader, because "can this be edited again" is a question only that reader can
 # answer — inferring it from `ExportReport::coincident_vertices` would be the

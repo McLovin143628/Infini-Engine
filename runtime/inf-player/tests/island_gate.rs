@@ -5367,3 +5367,508 @@ fn the_islands_own_rate_makes_a_commute_a_walk() {
         "the island's day is {day_min:.1} minutes"
     );
 }
+
+// ── island wave VEH1a: THE CAR DRIVES THE CIRCUIT ───────────────────────────
+//
+// Wave I7 left two open items about the roads it had just built, and this
+// section closes both:
+//
+//   15. "THE CIRCUIT IS DRAWN AND AUDITED, AND NOTHING DRIVES IT. … The drive
+//       trace moves the streaming source at 24 m/s, which is the *streaming*
+//       claim; it is not a vehicle simulation."
+//   16. "The road network's topology is asserted on a flat fixture, not on the
+//       island. … A connectivity walk over the built `RoadGraph` is what would
+//       close it."
+//
+// The first is `pie_equals_shipping_when_the_car_drives_the_circuit`, which
+// replaces the scripted teleport with a real `step_vehicles` trace: the hero
+// walks to a car, presses the interact the seat door already listens for, and
+// holds the throttle. It is still the streaming claim as well — the hero is the
+// `StreamingSource` and the seat step carries it — so the source is now a car
+// that is *driving*, and it is still sim state and never a camera.
+
+/// How many fixed steps the car drive runs — ten seconds at 60 Hz.
+const DRIVE_STEPS: u64 = 300;
+
+/// Every chassis the **vehicle recogniser** finds in a live sim, in `Guid`
+/// order.
+///
+/// Found rather than named: `inf_ecs::vehicle::rig_of` is the function the
+/// physics bridge itself derives a rig with, so an arm that finds its cars this
+/// way is asserting that the cooked pack's entities really are vehicles, not
+/// that a generator wrote a GUID somewhere.
+fn cars(sim: &RuntimeSim) -> Vec<uuid::Uuid> {
+    let world = sim.world();
+    let mut out: Vec<uuid::Uuid> = world
+        .world()
+        .iter_entities()
+        .filter_map(|e| e.get::<inf_ecs::Guid>().map(|g| g.0))
+        .filter(|g| inf_ecs::vehicle::rig_of(world, *g).is_some())
+        .collect();
+    out.sort();
+    out
+}
+
+/// Where a chassis is, right now.
+fn chassis_at(sim: &RuntimeSim, guid: uuid::Uuid) -> glam::DVec3 {
+    let e = sim.world().entity_of(guid).expect("a live chassis");
+    sim.world()
+        .world()
+        .get::<inf_ecs::components::Transform>(e)
+        .map(|t| t.translation.to_dvec3())
+        .expect("with a transform")
+}
+
+/// One host's whole drive: the state bytes, and what its car did each step.
+struct CarTrace {
+    states: Vec<Vec<u8>>,
+    /// Per step: wheels on the ground, forward m/s, engine revs and load.
+    wheels: Vec<usize>,
+    speed: Vec<f64>,
+    revs: Vec<f64>,
+    load: Vec<f64>,
+    /// The chassis position each step.
+    at: Vec<glam::DVec3>,
+    /// The audio commands the drive queued, by kind: Play, SetPitch, SetVolume.
+    audio: (usize, usize, usize),
+    entered: bool,
+}
+
+/// Walk the hero to the nearest car, get in, and drive.
+///
+/// The **enter is the shipped door**: one step with `actions::INTERACT` held,
+/// resolved by `inf_physics::d3::interact::resolve` exactly as an authored
+/// `Interactable` or a doorway is. Nothing here reaches into the seat state.
+fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
+    // The audio window opens HERE and not at the drive loop: the engine's one
+    // `Play` is emitted on the first step the car appears in an outcome, which
+    // is the step that derives its rig — long before anybody is driving it. A
+    // window that opened at the throttle counted 0 Plays and 300 SetPitches and
+    // read as a defect; the loop was right and the instrument was late.
+    let before_audio = sim.audio_command_log().len();
+    let hero = hero_entity(sim).expect("the island has a player-controlled hero");
+    let fleet = cars(sim);
+    assert!(
+        !fleet.is_empty(),
+        "no vehicle in the resident world — the level parks one at each \
+         settlement and the recogniser found none of them"
+    );
+    // The nearest car to the hero's own start, so the walk is short and the
+    // choice is a function of the world rather than of an index.
+    let hero_at = sim
+        .world()
+        .world()
+        .get::<inf_ecs::components::Transform>(hero)
+        .map(|t| t.translation.to_dvec3())
+        .expect("the hero has a transform");
+    let car = *fleet
+        .iter()
+        .min_by(|a, b| {
+            (chassis_at(sim, **a) - hero_at)
+                .length_squared()
+                .total_cmp(&(chassis_at(sim, **b) - hero_at).length_squared())
+        })
+        .expect("checked non-empty");
+
+    // ── 1. STAND BESIDE IT ── inside `ENTER_REACH_M` of the seat, on the ground
+    //    rather than on the bodywork: a character teleported onto a dynamic box
+    //    is a depenetration, and `request(Driving)` needs a grounded mode.
+    // One step first: the bridge derives its vehicle map inside its own
+    // `sync_from_world_sim`, so a seat asked for before the sim has stepped is a
+    // seat on a rig nothing has recognised yet.
+    sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    let seat = inf_physics::d3::vehicle::seat_pose(sim.bridge3d(), car)
+        .expect("the car has a seat once the bridge has derived its rig")
+        .0;
+    // Beside the driver's door and level with the ground the car is on, so the
+    // hero is standing rather than falling: `step_driving` is entered through
+    // `request(Driving)`, which refuses from a non-grounded mode.
+    let beside = glam::DVec3::new(seat.x + 1.7, seat.y - 0.2, seat.z);
+    for _ in 0..24 {
+        set_hero(sim, hero, beside);
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let mode_before = sim
+        .world()
+        .world()
+        .get::<inf_ecs::components::CharacterMovement>(hero)
+        .map(|m| m.mode);
+
+    // ── 2. PRESS E ── the same edge a door takes, through the same resolver.
+    //    `just_pressed` is the difference against the previous tick's held set,
+    //    so a press has to be a RELEASED step followed by a HELD one — pressing
+    //    on every step of a loop is one edge and then nothing.
+    let mut entered = false;
+    for _ in 0..8 {
+        sim.step_once(
+            inf_player::runtime_sim::RuntimeInput::default()
+                .press(inf_ecs::movement::actions::INTERACT),
+        );
+        entered = sim
+            .world()
+            .world()
+            .get::<inf_ecs::components::CharacterMovement>(hero)
+            .is_some_and(|m| m.mode == inf_ecs::components::MovementMode::Driving);
+        if entered {
+            break;
+        }
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    if !entered {
+        // Say WHY, in the units the door decides in — a gate that reports
+        // "false" about a resolver with three refusals has named none of them.
+        let hero_now = sim
+            .world()
+            .world()
+            .get::<inf_ecs::components::Transform>(hero)
+            .map(|t| t.translation.to_dvec3())
+            .unwrap_or_default();
+        let reach = inf_physics::d3::vehicle::try_enter(
+            sim.bridge3d(),
+            hero_now - glam::DVec3::Y * 0.9,
+            &std::collections::BTreeSet::new(),
+        );
+        println!(
+            "THE SEAT REFUSED: hero at {hero_now:?} in mode {mode_before:?}, \
+             seat at {seat:?}, feet-to-seat {:.2} m against a {} m reach, \
+             nearest_seat = {reach:?}",
+            ((hero_now - glam::DVec3::Y * 0.9) - seat).length(),
+            inf_physics::d3::vehicle::ENTER_REACH_M
+        );
+    }
+
+    // ── 3. DRIVE ── the throttle held, and NOTHING teleported: from here the
+    //    hero's transform is written by the seat step, so the `StreamingSource`
+    //    is carried by the car and the ground pages under a vehicle.
+    let mut t = CarTrace {
+        states: Vec::with_capacity(DRIVE_STEPS as usize),
+        wheels: Vec::with_capacity(DRIVE_STEPS as usize),
+        speed: Vec::with_capacity(DRIVE_STEPS as usize),
+        revs: Vec::with_capacity(DRIVE_STEPS as usize),
+        load: Vec::with_capacity(DRIVE_STEPS as usize),
+        at: Vec::with_capacity(DRIVE_STEPS as usize),
+        audio: (0, 0, 0),
+        entered,
+    };
+    for step in 0..DRIVE_STEPS {
+        // A gentle weave, so the drive is a drive and not a straight line — and
+        // so no two steps stand in the same place, which is what the
+        // distinctness arm below needs.
+        let steer = if (step / 60) % 2 == 0 { 0.2 } else { -0.2 };
+        sim.step_once(
+            inf_player::runtime_sim::RuntimeInput::default()
+                .axis_at(inf_ecs::movement::actions::MOVE_Y, 1.0)
+                .axis_at(inf_ecs::movement::actions::MOVE_X, steer),
+        );
+        t.states.push(sim.state_bytes());
+        let out = sim
+            .vehicles()
+            .iter()
+            .find(|o| o.chassis == car)
+            .copied()
+            .unwrap_or(inf_physics::d3::VehicleOutcome {
+                chassis: car,
+                wheels_grounded: 0,
+                load_n: 0.0,
+                forward_mps: 0.0,
+                revs: 0.0,
+                load: 0.0,
+            });
+        t.wheels.push(out.wheels_grounded);
+        t.speed.push(out.forward_mps);
+        t.revs.push(out.revs);
+        t.load.push(out.load);
+        t.at.push(chassis_at(sim, car));
+    }
+    for cmd in &sim.audio_command_log()[before_audio..] {
+        match cmd {
+            inf_audio::AudioCommand::Play(_) => t.audio.0 += 1,
+            inf_audio::AudioCommand::SetPitch { .. } => t.audio.1 += 1,
+            inf_audio::AudioCommand::SetVolume { .. } => t.audio.2 += 1,
+            _ => {}
+        }
+    }
+    t
+}
+
+/// **THE DRIVE GATE.** A real `step_vehicles` trace over the island's own
+/// circuit, byte-identical on both hosts.
+///
+/// This is `pie_equals_shipping_on_an_island_drive` with the scripted teleport
+/// replaced by a car. What it adds over that arm is that the thing moving is
+/// **simulated**: four wheel rays a step into a streamed heightfield, a
+/// suspension, a friction circle and an engine curve, all of which are floating
+/// point over content that pages in as the car reaches it. If either host paged
+/// one tile differently, a wheel ray would find a different surface and the two
+/// traces would separate within a step or two — which makes this a far sharper
+/// instrument for the streaming claim than moving a capsule at a constant rate.
+///
+/// Coverage first, then the comparison (the NPC1d law: a gate staged where a
+/// defect cannot appear certifies the defect).
+#[test]
+fn pie_equals_shipping_when_the_car_drives_the_circuit() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let pack = cook(tmp.path());
+    let proj = tmp.path().join("island");
+    let recipe = inf_island::IslandRecipe::load(&fixture_recipe()).expect("the recipe loads");
+    let slug = inf_island::slug(&recipe.name);
+    let mut ship = pack_sim(&pack);
+    let mut pie = loose_sim(&proj.join("Content"), &slug);
+
+    // ── COVERAGE ── both hosts hold the same fleet, and it is not empty.
+    for (who, sim) in [("shipping", &ship), ("PIE", &pie)] {
+        let fleet = cars(sim);
+        assert!(
+            !fleet.is_empty(),
+            "{who}: the resident world holds no vehicle at all — the level parks \
+             one at each settlement and the recogniser found none"
+        );
+        println!("{who}: {} car(s) resident at boot", fleet.len());
+    }
+    assert_eq!(
+        cars(&ship),
+        cars(&pie),
+        "the two hosts disagree about which cars exist"
+    );
+
+    let a = drive_a_car(&mut ship);
+    let b = drive_a_car(&mut pie);
+
+    // ── THE DOOR ── the hero really got in, on both hosts. Asserted before the
+    //    comparison, because two hosts that both failed to enter agree
+    //    perfectly and would certify a seat door that does not work.
+    assert!(
+        a.entered && b.entered,
+        "the hero did not enter the car (shipping {}, PIE {}) — the interact \
+         edge reached no seat, so the drive below is a car nobody is in",
+        a.entered,
+        b.entered
+    );
+
+    // ── IT DROVE ── the trace is a vehicle simulation, not a parked car.
+    let travelled = (a.at[a.at.len() - 1] - a.at[0]).length();
+    let top = a.speed.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let grounded: usize = a.wheels.iter().sum();
+    let steps = DRIVE_STEPS as usize;
+    println!(
+        "THE DRIVE: {travelled:.1} m in {DRIVE_STEPS} steps, top {top:.2} m/s, \
+         {grounded} wheel contacts of a possible {}, engine \
+         Play/SetPitch/SetVolume = {:?}",
+        steps * 4,
+        a.audio
+    );
+    assert!(
+        travelled > 30.0,
+        "the car covered {travelled} m in five seconds of throttle — that is a \
+         parked car, and every comparison below is about nothing"
+    );
+    assert!(top > 5.0, "the car's best forward speed was {top} m/s");
+    assert!(
+        grounded > steps * 2,
+        "{grounded} wheel contacts over {steps} steps (of a possible {}) — the \
+         car spent the drive in the air, so the suspension was never solved",
+        steps * 4
+    );
+    // The ENGINE spoke, and it spoke every step: the loop is one `Play` and a
+    // pitch/volume pair per step per car, which is what makes the stream a pure
+    // function of sim state rather than an event somebody remembered to fire.
+    assert_eq!(
+        a.audio.0, 1,
+        "the engine loop queued {} `Play`s for one car — a voice is started \
+         ONCE and then addressed, or the clip restarts sixty times a second",
+        a.audio.0
+    );
+    assert!(
+        a.audio.1 >= steps && a.audio.2 >= steps,
+        "the engine loop queued {:?} (Play, SetPitch, SetVolume) over {steps} \
+         driving steps — a loop that is a function of sim state emits a pair a \
+         step",
+        a.audio
+    );
+    assert_eq!(
+        a.audio, b.audio,
+        "the two hosts queued different engine audio for the same drive"
+    );
+    // …and the pitch really MOVED: a constant cue would satisfy every count.
+    let (rlo, rhi) = a
+        .revs
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
+    println!(
+        "THE ENGINE: revs {rlo:.4} to {rhi:.4}, load {:.2}",
+        a.load[10]
+    );
+    assert!(
+        rhi - rlo > 0.05,
+        "the engine's revs ran {rlo}..{rhi} over the drive — the cue is a \
+         constant, so `SetPitch` is carrying no information"
+    );
+
+    // ── ANTI-VACUITY ── the states are not one state repeated.
+    let distinct: std::collections::BTreeSet<&Vec<u8>> = a.states.iter().collect();
+    assert!(
+        distinct.len() > steps / 2,
+        "only {} of {steps} drive states are distinct",
+        distinct.len()
+    );
+
+    // ── THE HEADLINE ── byte for byte, step for step.
+    assert_eq!(a.states.len(), steps);
+    assert_eq!(b.states.len(), steps);
+    for (i, (x, y)) in a.states.iter().zip(&b.states).enumerate() {
+        assert_eq!(
+            x, y,
+            "PIE and shipping diverged at step {i} of {DRIVE_STEPS} of a DRIVE — \
+             the vehicle step, the ground its wheels are cast into, or the \
+             streaming that paged that ground is a function of something other \
+             than sim state"
+        );
+    }
+    // …and their cars agree about what they did, which is the half a byte
+    // comparison of the whole world can hide behind a big number.
+    for i in 0..steps {
+        assert_eq!(a.wheels[i], b.wheels[i], "wheels grounded at step {i}");
+        assert_eq!(
+            a.speed[i].to_bits(),
+            b.speed[i].to_bits(),
+            "forward speed at step {i}"
+        );
+    }
+
+    // ── THE SINK, ON THE REAL CIRCUIT ── the ~2 cm clause 1 priced on a
+    //    fixture, named where the road actually is. Roads carry NO colliders
+    //    (IB-4's priced ruling), so a wheel rides the terrain heightfield and
+    //    the tarmac it looks like it is on is the ribbon, drawn at
+    //    `DEFAULT_ROAD_LIFT_M` above the ground it drapes on.
+    let lift = inf_gis::roads::DEFAULT_ROAD_LIFT_M;
+    println!(
+        "THE SINK: the road ribbon is drawn {lift} m above the heightfield the \
+         wheels are cast into, so a wheel rides that far under the visible \
+         tarmac at every ribbon vertex, plus whatever the cross-section's own \
+         chord adds between them"
+    );
+    assert!(
+        lift > 0.0 && lift < 0.05,
+        "the road lift is {lift} m — the sink this wave priced at two \
+         centimetres is a different number now"
+    );
+}
+
+/// **EVERY SITE IS REACHABLE FROM EVERY OTHER** — wave I7's open item 16, over
+/// the graph the road builder actually builds.
+///
+/// I7's own words: *"on the real island the same planner produced 11 links and
+/// 7 junctions, which is consistent with it and is not the same as an assertion
+/// that every site is reachable from every other. A connectivity walk over the
+/// built `RoadGraph` is what would close it."*
+///
+/// So the walk is over a **real `inf_gis::RoadGraph`**, built by
+/// `RoadGraph::from_layer` from the committed roads layer — the same function
+/// `inf_island::roads::build_mesh` builds one with, on the same bytes — and
+/// routed with `inf_nav::route` over the graph's own `nav_graph()`. Not over the
+/// route list, which is the *input* to the junction derivation and cannot
+/// falsify it: two roads that cross without sharing an endpoint are two routes
+/// and one junction-free graph, and that is exactly the defect a topology claim
+/// has to be able to see.
+///
+/// Run against **both** committed islands, because a fixture that agrees with
+/// itself proves nothing about the island that ships.
+#[test]
+fn every_settlement_is_reachable_from_every_other_over_the_built_road_graph() {
+    for rel in [
+        "../../samples/island-fixture/island.toml",
+        "../../samples/island/island.toml",
+    ] {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
+        let Ok(recipe) = inf_island::IslandRecipe::load(&path) else {
+            println!("SKIP: no {rel} in this tree");
+            continue;
+        };
+        let anchor = inf_island::read_design(&recipe)
+            .expect("the design reads")
+            .anchor;
+        let layer = inf_island::layers::read_layer(
+            &path
+                .parent()
+                .expect("a recipe dir")
+                .join("layers/roads.geojson"),
+            inf_gis::LayerKind::Roads,
+            &anchor,
+        )
+        .expect("the committed roads layer reads");
+        let graph = inf_gis::RoadGraph::from_layer(&layer);
+        let nav = graph.nav_graph();
+        println!(
+            "{}: {} segments, {} intersections, {} junctions, {:.2} km; nav has \
+             {} nodes",
+            recipe.name,
+            graph.segments.len(),
+            graph.intersections.len(),
+            graph.junctions().count(),
+            graph.total_length_m() / 1000.0,
+            nav.nodes().count()
+        );
+        assert!(
+            !graph.segments.is_empty() && nav.nodes().count() > 1,
+            "{}: the built graph has nothing in it, so the walk below is vacuous",
+            recipe.name
+        );
+
+        // Each site's own entry point: the nearest node of the graph to it.
+        let sites: Vec<(String, inf_nav::NavNodeId)> = recipe
+            .sites
+            .iter()
+            .filter_map(|s| {
+                nav.nearest_planar(glam::DVec3::new(s.x, 0.0, s.z), f64::INFINITY)
+                    .map(|n| (s.name.clone(), n))
+            })
+            .collect();
+        assert_eq!(
+            sites.len(),
+            recipe.sites.len(),
+            "{}: a site found no road node at all",
+            recipe.name
+        );
+
+        // THE WALK: every ordered pair.
+        let mut worst = 0.0f64;
+        let mut pairs = 0usize;
+        for (from_name, from) in &sites {
+            for (to_name, to) in &sites {
+                if from == to {
+                    continue;
+                }
+                pairs += 1;
+                let verdict = inf_nav::route(&nav, *from, *to);
+                let r = match verdict {
+                    inf_nav::NavVerdict::Found(r) => r,
+                    other => panic!(
+                        "{}: {from_name} cannot reach {to_name} over the built \
+                         road graph — {other:?}. The circuit is not connected, \
+                         which is what wave I7 open item 16 could not tell.",
+                        recipe.name
+                    ),
+                };
+                worst = worst.max(r.cost_m);
+            }
+        }
+        assert!(
+            pairs >= recipe.sites.len() * (recipe.sites.len() - 1),
+            "{}: only {pairs} ordered pairs walked",
+            recipe.name
+        );
+        println!(
+            "{}: {pairs} ordered site pairs, ALL reachable; the longest is \
+             {:.2} km of road",
+            recipe.name,
+            worst / 1000.0
+        );
+        // A route that costs nothing is two sites welded onto one node, which
+        // would make "reachable" true and meaningless.
+        assert!(
+            worst > 100.0,
+            "{}: the longest route between any two sites is {worst} m",
+            recipe.name
+        );
+    }
+}
