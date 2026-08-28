@@ -156,7 +156,12 @@ pub struct SkinnedDraw {
     /// `(mesh, skeleton)` pair.
     pub mesh: Arc<SkinnedMeshData>,
     /// `global · inverse_bind` per joint, for this entity's current pose.
-    pub palette: Vec<Mat4>,
+    ///
+    /// **`Arc`, since NPC1b**: the crowd's non-posing tiers all resolve to one
+    /// rest palette per `(mesh, skeleton)`, derived once here and handed to every
+    /// agent that shares it, so the renderer's atlas deduplicates it by pointer
+    /// identity instead of uploading a thousand copies of one answer.
+    pub palette: Arc<Vec<Mat4>>,
     /// The `(mesh, skeleton)` pair, so a caller can deduplicate
     /// [`RenderScene::skinned_meshes`](inf_render::RenderScene::skinned_meshes)
     /// entries across instances.
@@ -189,6 +194,13 @@ pub struct EditorRenderAssets {
     skeletons: HashMap<Uuid, Option<Arc<Skeleton>>>,
     /// Decoded clips by GUID.
     clips: HashMap<Uuid, Option<Arc<AnimClip>>>,
+    /// **The rest-pose palette per `(mesh, skeleton)` pair** (wave NPC1b) — the
+    /// one a crowd's non-posing tiers all draw.
+    ///
+    /// Keyed by the pair and not by the mesh alone, unlike `skinned` above: the
+    /// value is `skinning_matrices` over a SKELETON's rest pose, so it is a
+    /// property of the rig and re-binding one mesh to two rigs is two answers.
+    rest_palettes: HashMap<(Uuid, Uuid), Arc<Vec<Mat4>>>,
     /// **Scatter geometry by mesh GUID** (wave TER2b) — the flat pull arrays a
     /// `PcgKind`'s `.inf_mesh` becomes so that scattered ground cover draws its
     /// authored shape instead of the placeholder cube every instance drew from
@@ -434,9 +446,49 @@ impl EditorRenderAssets {
         };
         Some(SkinnedDraw {
             mesh,
-            palette: inf_anim::skinning_matrices(&skeleton, &pose),
+            palette: Arc::new(inf_anim::skinning_matrices(&skeleton, &pose)),
             key: (mesh_id, skeleton_id),
         })
+    }
+
+    /// **The tier's shared pose** (wave NPC1b): the palette every crowd agent
+    /// that is not evaluating one draws, derived ONCE per `(mesh, skeleton)`.
+    ///
+    /// It is deliberately not a new pose rule. A crowd agent the ladder took off
+    /// the pose path has no [`EvaluatedPose`] — `step_pose_evaluation` rebuilds
+    /// the store from the tier's own target set, so a `Far` agent has no entry —
+    /// and carries no `AnimPlayer`, so `resolve_skinned` falls through rules 2 and
+    /// 4 to rule 3 and returns exactly this. What changes is how many times it is
+    /// derived: once, instead of once per agent per frame, and the four
+    /// joint-length allocations wall 3 counted stop happening for that tier
+    /// entirely. `the_shared_palette_is_the_one_the_per_agent_path_would_have_built`
+    /// is the arm that keeps the two answers equal.
+    pub fn resolve_skinned_shared(&mut self, sm: &SkeletalMesh) -> Option<SkinnedDraw> {
+        let mesh_id = sm.mesh?;
+        let skeleton_id = sm.skeleton?;
+        let skeleton = self.skeleton(skeleton_id)?;
+        if skeleton.is_empty() {
+            return None;
+        }
+        let mesh = self.skinned_geometry(mesh_id, skeleton_id)?;
+        Some(SkinnedDraw {
+            mesh,
+            palette: self.rest_palette(&skeleton, (mesh_id, skeleton_id)),
+            key: (mesh_id, skeleton_id),
+        })
+    }
+
+    /// The rest-pose palette for one `(mesh, skeleton)` pair, cached.
+    fn rest_palette(&mut self, skeleton: &Skeleton, key: (Uuid, Uuid)) -> Arc<Vec<Mat4>> {
+        if let Some(hit) = self.rest_palettes.get(&key) {
+            return hit.clone();
+        }
+        let built = Arc::new(inf_anim::skinning_matrices(
+            skeleton,
+            &inf_anim::Pose::rest(skeleton),
+        ));
+        self.rest_palettes.insert(key, built.clone());
+        built
     }
 
     /// A decoded skeleton, cached (hit or miss) by GUID.
@@ -1283,7 +1335,7 @@ mod tests {
         assert_eq!(draw.palette.len(), 2, "one matrix per joint");
         // Rest pose: `global · inverse_bind` is the identity for a bind-pose
         // skeleton, which is what makes the drawn mesh its authored shape.
-        for m in &draw.palette {
+        for m in draw.palette.iter() {
             assert!(
                 (*m - Mat4::IDENTITY)
                     .to_cols_array()

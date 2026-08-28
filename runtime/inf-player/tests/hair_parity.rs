@@ -374,7 +374,7 @@ fn the_simulated_hair_reaches_the_render_scene() {
         .iter()
         .find(|i| i.color == inf_render::HAIR_TINT)
         .expect("the simulated hair did not reach the render scene");
-    assert_eq!(ribbon.palette, vec![Mat4::IDENTITY]);
+    assert_eq!(*ribbon.palette, vec![Mat4::IDENTITY]);
     assert_eq!(ribbon.id, inf_render::ID_NONE);
     let data = &first.skinned_meshes[ribbon.mesh];
     assert_eq!(

@@ -126,6 +126,12 @@ pub use passes::terrain::{
 pub use passes::voxel::{
     plan_chunk_cache, CachedChunk, ChunkCacheKey, ChunkCachePlan, VoxelReport,
 };
+// Wave NPC1b: the skinned pass's own batch planner, exported for the same reason
+// `plan_tile_cache` is — an instrument that wants this frame's skinned draw count
+// or its palette bytes calls the function the pass calls, not a re-derivation.
+pub use passes::skinned::{
+    plan_skinned_batches, SkinnedBatches, SkinnedRun, SKINNED_PALETTE_MATRICES,
+};
 pub use pick::Picker;
 pub use precip::{
     particle_offset, precip_base, wrap_signed, PrecipParams, PrecipQuality, PRECIP_BOX_XZ_M,
@@ -138,13 +144,14 @@ pub use renderer::{
     SCENE_SAMPLES,
 };
 pub use scene::{
-    apply_seam, box_uv, deformed_skinned_mesh, RenderFractureChunk, RenderFractureVertex,
-    RenderTilemap, RenderVoxelChunk, RenderVoxelVertex, RenderVoxelVolume, ScatterBatch,
-    ScatterData, ScatterGeometry, ScatterInstance, ScatterInstanceRaw, ScatterMemo, ScatterMeshes,
-    ScatterSource, SkinnedInstance, SkinnedMeshData, SkinnedVertex, SkyParams, SpriteInstance,
-    SpriteTextureUpload, SunParams, TerrainTileKey, TextureHandle, TilemapParams, VgeomAsset,
-    VgeomInstance, VgeomMesh, VoxelChunkKey, CLOTH_TINT, DEFAULT_SUN_DIR, HAIR_TINT, ID_GIZMO_BASE,
-    ID_NONE, MAX_SCATTER_MESH_TRIANGLES, STRUCTURE_LOD_M,
+    apply_seam, box_uv, deformed_skinned_mesh, identity_palette, RenderFractureChunk,
+    RenderFractureVertex, RenderTilemap, RenderVoxelChunk, RenderVoxelVertex, RenderVoxelVolume,
+    ScatterBatch, ScatterData, ScatterGeometry, ScatterInstance, ScatterInstanceRaw, ScatterMemo,
+    ScatterMeshes, ScatterSource, SkinnedInstance, SkinnedMeshData, SkinnedShadow, SkinnedVertex,
+    SkyParams, SpriteInstance, SpriteTextureUpload, SunParams, TerrainTileKey, TextureHandle,
+    TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VoxelChunkKey, CLOTH_TINT,
+    DEFAULT_SUN_DIR, HAIR_TINT, ID_GIZMO_BASE, ID_NONE, MAX_SCATTER_MESH_TRIANGLES,
+    STRUCTURE_LOD_M,
 };
 pub use scene::{
     detail_scale_q8, glow_emissive, night_glow_step, scatter_table_stamp, take_unchanged_terrain,

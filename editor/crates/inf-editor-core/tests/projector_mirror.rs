@@ -1264,6 +1264,75 @@ fn the_skinned_pose_rule_is_identical_in_both_stores() {
     );
 }
 
+/// **The tier's shared pose is one rule, not two** (wave NPC1b) — the
+/// `resolve_skinned` gate above, applied to the door beside it.
+///
+/// It matters for the same reason and one more: `resolve_skinned_shared` is what
+/// a crowd's non-posing tiers draw, and the whole claim behind it is that its
+/// answer *equals* the per-agent path's. Two copies of that claim are two chances
+/// for one host to derive a rest pose the other does not.
+#[test]
+fn the_shared_tier_pose_is_identical_in_both_stores() {
+    let raw = extract_method_with_doc(&read(EDITOR_ASSETS), "resolve_skinned_shared");
+    assert_eq!(
+        raw.matches("&mut self").count(),
+        1,
+        "`resolve_skinned_shared` contains more than one `&mut self`; the receiver          normalization below would erase the others too"
+    );
+    let mine = raw.replace("&mut self", "&self");
+    let theirs = extract_method_with_doc(&read(PLAYER_ASSETS), "resolve_skinned_shared");
+    assert_eq!(
+        mine, theirs,
+        "the editor's and the player's `resolve_skinned_shared` have drifted — the          two hosts would draw a far crowd differently, so PIE would stop matching          shipping"
+    );
+    // …and not a stub: it resolves a real rig and goes through the cache door,
+    // rather than returning `None` and quietly leaving every far agent a
+    // placeholder cube.
+    let body = extract_method(&read(PLAYER_ASSETS), "resolve_skinned_shared");
+    for fragment in [
+        "let skeleton = self.skeleton(skeleton_id)?;",
+        "if skeleton.is_empty() {",
+        "let mesh = self.skinned_geometry(mesh_id, skeleton_id)?;",
+        "palette: self.rest_palette(&skeleton, (mesh_id, skeleton_id)),",
+    ] {
+        assert!(
+            body.contains(fragment),
+            "`resolve_skinned_shared` no longer contains `{fragment}`:
+{body}"
+        );
+    }
+}
+
+/// **The tier → caster mapping is one rule, not two** (wave NPC1b).
+///
+/// `crowd_shadow` is the only place either host decides whether an agent casts a
+/// skinned shadow or a proxy one, and the two copies are held byte-identical the
+/// way `project_cloth`'s are. A host that mapped `Near` to a skinned caster would
+/// spend a group per agent against a ceiling of 1 024 — and would do it in the
+/// preview only, which is the divergence class this file exists for.
+#[test]
+fn the_crowd_shadow_door_is_identical_in_both_projectors() {
+    let mine = extract_fn(&read(VIEWPORT), "crowd_shadow");
+    let theirs = extract_fn(&read(PLAYER), "crowd_shadow");
+    assert_eq!(
+        mine, theirs,
+        "the two `crowd_shadow` doors have drifted — a crowd would cast          differently in the editor viewport than in the shipped player"
+    );
+    // …and it reads the TIER rather than hard-coding one answer: a door that
+    // returned `Proxy` for everything is identical on both sides and wrong.
+    for fragment in [
+        "None => inf_render::SkinnedShadow::BindSphere,",
+        "Some(a) if a.tier.skinned_caster() => inf_render::SkinnedShadow::Posed,",
+        "Some(_) => inf_render::SkinnedShadow::Proxy,",
+    ] {
+        assert!(
+            theirs.contains(fragment),
+            "`crowd_shadow` no longer contains `{fragment}`:
+{theirs}"
+        );
+    }
+}
+
 /// A guard on the guard: two stubs are identical too. The shared body has to
 /// actually implement the three arms.
 #[test]
@@ -1288,7 +1357,7 @@ fn the_shared_pose_rule_is_not_a_stub() {
         "inf_anim::Pose::rest(&skeleton)",
         // The palette the skinned pass consumes, and the dedup key the projection
         // allocates `skinned_meshes` slots from.
-        "palette: inf_anim::skinning_matrices(&skeleton, &pose)",
+        "palette: Arc::new(inf_anim::skinning_matrices(&skeleton, &pose))",
         "key: (mesh_id, skeleton_id)",
     ] {
         assert!(
@@ -1422,7 +1491,7 @@ fn the_skinned_instance_projection_matches_field_for_field() {
 #[test]
 fn both_projectors_draw_skeletal_meshes_the_same_way() {
     // Fragments that must appear in BOTH projectors, verbatim.
-    const SHARED: [&str; 12] = [
+    const SHARED: [&str; 16] = [
         // The branch is the `MeshRef`-absent arm: an entity is a rigid draw or a
         // skinned one, never both.
         "w.get::<MeshRef>(entity).is_none()",
@@ -1443,6 +1512,18 @@ fn both_projectors_draw_skeletal_meshes_the_same_way() {
         "w.get::<inf_ecs::components::AnimPlayer>(entity).copied()",
         "inf_ecs::pose::evaluated_pose(world, guid)",
         "resolve_skinned(&sm, player.as_ref(), posed)",
+        // **The tier reaches the renderer** (wave NPC1b). Four fragments, because
+        // four separate things follow from `CrowdAgent` and each of them is a
+        // divergence if one host drops it: an agent off the pose path resolves the
+        // SHARED rest palette (drop it on one side and that host derives and
+        // uploads a thousand copies of one answer), its look is derived from its
+        // `Guid` through the one Ring-0 door (drop it and PIE's crowd is grey
+        // while the shipped one is not), its build multiplies the drawn scale, and
+        // its tier decides whether it casts a skinned shadow or a proxy.
+        "w.get::<inf_ecs::crowd::CrowdAgent>(entity).copied()",
+        "agent.map(|a| inf_ecs::crowd::agent_look(a.guid))",
+        "Some(a) if !a.tier.poses() =>",
+        "let shadow = crowd_shadow(agent);",
         // ONE `skinned_meshes` slot per (mesh, skeleton) pair…
         "skinned_slots.entry(draw.key).or_insert_with(",
         // …and the entry is the store's own `Arc`, pushed with no copy.
@@ -2707,7 +2788,12 @@ fn the_shared_cloth_projector_is_not_a_stub() {
         // …onto the skinned path, with the identity palette that makes a
         // model-space garment land where the sim put it.
         "scene.skinned_meshes.push(std::sync::Arc::new(mesh))",
-        "palette: vec![glam::Mat4::IDENTITY]",
+        // …with the SHARED one-entry identity palette (wave NPC1b). `vec![]` at
+        // each call site was two allocations naming one value, and the renderer's
+        // atlas deduplicates blocks by pointer identity — so two `vec![]`s are two
+        // blocks and one `identity_palette()` is one, for every garment in a level.
+        "palette: inf_render::identity_palette()",
+        "shadow: inf_render::SkinnedShadow::BindSphere",
         "color: inf_render::CLOTH_TINT",
         "id: inf_render::ID_NONE",
         // …and it refuses an empty garment rather than emitting a draw for no

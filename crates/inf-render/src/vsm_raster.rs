@@ -494,6 +494,27 @@ struct SkinnedCasterGeom {
     /// instance only in the sense that a pose can leave it — which is why the
     /// radius is inflated by [`SKINNED_POSE_MARGIN`] rather than trusted.
     bounds: (glam::Vec3, f32),
+    /// Local-space `(centre, half-extent)` of the BIND pose — the box a
+    /// [`SkinnedShadow::Proxy`](crate::scene::SkinnedShadow::Proxy) caster is
+    /// scaled to. A cylinder of it is a standing person; the sphere above would
+    /// be a person-sized ball.
+    bind_box: (glam::Vec3, glam::Vec3),
+    /// **Per-joint bind spheres** — for joint `j`, the smallest sphere over every
+    /// vertex this mesh skins to `j` with a non-zero weight (wave NPC1b).
+    ///
+    /// The half of the exact posed bound the *mesh* owns, computed once per mesh
+    /// and not per frame. Transformed by an instance's own palette and unioned,
+    /// it contains the pose exactly: a skinned position is a convex combination
+    /// of `M_i · v` over the influencing joints, each of which lies inside joint
+    /// `i`'s transformed sphere, so the whole vertex lies inside the convex hull
+    /// of those spheres — and a sphere containing all of them contains the hull.
+    ///
+    /// This is what retires [`SKINNED_POSE_MARGIN`] for the instances that ask
+    /// for it, and it is the bound `SKINNED_POSE_MARGIN`'s own doc calls "the
+    /// posed skeleton's own AABB, which the renderer is not given". It turns out
+    /// the renderer *is* given it, twice over: it holds the bind geometry and the
+    /// palette. What it lacked was a caller who wanted the exact one.
+    joint_bounds: Vec<(glam::Vec3, f32)>,
 }
 
 /// How far a posed skinned mesh may leave its bind-pose bounding sphere, as a
@@ -514,8 +535,20 @@ struct SkinnedCasterGeom {
 /// invalidation scatter folds a skinned caster's stamp into the pages this
 /// inflated sphere reaches, so the margin now costs *re-rasterized pages* as well
 /// as vertex invocations — a conservative bound over-invalidates, in the same
-/// direction it over-draws. Making it exact needs the posed AABB the renderer is
-/// still not handed, which is `inf-anim`'s to produce.
+/// direction it over-draws.
+///
+/// **Wave NPC1b built the exact bound and did not switch this default over to
+/// it**, and both halves of that are deliberate. The exact bound is
+/// [`SkinnedCasterGeom::joint_bounds`] unioned through the instance's own
+/// palette; it is opt-in per instance
+/// ([`SkinnedShadow::Posed`](crate::scene::SkinnedShadow::Posed)) and the crowd
+/// is its only caller today. The reason it is not the default is the reason P27.3
+/// deferred it: a tighter caster sphere changes which pages the cull keeps and
+/// therefore which pages a mover invalidates, which is the exact quantity
+/// `phase27_gate`'s arm (c) and the page-cache arms are measured against. Making
+/// it the default is a re-measurement of those arms, not a constant change — and
+/// the forward reference is now to a bound that exists rather than to one
+/// `inf-anim` was supposed to produce.
 pub const SKINNED_POSE_MARGIN: f32 = 0.5;
 
 /// One terrain tile as a static caster mesh: the tile's own height samples, in
@@ -547,6 +580,177 @@ struct TerrainCasterGeom {
     origin: glam::DVec3,
 }
 
+/// **Per-joint bind spheres for one skinned mesh** — the mesh half of the exact
+/// posed bound (wave NPC1b).
+///
+/// For each joint index the mesh actually skins to, the smallest sphere over the
+/// bind-space positions of every vertex that names it with a non-zero weight. A
+/// joint no vertex names gets a zero radius at the origin and is skipped by the
+/// union, so a 161-bone rig whose mesh only uses 90 of them pays for 90.
+///
+/// Computed once per mesh, beside its vertex upload — `O(vertices)` on a path
+/// that is already `O(vertices)`, and never per frame.
+fn joint_bind_spheres(mesh: &crate::scene::SkinnedMeshData) -> Vec<(glam::Vec3, f32)> {
+    let joints = mesh
+        .vertices
+        .iter()
+        .flat_map(|v| {
+            v.joints
+                .iter()
+                .zip(v.weights)
+                .filter(|(_, w)| *w != 0.0)
+                .map(|(j, _)| *j as usize + 1)
+        })
+        .max()
+        .unwrap_or(0);
+    // Two passes over the vertices: the box first (so the centre is the box's,
+    // which is what makes the radius small), then the radius about it.
+    let mut lo = vec![glam::Vec3::splat(f32::INFINITY); joints];
+    let mut hi = vec![glam::Vec3::splat(f32::NEG_INFINITY); joints];
+    for v in &mesh.vertices {
+        let p = glam::Vec3::from(v.pos);
+        for (j, w) in v.joints.iter().zip(v.weights) {
+            let j = *j as usize;
+            if w == 0.0 || j >= joints {
+                continue;
+            }
+            lo[j] = lo[j].min(p);
+            hi[j] = hi[j].max(p);
+        }
+    }
+    let mut out: Vec<(glam::Vec3, f32)> = (0..joints)
+        .map(|j| {
+            if lo[j].x > hi[j].x {
+                (glam::Vec3::ZERO, 0.0)
+            } else {
+                (0.5 * (lo[j] + hi[j]), 0.0)
+            }
+        })
+        .collect();
+    for v in &mesh.vertices {
+        let p = glam::Vec3::from(v.pos);
+        for (j, w) in v.joints.iter().zip(v.weights) {
+            let j = *j as usize;
+            if w == 0.0 || j >= joints {
+                continue;
+            }
+            out[j].1 = out[j].1.max((p - out[j].0).length());
+        }
+    }
+    out
+}
+
+/// **The exact bound of one posed instance**: the union of its mesh's per-joint
+/// bind spheres, each carried through that joint's own palette matrix.
+///
+/// Sound because linear blend skinning is a *convex combination*: a skinned
+/// vertex is `Σ wᵢ (Mᵢ · v)` with `Σ wᵢ = 1`, each term lies inside joint `i`'s
+/// transformed sphere, and every convex combination of points inside a set of
+/// spheres lies inside any sphere containing all of them. The radius is scaled by
+/// the matrix's **largest** axis length, which is what keeps it conservative under
+/// a scaling joint.
+///
+/// Falls back to `bind` when the instance carries no palette or the mesh names no
+/// joints — a bound of nothing is not a bound.
+fn posed_bound(
+    joint_bounds: &[(glam::Vec3, f32)],
+    palette: &[glam::Mat4],
+    bind: (glam::Vec3, f32),
+) -> (glam::Vec3, f32) {
+    let mut centre = glam::Vec3::ZERO;
+    let mut radius = -1.0f32;
+    for (j, (c, r)) in joint_bounds.iter().enumerate() {
+        if *r <= 0.0 {
+            continue;
+        }
+        let Some(m) = palette.get(j) else {
+            continue;
+        };
+        let jc = m.transform_point3(*c);
+        let scale = m
+            .x_axis
+            .truncate()
+            .length()
+            .max(m.y_axis.truncate().length())
+            .max(m.z_axis.truncate().length());
+        let jr = *r * scale;
+        if radius < 0.0 {
+            centre = jc;
+            radius = jr;
+            continue;
+        }
+        // The smallest sphere containing both.
+        let d = (jc - centre).length();
+        if d + jr <= radius {
+            continue;
+        }
+        if d + radius <= jr {
+            centre = jc;
+            radius = jr;
+            continue;
+        }
+        let nr = 0.5 * (radius + d + jr);
+        centre += (jc - centre) * ((nr - radius) / d.max(1e-6));
+        radius = nr;
+    }
+    if radius < 0.0 {
+        bind
+    } else {
+        (centre, radius)
+    }
+}
+
+/// One skinned caster's joint palette on the page-raster path.
+struct SkinnedPaletteSlot {
+    buffer: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+    /// The `skinned` cache key this slot's instance drew from, re-stamped every
+    /// frame: the group that draws this instance looks its geometry up by
+    /// identity, so an index that changed meshes cannot be handed the previous
+    /// mesh's buffers.
+    mesh_key: usize,
+    /// Allocated size in bytes — the grow test.
+    capacity: u64,
+}
+
+/// **Fill a palette buffer's power-of-two tail with the last live matrix**
+/// (round-2 finding R2-6).
+///
+/// A slot allocated for 40 joints holds room for 64 and only the first 40 are
+/// ever written. The shader binds the WHOLE buffer as `array<mat4x4<f32>>`, and
+/// wgpu's bounds check clamps against the *binding's* length, not against
+/// `joint_count` — so a vertex whose skin index runs past its own skeleton (a
+/// mesh bound to the wrong rig, an index the CPU clamp did not see) reads the
+/// tail. Before this it was whatever the previous, larger, character in that slot
+/// left there: a limb snapping to another actor's pose.
+///
+/// The tail carries the last live matrix. That is a *plausible* transform — the
+/// vertex follows some real joint of its own skeleton instead of a stranger's.
+/// Zero would collapse the vertex to the origin; identity would leave it in bind
+/// space in the middle of the world.
+///
+/// **This lives here now** (wave NPC1b) because the page raster is its only
+/// remaining caller: the lit path packs its palettes into one atlas, where
+/// padding is not merely unnecessary but *impossible to make safe* — a
+/// power-of-two tail there would be the next character's block — so that path
+/// clamps the joint index in the shader instead. Two paths, two rules, each
+/// stated where it runs.
+///
+/// `live` is how many entries of `palette` are real; `capacity_bytes` is the
+/// buffer's size. Returns `palette` unchanged when it already fills the buffer.
+fn pad_palette(mut palette: Vec<[f32; 16]>, live: usize, capacity_bytes: u64) -> Vec<[f32; 16]> {
+    let slots = (capacity_bytes as usize) / std::mem::size_of::<[f32; 16]>();
+    if slots <= palette.len() {
+        return palette;
+    }
+    let fill = palette
+        .get(live.saturating_sub(1))
+        .copied()
+        .unwrap_or_else(|| glam::Mat4::IDENTITY.to_cols_array());
+    palette.resize(slots, fill);
+    palette
+}
+
 /// The cull's uniform. 16 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -571,6 +775,17 @@ enum GroupSource {
     /// palette. A group per *instance* rather than per mesh, because the palette
     /// is per instance and it is a bind group.
     Skinned { instance: usize },
+    /// **The crowd's shared shadow proxy** (wave NPC1b) — ONE group holding one
+    /// box caster per
+    /// [`SkinnedShadow::Proxy`](crate::scene::SkinnedShadow::Proxy) instance in
+    /// the whole scene.
+    ///
+    /// It draws the shared [`PrimMesh::Cylinder`] out of the same [`PrimGpu`]
+    /// buffers the rigid path uses, so it needs no geometry of its own and no
+    /// pipeline switch. The point is the arithmetic: a thousand NPCs is a
+    /// thousand `Skinned` groups against a [`VSM_MAX_GROUPS`] of 1 024, and one
+    /// `Proxy` group.
+    Proxy,
     /// One terrain tile, as a static world-space caster mesh.
     ///
     /// Keyed by the tile's **own** `TerrainTileKey` and not by its index in the
@@ -665,6 +880,15 @@ pub struct VsmRasterStats {
     pub vgeom_level_sum: u64,
     /// Skinned casters packed, summed over frames.
     pub skinned_casters: u64,
+    /// **Crowd proxy casters** packed, summed over frames (wave NPC1b) — the
+    /// agents that cast a box out of the ONE shared
+    /// [`Proxy`](GroupSource::Proxy) group instead of a skinned group each.
+    ///
+    /// Counted apart from [`skinned_casters`](Self::skinned_casters) rather than
+    /// folded into it, because the two are the *ratio* this wave exists to move:
+    /// a thousand skinned casters is a thousand groups against a ceiling of
+    /// 1 024, and a thousand proxy casters is one.
+    pub proxy_casters: u64,
     /// Terrain-tile casters packed, summed over frames.
     pub terrain_casters: u64,
     /// Casters the [`VSM_MAX_CASTERS`] and [`VSM_MAX_GROUPS`] ceilings dropped,
@@ -786,7 +1010,7 @@ impl VsmRasterStats {
             "vsm raster: {} frames, {} pages, {} draws ({} terrain, {} meshlet, \
              {} skipped), {} indices ({} terrain, {} meshlet at level sum {}), \
              {} casters ({} scattered, \
-             {} meshlet-asset, {} skinned, {} terrain), {} pages deferred, \
+             {} meshlet-asset, {} skinned, {} crowd-proxy, {} terrain), {} pages deferred, \
              {} casters dropped, {} groups refused, {} pages cached / {} dirty \
              ({} re-slotted, {} moved, {} re-cast) / {} cleared, {} invalidation \
              touches, {} cut flushes, {} masked frames, pages by level {}",
@@ -804,6 +1028,7 @@ impl VsmRasterStats {
             self.scatter_casters,
             self.vgeom_casters,
             self.skinned_casters,
+            self.proxy_casters,
             self.terrain_casters,
             self.deferred_pages,
             self.dropped_casters,
@@ -907,7 +1132,11 @@ pub struct VsmRaster {
     /// so an index that changed *meshes* invalidates and an index that did not
     /// costs nothing.
     skinned_keys: Vec<usize>,
-    /// Per-instance palette `(buffer, bind group, mesh pointer key, capacity)`.
+    /// Per-instance palette, indexed by scene-instance index. **`None` for a
+    /// proxy caster** (wave NPC1b), which draws a box out of the shared prim
+    /// buffers and has no palette to bind — so a crowd of a thousand allocates a
+    /// thousand fewer storage buffers and bind groups here as well as in
+    /// `passes::skinned`. The slot stays dense so the index is still the scene's.
     ///
     /// **Persistent** (Hardening D): the payload changes every animated frame but
     /// the *objects* do not need to. This used to `clear()` and rebuild one
@@ -916,7 +1145,7 @@ pub struct VsmRaster {
     /// 4N wgpu objects per frame for N characters across the two. They are grown
     /// on demand and written with `write_buffer` now (the `AssetDraw::params`
     /// rule), which is the same trade the water pass's `UNIFORM_STRIDE` makes.
-    skinned_palettes: Vec<(wgpu::Buffer, wgpu::BindGroup, usize, u64)>,
+    skinned_palettes: Vec<Option<SkinnedPaletteSlot>>,
     /// Static caster meshes for terrain tiles, keyed `(terrain id, tile key)` and
     /// rebuilt when that tile's version, its hole mask or the origin moves.
     terrain: std::collections::BTreeMap<(u64, crate::scene::TerrainTileKey), TerrainCasterGeom>,
@@ -1786,7 +2015,12 @@ impl VsmRaster {
                             bound_skinned = wants_skinned;
                         }
                         match geo.source {
-                            GroupSource::Prim => self.prim.bind_geometry(&mut pass),
+                            // The crowd proxy draws the shared prim buffers, which
+                            // is why it needs no pipeline switch and no geometry
+                            // of its own — its index range is the cylinder's.
+                            GroupSource::Prim | GroupSource::Proxy => {
+                                self.prim.bind_geometry(&mut pass)
+                            }
                             GroupSource::Vgeom { asset, level } => {
                                 let Some(a) = self.vgeom.get(&asset) else {
                                     continue;
@@ -1798,15 +2032,15 @@ impl VsmRaster {
                                 pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
                             }
                             GroupSource::Skinned { instance } => {
-                                let Some(mesh_index) =
-                                    self.skinned_palettes.get(instance).map(|(_, _, m, _)| *m)
+                                let Some(slot) =
+                                    self.skinned_palettes.get(instance).and_then(|s| s.as_ref())
                                 else {
                                     continue;
                                 };
-                                let Some(m) = self.skinned.get(&mesh_index) else {
+                                let Some(m) = self.skinned.get(&slot.mesh_key) else {
                                     continue;
                                 };
-                                pass.set_bind_group(2, &self.skinned_palettes[instance].1, &[]);
+                                pass.set_bind_group(2, &slot.bind, &[]);
                                 pass.set_vertex_buffer(0, m.vertices.slice(..));
                                 pass.set_index_buffer(
                                     m.indices.slice(..),
@@ -1890,6 +2124,7 @@ impl VsmRaster {
         self.stats.vgeom_casters += of(|s| matches!(s, GroupSource::Vgeom { .. }));
         self.stats.skinned_casters += of(|s| matches!(s, GroupSource::Skinned { .. }));
         self.stats.terrain_casters += of(|s| matches!(s, GroupSource::Terrain { .. }));
+        self.stats.proxy_casters += of(|s| matches!(s, GroupSource::Proxy));
         self.stats.masked_frames += u64::from(masked);
         self.stats.dropped_casters += u64::from(dropped);
         self.stats.dropped_groups += u64::from(dropped_groups);
@@ -2264,11 +2499,17 @@ impl VsmRaster {
                 lo = lo.min(p);
                 hi = hi.max(p);
             }
-            let bounds = if mesh.vertices.is_empty() {
-                (glam::Vec3::ZERO, 0.0)
+            let (bounds, bind_box) = if mesh.vertices.is_empty() {
+                (
+                    (glam::Vec3::ZERO, 0.0),
+                    (glam::Vec3::ZERO, glam::Vec3::ZERO),
+                )
             } else {
                 let c = 0.5 * (lo + hi);
-                (c, (hi - c).length() * (1.0 + SKINNED_POSE_MARGIN))
+                (
+                    (c, (hi - c).length() * (1.0 + SKINNED_POSE_MARGIN)),
+                    (c, 0.5 * (hi - lo)),
+                )
             };
             self.skinned.insert(
                 key,
@@ -2281,6 +2522,8 @@ impl VsmRaster {
                     indices,
                     index_count: mesh.indices.len() as u32,
                     bounds,
+                    bind_box,
+                    joint_bounds: joint_bind_spheres(mesh),
                 },
             );
         }
@@ -2294,13 +2537,23 @@ impl VsmRaster {
         }
         self.skinned_version = Some(scene.version);
         self.skinned_palettes.truncate(scene.skinned.len());
+        self.skinned_palettes
+            .resize_with(scene.skinned.len(), || None);
         for (i, inst) in scene.skinned.iter().enumerate() {
+            // **A proxy caster has no palette** (wave NPC1b): it draws a box out
+            // of the shared prim buffers, so allocating one storage buffer and
+            // one bind group for it would be paying the cost this clause exists
+            // to remove. Cleared rather than left standing, because a slot that
+            // outlives the instance that filled it is the P27.3 stale-slot defect.
+            if inst.shadow == crate::scene::SkinnedShadow::Proxy {
+                self.skinned_palettes[i] = None;
+                continue;
+            }
             let n = inst.palette.len().max(1);
             let bytes = (n * std::mem::size_of::<glam::Mat4>()) as u64;
-            let fits = self
-                .skinned_palettes
-                .get(i)
-                .is_some_and(|(_, _, _, cap)| *cap >= bytes);
+            let fits = self.skinned_palettes[i]
+                .as_ref()
+                .is_some_and(|slot| slot.capacity >= bytes);
             if !fits {
                 // A power-of-two ceiling: a slot that takes a different character
                 // reallocates O(log joints) times over a session, not per frame.
@@ -2319,17 +2572,21 @@ impl VsmRaster {
                         resource: buffer.as_entire_binding(),
                     }],
                 });
-                let slot = (buffer, bind, 0usize, capacity);
-                match self.skinned_palettes.get_mut(i) {
-                    Some(existing) => *existing = slot,
-                    None => self.skinned_palettes.push(slot),
-                }
+                self.skinned_palettes[i] = Some(SkinnedPaletteSlot {
+                    buffer,
+                    bind,
+                    mesh_key: 0,
+                    capacity,
+                });
             }
+            let Some(slot) = self.skinned_palettes[i].as_mut() else {
+                continue;
+            };
             // **Always written, and padded** (round-2 finding R2-6 and the P27.3
             // mirror it restores). The `!is_empty()` gate meant a reused slot
             // whose new instance has no palette rasterized with the PREVIOUS
-            // instance's matrices — `passes/skinned.rs` substitutes identity for
-            // exactly that case, and the two mirrors had come to disagree. The
+            // instance's matrices — the lit path substitutes identity for exactly
+            // that case, and the two mirrors had come to disagree. The
             // power-of-two tail is filled with the last live matrix through the
             // same door, because the shader binds the whole buffer and wgpu
             // clamps against the BINDING's length rather than `joint_count`.
@@ -2339,16 +2596,15 @@ impl VsmRaster {
                 inst.palette.iter().map(|m| m.to_cols_array()).collect()
             };
             let live = raw.len();
-            let capacity = self.skinned_palettes[i].3;
-            let raw = crate::passes::skinned::pad_palette(raw, live, capacity);
+            let raw = pad_palette(raw, live, slot.capacity);
             gpu.queue
-                .write_buffer(&self.skinned_palettes[i].0, 0, bytemuck::cast_slice(&raw));
+                .write_buffer(&slot.buffer, 0, bytemuck::cast_slice(&raw));
             // The **pointer key**, not the scene index: the group that draws this
             // instance looks its geometry up by identity, so an index that changed
             // meshes cannot be handed the previous mesh's buffers. Re-stamped
             // every frame now that the slot outlives the frame — a reused slot
             // whose key was left standing would be exactly that defect.
-            self.skinned_palettes[i].2 = self.skinned_keys.get(inst.mesh).copied().unwrap_or(0);
+            slot.mesh_key = self.skinned_keys.get(inst.mesh).copied().unwrap_or(0);
         }
     }
 
@@ -3307,6 +3563,12 @@ fn pack_casters(
     // a bind group. Each group therefore holds exactly one caster, and the cull's
     // verdict for it is 0 or 1 — which is still the per-page cull doing its job,
     // just at the granularity a character has.
+    //
+    // **Unless the instance is a crowd proxy** (wave NPC1b), in which case it
+    // skips this loop entirely and lands in the one shared group below. That is
+    // the whole answer to `VSM_MAX_GROUPS`: a thousand agents cost one group, not
+    // a thousand, and the ceiling stops being a thing a crowd can reach.
+    let mut proxies: Vec<&crate::scene::SkinnedInstance> = Vec::new();
     for (i, inst) in scene.skinned.iter().enumerate() {
         if casters.len() as u32 >= VSM_MAX_CASTERS {
             dropped += (scene.skinned.len() - i) as u32;
@@ -3321,15 +3583,30 @@ fn pack_casters(
         if mesh.index_count == 0 {
             continue;
         }
+        if inst.shadow == crate::scene::SkinnedShadow::Proxy {
+            proxies.push(inst);
+            continue;
+        }
         if !admit_group(groups.len(), 1, &mut dropped, &mut dropped_groups) {
             continue;
         }
         let model = origin.model_matrix(inst.translation, inst.rotation, inst.scale);
         let max_scale = inst.scale.abs().max_element().max(1e-6);
-        let centre = model.transform_point3(mesh.bounds.0);
+        // **The bound, exact or inflated, decided by the instance.** `Posed` is
+        // the union of this rig's per-joint bind spheres carried through this
+        // instance's own palette; `BindSphere` is the pre-NPC1b bind sphere times
+        // `1 + SKINNED_POSE_MARGIN`, which is what every hero, garment and hair
+        // ribbon in this tree still asks for.
+        let (local_c, local_r) = match inst.shadow {
+            crate::scene::SkinnedShadow::Posed => {
+                posed_bound(&mesh.joint_bounds, &inst.palette, mesh.bounds)
+            }
+            _ => mesh.bounds,
+        };
+        let centre = model.transform_point3(local_c);
         let c = VsmCasterRaw {
             model: model.to_cols_array(),
-            sphere: [centre.x, centre.y, centre.z, mesh.bounds.1 * max_scale],
+            sphere: [centre.x, centre.y, centre.z, local_r * max_scale],
             mat: [0.0, 0.0, 1.0, 0.0],
             ids: [groups.len() as u32, 0, first, 0],
         };
@@ -3340,7 +3617,7 @@ fn pack_casters(
         // character standing still does not, which is the claim
         // `a_still_character_stops_re_rasterizing_its_pages` measures.
         let mut fold = Fold::new(3).u64(mesh_key as u64);
-        for m in &inst.palette {
+        for m in inst.palette.iter() {
             fold = fold.f32s(&m.to_cols_array());
         }
         hashes.push(caster_stamp(&c, fold));
@@ -3353,6 +3630,79 @@ fn pack_casters(
             casters: 1,
         });
         first += 1;
+    }
+
+    // ── the crowd's shared proxy ───────────────────────────────────────
+    //
+    // ONE group, one caster per agent, drawing the shared unit cylinder scaled to
+    // each agent's own bind box. A cylinder rather than a cube because a standing
+    // person's shadow reads as a person and a box reads as a crate, and rather
+    // than the bind *sphere* because that is a person-sized ball. What the proxy
+    // costs is stated rather than hidden: an NPC's arms and legs do not move its
+    // shadow, and at the tiers that take it (`Near` and out — 32 m and further)
+    // that shadow is a handful of page texels.
+    if !proxies.is_empty() {
+        let range = prim.range(PrimMesh::Cylinder);
+        let mut count = 0u32;
+        let group = groups.len() as u32;
+        if admit_group(
+            groups.len(),
+            proxies.len() as u32,
+            &mut dropped,
+            &mut dropped_groups,
+        ) {
+            for inst in &proxies {
+                if casters.len() as u32 >= VSM_MAX_CASTERS {
+                    dropped += proxies.len() as u32 - count;
+                    break;
+                }
+                let Some(mesh_key) = mesh_keys.get(inst.mesh).copied() else {
+                    continue;
+                };
+                let Some(mesh) = skinned.get(&mesh_key) else {
+                    continue;
+                };
+                // The unit cylinder is 0.5 in radius and 1 tall, centred — so the
+                // box's half-extents doubled put its skin on the bind box.
+                let (bc, bh) = mesh.bind_box;
+                let model = origin.model_matrix(inst.translation, inst.rotation, inst.scale)
+                    * Mat4::from_translation(bc)
+                    * Mat4::from_scale(2.0 * bh.max(glam::Vec3::splat(1e-4)));
+                let scale = model
+                    .x_axis
+                    .truncate()
+                    .length()
+                    .max(model.y_axis.truncate().length())
+                    .max(model.z_axis.truncate().length());
+                let centre = model.w_axis.truncate();
+                let c = VsmCasterRaw {
+                    model: model.to_cols_array(),
+                    sphere: [
+                        centre.x,
+                        centre.y,
+                        centre.z,
+                        PrimMesh::Cylinder.bounding_radius() * scale,
+                    ],
+                    mat: [0.0, 0.0, 1.0, 0.0],
+                    ids: [group, count, first, 0],
+                };
+                // The stamp folds the MODEL and not a palette: a proxy's shadow is
+                // a function of where the agent stands and how big it is, so an
+                // agent walking invalidates its pages and an agent standing still
+                // does not — however hard its joints are working.
+                hashes.push(caster_stamp(&c, Fold::new(4).u64(mesh_key as u64)));
+                casters.push(c);
+                count += 1;
+            }
+            groups.push(GroupGeom {
+                source: GroupSource::Proxy,
+                index_count: range.index_count,
+                first_index: range.index_start,
+                base_vertex: range.base_vertex,
+                casters: count,
+            });
+            first += count;
+        }
     }
 
     // ── terrain ────────────────────────────────────────────────────────
@@ -4067,6 +4417,7 @@ mod tests {
             vgeom_casters: 4,
             vgeom_level_sum: 5,
             skinned_casters: 1,
+            proxy_casters: 97,
             terrain_casters: 2,
             dropped_casters: 6,
             dropped_groups: 1,
@@ -4101,7 +4452,7 @@ mod tests {
         // of its own here so the list can see it.
         for n in [
             "3", "17", "51", "9", "2", "1", "4", "6", "23", "29", "31", "37", "41", "43", "47",
-            "53", "59", "61", "67", "71", "73", "79", "83", "89",
+            "53", "59", "61", "67", "71", "73", "79", "83", "89", "97",
         ] {
             assert!(s.contains(n), "{n} is missing from {s:?}");
         }

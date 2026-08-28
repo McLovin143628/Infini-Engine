@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use glam::{DVec3, Mat4, Quat, Vec3};
+use glam::{DVec3, Quat, Vec3};
 use inf_math::FloatingOrigin;
 use inf_render::{
     EngineRenderer, GiSettings, GpuContext, HeadlessTarget, RenderScene, RenderSettings,
@@ -372,7 +372,8 @@ fn gi_holds_only_the_content_the_scene_still_names() {
         emissive: [0.0; 3],
         id: 2,
         mesh: 0,
-        palette: vec![Mat4::IDENTITY],
+        palette: inf_render::identity_palette(),
+        shadow: inf_render::SkinnedShadow::BindSphere,
     });
     scene.mark_dirty();
     renderer.render(&gpu, &scene, &view, &target.view, (W, H));
@@ -400,7 +401,8 @@ fn gi_holds_only_the_content_the_scene_still_names() {
         emissive: [0.0; 3],
         id: 2,
         mesh: 0,
-        palette: vec![Mat4::IDENTITY],
+        palette: inf_render::identity_palette(),
+        shadow: inf_render::SkinnedShadow::BindSphere,
     });
     swapped.mark_dirty();
     renderer.render(&gpu, &swapped, &view, &target.view, (W, H));
@@ -449,7 +451,8 @@ fn gi_releases_its_caches_when_the_setting_goes_off() {
         emissive: [0.0; 3],
         id: 2,
         mesh: 0,
-        palette: vec![Mat4::IDENTITY],
+        palette: inf_render::identity_palette(),
+        shadow: inf_render::SkinnedShadow::BindSphere,
     });
     scene.mark_dirty();
     renderer.render(&gpu, &scene, &view, &target.view, (W, H));

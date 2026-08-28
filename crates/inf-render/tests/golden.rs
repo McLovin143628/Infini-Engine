@@ -2015,9 +2015,13 @@ fn skinned_cylinder() -> (inf_anim::Skeleton, inf_anim::AnimClip, SkinnedMeshDat
 }
 
 /// The skinning palette (`global · inverse_bind` per joint) for a clip at time `t`.
-fn palette_at(sk: &inf_anim::Skeleton, clip: &inf_anim::AnimClip, t: f32) -> Vec<Mat4> {
+fn palette_at(
+    sk: &inf_anim::Skeleton,
+    clip: &inf_anim::AnimClip,
+    t: f32,
+) -> std::sync::Arc<Vec<Mat4>> {
     let pose = inf_anim::sample_clip(sk, clip, t, false);
-    inf_anim::skinning_matrices(sk, &pose)
+    std::sync::Arc::new(inf_anim::skinning_matrices(sk, &pose))
 }
 
 /// Skinned-mesh golden (P11.1): a procedural skinned cylinder driven by a real
@@ -2032,7 +2036,7 @@ fn golden_skinned_mesh() {
     let Some(gpu) = gpu_or_skip() else { return };
     let (sk, clip, mesh) = skinned_cylinder();
 
-    let make = |palette: Vec<Mat4>| SkinnedInstance {
+    let make = |palette: std::sync::Arc<Vec<Mat4>>| SkinnedInstance {
         vt: Default::default(),
         translation: DVec3::ZERO,
         rotation: Quat::IDENTITY,
@@ -2044,6 +2048,7 @@ fn golden_skinned_mesh() {
         id: 1,
         mesh: 0,
         palette,
+        shadow: inf_render::SkinnedShadow::BindSphere,
     };
 
     // P18.3: the scene shares bind-space geometry as an `Arc`, so a host that
@@ -3178,6 +3183,7 @@ fn the_prepass_sees_a_skinned_character() {
         id: 2,
         mesh: 0,
         palette: palette_at(&sk, &clip, 0.5),
+        shadow: inf_render::SkinnedShadow::BindSphere,
     });
     scene.mark_dirty();
     let view = look_view(DVec3::new(3.2, 1.6, 3.6), DVec3::new(0.0, 0.6, 0.0));
@@ -4756,6 +4762,7 @@ fn gi_sees_skinned_and_vgeom_geometry() {
             id: 2,
             mesh: 0,
             palette: palette_at(&sk, &clip, 0.0),
+            shadow: inf_render::SkinnedShadow::BindSphere,
         });
         s.lights.push(sun);
         s.mark_dirty();

@@ -470,7 +470,7 @@ fn palette(
     store: &inf_player::skinned::SkinnedRegistry,
     sm: &SkeletalMesh,
     sim: &RuntimeSim,
-) -> Vec<Mat4> {
+) -> std::sync::Arc<Vec<Mat4>> {
     let posed = inf_ecs::pose::evaluated_pose(sim.world(), HERO);
     assert!(posed.is_some(), "the sim published no pose to draw");
     store

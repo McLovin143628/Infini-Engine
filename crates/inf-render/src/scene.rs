@@ -1247,10 +1247,54 @@ pub fn deformed_skinned_mesh(positions: &[[f32; 3]], indices: &[u32]) -> Skinned
     }
 }
 
+/// **How one skinned instance casts its shadow** (wave NPC1b).
+///
+/// A skinned caster is a *geometry group* in the page raster, and
+/// [`VSM_MAX_GROUPS`](crate::VSM_MAX_GROUPS) is 1 024 — so a thousand NPCs is a
+/// thousand groups, and past the ceiling a crowd's shadows are refused (counted,
+/// but refused). This enum is the renderer's whole reading of the crowd tier: the
+/// near few keep a real skinned caster, everything further out casts through
+/// **one shared proxy group** for the entire crowd.
+///
+/// [`BindSphere`](Self::BindSphere) is the [`Default`] and is what every
+/// instance before this wave was: nothing in the tree opts into the other two
+/// unless a projector reads a tier, so every committed level, every golden and
+/// every P27 page-cache arm is byte-identical to its pre-NPC1b self.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkinnedShadow {
+    /// A skinned caster culled on the mesh's **bind** bounding sphere inflated by
+    /// [`SKINNED_POSE_MARGIN`](crate::SKINNED_POSE_MARGIN) — the pre-NPC1b rule,
+    /// and still the rule for every hero, garment and hair ribbon.
+    #[default]
+    BindSphere,
+    /// A skinned caster culled on the **exact** bound of the pose it is drawing:
+    /// the union of this instance's per-joint bind spheres transformed by its own
+    /// palette. Strictly tighter than [`BindSphere`](Self::BindSphere) and
+    /// therefore strictly fewer invalidated pages.
+    Posed,
+    /// **No skinned caster at all.** This instance casts from the crowd's shared
+    /// box proxy, which is ONE group however many agents are in it.
+    Proxy,
+}
+
+/// **The one-entry identity palette**, shared process-wide.
+///
+/// A CPU-deformed garment or hair ribbon arrives already in model space, so its
+/// "skinning" is the identity — see [`deformed_skinned_mesh`]. Every one of them
+/// naming the *same* `Arc` means a level full of garments costs the palette atlas
+/// exactly one matrix rather than one per ribbon, through the same pointer-identity
+/// dedup a crowd's shared rest pose uses. It is also the reason this is a function
+/// and not a `vec![]` at each call site: two `vec![]`s are two blocks.
+pub fn identity_palette() -> std::sync::Arc<Vec<Mat4>> {
+    static ONE: std::sync::OnceLock<std::sync::Arc<Vec<Mat4>>> = std::sync::OnceLock::new();
+    ONE.get_or_init(|| std::sync::Arc::new(vec![Mat4::IDENTITY]))
+        .clone()
+}
+
 /// One skinned draw: a [`SkinnedMeshData`] (by index into
 /// [`RenderScene::skinned_meshes`]) placed by a world transform and deformed by a
 /// per-instance **skinning palette** (`global · inverse_bind` per joint, computed
-/// CPU-side by the host — v1; a GPU palette compute pass is a P15 optimization).
+/// CPU-side by the host).
 ///
 /// The palette is applied in the vertex shader **before** the model matrix, so it
 /// stays in bind/model space (no floating-origin adjustment needed — only the
@@ -1271,8 +1315,21 @@ pub struct SkinnedInstance {
     /// Index into [`RenderScene::skinned_meshes`].
     pub mesh: usize,
     /// The skinning palette: one matrix per skeleton joint, indexed by the
-    /// vertex `joints`. Bound as a `@group(3)` storage buffer.
-    pub palette: Vec<Mat4>,
+    /// vertex `joints`. Uploaded into the pass's **palette atlas** at an offset
+    /// this instance carries in a packed channel.
+    ///
+    /// **`Arc`, since NPC1b, and the sharing is the point.** A crowd's far tier
+    /// evaluates no pose, so every agent of one archetype out there resolves to
+    /// the *same* rest-pose palette — a thousand byte-identical 16 KiB blocks,
+    /// derived a thousand times and uploaded a thousand times. The projector now
+    /// hands one `Arc` to all of them and
+    /// [`plan_skinned_batches`](crate::plan_skinned_batches) deduplicates the
+    /// atlas by pointer identity, exactly as `skinned_meshes` deduplicates
+    /// geometry. A posed character still gets its own, because a pose is the part
+    /// that actually changes.
+    pub palette: std::sync::Arc<Vec<Mat4>>,
+    /// How this instance casts into the virtual shadow map (wave NPC1b).
+    pub shadow: SkinnedShadow,
     /// P26.3: the virtual textures this instance samples. [`VtTextureSet::NONE`]
     /// on every instance that names none, which is every instance before this
     /// batch — and then the fragment shader runs the arithmetic it always ran.
@@ -2686,11 +2743,18 @@ pub struct RenderScene {
     /// change *and* — because the pass keyed its uploads on `scene.version` — a
     /// full GPU re-upload of geometry that had not moved. Sharing the buffer lets
     /// the pass cache by **pointer identity** instead: same `Arc`, same GPU
-    /// buffers, no copy and no upload. Palettes are still rebuilt every projection,
-    /// which is correct — they are the part that actually changes.
+    /// buffers, no copy and no upload.
+    ///
+    /// **Palettes take the same discipline since NPC1b** (see
+    /// [`SkinnedInstance::palette`]). The original sentence here said they are
+    /// "still rebuilt every projection, which is correct — they are the part that
+    /// actually changes", and that is true of a *posed* character and false of a
+    /// crowd: a thousand agents that evaluate no pose share one rest palette, and
+    /// rebuilding it a thousand times is a thousand copies of one answer.
     pub skinned_meshes: Vec<std::sync::Arc<SkinnedMeshData>>,
-    /// GPU-skinned instances (P11.1). Each carries its own joint palette; drawn
-    /// by the skinned mesh pass after the rigid mesh pass, into the same targets.
+    /// GPU-skinned instances (P11.1). Each names a joint palette (shared, by
+    /// `Arc`) and how it casts; drawn by the skinned mesh pass after the rigid
+    /// mesh pass, into the same targets.
     pub skinned: Vec<SkinnedInstance>,
     /// Virtualized-geometry (meshlet DAG) assets referenced by
     /// [`vgeom_instances`](Self::vgeom_instances) (P13.1b). Each is uploaded to GPU

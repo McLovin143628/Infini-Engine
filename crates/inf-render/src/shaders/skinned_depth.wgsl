@@ -42,12 +42,23 @@ struct VsIn {
 
 @group(1) @binding(0) var<storage, read> palette: array<mat4x4<f32>>;
 
+// The atlas addressing and the out-of-range clamp, character for character from
+// `skinned_mesh.wgsl` for the same reason the skinning arithmetic below is: a
+// prepass depth that disagrees with the colour pass's by one ulp is a
+// self-occlusion pattern in the AO, and a prepass that clamped differently would
+// draw a different silhouette from the one it is supposed to pre-depth.
+fn joint(base: u32, count: u32, index: u32) -> mat4x4<f32> {
+    return palette[base + min(index, max(count, 1u) - 1u)];
+}
+
 @vertex
 fn vs(in: VsIn) -> @builtin(position) vec4<f32> {
-    let skin = in.weights.x * palette[in.joints.x]
-             + in.weights.y * palette[in.joints.y]
-             + in.weights.z * palette[in.joints.z]
-             + in.weights.w * palette[in.joints.w];
+    let base = u32(in.emissive.w);
+    let count = u32(in.pbr.z);
+    let skin = in.weights.x * joint(base, count, in.joints.x)
+             + in.weights.y * joint(base, count, in.joints.y)
+             + in.weights.z * joint(base, count, in.joints.z)
+             + in.weights.w * joint(base, count, in.joints.w);
     let skinned_pos = (skin * vec4<f32>(in.pos, 1.0)).xyz;
     let model = mat4x4<f32>(in.model_0, in.model_1, in.model_2, in.model_3);
     return view.view_proj * (model * vec4<f32>(skinned_pos, 1.0));

@@ -165,6 +165,24 @@ impl CrowdTier {
         !matches!(self, CrowdTier::Dormant)
     }
 
+    /// **Whether this tier casts a shadow of its own shape** (`Full` only), or
+    /// through the crowd's shared proxy (wave NPC1b).
+    ///
+    /// A skinned caster is one *geometry group* in the virtual shadow map, and
+    /// `inf_render::VSM_MAX_GROUPS` is 1 024 — so a thousand NPCs each casting
+    /// their own silhouette is a thousand groups, past the ceiling, and the
+    /// overflow is refused. `Full` is 32 m, which is where a viewer can read that
+    /// an arm moved; past it a box the agent's own size is the same handful of
+    /// page texels and costs ONE group for the whole crowd.
+    ///
+    /// The predicate lives here, beside [`poses`](Self::poses) and
+    /// [`has_body`](Self::has_body), so the tier means one thing in the editor
+    /// and the player — both projectors read it through the same door.
+    #[inline]
+    pub fn skinned_caster(self) -> bool {
+        matches!(self, CrowdTier::Full)
+    }
+
     /// The byte the trace folds. Frozen: these discriminants are compared
     /// between two hosts and, through the replay path, two machines.
     #[inline]
@@ -444,6 +462,103 @@ pub fn agent_rand(guid: Uuid, tick: u64, salt: u64) -> u64 {
 #[inline]
 pub fn agent_unit(guid: Uuid, tick: u64, salt: u64) -> f64 {
     (agent_rand(guid, tick, salt) >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0)
+}
+
+// ── what an agent looks like (wave NPC1b) ───────────────────────────────────
+
+/// The salt an agent's palette-swap look is drawn with.
+pub const SALT_LOOK: u64 = 0x4c4f_4f4b_0000_0003;
+
+/// The salt an agent's build (its drawn height and girth) is drawn with.
+pub const SALT_BUILD: u64 = 0x4255_494c_4400_0004;
+
+/// **The crowd's palette swaps** — linear-space multipliers over whatever base
+/// colour the archetype's material resolves to.
+///
+/// Eight, because a crowd wants to stop reading as clones and does not want to
+/// read as a paint chart: at eight looks a group of six is very unlikely to be
+/// uniform and no look is rare enough to feel like a special character. They are
+/// *multipliers*, not colours, so a character with an authored material keeps its
+/// own material and takes the variation on top — which is what makes this work
+/// for content that does not exist yet.
+///
+/// **Body variation without rig variation**, which is the shape
+/// [`CrowdArchetype`]'s own doc names: N NPCs share one mesh, one skeleton, one
+/// `.inf_sm` and every clip, and what makes them different is per-instance data
+/// the renderer already carries. NPC1a deliberately did not smuggle it in here;
+/// this is where it lands.
+pub const CROWD_LOOKS: [[f32; 3]; 8] = [
+    [1.00, 0.98, 0.94], // bone
+    [0.52, 0.60, 0.82], // denim
+    [0.58, 0.62, 0.42], // olive
+    [0.86, 0.52, 0.36], // rust
+    [0.38, 0.40, 0.44], // charcoal
+    [0.92, 0.82, 0.62], // sand
+    [0.40, 0.70, 0.70], // teal
+    [0.66, 0.34, 0.40], // maroon
+];
+
+/// The narrowest and widest an agent is drawn, as a multiplier on its archetype's
+/// proportions.
+///
+/// **±8 %, and the bound is a physics bound rather than a taste one.** A crowd
+/// agent's *collider* is its archetype's capsule and this multiplier does not
+/// reach it (see [`agent_look`]), so every centimetre of it is a centimetre of
+/// disagreement between what a player sees and what they can walk into. Eight
+/// per cent of a 1.8 m adult is 14 cm of height and 2.4 cm of radius — inside the
+/// slack a capsule already has around a humanoid mesh, and visible enough that a
+/// row of six does not read as one model repeated.
+pub const CROWD_BUILD_RANGE: (f32, f32) = (0.92, 1.08);
+
+/// **What one crowd agent looks like** — derived from its `Guid` and nothing
+/// else, and therefore never stored.
+///
+/// A stored look would be a second copy of a pure function, and the copy is what
+/// drifts (NPC1a's ruling about the speed multiplier and the route phase, met
+/// again). It is also why this is not a component: nothing here is sim state, so
+/// nothing here reaches `state_bytes`, and **PIE equals shipping for the same
+/// reason it did before the crowd had a face** — both projectors call this one
+/// door with the same `Guid` and get the same answer.
+///
+/// Drawn at `tick = 0`, so an agent's look does not change as it walks.
+#[inline]
+pub fn agent_look(guid: Uuid) -> CrowdLook {
+    let swap = (agent_rand(guid, 0, SALT_LOOK) % CROWD_LOOKS.len() as u64) as usize;
+    let u = agent_unit(guid, 0, SALT_BUILD) as f32;
+    let (lo, hi) = CROWD_BUILD_RANGE;
+    CrowdLook {
+        tint: CROWD_LOOKS[swap],
+        build: lo + (hi - lo) * u,
+    }
+}
+
+/// One agent's drawn variation — see [`agent_look`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CrowdLook {
+    /// A linear-space multiplier over the base colour, from [`CROWD_LOOKS`].
+    pub tint: [f32; 3],
+    /// A uniform multiplier on the agent's **drawn** scale, inside
+    /// [`CROWD_BUILD_RANGE`].
+    ///
+    /// Drawn and not simulated: it multiplies the render instance's scale and
+    /// leaves the rapier capsule at the archetype's own proportions. That is the
+    /// honest v1 — a per-agent collider is a per-agent `Collider3D`, which is sim
+    /// state, which is a schema question and a trace question and belongs with the
+    /// wave that gives a near agent a controller.
+    pub build: f32,
+}
+
+impl CrowdLook {
+    /// This look applied to a base colour, alpha untouched.
+    #[inline]
+    pub fn over(self, base: [f32; 4]) -> [f32; 4] {
+        [
+            base[0] * self.tint[0],
+            base[1] * self.tint[1],
+            base[2] * self.tint[2],
+            base[3],
+        ]
+    }
 }
 
 // ── the route ───────────────────────────────────────────────────────────────

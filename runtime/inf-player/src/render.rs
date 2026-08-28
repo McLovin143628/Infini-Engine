@@ -1015,7 +1015,28 @@ pub fn project_scene_full(
                         [0.0; 3],
                         inf_render::VtTextureSet::NONE,
                     ));
-                match skinned.resolve_skinned(&sm, player.as_ref(), posed) {
+
+                // ── THE RENDERER READS THE TIER (wave NPC1b) ──
+                //
+                // `CrowdAgent` is the verdict `inf_ecs::crowd::step_crowd`
+                // published this fixed step. Three things follow from it, all
+                // of them render-side and none of them sim state — so nothing
+                // here can move a trace byte, and both hosts derive the same
+                // answers from the same `Guid`.
+                let agent = w.get::<inf_ecs::crowd::CrowdAgent>(entity).copied();
+                let look = agent.map(|a| inf_ecs::crowd::agent_look(a.guid));
+                let color = look.map_or(color, |l| l.over(color));
+                let body = look.map_or(1.0, |l| l.build);
+                let shadow = crowd_shadow(agent);
+                // An agent the ladder took OFF the pose path resolves to
+                // its rig's shared rest palette — the same matrices the
+                // per-agent call would have produced for it, derived once per
+                // `(mesh, skeleton)` instead of once per agent per frame.
+                let resolved = match agent {
+                    Some(a) if !a.tier.poses() => skinned.resolve_skinned_shared(&sm),
+                    _ => skinned.resolve_skinned(&sm, player.as_ref(), posed),
+                };
+                match resolved {
                     Some(draw) => {
                         // One `skinned_meshes` entry per (mesh, skeleton) pair,
                         // and the entry is the store's own `Arc` — no copy here,
@@ -1032,7 +1053,7 @@ pub fn project_scene_full(
                             vt,
                             translation,
                             rotation: rot.as_quat(),
-                            scale: scale.as_vec3(),
+                            scale: scale.as_vec3() * body,
                             color,
                             metallic,
                             roughness,
@@ -1040,6 +1061,7 @@ pub fn project_scene_full(
                             id,
                             mesh: slot,
                             palette: draw.palette,
+                            shadow,
                         });
                     }
                     // Unbound (or unskinned) — the editor's placeholder, down to
@@ -2851,6 +2873,28 @@ fn project_text(text: &Text2D, translation: DVec3) -> Option<PrebatchedRun> {
     })
 }
 
+/// **How a crowd agent casts** — the one mapping from the sim-LOD tier to the
+/// renderer's caster mode (wave NPC1b).
+///
+/// `Full` is 32 m, which is where a viewer can read that an arm moved, so those
+/// agents keep a real skinned caster and get the EXACT posed bound
+/// (`SkinnedShadow::Posed`) rather than the 50 % `SKINNED_POSE_MARGIN` inflation
+/// — a tighter caster sphere is fewer invalidated shadow pages, which is what an
+/// animating character costs the page cache. Everything further out casts a box
+/// out of the crowd's single shared proxy group, because `VSM_MAX_GROUPS` is
+/// 1 024 and a skinned caster is one group each.
+///
+/// An entity with no `CrowdAgent` — every hero, every garment, every hair ribbon,
+/// every authored character in this tree — answers `BindSphere`, which is exactly
+/// what it was before this wave.
+fn crowd_shadow(agent: Option<inf_ecs::crowd::CrowdAgent>) -> inf_render::SkinnedShadow {
+    match agent {
+        None => inf_render::SkinnedShadow::BindSphere,
+        Some(a) if a.tier.skinned_caster() => inf_render::SkinnedShadow::Posed,
+        Some(_) => inf_render::SkinnedShadow::Proxy,
+    }
+}
+
 /// **A simulated garment, as a skinned draw** (P24.4).
 ///
 /// The sim's `inf_ecs::cloth` store already holds this wearer's particle
@@ -2905,7 +2949,8 @@ fn project_cloth(
         emissive: [0.0; 3],
         id: inf_render::ID_NONE,
         mesh: slot,
-        palette: vec![glam::Mat4::IDENTITY],
+        palette: inf_render::identity_palette(),
+        shadow: inf_render::SkinnedShadow::BindSphere,
     });
 }
 
@@ -2950,7 +2995,8 @@ fn project_hair(
         emissive: [0.0; 3],
         id: inf_render::ID_NONE,
         mesh: slot,
-        palette: vec![glam::Mat4::IDENTITY],
+        palette: inf_render::identity_palette(),
+        shadow: inf_render::SkinnedShadow::BindSphere,
     });
 }
 #[cfg(test)]

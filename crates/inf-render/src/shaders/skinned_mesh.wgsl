@@ -43,16 +43,37 @@ struct VsOut {
     @location(8) @interpolate(flat) vt: vec3<u32>,
 };
 
-// The per-instance joint palette: skin[i] = global[i] · inverse_bind[i].
+// **The joint-palette ATLAS** (wave NPC1b): every instance's palette, packed at
+// matrix granularity into one storage buffer. skin[i] = global[i] · inverse_bind[i].
+//
+// An instance finds its own block through two channels of the instance stream
+// that have been reserved-zero since P7.1 — `emissive.w` is the block's offset in
+// matrices and `pbr.z` is its live joint count — because this pipeline is at the
+// `max_vertex_attributes: 16` wall exactly and there is no seventeenth address to
+// put them at (docs/memos/p26-5-vertex-streams.md). Both are small integers, so
+// the f32 round-trip is exact.
 @group(3) @binding(0) var<storage, read> palette: array<mat4x4<f32>>;
+
+// **The clamp that replaced `pad_palette`.** A vertex whose joint index runs past
+// its own skeleton (a mesh bound to the wrong rig, an index the CPU clamp did not
+// see) used to read a power-of-two tail the CPU had filled with this skeleton's
+// last live matrix. In an ATLAS that vertex would read the next character's
+// palette instead — the same round-2 finding R2-6, made worse — so the rule moved
+// here, where it is exact, costs no padding at all, and cannot be defeated by a
+// buffer whose length says nothing about this instance's rig.
+fn joint(base: u32, count: u32, index: u32) -> mat4x4<f32> {
+    return palette[base + min(index, max(count, 1u) - 1u)];
+}
 
 @vertex
 fn vs(in: VsIn) -> VsOut {
+    let base = u32(in.emissive.w);
+    let count = u32(in.pbr.z);
     // Linear blend skinning: weighted sum of the four influencing joint matrices.
-    let skin = in.weights.x * palette[in.joints.x]
-             + in.weights.y * palette[in.joints.y]
-             + in.weights.z * palette[in.joints.z]
-             + in.weights.w * palette[in.joints.w];
+    let skin = in.weights.x * joint(base, count, in.joints.x)
+             + in.weights.y * joint(base, count, in.joints.y)
+             + in.weights.z * joint(base, count, in.joints.z)
+             + in.weights.w * joint(base, count, in.joints.w);
     let skinned_pos = (skin * vec4<f32>(in.pos, 1.0)).xyz;
     let skin3 = mat3x3<f32>(skin[0].xyz, skin[1].xyz, skin[2].xyz);
     let skinned_normal = skin3 * in.normal;
@@ -66,7 +87,11 @@ fn vs(in: VsIn) -> VsOut {
     out.normal = nrm * skinned_normal;
     out.color = in.color;
     out.id = in.misc.x;
-    out.pbr = in.pbr;
+    // `pbr.zw` are the rigid path's alpha cutoff and blend code, and `pbr.z` is
+    // this path's joint count — so it is dropped HERE rather than left for a
+    // fragment stage to read as a cutoff the day someone gives this pipeline an
+    // alpha test. `emissive.w` (the atlas offset) is dropped by `.rgb` already.
+    out.pbr = vec4<f32>(in.pbr.xy, 0.0, 0.0);
     out.emissive = in.emissive.rgb;
     // The uv is a property of the SURFACE, not of the pose, so it rides through
     // unchanged — which is the whole difference between an authored

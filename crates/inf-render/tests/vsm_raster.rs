@@ -945,7 +945,8 @@ fn a_skinned_caster_casts_through_its_own_palette() {
             emissive: [0.0; 3],
             id: 3,
             mesh: 0,
-            palette: vec![palette],
+            palette: std::sync::Arc::new(vec![palette]),
+            shadow: inf_render::SkinnedShadow::BindSphere,
             vt: inf_render::VtTextureSet::NONE,
         });
         s.instances.push(backdrop());
@@ -1496,7 +1497,8 @@ fn a_skinned_casters_cull_sphere_contains_a_pose_that_left_the_bind_pose() {
         emissive: [0.0; 3],
         id: 3,
         mesh: 0,
-        palette: vec![palette],
+        palette: std::sync::Arc::new(vec![palette]),
+        shadow: inf_render::SkinnedShadow::BindSphere,
         vt: inf_render::VtTextureSet::NONE,
     });
     s.instances.push(backdrop());
@@ -2207,7 +2209,8 @@ fn the_group_ceiling_counts_the_groups_it_refuses() {
             emissive: [0.0; 3],
             id: 1_000 + i,
             mesh: 0,
-            palette: vec![glam::Mat4::IDENTITY],
+            palette: inf_render::identity_palette(),
+            shadow: inf_render::SkinnedShadow::BindSphere,
             vt: inf_render::VtTextureSet::NONE,
         });
     }
@@ -3247,7 +3250,8 @@ fn an_animating_character_invalidates_its_pages_and_a_still_one_does_not() {
             emissive: [0.0; 3],
             id: 77,
             mesh: 0,
-            palette: vec![palette],
+            palette: std::sync::Arc::new(vec![palette]),
+            shadow: inf_render::SkinnedShadow::BindSphere,
             vt: inf_render::VtTextureSet::NONE,
         });
         s.instances.push(backdrop());
@@ -3363,7 +3367,8 @@ fn the_skinned_caster_cache_holds_the_arc_its_pointer_key_names() {
         emissive: [0.0; 3],
         id: 77,
         mesh: 0,
-        palette: vec![glam::Mat4::IDENTITY],
+        palette: inf_render::identity_palette(),
+        shadow: inf_render::SkinnedShadow::BindSphere,
         vt: inf_render::VtTextureSet::NONE,
     });
     s.instances.push(backdrop());

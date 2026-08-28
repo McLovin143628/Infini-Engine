@@ -19,12 +19,38 @@
 //! * **Bind groups** — `@group(0)` view uniforms + `@group(1)` lights (shared
 //!   with the rigid pass), `@group(2)` **reserved for the material seam** (an
 //!   empty bind group today, mirroring the `inf-material` convention that binds
-//!   material textures at group 2), and `@group(3)` the per-instance joint-matrix
-//!   **storage buffer** (`array<mat4x4<f32>>`).
-//! * **Batching (v1)** — one draw per skinned instance, each with its own palette
-//!   bind group; palettes vary per instance so this is the simple correct
-//!   baseline. A shared palette atlas + instanced draw (and a GPU palette compute
-//!   pass) is the documented P15 optimization.
+//!   material textures at group 2), and `@group(3)` the joint-matrix
+//!   **palette atlas** (`array<mat4x4<f32>>`).
+//! * **Batching** — ONE draw per `(mesh)` run over a shared atlas, which is the
+//!   optimization this file called "the documented P15 optimization" and did not
+//!   build for four years of waves. See [`plan_skinned_batches`].
+//!
+//! ## The atlas (wave NPC1b)
+//!
+//! Before this wave the pass allocated **one storage buffer and one bind group
+//! per skinned instance**, wrote each palette with its own `write_buffer`, and
+//! issued **one draw per instance** — twice, because the depth prepass walks the
+//! same list. At a thousand NPCs that is 2 002 draws, 2 002 bind-group binds and
+//! 31.28 MB of palette upload a frame (`crowd_sweep`'s wall-3 column), and the
+//! palettes were *byte-identical* across the 710 agents the sim-LOD ladder had
+//! decided not to pose at all.
+//!
+//! Now: every distinct palette (by `Arc` pointer, so a shared one is uploaded
+//! **once**) is appended to one atlas buffer at a matrix granularity, and each
+//! instance carries its block's `(offset, joint count)` in two channels of the
+//! instance stream that have been reserved-zero since P7.1 — `emissive.w` and
+//! `pbr.z`. There is no seventeenth vertex attribute, because there is no
+//! seventeenth address: this pipeline is at the `max_vertex_attributes: 16` wall
+//! exactly (`docs/memos/p26-5-vertex-streams.md`), and channel packing into an
+//! existing attribute is the route that memo names.
+//!
+//! The **count** is not bookkeeping. `pad_palette` used to fill a power-of-two
+//! tail with the last live matrix so that a vertex whose joint index ran past its
+//! own skeleton read something of its own rig (round-2 finding R2-6); in an atlas
+//! that vertex would read the *next character's* palette, which is the same
+//! defect made worse. The clamp moved into the shader — `palette[base +
+//! min(j, count - 1)]` — where it is exact, needs no padding at all, and holds
+//! for a packed atlas that padding cannot.
 
 use glam::Mat3;
 use inf_math::FloatingOrigin;
@@ -181,9 +207,148 @@ fn vertex_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
     ]
 }
 
+/// Matrices the joint-palette atlas may hold in one frame.
+///
+/// **16 MiB** at 64 bytes a matrix — an eighth of `Limits::default()`'s
+/// `max_storage_buffer_binding_size` (128 MiB), and **1 628 distinct**
+/// island-class 161-bone poses. The number that binds is distinct *poses*, not
+/// agents, because a crowd shares its palettes: the N = 1 000 sweep fills 292
+/// blocks of it, and a level would have to hold sixteen hundred separately-posed
+/// characters *inside one frame* to reach it.
+///
+/// It is a **counted** ceiling, not a silent one — see
+/// [`SkinnedBatches::dropped`], the same rule `VSM_MAX_GROUPS` follows.
+pub const SKINNED_PALETTE_MATRICES: usize = 1 << 18;
+
+/// The atlas offset rides an `f32` channel, so the ceiling has to stay inside the
+/// integers an `f32` represents exactly (`2^24`). It also has to fit the default
+/// storage-buffer binding size, which is what actually stops a device error.
+const _: () = {
+    assert!(SKINNED_PALETTE_MATRICES <= (1 << 24));
+    assert!(SKINNED_PALETTE_MATRICES * 64 <= 128 * 1024 * 1024);
+};
+
+/// One draw: a contiguous run of instances sharing a mesh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkinnedRun {
+    /// Index into `RenderScene::skinned_meshes`.
+    pub mesh: usize,
+    /// First instance of the run in the packed instance buffer — the draw's
+    /// `base_instance`.
+    pub first_instance: u32,
+    /// Instances in the run.
+    pub count: u32,
+}
+
+/// **What one frame's skinned draws are, derived from the scene alone.**
+///
+/// Pure: no device, no adapter, no frame. [`SkinnedMeshNode::sync`] calls this
+/// and then executes it, so an instrument that wants the draw count or the
+/// palette bytes calls the same function the pass does rather than a
+/// re-derivation of it (the "a gate must aim at the thing it names" rule — the
+/// N-sweep's palette column was a *multiplication* before this wave, and this is
+/// what makes it a measurement).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkinnedBatches {
+    /// Scene-instance indices, in draw order — grouped by mesh, stable within a
+    /// mesh, and with dropped instances removed.
+    pub order: Vec<u32>,
+    /// Per entry of [`order`](Self::order): its palette block's `(offset in
+    /// matrices, live joint count)`, which is what the instance stream carries.
+    pub palette: Vec<(u32, u32)>,
+    /// One draw each.
+    pub runs: Vec<SkinnedRun>,
+    /// Distinct palette blocks in the atlas. **Fewer than `order.len()` is the
+    /// whole point**: a crowd's far tier shares one.
+    pub blocks: usize,
+    /// Matrices the atlas holds — `matrices * 64` bytes uploaded per frame.
+    pub matrices: usize,
+    /// Instances not drawn because [`SKINNED_PALETTE_MATRICES`] was reached.
+    pub dropped: usize,
+}
+
+/// Plan one frame's skinned draws: group by mesh, deduplicate palettes by `Arc`
+/// identity, and lay the surviving blocks out in one atlas.
+///
+/// The ordering is a **stable** sort on the mesh index, so a scene with one
+/// skinned mesh — every character scene in this tree, and every golden — keeps
+/// exactly the instance order it had before this wave and draws exactly the same
+/// pixels through one call instead of N.
+pub fn plan_skinned_batches(scene: &crate::scene::RenderScene) -> SkinnedBatches {
+    let mut order: Vec<u32> = (0..scene.skinned.len() as u32).collect();
+    order.sort_by_key(|i| scene.skinned[*i as usize].mesh);
+
+    // Palette blocks, keyed on the `Arc`'s address. Sound for the same reason
+    // `skinned_meshes`' upload cache is: the scene holds the `Arc` for the whole
+    // frame, so the allocation cannot be freed and re-used under a live key.
+    // Key 0 is the sentinel for an EMPTY palette — one shared identity block, so
+    // a scene full of cloth ribbons costs one matrix and not one each.
+    let mut blocks: std::collections::HashMap<usize, (u32, u32)> = std::collections::HashMap::new();
+    let mut matrices = 0usize;
+    let mut kept: Vec<u32> = Vec::with_capacity(order.len());
+    let mut palette: Vec<(u32, u32)> = Vec::with_capacity(order.len());
+    let mut dropped = 0usize;
+
+    for i in order {
+        let inst = &scene.skinned[i as usize];
+        let key = if inst.palette.is_empty() {
+            0
+        } else {
+            std::sync::Arc::as_ptr(&inst.palette) as usize
+        };
+        let block = match blocks.get(&key) {
+            Some(hit) => *hit,
+            None => {
+                let live = inst.palette.len().max(1);
+                if matrices + live > SKINNED_PALETTE_MATRICES {
+                    dropped += 1;
+                    continue;
+                }
+                let fresh = (matrices as u32, live as u32);
+                matrices += live;
+                blocks.insert(key, fresh);
+                fresh
+            }
+        };
+        kept.push(i);
+        palette.push(block);
+    }
+
+    // One run per contiguous mesh, over the instances that survived.
+    let mut runs: Vec<SkinnedRun> = Vec::new();
+    for (slot, i) in kept.iter().enumerate() {
+        let mesh = scene.skinned[*i as usize].mesh;
+        match runs.last_mut() {
+            Some(run) if run.mesh == mesh => run.count += 1,
+            _ => runs.push(SkinnedRun {
+                mesh,
+                first_instance: slot as u32,
+                count: 1,
+            }),
+        }
+    }
+
+    SkinnedBatches {
+        order: kept,
+        palette,
+        runs,
+        blocks: blocks.len(),
+        matrices,
+        dropped,
+    }
+}
+
 /// Build an [`InstanceRaw`] for a skinned instance (origin-relative model matrix,
 /// inverse-transpose normal matrix), mirroring `InstanceRaw::pack`.
-fn instance_raw(origin: &FloatingOrigin, inst: &SkinnedInstance) -> InstanceRaw {
+///
+/// `block` is the instance's `(atlas offset, live joint count)`, packed into the
+/// two `f32` channels of the shared instance stream that the skinned path has
+/// never used: `pbr.z` (the rigid path's alpha cutoff — a skinned surface is
+/// opaque and `skinned_mesh.wgsl`'s fragment reads only `pbr.xy`) and
+/// `emissive.w` (reserved on **both** paths since P7.1, and dropped by both
+/// vertex stages). Both values are integers well under `2^24`, so the `f32`
+/// round-trip is exact rather than approximately exact.
+fn instance_raw(origin: &FloatingOrigin, inst: &SkinnedInstance, block: (u32, u32)) -> InstanceRaw {
     let model = origin.model_matrix(inst.translation, inst.rotation, inst.scale);
     let inv_scale = inst.scale.max(glam::Vec3::splat(1e-6)).recip();
     let nrm = Mat3::from_quat(inst.rotation) * Mat3::from_diagonal(inv_scale);
@@ -203,8 +368,13 @@ fn instance_raw(origin: &FloatingOrigin, inst: &SkinnedInstance) -> InstanceRaw 
             let s = inst.vt.slots();
             [inst.id, s[0], s[1], s[2]]
         },
-        pbr: [inst.metallic, inst.roughness, 0.0, 0.0],
-        emissive: [inst.emissive[0], inst.emissive[1], inst.emissive[2], 0.0],
+        pbr: [inst.metallic, inst.roughness, block.1 as f32, 0.0],
+        emissive: [
+            inst.emissive[0],
+            inst.emissive[1],
+            inst.emissive[2],
+            block.0 as f32,
+        ],
     }
 }
 
@@ -213,25 +383,6 @@ struct GpuSkinnedMesh {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     index_count: u32,
-}
-
-/// One uploaded skinned instance: which mesh it draws + its palette bind group.
-///
-/// **The buffer and the bind group are persistent** (Hardening D). The palette
-/// *contents* change every animated frame — that is what animation is — but a
-/// storage buffer big enough for a skeleton stays big enough for it, so the GPU
-/// objects are created once per instance and only replaced when the payload
-/// outgrows them. Before this, `sync` allocated one storage buffer **and** one
-/// bind group per skinned instance per frame, and `vsm_raster` did the same on
-/// its own path: 4N wgpu objects per frame for N characters, all of them
-/// deferred-destroy traffic. The rule is `AssetDraw::params`': write the bytes,
-/// keep the object.
-struct GpuSkinnedInstance {
-    mesh: usize,
-    palette: wgpu::Buffer,
-    palette_bg: wgpu::BindGroup,
-    /// Allocated size in bytes — the grow test.
-    capacity: u64,
 }
 
 pub struct SkinnedMeshNode {
@@ -256,8 +407,22 @@ pub struct SkinnedMeshNode {
     /// buffers so the pointer used as the key can never be recycled under a live
     /// entry; entries not referenced by a sync are dropped, which frees them.
     mesh_cache: std::collections::HashMap<usize, (std::sync::Arc<SkinnedMeshData>, GpuSkinnedMesh)>,
-    instances: Vec<GpuSkinnedInstance>,
-    /// One [`InstanceRaw`] per instance, selected per draw by `base_instance`.
+    /// **One** joint-palette storage buffer for the whole frame — the atlas — and
+    /// its bind group, both persistent and both grown to a power of two so a
+    /// crowd that gains an agent reallocates `O(log N)` times over a session
+    /// rather than every frame (`GpuSkinnedInstance`'s rule, applied to one
+    /// object instead of N).
+    atlas: Option<(wgpu::Buffer, wgpu::BindGroup)>,
+    /// The atlas's allocated size in bytes — the grow test.
+    atlas_capacity: u64,
+    /// The CPU staging buffer the atlas is written from, **kept between frames**.
+    /// This is the fourth of the four joint-length allocations wall 3 counted; the
+    /// other three are the projector's, and the crowd's far tier no longer pays
+    /// them at all (it shares one derivation).
+    scratch: Vec<[f32; 16]>,
+    /// This frame's draws (see [`plan_skinned_batches`]).
+    runs: Vec<SkinnedRun>,
+    /// One [`InstanceRaw`] per *drawn* instance, in `runs` order.
     instance_buf: Option<wgpu::Buffer>,
     uploaded_version: Option<(u64, glam::DVec3)>,
     active: bool,
@@ -458,7 +623,10 @@ impl SkinnedMeshNode {
             lights_bg,
             meshes: Vec::new(),
             mesh_cache: std::collections::HashMap::new(),
-            instances: Vec::new(),
+            atlas: None,
+            atlas_capacity: 0,
+            scratch: Vec::new(),
+            runs: Vec::new(),
             instance_buf: None,
             uploaded_version: None,
             active: false,
@@ -473,7 +641,6 @@ impl SkinnedMeshNode {
             return;
         }
         self.uploaded_version = Some(key);
-        self.active = !frame.scene.skinned.is_empty();
 
         // Lights (same projection as the rigid pass).
         let lights =
@@ -509,13 +676,77 @@ impl SkinnedMeshNode {
         // Whatever `cache` still holds was not referenced this frame — dropped
         // here, which releases its GPU buffers.
 
-        // Instance transforms (one InstanceRaw each, selected via base_instance).
-        let raws: Vec<InstanceRaw> = frame
-            .scene
-            .skinned
+        // ── the plan, then the atlas, then the instances (wave NPC1b) ──────
+        let plan = plan_skinned_batches(frame.scene);
+        if plan.dropped > 0 {
+            tracing::warn!(
+                "inf-render: {} skinned instances past the {}-matrix joint-palette \
+                 atlas drew nothing this frame",
+                plan.dropped,
+                SKINNED_PALETTE_MATRICES
+            );
+        }
+        self.runs = plan.runs;
+
+        // The atlas: every distinct palette once, laid out at the offsets the plan
+        // assigned. Written from a scratch buffer that outlives the frame, so a
+        // thousand characters cost one allocation and one `write_buffer` rather
+        // than a thousand of each. `max(1)` keeps the storage buffer non-empty on
+        // a frame whose only skinned instances were dropped.
+        self.scratch.clear();
+        self.scratch
+            .resize(plan.matrices.max(1), glam::Mat4::IDENTITY.to_cols_array());
+        for (slot, i) in plan.order.iter().enumerate() {
+            let inst = &frame.scene.skinned[*i as usize];
+            let (offset, live) = plan.palette[slot];
+            // Written once per BLOCK, not once per instance: the second agent
+            // sharing an `Arc` re-writes the same bytes it already holds. Cheap
+            // and idempotent, and it keeps the loop one pass with no second map.
+            for (j, m) in inst.palette.iter().take(live as usize).enumerate() {
+                self.scratch[offset as usize + j] = m.to_cols_array();
+            }
+        }
+        let bytes = std::mem::size_of_val(self.scratch.as_slice()) as u64;
+        if self.atlas_capacity < bytes || self.atlas.is_none() {
+            let capacity = bytes.next_power_of_two().max(64);
+            let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("skinned-palette-atlas"),
+                size: capacity,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("skinned-palette-atlas"),
+                layout: &self.joints_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf.as_entire_binding(),
+                }],
+            });
+            self.atlas = Some((buf, bg));
+            self.atlas_capacity = capacity;
+        }
+        if let Some((buf, _)) = self.atlas.as_ref() {
+            gpu.queue
+                .write_buffer(buf, 0, bytemuck::cast_slice(&self.scratch));
+        }
+
+        // Instance transforms, in the plan's draw order — one `InstanceRaw` per
+        // DRAWN instance, selected per draw by `base_instance` over a contiguous
+        // run rather than one instance at a time.
+        let raws: Vec<InstanceRaw> = plan
+            .order
             .iter()
-            .map(|i| instance_raw(&frame.view.origin, i))
+            .zip(&plan.palette)
+            .map(|(i, block)| {
+                instance_raw(
+                    &frame.view.origin,
+                    &frame.scene.skinned[*i as usize],
+                    *block,
+                )
+            })
             .collect();
+        self.active = !raws.is_empty();
         self.instance_buf = (!raws.is_empty()).then(|| {
             let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("skinned-instances"),
@@ -526,99 +757,37 @@ impl SkinnedMeshNode {
             gpu.queue.write_buffer(&buf, 0, bytemuck::cast_slice(&raws));
             buf
         });
+    }
 
-        // Per-instance palette storage buffers + bind groups — **reused across
-        // frames**, written per frame. See `GpuSkinnedInstance`.
-        self.instances.truncate(frame.scene.skinned.len());
-        for (i, inst) in frame.scene.skinned.iter().enumerate() {
-            // Non-empty so the storage buffer is never zero-sized.
-            let palette: Vec<[f32; 16]> = if inst.palette.is_empty() {
-                vec![glam::Mat4::IDENTITY.to_cols_array()]
-            } else {
-                inst.palette.iter().map(|m| m.to_cols_array()).collect()
+    /// Bind the atlas, the geometry of one run, and issue its draw.
+    ///
+    /// Shared by the colour pass and the depth prepass because the two differ in
+    /// exactly one thing — the group index the palette layout sits at (3 and 1) —
+    /// and a second copy of the loop is how the two come to disagree about which
+    /// instances exist (the P27.3 mirror finding, one file over).
+    fn draw_runs(&self, pass: &mut wgpu::RenderPass<'_>, palette_group: u32) {
+        let Some((_, atlas_bg)) = self.atlas.as_ref() else {
+            return;
+        };
+        pass.set_bind_group(palette_group, atlas_bg, &[]);
+        for run in &self.runs {
+            let Some(gpu_mesh) = self
+                .meshes
+                .get(run.mesh)
+                .and_then(|key| self.mesh_cache.get(key))
+                .map(|(_, m)| m)
+            else {
+                continue;
             };
-            let live = palette.len();
-            let bytes = std::mem::size_of_val(palette.as_slice()) as u64;
-            let fits = self
-                .instances
-                .get(i)
-                .is_some_and(|slot| slot.capacity >= bytes);
-            if !fits {
-                // Grow to a power of two so a skeleton that gains a joint (a
-                // re-rig, a different character in the same slot) reallocates
-                // O(log joints) times over a session rather than every frame.
-                let capacity = bytes.next_power_of_two().max(64);
-                let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("skinned-palette"),
-                    size: capacity,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let palette_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("skinned-palette"),
-                    layout: &self.joints_bgl,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: buf.as_entire_binding(),
-                    }],
-                });
-                let slot = GpuSkinnedInstance {
-                    mesh: inst.mesh,
-                    palette: buf,
-                    palette_bg,
-                    capacity,
-                };
-                match self.instances.get_mut(i) {
-                    Some(existing) => *existing = slot,
-                    None => self.instances.push(slot),
-                }
+            if gpu_mesh.index_count == 0 {
+                continue;
             }
-            let slot = &mut self.instances[i];
-            slot.mesh = inst.mesh;
-            let padded = pad_palette(palette, live, slot.capacity);
-            gpu.queue
-                .write_buffer(&slot.palette, 0, bytemuck::cast_slice(&padded));
+            pass.set_vertex_buffer(0, gpu_mesh.vertices.slice(..));
+            pass.set_index_buffer(gpu_mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+            let first = run.first_instance;
+            pass.draw_indexed(0..gpu_mesh.index_count, 0, first..first + run.count);
         }
     }
-}
-
-/// **Fill a palette buffer's power-of-two tail with the last live matrix**
-/// (round-2 finding R2-6).
-///
-/// Wave D made these buffers persistent and grew them to a power of two, so a
-/// slot allocated for 40 joints holds room for 64 and only the first 40 are
-/// ever written. Wave D's own note argued the padding is unreadable; it is not.
-/// The shader binds the WHOLE buffer as `array<mat4x4<f32>>`, and wgpu's
-/// bounds check clamps against the *binding's* length, not against
-/// `joint_count` — so a vertex whose skin index runs past its own skeleton
-/// (a mesh bound to the wrong rig, an index the CPU clamp did not see) reads
-/// the tail. Before this it was whatever the previous, larger, character in
-/// that slot left there: a limb snapping to another actor's pose.
-///
-/// The tail carries the last live matrix. That is a *plausible* transform —
-/// the vertex follows some real joint of its own skeleton instead of a
-/// stranger's — and it needs no shader change, no extra uniform and no second
-/// derivation of `joint_count` for the two subsystems to disagree about. Zero
-/// would collapse the vertex to the origin; identity would leave it in bind
-/// space in the middle of the world.
-///
-/// `live` is how many entries of `palette` are real; `capacity_bytes` is the
-/// buffer's size. Returns `palette` unchanged when it already fills the buffer.
-pub(crate) fn pad_palette(
-    mut palette: Vec<[f32; 16]>,
-    live: usize,
-    capacity_bytes: u64,
-) -> Vec<[f32; 16]> {
-    let slots = (capacity_bytes as usize) / std::mem::size_of::<[f32; 16]>();
-    if slots <= palette.len() {
-        return palette;
-    }
-    let fill = palette
-        .get(live.saturating_sub(1))
-        .copied()
-        .unwrap_or_else(|| glam::Mat4::IDENTITY.to_cols_array());
-    palette.resize(slots, fill);
-    palette
 }
 
 fn upload_mesh(gpu: &GpuContext, mesh: &SkinnedMeshData) -> GpuSkinnedMesh {
@@ -689,26 +858,9 @@ impl RenderNode for SkinnedMeshNode {
         pass.set_pipeline(&self.pipeline_depth);
         pass.set_bind_group(0, frame.view_bg, &[]);
         pass.set_vertex_buffer(1, instance_buf.slice(..));
-        for (i, inst) in self.instances.iter().enumerate() {
-            let Some(gpu_mesh) = self
-                .meshes
-                .get(inst.mesh)
-                .and_then(|key| self.mesh_cache.get(key))
-                .map(|(_, m)| m)
-            else {
-                continue;
-            };
-            if gpu_mesh.index_count == 0 {
-                continue;
-            }
-            // The palette bind group is built against `joints_bgl`; this pipeline
-            // puts that layout at slot 1 rather than 3, and the same object binds.
-            pass.set_bind_group(1, &inst.palette_bg, &[]);
-            pass.set_vertex_buffer(0, gpu_mesh.vertices.slice(..));
-            pass.set_index_buffer(gpu_mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-            let base = i as u32;
-            pass.draw_indexed(0..gpu_mesh.index_count, 0, base..base + 1);
-        }
+        // The atlas bind group is built against `joints_bgl`; this pipeline puts
+        // that layout at slot 1 rather than 3, and the same object binds.
+        self.draw_runs(&mut pass, 1);
     }
 
     fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
@@ -754,74 +906,187 @@ impl RenderNode for SkinnedMeshNode {
         pass.set_bind_group(1, &self.lights_bg, &[]);
         pass.set_bind_group(2, &env_bg, &[]);
         pass.set_vertex_buffer(1, instance_buf.slice(..));
-
-        for (i, inst) in self.instances.iter().enumerate() {
-            let Some(gpu_mesh) = self
-                .meshes
-                .get(inst.mesh)
-                .and_then(|key| self.mesh_cache.get(key))
-                .map(|(_, m)| m)
-            else {
-                continue;
-            };
-            if gpu_mesh.index_count == 0 {
-                continue;
-            }
-            pass.set_bind_group(3, &inst.palette_bg, &[]);
-            pass.set_vertex_buffer(0, gpu_mesh.vertices.slice(..));
-            pass.set_index_buffer(gpu_mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-            let base = i as u32;
-            pass.draw_indexed(0..gpu_mesh.index_count, 0, base..base + 1);
-        }
+        self.draw_runs(&mut pass, 3);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::pad_palette;
+    use super::{plan_skinned_batches, SkinnedRun, SKINNED_PALETTE_MATRICES};
+    use crate::scene::{RenderScene, SkinnedInstance, SkinnedMeshData, SkinnedShadow};
+    use std::sync::Arc;
 
-    fn m(n: f32) -> [f32; 16] {
-        let mut a = [0.0f32; 16];
-        a[0] = n;
-        a
+    fn palette(n: usize, tag: f32) -> Arc<Vec<glam::Mat4>> {
+        Arc::new(vec![glam::Mat4::from_scale(glam::Vec3::splat(tag)); n])
     }
 
-    /// **Round-2 finding R2-6**: the power-of-two tail is readable, so it must
-    /// hold something of this skeleton's rather than the previous character's.
-    ///
-    /// The shader binds the whole buffer as `array<mat4x4<f32>>` and wgpu
-    /// clamps against the BINDING's length, not against `joint_count`. Wave D's
-    /// note argued the padding was unreachable; it is not.
+    fn instance(mesh: usize, palette: Arc<Vec<glam::Mat4>>) -> SkinnedInstance {
+        SkinnedInstance {
+            translation: glam::DVec3::ZERO,
+            rotation: glam::Quat::IDENTITY,
+            scale: glam::Vec3::ONE,
+            color: [1.0; 4],
+            metallic: 0.0,
+            roughness: 1.0,
+            emissive: [0.0; 3],
+            id: 1,
+            mesh,
+            palette,
+            shadow: SkinnedShadow::BindSphere,
+            vt: crate::scene::VtTextureSet::NONE,
+        }
+    }
+
+    fn scene(instances: Vec<SkinnedInstance>, meshes: usize) -> RenderScene {
+        RenderScene {
+            skinned_meshes: (0..meshes)
+                .map(|_| {
+                    Arc::new(SkinnedMeshData {
+                        vertices: Vec::new(),
+                        indices: Vec::new(),
+                    })
+                })
+                .collect(),
+            skinned: instances,
+            ..Default::default()
+        }
+    }
+
+    /// **The wave's headline, as arithmetic.** A crowd whose far tier shares one
+    /// palette must upload ONE block for all of them, and draw the whole mesh in
+    /// one call — not `N` blocks and `N` calls.
     #[test]
-    fn the_padded_tail_repeats_the_last_live_matrix() {
-        let stride = std::mem::size_of::<[f32; 16]>() as u64;
+    fn a_shared_palette_is_one_atlas_block_and_one_draw() {
+        let shared = palette(20, 1.0);
+        let far: Vec<SkinnedInstance> = (0..1000).map(|_| instance(0, shared.clone())).collect();
+        let plan = plan_skinned_batches(&scene(far, 1));
 
-        // 3 live joints in a 4-slot buffer: one slot of tail.
-        let out = pad_palette(vec![m(1.0), m(2.0), m(3.0)], 3, stride * 4);
-        assert_eq!(out.len(), 4, "the buffer must be filled to its capacity");
         assert_eq!(
-            out[3],
-            m(3.0),
-            "the tail holds neither the last live matrix nor anything of this \
-             skeleton's — a vertex indexing past its own joint count reads it"
+            plan.runs.len(),
+            1,
+            "one mesh must be one draw, not a thousand"
         );
-        assert_eq!(&out[..3], &[m(1.0), m(2.0), m(3.0)], "the live half moved");
+        assert_eq!(
+            plan.runs[0],
+            SkinnedRun {
+                mesh: 0,
+                first_instance: 0,
+                count: 1000
+            }
+        );
+        assert_eq!(
+            (plan.blocks, plan.matrices),
+            (1, 20),
+            "a thousand agents sharing one `Arc` uploaded {} blocks / {} matrices \
+             — the sharing is not reaching the atlas",
+            plan.blocks,
+            plan.matrices
+        );
+        // Every instance reads the same block, and none of them is at a stale
+        // offset: the anti-vacuity half, because a plan that assigned (0, 0) to
+        // everything would satisfy the counts above.
+        assert!(plan.palette.iter().all(|b| *b == (0, 20)));
+        assert_eq!(plan.order.len(), 1000);
+    }
 
-        // Exactly full: unchanged, and no allocation of a longer vec.
-        let exact = pad_palette(vec![m(1.0), m(2.0)], 2, stride * 2);
-        assert_eq!(exact, vec![m(1.0), m(2.0)]);
+    /// The control: a thousand agents with a thousand *different* poses pay for a
+    /// thousand blocks, and still draw in one call. Without this the arm above is
+    /// satisfied by a plan that ignores the palette entirely.
+    #[test]
+    fn distinct_palettes_are_distinct_blocks_at_ascending_offsets() {
+        let posed: Vec<SkinnedInstance> = (0..1000)
+            .map(|i| instance(0, palette(20, i as f32 + 1.0)))
+            .collect();
+        let plan = plan_skinned_batches(&scene(posed, 1));
 
-        // A capacity smaller than the palette (cannot happen — the caller grows
-        // first — but the helper must not truncate the live half if it does).
-        let small = pad_palette(vec![m(1.0), m(2.0)], 2, stride);
-        assert_eq!(small.len(), 2);
+        assert_eq!(plan.runs.len(), 1);
+        assert_eq!((plan.blocks, plan.matrices), (1000, 20_000));
+        for (slot, (offset, live)) in plan.palette.iter().enumerate() {
+            assert_eq!((*offset, *live), (slot as u32 * 20, 20));
+        }
+    }
 
-        // The empty case: the caller substitutes one identity, and the tail
-        // repeats it rather than staying zero (which collapses a vertex to the
-        // origin).
-        let ident = glam::Mat4::IDENTITY.to_cols_array();
-        let out = pad_palette(vec![ident], 1, stride * 8);
-        assert_eq!(out.len(), 8);
-        assert!(out.iter().all(|e| *e == ident));
+    /// Two meshes are two draws, and the ordering is a **stable** sort — so a
+    /// one-mesh scene (every golden in this tree) keeps the instance order it had
+    /// before the atlas and draws the same pixels.
+    #[test]
+    fn runs_group_by_mesh_and_the_order_within_a_mesh_is_stable() {
+        let p = palette(2, 1.0);
+        let mixed = vec![
+            instance(1, p.clone()),
+            instance(0, p.clone()),
+            instance(1, p.clone()),
+            instance(0, p.clone()),
+        ];
+        let plan = plan_skinned_batches(&scene(mixed, 2));
+
+        assert_eq!(
+            plan.order,
+            vec![1, 3, 0, 2],
+            "the sort is not stable by mesh"
+        );
+        assert_eq!(
+            plan.runs,
+            vec![
+                SkinnedRun {
+                    mesh: 0,
+                    first_instance: 0,
+                    count: 2
+                },
+                SkinnedRun {
+                    mesh: 1,
+                    first_instance: 2,
+                    count: 2
+                },
+            ]
+        );
+    }
+
+    /// An empty palette is ONE shared identity block — the cloth/hair case, where
+    /// every ribbon in a level names `vec![Mat4::IDENTITY]` or nothing at all.
+    #[test]
+    fn empty_palettes_share_one_identity_block() {
+        let empties: Vec<SkinnedInstance> =
+            (0..8).map(|_| instance(0, Arc::new(Vec::new()))).collect();
+        let plan = plan_skinned_batches(&scene(empties, 1));
+        assert_eq!((plan.blocks, plan.matrices), (1, 1));
+        assert!(plan.palette.iter().all(|b| *b == (0, 1)));
+    }
+
+    /// **The ceiling counts what it refuses**, and the instances that fit still
+    /// draw. A cap that silently offset a block to zero would draw a character in
+    /// another character's pose, which is worse than not drawing it.
+    #[test]
+    fn the_atlas_ceiling_refuses_and_counts_rather_than_aliasing() {
+        // One joint each, so the ceiling is reached at exactly its own count.
+        let over = SKINNED_PALETTE_MATRICES + 7;
+        let many: Vec<SkinnedInstance> = (0..over)
+            .map(|i| instance(0, palette(1, i as f32 + 1.0)))
+            .collect();
+        let plan = plan_skinned_batches(&scene(many, 1));
+
+        assert_eq!(plan.dropped, 7);
+        assert_eq!(plan.matrices, SKINNED_PALETTE_MATRICES);
+        assert_eq!(plan.order.len(), SKINNED_PALETTE_MATRICES);
+        assert_eq!(
+            plan.runs,
+            vec![SkinnedRun {
+                mesh: 0,
+                first_instance: 0,
+                count: SKINNED_PALETTE_MATRICES as u32
+            }]
+        );
+        // Every surviving block is inside the atlas — the aliasing check.
+        assert!(plan
+            .palette
+            .iter()
+            .all(|(o, n)| (*o as usize + *n as usize) <= SKINNED_PALETTE_MATRICES));
+    }
+
+    /// The empty scene stays empty: no runs, no blocks, no atlas.
+    #[test]
+    fn a_scene_with_no_skinned_instances_plans_nothing() {
+        let plan = plan_skinned_batches(&RenderScene::default());
+        assert_eq!(plan, super::SkinnedBatches::default());
     }
 }
