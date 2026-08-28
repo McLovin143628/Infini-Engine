@@ -2090,6 +2090,165 @@ fn golden_skinned_mesh() {
     assert!(lit, "expected a lit skinned pixel");
 }
 
+/// **A CROWD IS NOT A THOUSAND CLONES, AND IT IS ONE DRAW** (wave NPC1b).
+///
+/// Eight copies of one skinned mesh, sharing **one** joint palette by `Arc` — the
+/// shape a crowd's far tier has, where the sim-LOD ladder evaluates no pose and
+/// every agent resolves to the same rest matrices — each with its own tint and
+/// its own build. Three claims, and the golden is only the third:
+///
+///  1. the batch planner puts all eight in **one draw** from **one** atlas block,
+///     so the sharing survives all the way to the GPU;
+///  2. the drawn bodies are **different heights**, so a per-instance scale rides
+///     the instance stream rather than being flattened by the shared palette;
+///  3. the drawn bodies are **different colours** — counted, from the image, so
+///     "a crowd is not a thousand clones" is a measurement rather than a claim
+///     about a `color` field nothing was proven to read.
+///
+/// The tints here are the renderer's business only: the *table* a crowd draws
+/// them from lives in `inf_ecs::crowd::CROWD_LOOKS` and is armed there, because
+/// this crate cannot see the sim and should not learn to.
+#[test]
+fn golden_crowd_variation() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (sk, clip, mesh) = skinned_cylinder();
+    let mesh = std::sync::Arc::new(mesh);
+
+    // ONE palette, shared: the far tier's shape.
+    let shared = palette_at(&sk, &clip, 0.0);
+    // Eight looks and eight builds, spread the way a real crowd's are.
+    let looks: [([f32; 3], f32); 8] = [
+        ([1.00, 0.98, 0.94], 1.06),
+        ([0.52, 0.60, 0.82], 0.94),
+        ([0.58, 0.62, 0.42], 1.02),
+        ([0.86, 0.52, 0.36], 0.96),
+        ([0.38, 0.40, 0.44], 1.08),
+        ([0.92, 0.82, 0.62], 0.92),
+        ([0.40, 0.70, 0.70], 1.04),
+        ([0.66, 0.34, 0.40], 0.98),
+    ];
+
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        skinned_meshes: vec![mesh],
+        ..Default::default()
+    };
+    for (i, (tint, build)) in looks.iter().enumerate() {
+        scene.skinned.push(SkinnedInstance {
+            vt: Default::default(),
+            translation: DVec3::new(i as f64 * 1.15 - 4.0, 0.0, 0.0),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::splat(*build),
+            color: [tint[0], tint[1], tint[2], 1.0],
+            metallic: 0.0,
+            roughness: 0.6,
+            emissive: [0.0; 3],
+            id: 1 + i as u32,
+            mesh: 0,
+            palette: shared.clone(),
+            shadow: inf_render::SkinnedShadow::Proxy,
+        });
+    }
+    scene.mark_dirty();
+
+    // (1) ONE draw, ONE block — the planner the pass itself calls.
+    let plan = inf_render::plan_skinned_batches(&scene);
+    assert_eq!(
+        plan.runs.len(),
+        1,
+        "eight clones drew in {} calls",
+        plan.runs.len()
+    );
+    assert_eq!(
+        (plan.blocks, plan.matrices),
+        (1, shared.len()),
+        "the shared far-tier palette did not deduplicate into one atlas block"
+    );
+
+    let view = look_view(DVec3::new(0.0, 1.6, 8.0), DVec3::new(0.0, 1.0, 0.0));
+    let img = check_golden(&gpu, "crowd_variation", &scene, &view);
+
+    // **The bodies are found against a CONTROL, not against brightness.** The sky
+    // is the brightest thing in the frame, so "the topmost lit row" is row 0 in
+    // every column and would read as eight identical heights however wrong the
+    // scale was. The control is the same frame with the crowd taken out; a pixel
+    // that differs from it is a body pixel.
+    let mut empty = scene.clone();
+    empty.skinned.clear();
+    empty.mark_dirty();
+    let bg = render(&gpu, &empty, &view);
+    let (w, h) = (W as usize, H as usize);
+    let body = |x: usize, y: usize| -> bool {
+        let i = (y * w + x) * 4;
+        let d = |k: usize| (img[i + k] as i16 - bg[i + k] as i16).abs();
+        d(0) + d(1) + d(2) > 24
+    };
+
+    // The eight bodies, as the frame's own connected column runs, left to right —
+    // rather than as eight equal slices of the frame, which assumes a framing.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for x in 0..w {
+        let hit = (0..h).any(|y| body(x, y));
+        match runs.last_mut() {
+            Some(r) if hit && r.1 == x => r.1 = x + 1,
+            _ if hit => runs.push((x, x + 1)),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        runs.len(),
+        looks.len(),
+        "the frame holds {} separated bodies, not {}: they overlap or are off-screen",
+        runs.len(),
+        looks.len()
+    );
+
+    // (2) different HEIGHTS: the tallest body's silhouette starts higher up the
+    // frame than the shortest's.
+    let column_top = |slot: usize| -> usize {
+        let (lo, hi) = runs[slot];
+        (0..h)
+            .find(|y| (lo..hi).any(|x| body(x, *y)))
+            .expect("a run with no body pixel")
+    };
+    let (tall, short) = (column_top(4), column_top(5));
+    assert!(
+        tall < short,
+        "the tallest body's top row is {tall} and the shortest's {short}: the build is not reaching the vertex stream"
+    );
+
+    // (3) different COLOURS: the brightest BODY pixel of each run, quantized.
+    // Eight looks must not collapse to one.
+    let mut hues: Vec<[u8; 3]> = Vec::new();
+    for slot in 0..looks.len() {
+        let (lo, hi) = runs[slot];
+        let mut best = [0u8; 3];
+        let mut best_sum = 0u16;
+        for y in 0..h {
+            for x in lo..hi {
+                if !body(x, y) {
+                    continue;
+                }
+                let p = &img[(y * w + x) * 4..];
+                let sum = p[0] as u16 + p[1] as u16 + p[2] as u16;
+                if sum > best_sum {
+                    best_sum = sum;
+                    best = [p[0] / 24, p[1] / 24, p[2] / 24];
+                }
+            }
+        }
+        assert!(best_sum > 0, "body {slot} drew no body pixel at all");
+        hues.push(best);
+    }
+    hues.sort_unstable();
+    hues.dedup();
+    assert!(
+        hues.len() >= 6,
+        "eight looks produced {} distinct sampled colours — a crowd of clones",
+        hues.len()
+    );
+}
+
 // ── P13.3a: HDR post pipeline (bloom, SSAO, TAA) ─────────────────────────────
 
 /// HDR bloom golden (P13.3a): a dark scene with a few **strongly emissive** cubes

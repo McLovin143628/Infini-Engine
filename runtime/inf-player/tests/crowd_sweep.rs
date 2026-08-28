@@ -957,6 +957,136 @@ fn the_n_sweep() {
 
 // ── the actor door ──────────────────────────────────────────────────────────
 
+/// **THE Far -> Near POSE POP, MEASURED** (wave NPC1b, clause 5).
+///
+/// NPC1a carried it as a sentence — *"a `Far -> Near` promotion pops; the machine
+/// does not advance while an agent is `Far`, so it resumes where it left off"* —
+/// and a sentence is not a size. This arm gives it one, in the only unit that
+/// makes it decidable: **how far a joint moves at a promotion, against how far it
+/// moves in an ordinary step.**
+///
+/// The two poses are the two the renderer actually draws. A `Far` agent
+/// evaluates nothing, so `resolve_skinned_shared` hands it its rig's rest
+/// matrices; the step it is promoted, the machine's pose arrives whole. So the
+/// pop is `|rest - posed|` and the ordinary motion is `|posed(t) - posed(t+1)|`,
+/// both read off the same registry the projector reads.
+///
+/// **It REPORTS.** The ratio is a property of the level's animation and of the
+/// fixed step, not of this wave, and asserting a number here would pin an
+/// author's clip. What it asserts is the two things that make the report mean
+/// something: that the ordinary step moves *something* (so the machine is
+/// running) and that the pop is strictly larger than it (so the pop is real and
+/// the sentence NPC1a carried is not folklore).
+#[test]
+fn the_far_to_near_promotion_pop_is_measured() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let pack = cook_scene(tmp.path());
+    let mut fx = open(&pack);
+
+    // Let the machine get past its entry state and into real motion.
+    for _ in 0..WARMUP {
+        fx.sim.step_once(RuntimeInput::default());
+    }
+
+    // The level's own posed character — the archetype every test NPC copies, so
+    // the numbers below are about the crowd's own rig.
+    let hero = fx
+        .sim
+        .world()
+        .world()
+        .iter_entities()
+        .filter_map(|e| {
+            let g = e.get::<inf_ecs::Guid>()?;
+            let sk = e.get::<inf_ecs::components::SkeletalMesh>()?;
+            sk.skeleton?;
+            Some((g.0, *sk))
+        })
+        .min_by_key(|(g, _)| *g)
+        .expect("the sweep scene has no rigged character");
+    let (guid, sm) = hero;
+
+    let palette_now = |fx: &Fixture| -> Vec<glam::Mat4> {
+        let posed = inf_ecs::pose::evaluated_pose(fx.sim.world(), guid);
+        assert!(
+            posed.is_some(),
+            "the level's character published no pose, so there is no promotion to \
+             measure"
+        );
+        fx.skinned
+            .resolve_skinned(&sm, None, posed)
+            .expect("the character resolves")
+            .palette
+            .to_vec()
+    };
+    let worst = |a: &[glam::Mat4], b: &[glam::Mat4]| -> f32 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x.w_axis.truncate() - y.w_axis.truncate()).length())
+            .fold(0.0f32, f32::max)
+    };
+
+    // What a `Far` agent is drawn in: its rig's rest matrices, shared by the
+    // whole bucket. Read through the same door the projector uses.
+    let rest = fx
+        .skinned
+        .resolve_skinned_shared(&sm)
+        .expect("the character resolves")
+        .palette
+        .to_vec();
+
+    // An ordinary step's motion, worst joint, over a window rather than one
+    // sample: a single fixed step can land between two keyframes and read zero.
+    let mut step_motion = 0.0f32;
+    let mut prev = palette_now(&fx);
+    let mut pop = worst(&rest, &prev);
+    for _ in 0..60 {
+        fx.sim.step_once(RuntimeInput::default());
+        let now = palette_now(&fx);
+        step_motion = step_motion.max(worst(&prev, &now));
+        pop = pop.max(worst(&rest, &now));
+        prev = now;
+    }
+
+    println!("\nTHE PROMOTION POP (NPC1b clause 5): a Far agent is drawn in its rig's REST pose;");
+    println!(
+        "  the step it is promoted, the machine's pose arrives whole. Worst joint over 60 steps:"
+    );
+    println!("  pop {pop:.4} m against an ordinary step's {step_motion:.4} m");
+    println!(
+        "  = {:.0}x an ordinary step. The character in this fixture is nearly still, so read the",
+        pop / step_motion.max(1.0e-9),
+    );
+    println!(
+        "  ratio as a floor and the metre as the fact: the pop is the WHOLE distance from the bind"
+    );
+    println!(
+        "  pose to the pose the machine is in, and it arrives in one step. It is not new — a Far"
+    );
+    println!("  agent drew its rest pose before NPC1b too, because it has no EvaluatedPose and no");
+    println!("  AnimPlayer — but nothing had measured it.");
+    println!("  NOT FIXED IN THIS WAVE. The fix is an inertialization on re-entry (the P29.2");
+    println!(
+        "  `PoseBlender` seam), which is SIM state on the crowd's own trace section and belongs"
+    );
+    println!(
+        "  with the wave that owns it — NPC1c gives a near agent a controller and re-enters the"
+    );
+    println!(
+        "  machine from a real pose rather than from rest. Carried by name in the NPC1b ledger."
+    );
+
+    assert!(
+        step_motion > 0.0,
+        "the character's machine moved no joint over 60 steps, so this arm is \
+         measuring a still character and its ratio means nothing"
+    );
+    assert!(
+        pop > step_motion,
+        "the promotion pop ({pop}) is no larger than an ordinary step ({step_motion}), \
+         so NPC1a's carried item 4 is wrong and the ledger should say so instead"
+    );
+}
+
 /// **DOES A CROWD NPC NEED A BLUEPRINT?** — the NPC1a decision, with the
 /// arithmetic it was made on.
 ///

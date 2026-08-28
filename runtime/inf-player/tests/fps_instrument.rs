@@ -1600,6 +1600,92 @@ fn island_fly(step: u64, width: u32, height: u32, from: DVec3) -> RenderView {
     }
 }
 
+/// **How many NPCs the island's headline arm puts in Harbour City** (wave NPC1b).
+///
+/// A thousand, because that is the number every NPC1a table is written at and
+/// the number the arc's brief names. The block they stand in is 160 m of
+/// half-extent about the flight's start, chosen the way `crowd_sweep`'s is:
+/// wider than `DEFAULT_CROWD_NEAR_M` (96 m) so the ladder produces a real mix of
+/// tiers, inside `DEFAULT_CROWD_FAR_M` (512 m) so the frame is not quietly
+/// measuring an empty town.
+const ISLAND_CROWD_N: usize = 1_000;
+
+/// Half-extent of the block the island's crowd stands in, metres.
+const ISLAND_CROWD_HALF_M: f64 = 160.0;
+
+/// The archetype every test NPC copies: the level's own lowest-`Guid` rigged
+/// character, so a thousand of them share one mesh, one skeleton, one `.inf_sm`
+/// and every clip.
+///
+/// A MIRROR of `crowd_sweep::archetype_from_hero`, and deliberately so: two
+/// instruments measuring the same subject have to build it the same way, or the
+/// island's numbers and the city's are about two different crowds.
+fn island_archetype(sim: &inf_player::runtime_sim::RuntimeSim) -> inf_ecs::crowd::CrowdArchetype {
+    let w = sim.world().world();
+    let mut best: Option<(uuid::Uuid, inf_ecs::crowd::CrowdArchetype)> = None;
+    for e in w.iter_entities() {
+        let (Some(g), Some(sk)) = (
+            e.get::<inf_ecs::Guid>(),
+            e.get::<inf_ecs::components::SkeletalMesh>(),
+        ) else {
+            continue;
+        };
+        if sk.skeleton.is_none() {
+            continue;
+        }
+        let sm = e
+            .get::<inf_ecs::components::AnimStateMachine>()
+            .and_then(|a| a.sm);
+        let a = inf_ecs::crowd::CrowdArchetype::humanoid(sk.mesh, sk.skeleton, sm);
+        if best.as_ref().is_none_or(|(bg, _)| g.0 < *bg) {
+            best = Some((g.0, a));
+        }
+    }
+    let (guid, a) = best.expect(
+        "the island has no rigged character to copy, so a crowd of it would pose \
+         nothing and this row would price an empty pipeline",
+    );
+    println!(
+        "island crowd archetype: hero {guid} — skeleton {:?}",
+        a.skeleton
+    );
+    a
+}
+
+/// A thousand NPCs walking short there-and-back routes about `centre`.
+///
+/// Deterministic lattice placement — no RNG, because the placement is fixture
+/// content; the per-agent variation the crowd itself needs comes from
+/// `agent_rand` inside the engine.
+fn island_population(
+    n: usize,
+    archetype: inf_ecs::crowd::CrowdArchetype,
+    centre: DVec3,
+) -> std::collections::BTreeMap<uuid::Uuid, inf_ecs::crowd::CrowdRecord> {
+    const NAMESPACE: u128 = 0x4e50_4331_625f_4953_4c41_4e44_0000_0000;
+    let mut out = std::collections::BTreeMap::new();
+    for i in 0..n {
+        let side = (n as f64).sqrt().ceil().max(1.0);
+        let (ix, iz) = ((i as f64) % side, (i as f64 / side).floor());
+        let span = 2.0 * ISLAND_CROWD_HALF_M;
+        let x = centre.x - ISLAND_CROWD_HALF_M + span * (ix + 0.5) / side;
+        let z = centre.z - ISLAND_CROWD_HALF_M + span * (iz + 0.5) / side;
+        let from = DVec3::new(x, centre.y, z);
+        out.insert(
+            uuid::Uuid::from_u128(NAMESPACE | i as u128),
+            inf_ecs::crowd::CrowdRecord::walking(
+                archetype,
+                inf_ecs::crowd::CrowdRoute {
+                    from,
+                    to: from + DVec3::new(0.0, 0.0, 6.0),
+                    speed_mps: 1.4,
+                },
+            ),
+        );
+    }
+    out
+}
+
 /// Where the island's recipe lives.
 fn island_recipe() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../samples/island/island.toml")
@@ -1873,7 +1959,34 @@ fn the_island_at_shipping_resolution() {
         ("LIT+SSR", lit_ssr),
         ("LIT+VIS", lit_vis),
         ("LIT-COARSE-CLIPMAP", lit_coarse),
+        // **WAVE NPC1b'S HEADLINE ROW.** The same `LIT+VIS` settings, the same
+        // flight, the same island — with a thousand NPCs standing in Harbour
+        // City. Last, and through the same loop, so the crowd's cost is the
+        // DIFFERENCE between two rows taken the same way rather than a number
+        // from a second harness nobody can compare against.
+        ("LIT+VIS+CROWD", lit_vis),
     ] {
+        if label == "LIT+VIS+CROWD" {
+            let archetype = island_archetype(&fx.sim);
+            fx.sim
+                .set_crowd_population(island_population(ISLAND_CROWD_N, archetype, from));
+            // The crowd materializes on its first step and takes every
+            // structure-stamp miss there is; measuring that would be measuring a
+            // step that happens once.
+            for _ in 0..STEP_WARMUP {
+                fx.sim
+                    .step_once(inf_player::runtime_sim::RuntimeInput::default());
+            }
+            let st = fx.sim.crowd_stats();
+            println!(
+                "=== THE CROWD AT HARBOUR CITY === {ISLAND_CROWD_N} NPCs in a {:.0} m block: {} full / {} near / {} far / {} dormant",
+                2.0 * ISLAND_CROWD_HALF_M,
+                st.per_tier[0],
+                st.per_tier[1],
+                st.per_tier[2],
+                st.per_tier[3],
+            );
+        }
         let m = measure(&gpu, &mut fx, 1920, 1080, settings, &path);
         let r = m.round();
         let cpu_sum: f64 = m.cpu_ms.iter().sum();
@@ -2001,6 +2114,45 @@ fn the_island_at_shipping_resolution() {
             m.terrain_tiles > 0,
             "{label}: the island's frame drew no terrain tile"
         );
+        // **What the crowd cost the RENDERER** (wave NPC1b) — read off a
+        // projection of the same sim through the passes' own planners, so the
+        // draw count and the palette bytes are the ones the frame above paid.
+        if label == "LIT+VIS+CROWD" {
+            let mut scene = RenderScene::default();
+            let mut voxels = inf_voxel::VoxelVolumes::new();
+            let mut debris = inf_render::DebrisCache::default();
+            inf_player::render::project_scene_full(
+                &mut scene,
+                &fx.sim,
+                1.0,
+                &fx.vmeshes,
+                &fx.skinned,
+                &voxels,
+                &mut debris,
+                None,
+                &fx.scatter_meshes,
+            );
+            let _ = &mut voxels;
+            let plan = inf_render::plan_skinned_batches(&scene);
+            let proxies = scene
+                .skinned
+                .iter()
+                .filter(|i| i.shadow == inf_render::SkinnedShadow::Proxy)
+                .count();
+            println!(
+                "  CROWD RENDER COST: {} skinned instances in {} draw call(s), {} palette blocks = {:.2} MB of atlas",
+                scene.skinned.len(),
+                plan.runs.len(),
+                plan.blocks,
+                plan.matrices as f64 * 64.0 / (1024.0 * 1024.0),
+            );
+            println!(
+                "  CROWD SHADOWS: {proxies} proxy casters in 1 group, {} skinned groups, {} of a {} ceiling",
+                inf_render::skinned_caster_groups(&scene) - usize::from(proxies > 0),
+                inf_render::skinned_caster_groups(&scene),
+                inf_render::VSM_MAX_GROUPS,
+            );
+        }
     }
     println!(
         "Reported, never asserted: the ceilings in `inf_player::budget` are set from the composed city, and asserting them over a different world would re-pin a ratchet by accident."
