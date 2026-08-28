@@ -479,7 +479,7 @@ mod tests {
             world.world_mut().entity_mut(walker).insert(CrowdAgent {
                 tier,
                 guid,
-                feet_offset_m: 1.2,
+                feet_offset_m: 0.9,
                 blocked: false,
             });
             let n = ground_contacts(&world).len();

@@ -906,15 +906,53 @@ impl BuildingPlan {
                 );
             }
         }
-        for (a, b) in self.stair_links() {
+        for f in &self.stairs {
+            let (Some(a), Some(b)) = (self.stair_room(f.from), self.stair_room(f.to)) else {
+                continue;
+            };
+            if a == b {
+                continue;
+            }
+            // **A stair edge walks the FLIGHT, not the shaft** (NPC1c). Both
+            // stair rooms are the same rectangle on two storeys, so a link
+            // between their centres is a *vertical line*: a pure-pursuit
+            // follower reading a target directly above its own feet has no
+            // direction at all, and the NPC stands at the bottom of the stairs
+            // for ever. Measured exactly that way on the island's own town walk.
+            //
+            // So the edge carries the two ends of the run, at their own storeys'
+            // heights, on the SAME axis the assembler lays its treads along
+            // (`along_x = size_x >= size_z`) -- a nav path that climbed the other
+            // one would walk a body into the side of its own staircase.
+            //
+            // **ONE waypoint, at the TOP of the run**, and the ordering is the
+            // whole lesson. A flight fills its core and its door opens onto the
+            // SIDE of the run, so a body enters part-way up it; a via that named
+            // the bottom of the run first sent a follower that had already
+            // climbed 3.20 m of a 3.60 m storey back DOWN the treads to reach a
+            // waypoint behind it, and it oscillated there until the walk gave
+            // up. Measured exactly that way on the island's own town walk.
+            //
+            // The top of the flight is where a climb ends whichever tread it
+            // starts on, so the edge names that and nothing else, and the climb
+            // is monotone from any entry.
+            let (_, hi) = flight_run(f.rect);
+            let via = vec![self.floor_point(hi, f.to.max(f.from))];
+            let (from, to) = if f.from < f.to { (a, b) } else { (b, a) };
             g.link(
-                room_node_id(a),
-                room_node_id(b),
+                room_node_id(from),
+                room_node_id(to),
                 inf_nav::NavKind::Stair,
-                Vec::new(),
+                via,
             );
         }
         g
+    }
+
+    /// A point on `floor`'s walking surface, in world metres.
+    fn floor_point(&self, xz: glam::DVec2, floor: u32) -> DVec3 {
+        let w = self.frame.to_world(xz);
+        DVec3::new(w.x, self.floor_y(floor), w.y)
     }
 
     /// The world-space void an opening carves: its XZ rectangle (widened by
@@ -986,6 +1024,30 @@ const NAV_DOORWAY_CLASS: u64 = 1 << 40;
 /// A trillion rooms; the mask is here so a caller that hands in a nonsense index
 /// corrupts its own node rather than the class or the domain tag above it.
 const NAV_INDEX_MASK: u64 = NAV_DOORWAY_CLASS - 1;
+
+/// **The two ends of a flight's run**, in the plan's own XZ, quarter-inset.
+///
+/// The axis is chosen by the same rule the assembler lays treads with -- the
+/// core's longer side -- because a nav waypoint on the other axis would send a
+/// body into the side of its own staircase. The quarter inset keeps both ends on
+/// treads rather than on the landing lip at either end.
+fn flight_run(rect: Rect2) -> (glam::DVec2, glam::DVec2) {
+    let c = rect.center();
+    let along_x = rect.size_x() >= rect.size_z();
+    if along_x {
+        let q = rect.size_x() * 0.25;
+        (
+            glam::DVec2::new(c.x - q, c.y),
+            glam::DVec2::new(c.x + q, c.y),
+        )
+    } else {
+        let q = rect.size_z() * 0.25;
+        (
+            glam::DVec2::new(c.x, c.y - q),
+            glam::DVec2::new(c.x, c.y + q),
+        )
+    }
+}
 
 /// **The nav-graph id of room `i`.** See [`BuildingPlan::interior_nav`] for the
 /// bit layout and why the namespace exists.

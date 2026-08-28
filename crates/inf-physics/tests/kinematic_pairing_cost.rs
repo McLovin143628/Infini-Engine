@@ -362,7 +362,10 @@ fn a_moving_kinematic_crowd_costs_multiples_of_the_same_crowd_standing_still() {
         control.touching,
         control.ms
     );
-    println!("    N | arm                            | pairs | manifolds |  ms/step | vs control |    us/agent");
+    println!(
+        "{:>5} | {:<30} | pairs | manifolds |  ms/step | vs control |    us/agent",
+        "N", "arm"
+    );
     for n in [32usize, 128, CROWD] {
         let base = Spec::new().crowd(n);
         for (label, spec) in [

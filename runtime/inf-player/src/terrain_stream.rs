@@ -581,41 +581,41 @@ mod tests {
     use inf_ecs::EcsWorld;
     use std::collections::BTreeMap;
 
-    /// **EVERY CROWD NPC IS A TERRAIN OBSERVER, INCLUDING THE ONES THE LADDER
-    /// TOOK THE BODY AWAY FROM** (NPC1b audit) — a tripwire, not an endorsement.
+    /// **ONLY THE TIERS THAT HAVE A BODY OBSERVE THE TERRAIN** (island wave
+    /// NPC1c) — the NPC1b audit's tripwire, flipped, and the ledger sentence it
+    /// was guarding rewritten.
     ///
-    /// `observes_terrain` picks its subjects by **component**: an entity carrying
-    /// `RigidBody3D` or `CharacterController3D` observes. `inf_ecs::crowd`'s
-    /// `materialize` gives every agent **both**, at every materialized tier — so a
-    /// `Far` agent, which `CrowdTier::has_body` says has no rapier body at all and
-    /// which cannot query a height (no `CharacterMovement`, no `ActorClass`, and a
-    /// position that is a pure function of the clock), still contributes a
-    /// `SIM_MARGIN_TILES` neighbourhood of level-0 pages to the sim want set on
-    /// **every fixed step**.
+    /// The tripwire read: *"a `Far` crowd agent stopped observing the terrain —
+    /// if that is deliberate, the NPC1b audit's `+1.26 ms terrain stream`
+    /// finding is closed and the ledger has to say so."* It is deliberate, and
+    /// this is the arm that says so.
     ///
-    /// That is this module's own stated hazard, met by the content it was written
-    /// against: *"residency must scale with the number of things that can look at
-    /// the ground, not with how much scenery the artist placed on it"*. And it is
-    /// NPC1a's own deform finding — *"a thing with no rapier body presses no
-    /// ground"* — one system over: two authorities disagreeing about whether a
-    /// thing is in the world, one reading components and one reading the tier.
+    /// **Nothing in `observes_terrain` changed.** The predicate still picks its
+    /// subjects by component, and this module's doctrine — *treat these two
+    /// knobs as content, not configuration* — is untouched. What changed is one
+    /// system over: `inf_ecs::crowd::set_tier_components` now puts the physical
+    /// set on and takes it off **with the tier**, so a `Far` agent carries no
+    /// `RigidBody3D` and no `CharacterController3D` and there is nothing here to
+    /// narrow. That is the right shape for the reason NPC1a's own deform finding
+    /// gives: anything asking "is this thing physically here" has to ask ONE
+    /// authority, and a predicate that reads components is answered by the
+    /// components.
     ///
-    /// **The measurement**: on the island's `LIT+VIS+CROWD` row the `terrain
-    /// stream` phase reads **1.257 ms** against a bracket in which it is under the
-    /// 0.02 ms print floor — 14 % of a 9.09 ms crowd step, from a thousand
-    /// observers where the bracket has one. Wave NPC1b's ledger attributes that
-    /// millisecond to "the crowd" without a mechanism, and it is not intrinsic to
-    /// a crowd.
+    /// **The measurement it closes**: on the island's crowd row the `terrain
+    /// stream` phase read **1.16 ms** against a bracket under the 0.02 ms print
+    /// floor — a thousand observers where the bracket had one, of which 712 had
+    /// no rapier body and no door by which to query a height. NPC1b's ledger
+    /// attributed that millisecond to "the crowd"; it was never intrinsic to
+    /// one.
     ///
-    /// **Not fixed here.** Narrowing the predicate changes which pages are
-    /// resident, and this module's own doctrine is that *"a missing sim page
-    /// changes the simulation"* — so it is a ruling with a PIE-==-shipping
-    /// re-measurement behind it, which is a wave's work and not an audit's. NPC1c
-    /// gives a near agent a controller and is where the question gets decided.
-    /// This arm fails the day it is, which is the day the ledger's `+1.26 ms`
-    /// attribution has to be rewritten.
+    /// Three claims, and the first is the anti-vacuity: the tiers that DO have
+    /// bodies still observe (a fixture where nothing observed would satisfy the
+    /// `Far` clause perfectly), the `Far` one does not, and the **transition**
+    /// puts the observation back — a component ladder that only ran at
+    /// materialization would leave every agent that was ever close observing for
+    /// ever.
     #[test]
-    fn every_materialized_crowd_agent_observes_the_terrain_at_every_tier() {
+    fn only_the_crowd_tiers_with_a_body_observe_the_terrain() {
         let mut world = EcsWorld::new();
         let src = world.spawn_with_guid(uuid::Uuid::from_u128(0xF1), "Player", None);
         world
@@ -625,7 +625,7 @@ mod tests {
         world.propagate();
 
         // One agent per materialized tier: 8 m (`Full`), 60 m (`Near`), 300 m
-        // (`Far`). The `Far` one is the subject — it has no rapier body.
+        // (`Far`). The `Far` one is the subject.
         let mut records = BTreeMap::new();
         for (i, x) in [8.0f64, 60.0, 300.0].iter().enumerate() {
             records.insert(
@@ -644,32 +644,40 @@ mod tests {
             "the fixture is not one agent per materialized tier: {stats:?}"
         );
 
-        for (i, tier) in [
-            inf_ecs::crowd::CrowdTier::Full,
-            inf_ecs::crowd::CrowdTier::Near,
-            inf_ecs::crowd::CrowdTier::Far,
-        ]
-        .iter()
-        .enumerate()
-        {
+        let observes = |world: &EcsWorld, i: usize| {
             let e = world
                 .entity_of(uuid::Uuid::from_u128(0xC00 + i as u128))
                 .expect("materialized");
-            let agent = world
-                .world()
-                .get::<inf_ecs::crowd::CrowdAgent>(e)
-                .copied()
-                .expect("the tier verdict");
-            assert_eq!(agent.tier, *tier, "the fixture drifted");
-            assert!(
-                observes_terrain(&world, e),
-                "a {tier:?} crowd agent stopped observing the terrain — if that is \
-                 deliberate, the NPC1b audit's `+1.26 ms terrain stream` finding is \
-                 closed and the ledger has to say so"
-            );
-        }
-        // …and the `Far` one really has no body, which is what makes it the
-        // finding rather than a cost.
-        assert!(!inf_ecs::crowd::CrowdTier::Far.has_body());
+            observes_terrain(world, e)
+        };
+        assert!(observes(&world, 0), "a `Full` agent stopped observing");
+        assert!(observes(&world, 1), "a `Near` agent stopped observing");
+        assert!(
+            !observes(&world, 2),
+            "a `Far` crowd agent still observes the terrain — it has a body \
+             component the ladder should have taken off, and NPC1c's \
+             terrain-stream saving is not real"
+        );
+
+        // …and the transition puts it back. A ladder that ran only at
+        // materialization would leave the saving in place for ever and the
+        // promotion silently un-grounded.
+        let e = world
+            .entity_of(uuid::Uuid::from_u128(0xC00 + 2u128))
+            .expect("materialized");
+        world
+            .world_mut()
+            .entity_mut(e)
+            .insert(inf_ecs::components::Transform {
+                translation: inf_ecs::math::Vec3d::new(8.0, 0.0, 0.0),
+                ..inf_ecs::components::Transform::IDENTITY
+            });
+        world.propagate();
+        inf_ecs::crowd::step_crowd(&mut world, 1.0 / 60.0);
+        assert!(
+            observes(&world, 2),
+            "a promoted agent did not get its body back, so it can never query \
+             a height again"
+        );
     }
 }

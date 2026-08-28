@@ -867,14 +867,35 @@ impl CrowdArchetype {
         self.half_height_m + self.radius_m
     }
 
-    /// The starter character's proportions — a 1.8 m adult: 0.9 m half-height,
-    /// 0.3 m radius, which is the capsule `inf_anim::template` fits a rig to.
+    /// **The starter character's proportions — a 1.8 m adult**: 0.6 m
+    /// half-height, 0.3 m radius, which is
+    /// [`CharacterMovement::stand_half_height_m`]'s own default for the same
+    /// body.
+    ///
+    /// # It read 0.9 until NPC1c, and nothing could see it
+    ///
+    /// A capsule's `half_height` in this engine is the segment half-length,
+    /// **excluding the radius** — the component's own doc says so — so
+    /// `2 (0.9 + 0.3)` is a **2.4 m** capsule wearing a comment that says 1.8.
+    /// Every arm NPC1a and NPC1b wrote passed on it: a tier decision, a trace
+    /// byte and a palette upload do not care how tall a capsule is, and the
+    /// crowd never met anything with a ceiling.
+    ///
+    /// The first thing that did was a doorway. `DEFAULT_DOOR_HEIGHT_M` is 2.1 m,
+    /// so a 2.4 m NPC does not fit through any door this engine builds, and the
+    /// town walk found it by standing in an open doorway for 3 400 steps with
+    /// the leaf swung to its full 95 degrees. It is also the other half of the
+    /// NPC1b audit's **1.20 m** character-space gap: that number was
+    /// `half_height + radius` on this capsule, and on the corrected one the
+    /// drop is **0.90 m**.
+    ///
+    /// [`CharacterMovement::stand_half_height_m`]: crate::components::CharacterMovement::stand_half_height_m
     pub fn humanoid(mesh: Option<Uuid>, skeleton: Option<Uuid>, sm: Option<Uuid>) -> Self {
         Self {
             mesh,
             skeleton,
             sm,
-            half_height_m: 0.9,
+            half_height_m: 0.6,
             radius_m: 0.3,
         }
     }
@@ -1482,6 +1503,22 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
 /// is aiming about where it will be next second.
 pub const PURSUIT_LOOKAHEAD_M: f64 = 1.5;
 
+/// How far the pursuit lookahead may grow looking for a horizontal lead,
+/// metres.
+///
+/// Six metres is four strides, which is longer than any flight of stairs this
+/// engine generates and shorter than a city block, so a follower that has run
+/// out of lead has really run out of path rather than merely met a steep bit.
+pub const PURSUIT_LOOKAHEAD_MAX_M: f64 = 6.0;
+
+/// The smallest horizontal separation a pursuit target may have from the agent's
+/// own feet, metres.
+///
+/// A quarter of a metre is under one capsule radius, so a target this close is
+/// somewhere the body is already standing — which on a stair means *directly
+/// above it*.
+pub const MIN_LEAD_M: f64 = 0.25;
+
 /// How close a steered agent has to get to the end of a [`RouteMode::Once`]
 /// route to have arrived, metres.
 ///
@@ -1678,19 +1715,39 @@ fn steer_agent(
     let wish = if arrived || !rec.route.is_walkable() {
         DVec3::ZERO
     } else {
-        let ahead = if plan.progress.forward {
-            (on.s_m + PURSUIT_LOOKAHEAD_M).min(len)
-        } else {
-            (on.s_m - PURSUIT_LOOKAHEAD_M).max(0.0)
-        };
-        let target = path.position_at(ahead);
-        let d = crate::math::Vec2d::new(target.x - feet.x, target.z - feet.z);
-        let m = (d.x * d.x + d.y * d.y).sqrt();
-        if m > 1.0e-6 {
-            DVec3::new(d.x / m, 0.0, d.y / m)
-        } else {
-            DVec3::ZERO
+        // **The lookahead grows until it has a HORIZONTAL lead** (NPC1c).
+        //
+        // A stair edge is nearly vertical: both ends of a flight sit inside one
+        // core, and a segment that climbs 3.6 m over 1.5 m of run puts the
+        // ordinary lookahead almost directly above the agent's own feet. A
+        // planar wish computed from that is zero, the agent stops at the bottom
+        // of the stairs, and the whole walk stalls one metre from the door it
+        // came in through. Measured exactly that way on the island's own gate.
+        //
+        // So the lookahead steps forward in whole strides until the target is at
+        // least [`MIN_LEAD_M`] away in plan, up to
+        // [`PURSUIT_LOOKAHEAD_MAX_M`]. On flat ground the first try answers and
+        // this costs one comparison.
+        let dir = if plan.progress.forward { 1.0 } else { -1.0 };
+        let mut wish = DVec3::ZERO;
+        let mut reach = PURSUIT_LOOKAHEAD_M;
+        while reach <= PURSUIT_LOOKAHEAD_MAX_M {
+            let ahead = (on.s_m + dir * reach).clamp(0.0, len);
+            let target = path.position_at(ahead);
+            let d = crate::math::Vec2d::new(target.x - feet.x, target.z - feet.z);
+            let m = (d.x * d.x + d.y * d.y).sqrt();
+            if m >= MIN_LEAD_M {
+                wish = DVec3::new(d.x / m, 0.0, d.y / m);
+                break;
+            }
+            // The end of the path is as far as a lookahead can reach; growing it
+            // past there would spin.
+            if ahead <= 0.0 || ahead >= len {
+                break;
+            }
+            reach += PURSUIT_LOOKAHEAD_M;
         }
+        wish
     };
     let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(entity) else {
         return;
@@ -2181,8 +2238,8 @@ mod tests {
         let drawn = crate::pose::model_to_world(&world, e).translation;
         let gap = placed - drawn;
         assert!(
-            (gap.y - 1.2).abs() < 1e-9,
-            "a `Full` crowd agent must publish the humanoid capsule's own              0.9 + 0.3 m drop; it published {gap:?}"
+            (gap.y - 0.9).abs() < 1e-6,
+            "a `Full` agent must publish the humanoid capsule's 0.6 + 0.3: {gap:?}"
         );
 
         // The two sources, held to one number. `feet_offset_m` off the live
@@ -2201,7 +2258,7 @@ mod tests {
             .feet_offset_m;
         assert_eq!(
             measured, published,
-            "the crowd's published foot offset and the movement model's measured              one have parted company — they are two sources for ONE number"
+            "the published foot offset and the measured one have parted company"
         );
 
         // …and the `Far` tier, which has neither component, publishes the same
@@ -2224,11 +2281,11 @@ mod tests {
             .translation();
         let drawn = crate::pose::model_to_world(&world, e).translation;
         assert!(
-            ((placed - drawn).y - 1.2).abs() < 1e-9,
-            "a `Far` agent must publish the same drop as a `Full` one; it              published {:?}",
+            ((placed - drawn).y - 0.9).abs() < 1e-6,
+            "a `Far` agent must publish a `Full` one's drop: {:?}",
             placed - drawn
         );
-        println!("NPC1c: the 1.20 m gap is closed at every tier. Measured {measured:.2} m.");
+        println!("NPC1c: the character-space gap is closed at every tier: {measured:.2} m.");
         println!("NPC1c: the archetype publishes {published:.2} m for the tiers with no capsule.");
     }
 

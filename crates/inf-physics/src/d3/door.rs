@@ -680,12 +680,35 @@ pub fn step_doors(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64) -
     // answer whichever order the walk arrives in. The alternative (probe, move,
     // probe, move) makes the outcome a function of `Guid` order in a way the
     // player can see.
+    //
+    // **A CROWD AGENT CANNOT HOLD A DOOR SHUT** (island wave NPC1c), and this is
+    // the one place that rule lives. Measured on the island's own town walk: an
+    // NPC that walks up to a shut door stops when the leaf stops it, which puts
+    // its capsule about 0.4 m from the leaf's centre -- inside the arc the block
+    // probe sweeps. So the leaf turned 3.667 degrees, `advance` saw a block and
+    // cut the power, the NPC pressed again, and the pair sat there for **5 278
+    // presses over 9 000 steps at exactly -3.6667 degrees**, with the agent's
+    // arc length frozen at 91.60 m of a 121.27 m route.
+    //
+    // It is a deadlock rather than a hard case: the NPC's whole plan is to go
+    // through that door, so it has no way to decide to step back, and the door
+    // has no way to decide to push. A PLAYER holding a door shut is different in
+    // exactly that respect -- a player chose to stand there and can choose not
+    // to -- so the player's own capsule is not in this set and can still block a
+    // leaf.
+    //
+    // Empty, and allocation-free, on every level with no crowd -- which is every
+    // level this tree has committed -- so no existing door changes by a degree.
+    let pawns: BTreeSet<ColliderId3D> = inf_ecs::crowd::crowd_colliders(world)
+        .into_iter()
+        .filter_map(|g| bridge.collider_of(g))
+        .collect();
     let mut blocked: Vec<bool> = Vec::with_capacity(places.len());
     for p in &places {
         let state = door::door_field(world)
             .map(|f| f.get(p.guid, &p.spec))
             .unwrap_or_else(|| DoorState::fresh(&p.spec));
-        blocked.push(is_blocked(bridge, p, &state, dt));
+        blocked.push(is_blocked(bridge, p, &state, dt, &pawns));
     }
     let mut poses: Vec<(Uuid, DVec3, DQuat)> = Vec::new();
     {
@@ -739,7 +762,16 @@ pub fn step_doors(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64) -
 /// is the direction the most of the leaf is going. Not an overlap test: a leaf
 /// that has already reached something is not the case that matters — the case
 /// that matters is a leaf about to.
-fn is_blocked(bridge: &mut PhysicsBridge3D, p: &DoorPlacement, state: &DoorState, dt: f64) -> bool {
+///
+/// `pawns` are the colliders a leaf is allowed to sweep *through* — the crowd's
+/// own capsules, for the deadlock reason [`step_doors`] states and measures.
+fn is_blocked(
+    bridge: &mut PhysicsBridge3D,
+    p: &DoorPlacement,
+    state: &DoorState,
+    dt: f64,
+    pawns: &BTreeSet<ColliderId3D>,
+) -> bool {
     if !p.spec.is_usable() || !dt.is_finite() || dt <= 0.0 {
         return false;
     }
@@ -771,7 +803,7 @@ fn is_blocked(bridge: &mut PhysicsBridge3D, p: &DoorPlacement, state: &DoorState
         ),
     };
     let rot = DQuat::from_rotation_y(r);
-    let mut exclude: BTreeSet<ColliderId3D> = BTreeSet::new();
+    let mut exclude: BTreeSet<ColliderId3D> = pawns.clone();
     if let Some(c) = bridge.collider_of(door_leaf_guid(p.guid)) {
         exclude.insert(c);
     }

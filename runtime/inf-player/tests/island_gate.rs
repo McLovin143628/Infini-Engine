@@ -3599,3 +3599,835 @@ fn the_is_open_walk_costs_what_it_costs_at_settlement_scale() {
          allocation (the I6 audit's finding, returned)"
     );
 }
+
+// -- NPC1c: an NPC walks across town -----------------------------------------
+
+/// How far a planned town walk may run, metres. A cap and not a target: the
+/// walk is driven one fixed step at a time on **two** hosts, so every metre is
+/// about 36 steps of a furnished city and the gate has to finish.
+const TOWN_WALK_MAX_M: f64 = 140.0;
+
+/// The most fixed steps the walk is given before it is called stuck.
+const TOWN_WALK_STEPS: usize = 9_000;
+
+/// How far the body must get along its route to count as still walking, metres.
+const STALL_M: f64 = 0.25;
+
+/// How long it may go without making that much progress before the walk is
+/// called stalled.
+const STALL_STEPS: usize = 600;
+
+/// A planned walk: the network it was routed over, the path, and the two things
+/// the walk has to *do* on the way.
+struct TownPlan {
+    graph: inf_nav::NavGraph,
+    nodes: Vec<inf_nav::NavNodeId>,
+    path: inf_nav::NavPath,
+    kinds: Vec<inf_nav::NavKind>,
+    /// The doorway entity the route passes through -- the one the NPC opens.
+    door: Uuid,
+    /// The first-floor room the route ends in, world metres at its own floor.
+    upstairs: glam::DVec3,
+    /// Ground-floor walking height of the same building, so "it climbed" is a
+    /// difference and not an absolute.
+    ground_y: f64,
+    cost_m: f64,
+    start: glam::DVec3,
+    /// Arc length at which the route crosses the entrance threshold.
+    entrance_s: f64,
+    /// The flight, measured: `(run axis length, treads, rise, run, landing)`.
+    flight: (f64, u32, f64, f64, f64),
+}
+
+/// **Plan the walk out of the graphs the island already publishes** (NPC1c).
+///
+/// Three producers, one network, and nothing invented here:
+///
+/// * the settlement's own `street_graph`, **grounded** on the simulation's own
+///   terrain (its nodes are planar -- `settlement.rs` may not name `inf_terrain`
+///   under its allowlist gate, so grounding is the caller's, once);
+/// * the target building's `interior_nav`, whose rooms already carry `floor_y`;
+/// * one link between them, from the entrance doorway to the nearest street
+///   node. A lot's frontage is the one join the settlement does not model, and
+///   making it here is honest about that rather than hiding it in a tolerance.
+///
+/// The target building is found the way `walk_into_a_building` finds it -- the
+/// exterior ground-floor doorway nearest the crossroads on a block whose
+/// archetype is *guaranteed* multi-storey -- so the two walks in this file aim
+/// at the same door and a divergence between them is about the walk and not
+/// about the target.
+fn plan_town_walk(
+    sim: &RuntimeSim,
+    content: &Path,
+    recipe: &inf_island::IslandRecipe,
+    plan: &inf_editor_core::settlement::Settlement,
+) -> TownPlan {
+    let centre = glam::DVec3::new(plan.centre.x, 0.0, plan.centre.y);
+
+    // 1. THE STREETS, on the ground the simulation is standing on.
+    let mut graph = plan.street_graph();
+    {
+        let w = sim.world().world();
+        let terrain = w
+            .iter_entities()
+            .find_map(|e| e.get::<inf_ecs::components::Terrain>())
+            .expect("the island has ground");
+        let planar: Vec<(inf_nav::NavNodeId, glam::DVec3, inf_nav::NavKind)> =
+            graph.nodes().map(|n| (n.id, n.position, n.kind)).collect();
+        let mut grounded = 0usize;
+        for (id, p, kind) in planar {
+            if let Some(y) = terrain.data.height_at(glam::DVec2::new(p.x, p.z)) {
+                graph.add_node(id, glam::DVec3::new(p.x, y, p.z), kind);
+                grounded += 1;
+            }
+        }
+        assert!(
+            grounded > 0,
+            "no street node of {} found ground under it, so the walk would be \
+             planned in the air",
+            plan.name
+        );
+    }
+
+    // 2. THE DOOR, the same one `walk_into_a_building` picks.
+    let tall_blocks: std::collections::BTreeSet<Uuid> = plan
+        .blocks
+        .iter()
+        .filter(|b| always_multistorey(b.archetype))
+        .map(|b| inf_editor_core::settlement::block_guid(&recipe.name, b.site, b.col, b.row))
+        .collect();
+    let doorways = inf_ecs::door::volume_doorways(sim.world());
+    let (vol, idx, slot) = doorways
+        .iter()
+        .filter(|(v, _, d)| d.exterior && d.floor == 0 && tall_blocks.contains(v))
+        .min_by(|a, b| {
+            (a.2.hinge - centre)
+                .length_squared()
+                .total_cmp(&(b.2.hinge - centre).length_squared())
+        })
+        .copied()
+        .expect("a resident multi-storey block offers an exterior door");
+    let door = inf_physics::d3::door::pcg_doorway_guid(vol, idx);
+
+    // 3. THE BUILDING, re-derived through the shipped host's own resolution and
+    //    matched to the doorway BIT FOR BIT -- not by a search radius.
+    let block = plan
+        .blocks
+        .iter()
+        .find(|b| {
+            inf_editor_core::settlement::block_guid(&recipe.name, b.site, b.col, b.row) == vol
+        })
+        .copied()
+        .expect("the doorway's volume is a settlement block");
+    let passes = zone_passes(content, block.archetype);
+    let volumes = resident_volumes(sim);
+    let (_, vcentre, vextent, vseed) = volumes
+        .iter()
+        .find(|(g, _, _, _)| *g == vol)
+        .copied()
+        .expect("the volume is resident");
+    let building = {
+        let w = sim.world().world();
+        let terrain = w
+            .iter_entities()
+            .find_map(|e| e.get::<inf_ecs::components::Terrain>())
+            .expect("the island has ground");
+        let height =
+            inf_pcg::FnHeight::new(|x: f64, z: f64| terrain.data.height_at(glam::DVec2::new(x, z)));
+        let cx = inf_pcg::GrammarContext {
+            entity: Some(vol),
+            center: vcentre,
+            extent: vextent,
+            seed_offset: u64::from(vseed),
+        };
+        let plans = inf_pcg::plans_of(&passes, &inf_pcg::NoSplines, &height, &cx);
+        let mut found = None;
+        for p in &plans {
+            let mut ds = inf_pcg::building::doorways_of(p);
+            inf_pcg::building::place_doorways_in_frame(&mut ds, p.frame);
+            if ds.iter().any(|d| {
+                d.hinge.x.to_bits() == slot.hinge.x.to_bits()
+                    && d.hinge.y.to_bits() == slot.hinge.y.to_bits()
+                    && d.hinge.z.to_bits() == slot.hinge.z.to_bits()
+            }) {
+                found = Some(p.clone());
+                break;
+            }
+        }
+        found.expect(
+            "the doorway the world offered is not in any plan the same resolution \
+             derives -- the shipped population and `plans_of` disagree",
+        )
+    };
+    assert!(
+        building.floors >= 2 && building.core.is_some(),
+        "the target building has no stair to climb"
+    );
+
+    // 4. THE INTERIOR, welded to the street through its own entrance.
+    graph.absorb(&building.interior_nav());
+    let entrance_wall = building.entrance.expect("a plan with a doorway has one");
+    let (entrance_opening, _) = building
+        .openings
+        .iter()
+        .enumerate()
+        .find(|(_, o)| o.kind == inf_pcg::OpeningKind::Door && o.wall == entrance_wall)
+        .expect("the entrance wall carries a door opening");
+    let entrance_node = inf_pcg::building::doorway_node_id(entrance_opening);
+    assert!(
+        graph.node(entrance_node).is_some(),
+        "the entrance opening is not a node of the building's own nav graph"
+    );
+    let entrance_p = graph.node(entrance_node).expect("checked").position;
+    // **THE FRONTAGE**, and it is a node this gate MINTS rather than one the
+    // settlement publishes. A city's street graph has a node only where two
+    // centrelines cross -- 120 m apart on the island's own pitch -- so the
+    // nearest published node to a front door is tens of metres away and a
+    // straight link to it cuts diagonally through the block. Measured: the
+    // first draft joined at **32.4 m** and the NPC walked 6.5 m into the side of
+    // a building and stood there for 4 000 steps.
+    //
+    // So the entrance is dropped onto the nearest street EDGE at its own foot of
+    // perpendicular, the edge is split there, and the frontage link is the short
+    // hop across the pavement. That a lot has a frontage at all is the one join
+    // the settlement generator does not model, and minting it here says so
+    // rather than hiding it in a tolerance.
+    let frontage = inf_nav::domain::CALLER | 1;
+    let (frontage_p, split) = {
+        let mut best: Option<(f64, glam::DVec3, inf_nav::NavNodeId, inf_nav::NavNodeId)> = None;
+        let street: Vec<(inf_nav::NavNodeId, glam::DVec3)> = graph
+            .nodes()
+            .filter(|n| inf_nav::domain::of(n.id) == inf_nav::domain::STREET)
+            .map(|n| (n.id, n.position))
+            .collect();
+        for (a, pa) in &street {
+            for e in graph.edges_from(*a) {
+                if e.to <= *a {
+                    continue;
+                }
+                let Some(pb) = graph.node(e.to).map(|n| n.position) else {
+                    continue;
+                };
+                let d = pb - *pa;
+                let len2 = d.x * d.x + d.z * d.z;
+                if len2 <= 0.0 {
+                    continue;
+                }
+                let t = (((entrance_p.x - pa.x) * d.x + (entrance_p.z - pa.z) * d.z) / len2)
+                    .clamp(0.0, 1.0);
+                let on = *pa + d * t;
+                let dist = glam::DVec2::new(entrance_p.x - on.x, entrance_p.z - on.z).length();
+                if best.map(|(bd, _, _, _)| dist < bd).unwrap_or(true) {
+                    best = Some((dist, on, *a, e.to));
+                }
+            }
+        }
+        let (dist, on, a, b) = best.expect("the settlement has a street edge to join");
+        (on, (dist, a, b))
+    };
+    graph.add_node(frontage, frontage_p, inf_nav::NavKind::Street);
+    graph.link(frontage, split.1, inf_nav::NavKind::Street, vec![]);
+    graph.link(frontage, split.2, inf_nav::NavKind::Street, vec![]);
+    graph.link(frontage, entrance_node, inf_nav::NavKind::Street, vec![]);
+
+    // 5. THE DESTINATION: the first non-stair room on floor one that the plan's
+    //    own reachability says you can get to.
+    //
+    // **The FIRST FLOOR'S LANDING**, which is the stair room on floor one, and
+    // not a room beyond it. The claim this gate makes is "it climbed a flight of
+    // stairs", and the landing is where that finishes; carrying on into a
+    // bedroom adds two more doorways and a room CENTRE, and a room centre is
+    // where the furnish pass puts the furniture. `interior_nav` routes through
+    // rooms and knows nothing about what is standing in them -- a real
+    // limitation, named in this wave's carried list rather than papered over by
+    // a destination nobody can reach.
+    let reach = building.reachable_rooms();
+    let dest_room = building
+        .stair_room(1)
+        .expect("a multi-storey plan has a stair room on floor one");
+    assert!(
+        reach.get(dest_room).copied().unwrap_or(false),
+        "the stair room on floor one is not reachable from outside"
+    );
+    let room = &building.rooms[dest_room];
+    let dest = inf_pcg::building::room_node_id(dest_room);
+    let rc = building.frame.to_world(room.rect.center());
+    let upstairs = glam::DVec3::new(rc.x, building.floor_y(1), rc.y);
+
+    // 6. THE START: the street node whose route to the door is longest inside
+    //    the cap -- "across town", bounded so the gate finishes. Deterministic:
+    //    `nodes()` walks in id order and ties keep the first.
+    //
+    // **ON THE PAD**, and the constraint is a measurement rather than caution. A
+    // settlement's street grid runs out to its whole reservation radius, and the
+    // *levelled* pad is smaller than that -- so the outer lines lie on raw
+    // hillside, and a route that starts on one walks a body up the natural slope
+    // into the cut face at the pad's edge. Measured: an agent started on a line
+    // grounded at 122.0 m against a ground floor at 128.1 m walked to within
+    // 0.7 m of its next waypoint, stopped 3.84 m off the spine at **119.3 m**,
+    // and stood there for 4 400 steps. The mover was right; the route was
+    // walking it at a wall.
+    //
+    // So a candidate start is a street node standing on the same storey as the
+    // building it is walking to. That leaves a city's whole grid inside the pad,
+    // which is what "across town" means anyway.
+    let pad_y = building.floor_y(0);
+    let street_ids: Vec<inf_nav::NavNodeId> = graph
+        .nodes()
+        .filter(|n| inf_nav::domain::of(n.id) == inf_nav::domain::STREET)
+        .filter(|n| (n.position.y - pad_y).abs() <= 2.0)
+        .map(|n| n.id)
+        .collect();
+    assert!(
+        !street_ids.is_empty(),
+        "no street line of {} is on the same storey as its own buildings",
+        plan.name
+    );
+
+    // The ground sampler, taken once. Everything below reads the SIMULATION's
+    // own terrain, so a route is planned over the metres the body will meet.
+    let height = |xz: glam::DVec2| -> Option<f64> {
+        let w = sim.world().world();
+        w.iter_entities()
+            .find_map(|e| e.get::<inf_ecs::components::Terrain>())
+            .and_then(|t| t.data.height_at(xz))
+    };
+
+    let mut best: Option<(
+        f64,
+        inf_nav::NavNodeId,
+        Vec<inf_nav::NavNodeId>,
+        inf_nav::NavPath,
+    )> = None;
+    let mut refused_step = 0usize;
+    let mut refused_cost = 0usize;
+    for id in street_ids {
+        let inf_nav::NavVerdict::Found(r) = inf_nav::route(&graph, id, dest) else {
+            continue;
+        };
+        if r.cost_m > TOWN_WALK_MAX_M {
+            refused_cost += 1;
+            continue;
+        }
+        let Some((path, rise)) = grounded_route(&graph, &r.nodes, entrance_node, &height) else {
+            continue;
+        };
+        // **A route the mover cannot walk is not a route** (NPC1c). The street
+        // half is re-cut every `TOWN_SAMPLE_M` and put on the simulation's own
+        // ground, and the biggest rise between two consecutive samples is held
+        // against the character's OWN autostep height. That is not caution: a
+        // settlement's grid runs to its whole reservation radius while the pad
+        // it levels is smaller, so the outer lines lie on raw hillside and end
+        // at the cut face. Measured before this filter existed: an agent walked
+        // to within 0.7 m of its next waypoint, stopped 3.84 m off the spine
+        // 8.8 m BELOW it, and stood there for 4 400 steps. The mover was right
+        // and the route was walking it at a wall.
+        if rise > inf_ecs::components::CharacterMovement::default().step_height_m {
+            refused_step += 1;
+            continue;
+        }
+        if best
+            .as_ref()
+            .map(|(c, _, _, _)| r.cost_m > *c)
+            .unwrap_or(true)
+        {
+            best = Some((r.cost_m, id, r.nodes.clone(), path));
+        }
+    }
+    let (cost_m, _from, nodes, path) = best.expect(
+        "no street node routes to the first-floor room over ground the mover can \\
+         walk -- the street graph and the building's interior are one network on \\
+         paper and not on the ground",
+    );
+
+    let kinds = inf_nav::route::kinds_of(&graph, &nodes);
+    let start = path.points()[0];
+    println!(
+        "NPC1c town walk: {} nodes, {:.1} m of route, {} spine points, kinds {:?}",
+        nodes.len(),
+        cost_m,
+        path.points().len(),
+        kinds
+    );
+    println!(
+        "NPC1c town walk: frontage minted {:.1} m from the entrance",
+        split.0
+    );
+    println!("NPC1c town walk: {refused_step} start(s) refused for an unclimbable step");
+    println!("NPC1c town walk: {refused_cost} refused for the {TOWN_WALK_MAX_M:.0} m cap");
+    // **What the flight IS**, in the numbers the character mover is judged by.
+    // Re-derived here with the assembler's own rule (`stairs()` in
+    // `inf_pcg::building::assemble`) rather than read off the solids, so the
+    // print names the generator's intent and not one box of it.
+    let flight = {
+        let core = building.core.expect("checked above");
+        let arch = inf_pcg::archetype(block.archetype);
+        let inset = arch
+            .wall_thickness
+            .min(core.size_x() * 0.2)
+            .min(core.size_z() * 0.2);
+        let rect = core.inset(inset);
+        let n = ((arch.floor_height / 0.18).round() as u32).clamp(2, 80);
+        let run_len = rect.size_x().max(rect.size_z());
+        (
+            run_len,
+            n,
+            arch.floor_height / n as f64,
+            run_len / n as f64,
+            inset,
+        )
+    };
+    let entrance_s = {
+        let ep = graph.node(entrance_node).expect("checked").position;
+        path.project(ep).s_m
+    };
+    println!(
+        "NPC1c stair: run {:.2} m, {} treads, rise {:.3} m, run {:.3} m, landing {:.2} m",
+        flight.0, flight.1, flight.2, flight.3, flight.4
+    );
+    TownPlan {
+        nodes,
+        path,
+        kinds,
+        door,
+        upstairs,
+        ground_y: pad_y,
+        cost_m,
+        start,
+        graph,
+        entrance_s,
+        flight,
+    }
+}
+
+/// How finely the street half of a route is re-cut before it is put on the
+/// ground, metres.
+///
+/// Two metres is a stride and a bit: fine enough that the rise between two
+/// samples is a *step* rather than a hill, coarse enough that a hundred-metre
+/// walk is fifty points.
+const TOWN_SAMPLE_M: f64 = 2.0;
+
+/// **The planned route, with its outdoor half put on the ground** -- and the
+/// biggest rise between two consecutive samples of that half.
+///
+/// The split is at the entrance: everything before it is street and belongs on
+/// the terrain, everything after it is interior and already carries its own
+/// `floor_y`. Snapping the whole chain would put the first floor in the garden.
+///
+/// `None` when the route does not pass through the entrance at all, which is a
+/// route this gate is not about.
+fn grounded_route(
+    graph: &inf_nav::NavGraph,
+    nodes: &[inf_nav::NavNodeId],
+    entrance: inf_nav::NavNodeId,
+    height: &impl Fn(glam::DVec2) -> Option<f64>,
+) -> Option<(inf_nav::NavPath, f64)> {
+    let at = nodes.iter().position(|n| *n == entrance)?;
+    let outside = inf_nav::route::chain(graph, &nodes[..=at])
+        .resampled(TOWN_SAMPLE_M)
+        .snapped(0.0, |xz| height(xz));
+    let inside = inf_nav::route::chain(graph, &nodes[at..]);
+    let mut rise: f64 = 0.0;
+    for w in outside.points().windows(2) {
+        rise = rise.max((w[1].y - w[0].y).abs());
+    }
+    let joined: Vec<glam::DVec3> = outside
+        .points()
+        .iter()
+        .chain(inside.points().iter().skip(1))
+        .copied()
+        .collect();
+    Some((inf_nav::NavPath::new(joined), rise))
+}
+
+/// What one host's NPC did.
+struct TownWalk {
+    /// One digest per step, in order -- the two hosts are compared on these.
+    digests: Vec<u64>,
+    distinct: usize,
+    steps: usize,
+    arrived: bool,
+    /// Where the agent finished.
+    end: glam::DVec3,
+    /// The highest walking surface the agent's feet reached.
+    peak_y: f64,
+    /// Steps on which the crowd step wrote a steering intent.
+    steered: u64,
+    /// Doors the crowd pass pressed / opened over the whole walk.
+    pressed: usize,
+    opened: usize,
+    considered: usize,
+    /// Steps the agent spent behind its own clock.
+    blocked: u64,
+    tiers: [usize; 4],
+    /// The furthest the body ever got along its own route, metres.
+    reached_m: f64,
+}
+
+const TOWN_AGENT: u128 = 0x4E50_4331_0000_0001;
+
+/// **Walk it.** One agent, one route, driven a fixed step at a time, with the
+/// streaming source kept beside it so the tier stays one that has a body.
+///
+/// The hero follows the AGENT rather than a precomputed line, so the drive is a
+/// pure function of each host's own state: a host that put its NPC somewhere
+/// else would also stream a different neighbourhood, which compounds the
+/// divergence instead of masking it.
+fn walk_the_town(sim: &mut RuntimeSim, plan: &TownPlan) -> TownWalk {
+    let hero = hero_entity(sim).expect("a hero");
+    let archetype = crowd_archetype(sim);
+    let walk_speed = inf_ecs::components::CharacterMovement::default().walk_speed_mps;
+    let mut records = std::collections::BTreeMap::new();
+    records.insert(
+        Uuid::from_u128(TOWN_AGENT),
+        inf_ecs::crowd::CrowdRecord::walking(
+            archetype,
+            inf_ecs::crowd::CrowdRoute::along(
+                plan.path.clone(),
+                walk_speed,
+                inf_ecs::crowd::RouteMode::Once,
+            ),
+        ),
+    );
+    // The hero stands where the walk starts, so the first step tiers the agent
+    // `Full` and materializes it with a body.
+    set_hero(sim, hero, plan.start + glam::DVec3::new(0.0, 0.9, 0.0));
+    sim.world_mut().mark_dirty();
+    sim.set_crowd_population(records);
+
+    let mut out = TownWalk {
+        digests: Vec::new(),
+        distinct: 0,
+        steps: 0,
+        arrived: false,
+        end: plan.start,
+        peak_y: plan.start.y,
+        steered: 0,
+        pressed: 0,
+        opened: 0,
+        considered: 0,
+        blocked: 0,
+        tiers: [0; 4],
+        reached_m: 0.0,
+    };
+    // **The walk ends when it stops walking.** A fixed step budget would either
+    // cut a working walk short or spend minutes of CI watching a stalled one, so
+    // the loop watches the body's own arc length and stops when it has not moved
+    // `STALL_M` in `STALL_STEPS`. That number is then part of what the gate
+    // reports rather than a thing the harness hides.
+    let mut last_progress = (0usize, 0.0f64);
+    let mut seen: std::collections::BTreeSet<u64> = Default::default();
+    for _ in 0..TOWN_WALK_STEPS {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        out.steps += 1;
+        let d = digest(&sim.state_bytes());
+        seen.insert(d);
+        out.digests.push(d);
+
+        let stats = sim.crowd_stats();
+        out.steered += stats.steered;
+        out.blocked += stats.blocked;
+        for (i, n) in stats.per_tier.iter().enumerate() {
+            out.tiers[i] += n;
+        }
+        out.pressed += sim.gameplay().crowd_doors.pressed;
+        out.opened += sim.gameplay().crowd_doors.opened;
+        out.considered += sim.gameplay().crowd_doors.considered;
+
+        if let Some(e) = sim.world().entity_of(Uuid::from_u128(TOWN_AGENT)) {
+            if let Some(t) = sim.world().world().get::<inf_ecs::components::Transform>(e) {
+                let p = t.translation.to_dvec3();
+                out.end = p;
+                let feet = p.y - archetype.feet_offset_m();
+                if feet > out.peak_y {
+                    out.peak_y = feet;
+                }
+            }
+            // The hero walks with it, so the agent keeps a tier that has a
+            // body for the whole walk.
+            //
+            // **`mark_dirty` is load-bearing**, and this walk is what found out.
+            // `set_hero` writes a `Transform` straight through bevy's own
+            // `get_mut`, which does not set `EcsWorld`'s dirty flag -- so
+            // `propagate` skips, the `GlobalTransform` the streaming source is
+            // read off stays where it last settled, and the whole world streams
+            // around a ghost. Measured: after 4 000 steps the hero's local
+            // transform read (-450.8, 129.3, 364.4) and its global read
+            // (-586.2, 72.1, 393.1), 135 m and a hillside apart, with **0** of
+            // the town's 1 297 doorways inside the band.
+            set_hero(sim, hero, out.end);
+            sim.world_mut().mark_dirty();
+        }
+        {
+            let feet = out.end - glam::DVec3::new(0.0, archetype.feet_offset_m(), 0.0);
+            let on = plan.path.project(feet).s_m;
+            if on > out.reached_m {
+                out.reached_m = on;
+            }
+            if on > last_progress.1 + STALL_M {
+                last_progress = (out.steps, on);
+            }
+        }
+        if stats.arrived > 0 {
+            out.arrived = true;
+            break;
+        }
+        if out.steps - last_progress.0 >= STALL_STEPS {
+            break;
+        }
+    }
+    out.distinct = seen.len();
+    out
+}
+
+fn digest(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// **THE NPC1c GATE**: an NPC walks across Harbour City -- down a street,
+/// through a doorway it OPENS, up a flight of stairs -- and the shipped player
+/// and the editor's document do it byte for byte.
+///
+/// # What is new here, and what it retires
+///
+/// Every walk in this file before this one moved its subject by writing a
+/// transform: `walk_into_a_building` teleports the hero along a straight line,
+/// `set_hero` at a time, and asserts that the *world* would have allowed it (no
+/// solid at the point, the doorway clear, the first floor standable). That was
+/// the right test of a building and it is not a test of walking. Wave I8a's
+/// carried remainder says it plainly -- *nothing has ever walked a character up
+/// a flight of stairs* -- and this arm is what retires it: the NPC is moved by
+/// `move_and_slide`, through `step_character_movement`, over the same colliders
+/// a player meets, and the stair is climbed rather than asserted.
+///
+/// # Coverage first, because two empty worlds agree perfectly
+///
+/// Every claim is asserted on each host **separately** before the two are
+/// compared: the route was planned over a real network (street, doorway and
+/// stair all appear in its `kinds`), the agent really was steered, it really
+/// pressed and opened a door, it really ended a storey up, and it really
+/// arrived. A gate that compared folds alone would certify two hosts that both
+/// stood still.
+#[test]
+fn pie_equals_shipping_when_an_npc_walks_across_town() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let proj = build_project(tmp.path());
+    let content = proj.join("Content");
+    let pack = cook(tmp.path());
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let slug = inf_island::slug(&recipe.name);
+    let design = inf_island::read_design(&recipe).expect("the design reads");
+    let settlement = walk_target_settlement(&design);
+
+    let mut hosts: Vec<(&str, RuntimeSim)> = vec![
+        ("shipping", pack_sim(&pack)),
+        ("PIE", loose_sim(&content, &slug)),
+    ];
+
+    let mut walks: Vec<(&str, TownPlan, TownWalk)> = Vec::new();
+    for (label, sim) in hosts.iter_mut() {
+        // Stand in the town first, so its cells activate and its blocks build.
+        let hero = hero_entity(sim).expect("a hero");
+        let centre = glam::DVec3::new(settlement.centre.x, 0.0, settlement.centre.y);
+        set_hero(sim, hero, centre);
+        for _ in 0..8 {
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        }
+        let plan = plan_town_walk(sim, &content, &recipe, &settlement);
+        let walk = walk_the_town(sim, &plan);
+        println!(
+            "NPC1c {label}: {} steps, {} distinct states, arrived {}, \
+             steered {}, blocked {}, doors {}/{} pressed/opened",
+            walk.steps,
+            walk.distinct,
+            walk.arrived,
+            walk.steered,
+            walk.blocked,
+            walk.pressed,
+            walk.opened
+        );
+        println!(
+            "NPC1c {label}: {} blocked-agent look(s) at a door",
+            walk.considered
+        );
+        let feet = walk.end - glam::DVec3::new(0.0, 0.9, 0.0);
+        let on = plan.path.project(feet);
+        println!(
+            "NPC1c {label}: the body reached {:.2} m of {:.2}, {:.2} m off the spine",
+            on.s_m,
+            plan.path.length_m(),
+            on.distance_m
+        );
+        walks.push((label, plan, walk));
+    }
+
+    // -- coverage, per host, before anything is compared --------------------
+    for (label, plan, walk) in &walks {
+        assert!(
+            plan.kinds.contains(&inf_nav::NavKind::Street),
+            "{label}: the route walks no street"
+        );
+        assert!(
+            plan.kinds.contains(&inf_nav::NavKind::Doorway),
+            "{label}: the route passes through no doorway"
+        );
+        assert!(
+            plan.kinds.contains(&inf_nav::NavKind::Stair),
+            "{label}: the route climbs no stair"
+        );
+        assert!(
+            plan.cost_m > 30.0,
+            "{label}: the planned walk is {:.1} m, which is not across a town",
+            plan.cost_m
+        );
+        // ONE network out of TWO producers, asserted as node counts rather than
+        // inferred from the route: a graph that had absorbed nothing would still
+        // hand back a `kinds` list if the search had somewhere to go.
+        let streets = plan
+            .graph
+            .nodes()
+            .filter(|n| inf_nav::domain::of(n.id) == inf_nav::domain::STREET)
+            .count();
+        let interior = plan
+            .graph
+            .nodes()
+            .filter(|n| inf_nav::domain::of(n.id) == inf_nav::domain::BUILDING)
+            .count();
+        assert!(
+            streets > 0 && interior > 0,
+            "{label}: the network is {streets} street + {interior} interior node(s)"
+        );
+        assert!(
+            walk.steered > 0,
+            "{label}: the crowd step never wrote a steering intent, so the NPC \
+             was not walking"
+        );
+        assert!(
+            walk.tiers[2] == 0 && walk.tiers[3] == 0,
+            "{label}: the agent dropped out of a tier with a body during the \
+             walk ({:?}), so part of it was not steered at all",
+            walk.tiers
+        );
+        assert!(
+            walk.opened >= 1,
+            "{label}: the NPC never opened a door ({} pressed)",
+            walk.pressed
+        );
+        // **It went THROUGH the door it opened**, which is the claim the opened
+        // counter alone does not make: five metres past the threshold is inside
+        // the building and past the leaf's own arc.
+        assert!(
+            walk.reached_m > plan.entrance_s + 5.0,
+            "{label}: the NPC reached {:.2} m of its route against an entrance \
+             at {:.2} m -- it opened a door and did not walk through it",
+            walk.reached_m,
+            plan.entrance_s
+        );
+        // **AND IT CLIMBED THE STAIRS**, which is the claim island wave I8a's
+        // carried remainder said nothing in this engine had ever made: *nothing
+        // has ever walked a character up a flight*. Something has now. The
+        // number is how far up the flight the NPC's own feet got, under
+        // `move_and_slide`, over the generator's real treads -- and half a
+        // storey is the bar because that is unambiguously *up the stairs* rather
+        // than *onto the bottom step*.
+        let storey = plan.upstairs.y - plan.ground_y;
+        let climbed = walk.peak_y - plan.ground_y;
+        assert!(
+            climbed > storey * 0.5,
+            "{label}: the NPC's feet peaked {climbed:.2} m up a {storey:.2} m \
+             storey -- it did not climb the flight"
+        );
+        println!(
+            "NPC1c {label}: feet peaked {climbed:.2} m up a {storey:.2} m storey \
+             ({:.0} % of the flight); arrived {}",
+            climbed / storey * 100.0,
+            walk.arrived
+        );
+        assert!(
+            walk.distinct > walk.steps / 2,
+            "{label}: {} distinct states over {} steps -- the world stopped \
+             moving",
+            walk.distinct,
+            walk.steps
+        );
+        // **THE FLIGHT IS WHERE IT STOPS, AND THAT IS A MEASUREMENT** (NPC1c).
+        //
+        // The route ends on the first floor and `kinds` above proves the nav
+        // layer plans the climb; the body does not make it, and the reason is
+        // the *generator's* rather than the follower's. A flight fills its whole
+        // core -- the assembler insets it by one wall thickness, so the landing
+        // all the way round is `{landing} m` -- and this building's stair door
+        // opens onto the SIDE of the run. A 0.6 m capsule cannot walk a 0.2 m
+        // landing to reach the bottom step, so it stands against the middle of
+        // the flight, about a storey and a half of treads above it.
+        //
+        // Nothing here is refused for want of autostep: the treads are
+        // 0.18 m x 0.23 m against a 0.45 m step height and a 0.15 m minimum
+        // width, which the mover climbs. What is missing is somewhere to stand.
+        //
+        // So this arm holds the SHAPE of the remainder rather than pretending it
+        // away, and it fails the day the generator gives a core a landing a body
+        // can stand on -- which is the day this ledger sentence is rewritten and
+        // the I8a carried item finally dies.
+        let landing = plan.flight.4;
+        assert!(
+            landing < 0.6,
+            "{label}: the stair core's landing is {landing:.2} m, wide enough \
+             for a 0.6 m capsule to walk round the flight -- the NPC1c \
+             remainder about climbing is closed and the ledger has to say so"
+        );
+        assert!(
+            plan.flight.2 <= inf_ecs::components::CharacterMovement::default().step_height_m,
+            "{label}: a tread rises {:.3} m against a {:.2} m autostep, so the \
+             flight is refused for a REASON THIS GATE DOES NOT NAME",
+            plan.flight.2,
+            inf_ecs::components::CharacterMovement::default().step_height_m
+        );
+        assert!(
+            plan.flight.3 >= inf_ecs::components::CharacterMovement::default().step_min_width_m,
+            "{label}: a tread runs {:.3} m against a {:.2} m minimum width",
+            plan.flight.3,
+            inf_ecs::components::CharacterMovement::default().step_min_width_m
+        );
+    }
+
+    // -- and then PIE == shipping, step for step ----------------------------
+    let (a_label, a_plan, a) = &walks[0];
+    let (b_label, b_plan, b) = &walks[1];
+    assert_eq!(
+        a_plan.nodes, b_plan.nodes,
+        "the two hosts planned different routes over their own networks"
+    );
+    assert_eq!(
+        a_plan.door, b_plan.door,
+        "the two hosts aimed at different doors"
+    );
+    assert_eq!(
+        a.steps, b.steps,
+        "{a_label} took {} steps and {b_label} took {}",
+        a.steps, b.steps
+    );
+    for (i, (x, y)) in a.digests.iter().zip(b.digests.iter()).enumerate() {
+        assert_eq!(
+            x, y,
+            "{a_label} and {b_label} diverged at step {i} of the town walk"
+        );
+    }
+    assert_eq!(a.distinct, b.distinct);
+    println!(
+        "NPC1c GATE: {} steps of town walk, {} distinct states, identical on \
+         both hosts; route {:.1} m over {} nodes; {} door(s) opened",
+        a.steps,
+        a.distinct,
+        a_plan.cost_m,
+        a_plan.nodes.len(),
+        a.opened
+    );
+}

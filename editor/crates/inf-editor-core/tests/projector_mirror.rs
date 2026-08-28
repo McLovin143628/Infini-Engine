@@ -2550,9 +2550,11 @@ fn both_fixed_steps_move_the_root_before_the_pose() {
 /// `inf_ecs::crowd::step_crowd` is one Ring-0 door, so the two hosts cannot
 /// disagree about *what* a tier means. What they could still disagree about is
 /// *when* it is decided, and that is not a stylistic difference: the tier gates
-/// the 3D bridge's bodies (`sync_from_world_sim` reads `bodiless_agents`), the
-/// character step and the pose evaluation. A host that tiered after its physics
-/// sync would give a `Far` agent a capsule for one step; a host that tiered
+/// the 3D bridge's bodies (NPC1c: the tier puts the body COMPONENTS on and takes
+/// them off, so a host that tiered late would hand the bridge a body the ladder
+/// had already decided against), the character step and the pose evaluation. A
+/// host that tiered after its physics sync would give a `Far` agent a capsule
+/// for one step; a host that tiered
 /// after `advance_state_machines` would pose an agent it had just decided not to
 /// pose. Either is a one-step disagreement between two hosts, which is exactly
 /// what the island gate's byte compare exists to catch and exactly the kind of
