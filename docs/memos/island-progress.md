@@ -35,6 +35,7 @@ that the engine lacks becomes an engine feature, never a level-local hack.
 
 | **I8c** | **the city at sixty** — the scatter band ordering, the VSM's GPU side, the two step clocks | **DONE** — see *Wave I8c* at the end of this file. The two passes the I8b audit named are both taken: `vsm-raster` **6.087 → 0.124 ms** and `scatter` **7.013 → 5.133**, so the lit GPU frame goes **17.982 → 10.202 ms** and the pipelined estimate **55.6 → 72.1 fps**; `LIT+VIS` p50 **29.886 → 24.270** and p95 **56.774 → 25.382**. The VSM clause was **counters first** and they convicted a suspect the brief did not name: **149.5 M of a 156.0 M-index frame was ONE `.inf_vmesh` instance**, submitted whole into every dirty page at the camera's LOD, where terrain — the expected culprit — was 4.2 %. P27.2's camera rule is kept as a **ceiling** and gains the floor it never had (the page's own world-per-texel through `lod_threshold`'s ortho branch), with a bucket mask that **partitions** so no page draws an asset twice. `STRUCTURE_LOD_M` **192 → 96**, the one value that is above the collider band, at or inside the scatter mesh band and equal to `inf_pcg`'s own — so **a shell is rasterized as geometry for the first time**. The two step clocks are reconciled *inside one harness*: the residue outside the step is **+0.002 ms**, so the growth is inside its own phases and **62 % of it is the solver**. **≥ 60 fps p50 `LIT+VIS` is still NOT met** (+7.670 where I8b left +14.149) and the remainder is now **CPU**: 13.879 ms serial against a 10.202 ms GPU frame |
 | **NPC1a** | **the sim foundations of a crowd** — the `Full`/`Near`/`Far`/`Dormant` sim-LOD ladder, the trace re-shape riding it, the crowd-agent door, the N-sweep | **DONE + AUDITED** — see *Wave NPC1a* and *Wave NPC1a — the audit* at the end of this file |
+| **VEH1a** | **the car drives the island** — the audited heightfield ride, a body and a fleet, the `vehicle` step phase, the drive-the-circuit gate | **DONE** — see *Wave VEH1a* at the end of this file. **Both of wave I7's open road items die**: the island parks seven cars (38 drawn body parts, **no new committed file**), the hero enters through the shipped seat door and drives **34.1 m at up to 16.81 m/s byte-identically on both hosts**, and **all 42 of Vancouver Island's ordered site pairs are reachable** over a real `RoadGraph`. The routed wheel-normal smoothing is **refused with a falsifier** — the snap is 15.69° on open ground and reaches **0.000000 m** of force — and the P29.7 sensor-ride bound is **closed** by `CastTargets::AllSolid`. `STEP_PHASES` **26 → 27**, `VEHICLE_STEP_BUDGET_MS` **0.5** minted at 64 cars from a measured 0.1101 ms, engine audio through the P12.3 queue with **zero new API**. The sedan climbs I7's audited **0.108** grade at 94 km/h |
 | **NPC1b** | **the crowd renderer** — instanced skinning over a palette atlas, VSM proxy casters, crowd variation, the headline at N = 1 000 | **DONE** — see *Wave NPC1b* at the end of this file. The renderer reads the tier: draws **2 002 → 2**, palette blocks **1 001 → 292**, palette upload **9.3–9.4×** smaller, shadow groups **1 001 → 32** of a 1 024 ceiling (wall 4 retired), a crowd golden that is not eight clones, and the exact posed caster bound at **67 % of the margin's radius**. **A thousand island-class NPCs do NOT fit the island's headroom** (42.0 → 16.8 fps p50, 74.3 → 34.0 pipelined) **and the wall is not the renderer**: +9.09 ms of fixed step, +3.67 of CPU-side recording, +2.95 of projection, against one draw call and 0.249 ms of skinned GPU. The `Far → Near` pop is measured at **0.95 m in one step** and routed |
 
 Wave numbering is this file's; the certification's ordering is what it follows. **I3 pulled
@@ -2904,7 +2905,17 @@ Both this wave's own, both found by `inf-packager`'s workspace sweep, and they a
     there is no wizard, no preview panel and no in-editor re-route. The ASCII
     elevation probe (`cargo test -p inf-island --test preview -- --ignored`) is
     what stands in for one.
-15. **THE CIRCUIT IS DRAWN AND AUDITED, AND NOTHING DRIVES IT.** The brief asked
+15. **THE CIRCUIT IS DRAWN AND AUDITED, AND NOTHING DRIVES IT.**
+    > **CLOSED by wave VEH1a.** The reason this item gave — *"a vehicle needs a
+    > chassis mesh and a tuning block that would be the fourth committed asset"* —
+    > turned out to be neither: the body is a union of built-in primitives from a
+    > Ring-0 table, and the tuning is the `VehicleClass` the scene has carried
+    > since v25. Seven settlements, seven cars, 38 drawn body parts, **no new
+    > committed file**; and `pie_equals_shipping_when_the_car_drives_the_circuit`
+    > is a real `step_vehicles` trace (34.1 m, top 16.81 m/s, 1 018 of 1 200
+    > wheel contacts, byte-identical on both hosts).
+
+    The brief asked
     for "a drivable road circuit connecting the (empty) city/town sites" and what
     ships is the road: 11 links, 33.74 km, 7 junctions, a surface mesh draped to
     within a 2 cm lift, and a grade audit that says a car could climb it. The
@@ -2915,7 +2926,16 @@ Both this wave's own, both found by `inf-packager`'s workspace sweep, and they a
     streaming source at 24 m/s, which is the *streaming* claim; it is not a
     vehicle simulation.
 16. **The road network's topology is asserted on a flat fixture, not on the
-    island.** `the_network_topology_joins_the_cities_and_strings_the_towns`
+    island.**
+    > **CLOSED by wave VEH1a**, with the walk this item asked for.
+    > `every_settlement_is_reachable_from_every_other_over_the_built_road_graph`
+    > builds a real `inf_gis::RoadGraph::from_layer` over the committed roads
+    > layer — not over the route list, which is the *input* to the junction
+    > derivation and cannot falsify it — and routes every ordered site pair with
+    > `inf_nav::route`. **Vancouver Island: 11 segments, 7 intersections, 7
+    > junctions, 33.74 km, 42 ordered pairs ALL reachable, longest 8.08 km.**
+
+    `the_network_topology_joins_the_cities_and_strings_the_towns`
     measures one highway, five town-to-city arterials and the closing circuit
     over flat ground; on the real island the same planner produced 11 links and
     7 junctions, which is consistent with it and is not the same as an assertion
@@ -18753,3 +18773,364 @@ the 7 m lattice" is not exactly what the fixture builds at 384.
 
 **Commits:** `d55cd088` (the primitive table), `f231cf0c` (the two arms and the
 census), and this ledger.
+
+## Wave VEH1a — the car drives the island (2026-08-28)
+
+Base `3b466575`. Five clauses, all five taken. Wave I7 shipped 33.74 km of
+graded, audited road and wrote two open items against it — *"the circuit is
+drawn and audited, and nothing drives it"* and *"the road network's topology is
+asserted on a flat fixture"* — and this wave closes both, with a car that is
+simulated rather than scripted and a walk over the graph the road builder
+actually builds.
+
+> **The island has a fleet, and the fleet drives.** Seven settlements, seven
+> cars, **38 drawn body parts and no new committed file**; the hero enters
+> through the seat door the phase-29 rig already had and covers **34.1 m in 300
+> steps at up to 16.81 m/s, byte-identical on both hosts**; the catalogue's
+> 1 185 kg sedan climbs the **0.108** grade I7's own audit found and tops out at
+> **26.19 m/s (94 km/h)** doing it; and **every one of Vancouver Island's 42
+> ordered site pairs is reachable** over the built `RoadGraph`.
+
+### Clause 1 — the D-14 surface, and the two things it turned out to be
+
+P29.7 left two facts about a wheel on real ground written down and unmeasured.
+Both are now numbers, and **neither disposition is the one the brief expected**.
+
+**THE NORMAL SNAP IS REAL AND IT REACHES NO FORCE.** `FIX_INTERNAL_EDGES` is on
+every heightfield this engine builds and it fixes *contacts*; a ray reads the
+hit triangle's own normal, un-fixed, so a wheel crossing a cell diagonal sees
+that vector jump. Measured over 800 five-centimetre steps of a 45° walk across
+40 cells of a 1 m lattice — the island's own grid:
+
+| surface | worst normal step | steps over 1° | worst height step |
+|---|---|---|---|
+| the levelled road corridor (a smooth 0.108 cross-slope) | **0.0643°** | 0 of 800 | 0.006240 m |
+| open ground (0.15 m of per-sample DTM relief) | **15.6898°** | **74 of 800** | 0.014408 m |
+
+The height is continuous and the normal is not, which is exactly what C0-and-not-C1
+looks like. The routed repair — **wheel-side normal smoothing** — is **refused**,
+and refused with a falsifier rather than an argument: `RaycastVehicle::solve`
+pushes its suspension along the **chassis up** (deliberately, since projecting
+onto the contact normal is how a car slides sideways off a ramp it should drive
+up) and takes its friction basis from the steered wheel's own axes, so no force
+is a function of that vector. Two rigs were driven 600 steps across the rough
+surface, one of them with **every contact normal replaced by a direction the
+ground could not have**, and they end **bit-identical** — 0.000000 m apart, over
+1 860 wheel contacts of a possible 2 400 and 61.72 m of travel.
+`the_snapped_normal_reaches_no_force_in_the_model` is that arm, and it goes red
+the day an island class starts reading the field.
+
+**THE SENSOR RIDE IS CLOSED**, as the P29.7 ledger asked it to be — *"a
+query-layer decision with its own arms, not a vehicle-wave footnote"*.
+`CastTargets::AllSolid` is the third variant (every body kind, sensors excluded,
+through rapier's own filter flags so the rejection happens as the tree is walked
+and the ground beneath a trigger is still found); the wheel ray is its only
+caller. Measured: with a sensor slab under all four wheels the car settles
+**0.9617 m** over the ground against its springs' 0.9529, and **the same slab as
+a solid holds it 0.8 m higher** — so the arm is about the sensor flag and not
+about a collider the bridge failed to mirror.
+
+Three more numbers the clause asked for, reported rather than repaired:
+
+* **the ray and `height_at` are one surface to 0.039784 m** at 0.15 m of relief,
+  over 300 probes — the twist inside a cell, triangulation against bilinear. On
+  the levelled corridor the road's own cross-section error is the I2 audit's
+  measured **0.000750 m**, so the "≤ 5 cm" bound is dominated by open ground and
+  not by the circuit;
+* **the sink is the lift**: the road ribbon is drawn at `DEFAULT_ROAD_LIFT_M`
+  = 0.02 m above the heightfield the wheels are cast into (roads carry no
+  colliders — IB-4's priced ruling), so a wheel rides two centimetres under the
+  visible tarmac at every ribbon vertex;
+* **at speed the ride is the suspension's**: at 24.00 m/s the chassis departs its
+  settled 0.9614 m clearance by **0.0517 m**, inside its own 0.25 m of travel,
+  and never comes within its half-height of the ground.
+
+And one the fixture found on its own: **a car parked on a 0.108 grade rolls
+4.5763 m in two seconds** with nothing applied, and 0.0554 m on the handbrake.
+P29.7's `a_parked_rig_settles_on_its_springs_and_stays_there` is on a box floor,
+where "stays there" is free.
+
+### Clause 2 — the car gets a body, and the body it had was sideways
+
+**THE FINDING IS WAVE I8b's, WEARING A BUMPER.** The committed car draws
+`Primitive::Cube` on a `Transform` with **scale one** over a collider of eight
+cubic metres — a one-metre cube standing in for a car, which is precisely what
+I8b found the settlements doing. And underneath it, invisible *because* of it:
+`PHASE29_CAR_HALF` is `(2.0, 0.5, 1.0)` and `+Z` is forward in this engine, so
+the phase-29 course's car is **four metres wide and two long**, standing across a
+1.8 m track on a 2.8 m wheelbase. Its own doc calls it "4 × 1 × 2 m", which it
+is — in the order width, height, length.
+
+That one is **not fixed** (that `.inf_lvl` has a twenty-arm gate over it and
+re-proportioning the chassis moves every number in it) and it is **asserted**:
+`the_phase29_courses_car_is_still_wider_than_it_is_long` goes red the day
+somebody fixes it and names the ledger item that owed it.
+
+**The body.** `inf_ecs::vehicle::VehicleBody` is two silhouettes as unions of
+axis-aligned boxes in **fractions of the hull** — the I8b proportional-module
+lesson one content kind over, so one table serves a saloon and a pickup at any
+size — with content-derived part GUIDs (`body_part_guid`, the synthetic-guid rule
+this repo already uses for door leaves, doorways, structure colliders, fracture
+chunks and building modules) and **no committed mesh file**. Axis-aligned boxes
+and one cylinder, because `inf-dcc` refuses a bevel on edges that share an
+endpoint (the P23 finding) and a car body is nothing but such edges.
+
+| family | parts | what they are |
+|---|---|---|
+| `Sedan` | 4 | lower body, set-back greenhouse, bonnet, boot |
+| `Truck` | 6 | lower body, tall cab, bed floor, two bed sides, headboard |
+
+Every part is asserted inside the hull it is drawn on, filling it on all three
+axes, leaving real air in it, and with a **roof narrower and much shorter than
+the hull** — the clause that separates a silhouette from a brick drawn in six
+pieces.
+
+**Why not the scatter path.** The brief routed the I8b module-mesh route, and the
+batch type refuses it in its own words: `ScatterData::key` is a content hash over
+the *instance records*, and a vehicle's instances carry its rotation, so a moving
+car re-keys its batch every frame — the one thing the anchor being outside the
+key exists to prevent. The parts are ordinary scene entities drawing built-in
+primitives, which costs the projectors nothing and needs no table either host
+could drift on. What is borrowed from I8b is the part that mattered: proportional
+families, content-derived ids, no committed bytes.
+
+**The wheels get tyres, and the tyre is a grandchild.** `step_vehicles` writes
+the wheel entity's rotation every step as euler `(spin, steer, 0)` — there is no
+roll slot left to lay a `+Y`-axis cylinder down with — so the tyre is a child of
+the wheel whose local transform is authored once and never written.
+
+**The catalogue is TOML with ZERO schema**, on the `WeaponDef` /
+`GAMEPLAY_ITEMS_TOML` precedent: `VehicleDef` derives no `Serialize`, the table
+is a `&str` this crate reads at **generation** time, and what reaches the level is
+a chassis, four sensor wheels, a body and the `VehicleClass` the scene has carried
+since v25. `VehicleClass` grew a `set`/`to_tuning` pair that routes through
+`VehicleTuning::names()` rather than restating it, so a tuning name added to the
+door reaches an authored row on the day it is added.
+
+| row | body | mass | top speed |
+|---|---|---|---|
+| `sedan` | 1.84 × 1.24 × **4.40 m** | 1 185 kg | 122 km/h |
+| `truck` | 2.04 × 1.64 × **5.30 m** | 2 341 kg | 97 km/h |
+
+**The island spawns them** — one at the nearest *planned route vertex* to each
+settlement, which is where the drivable circuit passes the town and the only
+place on this island a **committed** number says what the ground height is
+(`inf_island::nearest_route_vertex`, which `player_start` now shares). Nothing
+here reads an elevation, so the level stays authorable without the terrain, and
+the yaw is `patan2_64` because it is serialized. Not `AlwaysLoaded`: a car streams
+with its partition cell exactly as a settlement block does.
+
+| | before | after |
+|---|---|---|
+| `VancouverIsland.inf_lvl` | 49 625 B | **73 633 B** — 7 cars, 38 drawn body parts |
+| `IslandFixture.inf_lvl` | 9 990 B | **16 671 B** — 2 cars, 10 drawn body parts |
+| committed files | — | **unchanged**: no `.inf_mesh`, no new asset kind |
+
+### Clause 3 — the vehicle phase
+
+`STEP_PHASES` **26 → 27**. `vehicle` is index 12, immediately after
+`character move`, which is exactly where `step_vehicles` has always run — the
+ordering is untouched and no trace moved. What moved is that the milliseconds are
+attributed. Every constant below it shifts by one and both pins that name them
+(`the_names_and_the_indices_are_one_table`,
+`the_phase_indices_are_a_permutation_of_the_slots`) move with it.
+
+**THE TRADE IS STATED AND PAID FOR.** P29.7 put the call inside
+`step_character_movement`'s last statement on a real argument — *"a sibling both
+hosts had to call separately would be a hand-maintained mirror"* — and the price
+was a phase that cannot say where its milliseconds went, which is the defect wave
+I4b exists to remove. So the mirror is **paid for rather than avoided**:
+`inf-editor-core/tests/fixed_step_mirror.rs` pins the two call sites
+character-for-character through the same fence instrument the projectors use,
+pins their **order** on both hosts (mover < vehicle < gameplay < solver — a
+vehicle step after the solver applies forces the solver has already integrated
+past), and pins that the movement door does not still step them itself, which an
+equality fence in two files cannot see. That is a *stronger* guard than the
+arrangement it replaces, which pinned the call and left nothing at all pinning
+the two hosts agreeing about **when**.
+
+**The budget is minted from a measurement.** `the_vehicle_phase_asks_four_
+questions_a_car_and_costs_what_it_prints` asserts the **count** a clock cannot
+see — the phase asks the world exactly four questions a car a step, one ray a
+wheel — and reports the clock:
+
+| cars | dev | release | per car (dev) |
+|---|---|---|---|
+| 1 | 0.0015 ms | 0.0012 | 1.51 µs |
+| 4 | 0.0053 | 0.0041 | 1.33 |
+| 16 | 0.0227 | 0.0178 | 1.42 |
+| **64** | **0.1101 ms** | **0.0882** | **1.72 µs** |
+
+`VEHICLE_STEP_BUDGET_MS = 0.5` at `VEHICLE_BUDGET_CARS = 64` — ~4.5× the dev
+measurement, deliberately tighter than `NPC_STEP_BUDGET_MS`'s ten-fold because
+four casts a car have nothing that is *supposed* to vary, and a twelfth of
+`CITY_STEP_BUDGET_MS`, which is what makes it able to see anything. §8
+direction-only.
+
+**The engine audio adds no audio API.** `Vehicle::engine_state` answers two
+numbers in `[0, 1]` — revs and load — with a default of **silence**, so a class
+that has not thought about sound makes none; `engine_cue` maps them onto pitch and
+volume in Ring 0, clamping and refusing non-finites so no NaN reaches a mixer;
+each host's audio step spends them as the P12.3 `Play`/`SetPitch`/`SetVolume`
+that have existed since phase 12. The cue is read off **this step's published
+`VehicleOutcome`** rather than off the vehicle map, so the stream stays a pure
+function of sim state — the P12 doctrine, met by a system that moves. Fenced and
+pinned in both hosts, with a refusal clause: the loop may not reach for a command
+the queue does not have.
+
+### Clause 4 — the gate
+
+**THE DRIVE.** `pie_equals_shipping_when_the_car_drives_the_circuit` is
+`pie_equals_shipping_on_an_island_drive` with the scripted 0.8 m/step teleport
+replaced by a car. The hero is stood beside the settlement's own vehicle, presses
+`INTERACT` through the shipped seat door (the same `interact::resolve` a doorway
+is ranked by), and holds the throttle; from there nothing is teleported, so the
+`StreamingSource` is **carried by the car** and the ground pages under a vehicle.
+
+> **1 car resident on both hosts, the same one; the hero enters on both;
+> 34.1 m in 300 steps, top 16.81 m/s, 1 018 wheel contacts of a possible 1 200;
+> and the two hosts are BYTE-IDENTICAL for all 300 steps** — plus a per-step
+> comparison of wheels-grounded and forward speed to the bit, because a
+> whole-world byte compare can hide a car inside a big number.
+
+It is a sharper instrument for the streaming claim than the arm it joins: the
+source is now a body whose four wheel rays read whatever ground has paged in, so
+a tile that arrived on one host and not the other separates the traces within a
+step or two. The engine is asserted from the same trace — **1 `Play`, 334
+`SetPitch`, 334 `SetVolume`, revs sweeping 0.0000 to 0.4944** — because a count
+arm alone passes on a constant cue.
+
+*(The audio clause's first cut read `(0, 300, 300)` and the loop was right: the
+one `Play` is emitted on the step the rig is **derived**, long before anybody is
+driving it. The instrument was late, not the feature.)*
+
+**THE CONNECTIVITY WALK — open item 16 dies.**
+`every_settlement_is_reachable_from_every_other_over_the_built_road_graph` builds
+a real `inf_gis::RoadGraph::from_layer` over the committed roads layer — the same
+function `inf_island::roads::build_mesh` builds one with, on the same bytes — and
+routes every ordered site pair with `inf_nav::route` over the graph's own
+`nav_graph()`. **Not** over the route list, which is the *input* to the junction
+derivation and cannot falsify it: two roads that cross without sharing an endpoint
+are two routes and one junction-free graph, which is exactly the defect a topology
+claim has to be able to see.
+
+| island | segments | intersections | junctions | length | ordered pairs | longest route |
+|---|---|---|---|---|---|---|
+| **Vancouver Island** | 11 | 7 | **7** | 33.74 km | **42, all reachable** | 8.08 km |
+| Island Fixture | 1 | 2 | 0 | 1.37 km | 2, all reachable | 1.37 km |
+
+**THE GRADE PROMISE, DRIVEN.** I7's ledger says its audit *"says a car could
+climb it"*; nothing in this repository had ever put a car on that slope.
+`editor/crates/inf-editor-core/tests/vehicle_grade.rs` reads the worst **planned**
+stretch off both committed route layers — **0.0810 against the island's own 0.080
+ceiling, 0.0993 against the fixture's 0.100** — and then drives the steeper number
+I7's audit found against the *built terrain*, **0.108**:
+
+> the catalogue's **1 185 kg sedan** covers **282.1 m in fifteen seconds**, gains
+> **30.51 m**, and tops out at **26.19 m/s (94 km/h)**. Its control is a 0.60
+> grade, where the same car goes **−54.0 m** — without it, an arm would pass
+> perfectly for a car sliding uphill on a bug.
+
+The truck climbs it too and is a different car: **97.9 m and +10.61 m** against
+the sedan's 156.1 and +16.91 over ten seconds, which is what a heavier row geared
+to a lower top speed has to look like.
+
+### Clause 5 — the ledger
+
+**What a car costs the island's step.** Release, the cooked fixture island with
+the hero driving, mean of ninety driving steps after the ground has paged and the
+springs have settled:
+
+| station | ms | | station | ms |
+|---|---|---|---|---|
+| `solver` | 6.8826 | | `crowd` | 0.0720 |
+| `animation` | 3.4523 | | `camera` | 0.0441 |
+| `physics3d sync` | 2.1954 | | `deformation` | 0.0408 |
+| `terrain stream` | 0.2541 | | `propagate` | 0.0346 |
+| `write-back` | 0.2110 | | `cell stream` | 0.0159 |
+| `character move` | 0.1784 | | `society` | 0.0115 |
+| `gameplay` | 0.1699 | | `audio` | 0.0102 |
+| | | | **`vehicle`** | **0.0070** |
+| **the whole step** | **13.6109 ms** | | | |
+
+**The `vehicle` row is 0.0070 ms for one car against a 0.5 ms ceiling at
+sixty-four**, and the phase is asserted to have *run* before it is asserted to
+have been cheap: a budget met by a door that returned early is a budget about
+nothing.
+
+**The frame is not re-measured, and that is a claim rather than an omission.**
+This wave adds no pass, no batch, no draw-call kind and no golden: a sedan is
+**eight `MeshInstance`s** — four body parts and four tyres, the wheel entities
+themselves drawing nothing — through the path an authored actor has always
+taken, and the island's own frame is a settlement of 365 545 scattered
+instances. Seven cars is fifty-six instances against that, and the projector
+walks them in the loop it already walks. What a car *would* cost a frame is a
+question about a fleet, and the fleet is VEH1b's.
+
+### Carried, by name
+
+1. **The engine's emitter does not MOVE.** `AudioCommand` has no `SetPosition`,
+   and `AudioEngine::set_position` has existed since P12.3 with **exactly one
+   caller, which is a test** — the `set_debris_budget` shape, for the seventh
+   time. So a driving car's engine is spatialized where its `Play` was issued and
+   fades as the car drives away from its own spawn. The zero-new-API constraint
+   was the brief's and it is met; the fix is one enum variant, one drain arm and
+   one mirrored line in each host, and it is a decision with its own arms.
+2. **The phase-29 course's car is still built sideways** — 4.0 × 1.0 × 2.0 m over
+   a 1.8 m track and a 2.8 m wheelbase. Tripwired by
+   `the_phase29_courses_car_is_still_wider_than_it_is_long`; the fix is a
+   re-proportion plus a re-bless of a committed level with a twenty-arm gate.
+3. **No car golden.** The four ADDITIVE pins (the phase18 name array and three
+   count/digest pairs) were **not moved** and the set stays at 59. A car has no
+   committed frame, and every claim this wave makes is asserted as *state*.
+4. **A car exists only in an active cell.** The fixture has two cars and **one**
+   is resident at boot, which is the coverage number the drive gate quotes. That
+   is the partition working — a car parked at a settlement nobody has visited does
+   not exist until they arrive — and it means the shipped island's seven are
+   asserted at the level, not in a running sim.
+5. **The wheel-ray normal is measured, unread and tripwired.** The smoothing
+   question re-opens the day a class reads `WheelContact::normal`, with the
+   0.0643° / 15.6898° table already measured.
+6. **The ≤ 5 cm cross-section bound is measured on open ground, not on the
+   circuit.** The ray-versus-`height_at` gap is 0.039784 m at 0.15 m of DTM
+   relief; the levelled road corridor's own chord error is the I2 audit's
+   0.000750 m. Nothing re-measured the island's *drawn* cross-section against the
+   heightfield at speed, because the road mesh has no collider to cast against.
+7. **Traffic is VEH1b's**: no lane centrelines, no path-following controller, no
+   parked cars, and a `route(clock)` crowd vehicle would never run
+   `step_vehicles` at all.
+8. **The catalogue has no runtime loader.** `VehicleDefs::merge_toml` is consumed
+   at *generation* time, which is what makes it cost no schema; a project that
+   wants a fleet an author edits after cook needs an asset kind.
+9. **`enter_window` is still absent from `VehicleClass`** (P29.7's own carried
+   item, unmoved — it needs a trait setter first).
+10. **The drive gate is 300 steps and the island drive is 900.** Ten seconds of
+    driving was cut to five to keep the arm inside a sensible CI slot; the
+    distinctness clause is over the shorter run.
+
+### The laws this wave paid for
+
+* **A field nothing reads is a repair nobody needs.** The wheel-ray normal snaps
+  by 15.7° on real ground and the correct response was to *grep the reader* and
+  then prove it in metres — the NPC1e `ground_normal` lesson, met on the very next
+  system. The fix that was routed would have been perfectly implemented and worth
+  nothing.
+* **A ratio is only a ratio if both halves hit** — met again, differently: the
+  sensor arm's control is *the same slab as a solid*, because "the car sat on the
+  ground" is satisfied equally well by a slab the bridge never mirrored.
+* **A gate's window has to open where the thing it counts happens.** The engine
+  loop's one `Play` is emitted on the step the rig is derived; an audio window
+  that opened at the throttle read `(0, 300, 300)` and convicted a feature that
+  was working.
+* **Two hosts agreeing about WHAT is not two hosts agreeing about WHEN.** P29.7
+  kept the vehicle step correct by refusing to let either host name it. The
+  replacement guard has to pin the *ordering* as well as the statement, because a
+  vehicle step after the solver is byte-identical source and a different
+  simulation.
+* **A parked car on a grade is not parked.** A fixture that measures a settled
+  ride height has to hold the car still, and the handbrake is what a car has:
+  4.5763 m of roll in two seconds against 0.0554 m.
+* **A committed level's yaw is a committed byte.** `f64::atan2` on the fleet's
+  heading would have put the platform's libm into `VancouverIsland.inf_lvl`; the
+  crate's own `portable_math_law` scans every `.rs` under `src/` and would have
+  caught it, which is the gate paying for itself a fourth time.

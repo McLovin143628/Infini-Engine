@@ -28489,3 +28489,73 @@ block and no arm), goldens **59** with `INF_GOLDEN_STRICT=1` green over 118 arms
 cross-checked against the per-crate sum; zero added, headroom 76), clippy **0** with
 `-D warnings` run last, fmt clean, schemas and `Cargo.lock` unmoved, no trace moved. Audit ledger
 in `docs/memos/island-progress.md` under *"Wave NPC1e — the adversarial audit"*.
+
+**ISLAND WAVE VEH1a — the car drives the island (2026-08-28, base `3b466575`).** Five clauses,
+all five taken, and **both of wave I7's open road items die**. *Clause 1, the D-14 surface:* a
+wheel ray reads the hit triangle's own normal (`FIX_INTERNAL_EDGES` fixes contacts, not ray hits),
+so it SNAPS at a heightfield cell diagonal — **0.0643° on a levelled road corridor and 15.6898° on
+open ground, 74 of 800 five-centimetre steps over one degree**. The routed wheel-side smoothing is
+**REFUSED with a falsifier rather than an argument**: `RaycastVehicle` pushes its suspension along
+the chassis up and takes its friction basis from the steered wheel's own axes, so two rigs driven
+600 steps across the rough surface — one of them with **every contact normal replaced by a
+direction the ground could not have** — end **bit-identical** (1 860 wheel contacts, 61.72 m).
+`WheelContact::normal` keeps its honest sentence and its tripwire. P29.7's carried sensor bound is
+**CLOSED** as its own ledger asked ("a query-layer decision with its own arms"):
+`CastTargets::AllSolid` is the third variant, the wheel ray is its only caller, and a car with a
+sensor slab under all four wheels now settles on the ground while the same slab as a **solid**
+holds it 0.8 m higher. Also priced: ray-versus-`height_at` **0.039784 m** at 0.15 m of DTM relief,
+the road ribbon's **0.02 m** lift (roads carry no colliders — IB-4), a **0.0517 m** ride departure
+at 24 m/s inside 0.25 m of travel, and a car that rolls **4.5763 m in two seconds** on a 0.108
+grade with nothing applied. *Clause 2, the body:* the committed car drew `Primitive::Cube` at
+**scale one** over an eight-cubic-metre collider — wave I8b's finding on a vehicle — and under it
+`PHASE29_CAR_HALF` describes a car **four metres wide and two long** (`+Z` is forward), which is
+**not fixed and IS asserted** so the day somebody fixes it the arm goes red.
+`inf_ecs::vehicle::VehicleBody` is two silhouettes as unions of axis-aligned boxes in **fractions
+of the hull** with content-derived part GUIDs and **no committed mesh file**; the tyre is a
+cylinder on a grandchild because `step_vehicles` writes the wheel's rotation as euler
+`(spin, steer, 0)` and there is no roll slot left. The scatter route is refused in the batch
+type's own words (`ScatterData::key` hashes the instance records, and a moving car re-keys every
+frame). The catalogue is TOML with **ZERO schema** on the `WeaponDef` precedent — sedan
+**1.84 × 1.24 × 4.40 m, 1 185 kg, 122 km/h**; truck **2.04 × 1.64 × 5.30 m, 2 341 kg, 97 km/h** —
+read at *generation* time, so what ships is a chassis, four sensor wheels, a body and the
+`VehicleClass` the scene has carried since v25. **The island parks seven** at the nearest planned
+route vertex to each settlement (`inf_island::nearest_route_vertex`, which `player_start` now
+shares; the yaw is `patan2_64` because it is a committed byte): 7 cars, 38 drawn body parts,
+levels 49 625 → 73 633 B and 9 990 → 16 671 B, **no new file**. *Clause 3, the phase:*
+`STEP_PHASES` **26 → 27**, `vehicle` at index 12 in the slot it has always run in, and the mirror
+P29.7 avoided is **paid for** — `fixed_step_mirror.rs` pins the two call sites
+character-for-character, pins their ORDER on both hosts (a vehicle step after the solver is
+identical source and a different simulation), and pins that the movement door no longer steps them
+itself. `VEHICLE_STEP_BUDGET_MS = 0.5` at `VEHICLE_BUDGET_CARS = 64`, minted from **0.1101 ms dev
+/ 0.0882 release** and armed beside a COUNT a clock cannot see (four world queries a car a step,
+one ray a wheel). Engine audio adds **no audio API**: `Vehicle::engine_state` → `engine_cue`
+(Ring 0, clamped, non-finite-refusing, silent by default) spent as P12.3
+`Play`/`SetPitch`/`SetVolume`, read off **this step's** published `VehicleOutcome` so the stream
+stays a pure function of sim state. *Clause 4, the gate:*
+`pie_equals_shipping_when_the_car_drives_the_circuit` replaces the scripted teleport with a car
+the hero enters through the shipped seat door — **34.1 m in 300 steps, top 16.81 m/s, 1 018 wheel
+contacts of 1 200, byte-identical on both hosts**, plus a per-step wheels/speed comparison to the
+bit and **1 `Play` / 334 `SetPitch` / 334 `SetVolume` with revs sweeping 0.0000–0.4944**.
+`every_settlement_is_reachable_from_every_other_over_the_built_road_graph` walks a **real
+`inf_gis::RoadGraph::from_layer`** (not the route list, which is the junction derivation's input
+and cannot falsify it): **Vancouver Island 11 segments / 7 intersections / 7 junctions / 33.74 km,
+42 ordered pairs ALL reachable, longest 8.08 km**. And the grade promise is **DRIVEN**: planned
+worsts **0.0810** (island, 0.080 ceiling) and **0.0993** (fixture, 0.100), then I7's audited
+**0.108**, where the 1 185 kg sedan covers **282.1 m in fifteen seconds, gains 30.51 m and tops
+out at 26.19 m/s (94 km/h)** against a 0.60-grade control at **−54.0 m**. *Clause 5, the ledger:*
+the island's step with a car driving it is **13.6109 ms** (solver 6.8826, animation 3.4523,
+physics3d sync 2.1954) and the **`vehicle` row is 0.0070 ms for one car** against a 0.5 ms
+ceiling at sixty-four; the frame is not re-measured because the wave adds no pass, no batch and no
+draw-call kind. Schemas unmoved (scene v26 / payload v11 / `.inf_sm` v3 / recipe v2), goldens
+**59** with none added or re-blessed, `Cargo.lock` moves for one **dev**-dependency (`inf-gis`,
+which `inf-island` already links). LAWS: **a field nothing reads is a repair nobody needs**;
+**a gate's window has to open where the thing it counts happens** (the engine's one `Play` is
+emitted on the step the rig is *derived*, and a window that opened at the throttle convicted a
+working feature); **two hosts agreeing about WHAT is not two hosts agreeing about WHEN**; **a
+parked car on a grade is not parked**; **a committed level's yaw is a committed byte**. Carried by
+name in `docs/memos/island-progress.md` under *"Wave VEH1a"*: the engine's emitter does not move
+(`AudioCommand` has no `SetPosition`, and `AudioEngine::set_position` has had exactly one caller —
+a test — since P12.3), the phase-29 car's proportions, no car golden, a car exists only in an
+active cell, the unread normal's tripwire, the cross-section bound measured on open ground rather
+than on the circuit, traffic to VEH1b, no runtime catalogue loader, `enter_window` still absent
+from `VehicleClass`, and the drive gate's 300-step window.

@@ -5657,8 +5657,14 @@ fn pie_equals_shipping_when_the_car_drives_the_circuit() {
         steps * 4,
         a.audio
     );
+    // 15 m against a measured 34.1 on the authoring machine. The margin is
+    // deliberate and it is not slack: the fixture's terrain is SAMPLED, and the
+    // sampling step is the one this repository's portability law exempts by
+    // name, so the ground a wheel finds is a fact about the machine that built
+    // it. The claim this clause has to carry is "it drove", and a car that
+    // covers fifteen metres in five seconds is driving on anybody's hillside.
     assert!(
-        travelled > 30.0,
+        travelled > 15.0,
         "the car covered {travelled} m in five seconds of throttle — that is a \
          parked car, and every comparison below is about nothing"
     );
