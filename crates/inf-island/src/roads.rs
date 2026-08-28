@@ -380,6 +380,43 @@ impl PartialOrd for OrderedF64 {
     }
 }
 
+/// **The island's road network as a routable graph** (island wave VEH1a) — the
+/// committed roads layer through `RoadGraph::from_layer`, which is the same
+/// function [`build_mesh`] builds one with, on the same bytes.
+///
+/// # Why this door exists at all
+///
+/// The graph is what a *topology* claim has to be made against. A `Vec<Route>`
+/// is the **input** to the junction derivation and cannot falsify it: two roads
+/// that cross without sharing an endpoint are two routes and a junction-free
+/// graph, which is exactly the defect wave I7's open item 16 says nothing could
+/// see.
+///
+/// And it exists as a **door on this crate** rather than as four lines in a
+/// caller because of `inf-gis`'s own portability gate: `inf-gis` is exempt from
+/// the libm ban on the grounds that nothing which cooks or ships re-derives a
+/// coordinate through it, and
+/// `inf-gis/tests/portable_math_law.rs::inf_gis_is_not_linked_by_the_cook_or_
+/// the_runtime` keeps that true by refusing to let `runtime/inf-player`'s
+/// manifest name the crate **at all** — dev-dependency included. `inf-island`
+/// already links it and is already dev-only to the player, so the graph reaches
+/// a gate through here and the exemption's condition is untouched.
+///
+/// The path is `recipe.resolve(&recipe.roads.layer)` — the same one
+/// [`crate::read_design`] reads — so this cannot be pointed at a file the island
+/// does not actually use.
+pub fn road_graph(
+    recipe: &IslandRecipe,
+    anchor: &inf_math::geo::GeoAnchor,
+) -> Result<inf_gis::RoadGraph, IslandError> {
+    let layer = crate::layers::read_layer(
+        &recipe.resolve(&recipe.roads.layer),
+        inf_gis::LayerKind::Roads,
+        anchor,
+    )?;
+    Ok(inf_gis::RoadGraph::from_layer(&layer))
+}
+
 /// **The nearest planned route vertex to `p`, and the direction the route runs
 /// there** (island wave VEH1a) — one door, three callers.
 ///

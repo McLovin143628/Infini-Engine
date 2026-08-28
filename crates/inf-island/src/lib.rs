@@ -93,7 +93,30 @@ pub use recipe::{
     SourceSpec, ANCHOR_AGREEMENT_DEG, RECIPE_SCHEMA_VERSION,
 };
 pub use report::{IslandReport, LayerDrift};
-pub use roads::{grade_audit, nearest_route_vertex, plan_network, GradeAudit, RoadReport, Route};
+pub use roads::{
+    grade_audit, nearest_route_vertex, plan_network, road_graph, GradeAudit, RoadReport, Route,
+};
+
+/// The routable road network [`road_graph`] answers with.
+///
+/// **Re-exported on purpose** (island wave VEH1a). `inf-gis`'s transcendental
+/// exemption rests on nothing that cooks or ships re-deriving a coordinate
+/// through it, and `inf-gis/tests/portable_math_law.rs` keeps that true with a
+/// **manifest** ban: `runtime/inf-player/Cargo.toml` may not name the crate in
+/// any dependency section, dev-dependencies included. A gate that needs the
+/// island's own graph therefore reaches it through this crate — which is
+/// dev-only to the player already, and whose linkage the same law governs — and
+/// never spells `inf_gis` itself.
+pub use inf_gis::RoadGraph;
+
+/// How far above the ground the island draws its road ribbon, metres.
+///
+/// Re-exported for the same reason as [`RoadGraph`]: a gate that prices the
+/// **sink** — the gap between the tarmac a driver sees and the heightfield the
+/// wheels are actually cast into, since roads carry no colliders — has to read
+/// the builder's own number rather than restate it, and it cannot name
+/// `inf-gis` to do so.
+pub use inf_gis::roads::DEFAULT_ROAD_LIFT_M;
 pub use shape::{
     carve_sample, flatten_sample, smooth01, Coastline, Field, SegmentIndex, ShapeStats, Vertex3,
 };

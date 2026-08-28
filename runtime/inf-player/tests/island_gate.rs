@@ -5746,7 +5746,7 @@ fn pie_equals_shipping_when_the_car_drives_the_circuit() {
     //    (IB-4's priced ruling), so a wheel rides the terrain heightfield and
     //    the tarmac it looks like it is on is the ribbon, drawn at
     //    `DEFAULT_ROAD_LIFT_M` above the ground it drapes on.
-    let lift = inf_gis::roads::DEFAULT_ROAD_LIFT_M;
+    let lift = inf_island::DEFAULT_ROAD_LIFT_M;
     println!(
         "THE SINK: the road ribbon is drawn {lift} m above the heightfield the \
          wheels are cast into, so a wheel rides that far under the visible \
@@ -5768,7 +5768,7 @@ fn pie_equals_shipping_when_the_car_drives_the_circuit() {
 /// that every site is reachable from every other. A connectivity walk over the
 /// built `RoadGraph` is what would close it."*
 ///
-/// So the walk is over a **real `inf_gis::RoadGraph`**, built by
+/// So the walk is over a **real `RoadGraph`** (`inf_island::road_graph`), built by
 /// `RoadGraph::from_layer` from the committed roads layer — the same function
 /// `inf_island::roads::build_mesh` builds one with, on the same bytes — and
 /// routed with `inf_nav::route` over the graph's own `nav_graph()`. Not over the
@@ -5793,16 +5793,12 @@ fn every_settlement_is_reachable_from_every_other_over_the_built_road_graph() {
         let anchor = inf_island::read_design(&recipe)
             .expect("the design reads")
             .anchor;
-        let layer = inf_island::layers::read_layer(
-            &path
-                .parent()
-                .expect("a recipe dir")
-                .join("layers/roads.geojson"),
-            inf_gis::LayerKind::Roads,
-            &anchor,
-        )
-        .expect("the committed roads layer reads");
-        let graph = inf_gis::RoadGraph::from_layer(&layer);
+        // Through `inf_island::road_graph`, which resolves the layer path off
+        // the recipe exactly as `read_design` does and builds the graph with the
+        // same `RoadGraph::from_layer` the island's own mesh builder uses. Not
+        // by naming `inf_gis` here: that crate's transcendental exemption is
+        // kept by a manifest ban this file's crate is subject to.
+        let graph = inf_island::road_graph(&recipe, &anchor).expect("the roads layer reads");
         let nav = graph.nav_graph();
         println!(
             "{}: {} segments, {} intersections, {} junctions, {:.2} km; nav has \

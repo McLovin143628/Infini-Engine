@@ -167,14 +167,16 @@ inf-editor-core = { workspace = true }
 # modules are exempt from the libm ban on the grounds that nothing which cooks or
 # ships re-derives a coordinate through them. A dev-dependency does not.
 inf-island = { workspace = true }
-# VEH1a: `island_gate`'s connectivity walk builds a REAL `inf_gis::RoadGraph`
-# from the committed roads layer — the same `RoadGraph::from_layer` the island's
-# own mesh builder uses, on the same bytes — because wave I7 open item 16 is a
-# claim about the graph's derived JUNCTIONS and the route list it is derived
-# from cannot falsify one. Dev-only, on `inf-island`'s argument directly above:
-# `inf-island` already links this crate, so the shipped player's dependency set
-# is unchanged.
-inf-gis = { workspace = true }
+# VEH1a: `island_gate`'s connectivity walk needs the island's REAL road graph —
+# wave I7 open item 16 is a claim about the graph's derived JUNCTIONS, and the
+# route list they are derived from cannot falsify one. It does NOT name
+# `inf-gis` to get it: that crate's transcendental exemption is kept by a
+# manifest ban (`inf-gis/tests/portable_math_law.rs::inf_gis_is_not_linked_by_
+# the_cook_or_the_runtime`) which forbids this file from naming it in any
+# dependency section, dev included. `inf_island::road_graph` is the door and
+# `inf_island::RoadGraph` the re-export, so the graph arrives through a crate
+# that is already dev-only here and the exemption's condition is untouched.
+# (Measured the hard way: adding the dev-dependency turned that gate red.)
 # `grammar_bake` re-opens the baked `.inf_mesh` through the DCC kernel's own
 # reader, because "can this be edited again" is a question only that reader can
 # answer — inferring it from `ExportReport::coincident_vertices` would be the

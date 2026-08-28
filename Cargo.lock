@@ -3521,7 +3521,6 @@ dependencies = [
  "inf-dcc",
  "inf-ecs",
  "inf-editor-core",
- "inf-gis",
  "inf-graph",
  "inf-input",
  "inf-island",
