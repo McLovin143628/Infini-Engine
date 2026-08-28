@@ -635,20 +635,46 @@ fn pie_equals_shipping_on_an_island_drive() {
     //
     // It is also the whole of this wave's cost on this trace: the drive went from
     // 403 bytes a state to 6 879.
+    //
+    // **NPC1d re-aims it from a NUMBER to a MULTIPLE**, and the reason is the
+    // wave working rather than the arm breaking. The island now derives a
+    // population from its own settlements, so the pose store is a *town*: the
+    // drive published 2 137 080 bytes, which is 330 × 6 476 — the hero plus
+    // Harbour City's 329 residents, every one of them a 161-bone character. The
+    // claim the arm exists for is unchanged and is now stronger: not "the store
+    // holds one 161-bone character" but "**every character in the store is a
+    // 161-bone character**", which a hero that quietly went back to being a
+    // capsule still fails, and which a crowd of them cannot satisfy by accident.
     const POSED_BYTES: usize = 36 + 161 * 40;
+    let mut posed_counts = Vec::new();
     for (who, sim) in [("shipping", &mut ship), ("pie", &mut pie)] {
         let bytes = inf_ecs::pose::pose_state_bytes(sim.world());
-        assert_eq!(
-            bytes.len(),
-            POSED_BYTES,
-            "{who} published {} bytes of pose, not a 161-bone character's {POSED_BYTES} \
-             — the island's hero has stopped being the starter character",
+        assert!(
+            bytes.len() >= POSED_BYTES,
+            "{who} published {} bytes of pose, less than one 161-bone character's \
+             {POSED_BYTES} — the island's hero has stopped being the starter \
+             character",
             bytes.len()
         );
+        assert_eq!(
+            bytes.len() % POSED_BYTES,
+            0,
+            "{who} published {} bytes of pose, which is not a whole number of \
+             161-bone characters — somebody in the store has a different rig",
+            bytes.len()
+        );
+        posed_counts.push(bytes.len() / POSED_BYTES);
     }
+    assert_eq!(
+        posed_counts[0], posed_counts[1],
+        "shipping posed {} characters and PIE posed {}",
+        posed_counts[0], posed_counts[1]
+    );
     println!(
-        "POSE: {POSED_BYTES} B a step on both hosts (403 B a state before the hero \
-         was a character, {} now)",
+        "POSE: {} x {POSED_BYTES} B a step on both hosts — the hero and the \
+         island's own residents (403 B a state before the hero was a character, \
+         {} now)",
+        posed_counts[0],
         a.states[0].len()
     );
 
@@ -4782,9 +4808,12 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
         // `Full` ring within a few in-game hours -- their bodies, strung out along
         // their routes by the compression, drift toward the middle -- and a census
         // taken over three hundred steered bodies measures the compression rather
-        // than the day. From the edge a handful steer and the rest are moved by
-        // their clock, which is the tier ladder's whole point and is what makes
-        // `rec.last` the schedule's own answer.
+        // than the day. From the edge NOBODY steers -- measured, `+0 steered` at
+        // every one of the six hours -- and every agent is moved by its clock,
+        // which is the tier ladder's whole point and is what makes `rec.last`
+        // the schedule's own answer rather than a body's opinion of it. The
+        // `Full` rung is exercised by the settle, which happens at the
+        // crossroads, and the `Dormant` rung by the coda.
         set_hero(sim, hero, centre + glam::DVec3::new(TOWN_EDGE_M, 0.0, 0.0));
         sim.world_mut().mark_dirty();
         for _ in 0..8 {

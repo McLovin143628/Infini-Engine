@@ -456,6 +456,7 @@ mod tests {
             phase::TERRAIN_STREAM,
             phase::BIOME_SCATTER,
             phase::SKY,
+            phase::SOCIETY,
             phase::CROWD,
             phase::PHYSICS2D_SYNC,
             phase::PHYSICS3D_SYNC,

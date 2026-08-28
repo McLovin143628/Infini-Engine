@@ -526,7 +526,7 @@ mod tests {
                 assert_eq!(
                     leaves.len(),
                     1,
-                    "{} at {floors} storeys offers {} single-edge doorway(s) of                      {doorways}",
+                    "{} at {floors} storeys offers {} of its {doorways} doorways as a single-edge leaf",
                     id.name(),
                     leaves.len()
                 );

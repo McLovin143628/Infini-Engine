@@ -28185,8 +28185,10 @@ own step phase** (`STEP_PHASES` 25 → 26, `society` at index 4) and its own
 ceiling** — four blocks of Harbour City alone offer 329 homes, so its hundred and seventy
 imply ~14 000 people, and a thousand is the N every wave of this arc is quoted at. LAWS:
 **a counter that resets is a report that says a system did nothing** (the fold's counters read
-`0 frontages, 0 crossings` over a network that decomposes exactly as 32 + 18 + 8); **the first
-quiet step is in the middle of a town, not at the end of one** (the settle read four blocks of
-a hundred and seventy); **a rate is a measurement** (48 minutes is the nicer number and it made
-a commute a jog); **price the search before you build the network**. Details in
+`0 frontages, 0 crossings` over a network that decomposes exactly as 32 + 18 + 8); **a fix whose
+measurement says it was not the defect is still a fix, and the measurement is what has to be
+reported** (waiting 120 quiet steps moved the settle 43 → 163 and changed the volume count by
+nothing — four blocks of a hundred and seventy is what a *stationary* hero pages in); **a rate
+is a measurement** (48 minutes is the nicer number and it made a commute a jog); **price the
+search before you build the network**. Details in
 `docs/memos/island-progress.md` under *"Wave NPC1d"*.

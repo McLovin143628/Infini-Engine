@@ -16679,7 +16679,11 @@ route.
 
 **Nobody plans a day while the town is still being built.** Volumes stream, and a
 resident of the first block to arrive would be paired with the only workplace it
-could see — a society that is a function of cell-activation order. So planning
+could see — a society that is a function of cell-activation order. (What the
+island shows is the honest limit of that: a *stationary* hero pages in four of
+Harbour City's blocks and no more, so its society is 329 people and not fourteen
+thousand. The population grows as a player walks the island, which is what a
+streaming world means.) So planning
 happens only on a step that folded **no** new volume, at most
 `SOCIETY_PLANS_PER_STEP = 8` agents on it. An agent's `Guid` is a hash of
 `(volume, building, room, slot)`, so folding two blocks in both orders mints the
@@ -16911,12 +16915,17 @@ step digests equal one for one.
   edges), 18 front doors (18 / 36) and 8 crossings (16), which is 50 and 116 to
   the unit. The two counters that are honestly per-step say so in their names;
   every other one is a total.
-* **The first quiet step is in the middle of a town, not at the end of one.** The
-  gate settled on the first step that folded no volume and measured **four
-  blocks of a hundred and seventy** — 329 residents packed into 320 m, all of
-  them `Full`, 329 controllers in a fixed step. A settlement's volumes evaluate
-  as the ground under them pages in, so "nothing arrived this step" is a
-  statement about one step.
+* **A fix whose measurement says it was not the defect is still a fix, and the
+  measurement is what has to be reported.** The gate settled on the *first* step
+  that folded no volume, read **four blocks of a hundred and seventy**, and the
+  obvious diagnosis was that it had stopped in the middle of a town — a
+  settlement's volumes evaluate as the ground under them pages in, so "nothing
+  arrived this step" is a statement about one step. Waiting a hundred and twenty
+  consecutive quiet steps moved the settle from **43 steps to 163** and changed
+  the volume count by **nothing**: four blocks is what a stationary hero pages
+  in. The wait is still right — it makes the settle a statement about the town
+  rather than about a gap — and the sentence that would have credited it with
+  the four is not.
 * **A rate is a measurement.** Forty-eight minutes is the nicer number to say and
   it made the island's median commute a **2.67 m/s jog**. Eighteen is set from
   the island's own 320 m median and the movement model's own 1.65 m/s, and the
