@@ -575,6 +575,26 @@ pub fn time_of_day_seconds(world: &EcsWorld) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// **The LOCAL hour of day**, `[0, 24)` — the clock a schedule is written
+/// against (NPC1d).
+///
+/// Local solar time rather than UTC: `TimeOfDay::seconds` is UTC and
+/// `longitude_deg` is how far east of it the level stands, at the standard
+/// 240 s a degree that `solar_input` already uses. A society whose working day
+/// began at 07:00 UTC would start work in the dark on Vancouver Island and at
+/// lunchtime in Tokyo, and neither is what "morning" means.
+///
+/// `0.0` on a level with no clock, on `time_of_day_seconds`'s own terms.
+pub fn local_hour(world: &EcsWorld) -> f64 {
+    let Some(tod) = sky_authority(world).and_then(|e| world.world().get::<TimeOfDay>(e)) else {
+        return 0.0;
+    };
+    if !(tod.seconds.is_finite() && tod.longitude_deg.is_finite()) {
+        return 0.0;
+    }
+    ((tod.seconds + tod.longitude_deg * 240.0) / 3600.0).rem_euclid(24.0)
+}
+
 /// The level clock's rate (simulated seconds per simulated second); `0` when the
 /// level has no clock, which is also what "frozen" means.
 pub fn time_of_day_rate(world: &EcsWorld) -> f64 {

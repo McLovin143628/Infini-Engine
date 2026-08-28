@@ -785,6 +785,8 @@ mod tests {
             groups: vec![],
             doorways: vec![],
             decor: vec![],
+            slots: vec![],
+            interior: Default::default(),
         };
         assert_eq!(
             parts_from_output(&out, &grammar),

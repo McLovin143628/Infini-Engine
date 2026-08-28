@@ -1311,8 +1311,9 @@ fn the_parallel_map_over_agent_decisions_is_priced_before_it_is_prescribed() {
             .collect();
         let t_s = 3.25;
 
-        let plan_one =
-            |x: &(Uuid, CrowdRecord, DVec3)| inf_ecs::crowd::plan_agent(&band, x.0, &x.1, x.2, t_s);
+        let plan_one = |x: &(Uuid, CrowdRecord, DVec3)| {
+            inf_ecs::crowd::plan_agent(&band, x.0, &x.1, x.2, inf_ecs::crowd::CrowdClock::at(t_s))
+        };
         // MIN of three, the instrument's discipline.
         let serial_out: Vec<_> = inputs.iter().map(plan_one).collect();
         let par_out = inf_core::parallel_map_ref(&inputs, plan_one);
