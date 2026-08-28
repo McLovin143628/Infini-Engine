@@ -2364,8 +2364,13 @@ mod tests {
 
     /// The trace byte count is what the doc claims, and the re-shape's ratio
     /// with it.
+    ///
+    /// *(NPC1c audit: this was still named `…_forty_nine_bytes` while asserting
+    /// **57**. A test's name is the sentence a reader takes away from a green
+    /// run, and this tree's own law is that a gate must aim at the thing it
+    /// names.)*
     #[test]
-    fn the_agent_trace_section_is_forty_nine_bytes() {
+    fn the_agent_trace_section_is_fifty_seven_bytes() {
         let mut records = BTreeMap::new();
         for i in 0..7u128 {
             records.insert(

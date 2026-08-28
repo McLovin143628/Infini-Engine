@@ -44,10 +44,18 @@
 //!   exactly — hands back a different one of two equally short routes depending
 //!   on heap internals.
 //! * **Portable math.** Costs are built out of `+ - * / sqrt` alone, which IEEE
-//!   754 specifies exactly, and headings go through [`inf_math::portable`]. A
-//!   route reaches an agent's `Transform` and therefore `state_bytes`, which two
-//!   hosts and two machines compare, so the P14 law binds every line here. The
-//!   module is on the libm ban list from its first commit.
+//!   754 specifies exactly, and a heading here is a *normalize* rather than an
+//!   angle — there is no trigonometry in this crate at all, which is why it
+//!   names no math crate. A route reaches an agent's `Transform` and therefore
+//!   `state_bytes`, which two hosts and two machines compare, so the P14 law
+//!   binds every line here; `crates/inf-anim/tests/portable_pose.rs` has all
+//!   three files on the libm ban list from this crate's first commit, and that
+//!   gate — not an import — is what enforces the claim.
+//!
+//!   *(The NPC1c audit's correction: this paragraph read "headings go through
+//!   `inf_math::portable`" and `inf-nav` depended on `inf-math` for it. No line
+//!   in the crate ever named that module. The dependency is gone and the
+//!   sentence says what the code does.)*
 //!
 //! # Units
 //!

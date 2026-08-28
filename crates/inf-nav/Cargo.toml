@@ -9,8 +9,12 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+# **glam and nothing else**, which is a stronger claim than the one this file
+# made until the NPC1c audit: it declared `inf-math` "the bit-portable trig a
+# heading is taken with" and no line in the crate ever named it. There is no
+# trigonometry here to route — a cost is `+ - * / sqrt` and a heading is a
+# normalize — so the dependency was an unused edge under a sentence that read
+# like a determinism guarantee. The guarantee is real and it comes from the
+# arithmetic, not from an import; `crates/inf-anim/tests/portable_pose.rs` bans
+# every `std` transcendental in all three files and is what enforces it.
 glam = { workspace = true }
-# The bit-portable trig a heading is taken with, and nothing else. Ring-0 →
-# Ring-0; `inf-math` names nothing, so there is no cycle — the same argument
-# that put it under `inf-water` and `inf-terrain`.
-inf-math = { workspace = true }
