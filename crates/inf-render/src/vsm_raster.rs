@@ -3821,6 +3821,137 @@ fn caster_stamp(c: &VsmCasterRaw, geom: Fold) -> u64 {
 mod tests {
     use super::*;
 
+    /// **Round-2 finding R2-6**: the power-of-two tail is readable, so it must
+    /// hold something of this skeleton's rather than the previous character's.
+    ///
+    /// The shader binds the whole buffer as `array<mat4x4<f32>>` and wgpu clamps
+    /// against the BINDING's length, not against `joint_count`. Wave D's note
+    /// argued the padding was unreachable; it is not.
+    ///
+    /// **This arm moved here with its subject** (wave NPC1b). The lit path packs
+    /// its palettes into one atlas, where a tail is the *next character's* block
+    /// and no fill can be safe, so it clamps the joint index in the shader
+    /// instead; the page raster still owns one buffer per caster and still pads.
+    #[test]
+    fn the_padded_tail_repeats_the_last_live_matrix() {
+        fn m(n: f32) -> [f32; 16] {
+            let mut a = [0.0f32; 16];
+            a[0] = n;
+            a
+        }
+        let stride = std::mem::size_of::<[f32; 16]>() as u64;
+
+        // 3 live joints in a 4-slot buffer: one slot of tail.
+        let out = pad_palette(vec![m(1.0), m(2.0), m(3.0)], 3, stride * 4);
+        assert_eq!(out.len(), 4, "the buffer must be filled to its capacity");
+        assert_eq!(
+            out[3],
+            m(3.0),
+            "the tail holds neither the last live matrix nor anything of this \
+             skeleton's — a vertex indexing past its own joint count reads it"
+        );
+        assert_eq!(&out[..3], &[m(1.0), m(2.0), m(3.0)], "the live half moved");
+
+        // Exactly full: unchanged, and no allocation of a longer vec.
+        let exact = pad_palette(vec![m(1.0), m(2.0)], 2, stride * 2);
+        assert_eq!(exact, vec![m(1.0), m(2.0)]);
+
+        // A capacity smaller than the palette (cannot happen — the caller grows
+        // first — but the helper must not truncate the live half if it does).
+        let small = pad_palette(vec![m(1.0), m(2.0)], 2, stride);
+        assert_eq!(small.len(), 2);
+
+        // The empty case: the caller substitutes one identity, and the tail
+        // repeats it rather than staying zero (which collapses a vertex to the
+        // origin).
+        let ident = glam::Mat4::IDENTITY.to_cols_array();
+        let out = pad_palette(vec![ident], 1, stride * 8);
+        assert_eq!(out.len(), 8);
+        assert!(out.iter().all(|e| *e == ident));
+    }
+
+    /// **The exact posed bound contains the pose and is tighter than the
+    /// margin** — the pure half of wave NPC1b's clause 2, so the rule is armed
+    /// on every CI leg and not only where an adapter exists.
+    ///
+    /// Two joints with disjoint vertex sets, pulled apart by the palette. The
+    /// union has to swallow both and still beat the whole-mesh bind sphere
+    /// inflated by `SKINNED_POSE_MARGIN`.
+    #[test]
+    fn the_posed_union_contains_every_joints_sphere_and_beats_the_margin() {
+        let joints = [
+            (glam::Vec3::new(-1.0, 0.0, 0.0), 0.25),
+            (glam::Vec3::new(1.0, 0.0, 0.0), 0.25),
+        ];
+        let palette = [
+            glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, 0.0)),
+            glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.0)),
+        ];
+        // The bind bound the pre-NPC1b path would have used: the whole mesh's
+        // sphere (centre 0, radius 1.25) inflated by the margin.
+        let bind = (glam::Vec3::ZERO, 1.25 * (1.0 + SKINNED_POSE_MARGIN));
+        let (c, r) = posed_bound(&joints, &palette, bind);
+
+        for (j, (jc, jr)) in joints.iter().enumerate() {
+            let moved = palette[j].transform_point3(*jc);
+            assert!(
+                (moved - c).length() + jr <= r + 1e-5,
+                "joint {j}'s sphere escapes the union"
+            );
+        }
+        assert!(
+            r < bind.1,
+            "the union ({r}) did not beat the margin ({})",
+            bind.1
+        );
+
+        // A joint the mesh never skins to (radius 0) contributes nothing, and a
+        // palette shorter than the joint list is skipped rather than panicking.
+        let sparse = [(glam::Vec3::ZERO, 0.0), joints[1]];
+        assert_eq!(posed_bound(&sparse, &palette, bind).1, joints[1].1);
+        assert_eq!(posed_bound(&joints, &palette[..1], bind).1, joints[0].1);
+
+        // No usable joint at all falls back to the bind bound — a bound of
+        // nothing is not a bound, and returning a zero sphere would delete the
+        // caster's shadow entirely.
+        assert_eq!(posed_bound(&[], &palette, bind), bind);
+    }
+
+    /// A mesh's per-joint bind spheres cover exactly the vertices that name each
+    /// joint, and a zero-weight influence names nothing.
+    #[test]
+    fn the_joint_bind_spheres_cover_their_own_vertices_only() {
+        let v = |x: f32, j: u32, w: f32| crate::scene::SkinnedVertex {
+            pos: [x, 0.0, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.0, 0.0],
+            joints: [j, 3, 0, 0],
+            weights: [w, 0.0, 0.0, 0.0],
+        };
+        let mesh = crate::scene::SkinnedMeshData {
+            // Joint 0 owns x = -2 and -1; joint 1 owns x = 4. Joint 3 is named by
+            // every vertex at weight ZERO and must stay empty.
+            vertices: vec![v(-2.0, 0, 1.0), v(-1.0, 0, 1.0), v(4.0, 1, 1.0)],
+            indices: vec![0, 1, 2],
+        };
+        let spheres = joint_bind_spheres(&mesh);
+        assert_eq!(
+            spheres.len(),
+            2,
+            "an unweighted joint index extended the list"
+        );
+        assert!((spheres[0].0.x + 1.5).abs() < 1e-5, "{:?}", spheres[0]);
+        assert!((spheres[0].1 - 0.5).abs() < 1e-5, "{:?}", spheres[0]);
+        assert!((spheres[1].0.x - 4.0).abs() < 1e-5, "{:?}", spheres[1]);
+        assert!(spheres[1].1 < 1e-5, "a single vertex needs no radius");
+        // An empty mesh has no joints and no spheres.
+        assert!(joint_bind_spheres(&crate::scene::SkinnedMeshData {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        })
+        .is_empty());
+    }
+
     /// **A MESHLET CASTER DRAWS AT THE LEVEL ITS PAGE CAN SHOW, ONCE** (island
     /// wave I8c) — the pure half of the wave's VSM clause.
     ///
