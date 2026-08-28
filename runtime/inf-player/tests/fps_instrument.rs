@@ -1959,13 +1959,43 @@ fn the_island_at_shipping_resolution() {
         ("LIT+SSR", lit_ssr),
         ("LIT+VIS", lit_vis),
         ("LIT-COARSE-CLIPMAP", lit_coarse),
+        // **THE CROWD'S CONTROL**, and it is adjacent for a reason. The rows
+        // above are taken in order over a world that keeps streaming, so the
+        // `LIT+VIS` row at the top of the list has seen less of the island than
+        // the crowd row at the bottom: its scatter count and its terrain
+        // residency are not the same numbers. A delta taken across that gap
+        // would attribute the streaming to the crowd. This row is `LIT+VIS`
+        // again, immediately before the population goes in, so the two rows
+        // differ in one thing.
+        ("LIT+VIS (crowd control)", lit_vis),
         // **WAVE NPC1b'S HEADLINE ROW.** The same `LIT+VIS` settings, the same
         // flight, the same island — with a thousand NPCs standing in Harbour
         // City. Last, and through the same loop, so the crowd's cost is the
         // DIFFERENCE between two rows taken the same way rather than a number
         // from a second harness nobody can compare against.
         ("LIT+VIS+CROWD", lit_vis),
+        // **THE AFTER-CONTROL, and it is not belt-and-braces.** These rows are
+        // taken back to back on one adapter, and a GPU that has been rendering
+        // 1080p for five minutes is not the GPU that rendered the first row: the
+        // island's `scatter` and `terrain` passes — neither of which a crowd can
+        // touch — read materially dearer at the bottom of the list than at the
+        // top. One control before the crowd cannot see that ramp; a control on
+        // each side measures it, and the crowd's cost is the row against the MEAN
+        // of its two brackets rather than against whichever bracket flatters it.
+        ("LIT+VIS (crowd cleared)", lit_vis),
     ] {
+        if label == "LIT+VIS (crowd cleared)" {
+            fx.sim.set_crowd_population(Default::default());
+            for _ in 0..STEP_WARMUP {
+                fx.sim
+                    .step_once(inf_player::runtime_sim::RuntimeInput::default());
+            }
+            let st = fx.sim.crowd_stats();
+            assert_eq!(
+                st.per_tier, [0; 4],
+                "the population did not clear, so this bracket still holds a crowd"
+            );
+        }
         if label == "LIT+VIS+CROWD" {
             let archetype = island_archetype(&fx.sim);
             fx.sim
@@ -2151,6 +2181,17 @@ fn the_island_at_shipping_resolution() {
                 inf_render::skinned_caster_groups(&scene) - usize::from(proxies > 0),
                 inf_render::skinned_caster_groups(&scene),
                 inf_render::VSM_MAX_GROUPS,
+            );
+            // **READ THE GPU ROWS ABOVE AGAINST THE BRACKETS, NOT PASS FOR
+            // PASS.** This row's frame is CPU-bound — the crowd's fixed step,
+            // projection and recording put the CPU total well past the GPU frame,
+            // so the device idles for much of it. Measured, every pass inflates,
+            // including `scatter` and `terrain`, which a crowd adds nothing to:
+            // whatever the cause, a pass-for-pass difference against a bracket is
+            // not a crowd cost. The numbers this row publishes AS the crowd's are
+            // the two structural lines above and the CPU stages.
+            println!(
+                "  (this row is CPU-bound; its per-pass GPU milliseconds are not comparable pass-for-pass with the bracket rows)"
             );
         }
     }

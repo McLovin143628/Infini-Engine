@@ -3715,7 +3715,13 @@ fn pack_casters(
                 // a function of where the agent stands and how big it is, so an
                 // agent walking invalidates its pages and an agent standing still
                 // does not — however hard its joints are working.
-                hashes.push(caster_stamp(&c, Fold::new(4).u64(mesh_key as u64)));
+                //
+                // **Domain 5**, and the number is load-bearing: 1 is the prims,
+                // 2 the vgeom assets, 3 the skinned casters and 4 the terrain
+                // tiles. Two caster kinds sharing a domain can fold to one stamp,
+                // and a page whose stamp matched another kind's would be cached
+                // holding the wrong silhouette.
+                hashes.push(caster_stamp(&c, Fold::new(5).u64(mesh_key as u64)));
                 casters.push(c);
                 count += 1;
             }
