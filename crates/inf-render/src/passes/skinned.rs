@@ -51,6 +51,29 @@
 //! defect made worse. The clamp moved into the shader — `palette[base +
 //! min(j, count - 1)]` — where it is exact, needs no padding at all, and holds
 //! for a packed atlas that padding cannot.
+//!
+//! ## The third part of P15, which is STILL NOT BUILT (NPC1b audit)
+//!
+//! The sentence this file carried since P11.1 named **three** things: *"a shared
+//! palette atlas + instanced draw **(and a GPU palette compute pass)** is the
+//! documented P15 optimization"*. Wave NPC1b built the first two, and rewrote the
+//! sentence in a form that no longer mentions the third — so a forward reference
+//! was retired by a wave that met two thirds of it. It is restored here because
+//! it is the lever for the two CPU stations that wave's own headline measured as
+//! a crowd's real cost:
+//!
+//! * the **projection** builds a fresh `Vec<Mat4>` per posed character per frame
+//!   (`inf_anim::skinning_matrices`) — 288 × 161 matrices and 2.9 MB of fresh
+//!   allocation a frame at the island's N = 1 000, measured at **+2.95 ms**
+//!   against a 1.5 ms `PROJECTION_BUDGET_MS`;
+//! * this pass then **copies** them into the atlas — the loop
+//!   `fill_palette_atlas` makes once-per-block.
+//!
+//! A compute pass that composed `global · inverse_bind` on the GPU from a
+//! joint-local pose stream would delete both. It is not built, and unlike the
+//! atlas it is not a two-hundred-line change: it needs the pose to reach the
+//! renderer as *data* rather than as a finished palette, which is a projector
+//! contract and not a pass.
 
 use glam::Mat3;
 use inf_math::FloatingOrigin;
@@ -274,6 +297,17 @@ pub struct SkinnedBatches {
 /// skinned mesh — every character scene in this tree, and every golden — keeps
 /// exactly the instance order it had before this wave and draws exactly the same
 /// pixels through one call instead of N.
+///
+/// # The offsets rise at first use, and `fill_palette_atlas` depends on it
+///
+/// A block's offset is `matrices` at the moment it is created and `matrices`
+/// only grows, so the entry of [`SkinnedBatches::palette`] whose offset is at or
+/// past everything before it **is** that block's first instance, and every later
+/// entry naming the block is a repeat. That is what lets the atlas be filled once
+/// per block rather than once per instance;
+/// `the_block_offsets_rise_at_first_use_and_repeat_below_the_watermark` is the
+/// arm that keeps the invariant true, and it is stated here rather than only at
+/// the loop that uses it because it is a property of *this* function.
 pub fn plan_skinned_batches(scene: &crate::scene::RenderScene) -> SkinnedBatches {
     let mut order: Vec<u32> = (0..scene.skinned.len() as u32).collect();
     order.sort_by_key(|i| scene.skinned[*i as usize].mesh);
@@ -336,6 +370,47 @@ pub fn plan_skinned_batches(scene: &crate::scene::RenderScene) -> SkinnedBatches
         matrices,
         dropped,
     }
+}
+
+/// **Fill the atlas staging buffer from a plan — once per BLOCK.** Returns the
+/// number of blocks written, which is the claim (NPC1b audit).
+///
+/// The wave shipped this loop keyed on the *instance*, under a comment that said
+/// "written once per BLOCK, not once per instance" and then described writing it
+/// once per instance ("the second agent sharing an `Arc` re-writes the same bytes
+/// it already holds"). Idempotent, yes — and `O(instances × joints)` in the one
+/// loop the whole clause exists to make `O(blocks × joints)`. On the island at
+/// N = 1 000 that is 1 001 × 161 matrix copies a frame where 290 × 161 are
+/// needed: **3.45× the memcpy**, in `SkinnedMeshNode::sync`, which is CPU render
+/// time — the station the wave's own headline says the crowd actually costs.
+///
+/// The skip is exact rather than a cache: [`plan_skinned_batches`] assigns block
+/// offsets at the running `matrices` watermark, so an entry at or past the
+/// watermark is that block's first instance and everything below it is a repeat.
+/// The identity prefill is what serves an EMPTY palette, whose block is one
+/// matrix nobody writes.
+pub(crate) fn fill_palette_atlas(
+    scratch: &mut Vec<[f32; 16]>,
+    scene: &crate::scene::RenderScene,
+    plan: &SkinnedBatches,
+) -> usize {
+    scratch.clear();
+    scratch.resize(plan.matrices.max(1), glam::Mat4::IDENTITY.to_cols_array());
+    let mut watermark = 0usize;
+    let mut written = 0usize;
+    for (slot, i) in plan.order.iter().enumerate() {
+        let (offset, live) = plan.palette[slot];
+        if (offset as usize) < watermark {
+            continue;
+        }
+        let inst = &scene.skinned[*i as usize];
+        for (j, m) in inst.palette.iter().take(live as usize).enumerate() {
+            scratch[offset as usize + j] = m.to_cols_array();
+        }
+        watermark = offset as usize + live as usize;
+        written += 1;
+    }
+    written
 }
 
 /// Build an [`InstanceRaw`] for a skinned instance (origin-relative model matrix,
@@ -686,26 +761,24 @@ impl SkinnedMeshNode {
                 SKINNED_PALETTE_MATRICES
             );
         }
-        self.runs = plan.runs;
+        self.runs.clone_from(&plan.runs);
 
         // The atlas: every distinct palette once, laid out at the offsets the plan
         // assigned. Written from a scratch buffer that outlives the frame, so a
         // thousand characters cost one allocation and one `write_buffer` rather
         // than a thousand of each. `max(1)` keeps the storage buffer non-empty on
         // a frame whose only skinned instances were dropped.
-        self.scratch.clear();
-        self.scratch
-            .resize(plan.matrices.max(1), glam::Mat4::IDENTITY.to_cols_array());
-        for (slot, i) in plan.order.iter().enumerate() {
-            let inst = &frame.scene.skinned[*i as usize];
-            let (offset, live) = plan.palette[slot];
-            // Written once per BLOCK, not once per instance: the second agent
-            // sharing an `Arc` re-writes the same bytes it already holds. Cheap
-            // and idempotent, and it keeps the loop one pass with no second map.
-            for (j, m) in inst.palette.iter().take(live as usize).enumerate() {
-                self.scratch[offset as usize + j] = m.to_cols_array();
-            }
-        }
+        //
+        // **Once per BLOCK** — see `fill_palette_atlas`. The wave shipped this
+        // loop keyed on the instance, so the 710 `Far` agents sharing one `Arc`
+        // re-copied the same 161 matrices 710 times a frame.
+        let blocks_written = fill_palette_atlas(&mut self.scratch, frame.scene, &plan);
+        debug_assert_eq!(
+            blocks_written, plan.blocks,
+            "the atlas fill wrote {blocks_written} blocks of {} — the watermark \
+             skip and the plan's offsets disagree",
+            plan.blocks
+        );
         let bytes = std::mem::size_of_val(self.scratch.as_slice()) as u64;
         if self.atlas_capacity < bytes || self.atlas.is_none() {
             let capacity = bytes.next_power_of_two().max(64);
@@ -1088,5 +1161,105 @@ mod tests {
     fn a_scene_with_no_skinned_instances_plans_nothing() {
         let plan = plan_skinned_batches(&RenderScene::default());
         assert_eq!(plan, super::SkinnedBatches::default());
+    }
+
+    /// **THE ATLAS IS FILLED ONCE PER BLOCK, AND IT IS THE SAME ATLAS**
+    /// (NPC1b audit).
+    ///
+    /// The wave's own loop was keyed on the *instance* under a comment saying it
+    /// was keyed on the block, so the far tier's 710 shared agents re-copied one
+    /// palette 710 times a frame in `SkinnedMeshNode::sync`. Two halves, and both
+    /// are needed: the fill must produce **byte-identical** bytes to the naive
+    /// per-instance fill (or the skip is a correctness bug, not an optimization),
+    /// and it must perform exactly `plan.blocks` writes (or it is not a skip).
+    #[test]
+    fn the_atlas_is_filled_once_per_block_and_matches_the_per_instance_fill() {
+        // A mixed scene: a shared far-tier block over two meshes, distinct posed
+        // blocks, and an empty palette — the four shapes the fill has to serve.
+        let shared = palette(4, 7.0);
+        let mut insts: Vec<SkinnedInstance> = Vec::new();
+        for i in 0..40 {
+            insts.push(instance(i % 2, shared.clone()));
+            insts.push(instance(i % 2, palette(3, i as f32 + 1.0)));
+            insts.push(instance(i % 2, Arc::new(Vec::new())));
+        }
+        let sc = scene(insts, 2);
+        let plan = plan_skinned_batches(&sc);
+        assert!(plan.blocks < plan.order.len(), "nothing is shared here");
+
+        let mut fast = Vec::new();
+        let written = super::fill_palette_atlas(&mut fast, &sc, &plan);
+        assert_eq!(
+            written, plan.blocks,
+            "the fill wrote {written} blocks of {} — it is still keyed on the \
+             instance",
+            plan.blocks
+        );
+
+        // The naive fill the wave shipped, spelled out here so the equality is
+        // against a thing and not against itself.
+        let mut naive = vec![glam::Mat4::IDENTITY.to_cols_array(); plan.matrices.max(1)];
+        for (slot, i) in plan.order.iter().enumerate() {
+            let (offset, live) = plan.palette[slot];
+            for (j, m) in sc.skinned[*i as usize]
+                .palette
+                .iter()
+                .take(live as usize)
+                .enumerate()
+            {
+                naive[offset as usize + j] = m.to_cols_array();
+            }
+        }
+        assert_eq!(fast, naive, "the once-per-block fill is not the same atlas");
+    }
+
+    /// **The invariant the skip rests on** (NPC1b audit): a block's offset is the
+    /// running matrix watermark at the moment it is created, so the entry at or
+    /// past the watermark IS that block's first instance and everything below it
+    /// is a repeat.
+    ///
+    /// Stated as an arm because `fill_palette_atlas` is exact only while it holds
+    /// — a planner that packed blocks in any other order would silently stop
+    /// writing some of them.
+    #[test]
+    fn the_block_offsets_rise_at_first_use_and_repeat_below_the_watermark() {
+        let a = palette(5, 1.0);
+        let b = palette(2, 2.0);
+        let insts = vec![
+            instance(0, a.clone()),
+            instance(0, b.clone()),
+            instance(0, a.clone()),
+            instance(1, b.clone()),
+            instance(1, palette(3, 3.0)),
+            instance(1, a),
+            instance(1, b),
+        ];
+        let sc = scene(insts, 2);
+        let plan = plan_skinned_batches(&sc);
+
+        let mut watermark = 0usize;
+        let mut firsts = 0usize;
+        let mut covered = vec![false; plan.matrices];
+        for (offset, live) in plan.palette.iter() {
+            let (o, n) = (*offset as usize, *live as usize);
+            if o >= watermark {
+                assert_eq!(
+                    o,
+                    watermark,
+                    "a first use skipped {} matrices",
+                    o - watermark
+                );
+                for c in covered.iter_mut().take(o + n).skip(o) {
+                    *c = true;
+                }
+                watermark = o + n;
+                firsts += 1;
+            } else {
+                assert!(o + n <= watermark, "a repeat block ran past the watermark");
+            }
+        }
+        assert_eq!(firsts, plan.blocks, "first uses are not the block count");
+        assert_eq!(watermark, plan.matrices, "the atlas has a hole in it");
+        assert!(covered.iter().all(|c| *c), "a matrix is written by nobody");
     }
 }
