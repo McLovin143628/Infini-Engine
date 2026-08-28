@@ -983,6 +983,30 @@ impl ScheduleLeg {
     }
 }
 
+/// **Which leg an agent is on and how far through that leg's walk the clock
+/// is** — `None` for a record with no schedule (island wave NPC1e).
+///
+/// # Why this is a type and not four calls to [`CrowdSchedule::at`]
+///
+/// Resolving it is not free: [`CrowdRecord::hour_of`] is a `mix64` and a
+/// `rem_euclid`, and [`CrowdSchedule::at`] is another `rem_euclid` per leg. The
+/// step used to ask for it **four times an agent** (the leg-change check, then
+/// `progress_at`, then `position_at` → `feet_at` → `path_at` → `progress_at`
+/// again), and a *steered* agent a fifth time inside the pursuit. NPC1d measured
+/// what that costs and carried it as item 11: the island's 329 scheduled
+/// residents read `crowd` **0.353 ms — 1.07 µs an agent —** against the
+/// instrument's thousand ping-pong walkers at **0.164 ms, 0.16 µs** — **6.5×**.
+///
+/// The lever that item names and refuses is *"cache the leg index on the
+/// record"*, because a stored index is a second copy of a pure function and this
+/// module has refused two of those already (the speed multiplier and the route
+/// phase). **This is the other lever**: resolve it once and pass it down, which
+/// is the P29.4-A8 shape — `step_character_movement` walks its character list
+/// once and hands the slice to `try_mantle` rather than letting it ask again.
+/// Nothing is stored, nothing can drift, and every `*_on` door below answers
+/// exactly what its `*_at` sibling answers.
+pub type ActiveLeg = Option<(usize, f64)>;
+
 /// **An agent's whole day**, as legs on the level clock.
 ///
 /// A schedule is a pure function of `(agent seed, clock)` and holds no
@@ -1288,7 +1312,7 @@ impl CrowdRecord {
 
     /// **Which leg this agent is on and how far through its walk**, or `None`
     /// for an unscheduled record.
-    pub fn leg_at(&self, guid: Uuid, clock: CrowdClock) -> Option<(usize, f64)> {
+    pub fn leg_at(&self, guid: Uuid, clock: CrowdClock) -> ActiveLeg {
         self.schedule
             .as_ref()
             .map(|s| s.at(self.hour_of(guid, clock.hour)))
@@ -1297,7 +1321,13 @@ impl CrowdRecord {
     /// **The path this agent is walking right now** — its active leg's, or its
     /// route's.
     pub fn path_at(&self, guid: Uuid, clock: CrowdClock) -> &inf_nav::NavPath {
-        match (&self.schedule, self.leg_at(guid, clock)) {
+        self.path_on(self.leg_at(guid, clock))
+    }
+
+    /// [`path_at`](Self::path_at) with the leg already resolved — see
+    /// [`ActiveLeg`].
+    pub fn path_on(&self, leg: ActiveLeg) -> &inf_nav::NavPath {
+        match (&self.schedule, leg) {
             (Some(s), Some((i, _))) => &s.legs()[i].path,
             _ => &self.route.path,
         }
@@ -1305,7 +1335,12 @@ impl CrowdRecord {
 
     /// **How far along its route this agent is** at `clock`.
     pub fn progress_at(&self, guid: Uuid, clock: CrowdClock) -> RouteProgress {
-        match (&self.schedule, self.leg_at(guid, clock)) {
+        self.progress_on(self.leg_at(guid, clock), guid, clock)
+    }
+
+    /// [`progress_at`](Self::progress_at) with the leg already resolved.
+    pub fn progress_on(&self, leg: ActiveLeg, guid: Uuid, clock: CrowdClock) -> RouteProgress {
+        match (&self.schedule, leg) {
             (Some(s), Some((i, u))) => {
                 let len = s.legs()[i].path.length_m();
                 let raw = len * u + self.rephase_m;
@@ -1331,8 +1366,13 @@ impl CrowdRecord {
     /// **Where this agent's FEET are at sim time `t_s`** — the point on the
     /// route itself, with no body geometry in it.
     pub fn feet_at(&self, guid: Uuid, clock: CrowdClock) -> DVec3 {
-        self.path_at(guid, clock)
-            .position_at(self.progress_at(guid, clock).s_m)
+        self.feet_on(self.leg_at(guid, clock), guid, clock)
+    }
+
+    /// [`feet_at`](Self::feet_at) with the leg already resolved.
+    pub fn feet_on(&self, leg: ActiveLeg, guid: Uuid, clock: CrowdClock) -> DVec3 {
+        self.path_on(leg)
+            .position_at(self.progress_on(leg, guid, clock).s_m)
     }
 
     /// **Where this agent's TRANSFORM is at sim time `t_s`** — the record's
@@ -1345,7 +1385,12 @@ impl CrowdRecord {
     /// that difference in two places got it 1.20 m wrong in one of them, which
     /// is what `a_demotion_hands_the_clock_the_metre_the_body_reached` caught.
     pub fn position_at(&self, guid: Uuid, clock: CrowdClock) -> DVec3 {
-        self.feet_at(guid, clock) + DVec3::new(0.0, self.archetype.feet_offset_m(), 0.0)
+        self.position_on(self.leg_at(guid, clock), guid, clock)
+    }
+
+    /// [`position_at`](Self::position_at) with the leg already resolved.
+    pub fn position_on(&self, leg: ActiveLeg, guid: Uuid, clock: CrowdClock) -> DVec3 {
+        self.feet_on(leg, guid, clock) + DVec3::new(0.0, self.archetype.feet_offset_m(), 0.0)
     }
 
     /// Metres of route travelled by `t_s`, before the fold — what a re-phase is
@@ -1364,7 +1409,13 @@ impl CrowdRecord {
     /// minus whatever the phase already holds. There is no ping-pong leg to pick
     /// and no lap to count.
     pub fn rephase_delta_at(&self, guid: Uuid, clock: CrowdClock, s_m: f64) -> f64 {
-        match (&self.schedule, self.leg_at(guid, clock)) {
+        self.rephase_delta_on(self.leg_at(guid, clock), guid, clock, s_m)
+    }
+
+    /// [`rephase_delta_at`](Self::rephase_delta_at) with the leg already
+    /// resolved.
+    pub fn rephase_delta_on(&self, leg: ActiveLeg, guid: Uuid, clock: CrowdClock, s_m: f64) -> f64 {
+        match (&self.schedule, leg) {
             (Some(s), Some((i, u))) => {
                 let len = s.legs()[i].path.length_m();
                 if !(len.is_finite() && s_m.is_finite() && self.rephase_m.is_finite()) {
@@ -1714,6 +1765,7 @@ pub fn plan_agent(
     rec: &CrowdRecord,
     here: DVec3,
     clock: CrowdClock,
+    leg: ActiveLeg,
 ) -> AgentPlan {
     // **The position law does not vary with the tier, `Dormant` included**
     // (NPC1a audit). It used to: a dematerialized record froze at `last`, the
@@ -1744,10 +1796,16 @@ pub fn plan_agent(
     // no `CharacterMovement` for `movement::feet_offset_m` to read. Keeping the
     // lift out of the path is also what lets a tall agent and a short one share
     // one `Arc`.
-    let progress = rec.progress_at(guid, clock);
+    //
+    // **And the leg is handed IN** (island wave NPC1e). This used to resolve it
+    // three times inside one call — once for `progress_at` and twice more down
+    // `position_at → feet_at → {path_at, progress_at}` — each a `mix64` and a
+    // `rem_euclid` a leg, for an answer that cannot change inside a step. See
+    // [`ActiveLeg`] for the measurement that made it worth threading.
+    let progress = rec.progress_on(leg, guid, clock);
     AgentPlan {
         tier: band.tier(here),
-        at: rec.position_at(guid, clock),
+        at: rec.position_on(leg, guid, clock),
         progress,
     }
 }
@@ -1802,7 +1860,14 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
         //    would start a commute home already two metres late on a different
         //    path. The leg index is sim state and is folded into the trace for
         //    exactly that reason.
-        if let Some((i, _)) = rec.leg_at(guid, clock) {
+        //
+        //    **Resolved ONCE, here, and handed down** (island wave NPC1e): the
+        //    leg-change check, the plan and the pursuit all asked for it
+        //    separately, which is five `mix64`-plus-`rem_euclid` resolutions an
+        //    agent for an answer that is constant across the step. See
+        //    [`ActiveLeg`].
+        let leg = rec.leg_at(guid, clock);
+        if let Some((i, _)) = leg {
             let i = i as u8;
             if i != rec.leg {
                 rec.leg = i;
@@ -1810,7 +1875,7 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
                 stats.legs_changed += 1;
             }
         }
-        let plan = plan_agent(&band, guid, rec, here, clock);
+        let plan = plan_agent(&band, guid, rec, here, clock, leg);
         let tier = plan.tier;
         let was = rec.tier;
         if tier != was {
@@ -1851,12 +1916,12 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
         let mut at = plan.at;
         if was.steers() && !tier.steers() {
             let feet = here - DVec3::new(0.0, rec.archetype.feet_offset_m(), 0.0);
-            let s_body = rec.path_at(guid, clock).project(feet).s_m;
-            let delta = rec.rephase_delta_at(guid, clock, s_body);
+            let s_body = rec.path_on(leg).project(feet).s_m;
+            let delta = rec.rephase_delta_on(leg, guid, clock, s_body);
             if delta != 0.0 {
                 rec.rephase_m += delta;
                 stats.rephased += 1;
-                at = rec.position_at(guid, clock);
+                at = rec.position_on(leg, guid, clock);
             }
         }
 
@@ -1899,12 +1964,7 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
             steer_agent(
                 world,
                 entity,
-                SteerSubject {
-                    guid,
-                    rec,
-                    clock,
-                    here,
-                },
+                SteerSubject { rec, here, leg },
                 &plan,
                 &mut stats,
             );
@@ -2131,11 +2191,18 @@ fn crowd_movement(a: &CrowdArchetype) -> CharacterMovement {
 /// step, and a call site that got `here` and `clock` the wrong way round would
 /// still compile.
 struct SteerSubject<'a> {
-    guid: Uuid,
     rec: &'a CrowdRecord,
-    clock: CrowdClock,
     /// Where the body is **now** — its live transform, not the clock's answer.
     here: DVec3,
+    /// The leg the step already resolved (island wave NPC1e; see
+    /// [`ActiveLeg`]).
+    ///
+    /// It replaced the `guid` and the `clock` this struct used to carry, and
+    /// that is the point rather than tidying: those two existed only so the
+    /// pursuit could re-derive the leg for itself, which is the fifth
+    /// resolution an agent the wave removed. A field nothing reads is a door
+    /// back to asking.
+    leg: ActiveLeg,
 }
 
 /// **Steer one agent along its own path** — pure pursuit, written as an intent.
@@ -2179,13 +2246,8 @@ fn steer_agent(
     plan: &AgentPlan,
     stats: &mut CrowdStats,
 ) {
-    let SteerSubject {
-        guid,
-        rec,
-        clock,
-        here,
-    } = who;
-    let path = rec.path_at(guid, clock);
+    let SteerSubject { rec, here, leg } = who;
+    let path = rec.path_on(leg);
     let len = path.length_m();
     // The path is the ground; the transform is the capsule's centre. Projecting
     // the centre would work on the flat and would find the wrong leg on a stair,
@@ -4263,5 +4325,99 @@ mod tests {
             !world.world().contains_resource::<CrowdPopulationRes>(),
             "a step over a world with no crowd installed one"
         );
+    }
+
+    /// **ISLAND WAVE NPC1e: resolving the leg once answers what resolving it
+    /// five times answered — to the BIT.**
+    ///
+    /// The step used to ask `CrowdRecord::leg_at` four times an agent and a
+    /// steered one five (see [`ActiveLeg`] for the measurement). The `*_on`
+    /// doors take the answer instead of re-deriving it, and the whole
+    /// correctness claim is that they are the same functions: this walks a
+    /// scheduled record round its own day, at the hour boundaries and between
+    /// them, and compares `to_bits()` rather than an epsilon, because "the same
+    /// arithmetic in the same order" is what is being claimed and a tolerance
+    /// would admit a different one.
+    ///
+    /// It is not a tautology: the `*_at` doors are the ones every caller outside
+    /// this module still uses, and the day somebody changes one of the pair the
+    /// two answers part company here.
+    #[test]
+    fn resolving_the_leg_once_answers_what_resolving_it_every_time_answered() {
+        let guid = Uuid::from_u128(0x1e9);
+        let mut rec = CrowdRecord::scheduled(CrowdArchetype::humanoid(None, None, None), day());
+        // A body that fell behind its clock, so `rephase_m` is not zero and the
+        // two doors have something to disagree about.
+        rec.rephase_m = -3.75;
+        let mut checked = 0_u32;
+        for step in 0..=240 {
+            let hour = f64::from(step) * 0.1;
+            let clock = CrowdClock {
+                t_s: f64::from(step) * 1.7,
+                hour,
+            };
+            let leg = rec.leg_at(guid, clock);
+            assert_eq!(
+                rec.progress_on(leg, guid, clock),
+                rec.progress_at(guid, clock),
+                "progress parted company at {hour} h"
+            );
+            let a = rec.position_on(leg, guid, clock);
+            let b = rec.position_at(guid, clock);
+            assert_eq!(
+                (a.x.to_bits(), a.y.to_bits(), a.z.to_bits()),
+                (b.x.to_bits(), b.y.to_bits(), b.z.to_bits()),
+                "position parted company at {hour} h: {a:?} against {b:?}"
+            );
+            assert!(
+                std::ptr::eq(rec.path_on(leg), rec.path_at(guid, clock)),
+                "the two doors named different paths at {hour} h"
+            );
+            for s_m in [0.0, 12.5, 99.0] {
+                assert_eq!(
+                    rec.rephase_delta_on(leg, guid, clock, s_m).to_bits(),
+                    rec.rephase_delta_at(guid, clock, s_m).to_bits(),
+                    "the re-phase parted company at {hour} h, s = {s_m}"
+                );
+            }
+            checked += 1;
+        }
+        // ANTI-VACUITY: the walk really crossed legs rather than sitting on one.
+        let legs: std::collections::BTreeSet<usize> = (0..=240)
+            .filter_map(|step| {
+                rec.leg_at(
+                    guid,
+                    CrowdClock {
+                        t_s: 0.0,
+                        hour: f64::from(step) * 0.1,
+                    },
+                )
+                .map(|(i, _)| i)
+            })
+            .collect();
+        assert_eq!(
+            legs.len(),
+            4,
+            "the sweep only ever saw legs {legs:?}, so it compared one leg 241 times"
+        );
+        assert_eq!(checked, 241);
+
+        // And an UNSCHEDULED record, where the leg is `None` and the `*_on`
+        // doors must fall through to the route exactly as the `*_at` ones do.
+        let ping = CrowdRecord::walking(
+            CrowdArchetype::humanoid(None, None, None),
+            CrowdRoute::between(DVec3::ZERO, DVec3::new(0.0, 0.0, 6.0), 1.4),
+        );
+        for step in 0..64 {
+            let clock = CrowdClock::at(f64::from(step) * 0.37);
+            let leg = ping.leg_at(guid, clock);
+            assert!(leg.is_none(), "an unscheduled record produced a leg");
+            let a = ping.position_on(leg, guid, clock);
+            let b = ping.position_at(guid, clock);
+            assert_eq!(
+                (a.x.to_bits(), a.y.to_bits(), a.z.to_bits()),
+                (b.x.to_bits(), b.y.to_bits(), b.z.to_bits())
+            );
+        }
     }
 }

@@ -1336,7 +1336,13 @@ fn the_parallel_map_over_agent_decisions_is_priced_before_it_is_prescribed() {
         let t_s = 3.25;
 
         let plan_one = |x: &(Uuid, CrowdRecord, DVec3)| {
-            inf_ecs::crowd::plan_agent(&band, x.0, &x.1, x.2, inf_ecs::crowd::CrowdClock::at(t_s))
+            // The leg the step resolves once and hands down (island wave NPC1e;
+            // `inf_ecs::crowd::ActiveLeg`). These records are unscheduled, so it
+            // is `None` — resolved through `leg_at` rather than written as
+            // `None` so this benchmark keeps calling what the step calls.
+            let clock = inf_ecs::crowd::CrowdClock::at(t_s);
+            let leg = x.1.leg_at(x.0, clock);
+            inf_ecs::crowd::plan_agent(&band, x.0, &x.1, x.2, clock, leg)
         };
         // MIN of three, the instrument's discipline.
         let serial_out: Vec<_> = inputs.iter().map(plan_one).collect();
