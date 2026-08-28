@@ -573,3 +573,103 @@ impl TerrainStreaming {
         self.stats = merged;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::observes_terrain;
+    use glam::DVec3;
+    use inf_ecs::EcsWorld;
+    use std::collections::BTreeMap;
+
+    /// **EVERY CROWD NPC IS A TERRAIN OBSERVER, INCLUDING THE ONES THE LADDER
+    /// TOOK THE BODY AWAY FROM** (NPC1b audit) — a tripwire, not an endorsement.
+    ///
+    /// `observes_terrain` picks its subjects by **component**: an entity carrying
+    /// `RigidBody3D` or `CharacterController3D` observes. `inf_ecs::crowd`'s
+    /// `materialize` gives every agent **both**, at every materialized tier — so a
+    /// `Far` agent, which `CrowdTier::has_body` says has no rapier body at all and
+    /// which cannot query a height (no `CharacterMovement`, no `ActorClass`, and a
+    /// position that is a pure function of the clock), still contributes a
+    /// `SIM_MARGIN_TILES` neighbourhood of level-0 pages to the sim want set on
+    /// **every fixed step**.
+    ///
+    /// That is this module's own stated hazard, met by the content it was written
+    /// against: *"residency must scale with the number of things that can look at
+    /// the ground, not with how much scenery the artist placed on it"*. And it is
+    /// NPC1a's own deform finding — *"a thing with no rapier body presses no
+    /// ground"* — one system over: two authorities disagreeing about whether a
+    /// thing is in the world, one reading components and one reading the tier.
+    ///
+    /// **The measurement**: on the island's `LIT+VIS+CROWD` row the `terrain
+    /// stream` phase reads **1.257 ms** against a bracket in which it is under the
+    /// 0.02 ms print floor — 14 % of a 9.09 ms crowd step, from a thousand
+    /// observers where the bracket has one. Wave NPC1b's ledger attributes that
+    /// millisecond to "the crowd" without a mechanism, and it is not intrinsic to
+    /// a crowd.
+    ///
+    /// **Not fixed here.** Narrowing the predicate changes which pages are
+    /// resident, and this module's own doctrine is that *"a missing sim page
+    /// changes the simulation"* — so it is a ruling with a PIE-==-shipping
+    /// re-measurement behind it, which is a wave's work and not an audit's. NPC1c
+    /// gives a near agent a controller and is where the question gets decided.
+    /// This arm fails the day it is, which is the day the ledger's `+1.26 ms`
+    /// attribution has to be rewritten.
+    #[test]
+    fn every_materialized_crowd_agent_observes_the_terrain_at_every_tier() {
+        let mut world = EcsWorld::new();
+        let src = world.spawn_with_guid(uuid::Uuid::from_u128(0xF1), "Player", None);
+        world
+            .world_mut()
+            .entity_mut(src)
+            .insert(inf_ecs::components::StreamingSource { radius_m: 0.0 });
+        world.propagate();
+
+        // One agent per materialized tier: 8 m (`Full`), 60 m (`Near`), 300 m
+        // (`Far`). The `Far` one is the subject — it has no rapier body.
+        let mut records = BTreeMap::new();
+        for (i, x) in [8.0f64, 60.0, 300.0].iter().enumerate() {
+            records.insert(
+                uuid::Uuid::from_u128(0xC00 + i as u128),
+                inf_ecs::crowd::CrowdRecord::standing(
+                    inf_ecs::crowd::CrowdArchetype::humanoid(None, None, None),
+                    DVec3::new(*x, 0.0, 0.0),
+                ),
+            );
+        }
+        inf_ecs::crowd::set_population(&mut world, records);
+        let stats = inf_ecs::crowd::step_crowd(&mut world, 1.0 / 60.0);
+        assert_eq!(
+            (stats.per_tier[0], stats.per_tier[1], stats.per_tier[2]),
+            (1, 1, 1),
+            "the fixture is not one agent per materialized tier: {stats:?}"
+        );
+
+        for (i, tier) in [
+            inf_ecs::crowd::CrowdTier::Full,
+            inf_ecs::crowd::CrowdTier::Near,
+            inf_ecs::crowd::CrowdTier::Far,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let e = world
+                .entity_of(uuid::Uuid::from_u128(0xC00 + i as u128))
+                .expect("materialized");
+            let agent = world
+                .world()
+                .get::<inf_ecs::crowd::CrowdAgent>(e)
+                .copied()
+                .expect("the tier verdict");
+            assert_eq!(agent.tier, *tier, "the fixture drifted");
+            assert!(
+                observes_terrain(&world, e),
+                "a {tier:?} crowd agent stopped observing the terrain — if that is \
+                 deliberate, the NPC1b audit's `+1.26 ms terrain stream` finding is \
+                 closed and the ledger has to say so"
+            );
+        }
+        // …and the `Far` one really has no body, which is what makes it the
+        // finding rather than a cost.
+        assert!(!inf_ecs::crowd::CrowdTier::Far.has_body());
+    }
+}

@@ -1482,6 +1482,83 @@ mod tests {
         );
     }
 
+    /// **A CROWD AGENT'S DRAWN BODY AND ITS CAPSULE DISAGREE BY THE WHOLE
+    /// CHARACTER DROP** (NPC1b audit) — and this arm is a **tripwire**, not an
+    /// endorsement.
+    ///
+    /// P29.6's ruling is that a rig's origin is its **feet** and a character's
+    /// entity transform is its capsule **centre**, and both projectors lift the
+    /// pose through the one door that knows the difference,
+    /// [`crate::pose::model_to_world`]. That door is gated on
+    /// [`CharacterMovement`](crate::components::CharacterMovement) — and a crowd
+    /// agent deliberately has none (see [`materialize`]), so the drop it applies
+    /// is **zero** and an NPC is drawn with its feet where its capsule's middle
+    /// is.
+    ///
+    /// Wave NPC1b's clause 3 measured the disagreement between the drawn body and
+    /// the collider as the build multiplier's **±8 %, up to 7 cm**, "inside the
+    /// slack a capsule already has around a humanoid mesh". On the humanoid
+    /// archetype the same pair already disagrees by `half_height + radius` =
+    /// **1.2 m**, which is seventeen times the bound that sentence argues, and it
+    /// has nothing to do with the build.
+    ///
+    /// Not fixed here: giving a crowd agent a `CharacterMovement` is NPC1c's
+    /// (it is the component that brings a controller, and NPC1a refused it on
+    /// purpose — two authorities writing one transform), and moving the gate
+    /// would move every published foot in the engine. So the arm **pins the
+    /// present** and fails the day a near agent gets a controller, which is the
+    /// day this ledger sentence has to be rewritten.
+    #[test]
+    fn a_crowd_agent_publishes_no_character_space_drop() {
+        let mut records = BTreeMap::new();
+        records.insert(
+            guid(0xC5A),
+            CrowdRecord::standing(
+                CrowdArchetype::humanoid(None, None, None),
+                DVec3::new(4.0, 0.0, 0.0),
+            ),
+        );
+        let mut world = crowd_world(records);
+        move_source(&mut world, 4.0);
+        let stats = step_crowd(&mut world, 1.0 / 60.0);
+        assert_eq!(stats.per_tier[0], 1, "the fixture agent is not `Full`");
+
+        let e = world
+            .entity_of(guid(0xC5A))
+            .expect("the agent materialized");
+        let w = world.world();
+        let placed = w
+            .get::<crate::components::GlobalTransform>(e)
+            .expect("a transform")
+            .translation();
+        let drawn = crate::pose::model_to_world(&world, e).translation;
+        let col = *w.get::<Collider3D>(e).expect("a capsule");
+        let capsule_drop = crate::movement::feet_offset_m(
+            &crate::components::CharacterMovement::default(),
+            Some(&col),
+        );
+
+        assert_eq!(
+            drawn, placed,
+            "a crowd agent now publishes a character-space drop — it has grown a \
+             `CharacterMovement`, which is NPC1c's change, and the NPC1b ledger's \
+             clause-3 sentence about the build multiplier has to be rewritten \
+             against the new number"
+        );
+        assert!(
+            (capsule_drop - 1.2).abs() < 1e-9,
+            "the humanoid archetype's capsule is no longer 0.9 + 0.3: {capsule_drop}"
+        );
+        println!(
+            "NPC1b audit — the crowd's character-space gap: the drawn rig origin \
+             sits at the CAPSULE CENTRE, {capsule_drop:.2} m from where a \
+             `CharacterMovement` character's feet would be published. The build \
+             multiplier's own disagreement (CROWD_BUILD_RANGE, +/-8 % of a 1.8 m \
+             adult) is 0.07 m of shoulder, {:.0}x smaller.",
+            capsule_drop / 0.07
+        );
+    }
+
     /// The cost ladder is monotone: every tier is cheaper than the one above it,
     /// in every dimension, and nothing costs more as it gets further away.
     #[test]
