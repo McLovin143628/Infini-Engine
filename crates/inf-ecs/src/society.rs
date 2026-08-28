@@ -248,8 +248,8 @@ pub struct SocietyStats {
     /// A day is not a day if it only goes one way: such an agent leaves at
     /// eight, arrives at nine and stands at its desk through the night, because
     /// the leg that would take it home is not in its schedule. It used to be
-    /// counted as a full day — [`DayKind::Full`](DayKind) is returned the
-    /// moment the outbound commute routes — so the one number that would have
+    /// counted as a full day (the private `DayKind::Full` is returned the
+    /// moment the outbound commute routes) — so the one number that would have
     /// said so was invisible. Zero on the island, and the gate asserts it.
     pub no_return: usize,
     /// **Agents with a workplace and no errand** (NPC1d audit) — the difference

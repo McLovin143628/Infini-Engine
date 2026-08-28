@@ -28227,5 +28227,22 @@ its LENGTH), mutation-verified in both a unit arm and the gate, and the gate gai
 **rush-hour coda** — the settle cannot be the arm, because the island's committed clock reads
 02:18 local and the town is correctly asleep. **4 197 steering intents, 71 agents `Full`**, and
 `rush` asserted beside it so the claim cannot go vacuous. LAW: **a gate staged where a defect
-cannot appear is a gate that certifies the defect.** Details in
-`docs/memos/island-progress.md` under *"Wave NPC1d"*.
+cannot appear is a gate that certifies the defect.**
+**The rest of the audit**, all fixed: the negative half of the street-route memo was never
+invalidated (a pair refused before its bridging block folded stayed refused for the session, on
+a network that only grows — now dropped on any fold step, and the island still reads 20 searched
+/ 944 cached); `DayKind::Full` was returned for an agent whose walk home did not route, so a
+one-way day counted as a full one — `SocietyStats::{no_return, errandless}` count both and the
+gate asserts `no_return == 0` and the identity `scheduled − full4 == errandless + homebound`
+(**0 / 176**); the one-byte leg index had no enforcement (`MAX_SCHEDULE_LEGS = 256`, refused
+whole); a **third** spliced doc block, of the shape `3bc5a044` repaired two of
+(`inf_nav::domain::CALLER` lost its doc to `PAVEMENT`); the gate's compression was **240×**, not
+72× (which is the clock-seconds one step advances), and `ScheduleLeg`'s doc still carried the
+rate-30 **172 800** where the island now authors 288 000; the hourly census table set decimal
+hours as clock times (`8.52 h` is 08:31, not 08:52); the fused-interior measurement is now
+printed and reads **80 + 79 → 81** nodes, not 80 + 81; and the **blood-red night** was promoted
+only inside a wave memo — its numbers and diagnosis are now in the Phase 17 STATUS block, where
+a sky wave will find them. Audit battery **333 / 6 397 / 0 / 19** (+1 arm), goldens **59**
+unmoved with `INF_GOLDEN_STRICT=1` green over 118 arms, rustdoc **374**, clippy **0**, fmt clean,
+no schema and no sample moved. Details in
+`docs/memos/island-progress.md` under *"Wave NPC1d"* and *"Wave NPC1d — the adversarial audit"*.
