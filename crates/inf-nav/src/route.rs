@@ -9,12 +9,23 @@
 //! heuristic would be admissible for the graphs this tree builds today and
 //! silently wrong for the first one that is not. The island's whole road network
 //! is a few hundred nodes and a settlement's grid is a few dozen; a search over
-//! that is microseconds, and the measurement is in this module's own arms rather
-//! than in an argument.
+//! that is cheap, and the measurement is in this module's own arms rather than
+//! in an argument.
 //!
-//! The door is left open in the honest way: the frontier is ordered on
+//! **What the arm measures is a count, not a clock.**
+//! `a_town_sized_grid_is_searched_within_dijkstras_own_bounds` searches a
+//! 1 600-node grid and pins the *shape* of the work —
+//! `(settled, stale_pops, scanned, pushed)`, the four [`SearchStats`] — because
+//! that is a function of the graph and the endpoints and of nothing else. The
+//! microseconds are printed beside it and asserted nowhere: the first draft of
+//! that arm asserted them and went red on two CI runners at 1 398 and 1 723 µs
+//! for a search nobody had touched.
+//!
+//! The door to A\* is left open in the honest way: the frontier is ordered on
 //! `(cost, id)` and nothing else, so adding a heuristic term is a change to one
-//! expression on the day a graph is large enough to want one.
+//! expression on the day a graph is large enough to want one — and the arm's
+//! pinned counts go red with it, which is the ledger being rewritten rather
+//! than a gate being wrong.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
@@ -97,6 +108,37 @@ impl NavVerdict {
     }
 }
 
+/// **What a search DID**, counted rather than timed.
+///
+/// Four numbers, every one of them a function of the graph and the two
+/// endpoints alone — no clock, no machine, no CI runner. That is the point of
+/// them: the property worth defending about this search is its *shape* (a node
+/// is decided once, an adjacency is read once), and a shape is countable, so it
+/// never has to be inferred from a stopwatch. See
+/// `a_town_sized_grid_is_searched_within_dijkstras_own_bounds`, which asserts
+/// these and only prints the microseconds.
+///
+/// Returned by [`route_counted`]. Zero on all four for the three refusals and
+/// for a stand, which do no search at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SearchStats {
+    /// Frontier pops that were **final** — the pop that decided a node's
+    /// shortest cost. Dijkstra decides a node at most once, so this is at most
+    /// the node count.
+    pub settled: usize,
+    /// Frontier pops thrown away because the node had already been reached more
+    /// cheaply after that entry was pushed: the tax this search pays for lazy
+    /// deletion instead of a decrease-key.
+    pub stale_pops: usize,
+    /// Edge records read by the relaxation loop. A settled node's adjacency is
+    /// read exactly once, and the degrees sum to the directed edge count, so
+    /// this is at most [`NavGraph::edge_count`].
+    pub scanned: usize,
+    /// Frontier pushes, the source's included: one for the source and at most
+    /// one per edge record that improved a node, so at most `1 + scanned`.
+    pub pushed: usize,
+}
+
 /// **The shortest route from `from` to `to`.**
 ///
 /// Deterministic in the two ways that matter and are easy to get wrong:
@@ -107,22 +149,41 @@ impl NavVerdict {
 ///
 /// `O((V + E) log V)`. The island's whole road network is a few hundred nodes.
 pub fn route(graph: &NavGraph, from: NavNodeId, to: NavNodeId) -> NavVerdict {
+    route_counted(graph, from, to).0
+}
+
+/// [`route`], with the work the search did counted beside its answer.
+///
+/// The *same* search — [`route`] is this function with the counters dropped, so
+/// there is no second copy of the loop to drift and an arm that drives this door
+/// drives the shipped one. The counters exist because the shape of this search
+/// is the thing worth defending and a wall clock cannot see it: a runner three
+/// times slower moves a microsecond figure and moves none of these four.
+pub fn route_counted(
+    graph: &NavGraph,
+    from: NavNodeId,
+    to: NavNodeId,
+) -> (NavVerdict, SearchStats) {
+    let mut stats = SearchStats::default();
     if graph.is_empty() {
-        return NavVerdict::EmptyGraph;
+        return (NavVerdict::EmptyGraph, stats);
     }
     if !graph.contains(from) {
-        return NavVerdict::OffGraph { node: from };
+        return (NavVerdict::OffGraph { node: from }, stats);
     }
     if !graph.contains(to) {
-        return NavVerdict::OffGraph { node: to };
+        return (NavVerdict::OffGraph { node: to }, stats);
     }
     if from == to {
         let p = graph.node(from).map(|n| n.position).unwrap_or(DVec3::ZERO);
-        return NavVerdict::Found(NavRoute {
-            nodes: vec![from],
-            path: NavPath::single(p),
-            cost_m: 0.0,
-        });
+        return (
+            NavVerdict::Found(NavRoute {
+                nodes: vec![from],
+                path: NavPath::single(p),
+                cost_m: 0.0,
+            }),
+            stats,
+        );
     }
 
     let mut dist: BTreeMap<NavNodeId, f64> = BTreeMap::new();
@@ -130,17 +191,21 @@ pub fn route(graph: &NavGraph, from: NavNodeId, to: NavNodeId) -> NavVerdict {
     let mut heap: BinaryHeap<Reverse<(Ordered, NavNodeId)>> = BinaryHeap::new();
     dist.insert(from, 0.0);
     heap.push(Reverse((Ordered(0.0), from)));
+    stats.pushed += 1;
 
     while let Some(Reverse((Ordered(d), node))) = heap.pop() {
         // A stale entry: this node was reached again more cheaply after it was
         // pushed. Cheaper than a decrease-key and the standard shape.
         if dist.get(&node).map(|best| d > *best).unwrap_or(true) {
+            stats.stale_pops += 1;
             continue;
         }
+        stats.settled += 1;
         if node == to {
             break;
         }
         for e in graph.edges_from(node) {
+            stats.scanned += 1;
             let nd = d + e.cost_m;
             let better = match dist.get(&e.to) {
                 None => true,
@@ -150,12 +215,13 @@ pub fn route(graph: &NavGraph, from: NavNodeId, to: NavNodeId) -> NavVerdict {
                 dist.insert(e.to, nd);
                 prev.insert(e.to, node);
                 heap.push(Reverse((Ordered(nd), e.to)));
+                stats.pushed += 1;
             }
         }
     }
 
     let Some(cost_m) = dist.get(&to).copied() else {
-        return NavVerdict::Disconnected { from, to };
+        return (NavVerdict::Disconnected { from, to }, stats);
     };
 
     // Unwind. `prev` is a tree rooted at `from`, so this terminates in at most
@@ -168,21 +234,24 @@ pub fn route(graph: &NavGraph, from: NavNodeId, to: NavNodeId) -> NavVerdict {
             break;
         }
         let Some(p) = prev.get(&cur).copied() else {
-            return NavVerdict::Disconnected { from, to };
+            return (NavVerdict::Disconnected { from, to }, stats);
         };
         nodes.push(p);
         cur = p;
     }
     if cur != from {
-        return NavVerdict::Disconnected { from, to };
+        return (NavVerdict::Disconnected { from, to }, stats);
     }
     nodes.reverse();
 
-    NavVerdict::Found(NavRoute {
-        path: chain(graph, &nodes),
-        nodes,
-        cost_m,
-    })
+    (
+        NavVerdict::Found(NavRoute {
+            path: chain(graph, &nodes),
+            nodes,
+            cost_m,
+        }),
+        stats,
+    )
 }
 
 /// **The route's geometry**: every node position with every edge's `via`
@@ -386,15 +455,83 @@ mod tests {
     /// search: a uniform grid has no dear edges to prune with and offers the
     /// frontier a fresh tie at every step.
     ///
-    /// The clock is **printed** and the bound asserted is deliberately loose —
-    /// this file's own standing rule, and the margin is stated rather than
-    /// implied: a corner-to-corner search over a 1 600-node grid is expected in
-    /// the tens of microseconds and the ceiling is a **millisecond**, which is
-    /// a factor of tens. What that bound is really for is the day somebody makes
-    /// `edges_from` allocate or `Ordered` compare through a `String`: it catches
-    /// a change of shape, not a change of machine.
+    /// # Why the assertion is a COUNT and the microseconds are a `println!`
+    ///
+    /// The first draft of this arm asserted the clock — `best < 1000.0` µs — and
+    /// went red on ubuntu **and** windows at **1 398.2 µs**, on a debug build on
+    /// a shared runner, for a search nobody had touched. That is this tree's
+    /// clock law met again (the I7 `step_profile` red, the I4b calibration
+    /// incident, the VIS1b frozen-eye fixture), and its newest face: **an arm
+    /// written during an audit is subject to it exactly as a wave's arm is.**
+    /// A structural property must never be asserted through a wall clock. The
+    /// failing message even named the property — *"the frontier or the
+    /// adjacency changed shape"* — and a millisecond ceiling spanning a 30×
+    /// machine spread cannot tell that from "the runner is busy", which is the
+    /// one distinction it existed to draw.
+    ///
+    /// The shape is **countable**, so it is counted. [`route_counted`] is the
+    /// same search with its own work tallied ([`route`] is it with the counters
+    /// dropped, so there is no second loop to drift). The **ceilings** are
+    /// Dijkstra's own law over any graph:
+    ///
+    /// * **`settled ≤ V = 40 × 40 = 1 600`.** The first pop whose key still
+    ///   matches `dist` decides that node for good and it is never re-opened.
+    ///   More than `V` means a node was decided **twice**.
+    /// * **`scanned ≤ E = 4 × 40 × 39 = 6 240`.** A settled node's adjacency is
+    ///   read exactly once and the out-degrees sum to `E`. More than `E` means
+    ///   the relaxation re-scans: an adjacency degraded from "the slice stored
+    ///   for this node" to "a filter over the edge set" reads `E` records per
+    ///   settled node, i.e. `1 600 × 6 240 ≈ 10 000 000`.
+    /// * **`pushed ≤ 1 + scanned`** — one push for the source and at most one per
+    ///   edge record that improved something — and **`settled + stale_pops ≤
+    ///   pushed`**, the identity that ties the three together so no counter can
+    ///   be bypassed on one path.
+    ///
+    /// **And the ceilings alone are not a gate, which is the second thing this
+    /// arm was taught the hard way.** They are all satisfied by a search doing
+    /// *less* work, and a broken frontier does less: dropping the `Reverse` so
+    /// the heap pops the **largest** key settles **79** nodes and reads **232**
+    /// edge records here, passes every ceiling — and still answers the right
+    /// route at the right cost, because on a uniform grid any monotone staircase
+    /// costs the Manhattan distance. (The old wall clock did not catch it
+    /// either; it got *faster*, 32.1 µs against 753.2.)
+    ///
+    /// So this fixture is pinned at its **floor**, which its own geometry
+    /// forces: the destination is the **unique** node at the maximum cost
+    /// `78 × 20 = 1 560` m, so a frontier that pops in non-decreasing key order
+    /// must decide all 1 599 others before it. `(settled, stale_pops, scanned,
+    /// pushed)` is exactly **`(1 600, 0, 6 238, 1 600)`** —
+    ///
+    /// * `settled = V`: forced above, both ways.
+    /// * `scanned = E − deg(to) = 6 240 − 2`: every settled node but the
+    ///   destination reads its whole adjacency, and the destination's pop
+    ///   **breaks** before its own two edges are read.
+    /// * `stale_pops = 0` and `pushed = V`: every edge costs the same 20 m, so a
+    ///   node is never reached more cheaply after it is discovered.
+    ///
+    /// The equality is deliberate and it is the arm's teeth. It also means the
+    /// day somebody adds the A\* term the header leaves a door for, this arm
+    /// goes red — which is right: the header's Dijkstra-over-A\* argument is
+    /// what it holds, and a heuristic rewrites the argument.
+    ///
+    /// **Mutation-verified**, both halves of the failing message:
+    ///
+    /// * *the adjacency changed shape* — relaxing over every node of the graph
+    ///   instead of `graph.edges_from(node)` takes `scanned` from 6 238 to
+    ///   **2 558 400**, failing the `E` ceiling by 410×, while the route, its
+    ///   node count and its cost stay correct;
+    /// * *the frontier changed shape* — the max-heap above fails the floor at
+    ///   `(79, 0, 232, 155)` against `(1 600, 0, 6 238, 1 600)`, and nothing
+    ///   else in this file fails with it.
+    ///
+    /// What a count cannot see is a constant-factor change — `Ordered` comparing
+    /// through a `String`, an `edges_from` that allocates — and this arm says so
+    /// rather than implying a clock covered it, because the red proves it did
+    /// not. `edges_from`'s signature carries the second of those: it hands back
+    /// a `&[NavEdge]` borrowed from `&self`, which an implementation that
+    /// materialised a list per call could not do.
     #[test]
-    fn a_town_sized_grid_is_searched_in_microseconds() {
+    fn a_town_sized_grid_is_searched_within_dijkstras_own_bounds() {
         const SIDE: u64 = 40;
         let mut g = NavGraph::new();
         for r in 0..SIDE {
@@ -417,47 +554,93 @@ mod tests {
                 }
             }
         }
-        assert_eq!(g.len() as u64, SIDE * SIDE);
-        assert_eq!(g.edge_count() as u64, 4 * SIDE * (SIDE - 1));
+        let v = g.len();
+        let e = g.edge_count();
+        assert_eq!(v as u64, SIDE * SIDE);
+        assert_eq!(e as u64, 4 * SIDE * (SIDE - 1));
 
         let (from, to) = (0u64, SIDE * SIDE - 1);
-        // MIN of five rounds of twenty searches, the shape every other clock in
-        // this tree is taken with.
-        let mut best = f64::INFINITY;
-        let mut nodes = 0usize;
-        let mut cost = 0.0;
-        for _ in 0..5 {
-            let t = std::time::Instant::now();
-            for _ in 0..20 {
-                let r = route(&g, from, to)
-                    .route()
-                    .expect("a corner-to-corner route");
-                nodes = r.nodes.len();
-                cost = r.cost_m;
-            }
-            best = best.min(t.elapsed().as_secs_f64() * 1.0e6 / 20.0);
-        }
-        // The world first, then the clock: a search that answered nothing would
-        // be the fastest of all.
+        let (verdict, s) = route_counted(&g, from, to);
+        let r = verdict.route().expect("a corner-to-corner route");
+
+        // The world first: a search that answered nothing would settle the
+        // fewest nodes of all.
         assert_eq!(
-            nodes as u64,
+            r.nodes.len() as u64,
             2 * SIDE - 1,
             "the route is not a monotone staircase"
         );
+        let manhattan_m = 2.0 * (SIDE - 1) as f64 * 20.0;
         assert!(
-            (cost - 2.0 * (SIDE - 1) as f64 * 20.0).abs() < 1.0e-9,
-            "the route costs {cost} m and the grid's Manhattan distance is {} m",
-            2.0 * (SIDE - 1) as f64 * 20.0
+            (r.cost_m - manhattan_m).abs() < 1.0e-9,
+            "the route costs {} m and the grid's Manhattan distance is {manhattan_m} m",
+            r.cost_m
         );
+
+        // THE BOUNDS. Dijkstra's own, as arithmetic over this fixture — see the
+        // doc comment for what each one falsifies.
+        assert!(
+            s.settled <= v,
+            "the search settled {} nodes over a {v}-node grid; Dijkstra decides a node once, so more than V means a node was decided twice and the frontier is not a min-priority queue",
+            s.settled
+        );
+        assert!(
+            s.scanned <= e,
+            "the search read {} edge records over a graph with {e} of them (4 x {SIDE} x {} directed halves); a settled node's adjacency is read once and the out-degrees sum to E, so more than E means the relaxation is re-scanning the edge set",
+            s.scanned,
+            SIDE - 1
+        );
+        assert!(
+            s.pushed <= 1 + s.scanned,
+            "the frontier took {} pushes against {} edge records read; one push for the source plus at most one per improving record is {}",
+            s.pushed,
+            s.scanned,
+            1 + s.scanned
+        );
+        assert!(
+            s.settled + s.stale_pops <= s.pushed,
+            "the frontier yielded {} pops ({} settled + {} stale) having been given {} entries",
+            s.settled + s.stale_pops,
+            s.settled,
+            s.stale_pops,
+            s.pushed
+        );
+
+        // THE FLOOR, which is the half with teeth — the ceilings above are all
+        // satisfied by a search that does LESS work and answers this fixture
+        // correctly anyway (measured: a max-heap frontier settles 79). This grid
+        // forces every one of the four, so they are pinned rather than bounded.
+        let deg_to = g.edges_from(to).len();
+        assert_eq!(
+            (s.settled, s.stale_pops, s.scanned, s.pushed),
+            (v, 0, e - deg_to, v),
+            "the search's shape is ({}, {}, {}, {}) and this fixture forces (settled, stale, scanned, pushed) = ({v}, 0, {}, {v}): the destination is the UNIQUE node at the maximum cost {manhattan_m} m, so a frontier popping in non-decreasing key order has to decide all {} others before it — settling fewer means the frontier is not a min-priority queue, and settling more means a node was decided twice; every settled node but the destination reads its whole adjacency, and the destination's own {deg_to} edges are never read because its pop BREAKS, so scanned is E - deg(to) = {e} - {deg_to}; and every edge costs the same 20 m, so a node is never reached more cheaply after it is discovered, which is why nothing is ever stale and pushed is V exactly",
+            s.settled,
+            s.stale_pops,
+            s.scanned,
+            s.pushed,
+            e - deg_to,
+            v - 1
+        );
+
+        // The clock, PRINTED and asserted nowhere: MIN of five rounds of twenty
+        // searches, the shape every other instrument in this tree is read with.
+        let mut best_us = f64::INFINITY;
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            for _ in 0..20 {
+                let _ = route(&g, from, to);
+            }
+            best_us = best_us.min(t.elapsed().as_secs_f64() * 1.0e6 / 20.0);
+        }
         println!(
-            "NPC1c audit / inf-nav: {} nodes / {} directed edges; corner to corner in {best:.1} us ({nodes} nodes, {cost:.0} m)",
-            g.len(),
-            g.edge_count()
-        );
-        assert!(
-            best > 0.0 && best < 1000.0,
-            "a corner-to-corner search over {} nodes took {best:.1} us; the module's own claim is microseconds, and a millisecond means the frontier or the adjacency changed shape",
-            g.len()
+            "NPC1c audit / inf-nav: {v} nodes / {e} directed edges; corner to corner settles {} (<= {v}), reads {} edge records (<= {e}), pushes {} and discards {} stale; {} route nodes, {} m; {best_us:.1} us on this machine, REPORTED not asserted",
+            s.settled,
+            s.scanned,
+            s.pushed,
+            s.stale_pops,
+            r.nodes.len(),
+            r.cost_m,
         );
     }
 }

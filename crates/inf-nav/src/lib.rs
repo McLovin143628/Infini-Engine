@@ -68,7 +68,7 @@ pub mod route;
 
 pub use graph::{NavEdge, NavGraph, NavKind, NavNode, NavNodeId};
 pub use path::{NavPath, PathProjection};
-pub use route::{route, NavRoute, NavVerdict};
+pub use route::{route, route_counted, NavRoute, NavVerdict, SearchStats};
 
 /// **The id namespace**, because [`NavGraph::absorb`] joins on id equality.
 ///
