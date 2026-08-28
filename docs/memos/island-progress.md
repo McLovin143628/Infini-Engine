@@ -14788,6 +14788,16 @@ one `wgpu::Buffer` **and** one `wgpu::BindGroup` per skinned instance, one
 prepass walks the same list. `vsm_raster` kept a second set of the same buffers
 on its own path.
 
+*(NPC1b audit: **the ellipsis is doing work.** The sentence in the file named
+**three** things — "a shared palette atlas + instanced draw **(and a GPU palette
+compute pass)** is the documented P15 optimization" — and the wave built two of
+them, elided the third out of the quotation, and rewrote the module doc in a form
+that no longer mentions it. The third is the lever for the two CPU stations this
+wave's own headline measures as a crowd's real cost: the projection's
+`skinning_matrices` (+2.95 ms, 288 × 161 fresh matrices a frame) and this pass's
+copy of them into the atlas. Restored to the module doc as a named remainder;
+finding 3.)*
+
 Three changes, in the order they depend on each other.
 
 **The palette is shared.** `SkinnedInstance::palette` and `SkinnedDraw::palette`
@@ -14912,6 +14922,13 @@ centimetre of it is a centimetre of disagreement between what a player sees and
 what they can walk into. Eight per cent of a 1.8 m adult is 14 cm of height and
 2.4 cm of radius — inside the slack a capsule already has around a humanoid mesh.
 Stated on the field, and carried.
+*(NPC1b audit: right about the build and **wrong about the pair it is measuring**.
+The drawn body and the capsule already disagree by **1.20 m**, seventeen times
+this bound and nothing to do with it: `pose::model_to_world` is gated on
+`CharacterMovement`, which a crowd agent deliberately has none of, so the P29.6
+character-space drop is zero and an NPC is drawn with its **feet at its capsule's
+centre**. Measured by `a_crowd_agent_publishes_no_character_space_drop`, which is
+a tripwire — see the audit ledger's finding 5.)*
 
 `golden_crowd_variation` (**golden 59**, additive) is eight bodies on one mesh
 sharing ONE palette `Arc` — the far tier's exact shape. It asserts the planner
@@ -14970,6 +14987,20 @@ frame cost is **+35.4 ms of p50** and the render half is a small part of it:
 | cpu render (record) | **+3.67 ms** | `graph` +1.77, `vsm raster` +1.00 — recording 1 236 page draws a frame against 328 |
 | cpu projection | **+2.95 ms** | building 1 001 `SkinnedInstance`s and their palettes |
 | gpu frame | +19.17 ms | **not comparable pass for pass — see below** |
+
+*(NPC1b audit, on the first two rows. **The solver delta is run-noisy and this
+table quotes it to two decimals beside numbers that reproduce to three**: +2.80 in
+the bracketed run this table's other columns come from, **+2.61** in the audit's
+own bracketed re-run, and the published +2.67 from the *unbracketed* run before
+either — read it as **≈2.6–2.8**. **Terrain stream +1.26 is not a crowd cost**:
+`terrain_stream::observes_terrain` picks observers by component and
+`crowd::materialize` gives every agent `RigidBody3D` + `CharacterController3D` at
+every tier, so a thousand NPCs are a thousand terrain observers — 712 of them
+`Far`, with no rapier body and no way to query a height. And **the `graph` +1.77
+closes exactly**: `depth-prepass` recording is 0.124 → **1.146 ms**, which is
+`SkinnedMeshNode::sync`, and the `gi` pass's recording is 0.162 → **0.778 ms**,
+which is a fifth place the renderer walks the skinned list — per joint. Findings
+1, 4 and 6 in the audit ledger.)*
 
 **The GPU column of that row does not mean what it looks like**, and the wave
 found that out by bracketing rather than by reasoning. Every pass in the crowd
@@ -15082,6 +15113,16 @@ controller and can re-enter the machine from a real pose rather than from rest.
    projection, against a render half that is one draw call and 0.25 ms of GPU.
    NPC1c and NPC1e inherit this with the numbers attached; NPC1a's carried item 2
    is **closed** by clause 1.
+   *(NPC1b audit — **the split NPC1c plans from, re-measured and re-ordered**:
+   animation **+3.03**, solver **+2.61** (run-noisy: 2.61 / 2.80 over two
+   bracketed runs, and the published +2.67 is from an unbracketed third), physics
+   sync **+1.10**, terrain stream **+1.16**, character move +0.27, the crowd phase
+   **0.13**, everything else +0.36. And **terrain stream is not a crowd cost**:
+   `observes_terrain` reads components, so every agent is a terrain observer at
+   every tier including the 712 `Far` ones the ladder gave no rapier body. The
+   recording half closes too — `graph` +1.67 is `depth-prepass` +1.02 (the skinned
+   pass's own `sync`) plus `gi` +0.62 (a fifth place the renderer walks the
+   skinned list, per joint) plus 0.04. Findings 1, 4 and 6.)*
 3. **The projection is 3.680 ms at N = 1 000 against `PROJECTION_BUDGET_MS`
    1.5** — worse than NPC1a's 1.136 ms because the island's rig is 161 joints and
    its hero is not the sweep's. NPC1a's carried item 13 stands unchanged and gets
@@ -15094,6 +15135,11 @@ controller and can re-enter the machine from a real pose rather than from rest.
    and is not an answer to *how many pages a moving crowd dirties*. A crowd
    shadow LOD — proxies that stop casting past a radius, or a coarser page level
    for the crowd bucket — is the next lever and is not built.
+   *(NPC1b audit: and the churn has a second, unnamed half —
+   `VsmRasterStats::deferred_pages` goes **7 465 → 15 910 over the same 478
+   rastering frames, 15.6 a frame to 33.3**. A deferred page keeps the depth it
+   already had, so the crowd is not only re-rasterizing more, it is **serving more
+   stale shadow**. Same lever, one more reason for it.)*
 5. **The exact posed bound is opt-in and the crowd is its only caller.** Making
    `SkinnedShadow::Posed` the default is a re-measurement of `phase27_gate`'s arm
    (c) and the P27.3 page-cache arms, not a constant change. Stated on
@@ -15103,6 +15149,12 @@ controller and can re-enter the machine from a real pose rather than from rest.
    thing you can walk into by up to 7 cm. Bounded deliberately against that (the
    `CROWD_BUILD_RANGE` doc); a per-agent collider is sim state and a schema
    question, and belongs with NPC1c.
+   *(NPC1b audit: **7 cm is the wrong order of magnitude for the pair it names.**
+   The drawn body and the capsule already disagree by **1.20 m** — the P29.6
+   character-space drop, which `pose::model_to_world` applies only to an entity
+   carrying `CharacterMovement`, and a crowd agent deliberately carries none. The
+   ±8 % bound is right about the build and is quoted as the whole disagreement.
+   Measured and pinned as a tripwire; finding 5.)*
 7. **`SKINNED_PALETTE_MATRICES` has no production caller that can reach it.**
    1 628 *distinct* island-class poses in one frame; the island's own crowd fills
    290 blocks. The refusal is armed and has never fired outside its arm — the
@@ -15132,3 +15184,385 @@ controller and can re-enter the machine from a real pose rather than from rest.
     and 2.82× their brackets in that row. The instrument prints the caveat; what
     it does not do is *explain* it, and a frame-pacing or clock investigation is
     a wave of its own.
+
+## Wave NPC1b — the adversarial audit (2026-08-27)
+
+Range `c4ff27ff..3e2cfde7`, nine commits, unpushed. The wave's subject was one
+sentence NPC1a handed it — *the renderer does not read the tier* — so the audit's
+first job was the two claims that sentence turns into shipped behaviour: that the
+atlas draws the same pixels through one call that N calls drew, and that the
+shared rest palette is the palette the per-agent path would have built. **Both
+hold.** Every finding below is one layer under them, and every one of them is in
+the same place: the CPU, which is where this wave's own headline says a crowd
+actually costs.
+
+**Reproduced first, before anything was touched.** The battery at `3e2cfde7`
+counted **329 blocks / 6 299 passed / 0 failed / 19 ignored** — the wave's number,
+to the arm. `INF_GOLDEN_STRICT=1` is green over **118 arms** with **59** files and
+`git status` over `tests/goldens` empty. The before/after arithmetic reproduces on
+paper as well as in the instrument, which matters because it is the wave's own
+law: the sweep's **3.91 → 0.42 MB** is `1001 × 2 × 2048 B` against
+`292 × 20 × 64 + 33 × 2048`, and the island's **31.3 → 3.33 MB** is
+`1001 × 2 × 16384` against `290 × 161 × 64 + 31 × 16384`. Both are computed the
+same way on the same content, and the 9.3× / 9.4× are real.
+
+**No HIGH, and the four things a reader would go looking for are all sound.**
+The channel packing is collision-free and armed: `pbr.z` is the *rigid* path's
+alpha cutoff and `pbr.w` its blend code, the skinned path has written both zero
+since P7.1, and the skinned vertex stage now hands the fragment
+`vec4(in.pbr.xy, 0.0, 0.0)` and `in.emissive.rgb` — so an emissive skinned hero
+cannot decode an atlas offset as emission, and a future skinned alpha test cannot
+read a joint count as a cutoff. `scene.skinned` has exactly **four** consumers in
+the renderer and none of them reads an `InstanceRaw`. The `Arc`-pointer dedup is
+sound for a reason stronger than its comment gives: the map is **local to
+`plan_skinned_batches`** and the scene is borrowed for the call, so no key can
+outlive its allocation across an origin rebase or a device-lost rebuild — this is
+not the VSM2 shape, where a key had to survive the frame. `sort_by_key` is Rust's
+stable merge sort, so the draw order is a pure function of the input on every
+host. And the moved tail rule is not merely equivalent to `pad_palette`, it is
+**identical**: padding fills the tail with `palette[live - 1]` and the shader
+reads `palette[base + min(j, count - 1)]`, which is the same matrix — so the two
+paths that now carry two different rules produce the same geometry for the R2-6
+case they are both about.
+
+### The findings
+
+**1 — MED, fixed. The atlas is filled once per INSTANCE, under a comment that
+says once per BLOCK.** The loop reads:
+
+> *"Written once per BLOCK, not once per instance: the second agent sharing an
+> `Arc` re-writes the same bytes it already holds. Cheap and idempotent…"*
+
+The second half describes what the code does and refutes the first. It is
+idempotent, and it is `O(instances × joints)` in the one loop this whole clause
+exists to make `O(blocks × joints)`: at the island's N = 1 000, **1 001 × 161 =
+161 161 matrix copies (10.3 MB of memcpy) a frame where 290 × 161 = 46 690
+(3.0 MB) are needed — 3.45×**.
+
+It sits in the station the wave's headline names. `SkinnedMeshNode::sync` runs
+from the depth prepass, and on the bracketed island row the **`depth-prepass` CPU
+recording goes 0.124 → 1.146 ms** — the largest single item inside the `+3.48 ms`
+of recording, larger than the `vsm raster` recording its carried item 4 is about,
+and the crowd adds nothing else to that stage.
+
+**What the fix bought is 0.08 ms, and that is said here rather than in its commit
+message.** The wave's run reads 1.223 ms and the audit's 1.146, which is inside
+the instrument's run-to-run spread and far under what 114 471 fewer 64-byte copies
+looks like on paper — because the redundant copies were **L1-hot**: 710 agents
+re-writing one 10.3 KB block hit cache every time. So this is a structural `O()`
+correction with an armed invariant and a comment that is now true, and it is not a
+millisecond. The wave's own law is that an unmeasured prescription can be
+backwards; a measured one that under-delivers has to say so.
+
+`fill_palette_atlas` is the fix and the skip is **exact rather than a cache**:
+`plan_skinned_batches` assigns a block's offset at the running matrix watermark,
+so the entry at or past the watermark **is** that block's first instance and
+everything below it is a repeat. Two arms, because the bytes and the count are
+two claims — `the_atlas_is_filled_once_per_block_and_matches_the_per_instance_fill`
+holds the result byte-for-byte against a spelled-out naive per-instance fill
+**and** asserts exactly `plan.blocks` writes, and
+`the_block_offsets_rise_at_first_use_and_repeat_below_the_watermark` pins the
+invariant the skip rests on (first uses tile the atlas with no hole and no
+overlap). Mutation-verified: `if false &&` in front of the skip fails the first
+arm on its write count. Not one golden moved, which is what a byte-identical fill
+has to look like.
+
+**2 — MED, fixed. `rest_palettes` was added to a store with three eviction doors
+and wired into none of them.** `EditorRenderAssets` evicts through `drop_loaded`
+(which `clear`, `set_content_root` and `refresh_index` all reach) and through
+`retain_only`. The wave's new map is in neither, which is two defects in one
+omission:
+
+* **stale.** `refresh_index`'s own doc says it drops what it holds because *"a
+  payload rewritten under the same GUID would otherwise be served from the old
+  mapping forever"*. A rest palette is `skinning_matrices` over a **skeleton**
+  that line drops — so after a re-import the per-agent path reads the new rig and
+  the crowd's shared path the old one. That is precisely the disagreement
+  `the_shared_palette_is_the_one_the_per_agent_path_would_have_built` asserts
+  cannot happen, arriving from the one direction that arm cannot see;
+* **a leak.** `retain_only` is, in its own words, *"the only place that knows
+  which assets are live"*, so a map missing from it is a map a session can only
+  grow — P21's *"a pin with no release is a leak with a deadline"*.
+
+`the_shared_rest_palette_is_dropped_with_the_skeleton_it_was_derived_from` holds
+both doors, holds that the map is **still a cache** in between (so a "fix" that
+stopped caching fails it too), and holds that the key is the **pair** — an entry
+whose *mesh* left the document goes as well. Mutation-verified separately on each
+door. The player-side `SkinnedRegistry` has no eviction door at all (it is built
+once per pack), so nothing mirrors here.
+
+**3 — MED, fixed. The ellipsis was doing work: P15 named three things and the
+wave built two.** The clause is titled *"instanced skinning, which is the P15
+optimization"* and quotes the file's own sentence as *"a shared palette atlas +
+instanced draw **…** is the documented P15 optimization"*. What the ellipsis
+replaces is **"(and a GPU palette compute pass)"**, and the wave's rewritten
+module doc no longer mentions it at all — a forward reference retired by a wave
+that met two thirds of it, which is this wave's own *"a forward reference outlives
+the thing it points at"* law pointed the other way.
+
+It matters because the missing third is the lever for the two CPU stations the
+wave's own headline measures as a crowd's real cost: the projection builds a
+fresh `Vec<Mat4>` per posed character per frame — 288 × 161 matrices and ~2.9 MB
+of fresh allocation, measured at **+2.95 ms** against a 1.5 ms
+`PROJECTION_BUDGET_MS` — and this pass then copies them into the atlas. A compute
+pass composing `global · inverse_bind` on the GPU deletes both. Restored to the
+module doc as a named remainder, with the reason it is not a two-hundred-line
+change: it needs the pose to reach the renderer as **data** rather than as a
+finished palette, which is a projector contract and not a pass.
+
+**And it is the answer to the projection question.** The `+2.95 ms` is **not**
+the I8a scatter-memo shape — nothing here is a rebuild of something that did not
+change. A posed agent's palette really is different every fixed step, and at
+16.8 fps against a 16.67 ms fixed step there are three or four steps to a frame,
+so no memo can serve it. The levers are fewer posed agents (anim LOD on joint
+count) or the compute pass above; neither is a fix an audit lands.
+
+**4 — MED, measured and routed, not fixed. The `+1.26 ms` of terrain streaming is
+not a crowd cost — it is the tier unread, one system further over than NPC1a
+looked.** `terrain_stream::observes_terrain` picks its subjects by **component**:
+anything carrying `RigidBody3D` or `CharacterController3D` observes, and
+`crowd::materialize` gives every agent **both, at every materialized tier**. So a
+thousand NPCs are a thousand terrain observers where the bracket has one —
+including the **712 `Far` agents `CrowdTier::has_body` says have no rapier body at
+all**, which carry no `CharacterMovement` and no `ActorClass` and whose position
+is a pure function of the clock, so they cannot query a height by any door the
+engine has. Each one contributes a `SIM_MARGIN_TILES` neighbourhood of level-0
+pages to a want set that is **never clamped**, on every fixed step.
+
+That is NPC1a's own deform finding — *"a thing with no rapier body presses no
+ground"* — met in the one pass NPC1a did not reach, and it is this module's own
+stated hazard: *"residency must scale with the number of things that can look at
+the ground, not with how much scenery the artist placed on it."*
+
+Deliberately **not fixed**, and the citation is that module's own doc: *"treat
+these two knobs as content, not configuration. Widening `SIM_MARGIN_TILES` or
+`observes_terrain` changes which pages are resident… replay traces and recorded
+goldens must be re-blessed exactly as they would be for a physics-tuning bump."*
+Narrowing it is the same change in the other direction, so it is a ruling with a
+PIE-==-shipping re-measurement behind it — a wave's work, not an audit's.
+`every_materialized_crowd_agent_observes_the_terrain_at_every_tier` is the
+tripwire, and it fails the day NPC1c decides.
+
+**5 — MED, measured, ledger corrected. Clause 3's honest sentence measures the
+wrong disagreement, by a factor of seventeen.** The ledger prices the build
+multiplier against the capsule it does not move — *"±8 % of a 1.8 m adult is 14 cm
+of height and 2.4 cm of radius — inside the slack a capsule already has around a
+humanoid mesh"* — and carries it as item 6, *"a tall NPC's shoulders are outside
+the thing you can walk into by up to 7 cm."*
+
+The same pair already disagrees by **1.20 m**. P29.6's ruling is that a rig's
+origin is its **feet** and a character's entity transform is its capsule
+**centre**, and both projectors lift the pose through the one door that knows the
+difference — `inf_ecs::pose::model_to_world`, which is gated on
+`CharacterMovement`. A crowd agent deliberately has none (NPC1a's carried item 5:
+two authorities writing one transform), so the drop is **zero** and an NPC is
+drawn with its feet where its capsule's middle is: `half_height + radius` =
+0.9 + 0.3 on the humanoid archetype.
+
+Measured, not inferred — `a_crowd_agent_publishes_no_character_space_drop` reads
+`model_to_world`'s translation against the `GlobalTransform` on a materialized
+`Full` agent and prints the gap — and it is a **tripwire**: it asserts the drop is
+zero, so it fails the day NPC1c gives a near agent a controller, which is the day
+this sentence has to be rewritten. The ±8 % bound is not wrong about itself; it is
+a bound argued in centimetres inside a metre of disagreement nobody had measured.
+
+**6 — MED, measured and carried. There is a FIFTH place the renderer walks the
+skinned list, and it walks it per JOINT.** The wave says the tier arrives "in four
+places". `passes/gi.rs` is the fifth: the GI voxelizer stages one oriented box
+**per joint per skinned instance** every frame GI runs, then clips the result to
+the volume around the eye. At the island's N = 1 000 that is **1 001 × 161 ≈
+161 000 staged boxes a frame**, nearly all of them thrown away — and it is visible
+in the wave's own bracketed row: the `gi` pass's CPU recording goes **0.162 →
+0.784 ms (+0.62)**, about a sixth of the `+3.67 ms` the ledger attributes to the
+crowd, for a pass a crowd adds one draw to.
+
+Not fixed: making it read the tier changes what bounces light, and making it cheap
+needs a conservative per-instance pre-reject the staging path has no bound for
+today. Routed to NPC1e with the number, beside the impostor question it belongs
+with.
+
+### The bracket, reproduced — and every structural number is identical
+
+Same RTX 4070 Ti, same Windows/Vulkan, same release build, same 1080p flight,
+same MIN of 3 × 120 frames, re-run at the audit's head:
+
+| | wave `3e2cfde7` | **audit** |
+|---|---|---|
+| control **before** p50 | 23.805 | **24.290** |
+| **+1 000 NPCs** p50 | 59.372 | **58.814** |
+| control **after** p50 | 23.998 | **24.007** |
+| the two brackets agree to | 0.193 ms | **0.283 ms** |
+| pipelined ceiling, crowd row | 29.369 (34.0 fps) | **29.248 (34.2 fps)** |
+| tiers | 31 F / 257 N / 712 Fa / 0 D | **identical** |
+| skinned instances / draw calls / palette blocks / atlas | 1 001 / 1 / 290 / 2.85 MB | **identical** |
+| proxy casters / skinned groups / of ceiling | 970 / 31 / 32 of 1 024 | **identical** |
+| casters dropped / groups refused | 0 / 0 | **identical** |
+| pages a rastering frame | 56.3 → 168.6 | **identical** |
+| **deferred** pages a rastering frame | 15.6 → 33.3 | **identical** |
+| `skinned-mesh` GPU, crowd row | 0.560 | **0.560** |
+
+**The headline holds.** A thousand island-class NPCs take the island from 41.2 fps
+p50 to **17.0**, and from a 72.0 fps pipelined ceiling to **34.2**. It is not
+60 fps and the wave says so.
+
+**The sim split, re-measured and re-ordered — this is what NPC1c plans from.**
+Against the adjacent before-bracket, `+8.68 ms` of fixed step:
+
+| phase | control | crowd | delta | what it is |
+|---|---|---|---|---|
+| animation | 0.041 | 3.072 | **+3.03** | 288 posed agents at 161 joints |
+| solver | 2.233 | 4.844 | **+2.61** | 288 *moving kinematic* capsules among 17 823 bodies — **1.6 % more bodies for 117 % more solver** |
+| physics3d sync | 2.913 | 4.015 | **+1.10** | 1 000 more transforms to walk |
+| terrain stream | ≤ 0.02 | 1.174 | **+1.16** | **not a crowd cost — finding 4** |
+| character move | 0.130 | 0.398 | +0.27 | |
+| **crowd** | — | **0.127** | **+0.13** | the phase the wave minted a budget for |
+| everything else | | | +0.36 | propagate, deformation, cell stream, biome scatter, gameplay, write-back, camera |
+
+The solver row is the one to read twice: a crowd agent is **kinematic and moves
+every step**, so 288 of them among the city's 17 823 bodies more than double the
+solver. That is a bigger lever than the crowd's own phase by twenty times and
+nothing in the arc has looked at it.
+
+**And the recording half closes exactly**, which the wave's `graph +1.77` did not:
+
+| | control | crowd | delta |
+|---|---|---|---|
+| `graph` | 0.913 | 2.587 | **+1.67** |
+| — of which `depth-prepass` recording | 0.124 | 1.146 | **+1.02** — `SkinnedMeshNode::sync` |
+| — of which `gi` recording | 0.162 | 0.778 | **+0.62** — the fifth consumer, per joint |
+| — everything else in the graph | | | +0.04 |
+| `vsm raster` | 0.643 | 1.677 | **+1.03** |
+| `submit` / `view uniforms` / `vsm sync` | | | +0.49 / +0.15 / +0.13 |
+| **cpu render (record)** | 6.551 | 10.034 | **+3.48** |
+| **cpu projection** | 0.768 | 3.629 | **+2.86** |
+
+**On what finding 1's fix actually bought, measured rather than argued.** The
+`depth-prepass` recording reads **1.146 ms** here against the wave's 1.223 —
+**≈0.08 ms**, which is inside this instrument's run-to-run spread and far under
+what 114 471 fewer 64-byte copies looks like on paper. The reason is that the
+redundant copies were **L1-hot**: 710 agents re-writing one 10.3 KB block hit
+cache every time. So the fix is a structural `O()` correction with an armed
+invariant and a comment that is now true, and it is **not** a millisecond. Said
+here rather than in the commit message, because the wave's own law is that an
+unmeasured prescription can be backwards.
+
+**The GPU caveat reproduces and is real.** `scatter` reads **2.33×** its bracket
+in the crowd row and `terrain` **2.81×**, and a crowd adds nothing to either. The
+frame is CPU-bound (59.2 ms of CPU against 29.2 of GPU), the instrument prints the
+caveat itself, and the after-bracket returns to baseline in 0.28 ms — so it is not
+a thermal ramp, and a pass-for-pass GPU delta in that row is not a crowd cost.
+
+### The shipped-defaults verdict
+
+The audit was asked what a level actually gets, and the answer has two halves.
+
+**The crowd half ships dormant.** `set_crowd_population` has exactly three
+callers and all three are tests (`crowd_sweep`, `island_gate`, `fps_instrument`);
+`SimSession` does not have the method at all (NPC1a's carried item 12); no
+`.inf_lvl`, no recipe and no sample installs a population. So on every committed
+level nothing carries a `CrowdAgent`, `crowd_shadow` answers `BindSphere` for
+every skinned instance in the tree, and **`SkinnedShadow::Proxy`, `Posed`,
+`resolve_skinned_shared` and `agent_look` have no production caller** — the
+`set_debris_budget` / `set_crowd_radii` shape, for the fourth time. The island's
+"32 groups / 0 dropped" row is produced by an instrument that calls
+`set_crowd_population` by hand, which the counts row does say ("the crowd is
+spawned by tests and by the island instrument, never by a level") and the ROADMAP
+block does not.
+
+**The atlas half ships live, for everything.** `plan_skinned_batches` runs on
+every frame with a skinned instance, so every character, garment and hair ribbon
+in every committed level now draws in one call per mesh out of one buffer, and
+`identity_palette()` collapses a level's cloth and hair to a single atlas matrix.
+That is the part of this wave a player of the shipped engine gets today, and it
+is the part the goldens cover.
+
+**And the visible consequence of the default, when a crowd is installed:** the
+tier→caster map is `Full → Posed` (a real skinned caster on the exact posed
+bound), everything else → `Proxy`. `Full` is ≤ 32 m, so a **`Near`-tier agent —
+32 to 96 m, fully posed, fully animated, capsule and all — casts a static
+cylinder**. That is stated in the module doc ("an NPC's arms and legs do not move
+its shadow") and it is the visible cost of the wall-4 fix; it is not a defect, and
+it is the thing an art pass will notice first.
+
+### Carried, by name (the audit's, after the wave's twelve)
+
+13. **The crowd doubles DEFERRED shadow pages, and a deferred page is a stale
+    shadow.** The wave's carried item 4 prices the proxy's page churn (168.6 pages
+    a frame against 56.3, 1 236 draws against 328) and names the re-cast column;
+    what it does not name is that `VsmRasterStats::deferred_pages` goes **7 465 →
+    15 910 over the same 478 rastering frames — 15.6 a frame to 33.3**. A deferred
+    page keeps the depth it already had, so the crowd is not only re-rasterizing
+    more, it is serving more *stale* shadow than the island alone does. Same lever
+    (a crowd shadow LOD), one more reason for it.
+14. **`observes_terrain`'s doc is stale about the reason it admits a rigid
+    body.** It says `RigidBody3D` is *"future-proofing for terrain↔physics
+    coupling, which does not exist yet: no terrain heightfield collider is fed to
+    the physics bridges today"* — P22.3 shipped exactly that, and called it *"the
+    prerequisite nobody had noticed"*. Pre-existing and unrelated to the crowd, and
+    it matters because it is the sentence a reader would use to decide finding 4.
+15. **The ledger's `solver +2.67` is from a different run than the table around
+    it**, and so is its `scatter 5.152`. The wave's own law in the same section is
+    *"a control has to be adjacent — and bracketed"*; the attribution table's
+    animation, physics-sync, terrain-stream and crowd-phase deltas come from the
+    bracketed run and the solver delta comes from the unbracketed one before it.
+    The published value is not *wrong* — the delta is run-noisy, **+2.80** in the
+    wave's bracketed run and **+2.61** in the audit's — which is the actual
+    finding: it is a column quoted to two decimals beside numbers that reproduce
+    to three, and the two decimals are not there. Read it as **≈2.6–2.8**;
+    corrected in the clause-4 table and in carried item 2.
+16. **The ROADMAP block quotes `0.249 ms of skinned GPU` without the range the
+    memo gives it.** The memo says *"0.249 ms in the least-inflated of the three
+    runs taken (0.56 in the two dearest — see the caveat below)"*, and the
+    bracketed run every other number in that block comes from reads **0.560**. The
+    caveat is real and reproduces (`scatter` 2.35× and `terrain` 2.83× their
+    brackets in a row a crowd adds nothing to), and the instrument prints it — but
+    a single number quoted without it is the best of three.
+17. **Nine `.rs` / `.md` files carry CRLF in the working copy** against
+    `.gitattributes`' `text eol=lf`, which this repository has paid for four times
+    (source-text gates `read_to_string` these files and compare them **to each
+    other**, so a mixed checkout makes a mirror gate compare two encodings).
+    Pre-existing and invisible to `git status`, because git normalizes on the way
+    in — which is exactly why it survives. They are, by crate: `inf-render`'s
+    `vt_stream.rs` and five `tests/` files, `inf-vt`'s two, and
+    `docs/memos/aaa-readiness-certification.md`. The one this audit touched
+    (`terrain_stream.rs`) is LF again.
+
+### The laws this audit paid for
+
+* **A comment that states a rule and then describes its exception is the
+  exception.** *"Written once per BLOCK, not once per instance: the second agent
+  sharing an `Arc` re-writes the same bytes it already holds"* is a correct first
+  clause followed by its own refutation, and it survived because the first clause
+  is what a reader takes away.
+* **A new cache is a new thing to evict.** The store `rest_palettes` joined
+  already had three eviction doors and a doc explaining why each exists. The map
+  went into none of them — and the arm that proves the cache is *correct* is
+  exactly the arm that cannot see it going stale.
+* **An ellipsis in a quotation is a claim.** *"a shared palette atlas + instanced
+  draw … is the documented P15 optimization"* elides the third of three things,
+  under a clause heading that says the optimization is now built.
+* **An honest sentence is only honest against everything it is measuring.** The
+  ±8 % build bound is right about the build and is quoted as the disagreement
+  between what a player sees and what they can walk into — which is 1.20 m, for a
+  reason the same paragraph does not mention.
+* **"The renderer reads the tier in four places" is a claim about a list, and a
+  list is falsified by grepping for its subject.** `scene.skinned` has five
+  consumers; the fifth walks it per joint.
+* **A wave can break a law in the paragraph that mints it.** *"A control has to be
+  adjacent — and bracketed"* is one of NPC1b's five laws, and the attribution table
+  under it mixes a bracketed run with the one it replaced.
+
+### Counts
+
+| | wave `3e2cfde7` | **audit** |
+|---|---|---|
+| battery | 329 blocks / 6 299 passed / 0 failed / 19 ignored | **329 / 6 304 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, **+5 arms, no new block**: 2 in `inf-render`'s lib (`the_atlas_is_filled_once_per_block_and_matches_the_per_instance_fill`, `the_block_offsets_rise_at_first_use_and_repeat_below_the_watermark`), 1 in `inf-editor-core`'s (`the_shared_rest_palette_is_dropped_with_the_skeleton_it_was_derived_from`), 1 in `inf-ecs`'s `crowd` (`a_crowd_agent_publishes_no_character_space_drop`) and 1 in `inf-player`'s `terrain_stream` — that module's **first** test, in the existing lib binary |
+| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**, `git status` over `tests/goldens` empty afterwards. The once-per-block fill is byte-identical to the per-instance one by arm *and* by picture |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — 404 `^warning` lines minus 30 per-crate summaries, after `cargo clean --doc` (8 869 files, 217.3 MiB). **The audit adds zero.** Headroom **76** |
+| `clippy --workspace --all-targets -D warnings` | 0 | **0** (run **LAST**, per the rmeta law) |
+| `cargo fmt --all --check` | clean | **clean** |
+| schema versions | scene v26 / payload v11 / `.inf_sm` v3 / recipe v2 | **all four unmoved** — nothing here reaches a serialized format |
+| step phases / trace sections / libm-ban subjects | 25 / 9 / 37 | **25 / 9 / 37** |
+| §8 budgets | `NPC_STEP_BUDGET_MS` 1.0 | **unmoved** — the crowd phase re-measured at **0.127 ms** on the island, a tenth of it |
+| committed levels (`EXPECTED_LEVELS`) / committed content / `Cargo.lock` / frontend | 23 / unmoved / unmoved / untouched | **unchanged** |
+| new crates or external dependencies | none | **none** |
