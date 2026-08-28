@@ -413,6 +413,14 @@ struct Measured {
     /// best round, in the shape the isolated block prints, so the two clocks can
     /// be compared where they differ rather than only in total.
     step_profile: inf_player::step_profile::StepProfile,
+    /// **The GI voxelizer's own counters** (island wave NPC1e), from the last
+    /// frame of the measured run.
+    ///
+    /// Read for one field: `skinned_rejected`, the engagement counter behind the
+    /// per-instance pre-reject that stopped the fifth skinned consumer walking a
+    /// crowd per joint. A pass whose recording got cheaper and a pass with
+    /// nothing to reject look identical in a millisecond.
+    gi: inf_render::GiAudit,
 }
 
 impl Measured {
@@ -601,6 +609,7 @@ fn measure(
         terrain_tiles: scene.terrains.iter().map(|t| t.tiles.len()).sum(),
         vt_textures,
         vsm: renderer.vsm_raster_stats(),
+        gi: renderer.gi_audit(),
         record: best_record,
         step_phases_ms: best_phases,
         step_profile: best_step,
@@ -1682,6 +1691,88 @@ fn island_population(
     out
 }
 
+/// **The level's player-controlled hero, and where it stands** (island wave
+/// NPC1e) — a MIRROR of `island_gate`'s `hero_entity` / `set_hero` pair, and
+/// deliberately so: the certification row stages the same world the day gate
+/// stages, and two instruments that put a hero in a town by different doors are
+/// two instruments measuring two towns.
+fn hero_at(sim: &inf_player::runtime_sim::RuntimeSim) -> Option<DVec3> {
+    let w = sim.world().world();
+    for e in w.iter_entities() {
+        if e.get::<inf_ecs::components::CharacterMovement>()
+            .is_some_and(|m| m.player_controlled)
+        {
+            return e
+                .get::<inf_ecs::components::Transform>()
+                .map(|t| t.translation.to_dvec3());
+        }
+    }
+    None
+}
+
+/// Move the hero — the streaming anchor every band in the engine is derived
+/// from — to `p`.
+fn set_hero(sim: &mut inf_player::runtime_sim::RuntimeSim, p: DVec3) {
+    let world = sim.world_mut();
+    let mut found = None;
+    {
+        let w = world.world();
+        for e in w.iter_entities() {
+            if e.get::<inf_ecs::components::CharacterMovement>()
+                .is_some_and(|m| m.player_controlled)
+            {
+                found = Some(e.id());
+            }
+        }
+    }
+    let Some(e) = found else { return };
+    if let Some(mut t) = world
+        .world_mut()
+        .get_mut::<inf_ecs::components::Transform>(e)
+    {
+        t.translation = inf_ecs::math::Vec3d::new(p.x, p.y, p.z);
+    }
+}
+
+/// **The centre of the town the flythrough is over** — where a player stands to
+/// be *in* Harbour City rather than beside it.
+///
+/// The settlement set comes through the same
+/// `inf_editor_core::settlement::settlements` door `island_gate`'s
+/// `walk_target_settlement` uses; the choice is **nearest to `from`**, with the
+/// name as the tie-break.
+///
+/// # Nearest, and not largest, and the difference is 3.8 km
+///
+/// The obvious pick is the biggest town, and on this island that is **Eastgate,
+/// 52 blocks, 3 812 m from the flight's start**. Standing the hero there would
+/// certify a *different world from the one the camera draws*: residency in this
+/// engine is derived from the streaming source and never from a camera (the
+/// law), so the cells around the hero would be the resident ones and the flight
+/// would be over a world that had streamed out. A certification row needs its
+/// town in **both** — under the anchor and in the frame — and only the town the
+/// flight passes over is in both.
+fn island_town_centre(design: &inf_island::IslandDesign, from: DVec3) -> DVec3 {
+    let d = |s: &inf_editor_core::settlement::Settlement| {
+        (s.centre.x - from.x).hypot(s.centre.y - from.z)
+    };
+    let mut plans = inf_editor_core::settlement::settlements(design);
+    plans.sort_by(|a, b| d(a).total_cmp(&d(b)).then(a.name.cmp(&b.name)));
+    let best = plans
+        .into_iter()
+        .next()
+        .expect("the island design has a settlement");
+    println!(
+        "island town centre: {} — {} blocks at ({:.0}, {:.0}), {:.0} m from the flight's start",
+        best.name,
+        best.blocks.len(),
+        best.centre.x,
+        best.centre.y,
+        d(&best),
+    );
+    DVec3::new(best.centre.x, 0.0, best.centre.y)
+}
+
 /// Where the island's recipe lives.
 fn island_recipe() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../samples/island/island.toml")
@@ -1797,6 +1888,17 @@ fn the_island_at_shipping_resolution() {
     let s = design.start(0.0);
     let from = DVec3::new(s.x, s.y, s.z);
     let path = move |step: u64, w: u32, h: u32| island_fly(step, w, h, from);
+    // Wave NPC1e's certification staging, read once: where the hero starts (so
+    // the arc's own rows can be put back exactly there) and where its town is.
+    let town_centre = island_town_centre(&design, from);
+    let hero_home = hero_at(&fx.sim).expect("the island has a player-controlled hero");
+    println!(
+        "island hero start: ({:.0}, {:.0}, {:.0}); the town centre is {:.0} m away",
+        hero_home.x,
+        hero_home.y,
+        hero_home.z,
+        (DVec3::new(town_centre.x, hero_home.y, town_centre.z) - hero_home).length()
+    );
 
     // **THE REAL ISLAND'S OWN FIXED STEP** (island wave I8a). The hero starts in
     // Harbour City, so the settlement blocks around it activate and the collider
@@ -1955,6 +2057,34 @@ fn the_island_at_shipping_resolution() {
         ("LIT+SSR", lit_ssr),
         ("LIT+VIS", lit_vis),
         ("LIT-COARSE-CLIPMAP", lit_coarse),
+        // ── **WAVE NPC1e'S CERTIFICATION PAIR** ───────────────────────────
+        //
+        // **The island a player boots, standing in its town, at the hour that
+        // town is on the street.** Every other row in this list has the hero at
+        // the level's authored player start and the clock at 02:18 local — a
+        // true configuration, and not the one to certify at, because the start
+        // is outside the blocks (measured: every one of the level's own
+        // residents is `Far` from it) and at two in the morning the town is
+        // correctly asleep.
+        //
+        // So this row does exactly two things, and neither of them installs
+        // anything: it winds the level's own `TimeOfDay` to **08:30 local**,
+        // leaving the island's authored rate alone, and it stands the hero at
+        // its largest settlement's centre, which is `island_gate`'s own staging
+        // for the day gate. The population is the one
+        // `inf_ecs::society::sync_society` derives from the level's own
+        // buildings; the clock is the one the recipe ships.
+        //
+        // **It comes FIRST of the four**, before the arc's own crowd rows, and
+        // that ordering is forced rather than chosen: `set_crowd_population`
+        // marks the population hand-installed and the society stops deriving —
+        // a one-way door for the session — so the derived row cannot follow a
+        // hand-installed one.
+        ("LIT+VIS (rush hour, the island's own society)", lit_vis),
+        // …and its control, taken immediately after at the same clock and with
+        // the hero in the same place, so the town's cost is a difference between
+        // two adjacent rows that differ in one thing.
+        ("LIT+VIS (rush hour, town cleared)", lit_vis),
         // **THE CROWD'S CONTROL**, and it is adjacent for a reason. The rows
         // above are taken in order over a world that keeps streaming, so the
         // `LIT+VIS` row at the top of the list has seen less of the island than
@@ -1963,6 +2093,10 @@ fn the_island_at_shipping_resolution() {
         // would attribute the streaming to the crowd. This row is `LIT+VIS`
         // again, immediately before the population goes in, so the two rows
         // differ in one thing.
+        //
+        // **The hero goes back to its authored start here**, so the three arc
+        // rows share one staging and the crowd the row installs stands where
+        // every NPC1a/b/c/d table put it.
         ("LIT+VIS (crowd control)", lit_vis),
         // **WAVE NPC1b'S HEADLINE ROW.** The same `LIT+VIS` settings, the same
         // flight, the same island — with a thousand NPCs standing in Harbour
@@ -1980,7 +2114,182 @@ fn the_island_at_shipping_resolution() {
         // of its two brackets rather than against whichever bracket flatters it.
         ("LIT+VIS (crowd cleared)", lit_vis),
     ] {
-        if label == "LIT+VIS (crowd cleared)" {
+        // **THE CERTIFICATION STAGING** (island wave NPC1e): wind the level's own
+        // clock to the morning commute, stand the hero in the town, and let the
+        // town get on the street. The rate is left at the island's authored 18,
+        // so the row measures a town that is *walking* rather than one frozen
+        // mid-stride.
+        if label == "LIT+VIS (rush hour, the island's own society)" {
+            {
+                let w = fx.sim.world_mut().world_mut();
+                let mut q = w.query::<&mut inf_ecs::components::TimeOfDay>();
+                let mut wound = 0usize;
+                for mut tod in q.iter_mut(w) {
+                    tod.seconds = (8.5 * 3600.0 - tod.longitude_deg * 240.0).rem_euclid(86_400.0);
+                    wound += 1;
+                }
+                assert!(wound > 0, "the island carries no clock to wind");
+            }
+            // **AND THE HERO STANDS AMONG ITS PEOPLE, which is not the same
+            // place as the town's centre and the difference is the whole
+            // staging.**
+            //
+            // The obvious placement is the settlement's own centre, which is
+            // `island_gate`'s staging for the day gate — and on this island the
+            // level's authored player start **already is** Harbour City's
+            // centre, 0 m away. Measured from there, every one of the level's
+            // own residents is `Far`: **0 `Full`, 0 `Near`, 998 `Far`, 0
+            // steering intents**. A settlement's centre is its crossroads, and
+            // its people live in the blocks around it.
+            //
+            // So the hero is placed at the **thickest part of the rush hour**:
+            // after one warm-up that lets the society derive and the bodies
+            // appear, the agent with the most neighbours inside the ladder's own
+            // `Full` radius, and the hero stands where it stands. It is derived
+            // from the level rather than chosen, it is what "standing in the
+            // crowd" means in the units the ladder is written in, and it is the
+            // *worst* plausible station rather than an average one — which is
+            // the right thing for a certification to price. NPC1d's own law, met
+            // from the other side: *a gate staged where a defect cannot appear
+            // is a gate that certifies the defect.*
+            //
+            // **On the ground it stands on, not at y = 0**: a hero buried in a
+            // height field is an anchor with metres of Y between it and every
+            // resident, which the ladder measures in three dimensions and would
+            // read as `Far`.
+            for _ in 0..STEP_WARMUP {
+                fx.sim
+                    .step_once(inf_player::runtime_sim::RuntimeInput::default());
+            }
+            let (among, thickest) = {
+                let w = fx.sim.world().world();
+                let mut at: Vec<DVec3> = Vec::new();
+                for e in w.iter_entities() {
+                    if e.get::<inf_ecs::crowd::CrowdAgent>().is_none() {
+                        continue;
+                    }
+                    if let Some(t) = e.get::<inf_ecs::components::Transform>() {
+                        at.push(t.translation.to_dvec3());
+                    }
+                }
+                assert!(
+                    !at.is_empty(),
+                    "the town materialized nobody to stand among"
+                );
+                let r = inf_ecs::crowd::DEFAULT_CROWD_RADII.0;
+                let mut best = (0usize, at[0]);
+                for p in &at {
+                    let n = at.iter().filter(|q| (**q - *p).length() <= r).count();
+                    if n > best.0 {
+                        best = (n, *p);
+                    }
+                }
+                (best.1, best.0)
+            };
+            let y = fx.sim.terrain_height_at(among.x, among.z);
+            set_hero(&mut fx.sim, DVec3::new(among.x, y + 1.5, among.z));
+            fx.sim.world_mut().mark_dirty();
+            for _ in 0..STEP_WARMUP {
+                fx.sim
+                    .step_once(inf_player::runtime_sim::RuntimeInput::default());
+            }
+            println!(
+                "  the town's centre is ({:.0}, {:.0}); the thickest part of its \
+                 rush hour is ({:.0}, {:.0}), {:.0} m away, with {thickest} \
+                 residents inside a {:.0} m ring",
+                town_centre.x,
+                town_centre.z,
+                among.x,
+                among.z,
+                (DVec3::new(among.x, town_centre.y, among.z) - town_centre).length(),
+                inf_ecs::crowd::DEFAULT_CROWD_RADII.0,
+            );
+            let soc = fx.sim.society_stats();
+            let st = fx.sim.crowd_stats();
+            // **WHERE ITS PEOPLE ARE, relative to where the player is standing**
+            // (island wave NPC1e). The tier ladder is a distance, so a tier
+            // census with no distances beside it cannot tell "the town is not
+            // around the hero" from "the ladder is broken" — and the first cut
+            // of this row read `0 full / 0 near / 998 far` and could say which
+            // only by measuring. Nearest, tenth-nearest and median, in metres.
+            let mut d: Vec<f64> = {
+                let here = hero_at(&fx.sim).unwrap_or(DVec3::ZERO);
+                let w = fx.sim.world().world();
+                let mut v = Vec::new();
+                for e in w.iter_entities() {
+                    if e.get::<inf_ecs::crowd::CrowdAgent>().is_none() {
+                        continue;
+                    }
+                    if let Some(t) = e.get::<inf_ecs::components::Transform>() {
+                        v.push((t.translation.to_dvec3() - here).length());
+                    }
+                }
+                v
+            };
+            d.sort_by(f64::total_cmp);
+            println!(
+                "  the hero stands at ({:.0}, {:.1}, {:.0}); its {} materialized \
+                 neighbours are {:.0} / {:.0} / {:.0} m away (nearest, tenth, median)",
+                hero_at(&fx.sim).unwrap_or(DVec3::ZERO).x,
+                hero_at(&fx.sim).unwrap_or(DVec3::ZERO).y,
+                hero_at(&fx.sim).unwrap_or(DVec3::ZERO).z,
+                d.len(),
+                d.first().copied().unwrap_or(f64::NAN),
+                d.get(9).copied().unwrap_or(f64::NAN),
+                d.get(d.len() / 2).copied().unwrap_or(f64::NAN),
+            );
+            println!(
+                "=== THE ISLAND'S OWN SOCIETY AT THE RUSH HOUR === {:.2} h local; \
+                 {} volumes folded, {} homes offered, {} agents, {} scheduled; \
+                 {} full / {} near / {} far / {} dormant; {} steering intents, \
+                 {} blocked, {} arrived",
+                inf_ecs::sky::local_hour(fx.sim.world()),
+                soc.volumes,
+                soc.homes,
+                soc.agents,
+                soc.agents - soc.pending,
+                st.per_tier[0],
+                st.per_tier[1],
+                st.per_tier[2],
+                st.per_tier[3],
+                st.steered,
+                st.blocked,
+                st.arrived,
+            );
+            // ANTI-VACUITY, both halves. A row that certifies "the island with
+            // its town" must have a town in it, and a row about the RUSH HOUR
+            // must be at the rush hour — a wound clock that did not take would
+            // certify a sleeping village and read like a triumph.
+            assert!(
+                soc.agents > 0 && st.per_tier.iter().sum::<usize>() > 0,
+                "the certification row has no population in it: {soc:?}"
+            );
+            let hour = inf_ecs::sky::local_hour(fx.sim.world());
+            assert!(
+                (8.0..10.0).contains(&hour),
+                "the clock reads {hour:.2} h, so this row is not the rush hour"
+            );
+            // …and the third half, which is the one the first cut of this row
+            // failed: bodies the mover actually visits. `Full` is the only tier
+            // that steers, so a certification row with none of it prices a town
+            // that never touches `step_character_movement`.
+            assert!(
+                st.per_tier[0] > 0,
+                "no agent is `Full`, so this row prices a crowd that never \
+                 enters the mover — the wall the whole arc is about"
+            );
+        }
+        // …and the hero goes back where the level put it, so the three arc rows
+        // below share one staging with every NPC1a-d table.
+        if label == "LIT+VIS (crowd control)" {
+            set_hero(&mut fx.sim, hero_home);
+            fx.sim.world_mut().mark_dirty();
+            for _ in 0..STEP_WARMUP {
+                fx.sim
+                    .step_once(inf_player::runtime_sim::RuntimeInput::default());
+            }
+        }
+        if label == "LIT+VIS (rush hour, town cleared)" || label == "LIT+VIS (crowd cleared)" {
             fx.sim.set_crowd_population(Default::default());
             for _ in 0..STEP_WARMUP {
                 fx.sim
@@ -2143,7 +2452,15 @@ fn the_island_at_shipping_resolution() {
         // **What the crowd cost the RENDERER** (wave NPC1b) — read off a
         // projection of the same sim through the passes' own planners, so the
         // draw count and the palette bytes are the ones the frame above paid.
-        if label == "LIT+VIS+CROWD" {
+        // **What GI stopped doing** (island wave NPC1e). Printed for every row,
+        // because the number that matters is a *pair*: `candidates` says the
+        // volume kept something and `skinned_rejected` says the pre-reject
+        // dropped something, and either alone can be read as the other.
+        println!(
+            "  gi {:>16}: {} candidates, {} voxelized, {} dropped, {} skinned instances rejected whole",
+            "audit", m.gi.candidates, m.gi.voxelized, m.gi.dropped, m.gi.skinned_rejected
+        );
+        if label == "LIT+VIS+CROWD" || label == "LIT+VIS (rush hour, the island's own society)" {
             let mut scene = RenderScene::default();
             let mut voxels = inf_voxel::VoxelVolumes::new();
             let mut debris = inf_render::DebrisCache::default();
@@ -2165,6 +2482,15 @@ fn the_island_at_shipping_resolution() {
                 .iter()
                 .filter(|i| i.shadow == inf_render::SkinnedShadow::Proxy)
                 .count();
+            // **The crowd shadow LOD's own share** (island wave NPC1e): the
+            // instances that cast nothing at all, counted here off the same
+            // projection so the ledger's shadow line and its draw line come from
+            // one scene.
+            let unshadowed = scene
+                .skinned
+                .iter()
+                .filter(|i| i.shadow == inf_render::SkinnedShadow::None)
+                .count();
             println!(
                 "  CROWD RENDER COST: {} skinned instances in {} draw call(s), {} palette blocks = {:.2} MB of atlas",
                 scene.skinned.len(),
@@ -2173,7 +2499,7 @@ fn the_island_at_shipping_resolution() {
                 plan.matrices as f64 * 64.0 / (1024.0 * 1024.0),
             );
             println!(
-                "  CROWD SHADOWS: {proxies} proxy casters in 1 group, {} skinned groups, {} of a {} ceiling",
+                "  CROWD SHADOWS: {proxies} proxy casters in 1 group, {unshadowed} past the shadow LOD, {} skinned groups, {} of a {} ceiling",
                 inf_render::skinned_caster_groups(&scene) - usize::from(proxies > 0),
                 inf_render::skinned_caster_groups(&scene),
                 inf_render::VSM_MAX_GROUPS,

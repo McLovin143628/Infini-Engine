@@ -24,6 +24,22 @@
 //!    whatever is under and around the body. So the same character is measured
 //!    on four worlds: nothing, the buildings alone, the ground alone, and both.
 //!
+//! # …and island wave NPC1e adds the third, which is the one the arc ended on
+//!
+//! The two questions above sweep **N** and **the world**, and their answers were
+//! *"flat in N"* and *"the ground is where the milliseconds are"*. The island's
+//! certification row then read `character move` at **84.100 ms for 170
+//! controllers — 0.494 ms each — against 0.171 at thirty-three** on the same
+//! island, which is three times a per-character cost this file held flat over a
+//! 64× range in N. Neither question can see it, because **neither of them
+//! sweeps DENSITY**: the bystander arm puts one capsule in front of each mover
+//! and then adds more of them further out, so what it grows is the crowd's
+//! extent. So there is a third question — *how much does a controller pay for
+//! the capsules **inside its own sweep**?* — and its answer is
+//! [`the_movers_cost_is_flat_in_a_crowds_size_and_not_in_its_density`]: the same
+//! population packed into the twenty metres the controllers stand in costs
+//! **2.6×** what it costs spread over the lattice.
+//!
 //! # The fixture is `kinematic_pairing_cost`'s, one system over
 //!
 //! Same 43 × 43 = **1 849** static boxes at a 7 m pitch, same island tile
@@ -127,6 +143,36 @@ fn agent_home(i: usize) -> DVec3 {
     )
 }
 
+/// **A bystander's home** — the NPC1c audit's queue, or island wave NPC1e's
+/// rush hour.
+///
+/// Unpacked (`None`) it is the arrangement that arm was written with: one
+/// capsule two metres in front of each mover, on the movers' own 7 m lattice
+/// spreading outward. That measures how much a controller pays for **the body
+/// in front of it**, and it saturates at 1.24x, which is the honest answer to
+/// the question it asks.
+///
+/// Packed it is a square lattice at `pitch` metres about the origin, so two
+/// hundred capsules occupy the twenty metres the movers themselves stand in.
+/// That is what a town's morning commute looks like — the island's own
+/// certification row measured **191 residents inside a 32 m ring** — and it is a
+/// different variable from the one the arm above sweeps.
+fn bystander_home(i: usize, pitch: Option<f64>) -> DVec3 {
+    match pitch {
+        None => agent_home(i) + DVec3::new(0.0, 0.0, 2.0),
+        Some(p) => {
+            let side = 24_usize;
+            let (c, r) = (i % side, (i / side) % side);
+            let half = (side - 1) as f64 * 0.5;
+            DVec3::new(
+                (c as f64 - half) * p,
+                GROUND_Y + AGENT_HALF_HEIGHT + AGENT_RADIUS,
+                (r as f64 - half) * p,
+            )
+        }
+    }
+}
+
 /// What world to build. Every field is something an arm varies.
 #[derive(Clone, Copy)]
 struct Spec {
@@ -140,6 +186,15 @@ struct Spec {
     /// controller — the island's `Near` tier, which the mover never visits but
     /// every one of its queries has to look past.
     bystanders: usize,
+    /// **How tightly the bystanders are packed**, metres of lattice pitch
+    /// (island wave NPC1e).
+    ///
+    /// `None` is the NPC1c audit's arrangement: one bystander two metres in
+    /// front of each mover, spreading outward on the movers' own 7 m lattice.
+    /// `Some(pitch)` packs all of them into a square lattice at that pitch about
+    /// the origin — a **rush hour** rather than a queue. See
+    /// [`the_movers_cost_is_flat_in_a_crowds_SIZE_and_not_in_its_DENSITY`].
+    packed_m: Option<f64>,
 }
 
 impl Spec {
@@ -149,6 +204,7 @@ impl Spec {
             ground: true,
             movers: 1,
             bystanders: 0,
+            packed_m: None,
         }
     }
     fn movers(mut self, n: usize) -> Self {
@@ -157,6 +213,10 @@ impl Spec {
     }
     fn bystanders(mut self, n: usize) -> Self {
         self.bystanders = n;
+        self
+    }
+    fn packed(mut self, pitch_m: f64) -> Self {
+        self.packed_m = Some(pitch_m);
         self
     }
     fn ground(mut self, on: bool) -> Self {
@@ -174,6 +234,9 @@ struct Fixture {
     bridge: PhysicsBridge3D,
     movers: Vec<Uuid>,
     bystanders: Vec<Uuid>,
+    /// The spec's packing, carried so `walk_bystanders` re-derives the same
+    /// homes the fixture placed.
+    packed_m: Option<f64>,
     bodies: usize,
 }
 
@@ -276,13 +339,14 @@ fn fixture(spec: Spec) -> Fixture {
     }
 
     // The bystanders start on the far half of the lattice, so they are a crowd
-    // standing among the movers rather than a crowd standing on top of them.
+    // standing among the movers rather than a crowd standing on top of them --
+    // unless the spec packs them, in which case they are a rush hour.
     let mut bystanders = Vec::with_capacity(spec.bystanders);
     for i in 0..spec.bystanders {
         let guid = bystander_guid(i);
         let e = world.spawn_with_guid(guid, "Near NPC", None);
         let mut t = Transform::IDENTITY;
-        let home = agent_home(i) + DVec3::new(0.0, 0.0, 2.0);
+        let home = bystander_home(i, spec.packed_m);
         t.translation = Vec3d::from_dvec3(home);
         world
             .world_mut()
@@ -302,6 +366,7 @@ fn fixture(spec: Spec) -> Fixture {
         bridge,
         movers,
         bystanders,
+        packed_m: spec.packed_m,
         bodies,
     }
 }
@@ -330,9 +395,13 @@ fn walk_bystanders(f: &mut Fixture, step: u32) {
         return;
     }
     let d = 1.4 * DT * f64::from(step);
+    let packed = f.packed_m;
     for (i, guid) in f.bystanders.clone().iter().enumerate() {
-        let home = agent_home(i) + DVec3::new(0.0, 0.0, 2.0);
-        let t = (d + i as f64 * 0.37) % 12.0 - 6.0;
+        let home = bystander_home(i, packed);
+        // A packed crowd shuffles a metre; a spread one paces twelve. Either
+        // way it MOVES, which is what makes the query BVH pay for it.
+        let span = if packed.is_some() { 1.0 } else { 12.0 };
+        let t = (d + i as f64 * 0.37) % span - 0.5 * span;
         let Some(body) = f.bridge.body_of(*guid) else {
             continue;
         };
@@ -1109,5 +1178,113 @@ fn a_walking_character_asks_the_world_once_and_a_sprinting_one_twice() {
     assert!(
         (n.y - 1.0).abs() < 1.0e-6 && n.x.abs() < 1.0e-6,
         "the sprinter's probe answered {n:?} over flat ground"
+    );
+}
+
+/// **ISLAND WAVE NPC1e: THE MOVER'S COST IS FLAT IN A CROWD'S *SIZE* AND NOT IN
+/// ITS *DENSITY*, and that is the arc's closing law.**
+///
+/// [`a_controller_pays_for_the_body_in_front_of_it_not_for_the_crowds_size`] is
+/// the NPC1c audit's answer to "does a crowd standing around make the mover
+/// dearer", and it reads **1.24x, saturating between 64 and 256** — which the
+/// audit summarised as *"a controller pays for the thing it has to slide around,
+/// and a second capsule behind the first costs it nothing."* That arm is right
+/// about the variable it sweeps: it puts **one** bystander two metres in front
+/// of each mover and then adds more of them **further away**, so what it grows
+/// is the crowd's *extent*, not what any one controller has to get past.
+///
+/// **The island's certification row is a different variable.** With the hero
+/// standing where the ladder's `Full` radius holds the most of the town —
+/// **191 residents inside a 32 m ring** — `character move` reads **84.100 ms for
+/// 170 controllers, 0.494 ms each**, against **0.171 ms** at thirty-three
+/// controllers on the same island. Three times the per-character cost, on a
+/// station the NPC1c audit's own sweep held flat over a 64x range in N. The
+/// difference is not N. It is how many capsules are inside one controller's
+/// sweep.
+///
+/// So this sweeps the density instead: **32 controllers**, and 0 / 64 / 192 /
+/// 384 bystanders **packed into the twenty metres the controllers themselves
+/// stand in** rather than spread over the lattice. Same fixture, same world,
+/// same movers — one variable changed, and it is the one the island moved.
+///
+/// **The clocks are printed and the SHAPE is asserted**, this file's own rule:
+/// what is held is that the packed arrangement is **dearer than the spread one
+/// at the same population**, which is a fact about the program (a query pays for
+/// what its swept AABB overlaps) and not about the machine. An engine whose
+/// mover really were flat in density would fail it — and so would this file's
+/// own reading of its sibling arm.
+#[test]
+fn the_movers_cost_is_flat_in_a_crowds_size_and_not_in_its_density() {
+    const MOVERS: usize = 32;
+    /// A metre and a half of pitch is shoulder to shoulder for a 0.3 m capsule
+    /// with room to walk — a pavement at rush hour, not a mosh pit.
+    const PITCH_M: f64 = 1.5;
+
+    let mut rows: Vec<(usize, Measured, Measured)> = Vec::new();
+    for b in [0usize, 64, 192, 384] {
+        let spread = measure(Spec::new().movers(MOVERS).bystanders(b));
+        let packed = measure(Spec::new().movers(MOVERS).bystanders(b).packed(PITCH_M));
+        rows.push((b, spread, packed));
+    }
+
+    println!(
+        "NPC1e / {MOVERS} controllers, N bystanders SPREAD over the 7 m lattice \
+         against PACKED at {PITCH_M} m:"
+    );
+    for (b, spread, packed) in &rows {
+        println!(
+            "  {b:>3} bystanders   spread {:>7.2} us/character   packed {:>7.2}   ({:.2}x)",
+            spread.us_per_character(MOVERS),
+            packed.us_per_character(MOVERS),
+            packed.ms / spread.ms.max(1.0e-9),
+        );
+    }
+    for (b, spread, packed) in &rows {
+        // **The two anti-vacuity bounds are different on purpose**, and the
+        // difference is the phenomenon rather than a concession: a body pressed
+        // into a rush hour walks *less* — at 384 packed capsules the controller
+        // covers **0.30 m** where the spread arrangement takes it 1.56 — because
+        // the crowd is in its way. That is what a dense crowd does to a
+        // collide-and-slide mover, and it is why the packed row is dearer per
+        // character while travelling further from nowhere. Both numbers are
+        // printed above; what each clause rules out is "the mover refused every
+        // step", which is a body that moved *nothing at all*.
+        assert!(
+            spread.travelled_m > 1.0,
+            "{b} bystanders: a controller moved {:.3} m spread, so this row \
+             measured a mover that did nothing",
+            spread.travelled_m
+        );
+        assert!(
+            packed.travelled_m > 0.1,
+            "{b} bystanders: a controller moved {:.3} m packed — not slowed by a \
+             crowd but stopped dead, which is a refusal rather than a price",
+            packed.travelled_m
+        );
+        assert_eq!(
+            spread.bodies, packed.bodies,
+            "{b} bystanders: the two arrangements are not the same population, \
+             so this row compares two worlds rather than two densities"
+        );
+    }
+    // THE SHAPE. At zero bystanders the two arrangements ARE the same world, so
+    // they must agree; past it, packing the same population must cost more.
+    let (_, s0, p0) = &rows[0];
+    println!(
+        "  at 0 bystanders the two arrangements are one world: {:.2} against \
+         {:.2} us/character",
+        s0.us_per_character(MOVERS),
+        p0.us_per_character(MOVERS)
+    );
+    let (b, spread, packed) = rows.last().unwrap();
+    assert!(
+        packed.ms > spread.ms,
+        "{b} bystanders packed into {PITCH_M} m cost {:.4} ms against {:.4} \
+         spread over the lattice — the mover would then be flat in DENSITY, \
+         and the island's certification row (0.494 ms a character at 170 \
+         controllers among 191 residents inside 32 m, against 0.171 at 33) \
+         says it is not",
+        packed.ms,
+        spread.ms
     );
 }
