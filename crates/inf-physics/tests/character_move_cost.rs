@@ -53,14 +53,14 @@
 
 use std::time::Instant;
 
-use glam::DVec3;
+use glam::{DQuat, DVec3};
 use inf_ecs::components::{
     BodyKind3D, CharacterController3D, CharacterMovement, Collider3D, ColliderShape3DKind, Gait,
     RigidBody3D, RotationMode, Terrain, Transform,
 };
 use inf_ecs::math::{Vec2d, Vec3d};
 use inf_ecs::EcsWorld;
-use inf_physics::d3::step_character_movement;
+use inf_physics::d3::{step_character_movement, AutoStep3D, CharacterMover3D, ColliderShape3D};
 use inf_physics::PhysicsBridge3D;
 use inf_terrain::TerrainData;
 use uuid::Uuid;
@@ -350,6 +350,23 @@ struct Measured {
     /// How far the first character travelled over the whole measurement, metres
     /// — the anti-vacuity reading.
     travelled_m: f64,
+    /// **Whether the first character was standing on anything at the end**
+    /// (island wave NPC1e), and how far it had sunk.
+    ///
+    /// The NPC1c audit's four-world table read `travelled_m > 1.0` as its
+    /// anti-vacuity clause, and a body in **free fall** travels further than a
+    /// body that walks: on the `no ground` worlds the character ends at
+    /// y = −1.334 m having never touched anything. Those rows therefore measure
+    /// a *different program* from the ones with ground in them — an airborne
+    /// step runs `predict_landing` and skips the ground-normal probe — so the
+    /// "the boxes cost 24 µs and the ground 30" split is not two ablations of
+    /// one walk. Printed here so the table cannot be read that way again.
+    grounded: bool,
+    /// The first character's Y at the end of the measurement, metres.
+    end_y: f64,
+    /// Scene queries the whole measurement asked of the world, per character per
+    /// step — the countable half of the same question (`PhysicsWorld3D::queries`).
+    queries_per_character_step: f64,
 }
 
 impl Measured {
@@ -380,6 +397,8 @@ fn measure(spec: Spec) -> Measured {
         step_character_movement(&mut f.world, &mut f.bridge, DT);
     }
 
+    let queries_before = f.bridge.world().queries();
+    let mut grounded = false;
     let mut best = f64::INFINITY;
     for _ in 0..ROUNDS {
         let mut total = 0.0f64;
@@ -388,11 +407,15 @@ fn measure(spec: Spec) -> Measured {
             walk_bystanders(&mut f, clock);
             drive(&mut f);
             let t = Instant::now();
-            step_character_movement(&mut f.world, &mut f.bridge, DT);
+            let out = step_character_movement(&mut f.world, &mut f.bridge, DT);
             total += t.elapsed().as_secs_f64();
+            grounded = out.first().is_some_and(|o| o.grounded);
         }
         best = best.min(total * 1000.0 / f64::from(STEPS));
     }
+    let asked = f.bridge.world().queries() - queries_before;
+    let queries_per_character_step =
+        asked as f64 / (f64::from(ROUNDS) * f64::from(STEPS) * spec.movers.max(1) as f64);
     // ANTI-VACUITY: a timer reading zero measured its own resolution.
     assert!(best > 0.0, "the movement step took no measurable time");
 
@@ -406,6 +429,9 @@ fn measure(spec: Spec) -> Measured {
         ms: best,
         bodies: f.bodies,
         travelled_m: (end - start).length(),
+        grounded,
+        end_y: end.y,
+        queries_per_character_step,
     }
 }
 
@@ -430,10 +456,11 @@ fn the_movers_cost_per_character_does_not_climb_with_the_crowd() {
     );
     for (n, m) in &rows {
         println!(
-            "  N = {n:>3}  {:>8.4} ms/step   {:>8.2} us/character   walked {:.2} m",
+            "  N = {n:>3}  {:>8.4} ms/step  {:>8.2} us/character  walked {:>6.2} m  {:.2} queries/character/step",
             m.ms,
             m.us_per_character(*n),
-            m.travelled_m
+            m.travelled_m,
+            m.queries_per_character_step
         );
     }
     // ANTI-VACUITY: a mover that refused every step would be the cheapest of all.
@@ -487,12 +514,17 @@ fn the_world_under_a_character_is_where_its_milliseconds_are() {
         ("both (the fixture)", &both),
     ] {
         println!(
-            "  {name:<28} {:>8.4} ms/step  {:>4} bodies  walked {:.2} m",
-            m.ms, m.bodies, m.travelled_m
+            "  {name:<28} {:>8.4} ms/step  {:>4} bodies  moved {:>7.2} m  ends {} at y = {:>8.3}  {:.2} queries/step",
+            m.ms,
+            m.bodies,
+            m.travelled_m,
+            if m.grounded { "GROUNDED" } else { "FALLING " },
+            m.end_y,
+            m.queries_per_character_step
         );
     }
     // The ONE structural claim: a character with nothing to collide with still
-    // walks, so none of the four rows measured a refusal.
+    // moves, so none of the four rows measured a refusal.
     for (name, m) in [
         ("nothing at all", &bare),
         ("1 849 boxes, no ground", &boxes),
@@ -501,7 +533,7 @@ fn the_world_under_a_character_is_where_its_milliseconds_are() {
     ] {
         assert!(
             m.travelled_m > 1.0,
-            "{name}: the character walked {:.3} m",
+            "{name}: the character moved {:.3} m",
             m.travelled_m
         );
     }
@@ -509,6 +541,36 @@ fn the_world_under_a_character_is_where_its_milliseconds_are() {
         "  the ground is {:.2}x the empty world and the boxes are {:.2}x",
         dirt.ms / bare.ms,
         boxes.ms / bare.ms
+    );
+    // **AND THE CLAUSE THE `travelled_m > 1.0` ONE COULD NOT MAKE** (island wave
+    // NPC1e). A body in **free fall** travels further than a body that walks, so
+    // the anti-vacuity above is satisfied by a character that never touched
+    // anything — which is exactly what the two ground-free rows are: they end at
+    // y = −139 m having fallen for the whole measurement. Their step is a
+    // different program from the grounded ones' (an airborne step runs
+    // `traversal::predict_landing` and takes no ground-normal probe), so the two
+    // halves are **not** ablations of one walk and the "boxes 24 µs, ground
+    // 30 µs, additive to 4 %" reading the NPC1c audit published is a comparison
+    // across that gap. Pinned as a shape, so the table cannot be read that way
+    // again and so it fails the day a ground-free world starts holding a body up.
+    assert!(
+        both.grounded && dirt.grounded,
+        "a world with ground under the character did not leave it grounded, so \
+         these rows are not about a walk"
+    );
+    assert!(
+        !bare.grounded && !boxes.grounded,
+        "a world with NO ground left the character grounded — these two rows \
+         measure a body in free fall (ending at y = {:.1} and {:.1}), which is \
+         the whole point of printing the column",
+        bare.end_y,
+        boxes.end_y
+    );
+    println!(
+        "  the two ground-free rows are a FALLING body (y = {:.1} and {:.1}) at \
+         {:.2} queries a step, against a walking one at {:.2} — they are not \
+         ablations of one program",
+        bare.end_y, boxes.end_y, boxes.queries_per_character_step, both.queries_per_character_step,
     );
 }
 
@@ -617,5 +679,435 @@ fn the_movers_per_character_cost_is_a_function_of_the_worlds_size() {
         rows.last().unwrap().1.bodies,
         small.ms,
         small.bodies
+    );
+}
+
+// ── wave NPC1e: the primitives, so a lever can be aimed ─────────────────────
+
+/// One primitive, timed the way [`measure`] times a step: MIN over rounds of the
+/// mean per-call microsecond.
+fn time_calls(rounds: u32, calls: u32, mut f: impl FnMut(u32)) -> f64 {
+    let mut best = f64::INFINITY;
+    for _ in 0..rounds {
+        let t = Instant::now();
+        for i in 0..calls {
+            f(i);
+        }
+        best = best.min(t.elapsed().as_secs_f64() * 1.0e6 / f64::from(calls));
+    }
+    best
+}
+
+/// **WAVE NPC1e — WHICH OF THE MOVER'S QUERIES THE MILLISECOND IS IN.**
+///
+/// The NPC1c audit decomposed `character move` down to *"96 % of it is the
+/// collide-and-slide queries, and four heightfield tiles cost more than 1 849
+/// buildings"*, and stopped there — its verdict named the lever as *"fewer or
+/// cheaper queries per character, and the **ground** is where to aim it first"*
+/// without saying which query. A step is not one query: it is
+/// `PhysicsWorld3D::move_character` (rapier's sweep, its ground snap and its
+/// autostep, which is three further casts every time the sweep meets a wall) plus
+/// this crate's own **ground-normal probe**, a second downward shape cast taken
+/// on every grounded step.
+///
+/// So each is timed on its own, on the fixture's own world, with the crowd's own
+/// mover — and each on the two half-worlds as well, because "the ground is dear"
+/// is a statement about a *cast*, not about a step.
+///
+/// **Everything here is printed. The only assertions are shapes**: that every
+/// primitive took measurable time (a zero is a timer reading its own resolution)
+/// and that the sweep really is the dearer of the two calls, which is the
+/// structural fact a lever has to be aimed at and is true by orders of magnitude
+/// rather than by a margin.
+#[test]
+fn where_the_movers_queries_go() {
+    const ROUNDS: u32 = 5;
+    const CALLS: u32 = 600;
+
+    // The crowd's own tuning, spelled from the components' defaults the way
+    // `crowd_movement` above spells the movement component: `mover_for` builds
+    // exactly this for a `CharacterController3D::default()` + the crowd's
+    // `CharacterMovement`.
+    let shape = ColliderShape3D::Capsule {
+        half_height: AGENT_HALF_HEIGHT,
+        radius: AGENT_RADIUS,
+    };
+    let cc = CharacterController3D::default();
+    let cm = crowd_movement();
+    let base = CharacterMover3D::new(shape)
+        .up(DVec3::Y)
+        .slide(true)
+        .offset(cc.offset)
+        .max_slope_climb_angle(cm.slope_limit_deg.to_radians())
+        .min_slope_slide_angle(cm.slide_slope_deg.to_radians())
+        .snap_to_ground(Some(cc.snap_to_ground))
+        .autostep(Some(AutoStep3D {
+            max_height: cm.step_height_m,
+            min_width: cm.step_min_width_m,
+            include_dynamic_bodies: true,
+        }));
+    let no_step = base.clone().autostep(None);
+    let no_snap = base.clone().snap_to_ground(None);
+    let neither = base.clone().autostep(None).snap_to_ground(None);
+
+    // The probe `step_one` takes at its section 9, verbatim: a sphere of 0.9 of
+    // the capsule's radius, swept down by `(half + radius) * 0.25 + 0.05 + half`.
+    let probe_shape = ColliderShape3D::Sphere {
+        radius: AGENT_RADIUS * 0.9,
+    };
+    let probe_len = (AGENT_HALF_HEIGHT + AGENT_RADIUS) * 0.25 + 0.05 + AGENT_HALF_HEIGHT;
+
+    // One step of a walking crowd agent's motion: the gait forward, the grounded
+    // gravity bias down. `crowd_movement`'s walk speed at 60 Hz.
+    let motion = DVec3::new(0.0, -9.81 * DT * DT, 1.65 * DT);
+
+    for (world_name, spec) in [
+        ("both (the fixture)", Spec::new()),
+        ("1 849 boxes, no ground", Spec::new().ground(false)),
+        ("4 tiles of ground, no boxes", Spec::new().side(0)),
+    ] {
+        let mut f = fixture(spec);
+        // Settle, so the sweeps below start from a body standing on the floor
+        // rather than one still falling into it.
+        for _ in 0..40 {
+            drive(&mut f);
+            step_character_movement(&mut f.world, &mut f.bridge, DT);
+        }
+        let guid = f.movers[0];
+        let at = f
+            .world
+            .entity_of(guid)
+            .and_then(|e| f.world.world().get::<Transform>(e))
+            .map(|t| t.translation.to_dvec3())
+            .expect("the mover has a transform");
+        let own = f.bridge.collider_of(guid);
+        let mut exclude = std::collections::BTreeSet::new();
+        if let Some(c) = own {
+            exclude.insert(c);
+        }
+
+        let sweep = |m: &CharacterMover3D, f: &mut Fixture| {
+            time_calls(ROUNDS, CALLS, |_| {
+                let r = f.bridge.world_mut().move_character(m, at, motion, own);
+                std::hint::black_box(r.grounded);
+            })
+        };
+        let full = sweep(&base, &mut f);
+        let a_off = sweep(&no_step, &mut f);
+        let s_off = sweep(&no_snap, &mut f);
+        let both_off = sweep(&neither, &mut f);
+        let probe = time_calls(ROUNDS, CALLS, |_| {
+            let hit = f.bridge.world_mut().cast_shape(
+                &probe_shape,
+                at,
+                DQuat::IDENTITY,
+                -DVec3::Y,
+                probe_len,
+                &exclude,
+            );
+            std::hint::black_box(hit.is_some());
+        });
+        println!(
+            "NPC1e / the mover's queries on {world_name} ({} bodies):",
+            f.bodies
+        );
+        for (what, us) in [
+            ("move_character (shipped: autostep + ground snap)", full),
+            ("move_character, autostep OFF", a_off),
+            ("move_character, ground snap OFF", s_off),
+            ("move_character, both OFF", both_off),
+            ("the section-9 ground-normal probe (one cast_shape)", probe),
+        ] {
+            println!("  {what:<50} {us:>8.2} us");
+        }
+        println!(
+            "  a step is one sweep + one probe = {:.2} us; the probe is {:.1} % of it, \
+             the autostep {:.1} %, the ground snap {:.1} %",
+            full + probe,
+            probe / (full + probe) * 100.0,
+            (full - a_off) / (full + probe) * 100.0,
+            (full - s_off) / (full + probe) * 100.0,
+        );
+
+        // SHAPES, not clocks.
+        for (what, us) in [
+            ("the sweep", full),
+            ("the sweep without autostep", a_off),
+            ("the sweep without the ground snap", s_off),
+            ("the sweep with neither", both_off),
+            ("the ground-normal probe", probe),
+        ] {
+            assert!(
+                us > 0.0,
+                "{world_name}: {what} took no measurable time, so this row is a \
+                 timer reading its own resolution"
+            );
+        }
+    }
+}
+
+/// A world holding `tiles × tiles` heightfield tiles at `res` samples and nothing
+/// else, with one probe capsule parked at the origin corner.
+fn ground_only(tiles: i32, res: u32) -> PhysicsBridge3D {
+    let mut world = EcsWorld::new();
+    let mut data = TerrainData::new(res, MPS * f64::from(TILE_RES - 1) / f64::from(res - 1));
+    let half = tiles / 2;
+    for tz in -half..(tiles - half) {
+        for tx in -half..(tiles - half) {
+            data.author_tile((tx, tz), |_, _| GROUND_Y);
+        }
+    }
+    let e = world.spawn_with_guid(Uuid::from_u128(0x7e44_0002), "Terrain", None);
+    world.world_mut().entity_mut(e).insert(Terrain {
+        meters_per_sample: MPS * f64::from(TILE_RES - 1) / f64::from(res - 1),
+        tile_resolution: res,
+        data,
+        ..Terrain::default()
+    });
+    world.mark_dirty();
+    world.propagate();
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync_from_world(&world);
+    bridge
+}
+
+/// **WAVE NPC1e — WHY A CAST AGAINST THE GROUND IS DEAR, AND WHAT IT SCALES
+/// WITH.**
+///
+/// [`where_the_movers_queries_go`] says a shape cast against four 257-sample
+/// tiles is ~6 µs where the same cast against 1 849 building boxes is ~0.07 —
+/// **ninety times** — which is the NPC1c audit's *"four heightfield tiles cost
+/// more than 1 849 buildings"* arriving at the primitive it is about. What that
+/// does not say is **what the number is a function of**, and a lever cannot be
+/// aimed without it: if it is the tile COUNT the answer is that the fixture parks
+/// its character on a four-way corner and the island's would touch one; if it is
+/// the RESOLUTION the cast is walking cells it does not need, which is a
+/// statement about the shape rather than about the fixture.
+///
+/// One capsule, one downward sweep of the mover's own probe length, against a
+/// growing grid of tiles at three resolutions. Printed; the assertions are
+/// shapes.
+#[test]
+fn what_a_cast_against_the_ground_costs() {
+    const ROUNDS: u32 = 5;
+    const CALLS: u32 = 400;
+    let probe_shape = ColliderShape3D::Sphere {
+        radius: AGENT_RADIUS * 0.9,
+    };
+    let probe_len = (AGENT_HALF_HEIGHT + AGENT_RADIUS) * 0.25 + 0.05 + AGENT_HALF_HEIGHT;
+    // Above the corner the fixture's character stands on, by the capsule's own
+    // centre height, so the sweep reaches the ground exactly as the step's does.
+    let at = DVec3::new(0.0, GROUND_Y + AGENT_HALF_HEIGHT + AGENT_RADIUS, 0.0);
+    let none = std::collections::BTreeSet::new();
+
+    println!("NPC1e / one downward shape cast against the ground:");
+    let mut rows: Vec<(i32, u32, f64)> = Vec::new();
+    for res in [33u32, 129, 257] {
+        for tiles in [1i32, 2, 4] {
+            let mut b = ground_only(tiles, res);
+            // ANTI-VACUITY, before the clock: a cast that hits nothing is a
+            // measurement of a broad phase saying "no" and not of the ground.
+            assert!(
+                b.world_mut()
+                    .cast_shape(
+                        &probe_shape,
+                        at,
+                        DQuat::IDENTITY,
+                        -DVec3::Y,
+                        probe_len,
+                        &none
+                    )
+                    .is_some(),
+                "{tiles}x{tiles} at {res}: the probe hit nothing, so this world \
+                 has no ground collider in it"
+            );
+            let us = time_calls(ROUNDS, CALLS, |_| {
+                let hit = b.world_mut().cast_shape(
+                    &probe_shape,
+                    at,
+                    DQuat::IDENTITY,
+                    -DVec3::Y,
+                    probe_len,
+                    &none,
+                );
+                std::hint::black_box(hit.is_some());
+            });
+            let cells = (res as u64 - 1) * (res as u64 - 1) * (tiles as u64) * (tiles as u64);
+            println!(
+                "  {tiles}x{tiles} tiles at {res:>3} samples ({cells:>7} cells, \
+                 {} bodies): {us:>8.3} us",
+                b.world().body_ids().len()
+            );
+            rows.push((tiles, res, us));
+        }
+    }
+    for (t, r, us) in &rows {
+        assert!(
+            *us > 0.0,
+            "{t}x{t} at {r}: the cast took no measurable time"
+        );
+    }
+    // THE SHAPE: at a fixed resolution the cost is a function of how many tiles
+    // the query AABB overlaps, and a 4x4 grid whose corner the capsule sits on
+    // overlaps four of them — never sixteen. A cast that walked every cell of
+    // every tile would be quadratic in `tiles` and cubic across this table.
+    // **AND THE SAME GROUND AS A BOX**, which is the control the ratio needs: if
+    // a flat box under the same capsule answers the same question in a fraction
+    // of the time, the cost is the SHAPE and not the fact that there is ground.
+    {
+        let mut world = EcsWorld::new();
+        let e = world.spawn_with_guid(Uuid::from_u128(0x7e44_0003), "Slab", None);
+        let mut t = Transform::IDENTITY;
+        t.translation = Vec3d::new(0.0, GROUND_Y - 8.0, 0.0);
+        world.world_mut().entity_mut(e).insert((
+            RigidBody3D {
+                kind: BodyKind3D::Static,
+                ..RigidBody3D::default()
+            },
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Box,
+                half_extents: Vec3d::new(256.0, 8.0, 256.0),
+                ..Collider3D::default()
+            },
+            t,
+        ));
+        world.mark_dirty();
+        world.propagate();
+        let mut b = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+        b.sync_from_world(&world);
+        assert!(
+            b.world_mut()
+                .cast_shape(
+                    &probe_shape,
+                    at,
+                    DQuat::IDENTITY,
+                    -DVec3::Y,
+                    probe_len,
+                    &none
+                )
+                .is_some(),
+            "the slab world's probe hit nothing"
+        );
+        let us = time_calls(ROUNDS, CALLS, |_| {
+            let hit = b.world_mut().cast_shape(
+                &probe_shape,
+                at,
+                DQuat::IDENTITY,
+                -DVec3::Y,
+                probe_len,
+                &none,
+            );
+            std::hint::black_box(hit.is_some());
+        });
+        println!("  one 512 x 512 m BOX under the same capsule: {us:>8.3} us");
+    }
+    let one = rows
+        .iter()
+        .find(|(t, r, _)| *t == 1 && *r == 257)
+        .unwrap()
+        .2;
+    let four = rows
+        .iter()
+        .find(|(t, r, _)| *t == 4 && *r == 257)
+        .unwrap()
+        .2;
+    println!(
+        "  16 tiles cost {:.2}x one tile at 257 samples (four of them are under the query)",
+        four / one
+    );
+    assert!(
+        four < one * 16.0,
+        "a cast against a 4x4 grid cost {four:.3} us against {one:.3} for one \
+         tile — that is 16x or worse, so the cast is walking every tile in the \
+         world rather than the ones its AABB touches"
+    );
+}
+
+/// **WAVE NPC1e'S LEVER, AS A COUNT** — a walking character asks the world once
+/// per step; a sprinting one asks twice.
+///
+/// `movement::reads_the_ground_normal` is the whole of the lever: section 9's
+/// downward sweep produces a number whose only reader is `slide_friction`, so a
+/// character that is neither sliding nor holding sprint no longer pays for it.
+/// [`where_the_movers_queries_go`] prices that probe at 18 % of a step over the
+/// island's own tile resolution; this arm holds the **shape**, which is what
+/// survives a busy runner: `PhysicsWorld3D::queries` is bumped once per ask in
+/// the one door every query goes through, so "the mover asks twice and now asks
+/// once" is a subtraction rather than a stopwatch.
+///
+/// Mutation: making the predicate `true` puts the walker back at 2.
+#[test]
+fn a_walking_character_asks_the_world_once_and_a_sprinting_one_twice() {
+    let mut f = fixture(Spec::new().movers(1));
+    let guid = f.movers[0];
+    // Settle first: the spawn step takes a settle sweep of its own, and the
+    // claim is about the steady state.
+    for _ in 0..40 {
+        drive(&mut f);
+        step_character_movement(&mut f.world, &mut f.bridge, DT);
+    }
+
+    let walking = {
+        let before = f.bridge.world().queries();
+        drive(&mut f);
+        let out = step_character_movement(&mut f.world, &mut f.bridge, DT);
+        assert!(
+            out.iter().any(|o| o.guid == guid && o.grounded),
+            "the walker is not on the ground, so this arm measured a fall"
+        );
+        f.bridge.world().queries() - before
+    };
+
+    // The same character, holding sprint — which is the only door into `Slide`
+    // and therefore the only way its ground normal can ever be read.
+    {
+        let e = f.world.entity_of(guid).expect("the mover exists");
+        let mut cm = f
+            .world
+            .world_mut()
+            .get_mut::<CharacterMovement>(e)
+            .expect("it has a movement component");
+        cm.runtime.want_sprint = true;
+    }
+    let sprinting = {
+        let before = f.bridge.world().queries();
+        drive(&mut f);
+        let out = step_character_movement(&mut f.world, &mut f.bridge, DT);
+        assert!(
+            out.iter().any(|o| o.guid == guid && o.grounded),
+            "the sprinter is not on the ground"
+        );
+        f.bridge.world().queries() - before
+    };
+
+    println!(
+        "NPC1e / queries a character a step: walking {walking}, sprinting \
+         {sprinting}"
+    );
+    assert_eq!(
+        walking, 1,
+        "a walking character asked the world {walking} times — one sweep is all \
+         it needs, and anything above it is a probe nothing reads"
+    );
+    assert_eq!(
+        sprinting, 2,
+        "a sprinting character asked the world {sprinting} times — it must keep \
+         its ground-normal probe, because sprint is the one door into `Slide` \
+         and `Slide` is the one reader of the normal"
+    );
+    // The ground normal a sprinter gets is the surface's, not the default: an
+    // arm that only counted queries would pass on a probe whose answer was
+    // thrown away.
+    let e = f.world.entity_of(guid).unwrap();
+    let n = f
+        .world
+        .world()
+        .get::<CharacterMovement>(e)
+        .unwrap()
+        .runtime
+        .ground_normal;
+    assert!(
+        (n.y - 1.0).abs() < 1.0e-6 && n.x.abs() < 1.0e-6,
+        "the sprinter's probe answered {n:?} over flat ground"
     );
 }

@@ -399,6 +399,50 @@ fn settle_on_spawn(
     }
 }
 
+/// **Whether this character's ground normal is worth a query** (island wave
+/// NPC1e) — the mover's one measured lever, and the arc's answer to
+/// *"fewer or cheaper ground queries per character"*.
+///
+/// # What the probe is for, and who reads it
+///
+/// [`MovementRuntime::ground_normal`](inf_ecs::components::MovementRuntime) has
+/// **exactly one reader in the engine** — grep it: `slide_friction`, inside
+/// section 7's `MovementMode::Slide` branch. Everything else about standing on
+/// the ground comes out of the sweep itself (`grounded`), out of the landing
+/// classifier (impact speed) or out of the ledge probe. So on every character
+/// that is not sliding, section 9 spends a shape cast against the world to
+/// produce a number nothing asks for.
+///
+/// # What that costs, measured
+///
+/// `character_move_cost::where_the_movers_queries_go`, on the island's own tile
+/// resolution: the probe is **5.3–5.7 µs** of a 31 µs step — **18 %** of
+/// `character move` — because a shape cast that *hits* a height-field tile costs
+/// about **5 µs** where the same cast against 1 849 building boxes costs
+/// **0.07**. The ground is not marginally dearer than the city, it is ~75× a
+/// cast, and this probe is one of about six the mover makes.
+///
+/// # Why this predicate, and the one-step bound it carries
+///
+/// `Slide` is reachable from exactly one place (section 4's crouch-press
+/// branch): `mode == Grounded && want_sprint && speed >= slide_entry_speed_mps`.
+/// So a character that is sliding, or that is holding sprint, keeps its probe;
+/// a walking crowd agent — which has no input at all and whose `Gait` is
+/// `Walk` — never asks and never pays.
+///
+/// **The bound, stated rather than implied.** Section 7 of step *N* reads the
+/// normal section 9 of step *N−1* wrote, so the predicate is evaluated one step
+/// before the read. A character that acquires `want_sprint` on the very step it
+/// presses crouch — while *already* at slide entry speed, which takes a sprint
+/// it was not asking for — enters `Slide` with the `+Y` default instead of last
+/// step's measured normal. That is a friction difference **only on a slope**
+/// (on flat ground the probe answers `+Y` too), for one step, on a transition
+/// no input scheme in this tree produces: sprint is held, not tapped, and the
+/// speed that gates the entry is reached by holding it.
+fn reads_the_ground_normal(cm: &CharacterMovement) -> bool {
+    cm.mode == MovementMode::Slide || cm.runtime.want_sprint
+}
+
 /// The slope, in degrees from vertical, of a surface normal.
 fn slope_deg(normal: DVec3) -> f64 {
     let n = normal.normalize_or_zero();
@@ -1269,10 +1313,12 @@ fn step_one(
     probe.centre = position;
     cm.runtime.grounded = result.grounded;
 
-    // ── 9. The ground normal, for the slide curve and for P29.4. rapier reports
-    //    "grounded" but not what it stood on, so this is a short downward sweep.
+    // ── 9. The ground normal, for the slide curve. rapier reports "grounded"
+    //    but not what it stood on, so this is a short downward sweep — **taken
+    //    only for a character that can read it** (island wave NPC1e; see
+    //    `reads_the_ground_normal`).
     cm.runtime.ground_normal = Vec3d::new(0.0, 1.0, 0.0);
-    if result.grounded && is_capsule {
+    if result.grounded && is_capsule && reads_the_ground_normal(&cm) {
         let probe_len = (half_height + radius) * 0.25 + 0.05;
         if let Some(hit) = bridge.world_mut().cast_shape(
             &ColliderShape3D::Sphere {

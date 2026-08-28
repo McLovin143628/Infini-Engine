@@ -611,6 +611,9 @@ pub struct PhysicsWorld3D {
     /// Bodies the solver moved — resolved to their colliders at query time,
     /// because a body's collider list is the body's to know.
     query_moved_bodies: Vec<RigidBodyHandle>,
+    /// **How many scene queries this world has answered** (island wave NPC1e) —
+    /// see [`queries`](Self::queries).
+    queries: u64,
 
     pending_contacts: Vec<ContactEvent3D>,
 }
@@ -635,6 +638,7 @@ impl PhysicsWorld3D {
             query_rebuild: true,
             query_moved: Vec::new(),
             query_moved_bodies: Vec::new(),
+            queries: 0,
             pending_contacts: Vec::new(),
         }
     }
@@ -1700,6 +1704,33 @@ impl PhysicsWorld3D {
         (self.query_moved_bodies.len(), self.query_moved.len())
     }
 
+    /// **How many scene queries this world has answered** (island wave NPC1e).
+    ///
+    /// A monotone count of *asks* — one per ray cast, shape cast, point or AABB
+    /// intersection and character-mover call — bumped in the single door all of
+    /// them go through (`ensure_query_pipeline`).
+    ///
+    /// # Why it exists, and why it is a COUNT
+    ///
+    /// The NPC1c audit decomposed `character move` and ended with *"the lever is
+    /// fewer or cheaper queries per character, and the **ground** is where to
+    /// aim it first"*. Wave NPC1e measured what a query against the ground
+    /// costs: a shape cast that hits a 257-sample height-field tile is
+    /// **~5.3 µs**, where the same cast against 1 849 building boxes is
+    /// **~0.07** — so "how many queries did this step make" is the quantity a
+    /// lever moves, and the millisecond is a consequence.
+    ///
+    /// It is a count rather than a clock **because this repository has paid for
+    /// that rule four times** (the NPC1c CI-red's own law: *a structural claim
+    /// that fits in a counter must never be spent on a clock*). "The mover asks
+    /// the world twice per character per step" is a fact about the program; the
+    /// microseconds are a fact about a machine.
+    ///
+    /// Saturating, so a long session cannot wrap it below where it started.
+    pub fn queries(&self) -> u64 {
+        self.queries
+    }
+
     /// **Throw the query BVH away and build it fresh on the next query**
     /// (island wave I4b).
     ///
@@ -1772,6 +1803,13 @@ impl PhysicsWorld3D {
     /// about what a query can see moved with this change; only how often the
     /// tree is thrown away did.
     fn ensure_query_pipeline(&mut self) {
+        // **The query counter lives here because this is the one door** (island
+        // wave NPC1e): every public query — ray, shape cast, point/AABB
+        // intersection and the character mover — calls it exactly once before it
+        // touches the tree, so a count taken here is a count of *asks* and
+        // cannot drift from the list of doors. See [`queries`](Self::queries)
+        // for what it is for.
+        self.queries = self.queries.saturating_add(1);
         let params = self.integration_parameters;
         if self.query_rebuild {
             let mut bvh = BroadPhaseBvh::new();
