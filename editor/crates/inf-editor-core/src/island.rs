@@ -690,23 +690,29 @@ pub fn repo_root() -> std::path::PathBuf {
 /// **How fast the island's day runs** — clock-seconds per simulated second, the
 /// [`TimeOfDay::rate`] the level authors (island wave NPC1d).
 ///
-/// Thirty is a **forty-eight-minute day**, and it is derived from the walk
-/// rather than chosen for looks. `inf_ecs::society` gives a commute one hour of
-/// the level clock, so the metres per second a commute implies is
-/// `length x rate / 3600`; the island's own settlements put a home about
-/// a couple of hundred metres from its work, and at thirty that is a walking pace. The
-/// exact figure this constant was set from is in the wave ledger's rate row,
-/// measured over the committed island's own population rather than estimated —
-/// and `inf_ecs::crowd::ScheduleLeg::implied_speed_mps` is the function that
-/// bridges the two, so the arithmetic is checkable rather than asserted here.
+/// Eighteen is an **eighty-minute day**, and it is set from a measurement rather
+/// than chosen for looks. `inf_ecs::society` gives a commute one hour of the
+/// level clock and a `ScheduleLeg` walks its route over that window, so the
+/// metres per second a commute implies is `length x rate / 3600`. Measured on
+/// the CI island's own derived population — 329 residents of Harbour City — the
+/// median commute is **320 m**, so the rate that makes the median commute a
+/// *walk* is `3600 x 1.65 / 320`, and eighteen is that number rounded to
+/// something a reader can hold. At eighteen the island's commutes imply
+/// **0.89 / 1.60 / 1.97 m/s** (min / median / max) against the movement model's
+/// own `walk_speed_mps` of 1.65 — every one of them a walking pace, and the
+/// median within three per cent of it.
 ///
-/// It was **zero** — a frozen clock at 10:30 UTC — from wave I7 until this one,
+/// The first draft was thirty (a forty-eight-minute day, which is a nicer number
+/// to say) and it made the median commute **2.67 m/s** — a jog. The arm that
+/// found that is `the_islands_own_rate_makes_a_commute_a_walk`, and it is in the
+/// gate rather than in this comment because a proportion stated in a doc is a
+/// claim (the NPC1c law about a 2.4 m capsule wearing a 1.8 m comment).
+///
+/// It was **zero** — a frozen clock at 10:30 UTC — from wave I7 until this wave,
 /// which is why the I8b night-window substrate (`inf_render::night_glow_step`)
 /// had never once returned a non-zero step on the shipped island: the sun could
-/// not get below the horizon. Turning it on is the whole of clause 3, and the
-/// blood-red night the SKY2 audit's LOW item 9 names is now something a player
-/// can see rather than a golden nobody looks at.
-pub const ISLAND_CLOCK_RATE: f64 = 30.0;
+/// not get below the horizon. Turning it on is the whole of clause 3.
+pub const ISLAND_CLOCK_RATE: f64 = 18.0;
 
 pub const ISLAND_RECIPES: [&str; 2] = [
     "samples/island/island.toml",

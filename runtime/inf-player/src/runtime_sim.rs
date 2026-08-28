@@ -1401,6 +1401,7 @@ impl RuntimeSim {
         //    every level committed before this wave: one entity walk that finds
         //    nothing and inserts no resource.
         self.society = inf_ecs::society::sync_society(&mut self.world);
+        clk.mark(phase::SOCIETY);
         self.crowd = inf_ecs::crowd::step_crowd_banded(&mut self.world, dt, self.crowd_radii);
         clk.mark(phase::CROWD);
         // 1. ECS → physics.

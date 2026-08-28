@@ -317,6 +317,9 @@ struct Row {
     banded: bool,
     step_ms: f64,
     crowd_ms: f64,
+    /// The `society` phase (NPC1d) — on this scene, a settled one: the sweep's
+    /// fixture derives its population once and folds nothing again.
+    society_ms: f64,
     anim_ms: f64,
     phys_ms: f64,
     solver_ms: f64,
@@ -510,6 +513,7 @@ fn measure(pack: &Path, n: usize, banded: bool) -> Row {
         banded,
         step_ms: prof.total_ms(),
         crowd_ms: ms("crowd"),
+        society_ms: ms("society"),
         anim_ms: ms("animation"),
         phys_ms: ms("physics3d sync"),
         solver_ms: ms("solver"),
@@ -904,6 +908,18 @@ fn the_n_sweep() {
         budgeted.n,
         inf_player::budget::NPC_STEP_BUDGET_MS
     );
+    // ── THE SOCIETY BUDGET (NPC1d) ──────────────────────────────────────────
+    //
+    // The SETTLED cost, which is the one a shipped frame pays for ever: one
+    // entity walk that folds nothing. The derivation transient is bounded by
+    // `SOCIETY_PLANS_PER_STEP` and is measured in the island gate, not here.
+    println!(
+        "THE SOCIETY BUDGET: {:.4} ms settled at N={} against \
+         SOCIETY_STEP_BUDGET_MS = {:.1} ms",
+        budgeted.society_ms,
+        budgeted.n,
+        inf_player::budget::SOCIETY_STEP_BUDGET_MS
+    );
     // ── THE PHASE'S WORK IS A FUNCTION OF THE CROWD (NPC1a audit) ───────────
     //
     // `step_crowd` does the same work per agent at every tier — a decision, a
@@ -936,6 +952,14 @@ fn the_n_sweep() {
         println!("CI runner: the budget is reported, not asserted (the P26.5 rule).");
         return;
     }
+    assert!(
+        budgeted.society_ms <= inf_player::budget::SOCIETY_STEP_BUDGET_MS,
+        "the society phase cost {:.4} ms on a SETTLED level against a {:.1} ms \
+         budget {}",
+        budgeted.society_ms,
+        inf_player::budget::SOCIETY_STEP_BUDGET_MS,
+        inf_player::budget::RATCHET_NOTE
+    );
     assert!(
         budgeted.crowd_ms <= inf_player::budget::NPC_STEP_BUDGET_MS,
         "the crowd phase cost {:.4} ms at N={} against a {:.1} ms budget {}",

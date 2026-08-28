@@ -141,6 +141,26 @@ pub const PAVEMENT_LATTICE_M: f64 = 0.01;
 /// ledger's planning row.
 pub const SOCIETY_PLANS_PER_STEP: usize = 8;
 
+/// **The most people one level's society will ever be.**
+///
+/// A settlement's own buildings imply far more residents than a fixed step can
+/// carry. Measured on the CI island's Harbour City: **four blocks alone offer
+/// 329 homes**, so its hundred and seventy imply something like fourteen
+/// thousand — a real number for a real town and about fourteen times the
+/// population this arc has ever measured.
+///
+/// A thousand, and the number is chosen so the island's society is directly
+/// comparable to the arc's own ledger: N = 1 000 is what NPC1a's sweep, NPC1b's
+/// crowd row and NPC1c's re-measurement are all quoted at. A level that wants
+/// all fourteen thousand needs the cheaper character mover the NPC1c audit
+/// routed, and until it exists a ceiling is more honest than a fixed step that
+/// silently takes four hundred milliseconds.
+///
+/// Homes past it are **declined, in `Guid` order**, and counted in
+/// [`SocietyStats::homes_declined`] — so which thousand a level gets is a
+/// function of its own content and not of the order its cells activated.
+pub const SOCIETY_MAX_AGENTS: usize = 1_000;
+
 /// The hour the working day begins, and the hours the other three legs do.
 ///
 /// One table, in one place, so "the town populates at morning and empties at
@@ -229,6 +249,11 @@ pub struct SocietyStats {
     /// was absorbed** — a building salt collision, which welds one building's
     /// room to another's. Zero is the expectation and the arm.
     pub salt_collisions: usize,
+    /// **Homes the level offered and the society declined**, because it had
+    /// already reached [`SOCIETY_MAX_AGENTS`]. Non-zero is not a defect — it is
+    /// the ceiling doing its job, and the number is how far past it a settlement
+    /// reached.
+    pub homes_declined: usize,
     /// Slots in a building with no exterior door — nobody can walk in, so
     /// nobody living there gets a day. Zero on a settlement.
     pub doorless: usize,
@@ -356,20 +381,32 @@ fn rect_gap(a_c: DVec3, a_e: DVec2, b_c: DVec3, b_e: DVec2) -> f64 {
     (dx * dx + dz * dz).sqrt()
 }
 
-/// What one volume contributes, read out of the world before anything is
-/// mutated.
-struct VolumeFacts {
+/// **Where a volume is** — the half every sync needs, and the half that costs
+/// nothing to read.
+///
+/// Split from the heavy half deliberately. A sync runs on **every fixed step**
+/// and most of them fold nothing, so cloning every resident list and every
+/// interior graph each time would be a per-step copy of a settlement — hundreds
+/// of graphs of a hundred nodes, sixty times a second, to discover that nothing
+/// had changed. This is a walk and four scalars; [`heavy_facts`] is what is paid
+/// once, for a volume that is actually being folded.
+struct VolumeSite {
     guid: Uuid,
     centre: DVec3,
     extent: DVec2,
     pad_y: f64,
+}
+
+/// What one volume contributes the once, read out of the world before anything
+/// is mutated. Keyed by `Guid` where it is held, so it carries no id of its own.
+struct VolumeFacts {
     residents: Vec<crate::components::ResidentSlot>,
     interior: NavGraph,
 }
 
-/// Read every volume that offers a resident, in `Guid` order.
-fn volume_facts(world: &EcsWorld) -> Vec<VolumeFacts> {
-    let mut out: Vec<VolumeFacts> = Vec::new();
+/// Every volume that offers a resident, in `Guid` order — positions only.
+fn volume_sites(world: &EcsWorld) -> Vec<VolumeSite> {
+    let mut out: Vec<VolumeSite> = Vec::new();
     for e in world.world().iter_entities() {
         let (Some(g), Some(v)) = (e.get::<Guid>(), e.get::<PcgVolume>()) else {
             continue;
@@ -396,16 +433,39 @@ fn volume_facts(world: &EcsWorld) -> Vec<VolumeFacts> {
             .filter(|d| d.exterior && d.floor == 0 && d.hinge.is_finite())
             .map(|d| d.hinge.y - d.height_m * 0.5)
             .fold(f64::INFINITY, f64::min);
-        out.push(VolumeFacts {
+        out.push(VolumeSite {
             guid: g.0,
             centre,
             extent: DVec2::new(v.extent.x, v.extent.y),
             pad_y: if pad_y.is_finite() { pad_y } else { centre.y },
-            residents: v.residents.clone(),
-            interior: v.interior_nav.clone(),
         });
     }
     out.sort_by_key(|f| f.guid);
+    out
+}
+
+/// The residents and the interior of the volumes in `want` — the copy that is
+/// paid once, when a volume is folded, and never again.
+fn heavy_facts(world: &EcsWorld, want: &BTreeSet<Uuid>) -> BTreeMap<Uuid, VolumeFacts> {
+    let mut out = BTreeMap::new();
+    if want.is_empty() {
+        return out;
+    }
+    for e in world.world().iter_entities() {
+        let (Some(g), Some(v)) = (e.get::<Guid>(), e.get::<PcgVolume>()) else {
+            continue;
+        };
+        if !want.contains(&g.0) {
+            continue;
+        }
+        out.insert(
+            g.0,
+            VolumeFacts {
+                residents: v.residents.clone(),
+                interior: v.interior_nav.clone(),
+            },
+        );
+    }
     out
 }
 
@@ -455,8 +515,8 @@ pub fn level_archetype(world: &EcsWorld) -> CrowdArchetype {
 /// Returns this step's counters; they are also left on
 /// [`SocietyRes::stats`].
 pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
-    let facts = volume_facts(world);
-    if facts.is_empty() && !world.world().contains_resource::<SocietyRes>() {
+    let sites = volume_sites(world);
+    if sites.is_empty() && !world.world().contains_resource::<SocietyRes>() {
         // Absent costs nothing.
         return SocietyStats::default();
     }
@@ -464,6 +524,12 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
         .world_mut()
         .remove_resource::<SocietyRes>()
         .unwrap_or_default();
+    // **Every counter here is a TOTAL except the two that say "this step"**
+    // (`folded_now`, `planned_now`). The first cut reset the fold's own counters
+    // each sync, so a gate that read them after the town had settled saw
+    // `0 frontages, 0 crossings` over a network that plainly had both — a report
+    // that says a system did nothing, about a system that did it on an earlier
+    // step.
     let mut stats = SocietyStats {
         agents: soc.stats.agents,
         guid_refusals: soc.stats.guid_refusals,
@@ -472,16 +538,24 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
         doorless: soc.stats.doorless,
         outer_searches: soc.stats.outer_searches,
         outer_cached: soc.stats.outer_cached,
+        frontages: soc.stats.frontages,
+        frontages_refused: soc.stats.frontages_refused,
+        crossings: soc.stats.crossings,
+        salt_collisions: soc.stats.salt_collisions,
+        homes_declined: soc.stats.homes_declined,
         ..SocietyStats::default()
     };
 
     // ── 1. fold every volume the network has not seen ──────────────────────
     // Rings are laid FIRST, all of them, so a crossing can never miss a
     // neighbour that happens to be folded later in the same step.
-    let fresh: Vec<&VolumeFacts> = facts
+    let want: BTreeSet<Uuid> = sites
         .iter()
         .filter(|f| !soc.folded.contains(&f.guid))
+        .map(|f| f.guid)
         .collect();
+    let heavy = heavy_facts(world, &want);
+    let fresh: Vec<&VolumeSite> = sites.iter().filter(|f| want.contains(&f.guid)).collect();
     let mut rings: BTreeMap<Uuid, Vec<(NavNodeId, DVec3)>> = BTreeMap::new();
     for f in &fresh {
         let pts = ring_points(f.centre, f.extent, f.pad_y);
@@ -502,7 +576,7 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
     // The rings a crossing may reach: the ones just laid, plus every one already
     // in the society, re-derived from the volumes that are still resident.
     let mut known: BTreeMap<Uuid, (DVec3, DVec2, Vec<(NavNodeId, DVec3)>)> = BTreeMap::new();
-    for f in &facts {
+    for f in &sites {
         let ids = match rings.get(&f.guid) {
             Some(v) => v.clone(),
             None => ring_points(f.centre, f.extent, f.pad_y)
@@ -541,13 +615,16 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
     //       level network ───────────────────────────────────────────────────
     let mut doors: BTreeMap<Uuid, BTreeMap<u64, NavNodeId>> = BTreeMap::new();
     for f in &fresh {
+        let Some(hf) = heavy.get(&f.guid) else {
+            continue;
+        };
         let ring = &known[&f.guid].2;
         let mut mine: BTreeMap<u64, NavNodeId> = BTreeMap::new();
-        for n in f.interior.nodes() {
+        for n in hf.interior.nodes() {
             // A building's EXTERIOR door is the doorway with one edge: the wall
             // it stands in has no room on the far side, so `interior_nav` links
             // it to exactly one room. Every internal door has two.
-            if n.kind != NavKind::Doorway || f.interior.edges_from(n.id).len() != 1 {
+            if n.kind != NavKind::Doorway || hf.interior.edges_from(n.id).len() != 1 {
                 continue;
             }
             // **A salt collision is two buildings claiming one id.** Checked on
@@ -576,12 +653,16 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
             }
         }
         doors.insert(f.guid, mine);
-        soc.interiors.insert(f.guid, f.interior.clone());
+        soc.interiors.insert(f.guid, hf.interior.clone());
     }
 
     // ── 3. register the fresh volumes' slots ───────────────────────────────
     for f in &fresh {
-        for s in &f.residents {
+        let Some(hf) = heavy.get(&f.guid) else {
+            soc.folded.insert(f.guid);
+            continue;
+        };
+        for s in &hf.residents {
             if !s.at.is_finite() {
                 continue;
             }
@@ -623,13 +704,33 @@ pub fn sync_society(world: &mut EcsWorld) -> SocietyStats {
     stats.errands = soc.errand.len();
 
     // ── 4. plan days, but never while the town is still arriving ───────────
+    // ...and never at all once somebody has installed a population by hand: a
+    // caller that says `set_crowd_population` owns the crowd, and a level that
+    // walked its own residents back in on the next step would make every number
+    // an instrument printed a number about a population it did not choose. The
+    // network is still folded above, because that is a property of the level
+    // rather than of anybody's crowd.
+    let hand = world
+        .world()
+        .get_resource::<crate::crowd::CrowdPopulationRes>()
+        .is_some_and(|p| p.hand_installed);
+    if hand {
+        soc.pending.clear();
+    }
     if stats.folded_now == 0 && !soc.pending.is_empty() {
         let archetype = level_archetype(world);
+        // The ceiling. Homes past it are declined in `Guid` order, so which
+        // thousand a level gets is a function of its own content.
+        let room = SOCIETY_MAX_AGENTS.saturating_sub(stats.agents);
+        if room == 0 {
+            stats.homes_declined += soc.pending.len();
+            soc.pending.clear();
+        }
         let batch: Vec<Uuid> = soc
             .pending
             .keys()
             .copied()
-            .take(SOCIETY_PLANS_PER_STEP)
+            .take(SOCIETY_PLANS_PER_STEP.min(room))
             .collect();
         let mut records: BTreeMap<Uuid, CrowdRecord> = BTreeMap::new();
         for g in batch {

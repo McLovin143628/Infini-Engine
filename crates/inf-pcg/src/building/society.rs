@@ -442,6 +442,98 @@ mod tests {
         }
     }
 
+    /// **The derivation table, over all seven archetypes** — printed so the
+    /// ledger quotes a measurement rather than an intention, and asserted where
+    /// the table's own sentences say something a reader can check.
+    #[test]
+    fn every_archetype_holds_what_its_rooms_imply() {
+        println!(
+            "{:<10} {:>6} {:>6} {:>6} {:>7} {:>7}",
+            "archetype", "floors", "rooms", "homes", "workers", "errands"
+        );
+        let mut homes_of = std::collections::BTreeMap::new();
+        for id in ArchetypeId::ALL {
+            let floors = 3;
+            let plan = plan_of(id, floors);
+            let slots = slots_of(&plan, 0, 0);
+            let h = slots.iter().filter(|s| s.role == SlotRole::Home).count();
+            let w = slots.iter().filter(|s| s.role == SlotRole::Work).count();
+            let e = slots.iter().filter(|s| s.role == SlotRole::Errand).count();
+            println!(
+                "{:<10} {:>6} {:>6} {:>6} {:>7} {:>7}",
+                id.name(),
+                floors,
+                plan.rooms.len(),
+                h,
+                w,
+                e
+            );
+            homes_of.insert(id.name(), h);
+            assert!(
+                h + w + e > 0,
+                "{} holds nobody at all on {floors} storeys of {} room(s)",
+                id.name(),
+                plan.rooms.len()
+            );
+        }
+        // The three sentences the module docs make about archetypes, each one a
+        // consequence of the ROOM table rather than an entry in it.
+        assert!(
+            homes_of["House"] > 0 && homes_of["Apartment"] > 0,
+            "a House or an Apartment holds nobody"
+        );
+        assert_eq!(
+            homes_of["Office"], 0,
+            "an Office holds residents, so the room table has gained a bedroom \
+             somewhere it should not have"
+        );
+        assert_eq!(homes_of["Shop"], 0, "a Shop holds residents");
+    }
+
+    /// **A slot-bearing building offers exactly one FRONT DOOR to a level
+    /// network**, and it is the doorway node with a single edge.
+    ///
+    /// `inf_ecs::society` finds a building's join to the street that way and by
+    /// no other means, so the day it stops being true a whole settlement stops
+    /// being routable and nothing else says so.
+    #[test]
+    fn a_building_offers_exactly_one_single_edge_doorway() {
+        for id in ArchetypeId::ALL {
+            for floors in [1u32, 2, 3] {
+                let plan = plan_of(id, floors);
+                if slots_of(&plan, 0, 7).is_empty() {
+                    continue;
+                }
+                let g = plan.interior_nav_in(7);
+                let leaves: Vec<_> = g
+                    .nodes()
+                    .filter(|n| {
+                        n.kind == inf_nav::NavKind::Doorway && g.edges_from(n.id).len() == 1
+                    })
+                    .map(|n| n.id)
+                    .collect();
+                let doorways = g
+                    .nodes()
+                    .filter(|n| n.kind == inf_nav::NavKind::Doorway)
+                    .count();
+                println!(
+                    "{:<10} {floors}F: {} rooms, {doorways} doorway node(s), {} leaf/leaves, entrance {:?}",
+                    id.name(),
+                    plan.rooms.len(),
+                    leaves.len(),
+                    plan.entrance
+                );
+                assert_eq!(
+                    leaves.len(),
+                    1,
+                    "{} at {floors} storeys offers {} single-edge doorway(s) of                      {doorways}",
+                    id.name(),
+                    leaves.len()
+                );
+            }
+        }
+    }
+
     #[test]
     fn slots_are_a_pure_function_of_the_plan() {
         let plan = plan_of(ArchetypeId::Hotel, 4);

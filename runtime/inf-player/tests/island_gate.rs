@@ -4448,3 +4448,614 @@ fn pie_equals_shipping_when_an_npc_walks_across_town() {
         a.opened
     );
 }
+
+// ── NPC1d: A DAY IN THE LIFE ────────────────────────────────────────────────
+
+/// How many fixed steps of ONE host the day-in-the-life gate runs — one whole
+/// in-game day.
+const DAY_STEPS: usize = 2_400;
+
+/// **The rate the gate compresses the island's own day to.**
+///
+/// The island authors `inf_editor_core::island::ISLAND_CLOCK_RATE = 18`, an
+/// eighty-minute day. At 60 Hz that is `4 800 x 60 = 288 000` fixed steps a
+/// host, and this gate runs two of them — better than two hours of test process
+/// for one arm.
+///
+/// So it runs the SAME day faster, and the compression is exact rather than
+/// approximate: a `ScheduleLeg`'s position is a *fraction of its own clock
+/// window*, so every agent is in the same place at the same HOUR whatever the
+/// rate. What compression does not preserve is the metres per second a leg
+/// implies — a body at `Full` still walks at its own gait and simply falls
+/// further behind its clock — and that is why the walking-pace claim is armed
+/// separately, at the rate the island actually authors, in
+/// `the_islands_own_rate_makes_a_commute_a_walk`.
+const GATE_CLOCK_RATE: f64 = 86_400.0 * 60.0 / DAY_STEPS as f64;
+
+/// The most steps the gate will spend waiting for a settlement to stream in and
+/// its society to be derived.
+const SETTLE_STEPS: usize = 4_000;
+
+/// How many consecutive steps a settlement has to fold NOTHING before the gate
+/// believes it has finished streaming.
+///
+/// A society is not settled the moment its first blocks have residents: a
+/// settlement's volumes evaluate over many steps as the ground under them pages
+/// in, and a gate that stopped at the first quiet step measured four blocks of a
+/// hundred and seventy. Measured exactly that way, and the number this constant
+/// replaced was **one**.
+const QUIET_STEPS: usize = 120;
+
+/// How near its own home or workplace an agent has to be to count as *there*,
+/// metres in plan.
+const THERE_M: f64 = 4.0;
+
+/// One reading of the town, at one hour.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DaySample {
+    hour: f64,
+    at_home: usize,
+    at_work: usize,
+    walking: usize,
+    tiers: [usize; 4],
+    glow_step: u16,
+    sun_y: f64,
+}
+
+/// What one host's day looked like.
+struct DayRun {
+    digests: Vec<u64>,
+    distinct: usize,
+    settle_steps: usize,
+    society: inf_ecs::society::SocietyStats,
+    samples: Vec<DaySample>,
+    /// The highest count each tier ever reached over the whole day.
+    tier_peak: [usize; 4],
+    /// Commute lengths over the whole population, metres: min / median / max.
+    commute_m: (f64, f64, f64),
+    /// Scheduled agents, and of those, agents with a full four-leg day.
+    scheduled: (usize, usize),
+    /// Glazed instances the settlements hold — the things a night lights up.
+    glazed: usize,
+}
+
+/// The local hour this host's clock is on.
+fn local_hour(sim: &RuntimeSim) -> f64 {
+    inf_ecs::sky::local_hour(sim.world())
+}
+
+/// The glow step the island's own sky implies right now — the I8b substrate,
+/// read through `resolve_sky` rather than through a projection, because the
+/// projection reads the same direction and this arm is about the CLOCK.
+fn glow_now(sim: &RuntimeSim) -> (u16, f64) {
+    let sky = inf_ecs::sky::resolve_sky(sim.world()).expect("the island carries a clock");
+    let dir = sky.sun.as_vec3();
+    (inf_render::night_glow_step(dir), sky.sun.y)
+}
+
+/// Step until the settlement has streamed in and every resident has a day.
+///
+/// **Quiet for [`QUIET_STEPS`] consecutive steps**, not merely quiet once: a
+/// settlement's volumes evaluate as the ground under them pages in, so the first
+/// step that folds nothing is somewhere in the middle of a town rather than at
+/// the end of one.
+fn settle_the_society(sim: &mut RuntimeSim) -> usize {
+    let mut quiet = 0usize;
+    for i in 0..SETTLE_STEPS {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        let s = sim.society_stats();
+        if s.folded_now > 0 || s.planned_now > 0 || s.pending > 0 {
+            quiet = 0;
+        } else {
+            quiet += 1;
+        }
+        if s.agents > 0 && quiet >= QUIET_STEPS {
+            return i + 1;
+        }
+    }
+    let s = sim.society_stats();
+    panic!(
+        "the society never settled in {SETTLE_STEPS} steps: {} volume(s), {} \
+         home(s), {} agent(s), {} still pending",
+        s.volumes, s.homes, s.agents, s.pending
+    );
+}
+
+/// Read the population's schedules — the commute lengths and how many agents
+/// got a full day.
+fn read_schedules(sim: &RuntimeSim) -> ((f64, f64, f64), (usize, usize)) {
+    let pop = sim
+        .world()
+        .world()
+        .get_resource::<inf_ecs::crowd::CrowdPopulationRes>()
+        .expect("the island installed a population");
+    let mut lens: Vec<f64> = Vec::new();
+    let mut scheduled = 0usize;
+    let mut full = 0usize;
+    for rec in pop.records.values() {
+        let Some(s) = rec.schedule.as_ref() else {
+            continue;
+        };
+        scheduled += 1;
+        if s.legs().len() == 4 {
+            full += 1;
+        }
+        lens.push(s.legs()[0].path.length_m());
+    }
+    lens.sort_by(f64::total_cmp);
+    let stat = if lens.is_empty() {
+        (0.0, 0.0, 0.0)
+    } else {
+        (lens[0], lens[lens.len() / 2], lens[lens.len() - 1])
+    };
+    ((stat.0, stat.1, stat.2), (scheduled, full))
+}
+
+/// Where the town is at this instant — read off the RECORDS' own `last`, which
+/// is where the step put every agent (the body's place for a steered tier, the
+/// clock's for the rest), not off a re-derived answer.
+fn sample_town(sim: &RuntimeSim, hour: f64) -> DaySample {
+    let pop = sim
+        .world()
+        .world()
+        .get_resource::<inf_ecs::crowd::CrowdPopulationRes>()
+        .expect("a population");
+    let mut s = DaySample {
+        hour,
+        at_home: 0,
+        at_work: 0,
+        walking: 0,
+        tiers: [0; 4],
+        glow_step: 0,
+        sun_y: 0.0,
+    };
+    let plan_d =
+        |a: glam::DVec3, b: glam::DVec3| -> f64 { glam::DVec2::new(a.x - b.x, a.z - b.z).length() };
+    for rec in pop.records.values() {
+        s.tiers[rec.tier.as_u8() as usize] += 1;
+        let Some(sched) = rec.schedule.as_ref() else {
+            continue;
+        };
+        let first = &sched.legs()[0];
+        let home = first.path.points()[0];
+        let work = first.path.points()[first.path.points().len() - 1];
+        let (dh, dw) = (plan_d(rec.last, home), plan_d(rec.last, work));
+        if dh <= THERE_M {
+            s.at_home += 1;
+        } else if dw <= THERE_M {
+            s.at_work += 1;
+        } else {
+            s.walking += 1;
+        }
+    }
+    let (step, y) = glow_now(sim);
+    s.glow_step = step;
+    s.sun_y = y;
+    s
+}
+
+/// **THE NPC1d GATE**: a whole day over a settlement, on both hosts, byte for
+/// byte.
+///
+/// # What it claims, and the order the claims are made in
+///
+/// Coverage first, per host, because two empty towns agree perfectly: the level
+/// derived a population from its OWN buildings (nobody installed one), the
+/// population is at home at two in the morning and at work at ten, somebody is
+/// walking in between, the tier ladder is exercised across the day, and the
+/// windows the island has always had are lit at night and dark at noon. Only
+/// then are the two hosts' traces compared.
+///
+/// # The day is compressed, and the compression is exact
+///
+/// See [`GATE_CLOCK_RATE`]. A leg is a fraction of its own clock window, so the
+/// day has the same shape at any rate; the walking-pace claim, which does NOT
+/// survive compression, is armed at the island's authored rate in its own arm.
+#[test]
+fn pie_equals_shipping_over_a_day_in_the_life() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let proj = build_project(tmp.path());
+    let content = proj.join("Content");
+    let pack = cook(tmp.path());
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let slug = inf_island::slug(&recipe.name);
+    let design = inf_island::read_design(&recipe).expect("the design reads");
+    let settlement = walk_target_settlement(&design);
+
+    // The hours the town is read at, and what each is for.
+    let hours: [f64; 6] = [2.0, 7.0, 8.5, 10.0, 19.0, 22.0];
+
+    let mut hosts: Vec<(&str, RuntimeSim)> = vec![
+        ("shipping", pack_sim(&pack)),
+        ("PIE", loose_sim(&content, &slug)),
+    ];
+    let mut runs: Vec<(&str, DayRun)> = Vec::new();
+
+    for (label, sim) in hosts.iter_mut() {
+        // Stand in the town so its cells activate, its blocks build and its
+        // society is derived. The hero does not move again: this gate is about
+        // the CLOCK, and a moving anchor would make the tier counts a statement
+        // about a drive line.
+        let hero = hero_entity(sim).expect("a hero");
+        let centre = glam::DVec3::new(settlement.centre.x, 0.0, settlement.centre.y);
+        set_hero(sim, hero, centre);
+        sim.world_mut().mark_dirty();
+        let settle_steps = settle_the_society(sim);
+        let society = sim.society_stats();
+        let (commute_m, scheduled) = read_schedules(sim);
+        let glazed = {
+            let w = sim.world().world();
+            let mut n = 0usize;
+            for e in w.iter_entities() {
+                if let Some(v) = e.get::<inf_ecs::components::PcgVolume>() {
+                    n += v.evaluated.iter().filter(|i| i.glow > 0.0).count();
+                }
+            }
+            n
+        };
+        println!(
+            "NPC1d {label}: settled in {settle_steps} steps -- {} volume(s), {} \
+             home(s), {} agent(s) ({} declined), {} scheduled ({} full days), \
+             {} homebound, {} housebound, {} doorless",
+            society.volumes,
+            society.homes,
+            society.agents,
+            society.homes_declined,
+            scheduled.0,
+            scheduled.1,
+            society.homebound,
+            society.housebound,
+            society.doorless
+        );
+        println!(
+            "NPC1d {label}: network {} nodes / {} edges, {} frontage(s) ({} \
+             refused), {} crossing(s), {} salt collision(s); street routes {} \
+             searched / {} cached",
+            society.nodes,
+            society.edges,
+            society.frontages,
+            society.frontages_refused,
+            society.crossings,
+            society.salt_collisions,
+            society.outer_searches,
+            society.outer_cached
+        );
+        println!(
+            "NPC1d {label}: commute {:.1} / {:.1} / {:.1} m (min/median/max); at \
+             the island's authored rate {} the median is {:.2} m/s",
+            commute_m.0,
+            commute_m.1,
+            commute_m.2,
+            inf_editor_core::island::ISLAND_CLOCK_RATE,
+            commute_m.1 * inf_editor_core::island::ISLAND_CLOCK_RATE / 3600.0
+        );
+
+        // ── the day itself ──────────────────────────────────────────────────
+        // Wind the clock to local midnight and compress it, so `DAY_STEPS` is
+        // exactly one turn and step `i` is hour `24 i / DAY_STEPS`.
+        {
+            let w = sim.world_mut().world_mut();
+            let mut q = w.query::<&mut inf_ecs::components::TimeOfDay>();
+            let mut wound = 0usize;
+            for mut tod in q.iter_mut(w) {
+                tod.seconds = (86_400.0 - tod.longitude_deg * 240.0).rem_euclid(86_400.0);
+                tod.rate = GATE_CLOCK_RATE;
+                wound += 1;
+            }
+            assert!(wound > 0, "the island carries no clock to wind");
+        }
+        let mut run = DayRun {
+            digests: Vec::with_capacity(DAY_STEPS),
+            distinct: 0,
+            settle_steps,
+            society,
+            samples: Vec::new(),
+            tier_peak: [0; 4],
+            commute_m,
+            scheduled,
+            glazed,
+        };
+        let mut seen: std::collections::BTreeSet<u64> = Default::default();
+        let mut next = 0usize;
+        for i in 0..DAY_STEPS {
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+            let d = digest(&sim.state_bytes());
+            seen.insert(d);
+            run.digests.push(d);
+            let st = sim.crowd_stats();
+            for (t, n) in st.per_tier.iter().enumerate() {
+                run.tier_peak[t] = run.tier_peak[t].max(*n);
+            }
+            if next < hours.len() && i >= (hours[next] / 24.0 * DAY_STEPS as f64) as usize {
+                let s = sample_town(sim, local_hour(sim));
+                println!(
+                    "NPC1d {label}: {:>5.2} h -- {} home / {} work / {} walking; \
+                     tiers {:?}; sun y {:+.3} -> glow {}",
+                    s.hour, s.at_home, s.at_work, s.walking, s.tiers, s.sun_y, s.glow_step
+                );
+                run.samples.push(s);
+                next += 1;
+            }
+        }
+        run.distinct = seen.len();
+        println!(
+            "NPC1d {label}: {DAY_STEPS} steps, {} distinct states; tier peaks \
+             {:?}; crowd trace {} B a step over {} agent(s) = {} B a day",
+            run.distinct,
+            run.tier_peak,
+            run.society.agents * inf_ecs::crowd::AGENT_TRACE_BYTES,
+            run.society.agents,
+            run.society.agents * inf_ecs::crowd::AGENT_TRACE_BYTES * DAY_STEPS
+        );
+        runs.push((label, run));
+    }
+
+    // ── coverage, per host, before anything is compared ────────────────────
+    for (label, r) in &runs {
+        assert!(
+            r.society.agents > 0,
+            "{label}: the level derived NO population from its own buildings"
+        );
+        assert_eq!(
+            r.society.pending, 0,
+            "{label}: {} resident(s) never got a day",
+            r.society.pending
+        );
+        assert_eq!(
+            r.society.salt_collisions, 0,
+            "{label}: {} building(s) share a nav namespace, so a route can walk \
+             into the wrong house",
+            r.society.salt_collisions
+        );
+        assert_eq!(
+            r.society.guid_refusals, 0,
+            "{label}: {} agent guid(s) collided with a level entity",
+            r.society.guid_refusals
+        );
+        assert!(
+            r.scheduled.1 > 0,
+            "{label}: {} agent(s) are scheduled and NONE has a full four-leg day \
+             -- nobody commutes",
+            r.scheduled.0
+        );
+        assert!(
+            r.society.crossings > 0 && r.society.frontages > 0,
+            "{label}: {} crossing(s) and {} frontage(s) -- the network is not one \
+             thing",
+            r.society.crossings,
+            r.society.frontages
+        );
+        assert!(
+            r.commute_m.1 > 10.0,
+            "{label}: the median commute is {:.1} m, which is not across a town",
+            r.commute_m.1
+        );
+
+        let at = |h: f64| -> &DaySample {
+            r.samples
+                .iter()
+                .find(|s| (s.hour - h).abs() < 1.0 || (s.hour - h).abs() > 23.0)
+                .unwrap_or_else(|| panic!("{label}: no sample near {h} h"))
+        };
+        let night = at(2.0);
+        let morning = at(7.0);
+        let commuting = at(8.5);
+        let working = at(10.0);
+        let evening = at(19.0);
+        let late = at(22.0);
+        let total = |s: &DaySample| s.at_home + s.at_work + s.walking;
+
+        // **THE TOWN IS AT HOME AT NIGHT AND AT WORK BY TEN.** Asserted as a
+        // majority rather than as all of them, because a homebound agent has no
+        // workplace to be at and stays home all day by design.
+        assert!(
+            night.at_home * 2 > total(night),
+            "{label}: at {:.2} h only {} of {} are at home",
+            night.hour,
+            night.at_home,
+            total(night)
+        );
+        assert!(
+            morning.at_home * 2 > total(morning),
+            "{label}: at {:.2} h only {} of {} are at home before work",
+            morning.hour,
+            morning.at_home,
+            total(morning)
+        );
+        assert!(
+            working.at_work > 0,
+            "{label}: NOBODY is at work at {:.2} h ({} home, {} walking)",
+            working.hour,
+            working.at_home,
+            working.walking
+        );
+        assert!(
+            working.at_work > night.at_work,
+            "{label}: {} at work at ten against {} at two in the morning -- the \
+             town does not go to work",
+            working.at_work,
+            night.at_work
+        );
+        // **AND SOMEBODY IS ON THE STREET IN BETWEEN**, which is the claim the
+        // two census readings above cannot make on their own.
+        assert!(
+            commuting.walking > 0,
+            "{label}: at {:.2} h {} are at home and {} at work and NOBODY is \
+             between them",
+            commuting.hour,
+            commuting.at_home,
+            commuting.at_work
+        );
+        assert!(
+            evening.at_home >= night.at_home / 2,
+            "{label}: the town has not started going home by {:.2} h ({} of {})",
+            evening.hour,
+            evening.at_home,
+            total(evening)
+        );
+
+        // **THE WINDOWS.** The island has always had glazed modules and its
+        // clock was frozen at half past ten in the morning, so the I8b substrate
+        // had never once returned a lit step on it. It does now, and it goes
+        // dark again by day.
+        assert!(
+            r.glazed > 0,
+            "{label}: the settlements hold no glazed module, so the night \
+             comparison would be vacuous"
+        );
+        assert_eq!(
+            working.glow_step, 0,
+            "{label}: the windows are lit at {:.2} h with the sun at y {:+.3}",
+            working.hour, working.sun_y
+        );
+        assert!(
+            night.glow_step > 0 && late.glow_step > 0,
+            "{label}: the windows are dark at {:.2} h (sun y {:+.3}) and {:.2} h \
+             (sun y {:+.3})",
+            night.hour,
+            night.sun_y,
+            late.hour,
+            late.sun_y
+        );
+        assert!(
+            night.sun_y < 0.0 && working.sun_y > 0.0,
+            "{label}: the sun did not rise and set over the day (night {:+.3}, \
+             noon {:+.3})",
+            night.sun_y,
+            working.sun_y
+        );
+
+        // **THE LADDER IS EXERCISED.** At least three rungs carry somebody at
+        // some point in the day; the fourth is reported rather than demanded,
+        // because whether a settlement is wider than `Dormant`'s radius is a
+        // property of the recipe rather than of this system.
+        let rungs = r.tier_peak.iter().filter(|n| **n > 0).count();
+        assert!(
+            rungs >= 3,
+            "{label}: only {rungs} of the four tiers ever carried an agent: {:?}",
+            r.tier_peak
+        );
+        assert!(
+            r.distinct > DAY_STEPS / 2,
+            "{label}: {} distinct states over {DAY_STEPS} steps -- the world \
+             stopped moving",
+            r.distinct
+        );
+    }
+
+    // ── and then PIE == shipping, step for step ────────────────────────────
+    let (a_label, a) = &runs[0];
+    let (b_label, b) = &runs[1];
+    assert_eq!(
+        a.society.agents, b.society.agents,
+        "{a_label} derived {} agents and {b_label} derived {}",
+        a.society.agents, b.society.agents
+    );
+    assert_eq!(
+        a.society.nodes, b.society.nodes,
+        "the two hosts built different networks ({} nodes against {})",
+        a.society.nodes, b.society.nodes
+    );
+    assert_eq!(
+        a.settle_steps, b.settle_steps,
+        "{a_label} settled in {} steps and {b_label} in {}",
+        a.settle_steps, b.settle_steps
+    );
+    assert_eq!(a.digests.len(), b.digests.len());
+    for (i, (x, y)) in a.digests.iter().zip(b.digests.iter()).enumerate() {
+        assert_eq!(
+            x,
+            y,
+            "the two hosts diverged at step {i} of {DAY_STEPS}, hour {:.2}",
+            24.0 * i as f64 / DAY_STEPS as f64
+        );
+    }
+    assert_eq!(a.distinct, b.distinct);
+    println!(
+        "NPC1d GATE: {DAY_STEPS} steps a host, {} distinct states, identical on \
+         both hosts to the byte; {} agents from {} homes over {} buildings",
+        a.distinct, a.society.agents, a.society.homes, a.society.volumes
+    );
+}
+
+/// **The rate the island authors makes a commute a WALK**, and this is the arm
+/// the compressed gate above cannot make.
+///
+/// `ISLAND_CLOCK_RATE` was not chosen for looks. A `ScheduleLeg` walks its route
+/// over its own clock window, so the metres per second it implies is
+/// `length x rate / 3600` — and the rate is the number that makes the island's
+/// own median commute a walking pace. This measures that commute on the
+/// committed island's own population and holds the implied speed inside a band a
+/// person walks in.
+#[test]
+fn the_islands_own_rate_makes_a_commute_a_walk() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let proj = build_project(tmp.path());
+    let content = proj.join("Content");
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let slug = inf_island::slug(&recipe.name);
+    let design = inf_island::read_design(&recipe).expect("the design reads");
+    let settlement = walk_target_settlement(&design);
+
+    let mut sim = loose_sim(&content, &slug);
+    let hero = hero_entity(&mut sim).expect("a hero");
+    let centre = glam::DVec3::new(settlement.centre.x, 0.0, settlement.centre.y);
+    set_hero(&mut sim, hero, centre);
+    sim.world_mut().mark_dirty();
+    settle_the_society(&mut sim);
+
+    let rate = inf_editor_core::island::ISLAND_CLOCK_RATE;
+    assert!(
+        rate > 0.0,
+        "the island's clock is frozen, so it has no day for a society to live"
+    );
+    let pop = sim
+        .world()
+        .world()
+        .get_resource::<inf_ecs::crowd::CrowdPopulationRes>()
+        .expect("a population");
+    let mut speeds: Vec<f64> = Vec::new();
+    for rec in pop.records.values() {
+        let Some(s) = rec.schedule.as_ref() else {
+            continue;
+        };
+        speeds.push(s.legs()[0].implied_speed_mps(rate));
+    }
+    speeds.sort_by(f64::total_cmp);
+    assert!(!speeds.is_empty(), "no agent has a leg to walk");
+    let (lo, med, hi) = (
+        speeds[0],
+        speeds[speeds.len() / 2],
+        speeds[speeds.len() - 1],
+    );
+    println!(
+        "NPC1d rate: at {rate} the island's {} commutes imply {lo:.2} / \
+         {med:.2} / {hi:.2} m/s (min/median/max); a walk is 1.65",
+        speeds.len()
+    );
+    let walk = inf_ecs::components::CharacterMovement::default().walk_speed_mps;
+    // **The rate is SET from this number**, so the band is tight rather than
+    // generous: a first draft of 30 put the median at 2.67 m/s -- a jog -- and a
+    // band wide enough to admit that would have certified it.
+    assert!(
+        med > walk * 0.75 && med < walk * 1.25,
+        "at rate {rate} the island's median commute implies {med:.2} m/s against \
+         a {walk:.2} m/s walk -- the rate and the schedule's hours disagree \
+         about what a commute is"
+    );
+    // And EVERY commute is a walk, not just the middle one: the slowest is a
+    // stroll and the fastest is not a run.
+    assert!(
+        lo > 0.4 && hi < walk * 1.6,
+        "the island's commutes run {lo:.2} to {hi:.2} m/s at rate {rate}"
+    );
+    // A day at this rate is a real length, stated in the units a reader has.
+    let day_min = 86_400.0 / rate / 60.0;
+    println!("NPC1d rate: a day is {day_min:.1} minutes of real time");
+    assert!(
+        (day_min - 80.0).abs() < 0.01,
+        "the island's day is {day_min:.1} minutes"
+    );
+}

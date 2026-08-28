@@ -1373,6 +1373,19 @@ pub struct CrowdPopulationRes {
     /// `steps · dt` rather than an accumulated `+= dt`, so a long run cannot
     /// drift and two hosts that started at the same step agree exactly.
     pub steps: u64,
+    /// **Somebody installed this population by hand** (NPC1d) — through
+    /// [`set_population`], which REPLACES.
+    ///
+    /// The rule it carries is one sentence: *a caller that installs a population
+    /// by hand owns it*, so [`crate::society`] stops deriving one. Without it an
+    /// instrument that installs a measured N and then clears it would find the
+    /// level's own residents walking back in on the next step, and every number
+    /// it printed would be about a population it did not choose.
+    ///
+    /// Not folded into [`crowd_state_bytes`]: it decides whether a *derivation*
+    /// runs, and two hosts that disagreed about it would disagree about the
+    /// records a step later, which is where the trace already looks.
+    pub hand_installed: bool,
 }
 
 /// The tier an entity's agent took this step — the component
@@ -1533,9 +1546,11 @@ impl CrowdStats {
 /// finding, so the old crowd goes through [`clear_crowd`] first.
 pub fn set_population(world: &mut EcsWorld, records: BTreeMap<Uuid, CrowdRecord>) {
     clear_crowd(world);
-    world
-        .world_mut()
-        .insert_resource(CrowdPopulationRes { records, steps: 0 });
+    world.world_mut().insert_resource(CrowdPopulationRes {
+        records,
+        steps: 0,
+        hand_installed: true,
+    });
 }
 
 /// **Add agents to the population without disturbing the ones already in it**

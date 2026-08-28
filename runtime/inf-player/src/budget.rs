@@ -319,6 +319,37 @@ pub const CITY_STEP_BUDGET_MS: f64 = 6.0;
 /// (NPC1a) and ratcheted to 1.0 by the NPC1a audit.
 pub const NPC_STEP_BUDGET_MS: f64 = 1.0;
 
+/// **What the `society` phase may cost on a settled level**, milliseconds
+/// (island wave NPC1d).
+///
+/// The phase does two different things and only one of them is steady. On a
+/// **settled** level — every volume folded, every resident given a day — it is
+/// one entity walk that finds no new volume and returns; that is what this
+/// budget is about, and it is the number a shipped frame pays sixty times a
+/// second for ever.
+///
+/// The other thing is the **derivation**, which happens once per volume as a
+/// settlement streams in: a pavement ring, an interior absorbed, and up to
+/// [`inf_ecs::society::SOCIETY_PLANS_PER_STEP`] days planned over the network.
+/// That is a bounded transient by construction — the per-step cap is exactly the
+/// mechanism that stops it being a cliff — and it is measured and REPORTED
+/// rather than budgeted, because a load-time spike asserted against a steady
+/// budget is the "a load asserts LOAD_BUDGET_MS, never FRAME_BUDGET_MS" rule
+/// (P20) pointed the wrong way.
+///
+/// **0.5 ms**, half of [`NPC_STEP_BUDGET_MS`]: the settled phase does strictly
+/// less work than the crowd phase beside it (a walk, against a walk plus a
+/// per-agent plan and a per-agent transform write), so a society phase that grew
+/// past half a crowd's has stopped being a walk.
+///
+/// # A clock, so: release only, real machine only
+///
+/// [`CITY_STEP_BUDGET_MS`]'s conditioning, for its reasons.
+///
+/// **RATCHET RULE (§8): this constant may only ever DECREASE.** Minted at 0.5
+/// (NPC1d).
+pub const SOCIETY_STEP_BUDGET_MS: f64 = 0.5;
+
 /// The population the [`NPC_STEP_BUDGET_MS`] measurement is taken at.
 ///
 /// Pinned beside the budget because a per-step millisecond without a population

@@ -41,7 +41,7 @@
 use std::time::Instant;
 
 /// How many phases one fixed step is split into.
-pub const STEP_PHASES: usize = 25;
+pub const STEP_PHASES: usize = 26;
 
 /// The phases, in the order [`RuntimeSim::fixed_step`] runs them.
 ///
@@ -65,6 +65,7 @@ pub const STEP_PHASE_NAMES: [&str; STEP_PHASES] = [
     "terrain stream",
     "biome scatter",
     "sky",
+    "society",
     "crowd",
     "physics2d sync",
     "physics3d sync",
@@ -100,55 +101,65 @@ pub(crate) mod phase {
     pub const BIOME_SCATTER: usize = 2;
     /// P17.1 time of day + P17.4 the weather blend.
     pub const SKY: usize = 3;
+    /// NPC1d — the level's own society: which of its buildings have been folded
+    /// into a walkable network, and the days their residents are given. HERE,
+    /// after the sky (a schedule reads the clock) and before the crowd (a record
+    /// installed after the tiering would be `Dormant` for one step on one host
+    /// and not the other). Its own phase rather than a corner of the crowd's,
+    /// because a level's whole population is derived in it and a step that
+    /// cannot say where its milliseconds went is the defect wave I4b existed to
+    /// remove. Inert — one entity walk that finds nothing — on a level whose
+    /// volumes offer no resident.
+    pub const SOCIETY: usize = 4;
     /// NPC1a — the sim-LOD tier decision and the crowd's own kinematic step.
     /// HERE, after streaming (so a streamed-in agent is tiered on the step it
     /// arrives) and before the physics sync (so the bridge sees this step's
     /// bodies), the character step and the animation (so both read this step's
     /// tiers). Inert — one `contains_resource` — on a level with no crowd.
-    pub const CROWD: usize = 4;
+    pub const CROWD: usize = 5;
     /// The 2D bridge's ECS → rapier2d walk.
-    pub const PHYSICS2D_SYNC: usize = 5;
+    pub const PHYSICS2D_SYNC: usize = 6;
     /// The 3D bridge's walk — the I3 collider band's gather lives here, and so
     /// does the P22.3 fracture follow that precedes it.
-    pub const PHYSICS3D_SYNC: usize = 6;
+    pub const PHYSICS3D_SYNC: usize = 7;
     /// P20.2 buoyancy + hydrodynamic drag.
-    pub const WATER: usize = 7;
+    pub const WATER: usize = 8;
     /// Wave 3 input edges and the dispatches they queue.
-    pub const INPUT_EVENTS: usize = 8;
+    pub const INPUT_EVENTS: usize = 9;
     /// The Tick pass over every actor, and the dispatches it queues.
-    pub const BLUEPRINT_TICK: usize = 9;
+    pub const BLUEPRINT_TICK: usize = 10;
     /// P29.3 — the one Ring-0 movement step, plus the intent that feeds it.
-    pub const CHARACTER_MOVE: usize = 10;
+    pub const CHARACTER_MOVE: usize = 11;
     /// I6 — doors, weapons and the health they spend, plus the host's own drain
     /// of the energy they owe the P22 damage door.
-    pub const GAMEPLAY: usize = 11;
+    pub const GAMEPLAY: usize = 12;
     /// rapier2d + rapier3d.
-    pub const SOLVER: usize = 12;
+    pub const SOLVER: usize = 13;
     /// Wave 3 contacts and overlaps, and the dispatches they queue.
-    pub const COLLISION_DRAIN: usize = 13;
+    pub const COLLISION_DRAIN: usize = 14;
     /// rapier → ECS.
-    pub const WRITE_BACK: usize = 14;
+    pub const WRITE_BACK: usize = 15;
     /// The transform + visibility DFS. **Three call sites, gathered.**
-    pub const PROPAGATE: usize = 15;
+    pub const PROPAGATE: usize = 16;
     /// P22.1 — the ground remembers what stood on it.
-    pub const DEFORMATION: usize = 16;
+    pub const DEFORMATION: usize = 17;
     /// Play-heads, state machines and root motion.
-    pub const ANIMATION: usize = 17;
+    pub const ANIMATION: usize = 18;
     /// P11.3 sockets.
-    pub const ATTACHMENTS: usize = 18;
+    pub const ATTACHMENTS: usize = 19;
     /// P24.4 garments and hair.
-    pub const CLOTH_HAIR: usize = 19;
+    pub const CLOTH_HAIR: usize = 20;
     /// P14.5 WASM mods — which propagate internally, so their propagate is here
     /// rather than in [`PROPAGATE`].
-    pub const MODS: usize = 20;
+    pub const MODS: usize = 21;
     /// P22.3 fracture write-back, the structural solve and the debris budget.
-    pub const DESTRUCTION: usize = 21;
+    pub const DESTRUCTION: usize = 22;
     /// P12.3 — the audio command queue.
-    pub const AUDIO: usize = 22;
+    pub const AUDIO: usize = 23;
     /// P29.6 — the locomotion camera.
-    pub const CAMERA: usize = 23;
+    pub const CAMERA: usize = 24;
     /// The interpolation history roll and the rising-edge clear.
-    pub const POSITION_CAPTURE: usize = 24;
+    pub const POSITION_CAPTURE: usize = 25;
 }
 
 /// One fixed step's phase milliseconds — or, after
