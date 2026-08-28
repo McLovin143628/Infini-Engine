@@ -2251,6 +2251,208 @@ fn the_group_ceiling_counts_the_groups_it_refuses() {
     );
 }
 
+/// **THE CROWD PROXY RETIRES THE GROUP CEILING** (wave NPC1b).
+///
+/// The arm above is this file's statement of wall 4: a skinned instance is one
+/// geometry group, `VSM_MAX_GROUPS` is 1 024, and past it a crowd's shadows are
+/// refused. This is the same fixture with the same population, asking for the
+/// proxy instead — and the number that has to move is `dropped_groups`, from
+/// eleven a frame to **zero**.
+///
+/// The two together are what makes the claim falsifiable. A proxy that quietly
+/// dropped the casters instead of grouping them would pass the zero-drops half
+/// and fail `proxy_casters`; a proxy that kept a group each would pass
+/// `proxy_casters` and fail the drops.
+#[test]
+fn a_crowd_of_proxies_is_one_group_and_refuses_nothing() {
+    let Some(gpu) = gpu_or_skip("the VSM crowd proxy") else {
+        return;
+    };
+    let v = |x: f32, y: f32| inf_render::SkinnedVertex {
+        pos: [x, y, 0.0],
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0, 0.0],
+        joints: [0, 0, 0, 0],
+        weights: [1.0, 0.0, 0.0, 0.0],
+    };
+    let mesh = std::sync::Arc::new(inf_render::SkinnedMeshData {
+        vertices: vec![v(-0.1, -0.1), v(0.1, -0.1), v(0.1, 0.1), v(-0.1, 0.1)],
+        indices: vec![0, 1, 2, 0, 2, 3],
+    });
+    const OVER: u32 = 11;
+    let want = inf_render::VSM_MAX_GROUPS + OVER - inf_render::VSM_RIGID_GROUPS;
+    let mut s = RenderScene {
+        grid_enabled: false,
+        skinned_meshes: vec![mesh],
+        ..Default::default()
+    };
+    for i in 0..want {
+        s.skinned.push(inf_render::SkinnedInstance {
+            translation: glam::DVec3::new((i % 32) as f64 * 0.2 - 3.2, (i / 32) as f64 * 0.2, 0.0),
+            rotation: glam::Quat::IDENTITY,
+            scale: glam::Vec3::ONE,
+            color: [1.0, 1.0, 1.0, 1.0],
+            metallic: 0.0,
+            roughness: 1.0,
+            emissive: [0.0; 3],
+            id: 1_000 + i,
+            mesh: 0,
+            palette: inf_render::identity_palette(),
+            shadow: inf_render::SkinnedShadow::Proxy,
+            vt: inf_render::VtTextureSet::NONE,
+        });
+    }
+    s.instances.push(backdrop());
+    s.lights.push(inf_render::RenderLight {
+        kind: inf_render::LightKind::Directional,
+        direction: glam::Vec3::Z,
+        cast_shadows: true,
+        ..Default::default()
+    });
+    s.mark_dirty();
+
+    let renderer = run(&gpu, &s, &view(6.0), &settings(), 3);
+    let stats = renderer.vsm_raster_stats().expect("stats");
+    assert!(stats.frames > 0, "the pass never opened: {stats:?}");
+    assert_eq!(
+        stats.dropped_groups, 0,
+        "the crowd proxy still overran the group ceiling: {stats:?}"
+    );
+    assert_eq!(stats.dropped_casters, 0, "{stats:?}");
+    // Every agent still casts — as a proxy, not as a silhouette of its own.
+    assert_eq!(
+        stats.proxy_casters,
+        u64::from(want) * stats.frames,
+        "{stats:?}"
+    );
+    assert_eq!(
+        stats.skinned_casters, 0,
+        "a proxy instance also packed a skinned caster: {stats:?}"
+    );
+    // …and the frame really rasterized, so "nothing refused" is not "nothing
+    // drawn".
+    assert!(
+        stats.draws > 0 && renderer.vsm_raster_frames() > 0,
+        "{stats:?}"
+    );
+    assert!(
+        renderer.vsm_summary().unwrap().contains("crowd-proxy"),
+        "the counter is not in the summary"
+    );
+}
+
+/// **The exact posed bound is tighter than the margin, and still contains the
+/// pose** (wave NPC1b) — the shipped half of
+/// `the_palette_union_bound_is_tighter_than_the_shipped_pose_margin`, which
+/// computed this bound in the test file and said it belonged to a later batch.
+///
+/// One fixture, two instances, differing only in `shadow`. The `Posed` one has to
+/// hold a strictly smaller cull sphere than the `BindSphere` one — and both have
+/// to contain the posed geometry, because a bound that culls a limb's shadow at
+/// the moment the limb moves is the worst shape a defect can have.
+#[test]
+fn the_posed_bound_is_tighter_than_the_margin_and_still_contains_the_pose() {
+    let Some(gpu) = gpu_or_skip("the exact posed skinned bound") else {
+        return;
+    };
+    // A quad at ±1, skinned entirely to joint 0, displaced 0.6 m along x — the
+    // same fixture the margin arm drives.
+    let v = |x: f32, y: f32| inf_render::SkinnedVertex {
+        pos: [x, y, 0.0],
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0, 0.0],
+        joints: [0, 0, 0, 0],
+        weights: [1.0, 0.0, 0.0, 0.0],
+    };
+    let mesh = std::sync::Arc::new(inf_render::SkinnedMeshData {
+        vertices: vec![v(-1.0, -1.0), v(1.0, -1.0), v(1.0, 1.0), v(-1.0, 1.0)],
+        indices: vec![0, 1, 2, 0, 2, 3],
+    });
+    let palette = std::sync::Arc::new(vec![glam::Mat4::from_translation(glam::Vec3::new(
+        0.6, 0.0, 0.0,
+    ))]);
+    let scene_with = |shadow: inf_render::SkinnedShadow| {
+        let mut s = RenderScene {
+            grid_enabled: false,
+            skinned_meshes: vec![mesh.clone()],
+            ..Default::default()
+        };
+        s.skinned.push(inf_render::SkinnedInstance {
+            translation: glam::DVec3::new(0.0, CUBE_XY.1 as f64, 0.0),
+            rotation: glam::Quat::IDENTITY,
+            scale: glam::Vec3::ONE,
+            color: [1.0, 1.0, 1.0, 1.0],
+            metallic: 0.0,
+            roughness: 1.0,
+            emissive: [0.0; 3],
+            id: 3,
+            mesh: 0,
+            palette: palette.clone(),
+            shadow,
+            vt: inf_render::VtTextureSet::NONE,
+        });
+        s.instances.push(backdrop());
+        s.lights.push(inf_render::RenderLight {
+            kind: inf_render::LightKind::Directional,
+            direction: glam::Vec3::Z,
+            cast_shadows: true,
+            ..Default::default()
+        });
+        s.mark_dirty();
+        s
+    };
+
+    let sphere_of = |shadow| {
+        let scene = scene_with(shadow);
+        let renderer = run(&gpu, &scene, &view(6.0), &settings_with(64), 6);
+        let sys = renderer.vsm().expect("the raster ran");
+        let c = sys
+            .raster_state()
+            .last_casters()
+            .iter()
+            .find(|c| c.ids[0] >= inf_render::VSM_RIGID_GROUPS)
+            .copied()
+            .expect("no skinned caster was packed");
+        (
+            glam::Vec3::new(c.sphere[0], c.sphere[1], c.sphere[2]),
+            c.sphere[3],
+        )
+    };
+
+    let (bind_c, bind_r) = sphere_of(inf_render::SkinnedShadow::BindSphere);
+    let (pose_c, pose_r) = sphere_of(inf_render::SkinnedShadow::Posed);
+
+    // Both contain every posed vertex.
+    for corner in [
+        glam::Vec3::new(-1.0, -1.0, 0.0),
+        glam::Vec3::new(1.0, -1.0, 0.0),
+        glam::Vec3::new(1.0, 1.0, 0.0),
+        glam::Vec3::new(-1.0, 1.0, 0.0),
+    ] {
+        let p = palette[0].transform_point3(corner) + glam::Vec3::new(0.0, CUBE_XY.1, 0.0);
+        assert!(
+            (p - bind_c).length() <= bind_r + 1e-3,
+            "the margin bound lost {p:?}"
+        );
+        assert!(
+            (p - pose_c).length() <= pose_r + 1e-3,
+            "the EXACT bound lost {p:?}, which is the one shape this must never do"
+        );
+    }
+    // …and the exact one is strictly smaller, which is the point of it.
+    assert!(
+        pose_r < bind_r,
+        "the posed bound ({pose_r}) is no tighter than the margin ({bind_r}), so \
+         opting in buys nothing"
+    );
+    println!(
+        "NPC1b posed bound: margin r {bind_r:.4} m, exact r {pose_r:.4} m — \
+         {:.0} % of the radius, {:.0} % of the volume",
+        100.0 * pose_r / bind_r,
+        100.0 * (pose_r / bind_r).powi(3)
+    );
+}
+
 // ── (i) P27.3: the page cache, and what invalidates it ───────────────────────
 
 /// Render `steps`, then hand back the renderer **and** the raster stats at the
@@ -4567,13 +4769,19 @@ fn a_floating_origin_rebase_moves_no_pages_identity_and_still_refreshes_the_atla
 /// to be made on. The palette union is measured **tighter**, and the ledger
 /// carries the number.
 ///
-/// **Not landed here.** A tighter caster sphere changes which pages the cull
-/// keeps and therefore which pages a mover invalidates, which is the exact
-/// quantity `phase27_gate`'s arm (c) asserts and P27.3's caching clause is
-/// measured against — so it is a change to make with its own arms and its own
-/// re-measurement, in the batch that owns the caster pack. That is P28.3, where
-/// the CPU caster cache already lives. The margin ships unchanged and this arm
-/// is what makes the day it moves a decision with a number in it.
+/// **Landed in wave NPC1b, and this arm is why it could be.** The shipped bound
+/// is `SkinnedCasterGeom::joint_bounds` unioned through the instance's own
+/// palette — tighter still than the whole-mesh union computed here, because it
+/// carries each joint's OWN vertices rather than the whole bind sphere — and it
+/// is opt-in per instance (`SkinnedShadow::Posed`), which is what keeps the
+/// margin's page-invalidation behaviour unchanged for everything that has not
+/// asked. The reasoning this paragraph used to carry still stands and is now
+/// stated where the constant is: a tighter caster sphere changes which pages the
+/// cull keeps and therefore which pages a mover invalidates, which is the exact
+/// quantity `phase27_gate`'s arm (c) asserts, so making it the DEFAULT is a
+/// re-measurement rather than a constant change. This arm stays as the pure
+/// statement of the ruling; `the_posed_bound_is_tighter_than_the_margin_and_still_contains_the_pose`
+/// is the shipped one, and measures 67 % of the radius on this same fixture.
 #[test]
 fn the_palette_union_bound_is_tighter_than_the_shipped_pose_margin() {
     // The fixture's bind pose: a quad at ±1 in x and y, so its bind sphere is

@@ -1578,6 +1578,86 @@ mod tests {
         }
     }
 
+    /// **A crowd is not a thousand clones, and the look is derived rather than
+    /// stored** (wave NPC1b).
+    ///
+    /// The three claims that make the variation legal at all: it is a pure
+    /// function of the `Guid` (so both hosts agree and nothing is folded into a
+    /// trace), it does not vary with the clock (so an agent does not change
+    /// clothes as it walks), and it actually spreads (so the crowd looks like a
+    /// crowd rather than like one model repeated).
+    #[test]
+    fn an_agents_look_is_derived_from_its_guid_and_spreads() {
+        // Pure, and constant over the agent's life — `agent_look` takes no tick
+        // at all, which is what makes the second half structural.
+        let g = guid(0xfeed_face);
+        assert_eq!(agent_look(g), agent_look(g));
+        assert_ne!(agent_look(g).tint, agent_look(guid(0xfeed_fade)).tint);
+
+        // Every look is a member of the table and every build is in range.
+        let mut seen = [0usize; CROWD_LOOKS.len()];
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        const N: u128 = 4_000;
+        for i in 0..N {
+            let l = agent_look(guid(i));
+            let at = CROWD_LOOKS
+                .iter()
+                .position(|t| *t == l.tint)
+                .expect("a tint that is not one of the palette swaps");
+            seen[at] += 1;
+            lo = lo.min(l.build);
+            hi = hi.max(l.build);
+            assert!(
+                (CROWD_BUILD_RANGE.0..=CROWD_BUILD_RANGE.1).contains(&l.build),
+                "build {} is outside {:?}",
+                l.build,
+                CROWD_BUILD_RANGE
+            );
+        }
+        // **The anti-clone arm.** A table nobody indexes into, or a mixer that
+        // collapsed, would put everything in one bucket and satisfy every
+        // assertion above. Four thousand draws over eight looks is 500 each; a
+        // fifth of that is a bound no working mixer comes near and no broken one
+        // clears.
+        let floor = N as usize / CROWD_LOOKS.len() / 5;
+        for (i, n) in seen.iter().enumerate() {
+            assert!(
+                *n > floor,
+                "look {i} was drawn {n} times of {N}, floor {floor}"
+            );
+        }
+        // …and the build really does span its range rather than sitting at one
+        // end of it.
+        assert!(
+            lo < CROWD_BUILD_RANGE.0 + 0.01 && hi > CROWD_BUILD_RANGE.1 - 0.01,
+            "the build spread only {lo}..{hi}"
+        );
+
+        // The tint MULTIPLIES rather than replaces, and it leaves alpha alone —
+        // so an authored material still shows through its own variation.
+        let l = CrowdLook {
+            tint: [0.5, 0.25, 2.0],
+            build: 1.0,
+        };
+        assert_eq!(l.over([0.8, 0.8, 0.8, 0.5]), [0.4, 0.2, 1.6, 0.5]);
+    }
+
+    /// The caster rung: `Full` casts its own silhouette, everything else casts
+    /// through the crowd's shared proxy. Held here rather than only at the two
+    /// projectors, because a tier predicate that agreed with itself in one host
+    /// is the failure mode this whole module is shaped against.
+    #[test]
+    fn only_the_full_tier_casts_a_skinned_shadow() {
+        assert!(CrowdTier::Full.skinned_caster());
+        for t in [CrowdTier::Near, CrowdTier::Far, CrowdTier::Dormant] {
+            assert!(!t.skinned_caster(), "{t:?} asked for a skinned caster");
+        }
+        // …and it is the same rung as the collider, not a second opinion: a tier
+        // that keeps a body is not automatically a tier that keeps a silhouette.
+        assert!(CrowdTier::Near.has_body() && !CrowdTier::Near.skinned_caster());
+    }
+
     /// A route is a pure function of the clock, ping-pongs, and stands still
     /// when it has nowhere to go.
     #[test]

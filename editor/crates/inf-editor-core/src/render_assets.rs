@@ -1349,6 +1349,44 @@ mod tests {
         assert_eq!(draw.key, (mesh, skel));
     }
 
+    /// **The shared tier palette is the one the per-agent path would have built**
+    /// (wave NPC1b) — the whole claim behind `resolve_skinned_shared`, as an
+    /// equality rather than as a sentence.
+    ///
+    /// A crowd agent the ladder took off the pose path has no `EvaluatedPose`
+    /// (`step_pose_evaluation` rebuilds its store from the tier's own target set)
+    /// and no `AnimPlayer`, so the per-agent call falls through to rule 3. If the
+    /// two ever disagreed, a crowd would visibly change pose at the tier boundary
+    /// — and it would do so in whichever host called which door.
+    #[test]
+    fn the_shared_palette_is_the_one_the_per_agent_path_would_have_built() {
+        let (_dir, root, mesh, skel, _clip) = project_with_character();
+        let mut store = EditorRenderAssets::new();
+        store.set_content_root(Some(root));
+        let sm = SkeletalMesh {
+            mesh: Some(mesh),
+            skeleton: Some(skel),
+        };
+        let per_agent = store.resolve_skinned(&sm, None, None).unwrap();
+        let shared = store.resolve_skinned_shared(&sm).unwrap();
+        assert_eq!(*shared.palette, *per_agent.palette);
+        assert_eq!(shared.key, per_agent.key);
+        assert!(Arc::ptr_eq(&shared.mesh, &per_agent.mesh));
+
+        // …and it is SHARED: two agents get one allocation, which is the thing
+        // the atlas deduplicates on. An equality that held while every call
+        // allocated a fresh `Vec` would satisfy the arm above and buy nothing.
+        let again = store.resolve_skinned_shared(&sm).unwrap();
+        assert!(
+            Arc::ptr_eq(&shared.palette, &again.palette),
+            "the shared palette was rebuilt — the cache is not a cache"
+        );
+        assert!(
+            !Arc::ptr_eq(&shared.palette, &per_agent.palette),
+            "the per-agent path handed back the shared block, so this arm cannot              tell the two derivations apart"
+        );
+    }
+
     /// With an `AnimPlayer` the palette follows the play-head — the same clip
     /// sampling the runtime does, so the viewport shows the pose the game would.
     #[test]
