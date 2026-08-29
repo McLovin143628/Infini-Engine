@@ -3424,6 +3424,28 @@ mod tests {
     ///    substrings of module and concept names rather than four spellings — with
     ///    the allowlists doing the real work, because a ban alone only catches what
     ///    its author imagined.
+    /// The `spawn_tick` loop body's own indentation, in spaces.
+    ///
+    /// Spelled as a number rather than as leading spaces inside a string literal,
+    /// and that is the SCRIPT1b audit's finding rather than a style preference.
+    /// This function used to pin its needles as `"            if outcome…"`, and a
+    /// twelve-space run inside a literal is *exactly* the shape
+    /// `inf_packager`'s eaten-`\`-continuation sweep looks for — so the function
+    /// was allowlisted in `ALIGNED_ON_PURPOSE`, and the wave then wrote **two
+    /// real eaten continuations** into the two assertion messages beside those
+    /// needles, where the sweep could not see them. Building the indentation
+    /// instead of spelling it retires the exemption, so the sweep covers this
+    /// function again.
+    const LOOP_INDENT: usize = 12;
+
+    /// Is `line` exactly `stmt`, at the tick loop's own indentation?
+    ///
+    /// The claim the old literal made, with the indentation counted rather than
+    /// written: one level further in and the statement is inside somebody's `if`.
+    fn at_loop_indent(line: &str, stmt: &str) -> bool {
+        line.trim() == stmt && line.len() - line.trim_start().len() == LOOP_INDENT
+    }
+
     #[test]
     fn the_save_pushes_its_invalidation_unconditionally() {
         let save = body_of(SOURCE, "pub async fn dcc_save(");
@@ -3452,7 +3474,7 @@ mod tests {
         let tick = body_of(ASSETS_SOURCE, "fn spawn_tick(");
         assert!(
             tick.lines()
-                .any(|l| l == "            if outcome.index_stale {"),
+                .any(|l| at_loop_indent(l, "if outcome.index_stale {")),
             "`if outcome.index_stale` is no longer a statement of the tick loop \
              itself - something else now decides whether the viewport is told"
         );
@@ -3479,12 +3501,19 @@ mod tests {
         //    the separation is read in BOTH directions here — otherwise the ban
         //    below would be satisfied by a tick that had simply moved the
         //    condition one call deep, which is the shape it exists to refuse.
-        assert_eq!(
-            tick.lines()
-                .filter(|l| l.contains("hot_reload_scripts("))
-                .collect::<Vec<_>>(),
-            vec!["            hot_reload_scripts(&app, &outcome.scripts);"],
-            "the tick's hot-reload call moved, multiplied or gained a guard. It              is pinned at the loop's OWN indentation — one level in and it is              inside somebody's `if`, and a designer's save would then reach a              live session only when something else about the tick was true."
+        let hot_calls: Vec<&str> = tick
+            .lines()
+            .filter(|l| l.contains("hot_reload_scripts("))
+            .collect();
+        assert_eq!(hot_calls.len(), 1, "{hot_calls:?}");
+        assert!(
+            at_loop_indent(hot_calls[0], "hot_reload_scripts(&app, &outcome.scripts);"),
+            "the tick's hot-reload call moved, multiplied or gained a guard. It \
+             is pinned at the loop's OWN indentation - one level in and it is \
+             inside somebody's `if`, and a designer's save would then reach a \
+             live session only when something else about the tick was true. \
+             Saw: {:?}",
+            hot_calls[0]
         );
         let hot = body_of(ASSETS_SOURCE, "fn hot_reload_scripts(");
         assert!(
@@ -3493,7 +3522,9 @@ mod tests {
         );
         assert!(
             !code_only(&hot).contains("refresh_asset_index"),
-            "`hot_reload_scripts` names the viewport invalidation. The two              concerns were separated so that neither could grow into the other,              and this is the direction the ban below cannot see."
+            "`hot_reload_scripts` names the viewport invalidation. The two \
+             concerns were separated so that neither could grow into the other, \
+             and this is the direction the ban below cannot see."
         );
 
         for (name, body) in [("dcc_save", &save), ("spawn_tick", &tick)] {

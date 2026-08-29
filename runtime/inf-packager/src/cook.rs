@@ -3367,7 +3367,17 @@ mod advisory_source_gate {
         // Source pins: the needle must equal the indented line it looks for.
         "the_skinned_optimize_skip_is_the_engines_one_doctrine",
         "the_shared_deform_projector_is_not_a_stub",
-        "the_save_pushes_its_invalidation_unconditionally",
+        // `the_save_pushes_its_invalidation_unconditionally` USED to be here, and
+        // the SCRIPT1b audit took it back out. **An exemption is keyed on a
+        // function, and a defect lands on a line** — the wave wrote two real
+        // eaten continuations into two assertion messages *inside* that
+        // allowlisted function, where this sweep by construction could not see
+        // them, and the wave's ledger then reported the sweep clean. The fix was
+        // to make the function not need the exemption (its pinned needles now
+        // count the indentation instead of spelling it, `dcc.rs`'s
+        // `at_loop_indent`) rather than to keep a hole open around two
+        // sentences. **An allowlist entry is a blind spot with a name on it**;
+        // prefer retiring the reason to widening the list.
         // A report table whose columns are aligned deliberately.
         "the_composed_frame_stays_inside_the_frame_budget",
         // I7: the island's report is a fixed-column table an author reads —
