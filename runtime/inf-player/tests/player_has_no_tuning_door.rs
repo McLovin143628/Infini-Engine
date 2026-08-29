@@ -145,11 +145,21 @@ fn no_shipped_player_source_names_a_tuning_door() {
     }
 }
 
-/// **The player cannot link the door**: `inf-editor-core` is a dev-dependency.
+/// **The player cannot link the doors**: `inf-editor-core` and `inf-script` are
+/// dev-dependencies.
 ///
 /// The source search above is about what is *written*; this is about what is
-/// *reachable*. A player that gained a normal dependency on the editor crate
-/// would pass the search on the day it did.
+/// *reachable*. A player that gained a normal dependency on either crate would
+/// pass the search on the day it did.
+///
+/// `inf-script` joined at SCRIPT1b, and the SCRIPT1b audit is why it is in this
+/// loop rather than only in a comment. The manifest's own note says *"the
+/// SHIPPED player reads the class the cook lowered, never a script, so it links
+/// no lexer and no parser (`player_has_no_tuning_door` keeps that honest)"* —
+/// and this gate was hard-coded to one crate name, so it did not. The claim the
+/// pack carries a lowered `BlueprintClass` and never `.infini` text is exactly
+/// the claim "the parser is not linked", and it is worth a line of code rather
+/// than a sentence.
 #[test]
 fn the_player_depends_on_the_editor_crate_only_for_tests() {
     let manifest = std::fs::read_to_string(
@@ -160,33 +170,35 @@ fn the_player_depends_on_the_editor_crate_only_for_tests() {
     )
     .expect("the player's manifest");
 
-    // Split into sections at top-level `[table]` headers, keeping the header.
-    let mut section = String::from("[package]");
-    let mut in_deps = Vec::new();
-    let mut in_dev = false;
-    let mut dev_names_it = false;
-    for line in manifest.lines() {
-        let t = line.trim();
-        if t.starts_with('[') && t.ends_with(']') {
-            section = t.to_string();
-            in_dev = section == "[dev-dependencies]";
-            continue;
+    for crate_name in ["inf-editor-core", "inf-script"] {
+        // Split into sections at top-level `[table]` headers, keeping the header.
+        let mut section = String::from("[package]");
+        let mut in_deps = Vec::new();
+        let mut in_dev = false;
+        let mut dev_names_it = false;
+        for line in manifest.lines() {
+            let t = line.trim();
+            if t.starts_with('[') && t.ends_with(']') {
+                section = t.to_string();
+                in_dev = section == "[dev-dependencies]";
+                continue;
+            }
+            if !t.starts_with(crate_name) {
+                continue;
+            }
+            if in_dev {
+                dev_names_it = true;
+            } else {
+                in_deps.push(section.clone());
+            }
         }
-        if !t.starts_with("inf-editor-core") {
-            continue;
-        }
-        if in_dev {
-            dev_names_it = true;
-        } else {
-            in_deps.push(section.clone());
-        }
+        assert!(
+            dev_names_it,
+            "the manifest no longer names {crate_name} at all — this gate is stale"
+        );
+        assert!(
+            in_deps.is_empty(),
+            "{crate_name} became a real dependency of the shipped player, in {in_deps:?}"
+        );
     }
-    assert!(
-        dev_names_it,
-        "the manifest no longer names inf-editor-core at all — this gate is stale"
-    );
-    assert!(
-        in_deps.is_empty(),
-        "inf-editor-core became a real dependency of the shipped player, in {in_deps:?}"
-    );
 }
