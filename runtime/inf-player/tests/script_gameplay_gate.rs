@@ -73,7 +73,17 @@ on tick(dt)
     item.give(var.get(\"entity\"), \"crate\", 1)
   end
   carried = math.to_float(item.count(var.get(\"entity\"), \"crate\"))
-  health.set(var.get(\"entity\"), 100.0 - handed * 7.0)
+  health.set(var.get(\"entity\"), remaining(handed))
+end
+
+-- **The call form** (wave SCRIPT2), on the ship path. A unit-local function is
+-- a one-segment `Expr::Call` and needed no IR change, so nothing about the cook
+-- or the pack had to learn it — which is a claim worth *crossing* the cook
+-- rather than asserting, because the failure it would have is silent: a class
+-- that lowered one way in the editor and another in the pack still runs on both
+-- sides and disagrees.
+function remaining(given: float) -> float
+  return math.max(100.0 - given * 7.0, 0.0)
 end
 ";
 
@@ -317,8 +327,14 @@ fn the_cooked_script_artifact_is_byte_identical_on_every_host() {
         h = h.wrapping_mul(0x1000_0000_01b3);
     }
     println!("cooked script: {} bytes, FNV-1a {h:#018x}", bytes.len());
+    // Re-blessed once, in wave SCRIPT2, for a stated reason: the fixture grew a
+    // `function remaining(given) -> float` and a call to it, so the class the
+    // cook packs holds one more `BlueprintFn` and one fewer inline expression.
+    // The LANGUAGE changed, which is the half of this assertion's own message
+    // that expects a new number; a move with the fixture unchanged would mean
+    // the lowering had started depending on the host.
     assert_eq!(
-        h, 0xe349_9f72_abc1_1769,
+        h, 0xd269_f486_f2b4_3cf4,
         "the cooked artifact moved. If the LANGUAGE changed this is expected and \
          the pin is re-blessed with the reason; if only the HOST changed, the \
          lowering is not host-independent and that is the bug."
