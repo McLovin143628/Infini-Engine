@@ -270,8 +270,7 @@ end
 
         // 1. The graph face refuses it, by the name the arc gave the refusal.
         let refused = inf_blueprint::raise_fn(handler)
-            .err()
-            .expect("`raise` must refuse a call form, or this arm is about nothing");
+            .expect_err("`raise` must refuse a call form, or this arm is about nothing");
         assert!(
             matches!(&refused, inf_blueprint::RaiseError::LocalFunctionCall(n) if n == "bump"),
             "expected the call form's own refusal, got {refused:?}"
