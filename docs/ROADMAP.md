@@ -20161,6 +20161,32 @@ quicker.
   `Cargo.lock` byte-identical, no new dependency of any kind. Full ledger in
   `docs/memos/island-progress.md`.
 
+  **The adversarial audit (2026-08-29)** re-ran the wave and confirmed its numbers —
+  battery **356 / 6 602 / 0 / 19** exit 0, the mission's trace reproduced *exactly* (clean
+  in at 21, out at 103 with 3.27 s left, clear at 201, condition 0.672, 256/90 states;
+  interrupted 21 / 202 / caught 203 / 0.276, 223/188; 28 witnesses both sides), the cook at
+  **157 ms**, the iteration loop at **1.05–1.12 ms** over four runs, and the warm Rust road
+  at **6.7–7.1 s** for `inf-editor-core` after a real Ring-0 edit. Six of the wave's own
+  mutations re-run and all six fire where it said. **One HIGH**: the arm named
+  *"…and the payload walks it"* measured the world and never the payload — only a
+  GUID-spelled prefab resolves and every fixture in the tree spells a stem, so
+  `build_scene_payload`'s new `asset_refs` walk could be deleted with every gate green,
+  the mission gate included. Armed. **MEDs, all fixed**: `engine.destroy` answered a `bool`,
+  so a destroyed **child actor** kept ticking against a world with no entity for it (both
+  hosts wrong identically, which is why no `PIE == shipping` gate could see it) — the rule
+  answers its subtree now; *"the two hosts' arms diff to nothing"* was kept by a
+  `contains`, which a clamp wrapped round the shared call sails past — the arms are
+  extracted and compared as code now; the fixture list under `the_fixture_copies_every_
+  committed_file` was seven of eleven names and missed the housing graph; the crowd
+  coupling was in the ledger and not in the gate a crowd wave will meet; §10.2 said a
+  script *"cannot drive a character"* and `physics3d.move_and_slide` says otherwise; §10.3
+  claimed every figure was *"printed by an arm"* when three of six are a shell timing or
+  CLAUDE.md history; the "19×" divided by 370 ms while the sentence beside it said "a
+  quarter of a second" (250 ms → 28×); and §10.5's *"everything the five waves carried"*
+  dropped three re-affirmed SCRIPT1a items and all twenty-four of the four audits'.
+  Zero eaten continuations in the range. Battery **356 / 6 604 / 0 / 19** (+2 arms, the
+  audit's own `#[test]` diff).
+
 ### Laws this arc is held to
 
 A script cannot name a transcendental — **only a verb** — so the P14/P22 determinism laws

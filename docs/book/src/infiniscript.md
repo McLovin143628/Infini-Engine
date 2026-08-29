@@ -260,9 +260,18 @@ the two to agree step for step.
 
 What it does **not** have is a user interface. It tells you what is happening
 with `debug.print`, which goes to the Output Log, because there is no `ui.*`
-namespace yet. That, a character that moves itself, a new engine capability, and
-arrays or tables are the four things you still need Rust for; everything else in
-that mission is a verb.
+namespace yet. That, **locomotion**, a new engine capability, and arrays or
+tables are the four things you still need Rust for; everything else in that
+mission is a verb.
+
+"Locomotion" is narrower than it sounds, so it is worth being exact. You *can*
+move a body from a script: `input.is_down` on `Tick` into
+`physics3d.move_and_slide` is a working character controller and this engine
+runs one. What you cannot reach from a verb is the gait system — the walk/run
+blend, the locomotion states, root motion — which lives in `CharacterMovement`,
+in Rust. The mission above is moved by its gate rather than by itself, but that
+is the gate keeping gravity and a camera out of a trace it wants to be about the
+mission, not a wall in the language.
 
 ## How fast the loop actually is
 
@@ -273,7 +282,13 @@ Measured on the mission above, on one developer machine:
 | save a `.infini` while Simulate is running | **~1 ms** of engine work (read, parse, lower, swap, one fixed step) — zero `rustc` |
 | …plus the editor noticing the save | 250–370 ms (the asset watcher's debounce and its drain tick) |
 | cook the whole project so it can ship | ~156 ms for this sample |
-| change gameplay written in **Rust** instead, and rebuild | ~7 s warm for the editor's own crate, ~12 s for the shipped player, and minutes from cold |
+| change gameplay written in **Rust** instead, and rebuild | ~7 s warm for the editor's own crate, ~12–15 s more for the shipped player, and minutes from cold |
+
+So the save is somewhere between **19×** and **28×** faster than the Rust road,
+depending on where in the watcher's window your save lands, and the engine's own
+share of it is about **5 800×**. The player's number is *extra* rather than
+included: the two builds resolve different dependency graphs, so each pays for
+the crates they share.
 
 Your live state survives the save: the mission above keeps the bullion already
 in the bag and the seconds already spent on its clock. What a save does **not**

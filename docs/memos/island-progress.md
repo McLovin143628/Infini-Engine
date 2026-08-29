@@ -23306,3 +23306,264 @@ for the code.
 named file it had not written, found one from an earlier wave, and spliced 150
 unrelated lines into a gate — successfully, and reporting success. Write first,
 under a name the wave owns; never read a path you did not just write.
+
+## Wave SCRIPT3 — the adversarial audit (2026-08-29)
+
+The wave that closes the arc, audited by a fresh reader over `d2a9910b..312b847a`.
+**The wave's own numbers all reproduce** — battery 356 / 6 602 / 0 / 19 exit 0,
+the mission's two traces step for step, the cook, the iteration loop, the six
+mutations. What the audit found is a HIGH under one gate's *name*, six MEDs of
+the shape this campaign keeps paying for — prose ahead of arms — and a handful of
+LOWs. All fixed; nothing is carried that could have been armed.
+
+### The reproduction, before the findings
+
+Everything below was re-run on the wave's final tree before a line was changed.
+
+| the wave's claim | re-run |
+|---|---|
+| battery **356 / 6 602 / 0 / 19**, exit 0 | **exact**, `cargo test --workspace -j 3 --no-fail-fast` |
+| clean route: in at 21, six bars, out at **103** on the loot with **3.27 s** left, clear at **201**, condition **0.672**, **256 / 90** states | **exact**, every figure |
+| interrupted: in at 21, two bars, out at **202** on the clock, caught at **203**, condition **0.276**, **223 / 188** | **exact** |
+| the crowd is **28** agents | **exact**, both routes, both hosts |
+| the cook is **156 ms** | **157 ms**; `{level 1, mesh 1, pcg 2, script 1}` |
+| the engine's iteration half is **1.08–1.33 ms** | **1.05–1.12 ms** over four runs (see LOW 3 about the fifth) |
+| the warm Rust road is **7 s** for `inf-editor-core` | **6.7–7.1 s**, after a *real* Ring-0 edit rather than a touch — 4 crates: `inf-ecs`, `inf-physics`, `inf-runtime`, `inf-editor-core` |
+| …**12 s** for `inf-player` | **14.9 s**, and **not additive**: `-p inf-player` resolves a different graph, so it rebuilds `inf-ecs`, `inf-physics` and `inf-runtime` a second time |
+| `EXPECTED_LEVELS` **24** | **24** `.inf_lvl` under `samples/` + `templates/`, counted |
+| goldens **59** | **59** files |
+| committed content **14 138 B over 11 files** | **exact** (see LOW 4 for the breakdown) |
+| `Cargo.lock` / manifests byte-identical, `editor/studio/src/` untouched, no schema moved | **all three confirmed** by `git diff --stat` over the range |
+
+### HIGH — the payload edge had no arm anywhere, and its gate is named for it
+
+`what_a_script_names_reaches_the_world_and_the_payload_walks_it` measures the
+world in three ways and **never measures the payload**. The wave paid a real
+debt — SCRIPT1b armed a tripwire saying that the day `engine.spawn` was
+implemented, `build_scene_payload` would owe the `asset_refs` edge
+`inf_packager::asset_deps` already walked — and the walk it added is
+**unreachable from every test in the tree**:
+
+* only a **GUID-spelled** prefab resolves (a `PackEntry` carries no name), and
+* every fixture in the repository spells a **stem** — this gate's
+  `engine.spawn("Coyote")` and the committed mission's `engine.spawn("Alarm")`.
+
+So the collector ran on every fixture and the resolver ran on none.
+`harbour_heist_gate::pie_sim` even passes a mesh resolver for the alarm, and it
+is never called. **Measured**: neutering the whole loop leaves
+`harbour_heist_gate` **4/4 green** and reddens nothing else in the workspace.
+
+Fixed by a fourth block in the same arm that spells the GUID, asserts
+`payload.meshes` carries exactly that asset (with the resolver's own call list in
+the failure message), and boots the payload to check the spawned entity binds it.
+Under the mutation the new block is the only thing that goes red.
+
+### The six MEDs
+
+**1. `engine.destroy` left a destroyed CHILD actor ticking.** The verb's own
+description promises "an entity, **and everything parented under it**", and the
+world half was true — `EcsWorld::despawn` walks the subtree and purges every
+guid. The lifecycle half was not: the Ring-0 rule answered a `bool`, so a host
+learned only "something was destroyed" and could drop only the **root** from its
+actor map. A destroyed child actor stayed in it and ran its `Tick` every step
+against a world with no entity for it — the exact ghost
+`an_actor_that_destroys_itself_finishes_the_handler_and_stops` forbids for the
+root. **No `PIE == shipping` gate could ever have seen it, because both hosts
+were wrong identically.** `destroy_entity` now answers every guid that left, in
+deterministic `subtree` order, and both hosts drain all of them.
+
+**2. "The two hosts' arms diff to nothing" was kept by a `contains`.** The
+retired tripwire was replaced by an arm asserting each host's source contains
+`inf_ecs::prefab::spawn_prefab` and its two siblings. That is necessary and not
+sufficient, and the wave's ledger, the ROADMAP block and `prefab.rs`'s header all
+make the stronger claim. A host can wrap the shared call in a guard, a clamp or
+an extra map write, name the rule on the line in the middle, and pass every
+assertion in the file. The arm now **extracts the three arms out of each host's
+source and compares them as code** — comments and indentation dropped, so a host
+may still say "MIRROR of …" in its own words — with an anti-vacuity floor on the
+extraction. Measured: an `if at.y < 0.0 { ZERO }` clamp in one host reddens the
+comparison and **nothing else** — not the registry set comparison, not the
+`contains` checks above it.
+
+**3. §10.2 said a script "cannot drive a character", and the registry says
+otherwise.** `physics3d.move_and_slide` and `input.is_down` are both callable
+verbs, and `simulate_character3d.rs` drives a character over rapier3d through
+exactly those two. The honest line is narrower and more useful: what has no verbs
+is `CharacterMovement` and the P29 catalogue — gaits, locomotion states, root
+motion — and nothing in the surface owns a camera or a frame. §10.1 already
+listed `physics3d.*` as available "with the same standing", so the two lists
+contradicted each other. Corrected in §10.2, §10.6 and the book.
+
+**4. §10.3's preamble claimed every figure is "printed by an arm".** Three of the
+six rows are not: the two warm `cargo build` numbers are a shell timing, and the
+cold row is CLAUDE.md's machine notes — history rather than a measurement of this
+wave, and it is the whole *battery* and the whole *clippy* pass rather than a
+rebuild of one crate. The three provenances are separated now and the cold row
+says "history" in its own cell.
+
+**5. The "19× felt" divided by a different number than the sentence beside it.**
+"What a designer feels is a quarter of a second against seven seconds — about
+19×": 7 s ÷ 250 ms is **28**, and 19 is 7 s ÷ **370 ms**, the slow end of the
+plumbing range. Both are true and the pair was not. The divisor is stated now,
+both ends given, and the book's table carries the range rather than a point.
+
+**6. §10.5's "everything the five waves carried" was two things short.** It
+consolidates the five **wave** ledgers, and *(a)* dropped three items from
+SCRIPT1a's own list that SCRIPT2a's item 9 explicitly re-affirmed as standing —
+the `math.neg`-on-a-`lit.float` graph gap, `math.pow` not being bit-portable, and
+the handler-level source map — and *(b)* folds in none of the arc's four
+**adversarial audits'** own carried lists: SCRIPT1a's six LOWs, SCRIPT1b's three,
+SCRIPT2a's four and SCRIPT2b's eleven, **twenty-four items**. It also omitted two
+of SCRIPT3's own six. The three are now items 16–18, SCRIPT3's two are 19–20, the
+audits are pointed at by section and count, and the heading's promise of "a live
+arm each" is corrected: **five of the thirteen have one** (8, 9, 10, 12, 13) and
+the rest are marked *(no arm)* — item 14's four editor-surface entries have
+nothing pinning any of them, which a heading promising an arm was hiding.
+
+Two smaller honesty repairs ride with them, both off the gate's own printed
+output. **§10.5's item 20 was one closure short**: "the day the prefab-name item
+closes, the same content starts drawing" is false, because the cook already
+prints *"mesh … (Alarm) has 12 triangles, below the virtualized-geometry
+threshold of 2048 … the shipped build renders it as a PLACEHOLDER CUBE"* — P23's
+own carried finding, met on this content, and a second thing that has to change.
+And **"the 132-verb surface"** re-opens the accounting the SCRIPT2a audit closed:
+132 is *registered nodes*, of which **94** are callable verbs, 29 are
+written-as-syntax refusals and 9 are `event.*` headers.
+
+### The mutations, re-run
+
+Every row was re-run on the wave's tree, and every one fires where the ledger
+says. Three of the audit's own are added at the bottom.
+
+| mutation | what went red |
+|---|---|
+| one grammar graph dropped from the PIE payload | the **exact expected count** at the producer, `payload.pcgs.len() == 2`, before anything is compared — and nothing else |
+| …with the count arm relaxed as well | `the_mission_is_the_same_program_in_pie_and_shipping`: *"clean: world diverged at step 1"*, verbatim |
+| the mission's prefab misspelled (`"Alarm"` → `"Alarmm"`) | the cook goes **BLOCKING**, the advisory naming itself word for word, **and** `every_verb_family_the_mission_uses_reaches_the_world` |
+| the mission's `engine.spawn` line removed entirely | the cook's positive assertion: **4 assets, `{level 1, pcg 2, script 1}`** — the mesh leaves the pack, so the edge is real and `kinds["mesh"] == 1` is not vacuous |
+| `spawn_entity_id` widened to 62 bits | `a_handle_cannot_be_mistaken_for_an_authored_actor`, **at the `f64` round trip and nowhere else**, exactly as claimed |
+| `build_scene_payload`'s `asset_refs` walk neutered *(the audit's)* | **the new payload block, and nothing else** — `harbour_heist_gate` 4/4 green, which is the HIGH in one line |
+| `destroy_entity` reduced to `vec![guid]` *(the audit's)* | `prefab::destroy_answers_every_guid_that_left_the_world` **and** `a_destroy_stops_the_handlers_of_everything_under_it` across two crates, the second with the ward still ticking |
+| one host clamping the spawn point before the shared rule *(the audit's)* | the mirror comparison alone |
+
+### The continuation hunt: none, and the detector's report re-derived
+
+**Zero eaten continuations in the range**, by an independent comment-aware lexer
+that knows raw strings, byte strings, escapes, char literals and both comment
+forms: no single-line literal on an added line carries an interior run of three
+or more spaces, which is the P22 signature. The eleventh was hunted and not
+found — in the wave's diff and in the audit's own.
+
+The wave's report of the adopted diff-scoped detector — *"5 lines across 14
+touched files … every one of them a `.infini` fixture with real newlines in
+it"* — **reproduces at 5 and is 4-of-5 on the composition.** The five are
+`script_engine_verbs.rs` ×2, `script_gameplay_gate.rs` ×2 and
+**`samples.rs:4714`, which is a grammar-module TOML fixture, not a `.infini`.**
+Two notes on the instrument, because the next wave will run it: what it reports
+is literals holding a **real newline**, not "every non-raw literal that spans a
+line boundary" — there are **134** of the latter in those same files, all
+ordinary `\`-continued messages, and they are the population the *first* shape
+hides in rather than the second. And it is **not committed anywhere**:
+`cook.rs`'s own sweep is line-based and its doc still says the stream lexer *"is
+not guarded here"*, so "adopted" means a practice, run by hand, each wave.
+
+### LOW, carried by name
+
+1. **`cook.rs`'s sweep cites a lexer that does not exist.** Its doc says
+   *"`inf-editor-core`'s test-support module already has exactly that lexer, in a
+   crate this one does not depend on"* — there is no such module and no such
+   lexer in the tree. Pre-existing (SCRIPT2a-era), outside this wave's range, and
+   load-bearing for a ruling ("a second copy to catch three instances is a worse
+   trade"), so it is named rather than fixed here.
+2. **"Routed to SCRIPT4" points at a wave with no plan entry.** ROADMAP §14's arc
+   list ends at SCRIPT3 and neither it nor the memo's §8 wave plan has a SCRIPT4
+   bullet. §10.5's routed list is the de-facto plan and is titled as one, which is
+   why this is LOW rather than MED — but a planner reading §14 top to bottom sees
+   an arc that finished and no successor.
+3. **The iteration numbers have a cold-start outlier the range does not admit.**
+   The *first* `script_iteration` run after a rebuild of `inf-editor-core`
+   measured **10.87 ms** of engine total — the file door paying for a cold page —
+   against 1.05–1.12 ms on the four runs after it. Printed, never asserted, so
+   nothing is red; recorded because "1.08–1.33 ms" is the arc's headline number
+   and the first save a designer makes after a rebuild is the one they remember.
+4. **The counts row's breakdown says "four sidecars" and there are five.** The
+   total (**14 138 B over 11 files**) is exact; the enumeration is 5 payloads +
+   **5** sidecars + 1 README. The wave's table stands as published; this is the
+   correction.
+5. **`item.spawn_pickup`'s six bullion on the vault floor are never picked up.**
+   The mission's bars come from `item.give`; the pickup entity is flavour. Not a
+   defect — the README calls it "the bullion on the floor" and it is — but a
+   reader of the mission looking for where the six bars come from will find two
+   candidates and only one that matters.
+
+### The three verdicts the brief asked for
+
+**The mission re-run: PASS, exactly.** Both routes byte-identical step for step
+on both hosts, every published figure reproduced to the digit, and the two
+falsifiers that matter — the exact payload count and the step-1 divergence behind
+it — both fire on demand.
+
+**The iteration table: HONEST after two corrections.** The measurements are real
+and reproduce; what was wrong was the *provenance* claim over the table and the
+divisor under the "19×". The 5 800× is 7 s ÷ ~1.2 ms and stands. The 7 s stands,
+measured after a real Ring-0 edit. The 12 s is 14.9 s here and is **not additive**
+with the 7 s, which the row's "…and the shipped player with it" invites you to
+do.
+
+**The consolidated carried list: INCOMPLETE as published, complete now.** Five
+items were missing (three re-affirmed SCRIPT1a items, two of SCRIPT3's own),
+twenty-four audit items were silently out of scope, and the "live arm each"
+heading covered eight items of which three had none. Nothing was dropped that had
+an arm; everything dropped is now listed or pointed at.
+
+### The laws this audit adds
+
+**A verb's description is a specification, and the host is only half of it.**
+`engine.destroy` said "and everything parented under it" and the *world* obeyed
+while the *lifecycle* did not, because the Ring-0 rule's return type could not
+carry the difference. A `bool` from a rule whose caller has to decide what to do
+about each thing that changed is a specification the signature cannot express;
+the fix was not in either host.
+
+**Two hosts that are wrong identically pass every parity gate ever written.**
+This arc's whole spine is `PIE == shipping`, and the ghost child actor was
+invisible to it by construction. A mirror pair needs an arm that asserts *the
+world*, not only an arm that asserts the two agree.
+
+**`contains(the_shared_rule)` is not "they call the same thing".** It is "they
+both mention it". Everything a host can wrap around the call — a guard, a clamp,
+an extra map write, a different refusal — sits in the gap between those two
+sentences, and the gap is exactly where a delayed divergence lives. Compare the
+code.
+
+**A walk with one caller and no GUID-spelled fixture is dead code with a green
+tick over it.** The payload's asset edge had a collector that always ran and a
+resolver that never did, because every fixture in the tree spelled the half of
+the contract that returns early. When a door has two spellings and one of them
+short-circuits, a fixture must exist for the *other* one.
+
+**State the divisor.** "About 19×" and "a quarter of a second against seven
+seconds" cannot both be right, and neither is wrong — one divides by 370 ms and
+the other by 250. A ratio in a ledger is a claim about two specific numbers, and
+writing only the ratio is how a table stops being checkable.
+
+**A consolidation claim is a completeness claim.** "Everything the five waves
+carried" is falsifiable by walking five lists, which is a cheap thing to do and
+was not done; five items and four whole audit lists were outside it. If the
+scope is the wave ledgers and not the audits, say so — a reader cannot see the
+difference from the heading.
+
+### Counts
+
+| | wave (`312b847a`) | **audit (`HEAD`)** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 356 / 6 602 / 0 / 19 | **356 / 6 604 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, exit 0. **+2 arms, +0 blocks**, which is exactly the audit's `#[test]` diff (2 added, 0 removed): `prefab::destroy_answers_every_guid_that_left_the_world` and `a_destroy_stops_the_handlers_of_everything_under_it`. The HIGH's fix is a fourth block inside an existing arm and moves no count |
+| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1`, and `git status` over `crates/inf-render/tests/goldens` is empty afterwards, so none blessed and none re-blessed. This audit renders nothing |
+| rustdoc individual warnings (cold, ceiling 450) | 373 over 30 crates | **373 over 30 crates** after `cargo clean --doc`. The audit adds **zero**. Headroom **77** |
+| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — run **LAST** per the rmeta law, `CARGO_INCREMENTAL=0` |
+| `cargo fmt --all --check` | clean | **clean** |
+| `Cargo.lock` / manifests | byte-identical | **byte-identical** over the audit's range too. No dependency of any kind |
+| schemas / committed content | unmoved | **unmoved.** No `schema_version`, no `FROZEN_WIRE` row, no pack change, `EXPECTED_LEVELS` still **24**, and **`samples/harbour-heist/` is byte-for-byte what the wave committed** — the two mutations that edited the mission were reverted through `git checkout` and the sample's own sidecar-hash arm re-run green |
+| generated docs | — | `docs/book/src/infiniscript-api.md` **re-blessed** (`INF_BLESS_API_MANUAL=1`): two verb descriptions, both honesty additions |
+| frontend | not run | **not run — `editor/studio/src/` is untouched by the audit as well as by the wave** |
+| `chr(92)` | 2 caught pre-commit | **zero eaten continuations** in the wave's range and in the audit's own diff, by an independent stream lexer |

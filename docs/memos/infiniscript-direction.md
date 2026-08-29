@@ -831,9 +831,12 @@ every carried item of the arc in one routed list.
 
 The arc set out to answer one question the owner asked: **can a designer build a
 game in this engine without waiting for a compiler?** Four waves built the
-language, the cook, the hot-reload path, the editor and the 132-verb surface.
-This section is what the fifth one measured, on a real mission rather than on a
-fixture.
+language, the cook, the hot-reload path, the editor and the verb surface —
+**132 registered nodes, of which 94 are callable verbs**; the other 38 are the
+29 written-as-syntax refusals and the 9 `event.*` headers, which is the
+accounting the SCRIPT2a audit closed and the shorthand "132 verbs" quietly
+re-opens. This section is what the fifth wave measured, on a real mission rather
+than on a fixture.
 
 The artifact is `samples/harbour-heist/HarbourHeist.infini` — 5 619 bytes, two
 handlers, six functions, committed island content with its own level, its own
@@ -852,11 +855,11 @@ used in anger.
 | an objective — *am I in the vault, am I at the boat* | `zone.contains` | any trigger region, polled on `Tick` |
 | a **state machine** | member variables + `if`/`elseif` + the SCRIPT2a **call form** | phases, objectives, fail states, anything a designer would draw as a flowchart |
 | a clock | `Tick`'s own `dt` and a `float` variable | timers, cooldowns, grace periods — deterministic, because `dt` is the fixed step |
-| a door that bolts behind you | `door.spawn`, `door.lock`, `door.use` | doors, gates, hatches, and the whole `Interactable` surface |
+| a door that bolts behind you | `door.spawn`, `door.lock`, `door.use` | doors, gates and hatches — every leaf in the level, hung by a script or by the building grammar. *(Not "the whole `Interactable` surface", which is what this cell first said: nothing in the kit authors a **generic** `inf_ecs::interact::Interactable`. The only two verbs that make one are `door.spawn` and `item.spawn_pickup`, and a switch or a terminal still needs a component.)* |
 | loot | `item.define`, `item.spawn_pickup`, `item.give`, `item.count` | catalogues, pickups, inventories, ammunition |
 | stakes | `health.set`, `health.damage`, `health.fraction` | damage, healing, downing, any resource with a maximum |
 | a world that answers back | `crowd.population` | population pressure, "is anyone watching", "is the town alive" |
-| putting things in the world | `engine.spawn`, `engine.destroy`, `engine.set_rotation` | markers, effects, props, anything a mission needs to exist for a while |
+| putting things in the world | `engine.spawn`, `engine.destroy`, `engine.set_rotation` | markers, effects, props, anything a mission needs to exist for a while — **at the acting entity's own place**, because the verb takes no point (see §10.4's second bound) |
 | telling the player | `debug.print` | (see the honest list below — this is the surface's weakest point) |
 
 And beyond the mission, from the same registry and with the same standing:
@@ -878,10 +881,18 @@ Four things, and the first is the one a designer meets first.
    screen, a timer, a damage flash, a "MISSION FAILED" card — all of it is
    engine work today. `inf-ui` exists; a `ui.*` kit over it is the single
    highest-value verb family this arc did not build.
-2. **Movement, and anything that owns a frame.** A script reacts on `Tick`; it
-   cannot drive a character. The Harbour Heist gate moves its hero from outside
-   the mission, which is honest about where the line is: locomotion is
-   `CharacterMovement` and the P29 catalogue, in Rust.
+2. **Locomotion, and anything that owns a frame.** *(Corrected by the SCRIPT3
+   audit. This entry first read "a script reacts on `Tick`; it cannot drive a
+   character", and the registry says otherwise.)* A script **can** move a body:
+   `input.is_down` on `Tick` into `physics3d.move_and_slide` is a working
+   controller, and `simulate_character3d.rs` drives one over rapier3d through
+   exactly those two verbs. What has no verbs at all is **`CharacterMovement`
+   and the P29 catalogue** — gaits, locomotion states, root motion, the fourteen
+   modes — and nothing in the surface owns a camera or a frame. The Harbour
+   Heist gate moves its hero from outside the mission for a *gate's* reason
+   rather than a language one, and says so in its own header: a
+   player-controlled mover would fold gravity, ground snap and a camera into
+   every step of the trace, and this is a mission gate.
 3. **New engine capability.** A verb is a door onto something Ring 0 already
    does. Where the door does not exist — a trigger volume that pushes an event,
    a nav query, a spatial index over the crowd — the door is Rust, and the whole
@@ -893,9 +904,19 @@ Four things, and the first is the one a designer meets first.
 
 ### 10.3 The compile-time table — the owner's question, answered with numbers
 
-Every figure is measured on this machine and named beside its arm; nothing here
-is asserted in a test (the house rule about wall clocks), and everything here is
-printed by one.
+Every figure is measured on this machine, and **nothing here is asserted in a
+test** (the house rule about wall clocks). The three *provenances* are separated
+rather than glossed, because this paragraph first said "everything here is
+printed by [an arm]" and three of the six rows are not:
+
+* **printed by an arm** — the two script rows and the cook row, by
+  `script_iteration.rs`, `script_hot_reload.rs` and `harbour_heist_gate.rs`;
+* **timed by hand at a shell** — the two warm `cargo build` rows. No arm runs
+  them and no arm could, because an arm that did would be a wall-clock
+  assertion;
+* **history, not a fresh measurement** — the cold row, quoted from CLAUDE.md's
+  machine notes, and it is the whole **battery** and the whole **clippy** pass
+  rather than a rebuild of one crate.
 
 | the road | what it costs | measured by |
 |---|---|---|
@@ -904,12 +925,16 @@ printed by one.
 | **cook the whole mission project** — two grammar graphs, a level, a mesh and the script | **156 ms** | `harbour_heist_gate.rs` |
 | **change one Ring-0 gameplay rule** and rebuild the crate Simulate lives in, warm incremental | **7 s** | `cargo build -p inf-editor-core` |
 | …and the shipped player with it | **12 s** | `cargo build -p inf-player` |
-| …from cold | **~50 min** for the battery, **~35 min** for clippy | CLAUDE.md's machine notes |
+| …from cold | **~50 min** for the battery, **~35 min** for clippy | CLAUDE.md's machine notes — **history**, not measured this wave |
 
 The engine's half of the script road is about **5 800×** cheaper than the warm
-Rust road. What a designer *feels* is a quarter of a second against seven
-seconds — about **19×** — and the seven seconds is the *warm* number, which is
-the one a good day gives you.
+Rust road: 7 s ÷ ~1.2 ms. What a designer *feels* is the plumbing on top, and
+**the divisor is worth stating rather than rounding** (the SCRIPT3 audit's
+correction — the two halves of this sentence used to disagree by 1.5×):
+**7 s ÷ 370 ms is 19×**, the slow end, a save whose debounce has just missed a
+drain; **7 s ÷ 250 ms is 28×**, the fast end. So a quarter-second to a third of
+a second against seven seconds — and the seven seconds is the *warm* number,
+which is the one a good day gives you.
 
 The three statements §5 made are all still true and now have arms under them:
 gameplay iteration is sub-second with zero `rustc`; **engine compile times are
@@ -917,7 +942,7 @@ unchanged**, because nothing in this arc makes `cargo build` faster; and the win
 compounds as gameplay migrates out of Rust, because the slow path gets hit less
 often rather than getting quicker.
 
-### 10.4 The bound that showed up in a real program
+### 10.4 The bounds that showed up in a real program
 
 SCRIPT1b's carried item 2 said *"a member variable that is not a float parses,
 lowers, interprets perfectly and cannot be transpiled"*, measured on a `bool`.
@@ -934,10 +959,37 @@ gate proves it ships identically to PIE. What it costs is the **Code tab**: a
 designer cannot open a real gameplay script as Rust. Carried, routed, and now
 with a real program's shape attached to it rather than a two-line fixture's.
 
+**And a second bound, found by the SCRIPT3 audit reading the ruling above it.**
+A spawn's identity is `(prefab, place)`, so two spawns of one prefab at one
+point are one entity — and **`engine.spawn` takes no point.** It spawns at the
+acting entity's own position, which means the remedy the first draft of
+`inf_ecs::prefab`'s header offered ("an author who wants two puts them in two
+places") is not reachable from inside a script: an author needs two spawner
+actors, or a spawner that has moved between the two calls, or a second name.
+Where the *point* is the thing being authored, `item.spawn_pickup` is the verb
+that takes one. Closing it properly is a second input on the node — a kit
+change, priced here and not taken — and the honest sentence is now in the verb's
+own description, so the generated manual carries it.
+
 ### 10.5 The arc's carried items, consolidated
 
-Everything the five waves carried, in one place, with a route. Nothing here is
+Every **wave** list the arc carried, in one place, with a route. Nothing here is
 new in SCRIPT3; what is new is that they are in one list instead of five.
+
+**The scope, stated rather than implied** — the SCRIPT3 audit's correction, and
+it is the ordinary shape of a consolidation claim. This paragraph first read
+*"everything the five waves carried"*, and what the list actually consolidates
+is the five **wave** ledgers' own "Carried, by name" sections. Two things sat
+outside it and are now inside or pointed at:
+
+* three items from SCRIPT1a's wave list that SCRIPT2a's item 9 explicitly
+  re-affirmed as standing were dropped on the way in. They are **16–18** below;
+* the arc's four **adversarial audits** each carried a list of their own, and
+  those are **not** folded in here — SCRIPT1a's six LOWs, SCRIPT1b's three,
+  SCRIPT2a's four and SCRIPT2b's eleven, **twenty-four items**, standing where a
+  reader of that wave meets them in `docs/memos/island-progress.md`. They are
+  message-honesty, editor-UX and fixture-shape items rather than surface
+  decisions; a wave that wants them reads those four sections and not this one.
 
 **Routed to SCRIPT4 (a wave's worth of work each):**
 
@@ -966,7 +1018,11 @@ new in SCRIPT3; what is new is that they are in one list instead of five.
 7. **InfiniScript Core** — the P14.5 WASM tier is rebranded and documented, and
    has no demo plugin of its own.
 
-**Maintenance-class, each with a live arm that will tell you the day it changes:**
+**Maintenance-class. Five of these have a live arm that fires the day they
+change — 8, 9, 10, 12 and 13 — and the rest are honest sentences, marked *(no
+arm)*. That split is the SCRIPT3 audit's correction too: this heading read "each
+with a live arm", and an item with no arm under a heading that promises one is
+exactly the blind spot with a name on it that an exception list is:**
 
 8. **`#[infinity::blueprint]` has no macro behind it**, so the Code tab's output
    does not compile (`the_generated_marker_has_no_macro_behind_it`). Priced:
@@ -976,24 +1032,68 @@ new in SCRIPT3; what is new is that they are in one list instead of five.
 10. **A `string` parameter on a unit-local function does not transpile**
     (SCRIPT2a): `Ty::Str` renders as `String` and `Lit::Str` as a `&str`, and the
     two do not meet at a generated call.
-11. **Transcendentals are outside the crown gate**, by a stated argument rather
-    than an oversight: a zero-dependency shim cannot call `psin64` without
-    becoming a second implementation of a bit-exact polynomial.
+11. *(no arm)* **Transcendentals are outside the crown gate**, by a stated
+    argument rather than an oversight: a zero-dependency shim cannot call
+    `psin64` without becoming a second implementation of a bit-exact polynomial.
+    SCRIPT1b's audit already classified this one as an honest sentence.
 12. **`crowd.*` counts and does not name an agent**; **`zone.count` counts
     everything with a collider**, the ground included.
 13. **A prefab name does not bind at run time.** The cook resolves a file stem
     because it has the asset database; a `PackEntry` carries no name, so the
     shipped player cannot, and a spawn names a placeholder cube unless the
     prefab is spelled as a GUID. Closing it is a pack-format move.
-14. **Editor surface**: no autocomplete/hover/go-to-definition over the verbs; no
-    "New InfiniScript" in the drawer's Add menu; a `.infini` tab never displayed
-    is never checked; `--ink-danger` is undefined at 18 sites across 8 files
-    (SCRIPT2b).
-15. **A.9's v1 language omissions**: no tables/arrays/structs, no closures, no
-    `repeat`/`break`/`continue`, no string concatenation, no multiple returns.
-    Each is a pricing question about the IR, and the question to ask first is
-    what the shapes it already has cannot say — which is how the call form
-    turned out to need no IR change at all.
+14. *(no arm)* **Editor surface**: no autocomplete/hover/go-to-definition over
+    the verbs; no "New InfiniScript" in the drawer's Add menu; a `.infini` tab
+    never displayed is never checked; `--ink-danger` is undefined at 18 sites
+    across 8 files (SCRIPT2b). Nothing in the frontend suite pins any of the
+    four.
+15. *(no arm for the list as a whole)* **A.9's v1 language omissions**: no
+    tables/arrays/structs, no closures, no `repeat`/`break`/`continue`, no
+    string concatenation, no multiple returns. Each is a pricing question about
+    the IR, and the question to ask first is what the shapes it already has
+    cannot say — which is how the call form turned out to need no IR change at
+    all. (Some of the *refusals* are armed; the absences are not, because an
+    absence has nothing to assert against.)
+16. *(no arm)* **A `math.neg` node wired to a `lit.float` lowers to IR the
+    transpiler refuses** (SCRIPT1a's carried item 4, re-affirmed by SCRIPT2a's
+    item 9 and dropped on the way into this list). The *language* no longer
+    writes `Unary(Neg, Lit)` — the parser folds it into a negative literal —
+    but the **graph** lowerer still can, so the Code tab would fail to generate
+    for such a graph. A.5's second bullet has the reasoning; the fix is a fold
+    at lowering, or teaching `emit` the canonicalisation and re-proving
+    `generate → lift`.
+17. *(no arm)* **`math.pow` is `f64::powf` and is not bit-portable** (SCRIPT1a's
+    item 6, likewise re-affirmed and likewise dropped). It is the one hole in a
+    math palette the P14 determinism law otherwise closes, it is inherited from
+    the node kit rather than opened by this arc, and it is **said in the verb's
+    own description** so the generated manual carries the warning. A committed
+    value must not depend on it. The remedy is a portable polynomial in
+    `inf_math`, on `psin64`'s pattern.
+18. *(no arm)* **The source map is handler-level** (SCRIPT1a's item 7, the
+    third). `Unit::spans` records where each handler begins, which is the
+    granularity containment actually has (A.7); a statement-level map is what a
+    panel would want the day one asks for it.
+19. *(armed — `harbour_heist_gate`)* **The mission's gate depends on the crowd's
+    determinism as well as the script's.** `crowd.population()` is a mission
+    mechanic, so 28 agents grown from two grammar-built buildings are inside the
+    compared trace. That is a property this repository already gates
+    (`island_gate`, `crowd_sweep`), and it is named because a crowd inside a
+    *script* gate is new: if the crowd ever stops being deterministic, this gate
+    goes red for a reason that is not about scripting. The coupling is stated in
+    the gate's own module header, which is where a crowd wave will meet it.
+20. *(no arm; the cook prints the second half as an advisory)* **The alarm mesh
+    is packed and nothing draws it**, and it takes **two** things to change
+    rather than one. It is in the pack because the mission names it and the
+    closure works; it is not on the spawned entity because a stem does not bind
+    (item 13). And even spelled as a GUID it would still draw a placeholder,
+    because the cook says so in the mission's own report: *"mesh … (Alarm) has 12
+    triangles, below the virtualized-geometry threshold of 2048, so no
+    `.inf_vmesh` was derived — the shipped build renders it as a PLACEHOLDER
+    CUBE"*, which is P23's own carried finding met on this content. So the
+    SCRIPT3 ledger's *"the day item 1 closes, the same content starts drawing"*
+    is one closure short: the pack needs a name index **and** the sample needs a
+    denser mesh (or a lowered `[vgeom] min_triangles`). Corrected by the SCRIPT3
+    audit, off the gate's own printed output.
 
 ### 10.6 The verdict, in one paragraph
 
@@ -1002,8 +1102,9 @@ objectives, timers, doors, items, damage, a reacting crowd, things spawned and
 destroyed, and a state machine over all of it — edited live, in a running world,
 in about a millisecond of engine time and a quarter-second of editor plumbing,
 against seven seconds for the warm Rust road and fifty minutes for the cold one.
-What they cannot build without Rust is a **user interface**, a character that
-moves itself, a new engine capability, or a data structure. The first of those
+What they cannot build without Rust is a **user interface**, **locomotion** (a
+body they can move with `physics3d.move_and_slide`; a `CharacterMovement` gait
+they cannot), a new engine capability, or a data structure. The first of those
 is one wave's work over a substrate that already exists, and it is the thing to
 build next.
 
@@ -1388,6 +1489,18 @@ interpreter, which is a different design, and this arc does not propose it.
 A `while true do … end` cannot hang the editor: `while` and `for` lower to the
 counter-guarded expansion, so the bound lives *in the IR* and the interpreter and
 the transpiled Rust share it.
+
+**And the other end of the same granularity, added by SCRIPT3 and written down
+here by its audit** (the wave cited this section for it and this section did not
+say it). `engine.destroy` removes an entity **and everything parented under
+it**, and every *actor* among them stops — at the **end** of the handler that
+did it, never at the call. So `engine.destroy(var.get("entity"))` followed by a
+`debug.print` prints: the statement after a destroy runs, exactly as the
+statement after any other call does. The host records the guids and the session
+drains them once the handler returns, which is this rule rather than an exception
+to it — the unit of both halves is *a handler, on its actor, for that tick*.
+Armed by `an_actor_that_destroys_itself_finishes_the_handler_and_stops` and, for
+the subtree, `a_destroy_stops_the_handlers_of_everything_under_it`.
 
 ## A.8 The third leg: text → IR → Rust → IR
 
