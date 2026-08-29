@@ -23254,7 +23254,7 @@ a route on every entry. What this wave itself adds or changes:
 | committed content added | — | **`samples/harbour-heist/`: 14 138 bytes over 11 files** — the mission (5 619 B, hand-authored), its level (1 342 B), two grammar graphs (1 353 + 1 358 B), the alarm mesh the mission names (1 236 B), four sidecars and a README |
 | `Cargo.lock` / manifests | — | **byte-identical.** No dependency of any kind, internal or external |
 | `chr(92)` | — | **two first-shape instances, both caught before commit**; the diff-scoped second-shape detector prints **5 multi-line non-raw literals over 14 touched files** and every one is a `.infini` fixture. See the section above |
-| disk | 28 GB free | **36 GB free.** `target/debug/incremental` (23 GB) deleted once before the battery with **no cold rebuild**, per the Wave-G half of the disk law; `target/` was 275 GB; no `cargo clean` beyond `--doc` |
+| disk | 28 GB free | **89 GB free at the end, and it went to 66 MB on the way there.** `target/debug/incremental` (23 GB) was deleted before the battery with **no cold rebuild** (the Wave-G half of the law) and the wave's own legs ran inside 36 GB — then the *verification* legs (goldens, a cold `cargo doc`, clippy at `CARGO_INCREMENTAL=0`, the mutation re-runs and a final per-crate sweep) filled the volume to **66 MB free**. Both cheap remedies applied in order, neither costing a rebuild: `incremental` again (**+19 GB**, it had regrown), then the SCRIPT2a audit's third face — **444 superseded `target/debug/deps/*.pdb`, 70.4 GiB**, of 976 totalling 222.9 GiB. `harbour_heist_gate` re-ran green afterwards with **nothing recompiled**, which is the measurement behind "cargo's fingerprints track the `.rlib`/`.exe`, never the `.pdb`". No `cargo clean` beyond `--doc` |
 
 **Commits:** `717849cc` (`engine.*` real in both hosts, the Ring-0 rule, the two
 retired tripwires and the payload's asset edge), `a367230f` (the Harbour Heist
@@ -23292,6 +23292,15 @@ succession — no residents, no homes, and then a payload that carried one graph
 of two — and every one of them presented as *the same number*. The only thing
 that separated them was asserting an exact expected count at the **producer**
 (the P21.4 rule) rather than a plausible one at the consumer.
+
+**On this machine it is the VERIFICATION that fills the disk, not the wave.**
+The whole of SCRIPT3's own building ran inside 36 GB. What took the volume from
+36 GB to **66 MB** was the sequence every wave ends with — goldens, a cold
+`cargo doc`, clippy under `CARGO_INCREMENTAL=0` (which builds its own artifact
+set), six mutation re-runs and a final per-crate sweep. The remedies are the two
+this repository has already paid for and both are free: `target/debug/incremental`
+first, then the superseded `.pdb` generation. Budget the disk for the gates, not
+for the code.
 
 **A scratchpad path is not a namespace.** A patch script read a generically
 named file it had not written, found one from an earlier wave, and spliced 150
