@@ -768,6 +768,24 @@ impl SimSession {
     ///   the handler. The defaults of variables the instance does not have are
     ///   inserted, and only those: an existing variable keeps its live value,
     ///   which is the whole point of hot reload.
+    ///
+    /// # The three edits, and only one of them is symmetric (SCRIPT1b audit)
+    ///
+    /// The seeding rule runs one way, so the other two shapes an author reaches
+    /// in a keystroke are named here rather than discovered. All three are
+    /// measured in `tests/script_hot_reload.rs`.
+    ///
+    /// | the edit | what the instance does |
+    /// |---|---|
+    /// | **adds** a variable | seeded from the class's default |
+    /// | **changes a default** | nothing — the live value stands, which is the feature |
+    /// | **removes** a variable | nothing — the value **lingers** in the map, unread. Put the variable back with a new default and the lingering value still wins, because by then it is not "added" |
+    /// | **changes a variable's type** | nothing — the map is untyped, so the first handler that reads it under the new type takes a `RunError::Type` and dies for that tick, on that actor, every tick, until the session is re-entered |
+    ///
+    /// Pruning a removed variable and coercing a retyped one are both the same
+    /// operation as discarding live state, which is what this door exists not to
+    /// do; leaving and re-entering Simulate rebuilds instances from the class
+    /// and is the remedy for both.
     pub fn reload_class(&mut self, asset: Uuid, class: BlueprintClass) {
         self.pending_classes.push((asset, class));
     }

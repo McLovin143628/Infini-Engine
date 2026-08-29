@@ -14,6 +14,7 @@
 //! | queued, not applied | a swap lands at a step boundary and never inside one |
 //! | state survives | live member variables keep their values across the swap |
 //! | a new variable is seeded | or the first Tick after adding one dies at `vars::get` |
+//! | a **removed** or **retyped** variable | the other two edits, which the wave stated nothing about — measured and sentenced by the SCRIPT1b audit |
 //! | **failure containment** | a broken edit leaves the PREVIOUS program running, and nothing is half-swapped |
 //! | atomic per unit | every actor bound to the script takes the new code in one step |
 
@@ -66,6 +67,62 @@ on tick(dt)
   count = count +
 end
 ";
+
+/// The editor's **real** watcher constants, read out of Ring 2's own source.
+///
+/// # The SCRIPT1b audit's finding, and why this is read rather than written
+///
+/// The first version of this arm chose `Duration::from_millis(120)` and called
+/// it *"the editor's own debounce"*, and the wave's ledger, `infiniscript-
+/// direction.md` §8 and the ROADMAP all repeated **"121 ms, of which 120 ms is
+/// the watcher's own debounce"**. Both halves of that sentence were wrong about
+/// the editor:
+///
+/// * `commands/assets.rs` sets `WATCH_DEBOUNCE` to **250 ms**, not 120;
+/// * **120 ms is `TICK`** — the interval at which the asset thread *drains* the
+///   watcher — so the two constants had been conflated.
+///
+/// The honest editor number is therefore the debounce **plus up to one drain
+/// tick**: `WATCH_DEBOUNCE ..= WATCH_DEBOUNCE + TICK`. The engine's half —
+/// door, compile, swap, one fixed step — is the part this repository controls
+/// and the only part worth a sub-millisecond figure.
+///
+/// Read from the file instead of duplicated so the printed number cannot go
+/// stale the day somebody tunes either constant. Ring 2 is not a dependency of
+/// this crate and must not become one; this is a **source read**, the same
+/// device `player_has_no_tuning_door` uses to make a claim about a tree it does
+/// not link.
+fn editor_watch_constants() -> (Duration, Duration) {
+    let src =
+        std::fs::read_to_string(repo_root().join("editor/studio/src-tauri/src/commands/assets.rs"))
+            .expect("the editor's asset command module is committed");
+    (ms_const(&src, "WATCH_DEBOUNCE"), ms_const(&src, "TICK"))
+}
+
+fn repo_root() -> std::path::PathBuf {
+    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for _ in 0..3 {
+        p.pop();
+    }
+    p
+}
+
+fn ms_const(src: &str, name: &str) -> Duration {
+    let needle = format!("const {name}: Duration");
+    let line = src
+        .lines()
+        .find(|l| l.trim_start().starts_with(&needle))
+        .unwrap_or_else(|| {
+            panic!("`{name}` is no longer a `Duration` constant in commands/assets.rs")
+        });
+    let ms: u64 = line
+        .split("from_millis(")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or_else(|| panic!("could not read `{name}` out of: {line}"));
+    Duration::from_millis(ms)
+}
 
 const ACTOR_A: Uuid = Uuid::from_u128(0x5C21_0001);
 const ACTOR_B: Uuid = Uuid::from_u128(0x5C21_0002);
@@ -127,6 +184,11 @@ fn count(session: &SimSession, guid: Uuid) -> f64 {
 /// which is a constant somebody chose, so the two halves are printed separately:
 /// what the *engine* costs (door → compile → swap → step) and what the
 /// *plumbing* costs on top.
+///
+/// The plumbing half is the **editor's own** constants, read out of Ring 2's
+/// source ([`editor_watch_constants`]) rather than invented here — the SCRIPT1b
+/// audit's finding: a number this arm chooses is a fact about this arm, and the
+/// wave reported it as a fact about the editor.
 #[test]
 fn a_save_becomes_new_behaviour_in_a_running_simulate() {
     let tmp = tempfile::tempdir().expect("a content root");
@@ -139,9 +201,10 @@ fn a_save_becomes_new_behaviour_in_a_running_simulate() {
     }
     assert_eq!(count(&session, ACTOR_A), 5.0, "v1 counts by 1");
 
-    // A real watcher on a real directory, with the editor's own debounce.
-    const DEBOUNCE: Duration = Duration::from_millis(120);
-    let watcher = AssetWatcher::watch(tmp.path(), DEBOUNCE).expect("the watcher starts");
+    // A real watcher on a real directory, with the editor's own debounce — the
+    // value `commands/assets.rs` really passes, read out of it.
+    let (debounce, drain_tick) = editor_watch_constants();
+    let watcher = AssetWatcher::watch(tmp.path(), debounce).expect("the watcher starts");
 
     let saved = Instant::now();
     std::fs::write(&path, V2).expect("save the edit");
@@ -184,10 +247,17 @@ fn a_save_becomes_new_behaviour_in_a_running_simulate() {
 
     let swap = session.last_swap();
     println!(
-        "edit -> running: watcher {:.0} ms (debounce {} ms), engine {:.2} ms \
-         (door + compile + swap + one step); swap {swap:?}",
+        "edit -> seen by this arm: {:.0} ms at the editor's WATCH_DEBOUNCE of {} ms. \
+         In the editor the asset thread DRAINS the watcher every TICK = {} ms, so \
+         edit -> seen there is {}..={} ms; the swap then lands on the next fixed step \
+         (<= {:.1} ms at {SIM_HZ} Hz). ENGINE half (door + compile + swap + one step): \
+         {:.2} ms, zero rustc. swap {swap:?}",
         watched.as_secs_f64() * 1000.0,
-        DEBOUNCE.as_millis(),
+        debounce.as_millis(),
+        drain_tick.as_millis(),
+        debounce.as_millis(),
+        debounce.as_millis() + drain_tick.as_millis(),
+        1000.0 / SIM_HZ,
         engine.as_secs_f64() * 1000.0
     );
 
@@ -307,6 +377,118 @@ fn a_swap_reaches_only_the_actors_bound_to_that_asset() {
         5.0,
         "the actor bound to a different asset still runs v1"
     );
+}
+
+/// **The other two edits, which the wave stated nothing about** (SCRIPT1b audit).
+///
+/// The seeding rule is one-directional: a variable the edit **added** is seeded,
+/// and nothing else is touched. The wave armed and sentenced that half and left
+/// the other two shapes an author can reach in one keystroke unmeasured, so
+/// here they are, as behaviour rather than as an intention.
+///
+/// **A variable the edit REMOVED keeps its live value on the instance.** The
+/// class stops declaring it, the map keeps it, and nothing prunes it. That is
+/// deliberate — pruning is the same operation as discarding live state, which is
+/// what hot reload exists not to do — but it has a consequence a designer will
+/// meet: *remove a variable, save, put it back with a different default, and the
+/// instance still holds the old value*, because by then it is no longer "a
+/// variable the edit added". The remedy is the one the feature already has:
+/// leave Simulate and re-enter, which rebuilds instances from the class.
+///
+/// **A variable whose TYPE changed is not migrated.** The instance keeps the
+/// `Value` it holds, so the first handler that reads it under the new type gets
+/// a `RunError::Type` — and that lands exactly on §4's stated bound: the handler
+/// dies, on that actor, for that tick, and the sim keeps running. It is *not*
+/// silent: the actor simply stops progressing, which is the observable this arm
+/// pins so the day somebody adds coercion the arm says so.
+#[test]
+fn a_removed_variable_lingers_and_a_retyped_one_stops_its_handler() {
+    // ── removed ──────────────────────────────────────────────────────────────
+    const NO_RATE: &str = "\
+actor \"Counter\"
+
+var count: float = 0.0
+
+on tick(dt)
+  count = count + 2.0
+end
+";
+    let (mut doc, mut session) = enter(&compile(V1));
+    for _ in 0..3 {
+        session.step_once(&mut doc, SimInput::default());
+    }
+    session.reload_class(SCRIPT_ASSET, compile(NO_RATE));
+    session.step_once(&mut doc, SimInput::default());
+    assert_eq!(session.last_swap().swapped, 2);
+    assert_eq!(session.last_swap().seeded_vars, 0, "nothing was ADDED");
+    assert_eq!(count(&session, ACTOR_A), 5.0, "the new program runs");
+    assert_eq!(
+        session.actor_var(ACTOR_A, "rate"),
+        Some(&Value::Float(1.0)),
+        "a variable the edit REMOVED lingers on the instance with its live \
+         value — hot reload prunes nothing, because pruning is discarding state"
+    );
+
+    // …and putting it back with a NEW default does not re-seed it, because by
+    // then the instance already has it. This is the consequence worth telling a
+    // designer about rather than letting them find.
+    const RATE_BACK: &str = "\
+actor \"Counter\"
+
+var count: float = 0.0
+var rate: float = 99.0
+
+on tick(dt)
+  count = count + rate
+end
+";
+    session.reload_class(SCRIPT_ASSET, compile(RATE_BACK));
+    session.step_once(&mut doc, SimInput::default());
+    assert_eq!(session.last_swap().seeded_vars, 0, "it was never missing");
+    assert_eq!(
+        count(&session, ACTOR_A),
+        6.0,
+        "the lingering 1.0 wins over the re-declared default of 99.0"
+    );
+
+    // ── retyped ──────────────────────────────────────────────────────────────
+    const RETYPED: &str = "\
+actor \"Counter\"
+
+var count: bool = false
+var rate: float = 1.0
+
+on tick(dt)
+  if count then
+    rate = rate + 1.0
+  end
+end
+";
+    let before_rate = session.actor_var(ACTOR_A, "rate").cloned();
+    session.reload_class(SCRIPT_ASSET, compile(RETYPED));
+    for _ in 0..3 {
+        session.step_once(&mut doc, SimInput::default());
+    }
+    assert_eq!(
+        session.last_swap().seeded_vars,
+        0,
+        "`count` is present, so a TYPE change seeds nothing — the map is untyped"
+    );
+    assert!(
+        matches!(session.actor_var(ACTOR_A, "count"), Some(Value::Float(_))),
+        "the instance still holds the OLD type: {:?}",
+        session.actor_var(ACTOR_A, "count")
+    );
+    assert_eq!(
+        session.actor_var(ACTOR_A, "rate").cloned(),
+        before_rate,
+        "the handler died at `if count` (RunError::Type) every tick, so nothing \
+         after it ran — §4's bound, on the actor, for the tick. If this ever \
+         changes, a type migration was added and this ledger entry is retired"
+    );
+    // …and the sim itself is fine: the other actor's handler dies the same way
+    // and the session keeps stepping, which is the containment claim.
+    assert_eq!(session.last_swap().swapped, 2);
 }
 
 /// The watcher recognises a `.infini` by the same door the compiler does — so
