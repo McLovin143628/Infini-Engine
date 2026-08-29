@@ -21736,3 +21736,345 @@ to what else the physics world holds.
 inside a cell ends the table and a pipe ends the cell, so the *renderer* fixes
 both rather than every future verb's author remembering. The failure was not
 hypothetical: it arrived in this wave's own first bless.
+
+---
+
+## Wave SCRIPT2a — the adversarial audit (2026-08-29)
+
+Two HIGHs, three MEDs, four LOWs. Both HIGHs are one sentence apart from each
+other and neither is visible to any gate the wave wrote, because both are
+properties of a *program the fixtures do not contain*. The wave's engineering is
+otherwise sound: every claim I could falsify, I tried to, and the list of things
+that held is longer than the list of things that did not.
+
+### HIGH 1 — THE DEPTH-PARITY HOLE: one program, two answers
+
+The brief asked me to construct it and rule. It is real, it is reachable from
+ordinary text with **no recursion in it**, and it was measured on both faces
+rather than argued.
+
+`MAX_CALL_DEPTH`'s own doc comment said: *"`inf_script`'s parser refuses a cycle
+outright, **so a `.infini` file cannot reach this bound at all**"*. It could.
+Refusing the *cycle* is not sufficient, and the arithmetic the brief asked about
+comes out the wrong way: `MAX_NESTING` (128) bounds **one declaration's tree**,
+not how many declarations a unit has, and nothing else bounds them either. So 65
+`function`s each calling the next form a **DAG** — the cycle check passes them —
+and the chain is 65 calls deep.
+
+I ran the same source through both faces:
+
+| chain | interpreted | transpiled, `rustc`-compiled and run |
+|---|---|---|
+| 64 | `64` | `64` |
+| **65** | **`RunError` — refused** | **`65`** |
+
+One legal-by-the-parser program, two answers. That falsifies the premise the
+whole arc leans on (*preview is the shipped program*), and it also made the
+interpreter's refusal a **lie about the program in front of it** — the message
+read *"a chain this deep means a cycle in hand-authored IR"*, and there is no
+cycle and it did come through the parser.
+
+**Ruled and fixed where the wave's own new law says to fix it**: *where the two
+faces cannot be made to agree at run time, the language refuses at compile time*
+— which is exactly why recursion is a parse error here and `while` is not, and
+depth is that same question one step along. `check_no_recursion` becomes
+`check_call_graph`: **one call graph, two static refusals.** The second computes
+the longest chain per function over the (now known acyclic) graph, **iteratively**
+— a guard against blowing a stack must not blow one — and refuses past the
+budget, naming the length, the budget, the route (elided in the middle) and the
+remedy. Every declared function is checked, not only the reachable ones: *"the
+parser accepted it"* must not depend on which handler happens to exist today. The
+budget is **read from** `inf_blueprint::interp::MAX_CALL_DEPTH` rather than
+copied, so it stays one number and moving it moves the language.
+
+`a_chain_longer_than_the_budget_is_refused_by_the_parser` asserts **both** sides
+of the boundary, and the at-budget side asserts the chain *runs* rather than
+merely parses. **Mutation-verified twice**: dropping the depth check fails that
+arm and nothing else; moving the boundary to `<` fails it from the other side.
+
+### HIGH 2 — the direction memo, which the wave never opened
+
+`docs/memos/infiniscript-direction.md` is the arc's governing spec, and it does
+not appear in the wave's diff **at all**. Five of its statements were false at
+head, two of them the ones a next wave plans from:
+
+* **A.9 still said the language has "no calls from a handler to its unit's own
+  `function` declarations"** — the feature the wave shipped. The ledger above even
+  says *"appendix A.9's v1 omissions — one of which, the user-function call form,
+  this wave retires"*, and then A.9 was not edited.
+* **A.2's grammar still read `call := IDENT ('.' IDENT){1,2}`.** The call form is
+  `{0,2}`. A grammar that cannot spell the language's newest statement is the one
+  document a next implementer would be right to trust.
+* **§2's table and A.4 both still said 115 verbs / 23 namespaces.** Measured and
+  corrected to **132 / 26** (113 `NodeDef::new` sites, three of them inside the
+  `compare`/`unary_math`/`binary_math` helpers, plus their 22 calls; 23
+  `register_all` groups).
+* **A.4 claimed the census arm made that sentence unable to go stale "silently".**
+  It went stale, silently, for a whole wave. Downgraded to what is true — *an arm
+  pins the number a **test** compares; it cannot pin prose in a file it never
+  opens* — with the one quotation that really is checked named as the contrast
+  (the manual's own header line, by `the_manual_covers_the_surface_it_claims_to`).
+* **A.5's table is described as executed by `raise_coverage.rs` — "the rows below
+  are its rows"** — and the wave added two rows to the test and none to the table.
+
+Fixed, with §8 split into 2a (COMPLETE) / 2b (ROUTED), and the call form's
+pricing, its two static refusals and the new surface written where the arc keeps
+them.
+
+### MED 3 — the eighth eaten continuation, of the shape the sweep cannot see
+
+The ledger says *"a fresh sweep over the whole wave diff finds exactly that one
+and nothing else."* True of **the sweep**, false about the wave. The same edit
+that lost a `\`-continuation out of one assertion message in `crown_parity.rs`
+also lost the `\n` out of the assertion **directly below it**, and a third site
+in the same function lost its `"\` opener:
+
+```
+"expected a type error from the monomorphic `vars::get`:
+{stderr}"
+```
+
+Legal Rust, identical output, wrong source. `inf_packager`'s sweep is line-based
+and looks for runs of spaces; its own doc has recorded this second shape as an
+unguarded blind spot since round 3.
+
+**The useful half is what it says about the two shapes: they arrive together,
+from one edit.** A green sweep is not a clean wave.
+
+I re-measured the round-3 ruling rather than repeating it. I wrote the missing
+lexer: over the twenty files this wave touched it finds **one** real defect and
+about **forty** legitimate multi-line literals — every `.infini` and Rust fixture
+in the script tests. A ban at that ratio needs an allowlist per fixture, which is
+the P23 ban-list hazard with worse economics than the gate it would replace. So
+the ruling stands, and the doc gains one *actionable* sentence instead: after a
+scripted edit to Rust literals, read the diff for a continuation line at column
+zero as well as running the sweep.
+
+### MED 4 — the call-graph walk was CUBIC: 359 s to refuse a 488 KiB script
+
+Not in the brief, and the worst thing in the wave after HIGH 1. Measured, in
+**release**, on files well inside `source::MAX_SOURCE_BYTES` (1 MiB):
+
+| unit | before | after |
+|---|---|---|
+| 2 000 functions in one call chain (95 KiB) | **2 030 ms** | 7.2 ms |
+| 10 000 functions in one call chain (488 KiB) | **359 257 ms** | 129.3 ms |
+
+Six minutes to produce one diagnostic. `parse_unit` is called by the asset
+watcher on **every save**, by `inf cook` on every build and by the PIE payload
+builder, so this is an editor that stops responding and a build that looks hung.
+
+Three linear scans nested inside two walks: `collect_local_calls` asked "is this
+one of ours" by scanning the name list per call expression *and* deduped by
+scanning its own output; the cycle walk resolved every callee the same way; and
+the cycle walk restarted from scratch, with a fresh `seen` buffer, from every
+function. Fixed structurally rather than tuned — the graph resolves **once** into
+`Vec<Vec<usize>>` through a map, and `check_no_recursion` becomes a single
+**white/grey/black** colouring, `O(V + E)` for the whole sweep.
+
+**The reported cycle is unchanged, and that is checked rather than asserted**:
+roots in declaration order, edges in statement order, so `down → down`,
+`ping → pong → ping`, `a → b → c → a` and the downstream `b → c → b` all still
+name the function they named before — the last being the case only the outer loop
+over roots can find.
+
+Gated by two rows in `hostile.rs`'s pathological table, which is the house shape
+for this: **no wall-clock assertion** — the arm merely has to complete, and the
+cost of the regression is measured in minutes.
+
+### MED 5 — `engine.*` was armed and routed nowhere
+
+The wave found it, armed it and named it in an exclusion list, which is three of
+the four things. It is a **SCRIPT3 blocker rather than a tidy-up**: SCRIPT3's
+clause is the document's heist mockup, and a script that cannot put anything in
+the world is not that. Routed into SCRIPT3's own bullet in both the ROADMAP and
+the memo, with the two consequences the day `engine.spawn` lands written down
+beside it — the tripwire arm goes red and retires *with* the exclusion-list entry,
+and `build_scene_payload` starts owing the asset edge it does not walk.
+
+**The history reconciles cleanly, checked**: nothing ever claimed the verb
+worked. SCRIPT1b's `nothing_a_script_names_can_reach_a_world_yet` says it *reaches*
+`Host::call` and lands on the unknown-call arm (logged, `Unit`); SCRIPT2a's arm
+says no host has a `(Some("engine"), Some(…))` arm. Both true, and they are about
+different things. The `engine::set_rotation` in P6's `parity.rs` and in
+`semantics.rs`'s own test is a **mock host in a fixture**, not an implementation.
+
+### The two HIGHs' shared shape, which is the law worth keeping
+
+**Both are properties of a program no fixture contains.** The crown gate compiles
+and runs real output and is the strongest gate in this tree, and it cannot see
+either, because a gate measures the program you hand it. The wave's fixtures have
+two functions; the hole needs sixty-five. The wave's fixtures have three
+statements; the cubic walk needs two thousand.
+
+> **A gate over a fixture is a gate about that fixture. When a bound is a NUMBER
+> — a depth, a count, a size — the fixture that finds it is the one built AT the
+> number, and nobody writes that fixture by accident.**
+
+### The packed-IR encoding verdict, asked for and settled
+
+**The IR never rides bincode. Anywhere.**
+
+* `.inf_act` and `.inf_fn` are **pretty JSON** — `load_actor_classes_from_dir` and
+  `cook::class_of` both use `serde_json::from_slice`.
+* The cook lowers a `.infini` and packs the resulting `BlueprintClass` as **the
+  same pretty JSON** under `AssetKind::Script`; `PackReader::actor_classes` reads
+  both kinds with one decoder.
+* `ScenePayload.classes: Vec<(Uuid, Vec<u8>)>` carries those JSON bytes as an
+  **opaque blob** inside its bincode envelope, so the positional hazard applies to
+  the envelope's own fields and never to an `Expr`.
+
+So the wave's "the positional-decode hazard is not this file's hazard" is right,
+and right for a **deeper reason than it gave**: `BlueprintClass` carries
+`skip_serializing_if` fields, and *that* is the Phase-10 law itself
+(`skip_serializing_if` desyncs bincode) — JSON here is not a convenience, it is
+the law's own remedy, and `semantics.rs`'s module doc says so.
+
+**A pre-SCRIPT2 packed script decodes at head by identity of the type, not by
+luck**: `crates/inf-blueprint/src/lib.rs`, which holds `Expr`/`Stmt`/
+`BlueprintFn`, has an **empty diff across the whole wave**, and `semantics.rs`'s
+only non-comment changes are one import and the host-stack rewiring inside
+`run_event`. No field, no variant, no attribute moved. A one-segment path is a
+shorter JSON array in a variant that already existed.
+
+### What I tried to falsify and could not
+
+* **`LocalFns`' stacking.** The `Host` trait has exactly four methods and the
+  decorator forwards all four. A callee's `vars::set` writes the **caller's**
+  actor — one `ActorInstance` — armed at `total == 24.0`. A param shadowing a
+  member variable is handled on **both** faces: the parser binds the param, and
+  `emit::Writer::new` seeds `live` with the params so a `vars::get("speed")`
+  inside a function whose param is `speed` prints `var.get("speed")` and not a
+  bare name.
+* **Aliasing, which would defeat the static cycle refusal.** There is none: the
+  grammar has no function values and no call through a name. The one indirect
+  re-entry channel, `event.dispatch`, **queues** — a FIFO drained under
+  `DISPATCH_ROUND_CAP` in both hosts, not a stack — so it cannot deepen a call
+  chain and behaves identically on both faces.
+* **`raise`'s named refusal really retires the old behaviour.** `raise_action`
+  returns `Err` *before* `self.add(&type_id)`, so the malformed graph node is
+  unreachable; and the editor path degrades cleanly rather than erroring —
+  `graph_open_actor` reports every handler with a `raisable` flag and a `reason`,
+  so a call-form handler appears in the switcher, greyed, saying what it is.
+* **`d3::door::nearest`'s determinism.** Candidates are sorted by `Guid` and the
+  scan takes a strict `<`, so equal distances resolve to the lowest `Guid` — one
+  answer in both hosts. Four verbs, one resolution.
+* **The bullet path is byte-for-byte unchanged** by `weapon::damage_entity`:
+  `entity_of` → `get_mut::<Health>` → `damage`, in that order, with the report
+  discarded exactly as before.
+* **Both hosts' seventeen new arms are IDENTICAL** — the added lines in
+  `simulate.rs` and `runtime_sim.rs` diff to nothing.
+* **The manual's drift check fails from both directions**, mutation-verified: a
+  hand-edit of one word in the committed page, and a one-word change to a
+  `NodeDef` description in the registry. Both name the line and print both sides.
+  Blanking one description fails `every_callable_verb_carries_a_doc_line` naming
+  the verb.
+* **The registry-versus-hosts gate is falsifiable, and so is its run-time twin.**
+  Misspelling `crowd.blocked` in `simulate.rs` reddens the source gate naming both
+  sets **and** `no_verb_the_script_calls_falls_through_to_the_logger`, which names
+  the verb seven times — the source gate's claim, made at run time, is not
+  vacuous: the unknown-call logger really does push `path.join("::")`, which is
+  what that arm's `starts_with` needles match.
+* **`zone.count` counts ground, honestly.** In the verb's own description, and the
+  differential arm is the right instrument rather than a pinned number.
+* **The `*.infini -text` sidecar rule is stated for a user**, in a block quote on
+  the book's `.infini` page — SCRIPT1b's carried item, closed as asked.
+* **The `string`-parameter bound is a refusal, not silent wrong code** — `rustc`
+  `E0308`, measured by compiling it. Worth one precision: it is **`rustc`'s**
+  refusal on generated source, not `inf_transpile::emit`'s named one (which is
+  what `i64::MIN` gets), so the diagnostic lands on code the author did not write.
+  Carried by name, with an arm that fails the day it is fixed.
+* **The local-toolchain lint note is honest.** Reproduced: `RUSTFLAGS` from
+  `ci.yml` verbatim fails `inf-math` alone with
+  `error[E0602]: unknown lint: clippy::chunks_exact_to_as_chunks` on rust 1.97.
+* **The wave's `+24 arms` is right**, though its stated method is not: two tests
+  *were* removed (`both_hosts_dispatch_exactly_the_registered_{ik,anim}_nodes`)
+  and two added in the same file, which the `#[test]`-line diff cannot see because
+  the attribute lines are unchanged context. Net is still exactly +24.
+
+### LOW, carried by name
+
+1. **The ledger's "144 rows" for the manual is a miscount.** The page has **123
+   data rows** — 94 callable verbs + 29 refusals — in **20** namespace sections
+   plus the refusal table. 144 is the data rows plus the 21 tables' header rows.
+   The accounting closes exactly: 94 + 29 + **9 `event.*` nodes** (deliberately
+   absent, since an event is a handler's header) = 132.
+2. **The depth refusal has no `diagnostics.rs` row**, because its source is 65
+   functions and that table is a literal. It is armed in `call_form.rs` and carries
+   a real span from the same door the recursion refusal uses.
+3. **`commands/graph.rs`'s `graph_run` preview does not stack `LocalFns`.** It
+   calls `eval_fn_traced` directly, so a class holding a call form previews there
+   with the call falling through to its own host. Unreachable from the canvas
+   today (`raise` refuses the form, so such a class cannot be drawn) and squarely
+   SCRIPT2b's surface.
+4. **The PIE gate's fixture changed semantics as well as shape** when it grew
+   `remaining(given) = math.max(100 - given * 7, 0)`: the clamp is new. It does not
+   weaken the gate — both sides run the same script — but the re-bless reason names
+   only the structural half.
+
+### Counts
+
+| | wave (`2bed25fb`) | **audit (`HEAD`)** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 353 / 6 573 / 0 / 19 | **353 / 6 575 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, one run, green. **+2 arms, +0 blocks**, which is exactly the audit's `#[test]` diff (2 added, 0 removed). The wave's own 6 573 is confirmed by subtraction |
+| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**, in 51.6 s; `git status` over `crates/inf-render/tests/goldens` is **empty** afterwards, so none re-blessed |
+| rustdoc individual warnings (cold, ceiling 450) | 373 over 30 crates | **373 over 30 crates** — after `cargo clean --doc` (9 120 files, 223.6 MiB): 403 `^warning` lines minus 30 per-crate summaries, cross-checked against the sum of those summaries (373 exactly). The audit adds **zero**. Headroom **77** |
+| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — exit 0, run **LAST** per the rmeta law, `CARGO_INCREMENTAL=0`. Incremental, and said so: **11** crates re-checked (`inf-blueprint`, `inf-script`, `inf-packager`, `inf-editor-core`, `inf-player` and everything downstream), which is exactly the audit's code footprint; the rest served from a fingerprint cache keyed on the **same** `RUSTFLAGS` and profile the wave used, which is what makes reusing it legitimate rather than a gap |
+| `cargo fmt --all --check` | clean | **clean** |
+| `Cargo.lock` / manifests | byte-identical | **byte-identical** over `2bed25fb..HEAD` as well. No dependency of any kind |
+| schemas / committed content | unmoved | **unmoved.** `EXPECTED_LEVELS` still **23**; no pin re-blessed by the audit (the wave's one cooked-script digest stands) |
+| frontend | not run | **not run — `editor/studio/src/` is untouched by the audit as well as by the wave** |
+| `chr(92)` sweep | one catch, repaired | **clean**, and one more found by the lexer the sweep does not have (MED 3) |
+
+**Disk, and a third face of the law worth writing down.** The audit hit
+`os error 112` mid-battery at 1.48 GB free, and the usual remedy did not apply:
+`target/debug/incremental` was only **1.19 GB**. The tree was 291 GB and
+**`target/debug/deps/*.pdb` alone was 249.8 GB of it** — MSVC debug databases, not
+build artifacts. Deleting the **superseded generation** (715 files dated to the
+previous day) freed **145.9 GB with no rebuild at all**, because cargo's
+fingerprints track the `.rlib`/`.exe`, never the `.pdb`. That is cheaper than
+`cargo clean` (which would have cost the whole workspace) and cheaper than the
+Wave-G remedy (which would have freed 1.2 GB). **Read the tree before choosing the
+remedy: on this machine the debug info is the disk.** The battery, the goldens, a
+cold `cargo doc` and clippy then all ran on top of that and the volume ended at
+**100 GB free**.
+
+One operating note that cost the first battery: `CARGO_INCREMENTAL=0` **changes
+the fingerprint** of every crate previously built with incremental on, so setting
+it for a test run rebuilds the workspace into a second artifact set rather than
+reusing the wave's. Use it for the whole session or not at all; the wave used it
+for clippy alone, which is why clippy's cache was reusable here and the test
+cache was not.
+
+### The laws this audit adds
+
+**A gate over a fixture is a gate about that fixture — and when a bound is a
+NUMBER, the fixture that finds it must be built AT the number.** The crown gate
+compiles and runs real transpiler output and is the strongest instrument in this
+tree; it could not see either HIGH, because one needs 65 functions and the other
+needs 2 000. Nobody writes those by accident, so they have to be written on
+purpose, from the constant.
+
+**A doc comment that states a safety property is a claim, and claims get
+audited.** `MAX_CALL_DEPTH` said a `.infini` file could not reach it. That
+sentence was the whole reason nobody had looked.
+
+**A refusal must be true about the program in front of it.** The interpreter's
+budget message diagnosed a cycle. There was no cycle, and a designer following
+that sentence would have gone looking for one.
+
+**A "sweep is clean" report is about the sweep.** Two damage shapes come out of
+one scripted edit and the detector sees one of them, which its own doc has said
+since round 3 — so the wave that cites the sweep must also read its own diff.
+
+**A refusal that is quadratic is a denial of service with a good error message.**
+The cost of `check_no_recursion` was paid on every save and every cook, and its
+output was correct the whole time, so nothing that looks at *results* could ever
+have found it.
+
+**Commits:** `1a2dd8c4` (the depth-parity hole — `check_call_graph`'s second
+refusal, both arms, mutation-verified twice), `676da182` (the eighth eaten
+continuation and the re-measured round-3 ruling), `4b225d34` (the direction memo's
+five false statements, §8 split, `engine.*` routed to SCRIPT3), `e2b1451b` (the
+ROADMAP block and the packed-IR verdict), `34ae08b6` (the cubic call-graph walk),
+plus this ledger.
