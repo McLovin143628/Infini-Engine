@@ -31,12 +31,13 @@ function baseName(p: string): string {
  * this icon has been inheriting the row's colour rather than going red. Fixed
  * here, on the panel this wave wires InfiniScript's refusals into.
  *
- * Carried, because it is wider than this file: **eighteen other sites spell it
- * `--ink-danger`** (GitPanel's diff colouring, the Explorer's status letters,
- * the drawer's delete affordances, PreferencesDialog's error text). One line in
- * `applyTheme` aliasing `--ink-danger` to `error` would make all eighteen real
- * at once, and that is an app-wide visual change a human should look at rather
- * than a scripting wave should smuggle.
+ * Carried, because it is wider than this file: **23 more occurrences across 9
+ * files** spell it `--ink-danger` (GitPanel's diff colouring, the Explorer's
+ * status letters, the drawer's delete affordances, PreferencesDialog's error
+ * text, `sm.css` — which alone supplies a fallback and so is the only one that
+ * renders). One line in `applyTheme` aliasing `--ink-danger` to `error` would
+ * make all of them real at once, and that is an app-wide visual change a human
+ * should look at rather than a scripting wave should smuggle.
  */
 function SeverityIcon({ severity }: { severity: number }) {
   const size = 13;

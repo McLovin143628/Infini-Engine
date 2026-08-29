@@ -20017,8 +20017,9 @@ quicker.
     reading "rust-analyzer: idle" over three InfiniScript refusals was a lie by omission), and
     the severity icon goes red — **`--ink-danger` is not a theme token**, so
     `color: var(--ink-danger)` has always been an invalid declaration the browser drops.
-    Eighteen other sites spell it that way; the one-line `applyTheme` alias that would fix
-    them all is named in the code and left for a human.
+    **23 more occurrences across 9 files** spell it that way (only `sm.css`'s supplies a
+    fallback, so only it renders); the one-line `applyTheme` alias that would fix them all is
+    named in the code and left for a human.
   * **THE NINTH EATEN CONTINUATION, and the sweep is structurally blind to it.** This wave's
     own graph-preview fixture lost its `\`-continuations to a shell heredoc, leaving bare
     newlines inside a non-raw literal — legal Rust, arm still green. That is the round-3
