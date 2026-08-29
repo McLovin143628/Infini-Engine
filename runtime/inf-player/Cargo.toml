@@ -191,6 +191,11 @@ inf-graph = { workspace = true }
 # then boot the built player off its output (both Ring 2; dev-dep only — the
 # shipped player never depends on the cook pipeline).
 inf-packager = { workspace = true }
+# SCRIPT1b: `script_gameplay_gate` authors its fixture as `.infini` TEXT and
+# compiles it for the PIE side. Dev-dep only, and deliberately so: the SHIPPED
+# player reads the class the cook lowered, never a script, so it links no lexer
+# and no parser (`player_has_no_tuning_door` keeps that honest).
+inf-script = { workspace = true }
 inf-project = { workspace = true }
 # `vgeom_activation` cooks the SAME displaced-grid fixture the renderer's vgeom
 # suites use; it lives once in `inf_vgeom::test_support` behind this test-only

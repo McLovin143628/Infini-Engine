@@ -3537,6 +3537,7 @@ dependencies = [
  "inf-render",
  "inf-runtime",
  "inf-scene",
+ "inf-script",
  "inf-terrain",
  "inf-transpile",
  "inf-ui",
