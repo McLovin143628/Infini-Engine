@@ -22078,3 +22078,370 @@ continuation and the re-measured round-3 ruling), `4b225d34` (the direction memo
 five false statements, §8 split, `engine.*` routed to SCRIPT3), `e2b1451b` (the
 ROADMAP block and the packed-IR verdict), `34ae08b6` (the cubic call-graph walk),
 plus this ledger.
+
+---
+
+## Wave SCRIPT2b — the editor learns InfiniScript (2026-08-29)
+
+The carried item that has stood since SCRIPT1a — *"the editor surface is still
+the Output Log"* — is closed. A `.infini` now opens from the Content Drawer,
+highlights, lints against the Ring-0 compiler, saves into the watcher, and a
+Blueprint can be read as InfiniScript text. Five clauses, ten commits, and one
+of the wave's own fixtures was damaged by the ninth eaten continuation in a shape
+the workspace sweep cannot see.
+
+### The design decision the whole wave rests on: it is a TOKENIZER
+
+The brief said to keep it one, and the reason is worth stating rather than
+obeying. InfiniScript has exactly one parser and it is `crates/inf-script`'s: a
+`.infini` file's meaning *is* `inf_blueprint::BlueprintFn` IR, and the arc's
+founding rule is that nothing sits between the text and that IR. A second grammar
+living in the frontend would be a second opinion about what a script is, and the
+first time the two disagreed the editor would be confidently wrong about a file
+the engine reads perfectly well.
+
+So `infiniLanguage.ts` colours tokens and knows nothing about blocks,
+declarations, scopes or types. **Every semantic claim the editor makes comes back
+over the wire** from `script_check`, which is `inf_script::compile_bytes` — the
+same door the watcher, the cook and the PIE payload builder enter.
+
+`StreamLanguage`/`StreamParser` ship with the installed `@codemirror/language`,
+so the mode cost **zero new npm dependencies**, which was the scouted premise and
+held. The theme bridge cost nothing either: a stream parser's token names are
+resolved by `@codemirror/language` straight against `@lezer/highlight`'s `tags`,
+so returning `"keyword"` or `"variableName.function"` lands on the very tags
+`cmTheme.ts`'s `HighlightStyle` already paints from `--ink-*`. There is no
+`.infini` colour table, so a theme swap repaints this language with everything
+else because it never had colours of its own.
+
+Two places it is a heuristic rather than a mirror, and both are stated at the top
+of the file rather than discovered later: a call's namespace is recognised by the
+character **after** the identifier (`debug . print(…)` lexes identically in Ring 0
+and colours differently here — colour, not meaning), and a type name is
+recognised only in the two positions the grammar has one — after a `:` and after
+a `->` — because `float`/`int`/`bool`/`string` are not reserved words and a
+script may still call a variable `int`. (The `->` half was missing at first and
+the arm passed anyway, because it asked for the FIRST `float` on a line that had
+two type positions and one type name. Both are asserted now, with two different
+type names.)
+
+### The arms that read Ring 0's source instead of quoting it
+
+Four of the tokenizer's fourteen arms are worth their space:
+
+* **The reserved words are compared against `lex.rs`'s `KEYWORDS`**, parsed out
+  of the Rust file through Vite's `?raw`. Two copies of one expression across a
+  language boundary are a contract nobody is measuring — the Wave-C law
+  `lspBridge.ts` already pays for — and a keyword the language grew would
+  otherwise have been coloured as a variable for a whole wave with nothing
+  anywhere saying so. **Mutation-verified**: misspelling one keyword reddens that
+  arm and nothing else.
+* **Every symbol in `SYMBOLS`/`SYMBOLS2` must lex here as one non-invalid
+  token**, and the count is asserted equal: **19 both sides**.
+* **`templates/scripts/Example.infini` — the script every new project ships —
+  must tokenize with not one `invalid` token.** That is a claim about the
+  language rather than about three lines I chose.
+
+* **CodeMirror's OWN driver runs it**, over the shipped script plus an
+  unterminated `[==[` block, through `ensureSyntaxTree`. `readToken` throws if a
+  token consumes nothing, and the candidates for that — a blank line, end of
+  line, a long bracket running off the end of the file — are exactly where a
+  hand-written loop is most likely to differ. A helper that agrees with itself is
+  not evidence about the driver.
+
+`?raw` rather than `node:fs` because this project has no `@types/node`, and
+buying a dependency to read two files would have made the zero-new-deps claim
+false in the same commit that stated it. One 16-line `src/raw.d.ts` types it.
+
+### The third compartment, and why the hazard is designed out rather than guarded
+
+The scouting was right: a `Compartment` holds exactly one configuration —
+`reconfigure` REPLACES, it does not add — and `lspBridge.ts` reconfigures
+`extraCompartment` on **every** active-tab change. A second consumer sharing it
+would be evicted the next time the author touched a `.rs` tab: silently, and only
+sometimes, which is the worst shape a bug can have.
+
+InfiniScript gets `scriptCompartment`. But the decisive move is the second one:
+**its contents are a pure function of the file's PATH**, exactly like the language
+extension, so `baseExtensions` fills it when the tab's `EditorState` is built and
+no bridge ever reconfigures it on a tab switch. There is no live-view race to
+lose and nothing to evict. The LSP layer keeps its bridge because it depends on a
+server's lifetime; this one does not.
+
+`compartments.test.ts` drives a real `EditorView` through the scouted sequence
+with the panel's own state-swapping (`EditorPanel` saves the outgoing state and
+`setState`s the incoming one) and the LSP bridge's own installer:
+
+| step | `extraCompartment` | `scriptCompartment` |
+|---|---|---|
+| `.rs` active, LSP installed | occupied | empty |
+| `.infini` active | empty | **occupied** |
+| back to `.rs` | **occupied** | empty (and the `.infini` state still holds its linter) |
+
+Plus the **counterfactual, run rather than argued**: a script layer put into
+`extraCompartment` is wiped by the very next `setExtraExtensions`, while the real
+seam survives the same event untouched.
+
+### The diagnostics wire carries Ring 0's numbers, and both ends are armed
+
+`ScriptDiagnosticDto` carries **1-based line and column, length in characters,
+severity as a word** — `inf_script::Span`'s own fields, unconverted. That is what
+`Span`'s `Display` prints, what the CLI prints and what the Output Log shows, so
+"the editor says 12:5" and "the cook says 12:5" are one claim rather than two
+that happen to agree. The frontend converts **once**, in `scriptDiagnostics.ts`,
+at the one place CodeMirror needs 0-based offsets.
+
+* The Rust arm pins the DTO against `inf_script::render`'s own rendering rather
+  than a literal: for every refusal, `render`'s text must contain `line:col:` and
+  the message.
+* The TS arm walks a real `Text` and requires the squiggle to land on the `+`
+  the refusal names.
+* A **zero-length span** — Ring 0's end-of-input marker — is widened by one
+  character, or "the file ends before `end`" would be an invisible squiggle on an
+  empty column.
+
+`script_check` takes TEXT and not a path, and says why at its signature: the
+buffer in front of the author is the program they are asking about and it is
+usually dirty; checking the file would need a filesystem door for an answer
+nobody asked for. `path` is the **label** a byte-level refusal names, so
+"Huge.infini is larger than the 1 MiB source limit" reads like the cook's version
+of the same sentence — and because the command goes through `compile_bytes`
+rather than `compile`, the buffer inherits the door's whole byte contract rather
+than the subset somebody remembered. Armed: a 1 MiB buffer is refused, naming the
+file.
+
+**Refusals stay values across the IPC boundary.** The command's `Err` is for a
+broken command and it has no way to be broken, so it never returns one. A file
+that will not compile is an `Ok` carrying its diagnostics (P21); one that compiles
+with warnings is the same `Ok` carrying those, which the "clean vs warned"
+arm distinguishes so an empty list and a successful compile are different answers.
+
+The debounce is 250 ms and **the arm reads `WATCH_DEBOUNCE` out of
+`commands/assets.rs`** rather than quoting it — typing and saving are one system
+and two different reflexes would be a choice nobody made. That is the SCRIPT1b
+lesson (a number a test picks is a number about the test) applied where it
+applies.
+
+### Two honesty fixes on the panel this wires into
+
+* **Every Problems row shows its `source`.** There are two producers now, and a
+  header reading "rust-analyzer: idle" above three InfiniScript refusals was a lie
+  by omission.
+* **`--ink-danger` is not a theme token.** `THEME_COLOR_KEYS` defines
+  `--ink-error`; nothing has ever written `--ink-danger`, so
+  `color: var(--ink-danger)` is an invalid declaration the browser drops and the
+  Problems panel's error icon has been inheriting the row's colour rather than
+  going red. Fixed on this panel. **23 more occurrences across 9 files spell it
+  that way** — GitPanel's diff colouring, the Explorer's status letters, the
+  drawer's delete affordances, PreferencesDialog's error text, and `sm.css`,
+  which alone supplies a fallback and is therefore the only one that renders —
+  and one line in `applyTheme` aliasing it would make all of them real at once.
+  That is an app-wide visual change a human should look at, so it is named in the
+  code and carried, not smuggled into a scripting wave. The first write-up said
+  "eighteen other sites" from a truncated grep; a carried item should carry a
+  number somebody counted.
+
+### Open, save, and the half nothing had ever measured
+
+The open is the existing `infinity:open-file` event and no third door: a `.infini`
+row gets a scroll glyph, the **blueprint's own tint** (they are two faces of one
+program, so they wear one colour) and a double-click. The root-plus-relative join
+becomes `contentAbsPath`, which was already spelled twice in `ContentDrawer.tsx` —
+Reveal-in-Explorer had its own copy — and an unknown root answers `""` rather than
+an absolute-looking path built from nothing.
+
+The save is the P5.1 keymap unchanged. What is new is that anything measures it.
+`scriptOpenSave.test.ts` drives the designer-facing half end to end: the drawer's
+path reaches `file_read`; the tab carries **both** the language and the linter
+from its path alone; Ctrl+S writes those bytes to that path; a failed write leaves
+the tab dirty rather than claiming it saved; closing the tab retires its Problems
+rows while leaving rust-analyzer's alone (those are the server's to retract). The
+two ends meet at one fact — **the path the drawer emits is the path `file_write`
+receives** — so the file the author edited is the file SCRIPT1b's watcher
+recompiles. The engine half is not re-proved here; it has its own arms.
+
+### The graph↔text bridge's editor half, which fit
+
+`script_emit_class` renders a blueprint asset as the `.infini` file it would be,
+through `AssetState::load_blueprint_class_result` — one door that already reads a
+`.inf_act`'s committed JSON *and* a `.infini` through the file door. "Open as
+InfiniScript" is in the drawer's context menu for both kinds.
+
+It is the arc's own claim made operational rather than repeated: **`raise` refuses
+far more than the emitter does** — a `NodeDef`'s ports are fixed at registration
+and a user function's signature is not — so a handler the canvas cannot draw can
+still be read. The text face is total over the IR; the graph face is not.
+
+**Read-only, for a real reason.** Writing it back means re-parsing to a class and
+re-serialising that class over the `.inf_act`, and `emit ∘ parse` is a fixed point
+on the TEXT (A.6 law 2) rather than on the JSON: a graph-lowered class carries
+synthetic local ids that renumber into the parser's walk order, so a save would
+rewrite bytes the author never touched. That is a decision about identity, not a
+wiring job. Locked twice — `EditorState.readOnly` stops the keystroke, so the
+author finds out by the document not moving rather than by a Ctrl+S that silently
+does nothing, and `saveActive` refuses the tab as well.
+
+The synthetic `infini://{asset}/{Class}.infini` is a **path rather than a flag**
+because everything downstream already switches on one: the emitted text gets the
+`.infini` mode and, better, the linter — so **the editor checks the emitter's own
+output with the same Ring-0 compiler**. `the_text_a_class_opens_as_is_text_the_checker_accepts`
+runs the module's two commands against each other over the shipped
+`Example.infini`: what `script_emit_class` shows, `script_check` accepts.
+
+### The preview gap, closed through the one composition
+
+The SCRIPT2a audit's LOW 3. `graph_run` and the debug run both called the
+interpreter directly, with no host layered over `RunHost`, so a class holding a
+unit-local call previewed with that call landing on the unknown-call arm — logged
+and answered `Unit` — while the same program in Simulate, in PIE and in the
+shipped player runs the function, because `semantics::run_event` stacks
+`LocalFns` outermost. Both previews now build that stack, with the ordering
+comment pointing at the function that owns the reasoning.
+
+The class comes from the **document id and nothing else**: `graph_open_actor`
+mints `bp:<asset>` and says so at its own signature, so there is no second map to
+keep in step; a scratch `bp:{counter}` document resolves to no functions, which is
+not an error, because a preview of a scratch graph is not broken.
+`load_blueprint_class` (the `Option` twin) rather than the `Result` one — a
+preview that refused to run because an asset moved is a worse answer than the
+fall-through it replaces.
+
+The audit called it unreachable from the canvas and it still is. *Cannot be
+reached today* is not the same claim as *cannot be reached*, and the seam it was
+reachable through is a `.infini`-backed actor, which this arc has been adding
+paths to all week. The arm asserts **both** sides so it cannot pass vacuously:
+with the class's functions the member variable holds 42.0; without them the call
+falls through and is logged — the behaviour that used to be the only one.
+
+### THE NINTH EATEN CONTINUATION, and the sweep is blind to it by construction
+
+The preview fixture's first draft was written through a shell heredoc with
+`\`-continuations. The transport ate them, leaving bare newlines inside a non-raw
+string literal: legal Rust, a string the lexer is perfectly happy with, **arm
+still green**. That is the round-3 *second* shape — an escape eaten out of the
+middle of a literal — met a fourth time.
+
+`inf_packager`'s workspace sweep could not have caught it, and the reason is
+structural rather than a threshold: it skips any line not containing a quote, and
+`interior_space_run` skips leading indentation. A multi-line literal's
+continuation lines have no quote and the damage lands entirely in their leading
+indentation, so **both filters miss it independently**. The round-3 ruling stands
+(a real string-state lexer is the only detector, and at this tree's ratio of
+legitimate multi-line literals it needs a per-fixture allowlist) and the SCRIPT2a
+audit's actionable sentence is what found this one: read the diff, not just the
+sweep.
+
+The fixture is a **raw string with real newlines** now. Worth being precise, since
+the law's shorthand has misled before: a raw string helps here because there is no
+backslash left for anything to eat — not because raw strings are protective in
+general.
+
+### Three found reading my own work back, before any audit
+
+Worth recording because each is a shape rather than a slip.
+
+* **A refresh that only writes the store refreshes nothing.** `openText` replaced
+  a re-opened blueprint's document in `tabStates` — and `EditorPanel` swaps
+  documents from an effect keyed on `activeId`, which does not change when the
+  already-active tab is re-opened. So the store held the new rendering and the
+  author went on reading the old one: precisely the case the refresh exists for.
+  It now pushes the state into the live view. Mutation-verified: dropping that
+  line fails the new arm and nothing else.
+* **A `find` in a test can answer the wrong question.** The tokenizer armed only
+  one of the grammar's two type positions (`:` but not `->`), and the arm passed —
+  because it looked for the FIRST `float` on `function f(a: float) -> float`,
+  which is the parameter's. Two different type names now, and both asserted.
+* **An evolving `any` is a wire with no contract.** `let refusals;` in the lint
+  source meant nothing checked that what came back over the IPC matched what the
+  converter expects. Annotated with the ts-rs binding.
+
+### Carried, by name
+
+1. **No autocomplete, hover or go-to-definition over the verb surface.** The
+   generated API manual is the palette in written form until then; the completion
+   source would read the same registry the manual is rendered from, which is where
+   a next wave should start.
+2. **No "New InfiniScript" in the drawer's Add menu.** `asset_create` writes
+   *payloads* through `write_asset` and a script is source text with no payload —
+   the door needs a text write, a collision rule and a rescan that can return the
+   new GUID. Priced, not taken; a script starts from a project template or from a
+   new file in the Explorer.
+3. **A `.infini` tab that has never been displayed is never checked.** A lint
+   source runs in a live `EditorView`, so unlike rust-analyzer (which publishes for
+   the whole workspace) the Problems panel only knows about scripts you have
+   looked at. Saving is what tells the rest of the editor.
+4. **The bridge is one-way.** A Blueprint reads as InfiniScript; editing that text
+   back into the graph needs the identity decision above.
+5. **`--ink-danger` is undefined at 23 more occurrences across 9 files**, with
+   the one-line remedy named in `ProblemsPanel.tsx`. Only `sm.css` supplies a
+   fallback colour, so it is the one site that has been rendering.
+6. **SCRIPT2a's carried items 2–9 stand**, unchanged by this wave: the `string`
+   parameter that does not transpile, `raise`'s missing call-a-function node,
+   `engine.*` implemented by neither host, `zone.*`'s missing push half, `crowd.*`
+   naming no agent, `zone.count` counting the ground, and SCRIPT1b/SCRIPT1a's own
+   lists. Item 1 (this wave) is retired; its LOW 3 is retired above.
+
+### Counts
+
+| | baseline (`8df5258a`) | **wave SCRIPT2b** |
+|---|---|---|
+| frontend: test files / arms | 80 / 719 | **84 / 755** — `npx vitest run`, green. **+4 files, +36 arms**, which is exactly the `it(` count of the four new suites (14 tokenizer, 4 compartment, 7 diagnostics, 11 open/save); the baseline is that subtraction, and the FILE count is confirmed directly against `8df5258a` |
+| frontend: `tsc --noEmit` / `eslint --max-warnings 0` / `vite build` | clean | **clean / 0 / built** |
+| battery blocks / passed / failed / ignored | 353 / 6 575 / 0 / 19 | **353 / 6 582 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, exit 0. **+7 arms, +0 blocks**, which is exactly the wave's `#[test]` diff (7 added, 0 removed): four in `commands/script.rs`, two in `commands/graph.rs`, one more in `commands/script.rs` for the emit/check pair |
+| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**, in 24.1 s; `git status` over `crates/inf-render/tests/goldens` is **empty** afterwards, so none blessed and none re-blessed. This wave renders nothing |
+| rustdoc individual warnings (cold, ceiling 450) | 373 over 30 crates | **373 over 30 crates** — after `cargo clean --doc` (9 120 files, 223.7 MiB): **403 `^warning` lines minus 30 per-crate summaries**, cross-checked against the sum of those summaries' own counts (373 exactly), over **48** documented crates. The wave adds **zero**. Headroom **77** |
+| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — exit 0, run **LAST** per the rmeta law, with `CARGO_INCREMENTAL=0` so the previous wave's clippy cache stayed reusable (the SCRIPT2a audit's operating note: set it for the whole session or not at all). Incremental, and said so: **4** crates re-checked — `inf-editor-core` (the new DTO), `inf-studio` (both command modules) and the two downstream of the first, `inf-viewport` and `inf-player` — which is exactly the wave's Rust footprint; everything else served from a fingerprint cache keyed on the same `RUSTFLAGS` and profile. 47.4 s. **The first pass was green** |
+| `cargo fmt --all --check` | clean | **clean** |
+| schemas / committed content | unmoved | **unmoved.** No `schema_version`, no `FROZEN_WIRE` row, no `kind_code`, no pack change; `EXPECTED_LEVELS` still **23**; no golden blessed and no pinned digest re-blessed. `AssetKind::Script` was already additive at SCRIPT1b and this wave adds no asset kind at all |
+| `Cargo.lock` / manifests / `package.json` | — | **byte-identical.** No dependency of any kind, Rust or npm — `StreamLanguage` and `@codemirror/lint` were both already installed, which is what made the scouted "zero new deps" premise true rather than hopeful |
+| ts-rs bindings | — | **+1** (`ScriptDiagnosticDto`), generated by the harness and committed; the drift job re-runs it |
+| `chr(92)` sweep | clean | **green, and green is not clean** — the sweep passes and passed while this wave's damaged fixture was on disk, because the damage was in leading indentation on lines with no quote character. See the section above; the SCRIPT2a audit's law held exactly as written |
+| disk | 51 GB free | **43 GB free.** No `cargo clean` beyond `--doc`, no `target/debug/incremental` deletion and no `.pdb` reclaim needed: the battery, the goldens, a cold `cargo doc` and clippy all ran inside 8 GB, because the wave's Rust footprint is two command modules and one DTO |
+
+**Commits:** `89fc3673` (the language mode and its 13 arms, two of them reading
+`lex.rs`), `de8b4eba` (`script_check`, the DTO, the third compartment, the
+Problems-panel honesty fixes), `40ba1b70` (the drawer's open, the save's first
+measurement, and `script_emit_class`), `6769b369` (the preview's `LocalFns`, and
+the ninth eaten continuation), `228b77b5` (the book's editor workflow, §8 and the
+ROADMAP block), `18f10f45` (the tokenizer under CodeMirror's own driver),
+`751dddf7` (the re-opened blueprint's live-view refresh), `78257fc7` (the return
+type is a type position), `7cccd473` (the lint source's reply, typed), `13d72570`
+(the `--ink-danger` sites counted rather than estimated), plus this ledger.
+
+### The laws this wave adds
+
+**A language mode is a tokenizer or it is a second opinion.** The editor's job is
+to make text legible, not to decide what it means. Every judgement — is this
+valid, what is wrong with line 12, which variable is undeclared — comes back from
+the one compiler, so the editor and the build cannot disagree about a file. The
+cost is a heuristic or two about colour; the benefit is that the whole class of
+"the editor says it's fine and the cook refuses it" cannot happen.
+
+**A wire should carry the producer's own units.** Ring 0 counts lines from 1 and
+prints `12:5`; so does the DTO, so the panel and the compiler make one claim
+rather than two that agree. Convert once, at the consumer that needs the other
+convention, and name the conversion.
+
+**Design a single-occupant seam out rather than guard it.** The compartment
+hazard was real and a third compartment answers it — but the stronger answer was
+noticing the extension is a pure function of the PATH, which removes the bridge,
+the tab-change subscription and the race all at once. When two consumers must
+share a mutable seam, ask first whether the second one needs the seam at all.
+
+**A gate over a fixture you wrote is a gate about you.** Three of the tokenizer's
+arms read Ring 0's own source (`KEYWORDS`, `SYMBOLS`/`SYMBOLS2`) or the engine's
+own shipped content (`Example.infini`) instead of a literal I chose, and the
+fourth runs CodeMirror's driver rather than my loop. The first two catch a
+language that grows; the third is a claim about the language; the fourth is the
+only one that can see a token that fails to consume.
+
+**A refresh that only writes the store refreshes nothing.** `EditorPanel` swaps
+documents from an effect keyed on `activeId`, so re-opening the already-active
+tab is invisible to it. Any store action that replaces a live document has to
+push it, and the arm that proves it needs a real `EditorView`.
+
+**The sweep's blind spot has a shape, and it is worth naming rather than
+restating.** `inf_packager`'s eaten-continuation gate skips lines with no quote
+and skips leading indentation — and a multi-line literal's continuation lines are
+exactly both. So the second damage shape is not merely "harder to detect": for
+literals spanning lines it is *invisible by construction*, twice over.
