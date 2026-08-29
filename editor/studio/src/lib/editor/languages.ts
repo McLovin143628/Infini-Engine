@@ -11,12 +11,19 @@ import { python } from "@codemirror/lang-python";
 import { rust } from "@codemirror/lang-rust";
 import type { Extension } from "@codemirror/state";
 
+import { infini } from "./infiniLanguage";
+
 /** The language extension for a path, or `null` if unrecognized. */
 export function languageExtensionFor(path: string): Extension | null {
   const ext = path.split(/[\\/]/).pop()?.split(".").pop()?.toLowerCase() ?? "";
   switch (ext) {
     case "rs":
       return rust();
+    // InfiniScript (wave SCRIPT2b). Hand-rolled and dependency-free, like every
+    // other face of this language — see `infiniLanguage.ts` for why it is a
+    // tokenizer and not a parser.
+    case "infini":
+      return infini();
     case "ts":
     case "tsx":
       return javascript({ typescript: true, jsx: ext === "tsx" });
