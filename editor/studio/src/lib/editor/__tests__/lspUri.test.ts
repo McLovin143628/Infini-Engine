@@ -19,6 +19,7 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { uriToPath } from "../fileUri";
 import { pathToUri } from "../lspBridge";
 import fixtures from "./lspUriFixtures.json";
 
@@ -55,6 +56,45 @@ describe("pathToUri agrees with the backend, case by case", () => {
       expect(/^[\x21-\x7e]+$/.test(uri)).toBe(true);
       expect(uri.slice("file://".length)).not.toContain("#");
     }
+  });
+
+  /**
+   * **The decoder, over the same corpus** (SCRIPT2b audit).
+   *
+   * `uriToPath` is what turns a Problems row back into a file to open, and it
+   * decoded `%20` and nothing else — Wave F's defect, fixed on the encoder and
+   * left standing on the decoder one module away. Every row for a path
+   * containing `#`, `(`, `&`, `+` or a non-ASCII character pointed at a file
+   * that does not exist, so clicking it did nothing, silently. Since SCRIPT2b
+   * both producers land in that panel.
+   *
+   * The pin is the round trip over the fixture the *backend* generated, so the
+   * decoder is measured against the same corpus as the encoder rather than
+   * against a table someone wrote for it.
+   */
+  it("decodes back to the path the backend's own fixture names", () => {
+    for (const c of cases) {
+      // Forward-slashed: that is the form `pathToUri` encodes and the form the
+      // file IPC takes on Windows.
+      expect(uriToPath(c.uri)).toBe(c.path.replace(/\\/g, "/"));
+    }
+  });
+
+  it("would have failed against the %20-only decoder it replaced", () => {
+    // The falsifier for the half above.
+    const old = (uri: string) => {
+      let p = uri.replace(/^file:\/\//, "").replace(/%20/g, " ");
+      if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
+      return p;
+    };
+    const wrong = cases.filter((c) => old(c.uri) !== c.path.replace(/\\/g, "/"));
+    expect(wrong.length).toBeGreaterThanOrEqual(cases.length / 2);
+  });
+
+  it("shows a URI it cannot decode rather than throwing while rendering", () => {
+    // A row is a React render; an exception here takes the panel down.
+    expect(() => uriToPath("file:///C:/a%ZZb/c.rs")).not.toThrow();
+    expect(uriToPath("file:///C:/a%ZZb/c.rs")).toBe("C:/a%ZZb/c.rs");
   });
 
   it("would have failed against the spaces-only encoder it replaced", () => {

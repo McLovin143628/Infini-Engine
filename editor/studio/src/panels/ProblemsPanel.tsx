@@ -11,15 +11,10 @@
 import { useMemo } from "react";
 import { AlertCircle, AlertTriangle, Info, Lightbulb } from "lucide-react";
 
+import { uriToPath } from "../lib/editor/fileUri";
 import { requestOpenFile } from "../lib/openFile";
 import { problemList, useLspStore, type Problem } from "../stores/lspStore";
 
-function uriToPath(uri: string): string {
-  let p = uri.replace(/^file:\/\//, "").replace(/%20/g, " ");
-  // file:///C:/… → C:/… on Windows.
-  if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
-  return p;
-}
 function baseName(p: string): string {
   return p.split(/[\\/]/).pop() ?? p;
 }

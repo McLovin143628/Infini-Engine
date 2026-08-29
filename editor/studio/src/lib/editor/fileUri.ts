@@ -59,3 +59,33 @@ export function pathToUri(path: string): string {
   }
   return p.startsWith("/") ? `file://${p}` : `file:///${p}`;
 }
+
+/**
+ * The inverse: a `file://` URI back to the path [`pathToUri`] made it from
+ * (forward-slashed).
+ *
+ * **Moved here and repaired by the SCRIPT2b audit.** It lived in
+ * `ProblemsPanel.tsx` and decoded `%20` and nothing else — the exact defect
+ * Wave F fixed on the *encoder* and left standing on the decoder, one function
+ * away from a doc comment about how the two halves must not move alone. A
+ * Problems row is a button that opens its file, so on any project under
+ * `C:\Users\Müller\` or in a folder called `Game (v2)` every row in the panel
+ * pointed at a path with `%C3%BC` or `%28` in it, `files.read` refused it, and
+ * clicking did nothing at all — silently, for both producers, since SCRIPT2b
+ * routes InfiniScript's refusals through the same panel.
+ *
+ * `decodeURIComponent` rather than a table, guarded: a malformed escape throws,
+ * and a row that shows a raw URI is better than a panel that throws while
+ * rendering. The drive-letter rule is `file:///C:/…` → `C:/…`, unchanged.
+ */
+export function uriToPath(uri: string): string {
+  let p = uri.replace(/^file:\/\//, "");
+  try {
+    p = decodeURIComponent(p);
+  } catch {
+    // Not our escaping; show what we were given rather than nothing.
+  }
+  // file:///C:/… → C:/… on Windows.
+  if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
+  return p;
+}
