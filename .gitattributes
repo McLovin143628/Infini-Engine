@@ -24,6 +24,18 @@
 # committed line endings a property of the developer's platform, which is the
 # exact defect the block above records paying for once already.
 *.inf_sm.txt -text
+# SCRIPT1b: `.infini` is InfiniScript SOURCE -- the first asset kind in this list
+# whose payload is text a human wrote, which makes `-text` look wrong and is
+# exactly why it is right. The LEXER normalises CRLF, a lone CR and a leading
+# byte-order mark, so what a script MEANS is insensitive to all three
+# (`inf-script`'s determinism gate). What cannot be normalised is the file's
+# **identity**: a `.infini` with no committed sidecar gets a GUID synthesised
+# from its CONTENT HASH (`AssetDb::scan`), and a hash is over bytes. So a
+# checkout that CRLF'd a committed script would give it a different asset GUID
+# on Windows than on Linux -- the same program under a different name, in a pack
+# whose entries are keyed by that name. The fourth catch of the CRLF class, met
+# from the one direction the lexer cannot cover.
+*.infini -text
 # .inf_biomes (P19.2): a BiomeSet is deterministic bincode whose bytes a cook
 # validates and a fixture will lock; never let git rewrite them.
 *.inf_biomes -text

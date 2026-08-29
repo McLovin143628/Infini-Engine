@@ -66,6 +66,10 @@ inf-mesh = { workspace = true }
 inf-physics = { workspace = true }
 inf-anim = { workspace = true }
 inf-blueprint = { workspace = true }
+# SCRIPT1b: the editor loads a `.infini` through `inf_script::source`, the same
+# door the cook uses, and hot-swaps the class it lowers to into a running
+# Simulate.
+inf-script = { workspace = true }
 inf-transpile = { workspace = true }
 inf-viewport = { workspace = true }
 # The PIE (play-in-editor) protocol types + tick rate (P9.4). Ring 2 spawns the

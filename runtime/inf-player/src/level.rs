@@ -268,6 +268,16 @@ impl PartitionContent {
 /// a cooked partitioned level ships no entities at all, so degrading to "run it
 /// unpartitioned" would silently boot an empty world, the one failure worse than
 /// not booting.
+/// The pack kinds whose payload is a `BlueprintClass` in pretty JSON.
+///
+/// Two of them since SCRIPT1b: an authored `.inf_act`, and a `.infini` the cook
+/// lowered. Spelled once, so a reader cannot learn about one and not the other —
+/// the shape of divergence `blueprint_classes_by_guid` and `actor_classes` are
+/// two copies of already.
+pub(crate) fn is_class_kind(kind: AssetKind) -> bool {
+    matches!(kind, AssetKind::Blueprint | AssetKind::Script)
+}
+
 fn resolve_cell_store(
     entities: &[RuntimeEntity],
     settings: &PartitionSettings,
@@ -2215,11 +2225,20 @@ impl PackLevelSource {
         })
     }
 
-    /// Decode every `.inf_act` blueprint class stored in the pack (GUID order).
+    /// Decode every blueprint class stored in the pack (GUID order) — from
+    /// `.inf_act` assets **and** from cooked `.infini` scripts.
+    ///
+    /// # Why one function reads two kinds (SCRIPT1b)
+    ///
+    /// A `.infini` is source; the cook lowers it and stores the resulting
+    /// `BlueprintClass` as the same pretty JSON a `.inf_act` carries, under
+    /// `AssetKind::Script`. So the *bytes* are identical in shape and the player
+    /// links no parser — the kind is what remembers which face an author wrote
+    /// it in, which is worth keeping for a report and is not worth two decoders.
     pub fn actor_classes(&self) -> Result<Vec<BlueprintClass>, String> {
         let mut out = Vec::new();
         for e in self.reader.index() {
-            if e.kind != AssetKind::Blueprint {
+            if !is_class_kind(e.kind) {
                 continue;
             }
             let bytes = self
@@ -2238,7 +2257,7 @@ impl PackLevelSource {
     pub fn blueprint_classes_by_guid(&self) -> Result<HashMap<Uuid, BlueprintClass>, String> {
         let mut out = HashMap::new();
         for e in self.reader.index() {
-            if e.kind != AssetKind::Blueprint {
+            if !is_class_kind(e.kind) {
                 continue;
             }
             let bytes = self

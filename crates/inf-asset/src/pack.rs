@@ -165,6 +165,8 @@ fn kind_code(kind: AssetKind) -> u16 {
         AssetKind::Hair => 23,
         // P26.3b. Appended, never inserted — same rule, same reason.
         AssetKind::DerivedMaterial => 24,
+        // SCRIPT1b. Appended, never inserted: a kind code is a WIRE value.
+        AssetKind::Script => 25,
     }
 }
 
@@ -195,6 +197,7 @@ fn kind_from_code(code: u16) -> AssetKind {
         22 => AssetKind::Cloth,
         23 => AssetKind::Hair,
         24 => AssetKind::DerivedMaterial,
+        25 => AssetKind::Script,
         _ => AssetKind::Unknown,
     }
 }
@@ -364,7 +367,12 @@ impl PackWriter {
             // when a level loads. There is no unit to page and nothing to
             // sub-slice; the `.inf_tex` payloads it POINTS AT are the streaming
             // half, and those are already raw.
-            | AssetKind::DerivedMaterial => true,
+            | AssetKind::DerivedMaterial
+            // SCRIPT1b: a `.infini` cooks to the same pretty-JSON
+            // `BlueprintClass` a `.inf_act` does — read whole when a level
+            // loads, nothing to page. The Blueprint answer, for the Blueprint
+            // reason.
+            | AssetKind::Script => true,
         }
     }
 

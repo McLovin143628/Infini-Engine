@@ -144,6 +144,28 @@ pub enum AssetKind {
     /// level loads, and there is nothing to page. So it compresses like every
     /// other bincode payload — see `PackWriter::compresses_kind`.
     DerivedMaterial,
+    /// An **InfiniScript source file** (`.infini`) — the text face on the Infini
+    /// Blueprints IR (SCRIPT1a/SCRIPT1b, `inf_script`).
+    ///
+    /// The one kind in this list whose payload on disk is **text a human wrote**.
+    /// Everything else here is a serialized structure; a `.infini` is
+    /// git-diffable source, and that is the point of it.
+    ///
+    /// **What the pack carries is not what the disk carries.** The cook lowers a
+    /// script through `inf_script::source` and stores the resulting
+    /// `BlueprintClass` as the same pretty JSON a `.inf_act` holds, under this
+    /// kind. So a shipped player links no lexer and no parser — it decodes a
+    /// class exactly as it does for a Blueprint — while the *project* keeps the
+    /// text. The kind is what tells the two apart.
+    ///
+    /// A script is an authoring **root** (`inf_packager`'s `is_root_kind`) for
+    /// the same reason a `.inf_act` is: a designer who writes gameplay expects it
+    /// in the build without also having to bind it somewhere.
+    ///
+    /// **Not** a streaming-class kind: a class is a few kilobytes read whole when
+    /// a level loads. It compresses like a Blueprint — see
+    /// `PackWriter::compresses_kind`.
+    Script,
     /// Anything else living under the content root.
     Unknown,
 }
@@ -176,6 +198,7 @@ impl AssetKind {
             AssetKind::Cloth => "inf_cloth",
             AssetKind::Hair => "inf_hair",
             AssetKind::DerivedMaterial => "inf_matd",
+            AssetKind::Script => "infini",
             AssetKind::Unknown => return None,
         })
     }
@@ -207,6 +230,7 @@ impl AssetKind {
             "inf_cloth" => AssetKind::Cloth,
             "inf_hair" => AssetKind::Hair,
             "inf_matd" => AssetKind::DerivedMaterial,
+            "infini" => AssetKind::Script,
             _ => AssetKind::Unknown,
         }
     }
@@ -246,6 +270,7 @@ impl AssetKind {
             AssetKind::Cloth => "cloth",
             AssetKind::Hair => "hair",
             AssetKind::DerivedMaterial => "derived_material",
+            AssetKind::Script => "script",
             AssetKind::Unknown => "unknown",
         }
     }
@@ -277,6 +302,7 @@ impl AssetKind {
             AssetKind::Cloth => "Cloth",
             AssetKind::Hair => "Hair",
             AssetKind::DerivedMaterial => "Derived Material",
+            AssetKind::Script => "InfiniScript",
             AssetKind::Unknown => "File",
         }
     }
@@ -309,6 +335,8 @@ impl AssetKind {
             AssetKind::Cloth,
             AssetKind::Hair,
             AssetKind::DerivedMaterial,
+            // ── SCRIPT1b append ─────────────────────────────────────────────
+            AssetKind::Script,
         ]
     }
 }
@@ -348,7 +376,7 @@ mod tests {
     /// the variant (`format!("{k:?}").to_snake_case()`) would agree with any
     /// rename by construction, which is the shape of gate this repository keeps
     /// having to repair.
-    const FROZEN_WIRE: [(AssetKind, &str, &str, &str); 24] = [
+    const FROZEN_WIRE: [(AssetKind, &str, &str, &str); 25] = [
         (AssetKind::Level, "level", "inf_lvl", "level"),
         (AssetKind::Mesh, "mesh", "inf_mesh", "mesh"),
         (
@@ -400,6 +428,8 @@ mod tests {
             "inf_matd",
             "derived_material",
         ),
+        // ── SCRIPT1b append ─────────────────────────────────────────────────
+        (AssetKind::Script, "script", "infini", "script"),
     ];
 
     #[test]

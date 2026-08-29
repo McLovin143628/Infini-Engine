@@ -465,6 +465,44 @@ fn cook_one(
             is_blueprint = true;
             raw
         }
+        // ── SCRIPT1b: an InfiniScript cooks to the class it lowers to ───────
+        //
+        // **The ship decision, taken here and stated in `script_cook_note`.**
+        // `.infini` is source; what rides in the pack is the `BlueprintClass`
+        // this lowers to, as the same pretty JSON a `.inf_act` carries. So the
+        // shipped player links no lexer and no parser, and a script is a
+        // Blueprint by the time it boots.
+        //
+        // Through `inf_script::source`, the ONE file door — the same function
+        // the editor's watcher and the PIE payload builder call, so a script
+        // that compiles in the editor compiles in the cook by construction and
+        // not by three matching implementations.
+        AssetKind::Script => {
+            let (class, warnings) =
+                inf_script::compile_bytes(&raw, &name, format!("script:{guid}")).map_err(
+                    |diags| CookError::Script {
+                        guid,
+                        name: name.clone(),
+                        diagnostics: inf_script::render(&diags),
+                    },
+                )?;
+            // A warning is not a refusal (P21) — an undeclared member variable
+            // is the runtime's business — but it must not be silent in a build.
+            for w in &warnings {
+                advisories.push(script_warning_advisory(guid, &name, &w.to_string()));
+            }
+            // The one literal a script can write that `inf_transpile::emit`
+            // refuses (`EmitError::IntMin`): `i64::MIN` is `-(9223372036854775808)`
+            // in Rust source and the magnitude overflows. It PREVIEWS and it
+            // COOKS — the interpreter computes with it perfectly and the packed
+            // class holds it — so this is an advisory rather than a stack trace,
+            // which is the shape SCRIPT1a routed here by name.
+            if let Some(handler) = int_min_handler(&class) {
+                advisories.push(int_min_advisory(guid, &name, &handler));
+            }
+            is_blueprint = true;
+            encode_class(guid, &name, &class)?
+        }
         AssetKind::FunctionLib => {
             let mut lib: BlueprintLibrary =
                 serde_json::from_slice(&raw).map_err(|e| CookError::Blueprint {
@@ -1611,6 +1649,86 @@ pub fn sub_threshold_advisory(guid: AssetId, name: &str, triangles: usize, min: 
     )
 }
 
+/// Encode a cooked script's class the way a `.inf_act` is stored: **pretty
+/// JSON**, not bincode.
+///
+/// The reason is not style. `BlueprintClass` carries `skip_serializing_if`
+/// fields, and a non-self-describing stream cannot round-trip those — the law
+/// this repository has caught three times (`skip_serializing_if` desyncs
+/// bincode). `inf_editor_core::samples::encode_actor` writes a `.inf_act` this
+/// way for exactly that reason, and a cooked script must be byte-comparable
+/// with one, because the player decodes both through the same `serde_json`
+/// call.
+fn encode_class(guid: AssetId, name: &str, class: &BlueprintClass) -> Result<Vec<u8>> {
+    serde_json::to_vec_pretty(class).map_err(|e| CookError::Script {
+        guid,
+        name: name.to_string(),
+        diagnostics: format!("the compiled class could not be encoded: {e}"),
+    })
+}
+
+/// A compile **warning** from a script, carried into the build's report.
+///
+/// Pure, so the wording and the trigger are unit-tested — the
+/// [`sub_threshold_advisory`] precedent.
+pub fn script_warning_advisory(guid: AssetId, name: &str, message: &str) -> String {
+    format!("script {guid} ({name}): {message}")
+}
+
+/// The handler in which a script writes `i64::MIN`, if any.
+///
+/// SCRIPT1a pinned the fact and routed the reporting here:
+/// `-9223372036854775808` is `-(9223372036854775808)` in Rust source and the
+/// magnitude overflows an `i64` literal, so `inf_transpile::emit` refuses it by
+/// name (`EmitError::IntMin`). The interpreter computes with it perfectly and
+/// the packed class holds it, so the script **previews and cooks** — what it
+/// cannot do is be transpiled to Rust, which is the Code tab's door and the
+/// WASM mod cook's.
+fn int_min_handler(class: &BlueprintClass) -> Option<String> {
+    fn in_expr(e: &inf_blueprint::Expr) -> bool {
+        match e {
+            inf_blueprint::Expr::Lit(inf_blueprint::Lit::Int(v)) => *v == i64::MIN,
+            inf_blueprint::Expr::Binary(_, a, b) => in_expr(a) || in_expr(b),
+            inf_blueprint::Expr::Unary(_, a) => in_expr(a),
+            inf_blueprint::Expr::Call { args, .. } => args.iter().any(in_expr),
+            _ => false,
+        }
+    }
+    fn in_block(body: &[inf_blueprint::Stmt]) -> bool {
+        use inf_blueprint::Stmt;
+        body.iter().any(|s| match s {
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } => in_expr(value),
+            Stmt::ExprStmt(e) => in_expr(e),
+            Stmt::Return(Some(e)) => in_expr(e),
+            Stmt::Return(None) | Stmt::Snippet(_) => false,
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => in_expr(cond) || in_block(then_body) || in_block(else_body),
+            Stmt::While { cond, body } => in_expr(cond) || in_block(body),
+        })
+    }
+    class
+        .events
+        .iter()
+        .map(|b| &b.body)
+        .chain(class.functions.iter())
+        .find(|f| in_block(&f.body))
+        .map(|f| f.name.clone())
+}
+
+/// The wording of the `i64::MIN` cook advisory, pure so it can be pinned.
+pub fn int_min_advisory(guid: AssetId, name: &str, handler: &str) -> String {
+    format!(
+        "script {guid} ({name}) writes the literal -9223372036854775808 (i64::MIN) in \
+         `{handler}`. It runs — the packed class holds it and the interpreter computes \
+         with it — but it CANNOT be transpiled to Rust (-(9223372036854775808) overflows \
+         an i64 literal), so the Code tab and the WASM mod cook will refuse this class. \
+         Use -9223372036854775807 unless the exact minimum is the point."
+    )
+}
+
 /// **Levels stranded outside the content root** — the island phase's IB-7
 /// migration advisory.
 ///
@@ -1753,7 +1871,14 @@ fn derive_vmesh(
 fn is_root_kind(kind: AssetKind) -> bool {
     matches!(
         kind,
-        AssetKind::Level | AssetKind::Blueprint | AssetKind::FunctionLib
+        AssetKind::Level
+            | AssetKind::Blueprint
+            | AssetKind::FunctionLib
+            // SCRIPT1b: an InfiniScript is gameplay logic in exactly the sense
+            // a `.inf_act` is, so it is a root for the same reason — a designer
+            // who writes a script expects it in the build without also having to
+            // bind it somewhere first.
+            | AssetKind::Script
     )
 }
 
@@ -2023,8 +2148,139 @@ fn asset_deps(db: &AssetDb, id: AssetId, unreadable: &mut BTreeSet<String>) -> V
             deps.extend(scatter_kind_mesh_refs(&raw).into_iter().map(AssetId));
             deps
         }
+        // ── SCRIPT1b: the SK1c blocker-4 arm ────────────────────────────────
+        //
+        // *"the cook's `asset_deps` walks Level, Material, StateMachine,
+        // AnimClip, BiomeSet and Pcg — **not Blueprint** — and an item
+        // catalogue is authored in a `.inf_act`, so a mesh the catalogue names
+        // would never enter the closure and would not be packed at all."*
+        // SK1c stopped on that rather than ship a dangling reference. It is open
+        // now, for `.inf_act`, `.inf_fn` and `.infini` at once, because all
+        // three hold the SAME IR and one walk reads it
+        // (`inf_blueprint::asset_refs`).
+        //
+        // What a program can name is **enumerated**, not guessed: `STR_PORTS`
+        // classifies every `Str` input port in the node kit as an asset, a
+        // gameplay id, free text or a whole table, and its census arm fails if a
+        // new verb arrives unclassified. Exactly one is an asset today
+        // (`engine.spawn`'s prefab), and a name that resolves to nothing is an
+        // **advisory** rather than a silent miss.
+        AssetKind::Blueprint | AssetKind::FunctionLib | AssetKind::Script => {
+            let Some(class) = class_of(db, id, entry.kind(), &entry.name, &raw, unreadable) else {
+                return Vec::new();
+            };
+            let mut deps: Vec<AssetId> = Vec::new();
+            for r in inf_blueprint::asset_refs(&class) {
+                match resolve_asset_name(db, &r.name) {
+                    Some(dep) => deps.push(dep),
+                    None => {
+                        unreadable.insert(unresolved_script_asset_advisory(
+                            id,
+                            &entry.name,
+                            &r.type_id,
+                            &r.name,
+                        ));
+                    }
+                }
+            }
+            deps
+        }
         _ => Vec::new(),
     }
+}
+
+/// The class behind a Blueprint, a function library or a script — the three
+/// asset kinds that hold this IR — or `None` with an advisory recorded.
+///
+/// A function library has no events, so `asset_refs` reads its `functions`; the
+/// wrapper exists so the walk above has one shape rather than three.
+fn class_of(
+    db: &AssetDb,
+    id: AssetId,
+    kind: AssetKind,
+    name: &str,
+    raw: &[u8],
+    unreadable: &mut BTreeSet<String>,
+) -> Option<BlueprintClass> {
+    match kind {
+        AssetKind::Script => match inf_script::compile_bytes(raw, name, format!("script:{id}")) {
+            Ok((class, _)) => Some(class),
+            Err(_) => {
+                // Not advised here: `cook_one` compiles the same bytes through
+                // the same door and fails the build with the diagnostics. An
+                // advisory naming "undecodable" beside a real parse error would
+                // be the *second*, worse, description of one fault.
+                None
+            }
+        },
+        AssetKind::FunctionLib => match serde_json::from_slice::<BlueprintLibrary>(raw) {
+            Ok(lib) => {
+                let mut class = BlueprintClass::new(lib.id, lib.name);
+                class.functions = lib.functions;
+                Some(class)
+            }
+            Err(_) => {
+                unreadable.insert(unreadable_edge_advisory(db, id, "function", "undecodable"));
+                None
+            }
+        },
+        _ => match serde_json::from_slice::<BlueprintClass>(raw) {
+            Ok(class) => Some(class),
+            Err(_) => {
+                unreadable.insert(unreadable_edge_advisory(db, id, "blueprint", "undecodable"));
+                None
+            }
+        },
+    }
+}
+
+/// Resolve an asset **name** a program wrote into a GUID.
+///
+/// Two spellings, in this order, and no others:
+///
+/// 1. the asset's **GUID**, written out — unambiguous, and what a picker
+///    inserts;
+/// 2. the asset's **file stem** (`Enemy` for `Enemy.inf_act`), matched exactly
+///    and case-sensitively, and only when **one** asset carries it.
+///
+/// A name that matches two assets resolves to neither, deliberately: picking the
+/// first would make a cook depend on directory order, which is the class of bug
+/// `AssetDb::scan`'s path-sort exists to prevent.
+fn resolve_asset_name(db: &AssetDb, name: &str) -> Option<AssetId> {
+    if let Ok(uuid) = name.parse::<uuid::Uuid>() {
+        let id = AssetId(uuid);
+        if db.get(id).is_some() {
+            return Some(id);
+        }
+    }
+    let mut hits = db.iter().filter(|e| e.name == name);
+    let first = hits.next()?;
+    if hits.next().is_some() {
+        return None;
+    }
+    Some(first.id())
+}
+
+/// A program named an asset the project does not have (SCRIPT1b).
+///
+/// **Blocking**, like the other `asset_deps` advisories it sits beside: an edge
+/// the closure could not follow means the pack is missing something the running
+/// program will ask for, and SK1c's whole finding is that this failure is
+/// invisible until somebody plays the build.
+///
+/// Pure, so the wording and the trigger are unit-tested.
+pub fn unresolved_script_asset_advisory(
+    id: AssetId,
+    name: &str,
+    type_id: &str,
+    named: &str,
+) -> String {
+    format!(
+        "{name} ({id}) names the asset `{named}` at `{type_id}`, and no asset in this \
+         project has that GUID or that file name — so nothing behind that name is in the \
+         pack and the call will find nothing at runtime. Fix the spelling, or paste the \
+         asset's GUID."
+    )
 }
 
 /// The mesh GUIDs every **scatter kind** in a `.inf_pcg` payload names, sorted

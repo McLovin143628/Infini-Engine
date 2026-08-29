@@ -21,6 +21,11 @@ inf-blueprint = { workspace = true }
 # WASM mod cook target (P14.5): the SAME transpiler the compiled/dylib path uses,
 # lowering a blueprint class → Rust for the generated mod crate.
 inf-transpile = { workspace = true }
+# SCRIPT1b: the cook lowers a `.infini` through `inf_script::source` — the ONE
+# file door the editor's watcher and the PIE payload builder also call, so a
+# script that compiles in one compiles in all three by construction. The player
+# does NOT link this: what rides in the pack is the lowered `BlueprintClass`.
+inf-script = { workspace = true }
 inf-project = { workspace = true }
 # Cook stage: derive the virtualized-geometry `.inf_vmesh` from `.inf_mesh`.
 inf-mesh = { workspace = true }

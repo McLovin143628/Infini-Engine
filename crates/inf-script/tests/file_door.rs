@@ -204,17 +204,31 @@ fn no_byte_sequence_makes_the_door_panic() {
     let tmp = tempfile::tempdir().unwrap();
     let mut refused = 0usize;
     let mut opened = 0usize;
+    // The comments sit ABOVE their bytes rather than trailing them: a run of
+    // spaces aligning a trailing comment after a string literal is
+    // indistinguishable from an eaten `\`-continuation, and `inf_packager`'s
+    // workspace-wide sweep says so. Rewritten rather than exempted — the
+    // SCRIPT1a precedent, where its raise-coverage fixtures collided with the
+    // same sweep.
     let cases: Vec<Vec<u8>> = vec![
+        // empty, and one NUL
         vec![],
         vec![0x00],
-        vec![0xff, 0xfe, 0x00, 0x00],       // UTF-32 BOM
-        vec![0xff, 0xfe],                   // UTF-16 LE BOM
-        vec![0xfe, 0xff],                   // UTF-16 BE BOM
-        b"\xef\xbb\xbf".to_vec(),           // UTF-8 BOM alone
-        b"on tick(dt)\x80\nend\n".to_vec(), // a stray continuation byte
-        b"\xc3".to_vec(),                   // a truncated two-byte sequence
-        b"\xed\xa0\x80".to_vec(),           // a lone surrogate (CESU-8)
-        b"\xf4\x90\x80\x80".to_vec(),       // past U+10FFFF
+        // the byte-order marks of the encodings InfiniScript is not
+        vec![0xff, 0xfe, 0x00, 0x00],
+        vec![0xff, 0xfe],
+        vec![0xfe, 0xff],
+        // a UTF-8 BOM alone: a valid, empty script
+        b"\xef\xbb\xbf".to_vec(),
+        // a stray continuation byte inside a real script
+        b"on tick(dt)\x80\nend\n".to_vec(),
+        // a truncated two-byte sequence
+        b"\xc3".to_vec(),
+        // a lone surrogate (CESU-8)
+        b"\xed\xa0\x80".to_vec(),
+        // past U+10FFFF
+        b"\xf4\x90\x80\x80".to_vec(),
+        // CRLF throughout
         b"actor \"x\"\r\non tick(dt)\r\nend\r\n".to_vec(),
         b"\x00\x00\x00\x00".repeat(64),
         GOOD.as_bytes().to_vec(),

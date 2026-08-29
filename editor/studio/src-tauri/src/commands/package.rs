@@ -87,6 +87,20 @@ fn cook_error_to_dto(err: CookError) -> PackageErrorDto {
             dto.handler = Some(handler);
             dto.guid = Some(guid.to_string());
         }
+        // SCRIPT1b: an InfiniScript that would not compile. Its own class, with
+        // the diagnostics as the message: a script's anchor is a LINE AND A
+        // COLUMN, and folding it into `blueprint` would have rendered it under a
+        // handler field it does not have.
+        CookError::Script {
+            guid,
+            name,
+            diagnostics,
+        } => {
+            dto.class = "script".into();
+            dto.message = diagnostics;
+            dto.blueprint_class = Some(name);
+            dto.guid = Some(guid.to_string());
+        }
         CookError::Scene { guid, source } => {
             dto.class = "scene".into();
             dto.message = source.to_string();

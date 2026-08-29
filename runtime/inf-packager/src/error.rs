@@ -79,6 +79,28 @@ pub enum CookError {
     #[error("partition of level {guid}: {message}")]
     Partition { guid: AssetId, message: String },
 
+    /// An InfiniScript (`.infini`) failed to decode or compile at cook
+    /// (SCRIPT1b).
+    ///
+    /// Its own variant rather than a reuse of [`Blueprint`](CookError::Blueprint)
+    /// because the two carry different things: a blueprint's anchor is a handler
+    /// name, and a script's is a **line and column in a file a human is looking
+    /// at**. Rendering a parse error as `/ <decode>` would throw away the one
+    /// piece of information the whole refusals-are-values doctrine exists to
+    /// carry.
+    ///
+    /// `diagnostics` is `inf_script::render`'s block — one `line:col: error: …`
+    /// per line, exactly as the editor prints it.
+    #[error(
+        "script {guid} (`{name}`):
+{diagnostics}"
+    )]
+    Script {
+        guid: AssetId,
+        name: String,
+        diagnostics: String,
+    },
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 

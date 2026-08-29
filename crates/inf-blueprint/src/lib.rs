@@ -23,6 +23,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod assetrefs;
 pub mod interp;
 pub mod loopshape;
 pub mod lower;
@@ -40,6 +41,7 @@ pub mod semantics;
 /// `raise` recognizer all agree on the exact bound.
 pub const LOOP_GUARD_MAX: i64 = 1_000_000;
 
+pub use assetrefs::{asset_refs, AssetRef, StrRole};
 pub use interp::{
     eval_fn, eval_fn_traced, AudioHost, Debug as InterpDebug, Host, MoveResult2d, MoveResult3d,
     Physics2dHost, Physics3dHost, RayHit2d, RayHit3d, RunError, Trace, Value,

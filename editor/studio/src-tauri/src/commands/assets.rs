@@ -131,11 +131,23 @@ impl AssetState {
         let inner = guard.as_ref().ok_or("assets not initialized")?;
         let proj = inner.project.lock().map_err(|_| "asset project poisoned")?;
         let entry = proj.db().get(id).ok_or_else(|| format!("no asset {id}"))?;
-        if entry.kind() != inf_asset::AssetKind::Blueprint {
-            return Err(format!("{} is not a blueprint asset", entry.name));
+        let kind = entry.kind();
+        if !matches!(
+            kind,
+            inf_asset::AssetKind::Blueprint | inf_asset::AssetKind::Script
+        ) {
+            return Err(format!("{} is not a blueprint or a script", entry.name));
         }
         let path = entry.path.clone();
         let name = entry.name.clone();
+        // SCRIPT1b: an InfiniScript arrives through `inf_script::source` — the
+        // ONE file door the cook and the PIE payload builder also use, so the
+        // editor and the build cannot disagree about what a script means.
+        if kind == inf_asset::AssetKind::Script {
+            return inf_script::compile_path(&path, format!("script:{id}"))
+                .map(|(class, _warnings)| class)
+                .map_err(|d| inf_script::render(&d));
+        }
         let bytes = std::fs::read(&path).map_err(|e| format!("read {name}: {e}"))?;
         serde_json::from_slice(&bytes).map_err(|e| format!("{name} will not parse: {e}"))
     }
@@ -157,10 +169,38 @@ impl AssetState {
         let inner = guard.as_ref()?;
         let proj = inner.project.lock().ok()?;
         let entry = proj.db().get(id)?;
-        if entry.kind() != inf_asset::AssetKind::Blueprint {
+        let kind = entry.kind();
+        if !matches!(
+            kind,
+            inf_asset::AssetKind::Blueprint | inf_asset::AssetKind::Script
+        ) {
             return None;
         }
         let path = entry.path.clone();
+        // SCRIPT1b: an InfiniScript compiles through the one file door. A script
+        // that will not parse is logged with its LINE, which a JSON decode
+        // error cannot give — and the actor runs with no gameplay logic, exactly
+        // as an unreadable `.inf_act` does.
+        if kind == inf_asset::AssetKind::Script {
+            return match inf_script::compile_path(&path, format!("script:{id}")) {
+                Ok((class, warnings)) => {
+                    for w in warnings {
+                        tracing::warn!(asset = %id, "{w}");
+                    }
+                    Some(class)
+                }
+                Err(diags) => {
+                    tracing::error!(
+                        asset = %id,
+                        path = %path.display(),
+                        "InfiniScript will not compile; this actor will run with NO gameplay                          logic:
+                    {}",
+                        inf_script::render(&diags)
+                    );
+                    None
+                }
+            };
+        }
         match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
                 Ok(class) => Some(class),
