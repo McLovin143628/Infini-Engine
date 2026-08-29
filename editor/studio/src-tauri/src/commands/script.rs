@@ -64,6 +64,41 @@ pub async fn script_check(
     Ok(check_text(&text, path.as_deref()))
 }
 
+/// **The graph↔text bridge's editor half** (wave SCRIPT2b): render a blueprint
+/// asset as the `.infini` file it would be.
+///
+/// `AssetState::load_blueprint_class_result` already reads BOTH kinds — a
+/// `.inf_act`'s committed JSON and a `.infini` through the file door — so this
+/// is one door for "show me this class as text", whichever it was authored as.
+///
+/// **Read-only in the editor, and the reason is a real one rather than
+/// caution.** Writing the text back would mean re-parsing it into a class and
+/// re-serialising that class over the `.inf_act`, and `emit ∘ parse` is a fixed
+/// point on the TEXT (roundtrip law 2) rather than on the JSON: a graph-lowered
+/// class carries synthetic local ids that renumber into the parser's walk
+/// order, so a save would rewrite bytes the author never touched. Making that
+/// safe is a decision about identity, not a wiring job.
+///
+/// `raise`-to-a-graph refuses far more than this does (a `NodeDef`'s ports are
+/// fixed and a call form has none), which is the arc's own claim made
+/// operational: **the text face is total over the IR and the graph face is
+/// not**, so a handler that cannot be drawn can still be read.
+#[tauri::command]
+pub async fn script_emit_class(
+    asset_id: String,
+    assets: tauri::State<'_, super::assets::AssetState>,
+) -> Result<String, String> {
+    let id: inf_asset::AssetId = asset_id.parse().map_err(|e| format!("bad asset id: {e}"))?;
+    let class = assets.load_blueprint_class_result(id)?;
+    inf_script::emit_class(&class).map_err(|e| {
+        format!(
+            "“{}” has no written form as InfiniScript ({e}); open the generated \
+             code instead.",
+            class.name
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +184,34 @@ mod tests {
             refusals[0].message.contains("Huge.infini"),
             "the refusal must name the file the author is looking at: {}",
             refusals[0].message
+        );
+    }
+
+    /// **What `script_emit_class` shows, `script_check` accepts.**
+    ///
+    /// The two commands in this module are the two halves of one loop — open a
+    /// class as text, and the editor immediately lints that text — so the arm
+    /// runs them against each other rather than each against a fixture.
+    /// Ring 0 proves `parse(emit(f)) == f` on the IR (`roundtrip.rs` law 1);
+    /// what is proved here is the consequence for the EDITOR: the buffer the
+    /// author is shown does not arrive covered in squiggles.
+    ///
+    /// The class comes from the script every new project ships, so this is a
+    /// claim about real content rather than about three statements I chose.
+    #[test]
+    fn the_text_a_class_opens_as_is_text_the_checker_accepts() {
+        let source = include_str!("../../../../../templates/scripts/Example.infini");
+        let (class, _warnings) =
+            inf_script::compile(source, "check:Example").expect("the shipped template compiles");
+
+        let text = inf_script::emit_class(&class).expect("a class the emitter can write");
+        assert!(text.contains("on tick"), "the emitted text is not empty: {text}");
+
+        let refusals = check_text(&text, Some("Example.infini"));
+        assert_eq!(
+            refusals,
+            vec![],
+            "the editor would open this class covered in squiggles:\n{text}"
         );
     }
 

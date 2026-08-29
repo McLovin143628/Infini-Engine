@@ -983,6 +983,13 @@ export const lsp = {
 export const script = {
   check: (text: string, path?: string): Promise<ScriptDiagnosticDto[]> =>
     invoke<ScriptDiagnosticDto[]>("script_check", { text, path: path ?? null }),
+  /**
+   * The graph↔text bridge's editor half: a blueprint asset (`.inf_act` or
+   * `.infini`) rendered as the `.infini` file it would be, through the Ring-0
+   * emitter. Rejects — with the class named — when the IR has no written form.
+   */
+  emitClass: (assetId: string): Promise<string> =>
+    invoke<string>("script_emit_class", { assetId }),
 };
 
 /**

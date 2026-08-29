@@ -353,6 +353,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         lsp::lsp_did_close,
         lsp::lsp_request,
         script::script_check,
+        script::script_emit_class,
         diagnostics::editor_diagnostics,
     ]
 }

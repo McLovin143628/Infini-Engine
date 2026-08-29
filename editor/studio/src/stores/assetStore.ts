@@ -603,6 +603,25 @@ export function visibleAssets(
     .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
 }
 
+/**
+ * The absolute path of an asset's payload (wave SCRIPT2b).
+ *
+ * `AssetDto.path` is relative to the content root and forward-slashed, and
+ * `AssetSnapshot.root` is the absolute root **already forward-slashed by
+ * `snapshot.rs`** — so joining them needs no separator translation, only a
+ * guard against doubling the slash. The one caller today is the drawer, which
+ * hands the result to `infinity:open-file`; anything else that needs a real
+ * file (rather than a GUID) should come through here rather than rebuild it.
+ *
+ * An empty root answers `""` rather than an absolute-looking path built from
+ * nothing: "the content root is not known yet" must not become a path that
+ * confidently points at the filesystem's root.
+ */
+export function contentAbsPath(root: string, relative: string): string {
+  if (!root || !relative) return "";
+  return `${root.replace(/[/\\]+$/, "")}/${relative.replace(/^[/\\]+/, "")}`;
+}
+
 /** Immediate child folders of `path`, sorted by name (pure; use in `useMemo`). */
 export function childFolders(
   folders: Record<string, AssetFolderDto>,

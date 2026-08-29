@@ -37,6 +37,7 @@ import {
   Pencil,
   Plus,
   Save,
+  ScrollText,
   Search,
   Star,
   Trash2,
@@ -47,18 +48,21 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "../lib/utils";
 import { deliverAssetDrop } from "../lib/assetDrop";
 import { executeCommand } from "../lib/commands";
-import { scene as sceneIpc, shell, viewport } from "../lib/ipc";
+import { scene as sceneIpc, script, shell, viewport } from "../lib/ipc";
 import { CUTOUT_ATTR, useViewportCutout } from "../lib/viewportOverlay";
 import { useDockLayout } from "../panels/dock/dockLayoutStore";
 import { useShellStore } from "../stores/shellStore";
 import { useSpriteSheetStore } from "../stores/spriteSheetStore";
 import {
   childFolders,
+  contentAbsPath,
   importViaDialog,
   useAssetStore,
   visibleAssets,
   type AssetDto,
 } from "../stores/assetStore";
+import { requestOpenFile } from "../lib/openFile";
+import { blueprintTextPath, useEditorStore } from "../stores/editorStore";
 import BiomeSetEditor from "./BiomeSetEditor";
 import DataAssetEditor from "./DataAssetEditor";
 import MaterialInstanceEditor from "./MaterialInstanceEditor";
@@ -71,6 +75,9 @@ const KIND_TINT: Record<string, string> = {
   material: "text-(--ink-accent)",
   material_instance: "text-(--ink-accent)",
   blueprint: "text-(--ink-accent)",
+  // A script and a blueprint are two faces of one program, so they wear
+  // one colour (SCRIPT2b).
+  script: "text-(--ink-accent)",
   audio: "text-(--ink-warning)",
   struct: "text-(--ink-info)",
   enum: "text-(--ink-info)",
@@ -104,6 +111,8 @@ function KindGlyph({
       return <Paintbrush {...p} />;
     case "blueprint":
       return <FileCode2 {...p} />;
+    case "script":
+      return <ScrollText {...p} />;
     case "audio":
       return <Music2 {...p} />;
     case "biome_set":
@@ -132,6 +141,7 @@ export default function ContentDrawer() {
   const ready = useAssetStore((s) => s.ready);
   const assetsById = useAssetStore((s) => s.assets);
   const folder = useAssetStore((s) => s.folder);
+  const rootPath = useAssetStore((s) => s.rootPath);
   const search = useAssetStore((s) => s.search);
   const kindFilter = useAssetStore((s) => s.kindFilter);
   const selected = useAssetStore((s) => s.selected);
@@ -202,7 +212,13 @@ export default function ContentDrawer() {
       useDockLayout.getState().openPanel("pcg"); // P10.5b PCG editor
     else if (asset.kind === "state_machine")
       useDockLayout.getState().openPanel("stateMachine"); // P11.2 state machine editor
-    else if (asset.kind === "texture") {
+    // SCRIPT2b: a `.infini` is SOURCE, so it opens in the Code Editor through
+    // the same `infinity:open-file` event the Explorer, Search and Git panels
+    // use — no third door, and the editor's own handler opens the panel.
+    else if (asset.kind === "script") {
+      const abs = contentAbsPath(rootPath, asset.path);
+      if (abs) requestOpenFile(abs);
+    } else if (asset.kind === "texture") {
       // P8.2a: open the Sprite Sheet slicer bound to this texture.
       void useSpriteSheetStore.getState().open(asset.id);
       useDockLayout.getState().openPanel("spriteSheet");
@@ -1056,10 +1072,11 @@ function AssetContextMenu({
       pushStatus(`Could not read references: ${String(e)}`, 8000);
     }
   };
-  // The asset's absolute payload path = content root + its content-relative path.
+  // The asset's absolute payload path, through the one join (SCRIPT2b) — this
+  // was the second copy of that expression in this file.
   const doReveal = async () => {
     try {
-      await shell.reveal(`${rootPath}/${asset.path}`);
+      await shell.reveal(contentAbsPath(rootPath, asset.path));
     } catch (e) {
       pushStatus(`Reveal failed: ${String(e)}`);
     }
@@ -1087,6 +1104,28 @@ function AssetContextMenu({
   };
   const isMaterialLike =
     asset.kind === "material" || asset.kind === "material_instance";
+  /**
+   * **Open a Blueprint as InfiniScript** (wave SCRIPT2b) — the arc's signature
+   * capability, from the drawer.
+   *
+   * `raise`-to-a-graph refuses far more than the emitter does, so a class the
+   * canvas cannot draw can still be READ: the text face is total over the IR
+   * and the graph face is not. Read-only for now, because writing it back means
+   * deciding what happens to the synthetic local ids a graph-lowered class
+   * carries — a decision about identity, not a wiring job.
+   */
+  const openAsScript = async () => {
+    try {
+      const text = await script.emitClass(asset.id);
+      useDockLayout.getState().openPanel("editor");
+      useEditorStore
+        .getState()
+        .openText(blueprintTextPath(asset.id, asset.name), text);
+      pushStatus(`"${asset.name}" opened as InfiniScript (read-only).`);
+    } catch (e) {
+      pushStatus(String(e), 8000);
+    }
+  };
   const bindToSelection = async () => {
     try {
       const n = await sceneIpc.applyActor(asset.id);
@@ -1156,6 +1195,12 @@ function AssetContextMenu({
           "Bind to Selection",
           <Link2 size={13} />,
           () => void bindToSelection(),
+        )}
+      {(asset.kind === "blueprint" || asset.kind === "script") &&
+        item(
+          "Open as InfiniScript",
+          <ScrollText size={13} />,
+          () => void openAsScript(),
         )}
       {asset.kind === "material" &&
         item(

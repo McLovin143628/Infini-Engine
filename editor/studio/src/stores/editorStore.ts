@@ -20,6 +20,22 @@ export interface EditorTab {
   path: string;
   name: string;
   dirty: boolean;
+  /** A view with no file behind it (SCRIPT2b's blueprint-as-text). Never saved. */
+  readOnly?: boolean;
+}
+
+/**
+ * The synthetic path a blueprint-as-text tab carries (SCRIPT2b).
+ *
+ * It is a path rather than a flag because everything downstream already
+ * switches on one: `languageExtensionFor` gives it the `.infini` mode and
+ * `scriptExtensionFor` gives it the linter, so the emitted text is checked by
+ * the same Ring-0 compiler that would check a real file — which is a useful
+ * self-test of the emitter rather than a decoration. The `infini://` scheme
+ * makes it unmistakably not a filesystem path, so nothing tries to read it.
+ */
+export function blueprintTextPath(assetId: string, className: string): string {
+  return `infini://${assetId}/${className}.infini`;
 }
 
 // Per-tab EditorState, kept off the React tree (immutable CM state references).
@@ -56,6 +72,7 @@ interface EditorStore {
   tabs: EditorTab[];
   activeId: string | null;
   openFile: (absPath: string) => Promise<void>;
+  openText: (path: string, content: string) => void;
   closeTab: (id: string) => void;
   activate: (id: string) => void;
   markDirty: (id: string, dirty: boolean) => void;
@@ -93,6 +110,29 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     }));
   },
 
+  /**
+   * Open a **read-only** tab over text the backend produced rather than a file
+   * on disk (SCRIPT2b: a blueprint rendered as InfiniScript).
+   *
+   * Keyed by `path` like every other tab, so asking twice focuses the one
+   * already open — but the content is REPLACED on a re-open, because the class
+   * it was rendered from may have moved since. A file tab does not do that
+   * (it would discard the author's edits); this document has no edits to
+   * discard, which is exactly what read-only means.
+   */
+  openText: (path, content) => {
+    const existing = get().tabs.find((t) => t.path === path);
+    const id = existing?.id ?? `tab-${counter++}`;
+    const onUpdate = (u: ViewUpdate) => tabStates.set(id, u.state);
+    tabStates.set(id, createEditorState(content, path, onUpdate, true));
+    set((s) => ({
+      tabs: existing
+        ? s.tabs
+        : [...s.tabs, { id, path, name: baseName(path), dirty: false, readOnly: true }],
+      activeId: id,
+    }));
+  },
+
   closeTab: (id) => {
     tabStates.delete(id);
     // SCRIPT2b: an InfiniScript's refusals come from a linter that only exists
@@ -119,6 +159,10 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     const tab = tabs.find((t) => t.id === activeId);
     const state = tabStates.get(activeId);
     if (!tab || !state) return;
+    // A blueprint opened as text has no file to write back to (SCRIPT2b). The
+    // document is already `EditorState.readOnly`, so this is the second lock on
+    // one door rather than the only one.
+    if (tab.readOnly) return;
     try {
       await files.write(tab.path, state.doc.toString());
       get().markDirty(activeId, false);

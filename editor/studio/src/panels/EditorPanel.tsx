@@ -4,7 +4,7 @@
  * `infinity:open-file` event; Ctrl/Cmd+S saves the active tab.
  */
 import { useEffect, useRef } from "react";
-import { FileCode2, X } from "lucide-react";
+import { FileCode2, Lock, X } from "lucide-react";
 
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
@@ -65,8 +65,15 @@ export default function EditorPanel() {
                 : "text-(--ink-text-dim) hover:bg-(--ink-bg-3)",
             )}
             onClick={() => activate(t.id)}
+            // A read-only tab has no file behind it (SCRIPT2b) and the path is
+            // a scheme rather than a location, so the tooltip says which.
+            title={t.readOnly ? `${t.name} — read-only view of a blueprint` : t.path}
           >
-            <FileCode2 size={12} className="text-(--ink-text-faint)" />
+            {t.readOnly ? (
+              <Lock size={11} className="text-(--ink-text-faint)" />
+            ) : (
+              <FileCode2 size={12} className="text-(--ink-text-faint)" />
+            )}
             <span className="max-w-40 truncate">{t.name}</span>
             {t.dirty && <span className="size-1.5 rounded-full bg-(--ink-accent)" />}
             <button

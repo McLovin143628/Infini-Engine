@@ -116,15 +116,27 @@ export function baseExtensions(path: string): Extension[] {
   ];
 }
 
-/** Build an EditorState for `doc` at `path`, with an update listener. */
+/**
+ * Build an EditorState for `doc` at `path`, with an update listener.
+ *
+ * `readOnly` (SCRIPT2b) is for a document that has no file behind it — a
+ * blueprint opened as InfiniScript text. It is `EditorState.readOnly`, which
+ * stops the keystroke rather than the save, so the author finds out by the
+ * document not moving instead of by a Ctrl+S that silently does nothing.
+ */
 export function createEditorState(
   doc: string,
   path: string,
   onUpdate: (u: ViewUpdate) => void,
+  readOnly = false,
 ): EditorState {
   return EditorState.create({
     doc,
-    extensions: [...baseExtensions(path), EditorView.updateListener.of(onUpdate)],
+    extensions: [
+      ...baseExtensions(path),
+      EditorState.readOnly.of(readOnly),
+      EditorView.updateListener.of(onUpdate),
+    ],
   });
 }
 
