@@ -249,7 +249,8 @@ fn a_broken_edit_leaves_the_previous_program_running() {
     let place = rendered.split(':').take(2).collect::<Vec<_>>();
     assert!(
         place[0].parse::<u32>().is_ok() && place[1].parse::<u32>().is_ok(),
-        "the diagnostic must open with a line and a column the designer can look          at: {rendered}"
+        "the diagnostic must open with a line and a column the designer can \
+         look at: {rendered}"
     );
     assert!(
         place[0].parse::<u32>().unwrap() >= 6,

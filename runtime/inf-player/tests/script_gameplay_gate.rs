@@ -237,7 +237,8 @@ fn assert_not_vacuous(trace: &[Frame]) {
     );
     assert!(
         states.len() >= 6,
-        "only {} distinct world states — the script ran but changed NOTHING in          the world, which is the vacuous shape this gate exists to refuse",
+        "only {} distinct world states — the script ran but changed NOTHING in \
+         the world, which is the vacuous shape this gate exists to refuse",
         states.len()
     );
     let handed = f64::from_bits(trace.last().expect("a trace").vars[1]);

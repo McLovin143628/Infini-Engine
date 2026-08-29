@@ -193,7 +193,8 @@ impl AssetState {
                     tracing::error!(
                         asset = %id,
                         path = %path.display(),
-                        "InfiniScript will not compile; this actor will run with NO gameplay                          logic:
+                        "InfiniScript will not compile; this actor will run with NO \
+                         gameplay logic:
                     {}",
                         inf_script::render(&diags)
                     );
@@ -691,7 +692,8 @@ fn spawn_tick(app: AppHandle) {
                             if sim.reload_class(*asset, class) {
                                 tracing::info!(
                                     script = %path.display(),
-                                    "InfiniScript recompiled; the new program takes over on the                                      next fixed step"
+                                    "InfiniScript recompiled; the new program takes \
+                                     over on the next fixed step"
                                 );
                             }
                         }
@@ -699,7 +701,8 @@ fn spawn_tick(app: AppHandle) {
                     Err(diags) => {
                         tracing::error!(
                             script = %path.display(),
-                            "InfiniScript did not compile; the PREVIOUS program keeps                              running:
+                            "InfiniScript did not compile; the PREVIOUS program \
+                             keeps running:
 {}",
                             inf_script::render(&diags)
                         );

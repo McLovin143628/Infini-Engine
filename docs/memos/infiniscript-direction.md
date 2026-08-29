@@ -77,11 +77,21 @@ output so the two cannot silently drift:
 * `coyote_parity.rs` — the `physics2d.*` coyote-time jump against an identical
   mock physics on both sides.
 
-**No test in the repository compiles the transpiler's output and runs it.**
-`parity.rs`'s own module doc names this: it is "the CI-cheap half of the parity
-story (no runtime `cargo build`)". `inf-wasm-host`'s `spinner_e2e` does compile
-and run real wasm, but from the *hand-written* `samples/mods/spinner`, not from
+**No test in the repository compiles the transpiler's output and runs it** —
+*until SCRIPT1b, which is exactly why it was routed there.* `parity.rs`'s own
+module doc names the bound: it is "the CI-cheap half of the parity story (no
+runtime `cargo build`)". `inf-wasm-host`'s `spinner_e2e` does compile and run
+real wasm, but from the *hand-written* `samples/mods/spinner`, not from
 generated code.
+
+**SCRIPT1b closed it** (`crates/inf-script/tests/crown_parity.rs`): a `.infini`
+is transpiled, the host shims are emitted beside the output, `rustc` compiles
+the zero-dependency program, it runs, and its trace is required byte-identical
+to the interpreter's. Everything below this paragraph about "one hand-mirrored
+fixture family per construct class" therefore describes the *four families*,
+which still stand and still guard what they guard; the general property they
+could not give is now measured over whatever the crown gate's fixture writes.
+See §8 for the two live defects that closing it found.
 
 That is a good gate and a real one. It is also a shape SCRIPT1 must plan for:
 "extending the P6 parity gate to scripts" means **one hand-mirrored fixture
@@ -519,29 +529,111 @@ and three of its edges were crashes rather than refusals (no depth guard; an
 emitter writing text its own parser rejects, from a two-node graph; an
 expression in statement position).
 
-**SCRIPT1b — hot reload, the cook, and the crown gate (ROUTED).** The wave split
-under the brief's own rule, at five majors, and the split is where the brief put
-it. What SCRIPT1b owes:
+**SCRIPT1b — hot reload, the cook, and the crown gate (COMPLETE 2026-08-29).**
+All five routed clauses landed. What is now true:
 
-* **Hot reload** — `.infini` watcher on `inf-asset`'s notify substrate →
-  re-lower → swap into the running Simulate's interpreter, with failure
-  containment armed at its true bound (per handler, per actor, per tick; §4).
-  Timing measured, not asserted.
-* **The cook path** — `.infini` is *source*, git-diffable text; the cook lowers
-  it and either transpiles it to Rust into the project crate or packs its IR for
-  the shipped interpreter. `asset_deps` walks scripts so the cook closure sees
-  script-named assets (the SK1c blocker-4 lesson). A packed-IR script asset, if
-  taken, is **additive** — the sidecar rule, and a STOP-and-price if a wire moves.
-* **THE CROWN GATE** — transpile a `.infini` script, **compile it, run it**, and
-  compare the trace against the interpreter byte for byte. §2's bound is that no
-  test in this repository has ever compiled the transpiler's output and run it;
-  SCRIPT1b is where "preview is the shipped program" stops being four
-  hand-mirrored fixture families. The substrate is the `inf-hotreload` dylib path
-  or a project-crate build, and the gate is slow and toolchain-dependent by
-  nature — that is the price, and it was known when it was routed.
-* **`PIE == shipping` over a trace whose gameplay runs from a `.infini` script**
-  — which needs the cook path first, and is therefore SCRIPT1b's and not a
-  SCRIPT3 aspiration.
+* **The file door.** `inf_script::source` is the one place bytes on disk become
+  a program, and the SCRIPT1a audit's routed item lands there: invalid UTF-8 is
+  a diagnostic naming the **byte offset** of the first bad byte, at the line and
+  column it falls on; a file over `MAX_SOURCE_BYTES` (1 MiB) is refused by
+  **both numbers**; a leading byte-order mark is *repaired*, because the door's
+  output is what a cook hashes. Three callers — the watcher, the cook, the PIE
+  payload builder — enter through it, so a script that compiles in one compiles
+  in all three by construction.
+* **Where a script lives: `Content/Scripts/`**, and the ruling is IB-7's for
+  IB-7's reason. A script is **content**: it takes a GUID, a sidecar, a content
+  hash and a dependency closure, a level binds it through the same
+  `ActorClass(Uuid)` a `.inf_act` uses, and `inf cook` opens the content root
+  and nothing else. `src/` is already the *generated* Rust's home. It is a
+  **convention rather than a lookup** — `AssetDb::scan` recurses, so a `.infini`
+  anywhere under `Content/` is found the day it exists — so there is no manifest
+  field to keep in sync. All four templates scaffold an `Example.infini`, and
+  the arm compiles it rather than asserting the file exists.
+* **Hot reload**, through the interpreter: watcher → door →
+  `SimSession::reload_class`, drained at the **top of a fixed step** beside
+  `apply_pending_tunes`, for the reason `crate::tuning` already argues. Keyed by
+  **asset GUID**, because what a watcher observes is a file. State survives —
+  `ActorInstance` sits beside the class — and variables the edit *added* are
+  seeded from their defaults, or the first Tick after adding one dies at
+  `vars::get`. The honest asymmetry, which a designer has to know: **changing a
+  variable's default does not change a running instance.** Containment is
+  tighter than §4's bound predicted: a broken edit never becomes a class, so
+  nothing is queued and the previous good program keeps running with the
+  diagnostics in the Output Log. **Measured: edit → running 121 ms, of which
+  120 ms is the watcher's own debounce; the engine's half — door, compile, swap,
+  one step — is 0.45 ms.** Zero `rustc`.
+* **The cook path, and the ship decision taken.** `AssetKind::Script` is
+  additive (appended at the tail of the enum, `all()`, `FROZEN_WIRE` 24→25 and
+  `kind_code` 25; no existing row moved, no schema moved). **The default is:
+  the cook lowers a script and packs the IR for the shipped interpreter.**
+  Reasons of record: it is what the engine already does with a `.inf_act`; the
+  transpile door writes into the *user's* crate and the shipped `inf-player` is
+  a prebuilt generic binary that loads packs, so transpiling changes nothing
+  about what ships until somebody prices a per-project player build; and after
+  the crown gate the choice costs no correctness. The transpile door stays where
+  it is (the Code tab, the WASM mod cook) and SCRIPT3 takes the per-class
+  decision with measurements. `i64::MIN` cooks **with the advisory** SCRIPT1a
+  routed here.
+* **The SK1c blocker-4 edge, open** — for `.inf_act`, `.inf_fn` and `.infini` at
+  once, because all three hold the same IR and one Ring-0 walk reads it
+  (`inf_blueprint::assetrefs`). What a program can name is **enumerated**:
+  `STR_PORTS` classifies all twenty `Str` input ports in the node kit as an
+  asset, a gameplay id, free text or a whole table, and a census arm fails if a
+  verb arrives unclassified. Exactly **one** is an asset today
+  (`engine.spawn`'s prefab); a name that resolves to nothing is a **blocking**
+  advisory naming itself.
+* **THE CROWN GATE** (`crates/inf-script/tests/crown_parity.rs`). Transpile a
+  `.infini`, emit the host shims beside it, **`rustc` the zero-dependency
+  program, run it**, and require the trace byte-identical to the interpreter's:
+  host calls in order, every argument as a **bit pattern**, each handler's
+  return, and the member-variable state after every event. 177 trace lines, 60+
+  host calls, **rustc 234 ms** against a 60 s LOAD-class budget. `rustc` rather
+  than `cargo` because there is no lock to take, no workspace to resolve and no
+  manifest to write — the `inf-hotreload` fixture path needs a dedicated target
+  directory and a process-private stash precisely because concurrent test
+  processes race over one.
+* **`PIE == shipping` over script-driven gameplay**
+  (`runtime/inf-player/tests/script_gameplay_gate.rs`): an item catalogue, a
+  pickup and a hand-out on a timer, cooked and run twice — off the pack the way
+  `--pack` boots, and off the `ScenePayload` the editor really builds. 90 steps,
+  compared per step. `build_scene_payload` needed **no new parameter**: a
+  script's class arrives through the same `|guid| Option<BlueprintClass>`
+  closure a `.inf_act` does. The cooked artifact's digest is pinned, so a
+  lowering that depended on the host reddens one CI leg with a number.
+
+### What the crown gate found, which nothing else in this tree can see
+
+Both defects are invisible to every existing arm **by construction**, because
+seeing them requires compiling the output, and §2's bound was that nothing did.
+
+1. **`#[infinity::blueprint(id = "…")]` has no macro behind it.** There is no
+   crate, module or macro named `infinity` anywhere in this workspace.
+   `inf_transpile::emit` writes the attribute onto every generated fn and
+   `inf_packager::mods` strips it with a comment saying the proc-macro *"ships
+   with the engine runtime"* — it does not. So the Code tab's own output,
+   `<project>/src/blueprints/<Class>_<guid8>.rs`, which the scaffolded `lib.rs`
+   declares and `cargo build` compiles, **does not compile**. The comment is
+   corrected, the fact is a tripwire arm, and the fix is priced rather than
+   taken: either a real `infinity` proc-macro crate, or stripping at the Code
+   tab's door — and the second costs `lift` its identity anchor
+   (`path.segments[0].ident == "infinity"`), which is a decision with a price.
+2. **`vars::get` is monomorphic in generated Rust.** The IR is untyped at the
+   call and the interpreter answers with whatever `Value` is in the map; one
+   Rust support function cannot return both an `f64` and a `bool`. So a member
+   variable that is not a float **parses, lowers, interprets perfectly and
+   cannot be transpiled** — measured by compiling one and reading `rustc`'s
+   refusal. Carried; the fix is typed accessors in the emitter and a decision
+   about a support module that does not exist yet.
+
+### The bound the crown gate does not cover, named rather than discovered
+
+**Transcendentals.** `math.sin` / `math.cos` route to
+`inf_math::portable::psin64`/`pcos64`, and a zero-dependency shim cannot call
+them without becoming a *second implementation* of a bit-exact polynomial —
+worse than no coverage. They stay covered where they already are:
+`portable_math_law.rs` proves the interpreter's routing bit for bit, and
+`math_parity.rs` proves the two sides agree **by construction**. The
+exact-IEEE builtins are inside the gate and are exact on both sides.
 
 **SCRIPT2 — the API surface and the tooling.** The verb surface grows toward the
 document's vision our way: `World.*`, `AI.*`, `Mission.*` (new, priced), `Audio.*`,
@@ -937,10 +1029,14 @@ Three claims: the transpiler renders every script; `lift` recovers it
 editable Rust rather than an opaque blob; and regeneration is byte-idempotent
 with the program unchanged.
 
-**It does not compile the generated Rust and it does not run it.** No test in
-this repository does — `parity.rs`'s own module doc calls itself "the CI-cheap
-half of the parity story". That is SCRIPT1b's crown gate; this file narrows what
-the crown gate has left to prove and does not stand in for it.
+**It does not compile the generated Rust and it does not run it.** That was
+SCRIPT1b's crown gate to build, and it is built: `crown_parity.rs` compiles the
+transpiler's output with `rustc`, runs it, and diffs the trace against the
+interpreter byte for byte. This file still narrows what that gate has left to
+prove — it is the *structural* leg, over IR shapes no graph and no Rust source
+produces — and it does not stand in for it. What the crown gate then found about
+the generated Rust (an attribute with no macro behind it, and a monomorphic
+`vars::get`) is in §8.
 
 **The one literal a script can write and the cook cannot render**: `i64::MIN`.
 `-9223372036854775808` is `-(9223372036854775808)` in Rust source and the

@@ -19713,8 +19713,9 @@ quicker.
   programs the cook refuses**. And it pinned the one literal a script can write and the
   cook cannot render: `i64::MIN`, which previews and does not cook, and which a `lit.int`
   node holds just as happily. What the bridge does **not** do is compile the generated
-  Rust and run it — that is SCRIPT1b's crown gate, and this narrows what it has left to
-  prove rather than standing in for it.
+  Rust and run it — that was SCRIPT1b's crown gate, **which is now
+  built** (`crown_parity.rs`); this narrows what it has left to prove rather than standing
+  in for it.
   **Determinism**: a `.infini` file's IR is a pure function of its bytes — a committed FNV-1a
   digest of the fixture's canonical IR (hand-rolled, because `DefaultHasher` is documented
   unspecified and a constant pinned against it says nothing about *hosts*), CRLF/LF/lone-CR
@@ -19767,33 +19768,57 @@ quicker.
   goldens **59** unmoved over 118 strict arms, rustdoc **373** over 30 crates (the audit
   adds zero, after taking one back out), clippy **0**, `fmt` clean, no schema and no
   committed content moved. Full audit ledger in `docs/memos/island-progress.md`.
-* **SCRIPT1b — hot reload, the cook, and the crown gate (ROUTED).** The wave split at five
-  majors under the brief's own rule, and the split is where the brief put it. Hot reload:
-  `.infini` watcher on `inf-asset`'s notify substrate → re-lower → swap into the running
-  Simulate's interpreter, with failure containment armed **at its real granularity** — the IR
-  interpreter propagates a `RunError` out of `run_event`, so a broken script takes *its
-  handler, on its actor, for that tick*; `run_on_guid` logs it and the per-actor loop
-  continues, in both hosts. (The downstream-cone containment belongs to `inf_graph::exec`,
-  which is a different runner and not the one scripts run on.) **And the watcher is the
-  file door `inf-script` does not have** — the SCRIPT1a audit's routing item: the crate
-  reads no filesystem at all (`parse_unit` takes a `&str`), so "the encoding is UTF-8" is a
-  statement about the *caller*, and a `.infini` holding invalid bytes must decode into a
-  diagnostic with a line rather than an `unwrap`. P21's law at the door instead of inside
-  it. Iteration timing **measured,
-  not asserted**. The cook: `.infini` is *source*, git-diffable text; the cook lowers it and
-  either transpiles it to Rust into the project crate or packs its IR for the shipped
-  interpreter, with `asset_deps` walking scripts so the cook closure sees script-named assets
-  (the SK1c blocker-4 lesson). A packed-IR script asset, if taken, is **additive** — the
-  sidecar rule, and a STOP-and-price if a wire moves. **THE CROWN GATE**: transpile a
-  `.infini` script, **compile it, run it**, and diff the trace against the interpreter byte
-  for byte. Today's parity gate is four fixture families
-  (`parity`/`flow_parity`/`math_parity`/`coyote_parity`), each running the interpreter against
-  a **hand-written Rust mirror** string-pinned to `generate_fn`'s output, and **no test in
-  this repository compiles the transpiler's output and runs it**. SCRIPT1b is where "preview
-  is the shipped program" stops being four hand-mirrored families; the gate is slow and
-  toolchain-dependent by nature, which is the price and was known when it was routed. And
-  `PIE == shipping` over a trace whose gameplay runs from a `.infini` script, which needs the
-  cook path first and is therefore SCRIPT1b's rather than a SCRIPT3 aspiration.
+* **SCRIPT1b — hot reload, the cook, and the crown gate (COMPLETE 2026-08-29).** All five
+  routed clauses landed. **The file door**: `inf_script::source` is the one place bytes become
+  a program, and the SCRIPT1a audit's routed item lands there — invalid UTF-8 names the **byte
+  offset** of the first bad byte at the line and column it falls on, a file over 1 MiB is
+  refused by **both numbers**, and a leading byte-order mark is *repaired* because the door's
+  output is what a cook hashes. Three callers enter through it (watcher, cook, PIE payload), so
+  a script that compiles in one compiles in all three by construction. **Where a script lives**
+  is IB-7's ruling for IB-7's reason: `Content/Scripts/`, because a script is CONTENT — a GUID,
+  a sidecar, a content hash, a dependency closure, bound by the same `ActorClass(Uuid)` a
+  `.inf_act` uses — and `inf cook` opens the content root and nothing else; a **convention, not
+  a lookup** (`AssetDb::scan` recurses), so no manifest field. All four templates scaffold an
+  `Example.infini` and the arm **compiles** it. **Hot reload** through the interpreter, drained
+  at the top of a fixed step beside `apply_pending_tunes` (a filesystem event is even less
+  welcome inside a step than a slider is), keyed by asset GUID, state surviving because
+  `ActorInstance` sits beside the class, with variables the edit *added* seeded from their
+  defaults — without which the first Tick after adding one dies at `vars::get`. Containment is
+  **tighter than §4 predicted**: a broken edit never becomes a class, so nothing is queued and
+  the previous good program keeps running with the diagnostics in the Output Log. **Measured:
+  edit → running 121 ms, of which 120 ms is the watcher's own debounce; the engine's half is
+  0.45 ms.** Zero `rustc`. The player gets no such door — `player_has_no_tuning_door` grew three
+  tokens. **The cook**: `AssetKind::Script` additive (enum tail, `all()`, `FROZEN_WIRE` 24→25,
+  `kind_code` 25; no row moved, no schema moved), and the **ship decision taken — pack the IR
+  for the shipped interpreter**, because it is what the engine already does with a `.inf_act`,
+  because the transpile door writes into the *user's* crate while the shipped player is a
+  prebuilt binary that loads packs, and because after the crown gate the choice costs no
+  correctness. `i64::MIN` cooks **with the advisory** SCRIPT1a routed here. **The SK1c blocker-4
+  edge is open** for `.inf_act`, `.inf_fn` and `.infini` at once — one Ring-0 walk
+  (`inf_blueprint::assetrefs`) over an **enumerated** surface: all twenty `Str` input ports in
+  the node kit classified as asset / gameplay id / text / table, with a census arm that fails if
+  a verb arrives unclassified; exactly one is an asset today, and a name resolving to nothing is
+  a **blocking** advisory naming itself. **THE CROWN GATE**: transpile a `.infini`, emit the host
+  shims beside it, `rustc` the zero-dependency program, **run it**, and require the trace
+  byte-identical to the interpreter's — host calls in order, every argument as a bit pattern,
+  each handler's return, and the variable state after every event. 177 trace lines, 60+ host
+  calls, rustc **234 ms** against a 60 s **LOAD**-class budget (never a frame one); `rustc`
+  rather than `cargo` because there is no lock to take, no workspace to resolve and no manifest
+  to write. It **found two defects nothing else in this tree can see**, because seeing them
+  requires compiling: `#[infinity::blueprint(id = …)]` **has no macro behind it** (no crate,
+  module or macro named `infinity` exists here, so the Code tab's own output does not compile —
+  comment corrected, tripwire armed, fix priced), and **`vars::get` is monomorphic in generated
+  Rust**, so a member variable that is not a float parses, lowers, interprets perfectly and
+  cannot be transpiled. Mutations measured: the parsed-token-stream re-association the Spike B
+  law forbids, `Sub` emitted as `Add`, and a **mirror-image** `Lt`/`Gt` swap in `emit` AND
+  `lift` that keeps generate-then-lift an identity — all three RED, each naming its divergence
+  line. **`PIE == shipping` over script-driven gameplay**: a catalogue, a pickup and a hand-out
+  on a timer, cooked and run twice (pack vs `ScenePayload`), 90 steps compared per step, with
+  `build_scene_payload` needing **no new parameter** — a script's class arrives through the same
+  class closure a `.inf_act` does. The cooked artifact's digest is pinned cross-host. And a
+  fourth CRLF-class catch, from the one direction the lexer cannot cover: a `.infini` with no
+  committed sidecar takes a GUID synthesised from its **content hash**, so `*.infini -text`.
+  Full ledger in `docs/memos/island-progress.md`.
 * **SCRIPT2 — the API surface and the tooling.** The verb surface grows toward the document's
   vision our way — `World.*`, `AI.*`, `Mission.*` (new, priced), `Audio.*`, `UI.*`,
   `Vehicle.*`, `Weapon.*`/`Door.*`/`Item.*` — every verb deterministic, Host-mediated,
