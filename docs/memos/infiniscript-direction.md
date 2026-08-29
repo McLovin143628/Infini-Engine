@@ -51,12 +51,12 @@ shipped the substrate the document describes, and Phase 14 shipped the other hal
 | the parity gate | `inf-transpile/tests/{parity,flow_parity,math_parity,coyote_parity}.rs` | interpreted == compiled over **four fixture families** — see the bound below. *Preview is the shipped program, per proven family.* |
 | graph ↔ IR | `inf_blueprint::lower` / `raise` | **both directions**: a graph lowers to IR, and IR raises to a graph |
 | the one boundary | the `Host` trait | everything external — engine calls, member variables, spawning — crosses one seam; the IR itself stays pure |
-| the verb surface | `inf_blueprint::nodekit` | 96 `NodeDef::new` sites across twenty registration groups and **23** namespaces: `event.*` `flow.*` `math.*` `logic.*` `cmp.*` `var.*` `lit.*` `dispatch.*` `engine.*` `debug.*` `input.*` `audio.*` `physics2d.*` `physics3d.*` `sky.*` `water.*` `voxel.*` `destruct.*` `door.*` `item.*` `health.*` `ik.*` `anim.*` |
+| the verb surface | `inf_blueprint::nodekit` | **115 registered verbs** (96 `NodeDef::new` sites, three of which are the `compare`/`unary_math`/`binary_math` helpers called 22 times between them) across twenty registration groups and **23** namespaces: `event.*` `flow.*` `math.*` `logic.*` `cmp.*` `var.*` `lit.*` `dispatch.*` `engine.*` `debug.*` `input.*` `audio.*` `physics2d.*` `physics3d.*` `sky.*` `water.*` `voxel.*` `destruct.*` `door.*` `item.*` `health.*` `ik.*` `anim.*` |
 | the sandbox | `crates/inf-wasm-host` + `crates/inf-mod` (P14.5) | a **`wasmtime`** engine with a capability-scoped linker, a flat host ABI, and a cook path Blueprint → Rust → `cdylib` → `.wasm` |
 | dylib hot-swap | `crates/inf-hotreload` | content-addressed shadow copies, never-unload, state migration |
 
 So: the interpreter, the compiler, the parity between them, the sandbox, the
-capability model and the ~100-verb API the document asks a studio to *build* are
+capability model and the 115-verb API the document asks a studio to *build* are
 built. What is missing is the one thing the document actually shows a designer —
 **a readable text file**.
 
@@ -395,12 +395,14 @@ update files it wrote itself, in an error blaming the author. So the door now
 an arm that fails if the door ever forgets. *A rename may not orphan the thing it
 renames.*
 
-**"Infinity Blueprints", the themes, and the npm package name stayed.**
-The theme *ids* `infinity-dark`/`infinity-light` are persisted in `localStorage`
-and in `EditorSettings`, and the npm package name `infinity-engine` is a lockfile
-key nobody ever sees — identifiers by the same rule as above, and the *displayed*
-theme names ("Infinity Dark") are a theme brand rather than a claim about the
-engine's name. The Blueprints feature name is a separate branding decision, and
+**"Infinity Blueprints", the themes, the npm name and the crate-name fallback
+stayed.** The theme *ids* `infinity-dark`/`infinity-light` are persisted in
+`localStorage` and in `EditorSettings`; the npm package name `infinity-engine` is
+a lockfile key nobody ever sees; and `sanitize_project`'s `"InfinityProject"`
+fallback becomes a **cargo crate name** in a user's own `Cargo.toml` the moment a
+project is scaffolded from an unnameable title — identifiers by the same rule as
+above, and the *displayed* theme names ("Infinity Dark") are a theme brand rather
+than a claim about the engine's name. The Blueprints feature name is a separate branding decision, and
 this arc is precisely the wrong moment to take it halfway: SCRIPT1 makes graphs
 and text two faces of one program, at which point what that one thing is called
 should be decided **once**, with the text face in hand — not twice, six weeks
@@ -444,6 +446,16 @@ The Win32 window classes (`InfinityViewportClass`, `InfinityEmbedProbe`, …) we
 checked and are unaffected: they are literals, not derived from the product name,
 so `window_class_gate` neither moved nor needed to. No golden renders the engine's
 name, so no golden moved.
+
+Two window *titles* sit beside those classes and the wave treated them
+differently, which is worth a sentence rather than a silent inconsistency: the
+embed probe's `w!("Infinity Engine embed probe")` moved with the phrase, and the
+viewport's `w!("Infinity Viewport")` did not — the phrase sweep could not see it.
+Neither is ever drawn (the probe is deliberately not `WS_VISIBLE`; the viewport is
+a `WS_CHILD` with no caption), so nothing user-facing turns on either. The
+viewport's stays, deliberately: it reads as one identifier with the
+`InfinityViewportClass` beside it, and splitting the pair would make that file
+say two things.
 
 **And `productName` is a label here, which is worth writing down rather than
 assuming.** In general a Tauri `productName` is *not* only a label — it names the
