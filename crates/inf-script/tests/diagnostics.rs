@@ -325,6 +325,57 @@ end
     );
 }
 
+/// …and neither is any **suffix**, which is what the parser gets from a file
+/// whose top has been cut off — a paste, a merge conflict resolved badly, a
+/// `.infini` truncated at the front by a broken tool. The prefix sweep above
+/// exercises "a file being typed"; this one exercises "a file that starts in the
+/// middle of a handler", and it reaches recovery paths the prefix sweep does
+/// not (`recover` skipping to a column-1 declaration, a bare `end`, a dangling
+/// `]]`).
+#[test]
+fn no_suffix_of_a_real_script_ever_panics() {
+    const GOOD: &str = r#"actor "Typing"
+
+var angle: float = 0.0 exposed
+
+on tick(dt)
+    local a = angle + dt * 2.0
+    if a > 1.0 then
+        for i = 0, 3 do
+            debug.print("x")
+        end
+    end
+    angle = a
+    rust [[
+    let _ = 1;
+]]
+end
+"#;
+    let chars: Vec<char> = GOOD.chars().collect();
+    let mut refused = 0;
+    for cut in 0..=chars.len() {
+        let suffix: String = chars[cut..].iter().collect();
+        if let Err(d) = compile(&suffix, "act:typing") {
+            refused += 1;
+            assert!(!d.is_empty(), "a refusal with no diagnostic at cut {cut}");
+            for diag in &d {
+                assert!(diag.span.line >= 1, "line 0 at cut {cut}: {diag}");
+                assert!(
+                    diag.span.line as usize <= suffix.lines().count() + 1,
+                    "cut {cut}: {diag} is past the end of {} lines",
+                    suffix.lines().count()
+                );
+            }
+        }
+    }
+    assert!(
+        refused > 100,
+        "only {refused} of {} suffixes refused — the sweep is not exercising \
+         the error paths",
+        chars.len() + 1
+    );
+}
+
 /// An undeclared member variable is a **warning**, not an error: the runtime
 /// refuses it by name, which is P21's law, and stopping the compile would make
 /// a whole handler unrunnable over one typo in one branch.

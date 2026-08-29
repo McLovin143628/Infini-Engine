@@ -116,6 +116,57 @@ fn a_windows_checkout_and_a_unix_one_lower_identically() {
     assert_eq!(ir_bytes(&FIXTURE.replace('\n', "\r")), ir_bytes(FIXTURE));
 }
 
+/// **A byte-order mark is not a syntax error.**
+///
+/// The CRLF rule's twin, and the same law: a file authored on Windows and one
+/// authored on Unix must lower to the same IR. A BOM is the *other* thing a
+/// Windows editor puts in a text file it saves, and before the SCRIPT1a audit it
+/// was `unexpected character `\u{feff}`` at 1:1 — a refusal naming a character
+/// that is invisible in the message, on a file that looks perfectly fine.
+///
+/// Only the leading one is stripped: U+FEFF elsewhere is a zero-width no-break
+/// space, which inside a string literal is content and outside one is still an
+/// unexpected character. Both halves are asserted, because a strip that ate them
+/// everywhere would silently change a string.
+#[test]
+fn a_file_saved_with_a_byte_order_mark_lowers_identically() {
+    let with_bom = format!("\u{feff}{FIXTURE}");
+    assert_ne!(with_bom.as_bytes(), FIXTURE.as_bytes());
+    assert_eq!(
+        ir_bytes(&with_bom),
+        ir_bytes(FIXTURE),
+        "a byte-order mark changed the IR"
+    );
+    // …and a CRLF file *with* a BOM, which is what Notepad actually writes.
+    assert_eq!(
+        ir_bytes(&format!("\u{feff}{}", FIXTURE.replace('\n', "\r\n"))),
+        ir_bytes(FIXTURE)
+    );
+    // Inside a string it is content, and survives the round trip as content.
+    let f = parse_fn("on begin_play()\n    debug.print(\"a\u{feff}b\")\nend\n").unwrap();
+    let text = emit_class(&{
+        let (c, _) = compile(
+            "on begin_play()\n    debug.print(\"a\u{feff}b\")\nend\n",
+            "act:bom",
+        )
+        .unwrap();
+        c
+    })
+    .unwrap();
+    assert!(
+        text.contains('\u{feff}'),
+        "the mark was eaten from a string"
+    );
+    assert_eq!(parse_fn(&text).unwrap(), f);
+    // Outside one it is still an unexpected character, with a place.
+    let d = compile(
+        "on begin_play()\n    \u{feff}debug.print(\"x\")\nend\n",
+        "act:bom",
+    )
+    .unwrap_err();
+    assert_eq!((d[0].span.line, d[0].span.col), (2, 5), "{}", d[0]);
+}
+
 /// A source containing a `rust` block round-trips its opaque contents **byte
 /// for byte**, including the trailing newline and the `]]` inside it — the one
 /// place in the language where bytes rather than tokens are preserved.

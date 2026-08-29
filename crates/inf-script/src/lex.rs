@@ -117,10 +117,10 @@ pub struct LexError {
     pub message: String,
 }
 
-/// Tokenise `source`. CRLF is normalised to LF first; every span is in
-/// characters of the normalised text.
+/// Tokenise `source`. A leading byte-order mark and CRLF are normalised away
+/// first; every span is in characters of the normalised text.
 pub fn lex(source: &str) -> Result<Vec<Spanned>, LexError> {
-    let text: String = normalize_newlines(source);
+    let text: String = normalize_newlines(strip_bom(source));
     Lexer {
         chars: text.chars().collect(),
         i: 0,
@@ -128,6 +128,22 @@ pub fn lex(source: &str) -> Result<Vec<Spanned>, LexError> {
         col: 1,
     }
     .run()
+}
+
+/// Drop a leading UTF-8 byte-order mark.
+///
+/// The CRLF rule's twin, and found by the SCRIPT1a audit for the same reason:
+/// the determinism law says a file authored on Windows and one authored on Unix
+/// lower to the same IR, and a BOM is the *other* thing a Windows editor puts in
+/// a text file it saves. Unstripped it was `unexpected character `\u{feff}`` —
+/// a diagnostic naming a character that is invisible in the message, pointing at
+/// column 1 of a file that looks perfectly fine.
+///
+/// Only a **leading** one: U+FEFF anywhere else is a zero-width no-break space,
+/// which inside a string literal is content, and outside one is still an
+/// unexpected character.
+pub fn strip_bom(source: &str) -> &str {
+    source.strip_prefix('\u{feff}').unwrap_or(source)
 }
 
 /// `\r\n` → `\n`, and a lone `\r` → `\n` too (an old-Mac file is rare and a
