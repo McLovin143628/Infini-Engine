@@ -538,6 +538,18 @@ pub struct TickOutcome {
     pub index_stale: bool,
     /// The content version to publish, or `None` when the project was busy.
     pub version: Option<u64>,
+    /// **InfiniScript files that changed on disk** (SCRIPT1b), as `(asset GUID,
+    /// path)` in the order the watcher saw them.
+    ///
+    /// The hot-reload path: Ring 2 compiles each through
+    /// `inf_script::source::compile_path` — the one file door — and swaps the
+    /// class into a running Simulate, or prints the diagnostics and leaves the
+    /// previous good program running.
+    ///
+    /// Resolved to a GUID **here**, while the database lock is already held, so
+    /// the caller does not take it a second time to answer a question this pass
+    /// already knew.
+    pub scripts: Vec<(uuid::Uuid, std::path::PathBuf)>,
 }
 
 /// Extensions whose external change invalidates the viewport's loose-asset index
@@ -575,6 +587,7 @@ pub fn tick(
             .iter()
             .any(|e| matches!(e, ImportProgress::Finished { .. })),
         index_stale: batch.index_stale,
+        scripts: Vec::new(),
         events: batch.events,
         version: None,
     };
@@ -602,6 +615,11 @@ pub fn tick(
                     // re-reads and shows the old asset as current; a removal
                     // that matched nothing means the entry is still indexed and
                     // still counting as a live referrer for a file that is gone.
+                    // SCRIPT1b: a `.infini` that changed is a program that
+                    // changed. Collected AFTER the rescan below so the GUID
+                    // reported is the one the database now holds — a file
+                    // created this pass has no entry until it is scanned.
+                    let is_script = inf_script::is_script_path(&path);
                     match c {
                         AssetChange::Upserted(p) => {
                             if let Err(e) = proj.db_mut().rescan_path(&p) {
@@ -610,6 +628,11 @@ pub fn tick(
                                      ({e}); the database still holds its previous entry",
                                     p.display()
                                 );
+                            }
+                            if is_script {
+                                if let Some(entry) = proj.db().get_by_path(&p) {
+                                    out.scripts.push((entry.id().0, p.clone()));
+                                }
                             }
                         }
                         AssetChange::Removed(p) => {

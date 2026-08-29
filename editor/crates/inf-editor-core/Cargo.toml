@@ -23,6 +23,9 @@ inf-voxel = { workspace = true }
 inf-water = { workspace = true }
 inf-physics = { workspace = true }
 inf-blueprint = { workspace = true }
+# SCRIPT1b: the content watcher recognises a `.infini` and the hot-reload path
+# compiles it through `inf_script::source` — the one file door the cook uses.
+inf-script = { workspace = true }
 # P29.6: the character wizard writes the project's `input.toml` from the engine's
 # own default bindings, so a generated character is playable the moment it
 # exists and the file an author edits is the one both hosts read.

@@ -6,8 +6,14 @@
 //! simulation wearing the first one's name, and every parity gate in this
 //! repository would go on passing while it happened.
 //!
+//! **SCRIPT1b extends it to hot reload**, which is the same capability wearing a
+//! different name: `SimSession::reload_class` swaps a recompiled InfiniScript
+//! into a running editor Simulate, and `RuntimeSim` has no such door and must
+//! not grow one. A shipped player's classes come out of a pack, once, at load.
+//!
 //! So the rule is: `inf_editor_core::tuning` is Ring 1, `SimSession` is the only
-//! thing that holds a queue of tunes, and the player links neither. Three
+//! thing that holds a queue of tunes *or of classes*, and the player links
+//! neither. Three
 //! assertions, and the third is the one that makes the first two mean anything:
 //!
 //! 1. `inf-editor-core` is a **dev-dependency** of `inf-player` and not a
@@ -27,12 +33,21 @@ use std::path::{Path, PathBuf};
 /// Each is a *type or function* name rather than a word: `tune` on its own
 /// appears in prose all over this tree, and a gate that fired on prose would be
 /// turned off within a week.
-const TOKENS: [&str; 5] = [
+const TOKENS: [&str; 8] = [
     "TuneScope",
     "apply_tune",
     "pending_tunes",
     "kept_tunes",
     "inf_editor_core::tuning",
+    // ── SCRIPT1b ── **and no hot-reload door either**, for exactly the same
+    //    reason. A host that can have its gameplay code swapped while the other
+    //    cannot is a second simulation wearing the first one's name, and every
+    //    parity gate here would go on passing while it happened. Hot reload is
+    //    an EDITOR capability: the shipped player's classes come out of a pack,
+    //    once, at load.
+    "reload_class",
+    "pending_classes",
+    "ScriptSwap",
 ];
 
 fn repo_root() -> PathBuf {

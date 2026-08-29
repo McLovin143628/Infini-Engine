@@ -3213,6 +3213,7 @@ dependencies = [
  "inf-physics",
  "inf-render",
  "inf-runtime",
+ "inf-script",
  "inf-terrain",
  "inf-ui",
  "inf-vgeom",

@@ -161,6 +161,21 @@ impl SimInput {
     }
 }
 
+/// What a drained hot-reload did (SCRIPT1b).
+///
+/// Counted shapes, never a clock: the wave measures edit-to-running and
+/// **prints** it, and asserts the swap.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScriptSwap {
+    /// How many queued units were drained.
+    pub units: usize,
+    /// How many live actors took new code.
+    pub swapped: usize,
+    /// How many variables the edit ADDED were seeded with their defaults on a
+    /// surviving instance.
+    pub seeded_vars: usize,
+}
+
 /// One actor's live class + instance state under Simulate.
 struct ActorState {
     class: BlueprintClass,
@@ -262,6 +277,22 @@ pub struct SimSession {
     /// anything reads anything, so a tuned run is still a deterministic sequence
     /// of fixed steps rather than a run with an edit somewhere inside one.
     pending_tunes: Vec<(crate::tuning::Tune, crate::tuning::TuneScope)>,
+    /// **Recompiled classes queued and not yet swapped in** (SCRIPT1b): the
+    /// hot-reload half of the script arc.
+    ///
+    /// Drained in the same slot as [`pending_tunes`](Self::pending_tunes) and
+    /// for the same reason, which `crate::tuning`'s header already argues: a
+    /// running Simulate is a deterministic sequence of fixed steps, and a change
+    /// that lands part-way through one is a step no replay can reproduce. A
+    /// filesystem event is even less welcome inside a step than a slider is.
+    ///
+    /// Keyed by **asset GUID**, not by class id: what a watcher observes is a
+    /// file, and what binds a file to an actor is
+    /// [`ActorClass`](inf_ecs::components::ActorClass).
+    pending_classes: Vec<(Uuid, BlueprintClass)>,
+    /// What the last drained swap did — read by the editor to report it, and by
+    /// the gate to assert it.
+    last_swap: ScriptSwap,
     /// The [`TuneScope::Keep`](crate::tuning::TuneScope::Keep) tunes this session
     /// has applied, replayed onto the document by [`exit`](Self::exit) after the
     /// snapshot restore.
@@ -551,6 +582,8 @@ impl SimSession {
             camera: inf_ecs::camera::LocomotionCamera::default(),
             camera_subject: None,
             pending_tunes: Vec::new(),
+            pending_classes: Vec::new(),
+            last_swap: ScriptSwap::default(),
             kept_tunes: Vec::new(),
             input: SimInput::default(),
             prev_down: BTreeSet::new(),
@@ -703,6 +736,95 @@ impl SimSession {
     /// The `Keep`-scoped tunes applied so far, in order.
     pub fn kept_tunes(&self) -> &[crate::tuning::Tune] {
         &self.kept_tunes
+    }
+
+    /// **Hot-reload a class into a running Simulate** (SCRIPT1b) — the P6
+    /// deferred item, landing through the interpreter rather than the dylib.
+    ///
+    /// `asset` is the GUID of the `.infini` (or `.inf_act`) that changed; every
+    /// actor whose entity carries that [`ActorClass`] gets the new code on the
+    /// **next fixed step**, keeping its live variables.
+    ///
+    /// # The contract, and each half of it earns its place
+    ///
+    /// * **Queued, not applied.** Same slot as [`tune`](Self::tune), same
+    ///   reason: a filesystem event must not land inside a fixed step.
+    /// * **Atomic per script unit.** A swap replaces a whole class on every
+    ///   actor bound to it, or nothing. There is no state in which one handler
+    ///   is new and another is old — the failure this exists to prevent is a
+    ///   half-swapped actor whose `Tick` writes a variable its `BeginPlay` never
+    ///   declared.
+    /// * **Failure is contained BEFORE this door.** A script that does not
+    ///   compile never reaches here: the caller holds diagnostics instead of a
+    ///   class, and the *previous good program keeps running*. Nothing is
+    ///   queued, nothing is half-applied, and the sim does not notice.
+    /// * **State survives.** [`ActorInstance`] is stored *beside* the class, so
+    ///   replacing the class alone keeps every member variable, every
+    ///   `nodestate` cell and the actor's `entity` id.
+    /// * **…and new variables are seeded.** A variable the edit ADDED is absent
+    ///   from the surviving map, and `vars::get` on a missing name is a hard
+    ///   `RunError` — so the very first Tick after adding a variable would kill
+    ///   the handler. The defaults of variables the instance does not have are
+    ///   inserted, and only those: an existing variable keeps its live value,
+    ///   which is the whole point of hot reload.
+    pub fn reload_class(&mut self, asset: Uuid, class: BlueprintClass) {
+        self.pending_classes.push((asset, class));
+    }
+
+    /// How many class swaps are queued and not yet applied — the read that
+    /// asserts the "next step, not this one" half.
+    pub fn pending_classes(&self) -> usize {
+        self.pending_classes.len()
+    }
+
+    /// What the last drained swap did.
+    pub fn last_swap(&self) -> ScriptSwap {
+        self.last_swap
+    }
+
+    /// Drain the queued class swaps. Runs beside `apply_pending_tunes`, at the
+    /// top of a fixed step.
+    fn apply_pending_classes(&mut self, doc: &SceneDoc) {
+        if self.pending_classes.is_empty() {
+            return;
+        }
+        let mut report = ScriptSwap::default();
+        for (asset, class) in std::mem::take(&mut self.pending_classes) {
+            // Which actors are bound to this asset? The session records a class
+            // *id*, not the GUID of the file it came from, so the binding is
+            // re-read from the document — the same `ActorClass` component
+            // `samples::bound_actors` reads when the session starts.
+            let world = doc.world();
+            let bound: Vec<Uuid> = self
+                .actors
+                .keys()
+                .copied()
+                .filter(|guid| {
+                    world
+                        .entity_of(*guid)
+                        .and_then(|e| world.world().get::<inf_ecs::components::ActorClass>(e))
+                        .is_some_and(|ac| ac.0 == asset)
+                })
+                .collect();
+            for guid in bound {
+                let Some(state) = self.actors.get_mut(&guid) else {
+                    continue;
+                };
+                for v in &class.variables {
+                    if !state.instance.vars.contains_key(&v.name) {
+                        state
+                            .instance
+                            .vars
+                            .insert(v.name.clone(), v.default_value());
+                        report.seeded_vars += 1;
+                    }
+                }
+                state.class = class.clone();
+                report.swapped += 1;
+            }
+            report.units += 1;
+        }
+        self.last_swap = report;
     }
 
     /// Drain the queue onto the world. The **first** thing a fixed step does.
@@ -1153,6 +1275,9 @@ impl SimSession {
         //    steps, and an edit that lands part-way through one is a step no
         //    replay can reproduce. See `crate::tuning`.
         self.apply_pending_tunes(doc);
+        // ── SCRIPT1b ── and recompiled script classes land in the same slot,
+        //    for the same reason. See `reload_class`.
+        self.apply_pending_classes(doc);
         // ── P17.1 time of day ── advance the level clock ONCE per fixed step,
         //    before anything reads it, so blueprints, the projected sun, shadows,
         //    GI and audio all observe one consistent clock for the step. Pure IEEE

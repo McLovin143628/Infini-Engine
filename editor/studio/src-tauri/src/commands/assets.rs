@@ -664,6 +664,48 @@ fn spawn_tick(app: AppHandle) {
             for ev in &outcome.events {
                 let _ = app.emit("assets://import", import_event(ev));
             }
+            // ── SCRIPT1b: HOT RELOAD ────────────────────────────────────────
+            //
+            // A `.infini` changed on disk. Compile it through
+            // `inf_script::source` — the ONE file door, the same one the cook
+            // uses — and swap the class into a running Simulate on its next
+            // fixed step.
+            //
+            // **Failure is contained here, before anything is queued.** A
+            // script that does not compile produces diagnostics, not a class;
+            // the previous good program keeps running and the sim never learns
+            // there was an edit. That is the per-handler bound stated honestly:
+            // a broken edit does not take a handler down, because a broken edit
+            // never becomes code.
+            //
+            // The diagnostics go to the **Output Log** through `tracing`, which
+            // is the smallest honest editor surface — the Problems panel and a
+            // `.infini` language mode are SCRIPT2's clause 2.
+            for (asset, path) in &outcome.scripts {
+                match inf_script::compile_path(path, format!("script:{asset}")) {
+                    Ok((class, warnings)) => {
+                        for w in &warnings {
+                            tracing::warn!(script = %path.display(), "{w}");
+                        }
+                        if let Some(sim) = app.try_state::<super::SimState>() {
+                            if sim.reload_class(*asset, class) {
+                                tracing::info!(
+                                    script = %path.display(),
+                                    "InfiniScript recompiled; the new program takes over on the                                      next fixed step"
+                                );
+                            }
+                        }
+                    }
+                    Err(diags) => {
+                        tracing::error!(
+                            script = %path.display(),
+                            "InfiniScript did not compile; the PREVIOUS program keeps                              running:
+{}",
+                            inf_script::render(&diags)
+                        );
+                    }
+                }
+            }
             if let Some(v) = outcome.version {
                 last_version = v;
             }

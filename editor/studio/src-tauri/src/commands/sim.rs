@@ -72,6 +72,26 @@ impl SimState {
             }
         }
     }
+
+    /// **Hot-reload a recompiled class into a running Simulate** (SCRIPT1b).
+    ///
+    /// The [`apply_mixer`](Self::apply_mixer) shape, for the same reasons: a
+    /// `&self` door a sibling command module calls, a no-op when stopped, and a
+    /// poisoned lock ignored rather than propagated. Returns whether the swap
+    /// was queued — the caller logs the answer, and nothing waits on it.
+    ///
+    /// The class is already compiled when it arrives: a script that does not
+    /// parse never becomes one, so the previous good program keeps running and
+    /// the diagnostics go to the Output Log instead.
+    pub fn reload_class(&self, asset: uuid::Uuid, class: inf_blueprint::BlueprintClass) -> bool {
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(session) = inner.session.as_mut() {
+                session.reload_class(asset, class);
+                return true;
+            }
+        }
+        false
+    }
 }
 
 struct SimInner {
