@@ -19449,6 +19449,15 @@ was classed before anything was written.
 | **the crash / data roots** | `InfinityEngine` in `win32.rs`, `commands/diagnostics.rs`, `inf-player/src/ui.rs` | **no** |
 | **persisted ids** | `infinity-dark` / `infinity-light`, the npm package name, `sanitize_project`'s `"InfinityProject"` crate-name fallback | **no** |
 | **the feature brand** | "Infinity Blueprints" | **no — carried to SCRIPT1** |
+| **the project settings dir** *(audit row)* | `.infinity/` — six members, six path-forming sites, read by the **cook** | **no** |
+| **the blueprint marker attribute** *(audit row)* | `#[infinity::blueprint(id = …)]` — `emit` writes, `lift` reads, the packager strips | **no** |
+| **the mod API / plugin ABI** *(audit row)* | `inf_mod::infinity_mod!`, `inf_hotreload::abi::ENTRY_SYMBOL` = `infinity_plugin_entry` | **no** |
+| **the event / preference prefix** *(audit row)* | the six `infinity:` keys (`open-file`, `asset-drop`, `rename-object`, `theme`, `tourSeen`, `prefsMigrated`) | **no** |
+
+The last four rows were added by the SCRIPT0 audit: the wave's sweep was a sweep
+for the *phrase*, and a phrase sweep cannot see a family whose members are not
+made of it. All four correctly did not move; the gap was in the record, and the
+record is what the next wave reads. The memo's §7 argues each.
 
 The crates stay because renaming forty-odd of them, plus every `use` path and
 every `include_str!` that names one, would move a prefix that already reads

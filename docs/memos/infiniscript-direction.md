@@ -285,7 +285,15 @@ redirect from a renamed repository's old path — for clones, fetches and the RE
 API alike — so CI and every existing checkout keep working whichever spelling they
 hold.
 
-Four things stayed, each for a stated reason.
+The sweep that produced that list was a sweep for the *phrase* — 86 of
+`Infinity Engine`, 6 of `Infinity-Engine`, 3 of `InfinityEngine`. A later,
+wider sweep (case-insensitive `infinity`, minus `f32::INFINITY` and the English
+word) finds four more families the phrase sweep could not see. **All four
+correctly did not move**, and all four are listed here because the next agent
+to read this section will read it as the whole list, and "finish the job" on any
+of them breaks something.
+
+Eight things stayed, each for a stated reason.
 
 **The crates keep their `inf-` prefix, and the repo folder keeps its name.**
 Forty-odd crates, every `use` path, every `Cargo.toml`, every `include_str!`, and
@@ -325,10 +333,49 @@ and text two faces of one program, at which point what that one thing is called
 should be decided **once**, with the text face in hand — not twice, six weeks
 apart. Carried by name for SCRIPT1.
 
+**`.infinity/` — the per-project settings directory — stays**, and it is the
+same argument as the bundle identifier with the indirection removed. Six members
+(`settings.toml`, `collision_layers.toml`, `sorting_layers.toml`,
+`collections.toml`, `mixer.toml`, `sequences/`), spelled at six path-forming
+sites — one in Ring 0 (`inf_audio::mixer::MIXER_REL_PATH`) and five in Ring 1 —
+plus two asset walkers that skip it by name. It is a real directory inside
+**every project that already exists** on somebody's disk, and the **cook** reads
+`settings.toml` out of it. Renaming it does not migrate a project's settings; it
+silently reverts them to defaults, which is the `com.infinityengine.app` failure
+mode without the operating system's help.
+
+**`#[infinity::blueprint(id = "…")]` stays**, and it is `GENERATED_MARKER`'s twin
+— the same class of thing, one level down, and it did not need a legacy door only
+because it did not move. `inf_transpile::emit` writes it into generated Rust in
+the author's own crate, `inf_transpile::lift` reads it back
+(`path.segments[0].ident == "infinity"`) to recover a function's identity when
+hand-edited source is re-lifted, and `inf_packager::mods` strips it on the way to
+a mod crate. Three sites that must agree about a string a *different session*
+wrote into a file on disk. That is the wave's law in its purest form.
+
+**`inf_mod::infinity_mod!` and `infinity_plugin_entry` stay** — a public macro
+name and a dylib ABI symbol. `inf_hotreload::abi::ENTRY_SYMBOL` is
+`b"infinity_plugin_entry\0"`, looked up by name in a plugin the host did not
+compile, and `infinity_mod!` is what `samples/mods/spinner` and every documented
+mod calls. Renaming either is an API break for third-party code, dressed as a
+rename.
+
+**The `infinity:` event and preference prefix stays** — six keys:
+`infinity:open-file`, `infinity:asset-drop`, `infinity:rename-object`, and the
+three `localStorage` keys `infinity:theme`, `infinity:tourSeen`,
+`infinity:prefsMigrated`. The first three are internal wire names, the last three
+are read out of a browser store a previous version of the app wrote, and
+`infinity:theme` is deliberately still written (it is the pre-paint theme cache).
+
 The Win32 window classes (`InfinityViewportClass`, `InfinityEmbedProbe`, …) were
 checked and are unaffected: they are literals, not derived from the product name,
 so `window_class_gate` neither moved nor needed to. No golden renders the engine's
 name, so no golden moved.
+
+The pattern in all eight is one sentence long, and it is the wave's law read
+backwards: **the things that must not move are the ones written down by one
+session and read back by another.** A phrase sweep cannot see them, because the
+phrase is not what they are made of.
 
 ---
 

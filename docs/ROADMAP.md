@@ -19612,13 +19612,19 @@ quicker.
   everywhere user-facing; the repository to `Infini-Engine` (GitHub redirects the old path
   permanently, so CI and existing checkouts keep working). The memo lands. Crates keep
   `inf-*` and the repo folder keeps its name — renaming forty-odd crates so that a prefix
-  reading "Infini" can read "Infini" is churn with zero user value. Four identifiers stayed
-  deliberately and each is argued in the memo §7: the Tauri bundle identifier
+  reading "Infini" can read "Infini" is churn with zero user value. **Eight** identifier
+  families stayed deliberately and each is argued in the memo §7: the Tauri bundle identifier
   `com.infinityengine.app` (it is the key to `app_data_dir()`, which holds the user's
   `Content/`, layouts, settings and crash-recovery file — renaming it hides a user's work
   rather than moving it), the three `InfinityEngine` crash/data roots (two of which are a
-  writer and a reader that must agree), the persisted theme ids, and the *recognition* half
-  of the generated-source marker. That last one is the wave's law: **a rename may not orphan
+  writer and a reader that must agree), the persisted theme ids and npm name, the *recognition*
+  half of the generated-source marker, and — found by the audit's wider sweep, since a sweep
+  for the *phrase* cannot see them — the `.infinity/` per-project settings directory (six
+  members, read by the **cook**, present in every project already on disk), the
+  `#[infinity::blueprint(id = …)]` marker attribute (written by `emit`, read by `lift`,
+  stripped by the packager — `GENERATED_MARKER`'s twin), `inf_mod::infinity_mod!` +
+  `infinity_plugin_entry` (a public macro and a dylib ABI symbol), and the six `infinity:`
+  event/`localStorage` keys. The marker is the wave's law: **a rename may not orphan
   the thing it renames** — `GENERATED_MARKER` is not a label but the only thing standing
   between the Code tab and an author's hand-written module, so the door now writes the new
   spelling and reads either, with `LEGACY_GENERATED_MARKER` and an arm that fails if it
