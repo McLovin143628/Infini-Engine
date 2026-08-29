@@ -347,8 +347,18 @@ fn the_mission_is_the_same_program_in_pie_and_shipping() {
     let tmp = tempfile::tempdir().expect("a temp dir");
     let proj = scaffold(tmp.path());
     let out = tmp.path().join("out");
+    // The COOK's own cost, printed beside the mission's iteration cost: this is
+    // the other half of the arc's compile-time table, and it is what an author
+    // pays to ship rather than to try. Printed, never asserted (no wall-clock
+    // assertions) — and it is a whole project: two grammar graphs, a level, a
+    // mesh and the mission.
+    let cooked = std::time::Instant::now();
     let report = inf_packager::cook(&proj, &out, &inf_packager::CookOptions::default())
         .expect("the mission cooks");
+    println!(
+        "the mission's project cooks in {:.0} ms",
+        cooked.elapsed().as_secs_f64() * 1000.0
+    );
     println!("{}", report.render());
     assert!(!report.has_blocking(), "{:?}", report.blocking);
     assert_eq!(

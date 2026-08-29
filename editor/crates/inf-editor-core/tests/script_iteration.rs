@@ -243,6 +243,49 @@ fn editing_the_mission_changes_the_running_simulate() {
     );
 }
 
+/// **The mission meets the monomorphic-`vars::get` bound head on** — SCRIPT1b's
+/// carried item 2, sharpened by a real program.
+///
+/// The item said *"a member variable that is not a float parses, lowers,
+/// interprets perfectly and cannot be transpiled"*, measured on a `bool`. What a
+/// mission shows is how much bigger that is than it sounded: the host seeds
+/// `entity` with an `Int`, every gameplay verb that needs a subject takes it, and
+/// **no author chose it**. So the bound is not stylistic — *no script that names
+/// its own entity can be transpiled*, which is nearly every gameplay script.
+///
+/// It costs the arc nothing today: the ship decision packs IR for the shipped
+/// interpreter, and `harbour_heist_gate` proves the mission ships identically to
+/// its preview. What it costs is the Code tab. Measured here as a count off the
+/// class rather than by compiling, because the compiling half is
+/// `crown_parity`'s, on a program built to be transpilable.
+#[test]
+fn the_mission_meets_the_monomorphic_vars_bound_head_on() {
+    let src = heist_script().expect("the mission is committed");
+    let (class, _) = inf_script::compile_bytes(
+        &src,
+        "HarbourHeist.infini",
+        format!("script:{HEIST_SCRIPT_GUID}"),
+    )
+    .expect("the mission compiles");
+    let non_float: Vec<&str> = class
+        .variables
+        .iter()
+        .filter(|v| v.ty != inf_blueprint::Ty::Float)
+        .map(|v| v.name.as_str())
+        .collect();
+    println!("the mission's non-float member variables: {non_float:?}");
+    assert!(
+        non_float.len() >= 4,
+        "the mission is meant to be an ordinary gameplay script, and an ordinary \
+         gameplay script counts things: {non_float:?}"
+    );
+    assert!(
+        non_float.contains(&"entity"),
+        "`entity` is the one every script has and no author chose — it is what \
+         makes this bound universal rather than stylistic"
+    );
+}
+
 /// **The committed mission is what this arm thinks it is.**
 ///
 /// Both arms above are written against the mission's own text (`AS_SHIPPED`, and

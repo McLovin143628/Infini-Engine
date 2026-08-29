@@ -773,31 +773,41 @@ script is source text — a real door, priced, not taken); a `.infini` tab that 
 never been displayed is never checked, because a lint source lives in a live view;
 and the graph half of the bridge is still one-way.
 
-**SCRIPT3 — dogfood and ship.** Real island gameplay migrates to `.infini` — the
-Phase 30 door and weapon logic, a settlement ambient script, and one
-mission-class sequence at Harbour City: the document's heist mockup, made real on
-our island.
+**SCRIPT3 — dogfood, and the arc's close (COMPLETE 2026-08-29).** The wave that
+says whether any of the four before it is usable. The answer is
+`samples/harbour-heist/HarbourHeist.infini` — **a whole mission in one text file
+with no Rust behind it**, and §10 is its ledger: what a designer can build
+without Rust, what still needs Rust, the compile-time table with numbers, and
+every carried item of the arc in one routed list.
 
-**`engine.*` is routed here, and it is a blocker for the mission clause rather
-than a tidy-up.** SCRIPT2a's generalized registry gate found that
-`engine.set_rotation`, `engine.spawn` and `engine.destroy` are registered,
-callable from text, and implemented by **neither** host — both end their `match`
-with the unknown-call arm, so all three log their path and answer `Unit`. A heist
-that cannot put anything in the world is not the document's mockup, so
-implementing `engine.spawn` in both hosts is a SCRIPT3 clause, and it carries two
-consequences the day it lands: the arm
-`the_engine_namespace_is_registered_and_implemented_by_neither_host` goes red and
-must be retired with `engine` removed from the registry gate's exclusion list,
-and **`inf_editor_core::pie::build_scene_payload` starts owing an asset edge it
-does not walk** — `engine.spawn`'s prefab is the kit's only `StrRole::Asset`
-port, `inf_packager::asset_deps` follows it and the payload builder is a
-hand-maintained mirror that does not, which is safe only while the verb is inert
-(`nothing_a_script_names_can_reach_a_world_yet` is the tripwire). Migrated scripts' traces stay byte-identical to their predecessors
-where semantics did not change. The interpret-vs-transpile decision is taken per
-script class *with measurements*. InfiniScript Core is documented with one demo
-plugin. And the arc closes honestly: the list of what a designer can build without
-touching Rust, the list of what still needs Rust, and iteration timings measured
-end to end — edit to running, and cold cook.
+* **`engine.*` is real, in both hosts** — the blocker routed here. One Ring-0
+  rule each (`inf_ecs::prefab`), so the two hosts' arms diff to nothing; a
+  spawned entity's identity is folded from the prefab name and the place
+  (`item::authored_pickup_guid`'s ruling, met a second time) and its handle from
+  that identity into **52 bits**, so it survives `math.to_float` into a `float`
+  member variable — above `2^53` it would round on the way in and name a
+  different entity on the way out. Both consequences this entry predicted are
+  paid: the tripwire arm and the registry gate's `engine` exception are retired,
+  and `build_scene_payload` walks a class's `asset_refs`. **Only a GUID-spelled
+  prefab binds at run time**, and that is the verb's contract rather than a
+  shortcut: a `PackEntry` carries no name, so a shipped player has nothing to
+  resolve a file stem against.
+* **The mission**, gated `PIE == shipping` **byte-identical over two routes**
+  with two exits and two endings (clean: six bars, out on the loot, clear;
+  interrupted: two bars, out on the clock, **caught**). Three engine facts cost
+  the wave real time and are in the ROADMAP block: an archetype has a lot size
+  it plans properly at, `society` pairs a HOME with a work to make an agent, and
+  the first PIE payload resolved one grammar graph of two — which diverged the
+  trace **at step 1** and is exactly what that gate exists to catch.
+* **The iteration claim, measured on that mission**: **1.08–1.33 ms** of engine
+  time to turn a saved edit into new behaviour mid-heist, with the run's state
+  intact across the save. §10.3 has the whole table.
+* **The `OnPlayerEnterZone` event is re-priced, not taken.** The mechanical
+  items were right and were not the hard part: **the hard part is where a zone
+  lives**. Routed to SCRIPT4 with three homes priced.
+* **Not done, and named**: the Phase 30 door/weapon logic is not migrated, there
+  is no settlement ambient script, and InfiniScript Core still has no demo
+  plugin. All three are SCRIPT4's, in §10.5's list.
 
 ---
 
@@ -814,6 +824,188 @@ end to end — edit to running, and cold cook.
   taken, is **additive** — the sidecar rule.
 * A gate must aim at the thing it names, and must be built to falsify (P22/P23).
   A round-trip test that round-trips the empty program proves nothing.
+
+---
+
+## 10. The arc's close (wave SCRIPT3, 2026-08-29)
+
+The arc set out to answer one question the owner asked: **can a designer build a
+game in this engine without waiting for a compiler?** Four waves built the
+language, the cook, the hot-reload path, the editor and the 132-verb surface.
+This section is what the fifth one measured, on a real mission rather than on a
+fixture.
+
+The artifact is `samples/harbour-heist/HarbourHeist.infini` — 5 619 bytes, two
+handlers, six functions, committed island content with its own level, its own
+`PIE == shipping` gate and its own measured edit loop. It has objectives, a
+timer, a bolted door, loot, a crowd that reacts, stakes and two endings. **There
+is no Rust behind it.**
+
+### 10.1 What a designer can build without touching Rust
+
+Read off the mission's own verbs rather than off the registry, because a list
+taken from the registry is a list of what exists and this is a list of what got
+used in anger.
+
+| the mission needed | the verbs it used | and what that generalises to |
+|---|---|---|
+| an objective — *am I in the vault, am I at the boat* | `zone.contains` | any trigger region, polled on `Tick` |
+| a **state machine** | member variables + `if`/`elseif` + the SCRIPT2a **call form** | phases, objectives, fail states, anything a designer would draw as a flowchart |
+| a clock | `Tick`'s own `dt` and a `float` variable | timers, cooldowns, grace periods — deterministic, because `dt` is the fixed step |
+| a door that bolts behind you | `door.spawn`, `door.lock`, `door.use` | doors, gates, hatches, and the whole `Interactable` surface |
+| loot | `item.define`, `item.spawn_pickup`, `item.give`, `item.count` | catalogues, pickups, inventories, ammunition |
+| stakes | `health.set`, `health.damage`, `health.fraction` | damage, healing, downing, any resource with a maximum |
+| a world that answers back | `crowd.population` | population pressure, "is anyone watching", "is the town alive" |
+| putting things in the world | `engine.spawn`, `engine.destroy`, `engine.set_rotation` | markers, effects, props, anything a mission needs to exist for a while |
+| telling the player | `debug.print` | (see the honest list below — this is the surface's weakest point) |
+
+And beyond the mission, from the same registry and with the same standing:
+`sky.*` (time of day, weather, fog), `terrain.height_at`, `water.*`, `voxel.*`
+carving, `destruct.*`, `anim.*` and `ik.*`, `audio.*`, `physics2d.*` /
+`physics3d.*`, `input.*`, and `dispatch.*` for actor-to-actor events. The whole
+of it is in `docs/book/src/infiniscript-api.md`, generated from the registry and
+drift-checked in the ordinary battery.
+
+**And the part that is not a verb list**: the mission is *hot-swappable while it
+runs*. That is what "without touching Rust" is worth — see §10.3.
+
+### 10.2 What still needs Rust
+
+Four things, and the first is the one a designer meets first.
+
+1. **A user interface.** There is no `ui.*` namespace. The mission tells the
+   player things with `debug.print`, which goes to the Output Log. Objectives on
+   screen, a timer, a damage flash, a "MISSION FAILED" card — all of it is
+   engine work today. `inf-ui` exists; a `ui.*` kit over it is the single
+   highest-value verb family this arc did not build.
+2. **Movement, and anything that owns a frame.** A script reacts on `Tick`; it
+   cannot drive a character. The Harbour Heist gate moves its hero from outside
+   the mission, which is honest about where the line is: locomotion is
+   `CharacterMovement` and the P29 catalogue, in Rust.
+3. **New engine capability.** A verb is a door onto something Ring 0 already
+   does. Where the door does not exist — a trigger volume that pushes an event,
+   a nav query, a spatial index over the crowd — the door is Rust, and the whole
+   arc's rule is that a verb is added *when* the door exists (SCRIPT2a added
+   seventeen and every one had a `pub fn` behind it already).
+4. **Data structures.** The IR's value set is `Float`/`Int`/`Bool`/`Str`. No
+   arrays, no tables, no structs (A.9). A mission that wants "the three nearest
+   guards" cannot hold them.
+
+### 10.3 The compile-time table — the owner's question, answered with numbers
+
+Every figure is measured on this machine and named beside its arm; nothing here
+is asserted in a test (the house rule about wall clocks), and everything here is
+printed by one.
+
+| the road | what it costs | measured by |
+|---|---|---|
+| **edit a `.infini`, running Simulate** — door + parse + lower, swap, one fixed step, on the 5 619-byte mission | **1.08–1.33 ms**, zero `rustc` | `script_iteration.rs` |
+| …plus the editor's plumbing before it: the watcher's debounce, plus up to one drain tick | **250–370 ms** | `script_hot_reload.rs`, read out of Ring 2's own source |
+| **cook the whole mission project** — two grammar graphs, a level, a mesh and the script | **156 ms** | `harbour_heist_gate.rs` |
+| **change one Ring-0 gameplay rule** and rebuild the crate Simulate lives in, warm incremental | **7 s** | `cargo build -p inf-editor-core` |
+| …and the shipped player with it | **12 s** | `cargo build -p inf-player` |
+| …from cold | **~50 min** for the battery, **~35 min** for clippy | CLAUDE.md's machine notes |
+
+The engine's half of the script road is about **5 800×** cheaper than the warm
+Rust road. What a designer *feels* is a quarter of a second against seven
+seconds — about **19×** — and the seven seconds is the *warm* number, which is
+the one a good day gives you.
+
+The three statements §5 made are all still true and now have arms under them:
+gameplay iteration is sub-second with zero `rustc`; **engine compile times are
+unchanged**, because nothing in this arc makes `cargo build` faster; and the win
+compounds as gameplay migrates out of Rust, because the slow path gets hit less
+often rather than getting quicker.
+
+### 10.4 The bound that showed up in a real program
+
+SCRIPT1b's carried item 2 said *"a member variable that is not a float parses,
+lowers, interprets perfectly and cannot be transpiled"*, measured on a `bool`.
+Writing a mission sharpened it into something much bigger:
+
+**No script that names its own entity can be transpiled.** The host seeds
+`entity` with an `Int`, every gameplay verb that needs a subject takes it, and
+`vars::get` is monomorphic in generated Rust. The Harbour Heist mission has five
+non-float member variables and one of them is `entity`, which no author chose.
+
+This costs the arc nothing *today*, because the ship decision SCRIPT1b took is
+that the cook packs IR for the shipped interpreter (§8) — the mission ships, the
+gate proves it ships identically to PIE. What it costs is the **Code tab**: a
+designer cannot open a real gameplay script as Rust. Carried, routed, and now
+with a real program's shape attached to it rather than a two-line fixture's.
+
+### 10.5 The arc's carried items, consolidated
+
+Everything the five waves carried, in one place, with a route. Nothing here is
+new in SCRIPT3; what is new is that they are in one list instead of five.
+
+**Routed to SCRIPT4 (a wave's worth of work each):**
+
+1. **`ui.*`** — §10.2's first entry, and the surface's biggest hole.
+2. **The `OnPlayerEnterZone` event.** Re-priced in SCRIPT3 from the other side:
+   the five mechanical items are right and are not the hard part; **the hard
+   part is where a zone lives**, because a pushed event needs the fixed step to
+   know the boxes before any handler runs, and today a box is six floats inside
+   a script's own expression. Three homes are priced in `nodekit`'s zone doc — a
+   `TriggerVolume` component (right long-run, a scene schema move), a
+   `zone.watch` resource the script declares (no schema move, the `item.define`
+   precedent, the recommended first cut), or keep polling (one fixed step of
+   latency, and a mission that reads better as an explicit state machine).
+3. **`RaiseError::NonLinear`, and the graph face's other refusals** (A.5). Closing
+   it means giving `flow.branch` a join and re-proving `lower ∘ raise == id` over
+   the enlarged image.
+4. **The graph↔text bridge is one-way.** A Blueprint reads as InfiniScript;
+   writing that text back into the graph needs a decision about a graph-lowered
+   class's synthetic local ids (SCRIPT2b).
+5. **`raise` has no call-a-function node** and cannot have a generic one: a
+   `NodeDef`'s ports are fixed at registration and a user function's signature is
+   not (SCRIPT2a).
+6. **Migration.** The Phase 30 door/weapon logic is still a `.inf_act`, there is
+   no settlement ambient script, and re-authoring committed content whose gate
+   pins its bytes is a wave rather than a clause.
+7. **InfiniScript Core** — the P14.5 WASM tier is rebranded and documented, and
+   has no demo plugin of its own.
+
+**Maintenance-class, each with a live arm that will tell you the day it changes:**
+
+8. **`#[infinity::blueprint]` has no macro behind it**, so the Code tab's output
+   does not compile (`the_generated_marker_has_no_macro_behind_it`). Priced:
+   either a real proc-macro crate, or stripping at `blueprint_source`'s door —
+   and the second costs `lift` its identity anchor.
+9. **`vars::get` is monomorphic in generated Rust** — see §10.4.
+10. **A `string` parameter on a unit-local function does not transpile**
+    (SCRIPT2a): `Ty::Str` renders as `String` and `Lit::Str` as a `&str`, and the
+    two do not meet at a generated call.
+11. **Transcendentals are outside the crown gate**, by a stated argument rather
+    than an oversight: a zero-dependency shim cannot call `psin64` without
+    becoming a second implementation of a bit-exact polynomial.
+12. **`crowd.*` counts and does not name an agent**; **`zone.count` counts
+    everything with a collider**, the ground included.
+13. **A prefab name does not bind at run time.** The cook resolves a file stem
+    because it has the asset database; a `PackEntry` carries no name, so the
+    shipped player cannot, and a spawn names a placeholder cube unless the
+    prefab is spelled as a GUID. Closing it is a pack-format move.
+14. **Editor surface**: no autocomplete/hover/go-to-definition over the verbs; no
+    "New InfiniScript" in the drawer's Add menu; a `.infini` tab never displayed
+    is never checked; `--ink-danger` is undefined at 18 sites across 8 files
+    (SCRIPT2b).
+15. **A.9's v1 language omissions**: no tables/arrays/structs, no closures, no
+    `repeat`/`break`/`continue`, no string concatenation, no multiple returns.
+    Each is a pricing question about the IR, and the question to ask first is
+    what the shapes it already has cannot say — which is how the call form
+    turned out to need no IR change at all.
+
+### 10.6 The verdict, in one paragraph
+
+A designer can build a **mission** in this engine without touching Rust: places,
+objectives, timers, doors, items, damage, a reacting crowd, things spawned and
+destroyed, and a state machine over all of it — edited live, in a running world,
+in about a millisecond of engine time and a quarter-second of editor plumbing,
+against seven seconds for the warm Rust road and fifty minutes for the cold one.
+What they cannot build without Rust is a **user interface**, a character that
+moves itself, a new engine capability, or a data structure. The first of those
+is one wave's work over a substrate that already exists, and it is the thing to
+build next.
 
 ---
 

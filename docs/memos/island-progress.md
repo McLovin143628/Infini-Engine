@@ -21644,10 +21644,22 @@ the table**. That is not a hypothetical any more.
    (`the_engine_namespace_is_registered_and_implemented_by_neither_host`), named
    in the exclusion list of the registry gate, and stated in the three verbs' own
    descriptions so the generated manual carries it.
+   *(**RETIRED by wave SCRIPT3.** All three go through one Ring-0 rule each in
+   both hosts (`inf_ecs::prefab`); the tripwire arm and the registry gate's
+   `engine` exception are gone, replaced by an arm that both hosts reach the
+   SAME rule; and `build_scene_payload` walks `asset_refs`, the edge this item
+   said it would start owing.)*
 5. **`zone.*` is the pull half only.** An `OnPlayerEnterZone` **event** is priced
    in the kit's doc — an `EventKind` variant, two host drains, two `event.*`
    NodeDefs and a `raise::event_kind_of` arm, on the `WaterEnter`/`WaterExit`
    precedent. A script polls on `Tick` today.
+   *(**Re-priced by wave SCRIPT3, from the other side, and still routed.** The
+   five mechanical items are right and are not the hard part: **the hard part is
+   where a zone LIVES** — a box today is six floats inside a script's own
+   expression, and a pushed event needs the fixed step to know the boxes before
+   any handler runs. Three homes are priced in `nodekit`'s zone doc; the cheap
+   one is a `zone.watch` resource the script declares on `BeginPlay`, the
+   `item.define` precedent, with no schema move. Routed to SCRIPT4.)*
 6. **`crowd.*` counts, and does not name an agent.** "Nearest villager" needs a
    `CrowdClock` (a position is a function of the hour) and a spatial index the
    crowd does not keep — an `O(agents)` scan per call on a level that plans tens
@@ -22383,6 +22395,9 @@ Worth recording because each is a shape rather than a slip.
    `engine.*` implemented by neither host, `zone.*`'s missing push half, `crowd.*`
    naming no agent, `zone.count` counting the ground, and SCRIPT1b/SCRIPT1a's own
    lists. Item 1 (this wave) is retired; its LOW 3 is retired above.
+   *(Wave SCRIPT3: item 4 — `engine.*` — is **retired**, and item 5's event is
+   **re-priced and routed to SCRIPT4**. The rest stand and are consolidated, with
+   routes, in `infiniscript-direction.md` §10.5.)*
 
 ### Counts
 
@@ -22902,3 +22917,379 @@ and needs no allowlist at all.
 **Exactly one level of backslash unescaping survives a quoted heredoc.** So `\`
 is safe and `\\` is not, and the difference is measurable in six rows. See the
 operating note above.
+
+## Wave SCRIPT3 — the dogfood, and the arc's close (2026-08-29)
+
+The arc built a language (SCRIPT1a), a file door, a cook and the crown gate
+(SCRIPT1b), a call form, 132 verbs and a generated manual (SCRIPT2a), and an
+editor (SCRIPT2b). This is the wave that had to say whether any of it is usable.
+
+The answer is a file: **`samples/harbour-heist/HarbourHeist.infini`** — 5 619
+bytes, two handlers, six functions, committed island content with its own level,
+its own `PIE == shipping` gate and its own measured edit loop. Objectives, a
+timer, a door that bolts behind you, loot, a crowd that reacts, stakes, and two
+endings. **No Rust behind any of it.**
+
+### Clause 1 — `engine.*` becomes real, in both hosts
+
+The blocker the SCRIPT2a audit routed here, in its own words: *"`engine.*` is
+registered and implemented by NEITHER host … `engine.spawn` is also the kit's
+only `StrRole::Asset` port, so the cook's whole asset-reference walk exists to
+serve a verb nothing implements."*
+
+`inf_ecs::prefab` is one Ring-0 rule per verb, so the two hosts' arms **diff to
+nothing** — the `door.*` arrangement, for P22's reason: a spawn implemented twice
+is two implementations that agree until they do not. What the arms carry:
+
+* **The identity of a spawned thing is content, never a counter.**
+  `authored_spawn_guid(prefab, at)` folds the name and the place, exactly as
+  `item::authored_pickup_guid` does and for exactly its reason — *a spawn keyed
+  on how many times a graph had run would put two hosts' worlds out of step the
+  first time one of them ran a handler twice.* Two spawns of one prefab at one
+  point are **one entity**, which is the pickup kit's ruling met a second time.
+* **The handle is folded from the identity, into 52 bits.** Two properties were
+  obvious — a function of the identity alone, and above every `1..=n` actor id.
+  The third was not, and it is the wave's smallest good decision:
+  **InfiniScript's arithmetic is float-first**, `math.to_float` is how a handle
+  reaches a `float` member variable, and a handle above `2^53` would be rounded
+  on the way in and name a **different entity** on the way out —
+  `engine.destroy` would silently miss. 52 bits is inside the range where every
+  integer is an exact `f64`. *A handle a script can hold must survive being
+  held.*
+* **A destroy goes through `EcsWorld::despawn`** — the door `cell_stream`
+  deactivates a cell with, so the guid index is purged with the entity and a
+  handle that named it stops resolving rather than dangling. And if the entity
+  was an **actor**, its handlers stop with it: the host records the guid and the
+  session drains it *after* the handler finishes, so the statement following an
+  `engine.destroy(var.get("entity"))` still runs. That is appendix A.7's
+  containment rule rather than an exception to it, and it is armed
+  (`an_actor_that_destroys_itself_finishes_the_handler_and_stops`).
+
+**Both consequences the SCRIPT2a audit wrote down for this day are paid.** The
+tripwire arm and the registry gate's `UNIMPLEMENTED_IN_BOTH_HOSTS` exception are
+retired, so `both_hosts_dispatch_exactly_the_registered_verbs` compares
+`engine.*` like every other namespace; what replaces the tripwire is the half
+that gate *cannot* state — that both hosts reach the **same** Ring-0 rule, since
+a host that grew its own spawn would pass a set comparison and diverge from the
+other one. And `build_scene_payload` walks a class's `asset_refs`, the edge
+`asset_deps` has had since SCRIPT1b.
+
+**The bound that came with it, measured rather than assumed.** Only a
+**GUID-spelled** prefab binds its asset at run time; a **file stem** spawns a
+placeholder cube carrying the name. That is not a shortcut, it is what the pack
+format says: an `inf_asset::PackEntry` carries a GUID, a kind and a content hash
+and **no name**, so a shipped player has nothing to resolve a stem against. The
+cook resolves stems because it has the asset database; a payload that resolved
+stems would hand PIE a mesh the shipped build could not find, which is this
+file's own failure mode wearing a fix's clothes. Closing it is a pack-format
+move, priced and not taken.
+
+### Clause 2 — the zone event, re-priced from the other side
+
+The brief allowed either the event or the pull-half workaround with the event
+routed by name. Writing the mission first is what made the pricing worth
+anything, and it moved.
+
+SCRIPT2a priced the event as five mechanical items (an `EventKind` variant, two
+host drains, two `event.*` NodeDefs, a `raise::event_kind_of` arm). **All five
+are right and none of them is the hard part.** The hard part is **where a zone
+lives**: an event is pushed by the fixed step, so the fixed step has to know the
+boxes before any handler runs — and today a box is six `Float` arguments *inside
+a script's own expression*, which nothing but the interpreter ever sees.
+
+Three homes, priced in the kit's own doc:
+
+| home | cost | verdict |
+|---|---|---|
+| a `TriggerVolume` **component** | a **scene schema move** — the one window this arc has not spent | the right long-run design: a zone a designer drags in the viewport, authorable without a script |
+| a `zone.watch` **resource** the script declares on `BeginPlay` | one verb, one Ring-0 resource, one edge pass per host. **No schema moves** | the `item.define` / `door.spawn` precedent — the recommended first cut |
+| keep polling | nothing | one fixed step of latency, and a `Tick` that runs whether anything is happening or not |
+
+And the third row is now a measurement rather than a shrug: the Harbour Heist
+mission polls two boxes on `Tick`, and the state machine it is written as reads
+**better** than four event handlers would, because the phase is explicit and in
+one place. Routed to **SCRIPT4** with the resource door named as the first cut.
+
+### Clause 3 — the mission
+
+A quay, a grammar-built bank with a vault, the apartment block its staff live
+in, and one hero whose `ActorClass` names a `.infini` exactly as it would name a
+`.inf_act` — which is SCRIPT1b's *"a script is content"* ruling made visible.
+Everything else the mission makes for itself on `BeginPlay`: the item catalogue,
+the vault door, the bullion on the shelf, the hero's own body.
+
+`harbour_heist_gate` runs the whole thing twice on each of two routes — off a
+cooked `.inf_pack` the way `--pack` boots, and off the `ScenePayload` the editor
+really builds — and requires the traces **byte-identical step for step**:
+
+| route | what happens | states |
+|---|---|---|
+| **clean** | in at step 21, six bars off the shelf, out at **103 on the LOOT** with 3.27 s left, **clear** at 201, condition 0.672 | 256 distinct world states, 90 distinct mission states |
+| **interrupted** | in at 21, two bars, back out where the staff can see you, out at **202 on the CLOCK**, **caught** at 203, condition 0.276 — and standing on the boat afterwards changes nothing | 223 / 188 |
+
+Two exits from the vault and two endings, out of one script over one level. A
+gate that drove only the first would certify a mission whose timeout and whose
+failure state both did nothing.
+
+**Three things cost real time, and every one is a fact about the engine rather
+than about the mission.** They are here because each looked like the answer:
+
+| the graph | residents | agents |
+|---|---|---|
+| the `phase30-gameplay` house, 14 × 10, one floor | 0 | 0 |
+| an Office at 14 × 10, two floors | 0 | 0 |
+| an Office at **30 × 24** (the settlement library's own lot), two floors | **40 work** | **0** |
+| …with an Apartment block across the plaza | 40 work + homes | **28** |
+
+Two facts fall out, both the settlement library's met from the other side: an
+archetype has a **lot size it plans properly at** (`society::occupancy` gives a
+Living room nobody and a 14 × 10 office is a lobby with a corridor), and
+`inf_ecs::society` makes an agent by **pairing a home with a work** — so forty
+desks and nowhere to live is forty slots and no people in them.
+
+And the third, which the gate caught rather than a reader: **the first PIE
+payload resolved one grammar graph of two.** The housing block grew nothing in
+PIE, the level had no crowd, `witnesses` was zero on one side and 28 on the
+other, and the trace diverged from the shipped one **at step 1**. That is
+precisely the divergence-in-the-door this class of gate exists to catch, and
+what caught it is an **exact expected count asserted at the payload before
+anything was compared** — the P21.4 rule, met again, in the direction it was
+written for.
+
+**The mission is authored, not generated**, and the ruling is stated where a
+reader arrives (`inf_editor_core::heist`'s module header): `write_heist` writes
+the level, the two grammar graphs, the alarm mesh the mission *names* and the
+README, and the script's **sidecar** from the script's own bytes — but not the
+script. Generating the mission from a Rust `const` would make the showcase a lie
+in the one place it is supposed to be true. The one thing a byte comparison
+cannot lock — that the script's coordinates and the level's agree — is asserted
+by **behaviour** in the gate instead, which is what a string comparison could not
+have said anyway.
+
+**`Alarm.inf_mesh` is in the folder because the mission NAMES it.**
+`engine.spawn("Alarm")` is the kit's only asset-naming port, the cook resolves
+the stem and pulls the mesh into the pack's closure, and a name resolving to
+nothing is a **blocking** advisory — the shape SK1c stopped a wave over. So the
+mission is the asset-reference walk's first live consumer, and the walk bites on
+committed content.
+
+### Clause 4 — the iteration showcase, measured on that mission
+
+`script_hot_reload` proved the mechanism on a four-line counter in a temp
+directory. `script_iteration` measures the arc's claim on the thing a designer
+would really be editing: the mission, **mid-heist**, in a real `SimSession` over
+its own committed level. The designer decides the bank's staff hit too softly,
+changes one number, saves.
+
+```
+first compile (door + parse + lower)   1.13-1.19 ms
+the edit: compile                      0.97-1.21 ms
+          swap + one fixed step        0.11-0.31 ms
+          ENGINE TOTAL                 1.08-1.33 ms, zero rustc
+the running mission changed            0.0040 -> 0.0133 of condition per step
+and carried across the save            3 bars, 4.67 s of clock, phase 1
+```
+
+Printed, never asserted (the house rule). What **is** asserted is behaviour: the
+mission running after the save is the edited one, and the run it was in the
+middle of survived it — which is the half that separates hot reload from a
+restart.
+
+**The compile-time table** — the owner's original question, answered with the
+arc's final numbers, every one of them measured on this machine:
+
+| the road | cost | measured by |
+|---|---|---|
+| edit a `.infini`, running Simulate (engine half) | **1.08–1.33 ms**, zero `rustc` | `script_iteration.rs` |
+| …the editor's plumbing before it | **250–370 ms** (`WATCH_DEBOUNCE` + up to one drain `TICK`) | `script_hot_reload.rs`, read out of Ring 2's source |
+| cook the whole mission project | **156 ms** | `harbour_heist_gate.rs` |
+| touch one Ring-0 gameplay rule, rebuild the crate Simulate lives in | **7 s** warm incremental | `cargo build -p inf-editor-core` |
+| …and the shipped player with it | **12 s** warm incremental | `cargo build -p inf-player` |
+| …from cold | ~50 min battery, ~35 min clippy | CLAUDE.md's machine notes |
+
+The engine's half is about **5 800×** cheaper than the warm Rust road. What a
+designer *feels* is a quarter-second against seven seconds — about **19×** — and
+the seven seconds is the **warm** number.
+
+**A fixture fact found on the way**, worth writing down because it reads like a
+defect and is not: in a cooked pack and a PIE payload a level's population grows
+from `PcgVolume::residents`, derived by `level::population_of` at world build; in
+the **editor** those slots come from the Ring-2 PCG evaluation, which a Ring-1
+test does not run. So a `SimSession` entered over a freshly generated document
+has a volume with no residents in it and nobody at all.
+`SimSession::set_crowd_population` is the documented door for a test that wants a
+crowd, and this arm uses it exactly as `script_api_surface` does.
+
+**And the bound the mission walked into**, which is SCRIPT1b's carried item 2
+grown up: it said *"a member variable that is not a float … cannot be
+transpiled"*, measured on a `bool`. The mission has five non-float member
+variables and one of them is **`entity`**, which the host seeds with an `Int` and
+which no author chose. So **no script that names its own entity can be
+transpiled** — which is nearly every gameplay script. It costs the arc nothing
+today (the cook packs IR for the shipped interpreter, and the gate proves the
+mission ships identically to PIE); what it costs is the Code tab.
+
+### Clause 5 — the arc's close
+
+`docs/memos/infiniscript-direction.md` gains **§10**: what a designer can build
+without Rust (read off the mission's own verbs rather than off the registry, so
+it is a list of what got used in anger), what still needs Rust (four things, and
+the first is a **user interface** — there is no `ui.*` namespace, and the mission
+tells the player things with `debug.print`), the compile-time table above, the
+`vars::get` finding, and **every carried item of all five waves consolidated into
+one routed list**: seven routed to SCRIPT4, eight maintenance-class with a live
+arm each. ROADMAP §14's SCRIPT3 bullet becomes its completion block. SCRIPT2a's
+carried items 4 and 5 are retired and re-priced **in place**, where a reader of
+that wave will meet them.
+
+### Two operating incidents, both the campaign's own laws
+
+**The tenth eaten continuation, caught by reading the diff.** Writing the new
+registry arm through a heredoc → Python → file chain ate two `\`-continuations
+out of one Rust assertion message, leaving the P22 signature (a run of interior
+spaces where a continuation had been). The SCRIPT2b audit's measured note is
+exactly why it was caught: *exactly one level of backslash unescaping survives a
+quoted heredoc*, so a `\` written into a Python source string arrives as a
+Python line continuation. Repaired with the editor rather than the shell, which
+is the law CLAUDE.md already carries.
+
+**A stale scratchpad file with a generic name silently supplied content.** A
+patch script read `scratchpad/new_arm.rs` to splice a rewritten test into
+`script_gameplay_gate.rs` — and a file of that name was already there from an
+earlier wave, so the splice succeeded, appended 150 lines about impostor proxies,
+and reported success. `git checkout` undid it. The lesson is the mechanical one:
+**a scratchpad path is not a namespace**; write the new content first, under a
+name the wave owns, and never read a path you did not just write.
+
+### Mutations
+
+Every row was run, and every row reports what went red **beyond** the arm the
+mutation was aimed at, because "my gate went red" is half a measurement.
+
+| mutation | what goes red |
+|---|---|
+| `engine.spawn` reverted to the unknown-call arm in the **shipped** host (`if false` on the match arm) | **3 of the mission gate's 4 arms** — the world gains no entity, the two routes take no exits, and the trace is compared over a mission that never leaves phase 0 — **and** `script_gameplay_gate`'s `what_a_script_names_reaches_the_world_and_the_payload_walks_it` |
+| `spawn_prefab` mints `Uuid::new_v4()` instead of folding the content | **four arms across three crates**: `prefab::spawning_the_same_thing_twice_is_one_entity`, the editor's `the_engine_kit_spawns_turns_and_destroys_a_real_entity` (the derived guid is not in the world), and **both** of the mission gate's world arms — including `PIE == shipping`, because two hosts minting random ids do not agree about anything |
+| `spawn_entity_id` widened back to 62 bits (past `2^53`) | `a_handle_cannot_be_mistaken_for_an_authored_actor`, at the round-trip-through-`f64` assertion and nowhere else — which is the point: nothing else in the tree can see a handle that stops being exact |
+| the session's `despawned` drain replaced by a `clear()` | `an_actor_that_destroys_itself_finishes_the_handler_and_stops` — the ghost keeps ticking against a world that no longer has it |
+| the mission's `and in_the_vault()` guard dropped from the grab condition | `the_two_routes_take_the_two_exits` (the interrupted run leaves on the loot, not the clock) **and** the trace comparison, whose anti-vacuity is over both routes |
+| **one grammar graph dropped from the PIE payload** | `the_mission_is_the_same_program_in_pie_and_shipping` **at step 1** — not a mutation invented afterwards but the wave's own first cut, which is why the payload's exact expected count is asserted before anything is compared |
+
+### The chr(92) sweeps, and the diff-scoped detector adopted
+
+**Two first-shape instances, both caught before they were committed**, both from
+the same transport and both by the discipline the SCRIPT2a audit prescribed:
+*read the written file, not just the sweep*. A `\`-continuation written into a
+Python source string through a heredoc is unescaped once on the way in and then
+eaten as a **Python** line continuation, so the Rust literal arrives with the
+indentation absorbed — the P22 signature. One landed in `nodekit.rs`'s new
+registry arm and one in `script_iteration.rs`'s; both were repaired with the
+editor rather than the shell.
+
+**And the SCRIPT2b audit's diff-scoped detector is adopted**, because it is as
+cheap as that audit said: a comment-aware string-state lexer over the `.rs`
+files a range touched, reporting every **non-raw literal that spans a line
+boundary** — exactly and only the population the second shape can hide in. Over
+this wave's range it prints **5 lines across 14 touched files** (~0.4 per file,
+against the workspace's 4.3), every one of them a `.infini` fixture with real
+newlines in it and none of them a defect. No allowlist, one page to read.
+
+One finding came out of writing it, and it is about detectors rather than about
+this wave: **a lexer that does not know char literals desyncs on `'\"'`** and
+then reports every doc comment after it as a multi-line string. Unpatched it
+printed 10 lines, 5 of them `nodekit.rs` doc comments downstream of that file's
+own `rest.find('\"')`. The workspace sweep in `inf_packager` is line-based and
+does not have this exposure; anything that walks Rust as a stream does.
+
+### Carried, by name
+
+The arc's whole list is consolidated in `infiniscript-direction.md` §10.5, with
+a route on every entry. What this wave itself adds or changes:
+
+1. **A prefab name does not bind at run time** — only a GUID does. An
+   `inf_asset::PackEntry` carries no name, so the shipped player has nothing to
+   resolve a file stem against, and `engine.spawn("Alarm")` puts a placeholder
+   cube named `Alarm` in the world while the cook has faithfully packed the mesh
+   beside it. Closing it is a **pack-format move** (a name index), priced and not
+   taken; the verb's own description says so, and so does the generated manual.
+2. **No script that names its own entity can be transpiled** — SCRIPT1b's
+   carried item 2, sharpened by a real program (`entity` is an `Int` the host
+   seeds, and `vars::get` is monomorphic in generated Rust). Ships fine, because
+   the cook packs IR; costs the Code tab.
+3. **`OnPlayerEnterZone` is routed to SCRIPT4** with its pricing re-derived and
+   three homes costed — see clause 2. The pull half stands and is what the
+   mission uses.
+4. **The Phase 30 door/weapon logic is not migrated**, there is **no settlement
+   ambient script**, and **InfiniScript Core has no demo plugin**. All three were
+   in the memo's original SCRIPT3 sketch, none was in this wave's clause list,
+   and re-authoring committed content whose gate pins its bytes is a wave rather
+   than a clause. Routed to SCRIPT4 by name.
+5. **The mission's crowd is 28 agents from two grammar-built buildings**, which
+   means the gate's trace depends on the NPC arc's determinism as well as the
+   script's. That is a property this repository already gates (`island_gate`,
+   `crowd_sweep`) and it is named here because a crowd in a *script* gate is new:
+   if the crowd ever stops being deterministic, this gate goes red for a reason
+   that is not about scripting.
+6. **The alarm mesh is packed and nothing draws it.** It is in the pack because
+   the mission names it and the closure works; it is not on the spawned entity
+   because of item 1. That is the honest state of the edge, and the day item 1
+   closes, the same content starts drawing without changing a line of the
+   mission.
+
+### Counts
+
+| | baseline (`d2a9910b`) | **wave SCRIPT3** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 353 / 6 583 / 0 / 19 | **356 / 6 602 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, **exit 0**. **+3 blocks** (`script_engine_verbs`, `script_iteration`, `harbour_heist_gate`) and **+19 arms**, which is exactly the `#[test]` count of the wave's diff (19 added, 0 removed). **Ordering, stated rather than glossed:** the tree moved three times after that run — an unused `pub const` removed, a doc comment rewritten, and a `println!` of the cook's own duration — none of which changes behaviour, and all five affected test binaries were re-run green on the final tree (`prefab` 7, `script_engine_verbs` 2, `script_iteration` 3, `harbour_heist_gate` 4, `script_gameplay_gate` 3) |
+| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**, 23.9 s; `git status` over `crates/inf-render/tests/goldens` is empty afterwards, so none blessed and none re-blessed. This wave renders nothing |
+| rustdoc individual warnings (cold, ceiling 450) | 373 over 30 crates | **373 over 30 crates** — after `cargo clean --doc` (9 131 files, 223.3 MiB): **403 `^warning` lines minus 30 per-crate summaries**, cross-checked against the sum of those summaries' own counts (373 exactly). The wave adds **zero**, and it nearly added one: `prefab.rs`'s header linked `[crate::super]`, which is not a path — caught by running the count rather than assuming it. Headroom **77** |
+| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — exit 0, run **LAST** per the rmeta law, with `CARGO_INCREMENTAL=0` so the previous wave's clippy cache stayed reusable (the SCRIPT2a operating note: set it for the whole leg or not at all). Incremental, and said so: **15** crates re-checked in 55.8 s — `inf-blueprint`, `inf-ecs`, `inf-script` and everything downstream of them (`inf-project`, `inf-transpile`, `inf-anim`, `inf-physics`, `inf-runtime`, `inf-scene`, `inf-editor-core`, `inf-packager`, `inf-player`, `inf-cli`, `inf-viewport`, `inf-studio`), which is exactly the wave's code footprint; the rest served from a fingerprint cache keyed on the **same** `RUSTFLAGS` and profile. **The first pass was green** |
+| `cargo fmt --all --check` | clean | **clean** |
+| frontend | not run | **not run — `editor/studio/src/` is untouched** by the whole wave (`git diff --stat` over the range is empty). No ts-rs type changed shape; the wave's editor-facing surface is Ring 0 and Ring 1 |
+| schemas / committed content | unmoved | **no schema moved** — no `schema_version`, no `FROZEN_WIRE` row, no `kind_code`, no pack change, and `engine.*` needed none (it is three host arms over an `Expr::Call` that already existed). **`EXPECTED_LEVELS` 23 → 24**, moved in the same commit as the level that moves it, with the constant's own doc naming the new level and why it is the twenty-fourth |
+| committed content added | — | **`samples/harbour-heist/`: 14 138 bytes over 11 files** — the mission (5 619 B, hand-authored), its level (1 342 B), two grammar graphs (1 353 + 1 358 B), the alarm mesh the mission names (1 236 B), four sidecars and a README |
+| `Cargo.lock` / manifests | — | **byte-identical.** No dependency of any kind, internal or external |
+| `chr(92)` | — | **two first-shape instances, both caught before commit**; the diff-scoped second-shape detector prints **5 multi-line non-raw literals over 14 touched files** and every one is a `.infini` fixture. See the section above |
+| disk | 28 GB free | **36 GB free.** `target/debug/incremental` (23 GB) deleted once before the battery with **no cold rebuild**, per the Wave-G half of the disk law; `target/` was 275 GB; no `cargo clean` beyond `--doc` |
+
+**Commits:** `717849cc` (`engine.*` real in both hosts, the Ring-0 rule, the two
+retired tripwires and the payload's asset edge), `a367230f` (the Harbour Heist
+mission, its level and its gate, `EXPECTED_LEVELS` 24), `ec3bfbae` (the
+iteration showcase measured on the mission, and the zone event re-priced), plus
+this ledger, ROADMAP §14's completion block, the direction memo's §10 and the
+book's two new sections.
+
+### The laws this wave adds
+
+**A handle a script can hold must survive being held.** The IR has `Int` and
+`Float`; the language's arithmetic is float-first and `math.to_float` is the
+bridge, so any opaque id an engine hands a script has to be exactly
+representable as an `f64` or it names a different thing on the way back. The
+fold is 52 bits for that reason and no other, and the arm that keeps it is a
+round trip through `f64`, not a range check.
+
+**Price a mechanism by writing the thing that needs it.** The zone event was
+priced twice: once as five mechanical items (an enum variant, two drains, two
+NodeDefs, a matcher arm) and once after writing the mission it was for. The
+second pricing found that all five were right and none was the hard part — the
+hard part is that a zone has nowhere to *live*. A feature's cost is not the sum
+of its parts until somebody has tried to use it.
+
+**A sample's SIZE is a parameter of the system that grows it.** The mission's
+building had to be 30 × 24 rather than 14 × 10, and nothing about the mission
+said so: `occupancy` gives a Living room nobody, an office's rooms come from its
+plan, and a plan on a small lot is a lobby with a corridor. Committed content
+that is "small on purpose" can be small enough to fall out of the system it is
+demonstrating, silently, with every arm green.
+
+**An empty answer and a missing input look identical from the consumer.** The
+mission read `crowd.population()` as zero for three different reasons in
+succession — no residents, no homes, and then a payload that carried one graph
+of two — and every one of them presented as *the same number*. The only thing
+that separated them was asserting an exact expected count at the **producer**
+(the P21.4 rule) rather than a plausible one at the consumer.
+
+**A scratchpad path is not a namespace.** A patch script read a generically
+named file it had not written, found one from an earlier wave, and spliced 150
+unrelated lines into a gate — successfully, and reporting success. Write first,
+under a name the wave owns; never read a path you did not just write.

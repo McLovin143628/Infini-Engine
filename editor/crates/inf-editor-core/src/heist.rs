@@ -107,9 +107,13 @@ pub const HEIST_VAULT_AT: (f64, f64, f64) = (0.0, 0.0, 0.0);
 pub const HEIST_BOAT_AT: (f64, f64, f64) = (0.0, 0.0, -30.0);
 /// The vault door's hinge, world metres — the point the script's three `door.*`
 /// calls name.
+///
+/// **A place, not a number the mission owns.** Every quantity the *mission*
+/// decides — how long the vault clock runs, what being watched costs, how much
+/// the hero's body is worth — is spelled in the `.infini` and nowhere else. A
+/// Rust constant beside it would be a second opinion about a number only one of
+/// them can change, and the one that can is the one a designer edits.
 pub const HEIST_VAULT_DOOR_AT: (f64, f64, f64) = (0.0, 1.05, -12.0);
-/// The hero's own body, joules.
-pub const HEIST_HERO_J: f64 = 3000.0;
 
 /// The repo-root `samples/harbour-heist/` directory.
 pub fn heist_dir() -> PathBuf {

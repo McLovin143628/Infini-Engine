@@ -242,3 +242,40 @@ functions, do not transpile. Both interpret perfectly and both ship.
 
 One literal previews and does not transpile: the most negative integer,
 `-9223372036854775808`. The cook reports it as an advisory naming the handler.
+
+## A whole mission, in one file
+
+`samples/harbour-heist/` is the engine's own dogfood: **a mission with no Rust
+behind it.** `HarbourHeist.infini` is 5.6 KB of the language on this page —
+objectives, a countdown, a door that bolts behind you, loot, a crowd that
+reacts, damage, and two endings — bound to the hero of its own committed level
+by one `ActorClass` component, exactly as a Blueprint would be.
+
+It is worth reading before writing your first mission, because it is written the
+way the language rewards: **the state machine is member variables**, the
+objectives are `zone.contains` calls wrapped in named functions, and the two ways
+out of the vault are two branches of one `if`. The gate over it runs it twice —
+once off a cooked pack, once off the editor's own preview payload — and requires
+the two to agree step for step.
+
+What it does **not** have is a user interface. It tells you what is happening
+with `debug.print`, which goes to the Output Log, because there is no `ui.*`
+namespace yet. That, a character that moves itself, a new engine capability, and
+arrays or tables are the four things you still need Rust for; everything else in
+that mission is a verb.
+
+## How fast the loop actually is
+
+Measured on the mission above, on one developer machine:
+
+| what you do | what it costs |
+|---|---|
+| save a `.infini` while Simulate is running | **~1 ms** of engine work (read, parse, lower, swap, one fixed step) — zero `rustc` |
+| …plus the editor noticing the save | 250–370 ms (the asset watcher's debounce and its drain tick) |
+| cook the whole project so it can ship | ~156 ms for this sample |
+| change gameplay written in **Rust** instead, and rebuild | ~7 s warm for the editor's own crate, ~12 s for the shipped player, and minutes from cold |
+
+Your live state survives the save: the mission above keeps the bullion already
+in the bag and the seconds already spent on its clock. What a save does **not**
+do is change a variable that is already live — a new default applies to new
+instances, not to the run you are in the middle of.

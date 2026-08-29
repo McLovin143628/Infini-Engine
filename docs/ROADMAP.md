@@ -20064,27 +20064,102 @@ quicker.
   hunted and not found**. Battery **353 / 6 583 / 0 / 19**, goldens 59 strict-green,
   rustdoc 373 unchanged, clippy 0 (**red on the first pass, on the audit's own new arm**),
   frontend **84 / 764**, schemas and `Cargo.lock` unmoved.
-* **SCRIPT3 — dogfood and ship.** Real island gameplay migrates to `.infini`: the Phase 30
-  door and weapon logic, a settlement ambient script, and one mission-class sequence at
-  Harbour City — the document's heist mockup made real on our island. Migrated traces stay
-  byte-identical to their predecessors where semantics did not change. The
-  interpret-vs-transpile decision is taken **per script class, with measurements**.
-  InfiniScript Core (the P14.5 WASM tier) is documented with one demo plugin. The arc closes
-  with two honest lists — what a designer can build without touching Rust, and what still
-  needs Rust — and iteration timings measured end to end: edit-to-running, and cold cook.
+* **SCRIPT3 — dogfood, and the arc's close (COMPLETE 2026-08-29).** The arc built a
+  language, a cook, a hot-reload path, an editor and 132 verbs. This is the wave that says
+  whether any of it is usable, and the answer it produced is a **whole mission in one text
+  file with no Rust behind it**: `samples/harbour-heist/HarbourHeist.infini`, 5 619 bytes,
+  two handlers and six functions, committed island content with its own level, its own gate
+  and its own measured iteration loop.
 
-  **`engine.*` is a SCRIPT3 CLAUSE, routed by the SCRIPT2a audit, and a blocker for the
-  mission half rather than a tidy-up.** `engine.set_rotation`, `engine.spawn` and
-  `engine.destroy` are registered, callable from text, and implemented by **neither** host —
-  both end their `match` with the unknown-call arm, so all three log their path and answer
-  `Unit`. A heist that cannot put anything in the world is not the document's mockup. The day
-  `engine.spawn` lands it carries two consequences already written down:
-  `the_engine_namespace_is_registered_and_implemented_by_neither_host` goes red and retires
-  with `engine` removed from the registry gate's exclusion list, and
-  `inf_editor_core::pie::build_scene_payload` starts **owing an asset edge it does not walk**
-  — `engine.spawn`'s prefab is the kit's only `StrRole::Asset` port and `asset_deps` follows
-  it while the payload builder (a hand-maintained mirror) does not, which is safe only while
-  the verb is inert. `nothing_a_script_names_can_reach_a_world_yet` is the tripwire on both.
+  **`engine.*` is real, in both hosts** — the blocker the SCRIPT2a audit routed here. The
+  three verbs Phase 6 registered and neither host implemented now go through one Ring-0 rule
+  each (`inf_ecs::prefab`), so the two hosts' arms diff to nothing. A spawned entity's
+  identity is folded from the prefab name and the place — `item::authored_pickup_guid`'s
+  ruling, met a second time, so two hosts running one trace name one entity and a spawn is
+  idempotent by content. Its blueprint handle is folded from that identity into **52 bits**,
+  which is the number's third property and the one nobody would guess: InfiniScript's
+  arithmetic is float-first, `math.to_float` is how a handle reaches a `float` member
+  variable, and a handle above `2^53` would round on the way in and name a different entity
+  on the way out. A destroy goes through `EcsWorld::despawn` — the door `cell_stream`
+  deactivates a cell with — and if the entity was an actor its handlers stop with it at the
+  END of the handler that did it, so the statement after still runs (A.7). Both consequences
+  the ROADMAP wrote down for this day are paid: the tripwire arm and the
+  `UNIMPLEMENTED_IN_BOTH_HOSTS` exception are **retired**, so
+  `both_hosts_dispatch_exactly_the_registered_verbs` compares `engine.*` like every other
+  namespace (what replaces the tripwire is the half that gate cannot state — that both hosts
+  reach the *same* rule); and `build_scene_payload` **walks a class's `asset_refs`**, the
+  edge `asset_deps` has had since SCRIPT1b. Only a GUID-spelled prefab resolves at run time,
+  and that is the verb's contract rather than a shortcut: a `PackEntry` carries a GUID, a
+  kind and a content hash and **no name**, so a shipped player has nothing to resolve a file
+  stem against, and a payload that resolved stems would hand PIE a mesh the shipped build
+  could not find.
+
+  **The mission.** A quay, a grammar-built bank with a vault, the apartment block its staff
+  live in, and one hero whose `ActorClass` names a `.infini` exactly as it would name a
+  `.inf_act`. Everything else it makes for itself on `BeginPlay` — the item catalogue, the
+  vault door, the bullion on the shelf, the hero's own body. `harbour_heist_gate` runs it
+  twice on each of two routes, off a cooked `.inf_pack` and off the `ScenePayload` the editor
+  really builds, and requires the traces **byte-identical step for step**: *clean* — in at
+  step 21, six bars, out at 103 on the LOOT with 3.27 s left, clear at 201, condition 0.672,
+  256 distinct world states; *interrupted* — in at 21, two bars, back out where the staff can
+  see you, out at 202 on the CLOCK, **caught** at 203, condition 0.276, and standing on the
+  boat afterwards changes nothing. Two exits and two endings out of one script.
+
+  Three things that cost, and each is a fact about the engine rather than about the mission.
+  The building had to be an **office at its lot size**: `occupancy` gives a Living room
+  nobody and a 14 × 10 office is a lobby, so the gameplay house *and* a small office both
+  grew **0** residents. Then 40 desks still made **0** agents, because `inf_ecs::society`
+  pairs a HOME with a work — hence the apartment block. And the first PIE payload resolved
+  **one graph of two**, so the housing block grew nothing in PIE, the level had no crowd, and
+  the trace diverged from the shipped one **at step 1**: the exact failure this class of gate
+  exists to catch, caught by an exact expected count asserted at the payload before anything
+  was compared (the P21.4 rule).
+
+  **The iteration claim, measured on that mission** (`script_iteration.rs`), mid-heist, in a
+  real `SimSession` over its own level: the designer decides the staff hit too softly,
+  changes one number, saves. Door + parse + lower **0.97–1.21 ms**, swap + one fixed step
+  **0.11–0.31 ms**, **engine total 1.08–1.33 ms with zero `rustc`** — and the run survives
+  it: three bars already in the bag, 4.67 s of clock already spent, phase 1 still true, and
+  the mission now costing 0.0133 of condition a step instead of 0.0040. The plumbing on top
+  is the editor's own two constants and is `script_hot_reload`'s claim, measured out of Ring
+  2's source: `WATCH_DEBOUNCE` 250 ms plus up to one 120 ms drain `TICK`. The **cook** of the
+  whole mission project — two grammar graphs, a level, a mesh and the script — is **156 ms**.
+  Against that: touching one Ring-0 gameplay rule and rebuilding, warm and incremental on
+  this machine, is `cargo build -p inf-editor-core` **7 s** and `cargo build -p inf-player`
+  **12 s**, and CLAUDE.md's own numbers put the cold end at ~50 minutes for the battery. The
+  engine's half of the script road is roughly **5 800×** cheaper than the warm Rust road;
+  what a designer *feels* is a quarter-second against seven seconds, and the seven is the
+  warm number.
+
+  **The `OnPlayerEnterZone` event is re-priced rather than taken**, from the other side now
+  that the mission it was priced for exists. The five items SCRIPT2a listed are right and are
+  not the hard part: **the hard part is where a zone LIVES**. A box today is six floats
+  inside a script's own expression, which nothing but the interpreter ever sees, and a pushed
+  event needs the fixed step to know the boxes before any handler runs. Three homes, priced
+  in the kit's own doc — a `TriggerVolume` **component** (the right long-run design, and a
+  scene schema move), a `zone.watch` **resource** the script declares on `BeginPlay` (no
+  schema moves, the `item.define` precedent, the recommended first cut), or keep polling.
+  What polling costs is measured rather than guessed: one fixed step of latency, and a
+  mission that reads *better* as an explicit state machine than it would as four event
+  handlers. **Routed to SCRIPT4.**
+
+  **What the arc can and cannot do** is written down as two lists in the direction memo's
+  §10 — the first read off the mission's own verbs rather than off the registry, the second
+  naming the four things a designer meets first. The carried items from every wave of the arc
+  are consolidated there and routed by name.
+
+  **Deliberately not done, and named rather than implied**: the Phase 30 door/weapon logic is
+  not migrated (`Gameplay.inf_act` still authors it, and re-authoring committed content whose
+  gate pins its bytes is a wave of its own); there is no settlement ambient script; and
+  InfiniScript Core (the P14.5 WASM tier) is still documented only as a rebrand, with no demo
+  plugin. All three are SCRIPT4's.
+
+  Battery **353 → 356 blocks / 6 583 → 6 602 arms** (+3 blocks — `script_engine_verbs`,
+  `script_iteration`, `harbour_heist_gate` — and **+19 arms**, exactly the `#[test]` count of
+  the wave's diff), goldens **59** unmoved, `EXPECTED_LEVELS` **23 → 24** (the mission's
+  level, moved in the same commit as the content it belongs to), schemas unmoved,
+  `Cargo.lock` byte-identical, no new dependency of any kind. Full ledger in
+  `docs/memos/island-progress.md`.
 
 ### Laws this arc is held to
 
