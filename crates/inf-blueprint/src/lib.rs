@@ -24,6 +24,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod interp;
+pub mod loopshape;
 pub mod lower;
 pub mod math_builtins;
 pub mod nodekit;

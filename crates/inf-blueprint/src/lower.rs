@@ -13,11 +13,12 @@ use std::collections::{BTreeMap, HashMap};
 
 use inf_graph::{Graph, Node, NodeId, NodeRegistry, ParamValue, PortType};
 
+use crate::loopshape::{
+    bound_init, counter_init, guard_lt, increment, index_init, index_le, runaway_report,
+};
 use crate::nodekit::{NodeRole, EXEC_THEN};
 use crate::semantics::EventKind;
-use crate::{
-    BinOp, Binding, BlueprintFn, Expr, Lit, LocalId, Param, Stmt, Ty, UnOp, LOOP_GUARD_MAX,
-};
+use crate::{BinOp, Binding, BlueprintFn, Expr, Lit, LocalId, Param, Stmt, Ty, UnOp};
 
 /// A failure while lowering a graph to IR.
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
@@ -440,13 +441,7 @@ impl Lowerer<'_> {
         let user_cond = self.resolve_input(node, "condition", out);
         self.no_debug_hoist -= 1;
         let user_cond = user_cond?;
-        out.push(Stmt::Let {
-            id: counter,
-            binding: Binding::Anon,
-            ty: None,
-            mutable: true,
-            value: Expr::Lit(Lit::Int(0)),
-        });
+        out.push(counter_init(counter));
         let cond = Expr::Binary(BinOp::And, Box::new(user_cond), Box::new(guard_lt(counter)));
         let mut body = self.exec_from(node, "loop_body")?;
         body.push(increment(counter));
@@ -467,34 +462,12 @@ impl Lowerer<'_> {
         self.bind_local(node, "index".to_string(), idx);
         let first = self.resolve_input(node, "first", out)?;
         let last = self.resolve_input(node, "last", out)?;
-        out.push(Stmt::Let {
-            id: idx,
-            binding: Binding::Anon,
-            ty: None,
-            mutable: true,
-            value: first,
-        });
-        out.push(Stmt::Let {
-            id: last_local,
-            binding: Binding::Anon,
-            ty: None,
-            mutable: false,
-            value: last,
-        });
-        out.push(Stmt::Let {
-            id: counter,
-            binding: Binding::Anon,
-            ty: None,
-            mutable: true,
-            value: Expr::Lit(Lit::Int(0)),
-        });
+        out.push(index_init(idx, first));
+        out.push(bound_init(last_local, last));
+        out.push(counter_init(counter));
         let cond = Expr::Binary(
             BinOp::And,
-            Box::new(Expr::Binary(
-                BinOp::Le,
-                Box::new(Expr::Local(idx)),
-                Box::new(Expr::Local(last_local)),
-            )),
+            Box::new(index_le(idx, last_local)),
             Box::new(guard_lt(counter)),
         );
         let mut body = self.exec_from(node, "loop_body")?;
@@ -859,52 +832,12 @@ fn default_literal(ty: PortType) -> Expr {
     })
 }
 
-/// The loop-guard sub-condition `counter < LOOP_GUARD_MAX`.
-fn guard_lt(counter: LocalId) -> Expr {
-    Expr::Binary(
-        BinOp::Lt,
-        Box::new(Expr::Local(counter)),
-        Box::new(Expr::Lit(Lit::Int(LOOP_GUARD_MAX))),
-    )
-}
-
-/// `counter = counter + 1;`
-fn increment(counter: LocalId) -> Stmt {
-    Stmt::Assign {
-        target: counter,
-        value: Expr::Binary(
-            BinOp::Add,
-            Box::new(Expr::Local(counter)),
-            Box::new(Expr::Lit(Lit::Int(1))),
-        ),
-    }
-}
-
-/// `if counter >= LOOP_GUARD_MAX { debug::print(RUNAWAY_MSG); }` — the after-loop
-/// report emitted when the guard, not the user condition, stopped the loop.
+/// The exact message the loop guard prints when it trips.
 ///
-/// The message is a **constant**, deliberately node-agnostic: it is a synthetic
-/// statement `raise` discards and re-lowering regenerates, so embedding the
-/// (raise-renumbered, non-user-facing) `NodeId` would break `lower(raise(f)) ==
-/// f`. A stable string keeps the loop guarded *and* round-trippable.
-fn runaway_report(counter: LocalId) -> Stmt {
-    Stmt::If {
-        cond: Expr::Binary(
-            BinOp::Ge,
-            Box::new(Expr::Local(counter)),
-            Box::new(Expr::Lit(Lit::Int(LOOP_GUARD_MAX))),
-        ),
-        then_body: vec![Stmt::ExprStmt(Expr::Call {
-            path: vec!["debug".into(), "print".into()],
-            args: vec![Expr::Lit(Lit::Str(RUNAWAY_MSG.to_string()))],
-        })],
-        else_body: Vec::new(),
-    }
-}
-
-/// The exact message the loop guard prints when it trips (constant so it
-/// round-trips through `raise`).
-pub const RUNAWAY_MSG: &str = "Runaway loop stopped (blueprint loop guard exceeded)";
+/// Re-exported from [`crate::loopshape`], which is where the whole guarded-loop
+/// shape now lives (SCRIPT1): the builders below and `raise`'s recognisers used
+/// to agree by hand, and `inf-script` made that a three-way agreement.
+pub use crate::loopshape::RUNAWAY_MSG;
 
 /// `nodestate::get_or(key, default)` — read persisted node state or a default.
 fn nodestate_get_or(key: &str, default: Expr) -> Expr {

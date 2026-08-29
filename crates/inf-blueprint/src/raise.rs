@@ -9,25 +9,32 @@
 //! sugar with no faithful graph form is out of scope and reported, mirroring the
 //! transpiler's snippet fallback.
 //!
-//! Raise coverage of the B-P2 flow palette:
-//! - **`flow.while`** *is* inverted — [`Raiser::try_raise_while`] recognizes the
-//!   exact counter-guarded pattern the lowerer emits (`let counter = 0; while
-//!   (cond && counter < CAP) { …; counter += 1; } if counter >= CAP { … }`) and
-//!   rebuilds the node, so `lower(raise(f)) == f` holds for while-loops too.
-//! - **`flow.for` / `flow.do_once` / `flow.flip_flop` / `flow.gate` are
-//!   raise-excluded** (like `flow.sequence`'s flattening): their lowered form is
-//!   a multi-statement / stateful expansion (`nodestate::*` calls, index/last
-//!   snapshots) with no unambiguous single-node inverse. Hand-edited Rust in
-//!   those shapes stays a `Stmt::Snippet` on lift rather than a graph node — the
-//!   documented, lossless fallback.
+//! Raise coverage of the B-P2 flow palette (SCRIPT1's table; the memo's §4 is
+//! the prose version):
+//! - **`flow.while` and `flow.for` are inverted** — [`Raiser::try_raise_for`]
+//!   and [`Raiser::try_raise_while`] recognise, through the one shared
+//!   [`crate::loopshape`] matcher, the exact counter-guarded expansions the
+//!   lowerer emits, and rebuild the node, so `lower(raise(f)) == f` holds for
+//!   both loop forms. `for` is tried **first**: a `for` expansion contains a
+//!   guarded `while` at its third statement, and matched the other way round it
+//!   reads as a while whose body ends in an index assignment — which is how
+//!   `flow.for` came to report an *assign* refusal rather than a "while" one
+//!   before SCRIPT1 widened it.
+//! - **`flow.do_once` / `flow.flip_flop` / `flow.gate` stay raise-excluded**
+//!   (like `flow.sequence`'s flattening): their lowered form wraps `nodestate::*`
+//!   state in a `Stmt::If`, which has no unambiguous single-node inverse — the
+//!   read is a pure call in value position and the wrapper is non-terminal.
+//!   Hand-edited Rust in those shapes stays a `Stmt::Snippet` on lift rather
+//!   than a graph node — the documented, lossless fallback.
 
 use std::collections::HashMap;
 
 use inf_graph::{Graph, Link, NodeId, NodeUi, ParamValue};
 
+use crate::loopshape;
 use crate::nodekit::EXEC_THEN;
 use crate::semantics::EventKind;
-use crate::{BinOp, Binding, BlueprintFn, Expr, Lit, LocalId, Stmt, UnOp, LOOP_GUARD_MAX};
+use crate::{BinOp, BlueprintFn, Expr, Lit, LocalId, Stmt, UnOp};
 
 /// A failure while raising IR to a graph (the IR is outside lowering's image).
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
@@ -157,8 +164,14 @@ impl Raiser {
     ) -> Result<(), RaiseError> {
         let mut i = 0;
         while i < body.len() {
-            // Recognize the canonical guarded `flow.while` expansion first; it
-            // spans three statements and continues from the loop's `completed`.
+            // Recognize the canonical guarded loop expansions first; each spans
+            // several statements and continues from the loop's `completed`.
+            // **`for` before `while`** — a `for` expansion satisfies the while
+            // matcher from its third statement (see `loopshape`'s own arm).
+            if let Some(consumed) = self.try_raise_for(body, i, &mut prev)? {
+                i += consumed;
+                continue;
+            }
             if let Some(consumed) = self.try_raise_while(body, i, &mut prev)? {
                 i += consumed;
                 continue;
@@ -241,63 +254,70 @@ impl Raiser {
     /// from its `completed` output. Returns `Some(3)` (statements consumed) on a
     /// match, `None` otherwise (the statement is handled by the normal chain).
     ///
-    /// The recognized shape is precisely
-    /// [`crate::lower::Lowerer::lower_while`]'s output:
-    /// ```text
-    /// let mut counter = 0;                                  // Anon, Int(0)
-    /// while (user_cond && counter < LOOP_GUARD_MAX) { <body>; counter = counter + 1; }
-    /// if counter >= LOOP_GUARD_MAX { debug::print(_); }
-    /// ```
+    /// The recognized shape is precisely [`crate::loopshape`]'s while form,
+    /// which is what [`crate::lower`] builds — one definition, three readers.
     fn try_raise_while(
         &mut self,
         body: &[Stmt],
         i: usize,
         prev: &mut Option<(NodeId, String)>,
     ) -> Result<Option<usize>, RaiseError> {
-        let (Some(s0), Some(s1), Some(s2)) = (body.get(i), body.get(i + 1), body.get(i + 2)) else {
+        let Some(m) = loopshape::match_while(body, i) else {
             return Ok(None);
         };
-        // s0: `let mut counter = 0;` (an anonymous, mutable Int-zero binding).
-        let Stmt::Let {
-            id: counter,
-            binding: Binding::Anon,
-            mutable: true,
-            value: Expr::Lit(Lit::Int(0)),
-            ..
-        } = s0
-        else {
-            return Ok(None);
-        };
-        let counter = *counter;
-        // s1: the guarded `while` whose body ends with `counter = counter + 1;`.
-        let Stmt::While { cond, body: wbody } = s1 else {
-            return Ok(None);
-        };
-        let Expr::Binary(BinOp::And, user_cond, guard) = cond else {
-            return Ok(None);
-        };
-        if !is_guard_lt(guard, counter) {
-            return Ok(None);
-        }
-        let Some((Stmt::Assign { target, value }, inner)) = wbody.split_last() else {
-            return Ok(None);
-        };
-        if *target != counter || !is_increment(value, counter) {
-            return Ok(None);
-        }
-        // s2: the runaway `if counter >= CAP { debug::print(_) }`.
-        if !is_runaway_if(s2, counter) {
-            return Ok(None);
-        }
-
+        let (cond, inner, consumed) = (m.cond.clone(), m.body.to_vec(), m.consumed);
         // Rebuild the node.
         let node = self.add("flow.while", 0.0);
         self.wire_prev(prev, node);
-        let c = self.raise_expr(user_cond)?;
+        let c = self.raise_expr(&cond)?;
         self.wire(c.0, &c.1, node, "condition");
-        self.raise_chain(inner, Some((node, "loop_body".into())))?;
+        self.raise_chain(&inner, Some((node, "loop_body".into())))?;
         *prev = Some((node, "completed".into()));
-        Ok(Some(3))
+        Ok(Some(consumed))
+    }
+
+    /// Recognize the five-statement `flow.for` expansion at `body[i..i+5]` and
+    /// rebuild the node — the [`Self::try_raise_while`] twin, over
+    /// [`loopshape::match_for`].
+    ///
+    /// **Widened in SCRIPT1**, and for a reason the text face made concrete:
+    /// `.infini` has a `for` statement, so leaving `flow.for` raise-excluded
+    /// would have meant that every script containing a counted loop was
+    /// unopenable as a graph — a hole the language itself would have dug. The
+    /// shape is a recognition, exactly like the while form; the *expensive* half
+    /// of the raise gap ([`RaiseError::NonLinear`]) is untouched and stays named
+    /// in the honest-subset table.
+    ///
+    /// The index local is bound to the node's `index` output **before** the body
+    /// is raised, mirroring `lower_for`'s own ordering, so a body read of the
+    /// loop variable wires back to the loop rather than dangling.
+    fn try_raise_for(
+        &mut self,
+        body: &[Stmt],
+        i: usize,
+        prev: &mut Option<(NodeId, String)>,
+    ) -> Result<Option<usize>, RaiseError> {
+        let Some(m) = loopshape::match_for(body, i) else {
+            return Ok(None);
+        };
+        let (index, first, last, inner, consumed) = (
+            m.index,
+            m.first.clone(),
+            m.last.clone(),
+            m.body.to_vec(),
+            m.consumed,
+        );
+        let node = self.add("flow.for", 0.0);
+        self.wire_prev(prev, node);
+        let f = self.raise_expr(&first)?;
+        self.wire(f.0, &f.1, node, "first");
+        let l = self.raise_expr(&last)?;
+        self.wire(l.0, &l.1, node, "last");
+        // The loop variable *is* the node's `index` output.
+        self.locals.insert(index, (node, "index".into()));
+        self.raise_chain(&inner, Some((node, "loop_body".into())))?;
+        *prev = Some((node, "completed".into()));
+        Ok(Some(consumed))
     }
 
     fn wire_prev(&mut self, prev: &Option<(NodeId, String)>, into: NodeId) {
@@ -460,42 +480,6 @@ fn math_data_ports(type_id: &str) -> Vec<String> {
         // abs/floor/ceil/round/sqrt/sin/cos/to_int/to_float are single-input.
         _ => vec!["a".into()],
     }
-}
-
-/// `counter < LOOP_GUARD_MAX` — the loop-guard sub-condition.
-fn is_guard_lt(e: &Expr, counter: LocalId) -> bool {
-    matches!(e, Expr::Binary(BinOp::Lt, l, r)
-        if matches!(l.as_ref(), Expr::Local(id) if *id == counter)
-        && matches!(r.as_ref(), Expr::Lit(Lit::Int(v)) if *v == LOOP_GUARD_MAX))
-}
-
-/// `counter + 1` — the loop-counter increment expression.
-fn is_increment(e: &Expr, counter: LocalId) -> bool {
-    matches!(e, Expr::Binary(BinOp::Add, l, r)
-        if matches!(l.as_ref(), Expr::Local(id) if *id == counter)
-        && matches!(r.as_ref(), Expr::Lit(Lit::Int(1))))
-}
-
-/// The after-loop `if counter >= LOOP_GUARD_MAX { debug::print(_) }` report.
-fn is_runaway_if(s: &Stmt, counter: LocalId) -> bool {
-    let Stmt::If {
-        cond,
-        then_body,
-        else_body,
-    } = s
-    else {
-        return false;
-    };
-    if !else_body.is_empty() {
-        return false;
-    }
-    let ge_ok = matches!(cond, Expr::Binary(BinOp::Ge, l, r)
-        if matches!(l.as_ref(), Expr::Local(id) if *id == counter)
-        && matches!(r.as_ref(), Expr::Lit(Lit::Int(v)) if *v == LOOP_GUARD_MAX));
-    ge_ok
-        && matches!(then_body.as_slice(),
-            [Stmt::ExprStmt(Expr::Call { path, .. })]
-                if path.as_slice() == ["debug".to_string(), "print".to_string()])
 }
 
 fn str_arg(arg: Option<&Expr>) -> Result<String, RaiseError> {
@@ -831,6 +815,84 @@ mod tests {
             [Stmt::Let { .. }, Stmt::While { .. }, Stmt::If { .. }]
         ));
         assert_round_trips(&f);
+    }
+
+    /// **SCRIPT1's widening.** `flow.for` now inverts, so a counted loop is a
+    /// graph and a script and the same program.
+    ///
+    /// Before this wave `raise` reported it as `UnsupportedStmt("assign")` — not
+    /// the `"while"` the direction memo predicted, because `try_raise_while`
+    /// matched the expansion's *tail* from its third statement and then met the
+    /// index increment inside the body. `loopshape`'s
+    /// `a_for_expansion_looks_like_a_while_from_its_third_statement` pins that
+    /// overlap so the ordering here can never be reversed by accident.
+    #[test]
+    fn for_loop_round_trips() {
+        use inf_graph::{Graph, NodeUi, ParamValue};
+        // begin_play → for i in 0..=3 { total = total + i } → debug.print("done")
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let lit = |g: &mut Graph, v: i64| {
+            let n = g.insert("lit.int", NodeUi::default());
+            g.node_mut(n)
+                .unwrap()
+                .params
+                .insert("value".into(), ParamValue::Int(v));
+            n
+        };
+        let first = lit(&mut g, 0);
+        let last = lit(&mut g, 3);
+        let fo = g.insert("flow.for", NodeUi::default());
+        let gettotal = g.insert("var.get", NodeUi::default());
+        g.node_mut(gettotal)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("total".into()));
+        let add = g.insert("math.add", NodeUi::default());
+        let settotal = g.insert("var.set", NodeUi::default());
+        g.node_mut(settotal)
+            .unwrap()
+            .params
+            .insert("name".into(), ParamValue::Text("total".into()));
+        let done = g.insert("debug.print", NodeUi::default());
+        g.node_mut(done)
+            .unwrap()
+            .params
+            .insert("message".into(), ParamValue::Text("done".into()));
+        wire(&mut g, first, "value", fo, "first");
+        wire(&mut g, last, "value", fo, "last");
+        wire(&mut g, gettotal, "value", add, "a");
+        // The loop variable feeds the accumulation — the `index` output is what
+        // `try_raise_for` has to rebind, so this arm would fail if it did not.
+        wire(&mut g, fo, "index", add, "b");
+        wire(&mut g, add, "out", settotal, "value");
+        wire(&mut g, bp, EXEC_THEN, fo, "exec");
+        wire(&mut g, fo, "loop_body", settotal, "exec");
+        wire(&mut g, fo, "completed", done, "exec");
+
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        // Sanity: it really lowered to the five-statement guarded shape.
+        assert!(
+            matches!(
+                f.body.as_slice(),
+                [
+                    Stmt::Let { .. },
+                    Stmt::Let { .. },
+                    Stmt::Let { .. },
+                    Stmt::While { .. },
+                    Stmt::If { .. },
+                    Stmt::ExprStmt(_)
+                ]
+            ),
+            "unexpected lowering: {:#?}",
+            f.body
+        );
+        assert_round_trips(&f);
+        // …and the rebuilt graph really carries a `flow.for`, not a while pair.
+        let g2 = raise_fn(&f).unwrap();
+        assert!(g2.nodes.values().any(|n| n.type_id == "flow.for"));
+        assert!(!g2.nodes.values().any(|n| n.type_id == "flow.while"));
     }
 
     #[test]
