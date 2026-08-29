@@ -117,9 +117,11 @@ describe("the .infini language mode", () => {
     expect(styleOf(c, "-- a comment with -- inside it")).toBe("comment");
     const minus = tokenize("local x = a - b");
     expect(styleOf(minus, "-")).toBe("operator");
-    const arrow = tokenize("function f(a: float) -> float");
+    const arrow = tokenize("function f(a: float) -> int");
     expect(styleOf(arrow, "->")).toBe("operator");
+    // BOTH type positions the grammar has: after a `:` and after a `->`.
     expect(styleOf(arrow, "float")).toBe("typeName");
+    expect(styleOf(arrow, "int")).toBe("typeName");
   });
 
   it("keeps a long bracket open across lines, and closes it at its own level", () => {

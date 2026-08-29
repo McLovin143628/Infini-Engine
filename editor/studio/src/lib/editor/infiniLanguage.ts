@@ -27,9 +27,11 @@
  *    (`.` → a namespace segment, `(` → the verb or the unit-local function).
  *    `debug . print(…)`, with spaces around the dot, lexes identically in Ring 0
  *    and colours differently here. Colour, not meaning.
- * 2. **A type name is recognised after a `:`** — `float`/`int`/`bool`/`string`
- *    are *not* reserved words (the keyword list is twenty long on purpose), so
- *    they are ordinary identifiers everywhere else and are coloured as such.
+ * 2. **A type name is recognised in the two positions the grammar has one** —
+ *    after a `:` (a declaration, a local, a parameter) and after a `->` (a
+ *    return type). `float`/`int`/`bool`/`string` are *not* reserved words (the
+ *    keyword list is twenty long on purpose), so everywhere else they are
+ *    ordinary identifiers and are coloured as such.
  *
  * # The theme bridge
  *
@@ -191,7 +193,9 @@ export function infiniToken(stream: StringStream, state: InfiniState): string | 
   for (const sym of LONG_SYMBOLS) {
     if (stream.string.startsWith(sym, stream.pos)) {
       stream.pos += sym.length;
-      state.expectType = false;
+      // `->` opens a return type, the grammar's other type position
+      // (`function IDENT params ('->' TYPE)? block`).
+      state.expectType = sym === "->";
       return "operator";
     }
   }
