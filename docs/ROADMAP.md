@@ -19715,7 +19715,17 @@ quicker.
   the structural arm beside it: a script writes `math.sin(x)` and gets
   `inf_math::portable::psin64(x)` **bit for bit**, over a `Host` that panics if reached.
   **Feature naming, decided once with the text face in hand**: "Infinity Blueprints" →
-  **"Infini Blueprints"** across eight prose sites (SCRIPT0's carried item, retired).
+  **"Infini Blueprints"** — ten spellings in eight files, all prose a reader meets
+  (SCRIPT0's carried item, retired).
+  Battery **344 / 6 500 / 0 / 19** (+8 blocks, +63 arms; the one red arm under load is
+  `inf-physics`' wall-clock mover-cost ratio, green alone and in two other full runs).
+  Goldens **59**, `INF_GOLDEN_STRICT=1` green over 118 arms with none added and none
+  re-blessed. Rustdoc **373** over 30 crates — *one below* the 374 baseline, because
+  `inf-script` generates none and `raise`'s two private intra-doc links went with the
+  widening; headroom 77. Clippy **0**, run last. `fmt` clean. **No schema moved**, no
+  committed content moved, `EXPECTED_LEVELS` still 23, and `Cargo.lock` gains the new
+  workspace member and **zero external crates**. The frontend suite was not run because
+  no editor or studio file moved. Full ledger in `docs/memos/island-progress.md`.
 * **SCRIPT1b — hot reload, the cook, and the crown gate (ROUTED).** The wave split at five
   majors under the brief's own rule, and the split is where the brief put it. Hot reload:
   `.infini` watcher on `inf-asset`'s notify substrate → re-lower → swap into the running

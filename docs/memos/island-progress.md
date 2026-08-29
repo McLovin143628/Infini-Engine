@@ -19740,3 +19740,329 @@ wave reuses the reasoning.
 parity gate, and the diagram's labels), `82e8cceb` (containment granularity),
 `03c1959c` (the diagram redrawn), `e9240c17` (115 verbs, `InfinityProject`, the
 two window titles), `37cca168` (four is five), and this ledger.
+
+## Wave SCRIPT1a — InfiniScript, the text face (2026-08-28)
+
+The arc's signature wave. `.infini` text is now a third face on the one
+execution model: the same `BlueprintFn` a graph lowers to and the transpiler
+renders to Rust. A script and a graph are not two programs that agree; they are
+one program with two editors pointed at it.
+
+The wave **split at five majors**, under the brief's own rule and where the brief
+put the seam. SCRIPT1a is the language — grammar, parser, lowering, emitter,
+round trip, determinism, the raise decision, the naming decision. SCRIPT1b is
+routed with hot reload, the cook path, `PIE == shipping` over a script trace, and
+the crown gate that compiles and runs the transpiler's output.
+
+### The design decision that made everything else fall out
+
+**The parser's output type is `BlueprintFn`.** There is no intermediate syntax
+tree. InfiniScript is not a language that compiles *to* the Blueprint IR; it is a
+face *on* it, and anything sitting between the two could acquire semantics of its
+own — which is precisely what `rust-report-crossref.md`'s Amendment 2 refused
+when it refused a second embedded language. `Stmt` and `Expr` are the AST. A
+`.infini` construct is a spelling of an IR construct, never more.
+
+Everything downstream is a consequence. Calls resolve against the **node kit at
+parse time**, so "a script cannot name a transcendental — only a verb" is a
+property of name resolution rather than of a review. `while` and `for` lower to
+the counter-guarded expansion, so a `while true` cannot hang the editor and the
+bound lives in the IR where the interpreter and the transpiled Rust share it.
+Member variables are `vars::get`/`vars::set` calls, so they needed no IR change —
+the P6 precedent, met again.
+
+### The finding: the text face is TOTAL, and the graph face is not
+
+`raise` (IR → graph) refuses ten shapes, and one unraisable statement makes a
+whole *handler* unraisable. The emitter refuses **none of them**. Every `Stmt`
+and every `Expr` in the IR has a `.infini` spelling, including the ones a canvas
+cannot draw:
+
+| IR shape | graph | text |
+|---|---|---|
+| `Stmt::If` that is not last in its block | `NonLinear` | `if … then … end`, and then whatever follows |
+| `Stmt::Assign` | `UnsupportedStmt("assign")` | `x = …` |
+| `Stmt::Snippet` | `UnsupportedStmt("snippet")` | `rust [[ … ]]` |
+| a call in value position | `UnsupportedExpr("pure call")` | an ordinary call |
+| the `do_once`/`flip_flop`/`gate` state cells | refused | `nodestate.get_or(…)` / `nodestate.set(…)` |
+
+So the arc's headline claim survives with a correction to its emphasis: graphs
+and text **are** two views of one program, and the text view is the complete one.
+The memo's appendix A.5 is the per-construct table and
+`crates/inf-script/tests/raise_coverage.rs` executes it — seventeen rows, both
+verdicts, and for the eleven that raise, proof that lowering the raised graph
+back runs the same program (compared as a host-call log, not as an id).
+
+### The raise decision, taken with pricing
+
+**`flow.for` was widened.** The language grew a `for` statement, so leaving it
+raise-excluded would have dug a hole the language itself created: every script
+with a counted loop unopenable as a graph. It cost one matcher.
+
+**`RaiseError::NonLinear` was priced instead of taken.** Closing it means giving
+`flow.branch` a **join** — a merge point where its two exec paths come back
+together — which the node kit does not have, the lowerer does not emit, and
+`lower ∘ raise == id` would then have to hold across. New port semantics on a
+frozen node, a matcher for the merge, canvas work to draw and route it, and a
+re-proof of the round-trip invariant over the enlarged image. **That is a wave,
+not a clause**, and the spec says so rather than leaving the next agent to
+discover it.
+
+The widening also produced a structural improvement that was overdue.
+`inf_blueprint::loopshape` is now the **single definition** of the guarded-loop
+shape: a builder and a matcher per form, read by the lowerer, by `raise` and by
+`inf-script`. Before this wave the builders were private in `lower` and the
+recogniser was private in `raise`, and they agreed **by hand** — the arrangement
+this house has paid for repeatedly (the scaffolded banner's three copies, the six
+diverged libm ban lists). A third reader was about to make it a four-way
+agreement.
+
+### THE BUG: `raise` hung on `local e = engine.spawn("x")`
+
+Writing the honest-subset table down as a test is what found it, and it is the
+wave's real discovery.
+
+`raise_chain`'s arm for *an action bound to a local* `continue`d without
+advancing the statement index. So `let e = engine::spawn("enemy")` raised the
+same statement for ever, adding a graph node on every pass, until the process
+died — measured here as a **7.5 GB allocation failure**, in a test that had run
+for over sixty seconds.
+
+It was reachable from the editor. `graph_open_actor` raises *every* handler of a
+`.inf_act`, and `engine.spawn` is the one action in the node kit with a consumed
+data output — which is to say the shape is exactly "spawn something and keep the
+entity", the most ordinary thing a spawner does. It has been there since P6.
+
+Nothing had ever asked `raise` about it, and the reason is instructive: **every
+round-trip fixture in the tree starts from a graph, and none of them wires a
+spawn's `entity` output onward.** The graph fixtures were written by people
+thinking about graphs, and a graph author draws the wire or does not. A text
+author writes `local e = engine.spawn(…)` because there is no other way to say
+it. A new face on an old IR asks the old IR questions nobody thought to ask.
+
+Fixed (`i += 1` before the `continue`), with the regression built **from a
+graph** so `lower ∘ raise == id` applies to it, and asserting the resulting node
+set rather than merely the absence of a hang.
+
+### Two corrections to the record, same source
+
+* **`flow.for` never reported `UnsupportedStmt("while")`**, which is what the
+  memo's §4 and ROADMAP §14 both said after the SCRIPT0 audit. It reported
+  `UnsupportedStmt("assign")`: a `for` expansion satisfies the *while* matcher
+  from its **third** statement, so `try_raise_while` caught the tail and then
+  choked on the index increment inside the body. Now pinned
+  (`loopshape::a_for_expansion_looks_like_a_while_from_its_third_statement`), and
+  it is why every consumer tries `match_for` first.
+* **`raise` inverts three flow forms, not two.**
+
+### THE THIRD LEG, and the two things it found
+
+`transpile_bridge.rs` closes text → IR → Rust → IR, and nothing else did.
+`inf-transpile`'s 38 proptests and its hand-edit corpus generate their IR from
+*graphs* and from *Rust*, and **neither producer makes a `Binding::Raw` binder, a
+`Stmt::Assign`, a non-terminal `if`, or a `for` whose index carries a name**. A
+text author writes all four the first day. (The bridge's own meta-arm fails if
+the corpus stops carrying them, so it cannot quietly become "things a graph could
+also have said".)
+
+**The transpiler refuses `Unary(Neg, Lit)`.** `EmitError::NegatedLiteral`, because
+the lifter folds `-lit` on the way back and the shape cannot round-trip through
+Rust. The language had kept `-1` and `-(1)` deliberately apart — with an arm
+celebrating the distinction — so that a graph holding the second could print and
+come back. What that bought, it turns out, was the ability to write programs the
+cook refuses. **A language must not be able to say something the ship path
+cannot.** So the parser folds and the emitter prints the canonical form, and the
+round trip now survives because the two *agree* rather than because they disagree
+carefully. The arm was rewritten to pin the fold in both directions.
+
+The *graph* path still has the gap: `math.neg` wired to a `lit.float` lowers to
+`Unary(Neg, Lit)`, which is IR the Code tab cannot generate from. That is
+`inf-blueprint`'s to close and is carried by name.
+
+**`i64::MIN` previews and does not cook.** `-9223372036854775808` is
+`-(9223372036854775808)` in Rust source and the magnitude overflows, so
+`EmitError::IntMin` refuses it. Not a hole the language opens — a `lit.int` node
+holds it just as happily — and the interpreter computes with it perfectly. Pinned
+so SCRIPT1b's cook reports it as an advisory rather than a stack trace.
+
+**What the bridge is not**: it does not compile the generated Rust and it does
+not run it. No test in this repository does. That is SCRIPT1b's crown gate; this
+narrows what the crown gate has left to prove and does not stand in for it, which
+is the exact over-claim the SCRIPT0 audit's finding 5 caught.
+
+### The battery caught two of my own, and one collision
+
+The P22 eaten-continuation sweep (`inf_packager`'s
+`no_string_literal_in_the_workspace_carries_an_eaten_continuation`) found **two
+literals in the parser** with the `\` continuation gone and the indentation
+absorbed — the exact defect the law is named for, arriving through scripted edits
+to Rust string literals, which is the third time that lesson has been paid for.
+
+It also **collided** with the raise-coverage fixtures, whose bodies are indented
+`.infini` source held in escaped one-liners: eight spaces after an escaped newline is
+indistinguishable from an eaten continuation. Rewritten as raw multi-line strings
+rather than exempted — the fixtures read better that way, and a whole-function
+exemption on a table called `table()` would have been the over-broad kind the
+sweep's own allowlist warns about. (The function is `raise_verdict_table` now for
+the same reason.)
+
+### The round trip, stated exactly rather than generously
+
+Three laws, because one of them cannot be stated as an equality and saying so is
+the honest move:
+
+1. **`parse(emit(f)) == f`, exactly, for every `f` the parser produces** — ids,
+   binding kinds, type annotations and mutability all survive. That is every
+   `.infini` file anyone writes. For the committed corpus something stronger
+   holds: `emit(parse(src)) == src`, so a designer opens a script, saves it, and
+   sees no diff.
+2. **`emit(parse(emit(f))) == emit(f)`, exactly, for every `f`** — including IR a
+   graph produced, whose anonymous locals the lowerer numbered in its own walk.
+   The emitter **renumbers into the parser's allocation order** (a `let`'s binder
+   after its value; a `for`'s index, bound and counter after its bounds; a
+   `while`'s counter after its condition — the last two invisible in the text and
+   numbered anyway), so the text is a fixed point from the *first* save rather
+   than the second. Law 1 is the gate on that mirror: if the two orders ever
+   disagree, a parsed script stops round-tripping to itself.
+3. **`parse(emit(f))` runs identically to `f`** — same host calls, same order,
+   same arguments, same wire values. This is the honest replacement for the
+   equality law 1 cannot make about graph-lowered IR, and it asserts the program
+   rather than the report.
+
+Two rules the round trip rests on, each with its own arm, and each is a bug that
+would otherwise be silent:
+
+* **`-1` is a negative literal; `-(1)` is a negation.** `Lit::Int(-1)` and
+  `Unary(Neg, Lit::Int(1))` are different IRs a graph can hold. Without the
+  parentheses they print the same text and only one of them comes back.
+* **A member variable shadowed by a local prints explicitly.** `vars::get("x")`
+  is `x` — until a `local x` is live at that point, at which it prints
+  `var.get("x")`, because a bare `x` there would resolve to the local and mean a
+  different program. The emitter therefore tracks scope. And the *parser* refuses
+  shadowing outright, which is a deliberate divergence from Lua and from Rust:
+  two live bindings of one name print as one name, and renaming costs a designer
+  one word where a silent capture costs a session.
+
+The corpus is checked for coverage **before** it is trusted — every `Stmt`
+variant, every `Expr` variant, every `BinOp`, both `UnOp`s, all four `Lit` kinds
+and all three `Binding` kinds, or the meta-arm fails. A round-trip test over the
+empty program proves nothing (P22/P23).
+
+### Refusals are values, at 29 rows and 300-odd prefixes
+
+Every diagnostic names a line, a column and — wherever there is one — the remedy
+rather than only the fault: `math.add` is *"the `+` operator here — write `a + b`"*,
+`flow.branch` is *"control flow, which InfiniScript writes as syntax — `if … then
+… end`"*, an unknown name says whether the **namespace** or the **verb** was the
+half it did not know. `diagnostics.rs` pins twenty-nine of them to exact
+positions, and then sweeps **every prefix** of a working script — which is what
+an editor hands the parser on each keystroke — asserting that none of the
+three-hundred-odd panics and that every span lands inside the text it was given.
+
+An undeclared member variable is a **warning**, not an error, and the reasoning
+is P21's: the runtime already refuses an unknown variable by name, and failing
+the compile would make a whole handler unrunnable over one typo in one branch.
+
+### Determinism
+
+* A committed **FNV-1a digest** of the fixture's canonical IR. Hand-rolled, and
+  the reason is worth the six lines: `DefaultHasher` is documented as unspecified
+  and free to change between releases, so a constant pinned against it says
+  nothing about *hosts* — only about toolchains. CI runs this on three operating
+  systems; a lowering that depended on the host reddens exactly one leg with a
+  line number instead of a mystery.
+* **CRLF, LF and lone-CR all lower to the same IR.** The lexer normalises first.
+  This is the `.rs is read by TESTS, so it needs text eol=lf` lesson met from the
+  other side: rather than depend on a `.gitattributes` entry for a file *users*
+  author, the reader is made insensitive. Fourth catch of the CRLF class, and the
+  first one where the fix was to stop caring.
+* The crate joins the **libm ban list day one**, with the structural arm beside
+  the source scan: a script writes `math.sin(x)` and gets
+  `inf_math::portable::psin64(x)` **bit for bit**, over a `Host` that panics if
+  it is reached. `std.sin`, `libm.sin`, a bare `sin`, `math.tan`, `math.exp`,
+  `math.ln`, `math.cbrt` and `math.atan2` are all refusals with a line, because
+  name resolution has one door. `math.pow` **is** reachable and **is** `f64::powf`
+  — a known hole in the node kit's palette, not one this crate opens, carried by
+  name.
+
+### The naming decision, taken once with the text face in hand
+
+**"Infinity Blueprints" → "Infini Blueprints".** SCRIPT0 carried this
+deliberately so it would be decided once rather than twice six weeks apart, and
+here is the reasoning: the feature is one of the engine's authoring faces and
+should carry the engine's name; the extension is `.infini`, the scripting layer
+is InfiniScript, and a flagship feature still spelled "Infinity" reads as a
+rename somebody abandoned halfway.
+
+Ten spellings in eight files, all of them prose a reader meets: the README's opening bullet and
+its feature table, the ROADMAP's opening paragraph and its Phase 6 heading, the
+mdBook's introduction and its `blueprints-101` page, the Spike B memo's title,
+`inf-blueprint`'s crate description and crate doc, and the doc comment
+`inf_project::template` scaffolds into a user's own `src/blueprints/mod.rs`. The
+ROADMAP's opening paragraph also gained **InfiniScript** beside the graphs: there
+are three faces now and it named two.
+
+**Nothing serialized moved**, because nothing serialized carries the phrase. The
+eight identifier families the SCRIPT0 audit enumerated (`#[infinity::blueprint]`,
+`.infinity/`, the theme ids, the `infinity:` keys, the bundle identifier, the
+crash/data roots, the mod ABI, `InfinityProject`) are identifiers, not the
+feature's name, and each stays for the reason §7 gives.
+
+### Counts
+
+| | baseline (`3f6a9984`) | **wave SCRIPT1a** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 336 / 6 437 / 0 / 19 | **344 / 6 500 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`. **+8 blocks** (the new crate's six test files, its lib and its doctest target) and **+63 arms**. One arm failed *under battery load only*, and it is not this wave's: `inf-physics`' `the_movers_per_character_cost_is_a_function_of_the_worlds_size` is a **wall-clock ratio** arm (5.00x against its own bound), green run alone and green in two other full runs of this same tree |
+| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**; none added, none re-blessed, and `git status` over `crates/inf-render/tests/goldens` is empty afterwards |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **373 over 30 crates** — after `cargo clean --doc` (9 082 files, 222.9 MiB): 403 `^warning` lines minus 30 per-crate summaries, cross-checked against the sum of those summaries' own counts (373 exactly). **One BELOW the baseline**: `inf-script` generates zero, and `raise`'s two private intra-doc links went with the widening rather than becoming three. Headroom **77** |
+| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — exit 0 over 48 workspace crates, run **LAST** per the rmeta law. Four lints in the new crate on the first pass, every one fixed rather than allowed |
+| `cargo fmt --all --check` | clean | **clean** |
+| frontend | green | **not run — no editor or studio file moved** |
+| schemas / `Cargo.lock` | unmoved | **no schema moved**; `Cargo.lock` gains the `inf-script` member only — **zero new external crates** |
+| `EXPECTED_LEVELS` | 23 | **23** — no level added, no committed content moved |
+| disk | — | **69 GB** free; incremental only, no `cargo clean` beyond `--doc` |
+
+### Carried, by name
+
+1. **SCRIPT1b is routed, not deferred**: hot reload, the cook path, `PIE ==
+   shipping` over a script trace, and **the crown gate** — transpile a `.infini`
+   script, compile it, run it, diff the trace against the interpreter. Today's
+   parity gate is still four hand-mirrored fixture families and **no test in this
+   repository compiles the transpiler's output and runs it**.
+2. **`RaiseError::NonLinear` is open and priced** (the branch join). So are the
+   other three non-flow refusals — `Assign`, `Snippet`, a non-call `ExprStmt` —
+   each a statement about what a graph is rather than a recogniser.
+3. **A handler cannot call its unit's own `function` declarations.** The IR has
+   no user-function call form; `function` bodies parse, lower and transpile, and
+   nothing invokes them yet. Adding a call form is an IR change with the P6
+   vars-via-Host bar to clear, and it is the first thing SCRIPT2's API surface
+   will want.
+4. **A `math.neg` node wired to a `lit.float` lowers to IR the transpiler
+   refuses.** The language no longer produces `Unary(Neg, Lit)`, but the *graph*
+   lowerer still can, and the Code tab would fail to generate for such a graph.
+   `inf-blueprint`'s to close — fold at lowering, or teach `emit` the
+   canonicalisation and re-prove `generate → lift`.
+5. **`i64::MIN` previews and does not cook** (`EmitError::IntMin`). Pinned, and
+   SCRIPT1b's cook owes it an advisory rather than a stack trace.
+6. **`math.pow` is `f64::powf` and is not bit-portable.** A script can reach it,
+   exactly as a graph can. Inherited from the node kit, not opened here; the
+   remedy is a portable polynomial in `inf_math`, which is `inf-blueprint`'s
+   ledger item and not this crate's.
+7. **The source map is handler-level.** `Unit::spans` records where each handler
+   begins — enough to point at a failing handler, which is the granularity
+   containment actually has. A statement-level map is SCRIPT2's, when a panel
+   consumes one.
+8. **No editor surface.** `.infini` has no CodeMirror mode, no diagnostics panel
+   wiring and no open-as-text menu item; SCRIPT1a is Ring 0 only. That is
+   SCRIPT2's clause 2 and was always going to be.
+9. **The language's v1 omissions are named in appendix A.9** — no tables, no
+   user types, no closures, no `break`/`continue`, no string concatenation, no
+   `for … in`, no modules, no multiple returns. Every one is a *pricing* question
+   about the IR rather than about the parser, which is the design working: the
+   language cannot outgrow the execution model by accident.
+
+**Commits:** `f9b39d8e` (`loopshape` + `raise` learns `flow.for`), `78a8449d`
+(the `inf-script` crate), `f214a86b` (the gates — and the spawn hang), `dad7ed20`
+(the spec appendix + Infini Blueprints), `245ff0e9` (the third leg — and the
+negated-literal and `i64::MIN` findings), `99bfcb29` (clippy, and one rustdoc
+warning fewer than the baseline), and this ledger.
