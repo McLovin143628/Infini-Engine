@@ -34,6 +34,7 @@ members = [
     "crates/inf-graph",
     "crates/inf-blueprint",
     "crates/inf-transpile",
+    "crates/inf-script",
     "crates/inf-hotreload",
     "crates/inf-hotreload/test-plugins/v1",
     "crates/inf-hotreload/test-plugins/v2",
@@ -509,6 +510,7 @@ inf-input = { path = "crates/inf-input" }
 inf-graph = { path = "crates/inf-graph" }
 inf-blueprint = { path = "crates/inf-blueprint" }
 inf-transpile = { path = "crates/inf-transpile" }
+inf-script = { path = "crates/inf-script" }
 # default-features off so plugin cdylibs get guest+abi only; host consumers
 # (editor, runtime) add `features = ["host"]`.
 inf-hotreload = { path = "crates/inf-hotreload", default-features = false }

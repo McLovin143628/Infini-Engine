@@ -268,7 +268,12 @@ fn lower_event_impl(
 /// Turn an event key into a valid Rust identifier for the generated `fn` name:
 /// the `:` in `input:jump` / `custom:foo` and any `.` become `_`
 /// (`input_jump`, `custom_foo`). `begin_play`/`tick`/`collision` are unchanged.
-fn sanitize_ident(key: &str) -> String {
+///
+/// **Public since SCRIPT1**: `inf-script` builds the same `BlueprintFn` from
+/// `.infini` text that this module builds from a graph, and the two must agree
+/// on a handler's `name` or the same program transpiles to two different Rust
+/// functions depending on which face authored it.
+pub fn sanitize_ident(key: &str) -> String {
     key.replace([':', '.'], "_")
 }
 
@@ -462,7 +467,7 @@ impl Lowerer<'_> {
         self.bind_local(node, "index".to_string(), idx);
         let first = self.resolve_input(node, "first", out)?;
         let last = self.resolve_input(node, "last", out)?;
-        out.push(index_init(idx, first));
+        out.push(index_init(idx, Binding::Anon, first));
         out.push(bound_init(last_local, last));
         out.push(counter_init(counter));
         let cond = Expr::Binary(
@@ -813,7 +818,7 @@ impl Lowerer<'_> {
 /// nodes remap onto the shared `event::*` host surface (`dispatch.call →
 /// event::dispatch`, `dispatch.bind → event::bind`, `dispatch.unbind →
 /// event::unbind`) so the sim's one dispatcher implementation backs all three.
-fn host_call_path(type_id: &str) -> Vec<String> {
+pub fn host_call_path(type_id: &str) -> Vec<String> {
     let mapped = match type_id {
         "dispatch.call" => "event.dispatch",
         "dispatch.bind" => "event.bind",
@@ -821,6 +826,23 @@ fn host_call_path(type_id: &str) -> Vec<String> {
         other => other,
     };
     mapped.split('.').map(str::to_string).collect()
+}
+
+/// The inverse of [`host_call_path`]: the node `type_id` an IR call path names.
+///
+/// Only the three `dispatch.*` nodes are renamed on the way down (their host
+/// path is `event::dispatch`/`bind`/`unbind`), so only they need naming on the
+/// way back; everything else is the path re-joined. `inf-script`'s emitter needs
+/// this to print an IR call as the verb an author wrote, and a hand-written
+/// second copy of a three-entry table is exactly the shape that rots — so the
+/// pair lives here, with `the_call_path_mapping_inverts` as its arm.
+pub fn node_type_of_path(path: &[String]) -> String {
+    match path.join(".").as_str() {
+        "event.dispatch" => "dispatch.call".into(),
+        "event.bind" => "dispatch.bind".into(),
+        "event.unbind" => "dispatch.unbind".into(),
+        other => other.to_string(),
+    }
 }
 
 fn default_literal(ty: PortType) -> Expr {
@@ -1789,6 +1811,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The two halves of the dispatcher rename invert each other, over the whole
+    /// registry rather than over the three entries somebody remembered.
+    #[test]
+    fn the_call_path_mapping_inverts() {
+        let reg = crate::nodekit::blueprint_registry();
+        let mut renamed = 0;
+        for def in reg.ordered() {
+            let path = host_call_path(&def.type_id);
+            assert_eq!(
+                node_type_of_path(&path),
+                def.type_id,
+                "`{}` does not survive host_call_path → node_type_of_path",
+                def.type_id
+            );
+            if path.join(".") != def.type_id {
+                renamed += 1;
+            }
+        }
+        assert_eq!(
+            renamed, 3,
+            "the three `dispatch.*` nodes are the only renames"
+        );
     }
 
     #[test]

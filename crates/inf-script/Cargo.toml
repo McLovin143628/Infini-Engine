@@ -1,0 +1,24 @@
+[package]
+name = "inf-script"
+description = "InfiniScript: the .infini text face on the Infini Blueprints IR — lexer, parser, lowering and emitter."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+# **Zero new external dependencies, by rule** (the SCRIPT1 brief). The lexer and
+# the parser are hand-rolled — the precedents are `inf-pcg`'s grammar DSL and
+# `inf-anim`'s `.inf_sm` text face — because a parser generator is a build-time
+# dependency for a grammar that fits in one file, and because the whole reason
+# InfiniScript is not Luau is that this engine does not take a foreign runtime
+# into its fixed step.
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+inf-blueprint = { workspace = true }
+inf-graph = { workspace = true }
+
+[dev-dependencies]
+inf-math = { workspace = true }

@@ -70,11 +70,20 @@ pub fn counter_init(counter: LocalId) -> Stmt {
     }
 }
 
-/// `let mut <id> = <value>;` — the `for` index's initialiser.
-pub fn index_init(index: LocalId, value: Expr) -> Stmt {
+/// `let mut <binding> = <value>;` — the `for` index's initialiser.
+///
+/// The **binding is a parameter** rather than always [`Binding::Anon`], because
+/// the two authors of a `for` loop name its variable differently and both are
+/// right: a graph's `flow.for` has no name for its index and passes `Anon`,
+/// while `.infini` text says `for i = 0, 9` and passes `Raw("i")`. The matcher
+/// accepts either and hands the binding back, so a designer's loop variable
+/// survives a text round trip. Raising a *text*-authored `for` to a graph and
+/// lowering it again returns `Anon` — the name has nowhere to live in a graph —
+/// which is the documented "up to binding kind" half of the graph round trip.
+pub fn index_init(index: LocalId, binding: Binding, value: Expr) -> Stmt {
     Stmt::Let {
         id: index,
-        binding: Binding::Anon,
+        binding,
         ty: None,
         mutable: true,
         value,
@@ -157,6 +166,8 @@ pub struct GuardedWhile<'a> {
 pub struct GuardedFor<'a> {
     /// The induction variable, and the local a body read of the index resolves to.
     pub index: LocalId,
+    /// How the index was bound — `Anon` from a graph, `Raw("i")` from text.
+    pub index_binding: &'a Binding,
     /// The snapshotted upper bound's local.
     pub bound: LocalId,
     /// The counter local the guard counts on.
@@ -217,10 +228,10 @@ pub fn match_for(body: &[Stmt], i: usize) -> Option<GuardedFor<'_>> {
         body.get(i + 3)?,
         body.get(i + 4)?,
     );
-    // s0: `let mut index = <first>;`
+    // s0: `let mut index = <first>;` — any binding kind (see `index_init`).
     let Stmt::Let {
         id: index,
-        binding: Binding::Anon,
+        binding: index_binding,
         ty: None,
         mutable: true,
         value: first,
@@ -270,6 +281,7 @@ pub fn match_for(body: &[Stmt], i: usize) -> Option<GuardedFor<'_>> {
     }
     Some(GuardedFor {
         index: *index,
+        index_binding,
         bound: *bound,
         counter,
         first,
@@ -359,7 +371,7 @@ mod tests {
         wbody.push(increment(index));
         wbody.push(increment(counter));
         vec![
-            index_init(index, first),
+            index_init(index, Binding::Anon, first),
             bound_init(bound, last),
             counter_init(counter),
             Stmt::While {
@@ -401,6 +413,7 @@ mod tests {
             (m.index, m.bound, m.counter),
             (LocalId(1), LocalId(2), LocalId(3))
         );
+        assert_eq!(m.index_binding, &Binding::Anon);
         assert_eq!(m.first, &Expr::Lit(Lit::Int(0)));
         assert_eq!(m.last, &Expr::Lit(Lit::Int(9)));
         assert_eq!(m.body, body.as_slice());
