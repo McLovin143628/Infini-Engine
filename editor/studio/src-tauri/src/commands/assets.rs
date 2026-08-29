@@ -665,50 +665,18 @@ fn spawn_tick(app: AppHandle) {
             for ev in &outcome.events {
                 let _ = app.emit("assets://import", import_event(ev));
             }
-            // ── SCRIPT1b: HOT RELOAD ────────────────────────────────────────
+            // ── SCRIPT1b: HOT RELOAD ────────────────────────
             //
-            // A `.infini` changed on disk. Compile it through
-            // `inf_script::source` — the ONE file door, the same one the cook
-            // uses — and swap the class into a running Simulate on its next
-            // fixed step.
-            //
-            // **Failure is contained here, before anything is queued.** A
-            // script that does not compile produces diagnostics, not a class;
-            // the previous good program keeps running and the sim never learns
-            // there was an edit. That is the per-handler bound stated honestly:
-            // a broken edit does not take a handler down, because a broken edit
-            // never becomes code.
-            //
-            // The diagnostics go to the **Output Log** through `tracing`, which
-            // is the smallest honest editor surface — the Problems panel and a
-            // `.infini` language mode are SCRIPT2's clause 2.
-            for (asset, path) in &outcome.scripts {
-                match inf_script::compile_path(path, format!("script:{asset}")) {
-                    Ok((class, warnings)) => {
-                        for w in &warnings {
-                            tracing::warn!(script = %path.display(), "{w}");
-                        }
-                        if let Some(sim) = app.try_state::<super::SimState>() {
-                            if sim.reload_class(*asset, class) {
-                                tracing::info!(
-                                    script = %path.display(),
-                                    "InfiniScript recompiled; the new program takes \
-                                     over on the next fixed step"
-                                );
-                            }
-                        }
-                    }
-                    Err(diags) => {
-                        tracing::error!(
-                            script = %path.display(),
-                            "InfiniScript did not compile; the PREVIOUS program \
-                             keeps running:
-{}",
-                            inf_script::render(&diags)
-                        );
-                    }
-                }
-            }
+            // In its OWN function, and that is a decision rather than
+            // tidiness. `dcc.rs`'s invalidation gate bans every spelling of
+            // play state from this loop, because the P23 law is that an asset
+            // edit is not in the document and Simulate has no opinion about
+            // whether the viewport is told. Hot reload is the one thing in
+            // this tick that legitimately asks whether a session is live, so
+            // it is kept where a reader can see it is NOT the invalidation —
+            // and the gate reads both directions, so neither can grow into
+            // the other.
+            hot_reload_scripts(&app, &outcome.scripts);
             if let Some(v) = outcome.version {
                 last_version = v;
             }
@@ -736,6 +704,56 @@ fn spawn_tick(app: AppHandle) {
             }
         })
         .expect("spawn asset tick");
+}
+
+/// **Hot-reload every `.infini` the watcher saw** (SCRIPT1b).
+///
+/// Compile each through `inf_script::source` — the ONE file door, the same
+/// one the cook and the PIE payload builder use — and swap the class into a
+/// running Simulate, which applies it on its next fixed step.
+///
+/// **Failure is contained here, before anything is queued.** A script that
+/// does not compile produces diagnostics, not a class: the previous good
+/// program keeps running and the session never learns there was an edit. So
+/// the containment bound is tighter than the one the memo states for a
+/// *runtime* failure — a broken edit does not take a handler down, because a
+/// broken edit never becomes code.
+///
+/// The diagnostics go to the **Output Log** through `tracing`, which is the
+/// smallest honest editor surface; the Problems panel and a `.infini`
+/// language mode are SCRIPT2's.
+///
+/// Separate from [`spawn_tick`] so the asset-invalidation path stays free of
+/// play state (`dcc.rs`'s `the_save_pushes_its_invalidation_unconditionally`),
+/// and so this function stays free of the invalidation — the same gate reads
+/// both.
+fn hot_reload_scripts(app: &AppHandle, scripts: &[(uuid::Uuid, std::path::PathBuf)]) {
+    for (asset, path) in scripts {
+        match inf_script::compile_path(path, format!("script:{asset}")) {
+            Ok((class, warnings)) => {
+                for w in &warnings {
+                    tracing::warn!(script = %path.display(), "{w}");
+                }
+                if let Some(state) = app.try_state::<super::SimState>() {
+                    if state.reload_class(*asset, class) {
+                        tracing::info!(
+                            script = %path.display(),
+                            "InfiniScript recompiled; the new program takes over \
+                             on the next fixed step"
+                        );
+                    }
+                }
+            }
+            Err(diags) => {
+                tracing::error!(
+                    script = %path.display(),
+                    "InfiniScript did not compile; the PREVIOUS program keeps \
+                     running:\n{}",
+                    inf_script::render(&diags)
+                );
+            }
+        }
+    }
 }
 
 fn import_event(ev: &ImportProgress) -> ImportEventDto {

@@ -742,7 +742,8 @@ impl SimSession {
     /// deferred item, landing through the interpreter rather than the dylib.
     ///
     /// `asset` is the GUID of the `.infini` (or `.inf_act`) that changed; every
-    /// actor whose entity carries that [`ActorClass`] gets the new code on the
+    /// actor whose entity carries that
+    /// [`ActorClass`](inf_ecs::components::ActorClass) gets the new code on the
     /// **next fixed step**, keeping its live variables.
     ///
     /// # The contract, and each half of it earns its place

@@ -3473,6 +3473,29 @@ mod tests {
              place an extra condition would look natural."
         );
 
+        // ── SCRIPT1b ── The tick grew a SECOND job: hot-reloading a `.infini`
+        //    into a running Simulate, which legitimately asks whether a session
+        //    is live. It lives in its own function for exactly that reason, and
+        //    the separation is read in BOTH directions here — otherwise the ban
+        //    below would be satisfied by a tick that had simply moved the
+        //    condition one call deep, which is the shape it exists to refuse.
+        assert_eq!(
+            tick.lines()
+                .filter(|l| l.contains("hot_reload_scripts("))
+                .collect::<Vec<_>>(),
+            vec!["            hot_reload_scripts(&app, &outcome.scripts);"],
+            "the tick's hot-reload call moved, multiplied or gained a guard. It              is pinned at the loop's OWN indentation — one level in and it is              inside somebody's `if`, and a designer's save would then reach a              live session only when something else about the tick was true."
+        );
+        let hot = body_of(ASSETS_SOURCE, "fn hot_reload_scripts(");
+        assert!(
+            code_only(&hot).contains("reload_class"),
+            "`hot_reload_scripts` no longer reloads anything"
+        );
+        assert!(
+            !code_only(&hot).contains("refresh_asset_index"),
+            "`hot_reload_scripts` names the viewport invalidation. The two              concerns were separated so that neither could grow into the other,              and this is the direction the ban below cannot see."
+        );
+
         for (name, body) in [("dcc_save", &save), ("spawn_tick", &tick)] {
             let code = code_only(body);
             for token in SIM_TOKENS {

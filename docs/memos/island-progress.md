@@ -20330,3 +20330,427 @@ for its own spawn hang was correct and its falsifier was a 7.5 GB allocation
 failure after a minute — which on a runner is an OOM-killed job with no line
 number. A gate is not finished when it fails; it is finished when it fails
 *legibly*, quickly, and without taking the machine with it.
+## Wave SCRIPT1b — hot reload, the cook, and the crown gate (2026-08-29)
+
+The wave the arc was pointing at. SCRIPT1a gave `.infini` a grammar, a parser
+and a round trip; SCRIPT1b gives it a **door**, a **build**, a **swap** and the
+one gate this repository has claimed since P6 and never had.
+
+### The headline: the crown gate exists, and it found two live defects
+
+`infiniscript-direction.md` §2 stated the bound in the repository's own words —
+***"No test in this repository compiles the transpiler's output and runs it."***
+`parity.rs`'s module doc calls itself *"the CI-cheap half of the parity story"*,
+and the four parity families each run the interpreter against a **hand-written
+Rust mirror** with a string pin tying the mirror to `generate_fn`'s output.
+
+That is a real gate and it proves a real thing: two *programs* agree. What it
+cannot prove is that the **generator** is right, because a defect in `emit`
+moves the generator's output and leaves the mirror exactly where it was.
+
+`crates/inf-script/tests/crown_parity.rs` parses a `.infini`, transpiles every
+handler, emits the host shims beside the output, hands the whole
+zero-dependency program to **`rustc`**, **runs it**, and requires the trace
+byte-identical to the interpreter's over one shared event sequence: the host
+calls in order, every argument as a **bit pattern**, each handler's return, and
+the member-variable state after every event. 177 trace lines, 60-plus host
+calls, and the compile costs **234 ms**.
+
+**`rustc`, not `cargo`, and the reason is in the tree already.** The
+`inf-hotreload` fixture path needs a dedicated `CARGO_TARGET_DIR`, an exclusive
+build-directory lock and a process-private artifact stash — all of it written
+because concurrent nextest processes raced over one build directory and `fs::copy`
+caught a dylib between unlink and rename. A zero-dependency program compiled by
+one `rustc` invocation has no lock to take, no workspace to resolve and no
+manifest to write. And `rustc` is present by construction: the test asking for
+it was compiled by it.
+
+**FINDING 1 — `#[infinity::blueprint(id = "…")]` has no macro behind it.**
+`inf_transpile::emit` writes that attribute onto every generated function.
+`inf_packager::mods` strips it, with a comment saying the proc-macro *"ships
+with the engine runtime, not a mod"*. **It does not.** There is no crate, no
+module and no macro named `infinity` anywhere in this workspace. So the Code
+tab's own output — `<project>/src/blueprints/<Class>_<guid8>.rs`, which the
+scaffolded `lib.rs` declares with `pub mod blueprints;` and which `cargo build`
+compiles — **does not compile**, and the template's promise that a scaffolded
+project builds is false the moment an author opens the Code tab.
+
+Nothing noticed because nothing had ever compiled it. `generate → lift` is
+perfectly happy with the attribute; the four parity families never see it,
+because their compiled side is hand-written. The comment is corrected where it
+was wrong, the fact is now a **tripwire arm** that hands the marker to `rustc`
+and reads back *"cannot find module or crate `infinity`"*, and the fix is
+**priced rather than taken**: either a real `infinity` proc-macro crate, or
+stripping at the Code tab's own door — and the second costs `lift` its identity
+anchor (`path.segments[0].ident == "infinity"`, three sites that must agree
+about a string a different session wrote into a file). That is a decision with a
+price, not a typo.
+
+**FINDING 2 — `vars::get` is monomorphic in generated Rust.** The IR is untyped
+at the call: `vars::get("flag")` is the same `Expr::Call` whether the variable
+holds a float or a bool, and the interpreter answers with whatever `Value` is in
+the map. Rust cannot. One support function cannot return both an `f64` and a
+`bool`, and `if vars::get("flag")` needs exactly `bool`. So **a member variable
+that is not a float parses, lowers, interprets perfectly and cannot be
+transpiled** — measured by compiling one and reading `rustc`'s `E0308`. Carried
+by name; the fix is typed accessors in the emitter plus a decision about a
+support module that does not exist yet.
+
+### The bound the crown gate does not cover, named rather than discovered
+
+**Transcendentals.** `math.sin` / `math.cos` route to
+`inf_math::portable::psin64`/`pcos64`, and a zero-dependency shim cannot call
+them without becoming a **second implementation** of a bit-exact polynomial —
+which is worse than no coverage, because two implementations that agree today
+are a divergence with a delay. They stay covered where they already are:
+`portable_math_law.rs` proves the interpreter's routing bit for bit over a
+`Host` that panics if reached, and `math_parity.rs` proves the two sides agree
+*by construction* (both bottom out in `inf_blueprint::math_builtins`). The
+exact-IEEE builtins — `sqrt`, `abs`, `floor`, `min`, `max` — are inside the gate
+and are exact on both sides because each is one instruction.
+
+### The file door, and the audit item it was routed
+
+SCRIPT1a shipped a parser and **no reader**: `parse_unit` takes a `&str`, and a
+grep for `std::fs` across the crate returned nothing, so appendix A.1's *"the
+encoding is UTF-8"* was a statement about a caller that did not exist. The audit
+routed it here by name.
+
+`inf_script::source` is that caller's door, and SCRIPT1b gives it three at once
+— a watcher, a cook and a PIE payload builder — which is the exact shape this
+house has been burned by (P22's *one door for three paths*: the cook, the PIE
+payload and the Simulate seeder each derived fractures, two of them separately,
+and they agreed "by construction" and did not).
+
+| | |
+|---|---|
+| the file will not open | a diagnostic naming the path and the OS error |
+| over `MAX_SOURCE_BYTES` (1 MiB) | a diagnostic naming **both numbers**, in bytes |
+| not UTF-8 | the **byte offset** of the first bad byte, at the line and column it falls on |
+| a leading byte-order mark | **repaired**, exactly as the lexer repairs one |
+
+The size bound is a *plausibility* bound rather than a performance one — the
+SCRIPT1a audit measured a twenty-million-character line through the lexer at
+0.09 s — and the refusal is deliberately loud, because the failure mode without
+one is the worst kind: the editor's watcher re-parsing a mis-renamed binary on
+every save, and nothing saying why the editor got slow.
+
+The BOM is repaired at the door as well as in the lexer, and that is not
+belt-and-braces: the door's output is what a cook hashes and what a diff shows,
+so the two have to agree about where the text starts.
+
+### Where a script lives: the project-layout ruling
+
+**`Content/Scripts/`**, and it is IB-7's ruling for IB-7's reason.
+
+A script is **content**. It takes a GUID, a sidecar, a content hash and a
+dependency closure; a level binds one through the same `ActorClass(Uuid)`
+component that binds a `.inf_act`; and `inf cook` opens `<root>/Content/` **and
+nothing else**. Putting scripts under `src/` would reproduce the IB-7 dead end
+exactly — the first thing anyone did with the engine would scaffold a script the
+cook cannot see. And `src/` is already spoken for by the other half of the same
+feature: `blueprint_source` writes *generated* Rust to `<root>/src/blueprints/`,
+and its module doc reserves `src/` for what `cargo build` compiles. `.infini` is
+authored source that cargo never sees; the two would be neighbours meaning
+opposite things.
+
+**And it is a convention, not a lookup.** There is no `scripts_dir` manifest
+field, deliberately: `AssetDb::scan` recurses, so a `.infini` anywhere under the
+content root is found the day it exists. `Scripts/` is where the template *puts*
+the first one, not where the engine *looks* — which is why a designer may
+organise scripts beside the actors they drive without telling anything.
+
+All four templates now scaffold an `Example.infini`, and the arm **compiles it
+through the door** rather than asserting a file exists.
+
+### Hot reload: 121 ms, of which 120 ms is a debounce
+
+The P6 deferred item — *"compile-on-save dylib hot swap in Simulate (mechanism
+proven in `inf-hotreload`, wired at the P9 Simulate/PIE loop)"* — lands at last,
+through the **interpreter** rather than the dylib.
+
+The watcher sees a `.infini`, the file door compiles it, and
+`SimSession::reload_class` queues the class for the **next fixed step**, in the
+same slot as `apply_pending_tunes` and for the reason `crate::tuning`'s header
+already argues: a running Simulate is a deterministic sequence of fixed steps,
+and a change that lands part-way through one is a step no replay can reproduce.
+A filesystem event is even less welcome inside a step than a slider is.
+
+Keyed by **asset GUID**, not by class id, because what a watcher observes is a
+file and what binds a file to an actor is `ActorClass`. The session records only
+a class *id*, so the binding is re-read from the document — the same component
+`bound_actors` reads when the session starts.
+
+**State survives** because `ActorInstance` sits *beside* the class in
+`ActorState`: replacing `state.class` alone keeps every member variable, every
+`nodestate` cell and the actor's `entity` id. **And variables the edit ADDED are
+seeded**, because `vars::get` on a missing name is a hard `RunError` and without
+the seed the very first Tick after adding a variable would kill the handler.
+
+That leaves an asymmetry a designer has to be told rather than discover:
+**changing a variable's DEFAULT does not change a running instance.** The gate
+states it and asserts it — the fixture's edit raises `rate` from 1 to 10 and
+adds `bonus` at 100, and the running actor counts by **101**, not 110. The
+alternative, re-seeding every variable from the class, would throw away exactly
+the state the feature exists to preserve.
+
+**Failure containment is tighter than §4's bound predicted.** §4 says a broken
+script takes *its handler, on its actor, for that tick*. On the hot-reload path
+it takes nothing at all: a broken edit never becomes a class, so nothing is
+queued, the previous good program keeps running and the sim does not learn there
+was an edit. The diagnostics go to the **Output Log** with their line and column
+— the smallest honest editor surface, and zero frontend movement; the Problems
+panel and a `.infini` language mode are SCRIPT2's clause 2.
+
+**Measured, printed, never asserted**: edit → running is **121 ms**, of which
+**120 ms is the watcher's own debounce** (a constant somebody chose). The
+engine's half — file door, compile, swap, one fixed step — is **0.45 ms**. Zero
+`rustc`. The two halves are printed separately on purpose: one is a fact about
+this engine and the other is a fact about a policy number.
+
+**And the player gets no such door.** `player_has_no_tuning_door` grew three
+tokens (`reload_class`, `pending_classes`, `ScriptSwap`), because a host whose
+gameplay code can be swapped while the other's cannot is a second simulation
+wearing the first one's name, and every parity gate here would go on passing
+while it happened.
+
+### The cook, and the ship decision taken
+
+**The default is: the cook lowers a script and packs the IR for the shipped
+interpreter.** Both doors were priced; this one is taken, and the reasons are of
+record:
+
+* it is what the engine **already does** with a `.inf_act` — the cook ships the
+  IR as data and PIE and the shipped player both interpret it — so a script
+  riding the same road costs no new mechanism and inherits the PIE == shipping
+  arms that road already has;
+* the transpile-to-Rust door writes into the **user's own crate**, and the
+  shipped `inf-player` is a *prebuilt generic binary that loads packs* — it does
+  not link a project crate at all. Transpiling therefore changes nothing about
+  what ships until somebody prices a per-project player build, which is a
+  build-system decision this wave did not take (and which finding 1 above says
+  would not compile today anyway);
+* and after the crown gate the choice **costs no correctness**, because
+  interpreted and compiled are now measured equal over a compiled program rather
+  than over four hand-written mirrors.
+
+The transpile door stays where it is — the Code tab, and the WASM mod cook — and
+SCRIPT3 takes the per-script-class decision with measurements, as the memo says.
+
+`AssetKind::Script` is **additive**: appended at the tail of the enum, of
+`all()`, of `FROZEN_WIRE` (24 → 25) and of `kind_code` (25), with
+`compresses_kind` deciding it like a Blueprint. No existing row moved and **no
+schema moved**. What rides in the pack is the lowered `BlueprintClass` as the
+same pretty JSON a `.inf_act` carries, so the shipped player links no lexer and
+no parser and `is_class_kind` reads both — one function rather than two
+divergent copies of a kind check.
+
+`i64::MIN` now **cooks with the advisory** SCRIPT1a routed here rather than a
+stack trace: the interpreter computes with it perfectly and the packed class
+holds it, so the script previews *and* ships; what it cannot do is be transpiled
+(`-(9223372036854775808)` overflows an `i64` literal), and the advisory names
+the handler and the remedy.
+
+### THE SK1c BLOCKER-4 EDGE, OPEN
+
+SK1c stopped a wave on this, in its own words: *"the cook's `asset_deps` walks
+Level, Material, StateMachine, AnimClip, BiomeSet and Pcg — **not Blueprint** —
+and an item catalogue is authored in a `.inf_act`, so a mesh the catalogue names
+would never enter the closure and would not be packed at all."* It refused to
+ship *"three cubes and a dangling reference"*.
+
+It is open now, and for `.inf_act`, `.inf_fn` and `.infini` **at once**, because
+all three hold the same IR and one Ring-0 walk reads it
+(`inf_blueprint::assetrefs`).
+
+The design decision is that what a program can name is **enumerated, not
+guessed**. A string argument in this IR is one of four things and only one is an
+asset: an asset name, a **gameplay id** whose meaning is a row in a catalogue
+the same program defines, free **text**, or a whole **table** carried as one
+string. Resolving the second class against the asset database would attach an
+actor to whatever asset happened to be called `rifle`; refusing it would advise
+on every correct program. So `STR_PORTS` writes each down with a role, and the
+**census arm** walks the node kit and fails if a registered `Str` input port has
+no row — *and* if a row names a port that no longer exists, because a row about
+nothing reads as coverage.
+
+Twenty string input ports, twenty rows, and **exactly one is an asset**:
+`engine.spawn`'s prefab. A name that resolves to neither a GUID nor a unique
+file stem is a **blocking** advisory naming itself, the verb and the remedy. The
+gate is anti-vacuous by construction: it cooks with **explicit roots** so the
+named actor can only reach the pack through the script's edge, on a *blank* boot
+level rather than the platformer's — whose own `actor` binding would have pulled
+the same asset in and certified an arm with no edge behind it.
+
+### `PIE == shipping`, over gameplay written as text
+
+The memo's law, discharged: *"`PIE == shipping` over a trace whose gameplay runs
+from a `.infini` script is a SCRIPT1 gate arm, not a SCRIPT3 aspiration."*
+
+An item catalogue defined on `BeginPlay`, a pickup put on the ground, a crate
+handed out every quarter second and health written from the count — authored as
+**text**, cooked, and run twice: once off a `.inf_pack` the way `--pack` boots,
+once off the `ScenePayload` the editor really builds. 90 steps, **6 distinct
+world states and 90 distinct variable tuples**, `handed = 5`, `carried = 5`,
+compared **per step** so a divergence names its step rather than printing two
+vectors.
+
+The failure it exists to catch is a divergence in the **door**, not in the
+program: the cook lowers a script and the PIE payload resolves a class, and if
+those two ever stop being one lowering, both sides go on working and disagree.
+
+**`build_scene_payload` needed no new parameter**, which is the wave's quietest
+good result: a script's class arrives through the same
+`|guid| Option<BlueprintClass>` closure a `.inf_act` does, because a level binds
+both by asset GUID. Eight closures stayed eight.
+
+There is deliberately **no loose-directory arm**. The shipped player never reads
+a `.infini` — `load_actor_classes_by_guid_from_dir` reads `.inf_act` and only
+`.inf_act` — and adding a parser to the player to make a "loose" comparison
+possible would falsify the sentence in order to gate it.
+
+### The fourth CRLF catch, from the one direction the lexer cannot cover
+
+The cross-host arm was written to assert that a Windows checkout and a Unix one
+cook the same artifact. It **failed**, and the reason is worth the paragraph.
+
+The lexer is insensitive to CRLF, a lone CR and a leading byte-order mark, so
+what a script *means* is a pure function of the text however an editor saved it.
+The cooked class's **id** is not: it is the asset GUID, and a `.infini` with no
+committed sidecar takes a GUID synthesised from its **content hash** — a hash
+over bytes, which nothing downstream can normalise after the fact. Same program,
+different name, in a pack whose entries are keyed by that name.
+
+So the arm asserts the strong half (the program is identical, byte for byte with
+the ids equalised) and **measures** the weak half, with an assertion that the
+two GUIDs *differ* — because if they ever agree, the synthesised GUID stopped
+being the content hash and the whole reasoning needs re-deriving. The remedy is
+`*.infini -text` in `.gitattributes`, which is where the CRLF law has always
+lived for files whose bytes are their identity, and it has its own arm beside
+the one that derives it.
+
+### The eaten continuation, fifth catch
+
+Five string literals in this wave lost their `\`-continuation and absorbed the
+indentation — the P22 law's exact signature, from the same cause as the third
+and fourth: scripted edits to Rust string literals, where a lone backslash
+before a newline is a *Python* continuation and eats the Rust one.
+`inf_packager`'s workspace sweep found every one, which is precisely what it is
+for. Repaired rather than exempted. (It also caught three *false* positives
+first — trailing comments aligned after byte-string literals, which are
+indistinguishable from the defect — and those were rewritten with the comments
+above their bytes, the SCRIPT1a precedent.)
+
+### The disk law, in its documented disguise, third time
+
+The battery died at `LINK : fatal error LNK1318: Unexpected PDB error; LIMIT
+(12)` on two `inf-editor-core` test binaries — which reads like an MSVC
+PDB-size ceiling and is not. CLAUDE.md has the law and Wave G has its cheap
+half: **remove `target/debug/incremental` first**. It freed **30 GB** (23 GB
+free → 52.6 GB) with **no cold rebuild**, and the battery went green on the
+retry. Read a link error against `df` before believing what it says.
+
+### Mutations
+
+The crown gate is built to falsify, and each mutation is reported with whether
+anything **else** in the tree caught it — because "my gate went red" is only
+half the measurement.
+
+| mutation | crown gate | what else caught it |
+|---|---|---|
+| `Expr::Binary` built from a **parsed token stream** (the exact thing the Spike B memo forbids: precedence re-association) | **RED**, "traces diverge at line 10", both bit patterns printed | `hand_edits::precedence_parens_are_preserved_in_regen` |
+| `bin_op_syn(Sub) => Add` | **RED** at line 69 | `roundtrip::generate_then_lift_is_identity` |
+| a **mirror-image** `Lt`/`Gt` swap in `emit` **and** `lift`, so `generate → lift` stays an identity | **RED** at line 12 | `hand_edits::{if_else_lifts, while_loop_lifts}` |
+| revert `apply_pending_classes`' variable seeding | — | `a_save_becomes_new_behaviour_in_a_running_simulate` (the first Tick after the swap dies at `vars::get`) |
+
+The two defects the crown gate found are the honest statement of what it adds:
+**no round trip can compile**, so `generate → lift` is perfectly happy with an
+attribute that has no macro and with a `vars::get` that has no type. Those are
+not mutations somebody invented; they were in the tree.
+
+### Counts
+
+| | baseline (`3f5d47f0`) | **wave SCRIPT1b** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 345 / 6 515 / 0 / 19 | **350 / 6 546 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, **exit 0**, on the final tree. **+5 blocks** (`file_door`, `crown_parity`, `cook_script`, `script_hot_reload`, `script_gameplay_gate`) and **+31 arms**, which is exactly the count of `#[test]` lines the wave's diff adds |
+| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**; none added, none re-blessed, and `git status` over `crates/inf-render/tests/goldens` is empty afterwards |
+| rustdoc individual warnings (cold, ceiling 450) | 373 over 30 crates | **373 over 30 crates** — after `cargo clean --doc` (9 086 files, 222.9 MiB): **403 `^warning:` lines minus 30 per-crate summaries**, cross-checked against the sum of those summaries' own counts (373 exactly), over **48** documented crates. The wave adds **zero** — and it added one first, caught by running the count rather than assuming it: `reload_class`'s doc named `ActorClass` without a path. Headroom **77** |
+| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — exit 0, run **LAST** per the rmeta law. Incremental, and said so: **29** crates re-checked (`inf-asset`, `inf-blueprint` and everything downstream of them), which is exactly the wave's code footprint; the rest served from a fingerprint cache keyed on the *same* `RUSTFLAGS`, which is what makes reusing it legitimate rather than a gap |
+| `cargo fmt --all --check` | clean | **clean** |
+| frontend | not run | **not run — no `editor/studio/src/` file moved.** The diagnostics surface is `tracing` → the Output Log, which is Ring 2 Rust; the wave's whole diff over `editor/studio/` is four `src-tauri` files. No ts-rs type changed shape |
+| schemas / committed content | unmoved | **no schema moved** — `AssetKind::Script` is an APPEND (enum tail, `all()`, `FROZEN_WIRE` 24→25, `kind_code` 25) and no existing row moved; scene, `ScenePayload`, `BlueprintClass` and the sidecar all stand. `EXPECTED_LEVELS` still **23** — the PIE gate builds its fixture in a temp directory rather than committing a level |
+| `Cargo.lock` | — | **zero new external crates**; the only edges added are internal (`inf-script` into `inf-packager`, `inf-studio`, `inf-editor-core`, and as a **dev**-dep of `inf-project` and `inf-player`) |
+| `chr(92)` sweep | clean | **clean** — 3 376 added Rust lines, 98 with a backslash, and **zero** eaten-continuation signatures after the fifth catch was repaired. `inf_packager`'s workspace sweep is green |
+| disk | 51 GB free | **50 GB** free — one `LNK1318` incident, resolved by deleting `target/debug/incremental` alone (**+30 GB**, no cold rebuild); no `cargo clean` beyond `--doc` |
+
+### Carried, by name
+
+1. **`#[infinity::blueprint]` has no macro, so the Code tab's output does not
+   compile.** Tripwire armed (`the_generated_marker_has_no_macro_behind_it`);
+   `inf_packager::mods`' comment corrected. The fix is a real `infinity`
+   proc-macro crate **or** stripping at `blueprint_source`'s door, and the second
+   costs `lift` its identity anchor. Priced, not taken.
+2. **`vars::get` is monomorphic in generated Rust**, so a member variable that is
+   not a float cannot be transpiled. Measured
+   (`a_bool_member_variable_does_not_compile`), and the arm fails the day it is
+   fixed.
+3. **Transcendentals are outside the crown gate**, by a stated argument rather
+   than an oversight. Closing it means a bit-exact `psin64` in the shim, i.e. a
+   second implementation; the honest alternative is linking `inf-math` into the
+   generated program, which trades the zero-dependency `rustc` invocation for a
+   `cargo` build and its lock.
+4. **The PIE payload does not walk `asset_refs`.** `build_scene_payload` is a
+   hand-maintained mirror of `asset_deps` and this edge is not in it. Safe today
+   for a **measured** reason — `engine.spawn`, the only asset-naming verb,
+   reaches neither host's `Host::call` — and armed
+   (`nothing_a_script_names_can_reach_a_world_yet`) so the day somebody
+   implements it, the arm goes red and says what it owes.
+5. **A `.infini` needs a committed sidecar to keep a stable GUID across hosts**,
+   or `*.infini -text`. Both are in place for this repository; a *user's* project
+   inherits the same rule and nothing tells them so yet.
+6. **The editor surface is the Output Log.** No CodeMirror mode, no Problems-panel
+   wiring, no open-as-text menu item — SCRIPT2's clause 2, unchanged from
+   SCRIPT1a's carried item 8. **And no user-facing page**: the mdBook names
+   Infini Blueprints in two places and `.infini` in none, so a designer reading
+   the docs learns about the graph face and not the text one. That belongs with
+   SCRIPT2's registry-generated API Manual rather than being written twice.
+7. **SCRIPT1a's carried items 2, 3, 4, 6, 7 and 9 stand**: `RaiseError::NonLinear`
+   and the three other non-flow refusals; no user-function call form; the
+   `math.neg`-on-a-`lit.float` graph gap; `math.pow` is `f64::powf`; the
+   handler-level source map; and appendix A.9's v1 omissions.
+
+**Commits:** `3659bb0f` (the file door, the `Content/Scripts/` ruling and the
+scaffolded example), `665ffaa2` (the cook path, `AssetKind::Script`, the ship
+decision, the SK1c blocker-4 edge and the `.gitattributes` catch), `89785aaa`
+(**the crown gate**, and the two defects it found), `d3846ff7` (hot reload, and
+the player's refusal of the same door), `5a3a222d` (`PIE == shipping` over a
+script trace, and the cooked-artifact digest), `206aa305` (the fifth eaten
+continuation, the memo and the ROADMAP), plus the invalidation-gate separation
+and this ledger.
+
+### The laws this wave adds
+
+**A gate that cannot compile cannot see a compile error.** `generate -> lift ==
+id` is a strong invariant and it is blind to an attribute with no macro behind
+it and to a function with no type. Every arm in the four parity families is
+about what the generated program *means*; none was about whether it *builds*,
+and both defects had been in the tree for waves.
+
+**A mirror is only as honest as its author's imagination.** A hand-written
+compiled side proves two programs agree; it cannot prove the generator is
+right, because a defect in `emit` moves the output and leaves the mirror where
+it was. The measured version of that sentence is the mutation table: the
+mirror-image `Lt`/`Gt` swap keeps `generate -> lift` an identity and reddens
+only the gate that runs the result.
+
+**Normalising a reader cannot normalise an identity.** The lexer can be made
+insensitive to CRLF and to a byte-order mark; a content hash cannot. Anything
+whose NAME is derived from its bytes needs the rule at the checkout, not at the
+parser -- which is why `.gitattributes` is where the CRLF law keeps ending up.
+
+**When a source gate blocks you, separate the concern rather than widen the
+gate.** `dcc.rs` bans play state from the asset-invalidation tick, and hot
+reload legitimately asks whether a session is live. Moving it into its own
+function and teaching the gate to read BOTH directions -- the tick's call is
+pinned at its own indentation, and the extracted function may not name the
+invalidation -- left both claims true and neither weakened.
