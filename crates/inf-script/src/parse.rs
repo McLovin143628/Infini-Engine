@@ -62,7 +62,7 @@
 //! `or`/`and`/`+`/`*` chains spends one level of the same budget: the bound is on
 //! the tree, not on the parser's own stack.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use inf_blueprint::loopshape;
 use inf_blueprint::lower::sanitize_ident;
@@ -186,23 +186,36 @@ pub fn parse_unit(source: &str) -> Result<(Unit, Vec<Diagnostic>), Vec<Diagnosti
 /// so the route a file reports is a function of the file rather than of a hash.
 fn check_call_graph(unit: &Unit, diags: &mut Vec<Diagnostic>) {
     let names: Vec<&str> = unit.functions.iter().map(|f| f.name.as_str()).collect();
-    let edges: Vec<Vec<String>> = unit
+    // **Resolved once, into indices.** Both walks below used to look a callee up
+    // by scanning `names`, and `collect_local_calls` decided "is this one of
+    // ours" the same way — three linear scans nested inside two walks, which the
+    // SCRIPT2a audit measured as **cubic**: 2 000 chained functions took 2.0 s to
+    // refuse and 10 000 took **359 s**, in release, on a 488 KiB file — well
+    // inside `source::MAX_SOURCE_BYTES`. The watcher calls this on every save and
+    // the cook calls it on every build, so that is a parse that hangs an editor.
+    // A map plus `Vec<Vec<usize>>` edges makes the whole thing linear.
+    let mut index: HashMap<&str, usize> = HashMap::with_capacity(names.len());
+    for (i, n) in names.iter().enumerate() {
+        // First wins, which is what a linear `position` scan did.
+        index.entry(*n).or_insert(i);
+    }
+    let edges: Vec<Vec<usize>> = unit
         .functions
         .iter()
         .map(|f| {
-            let mut out: Vec<String> = Vec::new();
-            collect_local_calls(&f.body, &names, &mut out);
+            let mut out: Vec<usize> = Vec::new();
+            let mut seen: HashSet<usize> = HashSet::new();
+            collect_local_calls(&f.body, &index, &mut seen, &mut out);
             out
         })
         .collect();
-    let index = |n: &str| names.iter().position(|c| *c == n);
     let before = diags.len();
-    check_no_recursion(unit, &names, &edges, &index, diags);
+    check_no_recursion(unit, &names, &edges, diags);
     // A cycle makes "how deep is the deepest chain" meaningless — and the walk
     // below assumes an acyclic graph — so the depth check runs only when the
     // graph is one.
     if diags.len() == before {
-        check_call_depth(unit, &names, &edges, &index, diags);
+        check_call_depth(unit, &names, &edges, diags);
     }
 }
 
@@ -210,48 +223,83 @@ fn check_call_graph(unit: &Unit, diags: &mut Vec<Diagnostic>) {
 ///
 /// Split out of [`check_call_graph`] so the two refusals share one call graph
 /// and one walk order.
+///
+/// A **white/grey/black** depth-first colouring: a `Grey` node is on the current
+/// route, so an edge into one is a back edge and the route from it is the cycle.
+/// `Black` is finished and never re-entered, which is what makes the whole sweep
+/// `O(V + E)` — the first version restarted a fresh walk, with a fresh `seen`
+/// buffer, from every function, and the audit measured what that cost (see
+/// [`check_call_graph`]).
+///
+/// The reported cycle is unchanged by the rewrite, and that is checked rather
+/// than assumed: roots are taken in **declaration order** and edges in statement
+/// order, so `down → down`, `ping → pong → ping`, `a → b → c → a` and the
+/// downstream `b → c → b` all still name the function they named before.
 fn check_no_recursion(
     unit: &Unit,
     names: &[&str],
-    edges: &[Vec<String>],
-    index: &impl Fn(&str) -> Option<usize>,
+    edges: &[Vec<usize>],
     diags: &mut Vec<Diagnostic>,
 ) {
-    for (start, f) in unit.functions.iter().enumerate() {
-        // Depth-first from this function, recording the route, and stopping at
-        // the first return to `start`.
-        let mut route = vec![start];
-        let mut stack = vec![(start, 0usize)];
-        let mut seen = vec![false; names.len()];
-        seen[start] = true;
+    #[derive(Clone, Copy, PartialEq)]
+    enum Colour {
+        White,
+        Grey,
+        Black,
+    }
+    let mut colour = vec![Colour::White; names.len()];
+    // The grey nodes, in route order. `route.last()` is always the node whose
+    // edges are being walked.
+    let mut route: Vec<usize> = Vec::new();
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    for root in 0..names.len() {
+        if colour[root] != Colour::White {
+            continue;
+        }
+        colour[root] = Colour::Grey;
+        route.push(root);
+        stack.push((root, 0));
         while let Some((node, next)) = stack.pop() {
-            let Some(callee) = edges[node].get(next) else {
+            let Some(&to) = edges[node].get(next) else {
+                colour[node] = Colour::Black;
                 route.pop();
                 continue;
             };
             stack.push((node, next + 1));
-            let Some(to) = index(callee) else { continue };
-            if to == start {
-                let mut chain: Vec<&str> = route.iter().map(|i| names[*i]).collect();
-                chain.push(names[start]);
-                diags.push(Diagnostic {
-                    severity: Severity::Error,
-                    span: unit.spans.get(&f.id).copied().unwrap_or_default(),
-                    message: format!(
-                        "`{}` calls itself ({}) — InfiniScript has no recursion, because \
-                         the interpreter bounds a call chain and the Rust the cook \
-                         generates does not, so the two would not agree. Write the \
-                         repetition as a `while` or `for` loop",
-                        names[start],
-                        chain.join(" → ")
-                    ),
-                });
-                return;
-            }
-            if !seen[to] {
-                seen[to] = true;
-                route.push(to);
-                stack.push((to, 0));
+            match colour[to] {
+                Colour::Grey => {
+                    let at = route
+                        .iter()
+                        .position(|n| *n == to)
+                        .expect("a grey node is on the route");
+                    let mut chain: Vec<&str> = route[at..].iter().map(|i| names[*i]).collect();
+                    chain.push(names[to]);
+                    let span = unit
+                        .functions
+                        .get(to)
+                        .and_then(|f| unit.spans.get(&f.id))
+                        .copied()
+                        .unwrap_or_default();
+                    diags.push(Diagnostic {
+                        severity: Severity::Error,
+                        span,
+                        message: format!(
+                            "`{}` calls itself ({}) — InfiniScript has no recursion, because \
+                             the interpreter bounds a call chain and the Rust the cook \
+                             generates does not, so the two would not agree. Write the \
+                             repetition as a `while` or `for` loop",
+                            names[to],
+                            chain.join(" → ")
+                        ),
+                    });
+                    return;
+                }
+                Colour::Black => {}
+                Colour::White => {
+                    colour[to] = Colour::Grey;
+                    route.push(to);
+                    stack.push((to, 0));
+                }
             }
         }
     }
@@ -274,12 +322,12 @@ fn check_no_recursion(
 fn check_call_depth(
     unit: &Unit,
     names: &[&str],
-    edges: &[Vec<String>],
-    index: &impl Fn(&str) -> Option<usize>,
+    edges: &[Vec<usize>],
     diags: &mut Vec<Diagnostic>,
 ) {
     // `depth[i]`, plus the callee that achieves it, so the refusal can print the
-    // route rather than only a number.
+    // route rather than only a number. Memoized, so the whole sweep is
+    // `O(V + E)` however many roots it starts from.
     let mut depth: Vec<Option<(u32, Option<usize>)>> = vec![None; names.len()];
     for start in 0..names.len() {
         // Iterative post-order, so a unit with thousands of functions cannot
@@ -290,18 +338,16 @@ fn check_call_depth(
             if depth[node].is_some() {
                 continue;
             }
-            match edges[node].get(next).and_then(|c| index(c)) {
-                Some(to) if depth[to].is_none() => {
+            match edges[node].get(next) {
+                Some(&to) if depth[to].is_none() => {
                     stack.push((node, next));
                     stack.push((to, 0));
                 }
                 Some(_) => stack.push((node, next + 1)),
-                None if next < edges[node].len() => stack.push((node, next + 1)),
                 None => {
                     // Every callee is resolved: fold them.
                     let mut best: (u32, Option<usize>) = (0, None);
-                    for c in &edges[node] {
-                        let Some(to) = index(c) else { continue };
+                    for &to in &edges[node] {
                         let d = depth[to].expect("callee resolved first").0;
                         if d > best.0 {
                             best = (d, Some(to));
@@ -349,25 +395,41 @@ fn check_call_depth(
     }
 }
 
-/// Every one-segment call in `body` that names one of `names`, in walk order,
-/// without repeats.
-fn collect_local_calls(body: &[Stmt], names: &[&str], out: &mut Vec<String>) {
-    fn expr(e: &Expr, names: &[&str], out: &mut Vec<String>) {
+/// Every one-segment call in `body` that names a declared `function`, resolved
+/// to its index, in walk order and without repeats.
+///
+/// `known` and `seen` are both maps rather than scans: this runs once per call
+/// expression in the unit, and doing either by walking a `Vec` is one of the
+/// three linear scans the SCRIPT2a audit measured as a cubic parse.
+fn collect_local_calls(
+    body: &[Stmt],
+    known: &HashMap<&str, usize>,
+    seen: &mut HashSet<usize>,
+    out: &mut Vec<usize>,
+) {
+    fn expr(
+        e: &Expr,
+        known: &HashMap<&str, usize>,
+        seen: &mut HashSet<usize>,
+        out: &mut Vec<usize>,
+    ) {
         match e {
             Expr::Call { path, args } => {
                 if let [name] = path.as_slice() {
-                    if names.contains(&name.as_str()) && !out.iter().any(|n| n == name) {
-                        out.push(name.clone());
+                    if let Some(&i) = known.get(name.as_str()) {
+                        if seen.insert(i) {
+                            out.push(i);
+                        }
                     }
                 }
                 for a in args {
-                    expr(a, names, out);
+                    expr(a, known, seen, out);
                 }
             }
-            Expr::Unary(_, a) => expr(a, names, out),
+            Expr::Unary(_, a) => expr(a, known, seen, out),
             Expr::Binary(_, a, b) => {
-                expr(a, names, out);
-                expr(b, names, out);
+                expr(a, known, seen, out);
+                expr(b, known, seen, out);
             }
             Expr::Lit(_) | Expr::Param(_) | Expr::Local(_) => {}
         }
@@ -375,22 +437,22 @@ fn collect_local_calls(body: &[Stmt], names: &[&str], out: &mut Vec<String>) {
     for s in body {
         match s {
             Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::ExprStmt(value) => {
-                expr(value, names, out)
+                expr(value, known, seen, out)
             }
             Stmt::If {
                 cond,
                 then_body,
                 else_body,
             } => {
-                expr(cond, names, out);
-                collect_local_calls(then_body, names, out);
-                collect_local_calls(else_body, names, out);
+                expr(cond, known, seen, out);
+                collect_local_calls(then_body, known, seen, out);
+                collect_local_calls(else_body, known, seen, out);
             }
             Stmt::While { cond, body } => {
-                expr(cond, names, out);
-                collect_local_calls(body, names, out);
+                expr(cond, known, seen, out);
+                collect_local_calls(body, known, seen, out);
             }
-            Stmt::Return(Some(e)) => expr(e, names, out),
+            Stmt::Return(Some(e)) => expr(e, known, seen, out),
             Stmt::Return(None) | Stmt::Snippet(_) => {}
         }
     }

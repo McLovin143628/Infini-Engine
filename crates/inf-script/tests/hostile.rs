@@ -399,6 +399,39 @@ fn pathological_input_is_always_a_value() {
             "a ten-thousand-segment path",
             format!("on tick(dt)\n    a{}()\nend\n", ".b".repeat(10_000)),
         ),
+        // **The SCRIPT2a audit's second finding, and the reason this row is a
+        // SIZE rather than a shape.** The call graph gets two walks (no cycle,
+        // no chain past `MAX_CALL_DEPTH`), and the first version of them looked
+        // a callee up by SCANNING the name list — three linear scans nested
+        // inside two walks. Measured, in release, on a file well inside
+        // `source::MAX_SOURCE_BYTES`: 2 000 chained functions took **2.0 s** to
+        // refuse and 10 000 took **359 s**. The watcher parses on every save and
+        // the cook parses on every build, so that is an editor that stops
+        // responding and a build that looks hung, from a 488 KiB script.
+        //
+        // Indices and a map make it linear (7 ms and 129 ms for the same two).
+        // There is no wall-clock assertion here — this house does not make them
+        // — and none is needed: the arm *completing* is the gate, because the
+        // cost of the defect is measured in minutes.
+        (
+            "five thousand functions in one call chain",
+            (0..5_000)
+                .map(|i| {
+                    let body = if i + 1 == 5_000 {
+                        "    return 1.0\n".to_string()
+                    } else {
+                        format!("    return f{}()\n", i + 1)
+                    };
+                    format!("function f{i}() -> float\n{body}end\n")
+                })
+                .collect::<String>(),
+        ),
+        (
+            "five thousand functions that call nobody",
+            (0..5_000)
+                .map(|i| format!("function f{i}() -> float\n    return 1.0\nend\n"))
+                .collect::<String>(),
+        ),
         ("nothing but dots", ".".repeat(10_000)),
         ("a file of end keywords", "end ".repeat(10_000)),
         ("an empty file", String::new()),
