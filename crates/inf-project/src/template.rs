@@ -426,6 +426,7 @@ pub fn scaffold(parent: &Path, name: &str, template: ProjectTemplate) -> Result<
     }
 
     write(&root.join(".gitignore"), GITIGNORE)?;
+    write(&root.join(".gitattributes"), GITATTRIBUTES)?;
     write(
         &root.join("README.md"),
         &format!(
@@ -461,6 +462,36 @@ fn cargo_toml(crate_name: &str) -> String {
 }
 
 const GITIGNORE: &str = "/target\n/Content/.inf/\n*.inf_lvl.autosave\ncrash-recovery.inf_lvl\n";
+
+/// The `.gitattributes` every scaffolded project gets — **SCRIPT1b's carried
+/// item 5, closed by the SCRIPT1b audit rather than carried again.**
+///
+/// The engine's own `.gitattributes` has had `*.infini -text` since the wave
+/// that found the reason, and the ledger's carried entry said *"a user's project
+/// inherits the same rule and nothing tells them so yet"*. That understated it
+/// once the layout ruling landed: every template now scaffolds
+/// `Content/Scripts/Example.infini` with **no committed sidecar**, so its asset
+/// GUID is synthesised from its **content hash** on the first scan — and a hash
+/// is over bytes. A user who commits the scaffolded project and clones it on the
+/// other operating system gets git's line-ending conversion, a different byte
+/// stream, a different GUID for the same program, and every `ActorClass` binding
+/// pointing at nothing. Telling them is not enough when the file is already
+/// there on day one; the rule ships with the project.
+///
+/// Scoped to what the reasoning covers: only the file kinds whose **identity is
+/// their bytes** live under a user's content root. `.inf_lvl` and the other
+/// binary payloads are already binary to git by content detection; `.infini` is
+/// the one that reads as text and must not be treated as such.
+const GITATTRIBUTES: &str = "\
+# InfiniScript source is text a human writes, and `-text` is deliberate: the
+# LEXER normalises CRLF, a lone CR and a byte-order mark, so what a script MEANS
+# is insensitive to all three. What cannot be normalised is the file's IDENTITY
+# - a `.infini` with no committed sidecar takes its asset GUID from its CONTENT
+# HASH, and a hash is over bytes. Let git rewrite the line endings and the same
+# program gets a different GUID on Windows than on Linux, with every level
+# binding pointing at nothing.
+*.infini -text
+";
 
 /// A filesystem-safe directory name (spaces → hyphens, alnum/-/_ kept).
 pub fn sanitize_dir(name: &str) -> String {
@@ -577,6 +608,18 @@ mod tests {
             assert!(warnings.is_empty(), "{t:?}: {warnings:?}");
             assert_eq!(class.events.len(), 2, "{t:?}: begin_play and tick");
             assert_eq!(class.variables.len(), 2, "{t:?}");
+
+            // …and the project ships the rule that keeps that file's IDENTITY
+            // stable across a clone (SCRIPT1b audit, carried item 5 closed).
+            // The scaffolded script has no committed sidecar, so its GUID is its
+            // content hash; git rewriting its line endings on the other
+            // operating system would silently rename it.
+            let attrs = std::fs::read_to_string(s.root.join(".gitattributes"))
+                .unwrap_or_else(|e| panic!("{t:?} scaffolded no .gitattributes: {e}"));
+            assert!(
+                attrs.lines().any(|l| l.trim() == "*.infini -text"),
+                "{t:?}: {attrs}"
+            );
         }
     }
 

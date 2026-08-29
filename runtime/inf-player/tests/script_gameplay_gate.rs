@@ -331,11 +331,24 @@ fn the_cooked_script_artifact_is_byte_identical_on_every_host() {
 /// The cook walks a script's asset references (`inf_blueprint::asset_refs`) and
 /// pulls what it names into the pack. `build_scene_payload` does **not** — it is
 /// a hand-maintained mirror of `asset_deps`, and this edge is not in it. That is
-/// safe today for a measurable reason and not for a hopeful one: `engine.spawn`
-/// reaches neither host's `Host::call`, so a script cannot spawn anything in
+/// safe today for a measurable reason and not for a hopeful one: **no host
+/// implements `engine.spawn`**, so a script cannot put anything in a world in
 /// either PIE or shipping, so there is nothing for a payload to be missing.
 ///
-/// The day somebody implements it, this arm goes red and says what it owes.
+/// # The second half, corrected by the SCRIPT1b audit
+///
+/// The wave wrote that the verb *"reaches neither host's `Host::call`"* and
+/// armed it as `!logs.contains("engine::spawn")` on a fixture that **does not
+/// call it** — an assertion that could not fail, under prose claiming something
+/// else. It does reach `Host::call`: both hosts end their `match` with an
+/// unknown-call arm that pushes `path.join("::")` onto the log and answers
+/// `Value::Unit`, so *"a partially-authored blueprint still runs rather than
+/// aborting"*.
+///
+/// So the arm now runs a script that really calls it and measures the three
+/// things the carried item rests on: the call happens, it is **reported** by
+/// name, and the world gains **nothing**. The day somebody implements the verb,
+/// the entity-count half goes red and says what the payload owes.
 #[test]
 fn nothing_a_script_names_can_reach_a_world_yet() {
     let assets = inf_blueprint::assetrefs::STR_PORTS
@@ -352,12 +365,59 @@ fn nothing_a_script_names_can_reach_a_world_yet() {
          this file exists to prevent. Mirror the edge, or factor one Ring-0 walk."
     );
 
-    // …and the verb is inert in the shipped host: a class that calls it runs,
-    // logs the unknown path and changes nothing.
-    let mut sim = pie_sim();
+    // …and the verb is INERT in the shipped host, measured on a script that
+    // really calls it: the handler runs to completion, the unknown path is
+    // logged by name, and the world gains no entity.
+    const SPAWNER: &str = "\
+on begin_play()
+  engine.spawn(\"Coyote\")
+  debug.print(\"the statement after the spawn\")
+end
+";
+    let doc = scene();
+    let (class, _) = inf_script::compile(SPAWNER, format!("script:{}", AssetId(SCRIPT_GUID)))
+        .expect("the spawner compiles");
+    let payload = inf_editor_core::pie::build_scene_payload(
+        &doc,
+        |guid| (guid == SCRIPT_GUID).then(|| class.clone()),
+        |_| None,
+        |_| None,
+        |_| None,
+        |_| None,
+        |_| None,
+        |_| None,
+        |_| None,
+        HZ,
+        false,
+    )
+    .expect("the payload builds");
+    let mut sim = inf_player::sim_from_payload(&payload)
+        .expect("the world builds")
+        .sim;
+    let before = sim.world_mut().entities().len();
     sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    println!("the spawner's host log: {:?}", sim.logs());
     assert!(
-        !sim.logs().iter().any(|l| l == "engine::spawn"),
-        "the fixture does not call it"
+        sim.logs().iter().any(|l| l == "engine::spawn"),
+        "the host's unknown-call arm must REPORT the verb by name, or a script \
+         that thinks it spawned something fails silently: {:?}",
+        sim.logs()
+    );
+    assert_eq!(
+        sim.world_mut().entities().len(),
+        before,
+        "`engine.spawn` put something in the world. It is now an implemented \
+         verb, so `build_scene_payload` owes the asset edge `asset_deps` \
+         already walks — mirror it, or factor one Ring-0 walk."
+    );
+    // Anti-vacuity: the handler did not merely abort at the unknown call — the
+    // statement AFTER it ran, which is what "inert, not fatal" means and is the
+    // reason the unknown-call arm returns a value instead of an error.
+    assert!(
+        sim.logs()
+            .iter()
+            .any(|l| l == "the statement after the spawn"),
+        "the handler stopped at the unknown verb: {:?}",
+        sim.logs()
     );
 }

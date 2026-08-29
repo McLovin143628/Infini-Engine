@@ -406,8 +406,27 @@ fn compiled_program(class: &BlueprintClass, keep_marker: bool) -> String {
             call_args.join(", ")
         ));
         src.push_str("    out.push_str(&LOG.with(|l| l.borrow().clone()));\n");
+        // **The `= …` line is a UNIT line, and that is asserted rather than
+        // assumed** (SCRIPT1b audit). The interpreted side prints whatever
+        // `eval_fn` returned; this side prints `V::U` as a literal, because a
+        // generated `fn tick(dt: f64)` returns `()` and there is nothing to
+        // read. Two sides where one of them is a constant cannot falsify, so the
+        // constant is legal only while every driven handler is `Ty::Unit`, and
+        // that is what the assertion below holds. The `let _: () = ret;` beneath
+        // it is the same claim handed to `rustc`: if the generator ever emits a
+        // handler returning a value, the compiled program stops building here
+        // rather than silently comparing against `u`.
+        assert_eq!(
+            binding.body.ret,
+            inf_blueprint::Ty::Unit,
+            "handler `{}` returns {:?}: the compiled side prints its `=` line as \
+             a literal Unit, so a non-Unit return would be compared against a \
+             constant. Read `ret` here before driving such a handler.",
+            binding.body.name,
+            binding.body.ret
+        );
         src.push_str("    out.push_str(&format!(\"= {}\\n\", fmt(&V::U)));\n");
-        src.push_str("    let _ = ret;\n");
+        src.push_str("    let _: () = ret;\n");
         src.push_str(
             "    VARS.with(|m| for (k, v) in m.borrow().iter() { \
              out.push_str(&format!(\"state {k} {}\\n\", fmt(v))); });\n",
@@ -419,7 +438,25 @@ fn compiled_program(class: &BlueprintClass, keep_marker: bool) -> String {
 
 /// Where the gate builds. Under `target/` so `cargo clean` reaches it, and
 /// per-process so two test binaries cannot write one another's files.
+///
+/// # …and it sweeps its own leavings (SCRIPT1b audit)
+///
+/// A directory per process id, never removed, is a leak with a slow fuse: the
+/// audit found **thirteen** of them at 19 MB after one wave's testing, and this
+/// repository has a law about `target/` growth paid for with three disk-full
+/// incidents. A test cannot run teardown after itself (the three arms here share
+/// one process and one directory), so the sweep runs at the *front*: any sibling
+/// older than [`STALE`] belongs to a process that has long since exited.
+///
+/// The age bound rather than a liveness check on purpose — asking the operating
+/// system whether a pid is alive is three platforms of code to delete a
+/// megabyte, and a pid is reused. An hour is longer than any run of this gate
+/// (measured in tenths of a second) by four orders of magnitude, so a
+/// concurrently-running sibling is never in range.
 fn build_dir() -> PathBuf {
+    /// How old a sibling build directory must be before it is swept.
+    const STALE: Duration = Duration::from_secs(3600);
+
     let base = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -428,11 +465,30 @@ fn build_dir() -> PathBuf {
                 .join("..")
                 .join("target")
         });
-    let dir = base
-        .join("crown-parity")
-        .join(format!("{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create the crown-gate build dir");
-    dir
+    let root = base.join("crown-parity");
+    let mine = root.join(format!("{}", std::process::id()));
+
+    // Best effort throughout: a sweep that failed is a directory left behind,
+    // never a red gate about somebody else's file lock.
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path == mine || !path.is_dir() {
+                continue;
+            }
+            let old = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|t| t.elapsed().map(|e| e > STALE).unwrap_or(false))
+                .unwrap_or(false);
+            if old {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        }
+    }
+
+    std::fs::create_dir_all(&mine).expect("create the crown-gate build dir");
+    mine
 }
 
 struct Built {

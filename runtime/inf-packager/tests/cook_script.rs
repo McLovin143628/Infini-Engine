@@ -126,6 +126,47 @@ fn a_script_under_content_cooks_into_a_class_the_player_can_read() {
     // `serde_json` anyway.
 }
 
+/// **`Scripts/` is a CONVENTION, not a lookup** — the load-bearing half of the
+/// layout ruling, and the SCRIPT1b audit's finding that nothing armed it.
+///
+/// The ruling says `Content/Scripts/` is where the template *puts* the first
+/// script, not where the engine *looks*: `AssetDb::scan` recurses, so a
+/// `.infini` anywhere under the content root is found the day it exists, which
+/// is what lets a designer keep a script beside the actor it drives without
+/// telling anything. Every fixture in this file put its script under
+/// `Scripts/`, so a cook that had grown a directory check would have passed all
+/// of them — and the ruling's own sentence would have been the only thing
+/// standing behind "there is no manifest field to keep in sync".
+///
+/// Three placements, none of them the convention: the content root itself, a
+/// directory a designer invented, and one nested two deep beside its actor.
+#[test]
+fn a_script_anywhere_under_the_content_root_cooks() {
+    for rel in [
+        "Loose.infini",
+        "Gameplay/Loose.infini",
+        "Actors/Doors/Loose.infini",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("proj");
+        scaffold(&proj, &[(rel, GATE.as_bytes())]);
+        let out = dir.path().join("out");
+        let report = cook(&proj, &out, &CookOptions::default())
+            .unwrap_or_else(|e| panic!("a script at `{rel}` did not cook: {e}"));
+        assert_eq!(
+            report.kinds.get("script"),
+            Some(&1),
+            "a `.infini` at `{rel}` was not seen — `Scripts/` became a LOOKUP, \
+             and the layout ruling's 'no manifest field to keep in sync' is no \
+             longer true: {:?}",
+            report.kinds
+        );
+        assert!(!report.has_blocking(), "{rel}: {:?}", report.blocking);
+        let (_, class) = packed_script(&out);
+        assert_eq!(class.name, "Gate", "{rel}");
+    }
+}
+
 /// **The same program cooks to the same class on any host** — the cross-host
 /// determinism law, extended from the lowering to the cooked artifact.
 ///
