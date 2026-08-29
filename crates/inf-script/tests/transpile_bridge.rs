@@ -254,6 +254,83 @@ fn the_one_literal_a_script_can_write_and_the_cook_cannot_render() {
     assert!(!observe(f).is_empty());
 }
 
+/// **The carried gap, armed.** The language no longer produces `Unary(Neg,
+/// Lit)` — the parser folds it and the emitter prints the canonical negative
+/// literal — but the **graph** lowerer still can: a `math.neg` node wired to a
+/// `lit.float` is exactly that shape, and `inf_transpile::emit` refuses it, so
+/// the Code tab cannot generate for such a graph.
+///
+/// SCRIPT1a carried that by name and the SCRIPT1a audit gives it a tripwire,
+/// because a carried item with no arm is a sentence that goes stale silently.
+/// This builds the graph, lowers it, and asserts the refusal — so the day
+/// `inf-blueprint` closes the gap (fold at lowering, or teach `emit` the
+/// canonicalisation and re-prove `generate → lift`) **this test fails**, and the
+/// ledger item gets retired by the failure rather than by somebody remembering.
+///
+/// It also asserts the *text* face is unaffected, which is the asymmetry the
+/// carry is about: the same IR prints as `-1.5` and reads back as a literal.
+#[test]
+fn a_math_neg_node_on_a_literal_still_lowers_to_ir_the_cook_refuses() {
+    use inf_blueprint::lower::lower_graph;
+    use inf_blueprint::nodekit::{blueprint_registry, EXEC_THEN};
+    use inf_blueprint::{Expr, Lit, Stmt, UnOp};
+    use inf_graph::{Graph, Link, NodeUi, ParamValue};
+
+    let reg = blueprint_registry();
+    let mut g = Graph::empty();
+    let bp = g.insert("event.begin_play", NodeUi::default());
+    let lit = g.insert("lit.float", NodeUi::default());
+    g.node_mut(lit)
+        .unwrap()
+        .params
+        .insert("value".into(), ParamValue::Float(1.5));
+    let neg = g.insert("math.neg", NodeUi::default());
+    let set = g.insert("var.set", NodeUi::default());
+    g.node_mut(set)
+        .unwrap()
+        .params
+        .insert("name".into(), ParamValue::Text("angle".into()));
+    for (from, fp, to, tp) in [
+        (lit, "value", neg, "a"),
+        (neg, "out", set, "value"),
+        (bp, EXEC_THEN, set, "exec"),
+    ] {
+        g.links.push(Link {
+            from,
+            from_port: fp.into(),
+            to,
+            to_port: tp.into(),
+        });
+    }
+    let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+
+    // The shape really is the one the carry names.
+    let Stmt::ExprStmt(Expr::Call { args, .. }) = &f.body[0] else {
+        panic!("unexpected lowering: {:#?}", f.body)
+    };
+    assert!(
+        matches!(&args[1], Expr::Unary(UnOp::Neg, inner) if matches!(inner.as_ref(), Expr::Lit(Lit::Float(_)))),
+        "the graph no longer lowers to `Unary(Neg, Lit)` — if that is deliberate, \
+         retire carried item 4: {:#?}",
+        args[1]
+    );
+
+    // The cook refuses it. THIS is the gap.
+    let err = generate_fn(&f).expect_err(
+        "`inf_transpile::emit` accepted `Unary(Neg, Lit)` — the SCRIPT1a carried \
+         item 4 is CLOSED and this arm plus the ledger entry should go",
+    );
+    assert!(
+        format!("{err:?}").contains("NegatedLiteral"),
+        "refused for a different reason: {err}"
+    );
+
+    // …and the text face is fine with it, which is the asymmetry.
+    let text = inf_script::emit_fn(&f).expect("text prints it");
+    assert!(text.contains("-1.5"), "{text}");
+    inf_script::parse_fn(&text).expect("and reads it back");
+}
+
 /// The three shapes a graph author never produces, present and rendered.
 ///
 /// Without this the corpus could quietly become "things a graph could also have
