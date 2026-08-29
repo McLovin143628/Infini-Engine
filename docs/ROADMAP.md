@@ -19906,6 +19906,50 @@ quicker.
   Twenty callable verbs had no description at all and now do, gated. `docs/book/src/infiniscript.md`
   is the hand-written face — including the `*.infini -text` sidecar rule **stated for a
   user**, which closes SCRIPT1b's carried item 6 along with the book naming `.infini` at all.
+
+  **THE ADVERSARIAL AUDIT (2026-08-29)** found one HIGH and three MEDs, all fixed in-wave.
+  **THE DEPTH-PARITY HOLE, measured on both faces of one program.** Refusing the *cycle* is
+  not enough: 65 `function`s each calling the next have **no cycle**, and nothing bounds how
+  many a unit declares (`MAX_NESTING` bounds one declaration's *tree*, not the count of
+  them). The audit ran it — chain 64 interprets to `64` and `rustc`-compiles to `64`; chain
+  **65 is REFUSED by the interpreter and returns `65` compiled**. One legal-by-the-parser
+  program, two answers, which falsifies the premise the arc leans on and made the
+  interpreter's own refusal message a lie about the program in front of it.
+  `check_no_recursion` becomes `check_call_graph` — one call graph, **two** static refusals —
+  with the depth walk **iterative** (a guard against blowing a stack must not blow one) and
+  the budget **read from** `inf_blueprint::interp::MAX_CALL_DEPTH` rather than copied, so the
+  constant stays one number. Mutation-verified twice (dropping the check, and moving the
+  boundary), with the at-budget control asserting the chain *runs* rather than merely parses.
+  **The direction memo was not in the wave's diff at all** and five of its statements were
+  false at head — A.9 still said the language has no call form (the feature the wave
+  shipped), A.2's grammar still said `{1,2}` segments, §2 and A.4 still said 115/23, A.4
+  claimed a census arm made that sentence unable to go stale *silently* (it did, for a whole
+  wave — an arm pins the number a **test** compares), and A.5's "executed" table was missing
+  the two rows the wave added to the test that executes it. All corrected, and §8 split into
+  2a/2b. **The eighth eaten continuation**, of the shape the sweep cannot see: the same edit
+  that lost a `\`-continuation lost the `\n` out of the assertion below it, so *the two shapes
+  arrive together* and a green sweep is not a clean wave. The round-3 "do not guard this"
+  ruling was re-measured rather than repeated (the audit wrote the missing lexer: one real
+  defect against ~40 legitimate multi-line fixtures in the wave's own files, so the ban-list
+  economics still lose) and given one actionable sentence instead. **`engine.*` is now
+  ROUTED** to SCRIPT3 rather than only armed. Verified and left alone: the packed-IR
+  encoding (the IR **never** rides bincode — see below), `raise`'s named refusal degrading
+  cleanly through `graph_open_actor`'s `raisable`/`reason` pair, `d3::door::nearest`'s
+  tie-break (`Guid`-sorted, strict `<`), the bullet path unchanged by
+  `weapon::damage_entity`, and the absence of any aliasing channel — `event.dispatch` is a
+  **bounded FIFO** (`DISPATCH_ROUND_CAP`) in both hosts, not a stack, so the static cycle
+  refusal really is sufficient for depth.
+
+  **THE PACKED-IR VERDICT, since the brief priced a bincode hazard: there is none, anywhere.**
+  A `.inf_act` and a `.inf_fn` are pretty JSON; the cook lowers a `.infini` and packs the
+  resulting `BlueprintClass` as **the same pretty JSON** under `AssetKind::Script`, which
+  `PackReader::actor_classes` reads with `serde_json::from_slice`; and `ScenePayload.classes`
+  carries those JSON bytes as an **opaque `Vec<u8>`** inside its bincode envelope, so the
+  positional hazard applies to the envelope's own fields and never to an `Expr`. It is JSON
+  for a load-bearing reason the wave did not name: `BlueprintClass` carries
+  `skip_serializing_if` fields, and *that* is the Phase-10 law. A pre-SCRIPT2 packed script
+  decodes at head **by identity of the type** rather than by luck — `crates/inf-blueprint/src/lib.rs`
+  (which holds `Expr`/`Stmt`/`BlueprintFn`) has an **empty diff** across the whole wave.
 * **SCRIPT2b — the editor (ROUTED).** A CodeMirror 6 language mode for `.infini` on the P5
   `extraCompartment` seam, the parse refusals wired into the Problems panel, opening a
   `.infini` through the existing `infinity:open-file` event, Ctrl+S = save → watcher →
@@ -19920,6 +19964,19 @@ quicker.
   InfiniScript Core (the P14.5 WASM tier) is documented with one demo plugin. The arc closes
   with two honest lists — what a designer can build without touching Rust, and what still
   needs Rust — and iteration timings measured end to end: edit-to-running, and cold cook.
+
+  **`engine.*` is a SCRIPT3 CLAUSE, routed by the SCRIPT2a audit, and a blocker for the
+  mission half rather than a tidy-up.** `engine.set_rotation`, `engine.spawn` and
+  `engine.destroy` are registered, callable from text, and implemented by **neither** host —
+  both end their `match` with the unknown-call arm, so all three log their path and answer
+  `Unit`. A heist that cannot put anything in the world is not the document's mockup. The day
+  `engine.spawn` lands it carries two consequences already written down:
+  `the_engine_namespace_is_registered_and_implemented_by_neither_host` goes red and retires
+  with `engine` removed from the registry gate's exclusion list, and
+  `inf_editor_core::pie::build_scene_payload` starts **owing an asset edge it does not walk**
+  — `engine.spawn`'s prefab is the kit's only `StrRole::Asset` port and `asset_deps` follows
+  it while the payload builder (a hand-maintained mirror) does not, which is safe only while
+  the verb is inert. `nothing_a_script_names_can_reach_a_world_yet` is the tripwire on both.
 
 ### Laws this arc is held to
 
