@@ -714,14 +714,64 @@ half, 2b the editor half.
   Twenty callable verbs had no description at all and now do, gated.
   `docs/book/src/infiniscript.md` is the hand-written face beside it.
 
-**SCRIPT2b — the editor (ROUTED).** A CodeMirror 6 language mode for `.infini` on
-the P5 `extraCompartment` seam, the parse refusals wired into the Problems panel,
-opening a `.infini` through the existing `infinity:open-file` event, Ctrl+S =
-save → watcher → hot swap, and the graph↔text bridge's editor half. **The editor
-surface is still the Output Log** until it lands. The one hazard scouted and
-carried: `extraCompartment` is **single-occupant** and `lspBridge.ts` reconfigures
-it on every active-tab change, so a second consumer needs a third compartment in
-`setup.ts` rather than a share.
+**SCRIPT2b — the editor (COMPLETE 2026-08-29).** All five clauses landed, and the
+sentence this memo has carried since SCRIPT1a — *"the editor surface is still the
+Output Log"* — is retired.
+
+* **The language mode is a TOKENIZER, and that is the design.** `.infini` goes
+  through `languages.ts`'s one `case` and returns a `StreamLanguage` over a
+  hand-rolled tokenizer mirroring appendix A.1 construct for construct, with
+  **zero new npm dependencies** (`StreamLanguage`/`StreamParser` ship with the
+  installed `@codemirror/language`). InfiniScript has exactly one parser and it is
+  `crates/inf-script`'s; a second grammar in the frontend would be a second
+  opinion about what a script *is*, and the first time the two disagreed the
+  editor would be confidently wrong about a file the engine reads perfectly well.
+  So it colours tokens and knows nothing about blocks, declarations, scopes or
+  types. The theme bridge costs nothing: token names resolve straight against
+  `@lezer/highlight`'s `tags`, so they land on the tags `cmTheme.ts` already
+  paints from `--ink-*`. Its two heuristics are stated where they live — a call's
+  namespace is recognised by the character AFTER the identifier, and a type name
+  only after a `:` (the four are not reserved words). Two arms read `lex.rs`
+  itself rather than a copied literal (`KEYWORDS`, and `SYMBOLS`/`SYMBOLS2` — 19
+  symbols both sides); a third requires the shipped `Example.infini` to tokenize
+  with **not one `invalid` token**.
+* **The refusals cross one wire, carrying Ring 0's numbers.** `script_check(text,
+  path?)` calls `inf_script::compile_bytes` — the ONE file door §8's SCRIPT1b
+  entry describes — and answers with 1-based line and column, length in
+  characters, severity as a word. That is what `Span`'s `Display` prints and what
+  the cook prints, so the editor and the build make one claim rather than two that
+  agree; the frontend converts once, where CodeMirror needs 0-based offsets. It
+  takes TEXT and not a path because the dirty buffer is the program being asked
+  about. **Refusals stay values across the IPC boundary** (P21) — the command has
+  no `Err` path at all. Debounced at the watcher's own 250 ms, read from
+  `commands/assets.rs` by the arm rather than quoted.
+* **The scouted hazard is designed out rather than worked around.**
+  `extraCompartment` is single-occupant and `lspBridge` reconfigures it on every
+  active-tab change. InfiniScript gets a third compartment — and, more decisively,
+  its contents are a pure function of the PATH, so `baseExtensions` fills it at
+  `EditorState` construction and no bridge can race it. The arm drives a real
+  `EditorView` through `.rs → .infini → .rs` and runs the counterfactual too.
+* **Open, save, and the drawer.** A `.infini` opens through the existing
+  `infinity:open-file` event from a Content-Drawer double-click; Ctrl+S writes it
+  and SCRIPT1b's watcher does the rest. The designer-facing half is armed
+  end to end for the first time: the path the drawer emits is the path
+  `file_write` receives.
+* **The graph↔text bridge's editor half fits, in one direction.**
+  `script_emit_class` renders any blueprint asset as the `.infini` file it would
+  be and opens it read-only. This is the arc's signature claim made operational:
+  **the text face is total over the IR and the graph face is not**, so a handler
+  `raise` refuses — a call form, for instance — still reads. It is read-only
+  because writing back means deciding what happens to a graph-lowered class's
+  synthetic local ids: `emit ∘ parse` is a fixed point on the TEXT (A.6 law 2),
+  not on the `.inf_act`'s JSON, so a save would rewrite bytes the author never
+  touched. **That decision is SCRIPT3's, or a wave of its own.**
+
+Carried out of the wave, by name: no autocomplete/hover/go-to-definition over the
+verb surface (the generated manual is the palette in written form until then); no
+"New InfiniScript" in the drawer's Add menu (`asset_create` writes payloads and a
+script is source text — a real door, priced, not taken); a `.infini` tab that has
+never been displayed is never checked, because a lint source lives in a live view;
+and the graph half of the bridge is still one-way.
 
 **SCRIPT3 — dogfood and ship.** Real island gameplay migrates to `.infini` — the
 Phase 30 door and weapon logic, a settlement ambient script, and one

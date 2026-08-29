@@ -19950,12 +19950,82 @@ quicker.
   `skip_serializing_if` fields, and *that* is the Phase-10 law. A pre-SCRIPT2 packed script
   decodes at head **by identity of the type** rather than by luck — `crates/inf-blueprint/src/lib.rs`
   (which holds `Expr`/`Stmt`/`BlueprintFn`) has an **empty diff** across the whole wave.
-* **SCRIPT2b — the editor (ROUTED).** A CodeMirror 6 language mode for `.infini` on the P5
-  `extraCompartment` seam, the parse refusals wired into the Problems panel, opening a
-  `.infini` through the existing `infinity:open-file` event, Ctrl+S = save → watcher →
-  hot swap, and the graph↔text bridge's editor half (open an `.inf_act` handler as text).
-  Unchanged from SCRIPT1a's carried item 8 and SCRIPT1b's item 6: **the editor surface is
-  still the Output Log.**
+* **SCRIPT2b — the editor (COMPLETE 2026-08-29).** All five clauses landed, and the carried
+  item that has stood since SCRIPT1a — *"the editor surface is still the Output Log"* — is
+  **closed**. What is now true:
+
+  * **THE LANGUAGE MODE.** `.infini` goes through `languages.ts`'s one `case` and returns a
+    `StreamLanguage` over a hand-rolled tokenizer — **zero new npm dependencies**, since
+    `StreamLanguage`/`StreamParser` ship with the installed `@codemirror/language`. It is a
+    TOKENIZER and that is the design: InfiniScript has one parser and it is
+    `crates/inf-script`'s, so a second grammar in the frontend would be a second opinion
+    about what a script *is*. The theme bridge costs nothing — token names resolve straight
+    against `@lezer/highlight`'s `tags`, so they land on the tags `cmTheme.ts`'s
+    `HighlightStyle` already paints from `--ink-*` (the P5.1 pattern), and `.infini` has no
+    colour table of its own. **Two arms read Ring 0's own source** rather than a copied
+    literal: the reserved words against `lex.rs`'s `KEYWORDS`, and every symbol in
+    `SYMBOLS`/`SYMBOLS2` required to lex here as one non-invalid token (19 both sides). A
+    third tokenizes `templates/scripts/Example.infini` — the script every new project ships
+    — and requires **not one `invalid` token**.
+  * **DIAGNOSTICS.** `script_check(text, path?)` hands a buffer to
+    `inf_script::compile_bytes`, the ONE file door the watcher, the cook and the PIE payload
+    builder enter, and answers with `ScriptDiagnosticDto` carrying **Ring 0's own numbers**
+    (1-based line and column, length in characters, severity as a word) — so "the editor says
+    12:5" and "the cook says 12:5" are one claim rather than two that agree. It takes TEXT and
+    not a path, stated at its signature: the dirty buffer is the program being asked about,
+    and reading the file would need a filesystem door for an answer nobody wanted. `path` is
+    the label a byte-level refusal names. **Refusals stay values across the IPC boundary**
+    (P21): the command has no `Err` path. Debounced at 250 ms, and the arm READS
+    `WATCH_DEBOUNCE` out of `commands/assets.rs` rather than quoting it. Armed on both sides —
+    the Rust arm pins the DTO against `inf_script::render`'s own text, the TS arm walks a real
+    `Text` and requires the squiggle to land on the character the refusal names.
+  * **THE THIRD COMPARTMENT**, which was the scouted hazard. A `Compartment` holds one
+    configuration — `reconfigure` REPLACES — and `lspBridge` reconfigures `extraCompartment`
+    on every active-tab change, so a shared seam would be evicted the next time the author
+    touched a `.rs` tab. InfiniScript gets `scriptCompartment`, and more decisively its
+    contents are a pure function of the PATH, so `baseExtensions` fills it when the tab's
+    `EditorState` is built and no bridge can race it. `compartments.test.ts` drives a real
+    `EditorView` through `.rs → .infini → .rs` and requires both layers to survive, plus the
+    **counterfactual run rather than argued**: a script layer put into `extraCompartment` is
+    wiped by the very next `setExtraExtensions`.
+  * **OPEN AND SAVE.** A `.infini` row in the Content Drawer gets a glyph, the blueprint's own
+    tint and a double-click that reaches the editor through the EXISTING `infinity:open-file`
+    event. The root-plus-relative join becomes `contentAbsPath` (it was already spelled twice
+    in that file). Ctrl+S is the P5.1 keymap unchanged; what is new is that anything measures
+    it — the path the drawer emits is the path `file_write` receives, so the file the author
+    edited is the file the watcher recompiles.
+  * **THE GRAPH↔TEXT BRIDGE'S EDITOR HALF**, which the brief made conditional and which fit.
+    `script_emit_class` renders a blueprint asset (either kind, through
+    `load_blueprint_class_result`) as the `.infini` file it would be; "Open as InfiniScript"
+    is in the drawer's context menu. It is the arc's own claim made operational: **`raise`
+    refuses far more than the emitter does, so a handler the canvas cannot draw can still be
+    read.** READ-ONLY, for a real reason rather than caution — writing back means re-parsing
+    to a class and re-serialising over the `.inf_act`, and `emit ∘ parse` is a fixed point on
+    the TEXT rather than on the JSON, so a save would rewrite synthetic local ids the author
+    never touched. Locked twice (`EditorState.readOnly` stops the keystroke; `saveActive`
+    refuses the tab). The synthetic path `infini://{asset}/{Class}.infini` is a path rather
+    than a flag so the emitted text gets the mode AND the linter — the editor checks the
+    emitter's own output with the same Ring-0 compiler.
+  * **THE GRAPH PREVIEW GAP** (the SCRIPT2a audit's LOW 3) closed through the ONE composition:
+    `graph_run` and the debug run now stack `interp::LocalFns` over `RunHost`, the same stack
+    `semantics::run_event` builds and for the same stated reason. The class comes from the
+    document id (`bp:<asset>`) and nothing else, so there is no second map to keep in step; a
+    scratch document resolves to no functions, which is not an error. The arm asserts BOTH
+    sides — with the functions the variable holds 42.0, without them the call falls through
+    and is logged.
+  * **Two honesty fixes on the Problems panel**: every row shows its `source` (a header
+    reading "rust-analyzer: idle" over three InfiniScript refusals was a lie by omission), and
+    the severity icon goes red — **`--ink-danger` is not a theme token**, so
+    `color: var(--ink-danger)` has always been an invalid declaration the browser drops.
+    Eighteen other sites spell it that way; the one-line `applyTheme` alias that would fix
+    them all is named in the code and left for a human.
+  * **THE NINTH EATEN CONTINUATION, and the sweep is structurally blind to it.** This wave's
+    own graph-preview fixture lost its `\`-continuations to a shell heredoc, leaving bare
+    newlines inside a non-raw literal — legal Rust, arm still green. That is the round-3
+    SECOND shape met a fourth time, and `inf_packager`'s sweep cannot see it *by
+    construction*: it only inspects lines containing a quote, and `interior_space_run` skips
+    leading indentation, which is exactly where the damage lands. Found by reading the file.
+    The fixture is a raw string now.
 * **SCRIPT3 — dogfood and ship.** Real island gameplay migrates to `.infini`: the Phase 30
   door and weapon logic, a settlement ambient script, and one mission-class sequence at
   Harbour City — the document's heist mockup made real on our island. Migrated traces stay

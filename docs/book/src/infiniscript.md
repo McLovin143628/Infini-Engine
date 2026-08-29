@@ -2,9 +2,10 @@
 
 **InfiniScript is the engine's scripting language.** A `.infini` file is plain
 text you can read, diff and merge, and it is *the same program* as a Blueprint
-graph — not a translation of one. Open a Blueprint as text, edit it, and it
-comes back as a graph. Draw the graph and read it as text. There is one program
-with two editors pointed at it.
+graph — not a translation of one. The two are proven to round-trip through the
+engine's gameplay IR, and today the editor exposes one direction of that:
+**open any Blueprint as InfiniScript and read it**, including handlers the
+canvas cannot draw. Editing it back into the graph is the remaining half.
 
 It exists because a designer should change a line and see it, not wait on a
 compiler. Saving a `.infini` file re-compiles it and swaps it into the running
@@ -160,14 +161,36 @@ working — the language cannot outgrow the execution model by accident.
 
 ## Editing a script
 
-Today a `.infini` file is edited in any text editor, and the engine's own editor
-watches the folder: **save the file and the running Simulate picks it up**.
-Measured, edit to running is 250–370 ms, almost all of it the watcher's debounce
-and the editor's drain interval — the engine's own half (read, compile, swap, one
-fixed step) is 0.35–0.45 ms, and no `rustc` runs at all. A broken edit never
-becomes a program —
-the previous one keeps running and the diagnostics, with their line and column,
-appear in the **Output Log**.
+### The loop, in the engine's own editor
+
+1. **Open it.** Double-click a `.infini` in the Content Drawer — they sit under
+   `Content/Scripts` with a scroll icon — and it opens as a tab in the **Code
+   Editor** panel. The Explorer, Search and Source Control panels open one the
+   same way; it is the same door.
+2. **Read it.** The tab gets InfiniScript highlighting: keywords, strings and
+   long brackets, numbers, comments, the namespace and verb halves of a call,
+   and a type name after a `:`. The colours are the editor theme's, so a theme
+   swap repaints scripts with everything else.
+3. **Fix it.** A quarter of a second after you stop typing, the buffer goes to
+   the engine's compiler — the same one the cook uses — and every refusal comes
+   back with its line, its column and its remedy. They appear twice: as a
+   squiggle under the text, and as a row in the **Problems** panel tagged
+   `infiniscript`. Click the row to jump to the file.
+4. **Save it.** `Ctrl+S`. The watcher takes it from there.
+
+Nothing in the editor parses InfiniScript. The highlighting is a tokenizer —
+it knows what a word looks like, not what it means — and every judgement about
+your program comes back from the one compiler in Ring 0. So the editor cannot
+disagree with the build about whether a script is valid.
+
+### What the save does
+
+**Save the file and the running Simulate picks it up.** Measured, edit to
+running is 250–370 ms, almost all of it the watcher's debounce and the editor's
+drain interval — the engine's own half (read, compile, swap, one fixed step) is
+0.35–0.45 ms, and no `rustc` runs at all. A broken edit never becomes a program:
+the previous one keeps running, and its diagnostics reach the **Output Log** as
+well as the Problems panel.
 
 Two things a designer should expect from a hot reload:
 
@@ -177,9 +200,29 @@ Two things a designer should expect from a hot reload:
   already has a value keeps it; the new default reaches the next actor to be
   created.
 
-> A `.infini` language mode inside the engine's own code editor — highlighting,
-> and diagnostics in the Problems panel — is the next wave's work. Until then the
-> Output Log is where a script's errors appear.
+### Reading a Blueprint as InfiniScript
+
+Right-click any Blueprint in the Content Drawer and choose **Open as
+InfiniScript**. The class is rendered as the `.infini` file it would be, through
+the engine's own emitter, and opens in a read-only tab.
+
+This works far more often than opening a script *as a graph* does. The text face
+is total over the gameplay IR and the canvas is not — a handler that calls one of
+its unit's own functions, for instance, has no node form and cannot be drawn, and
+it reads perfectly well as text.
+
+It is read-only for now, and the reason is worth knowing rather than guessing:
+writing the text back means deciding what happens to the internal names a
+graph-lowered class carries, which would rewrite bytes you never touched. Edit
+the graph, or write the script — for now, not both at once on the same asset.
+
+### What is not there yet
+
+No autocomplete for the verb surface, no hover documentation, no
+go-to-definition, and no "New InfiniScript" in the drawer's Add menu — a script
+starts life from a project template or from a new file in the Explorer. The
+[API reference](./infiniscript-api.md) is the palette in written form until
+completion arrives.
 
 ## What happens at cook time
 
