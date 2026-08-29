@@ -23071,7 +23071,10 @@ have said anyway.
 the stem and pulls the mesh into the pack's closure, and a name resolving to
 nothing is a **blocking** advisory — the shape SK1c stopped a wave over. So the
 mission is the asset-reference walk's first live consumer, and the walk bites on
-committed content.
+committed content: the gate asserts `report.kinds["mesh"] == 1` (the mesh is in
+the pack **because of that edge and nothing else** — the level does not
+reference it and no component names it), and misspelling the prefab turns the
+build red with the advisory naming itself.
 
 ### Clause 4 — the iteration showcase, measured on that mission
 
@@ -23173,6 +23176,7 @@ mutation was aimed at, because "my gate went red" is half a measurement.
 | `spawn_entity_id` widened back to 62 bits (past `2^53`) | `a_handle_cannot_be_mistaken_for_an_authored_actor`, at the round-trip-through-`f64` assertion and nowhere else — which is the point: nothing else in the tree can see a handle that stops being exact |
 | the session's `despawned` drain replaced by a `clear()` | `an_actor_that_destroys_itself_finishes_the_handler_and_stops` — the ghost keeps ticking against a world that no longer has it |
 | the mission's `and in_the_vault()` guard dropped from the grab condition | `the_two_routes_take_the_two_exits` (the interrupted run leaves on the loot, not the clock) **and** the trace comparison, whose anti-vacuity is over both routes |
+| the mission's prefab misspelled (`"Alarm"` → `"Alarmm"`) | the cook goes **BLOCKING** and names itself: *"names the asset `Alarmm` at `engine.spawn`, and no asset in this project has that GUID or that file name… Fix the spelling, or paste the asset's GUID"* — SK1c's blocker-4 edge, firing on committed content |
 | **one grammar graph dropped from the PIE payload** | `the_mission_is_the_same_program_in_pie_and_shipping` **at step 1** — not a mutation invented afterwards but the wave's own first cut, which is why the payload's exact expected count is asserted before anything is compared |
 
 ### The chr(92) sweeps, and the diff-scoped detector adopted

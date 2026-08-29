@@ -367,6 +367,20 @@ fn the_mission_is_the_same_program_in_pie_and_shipping() {
         "the mission must be packed as a script: {:?}",
         report.kinds
     );
+    // **THE COOK'S ASSET WALK, BITING ON COMMITTED CONTENT.** `engine.spawn`'s
+    // prefab is the node kit's only `StrRole::Asset` port, and until SCRIPT3 it
+    // served a verb neither host implemented. The mission names `Alarm`, the
+    // walk resolves that stem against the project, and the mesh is in the pack
+    // because of that edge and nothing else -- the level does not reference it
+    // and no component names it. A stem that resolved to nothing would be a
+    // BLOCKING advisory, which is what `has_blocking` above is really testing;
+    // this is the positive half of the same claim.
+    assert_eq!(
+        report.kinds.get("mesh"),
+        Some(&1),
+        "the asset the MISSION names must be in the pack: {:?}",
+        report.kinds
+    );
 
     for (label, route, steps, ending) in [
         ("clean", clean_run as Route, 340, PHASE_CLEAR),
