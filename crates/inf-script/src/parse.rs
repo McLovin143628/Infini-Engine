@@ -535,7 +535,15 @@ impl<'a> Parser<'a> {
             Tok::Kw("for") => self.for_stmt(out),
             Tok::Kw("return") => {
                 self.bump();
-                let value = if self.starts_expr() {
+                // **A returned value must be on the `return`'s own line.**
+                // Without the rule `return` followed by a call on the next line
+                // reads the call as the returned value — Lua avoids the
+                // ambiguity by requiring `return` to end its block, and this
+                // engine's IR has `Stmt::Return` in the middle of a body (it is
+                // `raise` that refuses one, not the interpreter), so the line is
+                // the cheaper rule and it matches what a reader sees.
+                let same_line = self.span().line == span.line;
+                let value = if same_line && self.starts_expr() {
                     Some(self.expr()?)
                 } else {
                     None

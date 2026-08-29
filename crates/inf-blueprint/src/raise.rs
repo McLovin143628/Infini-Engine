@@ -191,6 +191,18 @@ impl Raiser {
                                 self.locals.insert(*id, (node, port));
                             }
                             prev = Some((node, EXEC_THEN.to_string()));
+                            // **`i += 1` before the `continue`.** This arm used
+                            // to jump straight back to the loop head without
+                            // advancing, so `let e = engine::spawn(…)` — the one
+                            // action in the kit with a consumed data output —
+                            // raised the same statement for ever, adding a node
+                            // per pass until the process ran out of memory. It
+                            // reached the editor: `graph_open_actor` on any
+                            // blueprint holding a bound spawn would hang and
+                            // then die. Found by SCRIPT1's honest-subset table,
+                            // which is the first thing that ever asked `raise`
+                            // about that shape.
+                            i += 1;
                             continue;
                         }
                     }
@@ -814,6 +826,58 @@ mod tests {
             f.body.as_slice(),
             [Stmt::Let { .. }, Stmt::While { .. }, Stmt::If { .. }]
         ));
+        assert_round_trips(&f);
+    }
+
+    /// **The spawn hang.** `let e = engine::spawn("x"); engine::destroy(e);`
+    /// looped for ever inside `raise_chain` — the action-bound-to-a-local arm
+    /// `continue`d without advancing the statement index, so it raised the same
+    /// `Let` on every pass, adding a graph node each time until the process ran
+    /// out of memory.
+    ///
+    /// It was reachable from the editor: `graph_open_actor` raises every handler
+    /// of a `.inf_act`, and `engine.spawn` is the one action in the kit with a
+    /// consumed data output — the exact shape "spawn something and keep the
+    /// entity" produces. Nothing had ever asked `raise` about it, because the
+    /// round-trip fixtures all start from a *graph* and none of them wires a
+    /// spawn's `entity` output onward.
+    ///
+    /// The arm asserts the graph rather than merely the absence of a hang: two
+    /// action nodes, threaded, with the spawn's entity feeding the destroy.
+    #[test]
+    fn an_action_bound_to_a_local_raises_and_terminates() {
+        use inf_graph::{Graph, NodeUi, ParamValue};
+        // begin_play → spawn("enemy") → destroy(entity) — the shape "spawn
+        // something and keep the entity", built from a graph so the round-trip
+        // invariant applies on lowering's own image.
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let bp = g.insert("event.begin_play", NodeUi::default());
+        let name = g.insert("lit.str", NodeUi::default());
+        g.node_mut(name)
+            .unwrap()
+            .params
+            .insert("value".into(), ParamValue::Text("enemy".into()));
+        let spawn = g.insert("engine.spawn", NodeUi::default());
+        let destroy = g.insert("engine.destroy", NodeUi::default());
+        wire(&mut g, name, "value", spawn, "prefab");
+        wire(&mut g, spawn, "entity", destroy, "entity");
+        wire(&mut g, bp, EXEC_THEN, spawn, "exec");
+        wire(&mut g, spawn, EXEC_THEN, destroy, "exec");
+        let f = lower_graph(&g, &reg).unwrap().pop().unwrap();
+        assert!(
+            matches!(f.body.as_slice(), [Stmt::Let { .. }, Stmt::ExprStmt(_)]),
+            "{:#?}",
+            f.body
+        );
+
+        let raised = raise_fn(&f).expect("a bound action raises");
+        let types: Vec<&str> = raised.nodes.values().map(|n| n.type_id.as_str()).collect();
+        assert!(types.contains(&"engine.spawn"), "{types:?}");
+        assert!(types.contains(&"engine.destroy"), "{types:?}");
+        // The event, the spawn, its string literal and the destroy — four
+        // nodes, not the thousands the runaway produced before it died.
+        assert_eq!(raised.nodes.len(), 4, "{types:?}");
         assert_round_trips(&f);
     }
 

@@ -1,0 +1,166 @@
+//! **A `.infini` file's IR is a pure function of its bytes.**
+//!
+//! The determinism law this arc inherits, made a fixture rather than a
+//! sentence. Three things are asserted, and the third is the one that has to
+//! hold on three operating systems at once:
+//!
+//! 1. **Purity.** Lowering the same source twice in one process gives the same
+//!    IR. Nothing reads a clock, a path, an environment variable or a hash seed.
+//! 2. **Line endings do not change a program.** A CRLF checkout and an LF
+//!    checkout of the same file lower to the same IR — the lexer normalises
+//!    first. This is the `.rs is read by TESTS, so it needs text eol=lf` lesson
+//!    met from the other side: rather than depend on a `.gitattributes` entry for
+//!    a file *users* author, the reader is made insensitive.
+//! 3. **The cross-host pin.** A committed digest of the fixture's lowered IR.
+//!    CI runs this on Windows, Linux and macOS; a lowering that depended on the
+//!    host would redden exactly one leg, with a line number instead of a
+//!    mystery.
+//!
+//! # Why a hand-rolled FNV rather than a hasher from the standard library
+//!
+//! `DefaultHasher` is explicitly documented as unspecified and free to change
+//! between releases, so a constant pinned against it says nothing about *hosts*
+//! — only about toolchains. FNV-1a over the canonical JSON bytes is six lines,
+//! has no state beyond two constants, and will give the same answer in ten
+//! years. The bytes it eats are `serde_json`'s, under the workspace's
+//! `float_roundtrip` pin, which is what keeps a `Lit::Float` from moving a bit on
+//! the way through.
+
+use inf_script::{compile, emit_class, parse_fn, render};
+
+/// The determinism fixture. Deliberately dense: every literal kind, a float
+/// with a full 17-digit mantissa, both loop forms, a branch, the math builtins
+/// (which route to `inf_math::portable`) and a `rust` block.
+const FIXTURE: &str = r#"actor "Determinism"
+
+var angle: float = -114668.51350953568 exposed
+var count: int = -9223372036854775808
+var flag: bool = true
+var label: string = "a\tb\u{1f600}"
+
+on tick(dt)
+    local a = angle + dt * math.sin(dt) - math.cos(dt) / 2.0
+    local b = math.clamp(math.lerp(a, 10.0, 0.5), 0.0, 6.0)
+    angle = b
+    if b > 1.0 and not flag then
+        for i = 0, 9 do
+            count = count + i
+        end
+    elseif b < -1.0 then
+        while count > 0 do
+            count = count - 1
+        end
+    else
+        debug.print(label)
+    end
+    engine.set_rotation(b)
+end
+"#;
+
+/// FNV-1a, 64-bit. Two constants and a loop; the same answer on every host and
+/// in every future toolchain.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// The canonical bytes of a source's IR.
+fn ir_bytes(source: &str) -> Vec<u8> {
+    let (class, _) = compile(source, "act:determinism")
+        .unwrap_or_else(|d| panic!("the fixture did not compile:\n{}", render(&d)));
+    serde_json::to_vec(&class).expect("the IR serialises")
+}
+
+/// **The pin.** Regenerate only with a stated reason: this number moving means
+/// either the fixture changed, the IR's shape changed, or a host disagreed —
+/// and the third is the one this file exists to catch.
+const FIXTURE_IR_DIGEST: u64 = 0xc47b_dc74_0874_3308;
+
+#[test]
+fn the_fixture_lowers_to_the_pinned_digest_on_every_host() {
+    let digest = fnv1a(&ir_bytes(FIXTURE));
+    assert_eq!(
+        digest, FIXTURE_IR_DIGEST,
+        "the determinism fixture lowered to {digest:#018x}, not the pinned \
+         {FIXTURE_IR_DIGEST:#018x}. If the fixture or the IR changed on purpose, \
+         re-pin with the reason in the commit message. If neither did, this host \
+         lowers `.infini` differently from the one that pinned it, which is the \
+         thing the pin is for"
+    );
+}
+
+#[test]
+fn lowering_is_pure() {
+    assert_eq!(ir_bytes(FIXTURE), ir_bytes(FIXTURE));
+}
+
+/// **CRLF and LF are the same program.**
+#[test]
+fn a_windows_checkout_and_a_unix_one_lower_identically() {
+    let crlf = FIXTURE.replace('\n', "\r\n");
+    assert_ne!(
+        crlf.as_bytes(),
+        FIXTURE.as_bytes(),
+        "the inputs differ in bytes"
+    );
+    assert_eq!(
+        ir_bytes(&crlf),
+        ir_bytes(FIXTURE),
+        "a carriage return changed the IR"
+    );
+    // …and a lone `\r`, which an ancient tool can still produce.
+    assert_eq!(ir_bytes(&FIXTURE.replace('\n', "\r")), ir_bytes(FIXTURE));
+}
+
+/// A source containing a `rust` block round-trips its opaque contents **byte
+/// for byte**, including the trailing newline and the `]]` inside it — the one
+/// place in the language where bytes rather than tokens are preserved.
+#[test]
+fn a_rust_block_survives_verbatim() {
+    let code = "    let v = vec![[1u8, 2][0]];\n    let _ = v + 1;\n";
+    let src = format!("on begin_play()\n    rust [=[\n{code}]=]\nend\n");
+    let f = parse_fn(&src).unwrap_or_else(|d| panic!("{}", render(&d)));
+    let inf_blueprint::Stmt::Snippet(got) = &f.body[0] else {
+        panic!("not a snippet: {:?}", f.body[0]);
+    };
+    assert_eq!(got, code, "the snippet's bytes moved");
+}
+
+/// **The determinism fixture is not trivial.** A pin over an empty program is a
+/// constant nobody can break.
+#[test]
+fn the_fixture_is_dense_enough_to_be_worth_pinning() {
+    let (class, warnings) = compile(FIXTURE, "act:determinism").unwrap();
+    assert!(warnings.is_empty(), "{}", render(&warnings));
+    assert_eq!(class.variables.len(), 4);
+    let body = &class.events[0].body.body;
+    // 4 statements at the top level: two lets, the member-variable set, the
+    // branch, and the rotation — plus everything nested inside the branch.
+    assert!(body.len() >= 5, "{body:#?}");
+    let json = String::from_utf8(ir_bytes(FIXTURE)).unwrap();
+    assert!(
+        json.len() > 2000,
+        "the fixture's IR is only {} bytes of JSON",
+        json.len()
+    );
+    // The full-mantissa float really is in there, undisturbed.
+    assert!(json.contains("-114668.51350953568"), "the float moved");
+    // And so is `i64::MIN`, the literal a naive lexer cannot read.
+    assert!(json.contains("-9223372036854775808"), "the int moved");
+}
+
+/// The emitted text is a pure function of the IR too — the other half of the
+/// same law, and what a cook writing a `.infini` back to disk depends on.
+#[test]
+fn emission_is_pure() {
+    let (class, _) = compile(FIXTURE, "act:determinism").unwrap();
+    let a = emit_class(&class).unwrap();
+    let b = emit_class(&class).unwrap();
+    assert_eq!(a, b);
+    // The emitter writes LF, whatever the source used.
+    assert!(!a.contains('\r'), "the emitter wrote a carriage return");
+}

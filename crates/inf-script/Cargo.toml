@@ -22,3 +22,6 @@ inf-graph = { workspace = true }
 
 [dev-dependencies]
 inf-math = { workspace = true }
+# Already a workspace dependency (with `float_roundtrip`); used only by the
+# determinism gate, to get canonical bytes to digest.
+serde_json = { workspace = true }
