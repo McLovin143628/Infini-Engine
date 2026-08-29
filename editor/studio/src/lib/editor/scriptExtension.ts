@@ -74,7 +74,7 @@ export function isScriptPath(path: string): boolean {
  * inventing an error at line 1 would be a refusal that is not true about the
  * program in front of it.
  */
-function checkSource(path: string) {
+export function checkSource(path: string) {
   const uri = pathToUri(path);
   return async (view: EditorView): Promise<Diagnostic[]> => {
     // The doc as it was when the check started. CodeMirror discards a result
@@ -89,7 +89,17 @@ function checkSource(path: string) {
       return [];
     }
     const lsp = scriptDiagnosticsToLsp(refusals);
-    useLspStore.getState().setDiagnostics(uri, lsp);
+    // **The panel obeys the same staleness rule as the gutter** (SCRIPT2b
+    // audit). `lintPlugin` drops a result whose `state.doc` has moved on, and
+    // two checks really can be in flight: the plugin schedules the next run the
+    // moment the document changes, without waiting for the one already awaiting
+    // IPC, and two `invoke`s have no ordering guarantee between them. Writing
+    // the store unconditionally therefore made the Problems panel the one
+    // surface that could sit showing refusals about a buffer that no longer
+    // exists — and, if the replies crossed, showing the OLDER of two answers.
+    // Skipping is safe because the run that supersedes this one publishes: the
+    // linter always ends on a check whose document is still current.
+    if (view.state.doc === doc) useLspStore.getState().setDiagnostics(uri, lsp);
     return diagnosticsToCM(doc, lsp);
   };
 }

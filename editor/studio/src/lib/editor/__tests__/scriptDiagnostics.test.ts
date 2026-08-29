@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The InfiniScript diagnostics wire, on the frontend side (wave SCRIPT2b).
  *
@@ -9,12 +10,16 @@
  * An off-by-one here is a squiggle under the wrong word with nothing anywhere
  * saying so.
  */
-import { Text } from "@codemirror/state";
-import { describe, expect, it } from "vitest";
+import { EditorState, Text } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
+import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { diagnosticsToCM } from "../lspExtension";
-import { SCRIPT_CHECK_DEBOUNCE_MS, isScriptPath } from "../scriptExtension";
+import { pathToUri } from "../fileUri";
+import { checkSource, SCRIPT_CHECK_DEBOUNCE_MS, isScriptPath } from "../scriptExtension";
 import { SCRIPT_DIAGNOSTIC_SOURCE, scriptDiagnosticsToLsp } from "../scriptDiagnostics";
+import { useLspStore } from "../../../stores/lspStore";
 import type { ScriptDiagnosticDto } from "../../ipc";
 
 // Ring 2's own source, read rather than quoted (the SCRIPT1b lesson: a number a
@@ -71,6 +76,68 @@ describe("InfiniScript refusals reaching the editor", () => {
     expect(isScriptPath("C:/Content/Scripts/Door.INFINI")).toBe(true);
     expect(isScriptPath("C:/proj/src/main.rs")).toBe(false);
     expect(isScriptPath("infini")).toBe(false);
+  });
+
+  /**
+   * **A check the gutter throws away must not reach the Problems panel either**
+   * (SCRIPT2b audit).
+   *
+   * `lintPlugin` drops a result whose `state.doc` has moved on — it compares
+   * the two documents by identity before dispatching — but the lint source also
+   * writes the shared diagnostics store, and that write had no such guard. Two
+   * checks really can be in flight (the plugin schedules the next run the moment
+   * the document changes, without waiting for the one already awaiting IPC), so
+   * the panel could sit showing refusals about a buffer that no longer exists,
+   * and if the two replies crossed it would settle on the OLDER of them.
+   *
+   * The arm makes the author type *while the check is in flight* — the mock
+   * dispatches into the view before answering — and requires the store to be
+   * untouched. The second half is the non-vacuity: an answer about the current
+   * document is published.
+   */
+  describe("a check that lost its race", () => {
+    afterEach(() => {
+      clearMocks();
+      useLspStore.getState().reset();
+    });
+
+    const PATH = "C:/proj/Content/Scripts/Race.infini";
+    const refusalOnTheWire = [
+      { severity: "error", line: 1, col: 1, len: 1, message: "an answer about some buffer" },
+    ];
+
+    it("is not published to the panel", async () => {
+      const view = new EditorView({ state: EditorState.create({ doc: 'actor "Race"\n' }) });
+      let typed = false;
+      mockIPC((cmd) => {
+        if (cmd !== "script_check") return [];
+        if (!typed) {
+          typed = true;
+          // The author keeps typing. `dispatch` is synchronous, so by the time
+          // the awaited reply lands the view holds a different document.
+          view.dispatch({ changes: { from: 0, insert: "-- typing\n" } });
+        }
+        return refusalOnTheWire;
+      });
+
+      const out = await checkSource(PATH)(view);
+
+      expect(useLspStore.getState().diagnostics[pathToUri(PATH)]).toBeUndefined();
+      // …and CodeMirror still gets the result, because CodeMirror is the one
+      // that knows how to throw it away.
+      expect(out).toHaveLength(1);
+      view.destroy();
+    });
+
+    it("is published when it did not lose it", async () => {
+      const view = new EditorView({ state: EditorState.create({ doc: 'actor "Race"\n' }) });
+      mockIPC((cmd) => (cmd === "script_check" ? refusalOnTheWire : []));
+
+      await checkSource(PATH)(view);
+
+      expect(useLspStore.getState().diagnostics[pathToUri(PATH)]).toHaveLength(1);
+      view.destroy();
+    });
   });
 
   it("debounces at the interval the watcher debounces at", () => {
