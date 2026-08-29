@@ -524,26 +524,56 @@ pub async fn graph_redo(
     Ok(doc)
 }
 
-/// Run the graph through the interpreter: lower each event handler, run
-/// BeginPlay once then Tick three times, collecting logs + final variables.
-#[tauri::command]
-pub async fn graph_run(id: String, state: State<'_, GraphState>) -> Result<GraphRunResult, String> {
-    state.with(|s| {
-        let doc = s.docs.get(&id).ok_or_else(|| format!("no graph `{id}`"))?;
-        let fns = match lower_graph(&doc.graph, &s.registry) {
-            Ok(f) => f,
-            Err(e) => {
-                return Ok(GraphRunResult {
-                    logs: Vec::new(),
-                    vars: BTreeMap::new(),
-                    handlers: Vec::new(),
-                    error: Some(e.to_string()),
-                })
-            }
-        };
-        let mut host = RunHost::default();
-        let mut handlers = Vec::new();
-        let mut error = None;
+/// **The unit-local functions a document's class declares** (wave SCRIPT2b).
+///
+/// An actor document's id is `bp:<asset>` — `graph_open_actor` says so at its
+/// own signature and the identity is deliberate — so the class behind a preview
+/// is recoverable from the id alone, with no second map to keep in step.
+/// Anything else (a scratch `bp:{counter}` document from the palette) has no
+/// class and therefore no local functions, which is `Vec::new()` rather than an
+/// error: a preview of a scratch graph is not broken.
+///
+/// `load_blueprint_class` (the `Option` twin) rather than the `Result` one: a
+/// class that will not load already logs its reason, and a PREVIEW that refused
+/// to run because the asset moved would be a worse answer than a preview whose
+/// local calls fall through the way they did before this existed.
+fn actor_local_fns(
+    doc_id: &str,
+    assets: &super::assets::AssetState,
+) -> Vec<inf_blueprint::BlueprintFn> {
+    let Some(rest) = doc_id.strip_prefix("bp:") else {
+        return Vec::new();
+    };
+    let Ok(asset) = rest.parse::<inf_asset::AssetId>() else {
+        return Vec::new();
+    };
+    assets
+        .load_blueprint_class(asset)
+        .map(|c| c.functions)
+        .unwrap_or_default()
+}
+
+/// Run lowered handlers the way the engine runs them: **`LocalFns` outermost**,
+/// over the host that owns member variables.
+///
+/// This is `inf_blueprint::semantics::run_event`'s composition, and it is here
+/// for the reason that function states at its own body: a local call recurses
+/// through the OUTERMOST host, so whatever answers `vars::*` has to be inside
+/// the thing that answers a one-segment call. The preview had neither layer
+/// stacked — it called the interpreter directly — so a class holding a call
+/// form previewed with its own function falling through to `RunHost`'s
+/// unknown-call arm, which logs the path and answers `Unit`. The canvas cannot
+/// draw such a class today (`raise` refuses the form by name), and "cannot be
+/// reached today" is not the same claim as "cannot be reached".
+fn run_handlers(
+    fns: &[inf_blueprint::BlueprintFn],
+    functions: &[inf_blueprint::BlueprintFn],
+) -> GraphRunResult {
+    let mut inner = RunHost::default();
+    let mut handlers = Vec::new();
+    let mut error = None;
+    {
+        let mut host = inf_blueprint::interp::LocalFns::new(&mut inner, functions);
 
         // BeginPlay once.
         for f in fns.iter().filter(|f| f.id == "begin_play") {
@@ -564,18 +594,44 @@ pub async fn graph_run(id: String, state: State<'_, GraphState>) -> Result<Graph
                 }
             }
         }
+    }
 
-        let vars = host
-            .vars
-            .iter()
-            .filter_map(|(k, v)| value_as_f64(v).map(|f| (k.clone(), f)))
-            .collect();
-        Ok(GraphRunResult {
-            logs: host.logs,
-            vars,
-            handlers,
-            error,
-        })
+    let vars = inner
+        .vars
+        .iter()
+        .filter_map(|(k, v)| value_as_f64(v).map(|f| (k.clone(), f)))
+        .collect();
+    GraphRunResult {
+        logs: inner.logs,
+        vars,
+        handlers,
+        error,
+    }
+}
+
+/// Run the graph through the interpreter: lower each event handler, run
+/// BeginPlay once then Tick three times, collecting logs + final variables.
+#[tauri::command]
+pub async fn graph_run(
+    id: String,
+    state: State<'_, GraphState>,
+    assets: State<'_, super::assets::AssetState>,
+) -> Result<GraphRunResult, String> {
+    let functions = actor_local_fns(&id, &assets);
+    state.with(|s| {
+        let doc = s.docs.get(&id).ok_or_else(|| format!("no graph `{id}`"))?;
+        let fns = match lower_graph(&doc.graph, &s.registry) {
+            Ok(f) => f,
+            Err(e) => {
+                return Ok(GraphRunResult {
+                    logs: Vec::new(),
+                    vars: BTreeMap::new(),
+                    handlers: Vec::new(),
+                    error: Some(e.to_string()),
+                })
+            }
+        };
+        Ok(run_handlers(&fns, &functions))
     })
 }
 
@@ -670,6 +726,7 @@ fn debug_run_store(
     id: &str,
     breakpoints: &[u32],
     capture: bool,
+    functions: &[inf_blueprint::BlueprintFn],
 ) -> Result<DebugRunResult, String> {
     let doc = store
         .docs
@@ -685,39 +742,43 @@ fn debug_run_store(
         }
     };
     let bp: HashSet<u32> = breakpoints.iter().copied().collect();
-    let mut host = RunHost::default();
+    let mut inner = RunHost::default();
     let mut handlers = Vec::new();
     let mut error = None;
     let mut hit_nodes: BTreeSet<u32> = BTreeSet::new();
     let mut wire_latest: BTreeMap<(u32, String), String> = BTreeMap::new();
+    {
+        // The same stack `run_handlers` builds, for the same reason.
+        let mut host = inf_blueprint::interp::LocalFns::new(&mut inner, functions);
 
-    // BeginPlay once.
-    for (f, map) in lowered.iter().filter(|(f, _)| f.id == "begin_play") {
-        handlers.push(f.id.clone());
-        let dbg = per_fn_debug(map, &bp, capture);
-        match eval_fn_traced(f, &HashMap::new(), &mut host, &dbg) {
-            Ok((_v, trace)) => project_trace(map, &trace, &mut hit_nodes, &mut wire_latest),
-            Err(e) => error = Some(format!("begin_play: {e}")),
-        }
-    }
-    // Tick three frames at 1/60 s.
-    for (f, map) in lowered.iter().filter(|(f, _)| f.id == "tick") {
-        handlers.push(f.id.clone());
-        let dbg = per_fn_debug(map, &bp, capture);
-        for _ in 0..3 {
-            let args: HashMap<String, Value> =
-                [("dt".to_string(), Value::Float(1.0 / 60.0))].into();
-            match eval_fn_traced(f, &args, &mut host, &dbg) {
+        // BeginPlay once.
+        for (f, map) in lowered.iter().filter(|(f, _)| f.id == "begin_play") {
+            handlers.push(f.id.clone());
+            let dbg = per_fn_debug(map, &bp, capture);
+            match eval_fn_traced(f, &HashMap::new(), &mut host, &dbg) {
                 Ok((_v, trace)) => project_trace(map, &trace, &mut hit_nodes, &mut wire_latest),
-                Err(e) => {
-                    error = Some(format!("tick: {e}"));
-                    break;
+                Err(e) => error = Some(format!("begin_play: {e}")),
+            }
+        }
+        // Tick three frames at 1/60 s.
+        for (f, map) in lowered.iter().filter(|(f, _)| f.id == "tick") {
+            handlers.push(f.id.clone());
+            let dbg = per_fn_debug(map, &bp, capture);
+            for _ in 0..3 {
+                let args: HashMap<String, Value> =
+                    [("dt".to_string(), Value::Float(1.0 / 60.0))].into();
+                match eval_fn_traced(f, &args, &mut host, &dbg) {
+                    Ok((_v, trace)) => project_trace(map, &trace, &mut hit_nodes, &mut wire_latest),
+                    Err(e) => {
+                        error = Some(format!("tick: {e}"));
+                        break;
+                    }
                 }
             }
         }
     }
 
-    let vars = host
+    let vars = inner
         .vars
         .iter()
         .filter_map(|(k, v)| value_as_f64(v).map(|f| (k.clone(), f)))
@@ -729,7 +790,7 @@ fn debug_run_store(
     Ok(DebugRunResult {
         hits: hit_nodes.into_iter().collect(),
         wires,
-        logs: host.logs,
+        logs: inner.logs,
         vars,
         handlers,
         error,
@@ -745,8 +806,10 @@ pub async fn graph_debug_run(
     breakpoints: Vec<u32>,
     capture: bool,
     state: State<'_, GraphState>,
+    assets: State<'_, super::assets::AssetState>,
 ) -> Result<DebugRunResult, String> {
-    state.with(|s| debug_run_store(s, &id, &breakpoints, capture))
+    let functions = actor_local_fns(&id, &assets);
+    state.with(|s| debug_run_store(s, &id, &breakpoints, capture, &functions))
 }
 
 /// The Rust `inf-transpile` generates for this graph ("Open generated Rust").
@@ -1353,7 +1416,7 @@ mod tests {
             .unwrap();
 
         let res = state
-            .with(|s| debug_run_store(s, "bp:1", &[add.0], true))
+            .with(|s| debug_run_store(s, "bp:1", &[add.0], true, &[]))
             .unwrap();
         assert!(res.error.is_none(), "run error: {:?}", res.error);
         assert!(
@@ -1368,5 +1431,89 @@ mod tests {
         assert!(add_wire.is_some(), "captured `+` wire: {:?}", res.wires);
         assert_eq!(add_wire.unwrap().value, "1");
         assert_eq!(res.vars.get("out"), Some(&1.0));
+    }
+    /// **The preview stacks `LocalFns`, so a call form calls the function**
+    /// (wave SCRIPT2b, the SCRIPT2a audit's LOW 3).
+    ///
+    /// `graph_run` and the debug run both called the interpreter directly, with
+    /// no host layered over `RunHost`. A class holding a unit-local call
+    /// therefore previewed with that call landing on `RunHost`'s unknown-call
+    /// arm — logged as `helper()` and answered `Unit` — while the SAME program
+    /// in Simulate, in PIE and in the shipped player runs the function, because
+    /// `semantics::run_event` stacks `LocalFns` outermost.
+    ///
+    /// The arm runs `run_handlers` — the exact function both previews now use —
+    /// with and without the class's functions, and requires the two to differ:
+    /// with them the variable holds what the function computed, and without
+    /// them the call fell through and was logged. Asserting BOTH sides is what
+    /// makes this a measurement rather than a hope; the second half is the
+    /// behaviour that used to be the only one.
+    #[test]
+    fn the_preview_runs_a_units_own_functions() {
+        // A RAW string with real newlines, deliberately: this fixture's first
+        // draft used `\n`-continuations, a scripted edit ate them, and the arm
+        // passed anyway — legal Rust, identical output, wrong source (the ninth
+        // catch of that law, and this wave's own). A raw literal has no
+        // backslash for anything to eat.
+        let source = r#"actor "Preview"
+
+function double(x: float) -> float
+  return x * 2.0
+end
+
+on begin_play()
+  out = double(21.0)
+end
+"#;
+        let (class, _w) = inf_script::compile(source, "preview").expect("the fixture compiles");
+        assert_eq!(
+            class.functions.len(),
+            1,
+            "the fixture declares one function"
+        );
+        let handlers: Vec<_> = class.events.iter().map(|b| b.body.clone()).collect();
+
+        let with = run_handlers(&handlers, &class.functions);
+        assert_eq!(with.error, None, "the preview errored: {:?}", with.error);
+        assert_eq!(
+            with.vars.get("out"),
+            Some(&42.0),
+            "the call form did not reach the function: logs {:?}",
+            with.logs
+        );
+
+        // …and the shape this replaces, so the arm cannot pass vacuously.
+        let without = run_handlers(&handlers, &[]);
+        assert_ne!(without.vars.get("out"), Some(&42.0));
+        assert!(
+            without.logs.iter().any(|l| l.starts_with("double(")),
+            "without the functions the call must fall through to the logger: {:?}",
+            without.logs
+        );
+    }
+
+    /// A document id names its class, or it names nothing — and "nothing" is a
+    /// scratch graph rather than an error.
+    #[test]
+    fn only_an_actor_document_can_have_local_functions() {
+        // `graph_open_actor` mints `bp:<asset>`; the palette mints `bp:<counter>`.
+        let id = inf_asset::AssetId(uuid::Uuid::from_u128(
+            0x1234_5678_9abc_def0_1234_5678_9abc_def0,
+        ));
+        assert_eq!(
+            format!("bp:{id}")
+                .strip_prefix("bp:")
+                .and_then(|r| r.parse::<inf_asset::AssetId>().ok()),
+            Some(id),
+        );
+        for scratch in ["bp:1", "bp:", "mat:1", "bp:not-a-guid"] {
+            assert!(
+                scratch
+                    .strip_prefix("bp:")
+                    .and_then(|r| r.parse::<inf_asset::AssetId>().ok())
+                    .is_none(),
+                "{scratch} must not resolve to an asset"
+            );
+        }
     }
 }

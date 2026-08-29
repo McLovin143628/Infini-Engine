@@ -205,7 +205,10 @@ mod tests {
             inf_script::compile(source, "check:Example").expect("the shipped template compiles");
 
         let text = inf_script::emit_class(&class).expect("a class the emitter can write");
-        assert!(text.contains("on tick"), "the emitted text is not empty: {text}");
+        assert!(
+            text.contains("on tick"),
+            "the emitted text is not empty: {text}"
+        );
 
         let refusals = check_text(&text, Some("Example.infini"));
         assert_eq!(
@@ -219,8 +222,14 @@ mod tests {
     /// a name a message can use.
     #[test]
     fn a_label_is_a_leaf_or_a_stand_in() {
-        assert_eq!(label_of(Some("C:/Content/Scripts/Door.infini")), "Door.infini");
-        assert_eq!(label_of(Some("C:\\Content\\Scripts\\Door.infini")), "Door.infini");
+        assert_eq!(
+            label_of(Some("C:/Content/Scripts/Door.infini")),
+            "Door.infini"
+        );
+        assert_eq!(
+            label_of(Some("C:\\Content\\Scripts\\Door.infini")),
+            "Door.infini"
+        );
         assert_eq!(label_of(Some("Door.infini")), "Door.infini");
         assert_eq!(label_of(None), "(unsaved script)");
         assert_eq!(label_of(Some("")), "(unsaved script)");
