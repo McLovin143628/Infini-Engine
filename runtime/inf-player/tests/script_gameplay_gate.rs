@@ -341,32 +341,30 @@ fn the_cooked_script_artifact_is_byte_identical_on_every_host() {
     );
 }
 
-/// **`engine.spawn` is the only asset-naming verb, and neither host implements
-/// it** — a tripwire under the PIE payload's dependency closure.
+/// **`engine.spawn` is the only asset-naming verb — and since wave SCRIPT3 both
+/// hosts implement it, so the PIE payload's asset edge fell due.**
 ///
-/// The cook walks a script's asset references (`inf_blueprint::asset_refs`) and
-/// pulls what it names into the pack. `build_scene_payload` does **not** — it is
-/// a hand-maintained mirror of `asset_deps`, and this edge is not in it. That is
-/// safe today for a measurable reason and not for a hopeful one: **no host
-/// implements `engine.spawn`**, so a script cannot put anything in a world in
-/// either PIE or shipping, so there is nothing for a payload to be missing.
+/// This arm was a **tripwire** under `build_scene_payload`'s dependency closure:
+/// the cook walks a script's `inf_blueprint::asset_refs` and pulls what it names
+/// into the pack, the payload builder is a hand-maintained mirror of that walk
+/// and did not, and the whole thing was safe for one measured reason — *no host
+/// implemented `engine.spawn`*, so a script could not put anything in a world in
+/// either PIE or shipping and there was nothing for a payload to be missing. The
+/// arm's message said what to do the day that changed: *"mirror the edge, or
+/// factor one Ring-0 walk."*
 ///
-/// # The second half, corrected by the SCRIPT1b audit
+/// SCRIPT3 changed it, the edge is mirrored (`pie.rs`, the SCRIPT3 block beside
+/// the skeletal refs), and the arm is turned round to face the other way. What it
+/// measures now:
 ///
-/// The wave wrote that the verb *"reaches neither host's `Host::call`"* and
-/// armed it as `!logs.contains("engine::spawn")` on a fixture that **does not
-/// call it** — an assertion that could not fail, under prose claiming something
-/// else. It does reach `Host::call`: both hosts end their `match` with an
-/// unknown-call arm that pushes `path.join("::")` onto the log and answers
-/// `Value::Unit`, so *"a partially-authored blueprint still runs rather than
-/// aborting"*.
-///
-/// So the arm now runs a script that really calls it and measures the three
-/// things the carried item rests on: the call happens, it is **reported** by
-/// name, and the world gains **nothing**. The day somebody implements the verb,
-/// the entity-count half goes red and says what the payload owes.
+/// 1. **`engine.spawn.prefab` is still the only `StrRole::Asset` port** — a new
+///    one arriving is a new edge, and the payload mirror would owe it too;
+/// 2. **the verb is LIVE in the shipped host**: a script that calls it puts an
+///    entity in the world, at its own place, under the content-derived GUID;
+/// 3. **the handler runs past it**, which was true when the call was inert and
+///    has to stay true now that it is not.
 #[test]
-fn nothing_a_script_names_can_reach_a_world_yet() {
+fn what_a_script_names_reaches_the_world_and_the_payload_walks_it() {
     let assets = inf_blueprint::assetrefs::STR_PORTS
         .iter()
         .filter(|(_, _, r)| *r == inf_blueprint::StrRole::Asset)
@@ -375,15 +373,12 @@ fn nothing_a_script_names_can_reach_a_world_yet() {
     assert_eq!(
         assets,
         ["engine.spawn.prefab"],
-        "a new asset-naming verb arrived. `inf_packager::asset_deps` walks it; \
-         `inf_editor_core::pie::build_scene_payload` does NOT, and a PIE payload \
-         that is missing what a cooked pack carries is precisely the divergence \
-         this file exists to prevent. Mirror the edge, or factor one Ring-0 walk."
+        "a new asset-naming verb arrived. `inf_packager::asset_deps` walks it and \
+         so does `inf_editor_core::pie::build_scene_payload` — check the second \
+         one covers this port too, or a PIE payload is missing what a cooked pack \
+         carries, which is precisely the divergence this file exists to prevent."
     );
 
-    // …and the verb is INERT in the shipped host, measured on a script that
-    // really calls it: the handler runs to completion, the unknown path is
-    // logged by name, and the world gains no entity.
     const SPAWNER: &str = "\
 on begin_play()
   engine.spawn(\"Coyote\")
@@ -410,30 +405,47 @@ end
     let mut sim = inf_player::sim_from_payload(&payload)
         .expect("the world builds")
         .sim;
-    let before = sim.world_mut().entities().len();
+    // `BeginPlay` runs when the sim is BUILT, not on the first step -- so the
+    // spawn has already happened here, and the count below is the whole world
+    // rather than a delta. (Measuring a delta across `step_once` would have read
+    // zero and looked like a verb that does nothing, which is the answer this
+    // arm used to assert.)
     sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
     println!("the spawner's host log: {:?}", sim.logs());
+
+    // The actor sits at the origin (the fixture's `Transform::default()`), so
+    // that is where its spawn lands — and the identity is derived here rather
+    // than searched for, so a spawn that minted a fresh GUID fails.
+    let spawned = inf_ecs::prefab::authored_spawn_guid("Coyote", inf_ecs::math::Vec3d::ZERO);
     assert!(
-        sim.logs().iter().any(|l| l == "engine::spawn"),
-        "the host's unknown-call arm must REPORT the verb by name, or a script \
-         that thinks it spawned something fails silently: {:?}",
+        sim.world_mut().entity_of(spawned).is_some(),
+        "`engine.spawn` is implemented in the shipped host now; a script that \
+         names a prefab must put THAT entity in the world: {:?}",
         sim.logs()
     );
     assert_eq!(
         sim.world_mut().entities().len(),
-        before,
-        "`engine.spawn` put something in the world. It is now an implemented \
-         verb, so `build_scene_payload` owes the asset edge `asset_deps` \
-         already walks — mirror it, or factor one Ring-0 walk."
+        2,
+        "the world is the actor plus its one spawn: {:?}",
+        sim.world_mut()
+            .entities()
+            .into_iter()
+            .map(|e| sim.world_mut().name_of(e).unwrap_or("?").to_string())
+            .collect::<Vec<_>>()
     );
-    // Anti-vacuity: the handler did not merely abort at the unknown call — the
-    // statement AFTER it ran, which is what "inert, not fatal" means and is the
-    // reason the unknown-call arm returns a value instead of an error.
+    assert!(
+        !sim.logs().iter().any(|l| l == "engine::spawn"),
+        "the verb reached the unknown-call logger, so it is dispatched by nobody \
+         again: {:?}",
+        sim.logs()
+    );
+    // Anti-vacuity, unchanged in purpose from when the call was inert: the
+    // handler did not stop at the spawn.
     assert!(
         sim.logs()
             .iter()
             .any(|l| l == "the statement after the spawn"),
-        "the handler stopped at the unknown verb: {:?}",
+        "the handler stopped at the spawn: {:?}",
         sim.logs()
     );
 }

@@ -44,6 +44,9 @@ pub mod item;
 pub mod math;
 pub mod movement;
 pub mod pose;
+// SCRIPT3: the `engine.*` kit's one rule — spawn, destroy and turn — behind the
+// three verbs the node kit registered at P6 and neither host implemented.
+pub mod prefab;
 pub mod props;
 pub mod refs;
 pub mod registry;

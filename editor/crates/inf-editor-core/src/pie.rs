@@ -504,6 +504,10 @@ where
 
     let mut classes: Vec<(Uuid, Vec<u8>)> = Vec::new();
     let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    // **What the PROGRAMS name** (SCRIPT3): every asset a carried class reaches
+    // by name, in `asset_refs` order, deduplicated. Resolved below, beside the
+    // components' own references. See `named_assets`' use site for the reason.
+    let mut named_assets: Vec<Uuid> = Vec::new();
     let world = doc.world();
     for &guid in doc.order() {
         if let Some(e) = world.entity_of(guid) {
@@ -511,6 +515,11 @@ where
                 let asset = ac.0;
                 if seen.insert(asset) {
                     if let Some(class) = resolve(asset) {
+                        for r in inf_blueprint::asset_refs(&class) {
+                            if let Ok(named) = r.name.parse::<Uuid>() {
+                                named_assets.push(named);
+                            }
+                        }
                         classes.push((asset, encode_class(&class)?));
                     }
                 }
@@ -778,6 +787,39 @@ where
         }
         if let Some(bytes) = resolve_mesh(mesh) {
             meshes.push((mesh, bytes));
+        }
+    }
+
+    // ── SCRIPT3: the asset edge a PROGRAM opens ──────────────────────────────
+    //
+    // `inf_packager::asset_deps` walks a class's `inf_blueprint::asset_refs` and
+    // pulls what it names into the pack's closure. This builder is a
+    // hand-maintained mirror of that walk and did **not**, which was safe for a
+    // measured reason rather than a hopeful one: `engine.spawn` is the kit's only
+    // `StrRole::Asset` port and NEITHER host implemented it, so nothing a program
+    // named could reach a world in either PIE or shipping. Wave SCRIPT3
+    // implemented it, so the debt fell due and this is it being paid.
+    //
+    // **Only a GUID-spelled name resolves, and that is the verb's contract rather
+    // than a shortcut here.** `inf_ecs::prefab::spawn_prefab` binds
+    // `MeshRef::asset` when the prefab parses as a `Uuid` and spawns a named
+    // placeholder cube when it does not, because an `.inf_pack` entry carries a
+    // GUID, a kind and a content hash and **no name** — a shipped player has
+    // nothing to resolve a file stem against. The cook resolves a stem because it
+    // has the asset database; the runtime does not have one, on either host, and
+    // a payload that resolved stems would give PIE a mesh the shipped build could
+    // not find. That would be this file's own failure mode wearing a fix's
+    // clothes.
+    //
+    // Through `resolve_mesh` into `meshes` — the same door and the same dedupe as
+    // the skeletal refs above, so a mesh both a `SkeletalMesh` and a spawn name
+    // rides once.
+    for named in named_assets {
+        if !seen_mesh.insert(named) {
+            continue;
+        }
+        if let Some(bytes) = resolve_mesh(named) {
+            meshes.push((named, bytes));
         }
     }
 

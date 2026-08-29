@@ -427,16 +427,16 @@ fn flow_nodes() -> Vec<NodeDef> {
 
 fn action_nodes() -> Vec<NodeDef> {
     vec![
-        // **The three `engine.*` verbs say so in their own descriptions**: they
-        // are registered, callable, and dispatched by NEITHER host, so each
-        // logs its path and answers `Unit`. The API manual is generated from
-        // these lines, so a designer reading the manual learns it at the point
-        // of use rather than from a wave ledger.
-        // (`the_engine_namespace_is_registered_and_implemented_by_neither_host`
-        // is the arm that keeps these three sentences true.)
+        // **Implemented in both hosts since wave SCRIPT3**, over one Ring-0 rule
+        // each (`inf_ecs::prefab`). Until then all three were registered,
+        // callable from `.infini` text and dispatched by NEITHER host — they fell
+        // through to the unknown-call arm, logged their path and answered `Unit`
+        // — and their descriptions said so. `both_hosts_dispatch_exactly_the_
+        // registered_verbs` now covers `engine` like every other namespace,
+        // which is what retired the exception rather than a promise to remember.
         NodeDef::new("engine.set_rotation", "Set Rotation", "engine")
             .described(
-                "Turn the acting entity to an absolute yaw, in DEGREES. NOT IMPLEMENTED BY EITHER HOST today: the call is logged and does nothing, which is what every unrecognised call does.",
+                "Turn the acting entity to an absolute yaw, in DEGREES, leaving its pitch and roll alone. The value is taken as written, so 370 is 370 — the component holds what an author typed.",
             )
             .with_inputs(vec![
                 exec_in(),
@@ -445,7 +445,7 @@ fn action_nodes() -> Vec<NodeDef> {
             .with_outputs(vec![exec_out(EXEC_THEN)]),
         NodeDef::new("engine.spawn", "Spawn Prefab", "engine")
             .described(
-                "Place a copy of a named prefab in the world and report its entity id. The name is the one string in this whole kit the cook resolves as an ASSET, so a name matching nothing is a blocking advisory. NOT IMPLEMENTED BY EITHER HOST today: the call is logged, nothing is spawned, and the reported id is unusable.",
+                "Place a copy of a named prefab at the acting entity's own position and report its entity id. The name is the one string in this whole kit the cook resolves as an ASSET, so a name matching nothing is a blocking advisory. The spawned entity's identity is folded from the name and the place, so spawning one prefab twice at one point is ONE entity; spell the prefab as a GUID and the spawned entity draws that asset, spell it as a file stem and it draws a placeholder cube carrying the name (a pack entry has no name to resolve a stem against).",
             )
             .with_inputs(vec![
                 exec_in(),
@@ -457,7 +457,7 @@ fn action_nodes() -> Vec<NodeDef> {
             ]),
         NodeDef::new("engine.destroy", "Destroy Entity", "engine")
             .described(
-                "Remove an entity from the world. NOT IMPLEMENTED BY EITHER HOST today: the call is logged and nothing is removed.",
+                "Remove an entity, and everything parented under it, from the world. An id that names nothing is reported and ignored rather than failing the handler. If the entity was an actor, its handlers stop with it at the end of this one.",
             )
             .with_inputs(vec![
                 exec_in(),
@@ -2164,17 +2164,19 @@ mod tests {
         // `Physics3dHost`, `AudioHost`). Their arms have a different shape —
         // `match (op, field)` — and their own per-namespace round-trip tests.
         const DISPATCHED_IN_INTERP: &[&str] = &["physics2d", "physics3d", "audio"];
-        // **Registered and implemented by NEITHER host** — the asymmetry this
-        // gate exists to make visible rather than to hide. `engine.set_rotation`,
-        // `engine.spawn` and `engine.destroy` are in the palette, callable from
-        // `.infini`, and fall through to the unknown-call logger in both
-        // `simulate.rs` and `runtime_sim.rs`: they log their path and answer
-        // `Unit`. `engine.spawn` is also the kit's ONLY `StrRole::Asset` port,
-        // so the cook's asset-reference walk exists to serve a verb no host
-        // implements. Named here so the day somebody implements one, this list
-        // shrinks in the same commit — and so that a reader of this gate learns
-        // the fact rather than reading a green tick over it.
-        const UNIMPLEMENTED_IN_BOTH_HOSTS: &[&str] = &["engine"];
+        // **`engine` came OFF this list in wave SCRIPT3**, which is what the
+        // exception was written to make happen. It carried the three verbs that
+        // were registered, callable from `.infini` and dispatched by neither
+        // host — including `engine.spawn`, the kit's ONLY `StrRole::Asset` port,
+        // so the cook's asset-reference walk existed to serve a verb no host
+        // implemented. Both hosts dispatch all three now, over one Ring-0 rule
+        // each, and they are compared here like every other namespace.
+        //
+        // The list stays (empty) rather than being deleted: it is the shape this
+        // gate uses to say "registered on purpose, dispatched by nobody", and
+        // the next verb that needs it should find the doorway open and the
+        // reasoning above it.
+        const UNIMPLEMENTED_IN_BOTH_HOSTS: &[&str] = &[];
 
         let reg = blueprint_registry();
         // Group the host-dispatched verbs by the namespace they reach on the
@@ -2245,17 +2247,20 @@ mod tests {
         }
     }
 
-    /// **The `engine.*` hole, measured rather than described.**
+    /// **The `engine.*` hole, CLOSED — and the arm turned round to face the
+    /// other way** (wave SCRIPT3).
     ///
-    /// The gate above carries `engine` on an exception list, and an exception
-    /// list is a blind spot with a name on it unless something checks the
-    /// exception is still true. This is that: all three `engine.*` verbs are
-    /// registered, and neither host has an arm for any of them.
+    /// This read `!src.contains("(Some(\"engine\"), Some(\"")` and said *"the day
+    /// somebody implements one, remove `engine` from `UNIMPLEMENTED_IN_BOTH_HOSTS`
+    /// and retire this arm."* Somebody did, so the exception is gone and the
+    /// general gate above now compares `engine.*` like every other namespace.
     ///
-    /// When somebody implements one, this fails and says so — which is the right
-    /// way round, because the exception list is what needs editing.
+    /// What is left is the half the general gate cannot state: that the three
+    /// verbs reach a Ring-0 rule rather than being re-implemented in each host.
+    /// A host that grew its own spawn would still pass the set comparison, and
+    /// two spawns that agree today are a divergence with a delay (P22).
     #[test]
-    fn the_engine_namespace_is_registered_and_implemented_by_neither_host() {
+    fn both_hosts_reach_the_same_ring_0_rule_for_the_engine_kit() {
         let reg = blueprint_registry();
         let declared: Vec<String> = reg
             .ordered()
@@ -2278,11 +2283,21 @@ mod tests {
             let src = std::fs::read_to_string(root.join(host))
                 .unwrap_or_else(|e| panic!("read {host}: {e}"));
             assert!(
-                !src.contains("(Some(\"engine\"), Some(\""),
-                "{host} now dispatches an `engine.*` verb. Good — remove `engine` from \
-                 `UNIMPLEMENTED_IN_BOTH_HOSTS` in `both_hosts_dispatch_exactly_the_registered_verbs` \
-                 so the real comparison starts running, and retire this arm."
+                src.contains("(Some(\"engine\"), Some(\""),
+                "{host} stopped dispatching the `engine.*` kit"
             );
+            for rule in [
+                "inf_ecs::prefab::spawn_prefab",
+                "inf_ecs::prefab::destroy_entity",
+                "inf_ecs::prefab::set_yaw_degrees",
+            ] {
+                assert!(
+                    src.contains(rule),
+                    "{host} does not reach `{rule}`. The `engine.*` arms are a MIRROR pair \
+                     over one Ring-0 rule each; a host that grew its own spawn would pass \
+                     the registry comparison and diverge from the other one."
+                );
+            }
         }
     }
 

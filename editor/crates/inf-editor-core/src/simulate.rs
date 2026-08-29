@@ -224,8 +224,12 @@ pub struct SimSession {
     stepper: FixedStepper,
     /// Actors keyed by `Guid` (deterministic iteration).
     actors: BTreeMap<Uuid, ActorState>,
-    /// Blueprint `i64` entity id → its `Guid`.
+    /// Blueprint `i64` entity id → its `Guid`. Seeded in `Guid` order at
+    /// [`enter`](Self::enter) and **grown by `engine.spawn`** (SCRIPT3).
     entities: BTreeMap<i64, Uuid>,
+    /// Guids the running handler destroyed (SCRIPT3), drained into
+    /// [`actors`](Self::actors) at the end of [`run_on_guid`](Self::run_on_guid).
+    despawned: Vec<Uuid>,
     /// The world state captured at [`enter`](Self::enter), restored on
     /// [`exit`](Self::exit).
     snapshot: SceneFile,
@@ -572,6 +576,7 @@ impl SimSession {
             stepper: FixedStepper::from_hz(hz),
             actors: states,
             entities,
+            despawned: Vec::new(),
             snapshot,
             state_machines: BTreeMap::new(),
             skeletons: BTreeMap::new(),
@@ -1759,7 +1764,8 @@ impl SimSession {
                 world: doc.world_mut(),
                 input: &self.input,
                 just_pressed: &self.just_pressed,
-                entities: &self.entities,
+                entities: &mut self.entities,
+                despawned: &mut self.despawned,
                 logs: &mut self.logs,
                 grounded: &mut self.grounded,
                 audio_cmds: &mut self.audio_cmds,
@@ -1796,6 +1802,12 @@ impl SimSession {
             self.debug_events.push(hit);
         }
         self.actors.insert(guid, state);
+        // SCRIPT3: `engine.destroy` took an entity out of the world; if it was an
+        // actor its handlers stop with it. Drained AFTER the re-insert above, so
+        // an actor that destroyed itself does not come back.
+        for g in std::mem::take(&mut self.despawned) {
+            self.actors.remove(&g);
+        }
     }
 
     /// Fire `event` on whatever actor owns blueprint entity id `entity_id`, if
@@ -2401,7 +2413,16 @@ struct SimHost<'a> {
     world: &'a mut EcsWorld,
     input: &'a SimInput,
     just_pressed: &'a BTreeSet<String>,
-    entities: &'a BTreeMap<i64, Uuid>,
+    /// The blueprint `i64 → Guid` map, **mutable since SCRIPT3**: `engine.spawn`
+    /// adds a row and `engine.destroy` takes one away, so a script-spawned
+    /// entity is addressed through the one map an actor is, rather than through
+    /// a second scheme beside it. (`inf_mod::tick` has taken it mutably since
+    /// P14.5 for the same reason — a spawning mod.)
+    entities: &'a mut BTreeMap<i64, Uuid>,
+    /// Guids `engine.destroy` removed from the world during this handler, drained
+    /// by the session after it finishes: if one of them was an ACTOR, its
+    /// handlers must stop with its entity.
+    despawned: &'a mut Vec<Uuid>,
     logs: &'a mut BoundedLog<String>,
     grounded: &'a mut BTreeMap<Uuid, bool>,
     /// The P12.3 audio command sink: `audio.*` nodes enqueue here; drained after
@@ -2481,6 +2502,68 @@ impl Host for SimHost<'_> {
             }
             (Some("debug"), Some("print")) => {
                 self.logs.push(arg_str(args, 0));
+                Ok(Value::Unit)
+            }
+            // ── the `engine.*` kit (wave SCRIPT3) ────────────────────────────
+            //
+            // The three verbs Phase 6 registered and, until this wave, NEITHER
+            // host implemented: `the_engine_namespace_is_registered_and_
+            // implemented_by_neither_host` measured them falling through to the
+            // unknown-call arm below, logging their path and answering `Unit`.
+            //
+            // One Ring-0 rule each (`inf_ecs::prefab`), so this block and the
+            // other host's diff to nothing — the `door.*` arrangement, for the
+            // reason P22 keeps charging for: a spawn implemented twice is two
+            // implementations that agree until they do not.
+            //
+            // The identity of what a spawn puts in the world is folded from the
+            // prefab name and the place (never a counter), and the `i64` handle
+            // is folded from that identity — so both hosts hand the same program
+            // the same number, and the map an actor is addressed through gains a
+            // row rather than growing a second addressing scheme.
+            (Some("engine"), Some("spawn")) => {
+                let prefab = arg_str(args, 0);
+                // At the ACTING actor's own place: the node has exactly one
+                // input and it is the prefab. An author who wants a point passes
+                // one to `item.spawn_pickup`, or moves the spawner.
+                let at = match self.guid_of(self.current_entity) {
+                    Ok(g) => inf_ecs::Vec3d::from(emitter_position(self.world, g)),
+                    Err(_) => inf_ecs::Vec3d::ZERO,
+                };
+                let (guid, handle) = inf_ecs::prefab::spawn_prefab(self.world, &prefab, at);
+                self.entities.insert(handle, guid);
+                Ok(Value::Int(handle))
+            }
+            (Some("engine"), Some("destroy")) => {
+                let id = arg_i64(args, 0);
+                match self.guid_of(id) {
+                    Ok(g) if inf_ecs::prefab::destroy_entity(self.world, g) => {
+                        self.entities.remove(&id);
+                        // If that entity was an ACTOR, its handlers must stop
+                        // with it. The host cannot reach the session's actor
+                        // map, so it records the guid and the session drains it
+                        // after this handler finishes — the statement after a
+                        // `engine.destroy(var.get("entity"))` still runs, which
+                        // is the containment rule (A.7) rather than an exception
+                        // to it.
+                        self.despawned.push(g);
+                        Ok(Value::Unit)
+                    }
+                    // A refusal is a VALUE (P21): an id that names nothing is
+                    // something an author fixes by typing, not a reason to take
+                    // the rest of the handler down.
+                    _ => {
+                        self.logs
+                            .push(format!("engine::destroy: no entity for id {id}"));
+                        Ok(Value::Unit)
+                    }
+                }
+            }
+            (Some("engine"), Some("set_rotation")) => {
+                let deg = arg_f64(args, 0);
+                if let Ok(g) = self.guid_of(self.current_entity) {
+                    inf_ecs::prefab::set_yaw_degrees(self.world, g, deg);
+                }
                 Ok(Value::Unit)
             }
             // terrain.height_at(x, z) → the world height at that XZ (P11.4). The

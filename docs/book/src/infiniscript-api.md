@@ -31,9 +31,9 @@ The surface is **132 registered nodes across 26 namespaces**. Not all of them ar
 
 | call | kind | answers | what it does |
 |---|---|---|---|
-| `engine.set_rotation(angle: float)` | statement | — | Turn the acting entity to an absolute yaw, in DEGREES. NOT IMPLEMENTED BY EITHER HOST today: the call is logged and does nothing, which is what every unrecognised call does. |
-| `engine.spawn(prefab: string)` | statement, value | `entity`: int | Place a copy of a named prefab in the world and report its entity id. The name is the one string in this whole kit the cook resolves as an ASSET, so a name matching nothing is a blocking advisory. NOT IMPLEMENTED BY EITHER HOST today: the call is logged, nothing is spawned, and the reported id is unusable. |
-| `engine.destroy(entity: int)` | statement | — | Remove an entity from the world. NOT IMPLEMENTED BY EITHER HOST today: the call is logged and nothing is removed. |
+| `engine.set_rotation(angle: float)` | statement | — | Turn the acting entity to an absolute yaw, in DEGREES, leaving its pitch and roll alone. The value is taken as written, so 370 is 370 — the component holds what an author typed. |
+| `engine.spawn(prefab: string)` | statement, value | `entity`: int | Place a copy of a named prefab at the acting entity's own position and report its entity id. The name is the one string in this whole kit the cook resolves as an ASSET, so a name matching nothing is a blocking advisory. The spawned entity's identity is folded from the name and the place, so spawning one prefab twice at one point is ONE entity; spell the prefab as a GUID and the spawned entity draws that asset, spell it as a file stem and it draws a placeholder cube carrying the name (a pack entry has no name to resolve a stem against). |
+| `engine.destroy(entity: int)` | statement | — | Remove an entity, and everything parented under it, from the world. An id that names nothing is reported and ignored rather than failing the handler. If the entity was an actor, its handlers stop with it at the end of this one. |
 
 ## `debug.*`
 
