@@ -1,4 +1,4 @@
-//! Infinity Blueprints: graph semantics + tree-walking interpreter for editor preview.
+//! Infini Blueprints: graph semantics + tree-walking interpreter for editor preview.
 //!
 //! Spike B model (docs/ROADMAP.md §5): the data structures that make the
 //! graph the *source of truth* while real Rust stays a faithful, hand-editable

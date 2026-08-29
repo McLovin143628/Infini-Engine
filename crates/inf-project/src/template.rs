@@ -170,7 +170,7 @@ impl ProjectTemplate {
         format!(
             "//! `{crate_name}` — gameplay for {doc}.\n\
              //!\n\
-             //! Hand-written systems live here; Infinity Blueprints (Phase 6) generate\n\
+             //! Hand-written systems live here; Infini Blueprints (Phase 6) generate\n\
              //! additional Rust into this crate and stay in sync.\n\
              //!\n\
              //! Generated blueprint code lives in `src/blueprints/` and is COMMITTED,\n\

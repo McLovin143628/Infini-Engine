@@ -1,6 +1,6 @@
 # Blueprints 101
 
-**Infinity Blueprints** are the visual way to write gameplay. A Blueprint is a node graph that the
+**Infini Blueprints** are the visual way to write gameplay. A Blueprint is a node graph that the
 engine transpiles into real Rust source — and lifts back from Rust when you hand-edit it — so a
 graph and its generated code stay bidirectionally in sync. This is the engine's signature feature:
 *two ways to code, one truth.*

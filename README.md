@@ -8,7 +8,7 @@ asset import to a shipped, packaged build.
 ## What makes it different
 
 - **Two ways to code, one truth.** Write gameplay in real Rust (built-in IDE with
-  rust-analyzer) or in **Infinity Blueprints** (node graphs) — interchangeably. Graphs
+  rust-analyzer) or in **Infini Blueprints** (node graphs) — interchangeably. Graphs
   transpile to real Rust source and stay bidirectionally in sync; the in-editor interpreter is
   parity-tested against the compiled Rust so preview never diverges from shipped behavior.
 - **Native-core editor.** The engine core is pure Rust (wgpu/WGSL, data-oriented `bevy_ecs`);
@@ -34,7 +34,7 @@ are complete and CI-green on Windows, macOS, and Linux:
 | ECS & scene model — reflection Details, undo/redo, `.inf_lvl` save/load | Phase 3 ✅ |
 | Asset system & Content Drawer — import, thumbnails, dependency graph | Phase 4 ✅ |
 | IDE integration — CodeMirror, terminal, git, search, LSP | Phase 5 ✅ |
-| Infinity Blueprints & transpiler — graph ↔ Rust, interpreter parity | Phase 6 ✅ |
+| Infini Blueprints & transpiler — graph ↔ Rust, interpreter parity | Phase 6 ✅ |
 | Materials & texture graphs — node graph → WGSL, PBR, bake | Phase 7 ✅ |
 | 2D pipeline — sprites, tilemaps, 2D physics, 2.5D | Phase 8 ✅ |
 | Play-in-editor, standalone player & desktop packaging | Phase 9 ✅ |

@@ -1,6 +1,6 @@
 [package]
 name = "inf-blueprint"
-description = "Infinity Blueprints: graph semantics + tree-walking interpreter for editor preview."
+description = "Infini Blueprints: graph semantics + tree-walking interpreter for editor preview."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

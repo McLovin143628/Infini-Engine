@@ -3640,6 +3640,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "inf-script"
+version = "0.1.0"
+dependencies = [
+ "inf-blueprint",
+ "inf-graph",
+ "inf-math",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "inf-stream"
 version = "0.1.0"
 dependencies = [

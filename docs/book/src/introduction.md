@@ -6,7 +6,7 @@ carries a project from the first imported asset all the way to a shipped, packag
 
 Two things make it distinct. First, **two ways to code, one truth**: you can write gameplay in
 real Rust — the editor embeds a full IDE with rust-analyzer completions, a terminal, and source
-control — or you can author it visually with **Infinity Blueprints**, node graphs that *transpile
+control — or you can author it visually with **Infini Blueprints**, node graphs that *transpile
 to real Rust source* and stay bidirectionally in sync. The in-editor interpreter that previews
 your graphs is parity-tested in CI against the compiled Rust, so what you see while iterating is
 what ships. Second, the **viewport is a native window**: the engine renders your scene into a

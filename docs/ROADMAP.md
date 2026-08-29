@@ -5,7 +5,7 @@
 Infini Engine is a commercial-grade, next-generation game engine: a native Rust core with a
 built-in Tauri v2 + React editor. It targets 2D, 2.5D, and 3D games of every genre,
 with a professional pipeline from first asset import to shipped, packaged builds. Developers write
-gameplay in **real Rust** (built-in IDE) or in **Infinity Blueprints** (node graphs) —
+gameplay in **real Rust** (built-in IDE) or in **Infini Blueprints** (node graphs), or in **InfiniScript** (`.infini` text) —
 interchangeably, because graphs transpile to real Rust source and stay bidirectionally in sync.
 
 ---
@@ -498,7 +498,7 @@ warns correctly.
 - **P5.5 Project system** *(done)* — 1. `inf new` (templates → user cargo workspace + `inf.toml`);
   2. project open/recent/switcher (Start Screen); 3. per-project content re-rooting.
 
-### Phase 6 — Infinity Blueprints & transpiler v1 *(signature feature)*
+### Phase 6 — Infini Blueprints & transpiler v1 *(signature feature)*
 
 > **STATUS: Phase 6 COMPLETE** (2026-07-20). The signature feature's full stack is in and
 > CI-green. The graph ↔ IR ↔ Rust four-way sync is proven end-to-end and interpreter-vs-compiled
