@@ -52,6 +52,7 @@ impl AssetProject {
         let mut db = AssetDb::new(&root);
         db.scan()?;
         report_sidecar_advisories(&db);
+        pin_script_ids(&db);
         let cache = ImportCache::open(root.join(".inf").join("import-cache"))?;
         let me = Self {
             root,
@@ -87,6 +88,7 @@ impl AssetProject {
     pub fn rescan(&mut self) -> Result<usize> {
         let n = self.db.scan()?;
         report_sidecar_advisories(&self.db);
+        pin_script_ids(&self.db);
         self.report_binding_advisories();
         self.bump();
         Ok(n)
@@ -741,6 +743,67 @@ fn report_sidecar_advisories(db: &AssetDb) {
     // consequence, remedy) — the sentence existed and had no reader.
     for c in db.collisions() {
         tracing::warn!("content scan: {c}");
+    }
+}
+
+/// **Pin every `.infini`'s identity to disk the first time we see it**
+/// (SCRIPT1b audit — a live defect, not a hardening).
+///
+/// # What was broken
+///
+/// A payload with no sidecar is registered under a GUID **synthesised from its
+/// content hash** (`AssetDb`'s `read_entry`), and `db.rs`'s own comment names
+/// the consequence for the one kind that had already met it: *"the content-hash
+/// fallback makes a level's asset id **churn with its contents**, so every save
+/// re-registers the level under a new id and every edge into it goes stale."* A
+/// `.inf_lvl` escapes because its own TOML declares a GUID, and a `.inf_act`
+/// escapes because the door that writes one writes a sidecar beside it.
+///
+/// **A `.infini` had neither.** It is text a human edits, so its content hash
+/// changes on *every save* — and a level binds it through `ActorClass(Uuid)`.
+/// So one save renamed the asset, and:
+///
+/// * SCRIPT1b's hot reload swapped **nothing**, because the class was queued
+///   under the new GUID while every actor's `ActorClass` still held the old one;
+/// * PIE and Simulate then resolved that binding to `None`, and the actor ran
+///   with no gameplay logic at all, silently;
+/// * and the cooked pack lost the edge for the same reason.
+///
+/// The wave's own gates could not see it: `script_hot_reload.rs` calls
+/// `reload_class` with a hard-coded constant, and `script_gameplay_gate.rs`
+/// writes a committed sidecar for its fixture *because the wave knew a
+/// synthesised GUID would not resolve* — the fact was in the tree, one step
+/// away from the feature it broke.
+///
+/// # Why pinning is the fix rather than a workaround
+///
+/// A sidecar is what this asset system already means by "identity that survives
+/// an edit", and `AssetDb`'s synthesis exists precisely so it *can* be written
+/// out: *"a payload with no sidecar loses nothing when the synthesized one is
+/// written out"*. So the first scan that meets a script writes the identity it
+/// just derived, and every later scan reads it back instead of re-deriving it
+/// from bytes that moved.
+///
+/// **Scripts only**, deliberately. Every other loose kind is a serialized
+/// structure produced by a door that already writes a sidecar; `.infini` is the
+/// only payload a human edits in place with an ordinary text editor.
+///
+/// Best effort: a project on a read-only checkout still opens and still runs,
+/// with the advisory saying which script cannot keep its name. `persist`
+/// already refuses to write over a sidecar it could not parse (C4-39).
+pub(super) fn pin_script_ids(db: &AssetDb) {
+    for entry in db.by_kind(inf_asset::AssetKind::Script) {
+        if inf_asset::sidecar_path(&entry.path).exists() {
+            continue;
+        }
+        if let Err(e) = db.persist(entry.id()) {
+            tracing::warn!(
+                "content scan: {} has no sidecar and one could not be written ({e}); its \
+                 asset id is derived from its bytes, so editing the script will change its \
+                 id and any actor bound to it will silently lose its gameplay logic",
+                entry.path.display()
+            );
+        }
     }
 }
 

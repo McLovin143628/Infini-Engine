@@ -630,6 +630,17 @@ pub fn tick(
                                 );
                             }
                             if is_script {
+                                // **Pin the identity before reading it**
+                                // (SCRIPT1b audit). A `.infini` with no sidecar
+                                // is registered under a GUID derived from its
+                                // CONTENT HASH, so a script created while the
+                                // editor is running would be renamed by its own
+                                // second save — and hot reload, PIE and the cook
+                                // all bind by that GUID. `super::pin_script_ids`
+                                // is the same door `AssetProject::open` uses;
+                                // once a sidecar is on disk, `rescan_path` reads
+                                // the id back instead of re-deriving it.
+                                super::pin_script_ids(proj.db());
                                 if let Some(entry) = proj.db().get_by_path(&p) {
                                     out.scripts.push((entry.id().0, p.clone()));
                                 }
@@ -659,6 +670,74 @@ pub fn tick(
 mod tests {
     use super::*;
     use inf_terrain::{encode_png16, HeightImage};
+
+    /// **The watcher tells the tick that a program changed** — the one link in
+    /// the hot-reload chain that had no arm behind it (SCRIPT1b audit).
+    ///
+    /// The chain is: this function collects `.infini` changes into
+    /// [`TickOutcome::scripts`]; Ring 2's asset thread calls
+    /// `hot_reload_scripts(&app, &outcome.scripts)`; that compiles each through
+    /// the file door and calls `SimSession::reload_class`; and the session
+    /// drains the queue at the top of a fixed step. Every link but the **first**
+    /// was gated — the Ring-2 call and its body by `dcc.rs`'s source pins, the
+    /// swap by `script_hot_reload.rs`. A `scripts` field that silently stayed
+    /// empty would make the whole feature dead in the editor while every one of
+    /// those arms went on passing, which is this repository's most-repaired
+    /// shape.
+    ///
+    /// Anti-vacuous in both directions: a `.infini` must arrive **with the GUID
+    /// the database now holds** (not a synthesised one, and not before the
+    /// rescan), and a change to something that is not a script must not.
+    #[test]
+    fn a_changed_script_reaches_the_tick_outcome_with_its_guid() {
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let scripts = dir.path().join("Scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        let path = scripts.join("Counter.infini");
+        std::fs::write(&path, "on tick(dt)\n  debug.print(\"v1\")\nend\n").unwrap();
+        // A non-script neighbour, so "only scripts arrive" is a claim about a
+        // file that really changes rather than about one that does not exist.
+        let other = dir.path().join("Notes.txt");
+        std::fs::write(&other, "v1").unwrap();
+
+        let project = Arc::new(Mutex::new(AssetProject::open(dir.path()).unwrap()));
+        let guid = lock(&project)
+            .db()
+            .get_by_path(&path)
+            .expect("the scan registered the script")
+            .id()
+            .0;
+
+        let watcher = inf_asset::AssetWatcher::watch(dir.path(), Duration::from_millis(50))
+            .expect("the watcher starts");
+        let mut queue = ImportQueue::spawn(project.clone());
+        std::fs::write(&path, "on tick(dt)\n  debug.print(\"v2\")\nend\n").unwrap();
+        std::fs::write(&other, "v2").unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut seen: Vec<(uuid::Uuid, std::path::PathBuf)> = Vec::new();
+        let mut saw_a_change = false;
+        while Instant::now() < deadline && seen.is_empty() {
+            let out = tick(&mut queue, &project, Some(&watcher));
+            saw_a_change |= out.content_changed;
+            seen = out.scripts;
+            std::thread::yield_now();
+        }
+        assert!(saw_a_change, "the watcher never reported anything at all");
+        assert_eq!(
+            seen.len(),
+            1,
+            "the tick reported {seen:?} — a `.infini` that changed must arrive \
+             here, and nothing else may"
+        );
+        assert_eq!(
+            seen[0].0, guid,
+            "the GUID must be the one the database holds AFTER the rescan"
+        );
+        assert_eq!(seen[0].1, path);
+    }
 
     #[test]
     fn submitting_a_bad_source_reports_failure() {
