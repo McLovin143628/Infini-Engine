@@ -11,8 +11,8 @@
 //!
 //! Raise coverage of the B-P2 flow palette (SCRIPT1's table; the memo's §4 is
 //! the prose version):
-//! - **`flow.while` and `flow.for` are inverted** — [`Raiser::try_raise_for`]
-//!   and [`Raiser::try_raise_while`] recognise, through the one shared
+//! - **`flow.while` and `flow.for` are inverted** — `try_raise_for` and
+//!   `try_raise_while` recognise, through the one shared
 //!   [`crate::loopshape`] matcher, the exact counter-guarded expansions the
 //!   lowerer emits, and rebuild the node, so `lower(raise(f)) == f` holds for
 //!   both loop forms. `for` is tried **first**: a `for` expansion contains a

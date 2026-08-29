@@ -277,7 +277,7 @@ impl Lexer {
             self.bump();
         }
         let close: String = std::iter::once(']')
-            .chain(std::iter::repeat('=').take(level))
+            .chain(std::iter::repeat_n('=', level))
             .chain(std::iter::once(']'))
             .collect();
         let mut body = String::new();

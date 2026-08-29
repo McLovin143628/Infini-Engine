@@ -123,15 +123,11 @@ fn handler_event(id: &str) -> Option<EventKind> {
         "water_exit" => EventKind::WaterExit,
         "water_splash" => EventKind::WaterSplash,
         "destroyed" => EventKind::Destroyed,
-        other => {
-            if let Some(a) = other.strip_prefix("input:") {
-                EventKind::Input(a.to_string())
-            } else if let Some(n) = other.strip_prefix("custom:") {
-                EventKind::Custom(n.to_string())
-            } else {
-                return None;
-            }
-        }
+        other => match (other.strip_prefix("input:"), other.strip_prefix("custom:")) {
+            (Some(a), _) => EventKind::Input(a.to_string()),
+            (_, Some(n)) => EventKind::Custom(n.to_string()),
+            _ => return None,
+        },
     })
 }
 
@@ -629,12 +625,12 @@ fn ident(s: &str) -> Result<&str, EmitError> {
 fn long_brackets(content: &str) -> (String, String) {
     for level in 0..64 {
         let close: String = std::iter::once(']')
-            .chain(std::iter::repeat('=').take(level))
+            .chain(std::iter::repeat_n('=', level))
             .chain(std::iter::once(']'))
             .collect();
         if !content.contains(&close) {
             let open: String = std::iter::once('[')
-                .chain(std::iter::repeat('=').take(level))
+                .chain(std::iter::repeat_n('=', level))
                 .chain(std::iter::once('['))
                 .collect();
             return (open, close);

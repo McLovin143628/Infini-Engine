@@ -131,7 +131,11 @@ fn a_script_that_writes_math_sin_gets_the_portable_one() {
         parse_fn("function trig(x: float) -> float\n    return math.sin(x) + math.cos(x)\nend\n")
             .unwrap_or_else(|d| panic!("{}", render(&d)));
 
-    for x in [0.0_f64, 1.0, -1.0, 2.0, 6.283185307179586, 1e6] {
+    // One full turn is written as the constant rather than its digits, because
+    // clippy reads a spelled-out tau as an approximation somebody meant to be
+    // the real one — and here it is the real one, on purpose: a large argument
+    // is where a range reduction that differs between libms shows itself.
+    for x in [0.0_f64, 1.0, -1.0, 2.0, std::f64::consts::TAU, 1e6] {
         let args: HashMap<String, Value> = [("x".to_string(), Value::Float(x))].into();
         let got = inf_blueprint::eval_fn(&f, &args, &mut NoHost)
             .expect("the math palette is hostless")

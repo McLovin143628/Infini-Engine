@@ -236,7 +236,12 @@ fn the_honest_subset_table_is_what_raise_actually_does() {
 fn a_counted_loop_comes_back_as_a_for_node() {
     let f = compile_one(
         "for",
-        "on begin_play()\n    for i = 0, 3 do\n        total = i\n    end\nend\n",
+        r#"on begin_play()
+    for i = 0, 3 do
+        total = i
+    end
+end
+"#,
     );
     let g = raise_fn(&f).expect("a for loop raises");
     assert!(
