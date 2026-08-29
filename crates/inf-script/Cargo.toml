@@ -28,3 +28,6 @@ serde_json = { workspace = true }
 # The third leg of the round trip (text -> IR -> Rust -> IR). A dev-dep only:
 # the compiler does not depend on the transpiler, and must not.
 inf-transpile = { workspace = true }
+# The file door's gate writes real files: an unreadable one, an over-long one,
+# and one holding a byte sequence that is not UTF-8.
+tempfile = { workspace = true }

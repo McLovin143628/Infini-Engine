@@ -1,0 +1,28 @@
+-- Example.infini - the InfiniScript a new project starts with.
+--
+-- This is a real script, not a comment block: it parses, it lowers to the same
+-- Infini Blueprints IR a graph lowers to, and it runs on the same interpreter.
+-- Bind it to an actor in the Outliner and press Simulate.
+--
+-- Save the file while Simulate is running and the new program takes over on the
+-- next fixed step - no cargo build, no restart. A script that does not compile
+-- leaves the previous one running and prints why in the Output Log.
+
+actor "Example"
+
+-- Member variables persist across a hot reload. Every bare name in a handler
+-- that is not a local or a parameter is one of these.
+var spin_deg_per_s: float = 45.0 exposed
+var angle_deg: float = 0.0
+
+on begin_play()
+  debug.print("Example.infini is running")
+end
+
+on tick(dt)
+  angle_deg = angle_deg + spin_deg_per_s * dt
+  if angle_deg > 360.0 then
+    angle_deg = angle_deg - 360.0
+  end
+  engine.set_rotation(angle_deg)
+end

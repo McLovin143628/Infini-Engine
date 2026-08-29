@@ -160,6 +160,28 @@ impl ProjectTemplate {
         }
     }
 
+    /// The example `.infini` every template scaffolds, as `(path under the
+    /// content root, source text)`.
+    ///
+    /// Separate from [`starter_content`](Self::starter_content) rather than
+    /// appended to it, and the reason is a gate: that constant's arm
+    /// (`every_3d_template_ships_the_whole_starter_character`) asserts it is
+    /// *exactly* the seventeen character files, so growing it would have meant
+    /// loosening the one check that keeps a template from silently shipping
+    /// fewer bindings than its level names.
+    ///
+    /// The same for all four templates, because the script it ships is about the
+    /// *language* rather than about the genre: a member variable, a `begin_play`,
+    /// a `tick` with arithmetic and a branch, and the two verbs every actor has.
+    /// A designer's first edit to it is the arc's whole point — save the file
+    /// while Simulate runs and the change is live.
+    pub fn starter_script(self) -> (&'static str, &'static str) {
+        (
+            "Scripts/Example.infini",
+            include_str!("../../../templates/scripts/Example.infini"),
+        )
+    }
+
     fn starter_lib(self, crate_name: &str) -> String {
         let doc = match self {
             ProjectTemplate::Blank3d => "an empty 3D scene",
@@ -224,6 +246,11 @@ impl ProjectTemplate {
 /// build was searched for the body's own bytes and does not contain them. The
 /// cost is real for the CLI and the editor, and zero for the thing that ships to
 /// a player.
+/// The directory under the content root that `inf new` puts `.infini` scripts
+/// in. A **convention**, not a lookup — see [`crate::Project::scripts_root`] for
+/// the SCRIPT1b layout ruling and why there is no manifest field.
+pub const SCRIPTS_DIR: &str = "Scripts";
+
 pub const STARTER_CHARACTER: &[(&str, &[u8])] = &[
     (
         "Characters/Starter.inf_skel",
@@ -376,6 +403,19 @@ pub fn scaffold(parent: &Path, name: &str, template: ProjectTemplate) -> Result<
         level.sidecar,
     )?;
 
+    // The example script, under `Content/Scripts/` (the SCRIPT1b layout ruling —
+    // see `Project::scripts_root`). Written as text through the same atomic door
+    // as everything else; the asset database synthesises its sidecar on the
+    // first scan, from the content hash, so the GUID is a function of the bytes.
+    {
+        let (rel, src) = template.starter_script();
+        let path = content_root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        write(&path, src)?;
+    }
+
     // …and whatever the boot scene binds, beside it under the content root.
     for (rel, bytes) in template.starter_content() {
         let path = content_root.join(rel);
@@ -495,6 +535,49 @@ mod tests {
         // The Cargo.toml names the sanitized crate.
         let cargo = std::fs::read_to_string(s.root.join("Cargo.toml")).unwrap();
         assert!(cargo.contains("name = \"my_cool_game\""));
+    }
+
+    /// **Every template scaffolds an InfiniScript that compiles** (SCRIPT1b
+    /// clause 1), under `Content/Scripts/` where the cook can see it.
+    ///
+    /// Three things at once, and each has cost somebody a wave before: the file
+    /// is *there* (IB-7 — a template that scaffolds content the cook cannot
+    /// reach is a dead end), it is under the **content** root rather than beside
+    /// the generated Rust in `src/`, and it **parses** — a scaffolded script
+    /// that refuses is the first thing a new user sees.
+    #[test]
+    fn every_template_scaffolds_a_script_that_compiles() {
+        for t in ProjectTemplate::all() {
+            let parent = tempfile::tempdir().unwrap();
+            let s = scaffold(parent.path(), "Scripted", *t).unwrap();
+            let project = crate::Project::open(&s.root).unwrap();
+            let (rel, _) = t.starter_script();
+            let path = s.root.join(&s.manifest.content_dir).join(rel);
+            assert!(path.exists(), "{t:?} scaffolded no script at {rel}");
+            assert!(
+                path.starts_with(project.scripts_root()),
+                "{t:?}'s script must live under the scripts root"
+            );
+            assert!(
+                path.starts_with(project.content_root()),
+                "{t:?}'s script must be CONTENT — `inf cook` opens nothing else"
+            );
+            assert!(
+                !s.root.join("src/scripts").exists(),
+                "the rejected layout must not be scaffolded as well"
+            );
+
+            // …and it is a program, through the file door the cook uses.
+            let (class, warnings) = inf_script::compile_path(&path, "script:example")
+                .unwrap_or_else(|d| {
+                    panic!("{t:?}'s starter script does not compile:\n{}", {
+                        inf_script::render(&d)
+                    })
+                });
+            assert!(warnings.is_empty(), "{t:?}: {warnings:?}");
+            assert_eq!(class.events.len(), 2, "{t:?}: begin_play and tick");
+            assert_eq!(class.variables.len(), 2, "{t:?}");
+        }
     }
 
     #[test]

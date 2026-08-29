@@ -23,3 +23,9 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# **A dev-dependency only.** The template ships an example `.infini`, and a
+# scaffolded script that does not compile is a broken first impression the
+# template's own arm has to catch. Scaffolding still names a *path*, not a
+# crate — `include_str!` — so nothing about this crate's shipped dependency
+# graph moves.
+inf-script = { workspace = true }

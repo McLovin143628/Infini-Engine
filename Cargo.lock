@@ -3568,6 +3568,7 @@ name = "inf-project"
 version = "0.1.0"
 dependencies = [
  "inf-asset",
+ "inf-script",
  "serde",
  "serde_json",
  "tempfile",
@@ -3649,6 +3650,7 @@ dependencies = [
  "inf-transpile",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
 ]
 

@@ -18,4 +18,4 @@ pub use manifest::{
 };
 pub use project::Project;
 pub use recent::{RecentProject, RecentProjects};
-pub use template::{scaffold, ProjectTemplate, Scaffolded};
+pub use template::{scaffold, ProjectTemplate, Scaffolded, SCRIPTS_DIR};

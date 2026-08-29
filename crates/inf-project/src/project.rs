@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::Result;
 use crate::manifest::{ProjectManifest, PROJECT_FILE};
-use crate::template::{scaffold, ProjectTemplate};
+use crate::template::{scaffold, ProjectTemplate, SCRIPTS_DIR};
 
 /// A loaded project.
 #[derive(Debug, Clone)]
@@ -82,6 +82,38 @@ impl Project {
     /// scene says so in the same breath.
     pub fn levels_root(&self) -> PathBuf {
         self.content_root().join(&self.manifest.levels_dir)
+    }
+
+    /// Where `inf new` puts the project's `.infini` scripts —
+    /// **`<root>/<content_dir>/Scripts/`**.
+    ///
+    /// # The SCRIPT1b project-layout ruling: a script is CONTENT
+    ///
+    /// The brief offered two homes, `Content/` or `src/scripts/`, and the answer
+    /// is IB-7's answer to the same question about levels, for the same reason.
+    ///
+    /// **`Content/`, because a script is an asset.** A `.infini` gets a GUID, a
+    /// sidecar, a content hash and a dependency closure; a level binds one
+    /// through the same `ActorClass(Uuid)` component that binds a `.inf_act`;
+    /// and `inf cook` opens `<root>/Content/` **and nothing else**. Putting
+    /// scripts under `src/` would reproduce the IB-7 dead end exactly — the first
+    /// thing anyone did with the engine would scaffold a script the cook cannot
+    /// see.
+    ///
+    /// **`src/` is already spoken for, by the other half of the same feature.**
+    /// `inf_editor_core::blueprint_source` writes *generated* Rust to
+    /// `<root>/src/blueprints/`, and its module doc reserves `src/` for what
+    /// `cargo build` compiles. `.infini` is authored source that `cargo` never
+    /// sees; the two would be neighbours that mean opposite things.
+    ///
+    /// **And this is a convention, not a lookup.** There is no `scripts_dir`
+    /// manifest field, deliberately: `AssetDb::scan` recurses, so a `.infini`
+    /// anywhere under the content root is found the day it exists. `Scripts/` is
+    /// where the template *puts* the first one, not where the engine *looks* —
+    /// which is why a designer may organise scripts beside the actors they drive
+    /// without telling anything.
+    pub fn scripts_root(&self) -> PathBuf {
+        self.content_root().join(SCRIPTS_DIR)
     }
 
     /// The **pre-ruling** levels directory (`<root>/<levels_dir>`) — where a

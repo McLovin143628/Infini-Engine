@@ -19,9 +19,15 @@
 //!
 //! | door | what it is for |
 //! |---|---|
-//! | [`compile`] | a whole file → a `BlueprintClass` the editor can instantiate |
+//! | [`source::compile_path`] | **a file on disk** → a class; the encoding contract lives here |
+//! | [`compile`] | a whole file's *text* → a `BlueprintClass` the editor can instantiate |
 //! | [`parse::parse_fn`] / [`emit::emit_fn`] | one handler, the graph↔text bridge's Ring-0 half |
 //! | [`emit::emit_class`] | a class → the file that re-parses to it |
+//!
+//! [`source`] is the **file door** SCRIPT1b added and SCRIPT1a did not have: the
+//! crate read no filesystem at all, so "the encoding is UTF-8" was a claim about
+//! whoever called it. The watcher, the cook and the PIE payload builder all
+//! enter through it.
 //!
 //! # What the round trip guarantees, stated exactly
 //!
@@ -63,6 +69,7 @@
 pub mod emit;
 pub mod lex;
 pub mod parse;
+pub mod source;
 pub mod verbs;
 
 use inf_blueprint::BlueprintClass;
@@ -70,6 +77,7 @@ use inf_blueprint::BlueprintClass;
 pub use emit::{emit_class, emit_fn, EmitError};
 pub use lex::Span;
 pub use parse::{parse_fn, parse_unit, Unit};
+pub use source::{compile_bytes, compile_path, is_script_path, MAX_SOURCE_BYTES, SCRIPT_EXT};
 pub use verbs::{Verb, VerbError, Verbs};
 
 /// How much a diagnostic matters. A warning does not stop a script compiling.
