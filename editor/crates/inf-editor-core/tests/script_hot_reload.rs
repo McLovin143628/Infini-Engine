@@ -212,11 +212,24 @@ fn a_save_becomes_new_behaviour_in_a_running_simulate() {
     // Wait for the watcher, stepping the sim the whole time — which is what an
     // editor does, and which is also what makes "the OLD program kept running"
     // observable rather than assumed.
+    //
+    // **Both sides canonicalized, at one place** (the SCRIPT1b CI-red fix; the
+    // same exposure reddened the queue's own watcher arm on macOS, see
+    // `assets::queue`'s `a_changed_script_reaches_the_tick_outcome_with_its_guid`):
+    // a tempdir handed out as `/var/folders/…` is reported
+    // by the watcher as `/private/var/folders/…` through macOS's `/var` →
+    // `/private/var` symlink, so matching the raw tempdir path finds nothing
+    // there and this arm would time out at its 20 s deadline. It is the file
+    // that has to match, not the spelling.
+    let want = std::fs::canonicalize(&path).expect("the saved file is on disk");
     let mut seen = None;
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
         let changes = watcher.drain();
-        if let Some(c) = changes.iter().find(|c| c.path() == path) {
+        if let Some(c) = changes
+            .iter()
+            .find(|c| std::fs::canonicalize(c.path()).is_ok_and(|p| p == want))
+        {
             seen = Some(c.path().to_path_buf());
             break;
         }
