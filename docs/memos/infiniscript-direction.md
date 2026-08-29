@@ -927,6 +927,13 @@ printed by [an arm]" and three of the six rows are not:
 | …and the shipped player with it | **12 s** | `cargo build -p inf-player` |
 | …from cold | **~50 min** for the battery, **~35 min** for clippy | CLAUDE.md's machine notes — **history**, not measured this wave |
 
+**The two `cargo build` rows are not additive**, which the second row's "…with
+it" invites you to assume (the SCRIPT3 audit re-measured both). `-p
+inf-editor-core` and `-p inf-player` resolve *different* dependency graphs, so
+the second build recompiles `inf-ecs`, `inf-physics` and `inf-runtime` a second
+time: 6.7–7.1 s and then a further 14.9 s, rather than 12 s of which 7 is
+already paid.
+
 The engine's half of the script road is about **5 800×** cheaper than the warm
 Rust road: 7 s ÷ ~1.2 ms. What a designer *feels* is the plumbing on top, and
 **the divisor is worth stating rather than rounding** (the SCRIPT3 audit's
