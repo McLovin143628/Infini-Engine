@@ -138,7 +138,8 @@ pub fn parse_unit(source: &str) -> Result<(Unit, Vec<Diagnostic>), Vec<Diagnosti
         }
     };
     let declared = prescan_variables(&toks);
-    let mut p = Parser::new(&toks, declared);
+    let functions = prescan_functions(&toks);
+    let mut p = Parser::new(&toks, declared, functions);
     let unit = p.unit();
     if p.diags.iter().any(|d| d.severity == Severity::Error) {
         return Err(p.diags);
@@ -191,12 +192,36 @@ fn prescan_variables(toks: &[Spanned]) -> Vec<String> {
     out
 }
 
+/// The `function` names a file declares, found before parsing for one reason:
+/// **so that calling one says why it cannot be called.**
+///
+/// The IR has no user-function call form (A.9), so `double(2.0)` cannot lower,
+/// and the generic refusal — *"`double` is not a verb — a call names a namespace
+/// and a verb"* — sends a designer looking for a namespace that does not exist
+/// and never mentions the `function double` twelve lines above. That is the
+/// loudest item on SCRIPT1a's carried list, and it is the one a designer meets
+/// first; a carried item is worth more said at the point of use than in a memo.
+fn prescan_functions(toks: &[Spanned]) -> Vec<String> {
+    let mut out = Vec::new();
+    for w in toks.windows(2) {
+        if w[0].tok == Tok::Kw("function") {
+            if let Tok::Ident(name) = &w[1].tok {
+                out.push(name.clone());
+            }
+        }
+    }
+    out
+}
+
 struct Parser<'a> {
     toks: &'a [Spanned],
     i: usize,
     diags: Vec<Diagnostic>,
     verbs: Verbs,
     declared: Vec<String>,
+    /// The `function` names this file declares — used only to explain why one
+    /// cannot be called (see [`prescan_functions`]).
+    functions: Vec<String>,
     /// Per-function: the next local id.
     next_local: u32,
     /// Per-function: block scopes of `local` bindings, innermost last.
@@ -210,13 +235,14 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(toks: &'a [Spanned], declared: Vec<String>) -> Self {
+    fn new(toks: &'a [Spanned], declared: Vec<String>, functions: Vec<String>) -> Self {
         Self {
             toks,
             i: 0,
             diags: Vec::new(),
             verbs: Verbs::new(),
             declared,
+            functions,
             next_local: 0,
             scopes: Vec::new(),
             params: Vec::new(),
@@ -1108,14 +1134,10 @@ impl<'a> Parser<'a> {
         if path.len() == 1 {
             let name = &path[0];
             if self.at(&Tok::Sym("(")) {
+                let name = name.clone();
                 let _ = self.call_args();
-                return Err(self.error(
-                    span,
-                    format!(
-                        "`{name}` is not a verb — a call names a namespace and a \
-                         verb, like `debug.print(\"hello\")`"
-                    ),
-                ));
+                let message = self.bare_call_message(&name);
+                return Err(self.error(span, message));
             }
             if let Some(id) = self.lookup_local(name) {
                 return Ok(Expr::Local(id));
@@ -1192,8 +1214,39 @@ impl<'a> Parser<'a> {
     fn resolve_call(&mut self, path: &[String], span: Span) -> P<crate::verbs::Verb> {
         match self.verbs.resolve(path) {
             Ok(v) => Ok(v),
+            // A one-segment call is the shape a designer writes when they mean
+            // one of their own `function`s, so it gets the message that names
+            // the real bound rather than the registry's generic one.
+            Err(crate::verbs::VerbError::NotNamespaced(_)) if path.len() == 1 => {
+                let message = self.bare_call_message(&path[0]);
+                Err(self.error(span, message))
+            }
             Err(e) => Err(self.error(span, e.message())),
         }
+    }
+
+    /// Why a bare `name(…)` is not a call — and, when the file declares a
+    /// `function` by that name, **what the actual limit is**.
+    ///
+    /// The IR has no user-function call form (spec A.9), so a handler cannot
+    /// invoke its unit's own functions. That is SCRIPT1a's loudest carried item
+    /// and the first thing SCRIPT2's API surface wants; before this it surfaced
+    /// as "a call names a namespace and a verb", which sends a designer looking
+    /// for a namespace that does not exist and never mentions the declaration
+    /// twelve lines above.
+    fn bare_call_message(&self, name: &str) -> String {
+        if self.functions.iter().any(|f| f == name) {
+            return format!(
+                "`{name}` is a `function` in this file, and InfiniScript v1 cannot \
+                 call one: the Blueprint IR has no user-function call form, so a \
+                 handler can only call engine verbs. Inline the body, or move it \
+                 behind a verb"
+            );
+        }
+        format!(
+            "`{name}` is not a verb — a call names a namespace and a verb, like \
+             `debug.print(\"hello\")`"
+        )
     }
 
     fn check_arity(&mut self, verb: &crate::verbs::Verb, args: &[Expr], span: Span) -> P<()> {

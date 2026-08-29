@@ -208,6 +208,20 @@ const BAD: &[(&str, &str, u32, u32, &str)] = &[
         "unexpected character `@`",
     ),
     (
+        // **The loudest carried item, said where a designer meets it.** The IR
+        // has no user-function call form (spec A.9), so a handler cannot invoke
+        // its unit's own `function`s. Before the SCRIPT1a audit this surfaced as
+        // the generic "a call names a namespace and a verb", which sends the
+        // reader looking for a namespace that does not exist and never mentions
+        // the declaration three lines above. The day SCRIPT2 adds a call form,
+        // this row goes red and the carried item retires with it.
+        "calling a `function` declared in the same file",
+        "function double(x: float) -> float\n    return x * 2.0\nend\n\non tick(dt)\n    local a = double(dt)\nend\n",
+        6,
+        15,
+        "InfiniScript v1 cannot call one",
+    ),
+    (
         "an `actor` header that is not first",
         "on tick(dt)\nend\nactor \"Late\"\n",
         3,
