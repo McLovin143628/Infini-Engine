@@ -271,13 +271,16 @@ update files it wrote itself, in an error blaming the author. So the door now
 an arm that fails if the door ever forgets. *A rename may not orphan the thing it
 renames.*
 
-**"Infinity Blueprints" and the `infinity-dark`/`infinity-light` themes stayed.**
-The theme *ids* are persisted in `localStorage` and in `EditorSettings`, so they
-are identifiers by the same rule as above. The Blueprints feature name is a
-separate branding decision, and this arc is precisely the wrong moment to take it
-halfway: SCRIPT1 makes graphs and text two faces of one program, at which point
-what that one thing is called should be decided **once**, with the text face in
-hand — not twice, six weeks apart. Carried by name for SCRIPT1.
+**"Infinity Blueprints", the themes, and the npm package name stayed.**
+The theme *ids* `infinity-dark`/`infinity-light` are persisted in `localStorage`
+and in `EditorSettings`, and the npm package name `infinity-engine` is a lockfile
+key nobody ever sees — identifiers by the same rule as above, and the *displayed*
+theme names ("Infinity Dark") are a theme brand rather than a claim about the
+engine's name. The Blueprints feature name is a separate branding decision, and
+this arc is precisely the wrong moment to take it halfway: SCRIPT1 makes graphs
+and text two faces of one program, at which point what that one thing is called
+should be decided **once**, with the text face in hand — not twice, six weeks
+apart. Carried by name for SCRIPT1.
 
 The Win32 window classes (`InfinityViewportClass`, `InfinityEmbedProbe`, …) were
 checked and are unaffected: they are literals, not derived from the product name,

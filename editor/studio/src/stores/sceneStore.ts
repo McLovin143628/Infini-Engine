@@ -312,7 +312,7 @@ export const useSceneStore = create<SceneState>((set, get) => ({
     const path = await save({
       title: "Save Current Level As",
       defaultPath,
-      filters: [{ name: "Infinity Level", extensions: ["inf_lvl"] }],
+      filters: [{ name: "Infini Level", extensions: ["inf_lvl"] }],
     });
     if (!path) return; // cancelled
     try {
