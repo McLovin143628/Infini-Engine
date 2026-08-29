@@ -1,0 +1,334 @@
+# InfiniScript — direction, and the technology ruling
+
+**Date:** 2026-08-28. **Status:** approved direction (user mandate; wave SCRIPT0 of the
+script arc). **Source:** the owner's document
+`../docs/UTILIZING-CUSTOM-SCRIPTING-LANGUAGE-ALONGSIDE-RUST-TO-DEVELOP-AAA-QUALITY-GAMES-IN-A-CUSTOM-RUST-BASED-GAME-ENGINE.md`
+(outside the repo), which named the engine **Infini Engine** and its scripting layer
+**InfiniScript**, and asked for an architecture. **Scope:** the whole arc — SCRIPT0
+(this rebrand), SCRIPT1 (the language), SCRIPT2 (the API surface + tooling),
+SCRIPT3 (dogfood + ship).
+
+This memo does two things: it adopts the source document's thesis, and it records
+where the implementation departs from the document's technology picks **with the
+reasons**, so neither half is relitigated later.
+
+---
+
+## 1. The thesis, adopted
+
+The source document's argument, in its own terms: a AAA engine splits into a
+performance core and a gameplay script layer, because
+
+* **iteration** — a designer must change a line and see it, not wait on a compiler;
+* **containment** — a broken mission script must take the mission down, not the game;
+* **accessibility** — the people writing missions are not systems programmers;
+* **branding** — the name is the *API surface*, not the syntax. RAGE Script is
+  "the toolset that commands RAGE"; InfiniScript is the toolset that commands
+  Infini Engine;
+* **don't write a VM** — a studio builds the *connective tissue*, not a new compiler.
+
+All five are adopted, unchanged, and they are the arc's brief. The document is also
+right about the thing it was asked about directly: **Rust does not solve this**.
+Rewriting the same architecture in Rust makes clean builds slower, not faster, and
+an engine of this size will never compile in the gap between a designer's thought
+and the designer's next thought.
+
+Where this engine departs is on *which existing thing* becomes the script layer.
+
+---
+
+## 2. What already exists (measured, 2026-08-28)
+
+The document's blueprint assumes a green field — `infini-script-core/` with `mlua`
+and `wasmtime` in its `Cargo.toml`. This engine is not a green field. Phase 6
+shipped the substrate the document describes, and Phase 14 shipped the other half:
+
+| piece | where | what it already is |
+|---|---|---|
+| the IR | `crates/inf-blueprint` (`BlueprintFn`, `Stmt`, `Expr`) | a small, pure, serializable gameplay IR — events (`BeginPlay`/`Tick`/`Input`/`Collision`/`Custom`), typed data (`Bool`/`Int`/`Float`/`Str`/`Named`), exec flow |
+| the interpreter | `inf_blueprint::interp` | a tree-walking evaluator **over that same IR**, running in-editor with no compile step; a failing node's damage is contained to its downstream cone |
+| the compiler | `crates/inf-transpile` (`emit`, `lift`) | IR → **real Rust**, and Rust → IR back; 15 round-trip/parity test files |
+| the parity gate | `inf-transpile/tests/parity.rs` | interpreted == compiled, pinned. *Preview is the shipped program.* |
+| graph ↔ IR | `inf_blueprint::lower` / `raise` | **both directions**: a graph lowers to IR, and IR raises to a graph |
+| the one boundary | the `Host` trait | everything external — engine calls, member variables, spawning — crosses one seam; the IR itself stays pure |
+| the verb surface | `inf_blueprint::nodekit` | 96 `NodeDef::new` sites across twenty registration groups: `event.*` `flow.*` `math.*` `logic.*` `var.*` `lit.*` `cmp.*` `dispatch.*` `engine.*` `debug.*` `input.*` `audio.*` `sky.*` `water.*` `voxel.*` `destruct.*` `door.*` `item.*` `health.*` `ik.*` `anim.*` |
+| the sandbox | `crates/inf-wasm-host` + `crates/inf-mod` (P14.5) | a **`wasmtime`** engine with a capability-scoped linker, a flat host ABI, and a cook path Blueprint → Rust → `cdylib` → `.wasm` |
+| dylib hot-swap | `crates/inf-hotreload` | content-addressed shadow copies, never-unload, state migration |
+
+So: the interpreter, the compiler, the parity between them, the sandbox, the
+capability model and the ~100-verb API the document asks a studio to *build* are
+built. What is missing is the one thing the document actually shows a designer —
+**a readable text file**.
+
+---
+
+## 3. The ruling: no Luau, no second WASM runtime
+
+The document's picks are **Luau via `mlua`** for the designer-facing half and
+**WebAssembly via `wasmtime`** for the systems half. The second is already here.
+The first is refused. Reasons of record, in order of weight:
+
+### 3.1 A foreign VM cannot be held byte-identical, and byte-identity is the spine
+
+`PIE == shipping` is not a slogan in this engine; it is an arm in every phase gate
+since P9, and several of them compare a **byte-for-byte trace** produced by the
+editor's Simulate against one produced by a real `--pie` subprocess, on three
+operating systems. Everything inside the fixed step is held to that.
+
+Luau under `mlua` brings its own garbage collector, its own numeric tower and its
+own `libm`-touching math into that step. The precedent class is already on the
+books and it cost real waves:
+
+* **P14's trig law** — `f32` standard-library `sin`/`cos` are *not* bit-portable
+  across platforms; committed content routes through `inf_math::psin`/`pcos`.
+* **P22's extension of it** — `f64::cbrt` routes through the `libm` crate on
+  `wasm32` and had to become `inf_math::pcbrt`, pinned bit-for-bit.
+
+A script that can name `math.sin` directly is a hole straight through both laws.
+Our answer is structural rather than disciplinary: **a script cannot name a
+transcendental — only a verb.** Portable math reaches scripts *through* the Host,
+so the determinism guarantee is a property of the surface, not of a review.
+
+A GC is the second half of the same problem: allocation order becomes part of the
+program's observable behaviour the moment a finalizer or a table iteration order
+reaches gameplay, and "deterministic across three OSes and two build profiles" is
+not something an embedder can assert about someone else's collector.
+
+### 3.2 `mlua` vendored is a C++ build in CI, and this repo has refused one before
+
+`mlua` with the `luau` feature and `vendored` compiles Luau's C++ sources on every
+runner. The precedent is explicit: **`intel_tex_2` / ISPC was refused at P4** for
+exactly this — an out-of-tree native toolchain build is a cross-OS CI liability —
+and BC7 was deferred rather than take it. P25 then re-paid the same lesson from a
+different direction (*"one platform's bounds redden CI"*). The rule has been
+consistent and the arc does not get an exemption for being interesting.
+
+### 3.3 A fourth execution model was already rejected, on the record
+
+`docs/memos/rust-report-crossref.md`, **Amendment 2** (pre-P14) decided this
+question once already:
+
+> Decision: **do not** add a separate embedded scripting language (Rhai/Lua/Rune).
+> The blueprint tree-walking interpreter already provides no-recompile *iteration*
+> over the same IR that ships as Rust, so another language would add a fourth
+> execution model and fracture product principle 2 ("two ways to code, one truth").
+
+That amendment is **not reversed by this arc — it is honoured by it.** The reason
+Amendment 2 said no is that a second language means a second semantics, a second
+determinism story and a second thing to keep in sync with the engine. InfiniScript
+adds none of those: it adds a **parser**. It is a third *face* on the second
+execution model, not a third execution model.
+
+The one capability Amendment 2 conceded the design lacked — safe, no-compiler,
+sandboxed **end-user** extensibility — is what P14.5's WASM tier serves, and it
+keeps serving it under a new name.
+
+### 3.4 The substrate is better integrated than anything we could bind
+
+This is the affirmative half, and it is the real reason. Binding Luau would give
+us an interpreter we cannot compile, cannot round-trip to a graph, and cannot
+prove equal to the shipped build. We already have an interpreter that
+**transpiles to native Rust** and is **gated equal to it**. A Luau script is fast
+for a script; a transpiled InfiniScript function is not a script at all by the
+time it ships — it is compiled Rust in the player binary, and no JIT beats that.
+
+---
+
+## 4. What InfiniScript is
+
+**InfiniScript is a text front-end over the Blueprint IR.**
+
+```
+.infini text ──parse──▶ BlueprintFn IR ──▶ interpreter   (in-editor, hot-swapped on save)
+                             │                              ▲
+                             │                              │ parity gate
+                             ├──── raise ──▶ graph ─ lower ─┘
+                             │
+                             └──transpile──▶ Rust ──▶ the shipped binary
+```
+
+Three consequences follow, and they are the whole design:
+
+1. **Instant iteration with zero `rustc`.** Save a `.infini` file → the watcher
+   re-lowers it → the interpreter swaps the new IR into the running Simulate. This
+   is the P6 deferred item ("compile-on-save hot swap in Simulate") landing at
+   last, through the interpreter rather than the dylib.
+
+2. **The shipped program is not a script.** At cook time a script either
+   transpiles to Rust into the project crate or packs its IR for the shipped
+   interpreter — *both doors already exist* — and the parity gate says the two
+   agree. The decision is per script class, taken with measurements, in SCRIPT3.
+
+3. **The signature feature: graphs and text are two views of one program.** Because
+   `lower` and `raise` both exist, a designer can open any Blueprint **as
+   InfiniScript**, edit the text, and have it round-trip to the graph — or draw
+   the graph and read the text. Unreal cannot do this; a Blueprint and a Lua
+   script there are different programs in different languages. Here they are one
+   `BlueprintFn` with two editors pointed at it.
+
+**Syntax:** Luau-inspired on the surface, per the document's mockup —
+`function`/`end` blocks, `Namespace:Verb(...)` calls, no sigils, readable by
+someone who has never seen Rust. **Semantics: our IR exactly.** Every `.infini`
+construct must lower to IR that `raise` can round-trip. The IR grows only with
+pricing; the precedent is P6's own — member variables were added *via the Host
+trait* with **no IR change at all**, and that is the bar.
+
+**Determinism:** the parser is held to the same law as the runtime. A `.infini`
+file's IR is a pure function of its bytes — byte-identical lowering on every host,
+with a fixture that lowers the same file on two hosts and compares IR hashes.
+
+**Refusals are values.** A parse error names its line, its column and what it
+expected. It does not panic, and — per P21's law, paid for in a wave — a script
+that fails at runtime takes its downstream cone and nothing else; the sim keeps
+running and the editor shows the error.
+
+### The honest bound, named now rather than discovered in SCRIPT1
+
+`raise` is **not total**, and the memo says so at the front: `flow.for`,
+`flow.do_once`, `flow.flip_flop` and `flow.gate` lower to multi-statement or
+stateful expansions with no unambiguous single-node inverse, and are
+raise-excluded today (`crates/inf-blueprint/src/raise.rs`, module docs). Hand-
+edited Rust in those shapes survives as a `Stmt::Snippet` — lossless, but not a
+node. "Two views of one program" is therefore exactly as complete as `raise` is,
+and closing that gap (or bounding it and saying so in the UI) is SCRIPT1's first
+named risk, not a detail.
+
+---
+
+## 5. The compile-time truth, stated honestly
+
+The owner asked what this does to compile times. The honest answer has three
+parts and only one of them is a win today:
+
+* **Gameplay iteration: sub-second, zero `rustc`.** Edit `.infini` → watcher →
+  re-lower → interpreter hot-swap in the running Simulate. This is the number the
+  arc exists to produce, and SCRIPT3 measures it rather than asserting it.
+* **Engine compile times: unchanged.** Nothing in this arc makes `cargo build`
+  faster. `inf-render`, `inf-vgeom`, `inf-terrain` and the rest compile exactly as
+  they do now. Any claim otherwise would be false.
+* **The win compounds.** As gameplay logic migrates out of Rust and into `.infini`
+  over the arcs, the slow path gets hit less often — not because it got faster,
+  but because fewer changes need it. That is the entire mechanism, and it is worth
+  stating plainly so nobody expects the first wave to change a build clock.
+
+---
+
+## 6. Branding
+
+* **InfiniScript** — the scripting ecosystem as a whole. The name of the *API
+  surface*, exactly as the source document argues.
+* **InfiniScript** (text) — the `.infini` front-end: what a designer writes.
+  Built in SCRIPT1.
+* **InfiniScript Core** — the P14.5 sandboxed WASM tier: what an engineer or a
+  modder compiles. **Rebrand and document; no new runtime.** If the tier is ever
+  measured to lack something, the missing thing gets priced on its own — the arc
+  does not adopt a dependency in advance of a measurement.
+* **The InfiniScript API Manual** — generated *from* the verb registry, not
+  hand-written (SCRIPT2). The document asks for a manual; a hand-written one goes
+  stale on the first verb, and the registry already carries names, categories,
+  descriptions and typed pins.
+
+---
+
+## 7. The SCRIPT0 rename ledger, and what deliberately did not move
+
+`Infinity Engine` → **`Infini Engine`** across everything user-facing: the title
+bar, the About box, the start screen and the tour, the status bar, the window and
+product names, every README, the ROADMAP headers, the mdBook, the project
+templates and their scaffolded READMEs, the sample notes, the CLI and player
+banners, the packager's export notes, and the crate doc comments a reader meets in
+rustdoc. The repository URL moves to `Infini-Engine`; GitHub serves a permanent
+redirect from a renamed repository's old path — for clones, fetches and the REST
+API alike — so CI and every existing checkout keep working whichever spelling they
+hold.
+
+Four things stayed, each for a stated reason.
+
+**The crates keep their `inf-` prefix, and the repo folder keeps its name.**
+Forty-odd crates, every `use` path, every `Cargo.toml`, every `include_str!`, and
+every path in every memo and roadmap block would move so that a prefix which
+already reads as "Infini" could read as "Infini". Zero user value; a diff nobody
+can review. `inf-*` was always the right prefix and it is *more* right now.
+
+**`com.infinityengine.app` — the Tauri bundle identifier — stays.** It is not a
+label: on every platform it is the key to `app_data_dir()`, and that directory
+holds the user's `Content/`, their layouts, their editor settings, their thumbnail
+cache and their crash-recovery file. Renaming it would not migrate a user's work;
+it would *hide* it, silently, and the editor would boot looking brand new. The
+same reasoning keeps the three `InfinityEngine` filesystem roots
+(`inf-viewport/src/win32.rs`, `commands/diagnostics.rs`, `inf-player/src/ui.rs`) —
+two of which are a **writer and a reader that must agree** about where crash
+dumps live.
+
+**The generated-source marker changed, but recognition did not.**
+`GENERATED_MARKER` looked like a label and is a runtime identifier:
+`is_generated` is the only thing standing between the Code tab and an author's
+hand-written module. Moving it with the brand would have re-classified every
+already-generated file in every existing project as "not ours", and the symptom
+would not have been a crash — it would have been the Code tab quietly refusing to
+update files it wrote itself, in an error blaming the author. So the door now
+**writes the new spelling and reads either**, with `LEGACY_GENERATED_MARKER` and
+an arm that fails if the door ever forgets. *A rename may not orphan the thing it
+renames.*
+
+**"Infinity Blueprints" and the `infinity-dark`/`infinity-light` themes stayed.**
+The theme *ids* are persisted in `localStorage` and in `EditorSettings`, so they
+are identifiers by the same rule as above. The Blueprints feature name is a
+separate branding decision, and this arc is precisely the wrong moment to take it
+halfway: SCRIPT1 makes graphs and text two faces of one program, at which point
+what that one thing is called should be decided **once**, with the text face in
+hand — not twice, six weeks apart. Carried by name for SCRIPT1.
+
+The Win32 window classes (`InfinityViewportClass`, `InfinityEmbedProbe`, …) were
+checked and are unaffected: they are literals, not derived from the product name,
+so `window_class_gate` neither moved nor needed to. No golden renders the engine's
+name, so no golden moved.
+
+---
+
+## 8. The wave plan
+
+**SCRIPT1 — the language.** `inf-script` in Ring 0, **zero new external
+dependencies** (the hand-rolled lexer/parser precedents are the grammar DSL and
+the `.inf_sm` text face). The grammar is specced *before* it is parsed. Parse →
+lower to `BlueprintFn` with source-mapped diagnostics (line/col, the naga-style
+mapping). An IR → `.infini` emitter, with round-trip gates in **both** directions:
+`parse(emit(f)) == f` on the IR, and `emit(parse(s))` idempotent on normalized
+text. Hot reload through `inf-asset`'s notify substrate into the running
+interpreter, with failure containment armed. The asset story: `.infini` is
+*source* — git-diffable text — and the cook either transpiles or packs the IR,
+both parity-gated, with `asset_deps` walking scripts so the cook closure sees
+script-named assets (the SK1c lesson).
+
+**SCRIPT2 — the API surface and the tooling.** The verb surface grows toward the
+document's vision our way: `World.*`, `AI.*`, `Mission.*` (new, priced), `Audio.*`,
+`UI.*`, `Vehicle.*`, `Weapon.*`/`Door.*`/`Item.*`. Every verb deterministic,
+Host-mediated, documented. The API Manual generates from the registry. In the
+editor: a CodeMirror 6 language mode for `.infini` on the P5 `extraCompartment`
+seam, diagnostics wiring, open-as-text on `.inf_act`/`.inf_fn`, and Ctrl+S =
+re-lower + hot-swap.
+
+**SCRIPT3 — dogfood and ship.** Real island gameplay migrates to `.infini` — the
+Phase 30 door and weapon logic, a settlement ambient script, and one
+mission-class sequence at Harbour City: the document's heist mockup, made real on
+our island. Migrated scripts' traces stay byte-identical to their predecessors
+where semantics did not change. The interpret-vs-transpile decision is taken per
+script class *with measurements*. InfiniScript Core is documented with one demo
+plugin. And the arc closes honestly: the list of what a designer can build without
+touching Rust, the list of what still needs Rust, and iteration timings measured
+end to end — edit to running, and cold cook.
+
+---
+
+## 9. Laws this arc inherits
+
+* Portable math reaches a script only through Host verbs; a script cannot name a
+  transcendental.
+* `PIE == shipping` over a trace whose gameplay runs from a `.infini` script is a
+  SCRIPT1 gate arm, not a SCRIPT3 aspiration.
+* A gameplay refusal is a **value**, not a failure (P21) — for parse errors and
+  runtime errors alike.
+* No engine schema moves without a STOP-and-price. A `.inf_script` asset kind, if
+  taken, is **additive** — the sidecar rule.
+* A gate must aim at the thing it names, and must be built to falsify (P22/P23).
+  A round-trip test that round-trips the empty program proves nothing.

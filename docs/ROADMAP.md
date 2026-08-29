@@ -1,8 +1,8 @@
-# Infinity Engine — Engineering Roadmap
+# Infini Engine — Engineering Roadmap
 
 **Version 1.0 · Supersedes the preliminary blueprint (v4.0)**
 
-Infinity Engine is a commercial-grade, next-generation game engine: a native Rust core with a
+Infini Engine is a commercial-grade, next-generation game engine: a native Rust core with a
 built-in Tauri v2 + React editor. It targets 2D, 2.5D, and 3D games of every genre,
 with a professional pipeline from first asset import to shipped, packaged builds. Developers write
 gameplay in **real Rust** (built-in IDE) or in **Infinity Blueprints** (node graphs) —
@@ -25,6 +25,7 @@ interchangeably, because graphs transpile to real Rust source and stay bidirecti
 11. [Post-plan status — UE-Parity Wave 1](#11-post-plan-status--ue-parity-wave-1-2026-07-22-complete)
 12. [Next-Gen Wave — Phases 16–28](#12-next-gen-wave--phases-1628-planned-2026-07-31-extended-2026-08-10-p16p23-complete) — 13 phases
 13. [Anim & Movement Wave — Phase 29](#13-anim--movement-wave--phase-29-planned-2026-08-15) — the mandate's first item
+14. [InfiniScript — the script arc](#14-infiniscript--the-script-arc-planned-2026-08-28) — `.infini` text over the Blueprint IR
 
 ---
 
@@ -39,7 +40,7 @@ interchangeably, because graphs transpile to real Rust source and stay bidirecti
    asset loading. No OO scene-graph bloat.
 4. **Planetary scale by construction.** 64-bit world coordinates with floating-origin rebasing
    from the first line of renderer code — retrofitting f64 is a rewrite, so it is never deferred.
-5. **The editor is a product.** Infinity Engine must feel like a next-generation refinement of
+5. **The editor is a product.** Infini Engine must feel like a next-generation refinement of
    UE5 — familiar mental model, modernized execution — from the first milestone.
 6. **Honest engineering.** Research-grade features (virtualized geometry) are sequenced so the
    engine ships without them; known platform constraints (Wayland embedding, console NDAs) are
@@ -19570,6 +19571,102 @@ The ruling, which binds P29.3:
 **What this changes in P29.2, concretely.** Its clause list gains `.inf_anim` v2 per Ruling 2
 and keeps everything the catalogue amendment already gave it. Rulings 3 and 4 are recorded here
 and implemented later; nothing in them is P29.2 scope.
+
+## 14. InfiniScript — the script arc (planned 2026-08-28)
+
+The owner's second document — *"Utilizing a custom scripting language alongside Rust to
+develop AAA-quality games in a custom Rust-based game engine"* — named the engine **Infini
+Engine** and its scripting layer **InfiniScript**, and asked for an architecture. Its thesis
+is adopted; its technology picks are adapted. The full reasoning, the refusals with their
+reasons, and the honest compile-time statement live in
+[`docs/memos/infiniscript-direction.md`](memos/infiniscript-direction.md), which is this
+arc's authoritative record. This section is the plan block.
+
+**The one-line ruling.** InfiniScript is **a `.infini` text front-end over the Phase 6
+`BlueprintFn` IR** — not a new language, not a bound VM. It runs on the interpreter that
+already exists, ships through the transpiler that already exists, and is held equal to its
+shipped form by the parity gate that already exists. Because `lower` and `raise` both exist,
+**a graph and a script are two views of one program**: open any Blueprint as InfiniScript,
+edit either face. That is the arc's signature feature and Unreal does not have it.
+
+**What was refused, and why.** No `mlua`/Luau: a foreign VM with its own GC and its own
+`libm`-touching math cannot be held byte-identical inside a fixed step across three operating
+systems (the P14 trig law and its P22 `cbrt` extension are the precedent class), and `mlua`
+vendored is a C++ build in CI — the same liability that got `intel_tex_2`/ISPC refused at P4.
+No *new* `wasmtime` adoption either, for the happier reason: P14.5's sandboxed WASM tier
+already is what the document calls the Core half, and it is rebranded rather than rebuilt.
+`rust-report-crossref.md`'s **Amendment 2** — "do not add a separate embedded scripting
+language" — is honoured by this arc, not reversed: InfiniScript adds a *parser*, not a fourth
+execution model.
+
+**Compile times, honestly.** Gameplay iteration becomes sub-second with **zero `rustc`**
+(edit → watcher → re-lower → interpreter hot-swap in the running Simulate — the P6 deferred
+"compile-on-save in Simulate", landing through the interpreter rather than the dylib). Engine
+compile times are **unchanged**; nothing here makes `cargo build` faster. The win compounds as
+gameplay migrates out of Rust, because the slow path gets hit less — not because it got
+quicker.
+
+### The waves
+
+* **SCRIPT0 — the rebrand (COMPLETE 2026-08-28).** `Infinity Engine` → **Infini Engine**
+  everywhere user-facing; the repository to `Infini-Engine` (GitHub redirects the old path
+  permanently, so CI and existing checkouts keep working). The memo lands. Crates keep
+  `inf-*` and the repo folder keeps its name — renaming forty-odd crates so that a prefix
+  reading "Infini" can read "Infini" is churn with zero user value. Four identifiers stayed
+  deliberately and each is argued in the memo §7: the Tauri bundle identifier
+  `com.infinityengine.app` (it is the key to `app_data_dir()`, which holds the user's
+  `Content/`, layouts, settings and crash-recovery file — renaming it hides a user's work
+  rather than moving it), the three `InfinityEngine` crash/data roots (two of which are a
+  writer and a reader that must agree), the persisted theme ids, and the *recognition* half
+  of the generated-source marker. That last one is the wave's law: **a rename may not orphan
+  the thing it renames** — `GENERATED_MARKER` is not a label but the only thing standing
+  between the Code tab and an author's hand-written module, so the door now writes the new
+  spelling and reads either, with `LEGACY_GENERATED_MARKER` and an arm that fails if it
+  forgets. `window_class_gate` was checked and is unaffected (the Win32 class names are
+  literals, not derived from the product name); no golden renders the engine's name, so no
+  golden moved. "Infinity Blueprints" is carried to SCRIPT1, where the graph/text unification
+  makes it one naming decision instead of two.
+* **SCRIPT1 — the language.** `inf-script` (Ring 0, **zero new external dependencies** — the
+  grammar DSL and the `.inf_sm` text face are the hand-rolled-parser precedents). The grammar
+  is specced before it is parsed: a Luau-inspired readable surface (`function`/`end`,
+  `Namespace:Verb(...)`, no sigils) over **our IR's semantics exactly**. Parse → lower to
+  `BlueprintFn` with source-mapped diagnostics; **refusals are values** — a parse error names
+  its line and its expectation. An IR → `.infini` emitter with round-trip gates in *both*
+  directions. Hot reload on `inf-asset`'s notify substrate, swapping into the running
+  interpreter with failure containment armed. `.infini` is *source* (git-diffable text); the
+  cook either transpiles it to Rust into the project crate or packs its IR for the shipped
+  interpreter — both doors exist, both parity-gated — and `asset_deps` walks scripts so the
+  cook closure sees script-named assets (the SK1c lesson). Gates: the parity gate; **byte-
+  identical lowering across hosts** (a `.infini` file's IR is a pure function of its bytes);
+  `PIE == shipping` over a trace whose gameplay runs from a script. **First named risk:**
+  `raise` is not total — `flow.for`, `flow.do_once`, `flow.flip_flop` and `flow.gate` are
+  raise-excluded today, so "two views of one program" is exactly as complete as `raise` is.
+  Closing that gap, or bounding it and saying so in the UI, is scope.
+* **SCRIPT2 — the API surface and the tooling.** The verb surface grows toward the document's
+  vision our way — `World.*`, `AI.*`, `Mission.*` (new, priced), `Audio.*`, `UI.*`,
+  `Vehicle.*`, `Weapon.*`/`Door.*`/`Item.*` — every verb deterministic, Host-mediated,
+  documented. **The InfiniScript API Manual generates from the registry**, not by hand: a
+  hand-written manual goes stale on the first verb, and the node kit already carries names,
+  categories, descriptions and typed pins. Editor: a CodeMirror 6 language mode for `.infini`
+  on the P5 `extraCompartment` seam, diagnostics wiring, open-as-text on `.inf_act`/`.inf_fn`,
+  Ctrl+S = re-lower + hot-swap. A trigger-volume door is priced here if `Mission.*` needs one.
+* **SCRIPT3 — dogfood and ship.** Real island gameplay migrates to `.infini`: the Phase 30
+  door and weapon logic, a settlement ambient script, and one mission-class sequence at
+  Harbour City — the document's heist mockup made real on our island. Migrated traces stay
+  byte-identical to their predecessors where semantics did not change. The
+  interpret-vs-transpile decision is taken **per script class, with measurements**.
+  InfiniScript Core (the P14.5 WASM tier) is documented with one demo plugin. The arc closes
+  with two honest lists — what a designer can build without touching Rust, and what still
+  needs Rust — and iteration timings measured end to end: edit-to-running, and cold cook.
+
+### Laws this arc is held to
+
+Portable math reaches a script **only** through Host verbs — a script cannot name a
+transcendental, so the P14/P22 determinism laws are enforced by the surface rather than by
+review. A gameplay refusal is a value, not a failure (P21). No engine schema moves without a
+STOP-and-price; a `.inf_script` asset kind, if taken, is **additive** — the sidecar rule. And
+a gate must aim at the thing it names and be built to falsify (P22/P23): a round-trip test
+that round-trips the empty program proves nothing.
 
 ## Hardening Wave A — save integrity & data loss (2026-08-14)
 
