@@ -21,7 +21,40 @@
 //! view is the complete one. What the emitter does refuse is a handful of IR
 //! states no producer in the tree makes and no text could denote — a non-finite
 //! float literal, a binder whose name is not an identifier, two live binders with
-//! the same name — and each is a value with a reason ([`EmitError`]).
+//! the same name, a handler whose parameters are not its event's — and each is a
+//! value with a reason ([`EmitError`]).
+//!
+//! # …and the converse, which is the half that was false
+//!
+//! "Total" was stated as a property of *this module alone*: nothing the IR can
+//! hold is refused. Read that way it points the wrong direction. What a designer
+//! needs is **a Blueprint that opens as text and comes back**, and that needs
+//! the converse — *anything the emitter writes, the parser reads back* — which
+//! nothing asserted and which was false in two places the SCRIPT1a audit found:
+//!
+//! * a **comparison in a comparison's left operand**. `cmp.lt` wired into
+//!   `cmp.eq`'s `a` input is a graph anybody can draw; it printed
+//!   `1.0 < 2.0 == true`, which the grammar refuses as a chained comparison. 36
+//!   of the 338 operator pairings. Comparisons do not associate, so **both**
+//!   operands need the parenthesis, not only the right one;
+//! * a **`Stmt::ExprStmt` that is not a statement-callable call** — a literal, a
+//!   local, a binary expression, a `vars::get` (which prints as a bare name), a
+//!   `nodestate::get_or` (a value spelling with no statement one). InfiniScript
+//!   has no evaluate-and-discard statement, so those are
+//!   [`EmitError::UnspellableStatement`] — the verdict `raise` already gives the
+//!   shape.
+//!
+//! An emitter that produces a file its own parser rejects is worse than one that
+//! refuses, because the refusal is silent until somebody opens the result. Both
+//! directions are gated now: `tests/hostile.rs` sweeps all 338 pairings and the
+//! two-node graph itself, and mutates a real script character by character
+//! requiring every mutation that parses to emit and re-parse identically.
+//!
+//! The sixth refusal is a resource bound rather than a shape:
+//! [`EmitError::TooDeep`]. A graph can chain operator nodes without limit and
+//! lowering makes the chain a left-deep `Expr`; printing one used to be a stack
+//! overflow. `MAX_EMIT_NESTING` is twice the parser's budget, which is a proof
+//! rather than a guess that anything the parser accepts, this module can write.
 //!
 //! # Two rules the round trip rests on
 //!

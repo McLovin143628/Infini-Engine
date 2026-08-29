@@ -29,8 +29,16 @@
 use inf_script::{compile, emit_class, parse_fn, render};
 
 /// The determinism fixture. Deliberately dense: every literal kind, a float
-/// with a full 17-digit mantissa, both loop forms, a branch, the math builtins
-/// (which route to `inf_math::portable`) and a `rust` block.
+/// with a full 17-digit mantissa, both loop forms, a branch and the math
+/// builtins (which route to `inf_math::portable`).
+///
+/// It carries **no `rust` block**, which the first draft of this comment said it
+/// did (the audit's correction). That is the right shape rather than an
+/// omission: a snippet's contents are preserved byte for byte, so a fixture
+/// holding one could not also be used by
+/// [`indentation_and_trailing_whitespace_are_not_part_of_the_program`], whose
+/// whole point is re-indenting the source. The snippet law has its own arm,
+/// [`a_rust_block_survives_verbatim`].
 const FIXTURE: &str = r#"actor "Determinism"
 
 var angle: float = -114668.51350953568 exposed
@@ -165,6 +173,48 @@ fn a_file_saved_with_a_byte_order_mark_lowers_identically() {
     )
     .unwrap_err();
     assert_eq!((d[0].span.line, d[0].span.col), (2, 5), "{}", d[0]);
+}
+
+/// **Nor is the layout part of the program.** Tabs for spaces, doubled
+/// indentation, and trailing whitespace on every line all lower to the same IR.
+///
+/// The audit's extension of the line-ending law in the direction it points:
+/// "a file's IR is a pure function of its bytes" is trivially true and says
+/// nothing a designer cares about. What they care about is that *incidental
+/// formatting* — which editor did the indenting, whether it strips trailing
+/// space on save — cannot change a program or a committed digest. Every one of
+/// these is a byte difference the lexer is required not to see.
+///
+/// It works on this fixture precisely because the fixture holds **no `rust`
+/// block**: a snippet's contents are the one place in the language where bytes
+/// rather than tokens survive (`a_rust_block_survives_verbatim`), so
+/// re-indenting one legitimately *does* change the program, and a version of
+/// this arm run over a fixture containing one would be asserting the opposite
+/// law.
+#[test]
+fn indentation_and_trailing_whitespace_are_not_part_of_the_program() {
+    let tabs: String = FIXTURE
+        .lines()
+        .map(|l| {
+            let n = l.len() - l.trim_start().len();
+            format!("{}{}\n", "\t".repeat(n), l.trim_start())
+        })
+        .collect();
+    assert_ne!(tabs.as_bytes(), FIXTURE.as_bytes());
+    assert_eq!(ir_bytes(&tabs), ir_bytes(FIXTURE), "a tab changed the IR");
+
+    let doubled: String = FIXTURE
+        .lines()
+        .map(|l| {
+            let n = l.len() - l.trim_start().len();
+            format!("{}{}\n", " ".repeat(n * 2), l.trim_start())
+        })
+        .collect();
+    assert_eq!(ir_bytes(&doubled), ir_bytes(FIXTURE));
+
+    let trailing: String = FIXTURE.lines().map(|l| format!("{l}   \n")).collect();
+    assert_ne!(trailing.as_bytes(), FIXTURE.as_bytes());
+    assert_eq!(ir_bytes(&trailing), ir_bytes(FIXTURE));
 }
 
 /// A source containing a `rust` block round-trips its opaque contents **byte
