@@ -141,10 +141,133 @@ pub fn parse_unit(source: &str) -> Result<(Unit, Vec<Diagnostic>), Vec<Diagnosti
     let functions = prescan_functions(&toks);
     let mut p = Parser::new(&toks, declared, functions);
     let unit = p.unit();
-    if p.diags.iter().any(|d| d.severity == Severity::Error) {
-        return Err(p.diags);
+    let mut diags = std::mem::take(&mut p.diags);
+    check_no_recursion(&unit, &mut diags);
+    if diags.iter().any(|d| d.severity == Severity::Error) {
+        return Err(diags);
     }
-    Ok((unit, p.diags))
+    Ok((unit, diags))
+}
+
+/// **InfiniScript has no recursion**, and the refusal is here rather than at run
+/// time because the two faces of one program would otherwise disagree about
+/// what an infinite one *does*.
+///
+/// The interpreter bounds a call chain at
+/// [`MAX_CALL_DEPTH`](inf_blueprint::interp::MAX_CALL_DEPTH) and answers with
+/// a `RunError` — a value, per P21. The **transpiled** Rust has no such bound:
+/// `generate_fn` renders a one-segment call as an ordinary Rust call and a
+/// recursive one overflows the stack of whatever is running it. That is a
+/// divergence the crown gate would only find with a fixture built to recurse,
+/// and "preview is the shipped program" is the claim this arc leans its whole
+/// weight on.
+///
+/// So the language refuses the *cycle*, statically, where a designer can see it,
+/// and the interpreter's budget stays as the defence for IR that did not come
+/// through this parser (a hand-edited `.inf_act`, a lift of hand-written Rust).
+/// A `while` loop is the spelling that survives both faces — it lowers to the
+/// counter-guarded expansion, so the bound lives in the IR and the interpreter
+/// and the compiled program share it (A.7).
+///
+/// The walk is over declaration order and, inside a body, over statement order,
+/// so the cycle a file reports is a function of the file rather than of a hash.
+fn check_no_recursion(unit: &Unit, diags: &mut Vec<Diagnostic>) {
+    let names: Vec<&str> = unit.functions.iter().map(|f| f.name.as_str()).collect();
+    let edges: Vec<Vec<String>> = unit
+        .functions
+        .iter()
+        .map(|f| {
+            let mut out: Vec<String> = Vec::new();
+            collect_local_calls(&f.body, &names, &mut out);
+            out
+        })
+        .collect();
+    let index = |n: &str| names.iter().position(|c| *c == n);
+    for (start, f) in unit.functions.iter().enumerate() {
+        // Depth-first from this function, recording the route, and stopping at
+        // the first return to `start`.
+        let mut route = vec![start];
+        let mut stack = vec![(start, 0usize)];
+        let mut seen = vec![false; names.len()];
+        seen[start] = true;
+        while let Some((node, next)) = stack.pop() {
+            let Some(callee) = edges[node].get(next) else {
+                route.pop();
+                continue;
+            };
+            stack.push((node, next + 1));
+            let Some(to) = index(callee) else { continue };
+            if to == start {
+                let mut chain: Vec<&str> = route.iter().map(|i| names[*i]).collect();
+                chain.push(names[start]);
+                diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    span: unit.spans.get(&f.id).copied().unwrap_or_default(),
+                    message: format!(
+                        "`{}` calls itself ({}) — InfiniScript has no recursion, because \
+                         the interpreter bounds a call chain and the Rust the cook \
+                         generates does not, so the two would not agree. Write the \
+                         repetition as a `while` or `for` loop",
+                        names[start],
+                        chain.join(" → ")
+                    ),
+                });
+                return;
+            }
+            if !seen[to] {
+                seen[to] = true;
+                route.push(to);
+                stack.push((to, 0));
+            }
+        }
+    }
+}
+
+/// Every one-segment call in `body` that names one of `names`, in walk order,
+/// without repeats.
+fn collect_local_calls(body: &[Stmt], names: &[&str], out: &mut Vec<String>) {
+    fn expr(e: &Expr, names: &[&str], out: &mut Vec<String>) {
+        match e {
+            Expr::Call { path, args } => {
+                if let [name] = path.as_slice() {
+                    if names.contains(&name.as_str()) && !out.iter().any(|n| n == name) {
+                        out.push(name.clone());
+                    }
+                }
+                for a in args {
+                    expr(a, names, out);
+                }
+            }
+            Expr::Unary(_, a) => expr(a, names, out),
+            Expr::Binary(_, a, b) => {
+                expr(a, names, out);
+                expr(b, names, out);
+            }
+            Expr::Lit(_) | Expr::Param(_) | Expr::Local(_) => {}
+        }
+    }
+    for s in body {
+        match s {
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::ExprStmt(value) => {
+                expr(value, names, out)
+            }
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                expr(cond, names, out);
+                collect_local_calls(then_body, names, out);
+                collect_local_calls(else_body, names, out);
+            }
+            Stmt::While { cond, body } => {
+                expr(cond, names, out);
+                collect_local_calls(body, names, out);
+            }
+            Stmt::Return(Some(e)) => expr(e, names, out),
+            Stmt::Return(None) | Stmt::Snippet(_) => {}
+        }
+    }
 }
 
 /// Parse a single handler or function on its own — the Ring-0 half of the
@@ -192,25 +315,95 @@ fn prescan_variables(toks: &[Spanned]) -> Vec<String> {
     out
 }
 
-/// The `function` names a file declares, found before parsing for one reason:
-/// **so that calling one says why it cannot be called.**
+/// A `function` declaration's header, learned before any body is parsed.
 ///
-/// The IR has no user-function call form (A.9), so `double(2.0)` cannot lower,
-/// and the generic refusal — *"`double` is not a verb — a call names a namespace
-/// and a verb"* — sends a designer looking for a namespace that does not exist
-/// and never mentions the `function double` twelve lines above. That is the
-/// loudest item on SCRIPT1a's carried list, and it is the one a designer meets
-/// first; a carried item is worth more said at the point of use than in a memo.
-fn prescan_functions(toks: &[Spanned]) -> Vec<String> {
+/// Only the header: a call needs the name, the argument count and whether there
+/// is a value to use — never the body. Parameter *types* are deliberately not
+/// carried, because nothing in this parser infers an expression's type and a
+/// check it cannot make is a check it must not claim.
+#[derive(Debug, Clone, PartialEq)]
+struct LocalFn {
+    name: String,
+    /// Parameter names, in declaration order — argument order, and what a
+    /// missing-argument refusal names.
+    params: Vec<String>,
+    /// The declared return type; `Unit` when the header carries no `->`.
+    ret: Ty,
+}
+
+/// The `function` **headers** a file declares, found before parsing so that a
+/// handler written above its declarations can still call them.
+///
+/// SCRIPT1a scanned for the names alone, for the opposite reason: the IR had no
+/// user-function call form, so the prescan existed to make the *refusal* name
+/// the real bound rather than send a designer hunting for a namespace. SCRIPT2
+/// adds the form (a one-segment [`Expr::Call`]), so the same prescan now
+/// resolves the call instead of explaining it — and it has to read the whole
+/// header, because arity and "does this produce a value" are checked here.
+///
+/// It is a token scan rather than a pre-parse, and it is deliberately lenient:
+/// a malformed header contributes what it can and the real parser produces the
+/// diagnostic. Nothing here reports an error, so nothing here can report one
+/// twice.
+fn prescan_functions(toks: &[Spanned]) -> Vec<LocalFn> {
     let mut out = Vec::new();
-    for w in toks.windows(2) {
-        if w[0].tok == Tok::Kw("function") {
-            if let Tok::Ident(name) = &w[1].tok {
-                out.push(name.clone());
+    let mut i = 0;
+    while i < toks.len() {
+        if toks[i].tok != Tok::Kw("function") {
+            i += 1;
+            continue;
+        }
+        let Some(Tok::Ident(name)) = toks.get(i + 1).map(|s| &s.tok) else {
+            i += 1;
+            continue;
+        };
+        let name = name.clone();
+        let mut j = i + 2;
+        if toks.get(j).map(|s| &s.tok) != Some(&Tok::Sym("(")) {
+            i += 1;
+            continue;
+        }
+        j += 1;
+        let mut params = Vec::new();
+        // `a: float, b: int )` — read names, skip the `: type` annotations, and
+        // stop at the first token that is none of those (a malformed header).
+        loop {
+            match toks.get(j).map(|s| &s.tok) {
+                Some(Tok::Sym(")")) => {
+                    j += 1;
+                    break;
+                }
+                Some(Tok::Sym(",")) => j += 1,
+                Some(Tok::Sym(":")) => {
+                    j += 2;
+                }
+                Some(Tok::Ident(p)) => {
+                    params.push(p.clone());
+                    j += 1;
+                }
+                _ => break,
             }
         }
+        let ret = match (toks.get(j).map(|s| &s.tok), toks.get(j + 1).map(|s| &s.tok)) {
+            (Some(Tok::Sym("->")), Some(Tok::Ident(t))) => ty_of_name(t).unwrap_or(Ty::Unit),
+            _ => Ty::Unit,
+        };
+        out.push(LocalFn { name, params, ret });
+        i += 2;
     }
     out
+}
+
+/// A type keyword's [`Ty`], for the header prescan. The parser's own `ty()`
+/// reports a diagnostic; this one only needs to recognise.
+fn ty_of_name(name: &str) -> Option<Ty> {
+    Some(match name {
+        "float" => Ty::Float,
+        "int" => Ty::Int,
+        "bool" => Ty::Bool,
+        "string" => Ty::Str,
+        _ => return None,
+    })
 }
 
 struct Parser<'a> {
@@ -219,9 +412,9 @@ struct Parser<'a> {
     diags: Vec<Diagnostic>,
     verbs: Verbs,
     declared: Vec<String>,
-    /// The `function` names this file declares — used only to explain why one
-    /// cannot be called (see [`prescan_functions`]).
-    functions: Vec<String>,
+    /// The `function` headers this file declares — what a bare call resolves
+    /// against (see [`prescan_functions`]).
+    functions: Vec<LocalFn>,
     /// Per-function: the next local id.
     next_local: u32,
     /// Per-function: block scopes of `local` bindings, innermost last.
@@ -235,7 +428,7 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(toks: &'a [Spanned], declared: Vec<String>, functions: Vec<String>) -> Self {
+    fn new(toks: &'a [Spanned], declared: Vec<String>, functions: Vec<LocalFn>) -> Self {
         Self {
             toks,
             i: 0,
@@ -767,6 +960,20 @@ impl<'a> Parser<'a> {
             out.push(var_set(&name, value));
             return Ok(());
         }
+        // **The call form**, in statement position. Checked before the registry
+        // so a declaration in this file wins; a name that is not declared here
+        // still gets the registry's refusal.
+        if let [name] = path.as_slice() {
+            if let Some(f) = self.local_fn(name) {
+                let args = self.call_args()?;
+                self.check_local_arity(&f, &args, span)?;
+                out.push(Stmt::ExprStmt(Expr::Call {
+                    path: vec![f.name],
+                    args,
+                }));
+                return Ok(());
+            }
+        }
         let verb = self.resolve_call(&path, span)?;
         let args = self.call_args()?;
         self.check_arity(&verb, &args, span)?;
@@ -1135,6 +1342,26 @@ impl<'a> Parser<'a> {
             let name = &path[0];
             if self.at(&Tok::Sym("(")) {
                 let name = name.clone();
+                // **The call form**, in value position: a bare call naming one
+                // of this unit's own `function` declarations.
+                if let Some(f) = self.local_fn(&name) {
+                    let args = self.call_args()?;
+                    self.check_local_arity(&f, &args, span)?;
+                    if f.ret == Ty::Unit {
+                        return Err(self.error(
+                            span,
+                            format!(
+                                "`{name}` returns nothing, so it cannot appear inside an \
+                                 expression — call it as a statement, or give it a return \
+                                 type: `function {name}(…) -> float`"
+                            ),
+                        ));
+                    }
+                    return Ok(Expr::Call {
+                        path: vec![name],
+                        args,
+                    });
+                }
                 let _ = self.call_args();
                 let message = self.bare_call_message(&name);
                 return Err(self.error(span, message));
@@ -1225,28 +1452,54 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Why a bare `name(…)` is not a call — and, when the file declares a
-    /// `function` by that name, **what the actual limit is**.
+    /// Why a bare `name(…)` is not a call, when the file declares no `function`
+    /// by that name.
     ///
-    /// The IR has no user-function call form (spec A.9), so a handler cannot
-    /// invoke its unit's own functions. That is SCRIPT1a's loudest carried item
-    /// and the first thing SCRIPT2's API surface wants; before this it surfaced
-    /// as "a call names a namespace and a verb", which sends a designer looking
-    /// for a namespace that does not exist and never mentions the declaration
-    /// twelve lines above.
+    /// A file that *does* declare one no longer reaches here: SCRIPT2's call
+    /// form resolves it (see [`Self::local_fn`]). SCRIPT1a's version of this
+    /// message explained why the call was impossible; the wave that made it
+    /// possible retires the explanation and keeps the one refusal that is still
+    /// true.
     fn bare_call_message(&self, name: &str) -> String {
-        if self.functions.iter().any(|f| f == name) {
-            return format!(
-                "`{name}` is a `function` in this file, and InfiniScript v1 cannot \
-                 call one: the Blueprint IR has no user-function call form, so a \
-                 handler can only call engine verbs. Inline the body, or move it \
-                 behind a verb"
-            );
-        }
         format!(
             "`{name}` is not a verb — a call names a namespace and a verb, like \
-             `debug.print(\"hello\")`"
+             `debug.print(\"hello\")`. To call one of this file's own functions, \
+             declare it: `function {name}(…) … end`"
         )
+    }
+
+    /// The unit-local `function` a bare name resolves to, if any.
+    fn local_fn(&self, name: &str) -> Option<LocalFn> {
+        self.functions.iter().find(|f| f.name == name).cloned()
+    }
+
+    /// A unit-local call's arguments, checked against the declared parameters.
+    ///
+    /// **Exact**, unlike a verb's: a verb's trailing inputs have literal
+    /// defaults the lowerer supplies for an unwired pin, and a function's
+    /// parameters have none — a missing one is an `UnboundParam` at run time,
+    /// which is a refusal a designer meets three steps from the mistake.
+    fn check_local_arity(&mut self, f: &LocalFn, args: &[Expr], span: Span) -> P<()> {
+        if args.len() == f.params.len() {
+            return Ok(());
+        }
+        let want = if f.params.is_empty() {
+            "no arguments".to_string()
+        } else {
+            format!(
+                "{} ({})",
+                plural(f.params.len(), "argument"),
+                f.params
+                    .iter()
+                    .map(|p| format!("`{p}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        Err(self.error(
+            span,
+            format!("`{}` takes {want}, not {}", f.name, args.len()),
+        ))
     }
 
     fn check_arity(&mut self, verb: &crate::verbs::Verb, args: &[Expr], span: Span) -> P<()> {

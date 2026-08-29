@@ -691,12 +691,20 @@ fn var_set_parts(args: &[Expr]) -> Result<(&str, &Expr), EmitError> {
 
 /// The text spelling of an IR call path.
 ///
-/// Two segments are a node's `type_id` (with the three `dispatch.*` renames
-/// undone); three are a multi-result query naming its result. `nodestate::*` has
-/// no node and keeps its own name — the rule being that text uses the node id
-/// where a node exists and the host path where none does.
+/// **One** segment is the call form — a call to the unit's own `function`,
+/// written bare, exactly as the declaration reads. Two segments are a node's
+/// `type_id` (with the three `dispatch.*` renames undone); three are a
+/// multi-result query naming its result. `nodestate::*` has no node and keeps
+/// its own name — the rule being that text uses the node id where a node exists
+/// and the host path where none does.
+///
+/// The one-segment arm goes through [`ident`], because a bare call must be a
+/// name the parser can read back: **anything the emitter writes, the parser must
+/// read back** (the SCRIPT1a audit's law, which the emitter had already broken
+/// twice in the other direction).
 fn call_spelling(path: &[String]) -> Result<String, EmitError> {
     match path.len() {
+        1 => Ok(ident(&path[0])?.to_string()),
         2 => Ok(node_type_of_path(path)),
         3 => Ok(format!("{}.{}", node_type_of_path(&path[..2]), path[2])),
         _ => Err(EmitError::UnspellableCall(path.join("::"))),

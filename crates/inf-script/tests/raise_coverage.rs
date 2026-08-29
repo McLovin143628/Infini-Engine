@@ -38,7 +38,7 @@ use inf_blueprint::interp::{Host, RunError, Value};
 use inf_blueprint::lower::lower_graph;
 use inf_blueprint::nodekit::blueprint_registry;
 use inf_blueprint::{raise_fn, BlueprintFn, RaiseError};
-use inf_script::{parse_fn, render};
+use inf_script::render;
 
 /// What `raise` should say about a construct.
 #[derive(Debug, PartialEq)]
@@ -206,11 +206,47 @@ fn raise_verdict_table() -> Vec<(&'static str, String, Verdict)> {
             ),
             Refuses(RaiseError::UnsupportedExpr("pure call")),
         ),
+        // ── the call form (SCRIPT2) ──────────────────────────────────────
+        //
+        // Text has it and a graph does not, and the reason is structural
+        // rather than an omission: a `NodeDef`'s ports are fixed at
+        // registration and a user function's signature is not, so a
+        // "call this function" node would have to be derived **per class**
+        // and `lower ∘ raise == id` re-proved over a registry that varies by
+        // document. Priced in the ledger; refused **by name** here, in both
+        // positions, because the alternative was a graph node whose
+        // `type_id` no registry knows.
+        (
+            "the call form, in statement position",
+            "function tap()\n    debug.print(\"tap\")\nend\n\non begin_play()\n    tap()\nend\n"
+                .to_string(),
+            Refuses(RaiseError::LocalFunctionCall("tap".into())),
+        ),
+        (
+            "the call form, in value position",
+            "function two() -> float\n    return 2.0\nend\n\non begin_play()\n    speed = two()\nend\n"
+                .to_string(),
+            Refuses(RaiseError::LocalFunctionCall("two".into())),
+        ),
     ]
 }
 
+/// The handler a row's source is about.
+///
+/// A row is compiled as a **unit** rather than through `parse_fn`, because the
+/// call form's rows need a `function` declaration *beside* the handler and
+/// `parse_fn` takes a source holding exactly one body. A lone handler is a unit
+/// with one event, so every older row means what it meant.
 fn compile_one(what: &str, src: &str) -> BlueprintFn {
-    parse_fn(src).unwrap_or_else(|d| panic!("{what} did not compile:\n{}", render(&d)))
+    let (class, _) = inf_script::compile(src, "act:table")
+        .unwrap_or_else(|d| panic!("{what} did not compile:\n{}", render(&d)));
+    class
+        .events
+        .into_iter()
+        .map(|b| b.body)
+        .chain(class.functions)
+        .next()
+        .unwrap_or_else(|| panic!("{what} produced no handler"))
 }
 
 /// **The table.** Every row's verdict, checked.
@@ -354,7 +390,7 @@ fn the_table_covers_both_verdicts() {
     let raises = rows.iter().filter(|(_, _, v)| *v == Raises).count();
     let refuses = rows.len() - raises;
     assert!(
-        raises == 11 && refuses == 6,
+        raises == 11 && refuses == 8,
         "{raises} raising rows and {refuses} refusing ones — the table has \
          stopped covering one of the two answers"
     );

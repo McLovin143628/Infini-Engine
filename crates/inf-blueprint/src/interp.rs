@@ -484,6 +484,115 @@ pub(crate) fn dispatch_math(path: &[String], args: &[Value]) -> Result<Value, Ru
     })
 }
 
+/// How deep a chain of unit-local `function` calls may go before the
+/// interpreter refuses.
+///
+/// **A refusal, not a stack overflow.** `inf_script`'s parser refuses a *cycle*
+/// outright, so a `.infini` file cannot reach this bound at all — but IR arrives
+/// from elsewhere too (a hand-edited `.inf_act`, a lift of hand-written Rust),
+/// and an unbounded self-call there is `STATUS_STACK_OVERFLOW` in whatever
+/// process is ticking. That takes the *editor* rather than the handler, which is
+/// exactly what P21's law and the SCRIPT1a parser depth guard exist to prevent:
+/// a gameplay refusal is a **value**.
+///
+/// 64 is two orders of magnitude past what a call *DAG* over one unit's
+/// functions reaches in practice, and leaves an order of magnitude of headroom
+/// on the 1 MiB stack a Windows main thread gets.
+pub const MAX_CALL_DEPTH: u32 = 64;
+
+/// **The call form**: a [`Host`] decorator that resolves a **one-segment** call
+/// path against a set of [`BlueprintFn`]s and runs it on the interpreter.
+///
+/// # Why one segment is the whole design
+///
+/// Every registered verb is `namespace.verb` — two path segments, or three when
+/// a multi-result query names its result — and the two synthesized namespaces
+/// (`vars`, `nodestate`) are two as well. So a one-segment path is unambiguous,
+/// and the call form needed **no IR change at all**: it is an
+/// [`Expr::Call`] that already existed, carrying a shorter
+/// path. That is the P6 vars-via-Host precedent met a second time — the
+/// capability is new, the IR is not, and the resolution lives on the one seam
+/// the arc already has.
+///
+/// # Where it sits in the stack
+///
+/// **Outermost.** A local call recurses by handing `self` back to the
+/// interpreter, so everything the callee does re-enters at the top: a called
+/// function's own `vars::get` has to fall through to whatever handles member
+/// variables (`ActorHost`), which means that host must be *inside* this one.
+/// `semantics::run_event` builds exactly that stack.
+///
+/// A one-segment call that names no function in `functions` is forwarded to
+/// `inner` unchanged, where both real hosts log it and answer `Unit` — the same
+/// "a partially-authored blueprint still runs" behaviour every other unknown
+/// call gets, rather than a new failure mode.
+pub struct LocalFns<'a> {
+    pub inner: &'a mut dyn Host,
+    /// The unit's own `function` declarations, callable by bare name.
+    pub functions: &'a [BlueprintFn],
+    /// Remaining call budget — see [`MAX_CALL_DEPTH`].
+    pub depth: u32,
+}
+
+impl<'a> LocalFns<'a> {
+    pub fn new(inner: &'a mut dyn Host, functions: &'a [BlueprintFn]) -> Self {
+        Self {
+            inner,
+            functions,
+            depth: MAX_CALL_DEPTH,
+        }
+    }
+}
+
+impl Host for LocalFns<'_> {
+    fn call(&mut self, path: &[String], args: &[Value]) -> Result<Value, RunError> {
+        if let [name] = path {
+            // `functions` is a shared slice, so copying the reference out
+            // detaches it from the `&mut self` the recursive call needs.
+            let functions = self.functions;
+            if let Some(f) = functions.iter().find(|f| &f.name == name) {
+                if self.depth == 0 {
+                    return Err(RunError::Host(
+                        name.clone(),
+                        format!(
+                            "call depth budget of {MAX_CALL_DEPTH} exhausted at `{name}` — \
+                             InfiniScript has no recursion, so a chain this deep means a \
+                             cycle in hand-authored IR"
+                        ),
+                    ));
+                }
+                let mut bound: HashMap<String, Value> = HashMap::new();
+                for (i, p) in f.params.iter().enumerate() {
+                    let Some(v) = args.get(i) else {
+                        return Err(RunError::Host(
+                            name.clone(),
+                            format!("`{name}` needs its `{}` argument", p.name),
+                        ));
+                    };
+                    bound.insert(p.name.clone(), v.clone());
+                }
+                self.depth -= 1;
+                let r = eval_fn(f, &bound, self);
+                self.depth += 1;
+                return r;
+            }
+        }
+        self.inner.call(path, args)
+    }
+
+    fn physics(&mut self) -> Option<&mut dyn Physics2dHost> {
+        self.inner.physics()
+    }
+
+    fn physics3d(&mut self) -> Option<&mut dyn Physics3dHost> {
+        self.inner.physics3d()
+    }
+
+    fn audio(&mut self) -> Option<&mut dyn AudioHost> {
+        self.inner.audio()
+    }
+}
+
 /// A [`Host`] that knows nothing — every call errors. Useful for pure fns.
 pub struct PureHost;
 impl Host for PureHost {

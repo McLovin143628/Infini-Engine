@@ -208,18 +208,30 @@ const BAD: &[(&str, &str, u32, u32, &str)] = &[
         "unexpected character `@`",
     ),
     (
-        // **The loudest carried item, said where a designer meets it.** The IR
-        // has no user-function call form (spec A.9), so a handler cannot invoke
-        // its unit's own `function`s. Before the SCRIPT1a audit this surfaced as
-        // the generic "a call names a namespace and a verb", which sends the
-        // reader looking for a namespace that does not exist and never mentions
-        // the declaration three lines above. The day SCRIPT2 adds a call form,
-        // this row goes red and the carried item retires with it.
-        "calling a `function` declared in the same file",
-        "function double(x: float) -> float\n    return x * 2.0\nend\n\non tick(dt)\n    local a = double(dt)\nend\n",
-        6,
+        // **The retired row.** This used to pin *"InfiniScript v1 cannot call
+        // one"* — the loudest of SCRIPT1a's carried items, said where a designer
+        // meets it — with a comment predicting that "the day SCRIPT2 adds a call
+        // form, this row goes red and the carried item retires with it". SCRIPT2
+        // added it; the row went red; the item is retired. What survives is the
+        // refusal that is still true: a bare call naming **no** declared
+        // function, whose message now says how to make it one.
+        "a bare call naming no `function` in this file",
+        "on tick(dt)\n    local a = double(dt)\nend\n",
+        2,
         15,
-        "InfiniScript v1 cannot call one",
+        "declare it: `function double(",
+    ),
+    (
+        // **Recursion**, refused where a designer can see it rather than at a
+        // depth budget three steps away — and refused at all because the
+        // interpreter bounds a call chain and the Rust the cook generates does
+        // not. The span is the *declaration's*, because that is the thing that
+        // has to change.
+        "a function that can call itself",
+        "function down(n: float) -> float\n    return down(n)\nend\n\non tick(dt)\n    local a = down(dt)\nend\n",
+        1,
+        1,
+        "InfiniScript has no recursion",
     ),
     (
         "an `actor` header that is not first",

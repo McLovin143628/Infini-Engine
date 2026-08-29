@@ -432,16 +432,25 @@ fn pathological_input_is_always_a_value() {
 /// what it writes reads back.
 #[test]
 fn single_character_mutations_never_panic_and_always_round_trip() {
+    // The **call form** is in the fixture, so every one of its characters is
+    // mutated too: a name that stops matching a declaration, a `(` that closes
+    // somewhere else, a `-` that turns `->` into a subtraction. Each is a source
+    // a designer can be halfway through typing, and the sweep requires every one
+    // that parses to emit and read back identically.
     const GOOD: &str = r#"actor "M"
 
 var angle: float = 0.0
 
 on tick(dt)
-    local a = angle + dt * 2.0
+    local a = scaled(angle + dt * 2.0)
     if a > 1.0 then
         debug.print("x")
     end
     angle = a
+end
+
+function scaled(v: float) -> float
+    return v * 0.5
 end
 "#;
     let chars: Vec<char> = GOOD.chars().collect();

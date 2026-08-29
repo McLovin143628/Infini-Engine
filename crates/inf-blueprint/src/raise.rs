@@ -45,6 +45,23 @@ pub enum RaiseError {
     UnsupportedExpr(&'static str),
     #[error("statements follow a terminal branch/return — not a linear graph")]
     NonLinear,
+    /// A call to the unit's own `function` declaration — the **call form**
+    /// (SCRIPT2), which text has and a graph does not.
+    ///
+    /// The node kit has no "call this function" node and cannot have a generic
+    /// one: a `NodeDef`'s ports are fixed at registration and a user function's
+    /// signature is not, so the palette entry would have to be **derived per
+    /// class**, the lowerer would have to map it back to a bare path, and
+    /// `lower ∘ raise == id` would have to be re-proved across a registry that
+    /// varies by document. That is a wave, not a clause — priced here rather
+    /// than half-taken.
+    ///
+    /// Refusing it **by name** is the point: before this variant a one-segment
+    /// call in statement position went to `raise_action`, which added a graph
+    /// node whose `type_id` no registry knows — a silently malformed graph
+    /// rather than a refusal.
+    #[error("`{0}` is a call to this unit's own function, which a graph has no node for")]
+    LocalFunctionCall(String),
     #[error("reference to unbound local n{0}")]
     UnboundLocal(u32),
     /// The statement walk made no progress — see the progress guard in
@@ -387,6 +404,13 @@ impl Raiser {
         let Expr::Call { path, args } = call else {
             return Err(RaiseError::UnsupportedExpr("action shape"));
         };
+        // A one-segment path is the call form — a call to the unit's own
+        // `function`. Caught here rather than in the caller because both
+        // statement shapes (a bare call, and one bound to a local) arrive
+        // through this door.
+        if let [name] = path.as_slice() {
+            return Err(RaiseError::LocalFunctionCall(name.clone()));
+        }
         let type_id = path.join(".");
         let node = self.add(&type_id, 0.0);
         self.wire_prev(prev, node);
@@ -464,6 +488,12 @@ impl Raiser {
                     self.wire(v.0, &v.1, node, &port);
                 }
                 Ok((node, "out".into()))
+            }
+            // The call form in *value* position — named rather than folded into
+            // "pure call", because the remedy is different: a pure call has a
+            // node and is refused for where it sits; this has no node at all.
+            Expr::Call { path, .. } if path.len() == 1 => {
+                Err(RaiseError::LocalFunctionCall(path[0].clone()))
             }
             Expr::Call { .. } => Err(RaiseError::UnsupportedExpr("pure call")),
         }

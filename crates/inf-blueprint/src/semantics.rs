@@ -28,7 +28,8 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::interp::{
-    eval_fn_traced, AudioHost, Debug, Host, Physics2dHost, Physics3dHost, RunError, Trace, Value,
+    eval_fn_traced, AudioHost, Debug, Host, LocalFns, Physics2dHost, Physics3dHost, RunError,
+    Trace, Value,
 };
 use crate::{BlueprintFn, Lit, Param, Ty};
 
@@ -294,6 +295,10 @@ impl ActorInstance {
 /// `vars` namespace (`vars::get(name)` / `vars::set(name, value)`) read and
 /// write member variables; everything else delegates to `inner` (the engine
 /// host: rotate, spawn, log, …).
+///
+/// The **call form** (a one-segment call into the unit's own `function`s) is
+/// a separate decorator, [`crate::interp::LocalFns`], stacked *outside* this one
+/// so that a called function's own `vars::*` still land here.
 pub struct ActorHost<'a> {
     pub actor: &'a mut ActorInstance,
     pub inner: &'a mut dyn Host,
@@ -386,10 +391,17 @@ pub fn run_event(
     let Some(binding) = class.handler(event) else {
         return Ok(Trace::default());
     };
-    let mut host = ActorHost {
+    // **The decorator stack, outermost first**: `LocalFns` (the call form) over
+    // `ActorHost` (member variables and node state) over the engine. The order
+    // is load-bearing in both directions — a local call recurses through the
+    // OUTERMOST host, so a function's own `vars::get` has to reach `ActorHost`
+    // on the way back down, and `vars`/`nodestate` are two segments so they can
+    // never collide with a one-segment local call on the way up.
+    let mut actor_host = ActorHost {
         actor,
         inner: engine,
     };
+    let mut host = LocalFns::new(&mut actor_host, &class.functions);
     let (_v, trace) = eval_fn_traced(&binding.body, args, &mut host, debug)?;
     Ok(trace)
 }

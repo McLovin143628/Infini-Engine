@@ -61,6 +61,23 @@
 //! **Monomorphic `vars::get`.** See
 //! [`a_bool_member_variable_does_not_compile`] — a measured refusal, not a
 //! guess.
+//!
+//! **A `string` parameter on a unit-local function.** See
+//! [`a_string_parameter_on_a_local_function_does_not_compile`] — the call form's
+//! own bound, of the same class and found the same way. `Ty::Str` renders as
+//! `String` and `Lit::Str` as a `&str` literal, so the two do not meet at a
+//! generated call.
+//!
+//! ## What SCRIPT2 added here
+//!
+//! **The call form.** The fixture declares two `function`s and calls them from
+//! two handlers — in value position, nested, and as a statement into a
+//! Unit-returning one that writes a member variable. The transpiler needed
+//! nothing: `emit` was already generic over a call path, and `generate_file`
+//! already puts many fns in one module, so a one-segment call renders as the
+//! Rust call to its sibling. **That claim is only checkable by compiling the
+//! output and running it**, which is why the form landed in the same wave as
+//! this gate's extension rather than beside it.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -88,9 +105,26 @@ var angle_deg: float = 0.0
 var speed: float = 90.0
 var hits: float = 0.0
 
+-- **The call form** (SCRIPT2), on both faces of the gate. Interpreted, this is
+-- `interp::LocalFns` resolving a one-segment `Expr::Call`; compiled, it is
+-- an ordinary Rust call to the sibling `pub fn` that `generate_file` puts in the
+-- same module. Nothing in the transpiler knew about it — `emit` was already
+-- generic over a call path — and that claim is only checkable by compiling the
+-- output and running it, which is what this file does.
+function wrapped(x: float) -> float
+  return math.min(x + 1.0, 400.0)
+end
+
+function bump(amount: float)
+  hits = hits + amount
+end
+
 on begin_play()
   debug.print("armed")
   angle_deg = 0.0
+  -- A value-position call, and a NESTED one: `f(f(x))` is where an evaluation
+  -- order that differed between the two faces would show.
+  engine.set_rotation(wrapped(wrapped(2.0)))
   -- A NaN through both NaN-ABSORBING builtins, and in the argument position
   -- that separates `f64::min`/`f64::max` from a comparison written by hand.
   -- Without this leg the gate certified a shim that answered NaN where the
@@ -130,7 +164,10 @@ on input "fire"(pressed)
     debug.print("impossible")
   end
   if pressed then
-    hits = hits + 10.0
+    -- A STATEMENT-position call into a Unit-returning function that writes a
+    -- member variable: the callee shares the caller's `ActorInstance`
+    -- interpreted, and the caller's `VARS` map compiled.
+    bump(10.0)
     engine.set_rotation(math.min(hits, 99.0))
   end
 end
@@ -239,7 +276,7 @@ impl Host for Recorder {
 }
 
 fn interpreted_trace(class: &BlueprintClass) -> String {
-    let mut host = Recorder {
+    let mut recorder = Recorder {
         vars: class
             .variables
             .iter()
@@ -247,6 +284,13 @@ fn interpreted_trace(class: &BlueprintClass) -> String {
             .collect(),
         log: String::new(),
     };
+    // **The call form, through the REAL decorator** rather than a second copy of
+    // it. `LocalFns` is what `semantics::run_event` stacks, and the SCRIPT1b
+    // audit's finding about this file's own shims is the reason: a gate that
+    // re-implements the thing it measures measures its own re-implementation.
+    // `Recorder` keeps `vars::*` — the trace's whole point is that those appear
+    // as host calls on both sides — so this decorator goes outside it, exactly
+    // as it goes outside `ActorHost` in the engine.
     let mut out = String::new();
     for (i, (event, args)) in steps().into_iter().enumerate() {
         let binding = class
@@ -268,12 +312,15 @@ fn interpreted_trace(class: &BlueprintClass) -> String {
             binding.body.name,
             argtxt.join(", ")
         ));
-        host.log.clear();
-        let ret = inf_blueprint::eval_fn(&binding.body, &argmap, &mut host)
-            .unwrap_or_else(|e| panic!("the interpreter refused step {i}: {e}"));
-        out.push_str(&host.log);
+        recorder.log.clear();
+        let ret = {
+            let mut host = inf_blueprint::interp::LocalFns::new(&mut recorder, &class.functions);
+            inf_blueprint::eval_fn(&binding.body, &argmap, &mut host)
+                .unwrap_or_else(|e| panic!("the interpreter refused step {i}: {e}"))
+        };
+        out.push_str(&recorder.log);
         out.push_str(&format!("= {}\n", fmt_value(&ret)));
-        for (k, v) in &host.vars {
+        for (k, v) in &recorder.vars {
             out.push_str(&format!("state {k} {}\n", fmt_value(v)));
         }
     }
@@ -381,11 +428,18 @@ fn strip_marker(rust: &str) -> String {
 /// The whole compiled program: the shims, the transpiler's **real output**, and
 /// a driver over the same step list the interpreter runs.
 fn compiled_program(class: &BlueprintClass, keep_marker: bool) -> String {
+    // **The unit's own `function`s go into the same file as its handlers**, and
+    // that is the whole of what the call form costs the transpiler:
+    // `generate_file` already emits many fns into one module
+    // (`blueprint_source`'s "file per CLASS, not per handler"), so a
+    // one-segment call renders as the Rust call to the sibling `pub fn`.
     let file = BlueprintFile {
         entries: class
-            .events
+            .functions
             .iter()
-            .map(|b| FileEntry::Blueprint(b.body.clone()))
+            .cloned()
+            .chain(class.events.iter().map(|b| b.body.clone()))
+            .map(FileEntry::Blueprint)
             .collect(),
     };
     let generated = generate_file(&file).expect("the transpiler renders the fixture");
@@ -700,8 +754,7 @@ fn the_generated_marker_has_no_macro_behind_it() {
 /// that does not exist yet.
 #[test]
 fn a_bool_member_variable_does_not_compile() {
-    let src = "\
-var flag: bool = true
+    let src = "var flag: bool = true
 
 on tick(dt)
   if flag then
@@ -727,8 +780,7 @@ end
     let program = compiled_program(&class, false);
     match rustc_and_run("boolvar", &program) {
         Ok(_) => panic!(
-            "a bool member variable compiled — `vars::get` gained a type, or the shim did. \
-             Retire this bound from the ledger and from `crown_parity`'s module doc."
+            "a bool member variable compiled — `vars::get` gained a type, or the shim did.              Retire this bound from the ledger and from `crown_parity`'s module doc."
         ),
         Err(stderr) => {
             println!(
@@ -737,7 +789,69 @@ end
             );
             assert!(
                 stderr.contains("mismatched types") || stderr.contains("expected `bool`"),
-                "expected a type error from the monomorphic `vars::get`:\n{stderr}"
+                "expected a type error from the monomorphic `vars::get`:
+{stderr}"
+            );
+        }
+    }
+}
+
+/// **A `string` PARAMETER on a unit-local function does not compile** — the
+/// call form's own bound, found the only way it can be: by compiling the
+/// output.
+///
+/// `Ty::Str::rust_name()` is `String` and `Lit::Str` renders as a `&str`
+/// literal, so `shout("hi")` against `fn shout(m: String)` is `E0308`. It is
+/// the same class as the monomorphic `vars::get` below and it has the same
+/// shape of fix (a decision in the emitter about how strings cross a generated
+/// boundary — `.to_string()` at the call, `&str` in the signature, or a support
+/// type), so it is **measured and carried** rather than half-taken here.
+///
+/// Interpreted it is perfect, which is what makes this a *transpiler* bound
+/// rather than a language one: a script with a string-taking function previews
+/// and ships (the cook packs IR for the interpreter — SCRIPT1b's ship decision)
+/// and only the Code tab's Rust refuses it.
+#[test]
+fn a_string_parameter_on_a_local_function_does_not_compile() {
+    let src = "\
+function shout(m: string)
+  debug.print(m)
+end
+
+on tick(dt)
+  shout(\"hi\")
+end
+";
+    let (class, _) = inf_script::compile(src, "script:shout").expect("it PARSES and it LOWERS");
+    // Interpreted it is perfect — which is what makes this a *transpiler* bound
+    // rather than a language one.
+    let mut recorder = Recorder {
+        vars: BTreeMap::new(),
+        log: String::new(),
+    };
+    let binding = class.handler(&EventKind::Tick).expect("a tick handler");
+    let args: HashMap<String, Value> = [("dt".to_string(), Value::Float(0.5))].into();
+    {
+        let mut host = inf_blueprint::interp::LocalFns::new(&mut recorder, &class.functions);
+        inf_blueprint::eval_fn(&binding.body, &args, &mut host).expect("the interpreter runs it");
+    }
+    assert!(recorder.log.contains("debug::print"), "{}", recorder.log);
+
+    let program = compiled_program(&class, false);
+    match rustc_and_run("strparam", &program) {
+        Ok(_) => panic!(
+            "a `string` parameter compiled — `Ty::Str` stopped rendering as `String`, or \
+             `Lit::Str` stopped rendering as a `&str` literal. Retire this bound from the \
+             ledger and from this file's module doc."
+        ),
+        Err(stderr) => {
+            println!(
+                "rustc on a string parameter: {}",
+                stderr.lines().next().unwrap_or("")
+            );
+            assert!(
+                stderr.contains("mismatched types") || stderr.contains("expected `String`"),
+                "expected a type error from `&str` against a `String` parameter:\n{stderr}"
             );
         }
     }
