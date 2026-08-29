@@ -313,7 +313,27 @@ Install it and re-run:
     cargo build --release --target wasm32-unknown-unknown --manifest-path <mod>/Cargo.toml";
 
 /// Strip the `#[infinity::blueprint(id = "…")]` marker attribute line(s) from
-/// transpiled Rust — that proc-macro ships with the engine runtime, not a mod.
+/// transpiled Rust.
+///
+/// **Corrected at SCRIPT1b.** This doc said the marker's proc-macro *"ships
+/// with the engine runtime, not a mod"*. It does not: there is no crate,
+/// module or macro named `infinity` anywhere in this workspace, and
+/// `crates/inf-script/tests/crown_parity.rs`'s
+/// `the_generated_marker_has_no_macro_behind_it` **measures** it — it hands the
+/// marker to `rustc` and reads back *"cannot find module or crate `infinity`"*.
+///
+/// So this is not a mod-crate concession. It is the only reason any transpiled
+/// Rust compiles anywhere, and the Code tab's own output
+/// (`<project>/src/blueprints/…`, which the scaffolded `lib.rs` declares and
+/// `cargo build` compiles) does **not** strip it and therefore does **not**
+/// compile. That is carried by name in the SCRIPT1b ledger: the fix is either a
+/// real `infinity` proc-macro crate or stripping at the Code tab's own door,
+/// and the second costs `lift` its identity anchor
+/// (`path.segments[0].ident == "infinity"`), so it is a decision with a price
+/// rather than a typo.
+///
+/// Nothing in this repository had ever compiled the transpiler's output, which
+/// is exactly the hole the crown gate was routed to close.
 fn strip_blueprint_marker(rust: &str) -> String {
     rust.lines()
         .filter(|l| !l.trim_start().starts_with("#[infinity::blueprint"))
