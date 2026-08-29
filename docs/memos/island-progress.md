@@ -22372,9 +22372,12 @@ Worth recording because each is a shape rather than a slip.
    looked at. Saving is what tells the rest of the editor.
 4. **The bridge is one-way.** A Blueprint reads as InfiniScript; editing that text
    back into the graph needs the identity decision above.
-5. **`--ink-danger` is undefined at 23 more occurrences across 9 files**, with
+5. **`--ink-danger` is undefined at 18 more occurrences across 8 files**, with
    the one-line remedy named in `ProblemsPanel.tsx`. Only `sm.css` supplies a
-   fallback colour, so it is the one site that has been rendering.
+   fallback colour, so it is the one site that has been rendering. *(The
+   audit's re-measurement. The "23 across 9" above counted this panel's own
+   paragraph about the defect; "eighteen" — the estimate the wave replaced —
+   was right.)*
 6. **SCRIPT2a's carried items 2–9 stand**, unchanged by this wave: the `string`
    parameter that does not transpile, `raise`'s missing call-a-function node,
    `engine.*` implemented by neither host, `zone.*`'s missing push half, `crowd.*`

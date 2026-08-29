@@ -20017,9 +20017,12 @@ quicker.
     reading "rust-analyzer: idle" over three InfiniScript refusals was a lie by omission), and
     the severity icon goes red — **`--ink-danger` is not a theme token**, so
     `color: var(--ink-danger)` has always been an invalid declaration the browser drops.
-    **23 more occurrences across 9 files** spell it that way (only `sm.css`'s supplies a
+    **18 more occurrences across 8 files** spell it that way (only `sm.css`'s supplies a
     fallback, so only it renders); the one-line `applyTheme` alias that would fix them all is
-    named in the code and left for a human.
+    named in the code and left for a human. *(The wave first said "eighteen", corrected itself
+    to "23 across 9", and the correction was the wrong one — the recount's pattern also matched
+    the five mentions in `ProblemsPanel.tsx`'s own paragraph about the defect, which is the
+    ninth "file". Re-measured by the audit over code sites only: **18 / 8**.)*
   * **THE NINTH EATEN CONTINUATION, and the sweep is structurally blind to it.** This wave's
     own graph-preview fixture lost its `\`-continuations to a shell heredoc, leaving bare
     newlines inside a non-raw literal — legal Rust, arm still green. That is the round-3

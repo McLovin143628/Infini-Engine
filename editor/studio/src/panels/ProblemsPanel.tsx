@@ -26,13 +26,21 @@ function baseName(p: string): string {
  * this icon has been inheriting the row's colour rather than going red. Fixed
  * here, on the panel this wave wires InfiniScript's refusals into.
  *
- * Carried, because it is wider than this file: **23 more occurrences across 9
- * files** spell it `--ink-danger` (GitPanel's diff colouring, the Explorer's
- * status letters, the drawer's delete affordances, PreferencesDialog's error
- * text, `sm.css` — which alone supplies a fallback and so is the only one that
- * renders). One line in `applyTheme` aliasing `--ink-danger` to `error` would
- * make all of them real at once, and that is an app-wide visual change a human
- * should look at rather than a scripting wave should smuggle.
+ * Carried, because it is wider than this file: **18 more occurrences across 8
+ * files** spell it `--ink-danger` (GitPanel's diff colouring ×4,
+ * DataAssetEditor ×4, SequencerPanel ×3, BiomeSetEditor ×2, ContentDrawer ×2,
+ * the Explorer's status letter, PreferencesDialog's error text, and `sm.css` —
+ * which alone supplies a fallback and so is the only one that renders). One
+ * line in `applyTheme` aliasing `--ink-danger` to `error` would make all of
+ * them real at once, and that is an app-wide visual change a human should look
+ * at rather than a scripting wave should smuggle.
+ *
+ * **The number has now been wrong twice, in opposite directions, and the second
+ * time was the "count it rather than estimate it" commit.** "Eighteen" was an
+ * eyeball and was right; "23 across 9" came from `grep -o … | wc -l` over a
+ * pattern that also matches THIS PARAGRAPH — five mentions of the token in the
+ * prose describing the defect, in the ninth file, which is this one. A count is
+ * only a measurement if you know what it counted.
  */
 function SeverityIcon({ severity }: { severity: number }) {
   const size = 13;
