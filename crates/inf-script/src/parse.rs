@@ -37,6 +37,30 @@
 //! the digits are display, and the parser assigns ids from its own counter as it
 //! walks. That is what makes the round trip a property of the walk rather than
 //! of an encoding, and it is why the emitter's output re-parses to the same ids.
+//!
+//! # Nesting is bounded, because a recursive-descent parser's real failure mode
+//! is the stack
+//!
+//! This is a **recursive** descent parser and the IR it builds is a tree, so
+//! both the parse and everything downstream (the emitter, the interpreter, the
+//! transpiler, and `Drop` itself) recurse once per level. Without a bound,
+//! `((((…1…))))` is not a refusal — it is `STATUS_STACK_OVERFLOW`, which takes
+//! the *editor* rather than the script, and a parser is exactly the component an
+//! editor calls on every keystroke. P19 paid for this law once already in the
+//! PCG grammar's parser; the SCRIPT1a audit measured it here: on a **1 MiB**
+//! stack (what a Windows main thread gets) the parser died somewhere between
+//! 512 and 768 nested parentheses, and it crashed rather than refused.
+//!
+//! So [`MAX_NESTING`] bounds the total nesting of a declaration — blocks and
+//! expressions share one budget, because they share one stack — and going past
+//! it is a diagnostic with a line, a column and a remedy. The deepest
+//! construction in the whole round-trip corpus is 4 levels.
+//!
+//! **A chain counts.** `1 + 1 + 1 + …` is parsed by a loop and costs no parser
+//! frames at all, but it builds a *left-deep tree*, and the emitter recursed
+//! itself to death on ten thousand of them. So each accumulation in the
+//! `or`/`and`/`+`/`*` chains spends one level of the same budget: the bound is on
+//! the tree, not on the parser's own stack.
 
 use std::collections::BTreeMap;
 
@@ -84,6 +108,18 @@ impl Unit {
 /// Unwinding marker: a diagnostic has already been recorded.
 struct Bail;
 type P<T> = Result<T, Bail>;
+
+/// How deeply one declaration may nest — blocks, parentheses, unary operators
+/// and operator-chain steps together, because all four cost the same stack.
+///
+/// Chosen against a **measurement**, not a feeling: on a 1 MiB stack (a Windows
+/// main thread) the unguarded parser overflowed between 512 and 768 nested
+/// parentheses, which is the tightest shape (eight frames per level through
+/// `expr → or → and → cmp → add → mul → unary → primary`). 128 leaves at least
+/// a fourfold margin there and a much larger one everywhere else, and it is two
+/// orders of magnitude past anything a person writes — the deepest construction
+/// in the round-trip corpus is **4**.
+pub const MAX_NESTING: u32 = 128;
 
 /// Parse a whole `.infini` file.
 ///
@@ -169,6 +205,8 @@ struct Parser<'a> {
     params: Vec<String>,
     /// Per-function: locals something assigns to.
     assigned: Vec<LocalId>,
+    /// How deeply nested the walk currently is — see [`MAX_NESTING`].
+    depth: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -183,7 +221,38 @@ impl<'a> Parser<'a> {
             scopes: Vec::new(),
             params: Vec::new(),
             assigned: Vec::new(),
+            depth: 0,
         }
+    }
+
+    // ── the nesting bound ────────────────────────────────────────────────
+
+    /// Spend one level of [`MAX_NESTING`], or refuse.
+    ///
+    /// The refusal is a **value** with a line and a remedy, which is the whole
+    /// point: unbounded, this is a stack overflow, and a stack overflow in a
+    /// library an editor calls on every keystroke takes the editor.
+    fn enter(&mut self) -> P<()> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            let span = self.span();
+            return Err(self.error(
+                span,
+                format!(
+                    "nested more than {MAX_NESTING} levels deep — split the \
+                     expression across `local` bindings, or the block across \
+                     handlers. (Blocks, parentheses, unary operators and the \
+                     steps of an operator chain share one budget, because they \
+                     share one stack.)"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Release levels claimed by [`Self::enter`].
+    fn leave(&mut self, to: u32) {
+        self.depth = to;
     }
 
     // ── token plumbing ───────────────────────────────────────────────────
@@ -311,6 +380,11 @@ impl<'a> Parser<'a> {
     /// Skip to the next plausible declaration start so one bad handler does not
     /// hide the rest of the file's diagnostics. Always advances.
     fn recover(&mut self) {
+        // A bail unwinds out of an arbitrary number of `enter`s, so the budget
+        // is reset here rather than unwound — otherwise the *next* declaration
+        // in a file whose first one nested too deeply would inherit a spent
+        // budget and refuse for a reason that is not about it.
+        self.depth = 0;
         loop {
             self.bump();
             match self.peek() {
@@ -490,6 +564,7 @@ impl<'a> Parser<'a> {
         self.scopes = vec![Vec::new()];
         self.params = params.iter().map(|p| p.name.clone()).collect();
         self.assigned.clear();
+        self.depth = 0;
         let mut body = self.block(&["end"])?;
         self.expect(Tok::Kw("end"))?;
         let assigned = std::mem::take(&mut self.assigned);
@@ -498,8 +573,17 @@ impl<'a> Parser<'a> {
         Ok(body)
     }
 
-    /// Statements until one of `terminators` (not consumed).
+    /// Statements until one of `terminators` (not consumed). One level of the
+    /// nesting budget: a block is reached only by recursing through a statement.
     fn block(&mut self, terminators: &[&str]) -> P<Vec<Stmt>> {
+        let entry = self.depth;
+        self.enter()?;
+        let r = self.block_inner(terminators);
+        self.leave(entry);
+        r
+    }
+
+    fn block_inner(&mut self, terminators: &[&str]) -> P<Vec<Stmt>> {
         let mut out = Vec::new();
         loop {
             match self.peek() {
@@ -793,9 +877,22 @@ impl<'a> Parser<'a> {
         self.or_expr()
     }
 
+    /// Each of the four chain parsers releases the levels its accumulation
+    /// spent once the whole chain is built: the tree it produced is a sibling of
+    /// whatever follows, not an ancestor of it. What it may **not** do is spend
+    /// nothing, because the tree is left-deep and every consumer of the IR walks
+    /// it recursively.
     fn or_expr(&mut self) -> P<Expr> {
+        let entry = self.depth;
+        let r = self.or_expr_inner();
+        self.leave(entry);
+        r
+    }
+
+    fn or_expr_inner(&mut self) -> P<Expr> {
         let mut lhs = self.and_expr()?;
         while self.eat(&Tok::Kw("or")) {
+            self.enter()?;
             let rhs = self.and_expr()?;
             lhs = Expr::Binary(BinOp::Or, Box::new(lhs), Box::new(rhs));
         }
@@ -803,8 +900,16 @@ impl<'a> Parser<'a> {
     }
 
     fn and_expr(&mut self) -> P<Expr> {
+        let entry = self.depth;
+        let r = self.and_expr_inner();
+        self.leave(entry);
+        r
+    }
+
+    fn and_expr_inner(&mut self) -> P<Expr> {
         let mut lhs = self.cmp_expr()?;
         while self.eat(&Tok::Kw("and")) {
+            self.enter()?;
             let rhs = self.cmp_expr()?;
             lhs = Expr::Binary(BinOp::And, Box::new(lhs), Box::new(rhs));
         }
@@ -841,6 +946,13 @@ impl<'a> Parser<'a> {
     }
 
     fn add_expr(&mut self) -> P<Expr> {
+        let entry = self.depth;
+        let r = self.add_expr_inner();
+        self.leave(entry);
+        r
+    }
+
+    fn add_expr_inner(&mut self) -> P<Expr> {
         let mut lhs = self.mul_expr()?;
         loop {
             let op = match self.peek() {
@@ -849,12 +961,20 @@ impl<'a> Parser<'a> {
                 _ => return Ok(lhs),
             };
             self.bump();
+            self.enter()?;
             let rhs = self.mul_expr()?;
             lhs = Expr::Binary(op, Box::new(lhs), Box::new(rhs));
         }
     }
 
     fn mul_expr(&mut self) -> P<Expr> {
+        let entry = self.depth;
+        let r = self.mul_expr_inner();
+        self.leave(entry);
+        r
+    }
+
+    fn mul_expr_inner(&mut self) -> P<Expr> {
         let mut lhs = self.unary()?;
         loop {
             let op = match self.peek() {
@@ -864,6 +984,7 @@ impl<'a> Parser<'a> {
                 _ => return Ok(lhs),
             };
             self.bump();
+            self.enter()?;
             let rhs = self.unary()?;
             lhs = Expr::Binary(op, Box::new(lhs), Box::new(rhs));
         }
@@ -875,6 +996,14 @@ impl<'a> Parser<'a> {
     /// `Unary(Neg, Lit::Int(1))` — two different IRs a graph can hold — would
     /// print the same text and could not both come back.
     fn unary(&mut self) -> P<Expr> {
+        let entry = self.depth;
+        self.enter()?;
+        let r = self.unary_inner();
+        self.leave(entry);
+        r
+    }
+
+    fn unary_inner(&mut self) -> P<Expr> {
         if self.at(&Tok::Kw("not")) {
             self.bump();
             let inner = self.unary()?;

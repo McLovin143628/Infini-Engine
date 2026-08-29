@@ -62,6 +62,18 @@ use crate::parse::ty_name;
 pub enum EmitError {
     #[error("a float literal is {0}, which has no written form (the IR's `Lit::Float` is documented finite)")]
     NonFiniteFloat(f64),
+    #[error(
+        "this IR nests more than {MAX_EMIT_NESTING} levels deep, which no `.infini` \
+         file can hold — the parser refuses past {} (a graph can chain operator \
+         nodes without limit; text cannot)",
+        crate::parse::MAX_NESTING
+    )]
+    TooDeep,
+    #[error(
+        "`{0}` is an expression, not a statement — InfiniScript has no \
+         evaluate-and-discard statement, so this IR has no written form"
+    )]
+    UnspellableStatement(String),
     #[error("`{0}` is not an identifier, so it cannot be written as a binder")]
     UnspellableName(String),
     #[error("two live bindings are both called `{0}`; the later one would capture the earlier's readers")]
@@ -217,6 +229,8 @@ struct Writer {
     live: Vec<Vec<String>>,
     /// The next display number, in the parser's allocation order.
     next: u32,
+    /// How deeply the walk is nested — see [`MAX_EMIT_NESTING`].
+    depth: u32,
 }
 
 impl Writer {
@@ -231,7 +245,23 @@ impl Writer {
             idents: HashMap::new(),
             live,
             next: 0,
+            depth: 0,
         })
+    }
+
+    /// Spend one level of the emitter's own bound, or refuse.
+    ///
+    /// The parser is bounded ([`crate::parse::MAX_NESTING`]) so text can never
+    /// build a tree deeper than this; a *graph* can, because a canvas will chain
+    /// as many `math.add` nodes as somebody drags out, and lowering turns that
+    /// chain into a left-deep `Expr`. Unbounded, printing one is a stack
+    /// overflow in whatever process opened the Blueprint as text.
+    fn deeper(&mut self) -> Result<(), EmitError> {
+        self.depth += 1;
+        if self.depth > MAX_EMIT_NESTING {
+            return Err(EmitError::TooDeep);
+        }
+        Ok(())
     }
 
     /// Claim the next display number for a local the text does not name (a
@@ -276,6 +306,13 @@ impl Writer {
 
     /// A statement list at `depth`, each line already indented and terminated.
     fn block(&mut self, body: &[Stmt], depth: usize) -> Result<String, EmitError> {
+        self.deeper()?;
+        let r = self.block_inner(body, depth);
+        self.depth -= 1;
+        r
+    }
+
+    fn block_inner(&mut self, body: &[Stmt], depth: usize) -> Result<String, EmitError> {
         let mut out = String::new();
         let mut i = 0;
         while i < body.len() {
@@ -386,7 +423,27 @@ impl Writer {
                     format!("{pad}var.set({}, {value})\n", quote(name))
                 }
             }
-            Stmt::ExprStmt(e) => format!("{pad}{}\n", self.expr(e, 0)?),
+            // **A statement position holds a call and nothing else.**
+            // InfiniScript has no evaluate-and-discard statement — `1 + 2` on a
+            // line of its own is a refusal in the grammar — and the two calls
+            // that print as something *other* than a call (`vars::get`, which
+            // prints as a bare name, and `nodestate::get_or`, whose namespace
+            // resolves only in value position) cannot be written either. The
+            // SCRIPT1a audit found all four printing happily and re-parsing not
+            // at all. `raise` names the same shape (`UnsupportedStmt("non-call
+            // expr stmt")`), so this is a state both faces agree they cannot
+            // hold, rather than a new limit.
+            Stmt::ExprStmt(e) => match e {
+                Expr::Call { path, .. }
+                    if *path != vars_path("get") && path.as_slice() != nodestate_get_or() =>
+                {
+                    format!("{pad}{}\n", self.expr(e, 0)?)
+                }
+                Expr::Call { path, .. } => {
+                    return Err(EmitError::UnspellableStatement(path.join("::")))
+                }
+                _ => return Err(EmitError::UnspellableStatement(describe_expr(e).into())),
+            },
             Stmt::Snippet(code) => {
                 let (open, close) = long_brackets(code);
                 format!("{pad}rust {open}\n{code}{close}\n")
@@ -427,6 +484,13 @@ impl Writer {
 
     /// An expression, parenthesised when its precedence is below `min`.
     fn expr(&mut self, e: &Expr, min: u8) -> Result<String, EmitError> {
+        self.deeper()?;
+        let r = self.expr_inner(e, min);
+        self.depth -= 1;
+        r
+    }
+
+    fn expr_inner(&mut self, e: &Expr, min: u8) -> Result<String, EmitError> {
         let (text, prec) = match e {
             Expr::Lit(l) => (literal(l)?, ATOM),
             Expr::Param(name) => (ident(name)?.to_string(), ATOM),
@@ -478,9 +542,21 @@ impl Writer {
             },
             Expr::Binary(op, l, r) => {
                 let p = prec(*op);
-                let lhs = self.expr(l, p)?;
-                // Left-associative, so the right operand needs one level more;
-                // comparisons do not associate at all, so both sides do.
+                // Left-associative operators let their *left* operand sit at
+                // their own level and force the right one up. A **comparison
+                // does not associate at all** — the grammar refuses `a < b == c`
+                // outright — so a comparison nested in *either* operand of a
+                // comparison has to be parenthesised, the left included.
+                //
+                // The SCRIPT1a audit found the left half missing: `cmp.lt` wired
+                // into `cmp.eq`'s `a` input is a graph anybody can draw, it
+                // lowers to `Binary(Eq, Binary(Lt, …), …)`, and the emitter
+                // printed `1.0 < 2.0 == true` — text the parser then refuses.
+                // An emitter that writes a file its own parser rejects is worse
+                // than one that refuses, because the refusal is silent until
+                // somebody tries to open the result.
+                let left_min = if associates(*op) { p } else { p + 1 };
+                let lhs = self.expr(l, left_min)?;
                 let rhs = self.expr(r, p + 1)?;
                 (format!("{lhs} {} {rhs}", spelling(*op)), p)
             }
@@ -495,6 +571,25 @@ impl Writer {
 
 const ATOM: u8 = 7;
 const UNARY: u8 = 6;
+
+/// How deeply the emitter will walk before refusing.
+///
+/// Twice [`crate::parse::MAX_NESTING`], deliberately: the parser counts a
+/// parenthesis and a chain step where the emitter counts a tree node, and at
+/// most one uncounted comparison node can sit inside each counted level — so
+/// twice is a proof rather than a guess that **anything the parser accepts, the
+/// emitter can write**. The bound exists for the other producer: a graph.
+pub const MAX_EMIT_NESTING: u32 = crate::parse::MAX_NESTING * 2;
+
+/// Whether an operator associates, i.e. whether `a op b op c` is a legal
+/// spelling of `(a op b) op c`. The comparisons do not — [`crate::parse`]
+/// refuses a chained one — so they need a parenthesis on both sides.
+fn associates(op: BinOp) -> bool {
+    !matches!(
+        op,
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+    )
+}
 
 fn prec(op: BinOp) -> u8 {
     match op {
@@ -526,6 +621,25 @@ fn spelling(op: BinOp) -> &'static str {
 
 fn vars_path(op: &str) -> Vec<String> {
     vec!["vars".to_string(), op.to_string()]
+}
+
+/// The lowerer's own state-cell read, which has a value spelling and no
+/// statement one.
+fn nodestate_get_or() -> [String; 2] {
+    ["nodestate".to_string(), "get_or".to_string()]
+}
+
+/// What an expression is, for the one message that has to name a shape rather
+/// than a path.
+fn describe_expr(e: &Expr) -> &'static str {
+    match e {
+        Expr::Lit(_) => "a literal",
+        Expr::Param(_) => "a parameter",
+        Expr::Local(_) => "a local",
+        Expr::Unary(..) => "a unary expression",
+        Expr::Binary(..) => "a binary expression",
+        Expr::Call { .. } => "a call",
+    }
 }
 
 fn var_get_name(args: &[Expr]) -> Result<&str, EmitError> {
