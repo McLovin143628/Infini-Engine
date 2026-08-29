@@ -43,7 +43,7 @@ import { linter, type Diagnostic } from "@codemirror/lint";
 import type { Extension } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 
-import { script } from "../ipc";
+import { script, type ScriptDiagnosticDto } from "../ipc";
 import { useLspStore } from "../../stores/lspStore";
 import { pathToUri } from "./fileUri";
 import { diagnosticsToCM } from "./lspExtension";
@@ -77,8 +77,11 @@ export function isScriptPath(path: string): boolean {
 function checkSource(path: string) {
   const uri = pathToUri(path);
   return async (view: EditorView): Promise<Diagnostic[]> => {
+    // The doc as it was when the check started. CodeMirror discards a result
+    // whose document has moved on, so pinning it here is the honest offset base
+    // rather than a race with `view.state`.
     const doc = view.state.doc;
-    let refusals;
+    let refusals: ScriptDiagnosticDto[];
     try {
       refusals = await script.check(doc.toString(), path);
     } catch (e) {
