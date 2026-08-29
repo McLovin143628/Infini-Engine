@@ -37,6 +37,22 @@
 //! The gate moves the hero the way a player's hands would and the mission reacts,
 //! which is the division of labour the mission itself has. Both sims are moved
 //! identically, which is what makes the comparison about the mission.
+//!
+//! # THE COUPLING A CROWD WAVE WILL MEET HERE
+//!
+//! **This gate's trace depends on the CROWD's determinism as well as the
+//! script's**, and that is new: a crowd inside a *script* gate had not happened
+//! before. `crowd.population()` is a mission mechanic — being watched costs the
+//! hero condition and runs the vault clock at double speed — so the 28 agents
+//! `inf_ecs::society` grows by pairing the apartment block's homes with the
+//! bank's desks are *inside* the compared trace and inside the two endings.
+//!
+//! So: **if this file goes red on a wave that touched the crowd, the mission is
+//! probably not what broke.** The properties it is leaning on are gated in their
+//! own right by `island_gate` and `crowd_sweep` (population, scheduling and
+//! routing determinism); read a failure here against those two before reading it
+//! against `HarbourHeist.infini`. The coupling is stated here rather than only
+//! in the wave ledger because this header is where a reader arrives.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -76,21 +92,35 @@ fn sample_files() -> Vec<String> {
 /// **The fixture really is what is committed**, file for file — a cooked mission
 /// missing a file the sample has is a gate measuring a smaller world than the one
 /// an author opens.
+///
+/// **Exact, not a subset** (the SCRIPT3 audit). This arm listed seven of the
+/// eleven committed files and `HarbourHousing.inf_pcg` was not among them — the
+/// graph whose absence from the PIE payload is the wave's own step-1
+/// divergence, and the one file whose disappearance would take the crowd out of
+/// *both* routes at once and leave the two sides agreeing perfectly. An exact
+/// expected set at the producer is the P21.4 rule; content added or removed on
+/// purpose moves this list in the same commit.
 #[test]
 fn the_fixture_copies_every_committed_file() {
     let files = sample_files();
     println!("the committed mission is {files:?}");
-    for want in [
-        "HarbourHeist.infini",
-        "HarbourHeist.infini.toml",
-        "HarbourHeist.inf_lvl",
-        "HarbourHeist.inf_lvl.toml",
-        "HarbourVault.inf_pcg",
-        "Alarm.inf_mesh",
-        "README.md",
-    ] {
-        assert!(files.iter().any(|f| f == want), "{want} is missing");
-    }
+    assert_eq!(
+        files,
+        [
+            "Alarm.inf_mesh",
+            "Alarm.inf_mesh.toml",
+            "HarbourHeist.inf_lvl",
+            "HarbourHeist.inf_lvl.toml",
+            "HarbourHeist.infini",
+            "HarbourHeist.infini.toml",
+            "HarbourHousing.inf_pcg",
+            "HarbourHousing.inf_pcg.toml",
+            "HarbourVault.inf_pcg",
+            "HarbourVault.inf_pcg.toml",
+            "README.md",
+        ],
+        "the committed mission is not the eleven files this gate cooks"
+    );
 }
 
 fn scaffold(tmp: &Path) -> PathBuf {

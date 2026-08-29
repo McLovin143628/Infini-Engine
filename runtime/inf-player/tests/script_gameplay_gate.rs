@@ -362,7 +362,14 @@ fn the_cooked_script_artifact_is_byte_identical_on_every_host() {
 /// 2. **the verb is LIVE in the shipped host**: a script that calls it puts an
 ///    entity in the world, at its own place, under the content-derived GUID;
 /// 3. **the handler runs past it**, which was true when the call was inert and
-///    has to stay true now that it is not.
+///    has to stay true now that it is not;
+/// 4. **and the payload really walks the edge** — added by the SCRIPT3 audit,
+///    because points 1–3 are all about the *world* and this arm's name promises
+///    the payload too. `build_scene_payload`'s SCRIPT3 walk resolves only a
+///    **GUID-spelled** prefab (a `PackEntry` carries no name), every fixture in
+///    the tree spells a **stem**, and so the walk's resolver had never been
+///    called by any test: deleting the loop reddened nothing anywhere. The
+///    fourth block below spells the GUID and asserts the mesh rides.
 #[test]
 fn what_a_script_names_reaches_the_world_and_the_payload_walks_it() {
     let assets = inf_blueprint::assetrefs::STR_PORTS
@@ -448,4 +455,92 @@ end
         "the handler stopped at the spawn: {:?}",
         sim.logs()
     );
+
+    // ── (4) …AND THE PAYLOAD WALKS IT ───────────────────────────────────────
+    //
+    // **The half this arm's NAME promised and did not measure** (the SCRIPT3
+    // audit). `build_scene_payload`'s SCRIPT3 walk resolves a class's
+    // `asset_refs` and pulls what they name into `meshes`, mirroring
+    // `inf_packager::asset_deps`. But **only a GUID-spelled prefab resolves** —
+    // a `PackEntry` carries no name — and every fixture in the tree spells a
+    // STEM: the spawner above, and the committed Harbour Heist mission. So the
+    // walk's collector ran and its resolver never did, in any test, and deleting
+    // the whole loop reddened nothing. This is the fixture that spells the GUID.
+    const MESH_GUID: Uuid = Uuid::from_u128(0x5C15_0004);
+    let named_src = format!("on begin_play()\n  engine.spawn(\"{MESH_GUID}\")\nend\n");
+    let (named_class, _) =
+        inf_script::compile(&named_src, format!("script:{}", AssetId(SCRIPT_GUID)))
+            .expect("the GUID-spelling spawner compiles");
+    let mesh_bytes = inf_asset::encode(&one_triangle()).expect("the mesh encodes");
+    let mut asked: Vec<Uuid> = Vec::new();
+    let payload = inf_editor_core::pie::build_scene_payload(
+        &scene(),
+        |guid| (guid == SCRIPT_GUID).then(|| named_class.clone()),
+        |_| None,
+        |_| None,
+        |_| None,
+        |_| None,
+        |_| None,
+        |guid| {
+            asked.push(guid);
+            (guid == MESH_GUID).then(|| mesh_bytes.clone())
+        },
+        |_| None,
+        HZ,
+        false,
+    )
+    .expect("the payload builds");
+    assert_eq!(
+        payload.meshes.iter().map(|(g, _)| *g).collect::<Vec<_>>(),
+        vec![MESH_GUID],
+        "`build_scene_payload` must pull what a PROGRAM names into the payload, the \
+         way `asset_deps` pulls it into the pack. A PIE session missing what a cooked \
+         pack carries is precisely the divergence this file exists to prevent. The \
+         mesh resolver was asked for: {asked:?}"
+    );
+    // …and the spawned entity binds it, so the bytes have an entity to be about.
+    let mut bound = inf_player::sim_from_payload(&payload)
+        .expect("the world builds")
+        .sim;
+    let g =
+        inf_ecs::prefab::authored_spawn_guid(&MESH_GUID.to_string(), inf_ecs::math::Vec3d::ZERO);
+    let e = bound
+        .world_mut()
+        .entity_of(g)
+        .expect("the GUID-spelled spawn is in the world");
+    assert_eq!(
+        bound
+            .world_mut()
+            .world()
+            .get::<inf_ecs::components::MeshRef>(e)
+            .expect("a mesh ref")
+            .asset,
+        Some(MESH_GUID),
+        "a GUID-spelled prefab binds its asset — that is the half of the verb's \
+         contract the payload edge exists to serve"
+    );
+}
+
+/// The smallest valid `.inf_mesh` an asset edge can be about: one triangle.
+///
+/// The claim being measured is a **closure edge**, and an edge does not care how
+/// many triangles are on the other end of it (`inf_editor_core::heist`'s alarm
+/// mesh makes the same argument about the committed sample).
+fn one_triangle() -> inf_mesh::MeshAsset {
+    let v = |p: [f32; 3]| inf_mesh::MeshVertex {
+        position: p,
+        normal: [0.0, 1.0, 0.0],
+        uv: [0.0, 0.0],
+        tangent: [1.0, 0.0, 0.0, 1.0],
+    };
+    inf_mesh::MeshAsset::new(
+        vec![inf_mesh::SubMesh {
+            name: "tri".into(),
+            vertices: vec![v([0.0, 0.0, 0.0]), v([1.0, 0.0, 0.0]), v([0.0, 0.0, 1.0])],
+            indices: vec![0, 1, 2],
+            material_slot: Some(0),
+            skin: Vec::new(),
+        }],
+        vec!["mat:tri".into()],
+    )
 }
