@@ -46,7 +46,7 @@ shipped the substrate the document describes, and Phase 14 shipped the other hal
 | piece | where | what it already is |
 |---|---|---|
 | the IR | `crates/inf-blueprint` (`BlueprintFn`, `Stmt`, `Expr`) | a small, pure, serializable gameplay IR — events (`BeginPlay`/`Tick`/`Input`/`Collision`/`Custom`), typed data (`Bool`/`Int`/`Float`/`Str`/`Named`), exec flow |
-| the interpreter | `inf_blueprint::interp` | a tree-walking evaluator **over that same IR**, running in-editor with no compile step; a failing node's damage is contained to its downstream cone |
+| the interpreter | `inf_blueprint::interp` | a tree-walking evaluator **over that same IR**, running in-editor with no compile step; a failure aborts *that handler on that actor* and the sim ticks on (see the containment note below — the granularity is not the cone) |
 | the compiler | `crates/inf-transpile` (`emit`, `lift`) | IR → **real Rust**, and Rust → IR back; 15 round-trip/parity test files |
 | the parity gate | `inf-transpile/tests/{parity,flow_parity,math_parity,coyote_parity}.rs` | interpreted == compiled over **four fixture families** — see the bound below. *Preview is the shipped program, per proven family.* |
 | graph ↔ IR | `inf_blueprint::lower` / `raise` | **both directions**: a graph lowers to IR, and IR raises to a graph |
@@ -228,9 +228,26 @@ file's IR is a pure function of its bytes — byte-identical lowering on every h
 with a fixture that lowers the same file on two hosts and compares IR hashes.
 
 **Refusals are values.** A parse error names its line, its column and what it
-expected. It does not panic, and — per P21's law, paid for in a wave — a script
-that fails at runtime takes its downstream cone and nothing else; the sim keeps
-running and the editor shows the error.
+expected, and it does not panic (P21's law, paid for in a wave).
+
+**Runtime containment, at its real granularity.** The first draft of this memo
+said a failing script "takes its downstream cone and nothing else". That is
+`inf_graph::exec`'s property — the generic graph runner has it, with a test
+called `error_is_contained_to_downstream_cone` — and the **blueprint IR
+interpreter is not that runner**. `run_event` propagates a `RunError` with `?`,
+so the failure aborts *that handler invocation* at the failing statement; the
+containment happens one level up, where `run_on_guid` logs the error and the
+per-actor loop moves to the next actor. Both hosts do this the same way
+(`simulate.rs` and `runtime_sim.rs`).
+
+The guarantee is therefore: **a broken script takes its handler, on its actor,
+for that tick.** The frame completes, other actors run, the editor gets the
+message. That is real containment and it is what SCRIPT1 should arm — but it is
+not the cone, and a designer whose Tick script fails halfway through will find
+the *rest of that handler's* effects un-run, which a "cone" model would not
+predict. Narrowing it to the cone would mean running scripts through
+`inf_graph::exec` instead of the IR interpreter, which is a different design and
+is not what this arc proposes.
 
 ### The honest bound, named now rather than discovered in SCRIPT1
 

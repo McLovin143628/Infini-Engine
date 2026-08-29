@@ -19642,7 +19642,11 @@ quicker.
   `BlueprintFn` with source-mapped diagnostics; **refusals are values** — a parse error names
   its line and its expectation. An IR → `.infini` emitter with round-trip gates in *both*
   directions. Hot reload on `inf-asset`'s notify substrate, swapping into the running
-  interpreter with failure containment armed. `.infini` is *source* (git-diffable text); the
+  interpreter with failure containment armed **at its real granularity**: the IR interpreter
+  propagates a `RunError` out of `run_event`, so a broken script takes *its handler, on its
+  actor, for that tick* — `run_on_guid` logs it and the per-actor loop continues, in both
+  hosts. The downstream-cone containment belongs to `inf_graph::exec`, which is a different
+  runner and not the one scripts run on. `.infini` is *source* (git-diffable text); the
   cook either transpiles it to Rust into the project crate or packs its IR for the shipped
   interpreter — both doors exist, both parity-gated — and `asset_deps` walks scripts so the
   cook closure sees script-named assets (the SK1c lesson). **What "parity-gated" costs, since
