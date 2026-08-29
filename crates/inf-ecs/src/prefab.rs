@@ -12,7 +12,13 @@
 //! `inf_player::runtime_sim` are mirrors, and a spawn implemented twice is two
 //! implementations that agree until they do not (P22's *one door for three
 //! paths*). Each host arm is a call to a function here and nothing else, so the
-//! two hosts' added lines diff to nothing.
+//! two hosts' added lines diff to nothing — and since the SCRIPT3 audit that is
+//! an **arm** rather than a sentence: `nodekit`'s
+//! `both_hosts_reach_the_same_ring_0_rule_for_the_engine_kit` extracts the three
+//! arms out of each host's source and compares them as code. Reaching a shared
+//! rule was already checked and is not sufficient — a host could wrap the call
+//! in a guard or a clamp, name the rule on the line in the middle, and diverge
+//! on the first program that took the wrapped path.
 //!
 //! # The identity of a spawned thing is CONTENT, never a counter
 //!
@@ -26,9 +32,19 @@
 //! The consequence a designer has to be told rather than discover: **two spawns
 //! of one prefab at one point are one entity.** `spawn_with_guid` would
 //! otherwise register a second entity under a GUID the index already holds, so
-//! [`spawn_prefab`] answers the existing entity instead — an author who wants
-//! two puts them in two places, which is the pickup kit's ruling met a second
-//! time.
+//! [`spawn_prefab`] answers the existing entity instead, which is the pickup
+//! kit's ruling met a second time.
+//!
+//! **And the honest half of that sentence** (the SCRIPT3 audit's correction —
+//! this paragraph used to say "an author who wants two puts them in two
+//! places", which is not a thing a script can do): **`engine.spawn` takes no
+//! point.** The node has exactly one input and it is the prefab, so a spawn
+//! lands at the *acting entity's* own position. An author who wants two of one
+//! prefab needs two spawner actors, or a spawner that has moved between the two
+//! calls, or a second name — they cannot offset the second one from inside the
+//! expression. Where the *point* is the thing being authored,
+//! [`crate::item::spawn_pickup`] is the verb that takes one. Giving the node a
+//! second input is a kit change, and it is priced rather than half-taken.
 //!
 //! # The handle is folded from the identity, not handed out
 //!
@@ -154,20 +170,41 @@ pub fn spawn_prefab(world: &mut EcsWorld, prefab: &str, at: Vec3d) -> (Uuid, i64
     (guid, handle)
 }
 
-/// **`engine.destroy`.** Remove `guid` and everything under it; `false` when the
-/// world does not have it.
+/// **`engine.destroy`.** Remove `guid` and everything under it, and answer
+/// **every guid that left the world**; empty when the world does not have it.
 ///
 /// Through [`EcsWorld::despawn`], which is the door `cell_stream` deactivates a
 /// cell with — the guid index is purged with the entity, so a handle that named
 /// it stops resolving rather than dangling. A runtime-spawned entity is in no
 /// cell's list, so streaming will never despawn it and this is the only way it
 /// goes (`inf_player::cell_stream`'s own header states that half).
-pub fn destroy_entity(world: &mut EcsWorld, guid: Uuid) -> bool {
+///
+/// # Why it answers the SUBTREE and not a `bool`
+///
+/// The SCRIPT3 audit's finding, and it is the shape a `bool` hides. The verb's
+/// own description promises *"an entity, **and everything parented under it**"*,
+/// and both hosts use the answer to decide whose handlers stop. Told only that
+/// "something was destroyed", a host removes the **root** from its actor map and
+/// leaves every destroyed *child* actor in it — ticking, every step, against a
+/// world that no longer has its entity. That is exactly the ghost
+/// `an_actor_that_destroys_itself_finishes_the_handler_and_stops` exists to
+/// forbid, one level down.
+///
+/// The list is [`EcsWorld::subtree`] order, which is a deterministic DFS, so the
+/// two hosts drain the same guids in the same order. An entity in the subtree
+/// with no [`crate::components::Guid`] contributes nothing — it was addressable
+/// by nobody.
+pub fn destroy_entity(world: &mut EcsWorld, guid: Uuid) -> Vec<Uuid> {
     let Some(entity) = world.entity_of(guid) else {
-        return false;
+        return Vec::new();
     };
+    let purged: Vec<Uuid> = world
+        .subtree(entity)
+        .into_iter()
+        .filter_map(|e| world.guid_of(e))
+        .collect();
     world.despawn(entity);
-    true
+    purged
 }
 
 /// **`engine.set_rotation`.** Turn `guid` to an absolute yaw in **degrees**,
@@ -178,6 +215,12 @@ pub fn destroy_entity(world: &mut EcsWorld, guid: Uuid) -> bool {
 /// shows), so a script and the inspector say the same number about one entity.
 /// The value is taken as written — `370` is `370`, not `10` — because the
 /// component holds what an author typed and `quat()` reduces it.
+///
+/// "Absolute" is **in the entity's own frame**: `Transform` is LOCAL, so on a
+/// parented entity this is a yaw relative to its parent rather than to the
+/// world. Everything [`spawn_prefab`] makes is a root, so for a spawned subject
+/// the two are the same number; a script turning an authored *child* is the case
+/// where they are not.
 pub fn set_yaw_degrees(world: &mut EcsWorld, guid: Uuid, degrees: f64) -> bool {
     let Some(entity) = world.entity_of(guid) else {
         return false;
@@ -294,10 +337,45 @@ mod tests {
     fn destroy_takes_the_entity_and_its_handle_with_it() {
         let mut w = EcsWorld::new();
         let (guid, _) = spawn_prefab(&mut w, "Crate", at(3.0));
-        assert!(destroy_entity(&mut w, guid));
+        assert_eq!(destroy_entity(&mut w, guid), vec![guid]);
         assert!(w.entity_of(guid).is_none());
         // …and a second destroy is a refusal with a value, not a panic.
-        assert!(!destroy_entity(&mut w, guid));
+        assert!(destroy_entity(&mut w, guid).is_empty());
+    }
+
+    /// **A destroy answers its whole subtree**, because a host uses the answer
+    /// to decide whose handlers stop — and a destroyed CHILD actor the host was
+    /// never told about keeps ticking against a world that has no entity for it.
+    #[test]
+    fn destroy_answers_every_guid_that_left_the_world() {
+        let mut w = EcsWorld::new();
+        let parent = Uuid::from_u128(0x5C13_A001);
+        let child = Uuid::from_u128(0x5C13_A002);
+        let grandchild = Uuid::from_u128(0x5C13_A003);
+        let pe = w.spawn_with_guid(parent, "Parent", None);
+        let ce = w.spawn_with_guid(child, "Child", Some(pe));
+        w.spawn_with_guid(grandchild, "Grandchild", Some(ce));
+        // A sibling of the parent, so the answer is the subtree and not the world.
+        let bystander = Uuid::from_u128(0x5C13_A004);
+        w.spawn_with_guid(bystander, "Bystander", None);
+
+        let purged = destroy_entity(&mut w, parent);
+        assert_eq!(
+            purged
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [parent, child, grandchild].into_iter().collect(),
+            "a destroy must name every guid that left, or a host stops the root's \
+             handlers and leaves its children's running"
+        );
+        for g in [parent, child, grandchild] {
+            assert!(w.entity_of(g).is_none());
+        }
+        assert!(
+            w.entity_of(bystander).is_some(),
+            "the answer is the SUBTREE, not the world"
+        );
     }
 
     #[test]

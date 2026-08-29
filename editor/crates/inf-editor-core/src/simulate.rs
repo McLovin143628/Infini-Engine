@@ -2536,28 +2536,33 @@ impl Host for SimHost<'_> {
             }
             (Some("engine"), Some("destroy")) => {
                 let id = arg_i64(args, 0);
-                match self.guid_of(id) {
-                    Ok(g) if inf_ecs::prefab::destroy_entity(self.world, g) => {
-                        self.entities.remove(&id);
-                        // If that entity was an ACTOR, its handlers must stop
-                        // with it. The host cannot reach the session's actor
-                        // map, so it records the guid and the session drains it
-                        // after this handler finishes — the statement after a
-                        // `engine.destroy(var.get("entity"))` still runs, which
-                        // is the containment rule (A.7) rather than an exception
-                        // to it.
-                        self.despawned.push(g);
-                        Ok(Value::Unit)
-                    }
+                // The rule answers the WHOLE SUBTREE that left the world, not a
+                // bool — the SCRIPT3 audit's finding. Told only "something was
+                // destroyed", this host would drop the root from the session's
+                // actor map and leave every destroyed CHILD actor in it, ticking
+                // against a world that no longer has its entity.
+                let purged = match self.guid_of(id) {
+                    Ok(g) => inf_ecs::prefab::destroy_entity(self.world, g),
+                    Err(_) => Vec::new(),
+                };
+                if purged.is_empty() {
                     // A refusal is a VALUE (P21): an id that names nothing is
                     // something an author fixes by typing, not a reason to take
                     // the rest of the handler down.
-                    _ => {
-                        self.logs
-                            .push(format!("engine::destroy: no entity for id {id}"));
-                        Ok(Value::Unit)
-                    }
+                    self.logs
+                        .push(format!("engine::destroy: no entity for id {id}"));
+                } else {
+                    // Every handle that named any of it stops resolving, and
+                    // every ACTOR in it stops with its entity. The host cannot
+                    // reach the session's actor map, so it records the guids and
+                    // the session drains them after this handler finishes — the
+                    // statement after an `engine.destroy(var.get("entity"))`
+                    // still runs, which is the containment rule (A.7) rather
+                    // than an exception to it.
+                    self.entities.retain(|_, g| !purged.contains(g));
+                    self.despawned.extend(purged);
                 }
+                Ok(Value::Unit)
             }
             (Some("engine"), Some("set_rotation")) => {
                 let deg = arg_f64(args, 0);

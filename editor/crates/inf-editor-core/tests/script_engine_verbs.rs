@@ -11,9 +11,14 @@
 //! **world** — an entity that is there, at a place, with a name, and then gone —
 //! never a log line and never the registry that was already checked.
 //!
-//! The shipped host's half of the same claim is `script_spawn_gate.rs`, which
-//! compares the two hosts step for step; this file is the editor's half and the
-//! one that can name a `Guid`.
+//! The shipped host's half of the same claim is
+//! `runtime/inf-player/tests/script_gameplay_gate.rs`'s
+//! `what_a_script_names_reaches_the_world_and_the_payload_walks_it`, and the
+//! two hosts are compared step for step by
+//! `runtime/inf-player/tests/harbour_heist_gate.rs`. This file is the editor's
+//! half and the one that can name a `Guid`. *(The SCRIPT3 audit's correction:
+//! both citations here read `script_spawn_gate.rs`, which is not a file in this
+//! repository — a cited gate that does not exist is worse than no claim.)*
 
 use glam::{DVec2, DVec3};
 use uuid::Uuid;
@@ -28,6 +33,10 @@ use inf_editor_core::simulate::{SimInput, SimSession, SIM_HZ};
 
 const CONJURER: u128 = 0x0005_C193_0001;
 const SUICIDE: u128 = 0x0005_C193_0002;
+/// The parent an `engine.destroy` names, and the child actor it takes with it
+/// (the SCRIPT3 audit's finding).
+const KEEPER: u128 = 0x0005_C193_0003;
+const WARD: u128 = 0x0005_C193_0004;
 
 /// Where the conjurer stands. **Not the origin**, deliberately: a spawn that
 /// ignored the acting actor's place and used `Vec3d::ZERO` would pass against it.
@@ -35,7 +44,8 @@ const AT: DVec3 = DVec3::new(10.0, 2.0, -5.0);
 
 /// The prefab name. A file stem rather than a GUID, so the placeholder half of
 /// the verb's contract is what is measured here; the GUID half is
-/// `inf_ecs::prefab`'s own arm and the cook's closure is `script_spawn_gate`'s.
+/// `inf_ecs::prefab`'s own arm and `script_gameplay_gate`'s payload half, and
+/// the cook's closure is `harbour_heist_gate`'s.
 const PREFAB: &str = "Crate";
 
 /// **The script.** Spawn once on `BeginPlay`, ask for the same thing again every
@@ -82,6 +92,36 @@ on begin_play()
     engine.destroy(entity)
     debug.print(\"the statement after the destroy\")
 end
+
+on tick(dt)
+    ticks = ticks + 1.0
+end
+";
+
+/// The parent's script: destroy **itself**, which by the verb's own description
+/// takes "everything parented under it" — including the ward below.
+const KEEPER_SCRIPT: &str = "\
+actor \"Keeper\"
+
+var entity: int = 0
+var ticks: float = 0.0
+
+on begin_play()
+    engine.destroy(entity)
+end
+
+on tick(dt)
+    ticks = ticks + 1.0
+end
+";
+
+/// The child's script: nothing but a tick counter, because the question this
+/// arm asks is whether it is still being ticked at all.
+const WARD_SCRIPT: &str = "\
+actor \"Ward\"
+
+var entity: int = 0
+var ticks: float = 0.0
 
 on tick(dt)
     ticks = ticks + 1.0
@@ -277,4 +317,57 @@ fn an_actor_that_destroys_itself_finishes_the_handler_and_stops() {
         "a destroyed actor must stop being an actor; it is still in the session's \
          map, so its `Tick` is still running against a world that no longer has it"
     );
+}
+
+/// **A destroy takes its SUBTREE's actors with it** — the SCRIPT3 audit's
+/// finding, and the arm above one level down.
+///
+/// `engine.destroy`'s own description promises "an entity, **and everything
+/// parented under it**". The world half of that was always true —
+/// `EcsWorld::despawn` walks the subtree and purges every guid in it. The
+/// *lifecycle* half was not: the Ring-0 rule answered a `bool`, so the host was
+/// told "something was destroyed" and could only drop the **root** from the
+/// session's actor map. A destroyed CHILD actor stayed in it, and its `Tick`
+/// went on running every step against a world with no entity for it — a ghost,
+/// which is exactly the state the arm above forbids for the root.
+///
+/// It could not diverge the two hosts (they were wrong identically), which is
+/// why no `PIE == shipping` gate could see it, and it is why this arm asserts
+/// the **world and the session** rather than a comparison.
+#[test]
+fn a_destroy_stops_the_handlers_of_everything_under_it() {
+    let mut doc = doc_with(&[(KEEPER, "Keeper"), (WARD, "Ward")]);
+    // The ward is parented UNDER the keeper, which is the whole fixture.
+    let keeper = doc.entity_of(Uuid::from_u128(KEEPER)).expect("the keeper");
+    let ward = doc.entity_of(Uuid::from_u128(WARD)).expect("the ward");
+    assert!(
+        doc.world_mut().reparent(ward, Some(keeper)),
+        "the ward must be under the keeper"
+    );
+    doc.world_mut().propagate();
+
+    let actors = vec![
+        (
+            Uuid::from_u128(KEEPER),
+            compile(KEEPER_SCRIPT, "script:keeper"),
+        ),
+        (Uuid::from_u128(WARD), compile(WARD_SCRIPT, "script:ward")),
+    ];
+    let mut session = SimSession::enter(&mut doc, actors, DVec2::ZERO, SIM_HZ);
+    for _ in 0..4 {
+        tick(&mut doc, &mut session, SimInput::default());
+    }
+
+    for (label, guid) in [("keeper", KEEPER), ("ward", WARD)] {
+        assert!(
+            doc.world().entity_of(Uuid::from_u128(guid)).is_none(),
+            "the {label}'s entity must be gone: `despawn` walks the subtree"
+        );
+        assert!(
+            session.actor_var(Uuid::from_u128(guid), "ticks").is_none(),
+            "the {label} is still an actor in the session, so its `Tick` is running \
+             against a world that no longer has its entity. A destroy must answer \
+             every guid that left, not just the one it was handed."
+        );
+    }
 }

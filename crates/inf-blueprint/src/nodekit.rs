@@ -445,7 +445,7 @@ fn action_nodes() -> Vec<NodeDef> {
             .with_outputs(vec![exec_out(EXEC_THEN)]),
         NodeDef::new("engine.spawn", "Spawn Prefab", "engine")
             .described(
-                "Place a copy of a named prefab at the acting entity's own position and report its entity id. The name is the one string in this whole kit the cook resolves as an ASSET, so a name matching nothing is a blocking advisory. The spawned entity's identity is folded from the name and the place, so spawning one prefab twice at one point is ONE entity; spell the prefab as a GUID and the spawned entity draws that asset, spell it as a file stem and it draws a placeholder cube carrying the name (a pack entry has no name to resolve a stem against).",
+                "Place a copy of a named prefab at the acting entity's own position and report its entity id. The name is the one string in this whole kit the cook resolves as an ASSET, so a name matching nothing is a blocking advisory. The spawned entity's identity is folded from the name and the place, so spawning one prefab twice at one point is ONE entity — and this node takes no point, so two of one prefab need two spawners, a spawner that has moved, or a second name (Spawn Item Pickup is the verb that takes a place). Spell the prefab as a GUID and the spawned entity draws that asset; spell it as a file stem and it draws a placeholder cube carrying the name, because a pack entry has no name to resolve a stem against.",
             )
             .with_inputs(vec![
                 exec_in(),
@@ -457,7 +457,7 @@ fn action_nodes() -> Vec<NodeDef> {
             ]),
         NodeDef::new("engine.destroy", "Destroy Entity", "engine")
             .described(
-                "Remove an entity, and everything parented under it, from the world. An id that names nothing is reported and ignored rather than failing the handler. If the entity was an actor, its handlers stop with it at the end of this one.",
+                "Remove an entity, and everything parented under it, from the world. An id that names nothing is reported and ignored rather than failing the handler. Every actor in what it removes — the entity itself and any actor under it — stops with its entity at the end of THIS handler, so the statement after the call still runs.",
             )
             .with_inputs(vec![
                 exec_in(),
@@ -2309,6 +2309,7 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..");
+        let mut blocks: Vec<(&str, String)> = Vec::new();
         for host in [
             "editor/crates/inf-editor-core/src/simulate.rs",
             "runtime/inf-player/src/runtime_sim.rs",
@@ -2331,7 +2332,57 @@ mod tests {
                      the registry comparison and diverge from the other one."
                 );
             }
+            blocks.push((host, engine_arms(host, &src)));
         }
+
+        // **And the half `contains` cannot state** (the SCRIPT3 audit): that the
+        // two hosts' arms are the SAME CODE, not merely two arms that both name
+        // the rule. Reaching a shared rule is necessary and it is not
+        // sufficient — a host could wrap the call in a guard, a clamp, an extra
+        // map write or a different refusal, name the rule on the line in the
+        // middle, and pass every assertion above while diverging on the first
+        // program that took the wrapped path. The wave's ledger claims "the two
+        // hosts' arms diff to nothing"; this is what keeps that sentence true.
+        //
+        // Compared on CODE: comment lines and indentation are dropped, so a
+        // host is free to say `MIRROR of …` in its own words the way the struct
+        // fields above the arms already do.
+        assert_eq!(
+            blocks[0].1, blocks[1].1,
+            "the `engine.*` arms have stopped being a mirror pair.\n\n{}:\n{}\n\n{}:\n{}",
+            blocks[0].0, blocks[0].1, blocks[1].0, blocks[1].1
+        );
+        // Anti-vacuity: two empty extractions are equal, and an end marker that
+        // moved would produce them.
+        assert!(
+            blocks[0].1.len() > 400 && blocks[0].1.contains("spawn_prefab"),
+            "the extraction collapsed to {} bytes — the markers moved",
+            blocks[0].1.len()
+        );
+    }
+
+    /// The three `engine.*` match arms of a host, as CODE: from the `spawn` arm
+    /// to the start of the `terrain.height_at` comment that follows the kit,
+    /// with comment lines dropped and every line trimmed.
+    ///
+    /// A slice between two markers rather than a brace walk, because the arms
+    /// contain `format!("… {id}")` and a brace counter that did not know string
+    /// literals would stop in the wrong place. If a later wave puts a verb
+    /// between `engine.*` and `terrain.*` the slice grows and the comparison
+    /// covers more, which is the safe direction for a mirror claim.
+    fn engine_arms(host: &str, src: &str) -> String {
+        let start = src
+            .find("(Some(\"engine\"), Some(\"spawn\"))")
+            .unwrap_or_else(|| panic!("{host} has no `engine.spawn` arm"));
+        let end = src[start..]
+            .find("// terrain.height_at")
+            .unwrap_or_else(|| panic!("{host} lost the `terrain.height_at` end marker"));
+        src[start..start + end]
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// The `anim.*` kit's shape (P29.4): three exec actions with the ONE data
