@@ -1018,11 +1018,12 @@ outside it and are now inside or pointed at:
 7. **InfiniScript Core** — the P14.5 WASM tier is rebranded and documented, and
    has no demo plugin of its own.
 
-**Maintenance-class. Five of these have a live arm that fires the day they
-change — 8, 9, 10, 12 and 13 — and the rest are honest sentences, marked *(no
-arm)*. That split is the SCRIPT3 audit's correction too: this heading read "each
-with a live arm", and an item with no arm under a heading that promises one is
-exactly the blind spot with a name on it that an exception list is:**
+**Maintenance-class — thirteen items, of which SIX have a live arm that fires
+the day they change (8, 9, 10, 12, 13, 19) and seven are honest sentences,
+marked *(no arm)*. That split is the SCRIPT3 audit's correction: this heading
+read "each with a live arm", and an item with no arm under a heading that
+promises one is exactly the blind spot with a name on it that an exception list
+is:**
 
 8. **`#[infinity::blueprint]` has no macro behind it**, so the Code tab's output
    does not compile (`the_generated_marker_has_no_macro_behind_it`). Priced:

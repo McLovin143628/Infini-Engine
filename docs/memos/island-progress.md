@@ -23416,9 +23416,9 @@ the handler-level source map — and *(b)* folds in none of the arc's four
 SCRIPT2a's four and SCRIPT2b's eleven, **twenty-four items**. It also omitted two
 of SCRIPT3's own six. The three are now items 16–18, SCRIPT3's two are 19–20, the
 audits are pointed at by section and count, and the heading's promise of "a live
-arm each" is corrected: **five of the thirteen have one** (8, 9, 10, 12, 13) and
-the rest are marked *(no arm)* — item 14's four editor-surface entries have
-nothing pinning any of them, which a heading promising an arm was hiding.
+arm each" is corrected: **six of the thirteen have one** (8, 9, 10, 12, 13, 19)
+and the other seven are marked *(no arm)* — item 14's four editor-surface entries
+have nothing pinning any of them, which a heading promising an arm was hiding.
 
 Two smaller honesty repairs ride with them, both off the gate's own printed
 output. **§10.5's item 20 was one closure short**: "the day the prefab-name item
