@@ -19634,7 +19634,18 @@ quicker.
   forgets. `window_class_gate` was checked and is unaffected (the Win32 class names are
   literals, not derived from the product name); no golden renders the engine's name, so no
   golden moved. "Infinity Blueprints" is carried to SCRIPT1, where the graph/text unification
-  makes it one naming decision instead of two.
+  makes it one naming decision instead of two. **Audited the same day** — ten findings, six
+  MED, every one of them in the *record* rather than in a reachable code path: the marker's
+  third copy (now the constant, with the Ring-0 copy armed by a cross-ring arm in `inf-studio`
+  — the wave's carried item 3 **retired**), the raise-exclusion list (five flow forms and five
+  non-flow refusals, not four), the four identifier families a phrase sweep cannot see, the
+  crash roots' real roles, the parity gate's real shape, and the interpreter's real containment
+  granularity. Battery **336 / 6 438 / 0 / 19** (+1 arm), goldens **59** strict-green over 118
+  arms with none re-blessed, rustdoc **374** (the audit adds zero, headroom 76), clippy **0**,
+  `fmt` clean, frontend 80 files / 719 tests. Full audit ledger in
+  `docs/memos/island-progress.md`. **The law: the things that must not move are the ones
+  written down by one session and read back by another** — a phrase sweep cannot see them,
+  because the phrase is not what they are made of.
 * **SCRIPT1 — the language.** `inf-script` (Ring 0, **zero new external dependencies** — the
   grammar DSL and the `.inf_sm` text face are the hand-rolled-parser precedents). The grammar
   is specced before it is parsed: a Luau-inspired readable surface (`function`/`end`,

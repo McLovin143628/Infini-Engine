@@ -19441,7 +19441,7 @@ was classed before anything was written.
 | docs | README, ROADMAP headers, CONTRIBUTING, LICENSING, release-channels, profiling, `book.toml` + seven mdBook pages | **yes** |
 | templates & scaffolds | the scaffolded project README, `src/blueprints/mod.rs`'s banner, the "not an Infini Engine project" refusal | **yes** |
 | samples | `samples/README.md`, `samples/mods/README.md`, and the two committed `.inf_sm.txt` faces | **yes** |
-| player / CLI / packager | the player's three window titles, the embed probe, `inf --version`, the desktop/web/Android export notes | **yes** |
+| player / CLI / packager | the player's **four** window titles (desktop, PIE, web, Android — the audit's recount), the embed probe, `inf --version`, the desktop/web/Android export notes | **yes** |
 | Ring-0 doc comments | `inf-audio`, `inf-input`, `inf-net`, `inf-physics`, `inf-mod`, `inf-graph`, `inf-dcc`'s upgrade remedy — what a reader meets in rustdoc, and one error a user reads | **yes** |
 | repository URL | `Cargo.toml`, `book.toml` ×2, three mdBook page links | **yes** → `Infini-Engine` |
 | **crate names, repo folder** | forty-odd `inf-*` crates and every path naming one | **no** |
@@ -19601,3 +19601,142 @@ not because it got quicker. Said that way in the memo, in §14, and here.
 **Commits:** `91e33b1b` (the rename — 58 files, and the marker's legacy arm),
 `97f2ebf7` (the memo + ROADMAP §14), `572562ba` (the Open-Level dialog label and
 the identifier ledger's last row), and this ledger.
+
+## Wave SCRIPT0 — the audit (2026-08-28)
+
+The rename itself is sound. Every user-facing surface moved, nothing persisted
+moved without a door, `window_class_gate` and the goldens were untouched and
+stayed untouched, and the one string that could have broken something quietly
+was caught by the wave itself and armed. **Every finding below is in the
+*record*, not in a code path a user could reach today** — and every one of them
+is a sentence SCRIPT1 would have built on, which is why they are MED rather than
+LOW.
+
+Two shapes recur. The wave's enumeration was a sweep for a **phrase**, and four
+of the things it ruled on are not made of that phrase. And the memo — which the
+ROADMAP names as the arc's authoritative document, and which SCRIPT1 plans from
+— states four of its load-bearing facts more generously than the code supports
+them.
+
+### The findings
+
+| # | sev | finding | verdict |
+|---|---|---|---|
+| 1 | MED | **The marker has a third copy.** Carried item 3 names two hand-agreeing spellings (Ring 0's scaffolder, Ring 1's constant). `write_module_index` — in the same file as `GENERATED_MARKER`, twelve lines below `is_generated` — spelled the banner as a bare literal. It agreed today because this wave moved it too; it agreed by luck. | FIXED `1ceef6be`. The Ring-1 copy interpolates the constant, so it is gone rather than watched; the Ring-0 copy is armed by a cross-ring arm in `inf-studio`, the one crate that depends on both. **Carried item 3 retired.** |
+| 2 | MED | **The raise-exclusion list is short.** The memo names four flow nodes. `raise.rs` excludes **five** — `flow.sequence` was dropped in transcription, and it is the only *lossy-but-not-failing* one — and refuses **five more shapes that are not flow nodes**, including `RaiseError::NonLinear`: an `if`/`return` that is not the last statement of its block. `function f() if x then A() end B() end` is ordinary text and does not raise at all. | FIXED `cd9987e6` + `37cca168`. The full table, read off the code, in memo §4 and ROADMAP §14 |
+| 3 | MED | **Four identifier families are not on the ruling list**, all correctly unmoved, none recorded: `.infinity/` (the per-project settings dir — six members, six path-forming sites, read by the **cook**, present in every project already on disk), `#[infinity::blueprint(id = …)]` (`emit` writes / `lift` reads / the packager strips — `GENERATED_MARKER`'s twin), `inf_mod::infinity_mod!` + `infinity_plugin_entry` (public macro + dylib ABI symbol), and the six `infinity:` event/`localStorage` keys | FIXED `fac88ba8`. Memo §7 argues eight families instead of four and says why the phrase sweep could not reach the last four; the table above gains four rows; §14 says eight |
+| 4 | MED | **Nothing reads a crash directory.** "Two of the three roots are a writer and a reader that must agree about where crash dumps live" is in the commit message, the memo, §14 and the ledger. There is no reader — `write_crash_report` has no counterpart anywhere in the workspace. The two crash roots are two *writers*, in two processes. | FIXED `85ce2dbb`. The roots enumerated by role; the writer-and-reader pair is the **third** — `inf-player`'s `settings_dir()`, whose `game-settings.toml` `PlayerUi::open` reads every launch. Renaming *that* one resets every shipped player's bindings, silently, on update |
+| 5 | MED | **The parity gate is four fixture families, not a property.** "Interpreted == compiled, pinned. *Preview is the shipped program*" reads as universal. It is `parity`/`flow_parity`/`math_parity`/`coyote_parity`, each running the interpreter against a **hand-written Rust mirror** string-pinned to `generate_fn`'s output. **No test compiles the transpiler's output and runs it** — `parity.rs`'s own doc calls itself "the CI-cheap half"; `spinner_e2e` builds the *hand-written* sample mod | FIXED `283b0fab`. §2 states the bound and what "extending the P6 gate" costs SCRIPT1: one mirrored family per construct class, or a new cook-build-run-diff gate that does not exist |
+| 6 | MED | **The interpreter does not contain to a cone.** `error_is_contained_to_downstream_cone` is `inf_graph::exec`'s test. The IR interpreter propagates `RunError` out of `run_event` with `?`; containment is `run_on_guid` — per handler, per actor, per tick, identically in both hosts | FIXED `82e8cceb`. Memo and §14 state the real granularity and what it costs a designer: a Tick that fails after one of three state writes leaves the actor half-updated, which a cone model would not predict |
+| 7 | LOW | **`productName` moved unargued.** In general it names the bundled exe, the `.app`, the installer and its install directory | FIXED `08a86af9`. It is a label *here*: `"bundle": { "active": false }`, and no Rust or TypeScript reads `package_info()`. Named as a live question the day bundling is enabled |
+| 8 | LOW | The verb surface is **115**, not the 96 `NodeDef::new` sites the table cites — three of those 96 are the `compare`/`unary_math`/`binary_math` helpers, called 6 + 8 + 8 times. And 21 namespaces were listed where **23** exist (`physics2d.*`, `physics3d.*` missing from an inventory SCRIPT2 grows from) | FIXED `cd9987e6` + `e9240c17` |
+| 9 | LOW | "Portable math reaches scripts through the **Host**" — `math.sin` is a node-kit **builtin** (`math_builtins` → `psin64`), not a `Host` call. Two seams, not one, and SCRIPT1's parser resolves into both | FIXED `cd9987e6` |
+| 10 | LOW | The §4 diagram put the **parity** label on the **round-trip** arrow | FIXED `283b0fab`, redrawn `03c1959c` |
+
+### The enumeration verdict
+
+**Nothing user-facing was left behind, and nothing that should have stayed
+moved.**
+
+Re-run at head: `Infinity Engine` survives in **7** places — five are prose about
+the rename itself (ROADMAP §14, the memo ×3, this file) and two are
+`LEGACY_GENERATED_MARKER` and its doc comment, which is the point.
+`Infinity-Engine` survives twice, both explaining the URL move. `InfinityEngine`
+survives in the three ruled filesystem roots and nowhere else.
+
+The wider sweep — case-insensitive `infinity`, minus `f32::INFINITY` — leaves 345
+lines, and every one classes: the `.infinity/` family, the blueprint marker
+attribute, the mod/plugin ABI names, the six `infinity:` keys, the theme ids and
+their *displayed* names, the npm name, `"InfinityProject"`, the Win32 class names
+and two never-drawn window titles, the repo-folder path in a tree diagram and one
+test fixture, and **"Infinity Blueprints"** — the one deliberately-carried
+*user-facing* name, in the README's feature table, the ROADMAP's opening
+paragraph, `inf-blueprint`'s crate description, the book's `blueprints-101`, the
+Spike B memo's title, and — worth noting, because it lands in a user's own crate
+— the doc comment `inf_project::template` scaffolds into `src/blueprints/mod.rs`.
+
+Nothing serialized moved except the generated-source marker, which moved **with**
+a legacy read. The two committed `.inf_sm.txt` headers moved with their generator
+and are TOML comments — `from_toml` parses through `toml::Table` and never sees
+them — while their `.inf_sm` payloads and sidecar content hashes are byte-unmoved.
+No schema constant, no `Cargo.lock` line, no golden. CI carries neither the name
+nor a repository URL and the repo has no badge, so nothing there needed touching.
+
+### The raise coverage, verified against the code
+
+The flow palette is **seven** nodes; `raise` inverts **two** (`flow.branch`, and
+`flow.while` through `try_raise_while`'s exact match on `lower_while`'s
+three-statement guarded expansion). The other five: `flow.sequence` is
+**flattened at lowering** — program preserved, node lost; `flow.for` lowers to a
+`Stmt::While` the recogniser does not match; `flow.do_once`/`flip_flop`/`gate`
+put `nodestate::*` inside a `Stmt::If` and hit `NonLinear` or a pure-call refusal.
+
+Plus five non-flow refusals: `Stmt::Assign`, `Stmt::Snippet`, a non-call
+`Stmt::ExprStmt`, a call in **value** position (only `engine::*`/`debug::*` are
+action paths), and `RaiseError::NonLinear`.
+
+And a shape correction: a `Stmt::Snippet` does not sit in a raised graph as a
+node-less statement — `raise_chain` returns `Err` on it, so **one unraisable
+statement makes the whole handler unraisable**. Lift is lossless into the *IR*;
+the graph is all-or-nothing per handler, and `graph_open_actor`'s partial open is
+the degradation SCRIPT1 inherits.
+
+### The three mutations
+
+| mutation | measured |
+|---|---|
+| delete the legacy arm of `is_generated` | `a_file_generated_before_the_rebrand_is_still_ours` **FAILED**, the other 8 green — the wave's new arm is real. And `is_generated` is the door's **only** read site: two callers, no second `starts_with` on the marker anywhere in the workspace, and no other generated-file classifier |
+| revert the Ring-0 template literal to `Infinity Engine` | `a_scaffolded_project_writes_an_index_the_code_tab_owns` **FAILED**, printing both sides — carried item 3 is armed against the world, not against two constants |
+| move `write_module_index`'s banner to `LEGACY_GENERATED_MARKER` | `the_index_skips_non_identifiers_and_is_restored_when_missing` **FAILED** and **nothing else did** — which is the finding: `is_generated` forgives the legacy spelling, so a stale banner is invisible to every other arm. That is why the new assertion is `starts_with(GENERATED_MARKER)` rather than `is_generated` |
+
+### Carried, by name
+
+1. **"Infinity Blueprints"** — unchanged from the wave's carry; SCRIPT1 decides
+   it once, with the text face in hand.
+2. **`LEGACY_GENERATED_MARKER` has no retirement date** — unchanged, with one
+   more consequence recorded: while it lives, `is_generated` cannot tell a
+   current banner from a stale one.
+3. ~~the scaffolded banner is duplicated across a ring boundary~~ — **RETIRED**
+   (finding 1).
+4. **`docs/LICENSING.md` still says OPEN DECISION** — unchanged.
+5. **The GitHub repository is not renamed by this wave** — unchanged; the
+   orchestrator's action at push time.
+6. *(new, LOW)* `editor/studio/src/lib/theme.ts:9` says "reduced to Infinity's
+   token set" in a module doc. Not user-facing, ambiguous between the product and
+   the theme, left rather than churned.
+7. *(new, LOW)* The ROADMAP's layout diagram roots at `infinity_engine/` — this
+   machine's checkout folder, which a fresh clone of `Infini-Engine` will not be
+   called. Cosmetic; the ruling is about the local working copy.
+8. *(new, LOW)* `w!("Infinity Viewport")`, the viewport child window's title,
+   stays while the embed probe's moved. Neither is ever drawn; the viewport's is
+   kept deliberately so it reads as one identifier with `InfinityViewportClass`
+   beside it. Reasoning recorded in memo §7.
+
+### Counts
+
+| | wave (`a8fea5fa`) | **audit (`HEAD`)** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 336 / 6 437 / 0 / 19 | **336 / 6 438 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, exit 0. **+1**, and it is `a_scaffolded_project_writes_an_index_the_code_tab_owns`; the block count does not move |
+| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**; none added, none re-blessed, and `git status` over `crates/inf-render/tests/goldens` is empty afterwards |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — after `cargo clean --doc` (9 023 files, 221.9 MiB): **404 `^warning` lines − 30 per-crate summaries**, cross-checked against the sum of those summaries (374 exactly). **The audit adds zero.** Headroom **76** |
+| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — exit 0, run **LAST** per the rmeta law. Incremental, and said so: **7** crates re-checked (`inf-editor-core`, `inf-project`, `inf-packager`, `inf-studio` and dependents — the audit's whole code footprint, plus the two files a mutation touched), the rest served from a fingerprint cache keyed on the *same* `RUSTFLAGS`, which is what makes reusing it legitimate rather than a gap |
+| `cargo fmt --all --check` | clean | **clean** |
+| frontend (`tsc` / `eslint --max-warnings 0` / vitest) | 80 files, 719 tests | **80 files, 719 tests, 0 failed**; `tsc` clean, `eslint` 0 |
+| schemas / `Cargo.lock` / committed content | unmoved | **unmoved** — no schema constant in the whole range, `Cargo.lock` byte-identical, `EXPECTED_LEVELS` **23** |
+| `chr(92)` sweep | — | **clean** — every backslash on an added Rust line is a well-formed string continuation or a `\n`; no Python-continuation mangling |
+| disk | 93 GB free | **84.4 GB** free; incremental only, no `cargo clean` beyond `--doc` |
+
+**The law this audit adds**, and it is the wave's own read backwards: **the
+things that must not move are the ones written down by one session and read back
+by another** — a phrase sweep cannot see them, because the phrase is not what
+they are made of. Its corollary, from finding 4: *an argument that names the
+wrong mechanism survives exactly until somebody checks it.* The ruling was right
+and the evidence for it was not, and the difference only shows up when the next
+wave reuses the reasoning.
+
+**Commits:** `1ceef6be` (the marker's third copy + the cross-ring arm),
+`cd9987e6` (the raise bound), `fac88ba8` (four identifier families), `85ce2dbb`
+(nothing reads a crash directory), `08a86af9` (`productName`), `283b0fab` (the
+parity gate, and the diagram's labels), `82e8cceb` (containment granularity),
+`03c1959c` (the diagram redrawn), `e9240c17` (115 verbs, `InfinityProject`, the
+two window titles), `37cca168` (four is five), and this ledger.
