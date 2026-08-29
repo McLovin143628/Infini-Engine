@@ -13,10 +13,11 @@
  * (`EditorPanel.tsx`: save the outgoing state, `view.setState` the incoming one)
  * and the LSP bridge's own installer, and requires **both layers to survive**.
  */
+import { forceLinting } from "@codemirror/lint";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   baseExtensions,
   createEditorState,
@@ -107,6 +108,65 @@ describe("the editor's compartments", () => {
   it("puts the script layer in the base set, so no bridge has to remember", () => {
     // `baseExtensions` is what `createEditorState` spreads; a future consumer
     // that installs the linter from an effect instead would re-open the hazard.
-    expect(baseExtensions(INFINI).length).toBe(baseExtensions(RS).length);
+    //
+    // The audit's fix: this arm compared the two arrays' LENGTHS, which are
+    // equal whether or not the compartment holds anything — `scriptCompartment`
+    // is one element of the array either way. It now builds a state out of
+    // `baseExtensions` ALONE, with no `createEditorState` and no bridge, and
+    // asks the compartment what it holds.
+    const fromBase = (path: string) => EditorState.create({ extensions: baseExtensions(path) });
+    expect(occupied(scriptCompartment, fromBase(INFINI))).toBe(true);
+    expect(occupied(scriptCompartment, fromBase(RS))).toBe(false);
+    // …and the language layer travels the same way, which is the property that
+    // makes both a pure function of the path.
+    expect(occupied(languageCompartment, fromBase(INFINI))).toBe(true);
+  });
+
+  /**
+   * **`.infini` → `.infini`, which the first matrix never walked** (audit).
+   *
+   * The three-step matrix above switches between two *kinds* of file. The case
+   * a per-path extension can actually get wrong is two files of the SAME kind:
+   * if the linter were installed by a bridge watching the active tab, or shared
+   * between documents, the second script would be checked under the first's
+   * path — and every refusal in it would be filed against the wrong file in the
+   * Problems panel, which is silent and permanent.
+   *
+   * `forceLinting` runs the source without waiting out the debounce, so this is
+   * a claim about the wiring and not about a timer.
+   */
+  it("checks each script under its own path, across a .infini → .infini switch", async () => {
+    const calls: { text: string; path: string }[] = [];
+    mockIPC((cmd, args) => {
+      if (cmd === "script_check") calls.push(args as unknown as { text: string; path: string });
+      return [];
+    });
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const view = new EditorView({ parent: host });
+
+    const A = "C:/proj/Content/Scripts/A.infini";
+    const B = "C:/proj/Content/Other/B.infini"; // …and not under Scripts/, either
+    const a = createEditorState('actor "A"\n', A, () => {});
+    const b = createEditorState('actor "B"\n', B, () => {});
+
+    view.setState(a);
+    forceLinting(view);
+    await vi.waitFor(() => expect(calls.length).toBe(1));
+    view.setState(b);
+    forceLinting(view);
+    await vi.waitFor(() => expect(calls.length).toBe(2));
+    // …and back, on the saved state, which is what the panel does.
+    view.setState(a);
+    forceLinting(view);
+    await vi.waitFor(() => expect(calls.length).toBe(3));
+
+    expect(calls.map((c) => c.path)).toEqual([A, B, A]);
+    expect(calls.map((c) => c.text)).toEqual(['actor "A"\n', 'actor "B"\n', 'actor "A"\n']);
+    // Each document carries its own linter instance rather than a shared one.
+    expect(scriptCompartment.get(a)).not.toBe(scriptCompartment.get(b));
+
+    view.destroy();
+    host.remove();
   });
 });

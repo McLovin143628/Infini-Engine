@@ -343,7 +343,7 @@ describe("the .infini language mode", () => {
         const state = EditorState.create({ doc, extensions: [infini()] });
         expect(ensureSyntaxTree(state, state.doc.length, 20000)).not.toBeNull();
       } catch (e) {
-        throw new Error(`document ${i}: ${JSON.stringify(doc)}\n${String(e)}`);
+        throw new Error(`document ${i}: ${JSON.stringify(doc)}`, { cause: e });
       }
     }
   });
