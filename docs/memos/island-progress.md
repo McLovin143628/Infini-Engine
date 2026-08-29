@@ -19417,3 +19417,173 @@ message.* A message is a spelling one author chose; a mutation is the question.
 
 **Commits:** `11e0cd68` (the streaming measurement, the audio arithmetic and the two
 pins), `d33a0720` (the sensor bound's surviving half, recorded), and this ledger.
+
+## Wave SCRIPT0 — the engine is Infini Engine, and InfiniScript has a plan (2026-08-28)
+
+The owner's second document arrived — *"Utilizing a custom scripting language
+alongside Rust to develop AAA-quality games in a custom Rust-based game
+engine"* — and it did two things at once: it renamed the product, and it asked
+for a scripting architecture. SCRIPT0 is the small wave that takes the first and
+records the ruling on the second, so the three waves behind it build against a
+decision rather than against a document.
+
+### The rename, and the things that deliberately did not move
+
+`Infinity Engine` → **Infini Engine**, user-facing only. The enumeration came
+before the edit, and it is why the wave is boring rather than interesting:
+**86** occurrences of the phrase across **59** tracked files, **6** of the
+hyphenated repository form, and **3** of `InfinityEngine` run together. Every one
+was classed before anything was written.
+
+| class | where | moved? |
+|---|---|---|
+| shell display strings | title bar, About, start screen, tour, status bar, the Open-Project and Open-Level dialogs, `productName`, the window title, `index.html`'s `<title>` | **yes** |
+| docs | README, ROADMAP headers, CONTRIBUTING, LICENSING, release-channels, profiling, `book.toml` + seven mdBook pages | **yes** |
+| templates & scaffolds | the scaffolded project README, `src/blueprints/mod.rs`'s banner, the "not an Infini Engine project" refusal | **yes** |
+| samples | `samples/README.md`, `samples/mods/README.md`, and the two committed `.inf_sm.txt` faces | **yes** |
+| player / CLI / packager | the player's three window titles, the embed probe, `inf --version`, the desktop/web/Android export notes | **yes** |
+| Ring-0 doc comments | `inf-audio`, `inf-input`, `inf-net`, `inf-physics`, `inf-mod`, `inf-graph`, `inf-dcc`'s upgrade remedy — what a reader meets in rustdoc, and one error a user reads | **yes** |
+| repository URL | `Cargo.toml`, `book.toml` ×2, three mdBook page links | **yes** → `Infini-Engine` |
+| **crate names, repo folder** | forty-odd `inf-*` crates and every path naming one | **no** |
+| **the Tauri bundle identifier** | `com.infinityengine.app` | **no** |
+| **the crash / data roots** | `InfinityEngine` in `win32.rs`, `commands/diagnostics.rs`, `inf-player/src/ui.rs` | **no** |
+| **persisted ids** | `infinity-dark` / `infinity-light`, the npm package name, `sanitize_project`'s `"InfinityProject"` crate-name fallback | **no** |
+| **the feature brand** | "Infinity Blueprints" | **no — carried to SCRIPT1** |
+
+The crates stay because renaming forty-odd of them, plus every `use` path and
+every `include_str!` that names one, would move a prefix that already reads
+"Infini" so that it can read "Infini". The identifiers stay for a harder reason.
+`com.infinityengine.app` is not a label: on every platform it is the key to
+`app_data_dir()`, and that directory is where the user's `Content/`, their
+layouts, their editor settings, their thumbnail cache and their crash-recovery
+file live. Renaming it does not migrate a user's work — it **hides** it, silently,
+and the editor boots looking brand new. Two of the three `InfinityEngine`
+filesystem roots are a **writer and a reader that have to agree** about where
+crash dumps land, which is the same argument with a second failure mode.
+
+"Infinity Blueprints" is *carried* rather than kept: SCRIPT1 makes graphs and
+text two faces of one program, and what that one thing is called should be
+decided **once**, with the text face in hand — not twice, six weeks apart.
+
+### The one that could have broken something quietly
+
+`GENERATED_MARKER` looked exactly like the other display strings and is not one.
+`is_generated` is a `starts_with` on it, and it is the **only** thing standing
+between the Code tab and an author's hand-written module. Every file any existing
+project has already generated carries the old spelling. Moving the constant with
+the brand would have re-classified all of them as "not ours" — and the symptom is
+not a crash. It is a refusal: the Code tab quietly stops updating files it wrote
+itself, in an error that blames the author for hand-writing them.
+
+So the door **writes the new spelling and reads either**.
+`LEGACY_GENERATED_MARKER` holds the old text, is never emitted, and
+`a_file_generated_before_the_rebrand_is_still_ours` fails if the door ever
+forgets: it asserts recognition of the legacy prefix, that `banner()` emits the
+*current* brand and does not contain the legacy one, and that the legacy marker
+is a prefix rule too rather than a search. It is the wave's only new arm, and the
+battery's `+1`.
+
+**The law: a rename may not orphan the thing it renames.** A string that decides
+what a program *does* is an identifier wearing a label's clothes, and the tell is
+that it is read back later, by a different process, out of a file somebody else's
+session wrote.
+
+### What was checked before it was assumed
+
+* **`window_class_gate`** — flagged by the brief, and unaffected. The viewport
+  registers `w!("InfinityViewportClass")`, a literal; the class name is not
+  derived from `productName`, and the gate's four arms pin `CS_DBLCLKS`, the
+  `WM_LBUTTONDBLCLK` arm, `SIM_RUNNING` in both pointer arms, and RMB
+  capture-on-down. None of them reads a brand.
+* **The goldens** — `crates/inf-render/src` and its tests contain zero
+  occurrences of the engine's name, and no golden scene renders text carrying it,
+  so **no re-bless was needed or taken**. `git status` over `tests/goldens` is
+  empty after a strict run.
+* **The `.inf_sm.txt` fixtures** — these *did* have to move, together with their
+  generator: `inf_anim::to_toml` writes the header, and
+  `committed_sample_matches_generators` compares both committed faces against it
+  as strings. One line each, caught by an arm that already existed.
+* **CI** — `.github/workflows/ci.yml` contains neither the engine's name nor a
+  repository URL, and the repo has no badge anywhere. Nothing in CI needed
+  touching, and GitHub redirects a renamed repository's old path permanently
+  (clones, fetches and the REST API alike), so the workflows keep working
+  whichever spelling a checkout holds.
+
+### The memo, and the ruling behind it
+
+`docs/memos/infiniscript-direction.md` is the arc's authoritative record;
+`docs/ROADMAP.md` gains **§14** as its plan block. The document's thesis is
+adopted whole — the engine/script split, instant iteration, containment,
+brand-the-API, don't-write-a-VM. Its technology picks are adapted, with reasons:
+
+* **No `mlua`/Luau.** A foreign VM brings its own GC and its own libm-touching
+  math *inside a fixed step this engine holds byte-identical across three
+  operating systems*. The P14 trig law and its P22 `cbrt` extension are the
+  precedent class, and a script that can name `math.sin` is a hole straight
+  through both. The answer is structural rather than disciplinary: **a script
+  cannot name a transcendental, only a verb** — portable math reaches scripts
+  *through* the Host, so determinism is a property of the surface and not of a
+  review. Separately, `mlua` vendored is a C++ build on every runner, which is
+  the liability that got `intel_tex_2` / ISPC refused at P4.
+* **No new `wasmtime`**, for the happier reason: P14.5's sandboxed tier already
+  *is* what the document calls the Core half. Rebranded, not rebuilt.
+* **Amendment 2 is honoured, not reversed.** `rust-report-crossref.md` decided
+  "do not add a separate embedded scripting language" because a second language
+  means a second semantics and a fourth execution model. InfiniScript adds a
+  **parser**: `.infini` text lowers to the same `BlueprintFn` IR the interpreter
+  runs and the transpiler ships, held equal by the parity gate that already
+  exists. A third *face* on the second execution model.
+
+Because `lower` and `raise` both exist, a graph and a script are two views of one
+program — the arc's signature feature. The memo names its bound at the front
+rather than letting SCRIPT1 discover it: **`raise` is not total.** `flow.for`,
+`flow.do_once`, `flow.flip_flop` and `flow.gate` lower to multi-statement or
+stateful expansions with no unambiguous single-node inverse and are
+raise-excluded today, so "two views" is exactly as complete as `raise` is. That
+is SCRIPT1's first named risk.
+
+On compile times, since the question was asked directly: gameplay iteration
+becomes sub-second with **zero `rustc`**; engine compile times are
+**unchanged** — nothing here makes `cargo build` faster; and the win compounds
+only as logic migrates out of Rust, because the slow path gets hit less often,
+not because it got quicker. Said that way in the memo, in §14, and here.
+
+### Carried, by name
+
+1. **"Infinity Blueprints"** is still the feature's name — in the ROADMAP's
+   opening paragraph, the README's feature table, `inf-blueprint`'s crate
+   description, the book's `blueprints-101` page and the Spike B memo's title.
+   Deliberate; SCRIPT1 decides it once, with the text face in hand.
+2. **`LEGACY_GENERATED_MARKER` has no retirement date.** It is correct and it is
+   permanent until somebody rules that no living project predates 2026-08-28.
+   The constant's doc comment says so; nothing enforces it.
+3. **The scaffolded `src/blueprints/mod.rs` banner is duplicated.** `inf-project`
+   (Ring 0) writes the marker as a literal and cannot see
+   `inf_editor_core::blueprint_source::GENERATED_MARKER` (Ring 1), so the two
+   agree by hand. They agree today — this wave moved both — and nothing would
+   catch it if a later wave moved only one. A Ring-0 home for the constant is the
+   fix, and that is a scope decision rather than a typo.
+4. **`docs/LICENSING.md` still says OPEN DECISION**, now under a new name. The
+   rename does not touch the question, and the repo stays public for CI.
+5. **The GitHub repository itself is not renamed by this wave.** It is an
+   outward-facing action and belongs to the orchestrator at push time; the
+   in-repo URLs already say `Infini-Engine` and the redirect makes the order
+   safe either way.
+
+### Counts
+
+| | baseline (`8835b92e`) | **wave SCRIPT0** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 336 / 6 436 / 0 / 19 | **336 / 6 437 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, exit 0. **+1**, and it is `a_file_generated_before_the_rebrand_is_still_ours`; the block count does not move |
+| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**; **none added, none re-blessed**, and `git status` over `crates/inf-render/tests/goldens` is empty afterwards |
+| rustdoc individual warnings (cold, ceiling 450) | 374 over 30 crates | **374 over 30 crates** — after `cargo clean --doc` (9 022 files, 221.8 MiB): **404 `^warning` lines − 30 per-crate summaries**, cross-checked against the sum of those summaries' own counts (374 exactly). **The wave adds zero.** Headroom **76** |
+| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — exit 0 over 47 workspace crates, run **LAST** per the rmeta law |
+| `cargo fmt --all --check` | clean | **clean** |
+| frontend (`tsc` / `eslint --max-warnings 0` / vitest) | green | **green** — 80 files, **719 tests**, 0 failed. Run twice: the shell strings moved, and nothing pinned them |
+| schemas / `Cargo.lock` / goldens | unmoved | **unmoved** — no schema touched, no dependency added, **zero new external crates** |
+| `EXPECTED_LEVELS` | 23 | **23** — no level added; the only committed content that moved is two `.inf_sm.txt` header lines |
+| disk | — | **93 GB** free; incremental only, no `cargo clean` beyond `--doc` |
+
+**Commits:** `91e33b1b` (the rename — 58 files, and the marker's legacy arm),
+`97f2ebf7` (the memo + ROADMAP §14), `572562ba` (the Open-Level dialog label and
+the identifier ledger's last row), and this ledger.
