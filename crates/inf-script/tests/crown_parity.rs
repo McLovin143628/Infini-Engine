@@ -44,7 +44,19 @@
 //! routing bit for bit, and `math_parity.rs` proves the two sides agree **by
 //! construction**, because both bottom out in `inf_blueprint::math_builtins`.
 //! The exact-IEEE builtins (`sqrt`, `abs`, `floor`, `min`, `max`) *are* here,
-//! and they are exact on both sides because they are one machine instruction.
+//! and each shim calls **`std`'s own function, the one `math_builtins` calls**
+//! — never a hand-written equivalent.
+//!
+//! That last clause is the SCRIPT1b audit's correction, and it is the same law
+//! the transcendental paragraph above states, met one level down. The wave read
+//! "exact-IEEE" as "one machine instruction, so any spelling will do" and wrote
+//! `min`/`max` as `if a < b { a } else { b }`. They are not one instruction and
+//! any spelling will not do: `math_builtins::{min,max}` are documented
+//! **NaN-absorbing** (they delegate to `f64::min`/`f64::max`, with
+//! `min_max_nan_absorbing` asserting it), and the comparison form propagates
+//! the NaN instead. `math.max(2.0, NaN)` was **`2.0` interpreted and `NaN`
+//! compiled**, and no arm could see it because nothing in the fixture's trace
+//! was ever not a number. The fixture now carries a NaN and both shims delegate.
 //!
 //! **Monomorphic `vars::get`.** See
 //! [`a_bool_member_variable_does_not_compile`] — a measured refusal, not a
@@ -79,6 +91,14 @@ var hits: float = 0.0
 on begin_play()
   debug.print("armed")
   angle_deg = 0.0
+  -- A NaN through both NaN-ABSORBING builtins, and in the argument position
+  -- that separates `f64::min`/`f64::max` from a comparison written by hand.
+  -- Without this leg the gate certified a shim that answered NaN where the
+  -- interpreter answers 2.0, because nothing in the trace was ever not a
+  -- number (SCRIPT1b audit).
+  local nan = 0.0 / 0.0
+  engine.set_rotation(math.max(2.0, nan))
+  engine.set_rotation(math.min(1.0, nan))
 end
 
 on tick(dt)
@@ -324,12 +344,22 @@ pub mod debug {
 // not record, because a math builtin is not a host call on either side. Only
 // the exact-IEEE operations are here — see this file's module doc for why
 // `sin`/`cos` are deliberately out of the compiled leg.
+//
+// EVERY ONE OF THESE IS `std`'s OWN FUNCTION, spelled the way
+// `inf_blueprint::math_builtins` spells it, and that is the SCRIPT1b audit's
+// finding rather than a tidy-up. `min`/`max` used to read `if a < b { a } else
+// { b }`, which is a SECOND IMPLEMENTATION — the exact thing this file's module
+// doc refuses for `sin`/`cos` — and it disagrees with the engine on the input
+// the engine has a contract and a test about: `math_builtins::{min,max}` are
+// documented **NaN-absorbing** (`min_max_nan_absorbing`), while the comparison
+// form propagates the NaN. Measured: `math.max(2.0, NaN)` is `2.0` in the
+// interpreter and `NaN` under the old shim.
 pub mod math {
     pub fn sqrt(x: f64) -> f64 { x.sqrt() }
     pub fn abs(x: f64) -> f64 { x.abs() }
     pub fn floor(x: f64) -> f64 { x.floor() }
-    pub fn min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
-    pub fn max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+    pub fn min(a: f64, b: f64) -> f64 { a.min(b) }
+    pub fn max(a: f64, b: f64) -> f64 { a.max(b) }
 }
 "#;
 
