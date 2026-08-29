@@ -142,36 +142,49 @@ pub fn parse_unit(source: &str) -> Result<(Unit, Vec<Diagnostic>), Vec<Diagnosti
     let mut p = Parser::new(&toks, declared, functions);
     let unit = p.unit();
     let mut diags = std::mem::take(&mut p.diags);
-    check_no_recursion(&unit, &mut diags);
+    check_call_graph(&unit, &mut diags);
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Err(diags);
     }
     Ok((unit, diags))
 }
 
-/// **InfiniScript has no recursion**, and the refusal is here rather than at run
-/// time because the two faces of one program would otherwise disagree about
-/// what an infinite one *does*.
+/// **The call graph must fit inside the interpreter's budget**, and both halves
+/// of that sentence are refusals made here rather than at run time — because the
+/// two faces of one program would otherwise disagree about what a call chain
+/// *does*.
 ///
-/// The interpreter bounds a call chain at
-/// [`MAX_CALL_DEPTH`](inf_blueprint::interp::MAX_CALL_DEPTH) and answers with
-/// a `RunError` — a value, per P21. The **transpiled** Rust has no such bound:
-/// `generate_fn` renders a one-segment call as an ordinary Rust call and a
-/// recursive one overflows the stack of whatever is running it. That is a
-/// divergence the crown gate would only find with a fixture built to recurse,
-/// and "preview is the shipped program" is the claim this arc leans its whole
-/// weight on.
+/// The interpreter bounds a chain at
+/// [`MAX_CALL_DEPTH`](inf_blueprint::interp::MAX_CALL_DEPTH) and answers with a
+/// `RunError` — a value, per P21. The **transpiled** Rust has no such bound:
+/// `generate_fn` renders a one-segment call as an ordinary Rust call. So there
+/// are two ways for a legal-looking program to run in one face and be refused by
+/// the other, and this function closes both:
 ///
-/// So the language refuses the *cycle*, statically, where a designer can see it,
-/// and the interpreter's budget stays as the defence for IR that did not come
-/// through this parser (a hand-edited `.inf_act`, a lift of hand-written Rust).
+/// 1. **A cycle** — refused with the route it found, because a recursive Rust
+///    call overflows the stack of whatever is running it and an interpreted one
+///    answers with a value.
+/// 2. **A chain longer than the budget** — refused with its length, because the
+///    SCRIPT2a audit measured the hole the first half alone leaves: a unit of 65
+///    functions each calling the next has **no cycle**, so the cycle check
+///    passes, and then the interpreter refuses at 64 while `rustc` compiles the
+///    same program and it prints `65`. One program, two answers. (The audit ran
+///    both faces: 64 agrees on both sides, 65 diverges.) Nothing bounds how many
+///    `function`s a unit may declare, so the parser's own `MAX_NESTING` — which
+///    is a bound on one declaration's *tree* — never sees it.
+///
+/// Together they make [`MAX_CALL_DEPTH`]'s own doc comment true: **a `.infini`
+/// file cannot reach that bound**, and the budget is left as the defence for IR
+/// that did not come through this parser (a hand-edited `.inf_act`, a lift of
+/// hand-written Rust).
+///
 /// A `while` loop is the spelling that survives both faces — it lowers to the
 /// counter-guarded expansion, so the bound lives in the IR and the interpreter
 /// and the compiled program share it (A.7).
 ///
 /// The walk is over declaration order and, inside a body, over statement order,
-/// so the cycle a file reports is a function of the file rather than of a hash.
-fn check_no_recursion(unit: &Unit, diags: &mut Vec<Diagnostic>) {
+/// so the route a file reports is a function of the file rather than of a hash.
+fn check_call_graph(unit: &Unit, diags: &mut Vec<Diagnostic>) {
     let names: Vec<&str> = unit.functions.iter().map(|f| f.name.as_str()).collect();
     let edges: Vec<Vec<String>> = unit
         .functions
@@ -183,6 +196,27 @@ fn check_no_recursion(unit: &Unit, diags: &mut Vec<Diagnostic>) {
         })
         .collect();
     let index = |n: &str| names.iter().position(|c| *c == n);
+    let before = diags.len();
+    check_no_recursion(unit, &names, &edges, &index, diags);
+    // A cycle makes "how deep is the deepest chain" meaningless — and the walk
+    // below assumes an acyclic graph — so the depth check runs only when the
+    // graph is one.
+    if diags.len() == before {
+        check_call_depth(unit, &names, &edges, &index, diags);
+    }
+}
+
+/// **No `function` may reach itself**, directly or through another.
+///
+/// Split out of [`check_call_graph`] so the two refusals share one call graph
+/// and one walk order.
+fn check_no_recursion(
+    unit: &Unit,
+    names: &[&str],
+    edges: &[Vec<String>],
+    index: &impl Fn(&str) -> Option<usize>,
+    diags: &mut Vec<Diagnostic>,
+) {
     for (start, f) in unit.functions.iter().enumerate() {
         // Depth-first from this function, recording the route, and stopping at
         // the first return to `start`.
@@ -220,6 +254,98 @@ fn check_no_recursion(unit: &Unit, diags: &mut Vec<Diagnostic>) {
                 stack.push((to, 0));
             }
         }
+    }
+}
+
+/// **No call chain may be longer than the interpreter's budget** — the second
+/// half of [`check_call_graph`], and the SCRIPT2a audit's finding.
+///
+/// `depth(f)` is the number of calls in the longest chain that *starts with a
+/// call to `f`*, so a leaf is 1 and a chain of `n` is `n`. The interpreter
+/// spends one unit of [`MAX_CALL_DEPTH`] per call and a handler is not a call,
+/// so a chain of exactly `MAX_CALL_DEPTH` runs and one more does not — measured
+/// on both faces, not inferred.
+///
+/// Every declared function is checked rather than only the ones a handler can
+/// reach: an unreachable over-deep chain is dead code either way, and "the
+/// parser accepted it" must not depend on which handler happens to exist today.
+///
+/// The graph is acyclic here (the caller guarantees it), so the memo terminates.
+fn check_call_depth(
+    unit: &Unit,
+    names: &[&str],
+    edges: &[Vec<String>],
+    index: &impl Fn(&str) -> Option<usize>,
+    diags: &mut Vec<Diagnostic>,
+) {
+    // `depth[i]`, plus the callee that achieves it, so the refusal can print the
+    // route rather than only a number.
+    let mut depth: Vec<Option<(u32, Option<usize>)>> = vec![None; names.len()];
+    for start in 0..names.len() {
+        // Iterative post-order, so a unit with thousands of functions cannot
+        // overflow the stack of the process doing the checking — which is the
+        // whole class of defect this function exists to close.
+        let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
+        while let Some((node, next)) = stack.pop() {
+            if depth[node].is_some() {
+                continue;
+            }
+            match edges[node].get(next).and_then(|c| index(c)) {
+                Some(to) if depth[to].is_none() => {
+                    stack.push((node, next));
+                    stack.push((to, 0));
+                }
+                Some(_) => stack.push((node, next + 1)),
+                None if next < edges[node].len() => stack.push((node, next + 1)),
+                None => {
+                    // Every callee is resolved: fold them.
+                    let mut best: (u32, Option<usize>) = (0, None);
+                    for c in &edges[node] {
+                        let Some(to) = index(c) else { continue };
+                        let d = depth[to].expect("callee resolved first").0;
+                        if d > best.0 {
+                            best = (d, Some(to));
+                        }
+                    }
+                    depth[node] = Some((best.0 + 1, best.1));
+                }
+            }
+        }
+    }
+
+    let budget = inf_blueprint::interp::MAX_CALL_DEPTH;
+    for (start, f) in unit.functions.iter().enumerate() {
+        let (d, _) = depth[start].expect("every function resolved");
+        if d <= budget {
+            continue;
+        }
+        let mut route: Vec<&str> = vec![names[start]];
+        let mut at = depth[start].and_then(|(_, n)| n);
+        while let Some(i) = at {
+            route.push(names[i]);
+            at = depth[i].and_then(|(_, n)| n);
+        }
+        let shown = if route.len() > 6 {
+            format!(
+                "{} → … → {}",
+                route[..3].join(" → "),
+                route[route.len() - 2..].join(" → ")
+            )
+        } else {
+            route.join(" → ")
+        };
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            span: unit.spans.get(&f.id).copied().unwrap_or_default(),
+            message: format!(
+                "calling `{}` starts a chain of {d} calls ({shown}), and InfiniScript \
+                 allows {budget} — the interpreter refuses past that and the Rust the \
+                 cook generates does not, so the two would not agree. Flatten the chain, \
+                 or write the repetition as a `while` or `for` loop",
+                names[start]
+            ),
+        });
+        return;
     }
 }
 

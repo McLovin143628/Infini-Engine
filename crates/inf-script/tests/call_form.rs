@@ -325,6 +325,140 @@ end
     parse_unit(chain).unwrap_or_else(|d| panic!("a call DAG is legal: {}", render(&d)));
 }
 
+/// **An indirect cycle of three is found and named in full.**
+///
+/// The direct and mutual cases above are two and one hops; a three-hop cycle is
+/// the first one whose detection depends on the walk *carrying a route* rather
+/// than on comparing a callee to its caller. And the anti-vacuity control is the
+/// same graph with the back-edge moved so the cycle no longer contains the
+/// **first-declared** function — the outer loop over start nodes is what finds
+/// that one, and a walk from `a` alone would report nothing.
+#[test]
+fn an_indirect_cycle_is_named_along_its_whole_route() {
+    let three = "\
+function a(n: float) -> float
+    return b(n)
+end
+
+function b(n: float) -> float
+    return c(n)
+end
+
+function c(n: float) -> float
+    return a(n)
+end
+
+on begin_play()
+    local x = a(1.0)
+end
+";
+    let text = render(&parse_unit(three).expect_err("refused"));
+    assert!(
+        text.contains("`a` calls itself (a → b → c → a)"),
+        "a three-hop cycle should print its whole route: {text}"
+    );
+
+    // The cycle that does NOT contain the first function: `a` reaches it and is
+    // not in it, so the walk from `a` finds no return to `a`.
+    let downstream = "\
+function a(n: float) -> float
+    return b(n)
+end
+
+function b(n: float) -> float
+    return c(n)
+end
+
+function c(n: float) -> float
+    return b(n)
+end
+
+on begin_play()
+    local x = a(1.0)
+end
+";
+    let text = render(&parse_unit(downstream).expect_err("refused"));
+    assert!(
+        text.contains("`b` calls itself (b → c → b)"),
+        "the cycle is downstream of `a`, so the refusal must name `b`: {text}"
+    );
+}
+
+/// **THE SCRIPT2a AUDIT'S FINDING: a chain longer than the budget is refused by
+/// the PARSER**, because the two faces of one program answered differently.
+///
+/// Refusing the cycle is not enough on its own. A unit of `MAX_CALL_DEPTH + 1`
+/// functions, each calling the next, has **no cycle** — so the cycle check
+/// passes — and nothing bounds how many `function`s a unit declares
+/// (`MAX_NESTING` bounds one declaration's *tree*, not the count of them). The
+/// audit ran both faces over exactly this program and measured:
+///
+/// | chain | interpreted | `rustc`-compiled |
+/// |---|---|---|
+/// | 64 | `64` | `64` |
+/// | 65 | **refused** (`RunError`) | **`65`** |
+///
+/// One program, two answers — the divergence the crown gate exists to prevent,
+/// reachable from ordinary text with no recursion in it. So the language refuses
+/// it where a designer can see it, which is the wave's own law
+/// (*two faces of one program must agree*) applied to depth as well as to
+/// infinity.
+///
+/// The boundary is asserted from both sides, so a fix that refused everything
+/// would fail the control.
+#[test]
+fn a_chain_longer_than_the_budget_is_refused_by_the_parser() {
+    /// `depth` functions, `f0` … `f{depth-1}`, each calling the next.
+    fn chain(depth: usize) -> String {
+        let mut src = String::from("actor \"Chain\"\n\nvar total: float = 0.0\n");
+        for i in 0..depth {
+            let body = if i + 1 == depth {
+                "    return 1.0\n".to_string()
+            } else {
+                format!("    return f{}() + 1.0\n", i + 1)
+            };
+            src.push_str(&format!("\nfunction f{i}() -> float\n{body}end\n"));
+        }
+        src.push_str("\non begin_play()\n    total = f0()\nend\n");
+        src
+    }
+
+    let budget = MAX_CALL_DEPTH as usize;
+
+    // **At the budget it runs**, and the run is asserted rather than the parse:
+    // a refusal moved one step either way is caught by one of these two arms.
+    let class = class_of(&chain(budget));
+    let mut actor = ActorInstance::new(&class);
+    let mut host = LogHost::default();
+    run_event(
+        &class,
+        &mut actor,
+        &EventKind::BeginPlay,
+        &HashMap::new(),
+        &mut host,
+        &Debug::default(),
+    )
+    .expect("a chain of exactly MAX_CALL_DEPTH is inside the budget");
+    assert_eq!(
+        actor.get("total"),
+        Some(&Value::Float(budget as f64)),
+        "the whole chain ran"
+    );
+
+    // **One more is a parse error**, naming the budget and the route.
+    let text = render(&parse_unit(&chain(budget + 1)).expect_err(
+        "a chain past the budget must be refused by the PARSER — the interpreter \
+         refuses it and compiled Rust does not, which is the divergence",
+    ));
+    assert!(
+        text.contains(&format!("chain of {} calls", budget + 1))
+            && text.contains(&format!("InfiniScript allows {budget}"))
+            && text.contains("f0 → f1 → f2 → … → f")
+            && text.contains("while"),
+        "the refusal must name the length, the budget, the route and the remedy: {text}"
+    );
+}
+
 /// **The interpreter's own bound**, for IR that did not come through the parser.
 ///
 /// A hand-built class whose function calls itself is exactly what a hand-edited

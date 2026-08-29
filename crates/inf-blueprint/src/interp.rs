@@ -487,13 +487,22 @@ pub(crate) fn dispatch_math(path: &[String], args: &[Value]) -> Result<Value, Ru
 /// How deep a chain of unit-local `function` calls may go before the
 /// interpreter refuses.
 ///
-/// **A refusal, not a stack overflow.** `inf_script`'s parser refuses a *cycle*
-/// outright, so a `.infini` file cannot reach this bound at all — but IR arrives
-/// from elsewhere too (a hand-edited `.inf_act`, a lift of hand-written Rust),
-/// and an unbounded self-call there is `STATUS_STACK_OVERFLOW` in whatever
-/// process is ticking. That takes the *editor* rather than the handler, which is
-/// exactly what P21's law and the SCRIPT1a parser depth guard exist to prevent:
-/// a gameplay refusal is a **value**.
+/// **A refusal, not a stack overflow.** IR arrives from places a parser never
+/// saw — a hand-edited `.inf_act`, a lift of hand-written Rust — and an
+/// unbounded self-call there is `STATUS_STACK_OVERFLOW` in whatever process is
+/// ticking. That takes the *editor* rather than the handler, which is exactly
+/// what P21's law and the SCRIPT1a parser depth guard exist to prevent: a
+/// gameplay refusal is a **value**.
+///
+/// **A `.infini` file cannot reach this bound**, and it takes *two* static
+/// refusals to make that sentence true — `inf_script::parse`'s `check_call_graph`
+/// refuses a cycle *and* a chain longer than this constant. The SCRIPT2a audit
+/// measured what the first alone left open: 65 functions each calling the next
+/// have no cycle, so the interpreter refused at 64 while `rustc` compiled the
+/// same program and ran it to `65`. One program, two answers — which is the
+/// divergence this whole arc's parity claim rests on not having. So a change to
+/// this constant is a change to the **language**, and the parser reads it from
+/// here rather than keeping its own copy.
 ///
 /// 64 is two orders of magnitude past what a call *DAG* over one unit's
 /// functions reaches in practice, and leaves an order of magnitude of headroom
@@ -556,8 +565,9 @@ impl Host for LocalFns<'_> {
                         name.clone(),
                         format!(
                             "call depth budget of {MAX_CALL_DEPTH} exhausted at `{name}` — \
-                             InfiniScript has no recursion, so a chain this deep means a \
-                             cycle in hand-authored IR"
+                             InfiniScript refuses both a call cycle and a chain this long \
+                             at parse time, so reaching this means IR that did not come \
+                             through that parser"
                         ),
                     ));
                 }
