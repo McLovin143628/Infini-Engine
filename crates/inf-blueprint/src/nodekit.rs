@@ -247,19 +247,33 @@ fn math_nodes() -> Vec<NodeDef> {
         binary_math("math.mul", "Multiply (×)"),
         binary_math("math.div", "Divide (÷)"),
         binary_math("math.rem", "Remainder (%)"),
-        // Unary functions.
+        // Unary functions. The ten below are **callable from InfiniScript**, so
+        // each carries a doc line: the generated API manual's last column is
+        // `NodeDef::description`, and a blank one is a blank row (SCRIPT2's
+        // `every_callable_verb_carries_a_doc_line`). The operators above do not
+        // and correctly do not — `+` is not a verb here.
         unary_math("math.neg", "Negate (−)"),
-        unary_math("math.abs", "Absolute"),
-        unary_math("math.floor", "Floor"),
-        unary_math("math.ceil", "Ceil"),
-        unary_math("math.round", "Round"),
-        unary_math("math.sqrt", "Square Root"),
-        unary_math("math.sin", "Sine"),
-        unary_math("math.cos", "Cosine"),
+        unary_math("math.abs", "Absolute")
+            .described("The magnitude of a number, dropping its sign. Stays an integer when its argument is one."),
+        unary_math("math.floor", "Floor")
+            .described("The largest whole number no greater than x — rounds toward negative infinity, so -1.5 floors to -2."),
+        unary_math("math.ceil", "Ceil")
+            .described("The smallest whole number no less than x — rounds toward positive infinity."),
+        unary_math("math.round", "Round")
+            .described("The nearest whole number, with halves rounded away from zero."),
+        unary_math("math.sqrt", "Square Root")
+            .described("The square root of x. Not a number for a negative x, which the rest of the program carries as a value rather than a failure."),
+        unary_math("math.sin", "Sine")
+            .described("The sine of an angle in RADIANS, through the engine's own portable polynomial — bit-identical on every operating system, which the platform library is not."),
+        unary_math("math.cos", "Cosine")
+            .described("The cosine of an angle in RADIANS, through the engine's own portable polynomial."),
         // Binary functions.
-        binary_math("math.min", "Min"),
-        binary_math("math.max", "Max"),
-        binary_math("math.pow", "Power (xʸ)"),
+        binary_math("math.min", "Min")
+            .described("The smaller of two numbers. Absorbs a not-a-number argument and answers the other one."),
+        binary_math("math.max", "Max")
+            .described("The larger of two numbers. Absorbs a not-a-number argument and answers the other one."),
+        binary_math("math.pow", "Power (xʸ)")
+            .described("a raised to the power b. NOT bit-portable across operating systems — the one hole in the math palette, and the reason a committed value should not depend on it."),
         // Ternary helpers.
         NodeDef::new("math.clamp", "Clamp", "math")
             .described("Constrain x to [min, max] (non-panicking; inverted range yields max).")
@@ -413,13 +427,26 @@ fn flow_nodes() -> Vec<NodeDef> {
 
 fn action_nodes() -> Vec<NodeDef> {
     vec![
+        // **The three `engine.*` verbs say so in their own descriptions**: they
+        // are registered, callable, and dispatched by NEITHER host, so each
+        // logs its path and answers `Unit`. The API manual is generated from
+        // these lines, so a designer reading the manual learns it at the point
+        // of use rather than from a wave ledger.
+        // (`the_engine_namespace_is_registered_and_implemented_by_neither_host`
+        // is the arm that keeps these three sentences true.)
         NodeDef::new("engine.set_rotation", "Set Rotation", "engine")
+            .described(
+                "Turn the acting entity to an absolute yaw, in DEGREES. NOT IMPLEMENTED BY EITHER HOST today: the call is logged and does nothing, which is what every unrecognised call does.",
+            )
             .with_inputs(vec![
                 exec_in(),
                 PortDef::new("angle", PortType::Float).required(),
             ])
             .with_outputs(vec![exec_out(EXEC_THEN)]),
         NodeDef::new("engine.spawn", "Spawn Prefab", "engine")
+            .described(
+                "Place a copy of a named prefab in the world and report its entity id. The name is the one string in this whole kit the cook resolves as an ASSET, so a name matching nothing is a blocking advisory. NOT IMPLEMENTED BY EITHER HOST today: the call is logged, nothing is spawned, and the reported id is unusable.",
+            )
             .with_inputs(vec![
                 exec_in(),
                 PortDef::new("prefab", PortType::Str).required(),
@@ -429,12 +456,18 @@ fn action_nodes() -> Vec<NodeDef> {
                 PortDef::new("entity", PortType::Int),
             ]),
         NodeDef::new("engine.destroy", "Destroy Entity", "engine")
+            .described(
+                "Remove an entity from the world. NOT IMPLEMENTED BY EITHER HOST today: the call is logged and nothing is removed.",
+            )
             .with_inputs(vec![
                 exec_in(),
                 PortDef::new("entity", PortType::Int).required(),
             ])
             .with_outputs(vec![exec_out(EXEC_THEN)]),
         NodeDef::new("debug.print", "Print", "debug")
+            .described(
+                "Write a line to the Output Log, tagged with the actor that wrote it. The one verb that is always safe to add: it changes nothing a replay can see.",
+            )
             .with_inputs(vec![
                 exec_in(),
                 PortDef::new("message", PortType::Str).required(),
@@ -491,6 +524,9 @@ fn physics_nodes() -> Vec<NodeDef> {
                 PortDef::new("normal_y", PortType::Float),
             ]),
         NodeDef::new("physics2d.set_velocity", "Set Velocity", "physics 2d")
+            .described(
+                "Set a body's linear velocity outright, in metres per second. It overwrites whatever the solver had; use Apply Impulse when the motion should add to what is already there.",
+            )
             .with_inputs(vec![
                 exec_in(),
                 PortDef::new("entity", PortType::Int).required(),
@@ -499,12 +535,18 @@ fn physics_nodes() -> Vec<NodeDef> {
             ])
             .with_outputs(vec![exec_out(EXEC_THEN)]),
         NodeDef::new("physics2d.get_velocity", "Get Velocity", "physics 2d")
+            .described(
+                "A body's linear velocity in metres per second. Two results, so a call names the one it wants: `physics2d.get_velocity.x(e)`.",
+            )
             .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
             .with_outputs(vec![
                 PortDef::new("x", PortType::Float),
                 PortDef::new("y", PortType::Float),
             ]),
         NodeDef::new("physics2d.apply_impulse", "Apply Impulse", "physics 2d")
+            .described(
+                "Add momentum to a body, in newton-seconds — a kick rather than a speed. Mass matters: the same impulse moves a light body further.",
+            )
             .with_inputs(vec![
                 exec_in(),
                 PortDef::new("entity", PortType::Int).required(),
@@ -572,6 +614,9 @@ fn physics3d_nodes() -> Vec<NodeDef> {
                 PortDef::new("normal_z", PortType::Float),
             ]),
         NodeDef::new("physics3d.set_velocity", "Set Velocity (3D)", "physics 3d")
+            .described(
+                "Set a body's linear velocity outright, in metres per second, on all three axes.",
+            )
             .with_inputs(vec![
                 exec_in(),
                 PortDef::new("entity", PortType::Int).required(),
@@ -581,6 +626,9 @@ fn physics3d_nodes() -> Vec<NodeDef> {
             ])
             .with_outputs(vec![exec_out(EXEC_THEN)]),
         NodeDef::new("physics3d.get_velocity", "Get Velocity (3D)", "physics 3d")
+            .described(
+                "A body's linear velocity in metres per second. Three results, so a call names the one it wants: `physics3d.get_velocity.y(e)`.",
+            )
             .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
             .with_outputs(vec![
                 PortDef::new("x", PortType::Float),
@@ -591,6 +639,9 @@ fn physics3d_nodes() -> Vec<NodeDef> {
             "physics3d.apply_impulse",
             "Apply Impulse (3D)",
             "physics 3d",
+        )
+        .described(
+            "Add momentum to a body, in newton-seconds — a kick rather than a speed. Mass matters: the same impulse moves a light body further.",
         )
         .with_inputs(vec![
             exec_in(),

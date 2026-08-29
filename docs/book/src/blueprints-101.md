@@ -37,10 +37,25 @@ go-to-definition all work in the embedded **Code Editor** panel. Edit within the
 and the graph updates on save; edit outside it and that region becomes a snippet node. Round-trip
 correctness (graph → Rust → graph) is enforced by permanent proptests in CI.
 
+## The same graph, as text
+
+A Blueprint is also an **[InfiniScript](./infiniscript.md)** file. `.infini` text and a node
+graph are not two programs that agree — they are one program with two editors pointed at it,
+because the graph lowers to the same gameplay IR the text parses into. Write whichever suits the
+job; a designer who prefers typing never has to draw a wire, and a designer who prefers wires
+never has to type.
+
+The text face is the *complete* one: a few shapes a text author writes naturally — an `if` that
+is not the last thing in its block, an assignment to a local, a call to one of the file's own
+functions — have no node to become, so such a handler opens as text and not as a graph. The
+[InfiniScript page](./infiniscript.md) says which.
+
 ## When to reach for Rust instead
 
-Blueprints and Rust are interchangeable, so use whichever fits: prototype and wire up gameplay
-events visually, then drop into hand-written Rust for hot loops, complex algorithms, or heavy data
-work. There is deliberately **no third scripting language** (no Lua/Rhai) — the interpreter already
-gives you no-recompile iteration over the same IR that ships as compiled Rust, and safe end-user
-extensibility is served by WASM mods (see [Modding](./modding.md)).
+Blueprints, InfiniScript and Rust are interchangeable, so use whichever fits: prototype and wire
+up gameplay events visually or in text, then drop into hand-written Rust for hot loops, complex
+algorithms, or heavy data work. There is deliberately **no foreign scripting language** (no
+Lua/Rhai) — InfiniScript is a text face on the engine's own IR rather than a second execution
+model, so it inherits the interpreter's no-recompile iteration *and* the parity gate that pins it
+to the compiled Rust. Safe end-user extensibility is served by WASM mods (see
+[Modding](./modding.md)).

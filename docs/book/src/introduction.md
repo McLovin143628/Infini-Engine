@@ -4,11 +4,14 @@
 runs as a Tauri v2 + React desktop app. It targets 2D, 2.5D, and 3D games of every genre, and
 carries a project from the first imported asset all the way to a shipped, packaged build.
 
-Two things make it distinct. First, **two ways to code, one truth**: you can write gameplay in
+Two things make it distinct. First, **three faces on one program**: you can write gameplay in
 real Rust — the editor embeds a full IDE with rust-analyzer completions, a terminal, and source
 control — or you can author it visually with **Infini Blueprints**, node graphs that *transpile
-to real Rust source* and stay bidirectionally in sync. The in-editor interpreter that previews
-your graphs is parity-tested in CI against the compiled Rust, so what you see while iterating is
+to real Rust source* and stay bidirectionally in sync, or you can write it as text in
+**[InfiniScript](./infiniscript.md)**, which is not a translation of a Blueprint but *the same
+program in another editor*: open any graph as a `.infini` file, edit it, and it round-trips.
+The in-editor interpreter that previews all three
+is parity-tested in CI against the compiled Rust, so what you see while iterating is
 what ships. Second, the **viewport is a native window**: the engine renders your scene into a
 real wgpu swapchain embedded in the editor, not into a browser canvas, so the editor feels and
 performs like a native tool.
