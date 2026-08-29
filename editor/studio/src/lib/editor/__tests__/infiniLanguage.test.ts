@@ -8,7 +8,8 @@
  * language grows would otherwise be coloured as a variable for a whole wave
  * with nothing anywhere saying so.
  */
-import { StringStream } from "@codemirror/language";
+import { ensureSyntaxTree, StringStream } from "@codemirror/language";
+import { EditorState } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 
 // The two Ring-0 files this suite pins itself against, read as text through
@@ -17,6 +18,7 @@ import LEX_RS from "../../../../../../crates/inf-script/src/lex.rs?raw";
 import EXAMPLE from "../../../../../../templates/scripts/Example.infini?raw";
 
 import {
+  infini,
   INFINI_KEYWORDS,
   INFINI_TYPES,
   infiniStreamParser,
@@ -180,6 +182,19 @@ describe("the .infini language mode", () => {
     const dotted = tokenize("local a = 1.x");
     expect(styleOf(dotted, "1")).toBe("number");
     expect(styleOf(dotted, ".")).toBe("punctuation");
+  });
+
+  it("survives CodeMirror's own driver over the shipped script", () => {
+    // The helper above is my loop; this is CM's. `readToken` throws
+    // "Stream parser failed to advance stream" if a token consumes nothing, and
+    // the places that could — a blank line, end of line, an unterminated long
+    // bracket running to the end of the file — are exactly the ones a
+    // hand-written loop is most likely to drive differently.
+    const doc = `${EXAMPLE}\n\nrust [==[\nlet unterminated = 1;\n`;
+    const state = EditorState.create({ doc, extensions: [infini()] });
+    const tree = ensureSyntaxTree(state, state.doc.length, 5000);
+    expect(tree, "the language did not finish parsing the document").not.toBeNull();
+    expect(tree!.length).toBe(state.doc.length);
   });
 
   it("marks a character the language has no token for as invalid", () => {
