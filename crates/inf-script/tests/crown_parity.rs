@@ -780,7 +780,8 @@ end
     let program = compiled_program(&class, false);
     match rustc_and_run("boolvar", &program) {
         Ok(_) => panic!(
-            "a bool member variable compiled — `vars::get` gained a type, or the shim did.              Retire this bound from the ledger and from `crown_parity`'s module doc."
+            "a bool member variable compiled — `vars::get` gained a type, or the shim \
+             did. Retire this bound from the ledger and from `crown_parity`'s module doc."
         ),
         Err(stderr) => {
             println!(

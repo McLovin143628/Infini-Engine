@@ -155,8 +155,11 @@ working — the language cannot outgrow the execution model by accident.
 ## Editing a script
 
 Today a `.infini` file is edited in any text editor, and the engine's own editor
-watches the folder: **save the file and the running Simulate picks it up**,
-typically within a third of a second. A broken edit never becomes a program —
+watches the folder: **save the file and the running Simulate picks it up**.
+Measured, edit to running is 250–370 ms, almost all of it the watcher's debounce
+and the editor's drain interval — the engine's own half (read, compile, swap, one
+fixed step) is 0.35–0.45 ms, and no `rustc` runs at all. A broken edit never
+becomes a program —
 the previous one keeps running and the diagnostics, with their line and column,
 appear in the **Output Log**.
 

@@ -21324,3 +21324,346 @@ already-built: the next run finished in **0.80 s** claiming the tree was fresh,
 and would have certified a version of the file it never saw. `touch` what you
 edited and watch for the `Checking <crate>` line before believing the exit
 code — the same shape as P26.2's "read a link error against `df`".
+
+## Wave SCRIPT2a — the call form, the API surface, and a manual that cannot go stale (2026-08-29)
+
+The wave **split at the brief's own seam**, and the scoping pass is why: the
+brief allowed a split at ~5 majors and named the line (`a` = the language and
+API half, `b` = the editor half). Three majors landed here — the call form, the
+verb surface, the generated manual — and each carries its own gate family. The
+editor half is a fourth major with a different gate axis entirely (a frontend
+suite, ts-rs bindings, typecheck, lint, build), and folding it in would have made
+one wave that failed for two unrelated reasons.
+
+### The pricing, which is the wave's first result: THE CALL FORM IS NOT A WIRE MOVE
+
+The brief named it the prerequisite and told me to STOP and price it against the
+`.inf_act` version ladder before taking it. Here is the ladder, and here is why
+it did not move.
+
+`Expr::Call` carries a `path: Vec<String>`. Every registered verb is
+`namespace.verb` — two segments, or three when a multi-result query names its
+result — and the two synthesized namespaces (`vars`, `nodestate`) are two as
+well. **A call to a unit-local function is the same variant with one segment.**
+
+So: no new `Expr` variant, no new `Stmt` variant, no `schema_version` move, no
+`FROZEN_WIRE` row, no `kind_code`, no pack format change. And the wire is not
+even the one the question assumed: a `.inf_act` is **pretty JSON**, read with
+`serde_json::from_slice` by `load_actor_classes_from_dir` — so an externally
+tagged variant travels as its *name*, and the positional-decode hazard the brief
+was guarding against is not the hazard this file has. Both facts are in
+`the_call_form_moved_no_wire`, which re-encodes the fixture's class byte for byte
+after a round trip through that wire.
+
+**The arc's one schema window is not spent.** Whatever SCRIPT2b or SCRIPT3 needs
+it for, it is still there.
+
+This is the P6 vars-via-Host precedent met a second time, and precisely: member
+variables needed no IR change because they became `vars::get`/`vars::set` calls
+crossing the one `Host` seam, and a local function call needs none because it
+becomes a one-segment call resolved on that same seam.
+
+### Every face learned it together
+
+| face | what it learned |
+|---|---|
+| the parser | `prescan_functions` reads whole **headers** now, not names — a handler written above its declarations still calls them. Arity is **exact** (a verb's trailing inputs have lowerer defaults; a function's parameters have none), and value position needs a `->` |
+| the emitter | a one-segment path prints bare, through `ident`, because *anything the emitter writes the parser must read back* is the SCRIPT1a audit's law and this is a new thing it writes |
+| the interpreter | a new `interp::LocalFns` decorator |
+| the transpiler | **nothing** |
+| `raise` | a **named refusal** |
+
+Two of those rows deserve their paragraph.
+
+**`LocalFns` is stacked OUTSIDE `ActorHost`, and the order is load-bearing in
+both directions.** A local call recurses by handing `self` back to the
+interpreter, so everything the callee does re-enters at the top — which means the
+host that owns member variables must be *inside* the one that owns the call form,
+or a called function's `vars::get` would sail past it to the engine. And the two
+cannot collide going the other way, because `vars`/`nodestate` are two segments
+and a local call is one. It is one implementation with two users: the crown gate
+composes the same decorator over its own recorder rather than re-implementing it,
+which is the SCRIPT1b audit's finding about this very file's shims, honoured.
+
+**The transpiler needed nothing, and only compiling the output can say so.**
+`inf_transpile::emit` was already generic over a call path, and `generate_file`
+already emits many fns into one module (`blueprint_source`'s "file per CLASS, not
+per handler"), so a one-segment call renders as the Rust call to its sibling
+`pub fn`. That is a claim about a *generator*, and the four hand-mirrored parity
+families cannot see it — which is exactly why the crown gate exists, and why the
+form landed in the same wave as the gate's extension rather than beside it.
+
+### `raise` refuses it by name, and the price is stated
+
+Before this wave a one-segment call in statement position went to `raise_action`,
+which added a graph node whose `type_id` no registry knows — **a silently
+malformed graph rather than a verdict**. In value position it was folded into the
+generic `pure call`, whose remedy does not apply.
+
+`RaiseError::LocalFunctionCall(name)` names it in both positions, and the reason
+it is a refusal rather than a feature is structural: a `NodeDef`'s ports are
+fixed at registration and a user function's signature is not, so a "call this
+function" node would have to be **derived per class**, the lowerer would have to
+map it back to a bare path, and `lower ∘ raise == id` would have to hold across a
+registry that varies by document. That is a wave, not a clause. Two rows in
+`raise_coverage.rs`'s executed table, which is now 11 raising and 8 refusing.
+
+### Recursion is refused, and the reason is parity rather than taste
+
+The interpreter bounds a call chain at `MAX_CALL_DEPTH` (64) and answers with a
+`RunError` — a value, per P21. **The transpiled Rust has no such bound at all**:
+a recursive one-segment call is an ordinary recursive Rust call and overflows the
+stack of whatever runs it. Two faces of one program that disagree about what an
+infinite one *does* is the exact thing the parity gate exists to prevent.
+
+So the language refuses the **cycle**, statically, where a designer can see it,
+and the message names the route it found (`ping → pong → ping`) rather than only
+the fault. The interpreter's budget stays as the defence for IR that did not come
+through this parser — a hand-edited `.inf_act`, a lift of hand-written Rust —
+and its arm builds exactly that: a class whose function calls itself, refused in
+a value with its budget named, against a 20-deep control chain that runs.
+
+`while` is the spelling that survives both faces, because it lowers to the
+counter-guarded expansion and the bound lives in the IR (A.7).
+
+### THE API SURFACE: 115 → 132 verbs, 23 → 26 namespaces
+
+The brief said to enumerate first and then add only where the doors exist. The
+enumeration is in the report; what landed is the part with a `pub fn` behind it
+already.
+
+| namespace | added | the door it opens |
+|---|---|---|
+| `terrain` (new) | `height_at` | **implemented in both hosts since P21.2, with no `NodeDef`** |
+| `sky` | `is_day`, `get_hour`, `get_cloud_coverage`, `get_fog_density` | `resolve_sky`, `local_hour` |
+| `door` | `is_locked`, `use`, `lock` | `d3::door::{is_locked_near, use_door, lock_door}` |
+| `health` | `damage`, `fraction`, `is_downed` | `weapon::{damage_entity, health_of, is_downed}` |
+| `crowd` (new) | `population`, `blocked`, `homes`, `workplaces` | `crowd_stats`, `blocked_agents`, `society_stats` |
+| `zone` (new) | `contains`, `count` | `intersect_aabb` + `guid_of_collider` |
+
+Three of those rows are worth a sentence each.
+
+**`terrain.height_at` is the cheapest verb this engine will ever add and it was
+missing for eight phases.** Both hosts dispatch it; nothing could call it. That
+is an asymmetry in the direction nobody notices, because the arm that would fail
+is the one nobody can write — and it is the reason the registry gate below is now
+over every namespace rather than the two somebody remembered.
+
+**Four door verbs, one resolution.** `is_open_near` inlined "which leaf is this
+point about", so `door.use` would have been a second copy of it. `nearest` is
+extracted and all four ask it, which is P22's *one door for three paths* met on a
+literal door: a script that tests `door.is_open(x, y, z)` and then calls
+`door.use(x, y, z)` is talking about the same leaf by construction.
+
+**`zone.*` is the mission primitive and only the primitive.** The memo asks for
+`Mission.*` with objectives, triggers and zones; what exists is an axis-aligned
+overlap query and a collider→`Guid` map, so *"is this actor in that box"* costs
+two host arms and no subsystem. The **push** half — an `OnPlayerEnterZone` event —
+is priced in the kit's own doc rather than half-taken: an `EventKind` variant, two
+host drains, two `event.*` NodeDefs and a `raise::event_kind_of` arm, on the
+`WaterEnter`/`WaterExit` precedent. A script polls on `Tick` today and gets the
+same answer one step later.
+
+### The registry-versus-hosts gate, over every namespace — and what it found
+
+`both_hosts_dispatch_exactly_the_registered_ik_nodes` and its `anim` twin read
+host source text and compared arm sets. Two namespaces of twenty-three; the other
+twenty-one could drift in silence, and a verb in the registry that no host
+dispatches **does nothing at all, silently**, because both hosts answer an
+unrecognised path by logging it and returning `Unit`.
+
+They are replaced by one gate over every host-dispatched namespace, grouped by
+the **wire** namespace via `host_call_path` so the three `dispatch.* → event::*`
+renames stay inside the table that owns them, with three exclusion lists named
+rather than assumed: the namespaces that never become calls, the three dispatched
+inside `interp.rs` through their own accessor traits, and —
+
+**`engine.*` is registered and implemented by NEITHER host.** `engine.set_rotation`,
+`engine.spawn` and `engine.destroy` are in the palette, callable from `.infini`,
+and fall through to the unknown-call logger in both `simulate.rs` and
+`runtime_sim.rs`. `engine.spawn` is also the kit's **only** `StrRole::Asset` port,
+so the cook's whole asset-reference walk exists to serve a verb nothing
+implements. It is on the exclusion list, and an exclusion list is a blind spot
+with a name on it unless something checks the exception is still true — so
+`the_engine_namespace_is_registered_and_implemented_by_neither_host` is that
+something, and it fails **when somebody implements one**, telling them to shrink
+the list. The three verbs also say so in their own descriptions, which is where
+the generated manual reads them from.
+
+Mutation-verified: misspelling one arm (`blocked` → `blockd`) reddens the gate
+naming both sets.
+
+### The arm-the-wiring law, in a real world
+
+`editor/crates/inf-editor-core/tests/script_api_surface.rs` drives all seventeen
+from a `.infini` script in a real `SimSession` over a real scene, and asserts the
+**world**: the ground reads 7.5 m (not zero, so a verb answering its own
+no-ground default cannot pass); the script hangs its own door and then locks it,
+fails to open it, unlocks it and opens it; three blows take a 1000 J body to zero
+with the third absorbing the honest 200 rather than the 400 it asked for; a crowd
+of three is counted against the session's own instrument; and a final arm sweeps
+the host log requiring that **none** of the six namespaces reached the
+unknown-call logger — the source gate's claim, made at run time.
+
+Two fixture findings worth recording rather than tidying away:
+
+* **`SimSession::enter` clears the crowd**, deliberately, so a Simulate never
+  leaves agents standing in the author's document. A crowd installed before
+  entering is gone; `set_crowd_population` is the door for a test that wants one,
+  and its own doc comment says so.
+* **`zone.count` is asserted DIFFERENTIALLY**, because the physics world holds
+  colliders no `Collider3D` component describes. The fixture's box held three
+  bodies where two were authored, and rather than pin a number I could not
+  explain, the arm now measures that adding one body to the box adds exactly one
+  to the count. The verb's contract — *entities with a collider overlapping this
+  box*, the ground included — is in its own description, where a designer meets
+  it.
+
+### The manual generates, and it is a drift check rather than a regenerator
+
+The direction memo asks for a manual and says why it must not be hand-written.
+The registry carried most of what it needs; what it did not carry was **twenty
+callable verbs with no `description` at all** — every `math.*` function, all
+three `engine.*`, `debug.print`, and six `physics2d`/`physics3d` velocity and
+impulse verbs. Twenty blank rows. They have doc lines now, and
+`every_callable_verb_carries_a_doc_line` keeps it so, scoped to the *callable*
+surface because demanding a description of `math.add` is demanding documentation
+for `+`.
+
+`docs/book/src/infiniscript-api.md` is 132 nodes rendered by namespace with
+arguments in declaration order (which is argument order — the one fact a manual
+most has to get right), their types, which are optional, what each answers, and
+whether it is a statement or a value; plus the refusal table with the syntax that
+replaces each, because *"why can't I call `math.add`"* is the first question the
+surface produces and the answer is already in the registry's own remedy text.
+
+**It is compared, never silently rewritten** (`INF_BLESS_API_MANUAL=1` to move
+it), which is `inf-studio`'s LSP-URI fixture's shape and its reason of record:
+*"a test that regenerates its own expectation is the vacuous shape this campaign
+has caught eight times."* Deliberately not the ts-rs shape, which writes on every
+run and leans on a CI job doing `git diff` — comparing in process costs **no CI
+job at all** and reddens inside the ordinary battery on three operating systems.
+Mutation-verified: one word changed in the committed page fails the arm, naming
+the line and printing both sides.
+
+Three arms beside it: the manual is not a stub (every callable verb has a row,
+the census it prints is the census it was generated from, the operators are in
+the refusal table and an **event is not** — an event is a handler's header, and
+"write instead" advice about one would be advice about a thing nobody tried to
+do); the summary names both pages and both exist on disk (`create-missing = false`
+plus a docs job with no Rust toolchain means a generated page **must** be
+committed, and this machine has no `mdbook` to catch it); and the introduction and
+Blueprints 101 both link InfiniScript, which is SCRIPT1b's carried item 6 — *"the
+mdBook names Infini Blueprints in two places and `.infini` in none"* — closed.
+
+`docs/book/src/infiniscript.md` is the hand-written face: what a script is, where
+it lives, the events, the statements, the two seams, the call form, why there is
+no recursion, what hot reload preserves and what it does not, what cooks — and
+the `*.infini -text` rule **stated for a user**, which was the other half of that
+item.
+
+### The chr(92) law, seventh catch, in this wave's own edits
+
+Writing twenty descriptions through a shell heredoc **doubled a backslash**:
+every Rust line continuation in `nodekit.rs` became the two characters `\` `\`
+followed by `n`, and 89 strings in a file I had already committed changes to were
+mangled in one command. The repair script written the same way did not undo it
+cleanly, because it was made of backslashes too.
+
+The fix is the law CLAUDE.md already carries and I had to pay for again:
+**scripted edits to Rust string literals go through a file, not a pipe**, and
+every backslash in that file is `chr(92)`. The file was restored from its commit
+and the descriptions re-applied with the editor rather than the shell.
+
+It left one structural improvement behind, which is the useful half: the manual's
+renderer now collapses whitespace and escapes a pipe in every description, because
+a description is an ordinary Rust string and **a newline inside a table row ends
+the table**. That is not a hypothetical any more.
+
+### The gates, extended rather than added
+
+* **The crown gate** — the fixture declares two `function`s and calls them from
+  two handlers: in value position, **nested** (`f(f(x))`, where an evaluation
+  order that differed between the faces would show), and as a statement into a
+  Unit-returning one that writes a member variable. **180 trace lines** (was 179),
+  `rustc` **252 ms** against a 60 s LOAD budget. It found one more bound of the
+  `vars::get` class, measured rather than guessed: **a `string` PARAMETER on a
+  local function does not transpile** (`Ty::Str` renders as `String`, `Lit::Str`
+  as a `&str` literal, and the two do not meet at a generated call). Carried.
+* **The round trip** — `tests/call_form.rs` asserts all three laws over a unit
+  that uses the form, including the strongest (`emit(parse(src)) == src`); and
+  `hostile.rs`'s ~3 500 single-character mutations now sweep a script that calls
+  one of its own functions, so every mutation of a call's name, its parentheses
+  and its `->` is required to emit and re-parse identically.
+* **`PIE == shipping`** — the script-driven trace's fixture now calls a local
+  function, so the call form crosses the cook, the pack and the shipped player.
+  90 steps, compared per step, green. The cooked-artifact digest is re-blessed
+  **once with its reason**, which is the half of its own message that expects a
+  new number: the language changed, not the host.
+* **`diagnostics.rs`'s 30th row was a tripwire the SCRIPT1a audit wrote for
+  exactly this day**, and it fired. *"InfiniScript v1 cannot call one"* is retired
+  and replaced by the refusal that is still true (a bare call naming no declared
+  function, whose message now says how to declare one), plus a row for recursion.
+
+### Carried, by name
+
+1. **SCRIPT2b is routed, not deferred**: the CodeMirror 6 language mode for
+   `.infini` on the P5 `extraCompartment` seam, the parse refusals wired into the
+   Problems panel, opening a `.infini` through the existing `infinity:open-file`
+   event, Ctrl+S = save → watcher → hot swap, and the graph↔text bridge's editor
+   half. **The editor surface is still the Output Log** — unchanged from
+   SCRIPT1a's item 8 and SCRIPT1b's item 6, and the *documentation* half of that
+   item is closed here (the book has a `.infini` page and a generated API
+   reference).
+   The scouting is done and is worth carrying with it: the seam is
+   `editor/studio/src/lib/editor/languages.ts` (one `case` returning an
+   `Extension`); `StreamLanguage`/`StreamParser` are already exported by the
+   installed `@codemirror/language`, so a hand-rolled tokenizer needs **zero new
+   dependencies**; `@codemirror/lint` is present and `pushDiagnostics` in
+   `lspExtension.ts` is already source-agnostic; and the one hazard is that
+   `extraCompartment` is **single-occupant** and `lspBridge.ts` reconfigures it on
+   every active-tab change, so a second consumer needs a third compartment in
+   `setup.ts` rather than a share.
+2. **A `string` PARAMETER on a unit-local function does not transpile.** Measured
+   by compiling it (`a_string_parameter_on_a_local_function_does_not_compile`):
+   `Ty::Str` renders as `String` and `Lit::Str` as a `&str` literal, so the two
+   do not meet at a generated call. The same class as SCRIPT1b's monomorphic
+   `vars::get` and the same shape of fix — a decision in the emitter about how a
+   string crosses a generated boundary. It interprets perfectly and it **ships**,
+   because the cook packs IR for the interpreter; only the Code tab's Rust
+   refuses it. The arm fails the day it is fixed.
+3. **`raise` has no call-a-function node, and cannot have a generic one.** A
+   `NodeDef`'s ports are fixed at registration and a user function's signature is
+   not, so the palette entry would have to be derived per class and
+   `lower ∘ raise == id` re-proved over a registry that varies by document.
+   Priced; two rows in the executed table.
+4. **`engine.*` is registered and implemented by neither host** — three verbs
+   that log their path and answer `Unit`, one of which (`engine.spawn`) is the
+   kit's only asset-naming port and therefore the sole reason the cook's
+   asset-reference walk exists. Armed
+   (`the_engine_namespace_is_registered_and_implemented_by_neither_host`), named
+   in the exclusion list of the registry gate, and stated in the three verbs' own
+   descriptions so the generated manual carries it.
+5. **`zone.*` is the pull half only.** An `OnPlayerEnterZone` **event** is priced
+   in the kit's doc — an `EventKind` variant, two host drains, two `event.*`
+   NodeDefs and a `raise::event_kind_of` arm, on the `WaterEnter`/`WaterExit`
+   precedent. A script polls on `Tick` today.
+6. **`crowd.*` counts, and does not name an agent.** "Nearest villager" needs a
+   `CrowdClock` (a position is a function of the hour) and a spatial index the
+   crowd does not keep — an `O(agents)` scan per call on a level that plans tens
+   of thousands. A real verb that needs a door built for it.
+7. **`zone.count` counts everything with a collider**, the ground's heightfield
+   and a door's leaf included, so a box on the ground reads higher than the number
+   of actors in it. In the verb's own description; the gate measures it
+   differentially rather than pinning a number nobody can explain.
+8. **SCRIPT1b's carried items 1, 2, 3 and 4 stand**: `#[infinity::blueprint]` has
+   no macro behind it; `vars::get` is monomorphic in generated Rust;
+   transcendentals are outside the crown gate by a stated argument; and the PIE
+   payload does not walk `asset_refs` (safe while nothing implements
+   `engine.spawn` — see item 4). Item 5 is closed, item 6 is half-closed here.
+9. **SCRIPT1a's carried items 2, 4, 6, 7 and 9 stand**: `RaiseError::NonLinear`
+   and the three other non-flow refusals; the `math.neg`-on-a-`lit.float` graph
+   gap; `math.pow` is `f64::powf` and is not bit-portable (now **said in its own
+   description**, so the manual carries the warning); the handler-level source
+   map; and appendix A.9's v1 omissions — one of which, the user-function call
+   form, this wave retires.

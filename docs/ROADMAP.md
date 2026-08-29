@@ -19847,14 +19847,71 @@ quicker.
   fourth CRLF-class catch, from the one direction the lexer cannot cover: a `.infini` with no
   committed sidecar takes a GUID synthesised from its **content hash**, so `*.infini -text`.
   Full ledger in `docs/memos/island-progress.md`.
-* **SCRIPT2 — the API surface and the tooling.** The verb surface grows toward the document's
-  vision our way — `World.*`, `AI.*`, `Mission.*` (new, priced), `Audio.*`, `UI.*`,
-  `Vehicle.*`, `Weapon.*`/`Door.*`/`Item.*` — every verb deterministic, Host-mediated,
-  documented. **The InfiniScript API Manual generates from the registry**, not by hand: a
-  hand-written manual goes stale on the first verb, and the node kit already carries names,
-  categories, descriptions and typed pins. Editor: a CodeMirror 6 language mode for `.infini`
-  on the P5 `extraCompartment` seam, diagnostics wiring, open-as-text on `.inf_act`/`.inf_fn`,
-  Ctrl+S = re-lower + hot-swap. A trigger-volume door is priced here if `Mission.*` needs one.
+* **SCRIPT2a — the call form, the API surface and the generated manual (COMPLETE
+  2026-08-29).** The wave **split at the brief's own seam**: 2a is the language and API
+  half, 2b is the editor half (below).
+
+  **THE CALL FORM, and the pricing is the first result: it is not a wire move.**
+  SCRIPT1a's loudest carried item was "a handler cannot call its unit's own `function`
+  declarations; the IR has no call form, and adding one is an IR change with the P6
+  vars-via-Host bar to clear". It does not need one. `Expr::Call` carries a
+  `path: Vec<String>` and every registered verb is `namespace.verb`; a unit-local call is
+  the **same variant with one segment**. No new `Expr` variant, no new `Stmt` variant, no
+  `schema_version` move on a `.inf_act` (which is pretty JSON read with
+  `serde_json::from_slice`, not bincode), no `FROZEN_WIRE` row, no pack change. **The arc's
+  one schema window is not spent.** Every face learned it together: the parser prescans
+  whole `function` HEADERS (so a handler above its declarations still calls them) with exact
+  arity and a value position that needs a `->`; the emitter prints a one-segment path bare,
+  through `ident`, because anything it writes the parser must read back; the interpreter
+  gained `interp::LocalFns`, a decorator stacked OUTSIDE `ActorHost` so a callee's own
+  `vars::*` still resolve; the transpiler needed **nothing**, which only compiling the
+  output can say, so the crown gate grew the fixture in the same wave (180 trace lines,
+  `rustc` 252 ms); and `raise` refuses it **by name** — the node kit has no
+  call-a-function node and cannot have a generic one, because a `NodeDef`'s ports are fixed
+  at registration and a signature is not, so closing it means per-class derived palette
+  entries and re-proving `lower ∘ raise == id` over a registry that varies by document. A
+  wave, priced. **Recursion is refused statically**, for parity rather than taste: the
+  interpreter bounds a chain at `MAX_CALL_DEPTH` and answers with a value (P21), and the
+  transpiled Rust has no such bound at all, so the parser refuses the *cycle* where a
+  designer can see it and names the route (`ping → pong → ping`).
+
+  **THE API SURFACE: 115 → 132 verbs, 23 → 26 namespaces**, every one a door Ring 0 already
+  had. `terrain.height_at` gets a `NodeDef` for a verb **both hosts have dispatched since
+  P21.2 and no palette could reach**; four `sky.*` reads (`is_day`, `get_hour` — the clock
+  the crowd's schedules run on — `get_cloud_coverage`, `get_fog_density`); three `door.*`
+  (`is_locked`, `use`, `lock`) joined by `is_open` under **one** resolution
+  (`d3::door::nearest`, extracted so four verbs cannot disagree about which leaf a point is
+  about); three `health.*` (`damage` through a new Ring-0 `weapon::damage_entity` whose
+  second caller is the bullet path); four `crowd.*` counts over the NPC arc's own resources
+  (counts and not agents — naming an individual needs a `CrowdClock` and a spatial index the
+  crowd does not keep, priced); and two `zone.*` queries, the **mission-class primitive and
+  only the primitive**, over `intersect_aabb` and the collider→`Guid` map. The push half —
+  an `OnPlayerEnterZone` *event* — is priced in the kit's own doc: an `EventKind` variant,
+  two host drains, two `event.*` NodeDefs and a `raise` arm.
+
+  **The registry-versus-hosts gate is now over EVERY host-dispatched namespace**, grouped by
+  the wire namespace so the three `dispatch.*` renames stay inside the table that owns them.
+  It replaces two per-namespace gates that covered `ik` and `anim` and left twenty-one able
+  to drift, and its exclusions are named rather than assumed — including its own finding,
+  which has an arm: **`engine.*` is registered and implemented by NEITHER host.** All three
+  verbs log their path and answer `Unit`, and `engine.spawn` is the kit's only asset-naming
+  port, so the cook's asset-reference walk exists to serve a verb nothing implements.
+
+  **THE MANUAL GENERATES.** `docs/book/src/infiniscript-api.md` is rendered from the verb
+  registry — every callable verb by namespace with its arguments in declaration order, their
+  types, which are optional, what it answers, statement or value, plus the refusal table with
+  the syntax that replaces each. It is a **drift check, not a regenerator** (the LSP-URI
+  fixture's shape and its reason: a test that regenerates its own expectation is vacuous), so
+  it needs **no CI job** and reddens inside the ordinary battery on three operating systems.
+  Twenty callable verbs had no description at all and now do, gated. `docs/book/src/infiniscript.md`
+  is the hand-written face — including the `*.infini -text` sidecar rule **stated for a
+  user**, which closes SCRIPT1b's carried item 6 along with the book naming `.infini` at all.
+* **SCRIPT2b — the editor (ROUTED).** A CodeMirror 6 language mode for `.infini` on the P5
+  `extraCompartment` seam, the parse refusals wired into the Problems panel, opening a
+  `.infini` through the existing `infinity:open-file` event, Ctrl+S = save → watcher →
+  hot swap, and the graph↔text bridge's editor half (open an `.inf_act` handler as text).
+  Unchanged from SCRIPT1a's carried item 8 and SCRIPT1b's item 6: **the editor surface is
+  still the Output Log.**
 * **SCRIPT3 — dogfood and ship.** Real island gameplay migrates to `.infini`: the Phase 30
   door and weapon logic, a settlement ambient script, and one mission-class sequence at
   Harbour City — the document's heist mockup made real on our island. Migrated traces stay
