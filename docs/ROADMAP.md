@@ -20030,6 +20030,40 @@ quicker.
     construction*: it only inspects lines containing a quote, and `interior_space_run` skips
     leading indentation, which is exactly where the damage lands. Found by reading the file.
     The fixture is a raw string now.
+
+  **AUDITED the same day** (ledger: `island-progress.md`, "Wave SCRIPT2b — the adversarial
+  audit"). **No HIGH; nine MED, all fixed; eleven LOW carried by name.** The design holds
+  and the *arms* were the subject: the symbol arm's closing assertion compared a set with
+  the set it had just been filled from (equal in every possible tree, so "19 both sides" was
+  true of the tree and not of the test); the `?raw` extraction could return `[]` for
+  `SYMBOLS` and leave that arm green over `SYMBOLS2`'s three, and now reads `[&str; N]` as
+  its own floor; the "puts the script layer in the base set" arm compared two array lengths
+  that are equal either way; the tab matrix never walked `.infini` → `.infini`, which is the
+  case a per-path extension can actually get wrong; and the IPC seam had no arm on either
+  side of itself (`ipc.test.ts` now pins both command names and their argument keys — the
+  two ends actually talking still has none, and is carried, not implied). One real defect:
+  **the Problems panel published checks CodeMirror had already discarded** — `lintPlugin`
+  drops a stale lint result and the store write beside it did not, so with two checks in
+  flight the panel could settle on the older answer. **The tokenizer was FUZZED and holds**:
+  36 hostile documents (an escaped quote, a long bracket that never closes, a `[`/`--`/`:`/
+  `->` at EOF, a lone surrogate, 100 000 dots on one line, a bracket open across 20 000
+  lines) plus 4 000 pseudorandom ones through both its own loop and `ensureSyntaxTree` — no
+  stall, no throw, no blow-up, 0.6 s. Also fixed: `ProblemsPanel`'s `uriToPath` decoded
+  `%20` of a full RFC-3986 encoding, so every row for a path with a `#`, `(`, `&` or a
+  non-ASCII character opened nothing, silently (Wave F's defect, fixed on the encoder and
+  left on the decoder); the bridge's signature claim — a handler `raise` refuses still reads
+  as text — was stated in three places and measured in none; "the text face is total over
+  the IR" is a shorthand and is false where repeated bare, two lines above a reachable
+  `EmitError` arm; and the canvas's refusal still told the user to open the generated Rust
+  while its `reason` string was serialized and **dropped by its only consumer**. The
+  **continuation economics were re-run with a real comment-aware lexer**: 5 legitimate
+  multi-line non-raw literals in the wave's Rust diff, **3 763 across the workspace** — so
+  the ban-list ruling stands on its denominator, the flip condition is a first instance in a
+  SHIPPED literal rather than a fifth in a test, and the cheap win is scoping the same
+  detector to the diff (five lines a wave, no allowlist). The **tenth eaten continuation was
+  hunted and not found**. Battery **353 / 6 583 / 0 / 19**, goldens 59 strict-green,
+  rustdoc 373 unchanged, clippy 0 (**red on the first pass, on the audit's own new arm**),
+  frontend **84 / 764**, schemas and `Cargo.lock` unmoved.
 * **SCRIPT3 — dogfood and ship.** Real island gameplay migrates to `.infini`: the Phase 30
   door and weapon logic, a settlement ambient script, and one mission-class sequence at
   Harbour City — the document's heist mockup made real on our island. Migrated traces stay

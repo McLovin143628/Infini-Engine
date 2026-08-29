@@ -22448,3 +22448,457 @@ restating.** `inf_packager`'s eaten-continuation gate skips lines with no quote
 and skips leading indentation — and a multi-line literal's continuation lines are
 exactly both. So the second damage shape is not merely "harder to detect": for
 literals spanning lines it is *invisible by construction*, twice over.
+
+## Wave SCRIPT2b — the adversarial audit (2026-08-29)
+
+Eleven commits, five clauses, and a wave whose *design* holds up better than its
+*arms* did. Nothing in the tokenizer, the compartment seam or the diagnostics
+wire is built wrong; what nine of the findings have in common is a claim that was
+made in prose and measured by something adjacent to it. The one exception is a
+race, and the one thing that came back clean is the piece that had the furthest
+to fall: the tokenizer.
+
+No HIGH. Nine MED, all fixed. Eleven LOW, carried by name.
+
+### The tokenizer: fuzzed, and it holds
+
+A tokenizer is on the keystroke path, `readToken` throws
+`"Stream parser failed to advance stream"` after ten calls that consume nothing,
+and every branch in `infiniToken` that could consume nothing is a branch about
+the END of something. So it was fuzzed, through **both** drivers — the suite's
+own loop and CodeMirror's `ensureSyntaxTree`:
+
+* **36 hostile documents.** An escaped quote; a backslash at end of line inside a
+  string; 10 000 backslashes inside a string; a long bracket that never closes; a
+  nested `[[` inside a `[==[`; a `[`, a `[==`, a `--`, a `-`, a `:` and a `->`
+  each at EOF with the type position armed; an empty document; nothing but
+  newlines; nothing but whitespace; a lone surrogate; a NUL; a combining mark; an
+  astral identifier; a 10 000-character token of each kind (identifier, number,
+  string, comment, long-bracket body); 50 000 one-character tokens on one line;
+  100 000 dots on one line; a long bracket held open across 20 000 lines; 20 000
+  bare quotes; 5 000 `=` between the brackets; a close with no open.
+* **4 000 pseudorandom documents** (xorshift32, reproducible) over an alphabet of
+  the language's own multi-character pieces plus the characters it has no token
+  for.
+
+**Verdict: clean.** No stall, no throw, no runaway, no quadratic. The whole
+suite runs in 0.6 s. The design reason it holds is worth stating: CodeMirror
+never calls `token` at end of line (`parseLine` checks `stream.eol()` and calls
+`blankLine` instead), so the one branch that returns without consuming —
+`peek() === undefined` — is unreachable from the driver, and every other path
+either matches a regex anchored at `^`, calls `next()`, or `skipToEnd()`s a
+non-empty remainder. `eatQuoted` tracks escapes correctly; `eatLongBody` advances
+by at least the close's length or to end of line.
+
+Kept as two permanent arms rather than thrown away, because the property is
+"answers at all", not "answers this". Mutation-verified: a `[` branch that
+returns without consuming reddens both and nothing else.
+
+### The IPC seam: two half-arms, and now three quarters of one
+
+The honest sentence, which the wave did not write. The Rust arm exercises
+`check_text` — one call **below** the `#[tauri::command]`. The TS arm exercises
+`scriptDiagnosticsToLsp` over a DTO built by hand. Nothing anywhere crossed the
+boundary, so the command NAME and the argument KEYS were unmeasured, and a typo
+in either is a runtime "command not found" or a missing-key deserialize with no
+test between it and the author.
+
+What did already constrain it, and is worth naming rather than discovering:
+`ScriptDiagnosticDto.ts` is **generated** by the ts-rs harness and drift-checked
+in CI, so the payload's field names and types cannot move on one side alone.
+Both commands **are** in `invoke_handler`'s list (checked), and `text` / `path` /
+`assetId` follow the camelCase convention every other wrapper in `ipc.ts` uses.
+
+The audit added the missing half that a test can hold: `ipc.test.ts` — the suite
+that exists for exactly this — now pins both command names and their argument
+keys, including that an omitted `path` goes on the wire as `null`. What remains
+untested is the two ends actually talking, which needs a Tauri integration
+harness this repo does not have. **Carried by name, in the code, rather than
+implied to be covered.**
+
+### The continuation economics, re-run at four instances with real numbers
+
+The brief asked whether the round-3 ruling flips at 4-vs-40. It does not, and
+the reason is that the count was never the axis.
+
+I wrote the detector the ruling is about — a real comment-aware string-state
+lexer over Rust, reporting every **non-raw literal that spans a line boundary**,
+which is exactly and only the population the second shape can hide in (recall is
+100% by construction: an eaten `\` at EOL leaves the literal spanning lines).
+Measured:
+
+| scope | files | legitimate multi-line non-raw literals | defects |
+|---|---|---|---|
+| this wave's Rust diff | 5 | **5** | 0 |
+| the whole workspace | 881 | **3 763** | 0 |
+
+The SCRIPT2a re-measurement's "about forty over twenty files" was right and
+scales: ~1 per file here, 4.3 per file workspace-wide.
+
+**So the ruling stands, decisively, at the scope it was ruled on.** A
+workspace-wide ban needs an allowlist of 3 763 entries to catch ~0.44 defects per
+wave. That is the P23 ban-list hazard with three orders of magnitude of the wrong
+kind of maintenance.
+
+**But the scope is the finding.** The detector does not have to be a workspace
+gate. Run over the wave's own diff it printed **five lines**, and it would have
+printed roughly forty for SCRIPT2a — a page to read once, with no allowlist at
+all, catching a shape a human reading a diff can and does miss. The SCRIPT2a
+audit prescribed exactly this as a *discipline* ("read the diff for a
+continuation line at column zero"); it is cheap enough to be a *script*, and the
+numbers above are what say so. One further measurement in favour: my first pass
+used a comment-**un**aware regex and produced ~40 hits over 6 files, of which 0
+were real — skipping `//`, `///` and `/* */` removes 87% of the noise for free,
+because quotes inside prose are what the noise is made of.
+
+**The flip condition, stated so the next wave does not re-argue it:**
+
+1. **Not the instance count.** Going 1 → 4 moved the numerator by 4 and the
+   3 763-site denominator not at all. A fifth, sixth and tenth instance change
+   nothing.
+2. **The damage class flips it.** Every second-shape instance whose site this
+   memo records landed in a **test** source — an assertion message
+   (`crown_parity.rs`) or a fixture (`graph.rs`) — where the cost is one arm that
+   measured a slightly different program and stayed green. The day one lands in a
+   **shipped** literal (a user-facing message, a cooked byte, a golden's caption)
+   the cost per instance stops being a weakened arm and becomes a wrong byte in
+   the product, and a 3 763-entry allowlist becomes worth its maintenance. The
+   FIRST shape has already crossed that line — P22's nine mangled user-facing
+   literals — which is precisely why the first shape has a gate and this one does
+   not.
+3. **A collapse in the legitimate population flips it too.** If the tree ever
+   moved multi-line messages to raw strings the allowlist would shrink to
+   something maintainable and the ban would win on cost alone. rustfmt has no
+   such mode, so this is theoretical.
+
+**The tenth eaten continuation was hunted and not found.** The lexer over this
+wave's five touched Rust files finds five multi-line literals and all five carry
+intact `\` continuations; the audit's own two new ones do too, checked the same
+way.
+
+### MED 1 — the symbol arm counted a set it had just filled
+
+The arm is called *"gives every symbol Ring 0 lexes a colour, **and invents
+none**"*, and its closing assertion was `expect(mine.size).toBe(ring0.size)`
+where `mine` had been filled one `add` per iteration out of `ring0`. Equal by
+construction, in every possible tree. So the ledger's *"the count is asserted
+equal: 19 both sides"* was true **of the tree** and not of the test — and the
+direction the arm's own name claims was unarmed: a symbol spelled in the mode and
+**not** in Ring 0 would be coloured as an operator inside a file the compiler
+refuses, which is the editor being confidently wrong about a program, which is
+the one thing the whole tokenizer design exists to prevent.
+
+`INFINI_SYMBOLS` is exported and the two SETS are compared. Mutation-verified:
+`!=` added to `LONG_SYMBOLS` reddens that arm and nothing else. (The tree was
+right: 16 + 3 = 19 on both sides, exactly.)
+
+### MED 2 — the `?raw` extraction could fail silently, for one of the three arrays
+
+The brief asked whether the arm parses Rust with a regex a reflow could break
+silently. Once, yes. `rustStringArray` used `indexOf`, and a `close` it cannot
+find makes `slice(open, -1)` the rest of the file, while an extraction that finds
+no literals returns `[]`. The **keyword** arm compares the whole list, so either
+goes loudly red there. The **symbol** arm iterated whatever came back — so an
+empty `SYMBOLS` would have left it green over `SYMBOLS2`'s three, with the ledger
+still claiming nineteen.
+
+`rustStringArray` now reads the array's own declared length out of `[&str; N]`
+and requires the extraction to match it. That is still Ring 0's count of Ring 0's
+table, not a number the test picked. Mutation-verified: declaring `[&str; 17]`
+over a sixteen-entry literal reddens it with both numbers in the message.
+
+### MED 3 — the thing on the keystroke path had never been fuzzed
+
+See the verdict above. Fixed by 36 hostile documents and 4 000 random ones
+through both drivers; the tokenizer survived every one, so this finding is about
+the **absence of the arm** rather than about a defect it found.
+
+### MED 4 — the Problems panel published checks the gutter had already thrown away
+
+`checkSource` pins `view.state.doc` before the await and the comment says why:
+CodeMirror discards a lint result whose document has moved on. It does —
+`lintPlugin` compares `this.view.state.doc == state.doc` by identity before
+dispatching. But the same callback **also** writes the shared diagnostics store,
+and that write had no such guard.
+
+It is a real race, not a theoretical one. `lintPlugin.update` schedules the next
+run the moment the document changes, without waiting for the run already awaiting
+IPC (`this.set` is false exactly then), so two `script_check` calls can be in
+flight over one document — and two `invoke`s have no ordering guarantee between
+them. If the replies cross, the panel settles on the **older** answer and stays
+there until the next keystroke, pointing the author at a line number computed
+about a buffer that no longer exists.
+
+One line: publish only when `view.state.doc === doc`. Skipping is safe because
+the run that superseded this one publishes — the linter always ends on a check
+whose document is current. Armed on both sides in a real `EditorView` (the mock
+dispatches into the view before answering); mutation-verified.
+
+### MED 5 — the panel decoded `%20` of a full RFC-3986 encoding
+
+Wave F's own defect, fixed on the encoder and left standing on the decoder, one
+module away from a doc comment about how the two halves must not move alone.
+`pathToUri` percent-escapes every byte outside the unreserved set;
+`ProblemsPanel`'s private `uriToPath` decoded `%20` and nothing else.
+
+A Problems row is a button that opens its file. So on any project under
+`C:\Users\Müller\`, in a folder called `Game (v2)`, or with a `#`, `&`, `+` or
+`,` anywhere in its path, every row pointed at a path containing `%C3%BC` or
+`%28`, `files.read` refused it, and clicking did nothing at all — silently, into
+a `console.error`. Pre-existing; in scope because this wave routes a **second**
+producer through that panel, so InfiniScript's refusals are dead on click too.
+
+`uriToPath` moved next to `pathToUri` and decodes with `decodeURIComponent`,
+guarded (a malformed escape throws `URIError`, and a row showing a raw URI beats
+a panel that throws while rendering). Armed over the corpus the **backend**
+generates: the round trip for all eighteen cases, and the retired decoder shown to
+be wrong on **thirteen of the eighteen** — the falsifier. (`eec62a37`'s own
+message says "fifteen"; the fixture holds eighteen. Counted afterwards, and
+recorded here rather than rewritten into the commit.)
+
+### MED 6 — the bridge's signature claim was measured nowhere
+
+*"A handler the canvas cannot draw can still be read"* is what "Open as
+InfiniScript" exists for. It is written in three places and was measured in none:
+the one arm that runs the emitter and the checker against each other uses
+`Example.infini`, which holds no unit-local call and therefore never crosses the
+asymmetry it is cited for.
+
+`a_handler_the_canvas_cannot_draw_still_reads_as_text` runs the three faces
+against one class that does: `raise_fn` refuses with
+`RaiseError::LocalFunctionCall("bump")` — the refusal the arc named on purpose —
+`emit_class` writes the call form anyway, and `check_text` accepts what was
+written, which is what the read-only tab's own linter does the moment it opens.
+Mutation-verified: swapping the call form for a namespaced verb (which `raise`
+accepts) fails the first assertion with *"or this arm is about nothing"*.
+
+**And the shorthand it is stated in is false where it is repeated bare.** "The
+text face is total over the IR" is SCRIPT1a's shorthand, and SCRIPT1a's memo
+prices the six refusals it is shorthand *for*. Repeated without them in SCRIPT2b
+it sits two lines above a `map_err` that renders `EmitError` into a message
+naming the class: `script_emit_class`'s `Err` arm is **reachable, not
+defensive**. Corrected to the comparative sentence — the text face refuses
+strictly *less* than the graph face — in `commands/script.rs` and in the book.
+
+### MED 7 — the `--ink-danger` recount counted its own prose
+
+The wave's last commit replaced "eighteen other sites" (an eyeball) with "23
+occurrences across 9 files", on the principle that a carried item should carry a
+number somebody counted. The principle is right and the recount is wrong:
+`grep -o … | wc -l` also matches the **five** mentions of the token inside
+`ProblemsPanel.tsx`'s own paragraph explaining that the token does not exist —
+and that paragraph's file is the ninth.
+
+Measured over code sites only: **18 occurrences across 8 files.** GitPanel ×4,
+DataAssetEditor ×4, SequencerPanel ×3, BiomeSetEditor ×2, ContentDrawer ×2,
+FileExplorerPanel, PreferencesDialog, and `sm.css` — which alone supplies a
+fallback and is therefore still the only one that renders. **The estimate the
+wave replaced was right.** Corrected in the code comment, the ROADMAP bullet and
+the memo's carried item, each saying which number is which so the next reader
+does not "correct" it back. The remedy is unchanged and still carried: it is an
+app-wide visual change a human should look at.
+
+*A count is only a measurement if you know what it counted.*
+
+### MED 8 — the canvas's refusal names a remedy this wave superseded, and the reason was never rendered
+
+When `raise` refuses a handler the Blueprint panel says *"this handler has no
+unambiguous node form; open the generated code instead"* — written when the
+generated Rust really was the only other way to read it. SCRIPT2b built the
+better answer in the same tree, and the case that reaches this arm most often is
+`LocalFunctionCall`, which the text face writes perfectly well. Two messages
+(`graph_open_actor`'s `Err` and `actor_handlers`' per-handler `reason`) now name
+"Open as InfiniScript" first and the generated code second. Mutation-verified:
+the old wording reddens the arm, which asserts the remedy as well as the
+diagnosis.
+
+Worse, and pre-existing: **`reason` was never shown to anybody.**
+`actor_handlers` computes a sentence carrying the refusal's own name,
+`ActorHandlerDto` carries it across the wire, `blueprintTypes.ts` declares it —
+and the one consumer rendered `(no graph form)` and dropped the string. The DTO
+field that exists to teach the user *which* form and *what to do* was serialized
+into nothing on every open. It is now the option's `title`.
+
+*A capability nobody is told about is a capability that was not shipped.*
+
+### MED 9 — three arms that did not assert what they name
+
+* **`baseExtensions(INFINI).length === baseExtensions(RS).length`**, under the
+  name *"puts the script layer in the base set"*. The two lengths are equal
+  whether or not the compartment holds anything — `scriptCompartment.of(…)` is
+  one element of the array either way. It now builds an `EditorState` out of
+  `baseExtensions` alone and asks the compartment what it holds.
+  Mutation-verified: `scriptCompartment.of([])` reddens all five arms in the file.
+* **The tab matrix never walked `.infini` → `.infini`.** It switches between two
+  KINDS of file; the case a per-path extension can actually get wrong is two files
+  of the same kind, and a linter installed by a bridge watching the active tab
+  would check the second script under the first's path — every refusal in it filed
+  against the wrong file, silently and permanently. The new arm drives A → B → A
+  through one `EditorView` with `forceLinting` and requires the three
+  `script_check` calls to carry the three paths and the three buffers. B lives
+  outside `Content/Scripts`, which is the folder-convention edge in the same arm.
+  Mutation-verified: a `checkSource` closing over a fixed path reddens exactly it.
+* **The IPC seam** — see the verdict above.
+
+### Carried, by name
+
+1. **"The text face is total over the IR" is still bare** in
+   `ContentDrawer.tsx`'s context-menu comment and in §8 of the direction memo.
+   Corrected where it contradicts adjacent code (`commands/script.rs`) and where
+   a user reads it (the book); SCRIPT1a's own qualified wording stands and is the
+   one to cite.
+2. **The Problems header still reads "rust-analyzer: {status}"** over InfiniScript
+   rows. It is a *server status* readout rather than a claim about the rows, and
+   the per-row `source` badge is the real fix — but the wave's sentence ("a header
+   reading 'rust-analyzer: idle' above three InfiniScript refusals was a lie by
+   omission") reads as though the header was what changed, and it was not.
+3. **A blueprint-as-text tab's Problems rows are dead on click.**
+   `uriToPath("file:///infini://{id}/{Class}.infini")` yields
+   `/infini://{id}/…`, which is neither the tab's path nor a file, so the row
+   opens nothing. Only reachable when the emitter writes text the checker refuses
+   — which is exactly the self-test case the linter on that tab exists for.
+4. **"Open as InfiniScript" on a `.infini` shows `emit(parse(file))`, not the
+   file.** Comments and formatting are gone (the IR has no comments), in a
+   read-only tab named `Door.infini` sitting beside the editable `Door.infini`.
+   Useful — it is the canonical form — and easy to mistake for your own file.
+5. **The read-only tab's name comes from the ASSET name, not the class name.** A
+   `Door.inf_act` holding `actor "MyDoor"` opens as a tab called `Door.infini`
+   over text whose first line says `MyDoor`. `blueprintTextPath`'s doc calls the
+   second segment `{Class}`.
+6. **A renamed or moved `.infini` leaves its open tab pointing at the old absolute
+   path**, and Ctrl+S then *recreates* the old file, which the watcher registers
+   as a second script asset with a fresh GUID. Pre-existing P5.1 behaviour for
+   every file kind; named because this wave is what puts a `.infini` in a tab from
+   the drawer. Checked and NOT a defect: `AssetProject::rename` moves the payload
+   and the sidecar together, rolls the sidecar back if the payload move fails, and
+   re-registers under the same GUID — so SCRIPT1b's GUID pinning survives a rename
+   correctly. It is the editor tab that does not follow.
+7. **Deleting a `.infini` that a level binds is not blocked by the P4 ref-guard.**
+   `level_dependencies` deliberately omits `ActorClass` — a class is code, reached
+   by the cook's own scan — and `island.rs` carries an *inverted* tripwire saying
+   so ("an `ActorClass` has started entering the level's asset closure — good,
+   but…"). The consequence for a designer is real and unstated: the drawer's
+   delete-with-references warning cannot fire for a bound script, and every actor
+   bound to it silently loses its logic. By design and already armed; named here
+   because SCRIPT2b makes scripts first-class in the drawer.
+8. **A lexer refusal is first-only; parse refusals are not.** `lex` returns a
+   single `Diagnostic` and `parse_unit` returns it alone, while the parser
+   recovers per top-level item and reports every refusal it found. So an
+   unterminated string shows one row and three bad handlers show three. Neither
+   the panel nor the docs say which.
+9. **A check racing a save is benign and unstated.** The linter checks the live
+   buffer; the watcher checks the saved bytes. Both are correct about the text
+   they were given, so the Problems panel and the Output Log can carry two
+   different answers under one file name, and neither is wrong.
+10. **The book still says a type name is recognised "after a `:`"** — the `->`
+    position landed in `78257fc7` and the user-facing page was not updated with
+    it.
+11. **A script double-clicked before the content root is known opens nothing,
+    silently** (`if (abs) requestOpenFile(abs)` in `ContentDrawer.tsx`). The
+    `""`-for-an-unknown-root rule is right; the caller swallows it.
+
+### The operating note this audit paid for: what a quoted heredoc actually preserves
+
+Measured, on this session's transport, writing through `cat > file <<'EOF'`:
+
+| written | arrives |
+|---|---|
+| `\` | `\` |
+| `\\` | `\` |
+| `\\\` | `\\` |
+| `\\\\` | `\\` |
+| `\n` | `\n` |
+| `\\n` | `\n` |
+
+**Exactly one level of backslash unescaping is applied, even inside a
+single-quoted heredoc.** Two consequences the campaign's shorthand does not
+carry, and both matter to a law it has paid for nine times:
+
+* A lone `\` **survives**, including at end of line — so a single-quoted heredoc
+  really is a safe transport for a Rust `\`-continuation. The law has been
+  asserting that without a measurement behind it; here is the measurement.
+* `\\` **does not**. The same transport silently rewrites `"C:\\path"` to
+  `"C:\path"` (loud — an invalid Rust escape) and `"a\\nb"` to `"a\nb"` (**silent**
+  — a real newline where a literal backslash-n was meant, which is the second
+  shape wearing a different hat). Any Rust, Python or TypeScript source carrying
+  a *doubled* backslash must go through `chr(92)` or a file write, never a
+  heredoc.
+
+This audit hit it on its first tooling script: a Python `replace('\\', '/')`
+inside a `<<'PYEOF'` heredoc arrived as `replace('\', '/')` and died with a
+`SyntaxError`. Loud that time. Nine recorded instances say the shape is not
+always loud.
+
+### Counts
+
+| | wave (`d698ccdd`) | **the audit** |
+|---|---|---|
+| frontend: test files / arms | 84 / 755 | **84 / 764** — `npx vitest run`, green. **+9 arms, +0 files**: 2 tokenizer fuzz, 1 `.infini` → `.infini` matrix, 1 IPC seam, 2 staleness, 3 URI decoder |
+| frontend: `tsc --noEmit` / `eslint --max-warnings 0` / `vite build` | clean | **clean / 0 / built** (5.4 s; the two chunk-size and dynamic-import warnings are pre-existing and unrelated) |
+| battery blocks / passed / failed / ignored | 353 / 6 582 / 0 / 19 | **353 / 6 583 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, exit 0. **+1 arm**, which is exactly the audit's `#[test]` diff (`a_handler_the_canvas_cannot_draw_still_reads_as_text`); `+0` blocks |
+| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**, in 25.8 s; `git status` over `crates/inf-render/tests/goldens` **empty** afterwards, so none blessed and none re-blessed. This audit renders nothing either |
+| rustdoc individual warnings (cold, ceiling 450) | 373 over 30 crates | **373 over 30 crates** — identical. After `cargo clean --doc` (9 122 files, 223.7 MiB): **403 `^warning` lines minus 30 per-crate summaries**, cross-checked against the sum of those summaries' own counts (373 exactly), over **48** documented crates. Headroom **77** |
+| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — exit 0, run **LAST** per the rmeta law, `CARGO_INCREMENTAL=0` as the wave did. **The first pass was RED**, and on the audit's own new arm: `clippy::err_expect` for `.err().expect()`. Fixed in `d10de2a6`; the second pass is green in 12.2 s over the one re-checked crate |
+| `cargo fmt --all --check` | clean | **clean** |
+| schemas / committed content | unmoved | **unmoved.** No `schema_version`, no `FROZEN_WIRE` row, no `kind_code`, no pack change, no golden blessed; `EXPECTED_LEVELS` still **23** |
+| `Cargo.lock` / manifests / `package.json` | byte-identical | **byte-identical.** The audit adds no dependency of any kind, Rust or npm |
+| ts-rs bindings | +1 (`ScriptDiagnosticDto`) | **unchanged** — the audit moves no DTO, and `git status` is clean after the battery has run the bindings harness, which is the drift check |
+| `chr(92)` sweep | green, and green is not clean | **green — and the tenth was HUNTED and not found.** A real comment-aware string-state lexer over the wave's five touched Rust files reports five multi-line non-raw literals and all five carry intact continuations; the audit's own two new ones do too, checked the same way |
+| disk | 43 GB free | **40 GB free.** `cargo clean --doc` only; no `target/debug/incremental` deletion and no `.pdb` reclaim needed |
+
+**Commits:** `0a756c48` (the symbol arm's tautology, the `?raw` length guard, and
+the tokenizer fuzzed), `d236dddf` (the base-set arm, the `.infini` → `.infini`
+matrix, and the IPC seam's frontend half), `bf2fd062` (the panel's staleness
+guard), `eec62a37` (the URI decoder, moved and repaired), `1529fc03` (the
+bridge's asymmetry measured, and "total" corrected where it contradicts itself),
+`51edfb55` (the `--ink-danger` recount), `490e63b5` (the canvas's refusal names
+the new remedy, and `reason` is rendered at all), `6a0641bd` (the book's type
+positions), `d10de2a6` (`expect_err`), plus this ledger.
+
+### The laws this audit adds
+
+**A set you fill from the answer cannot check the answer.** `mine.size ===
+ring0.size`, where `mine` was built one `add` per element of `ring0`, is true in
+every tree there is. The tell is structural rather than clever: the assertion's
+two sides share a source. And when an arm's NAME claims two directions — "gives
+every symbol a colour, and invents none" — it needs two assertions, not one
+assertion and a name.
+
+**A count is only a measurement if you know what it counted.** The wave replaced
+an eyeball with a `grep -o | wc -l`, and the pattern matched the paragraph
+*describing* the defect. The estimate was right and the measurement was wrong,
+which is the shape worth remembering: measuring the wrong population is not
+safer than estimating the right one.
+
+**The staleness rule belongs to every consumer of an answer, not to the one that
+has it built in.** CodeMirror drops a lint result whose document has moved; the
+store write two lines away did not, so the panel could show an older answer than
+the gutter — two surfaces disagreeing under one file name. When you rely on a
+library's discipline, apply it to the code beside the library, not only to the
+call into it.
+
+**An encoder and its inverse are one thing.** Wave F gave `path_to_uri` full
+RFC-3986 escaping, its TypeScript twin was pinned to the backend by a generated
+fixture, and the DECODER sat in a panel three directories away still handling
+`%20`. Neither test knew the other existed. Put them in one module and pin the
+**round trip** over the fixture the other side generates, with the retired
+implementation kept as the falsifier.
+
+**A capability nobody is told about was not shipped.** The wave built "Open as
+InfiniScript" and left the one sentence a user meets when the canvas refuses
+pointing at the generated Rust — while the `reason` field that would have
+explained it was computed, serialized, and dropped by its only consumer. Shipping
+a capability includes updating the message that stands where the old limitation
+was.
+
+**The ban-list ruling's axis is damage class, not instance count.** Four
+instances of the second eaten-continuation shape do not flip a ruling that 3 763
+legitimate multi-line literals decided; a first instance in a *shipped* literal
+would. Re-run an economic ruling against its denominator, not its numerator — and
+when the numbers say the gate loses, check whether a narrower SCOPE wins before
+concluding nothing does. Diff-scoped, the same detector costs five lines a wave
+and needs no allowlist at all.
+
+**Exactly one level of backslash unescaping survives a quoted heredoc.** So `\`
+is safe and `\\` is not, and the difference is measurable in six rows. See the
+operating note above.
