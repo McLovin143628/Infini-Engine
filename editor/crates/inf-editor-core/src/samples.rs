@@ -10899,6 +10899,7 @@ mod tests {
                 .expect("regenerate the settlement zone library");
             write_city().expect("regenerate the island city");
             write_gameplay().expect("regenerate the island gameplay fixture");
+            crate::heist::write_heist().expect("regenerate the harbour heist mission");
             crate::island::write_island_levels().expect("regenerate the island levels");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
@@ -11511,6 +11512,43 @@ mod tests {
                 CITY_README,
                 "committed city README drifted from the generator"
             );
+        }
+
+        // The Harbour Heist mission (SCRIPT3). The level, the vault graph and the
+        // README are locked here; the **mission itself** is not, because it is
+        // hand-authored (`crate::heist`'s module header states the ruling) and
+        // its own arms live beside it — it compiles clean, and its sidecar
+        // describes its bytes.
+        let hdir = crate::heist::heist_dir();
+        let hlvl = hdir.join("HarbourHeist.inf_lvl");
+        if hlvl.exists() {
+            assert_eq!(
+                std::fs::read(&hlvl).unwrap(),
+                crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(
+                    &crate::heist::heist_scene()
+                ))
+                .unwrap(),
+                "committed HarbourHeist.inf_lvl drifted from the generator"
+            );
+            for (graph, file) in [
+                (crate::heist::heist_vault_graph(), "HarbourVault.inf_pcg"),
+                (
+                    crate::heist::heist_housing_graph(),
+                    "HarbourHousing.inf_pcg",
+                ),
+            ] {
+                let lowered = inf_pcg::lower_graph(&graph, &inf_pcg::pcg_registry());
+                assert!(lowered.ok, "{file}'s graph stopped lowering");
+                assert_eq!(
+                    std::fs::read(hdir.join(file)).unwrap(),
+                    inf_asset::encode(&inf_pcg::PcgAssetPayload::from_graph(
+                        &graph,
+                        lowered.document
+                    ))
+                    .unwrap(),
+                    "committed {file} drifted from the generator"
+                );
+            }
         }
 
         // The island levels (I7). The `.inf_lvl` and the `.inf_pcg` are locked

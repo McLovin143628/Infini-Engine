@@ -57,6 +57,9 @@ pub mod gisbuild;
 // `MeshAsset`, draped on the level's own terrains through the IB-15 ground rule
 // and spawned through the same door a dropped asset uses.
 pub mod gisroad;
+// SCRIPT3: the Harbour Heist mission sample -- a whole mission authored as one
+// `.infini` file, and the level it is bound to.
+pub mod heist;
 pub mod hydro;
 pub mod ipc;
 pub mod island;

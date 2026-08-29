@@ -1,0 +1,139 @@
+-- ===========================================================================
+--  HARBOUR HEIST -- the InfiniScript arc's dogfood mission (wave SCRIPT3).
+--
+--  A whole mission in one text file, with NO Rust behind it: the objectives,
+--  the timer, the bolt on the door, the loot, the stakes and the outcome are
+--  member variables and verbs from the shipped node kit. Edit this file with
+--  the editor's Simulate running and the mission changes under you -- that is
+--  the arc's whole claim, and `script_iteration.rs` measures it on this file.
+--
+--  It is bound to the HERO, so `entity` is the player: everything below that
+--  asks "am I inside", "how hurt am I", "what am I carrying" is asking about
+--  the person playing.
+--
+--  The five verb families it is made of:
+--    zone.*    the mission primitive -- am I in the vault, am I at the boat
+--    door.*    the bolt that shuts behind you
+--    item.*    the catalogue, the bullion on the floor, the bag it goes in
+--    health.*  the stakes: being watched costs condition, and condition ends runs
+--    engine.*  the alarm this mission puts in the world and takes away again
+--
+--  WHY THERE IS NO `on zone_enter`: the PULL half of `zone.*` is what exists.
+--  An OnPlayerEnterZone EVENT is priced in `inf_blueprint::nodekit`'s zone kit
+--  and routed to SCRIPT4 -- an `EventKind` variant, two host drains, two
+--  `event.*` NodeDefs, a `raise::event_kind_of` arm, and somewhere for a trigger
+--  volume to LIVE that is not a script's own literals. Polling on `Tick` is one
+--  fixed step later than an event would be and is otherwise the same mission.
+-- ===========================================================================
+
+actor "HarbourHeist"
+
+-- The hero. Seeded by the host with this actor's own entity id at entry.
+var entity: int = 0
+
+-- The mission's state machine: 0 approach, 1 in the vault, 2 running for the
+-- boat, 3 clear, 4 caught. An `int` because it is compared, never added to.
+var phase: int = 0
+-- Seconds left before the guards arrive. The vault's clock, counted in `Tick`'s
+-- own `dt`, so it is a function of the fixed step and not of a wall clock.
+var clock: float = 0.0
+-- Seconds until the next bar comes off the shelf.
+var grab: float = 0.0
+-- Bars in the bag, read back out of the inventory rather than remembered: the
+-- world is the state, and a counter beside it is a second opinion.
+var bars: int = 0
+-- The alarm this mission spawned, or 0 while there is none.
+var alarm: int = 0
+-- How many people the quarter holds. The crowd this job has to answer to.
+var witnesses: int = 0
+-- The hero's condition, 1.0 whole to 0.0 down.
+var condition: float = 1.0
+
+on begin_play()
+    item.define(catalogue())
+    door.spawn(doors())
+    health.set(entity, 3000.0)
+    item.spawn_pickup("bullion", 0.0, 0.5, 0.0, 6)
+    debug.print("Harbour Heist: the vault is open and the boat leaves shortly.")
+end
+
+on tick(dt)
+    condition = health.fraction(entity)
+    witnesses = crowd.population()
+    bars = item.count(entity, "bullion")
+    if phase == 0 then
+        if in_the_vault() then
+            break_in()
+        end
+    elseif phase == 1 then
+        clock = clock - dt
+        grab = grab - dt
+        if witnesses > 0 then
+            -- Somebody out there is watching. Watchers fetch guards: the job
+            -- costs condition and the clock runs at double speed.
+            health.damage(entity, 12.0)
+            clock = clock - dt
+        end
+        -- The bullion is IN the vault. Step out and the shelf stops paying.
+        if bars < 6 and grab <= 0.0 and in_the_vault() then
+            item.give(entity, "bullion", 1)
+            grab = 0.25
+        end
+        if clock <= 0.0 then
+            get_out()
+        elseif bars >= 6 then
+            get_out()
+        end
+    elseif phase == 2 then
+        if condition <= 0.5 then
+            phase = 4
+            debug.print("Harbour Heist: down on the quay. The job is off.")
+        elseif at_the_boat() then
+            phase = 3
+            debug.print("Harbour Heist: clear, on the water, with the bullion.")
+        end
+    end
+end
+
+-- The objective's own two zones. Written as functions rather than inline so the
+-- Tick handler reads as the mission and the geometry is in one place -- which is
+-- the closest this language gets to a named constant.
+function in_the_vault() -> bool
+    return zone.contains(entity, 0.0, 1.5, 0.0, 13.0, 1.5, 10.0)
+end
+
+function at_the_boat() -> bool
+    return zone.contains(entity, 0.0, 1.5, -30.0, 3.0, 2.0, 3.0)
+end
+
+-- The way in. Bolt the door behind you, put the alarm on the floor where you
+-- are standing, and turn to face the way you came.
+function break_in()
+    phase = 1
+    clock = 6.0
+    grab = 0.0
+    alarm = engine.spawn("Alarm")
+    engine.set_rotation(180.0)
+    door.lock(0.0, 1.05, -12.0)
+    debug.print("Harbour Heist: in. The door is bolted behind you.")
+end
+
+-- The way out, reached from two different conditions -- which is why it is a
+-- function. `door.lock` TOGGLES the bolt, so the first call unlocks what
+-- `break_in` locked and `door.use` then swings it.
+function get_out()
+    phase = 2
+    door.lock(0.0, 1.05, -12.0)
+    door.use(0.0, 1.05, -12.0)
+    engine.destroy(alarm)
+    alarm = 0
+    debug.print("Harbour Heist: out through the front, running for the boat.")
+end
+
+function catalogue() -> string
+    return "[bullion]\nlabel = \"Gold Bar\"\nstack_max = 12\nmass_kg = 12.4\n"
+end
+
+function doors() -> string
+    return "[vault]\nlabel = \"vault door\"\nhinge = [0.0, 1.05, -12.0]\nclosed_yaw_deg = 0.0\ninside_yaw_deg = 90.0\nopen_limit_deg = 95.0\nlocked = false\n"
+end

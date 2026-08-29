@@ -1,0 +1,9 @@
+schema_version = 26
+guid = "00000000-0000-0000-0000-00005c130000"
+title = "Harbour Heist"
+entity_count = 5
+content_hash = "2163ef927d0711f2"
+dependencies = [
+    "00000000-0000-0000-0000-00005c130002",
+    "00000000-0000-0000-0000-00005c130009",
+]

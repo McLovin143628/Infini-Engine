@@ -85,9 +85,14 @@ fn committed_levels() -> Vec<PathBuf> {
 /// The level itself is authored from the committed design alone, which is
 /// exactly what lets it be counted here.
 ///
+/// …**plus wave SCRIPT3's mission** (`samples/harbour-heist/HarbourHeist.inf_lvl`),
+/// which is the twenty-fourth and the first committed level whose gameplay is a
+/// `.infini` rather than a `.inf_act`: a quayside slab, a grammar-built vault
+/// and one hero whose `ActorClass` names the script beside it.
+///
 /// Exact, not `>= 1`: this arm's whole subject is *shipped content*, and a walk
 /// that quietly found one file would pass every assertion below.
-const EXPECTED_LEVELS: usize = 23;
+const EXPECTED_LEVELS: usize = 24;
 
 #[test]
 fn every_committed_level_sidecar_declares_its_bindings() {
