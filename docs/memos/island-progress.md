@@ -21667,3 +21667,72 @@ the table**. That is not a hypothetical any more.
    description**, so the manual carries the warning); the handler-level source
    map; and appendix A.9's v1 omissions — one of which, the user-function call
    form, this wave retires.
+
+### Counts
+
+| | baseline (`c672c030`) | **wave SCRIPT2a** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 350 / 6 549 / 0 / 19 | **353 / 6 573 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`. **+3 blocks** (`call_form`, `api_manual`, `script_api_surface`) and **+24 arms**, which is exactly the `#[test]` count of the wave's diff (24 added, 0 removed). The run itself reported 6 572 passed and **one failure**, and it was the `chr(92)` sweep catching one of this wave's own literals — repaired in `a6526c98` and re-run green (`inf-packager` 28/28, `inf-script` 4/11/8/8/9/8/3/5/10/5 across its ten blocks) |
+| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**; none added, none re-blessed, and `git status` over `crates/inf-render/tests/goldens` is empty afterwards |
+| rustdoc individual warnings (cold, ceiling 450) | 373 over 30 crates | **373 over 30 crates** — after `cargo clean --doc` (9 117 files, 225.9 MiB): **403 `^warning` lines minus 30 per-crate summaries**, cross-checked against the sum of those summaries' own counts (373 exactly), over **48** documented crates. The wave adds **zero**, and it added one first — a `[Expr::Call](crate::Expr::Call)` whose label already resolved (`redundant explicit link target`), caught by running the count rather than assuming it. Headroom **77** |
+| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — exit 0, run **LAST** per the rmeta law, with `CARGO_INCREMENTAL=0` so a 20-GB-free machine did not grow a second incremental set. Incremental, and said so: **18** crates re-checked (`inf-blueprint`, `inf-script`, `inf-transpile`, `inf-ecs`, `inf-physics` and everything downstream — `inf-anim`, `inf-scene`, `inf-runtime`, `inf-project`, `inf-packager`, `inf-player`, `inf-editor-core`, `inf-cli`, `inf-viewport`, `inf-studio`), which is exactly the wave's code footprint; the rest served from a fingerprint cache keyed on the *same* `RUSTFLAGS` and profile, which is what makes reusing it legitimate rather than a gap. **The first pass was red** — five `clippy::unusual_byte_groupings` on the new gate's GUID constants, from the audit's own new file |
+| `cargo fmt --all --check` | clean | **clean** |
+| frontend | not run | **not run — no `editor/studio/src/` file moved**, verified with `git diff --stat` over `editor/studio/src/`, `runtime/`, `samples/` for the whole wave range. The editor half is SCRIPT2b, and its gate axis (typecheck, lint, vitest, build) goes with it. No ts-rs type changed shape |
+| schemas / committed content | unmoved | **unmoved — and the call form is the reason this row is interesting.** No `schema_version` moved, no `FROZEN_WIRE` row, no `kind_code`, no pack change; the call form is a one-segment value of an `Expr::Call` that already existed. `EXPECTED_LEVELS` still **23**. One pinned digest moved with its reason stated: the cooked-script artifact, because the gate's *fixture* grew a function |
+| `Cargo.lock` / manifests | — | **byte-identical.** No dependency of any kind, internal or external |
+| `chr(92)` sweep | clean | **one catch, repaired, and then clean.** `inf_packager`'s workspace sweep reddened the battery on a literal in `crown_parity.rs` that lost its `\`-continuation to a shell heredoc — the seventh instance of the same cause. A fresh sweep over the whole wave diff finds exactly that one and nothing else |
+| disk | 17 GB free | **20 GB free.** `target/debug/incremental` deleted twice (5.2 GB and 9 GB) with **no cold rebuild**, per the Wave-G half of the disk law; no `cargo clean` beyond `--doc` |
+
+**A local-toolchain note, carried rather than acted on.** `ci.yml`'s workspace
+`RUSTFLAGS` is `-D warnings -A clippy::chunks_exact_to_as_chunks`, and running it
+verbatim on this machine fails **every crate** with
+`error[E0602]: unknown lint: clippy::chunks_exact_to_as_chunks` — because
+`-D warnings` implies `-D unknown-lints` and this machine's clippy (rust 1.97) does
+not have that lint. CI's `dtolnay/rust-toolchain@stable` is newer and does. So the
+local gate is run as the house command has always stated it (`RUSTFLAGS=-D
+warnings`), and the observation is written down because it cuts the other way the
+day CI's stable *drops* the lint: the allow would then redden all three legs with
+an error about a lint name rather than about any code.
+
+**Commits:** `62febfde` (the call form — parser, emitter, `LocalFns`, `raise`'s
+named refusal, the recursion ruling, `tests/call_form.rs`, the crown gate's
+fixture and the retired diagnostics row), `597d6cda` (seventeen verbs, the
+generalized registry-versus-hosts gate, the `engine.*` tripwire, and
+`script_api_surface.rs`), `f387d759` (twenty descriptions, the generated API
+manual and its drift check, the `.infini` language page, the book's cross-links),
+`a265f7fd` (the call form across the cook, the pack and the shipped player),
+`a6526c98` (the eaten continuation), plus this ledger and the ROADMAP block.
+
+### The laws this wave adds
+
+**A capability can be new without the IR being new.** The brief expected a schema
+question and priced one; the honest answer was that `Expr::Call`'s path length is
+free information nobody had spent. Before bumping a wire, ask what the *existing*
+shapes cannot already say — the P6 vars-via-Host precedent is not a one-off
+trick, it is the shape of the question.
+
+**Two faces of one program must agree about what an infinite loop does.** The
+interpreter can refuse; compiled Rust can only overflow. Where the two cannot be
+made to agree at run time, the *language* refuses at compile time — which is why
+recursion is a parse error here and `while` is not.
+
+**A gate over two of twenty-three namespaces is a gate about two namespaces.**
+The `ik`/`anim` registry checks were right and their scope was an accident of
+which wave wrote them. Generalizing found `engine.*` — three verbs in the
+palette, callable from text, implemented by nobody, one of them the sole reason
+the cook has an asset-reference walk at all.
+
+**An exclusion list needs its own arm.** Naming `engine` as an exception makes
+the general gate honest; without a second arm asserting the exception is still
+true, it is a blind spot with a name on it.
+
+**Measure a count differentially when you cannot enumerate what is in the box.**
+`zone.count` read three where two were authored, and the third was a collider no
+component describes. Pinning 3 would have pinned a number nobody could explain;
+asserting that one more body adds one is the same claim, falsifiable, and immune
+to what else the physics world holds.
+
+**A generated document is a table, and a description is a string.** A newline
+inside a cell ends the table and a pipe ends the cell, so the *renderer* fixes
+both rather than every future verb's author remembering. The failure was not
+hypothetical: it arrived in this wave's own first bless.

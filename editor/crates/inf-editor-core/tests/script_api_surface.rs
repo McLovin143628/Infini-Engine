@@ -47,10 +47,10 @@ use inf_editor_core::scene::SceneDoc;
 use inf_editor_core::simulate::{SimInput, SimSession, SIM_HZ};
 use inf_terrain::TerrainData;
 
-const PROBE_GUID: u128 = 0x5C819_2000;
-const NEIGHBOUR_GUID: u128 = 0x5C819_2001;
-const TERRAIN_GUID: u128 = 0x5C819_2002;
-const SKY_GUID: u128 = 0x5C819_2003;
+const PROBE_GUID: u128 = 0x0005_C819_2000;
+const NEIGHBOUR_GUID: u128 = 0x0005_C819_2001;
+const TERRAIN_GUID: u128 = 0x0005_C819_2002;
+const SKY_GUID: u128 = 0x0005_C819_2003;
 
 /// The flat ground's height, metres. Not zero, deliberately: a `terrain.height_at`
 /// that answered its own "no ground here" default would pass against 0.
@@ -258,7 +258,7 @@ fn install_crowd(doc: &mut SceneDoc, session: &mut SimSession) {
     let records: BTreeMap<Uuid, CrowdRecord> = (0..AGENTS)
         .map(|i| {
             (
-                Uuid::from_u128(0x5C819_3000 + i as u128),
+                Uuid::from_u128(0x0005_C819_3000 + i as u128),
                 CrowdRecord::standing(
                     CrowdArchetype::default(),
                     DVec3::new(100.0 + i as f64 * 4.0, 0.0, 0.0),
