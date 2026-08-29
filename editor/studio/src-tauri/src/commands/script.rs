@@ -81,8 +81,15 @@ pub async fn script_check(
 ///
 /// `raise`-to-a-graph refuses far more than this does (a `NodeDef`'s ports are
 /// fixed and a call form has none), which is the arc's own claim made
-/// operational: **the text face is total over the IR and the graph face is
-/// not**, so a handler that cannot be drawn can still be read.
+/// operational: **the text face refuses strictly less than the graph face**, so
+/// a handler that cannot be drawn can still be read. Measured, over the shape
+/// the bridge is sold on, by `a_handler_the_canvas_cannot_draw_still_reads_as_text`.
+///
+/// "Total over the IR" is the arc's shorthand and it is a shorthand: `emit_class`
+/// has four refusal kinds (SCRIPT1a's memo prices them — four IR states no
+/// producer makes, a depth bound, and one statement shape `raise` refuses too),
+/// which is exactly why this function has an error arm at all. The `Err` below
+/// is reachable, not defensive.
 #[tauri::command]
 pub async fn script_emit_class(
     asset_id: String,
@@ -213,6 +220,74 @@ mod tests {
         let refusals = check_text(&text, Some("Example.infini"));
         assert_eq!(
             refusals,
+            vec![],
+            "the editor would open this class covered in squiggles:\n{text}"
+        );
+    }
+
+    /// **A handler the canvas cannot draw still reads as text** — the claim
+    /// "Open as InfiniScript" exists for, measured rather than repeated.
+    ///
+    /// It is stated in three places (this module's doc, the drawer's context
+    /// menu, the book's "Reading a Blueprint as InfiniScript") and until this
+    /// arm it was measured in none: the only emit→check arm runs over
+    /// `Example.infini`, which holds no unit-local call and therefore never
+    /// crosses the asymmetry it is cited for. So the three faces are run
+    /// against each other over one class that does:
+    ///
+    /// * the GRAPH face refuses it **by name** — `RaiseError::LocalFunctionCall`,
+    ///   because a `NodeDef`'s ports are fixed at registration and a user
+    ///   function's signature is not, so the palette has no node to draw it with;
+    /// * the TEXT face writes it anyway;
+    /// * `script_check` accepts what was written, so the tab does not open
+    ///   covered in squiggles.
+    ///
+    /// Note what is NOT claimed: the emitter is not total. `emit_class` has four
+    /// refusal kinds and `script_emit_class` renders one into a message naming
+    /// the class. What is true, and what this measures, is the *direction*: the
+    /// text face refuses strictly less than the graph face on the shape the
+    /// bridge is sold on.
+    #[test]
+    fn a_handler_the_canvas_cannot_draw_still_reads_as_text() {
+        let source = r#"actor "Bridge"
+
+var out: float = 0.0
+
+function bump(x: float)
+  out = out + x
+end
+
+on begin_play()
+  bump(21.0)
+end
+"#;
+        let (class, _w) = inf_script::compile(source, "bridge").expect("the fixture compiles");
+        let handler = &class
+            .events
+            .first()
+            .expect("the fixture declares one handler")
+            .body;
+
+        // 1. The graph face refuses it, by the name the arc gave the refusal.
+        let refused = inf_blueprint::raise_fn(handler)
+            .err()
+            .expect("`raise` must refuse a call form, or this arm is about nothing");
+        assert!(
+            matches!(&refused, inf_blueprint::RaiseError::LocalFunctionCall(n) if n == "bump"),
+            "expected the call form's own refusal, got {refused:?}"
+        );
+
+        // 2. The text face writes it…
+        let text = inf_script::emit_class(&class).expect("the emitter writes a call form");
+        assert!(
+            text.contains("bump(21.0)"),
+            "the call form did not survive the emitter:\n{text}"
+        );
+
+        // 3. …and the checker accepts what was written, which is what the
+        //    read-only tab's own linter does the moment it opens.
+        assert_eq!(
+            check_text(&text, Some("Bridge.infini")),
             vec![],
             "the editor would open this class covered in squiggles:\n{text}"
         );

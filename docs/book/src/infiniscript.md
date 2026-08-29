@@ -207,9 +207,10 @@ InfiniScript**. The class is rendered as the `.infini` file it would be, through
 the engine's own emitter, and opens in a read-only tab.
 
 This works far more often than opening a script *as a graph* does. The text face
-is total over the gameplay IR and the canvas is not — a handler that calls one of
-its unit's own functions, for instance, has no node form and cannot be drawn, and
-it reads perfectly well as text.
+refuses much less than the canvas does — a handler that calls one of its unit's
+own functions, for instance, has no node form and cannot be drawn, and it reads
+perfectly well as text. It is not guaranteed: a class the emitter has no written
+form for gets a message naming it and pointing at the generated Rust instead.
 
 It is read-only for now, and the reason is worth knowing rather than guessing:
 writing the text back means deciding what happens to the internal names a
