@@ -178,21 +178,21 @@ time it ships — it is compiled Rust in the player binary, and no JIT beats tha
 **InfiniScript is a text front-end over the Blueprint IR.**
 
 ```
-                                       ┌──▶ interpreter ──▶ in-editor, hot-swapped on save
-                                       │          ▲
-.infini text ──parse──▶ BlueprintFn IR ┤          │ parity gate (interpreted == compiled)
-       ▲                     │  ▲      │          ▼
-       └──── emit ───────────┘  │      └──▶ transpile ──▶ Rust ──▶ the shipped binary
-                                │
-                         raise ─┴─ lower  ⇄  graph      (round trip: lower(raise(f)) == f
-                                                         on lowering's image)
+                                   ┌─▶ interpreter ──▶ in-editor, hot-swapped on save
+                                   │         ⇕   PARITY GATE: interpreted == compiled
+  .infini text ──parse──▶ IR ──────┼─▶ transpile ──▶ Rust ──▶ the shipped binary
+       ▲                           │
+       └──────── emit ─────────────┤
+                                   └─▶ raise ──▶ graph ──▶ lower ──▶ IR
+                                        ROUND TRIP: lower(raise(f)) == f,
+                                        on lowering's image
 ```
 
 Two different guarantees, and the first draft of this diagram put one label on
-the other's arrow. **Parity** is interpreter-vs-transpiled — the vertical seam on
-the right. **Round-trip** is `lower ∘ raise` — the graph loop at the bottom, and
-the thing that makes text and graph two views. They fail differently and they are
-gated separately.
+the other's arrow. **Parity** is interpreter-vs-transpiled — the `⇕` between the
+IR's first two consumers. **Round-trip** is `lower ∘ raise` — the third branch,
+and the thing that makes text and graph two views of one program. They fail
+differently and they are gated separately.
 
 Three consequences follow, and they are the whole design:
 
