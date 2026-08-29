@@ -19466,9 +19466,14 @@ every `include_str!` that names one, would move a prefix that already reads
 `app_data_dir()`, and that directory is where the user's `Content/`, their
 layouts, their editor settings, their thumbnail cache and their crash-recovery
 file live. Renaming it does not migrate a user's work — it **hides** it, silently,
-and the editor boots looking brand new. Two of the three `InfinityEngine`
-filesystem roots are a **writer and a reader that have to agree** about where
-crash dumps land, which is the same argument with a second failure mode.
+and the editor boots looking brand new. Of the three `InfinityEngine` filesystem
+roots, two (`win32.rs`, `commands/diagnostics.rs`) are **two writers in two
+processes** landing crash reports in one directory a human collects — the audit
+found nothing in the workspace *reads* a crash directory, so the "writer and a
+reader" framing belongs to the **third**: `inf-player`'s `settings_dir()` holds
+`game-settings.toml`, which `PlayerUi::open` reads every launch and the settings
+screen writes. Renaming that one resets every shipped player's bindings and look
+sensitivity, silently, on update.
 
 "Infinity Blueprints" is *carried* rather than kept: SCRIPT1 makes graphs and
 text two faces of one program, and what that one thing is called should be

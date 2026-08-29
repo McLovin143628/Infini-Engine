@@ -19616,8 +19616,11 @@ quicker.
   families stayed deliberately and each is argued in the memo §7: the Tauri bundle identifier
   `com.infinityengine.app` (it is the key to `app_data_dir()`, which holds the user's
   `Content/`, layouts, settings and crash-recovery file — renaming it hides a user's work
-  rather than moving it), the three `InfinityEngine` crash/data roots (two of which are a
-  writer and a reader that must agree), the persisted theme ids and npm name, the *recognition*
+  rather than moving it), the three `InfinityEngine` crash/data roots (two are two *writers*
+  in two processes landing crash reports in one place; the writer-and-reader pair is the
+  third — `inf-player`'s `settings_dir()`, whose `game-settings.toml` is read every launch,
+  so renaming it resets every shipped player's bindings), the persisted theme ids and npm
+  name, the *recognition*
   half of the generated-source marker, and — found by the audit's wider sweep, since a sweep
   for the *phrase* cannot see them — the `.infinity/` per-project settings directory (six
   members, read by the **cook**, present in every project already on disk), the

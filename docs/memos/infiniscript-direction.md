@@ -306,10 +306,24 @@ label: on every platform it is the key to `app_data_dir()`, and that directory
 holds the user's `Content/`, their layouts, their editor settings, their thumbnail
 cache and their crash-recovery file. Renaming it would not migrate a user's work;
 it would *hide* it, silently, and the editor would boot looking brand new. The
-same reasoning keeps the three `InfinityEngine` filesystem roots
-(`inf-viewport/src/win32.rs`, `commands/diagnostics.rs`, `inf-player/src/ui.rs`) —
-two of which are a **writer and a reader that must agree** about where crash
-dumps live.
+same reasoning keeps the three `InfinityEngine` filesystem roots, though not for
+quite the reason the first draft gave. Enumerated:
+
+* `inf-viewport/src/win32.rs` and `commands/diagnostics.rs` are **two writers, in
+  two processes** — the viewport thread's panic handler and the editor's own
+  crash hook, both falling back to `temp_dir()/InfinityEngine/crashes`. Nothing
+  in the workspace *reads* a crash directory; the agreement matters because the
+  human collecting a bug report needs both halves of a crash in one place, and
+  moving one of the two spelling-wise would scatter them silently.
+* `inf-player/src/ui.rs`'s `settings_dir()` **is** the writer-and-reader pair:
+  `%APPDATA%\InfinityEngine` (or `$XDG_CONFIG_HOME/InfinityEngine`) holds
+  `game-settings.toml`, which `PlayerUi::open` reads on every launch and the
+  settings screen writes. Renaming it does not lose a crash dump — it resets
+  every shipped player's key bindings and look sensitivity to defaults, on
+  update, with no message.
+
+So the ruling stands and its strongest case is the third root rather than the
+first two.
 
 **The generated-source marker changed, but recognition did not.**
 `GENERATED_MARKER` looked like a label and is a runtime identifier:
