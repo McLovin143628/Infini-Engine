@@ -19783,12 +19783,31 @@ quicker.
   at the top of a fixed step beside `apply_pending_tunes` (a filesystem event is even less
   welcome inside a step than a slider is), keyed by asset GUID, state surviving because
   `ActorInstance` sits beside the class, with variables the edit *added* seeded from their
-  defaults — without which the first Tick after adding one dies at `vars::get`. Containment is
+  defaults — without which the first Tick after adding one dies at `vars::get`. **The audit's
+  HIGH: the key moved.** A payload with no sidecar takes a GUID synthesised from its
+  **content hash**, and a `.infini` is the only payload here a human edits in place — so
+  every save renamed the asset, hot reload swapped **nothing** (the class was queued under a
+  GUID no `ActorClass` held), and PIE, Simulate and the cook then resolved that binding to
+  `None` and ran the actor with no gameplay logic at all. Neither gate could see it: the
+  hot-reload arm calls `reload_class` with a hard-coded constant, and the PIE gate writes its
+  fixture a committed sidecar *because the wave knew a synthesised GUID would not resolve*.
+  Fixed by `pin_script_ids` (the synthesised sidecar is written the first time a scan meets a
+  script), and the missing link — `queue::tick` reporting the change at all — is now armed. Containment is
   **tighter than §4 predicted**: a broken edit never becomes a class, so nothing is queued and
-  the previous good program keeps running with the diagnostics in the Output Log. **Measured:
-  edit → running 121 ms, of which 120 ms is the watcher's own debounce; the engine's half is
-  0.45 ms.** Zero `rustc`. The player gets no such door — `player_has_no_tuning_door` grew three
-  tokens. **The cook**: `AssetKind::Script` additive (enum tail, `all()`, `FROZEN_WIRE` 24→25,
+  the previous good program keeps running with the diagnostics in the Output Log. **Measured
+  (corrected by the SCRIPT1b audit): the ENGINE's half — file door, compile, swap, one fixed
+  step — is 0.35–0.45 ms, zero `rustc`.** The plumbing on top is the editor's own two
+  constants, and the wave conflated them: `commands/assets.rs` sets `WATCH_DEBOUNCE` to
+  **250 ms** and `TICK` — the interval at which the asset thread *drains* the watcher — to
+  120 ms, so edit → seen in the editor is **250–370 ms**, and the swap then lands on the next
+  fixed step (≤ 16.7 ms at 60 Hz). The wave's "121 ms, of which 120 ms is the watcher's own
+  debounce" was a fact about a debounce the *arm* chose, reported as one about the editor; the
+  arm now reads both constants out of Ring 2's source so the printed number cannot drift from
+  the shipped one. The player gets no such door — `player_has_no_tuning_door` grew three
+  tokens. **And the seeding rule runs one way**: a variable the edit *removed* lingers on the
+  instance (and still wins if it is re-declared with a new default), and one whose *type*
+  changed is not migrated, so the first handler to read it dies at `RunError::Type` for that
+  tick — both armed and sentenced by the audit. **The cook**: `AssetKind::Script` additive (enum tail, `all()`, `FROZEN_WIRE` 24→25,
   `kind_code` 25; no row moved, no schema moved), and the **ship decision taken — pack the IR
   for the shipped interpreter**, because it is what the engine already does with a `.inf_act`,
   because the transpile door writes into the *user's* crate while the shipped player is a
@@ -19801,8 +19820,12 @@ quicker.
   a **blocking** advisory naming itself. **THE CROWN GATE**: transpile a `.infini`, emit the host
   shims beside it, `rustc` the zero-dependency program, **run it**, and require the trace
   byte-identical to the interpreter's — host calls in order, every argument as a bit pattern,
-  each handler's return, and the variable state after every event. 177 trace lines, 60+ host
-  calls, rustc **234 ms** against a 60 s **LOAD**-class budget (never a frame one); `rustc`
+  each handler's return (which every event handler's is `Ty::Unit`, so the audit made the
+  compiled side's constant a *checked* one rather than an unfalsifiable line), and the
+  variable state after every event. 177 trace lines — **179** since the audit added a NaN leg
+  through the two NaN-absorbing builtins, whose shims were a second implementation and
+  disagreed with the engine — 60+ host
+  calls, rustc **210–234 ms** against a 60 s **LOAD**-class budget (never a frame one); `rustc`
   rather than `cargo` because there is no lock to take, no workspace to resolve and no manifest
   to write. It **found two defects nothing else in this tree can see**, because seeing them
   requires compiling: `#[infinity::blueprint(id = …)]` **has no macro behind it** (no crate,
@@ -23231,6 +23254,25 @@ refused by name and left byte-identical. The path guard is *structural* — the 
 hostile names are asserted to stay inside the directory. New projects scaffold
 `pub mod blueprints;` and the index beside it; existing ones are not edited behind their
 author's back.
+
+**CORRECTION (SCRIPT1b, 2026-08-29; restated by the SCRIPT1b audit here rather than only in
+the wave block, because this is the paragraph a reader arrives at).** Everything above is
+true about the *path*, and the thing the path exists for is not: **what the Code tab writes
+does not compile.** `inf_transpile::emit` puts `#[infinity::blueprint(id = "…")]` on every
+generated fn, and there is no crate, module or macro named `infinity` anywhere in this
+workspace — so `pub mod blueprints;` plus one generated file is a `cargo build` failure
+(`E0433: cannot find module or crate 'infinity'`), and the template's promise that a
+scaffolded project builds ends at the author's first Code-tab generate. Nothing had noticed
+because **nothing in this repository had ever compiled the transpiler's output**: `generate →
+lift` is a perfect identity with the attribute in place, and the four parity families'
+compiled side is hand-written. Measured by SCRIPT1b's crown gate
+(`crates/inf-script/tests/crown_parity.rs::the_generated_marker_has_no_macro_behind_it`,
+which hands the marker to `rustc` and reads the refusal back), and carried as a **tripwire**:
+the fix is a real `infinity` proc-macro crate, **or** stripping at `blueprint_source`'s own
+door, and the second costs `lift` its identity anchor (`path.segments[0].ident ==
+"infinity"`) — a decision with a price, priced and not taken. A second bound rides with it:
+generated `vars::get` is **monomorphic**, so a member variable that is not a float parses,
+lowers, interprets perfectly and cannot be transpiled at all.
 
 ### The fifteen-remainder sweep
 

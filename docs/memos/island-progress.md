@@ -20701,13 +20701,28 @@ not mutations somebody invented; they were in the tree.
    `cargo` build and its lock.
 4. **The PIE payload does not walk `asset_refs`.** `build_scene_payload` is a
    hand-maintained mirror of `asset_deps` and this edge is not in it. Safe today
-   for a **measured** reason — `engine.spawn`, the only asset-naming verb,
-   reaches neither host's `Host::call` — and armed
+   for a **measured** reason — no host *implements* `engine.spawn`, the only
+   asset-naming verb — and armed
    (`nothing_a_script_names_can_reach_a_world_yet`) so the day somebody
    implements it, the arm goes red and says what it owes.
+   *(SCRIPT1b audit, two corrections. The reason of record read "reaches
+   neither host's `Host::call`", which is false — it does reach it and lands on
+   the unknown-call arm that logs `path.join("::")` and answers `Value::Unit`,
+   so "a partially-authored blueprint still runs rather than aborting". And the
+   arm asserted the log did **not** contain `engine::spawn`, on a fixture that
+   never calls it — an assertion that could not fail, under prose claiming the
+   opposite. It now runs a script that really calls the verb: the host log is
+   `["engine::spawn", "the statement after the spawn"]` and the world gains no
+   entity.)*
 5. **A `.infini` needs a committed sidecar to keep a stable GUID across hosts**,
    or `*.infini -text`. Both are in place for this repository; a *user's* project
    inherits the same rule and nothing tells them so yet.
+   *(SCRIPT1b audit: **closed, and it was understating a live defect.** The
+   sidecar is not only about hosts — without one a script's GUID is its content
+   hash, so **its own next save renames it**, which is what broke hot reload
+   end to end. `pin_script_ids` now writes the sidecar the first time a scan
+   meets a script, and `scaffold` writes the `.gitattributes` rule into every
+   new project.)*
 6. **The editor surface is the Output Log.** No CodeMirror mode, no Problems-panel
    wiring, no open-as-text menu item — SCRIPT2's clause 2, unchanged from
    SCRIPT1a's carried item 8. **And no user-facing page**: the mdBook names
@@ -20741,7 +20756,13 @@ compiled side proves two programs agree; it cannot prove the generator is
 right, because a defect in `emit` moves the output and leaves the mirror where
 it was. The measured version of that sentence is the mutation table: the
 mirror-image `Lt`/`Gt` swap keeps `generate -> lift` an identity and reddens
-only the gate that runs the result.
+the gate that runs the result. *(The SCRIPT1b audit re-ran it and struck the
+word "only": the table one section above already records `hand_edits::
+{if_else_lifts, while_loop_lifts}` catching it too, and re-running the whole
+`inf-transpile` suite under the mutation confirms exactly those two — they
+pin generated **source text** containing `<` and `>`, which is a different
+instrument from a round trip. The law stands; the round trip is what is blind,
+not the tree.)*
 
 **Normalising a reader cannot normalise an identity.** The lexer can be made
 insensitive to CRLF and to a byte-order mark; a content hash cannot. Anything
@@ -20754,3 +20775,428 @@ reload legitimately asks whether a session is live. Moving it into its own
 function and teaching the gate to read BOTH directions -- the tick's call is
 pinned at its own indentation, and the extracted function may not name the
 invalidation -- left both claims true and neither weakened.
+
+## Wave SCRIPT1b — the adversarial audit (2026-08-29)
+
+The wave built five real things and one of them did not work. Everything the
+ledger claims about the crown gate, the cook, the SK1c edge and `PIE ==
+shipping` re-runs and holds — the three mutations redden at the exact lines the
+table names, 177 trace lines, 90 steps, 6 world states, the pinned FNV digest.
+What does not hold is the feature the wave is named for: **a save did not
+become new behaviour in the editor**, and the two gates over it could not see
+that, because each of them stepped around the one thing that was broken. The
+crown gate holds too — and its own shim disagreed with the engine on a NaN,
+which is why its trace is 179 lines now rather than 177.
+
+### THE HIGH: a save renamed the script, so hot reload swapped nothing
+
+`AssetDb` registers a payload with **no sidecar** under a GUID synthesised from
+its **content hash**. `db.rs`'s own comment already names what that costs, for
+the one kind that had met it before:
+
+> *"the content-hash fallback below makes a level's asset id **churn with its
+> contents**, so every save re-registers the level under a new id and every edge
+> into it goes stale."*
+
+A `.inf_lvl` escapes because its own TOML declares a GUID. A `.inf_act` escapes
+because the door that writes one writes a sidecar beside it. **A `.infini` had
+neither** — and it is the only payload in this system a human edits in place
+with a text editor, so its hash moves on *every save*.
+
+Measured, before anything was changed: scan a `.infini`, change one character,
+and the database hands back a different asset id — `e723334b-…` → `31772202-…`
+— with no sidecar on disk. A level binds a script through `ActorClass(Uuid)`,
+so:
+
+* **hot reload swapped nothing.** `hot_reload_scripts` queued the class under
+  the *new* GUID while every actor's `ActorClass` still held the old one, so
+  `apply_pending_classes` matched no actors and `ScriptSwap::swapped` was 0.
+  The designer saves, the Output Log says "recompiled", and the world does not
+  change;
+* **and the damage outlives the session.** PIE, Simulate and the cook all
+  resolve that same binding, and after one save it resolves to `None` — so the
+  actor runs with **no gameplay logic at all**, silently, in all three.
+
+**Why neither gate could see it, which is the part worth keeping.**
+`script_hot_reload.rs` calls `session.reload_class(SCRIPT_ASSET, class)` with a
+**hard-coded constant** — it never asks the asset database anything, so the one
+question that mattered was never put. And `script_gameplay_gate.rs` *writes a
+committed sidecar* for its fixture, with the comment *"without it the database
+would synthesise a content-hash GUID and the binding would resolve to
+nothing"*. The fact was in the tree, one step from the feature it broke,
+written down as a fixture detail. Carried item 5 states the same fact a third
+time and frames it as a **cross-host** concern; the far worse consequence is
+across **two saves on one host**.
+
+Fixed where this asset system already keeps identity: `pin_script_ids` writes
+the synthesised sidecar the first time a scan meets a script — at
+`AssetProject::open`, at `rescan`, and in the watcher tick *before* the GUID is
+read. That is what the synthesis exists for (*"a payload with no sidecar loses
+nothing when the synthesized one is written out"*), `persist` already refuses to
+write over an unparseable sidecar, and a read-only checkout still opens with an
+advisory naming the script that cannot keep its name. **Scripts only**: every
+other loose kind comes from a door that already writes a sidecar.
+
+And the link that had no arm now has one. The chain is `queue::tick` collects
+→ Ring 2 calls `hot_reload_scripts` → it compiles and calls `reload_class` →
+the session drains at a step boundary. Every link but the **first** was gated
+(the Ring-2 call and its body by `dcc.rs`'s source pins, the swap by
+`script_hot_reload.rs`), so a `scripts` field that silently stayed empty would
+have made the feature dead in the editor with every arm green.
+`a_changed_script_reaches_the_tick_outcome_with_its_guid` drives `queue::tick`
+with a real watcher and requires the reported GUID to be the one the database
+held **before** the edit — which is the assertion that found this.
+
+### THE SECOND HIGH: the 120 ms was the TICK, not the debounce
+
+The wave's headline measurement — **"edit → running 121 ms, of which 120 ms is
+the watcher's own debounce"** — appears in the ledger, in
+`infiniscript-direction.md` §8 and in the ROADMAP. It is a fact about the arm,
+reported as a fact about the editor, and both halves are wrong:
+
+| | the wave said | `commands/assets.rs` says |
+|---|---|---|
+| the watcher's debounce | 120 ms | **`WATCH_DEBOUNCE` = 250 ms** |
+| what 120 ms actually is | — | **`TICK`** — the interval at which the asset thread *drains* the watcher |
+
+The arm had simply chosen `Duration::from_millis(120)` for itself and called it
+*"the editor's own debounce"*. The honest editor shape is the debounce **plus
+up to one drain tick**, and then the next fixed step:
+
+```
+edit -> seen by this arm: 251 ms at the editor's WATCH_DEBOUNCE of 250 ms.
+In the editor the asset thread DRAINS the watcher every TICK = 120 ms, so
+edit -> seen there is 250..=370 ms; the swap then lands on the next fixed step
+(<= 16.7 ms at 60 Hz). ENGINE half (door + compile + swap + one step): 0.35 ms,
+zero rustc.
+```
+
+**The engine's half stands** — 0.35–0.45 ms, and it is the only part of the
+number this repository controls. The arm now *reads* both constants out of Ring
+2's source (a source read, not a crate edge — `player_has_no_tuning_door`'s
+device), so the printed figure cannot drift from the shipped one.
+
+### The crown gate's own shim was a second implementation
+
+The gate's module doc refuses a hand-written `psin64` in the shims, because two
+implementations that agree today are a divergence with a delay. Then it wrote:
+
+```rust
+pub fn min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+pub fn max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+```
+
+under the sentence *"the exact-IEEE builtins … are exact on both sides because
+they are one machine instruction"*. They are not one instruction, and the
+spelling is not free: `inf_blueprint::math_builtins::{min,max}` are documented
+**NaN-absorbing**, delegate to `f64::min`/`f64::max`, and have had
+`min_max_nan_absorbing` asserting it since the day they were written. The
+comparison form propagates the NaN instead. Measured, on this machine, before
+anything changed:
+
+```
+math.max(2.0, NaN)   interpreted 4000000000000000 (2.0)
+                     compiled    7ff8000000000000 (NaN)
+```
+
+So the crown gate would have certified a transpiler that got `max` wrong on the
+one input the engine has a contract about — and **no arm could see it, because
+nothing in the fixture's 177-line trace was ever not a number**. That is the
+gate's own headline law (*"a mirror is only as honest as its author's
+imagination"*) landing on the mirror the gate itself writes. Both shims now call
+`std`'s function, the one `math_builtins` calls, and the fixture carries a NaN
+through both in the argument position that separates them. Trace **177 → 179**
+lines. Mutation-verified: restoring the wave's comparison form reddens the gate
+at trace line 3 with both bit patterns printed.
+
+### The sixth eaten continuation, and the exemption that hid it
+
+The wave's Counts row reports the `chr(92)` sweep **clean**. It is not: two
+assertion messages in `dcc.rs`'s
+`the_save_pushes_its_invalidation_unconditionally` carry runs of **fourteen
+spaces** where a `\`-continuation was eaten — the P22 signature, written by the
+very commit that separated hot reload from the invalidation (`f075c894`).
+
+The sweep could not see them, and **that** is the finding. `ALIGNED_ON_PURPOSE`
+exempts that function **by name**, because its source pins spelled the
+twelve-space indentation they look for inside a literal — the same shape the
+sweep bans. *An exemption is keyed on a function and a defect lands on a line*,
+so every literal in the function went dark, and the wave wrote two into it.
+
+Fixed the way the wave's own law says — **separate the concern rather than
+widen the gate**. The pins now *count* the indentation (`at_loop_indent`)
+instead of spelling it, so the function does not need the exemption and the
+exemption is retired. Both claims the pins made are unchanged.
+Mutation-verified: re-introducing one of the two now reddens
+`no_string_literal_in_the_workspace_carries_an_eaten_continuation` by file and
+line, where before it was invisible.
+
+### Two doc comments the wave's inserts walked into
+
+Two of the wave's new items were dropped **inside** an existing doc-comment
+block, so each stole the documentation of the item it was inserted above and
+left that item undocumented. Neither is a compile error and neither is a
+rustdoc warning, which is exactly why both survived a wave that counted
+warnings.
+
+| the insert | what it inherited |
+|---|---|
+| `inf_project::template::SCRIPTS_DIR` — a nine-character string constant | `STARTER_CHARACTER`'s thirty lines, **including the SK1c audit's measured cost table** ("152 408 B over seventeen files…"). Both are `pub`, so the table renders on the wrong item in public rustdoc |
+| `inf_player::level::is_class_kind` | `resolve_cell_store`'s twenty-line *"the discriminator is 'is there a pack?', not 'is the level empty?'"* reasoning — the answer to the question that function exists to answer |
+
+A sweep for the shape (an added `///` line directly under a *context* `///`
+line, over the whole wave range) finds exactly these two.
+
+### Four gates that could not falsify
+
+1. **The crown gate's handler-return line was a constant.** The trace claims to
+   compare *"each handler's return"*; the interpreted side prints what `eval_fn`
+   returned and the compiled side printed `fmt(&V::U)` — a literal — and threw
+   `ret` away. True today, because every event handler is `Ty::Unit`, and
+   unfalsifiable as written. The gate now **asserts** each driven handler is
+   Unit and hands the same claim to `rustc` as `let _: () = ret;`.
+2. **"`Content/Scripts/` is a convention, not a lookup" had no arm.** It is the
+   sentence the whole layout ruling rests on — `AssetDb::scan` recurses, so
+   there is no manifest field to keep in sync — and every fixture in the tree
+   put its script under `Scripts/`, so a cook that had grown a directory check
+   would have passed all of them. Three placements now cook: the content root
+   itself, an invented directory, and one nested two deep beside its actor.
+3. **`nothing_a_script_names_can_reach_a_world_yet` asserted the opposite of its
+   prose.** The comment says *"a class that calls it runs, logs the unknown path
+   and changes nothing"*; the assertion was that the log does **not** contain
+   `engine::spawn`, on a fixture that never calls it. The reason of record
+   (*"reaches neither host's `Host::call`"*) is also wrong — it reaches it and
+   lands on the unknown-call arm. Now measured on a script that really calls it:
+   the host log is `["engine::spawn", "the statement after the spawn"]` and the
+   world gains no entity, so all three things the carried item rests on are
+   facts.
+4. **The player's "links no lexer" claim cited an arm that did not check it.**
+   `inf-player`'s manifest note says `player_has_no_tuning_door` keeps the
+   `inf-script` dev-dep honest; the manifest walk was hard-coded to
+   `inf-editor-core`. It is a loop over both names now. Mutation-verified.
+
+### The two edits the seeding rule says nothing about
+
+The wave armed and sentenced the edit that **adds** a variable and left the two
+an author reaches in the same keystroke unmeasured. Both are now behaviour
+rather than intention, in `reload_class`'s doc and in an arm:
+
+| the edit | what the instance does |
+|---|---|
+| **adds** a variable | seeded from the class's default |
+| **changes a default** | nothing — the live value stands, which is the feature |
+| **removes** a variable | nothing — the value **lingers**, unread. Put the variable back with a new default and the lingering value still wins, because by then it is not "added". Measured: `1.0` beats a re-declared `99.0` |
+| **changes a type** | nothing — the map is untyped, so the first handler to read it takes a `RunError::Type` and dies for that tick, on that actor, **every** tick, until the session is re-entered |
+
+Both are the same operation as discarding live state, which is what the door
+exists not to do, so both are sentenced rather than fixed; leaving and
+re-entering Simulate rebuilds instances from the class and is the remedy.
+
+### The gate that leaked, and the carried item that had stopped being honest
+
+**The crown gate leaked a build directory per test process** — thirteen of
+them, **19 MB**, after one wave's testing, in a repository with three disk-full
+incidents on the books. `build_dir` now sweeps siblings older than an hour at
+the front (a test cannot run teardown after itself, and the three arms share one
+directory); an age bound rather than a liveness check, because a run of this
+gate is measured in tenths of a second and a pid is reused.
+
+**Carried item 5 closed for users.** The ledger said a user's project inherits
+the `*.infini -text` rule and *"nothing tells them so yet"*. Once every template
+began scaffolding `Content/Scripts/Example.infini`, that stopped being a note:
+its GUID is its content hash from the first scan, so a project committed on one
+operating system and cloned on the other renames the script and every
+`ActorClass` binding points at nothing — on day one, by default. `scaffold` now
+writes a `.gitattributes` carrying the rule and its reasoning, armed for all
+four templates.
+
+### The Code-tab correction, put where a reader arrives
+
+The wave's finding 1 is real and its tripwire is right. What it did not do is
+correct the **paragraph that made the claim**: ROADMAP §12's *"The CODE TAB"*
+block ends *"New projects scaffold `pub mod blueprints;` and the index beside
+it"*, and audit row **A6** beside it speaks of *"the hand-written index an
+existing project needs to make `pub mod blueprints;` compile"*. Everything there
+is true about the **path**, and the thing the path exists for is false. The
+correction now sits in that block, with the finding, the `E0433`, the measuring
+arm and the priced fix cited — because a reader looking for what the Code tab
+does reads the Code Tab block, not a wave ledger fourteen thousand lines away.
+
+### What re-ran and held
+
+* **The crown gate**: 3/3 green. `rustc` 210–233 ms against the 60 s LOAD
+  budget; 177 trace lines before the audit's NaN leg, **179** after. All three
+  claimed mutations reproduce, at the exact lines the wave's table names —
+  the parsed-token-stream re-association **RED at line 10** with both bit
+  patterns printed, `bin_op_syn(Sub) => Add` **RED at line 69**, the
+  mirror-image `Lt`/`Gt` swap in `emit` **and** `lift` **RED at line 12** while
+  `generate → lift` stays an identity (36 of 38 `inf-transpile` arms still pass
+  under it; the two that fail are `hand_edits::{if_else_lifts,
+  while_loop_lifts}`, exactly as the table says).
+* **The file door**: 9/9. The 1 MiB bound is `>` and **both edges are armed**
+  (`MAX_SOURCE_BYTES` opens, `MAX_SOURCE_BYTES + 1` refuses by both numbers);
+  invalid UTF-8 names byte 10 at 1:11 and byte offset + line/col move together;
+  the 13-case hostile sweep is anti-vacuous in both directions.
+* **The census**: mutation-verified. Adding an unclassified `Str` port to
+  `engine.spawn` fails `every_string_port_in_the_node_kit_is_classified` naming
+  `engine.spawn.mesh_override`.
+* **`PIE == shipping`**: 6 distinct world states, 90 distinct variable tuples,
+  `handed = 5`, `carried = 5`, digest `0xe3499f72abc11769` unmoved. Severing the
+  script from the level (deleting the `ActorClass` insert) fails **2 of 3** arms
+  at the payload's own anti-vacuity assert, before any comparison.
+* **The seeding mutation**: removing the seeding loop fails
+  `a_save_becomes_new_behaviour_in_a_running_simulate` **and**
+  `a_swap_reaches_only_the_actors_bound_to_that_asset`.
+* **The player's refusal**: 8 tokens, and the vacuity half requires every one to
+  appear in the editor.
+* **The freeze pin**: `FROZEN_WIRE` 24 → 25 is an append and the row-order arm
+  (`AssetKind::all()[i] == kind`) proves it; `kind_code` 25 is appended; nothing
+  serializes an `AssetKind` by ordinal (the sidecar writes a slug, the pack
+  writes an explicit code). **Not a schema move** by the house definition.
+* **`Cargo.lock`**: five internal edges and `tempfile`; **zero new external
+  crates**, and `inf-script` is a **dev**-dependency of both `inf-project` and
+  `inf-player`.
+* **The wave's `+31 arms`**: exactly the `#[test]` count of its diff (31 added,
+  0 removed). `EXPECTED_LEVELS` 23, goldens 59 on disk.
+* **The no-loose-arm reasoning**, checked against the loader rather than against
+  the sentence: `load_actor_classes_by_guid_from_dir` really does
+  `filter(|p| p.extension() == Some("inf_act"))`. *"The shipped player reads
+  `.inf_act` only, by design"* is exact, and adding a parser to make a loose
+  comparison possible would indeed falsify it in order to gate it.
+* **"A broken edit never queues" is enforced by the TYPE, not by a guard** —
+  which is why the audit reports no mutation for it. `reload_class` takes a
+  `BlueprintClass`, and a script that does not compile produces `Vec<Diagnostic>`
+  instead; there is no branch to sever, and severing it means changing a
+  signature. That is stronger than the claim the wave made for it, and worth
+  saying rather than manufacturing a mutation to have one.
+
+### The seven carried items, one line each
+
+| # | the wave's item | verdict |
+|---|---|---|
+| 1 | `#[infinity::blueprint]` has no macro | **tripwire**, and it fires: `rustc` answers `E0433: cannot find module or crate 'infinity'`. The ROADMAP's Code Tab block now carries the correction too |
+| 2 | `vars::get` is monomorphic | **measured refusal**, and it is a refusal rather than silent wrong code — `rustc` answers `E0308`, and the arm panics with "retire this bound" the day it compiles |
+| 3 | transcendentals outside the crown gate | **honest sentence**, with the argument (a second bit-exact polynomial is worse than no coverage) and the two arms that do cover them named. *The audit found the same argument had not been applied to `min`/`max`* — see above |
+| 4 | the PIE payload does not walk `asset_refs` | **tripwire**, and its reason of record was wrong and its second assertion vacuous — both corrected in place |
+| 5 | a `.infini` needs a sidecar or `-text` | **was an honest sentence about the wrong hazard**; it is the HIGH above, and it is now closed for the repository, for users' projects, and in the editor |
+| 6 | the editor surface is the Output Log | **honest sentence**, unchanged, correctly routed to SCRIPT2 |
+| 7 | SCRIPT1a's items 2, 3, 4, 6, 7, 9 stand | **accurate cross-reference** — checked against SCRIPT1a's own wave list; items 1, 5 and 8 are correctly omitted (1 is SCRIPT1b itself, 5 landed as the `i64::MIN` advisory, 8 is folded into item 6) |
+
+### The `.gitattributes` rule, checked against what it actually buys
+
+`-text` means git performs **no** end-of-line conversion in either direction, so
+a committed `.infini`'s bytes in a working tree are its bytes in the repository
+on every platform. The invariant that buys is exactly the one the wave names:
+the **content hash** is the same on every checkout, so the synthesised GUID is
+too. The ledger states it correctly, and the arm
+(`committed_scripts_are_pinned_against_line_ending_conversion`) reads the rule
+out of the file rather than describing it.
+
+Two notes the wave did not make. First, the cross-host cook arm asserts the two
+GUIDs **differ** and is unaffected by the pin above — it drives `inf_packager`
+over a bare `AssetDb`, not an `AssetProject`, so it still measures the raw
+content-hash behaviour it was written to measure. Second, `-text` keeps earning
+its place *after* the pin: the sidecar records a `ContentHash` beside the GUID,
+and a checkout that rewrote the bytes would leave that hash describing a file
+that is no longer there — which is the dedupe index's input, not the identity's.
+
+**And the two fixes meet rather than overlap**, which is worth stating because
+the scaffolded `.gitattributes`' own doc says "no committed sidecar" and the pin
+writes one. Both are true, in order: `inf new` writes the script and no sidecar,
+so a project cooked before it is ever opened in the editor still has a
+content-hash GUID and needs `-text`; the **first editor open** then pins the
+identity to disk, and from that moment the GUID survives an edit. The rule
+covers the window the pin cannot reach, and the pin covers the edits the rule
+cannot.
+
+### The three carried, by name
+
+1. **The crown gate's shims are still a hand-written engine.** A fixture that
+   reaches a verb with no shim fails as *"the transpiler's output does not
+   compile"* rather than *"unshimmed verb"* — loud, but the message blames the
+   generator. Cheap to improve the day a second fixture exists; there is one.
+2. **`cook_script.rs::scaffold` shadows its `root` parameter** with
+   `workspace_root()` halfway through. It works because `content` is computed
+   first, and it reads as a bug for the length of one function.
+3. **`apply_pending_classes` drains in watcher order.** Two scripts saved
+   together are applied in the order the debouncer reported them, which is the
+   filesystem's. It cannot matter today — different assets reach disjoint actor
+   sets, and the same asset twice ends on the later class either way — but it is
+   an order this repository has not pinned, and the sentence is here rather than
+   in a claim that it is deterministic.
+
+### Counts
+
+| | wave (`f075c894`) | **audit (`HEAD`)** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 350 / 6 546 / 0 / 19 | **350 / 6 549 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, **exit 0**, on the final tree. **+3 arms and no new block**, which is exactly the `#[test]` count of the audit's diff (3 added, 0 removed): the removed/retyped-variable arm, the anywhere-under-`Content/` cook arm, and the watcher→tick arm that found the HIGH. All three land in blocks the wave already created |
+| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**; none added, none re-blessed, and `git status` over `crates/inf-render/tests/goldens` is empty afterwards |
+| rustdoc individual warnings (cold, ceiling 450) | 373 over 30 crates | **373 over 30 crates** — after `cargo clean --doc` (9 115 files, 223.3 MiB): **403 `^warning:` lines minus 30 per-crate summaries**, cross-checked against the sum of those summaries' own counts (373 exactly). The audit adds **zero**, and the two hijacked doc blocks it repaired were invisible to this number by construction — a re-parented doc comment moves no warning. Headroom **77** |
+| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — exit 0, run **LAST** per the rmeta law, `CARGO_INCREMENTAL=0` so a 23-GB-free machine did not grow a second incremental set. **Two invocations, and the first one was red**: `clippy::doc_lazy_continuation` on `inf-studio`, from the audit's own insert (see the law below). 46 crates checked in the first pass, **39** re-checked in the second and the rest served from that pass's fingerprint cache — same `RUSTFLAGS`, same profile, which is what makes reusing it legitimate rather than a gap |
+| `cargo fmt --all --check` | clean | **clean** |
+| frontend | not run | **not run — no `editor/studio/src/` file moved.** The audit's whole `editor/studio/` footprint is one test module in `commands/dcc.rs`. No ts-rs type changed shape; `TickOutcome` and `ScriptSwap` are Ring 1 and cross no wire |
+| schemas / committed content | unmoved | **unmoved.** `FROZEN_WIRE` 24→25 re-verified as an **append**: `the_wire_tokens_are_frozen_and_append_only` asserts `AssetKind::all()[i] == kind` at every row, `kind_code` 25 is appended, `compresses_kind` is exhaustive with no wildcard, and nothing serializes a kind by ordinal (the sidecar writes a slug, the pack an explicit code). **Not a schema move** by the house definition. `EXPECTED_LEVELS` still **23** |
+| `Cargo.lock` | zero new external crates | **byte-identical** — the audit adds no dependency of any kind. Re-verified of the wave: five internal edges plus `tempfile`, and `inf-script` is a **dev**-dependency of both `inf-project` and `inf-player`, now with an arm rather than a comment |
+| `chr(92)` sweep | reported **clean** — it was not | **clean, and the sweep can now see the shape it missed.** The wave's two eaten continuations are repaired and the function-level exemption that hid them is retired; a fresh sweep over the audit's own diff (714 added Rust lines, 37 carrying a backslash) finds **zero** |
+| disk | 50 GB free | **23 GB free at the audit's start, 36 GB at its end.** `target/debug/incremental` was deleted twice — **18 GB** before the first build and **15 GB** before the doc/clippy legs — both times with **no cold rebuild**, per the Wave-G half of the disk law. `target/` reached **280 GB** mid-battery. No `cargo clean` beyond `--doc`, and clippy ran with `CARGO_INCREMENTAL=0` so it did not grow a second incremental set on a nearly-full volume |
+
+**Commits:** `af8f753c` (the sixth eaten continuation and the exemption that hid
+it), `3618ee04` (two hijacked doc comments), `6a5f5ea7` (the debounce that was
+the tick, and the removed/retyped edits), `3f961729` (four gates that could not
+falsify, and a user's `.gitattributes`), `3a70970e` (the crown gate's own shim),
+`a0fcd11f` (the player's dev-dep arm), `b722c776` (**the HIGH** — the GUID churn
+and the missing link's arm), `9bd845f5` (that arm's failure message), `7daa4104`
+(the audit's own doc-block insert, caught by clippy), plus this ledger and the
+corrections in `infiniscript-direction.md` and the ROADMAP.
+
+### The laws this audit adds
+
+**An identity derived from content cannot key an edit.** Hot reload, PIE,
+Simulate and the cook all bind a script by asset GUID, and that GUID was the
+script's own content hash — so the key moved every time the thing it keyed did,
+and the feature could never fire. Anything a human edits in place needs an
+identity **written down beside it**, not derived from it. The asset system knew:
+`db.rs` had the sentence, about levels, in a comment, before this wave started.
+
+**A gate that supplies the value under test cannot test how it is obtained.**
+The hot-reload gate handed `reload_class` a constant GUID; the PIE gate wrote
+its fixture a sidecar so the binding would resolve. Both were right to, and
+between them nobody asked where a real GUID comes from — which was the only
+broken thing in the wave. When a fixture short-circuits a step to get to its
+subject, **that step is the one still owing an arm.**
+
+**An allowlist entry is a blind spot with a name on it.** The eaten-continuation
+sweep exempted one function for two source pins and thereby stopped reading
+every literal in it; the wave wrote two defects into that function and the
+ledger reported the sweep clean. Retire the *reason* for an exemption rather
+than widen the list — the pins now count the indentation instead of spelling it,
+and the exemption is gone.
+
+**"One instruction" is not a licence to re-spell it.** The crown gate refuses a
+hand-written `psin64` and then hand-wrote `min`/`max` as comparisons, under a
+sentence claiming they were exact. `f64::min`/`f64::max` are NaN-absorbing and a
+comparison is not; the interpreted and compiled sides genuinely disagreed, and
+the fixture had no NaN in it to notice. **If the engine has a contract about an
+input, the mirror must be fed that input.**
+
+**A number a test chooses is a number about the test.** "121 ms, of which 120 ms
+is the watcher's own debounce" was a debounce this arm invented, and 120 ms is
+the editor's *drain tick*. Constants that describe the shipped product are read
+out of the shipped product, or the prose drifts from it silently and gets copied
+into two more documents.
+
+**A doc comment has no closing brace.** Two of the wave's inserts landed inside
+an existing `///` run and silently re-parented thirty lines of reasoning onto a
+nine-character constant. The compiler cannot see it, the rustdoc *count* cannot
+see it (the total does not move), and review reads the new lines rather than the
+line above them. The detector is mechanical: an added `///` directly under a
+context `///`.
+
+**Run your detector against yourself.** Two commits after reporting that law,
+this audit committed the same defect — its two new helpers went in between
+`the_save_pushes_its_invalidation_unconditionally`'s doc comment and its
+`#[test]`, re-parenting that function's numbered list onto a `const`.
+`clippy::doc_lazy_continuation` reddened the battery's last step and is what
+found it. The audit's own mechanical detector **would have** found it too; it
+had been run against the wave's diff and never against the audit's. A check
+written for somebody else's change is half a check.

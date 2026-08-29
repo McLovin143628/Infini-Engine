@@ -552,16 +552,42 @@ All five routed clauses landed. What is now true:
 * **Hot reload**, through the interpreter: watcher → door →
   `SimSession::reload_class`, drained at the **top of a fixed step** beside
   `apply_pending_tunes`, for the reason `crate::tuning` already argues. Keyed by
-  **asset GUID**, because what a watcher observes is a file. State survives —
+  **asset GUID**, because what a watcher observes is a file — **and the SCRIPT1b
+  audit found that the key moved.** A payload with no sidecar is registered
+  under a GUID synthesised from its **content hash**, and a `.infini` is the one
+  payload in this system a human edits in place, so every save renamed it: hot
+  reload queued the class under a GUID no actor was bound to and swapped
+  *nothing*, and PIE, Simulate and the cook then resolved that binding to
+  `None`, running the actor with no gameplay logic at all. Fixed by pinning —
+  `pin_script_ids` writes the synthesised sidecar the first time a scan meets a
+  script — which is what carried item 5 already said a script needs, one step
+  from the feature it broke. State survives —
   `ActorInstance` sits beside the class — and variables the edit *added* are
   seeded from their defaults, or the first Tick after adding one dies at
   `vars::get`. The honest asymmetry, which a designer has to know: **changing a
   variable's default does not change a running instance.** Containment is
   tighter than §4's bound predicted: a broken edit never becomes a class, so
   nothing is queued and the previous good program keeps running with the
-  diagnostics in the Output Log. **Measured: edit → running 121 ms, of which
-  120 ms is the watcher's own debounce; the engine's half — door, compile, swap,
-  one step — is 0.45 ms.** Zero `rustc`.
+  diagnostics in the Output Log. The seeding rule runs **one way**, and the
+  SCRIPT1b audit armed and sentenced the other two edits: a variable the edit
+  *removed* **lingers** on the instance (and still wins over a later
+  re-declaration's new default, because by then it is not "added"), and one
+  whose *type* changed is **not migrated**, so the first handler to read it
+  takes a `RunError::Type` and dies for that tick, on that actor, every tick,
+  until the session is re-entered. Both are the same operation as discarding
+  live state, which is what this door exists not to do.
+  **Measured (corrected by the SCRIPT1b audit): the ENGINE's half — door,
+  compile, swap, one fixed step — is 0.35–0.45 ms, zero `rustc`.** The plumbing
+  on top is the editor's own two constants, and the wave conflated them:
+  `commands/assets.rs` sets `WATCH_DEBOUNCE` to **250 ms**, and **120 ms is
+  `TICK`**, the interval at which the asset thread *drains* the watcher. So edit
+  → seen in the editor is `WATCH_DEBOUNCE ..= WATCH_DEBOUNCE + TICK` =
+  **250–370 ms**, and the swap then lands on the next fixed step (≤ 16.7 ms at
+  60 Hz). The wave's *"121 ms, of which 120 ms is the watcher's own debounce"*
+  was a fact about a debounce the **arm** chose, reported as a fact about the
+  editor — a number a test picks is a number about the test. The arm now reads
+  both constants out of Ring 2's source, so the printed figure cannot drift from
+  the shipped one.
 * **The cook path, and the ship decision taken.** `AssetKind::Script` is
   additive (appended at the tail of the enum, `all()`, `FROZEN_WIRE` 24→25 and
   `kind_code` 25; no existing row moved, no schema moved). **The default is:
@@ -586,8 +612,16 @@ All five routed clauses landed. What is now true:
   `.infini`, emit the host shims beside it, **`rustc` the zero-dependency
   program, run it**, and require the trace byte-identical to the interpreter's:
   host calls in order, every argument as a **bit pattern**, each handler's
-  return, and the member-variable state after every event. 177 trace lines, 60+
-  host calls, **rustc 234 ms** against a 60 s LOAD-class budget. `rustc` rather
+  return, and the member-variable state after every event. 177 trace lines —
+  **179** since the audit added a NaN leg through `math.min`/`math.max`, whose
+  shims were a second implementation and answered `NaN` where the interpreter
+  answers `2.0` — 60+ host calls, **rustc 210–234 ms** against a 60 s LOAD-class
+  budget. (The
+  handler-return line is `Ty::Unit` on both sides for every *event* handler, so
+  the compiled side prints it as a literal; the SCRIPT1b audit made that a
+  **checked** constant — the gate now asserts each driven handler is Unit and
+  hands the same claim to `rustc` as `let _: () = ret;` — rather than a line one
+  side cannot falsify.) `rustc` rather
   than `cargo` because there is no lock to take, no workspace to resolve and no
   manifest to write — the `inf-hotreload` fixture path needs a dedicated target
   directory and a process-private stash precisely because concurrent test
