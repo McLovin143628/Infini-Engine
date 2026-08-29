@@ -974,6 +974,57 @@ pub struct FileEntryDto {
     pub is_dir: bool,
 }
 
+// ── InfiniScript: the parse refusals, on the wire (wave SCRIPT2b) ────────
+
+/// One InfiniScript diagnostic, as `script_check` hands it to the editor.
+///
+/// **The fields are Ring 0's, unconverted.** `inf_script::Diagnostic` carries
+/// an `inf_script::Span` whose `line` and `col` are **1-based** and whose `len`
+/// is in **characters**, and `Display` prints them as `line:col`. That is what
+/// the CLI prints, what the Output Log prints, and what an author sees at the
+/// bottom of a compiler message — so it is what crosses the wire, and the
+/// frontend converts once, at the one place CodeMirror needs 0-based offsets
+/// (`scriptDiagnostics.ts`). A wire that quietly shifted the numbers would make
+/// "the editor says 12:5" and "the cook says 12:5" two different claims that
+/// happen to agree.
+///
+/// `severity` is the Ring-0 word (`"error"` / `"warning"`) rather than an LSP
+/// integer for the same reason: this is not an LSP diagnostic and dressing it
+/// as one would invite the Problems panel to believe a server produced it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ScriptDiagnosticDto {
+    /// `"error"` or `"warning"`. A warning does not stop a script compiling.
+    pub severity: String,
+    /// 1-based line.
+    #[ts(type = "number")]
+    pub line: u32,
+    /// 1-based column, in characters of the newline-normalised source.
+    #[ts(type = "number")]
+    pub col: u32,
+    /// Length in characters; **zero at end of input**, where there is no text
+    /// to underline and the editor must widen the range itself.
+    #[ts(type = "number")]
+    pub len: u32,
+    /// What is wrong, and — wherever there is one — the remedy.
+    pub message: String,
+}
+
+impl From<&inf_script::Diagnostic> for ScriptDiagnosticDto {
+    fn from(d: &inf_script::Diagnostic) -> Self {
+        Self {
+            severity: match d.severity {
+                inf_script::Severity::Error => "error",
+                inf_script::Severity::Warning => "warning",
+            }
+            .to_string(),
+            line: d.span.line,
+            col: d.span.col,
+            len: d.span.len,
+            message: d.message.clone(),
+        }
+    }
+}
+
 /// One changed file in `git_status`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct GitFileDto {

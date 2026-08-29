@@ -86,6 +86,7 @@ import type { PropValueDto } from "../bindings/PropValueDto";
 import type { RecentProjectDto } from "../bindings/RecentProjectDto";
 import type { RiverReportDto } from "../bindings/RiverReportDto";
 import type { SearchHitDto } from "../bindings/SearchHitDto";
+import type { ScriptDiagnosticDto } from "../bindings/ScriptDiagnosticDto";
 import type { FoliageSettingsDto } from "../bindings/FoliageSettingsDto";
 import type { SculptSettingsDto } from "../bindings/SculptSettingsDto";
 import type { WaterDefaultsDto } from "../bindings/WaterDefaultsDto";
@@ -150,6 +151,7 @@ export type {
   ProjectSettingsDto,
   PropValueDto,
   RecentProjectDto,
+  ScriptDiagnosticDto,
   SearchHitDto,
   SearchOptsDto,
   SceneSnapshot,
@@ -966,6 +968,21 @@ export const lsp = {
   // `params`/result are raw LSP JSON (opaque to the typed layer).
   request: (language: string, method: string, params: unknown): Promise<unknown> =>
     invoke<unknown>("lsp_request", { language, method, params }),
+};
+
+/**
+ * InfiniScript (wave SCRIPT2b). One command, and it is the reason the frontend
+ * never parses `.infini`: `check` hands a buffer to `inf_script::compile_bytes`
+ * — the same file door the asset watcher, `inf cook` and the PIE payload
+ * builder go through — and gets Ring 0's diagnostics back with their line,
+ * column and length **as Ring 0 counts them** (1-based, characters). `path` is
+ * a label only; nothing is read from disk. A file that will not compile is a
+ * resolved promise carrying its refusals, never a rejection: refusals are
+ * values (P21), across the IPC boundary as well as inside it.
+ */
+export const script = {
+  check: (text: string, path?: string): Promise<ScriptDiagnosticDto[]> =>
+    invoke<ScriptDiagnosticDto[]>("script_check", { text, path: path ?? null }),
 };
 
 /**

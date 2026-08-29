@@ -10,6 +10,7 @@ import { create } from "zustand";
 import type { EditorState } from "@codemirror/state";
 import type { EditorView, ViewUpdate } from "@codemirror/view";
 
+import { clearScriptDiagnostics } from "../lib/editor/scriptExtension";
 import { createEditorState, registerSaveHandler } from "../lib/editor/setup";
 import { files } from "../lib/ipc";
 import { onOpenFile } from "../lib/openFile";
@@ -94,6 +95,12 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
   closeTab: (id) => {
     tabStates.delete(id);
+    // SCRIPT2b: an InfiniScript's refusals come from a linter that only exists
+    // inside a live view, so closing its tab retires its Problems rows too —
+    // otherwise the last diagnostics of a file nobody has open any more would
+    // sit in the panel for the rest of the session.
+    const closing = get().tabs.find((t) => t.id === id);
+    if (closing) clearScriptDiagnostics(closing.path);
     set((s) => {
       const tabs = s.tabs.filter((t) => t.id !== id);
       const activeId = s.activeId === id ? (tabs[tabs.length - 1]?.id ?? null) : s.activeId;

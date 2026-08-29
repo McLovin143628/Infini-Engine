@@ -1,0 +1,165 @@
+//! InfiniScript editor commands (wave SCRIPT2b).
+//!
+//! One command: [`script_check`], which hands the editor the **Ring-0 parse
+//! refusals** for a buffer of `.infini` text. It is the reason the frontend has
+//! a tokenizer and not a parser — every semantic claim the editor makes about a
+//! script (this line is wrong, this variable is not declared, this call needs
+//! three arguments) is produced here, by `inf_script::compile_bytes`, which is
+//! the same door the asset watcher, `inf cook` and the PIE payload builder go
+//! through. There is exactly one InfiniScript compiler in this system and the
+//! editor is not a second one.
+//!
+//! # Why it takes TEXT and not a path
+//!
+//! The buffer in front of the author is the program they are asking about, and
+//! it is usually dirty. Checking the file on disk would answer a question
+//! nobody asked and would need a filesystem door (`super::paths`' confinement
+//! rule) for no gain — the file's own compile already happens, on save, in
+//! `assets::hot_reload_scripts`, and its diagnostics already reach the Output
+//! Log. `path` is carried only as the **label** a byte-level refusal names, so
+//! "Door.infini is larger than the 1 MiB source limit" reads like the cook's
+//! version of the same sentence.
+//!
+//! # Refusals are values, all the way out
+//!
+//! The command's `Err` is for a broken *command*, and there is no way to break
+//! this one, so it never returns one. A file that will not compile is an `Ok`
+//! carrying its diagnostics — P21's law, kept across the IPC boundary rather
+//! than abandoned at it. A file that compiles with warnings is the same `Ok`
+//! carrying those.
+
+use inf_editor_core::ipc::ScriptDiagnosticDto;
+
+/// The label a diagnostic names: the file's leaf, or a stand-in for an unsaved
+/// buffer. Never the whole path — the editor already knows which tab this is,
+/// and a message that repeats an absolute path is a message the panel truncates.
+fn label_of(path: Option<&str>) -> String {
+    path.and_then(|p| p.rsplit(['/', '\\']).next())
+        .filter(|leaf| !leaf.is_empty())
+        .unwrap_or("(unsaved script)")
+        .to_string()
+}
+
+/// Compile `text` through the one file door and answer with what it had to say.
+///
+/// `compile_bytes` rather than `compile`: the door owns the byte-level contract
+/// (the `MAX_SOURCE_BYTES` ceiling, the byte-order mark), so a buffer the cook
+/// would refuse is refused here too, in the same words. The text is already a
+/// `String`, so the UTF-8 half of that contract is satisfied before we arrive.
+pub fn check_text(text: &str, path: Option<&str>) -> Vec<ScriptDiagnosticDto> {
+    let label = label_of(path);
+    match inf_script::compile_bytes(text.as_bytes(), &label, format!("check:{label}")) {
+        Ok((_class, warnings)) => warnings.iter().map(ScriptDiagnosticDto::from).collect(),
+        Err(diags) => diags.iter().map(ScriptDiagnosticDto::from).collect(),
+    }
+}
+
+/// Check a buffer of InfiniScript. `path` is a label only — nothing is read
+/// from disk. Always `Ok`; a refusal is a value in the list.
+#[tauri::command]
+pub async fn script_check(
+    text: String,
+    path: Option<String>,
+) -> Result<Vec<ScriptDiagnosticDto>, String> {
+    Ok(check_text(&text, path.as_deref()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The wire carries Ring 0's own numbers.**
+    ///
+    /// Asserted against `inf_script::render` — the string the CLI prints and the
+    /// Output Log shows — rather than against a literal, because the claim worth
+    /// making is that the panel and the compiler say the same thing about the
+    /// same file, not that a `u32` survived serde. `render` writes `line:col:`
+    /// through `Span`'s `Display`, so finding that prefix in it proves the DTO
+    /// did not shift either number on the way out.
+    #[test]
+    fn a_refusals_line_and_column_cross_the_wire_intact() {
+        // Line 3, and the `+` has nothing to add to.
+        let src = "actor \"Wire\"\n\non tick(dt)\n  local x = 1 +\nend\n";
+        let refusals = check_text(src, Some("C:/Content/Scripts/Wire.infini"));
+        assert!(
+            !refusals.is_empty(),
+            "a truncated expression must refuse, or this arm is vacuous"
+        );
+
+        let rendered = inf_script::render(
+            &inf_script::compile(src, "check:Wire.infini")
+                .expect_err("this source does not compile"),
+        );
+        for d in &refusals {
+            assert!(
+                rendered.contains(&format!("{}:{}:", d.line, d.col)),
+                "the DTO says {}:{} and Ring 0's own rendering says:\n{rendered}",
+                d.line,
+                d.col
+            );
+            assert!(
+                rendered.contains(&d.message),
+                "the DTO's message is not Ring 0's:\n  dto: {}\n  ring 0:\n{rendered}",
+                d.message
+            );
+            assert_eq!(d.severity, "error");
+            // 1-based, both of them — a 0 here would be an off-by-one that the
+            // frontend's own conversion would then double.
+            assert!(d.line >= 1 && d.col >= 1, "the span is 1-based");
+        }
+    }
+
+    /// A file that compiles answers with its **warnings**, not with an error.
+    ///
+    /// The bare `undeclared` is a member variable by rule 3 of A.3 (anything
+    /// that is not a local or a parameter is one), and a unit that declares no
+    /// such `var` gets a warning rather than a refusal — so this is the one
+    /// shape that proves `Ok` and "the list is empty" are different answers.
+    #[test]
+    fn a_script_that_compiles_can_still_have_something_to_say() {
+        let clean = check_text(
+            "actor \"Quiet\"\n\nvar hp: float = 1.0\n\non tick(dt)\n  hp = hp - dt\nend\n",
+            None,
+        );
+        assert_eq!(clean, vec![], "a clean script has nothing to report");
+
+        let warned = check_text(
+            "actor \"Loud\"\n\non tick(dt)\n  undeclared = dt\nend\n",
+            None,
+        );
+        assert_eq!(warned.len(), 1, "expected one warning, got {warned:?}");
+        assert_eq!(warned[0].severity, "warning");
+        assert!(
+            warned[0].message.contains("undeclared"),
+            "a warning must name the variable: {}",
+            warned[0].message
+        );
+    }
+
+    /// **The editor refuses what the cook refuses.** `compile_bytes` is the file
+    /// door, so the 1 MiB ceiling applies to a buffer as well as to a file — and
+    /// the message names the label, which is why `path` is carried at all.
+    #[test]
+    fn the_source_ceiling_applies_to_a_buffer_too() {
+        let huge = "-- pad\n".repeat(inf_script::MAX_SOURCE_BYTES / 7 + 1);
+        assert!(huge.len() > inf_script::MAX_SOURCE_BYTES);
+        let refusals = check_text(&huge, Some("Content/Scripts/Huge.infini"));
+        assert_eq!(refusals.len(), 1);
+        assert!(
+            refusals[0].message.contains("Huge.infini"),
+            "the refusal must name the file the author is looking at: {}",
+            refusals[0].message
+        );
+    }
+
+    /// The label is a leaf on both separators, and an unsaved buffer still has
+    /// a name a message can use.
+    #[test]
+    fn a_label_is_a_leaf_or_a_stand_in() {
+        assert_eq!(label_of(Some("C:/Content/Scripts/Door.infini")), "Door.infini");
+        assert_eq!(label_of(Some("C:\\Content\\Scripts\\Door.infini")), "Door.infini");
+        assert_eq!(label_of(Some("Door.infini")), "Door.infini");
+        assert_eq!(label_of(None), "(unsaved script)");
+        assert_eq!(label_of(Some("")), "(unsaved script)");
+    }
+}

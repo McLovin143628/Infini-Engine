@@ -30,6 +30,8 @@ mod photogrammetry;
 mod pie;
 mod project;
 mod scene;
+// SCRIPT2b: the InfiniScript editor's one door to the Ring-0 compiler.
+mod script;
 mod search;
 mod sequencer;
 mod settings;
@@ -350,6 +352,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         lsp::lsp_did_change,
         lsp::lsp_did_close,
         lsp::lsp_request,
+        script::script_check,
         diagnostics::editor_diagnostics,
     ]
 }

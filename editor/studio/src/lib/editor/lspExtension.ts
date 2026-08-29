@@ -164,10 +164,17 @@ export function lspExtensionFor(ctx: LspContext) {
   ];
 }
 
-/** Convert LSP diagnostics to CM lint diagnostics and push them onto `view`. */
-export function pushDiagnostics(view: EditorView, diags: LspDiagnostic[]): void {
-  const doc = view.state.doc;
-  const cm: Diagnostic[] = diags.map((d) => {
+/**
+ * Convert LSP-shaped diagnostics (0-based line, utf-16 character) to CM lint
+ * diagnostics against `doc`.
+ *
+ * **Source-agnostic on purpose**, and SCRIPT2b is the second caller that proves
+ * it: nothing here asks where the diagnostics came from, so InfiniScript's
+ * Ring-0 parse refusals reach the same squiggles as rust-analyzer's, through
+ * `scriptDiagnostics.ts`'s one conversion into this shape.
+ */
+export function diagnosticsToCM(doc: Text, diags: LspDiagnostic[]): Diagnostic[] {
+  return diags.map((d) => {
     const from = posToOffset(doc, d.range.start);
     const to = Math.max(from, posToOffset(doc, d.range.end));
     const severity =
@@ -180,5 +187,9 @@ export function pushDiagnostics(view: EditorView, diags: LspDiagnostic[]): void 
             : "hint";
     return { from, to, severity, message: d.message, source: d.source };
   });
-  view.dispatch(setDiagnostics(view.state, cm));
+}
+
+/** Convert LSP diagnostics to CM lint diagnostics and push them onto `view`. */
+export function pushDiagnostics(view: EditorView, diags: LspDiagnostic[]): void {
+  view.dispatch(setDiagnostics(view.state, diagnosticsToCM(view.state.doc, diags)));
 }

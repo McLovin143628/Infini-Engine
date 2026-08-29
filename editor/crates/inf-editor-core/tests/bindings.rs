@@ -25,7 +25,8 @@ use inf_editor_core::ipc::{
     PackageResultDto, PartitionSettingsDto, PhotoEntryDto, ProjectInfoDto, ProjectSettingsDto,
     ProjectTemplateDto, PropFieldDto, PropValueDto, RecentProjectDto, RiverBedConflictDto,
     RiverClimbDto, RiverReportDto, SaveResultDto, SceneDelta, SceneNode, SceneSnapshot,
-    SculptFalloffDto, SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto,
+    ScriptDiagnosticDto, SculptFalloffDto, SculptOpDto, SculptSettingsDto, SearchHitDto,
+    SearchOptsDto, SeqInterpDto,
     SeqKeyDto, SeqTrackDto, SequenceDto, SkelApplyDto, SkelDocDto, SkelJointDto, SkelSocketDto,
     SkyAtmosphereDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind, SpoilModeDto,
     SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainBiomesDto, TerrainImportPlanDto,
@@ -159,6 +160,8 @@ fn export_bindings() {
     GitFileDto::export_all(&cfg).expect("export GitFileDto");
     SearchOptsDto::export_all(&cfg).expect("export SearchOptsDto");
     SearchHitDto::export_all(&cfg).expect("export SearchHitDto");
+    // The InfiniScript parse refusals (wave SCRIPT2b).
+    ScriptDiagnosticDto::export_all(&cfg).expect("export ScriptDiagnosticDto");
     SpriteGridDto::export_all(&cfg).expect("export SpriteGridDto");
     SpriteRectDto::export_all(&cfg).expect("export SpriteRectDto");
     SpriteSheetDto::export_all(&cfg).expect("export SpriteSheetDto");

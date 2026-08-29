@@ -1,6 +1,12 @@
 /**
- * Problems panel (P5.2): the diagnostics rust-analyzer publishes, grouped by
- * file, most-severe first. Clicking a row opens the file in the editor.
+ * Problems panel (P5.2): diagnostics grouped by file, most-severe first.
+ * Clicking a row opens the file in the editor.
+ *
+ * **Two producers since wave SCRIPT2b**, and the panel names them rather than
+ * implying one: rust-analyzer publishes over `lsp://diagnostics`, and the
+ * InfiniScript linter writes the same store from `inf_script::compile_bytes`.
+ * Every row therefore carries its `source` — a header reading "rust-analyzer:
+ * idle" above three InfiniScript refusals was the honest version of a lie.
  */
 import { useMemo } from "react";
 import { AlertCircle, AlertTriangle, Info, Lightbulb } from "lucide-react";
@@ -18,9 +24,23 @@ function baseName(p: string): string {
   return p.split(/[\\/]/).pop() ?? p;
 }
 
+/**
+ * **`--ink-danger` is not a theme token.** `THEME_COLOR_KEYS` in `lib/theme.ts`
+ * defines `--ink-error`, and nothing has ever written `--ink-danger` — so
+ * `color: var(--ink-danger)` is an invalid declaration the browser drops, and
+ * this icon has been inheriting the row's colour rather than going red. Fixed
+ * here, on the panel this wave wires InfiniScript's refusals into.
+ *
+ * Carried, because it is wider than this file: **eighteen other sites spell it
+ * `--ink-danger`** (GitPanel's diff colouring, the Explorer's status letters,
+ * the drawer's delete affordances, PreferencesDialog's error text). One line in
+ * `applyTheme` aliasing `--ink-danger` to `error` would make all eighteen real
+ * at once, and that is an app-wide visual change a human should look at rather
+ * than a scripting wave should smuggle.
+ */
 function SeverityIcon({ severity }: { severity: number }) {
   const size = 13;
-  if (severity === 1) return <AlertCircle size={size} className="text-(--ink-danger)" />;
+  if (severity === 1) return <AlertCircle size={size} className="text-(--ink-error)" />;
   if (severity === 2) return <AlertTriangle size={size} className="text-(--ink-warning)" />;
   if (severity === 3) return <Info size={size} className="text-(--ink-info)" />;
   return <Lightbulb size={size} className="text-(--ink-text-dim)" />;
@@ -55,7 +75,7 @@ export default function ProblemsPanel() {
 
       <div className="min-h-0 flex-1 overflow-auto">
         {error && status === "error" && (
-          <div className="m-2 rounded border border-(--ink-danger) bg-(--ink-danger)/10 p-2 text-(--ink-danger)">
+          <div className="m-2 rounded border border-(--ink-error) bg-(--ink-error)/10 p-2 text-(--ink-error)">
             {error}
           </div>
         )}
@@ -81,6 +101,11 @@ export default function ProblemsPanel() {
                       <SeverityIcon severity={p.severity} />
                     </span>
                     <span className="min-w-0 flex-1 truncate">{p.message}</span>
+                    {p.source && (
+                      <span className="shrink-0 text-[10px] text-(--ink-text-faint)">
+                        {p.source}
+                      </span>
+                    )}
                     <span className="shrink-0 text-(--ink-text-faint)">{p.line + 1}</span>
                   </button>
                 ))}
