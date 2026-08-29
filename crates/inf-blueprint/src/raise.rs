@@ -47,9 +47,11 @@ pub enum RaiseError {
     NonLinear,
     #[error("reference to unbound local n{0}")]
     UnboundLocal(u32),
-    /// The statement walk made no progress — see [`Raiser::raise_chain`]'s
-    /// progress guard. Unreachable by construction; a **value** rather than a
-    /// hang if the construction is ever broken again.
+    /// The statement walk made no progress — see the progress guard in
+    /// `Raiser::raise_chain` (private, so this is a name rather than a link:
+    /// a public doc that links a private item is a rustdoc warning, and this
+    /// crate's count is a ratcheted number). Unreachable by construction; a
+    /// **value** rather than a hang if the construction is ever broken again.
     #[error("the statement walk did not advance past statement {0} — this is a bug in `raise`")]
     NoProgress(usize),
 }
