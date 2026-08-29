@@ -386,6 +386,16 @@ checked and are unaffected: they are literals, not derived from the product name
 so `window_class_gate` neither moved nor needed to. No golden renders the engine's
 name, so no golden moved.
 
+**And `productName` is a label here, which is worth writing down rather than
+assuming.** In general a Tauri `productName` is *not* only a label — it names the
+bundled executable, the macOS `.app`, the installer and its default install
+directory, so moving it can strand an existing installation beside a new one. In
+this configuration it cannot: `tauri.conf.json` carries `"bundle": { "active":
+false }`, so nothing is generated from it, and no Rust or TypeScript in the
+workspace reads `package_info()` or the product name at all — `app_data_dir()`
+resolves from the **identifier**, which did not move. The day bundling is turned
+on, the install-path consequence becomes real and belongs in that decision.
+
 The pattern in all eight is one sentence long, and it is the wave's law read
 backwards: **the things that must not move are the ones written down by one
 session and read back by another.** A phrase sweep cannot see them, because the
