@@ -249,6 +249,16 @@ impl PartitionContent {
     }
 }
 
+/// The pack kinds whose payload is a `BlueprintClass` in pretty JSON.
+///
+/// Two of them since SCRIPT1b: an authored `.inf_act`, and a `.infini` the cook
+/// lowered. Spelled once, so a reader cannot learn about one and not the other —
+/// the shape of divergence `blueprint_classes_by_guid` and `actor_classes` are
+/// two copies of already.
+pub(crate) fn is_class_kind(kind: AssetKind) -> bool {
+    matches!(kind, AssetKind::Blueprint | AssetKind::Script)
+}
+
 /// Resolve a partitioned level's cell store.
 ///
 /// # The discriminator is "is there a pack?", not "is the level empty?"
@@ -268,16 +278,6 @@ impl PartitionContent {
 /// a cooked partitioned level ships no entities at all, so degrading to "run it
 /// unpartitioned" would silently boot an empty world, the one failure worse than
 /// not booting.
-/// The pack kinds whose payload is a `BlueprintClass` in pretty JSON.
-///
-/// Two of them since SCRIPT1b: an authored `.inf_act`, and a `.infini` the cook
-/// lowered. Spelled once, so a reader cannot learn about one and not the other —
-/// the shape of divergence `blueprint_classes_by_guid` and `actor_classes` are
-/// two copies of already.
-pub(crate) fn is_class_kind(kind: AssetKind) -> bool {
-    matches!(kind, AssetKind::Blueprint | AssetKind::Script)
-}
-
 fn resolve_cell_store(
     entities: &[RuntimeEntity],
     settings: &PartitionSettings,

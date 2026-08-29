@@ -215,6 +215,11 @@ impl ProjectTemplate {
     }
 }
 
+/// The directory under the content root that `inf new` puts `.infini` scripts
+/// in. A **convention**, not a lookup — see [`crate::Project::scripts_root`] for
+/// the SCRIPT1b layout ruling and why there is no manifest field.
+pub const SCRIPTS_DIR: &str = "Scripts";
+
 /// **The engine's committed starter character**, as `(path under the content
 /// root, bytes)` — the seventeen files `samples/starter-character` ships, minus
 /// its README and its two loose `.toml` tables.
@@ -246,11 +251,6 @@ impl ProjectTemplate {
 /// build was searched for the body's own bytes and does not contain them. The
 /// cost is real for the CLI and the editor, and zero for the thing that ships to
 /// a player.
-/// The directory under the content root that `inf new` puts `.infini` scripts
-/// in. A **convention**, not a lookup — see [`crate::Project::scripts_root`] for
-/// the SCRIPT1b layout ruling and why there is no manifest field.
-pub const SCRIPTS_DIR: &str = "Scripts";
-
 pub const STARTER_CHARACTER: &[(&str, &[u8])] = &[
     (
         "Characters/Starter.inf_skel",
