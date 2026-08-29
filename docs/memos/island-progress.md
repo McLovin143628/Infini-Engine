@@ -23558,12 +23558,13 @@ difference from the heading.
 | | wave (`312b847a`) | **audit (`HEAD`)** |
 |---|---|---|
 | battery blocks / passed / failed / ignored | 356 / 6 602 / 0 / 19 | **356 / 6 604 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, exit 0. **+2 arms, +0 blocks**, which is exactly the audit's `#[test]` diff (2 added, 0 removed): `prefab::destroy_answers_every_guid_that_left_the_world` and `a_destroy_stops_the_handlers_of_everything_under_it`. The HIGH's fix is a fourth block inside an existing arm and moves no count |
-| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1`, and `git status` over `crates/inf-render/tests/goldens` is empty afterwards, so none blessed and none re-blessed. This audit renders nothing |
-| rustdoc individual warnings (cold, ceiling 450) | 373 over 30 crates | **373 over 30 crates** after `cargo clean --doc`. The audit adds **zero**. Headroom **77** |
-| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — run **LAST** per the rmeta law, `CARGO_INCREMENTAL=0` |
+| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**, 25.5 s; `git status` over `crates/inf-render/tests/goldens` is empty afterwards, so none blessed and none re-blessed. This audit renders nothing |
+| rustdoc individual warnings (cold, ceiling 450) | 373 over 30 crates | **373 over 30 crates** — after `cargo clean --doc` (9 159 files, 224.1 MiB): **403 `^warning` lines minus 30 per-crate summaries**, cross-checked against the sum of those summaries' own counts (373 exactly). The audit adds **zero**. Headroom **77** |
+| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — exit 0, run **LAST** per the rmeta law, with `CARGO_INCREMENTAL=0` so the wave's own clippy cache stayed reusable. Incremental, and said so: **15** crates re-checked in 58.4 s — `inf-ecs`, `inf-blueprint` and everything downstream of them, which is exactly the audit's code footprint. **The first pass was green** |
 | `cargo fmt --all --check` | clean | **clean** |
 | `Cargo.lock` / manifests | byte-identical | **byte-identical** over the audit's range too. No dependency of any kind |
 | schemas / committed content | unmoved | **unmoved.** No `schema_version`, no `FROZEN_WIRE` row, no pack change, `EXPECTED_LEVELS` still **24**, and **`samples/harbour-heist/` is byte-for-byte what the wave committed** — the two mutations that edited the mission were reverted through `git checkout` and the sample's own sidecar-hash arm re-run green |
 | generated docs | — | `docs/book/src/infiniscript-api.md` **re-blessed** (`INF_BLESS_API_MANUAL=1`): two verb descriptions, both honesty additions |
 | frontend | not run | **not run — `editor/studio/src/` is untouched by the audit as well as by the wave** |
 | `chr(92)` | 2 caught pre-commit | **zero eaten continuations** in the wave's range and in the audit's own diff, by an independent stream lexer |
+| disk | 89 GB free | **63 GB free at the end**, and the wave's own law paid for a fourth time: the audit's rebuilds took the volume from 94 GB to **39 GB**, and deleting `target/debug/incremental` alone (**29.8 GB**) returned **+24 GB with no cold rebuild** before the verification legs ran. No `cargo clean` beyond `--doc`, and no `.pdb` reclaim needed |
