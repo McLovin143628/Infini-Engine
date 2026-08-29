@@ -1,4 +1,4 @@
-//! Infinity Engine audio facade (Ring 0).
+//! Infini Engine audio facade (Ring 0).
 //!
 //! This crate wraps [kira](https://docs.rs/kira) behind a small, engine-flavoured
 //! API so the rest of the engine never names kira types directly. The public

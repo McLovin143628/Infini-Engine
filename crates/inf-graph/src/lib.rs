@@ -1,7 +1,7 @@
 //! Generic node-graph DAG: model, registry, compile, exec, derive, cache.
 //!
 //! A domain-agnostic ("de-geo'd") port of the GeoCanvas node-graph engine.
-//! `inf-graph` owns the *substrate* every visual graph in Infinity Engine
+//! `inf-graph` owns the *substrate* every visual graph in Infini Engine
 //! shares — Blueprints (P6), material graphs (P7), texture/PCG graphs (P10),
 //! animation state machines (P11) — while each domain supplies its own node
 //! kit and value type on top.

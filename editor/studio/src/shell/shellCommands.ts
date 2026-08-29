@@ -237,7 +237,7 @@ export function bootstrapShellCommands(): void {
   });
   setCommandHandler("help.about", async () => {
     // Surface the build banner (version + git hash) embedded at build time.
-    let info = "Infinity Engine — native Rust core, Tauri v2 editor.";
+    let info = "Infini Engine — native Rust core, Tauri v2 editor.";
     try {
       info = (await app.buildInfo()).replace(/\n/g, " · ");
     } catch {

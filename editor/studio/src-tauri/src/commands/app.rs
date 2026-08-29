@@ -14,6 +14,6 @@ pub async fn app_build_info() -> Result<String, String> {
     let version = env!("CARGO_PKG_VERSION");
     let git = option_env!("INF_GIT_HASH").unwrap_or("unknown");
     Ok(format!(
-        "Infinity Engine {version}\ncommit {git}\nnative Rust core · Tauri v2 editor"
+        "Infini Engine {version}\ncommit {git}\nnative Rust core · Tauri v2 editor"
     ))
 }

@@ -54,7 +54,7 @@ export default function TitleBar() {
         className="flex min-w-8 flex-1 items-center justify-center text-(--ink-text-dim)"
       >
         <span data-tauri-drag-region className="truncate px-4">
-          Infinity Engine
+          Infini Engine
         </span>
       </div>
       <div className="flex items-stretch">

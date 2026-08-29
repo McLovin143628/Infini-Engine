@@ -1,4 +1,4 @@
-//! Infinity Engine command-line tool.
+//! Infini Engine command-line tool.
 //!
 //! Subcommands: `inf new <name>` (scaffold a project from a template),
 //! `inf cook --project <dir>` (build a shippable asset pack + manifest),
@@ -45,7 +45,7 @@ fn main() -> ExitCode {
 
 fn print_help() {
     println!(
-        "inf {} — Infinity Engine CLI\n\n\
+        "inf {} — Infini Engine CLI\n\n\
          USAGE:\n  \
              inf new <name> [--template <slug>] [--dir <path>]\n  \
              inf cook --project <dir> [--out <dir>] [--roots <guid,guid,…>]\n  \

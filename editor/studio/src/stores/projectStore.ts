@@ -108,7 +108,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   openViaDialog: async () => {
-    const dir = await pickDirectory("Open Infinity Engine Project");
+    const dir = await pickDirectory("Open Infini Engine Project");
     if (dir) await get().openProject(dir);
   },
 

@@ -1,6 +1,6 @@
 # Terrain & PCG
 
-Infinity Engine carries a Gaea-heritage terrain and procedural-content-generation (PCG) stack:
+Infini Engine carries a Gaea-heritage terrain and procedural-content-generation (PCG) stack:
 sculptable, GPU-erodible, planet-ready heightfields with rule-based scattering of millions of
 instances. The `samples/terrain-demo` project is the reference scene for everything below.
 

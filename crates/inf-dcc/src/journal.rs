@@ -150,7 +150,7 @@ impl SessionSave {
 
     /// …and one this build is too old to read.
     pub const TOO_NEW_REMEDY: &'static str =
-        "update Infinity Engine, or re-open the mesh (Content Drawer ▸ double-click) to start a fresh history from the asset on disk";
+        "update Infini Engine, or re-open the mesh (Content Drawer ▸ double-click) to start a fresh history from the asset on disk";
 }
 
 /// Why a [`SessionSave`] could not become a session.

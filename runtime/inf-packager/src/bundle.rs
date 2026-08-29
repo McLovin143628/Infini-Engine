@@ -293,10 +293,10 @@ fn workspace_root() -> Option<PathBuf> {
 
 fn packaging_note(name: &str) -> String {
     format!(
-        "Infinity Engine — desktop export: {name}\n\
+        "Infini Engine — desktop export: {name}\n\
          ================================================\n\n\
          This folder is a self-contained, runnable build:\n\n\
-         * {name}{exe}  — the game executable (the Infinity Engine player,\n\
+         * {name}{exe}  — the game executable (the Infini Engine player,\n\
            renamed). It reads player.toml beside it and boots content.inf_pack.\n\
          * content.inf_pack       — the cooked, content-addressed asset pack.\n\
          * manifest.toml          — the cook manifest (root level, pack list).\n\

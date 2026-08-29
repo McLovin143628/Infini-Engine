@@ -12773,7 +12773,7 @@ mod tests {
     /// machine in this repository gates on `exit_time` at all** — not this
     /// sample (which is what the committed `Locomotion.inf_sm` is blessed from),
     /// and not the wizard's generated locomotion, which is every machine an
-    /// Infinity Engine project gets without an author typing one. The retiming
+    /// Infini Engine project gets without an author typing one. The retiming
     /// was real in principle and empty in fact.
     ///
     /// This is an assertion rather than a paragraph because the claim has an

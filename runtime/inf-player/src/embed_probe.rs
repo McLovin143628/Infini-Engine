@@ -57,7 +57,7 @@ pub fn run() -> ExitCode {
         match CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("InfinityEmbedProbe"),
-            w!("Infinity Engine embed probe"),
+            w!("Infini Engine embed probe"),
             WS_OVERLAPPEDWINDOW, // deliberately NOT WS_VISIBLE — stays hidden
             CW_USEDEFAULT,
             CW_USEDEFAULT,

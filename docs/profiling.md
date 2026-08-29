@@ -1,6 +1,6 @@
 # Profiling, performance budgets & stability (P15.1 / P15.2)
 
-This document covers how to profile Infinity Engine with Tracy, the performance
+This document covers how to profile Infini Engine with Tracy, the performance
 budgets enforced in CI, the memory diagnostics, and the crash-reporting /
 autosave-recovery machinery. It is the reference for the P15.1 (performance) and
 P15.2 (stability) work.

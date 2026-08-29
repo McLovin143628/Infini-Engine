@@ -1,6 +1,6 @@
 # Release channels & the updater — design
 
-**Status: DESIGN + partial substance.** This document specifies how Infinity Engine will be
+**Status: DESIGN + partial substance.** This document specifies how Infini Engine will be
 versioned and distributed across release channels, and what an in-app updater needs. The
 **in-repo substance shipped in P15.4** is the build-time version stamping (a git short hash
 embedded via `build.rs`, surfaced in the About dialog — see below). A *real* signed auto-updater
@@ -10,7 +10,7 @@ are specified here as the ops steps, honestly, rather than faked.
 
 ## Versioning scheme
 
-Infinity Engine uses **semantic versioning** (`MAJOR.MINOR.PATCH`) sourced from a single place:
+Infini Engine uses **semantic versioning** (`MAJOR.MINOR.PATCH`) sourced from a single place:
 `[workspace.package].version` in the root `Cargo.toml`. Every crate inherits it with
 `version = { workspace = true }`, and the Tauri app mirrors it in `tauri.conf.json`.
 
@@ -22,7 +22,7 @@ Infinity Engine uses **semantic versioning** (`MAJOR.MINOR.PATCH`) sourced from 
 
 The **git short hash** is embedded at build time (`editor/studio/src-tauri/build.rs` sets
 `INF_GIT_HASH`) and shown alongside the version, so any build is traceable to a commit even
-between tagged releases. `app_build_info` returns `"Infinity Engine <version> · commit <hash>"`.
+between tagged releases. `app_build_info` returns `"Infini Engine <version> · commit <hash>"`.
 
 ## Channels
 

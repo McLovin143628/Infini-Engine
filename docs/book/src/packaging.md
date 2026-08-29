@@ -1,6 +1,6 @@
 # Packaging & Shipping
 
-Infinity Engine closes the make → play → ship loop deliberately early, so you can package a
+Infini Engine closes the make → play → ship loop deliberately early, so you can package a
 double-clickable build long before the engine's advanced features are all in. Shipped games run
 one execution model: compiled native code (Blueprints included, via transpiled Rust).
 
@@ -42,7 +42,7 @@ inf-player --pack MyGame/Build --headless --run-frames 300 --assert-exit
 ```
 
 This runs a fixed number of deterministic frames and asserts a clean exit, capturing a crash log if
-anything fails. Infinity Engine's own CI cooks the 2D platformer sample and runs it this way on
+anything fails. Infini Engine's own CI cooks the 2D platformer sample and runs it this way on
 every push, on all three desktop OSes — the make → cook → play gate.
 
 ## Export a runnable build
@@ -56,5 +56,5 @@ inf export --project MyGame --out MyGame/Dist
 This writes a renamed copy of the player, your cooked pack, and a boot config, so the exported
 executable launches your content with zero arguments. Per-OS installers and code signing
 (Authenticode, macOS notarization, Linux AppImage) are the packaging polish tracked in the
-[release-channels design](https://github.com/McLovin143628/Infinity-Engine/blob/main/docs/release-channels.md);
+[release-channels design](https://github.com/McLovin143628/Infini-Engine/blob/main/docs/release-channels.md);
 export gives you a working, distributable build today without faking a signed installer.

@@ -71,7 +71,7 @@ export default function StatusBar() {
         <GitBranch size={13} />
         Source Control: Off
       </button>
-      <span className="px-2">Infinity Engine v{version}</span>
+      <span className="px-2">Infini Engine v{version}</span>
     </div>
   );
 }

@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-REM Launch Infinity Engine in development mode.
+REM Launch Infini Engine in development mode.
 REM Double-click this from Explorer, or run from any shell -- it works either way.
 
 cd /d "%~dp0"
@@ -45,7 +45,7 @@ if not exist "node_modules" (
     )
 )
 
-echo Launching Infinity Engine (dev mode, Vite on port 1440)...
+echo Launching Infini Engine (dev mode, Vite on port 1440)...
 echo First launch compiles the engine workspace; expect a few minutes.
 echo Subsequent launches are seconds.
 echo.

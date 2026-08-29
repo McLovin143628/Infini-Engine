@@ -32,7 +32,7 @@ fn android_main(app: AndroidApp) {
     let sim = crate::sim_from_built(built);
     if let Err(e) = crate::window::run_android(
         app,
-        "Infinity Engine".into(),
+        "Infini Engine".into(),
         sim,
         crate::input::default_map(),
     ) {

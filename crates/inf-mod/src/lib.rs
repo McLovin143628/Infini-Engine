@@ -1,4 +1,4 @@
-//! Guest-side shim for Infinity Engine WASM mods (ROADMAP P14.5, deliverable 2).
+//! Guest-side shim for Infini Engine WASM mods (ROADMAP P14.5, deliverable 2).
 //!
 //! A mod is a `cdylib` compiled to `wasm32-unknown-unknown`. It imports the host
 //! functions its capabilities grant and exports `mod_update(dt)`. This crate

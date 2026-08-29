@@ -1,6 +1,6 @@
 [package]
 name = "inf-mod"
-description = "Guest-side shim for Infinity Engine WASM mods: safe wrappers over the host ABI + the entry macro (P14.5)."
+description = "Guest-side shim for Infini Engine WASM mods: safe wrappers over the host ABI + the entry macro (P14.5)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

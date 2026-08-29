@@ -1,6 +1,6 @@
 [package]
 name = "inf-studio"
-description = "Infinity Engine: the Tauri v2 editor application shell."
+description = "Infini Engine: the Tauri v2 editor application shell."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

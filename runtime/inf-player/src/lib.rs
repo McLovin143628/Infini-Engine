@@ -1,4 +1,4 @@
-//! Infinity Engine standalone player (P9.3) — library entry.
+//! Infini Engine standalone player (P9.3) — library entry.
 //!
 //! The player runs a cooked game: it opens a window and drives a fixed-step
 //! [`RuntimeSim`] (Blueprints + 2D physics) with
@@ -436,7 +436,7 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     };
     let title = match &args.title_override {
         Some(t) => t.clone(),
-        None => format!("Infinity Engine — {}", built.label),
+        None => format!("Infini Engine — {}", built.label),
     };
     // P13.4: load the cook-derived vmesh DAGs so `MeshRef.asset` entities render
     // real geometry (meshlet path / classic fallback per the renderer's auto-tier),

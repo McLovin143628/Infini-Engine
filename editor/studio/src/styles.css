@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* ── Infinity Engine design tokens ──────────────────────────────────────
+/* ── Infini Engine design tokens ──────────────────────────────────────
    These :root values are the compiled-in fallback (= Infinity Dark).
    The runtime source of truth is lib/theme.ts, which writes every
    `--ink-*` variable from the active JSON theme (src/themes/*.json). */

@@ -35,7 +35,7 @@ export interface TourStep {
 export const TOUR_STEPS: TourStep[] = [
   {
     id: "welcome",
-    title: "Welcome to Infinity Engine",
+    title: "Welcome to Infini Engine",
     body: "A quick tour of the core panels. You can skip any time — this only shows on first launch. Reopen it from Help ▸ Interactive Tour.",
     anchor: null,
     placement: "center",

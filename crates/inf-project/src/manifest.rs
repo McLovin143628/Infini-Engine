@@ -1,6 +1,6 @@
 //! The `inf.toml` project manifest.
 //!
-//! Every Infinity Engine project is rooted at a directory containing an
+//! Every Infini Engine project is rooted at a directory containing an
 //! `inf.toml` — the human-readable, git-diffable descriptor the editor, the CLI
 //! (`inf new`/`inf cook`), and the runtime all read to locate a project's
 //! content, engine version, and template lineage.

@@ -1,4 +1,4 @@
-//! Infinity Engine input facade (Ring 0).
+//! Infini Engine input facade (Ring 0).
 //!
 //! An **action/axis mapping** layer shared by the editor and the runtime (roadmap
 //! P9.1): the game speaks in named actions (`"jump"`) and axes (`"move_x"`), and

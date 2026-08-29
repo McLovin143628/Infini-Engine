@@ -1,6 +1,6 @@
 [package]
 name = "inf-cli"
-description = "Infinity Engine CLI: inf new / inf cook / inf bindings."
+description = "Infini Engine CLI: inf new / inf cook / inf bindings."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

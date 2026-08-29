@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-REM Build Infinity Engine in release mode.
+REM Build Infini Engine in release mode.
 REM Double-click this from Explorer, or run from any shell -- it works either way.
 REM
 REM Output:
@@ -51,7 +51,7 @@ if not exist "node_modules" (
 )
 
 echo ================================================================
-echo  Building Infinity Engine (release)
+echo  Building Infini Engine (release)
 echo.
 echo  This type-checks + builds the frontend, then compiles the
 echo  whole engine workspace in release mode. The first release

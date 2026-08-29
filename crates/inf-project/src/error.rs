@@ -12,7 +12,7 @@ pub enum ProjectError {
     #[error("manifest write: {0}")]
     Write(#[from] toml::ser::Error),
 
-    #[error("no {0} found (not an Infinity Engine project)")]
+    #[error("no {0} found (not an Infini Engine project)")]
     NoManifest(String),
 
     #[error("project schema v{found} is newer than this editor (v{current})")]

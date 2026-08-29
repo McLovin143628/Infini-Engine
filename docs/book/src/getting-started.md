@@ -27,7 +27,7 @@ On Windows you can also use the convenience wrappers at the repo root: `run_dev.
 
 ## Run the tests
 
-Infinity Engine holds a hard quality bar — CI runs the same checks on Windows, macOS, and Linux
+Infini Engine holds a hard quality bar — CI runs the same checks on Windows, macOS, and Linux
 on every commit. To run them locally:
 
 ```sh

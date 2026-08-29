@@ -1,4 +1,4 @@
-//! Infinity Engine physics facade (Ring 0).
+//! Infini Engine physics facade (Ring 0).
 //!
 //! This crate wraps [rapier](https://rapier.rs) behind a small, engine-flavoured
 //! API so the rest of the engine never names rapier/parry/nalgebra types

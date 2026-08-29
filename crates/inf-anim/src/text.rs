@@ -123,7 +123,7 @@ pub enum TextError {
 pub fn to_toml(machine: &StateMachine) -> String {
     let mut out = String::new();
     out.push_str(
-        "# An Infinity Engine state machine, as text (pillar S1).\n\
+        "# An Infini Engine state machine, as text (pillar S1).\n\
          #\n\
          # This is the reviewable face of a `.inf_sm`; the binary payload beside it is\n\
          # the machine face. Every authorable value is its own line, so a tweak is a\n\

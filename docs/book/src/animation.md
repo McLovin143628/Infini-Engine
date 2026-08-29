@@ -1,6 +1,6 @@
 # Animation
 
-Infinity Engine drives skeletal characters with clips, blend spaces, and state machines, all wired
+Infini Engine drives skeletal characters with clips, blend spaces, and state machines, all wired
 to gameplay through Blueprints. The `samples/character-demo` project is the reference: an
 idle/run/jump character that walks and jumps across terrain, driven entirely by a Blueprint.
 

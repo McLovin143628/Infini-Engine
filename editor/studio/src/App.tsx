@@ -1,5 +1,5 @@
 /**
- * Infinity Engine shell (Phase 1). Vertical composition per ROADMAP §4:
+ * Infini Engine shell (Phase 1). Vertical composition per ROADMAP §4:
  * custom title bar (chrome + UE-parity menus) → main toolbar → dock
  * workspace (native viewport center + dockable panels) → Content Drawer
  * (push-up, airspace-safe) → status bar.

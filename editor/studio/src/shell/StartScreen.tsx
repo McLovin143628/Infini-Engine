@@ -76,7 +76,7 @@ function StartScreenBody({ canCancel }: { canCancel: boolean }) {
         <div className="flex min-w-0 flex-1 flex-col border-r border-(--ink-border) p-6">
           <div className="mb-4 flex items-center gap-2">
             <Rocket size={20} className="text-(--ink-accent)" />
-            <h1 className="text-lg font-semibold">Infinity Engine</h1>
+            <h1 className="text-lg font-semibold">Infini Engine</h1>
             {canCancel && (
               <button
                 className="ml-auto flex size-6 items-center justify-center rounded text-(--ink-text-dim) hover:bg-(--ink-bg-3) hover:text-(--ink-text)"

@@ -1,4 +1,4 @@
-//! Infinity Engine networking (ROADMAP P14.3).
+//! Infini Engine networking (ROADMAP P14.3).
 //!
 //! Two layers, cleanly split so the deterministic sim never pulls an async runtime:
 //!

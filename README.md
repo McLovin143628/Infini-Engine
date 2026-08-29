@@ -1,4 +1,4 @@
-# Infinity Engine
+# Infini Engine
 
 A next-generation, commercial-grade game engine built in **Rust**, with a built-in
 Tauri v2 + React editor designed as a modern evolution of the industry-standard editor UX.
@@ -24,7 +24,7 @@ asset import to a shipped, packaged build.
 
 ## Feature status
 
-Infinity Engine is built in 16 phases (see [`docs/ROADMAP.md`](docs/ROADMAP.md)). The following
+Infini Engine is built in 16 phases (see [`docs/ROADMAP.md`](docs/ROADMAP.md)). The following
 are complete and CI-green on Windows, macOS, and Linux:
 
 | Area | Status |
@@ -52,7 +52,7 @@ The interactive documentation lives in [`docs/book/`](docs/book/) (build with `m
 ```
 crates/            Engine core (Ring 0) — Tauri-free, console-portable
 editor/crates/     Editor core + native viewport host (Ring 1) — Tauri-free
-editor/studio/     The Infinity Engine editor — Tauri v2 app (React + TypeScript frontend)
+editor/studio/     The Infini Engine editor — Tauri v2 app (React + TypeScript frontend)
 runtime/           Standalone player + cook/packaging pipeline
 tools/             `inf` CLI (new / cook / pack / export)
 templates/         Project templates (scaffolded by `inf new`)

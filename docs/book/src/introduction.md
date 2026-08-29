@@ -1,6 +1,6 @@
 # Introduction
 
-**Infinity Engine** is a commercial-grade game engine built in Rust, with a built-in editor that
+**Infini Engine** is a commercial-grade game engine built in Rust, with a built-in editor that
 runs as a Tauri v2 + React desktop app. It targets 2D, 2.5D, and 3D games of every genre, and
 carries a project from the first imported asset all the way to a shipped, packaged build.
 
@@ -13,7 +13,7 @@ what ships. Second, the **viewport is a native window**: the engine renders your
 real wgpu swapchain embedded in the editor, not into a browser canvas, so the editor feels and
 performs like a native tool.
 
-Under the hood, Infinity Engine is data-oriented. The world is a `bevy_ecs` archetype ECS driven
+Under the hood, Infini Engine is data-oriented. The world is a `bevy_ecs` archetype ECS driven
 by a real parallel schedule; rendering is GPU-driven wgpu/WGSL; and world coordinates are 64-bit
 with floating-origin rebasing designed in from the first line of renderer code, so planetary-scale
 worlds keep their precision. Assets are a dual format — a fast binary payload plus a git-diffable
@@ -28,5 +28,5 @@ JSON theme system, a global command palette (Ctrl+Shift+P), and first-run layout
 This guide walks you from installing the engine through building your first scene, scripting it
 with Blueprints, sculpting terrain, authoring materials, animating a character, and finally
 packaging and shipping your game. For the full engineering plan — architecture, the 16-phase
-roadmap, and the technology matrix — see [`docs/ROADMAP.md`](https://github.com/McLovin143628/Infinity-Engine/blob/main/docs/ROADMAP.md)
+roadmap, and the technology matrix — see [`docs/ROADMAP.md`](https://github.com/McLovin143628/Infini-Engine/blob/main/docs/ROADMAP.md)
 in the repository.

@@ -1,6 +1,6 @@
 # Contributing
 
-Ground rules for working on Infinity Engine. The architecture itself is
+Ground rules for working on Infini Engine. The architecture itself is
 specified in [ROADMAP.md](ROADMAP.md) — read §2 (architecture) and the phase
 you are touching before writing code.
 

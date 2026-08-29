@@ -319,7 +319,7 @@ impl EditorSettings {
     pub fn migrate(&mut self) -> Result<(), String> {
         if self.schema_version > EDITOR_SETTINGS_VERSION {
             return Err(format!(
-                "editor settings were written by a newer Infinity Engine \
+                "editor settings were written by a newer Infini Engine \
                  (schema v{}, this build understands v{EDITOR_SETTINGS_VERSION}); \
                  the file is left untouched — update the editor or move it aside",
                 self.schema_version
@@ -528,7 +528,7 @@ mod tests {
         )
         .unwrap();
         let err = EditorSettings::load_or_default(dir.path()).expect_err("newer must be refused");
-        assert!(err.contains("newer Infinity Engine"), "{err}");
+        assert!(err.contains("newer Infini Engine"), "{err}");
     }
 
     /// Every numeric door: NaN and infinity fall back to the default, and

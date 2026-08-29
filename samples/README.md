@@ -1,4 +1,4 @@
-# Infinity Engine samples
+# Infini Engine samples
 
 These are dogfood projects that double as integration-test fixtures — each is generated
 deterministically by `inf_editor_core::samples` and its committed bytes are drift-checked in CI

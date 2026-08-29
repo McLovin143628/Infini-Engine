@@ -1,6 +1,6 @@
 # Modding
 
-Infinity Engine ships a safe, no-compiler extensibility tier for end users: **sandboxed WASM
+Infini Engine ships a safe, no-compiler extensibility tier for end users: **sandboxed WASM
 mods**. Where dylib plugins are ABI-fragile and unsafe, and Blueprints are an authoring tool rather
 than a runtime-user surface, WASM mods let a player extend a shipped game safely and without
 recompiling the engine. A mod is authored in the *same* Blueprints or Rust as the rest of the game —
@@ -58,4 +58,4 @@ not granted **fails to load** with a clear message. The capabilities are narrow 
 | `spawn`    | spawn new entities                 |
 
 For the full security posture, see the modding memo
-([`docs/memos/p14-wasm-modding.md`](https://github.com/McLovin143628/Infinity-Engine/blob/main/docs/memos/p14-wasm-modding.md)).
+([`docs/memos/p14-wasm-modding.md`](https://github.com/McLovin143628/Infini-Engine/blob/main/docs/memos/p14-wasm-modding.md)).

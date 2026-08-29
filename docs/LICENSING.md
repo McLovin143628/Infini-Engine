@@ -1,6 +1,6 @@
 # Licensing — options for the owner's decision
 
-**Status: OPEN DECISION.** This document lays out the licensing options for Infinity Engine so
+**Status: OPEN DECISION.** This document lays out the licensing options for Infini Engine so
 the project owner can make an informed, deliberate choice. **No license is picked unilaterally
 here.** Until this is resolved, the codebase carries a consistent *placeholder* license field
 (`MIT OR Apache-2.0`) in `[workspace.package]` so tooling (cargo-deny, crates metadata) stays
@@ -9,7 +9,7 @@ coherent; changing the decision means updating that one field plus adding the co
 
 ## Why this needs a deliberate choice
 
-Infinity Engine is positioned as a commercial-grade engine. The license determines who can use
+Infini Engine is positioned as a commercial-grade engine. The license determines who can use
 it, whether it can be forked into a competitor, whether studios can ship closed-source games on
 top of it, and how (or whether) the project can be monetized. This is a business decision, not
 an engineering default, so it is surfaced for the owner rather than assumed.

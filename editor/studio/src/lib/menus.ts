@@ -248,7 +248,7 @@ export const MENU_BAR: TopMenu[] = [
       act("help.tour", "Interactive Tour"),
       act("help.reportBug", "Report a Bug…"),
       sep,
-      act("help.about", "About Infinity Engine"),
+      act("help.about", "About Infini Engine"),
     ],
   },
 ];

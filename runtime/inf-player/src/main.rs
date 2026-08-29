@@ -1,4 +1,4 @@
-//! Infinity Engine standalone player — binary entry.
+//! Infini Engine standalone player — binary entry.
 //!
 //! Modes (see [`inf_player::args`]):
 //!
@@ -420,7 +420,7 @@ fn run_pie_window(
             return ExitCode::FAILURE;
         }
     };
-    let title = format!("Infinity Engine (PIE) — {label}");
+    let title = format!("Infini Engine (PIE) — {label}");
     if write_msg(
         &mut stdout,
         &PlayerToEditor::Loaded {

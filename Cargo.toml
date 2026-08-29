@@ -59,8 +59,13 @@ exclude = ["samples/mods"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/McLovin143628/Infinity-Engine"
-authors = ["Infinity Engine contributors"]
+# SCRIPT0: `Infinity-Engine` → `Infini-Engine` with the product name. GitHub
+# serves a permanent redirect from a renamed repository's old path, for clones,
+# fetches and the REST API alike, so CI and every existing checkout keep working
+# whichever spelling they hold. The URL is updated because it should say the
+# truth, not because anything breaks if it does not.
+repository = "https://github.com/McLovin143628/Infini-Engine"
+authors = ["Infini Engine contributors"]
 
 [workspace.dependencies]
 # ── shared, version-pinned once here; crates reference with { workspace = true } ──

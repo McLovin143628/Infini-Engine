@@ -1,6 +1,6 @@
 # Sample mods — the moddable game (P14.5)
 
-Infinity Engine loads sandboxed **WASM mods** at runtime: safe, no-compiler,
+Infini Engine loads sandboxed **WASM mods** at runtime: safe, no-compiler,
 end-user extensibility that neither dylib plugins (ABI-fragile / unsafe) nor
 Blueprints (not runtime-user-facing) provide. A mod is authored in the **same**
 Blueprints/Rust as the rest of the game — no new scripting language, "two ways to

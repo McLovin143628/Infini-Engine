@@ -371,7 +371,7 @@ fn index_html_contents(name: &str) -> String {
 /// The honest two-step web-build note (WebGPU + toolchain caveats).
 fn web_build_note(name: &str) -> String {
     format!(
-        "Infinity Engine — web export: {name}\n\
+        "Infini Engine — web export: {name}\n\
          ================================================\n\n\
          This folder is a browser bundle SKELETON. It already contains:\n\
          * index.html          — a full-viewport <canvas id=\"game\"> that boots the game\n\
@@ -405,7 +405,7 @@ fn web_build_note(name: &str) -> String {
 /// The honest Android build note (cargo-ndk + APK, NDK required).
 fn android_build_note(name: &str) -> String {
     format!(
-        "Infinity Engine — Android export: {name}\n\
+        "Infini Engine — Android export: {name}\n\
          ================================================\n\n\
          This folder contains the cooked assets (content.inf_pack + manifest.toml).\n\
          Building the APK requires the Android SDK + NDK, which are NOT in this repo.\n\n\

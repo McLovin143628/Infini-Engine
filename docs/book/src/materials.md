@@ -1,6 +1,6 @@
 # Materials
 
-Infinity Engine shades with a physically-based (PBR) model and lets you author materials either as
+Infini Engine shades with a physically-based (PBR) model and lets you author materials either as
 simple parameter sets or as full node graphs that compile to live WGSL.
 
 ## The PBR model
