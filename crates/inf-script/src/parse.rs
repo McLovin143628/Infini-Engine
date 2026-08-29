@@ -325,7 +325,8 @@ impl<'a> Parser<'a> {
     /// `var name: type = literal [exposed]`
     fn var_decl(&mut self, unit: &mut Unit) -> P<()> {
         self.expect(Tok::Ident("var".into()))?;
-        let (name, _) = self.expect_ident("a variable name")?;
+        let (name, nspan) = self.expect_ident("a variable name")?;
+        self.check_writable(&name, nspan)?;
         self.expect(Tok::Sym(":"))?;
         let ty = self.ty()?;
         self.expect(Tok::Sym("="))?;
@@ -402,6 +403,7 @@ impl<'a> Parser<'a> {
         let header = self.span();
         self.expect(Tok::Kw("function"))?;
         let (name, nspan) = self.expect_ident("a function name")?;
+        self.check_writable(&name, nspan)?;
         let params = self.params(None)?;
         let ret = if self.eat(&Tok::Sym("->")) {
             self.ty()?
@@ -437,11 +439,14 @@ impl<'a> Parser<'a> {
             // `n7` and `speed_n7` are how an unnamed and a named graph value
             // print; a parameter wearing one of those spellings would collide
             // with a local's printed name on the way back out.
+            if signature.is_none() {
+                self.check_writable(&name, nspan)?;
+            }
             if signature.is_none() && BlueprintFn::parse_local_ident(&name).is_some() {
                 return Err(self.error(
                     nspan,
                     format!(
-                        "`{name}` is reserved — `n<number>` and `<name>_n<number>`                          are how graph-authored values are written"
+                        "`{name}` is reserved — `n<number>` and `<name>_n<number>` are how graph-authored values are written"
                     ),
                 ));
             }
@@ -884,7 +889,32 @@ impl<'a> Parser<'a> {
                 return self.number_lit(&format!("-{digits}"), is_int, span);
             }
             let inner = self.unary()?;
-            return Ok(Expr::Unary(UnOp::Neg, Box::new(inner)));
+            // **A negated literal is folded into a negative one**, whatever
+            // spelling it arrived in. `Unary(Neg, Lit)` is *non-canonical IR*:
+            // `inf_transpile::emit` refuses it outright
+            // (`EmitError::NegatedLiteral`), because the lifter folds `-lit` on
+            // the way back and so the shape could not round-trip through Rust.
+            // A language that could write it would be a language that can write
+            // programs the cook refuses, which is not a trade this arc makes.
+            // `-(1)` and `-1` are therefore one thing here, and the emitter
+            // prints the canonical form.
+            return Ok(match inner {
+                Expr::Lit(Lit::Float(f)) => Expr::Lit(Lit::Float(-f)),
+                // `-i64::MIN` has no `i64`; that one keeps the unary form, which
+                // the transpiler refuses for a different reason it already names
+                // (`EmitError::IntMin`).
+                Expr::Lit(Lit::Int(i)) => match i.checked_neg() {
+                    Some(n) => Expr::Lit(Lit::Int(n)),
+                    None => Expr::Unary(UnOp::Neg, Box::new(Expr::Lit(Lit::Int(i)))),
+                },
+                Expr::Lit(other) => {
+                    return Err(self.error(
+                        span,
+                        format!("`-` needs a number, not {}", lit_kind(&other)),
+                    ))
+                }
+                other => Expr::Unary(UnOp::Neg, Box::new(other)),
+            });
         }
         self.primary()
     }
@@ -1083,21 +1113,32 @@ impl<'a> Parser<'a> {
     /// program across a round trip, which is the class of defect this house
     /// writes gates for. Renaming costs a designer one word; a capture costs a
     /// session.
-    fn check_shadow(&mut self, name: &str, span: Span) -> P<()> {
-        // `var` and `nodestate` open the two explicit escape hatches
-        // (`var.get("…")`, `nodestate.set("…", …)`). A local wearing either name
-        // would print bare and turn the next escape hatch in the same body into
-        // a field access on itself.
+    /// A name the emitter can write back bare.
+    ///
+    /// `var` and `nodestate` open the two explicit escape hatches
+    /// (`var.get("…")`, `nodestate.set("…", …)`), so a binder wearing either
+    /// would print bare and turn the next escape hatch in the same body into a
+    /// field access on itself. Checked at every declaration site — variables,
+    /// functions, function parameters, locals and loop indices — because
+    /// **anything the parser accepts, the emitter must be able to write**, and a
+    /// program that parses and then cannot be printed is a worse failure than a
+    /// refusal with a line number.
+    fn check_writable(&mut self, name: &str, span: Span) -> P<()> {
         if matches!(name, "var" | "nodestate") {
             return Err(self.error(
                 span,
                 format!("`{name}` is reserved — it opens the explicit `{name}.…` form"),
             ));
         }
+        Ok(())
+    }
+
+    fn check_shadow(&mut self, name: &str, span: Span) -> P<()> {
+        self.check_writable(name, span)?;
         if self.lookup_local(name).is_some() {
             return Err(self.error(
                 span,
-                format!("`{name}` is already a local here — pick another name                          (InfiniScript does not shadow, so that text and graph                          cannot disagree about which one a reader meant)"),
+                format!("`{name}` is already a local here — pick another name (InfiniScript does not shadow, so text and graph cannot disagree about which one a reader meant)"),
             ));
         }
         if self.params.iter().any(|p| p == name) {

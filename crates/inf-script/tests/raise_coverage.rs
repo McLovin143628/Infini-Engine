@@ -50,13 +50,23 @@ enum Verdict {
 }
 use Verdict::{Raises, Refuses};
 
-/// `(construct, source, verdict)` — the spec's appendix-A table, in code.
-fn table() -> Vec<(&'static str, String, Verdict)> {
+/// `(construct, body, verdict)` — the spec's appendix-A table, in code.
+///
+/// The bodies are raw multi-line strings rather than escaped one-liners,
+/// deliberately: an escaped body puts a run of eight spaces *inside* a string
+/// literal, which is the exact signature `inf_packager`'s eaten-continuation
+/// sweep looks for. Writing indented source as indented source is both more
+/// readable and outside that collision.
+fn raise_verdict_table() -> Vec<(&'static str, String, Verdict)> {
     let handler = |body: &str| format!("on begin_play()\n{body}end\n");
     vec![
         (
             "a linear chain of actions",
-            handler("    debug.print(\"a\")\n    debug.print(\"b\")\n"),
+            handler(
+                r#"    debug.print("a")
+    debug.print("b")
+"#,
+            ),
             Raises,
         ),
         (
@@ -66,7 +76,11 @@ fn table() -> Vec<(&'static str, String, Verdict)> {
         ),
         (
             "arithmetic, comparison and logic operators",
-            handler("    speed = (1.0 + 2.0) * 3.0\n    flag = 1.0 < 2.0 and not false\n"),
+            handler(
+                r#"    speed = (1.0 + 2.0) * 3.0
+    flag = 1.0 < 2.0 and not false
+"#,
+            ),
             Raises,
         ),
         (
@@ -74,60 +88,107 @@ fn table() -> Vec<(&'static str, String, Verdict)> {
             handler("    speed = math.clamp(math.sqrt(16.0), 0.0, 3.0)\n"),
             Raises,
         ),
-        (
-            "unary minus",
-            handler("    speed = -(speed)\n"),
-            Raises,
-        ),
+        ("unary minus", handler("    speed = -(speed)\n"), Raises),
         (
             "an `if` as the last statement of its block",
-            handler("    if flag then\n        debug.print(\"yes\")\n    else\n        debug.print(\"no\")\n    end\n"),
+            handler(
+                r#"    if flag then
+        debug.print("yes")
+    else
+        debug.print("no")
+    end
+"#,
+            ),
             Raises,
         ),
         (
             "a `while` loop",
-            handler("    while flag do\n        debug.print(\"spin\")\n    end\n"),
+            handler(
+                r#"    while flag do
+        debug.print("spin")
+    end
+"#,
+            ),
             Raises,
         ),
         (
             "a `while` loop with statements after it",
-            handler("    while flag do\n        debug.print(\"spin\")\n    end\n    debug.print(\"done\")\n"),
+            handler(
+                r#"    while flag do
+        debug.print("spin")
+    end
+    debug.print("done")
+"#,
+            ),
             Raises,
         ),
         (
             "a `for` loop — WIDENED IN SCRIPT1",
-            handler("    for i = 0, 3 do\n        total = i\n    end\n"),
+            handler(
+                r#"    for i = 0, 3 do
+        total = i
+    end
+"#,
+            ),
             Raises,
         ),
         (
             "a `return` as the last statement",
-            handler("    debug.print(\"bye\")\n    return\n"),
+            handler(
+                r#"    debug.print("bye")
+    return
+"#,
+            ),
             Raises,
         ),
         (
             "an action bound to a local",
-            handler("    local e = engine.spawn(\"enemy\")\n    engine.destroy(e)\n"),
+            handler(
+                r#"    local e = engine.spawn("enemy")
+    engine.destroy(e)
+"#,
+            ),
             Raises,
         ),
         // ── and now the honest half ───────────────────────────────────────
         (
             "an `if` that is NOT the last statement of its block",
-            handler("    if flag then\n        debug.print(\"yes\")\n    end\n    debug.print(\"after\")\n"),
+            handler(
+                r#"    if flag then
+        debug.print("yes")
+    end
+    debug.print("after")
+"#,
+            ),
             Refuses(RaiseError::NonLinear),
         ),
         (
             "a `return` that is NOT the last statement",
-            handler("    return\n    debug.print(\"unreachable\")\n"),
+            handler(
+                r#"    return
+    debug.print("unreachable")
+"#,
+            ),
             Refuses(RaiseError::NonLinear),
         ),
         (
             "assigning to a local",
-            handler("    local x = 0\n    x = x + 1\n    debug.print(\"x\")\n"),
+            handler(
+                r#"    local x = 0
+    x = x + 1
+    debug.print("x")
+"#,
+            ),
             Refuses(RaiseError::UnsupportedStmt("assign")),
         ),
         (
             "a `rust` escape block",
-            handler("    rust [[\n    let _ = 1;\n]]\n"),
+            handler(
+                r#"    rust [[
+    let _ = 1;
+]]
+"#,
+            ),
             Refuses(RaiseError::UnsupportedStmt("snippet")),
         ),
         (
@@ -137,13 +198,13 @@ fn table() -> Vec<(&'static str, String, Verdict)> {
         ),
         (
             "the `nodestate` cells a do_once graph lowers to",
-            handler("    if not nodestate.get_or(\"k\", false) then\n        nodestate.set(\"k\", true)\n    end\n"),
+            handler(
+                r#"    if not nodestate.get_or("k", false) then
+        nodestate.set("k", true)
+    end
+"#,
+            ),
             Refuses(RaiseError::UnsupportedExpr("pure call")),
-        ),
-        (
-            "a bare `while` with no guard — which text cannot write, and lift can",
-            handler("    while flag do\n        debug.print(\"spin\")\n    end\n"),
-            Raises,
         ),
     ]
 }
@@ -156,7 +217,7 @@ fn compile_one(what: &str, src: &str) -> BlueprintFn {
 #[test]
 fn the_honest_subset_table_is_what_raise_actually_does() {
     let mut wrong = Vec::new();
-    for (what, src, want) in table() {
+    for (what, src, want) in raise_verdict_table() {
         let f = compile_one(what, &src);
         let got = match raise_fn(&f) {
             Ok(_) => Raises,
@@ -217,7 +278,7 @@ fn one_unraisable_statement_takes_the_whole_handler() {
 fn raising_a_script_to_a_graph_and_back_preserves_the_program() {
     let reg = blueprint_registry();
     let mut compared = 0;
-    for (what, src, want) in table() {
+    for (what, src, want) in raise_verdict_table() {
         if want != Raises {
             continue;
         }
@@ -284,11 +345,11 @@ fn observe(f: &BlueprintFn) -> Vec<String> {
 /// verdicts, in numbers, and a change that collapses one column shows up here.
 #[test]
 fn the_table_covers_both_verdicts() {
-    let rows = table();
+    let rows = raise_verdict_table();
     let raises = rows.iter().filter(|(_, _, v)| *v == Raises).count();
     let refuses = rows.len() - raises;
     assert!(
-        raises >= 11 && refuses >= 6,
+        raises == 11 && refuses == 6,
         "{raises} raising rows and {refuses} refusing ones — the table has \
          stopped covering one of the two answers"
     );

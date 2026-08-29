@@ -3646,6 +3646,7 @@ dependencies = [
  "inf-blueprint",
  "inf-graph",
  "inf-math",
+ "inf-transpile",
  "serde",
  "serde_json",
  "thiserror 2.0.19",

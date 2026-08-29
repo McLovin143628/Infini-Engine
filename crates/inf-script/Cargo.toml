@@ -25,3 +25,6 @@ inf-math = { workspace = true }
 # Already a workspace dependency (with `float_roundtrip`); used only by the
 # determinism gate, to get canonical bytes to digest.
 serde_json = { workspace = true }
+# The third leg of the round trip (text -> IR -> Rust -> IR). A dev-dep only:
+# the compiler does not depend on the transpiler, and must not.
+inf-transpile = { workspace = true }

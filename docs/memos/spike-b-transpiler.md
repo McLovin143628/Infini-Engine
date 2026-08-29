@@ -1,4 +1,4 @@
-# Spike B memo — bidirectional Infinity Blueprints ↔ Rust transpiler
+# Spike B memo — bidirectional Infini Blueprints ↔ Rust transpiler
 
 **Status:** GO. The graph↔code round trip works with the guarantees the
 product needs; the proptest suite and a 38-case hand-edit corpus are green

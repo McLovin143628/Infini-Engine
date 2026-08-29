@@ -25,10 +25,16 @@
 //!
 //! # Two rules the round trip rests on
 //!
-//! **A negative literal and a negation print differently.** `Lit::Int(-1)` is
-//! `-1`; `Unary(Neg, Lit::Int(1))` is `-(1)`. They are different IRs a graph can
-//! hold, and without the parentheses they would print the same text and could
-//! not both come back. [`crate::parse`]'s `unary` is the other half of the pair.
+//! **A negated literal prints as the negative literal it means.** `Unary(Neg,
+//! Lit::Int(1))` is written `-1`, not `-(1)`. The first draft kept the two apart
+//! so a graph holding the second could print and come back; `tests/
+//! transpile_bridge.rs` then found what that cost — `inf_transpile::emit`
+//! **refuses** `Unary(Neg, Lit)` outright, because the lifter folds `-lit` on the
+//! way back and the shape cannot round-trip through Rust. A language able to
+//! write it is a language able to write programs the cook refuses. So
+//! [`crate::parse`] folds and this module prints the canonical form, and the
+//! round trip survives because the two *agree* rather than because they disagree
+//! carefully.
 //!
 //! **A member variable prints bare unless something shadows it.** `vars::get("x")`
 //! is `x` — until a `local x` is live at that point, at which case it prints as
@@ -448,19 +454,32 @@ impl Writer {
                 )
             }
             Expr::Unary(UnOp::Not, inner) => (format!("not {}", self.expr(inner, UNARY)?), UNARY),
-            Expr::Unary(UnOp::Neg, inner) => {
-                // A literal operand *must* be parenthesised — `-1` is the
-                // negative literal, a different IR. So must a nested unary, or
-                // the two minus signs would open a comment.
-                let force = matches!(inner.as_ref(), Expr::Lit(_) | Expr::Unary(..));
-                let written = self.expr(inner, UNARY)?;
-                let written = if force && !written.starts_with('(') {
-                    format!("({written})")
-                } else {
-                    written
-                };
-                (format!("-{written}"), UNARY)
-            }
+            // **A negated literal is written as the negative literal.** The
+            // canonical IR for a negative constant is `Lit`, not `Unary(Neg,
+            // Lit)` — `inf_transpile::emit` refuses the latter outright — and
+            // `crate::parse` folds it on the way in, so printing the canonical
+            // form is what makes the text a fixed point over an IR a *graph*
+            // produced (a `math.neg` node wired to a `lit.float` is exactly
+            // that shape, and it is why the graph path still has the gap).
+            Expr::Unary(UnOp::Neg, inner) => match inner.as_ref() {
+                Expr::Lit(Lit::Float(f)) => (literal(&Lit::Float(-f))?, ATOM),
+                Expr::Lit(Lit::Int(i)) if i.checked_neg().is_some() => {
+                    (literal(&Lit::Int(-i))?, ATOM)
+                }
+                _ => {
+                    // A nested unary must be parenthesised or the two minus
+                    // signs open a comment; `-i64::MIN` keeps the unary form
+                    // and so does anything non-literal that binds looser.
+                    let force = matches!(inner.as_ref(), Expr::Lit(_) | Expr::Unary(..));
+                    let written = self.expr(inner, UNARY)?;
+                    let written = if force && !written.starts_with('(') {
+                        format!("({written})")
+                    } else {
+                        written
+                    };
+                    (format!("-{written}"), UNARY)
+                }
+            },
             Expr::Binary(op, l, r) => {
                 let p = prec(*op);
                 let lhs = self.expr(l, p)?;

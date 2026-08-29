@@ -138,8 +138,8 @@ on begin_play()
     local d = a > 1.0 and a >= 2.0
     local e = not b
     local f = -a
-    local g = -(1)
-    local h = -1
+    local g = -1
+    local h = -1.5
     debug.print("ops")
 end
 "#,
@@ -154,7 +154,7 @@ on begin_play()
     local c = (1 or 0) and 1
     local d = 1 - (2 - 3)
     local e = 1 - 2 - 3
-    local f = -(-(1.5))
+    local f = -(-a)
     debug.print("prec")
 end
 "#,
@@ -885,29 +885,46 @@ fn every_ir_construct_appears_in_the_corpus() {
     assert_eq!(lits, want_lits, "a `Lit` kind is missing");
 }
 
-/// **The falsification arm.** Break the emitter's one non-obvious rule — the
-/// parentheses that separate a negative literal from a negation — and the round
-/// trip must go red. Asserted here as the *difference* between the two IRs, so
-/// the day somebody "simplifies" `-(1)` to `-1` this file names the reason.
+/// **A negated literal is a negative literal, in both directions.**
+///
+/// The first draft of the language kept the two apart — `-1` as `Lit::Int(-1)`
+/// and `-(1)` as `Unary(Neg, Lit::Int(1))` — so that a graph holding the second
+/// could print and come back. `tests/transpile_bridge.rs` then found what that
+/// cost: `inf_transpile::emit` **refuses** `Unary(Neg, Lit)` outright
+/// (`EmitError::NegatedLiteral`), because the lifter folds `-lit` on the way
+/// back and the shape could not round-trip through Rust. A language able to
+/// write it is a language able to write programs the cook refuses.
+///
+/// So the parser folds and the emitter prints the canonical form, and the
+/// round trip survives *because the two agree* rather than because they
+/// disagree carefully. The arm pins both halves; the day one is "simplified"
+/// without the other, the fixed point breaks here.
 #[test]
-fn a_negative_literal_and_a_negation_are_different_programs() {
-    let neg_lit = parse_fn("on begin_play()\n    local a = -1\nend\n").unwrap();
-    let negation = parse_fn("on begin_play()\n    local a = -(1)\nend\n").unwrap();
-    assert_ne!(neg_lit.body, negation.body);
-    let Stmt::Let { value, .. } = &neg_lit.body[0] else {
+fn a_negated_literal_is_folded_into_a_negative_one() {
+    for src in [
+        "on begin_play()\n    local a = -1\nend\n",
+        "on begin_play()\n    local a = -(1)\nend\n",
+        "on begin_play()\n    local a = -(-(-1))\nend\n",
+    ] {
+        let f = parse_fn(src).unwrap();
+        let Stmt::Let { value, .. } = &f.body[0] else {
+            panic!()
+        };
+        assert_eq!(value, &Expr::Lit(Lit::Int(-1)), "{src}");
+        assert!(emit_fn(&f).unwrap().contains("= -1\n"), "{src}");
+    }
+    // A negation of something that is *not* a literal keeps its unary form, and
+    // a nested one is parenthesised so the two minus signs cannot open a
+    // comment.
+    let f = parse_fn("on begin_play()\n    local a = -(-speed)\nend\n").unwrap();
+    let Stmt::Let { value, .. } = &f.body[0] else {
         panic!()
     };
-    assert_eq!(value, &Expr::Lit(Lit::Int(-1)));
-    let Stmt::Let { value, .. } = &negation.body[0] else {
-        panic!()
-    };
-    assert_eq!(
-        value,
-        &Expr::Unary(UnOp::Neg, Box::new(Expr::Lit(Lit::Int(1))))
-    );
-    // …and each prints as itself.
-    assert!(emit_fn(&neg_lit).unwrap().contains("= -1\n"));
-    assert!(emit_fn(&negation).unwrap().contains("= -(1)\n"));
+    assert!(matches!(value, Expr::Unary(UnOp::Neg, _)));
+    let text = emit_fn(&f).unwrap();
+    assert!(text.contains("= -(-speed)\n"), "{text}");
+    assert!(!text.contains("--"), "the emitter opened a comment: {text}");
+    assert_eq!(parse_fn(&text).unwrap(), f);
 }
 
 /// A member variable shadowed by a local prints as `var.get("…")`, because a

@@ -799,9 +799,15 @@ Three laws, all in `crates/inf-script/tests/roundtrip.rs`:
 
 Two rules the round trip rests on, each with its own arm:
 
-* **`-1` is a negative literal; `-(1)` is a negation.** `Lit::Int(-1)` and
-  `Unary(Neg, Lit::Int(1))` are different IRs a graph can hold, and without the
-  parentheses they would print the same text and could not both come back.
+* **A negated literal is folded into a negative one, in both directions.** The
+  parser turns `-(1)` into `Lit::Int(-1)` and the emitter prints `Unary(Neg,
+  Lit)` as the negative literal. The first draft kept them apart, so that a graph
+  holding `Unary(Neg, Lit)` (a `math.neg` node wired to a `lit.float`) could
+  print and come back. A.8's bridge then found what that cost:
+  `inf_transpile::emit` **refuses** `Unary(Neg, Lit)`, because the lifter folds
+  `-lit` on the way back and the shape cannot round-trip through Rust. **A
+  language able to write it is a language able to write programs the cook
+  refuses**, and that is not a trade this arc makes.
 * **A member variable shadowed by a local prints explicitly.** `vars::get("x")`
   is `x` — until a `local x` is live there, at which point it prints
   `var.get("x")`, because a bare `x` would mean the local.
@@ -814,7 +820,10 @@ program proves nothing.
 **What the emitter refuses** is four IR states no producer in the tree makes: a
 non-finite float literal (`Lit::Float` is documented finite), a binder whose name
 is not an identifier, two live binders of one name, and a handler whose
-parameters are not its event's signature.
+parameters are not its event's signature. And **anything the parser accepts, the
+emitter can write** — the two reserved names (`var`, `nodestate`) are refused at
+every declaration site for exactly that reason, because a program that parses and
+then cannot be printed is a worse failure than a refusal with a line number.
 
 ## A.7 Containment, at its true granularity
 
@@ -832,7 +841,35 @@ A `while true do … end` cannot hang the editor: `while` and `for` lower to the
 counter-guarded expansion, so the bound lives *in the IR* and the interpreter and
 the transpiled Rust share it.
 
-## A.8 What v1 deliberately does not have
+## A.8 The third leg: text → IR → Rust → IR
+
+`crates/inf-script/tests/transpile_bridge.rs` closes the triangle. Nothing else
+did: `inf-transpile`'s 38 proptests and its hand-edit corpus generate their IR
+from graphs and from Rust, and **neither producer makes a `Binding::Raw` binder,
+a `Stmt::Assign`, a non-terminal `if`, or a `for` whose index carries a name**.
+A text face produces all four the first day somebody writes a script, and the
+bridge's own meta-arm fails if the corpus stops carrying them.
+
+Three claims: the transpiler renders every script; `lift` recovers it
+**structurally** (no verbatim fallback, no warning), so a designer's script is
+editable Rust rather than an opaque blob; and regeneration is byte-idempotent
+with the program unchanged.
+
+**It does not compile the generated Rust and it does not run it.** No test in
+this repository does — `parity.rs`'s own module doc calls itself "the CI-cheap
+half of the parity story". That is SCRIPT1b's crown gate; this file narrows what
+the crown gate has left to prove and does not stand in for it.
+
+**The one literal a script can write and the cook cannot render**: `i64::MIN`.
+`-9223372036854775808` is `-(9223372036854775808)` in Rust source and the
+magnitude overflows, so `inf_transpile::emit` refuses it by name
+(`EmitError::IntMin`). It is not a hole the language opens — a `lit.int` node
+holds it just as happily — and the interpreter computes with it perfectly, so a
+script using it **previews and does not cook**. Pinned by
+`the_one_literal_a_script_can_write_and_the_cook_cannot_render` so SCRIPT1b's
+cook reports it as an advisory rather than a stack trace.
+
+## A.9 What v1 deliberately does not have
 
 Named by scope rather than discovered: no tables, arrays or structs (the IR's
 value set is `Float`/`Int`/`Bool`/`Str`), no user-defined types, no closures, no
