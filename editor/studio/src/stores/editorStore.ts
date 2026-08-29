@@ -119,18 +119,28 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
    * it was rendered from may have moved since. A file tab does not do that
    * (it would discard the author's edits); this document has no edits to
    * discard, which is exactly what read-only means.
+   *
+   * **The live view is pushed the new state directly**, and it has to be:
+   * `EditorPanel` swaps states from an effect keyed on `activeId`, and
+   * re-opening the tab that is *already* active does not change `activeId` — so
+   * without this the store would hold the refreshed document and the author
+   * would go on reading the stale one, which is the exact case the refresh
+   * exists for.
    */
   openText: (path, content) => {
     const existing = get().tabs.find((t) => t.path === path);
     const id = existing?.id ?? `tab-${counter++}`;
     const onUpdate = (u: ViewUpdate) => tabStates.set(id, u.state);
-    tabStates.set(id, createEditorState(content, path, onUpdate, true));
+    const state = createEditorState(content, path, onUpdate, true);
+    tabStates.set(id, state);
+    const wasActive = get().activeId === id;
     set((s) => ({
       tabs: existing
         ? s.tabs
         : [...s.tabs, { id, path, name: baseName(path), dirty: false, readOnly: true }],
       activeId: id,
     }));
+    if (wasActive) getActiveView()?.setState(state);
   },
 
   closeTab: (id) => {

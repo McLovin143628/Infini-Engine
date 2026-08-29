@@ -15,6 +15,7 @@
  * path the drawer emits is the path `file_write` receives, so the file the
  * author edited is the file the watcher recompiles.
  */
+import { EditorView } from "@codemirror/view";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../lib/ipc", () => ({
@@ -34,6 +35,7 @@ import { pathToUri } from "../../lib/editor/fileUri";
 import {
   blueprintTextPath,
   initEditorSync,
+  setActiveView,
   tabStateFor,
   useEditorStore,
 } from "../editorStore";
@@ -166,6 +168,30 @@ describe("a .infini goes from the drawer to the editor and back to disk", () => 
     expect(useEditorStore.getState().tabs).toHaveLength(1);
     expect(useEditorStore.getState().tabs[0].id).toBe(first);
     expect(tabStateFor(first)!.doc.toString()).toBe('actor "Door"\n');
+  });
+
+  it("pushes the refresh into the LIVE view, which no effect would do", () => {
+    // `EditorPanel` swaps states from an effect keyed on `activeId`, and
+    // re-opening the already-active tab does not change it — so the store would
+    // hold the new document and the author would go on reading the old one.
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const view = new EditorView({ parent: host });
+    setActiveView(view);
+
+    const path = blueprintTextPath("id", "Door");
+    useEditorStore.getState().openText(path, SOURCE);
+    // The panel's effect does the FIRST attach; the store cannot, because the
+    // tab was not active when it was created.
+    view.setState(tabStateFor(useEditorStore.getState().activeId!)!);
+    expect(view.state.doc.toString()).toBe(SOURCE);
+
+    useEditorStore.getState().openText(path, 'actor "Door"\n');
+
+    expect(view.state.doc.toString()).toBe('actor "Door"\n');
+    setActiveView(null);
+    view.destroy();
+    host.remove();
   });
 
   it("leaves a Rust tab's rows alone — those are the server's to retract", async () => {
