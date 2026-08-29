@@ -3405,25 +3405,6 @@ mod tests {
     /// allowlists above, never the primary check.
     const SIM_TOKENS: [&str; 6] = ["sim", "Sim", "play", "Play", "paus", "Paus"];
 
-    /// **The P23.6 headline's missing link, held where a test can reach it.**
-    ///
-    /// `dcc_edit_during_simulate.rs` executes both *ends* of the live-update chain
-    /// — the save writes new bytes, and `EditorRenderAssets` re-keys on them while
-    /// a `SimSession` is alive. The link between them is this function's push, and
-    /// a `#[tauri::command]` cannot be driven from a test on any CI leg. So it is
-    /// read instead.
-    ///
-    /// Three things are read, and each closes a hole the first version had:
-    ///
-    /// 1. **The save's tail is an exact statement sequence** at the body's own
-    ///    indentation. Wrapping the push in any condition moves it a level in and
-    ///    fails; inserting a statement before it fails; deleting it fails.
-    /// 2. **The tick's guard chain is pinned line by line.** The old version used
-    ///    `.contains()` over the whole body, which a comment satisfies.
-    /// 3. **The bans run over code with comments stripped**, and they ban
-    ///    substrings of module and concept names rather than four spellings — with
-    ///    the allowlists doing the real work, because a ban alone only catches what
-    ///    its author imagined.
     /// The `spawn_tick` loop body's own indentation, in spaces.
     ///
     /// Spelled as a number rather than as leading spaces inside a string literal,
@@ -3446,6 +3427,25 @@ mod tests {
         line.trim() == stmt && line.len() - line.trim_start().len() == LOOP_INDENT
     }
 
+    /// **The P23.6 headline's missing link, held where a test can reach it.**
+    ///
+    /// `dcc_edit_during_simulate.rs` executes both *ends* of the live-update chain
+    /// — the save writes new bytes, and `EditorRenderAssets` re-keys on them while
+    /// a `SimSession` is alive. The link between them is this function's push, and
+    /// a `#[tauri::command]` cannot be driven from a test on any CI leg. So it is
+    /// read instead.
+    ///
+    /// Three things are read, and each closes a hole the first version had:
+    ///
+    /// 1. **The save's tail is an exact statement sequence** at the body's own
+    ///    indentation. Wrapping the push in any condition moves it a level in and
+    ///    fails; inserting a statement before it fails; deleting it fails.
+    /// 2. **The tick's guard chain is pinned line by line.** The old version used
+    ///    `.contains()` over the whole body, which a comment satisfies.
+    /// 3. **The bans run over code with comments stripped**, and they ban
+    ///    substrings of module and concept names rather than four spellings — with
+    ///    the allowlists doing the real work, because a ban alone only catches what
+    ///    its author imagined.
     #[test]
     fn the_save_pushes_its_invalidation_unconditionally() {
         let save = body_of(SOURCE, "pub async fn dcc_save(");
