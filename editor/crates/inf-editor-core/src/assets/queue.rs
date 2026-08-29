@@ -685,9 +685,10 @@ mod tests {
     /// those arms went on passing, which is this repository's most-repaired
     /// shape.
     ///
-    /// Anti-vacuous in both directions: a `.infini` must arrive **with the GUID
-    /// the database now holds** (not a synthesised one, and not before the
-    /// rescan), and a change to something that is not a script must not.
+    /// Anti-vacuous in both directions: a `.infini` must arrive **under the GUID
+    /// a level's `ActorClass` is bound to** — that is, the one the database held
+    /// *before* the edit, which is the assertion that found the wave's HIGH —
+    /// and a change to something that is not a script must not arrive at all.
     #[test]
     fn a_changed_script_reaches_the_tick_outcome_with_its_guid() {
         use std::time::{Duration, Instant};
@@ -734,7 +735,12 @@ mod tests {
         );
         assert_eq!(
             seen[0].0, guid,
-            "the GUID must be the one the database holds AFTER the rescan"
+            "editing the script CHANGED its asset id. A level binds a script \
+             through `ActorClass(Uuid)`, so hot reload would queue the class \
+             under a GUID no actor holds and swap nothing — and PIE, Simulate \
+             and the cook would then resolve that binding to None and run the \
+             actor with no gameplay logic at all. `pin_script_ids` is what \
+             stops the id being re-derived from bytes that moved"
         );
         assert_eq!(seen[0].1, path);
     }
