@@ -226,7 +226,13 @@ function CanvasInner() {
             title="Which handler of this actor class to show"
           >
             {actor.handlers.map((h) => (
-              <option key={h.key} value={h.key} disabled={!h.raisable}>
+              // `reason` was computed by `actor_handlers`, serialized across the
+              // wire and then DROPPED here — the one consumer showed
+              // "(no graph form)" and threw away the sentence naming which form
+              // and what to do about it (SCRIPT2b audit). It carries the
+              // refusal's own name (`RaiseError`) and, since the audit, the
+              // remedy that now exists: "Open as InfiniScript".
+              <option key={h.key} value={h.key} disabled={!h.raisable} title={h.reason ?? h.label}>
                 {h.label}
                 {h.raisable ? "" : " (no graph form)"}
               </option>

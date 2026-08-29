@@ -239,7 +239,8 @@ pub async fn graph_open_actor(
 
     let graph = inf_blueprint::raise_fn(chosen.2).map_err(|e| {
         format!(
-            "“{}” ▸ {} cannot be drawn as a graph ({e}); open the generated code instead.",
+            "“{}” ▸ {} cannot be drawn as a graph ({e}); right-click the asset and \
+             choose “Open as InfiniScript” to read it, or open the generated code.",
             class.name, chosen.1
         )
     })?;
@@ -339,6 +340,15 @@ fn actor_candidates(class: &inf_blueprint::BlueprintClass) -> Vec<ActorCandidate
 /// make the actor look like it has fewer handlers than it has, and the user
 /// would never learn that the one they are looking for is hand-edited past the
 /// node kit's image.
+///
+/// **The reason names the remedy that now exists** (SCRIPT2b audit). Until this
+/// wave the only thing a refused handler could be read as was the generated
+/// Rust, so that is what the message said. SCRIPT2b built the better answer —
+/// `script_emit_class` renders the whole class as InfiniScript, and the case
+/// that reaches this arm most often is `RaiseError::LocalFunctionCall`, which
+/// the text face writes perfectly well — and did not update the one sentence in
+/// the product that tells the user where to go. A capability nobody is told
+/// about is a capability that was not shipped.
 fn actor_handlers(candidates: &[ActorCandidate<'_>]) -> Vec<ActorHandlerDto> {
     candidates
         .iter()
@@ -354,8 +364,8 @@ fn actor_handlers(candidates: &[ActorCandidate<'_>]) -> Vec<ActorHandlerDto> {
                 label: label.clone(),
                 raisable: false,
                 reason: Some(format!(
-                    "{e} — this handler has no unambiguous node form; open the generated code \
-                     instead."
+                    "{e} — this handler has no unambiguous node form; “Open as InfiniScript” \
+                     reads it as text, or open the generated code."
                 )),
             },
         })
@@ -1220,6 +1230,11 @@ mod tests {
         let reason = handlers[0].reason.as_deref().expect("a refusal is a value");
         assert!(!reason.trim().is_empty());
         assert!(reason.contains("no unambiguous node form"), "{reason}");
+        // …and it names the remedy that exists NOW (SCRIPT2b audit). A refusal
+        // that sends the user to the generated Rust when the same handler reads
+        // perfectly well as InfiniScript is a message that has fallen behind
+        // the product.
+        assert!(reason.contains("InfiniScript"), "{reason}");
         assert!(handlers[1].raisable && handlers[1].reason.is_none());
         assert!(handlers[2].raisable);
 
