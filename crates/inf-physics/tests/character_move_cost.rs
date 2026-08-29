@@ -55,12 +55,27 @@
 //! **The shape is asserted, the clocks are printed** — `kinematic_pairing_cost`'s
 //! own rule and `city_collider_band`'s before it. A wall-clock assertion on a
 //! shared runner is a flake generator, and every absolute millisecond here is a
-//! statement about one dev box. What *is* asserted is a **ratio with a 4×
-//! margin**: a genuine `O(N²)` term would make the per-character cost at N = 64
-//! sixty-four times its cost at N = 1, so a bound at 4× cannot be met by noise
-//! and cannot be missed by a quadratic. Every arm also asserts the characters
-//! actually **moved**, because a mover that refused every step would be the
-//! cheapest of all.
+//! statement about one dev box. What *is* asserted is a **ratio**: a genuine
+//! `O(N²)` term would make the per-character cost at N = 64 sixty-four times its
+//! cost at N = 1, which no amount of noise reaches. Every arm also asserts the
+//! characters actually **moved**, because a mover that refused every step would
+//! be the cheapest of all.
+//!
+//! # …and a ratio of two clocks is still a clock (island wave SCRIPT1a's audit)
+//!
+//! The paragraph above used to say "a **4×** margin … cannot be met by noise".
+//! Under a full `cargo test --workspace`,
+//! [`the_movers_per_character_cost_is_a_function_of_the_worlds_size`] read
+//! **5.00×** and reddened — green alone, and green in two other full runs of the
+//! same tree. Both halves of a ratio are noisy and the ratio compounds them, so
+//! the NPC1c-CI law (*a clock arm that reddens under load is not a gate, it is a
+//! flake with a good story*) applies to a ratio exactly as it does to an
+//! absolute. Two changes rather than a wider number: that arm's **gate** is now
+//! the **counted** quantity (`PhysicsWorld3D::queries` per character per step,
+//! which no other process can perturb), and the clock it keeps is bounded at
+//! **half the fixture's own body growth** — a figure derived from the world
+//! rather than chosen, that a genuine walk cannot meet and that load noise does
+//! not reach.
 //!
 //! Every figure is the MIN of five rounds of sixty steps on this crate's dev
 //! profile (`[profile.dev.package."*"] opt-level = 2`, so rapier and parry are
@@ -732,22 +747,72 @@ fn the_movers_per_character_cost_is_a_function_of_the_worlds_size() {
         );
     }
     let small = &rows[0].1;
-    let big = rows.last().unwrap().1.ms;
+    let biggest = &rows.last().unwrap().1;
+    let big = biggest.ms;
+    let body_growth = biggest.bodies as f64 / small.bodies as f64;
     println!(
-        "  {:.0}x the bodies costs {:.2}x the millisecond",
-        rows.last().unwrap().1.bodies as f64 / small.bodies as f64,
-        big / small.ms
+        "  {body_growth:.0}x the bodies costs {:.2}x the millisecond, and {:.2}x \
+         the scene queries ({:.2} -> {:.2} a character a step)",
+        big / small.ms,
+        biggest.queries_per_character_step / small.queries_per_character_step,
+        small.queries_per_character_step,
+        biggest.queries_per_character_step,
     );
-    // The bound the shape has to hold: growing the world 20x must not grow the
-    // per-character cost 20x, or the mover is walking the world rather than
-    // querying a tree.
+
+    // **THE COUNTED HALF, and it is the gate** (island wave SCRIPT1a's audit).
+    //
+    // This arm used to assert `big < small.ms * 4.0` — a ratio of two wall
+    // clocks — and its own module doc argued that "a bound at 4x cannot be met
+    // by noise". Measured under a full `cargo test --workspace` it read
+    // **5.00x** and reddened, green alone and green in two other full runs of
+    // the same tree. So the sentence was wrong in the direction that matters:
+    // both numbers are noisy and a ratio compounds their noise, which is the
+    // NPC1c-CI law (*a clock arm that reddens under load is not a gate, it is a
+    // flake with a good story*) met from the ratio side rather than the
+    // absolute one.
+    //
+    // There are two ways this mover could go linear in the world, and they need
+    // different instruments — saying so is the point, because one gate claiming
+    // both is the "a gate must aim at the thing it names" defect:
+    //
+    // * **this crate's own code walks the body list** — the defect class the
+    //   P29.4 audit's A8 already caught once (`try_mantle` asking
+    //   `movement_targets` for its own copy). That shows up as *more scene
+    //   queries per character*, which `PhysicsWorld3D::queries` counts and which
+    //   does not move when another test is compiling. That is the assertion
+    //   below, and it is the gate.
+    // * **one broad-phase query gets dearer inside rapier** — invisible to a
+    //   counter, because it is the same call. Only a clock sees that, so the
+    //   clock is kept, at a bound derived from the fixture rather than picked.
+    //
+    // Measured here: 1.00 queries a character a step on 174 bodies and 1.00 on
+    // 3 726 — flat, which is the countable half of "not a walk".
     assert!(
-        big < small.ms * 4.0,
-        "the mover costs {big:.4} ms a character on {} bodies against {:.4} on \
-         {} — that is not a tree query, that is a walk",
-        rows.last().unwrap().1.bodies,
-        small.ms,
+        biggest.queries_per_character_step < small.queries_per_character_step * 1.5,
+        "one character asked {:.2} scene queries a step on {} bodies against \
+         {:.2} on {} — the mover is asking more questions as the world grows, \
+         which is a walk",
+        biggest.queries_per_character_step,
+        biggest.bodies,
+        small.queries_per_character_step,
         small.bodies
+    );
+
+    // …and the clock is kept as corroboration at a bound **derived from the
+    // fixture** rather than picked: half the body growth. A mover that walked
+    // the world would cost the full ~20x and cannot meet it; the 5.00x this arm
+    // was seen to reach under load is comfortably inside it. It is the weaker
+    // of the two assertions on purpose — the counted one above is what fails
+    // first if the shape ever really breaks.
+    assert!(
+        big / small.ms < body_growth * 0.5,
+        "the mover costs {big:.4} ms a character on {} bodies against {:.4} on \
+         {} — {:.2}x for {body_growth:.0}x the world, which is a walk rather \
+         than a tree query",
+        biggest.bodies,
+        small.ms,
+        small.bodies,
+        big / small.ms
     );
 }
 
