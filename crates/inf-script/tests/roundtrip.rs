@@ -927,6 +927,38 @@ fn a_negated_literal_is_folded_into_a_negative_one() {
     assert_eq!(parse_fn(&text).unwrap(), f);
 }
 
+/// **A comment does not survive the round trip, and the bound is named here
+/// rather than discovered by a designer.**
+///
+/// The parser's output type *is* `BlueprintFn`, which is the thesis and which
+/// also means there is nowhere for a comment to live: `Stmt` and `Expr` have no
+/// trivia. So `emit(parse(src)) == src` holds for the corpus because **the
+/// corpus carries no comments**, and the stronger-sounding sentence "open a
+/// script, save it, and see no diff" is true only of a file that has none.
+///
+/// This is not a defect the wave can fix without an IR change (the P6
+/// vars-via-Host bar), and it costs nothing until something *writes* a `.infini`
+/// file back — which is SCRIPT2's graph→text door, not SCRIPT1a. It is pinned so
+/// that the day that door lands, the arm is already here saying what it takes
+/// with it: comments, blank lines and the author's own indentation.
+#[test]
+fn a_comment_does_not_survive_the_round_trip() {
+    let src = "actor \"Commented\"\n\n-- what this actor is for\non begin_play()\n    -- why the print\n    debug.print(\"x\") -- and a trailing one\nend\n";
+    let (class, _) = compile(src, "act:c").unwrap();
+    let text = emit_class(&class).unwrap();
+    assert!(
+        !text.contains("--"),
+        "comments were preserved after all — if the IR grew trivia, this arm and \
+         the spec's A.1 both need rewriting: {text}"
+    );
+    // The *program* is untouched, which is the half that is guaranteed.
+    let (again, _) = compile(&text, "act:c").unwrap();
+    assert_eq!(again, class);
+    // And the round trip is a fixed point from the second save onward, which is
+    // the honest form of "no diff": the comments go on the first one.
+    assert_eq!(emit_class(&again).unwrap(), text);
+}
+
 /// A member variable shadowed by a local prints as `var.get("…")`, because a
 /// bare name there would mean the local. The silent-capture arm.
 #[test]

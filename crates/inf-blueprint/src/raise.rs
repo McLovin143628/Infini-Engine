@@ -47,6 +47,11 @@ pub enum RaiseError {
     NonLinear,
     #[error("reference to unbound local n{0}")]
     UnboundLocal(u32),
+    /// The statement walk made no progress — see [`Raiser::raise_chain`]'s
+    /// progress guard. Unreachable by construction; a **value** rather than a
+    /// hang if the construction is ever broken again.
+    #[error("the statement walk did not advance past statement {0} — this is a bug in `raise`")]
+    NoProgress(usize),
 }
 
 /// Raise one handler function into a fresh graph rooted at an `event.*` node.
@@ -163,7 +168,20 @@ impl Raiser {
         mut prev: Option<(NodeId, String)>,
     ) -> Result<(), RaiseError> {
         let mut i = 0;
+        // **The progress guard.** SCRIPT1's spawn hang was a `continue` that
+        // did not advance `i`, and the way it announced itself was a 7.5 GB
+        // allocation failure after a minute of adding graph nodes. That is a
+        // *detection*, but it is the worst kind: on a CI runner it is an
+        // OOM-killed job with no line number, and in the editor it is a frozen
+        // process. So non-termination is made a **value** instead — the loop
+        // asserts its own advance, which costs one comparison per statement and
+        // turns the same mutation into an immediate, named `Err`.
+        let mut previous: Option<usize> = None;
         while i < body.len() {
+            if previous == Some(i) {
+                return Err(RaiseError::NoProgress(i));
+            }
+            previous = Some(i);
             // Recognize the canonical guarded loop expansions first; each spans
             // several statements and continues from the loop's `completed`.
             // **`for` before `while`** — a `for` expansion satisfies the while
@@ -879,6 +897,53 @@ mod tests {
         // nodes, not the thousands the runaway produced before it died.
         assert_eq!(raised.nodes.len(), 4, "{types:?}");
         assert_round_trips(&f);
+    }
+
+    /// **The progress guard**, and why the arm above needed one beside it.
+    ///
+    /// Reverting the spawn hang's `i += 1` used to announce itself as a 7.5 GB
+    /// allocation failure after a minute of adding graph nodes. That is a
+    /// detection of the worst kind: on a CI runner it is an OOM-killed job with
+    /// no line number, and in the editor it is a frozen process. `raise_chain`
+    /// now asserts its own advance, so the same mutation is an immediate,
+    /// named `Err` — a *value*, which is P21's law applied to a walk rather than
+    /// to a gameplay node.
+    ///
+    /// The guard is unreachable by construction, so it is exercised the only way
+    /// an unreachable branch can be: by calling the loop over a body whose walk
+    /// cannot advance. There is no such body, so the arm pins the *mechanism* —
+    /// that the error exists, that it names a statement index, and that an
+    /// ordinary chain still raises without tripping it.
+    #[test]
+    fn the_statement_walk_asserts_its_own_advance() {
+        // The mechanism: the variant is a value with a place in it.
+        let e = RaiseError::NoProgress(3);
+        assert!(e.to_string().contains("did not advance past statement 3"));
+        // …and an ordinary multi-statement handler is not tripped by it. Seven
+        // statements, so a guard that fired on any repeated index would show.
+        let mut body = Vec::new();
+        for k in 0..7 {
+            body.push(Stmt::ExprStmt(Expr::Call {
+                path: vec!["debug".into(), "print".into()],
+                args: vec![Expr::Lit(Lit::Str(format!("{k}")))],
+            }));
+        }
+        let f = BlueprintFn {
+            id: "begin_play".into(),
+            name: "begin_play".into(),
+            params: vec![],
+            ret: crate::Ty::Unit,
+            body,
+        };
+        let g = raise_fn(&f).expect("a plain chain raises");
+        assert_eq!(
+            g.nodes
+                .values()
+                .filter(|n| n.type_id == "debug.print")
+                .count(),
+            7,
+            "the walk visited each statement exactly once"
+        );
     }
 
     /// **SCRIPT1's widening.** `flow.for` now inverts, so a counted loop is a
