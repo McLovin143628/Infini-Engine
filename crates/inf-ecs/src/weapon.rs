@@ -694,6 +694,26 @@ pub fn is_downed(world: &EcsWorld, guid: Uuid) -> bool {
         .is_some_and(|e| world.world().get::<Downed>(e).is_some())
 }
 
+/// **Spend energy on one body, by `Guid`** — the world-level door beside
+/// [`damage`]'s component-level one.
+///
+/// `None` when the entity does not exist or has no [`Health`], which is the
+/// honest answer to "how much did that hurt" for something that cannot be hurt.
+///
+/// It does **not** mark the body [`Downed`]; the fixed step's own pass does that
+/// from [`newly_dead`], and doing it here would put the transition in two places
+/// that have to agree about when it happens.
+///
+/// Added in wave SCRIPT2 for the `health.damage` verb, and immediately given a
+/// second caller: `inf_physics::d3::gameplay::apply_hit` did this by hand, and
+/// two spellings of "take joules out of a body" is the shape this house has paid
+/// for repeatedly.
+pub fn damage_entity(world: &mut EcsWorld, guid: Uuid, energy_j: f64) -> Option<HealthReport> {
+    let entity = world.entity_of(guid)?;
+    let mut health = world.world_mut().get_mut::<Health>(entity)?;
+    Some(damage(&mut health, energy_j))
+}
+
 /// Read one body's health.
 pub fn health_of(world: &EcsWorld, guid: Uuid) -> Option<Health> {
     let entity = world.entity_of(guid)?;

@@ -886,11 +886,9 @@ fn apply_hit(world: &mut EcsWorld, hit: &WeaponHit, report: &mut GameplayReport)
         return;
     };
     if hit.on_flesh {
-        if let Some(entity) = world.entity_of(target) {
-            if let Some(mut h) = world.world_mut().get_mut::<Health>(entity) {
-                weapon::damage(&mut h, hit.energy_j);
-            }
-        }
+        // One door (`weapon::damage_entity`), shared with the `health.damage`
+        // verb, so a bullet and a script spend joules the same way.
+        weapon::damage_entity(world, target, hit.energy_j);
         return;
     }
     // Not flesh: the host spends it at the P22 door. Coalesced by entity so one

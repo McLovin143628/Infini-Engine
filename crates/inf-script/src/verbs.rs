@@ -428,9 +428,9 @@ mod tests {
         let (verbs, namespaces) = v.census();
         assert_eq!(
             (verbs, namespaces),
-            (115, 23),
-            "the verb surface moved; the spec's table and the memo both quote \
-             these two numbers"
+            (132, 26),
+            "the verb surface moved; the spec's table, the memo and the \
+             generated API manual all quote these two numbers"
         );
         // Everything that resolves came out of the registry, so its path is a
         // node's host path — never an arbitrary string.
@@ -456,7 +456,7 @@ mod tests {
             }
         }
         assert!(
-            resolvable >= 70,
+            resolvable >= 87,
             "only {resolvable} of {verbs} verbs are callable from text — the \
              refusals are meant to be the operators, the flow palette, the \
              literals, the events and the two variable nodes, not most of the kit"

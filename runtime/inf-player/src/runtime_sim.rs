@@ -2602,6 +2602,30 @@ impl Host for RuntimeHost<'_> {
             (Some("sky"), Some("get_wind_speed")) => {
                 Ok(Value::Float(inf_ecs::sky::weather_wind_speed(self.world)))
             }
+            // ── the four SCRIPT2 sky reads ──
+            //
+            // `is_day` and `get_hour` come off the **same** resolution the
+            // atmosphere and the crowd's daily schedules use, so a script, the
+            // sky and an NPC's day cannot disagree about what time it is.
+            // `resolve_sky` answers `None` on a level with no sky authority, and
+            // the honest reading of "is it day" there is `false` rather than a
+            // guess — the `water.surface_height` precedent.
+            (Some("sky"), Some("is_day")) => Ok(Value::Bool(
+                inf_ecs::sky::resolve_sky(self.world).is_some_and(|s| s.is_day()),
+            )),
+            (Some("sky"), Some("get_hour")) => {
+                Ok(Value::Float(inf_ecs::sky::local_hour(self.world)))
+            }
+            (Some("sky"), Some("get_cloud_coverage")) => Ok(Value::Float(
+                inf_ecs::sky::resolve_sky(self.world)
+                    .map(|s| f64::from(s.weather().cloud_coverage))
+                    .unwrap_or(0.0),
+            )),
+            (Some("sky"), Some("get_fog_density")) => Ok(Value::Float(
+                inf_ecs::sky::resolve_sky(self.world)
+                    .map(|s| f64::from(s.weather().fog_density))
+                    .unwrap_or(0.0),
+            )),
             // water.* (P20.2) — three pure queries against the **fixed step's own**
             // water index, shared verbatim with the editor SimHost so preview ==
             // shipped by construction. They read `inf_water`'s height query, the
@@ -2869,6 +2893,114 @@ impl Host for RuntimeHost<'_> {
                         .unwrap_or(0.0),
                     Err(_) => 0.0,
                 }))
+            }
+            // ── the SCRIPT2 door verbs ──
+            //
+            // Four verbs, **one rule**: `d3::door::nearest` decides which leaf a
+            // world point is about, and `is_open`, `is_locked`, `use` and `lock`
+            // all ask it. A script that tests `door.is_open(x, y, z)` and then
+            // calls `door.use(x, y, z)` is talking about the same leaf because
+            // there is one resolution, not four that agree by hand (P22).
+            //
+            // The query point doubles as the character's FEET for `lock`, which
+            // is what decides the face the bolt is offered from: a script locking
+            // a door is standing where it says it is.
+            (Some("door"), Some("is_locked")) => {
+                Ok(Value::Bool(inf_physics::d3::door::is_locked_near(
+                    self.world,
+                    DVec3::new(arg_f64(args, 0), arg_f64(args, 1), arg_f64(args, 2)),
+                )))
+            }
+            (Some("door"), Some("use")) => {
+                let at = DVec3::new(arg_f64(args, 0), arg_f64(args, 1), arg_f64(args, 2));
+                let guid = inf_physics::d3::door::nearest(self.world, at).map(|p| p.guid);
+                Ok(Value::Bool(match guid {
+                    Some(g) => inf_physics::d3::door::use_door(self.world, g, at).moved(),
+                    None => false,
+                }))
+            }
+            (Some("door"), Some("lock")) => {
+                let at = DVec3::new(arg_f64(args, 0), arg_f64(args, 1), arg_f64(args, 2));
+                let guid = inf_physics::d3::door::nearest(self.world, at).map(|p| p.guid);
+                Ok(Value::Bool(match guid {
+                    Some(g) => matches!(
+                        inf_physics::d3::door::lock_door(self.world, g, at),
+                        inf_ecs::door::DoorVerdict::Locked
+                            | inf_ecs::door::DoorVerdict::Unlocked
+                            | inf_ecs::door::DoorVerdict::LockedNow
+                    ),
+                    None => false,
+                }))
+            }
+            // ── the SCRIPT2 health verbs ──
+            //
+            // `damage` goes through `weapon::damage_entity`, the door a bullet
+            // uses, so a script and a rifle spend joules identically. Downing is
+            // NOT marked here: the fixed step's own pass reads `newly_dead`, and
+            // doing it in two places is two places that have to agree.
+            (Some("health"), Some("damage")) => {
+                let joules = arg_f64(args, 1);
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Float(match entity {
+                    Ok(guid) => inf_ecs::weapon::damage_entity(self.world, guid, joules)
+                        .map(|r| r.absorbed_j)
+                        .unwrap_or(0.0),
+                    Err(_) => 0.0,
+                }))
+            }
+            (Some("health"), Some("fraction")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Float(match entity {
+                    Ok(guid) => inf_ecs::weapon::health_of(self.world, guid)
+                        .map(|h| h.fraction())
+                        .unwrap_or(0.0),
+                    Err(_) => 0.0,
+                }))
+            }
+            (Some("health"), Some("is_downed")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Bool(match entity {
+                    Ok(guid) => inf_ecs::weapon::is_downed(self.world, guid),
+                    Err(_) => false,
+                }))
+            }
+            // ── the SCRIPT2 crowd counts ──
+            //
+            // Four pure reads of the NPC arc's own resources, which gameplay
+            // could not reach a single number of before this wave. Counts and not
+            // agents: naming an individual needs a `CrowdClock` and a spatial
+            // index the crowd does not keep, and that is priced rather than
+            // smuggled in behind a count.
+            (Some("crowd"), Some("population")) => Ok(Value::Int(
+                inf_ecs::crowd::crowd_stats(self.world).total() as i64,
+            )),
+            (Some("crowd"), Some("blocked")) => Ok(Value::Int(
+                inf_ecs::crowd::blocked_agents(self.world).len() as i64,
+            )),
+            (Some("crowd"), Some("homes")) => Ok(Value::Int(
+                inf_ecs::society::society_stats(self.world).homes as i64,
+            )),
+            (Some("crowd"), Some("workplaces")) => Ok(Value::Int(
+                inf_ecs::society::society_stats(self.world).works as i64,
+            )),
+            // ── the SCRIPT2 zone queries ──
+            //
+            // The mission-class primitive, and only the primitive: an
+            // axis-aligned overlap on the 3D physics world plus the
+            // collider→`Guid` map beside it. `zone.count` counts **entities**,
+            // so an actor with three colliders in the box is one — a
+            // `BTreeSet`, which also makes the count independent of the order
+            // rapier returned the colliders in.
+            (Some("zone"), Some("contains")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                let inside = match entity {
+                    Ok(guid) => zone_guids(self.bridge3d, args, 1).contains(&guid),
+                    Err(_) => false,
+                };
+                Ok(Value::Bool(inside))
+            }
+            (Some("zone"), Some("count")) => {
+                Ok(Value::Int(zone_guids(self.bridge3d, args, 0).len() as i64))
             }
             // ── the `ik.*` kit (P24.3) ──
             //
@@ -3351,6 +3483,43 @@ fn collider_shape(c: &Collider2D) -> ColliderShape2D {
             radius: c.radius,
         },
     }
+}
+
+/// **The entities whose colliders overlap an axis-aligned box** — the one rule
+/// behind `zone.contains` and `zone.count`, in both hosts.
+///
+/// `args[base..base + 6]` is `centre_xyz` then `half_extents_xyz`, in metres. A
+/// negative half-extent is folded to its magnitude, because a box written
+/// backwards is a typo rather than an empty region and an empty region is the
+/// answer a designer would not be able to explain.
+///
+/// Returns a `BTreeSet`, so the answer is entity-shaped and order-free: an actor
+/// with three colliders inside the box counts once, and rapier's collider order
+/// cannot reach a committed count.
+fn zone_guids(
+    bridge: &mut PhysicsBridge3D,
+    args: &[Value],
+    base: usize,
+) -> std::collections::BTreeSet<Uuid> {
+    let c = DVec3::new(
+        arg_f64(args, base),
+        arg_f64(args, base + 1),
+        arg_f64(args, base + 2),
+    );
+    let h = DVec3::new(
+        arg_f64(args, base + 3).abs(),
+        arg_f64(args, base + 4).abs(),
+        arg_f64(args, base + 5).abs(),
+    );
+    if !c.is_finite() || !h.is_finite() {
+        return std::collections::BTreeSet::new();
+    }
+    bridge
+        .world_mut()
+        .intersect_aabb(c - h, c + h)
+        .into_iter()
+        .filter_map(|id| bridge.guid_of_collider(id))
+        .collect()
 }
 
 fn arg_str(args: &[Value], i: usize) -> String {

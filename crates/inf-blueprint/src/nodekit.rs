@@ -55,6 +55,9 @@ pub fn blueprint_registry() -> NodeRegistry {
     reg.register_all(gameplay_nodes());
     reg.register_all(ik_nodes());
     reg.register_all(anim_nodes());
+    reg.register_all(terrain_nodes());
+    reg.register_all(crowd_nodes());
+    reg.register_all(zone_nodes());
     reg
 }
 
@@ -667,6 +670,43 @@ fn sky_nodes() -> Vec<NodeDef> {
                 "Wind speed in metres per second — what drifts the clouds and slants the rain.",
             )
             .with_outputs(vec![PortDef::new("speed", PortType::Float)]),
+        // ── the four SCRIPT2 adds ──
+        //
+        // All pure reads of `inf_ecs::sky`, which already had them: the wave
+        // exposed doors, it did not build any. `get_hour` in particular is the
+        // clock the CROWD's schedules run on (`sky::local_hour`), so a script
+        // asking "is the market open" and an NPC deciding to walk to it are
+        // reading one number.
+        //
+        // There is no per-parameter SETTER here on purpose: Ring 0 offers
+        // `set_weather(preset, blend)` and nothing finer, and inventing a
+        // `sky.set_fog_density` would mean a new Ring-0 door plus a decision
+        // about what happens when the next preset blend overwrites it.
+        NodeDef::new("sky.is_day", "Is Daytime", "sky")
+            .described(
+                "True while the sun is above the horizon. The same test the atmosphere \
+                 uses to choose a sun or a moon, so it flips exactly when the sky does.",
+            )
+            .with_outputs(vec![PortDef::new("day", PortType::Bool)]),
+        NodeDef::new("sky.get_hour", "Get Local Hour", "sky")
+            .described(
+                "The level clock as an hour in 0..24, local to the level's longitude and \
+                 time zone — the same number the crowd's daily schedules run on. Use this \
+                 rather than dividing Get Time of Day, which is UTC.",
+            )
+            .with_outputs(vec![PortDef::new("hour", PortType::Float)]),
+        NodeDef::new("sky.get_cloud_coverage", "Get Cloud Coverage", "sky")
+            .described(
+                "How much of the sky the clouds cover, 0..1, including a blend in \
+                 progress. 0 with weather off.",
+            )
+            .with_outputs(vec![PortDef::new("coverage", PortType::Float)]),
+        NodeDef::new("sky.get_fog_density", "Get Fog Density", "sky")
+            .described(
+                "Height-fog extinction in inverse metres — visibility is roughly 3 / \
+                 density. 0 with weather off, and a fog preset is about 0.02 (150 m).",
+            )
+            .with_outputs(vec![PortDef::new("density", PortType::Float)]),
     ]
 }
 
@@ -1081,6 +1121,149 @@ fn anim_nodes() -> Vec<NodeDef> {
     ]
 }
 
+/// The terrain kit (wave SCRIPT2) — **one node for a verb both hosts have
+/// implemented since P21.2 and neither palette could reach.**
+///
+/// `terrain::height_at` is dispatched by `simulate.rs` and `runtime_sim.rs`
+/// alike, through `inf_voxel::ground_height_at`, so it already answers the
+/// combined heightfield-and-voxel question. It had no `NodeDef`, which meant a
+/// Blueprint could not draw it and `.infini` refused it with *"there is no
+/// `terrain` namespace"* — an asymmetry between the registry and the hosts, in
+/// the direction nobody notices, because the arm that would fail is the one
+/// nobody can write.
+///
+/// The registry is the API surface, so a verb outside it does not exist. This is
+/// the cheapest possible verb — no host change at all — and it is the one a
+/// gameplay script wants first: *put this at ground level*.
+fn terrain_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("terrain.height_at", "Ground Height", "terrain")
+            .described(
+                "The ground height in metres at a world XZ — the terrain heightfield with \
+             any voxel surface above or below it folded in, which is the same number \
+             the character controller stands on. Answers 0 where the level has no \
+             ground, the way `water.surface_height` does, because the IR has no \
+             optional Float.",
+            )
+            .with_inputs(vec![
+                PortDef::new("x", PortType::Float),
+                PortDef::new("z", PortType::Float),
+            ])
+            .with_outputs(vec![PortDef::new("height", PortType::Float)]),
+    ]
+}
+
+/// The crowd kit (wave SCRIPT2) — **pure counts over the NPC arc's own
+/// resources**, and nothing else.
+///
+/// The NPC1a–e waves built a crowd (`CrowdPopulationRes`) and a society
+/// (`SocietyRes`) with a real query surface, and gameplay could not reach a
+/// single number of it. These four are the numbers a mission asks for: how many
+/// people are being simulated, how many are stuck, and how big the town's
+/// offering of homes and workplaces is.
+///
+/// **Counts, deliberately, and not agents.** Naming an individual NPC would need
+/// a `CrowdClock` (a position is a function of the hour) and a spatial index the
+/// crowd does not keep — an `O(agents)` scan per call, on a level that plans
+/// tens of thousands. "Nearest villager" is a real verb and it needs a door
+/// built for it; that is priced, not smuggled in behind a count.
+///
+/// Each is one call into an existing `pub fn` that takes `&EcsWorld`, so both
+/// hosts read the same resource in the same step and a count is a fact about the
+/// simulation rather than about the reader.
+fn crowd_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("crowd.population", "Crowd Population", "crowd")
+            .described(
+                "How many crowd agents the level is simulating right now, across every \
+                 tier — the dormant ones included, because a schedule keeps running for \
+                 an agent nobody can see.",
+            )
+            .with_outputs(vec![PortDef::new("count", PortType::Int)]),
+        NodeDef::new("crowd.blocked", "Blocked Agents", "crowd")
+            .described(
+                "How many agents are stuck against something they cannot walk through. \
+                 A number to watch rather than to act on: a large one means the level's \
+                 navigation is not joined up.",
+            )
+            .with_outputs(vec![PortDef::new("count", PortType::Int)]),
+        NodeDef::new("crowd.homes", "Homes Offered", "crowd")
+            .described(
+                "How many homes the level's buildings have offered the society — the \
+                 people it has, plus the ones still waiting for a day, plus the ones the \
+                 population ceiling declined.",
+            )
+            .with_outputs(vec![PortDef::new("count", PortType::Int)]),
+        NodeDef::new("crowd.workplaces", "Workplaces Offered", "crowd")
+            .described("How many workplaces the level's buildings have offered the society.")
+            .with_outputs(vec![PortDef::new("count", PortType::Int)]),
+    ]
+}
+
+/// The zone kit (wave SCRIPT2) — **the mission-class primitive, and only the
+/// primitive.**
+///
+/// The scripting direction memo asks for `Mission.*` with objectives, triggers
+/// and zones. What the engine already has is an **axis-aligned overlap query**
+/// on the 3D physics world (`PhysicsWorld3D::intersect_aabb`) and a
+/// collider→`Guid` map beside it, so *"is this actor inside that box"* and
+/// *"how many things are in it"* cost two host arms and no new subsystem. That
+/// is what these two are.
+///
+/// **What is deliberately NOT here**: objectives, a mission state machine, a
+/// persisted zone asset, and an `OnPlayerEnterZone` **event**. The event is the
+/// expensive half and the memo's own precedent says why: `WaterEnter`/`WaterExit`
+/// are latched edges the fixed step computes and pushes, which means an
+/// `EventKind` variant, two host drains, two `event.*` NodeDefs and a
+/// `raise::event_kind_of` arm — a wave's worth of work whose *pull* half is
+/// these two nodes. A script polls `zone.contains` on `Tick` today and gets the
+/// same answer one step later than an event would; when the push half is built,
+/// these stay as they are.
+///
+/// The box is a **centre and half-extents**, in metres, axis-aligned. A rotated
+/// zone would need a shape cast rather than an AABB, which the query pipeline
+/// supports and this pair does not use, so the honest name for what it tests is
+/// a box and not a volume.
+fn zone_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("zone.contains", "Is In Zone", "zone")
+            .described(
+                "True when the actor's collider overlaps an axis-aligned box, given as a \
+                 centre and half-extents in metres. False for an entity with no collider \
+                 — this asks the physics world, so an actor the physics world has never \
+                 heard of is not anywhere.",
+            )
+            .with_inputs(vec![
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("x", PortType::Float),
+                PortDef::new("y", PortType::Float),
+                PortDef::new("z", PortType::Float),
+                PortDef::new("half_x", PortType::Float),
+                PortDef::new("half_y", PortType::Float),
+                PortDef::new("half_z", PortType::Float),
+            ])
+            .with_outputs(vec![PortDef::new("inside", PortType::Bool)]),
+        NodeDef::new("zone.count", "Count In Zone", "zone")
+            .described(
+                "How many distinct entities have a collider overlapping the box. Counts \
+                 ENTITIES, not colliders: an actor with three colliders in the box is \
+                 one, and a collider the physics world cannot name is none. It counts \
+                 EVERYTHING with a collider — the ground's heightfield and a door's leaf \
+                 included — so a box on the ground reads higher than the number of actors \
+                 in it. Use Is In Zone when the question is about a particular actor.",
+            )
+            .with_inputs(vec![
+                PortDef::new("x", PortType::Float),
+                PortDef::new("y", PortType::Float),
+                PortDef::new("z", PortType::Float),
+                PortDef::new("half_x", PortType::Float),
+                PortDef::new("half_y", PortType::Float),
+                PortDef::new("half_z", PortType::Float),
+            ])
+            .with_outputs(vec![PortDef::new("count", PortType::Int)]),
+    ]
+}
+
 /// The destruction kit (P22.3) — **runtime destruction**: two exec actions that
 /// break things and two pure queries that ask what is left. The `voxel_nodes`
 /// shape, one phase later, because the two kits are the same idea about two
@@ -1348,6 +1531,63 @@ fn gameplay_nodes() -> Vec<NodeDef> {
                 PortDef::new("z", PortType::Float),
             ])
             .with_outputs(vec![PortDef::new("open", PortType::Bool)]),
+        // ── the SCRIPT2 door verbs ──
+        //
+        // Four verbs about ONE rule: `inf_physics::d3::door::nearest` decides
+        // which leaf a world point is about, and `is_open`, `is_locked`, `use`
+        // and `lock` all ask it. Before this wave the resolution was inlined in
+        // `is_open_near` and a second verb would have been a second copy of it —
+        // P22's *one door for three paths*, met on a literal door.
+        //
+        // Every one takes a PLACE rather than an entity, following `door.is_open`
+        // and for its reason: half the doors in this engine have no entity, since
+        // a grammar doorway is a record on a volume.
+        NodeDef::new("door.is_locked", "Is Door Locked", "door")
+            .described(
+                "True when the door nearest a world point is bolted. False when there is \
+                 no door within a few metres, and false for a lock that has been broken \
+                 open — a bolt that holds nothing is not a locked door.",
+            )
+            .with_inputs(vec![
+                PortDef::new("x", PortType::Float),
+                PortDef::new("y", PortType::Float),
+                PortDef::new("z", PortType::Float),
+            ])
+            .with_outputs(vec![PortDef::new("locked", PortType::Bool)]),
+        NodeDef::new("door.use", "Use Door", "door")
+            .described(
+                "Open or close the door nearest a world point — the E key, as a verb. \
+                 Reports whether the leaf actually started to move: a locked door, a door \
+                 with unusable numbers and no door at all all report false, which is the \
+                 same thing the prompt tells a player.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("x", PortType::Float),
+                PortDef::new("y", PortType::Float),
+                PortDef::new("z", PortType::Float),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("moved", PortType::Bool),
+            ]),
+        NodeDef::new("door.lock", "Toggle Door Lock", "door")
+            .described(
+                "Throw or release the bolt on the door nearest a world point, as if a \
+                 character standing there turned a key. Refused on an OPEN leaf (a door \
+                 standing open with its bolt thrown is a lock nobody can see) and from \
+                 the wrong face. Reports whether the bolt moved.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("x", PortType::Float),
+                PortDef::new("y", PortType::Float),
+                PortDef::new("z", PortType::Float),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("changed", PortType::Bool),
+            ]),
         NodeDef::new("health.set", "Set Health", "health")
             .described(
                 "Give an actor a body worth this many JOULES — what it can absorb before \
@@ -1371,6 +1611,45 @@ fn gameplay_nodes() -> Vec<NodeDef> {
             )
             .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
             .with_outputs(vec![PortDef::new("joules", PortType::Float)]),
+        // ── the SCRIPT2 health verbs ──
+        //
+        // `inf_ecs::weapon` has had `damage`, `is_downed` and `Health::fraction`
+        // since P29 and the kit exposed neither the verb nor the two questions
+        // about it, so a script could give an actor a body and then only read the
+        // raw joules back.
+        NodeDef::new("health.damage", "Damage", "health")
+            .described(
+                "Take energy out of an actor's body, in JOULES — a bullet, a kick, a \
+                 falling wall. Reports how much was actually absorbed, which is less than \
+                 asked for when the blow finished the actor off, and 0 for an actor with \
+                 no health at all. Downing is what happens at zero; there are no hit \
+                 points to convert.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("joules", PortType::Float),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("absorbed", PortType::Float),
+            ]),
+        NodeDef::new("health.fraction", "Health Fraction", "health")
+            .described(
+                "How much of its body an actor has left, 0..1, against the amount it \
+                 started with. 0 for an actor with no health at all — pair it with Get \
+                 Health when the difference matters.",
+            )
+            .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
+            .with_outputs(vec![PortDef::new("fraction", PortType::Float)]),
+        NodeDef::new("health.is_downed", "Is Downed", "health")
+            .described(
+                "True once an actor has absorbed everything it can and gone limp. False \
+                 for an actor with no health at all, which is not the same as unhurt and \
+                 is the honest answer to `is it down`.",
+            )
+            .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
+            .with_outputs(vec![PortDef::new("downed", PortType::Bool)]),
     ]
 }
 
@@ -1824,15 +2103,61 @@ mod tests {
     /// host `call` would need its whole context struct built in a test; that gap
     /// is ledgered in ROADMAP §12 rather than papered over.
     #[test]
-    fn both_hosts_dispatch_exactly_the_registered_ik_nodes() {
+    fn both_hosts_dispatch_exactly_the_registered_verbs() {
+        // Namespaces the kit registers that NEVER become a `Host::call`: the
+        // operators, the literals, the flow palette, the variable pair and the
+        // event headers are all lowered into IR shapes, not into calls.
+        const NOT_A_CALL: &[&str] = &["event", "lit", "math", "cmp", "logic", "var", "flow"];
+        // Namespaces dispatched inside `interp.rs` rather than in a host's
+        // `call`, through their own accessor traits (`Physics2dHost`,
+        // `Physics3dHost`, `AudioHost`). Their arms have a different shape —
+        // `match (op, field)` — and their own per-namespace round-trip tests.
+        const DISPATCHED_IN_INTERP: &[&str] = &["physics2d", "physics3d", "audio"];
+        // **Registered and implemented by NEITHER host** — the asymmetry this
+        // gate exists to make visible rather than to hide. `engine.set_rotation`,
+        // `engine.spawn` and `engine.destroy` are in the palette, callable from
+        // `.infini`, and fall through to the unknown-call logger in both
+        // `simulate.rs` and `runtime_sim.rs`: they log their path and answer
+        // `Unit`. `engine.spawn` is also the kit's ONLY `StrRole::Asset` port,
+        // so the cook's asset-reference walk exists to serve a verb no host
+        // implements. Named here so the day somebody implements one, this list
+        // shrinks in the same commit — and so that a reader of this gate learns
+        // the fact rather than reading a green tick over it.
+        const UNIMPLEMENTED_IN_BOTH_HOSTS: &[&str] = &["engine"];
+
         let reg = blueprint_registry();
-        let declared: std::collections::BTreeSet<String> = reg
-            .ordered()
-            .map(|d| d.type_id.clone())
-            .filter(|id| id.starts_with("ik."))
-            .map(|id| id["ik.".len()..].to_string())
-            .collect();
-        assert_eq!(declared.len(), 5, "the ik kit changed size: {declared:?}");
+        // Group the host-dispatched verbs by the namespace they reach on the
+        // WIRE, which is `host_call_path`'s answer and not the `type_id`'s first
+        // segment — `dispatch.call` is `event::dispatch`. Doing it through the
+        // real mapping is what keeps the three renames inside the one table that
+        // owns them.
+        let mut declared: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+            Default::default();
+        for def in reg.ordered() {
+            let ns = def.type_id.split('.').next().unwrap_or_default();
+            if NOT_A_CALL.contains(&ns)
+                || DISPATCHED_IN_INTERP.contains(&ns)
+                || UNIMPLEMENTED_IN_BOTH_HOSTS.contains(&ns)
+            {
+                continue;
+            }
+            let path = crate::lower::host_call_path(&def.type_id);
+            let (Some(host_ns), Some(verb)) = (path.first(), path.get(1)) else {
+                panic!("`{}` has no two-segment host path", def.type_id);
+            };
+            declared
+                .entry(host_ns.clone())
+                .or_default()
+                .insert(verb.clone());
+        }
+        // Anti-vacuity: a mapping that stopped producing namespaces would make
+        // every comparison below trivially true.
+        assert!(
+            declared.len() >= 12 && declared.values().map(|v| v.len()).sum::<usize>() >= 45,
+            "the host-dispatched surface collapsed to {} namespaces / {} verbs",
+            declared.len(),
+            declared.values().map(|v| v.len()).sum::<usize>()
+        );
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -1845,43 +2170,52 @@ mod tests {
             // CRLF checkout reads it identically.
             let src = std::fs::read_to_string(root.join(host))
                 .unwrap_or_else(|e| panic!("read {host}: {e}"));
-            let mut arms: std::collections::BTreeSet<String> = Default::default();
-            for (i, _) in src.match_indices("(Some(\"ik\"), Some(\"") {
-                let rest = &src[i + "(Some(\"ik\"), Some(\"".len()..];
-                if let Some(end) = rest.find('"') {
-                    arms.insert(rest[..end].to_string());
+            for (ns, want) in &declared {
+                let needle = format!("(Some({ns:?}), Some(\"");
+                let mut arms: std::collections::BTreeSet<String> = Default::default();
+                for (i, _) in src.match_indices(&needle) {
+                    let rest = &src[i + needle.len()..];
+                    if let Some(end) = rest.find('"') {
+                        arms.insert(rest[..end].to_string());
+                    }
                 }
+                // `terrain::height_at` is implemented in both hosts and had no
+                // `NodeDef` until wave SCRIPT2 — the asymmetry in the other
+                // direction, and the reason this gate is over every namespace
+                // rather than over the two somebody remembered.
+                assert_eq!(
+                    &arms, want,
+                    "{host} dispatches a different set of `{ns}.*` verbs than the registry declares. \
+                     A verb in the registry and in neither host falls through to the unknown-call \
+                     logger and does nothing at all, silently; a verb in a host and not the registry \
+                     is an arm no author can reach."
+                );
             }
-            assert_eq!(
-                arms, declared,
-                "{host} dispatches a different set of `ik.*` nodes than the registry declares. An id in the registry and in neither host falls through to the unknown-call logger and the node silently does nothing; an id in a host and not the registry is an arm no author can reach."
-            );
         }
     }
 
-    /// **The `anim.*` kit's registry-versus-hosts gate** (P29.4), the same shape
-    /// as the `ik.*` one above and for the same reason §13's risk register gives:
-    /// the two Blueprint dispatches are a hand-maintained MIRROR pair, so a
-    /// host-versus-host text compare cannot see an id spelled wrong in *both*. An
-    /// id the registry declares and neither host matches falls through to the
-    /// unknown-call logger and the node silently does nothing; an id a host
-    /// matches and the registry does not is an arm no author can reach.
+    /// **The `engine.*` hole, measured rather than described.**
     ///
-    /// **The bound, stated.** This is a source check: it proves the arms are
-    /// written and named correctly, not that dispatching one has the effect it
-    /// should. The effects are covered where they are implemented — the doors in
-    /// `inf_ecs::anim_bridge` have execution tests, and `pie_skinned.rs` drives
-    /// them against a real world through both hosts.
+    /// The gate above carries `engine` on an exception list, and an exception
+    /// list is a blind spot with a name on it unless something checks the
+    /// exception is still true. This is that: all three `engine.*` verbs are
+    /// registered, and neither host has an arm for any of them.
+    ///
+    /// When somebody implements one, this fails and says so — which is the right
+    /// way round, because the exception list is what needs editing.
     #[test]
-    fn both_hosts_dispatch_exactly_the_registered_anim_nodes() {
+    fn the_engine_namespace_is_registered_and_implemented_by_neither_host() {
         let reg = blueprint_registry();
-        let declared: std::collections::BTreeSet<String> = reg
+        let declared: Vec<String> = reg
             .ordered()
             .map(|d| d.type_id.clone())
-            .filter(|id| id.starts_with("anim."))
-            .map(|id| id["anim.".len()..].to_string())
+            .filter(|id| id.starts_with("engine."))
             .collect();
-        assert_eq!(declared.len(), 4, "the anim kit changed size: {declared:?}");
+        assert_eq!(
+            declared.len(),
+            3,
+            "the engine kit changed size: {declared:?}"
+        );
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -1892,16 +2226,11 @@ mod tests {
         ] {
             let src = std::fs::read_to_string(root.join(host))
                 .unwrap_or_else(|e| panic!("read {host}: {e}"));
-            let mut arms: std::collections::BTreeSet<String> = Default::default();
-            for (i, _) in src.match_indices("(Some(\"anim\"), Some(\"") {
-                let rest = &src[i + "(Some(\"anim\"), Some(\"".len()..];
-                if let Some(end) = rest.find('"') {
-                    arms.insert(rest[..end].to_string());
-                }
-            }
-            assert_eq!(
-                arms, declared,
-                "{host} dispatches a different set of `anim.*` nodes than the registry declares."
+            assert!(
+                !src.contains("(Some(\"engine\"), Some(\""),
+                "{host} now dispatches an `engine.*` verb. Good — remove `engine` from \
+                 `UNIMPLEMENTED_IN_BOTH_HOSTS` in `both_hosts_dispatch_exactly_the_registered_verbs` \
+                 so the real comparison starts running, and retire this arm."
             );
         }
     }

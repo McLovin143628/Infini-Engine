@@ -325,7 +325,19 @@ fn reach_to(p: &DoorPlacement, at: DVec3) -> Option<f64> {
     (d.is_finite() && d <= NEAR_DOOR_M).then_some(d)
 }
 
-pub fn is_open_near(world: &EcsWorld, at: DVec3) -> bool {
+/// **The door nearest `at`**, or `None` when there is none within
+/// [`NEAR_DOOR_M`] — the one place "which door is this point about" is decided.
+///
+/// Extracted in SCRIPT2 so that `door.is_open`, `door.is_locked`, `door.use` and
+/// `door.lock` are four verbs about **one** rule rather than four resolutions
+/// that agree by hand. That is P22's *one door for three paths*, met on a
+/// literal door: a script that tests `door.is_open(x, y, z)` and then calls
+/// `door.use(x, y, z)` must be talking about the same leaf, and the only way to
+/// guarantee it is to ask once.
+///
+/// A place rather than an entity, because half the doors in this engine have no
+/// entity: a grammar doorway is a record on a volume.
+pub fn nearest(world: &EcsWorld, at: DVec3) -> Option<DoorPlacement> {
     // **The reach is checked BEFORE a placement is built** — the same discipline
     // `placements_near` applies with the band, and for the same measurement:
     // this is a Blueprint node an author may put on `Tick`, and the shipped city
@@ -358,7 +370,6 @@ pub fn is_open_near(world: &EcsWorld, at: DVec3) -> bool {
     // The `Guid` order the tie-break rests on, over the doors that are in reach
     // rather than over every door in the world.
     near.sort_by_key(|p| p.guid);
-    let field = door::door_field(world);
     let mut best: Option<(f64, DoorPlacement)> = None;
     for p in near {
         let Some(d) = reach_to(&p, at) else {
@@ -370,11 +381,35 @@ pub fn is_open_near(world: &EcsWorld, at: DVec3) -> bool {
             best = Some((d, p));
         }
     }
-    match best {
-        Some((_, p)) => field
-            .map(|f| f.get(p.guid, &p.spec))
-            .unwrap_or_else(|| DoorState::fresh(&p.spec))
-            .is_open(&p.spec),
+    best.map(|(_, p)| p)
+}
+
+/// The live state of a placement, or a fresh one when the world has no field.
+fn state_of(world: &EcsWorld, p: &DoorPlacement) -> DoorState {
+    door::door_field(world)
+        .map(|f| f.get(p.guid, &p.spec))
+        .unwrap_or_else(|| DoorState::fresh(&p.spec))
+}
+
+pub fn is_open_near(world: &EcsWorld, at: DVec3) -> bool {
+    match nearest(world, at) {
+        Some(p) => state_of(world, &p).is_open(&p.spec),
+        None => false,
+    }
+}
+
+/// **Is the door nearest `at` bolted** — the Blueprint kit's `door.is_locked`.
+///
+/// `false` when there is no door within [`NEAR_DOOR_M`], the same honest answer
+/// [`is_open_near`] gives, and `false` for a door whose lock has been **broken
+/// open**: a bolt that no longer holds anything is not a locked door, and a
+/// script that opened one by force should not keep being told it is shut.
+pub fn is_locked_near(world: &EcsWorld, at: DVec3) -> bool {
+    match nearest(world, at) {
+        Some(p) => {
+            let s = state_of(world, &p);
+            s.locked && !s.lock_broken
+        }
         None => false,
     }
 }
