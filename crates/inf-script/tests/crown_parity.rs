@@ -754,7 +754,8 @@ fn the_generated_marker_has_no_macro_behind_it() {
 /// that does not exist yet.
 #[test]
 fn a_bool_member_variable_does_not_compile() {
-    let src = "var flag: bool = true
+    let src = "\
+var flag: bool = true
 
 on tick(dt)
   if flag then
@@ -790,8 +791,7 @@ end
             );
             assert!(
                 stderr.contains("mismatched types") || stderr.contains("expected `bool`"),
-                "expected a type error from the monomorphic `vars::get`:
-{stderr}"
+                "expected a type error from the monomorphic `vars::get`:\n{stderr}"
             );
         }
     }

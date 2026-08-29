@@ -3536,6 +3536,26 @@ mod advisory_source_gate {
     /// is what this paragraph is. What actually stops them being written is the
     /// scripted-edit law (`chr(92)`, raw strings, heredocs).
     ///
+    /// **A fourth, and the ruling above re-measured (SCRIPT2a audit).** Wave
+    /// SCRIPT2a's own ledger reported "a fresh sweep over the whole wave diff
+    /// finds exactly that one and nothing else" — true of *this* sweep, and the
+    /// wave's other damage was of the shape this sweep cannot see:
+    /// `crown_parity.rs`'s `"…`vars::get`:\n{stderr}"` had lost its `\n` to a
+    /// real line break, in the same edit and from the same cause as the run of
+    /// spaces the sweep did catch. So the two shapes arrive **together**, and a
+    /// clean report from this file is not a clean report about a wave.
+    ///
+    /// The audit wrote the missing lexer to check, and the numbers say the
+    /// ruling above still stands rather than being overturned: across the
+    /// twenty files that wave touched it finds **one** real defect and roughly
+    /// **forty** legitimate multi-line literals — every `.infini` and Rust
+    /// fixture in the script tests. A ban at that signal-to-noise needs an
+    /// allowlist per fixture, which is the ban-list hazard (P23) with a worse
+    /// ratio than the one it would replace. **The remedy stays the edit
+    /// discipline, and the honest addition is this sentence**: after a scripted
+    /// edit to Rust literals, read the diff for a continuation line at column
+    /// zero as well as running this sweep.
+    ///
     /// # A RAW string is not a remedy either (SK1c audit)
     ///
     /// The law's shorthand has been "use a raw string or a heredoc", and catches
