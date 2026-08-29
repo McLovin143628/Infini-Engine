@@ -507,10 +507,17 @@ phrase is not what they are made of.
 the grammar DSL and the `.inf_sm` text face). The grammar is **appendix A** of
 this memo, and every claim in it has an arm. Parse → `BlueprintFn` in one pass,
 with diagnostics that name a line, a column and a remedy. An IR → `.infini`
-emitter that is **total over the IR** — the text face is the complete one, and
-the graph face is not. Three round-trip laws, gated. Determinism: a digest of the
-fixture's IR, pinned, plus CRLF/LF insensitivity and the crate's libm ban. The
-raise decision taken with pricing: `flow.for` widened, `NonLinear` priced.
+emitter that is **total over the IR's shapes** — the text face is the complete
+one, and the graph face is not; the emitter's six refusals (A.6) are four IR
+states no producer makes plus a depth bound and one statement shape `raise`
+refuses too, none of them a construct a canvas can draw. Three round-trip laws,
+gated. Determinism: a digest of the fixture's IR, pinned, plus CRLF/LF/BOM
+insensitivity and the crate's libm ban. The raise decision taken with pricing:
+`flow.for` widened, `NonLinear` priced. **Audited the same day** — see the
+SCRIPT1a audit ledger in `island-progress.md`: a language is maximum surface,
+and three of its edges were crashes rather than refusals (no depth guard; an
+emitter writing text its own parser rejects, from a two-node graph; an
+expression in statement position).
 
 **SCRIPT1b — hot reload, the cook, and the crown gate (ROUTED).** The wave split
 under the brief's own rule, at five majors, and the split is where the brief put
@@ -585,11 +592,36 @@ exactly what Amendment 2 refused.
 
 ## A.1 Lexical
 
-* **Encoding** is UTF-8. **Line endings are normalised** (`\r\n`, and a lone
-  `\r`, both become `\n`) before anything else, so a Windows checkout and a Linux
-  one lower a file to the same IR — `crates/inf-script/tests/determinism.rs`'s
-  `a_windows_checkout_and_a_unix_one_lower_identically`.
-* **Comments** run from `--` to end of line. There are no block comments.
+* **Encoding** is UTF-8. **A leading byte-order mark is dropped, and line
+  endings are normalised** (`\r\n`, and a lone `\r`, both become `\n`) before
+  anything else, so a Windows checkout and a Linux one lower a file to the same
+  IR — `crates/inf-script/tests/determinism.rs`'s
+  `a_windows_checkout_and_a_unix_one_lower_identically` and
+  `a_file_saved_with_a_byte_order_mark_lowers_identically`. Only the *leading*
+  mark: U+FEFF elsewhere is a zero-width no-break space, which inside a string
+  is content and outside one is an unexpected character with a place. (The BOM
+  was the SCRIPT1a audit's find — unstripped it was `unexpected character` naming
+  a character invisible in its own message, on a file Notepad had just saved.)
+* **Comments** run from `--` to end of line. There are no block comments, and
+  **a comment does not survive a round trip.** The parser's output type *is*
+  `BlueprintFn`, which is the thesis and which also means there is nowhere for
+  trivia to live — so `emit(parse(src)) == src` (A.6, law 1's corollary) holds
+  over the committed corpus *because that corpus carries no comments*, and
+  "open a script, save it, no diff" is true of a file that has none. Pinned by
+  `roundtrip.rs`'s `a_comment_does_not_survive_the_round_trip`, which costs
+  nothing until SCRIPT2's graph→text door writes a `.infini` back.
+* **Nesting is bounded** at `parse::MAX_NESTING` = **128** levels per
+  declaration — blocks, parentheses, unary operators and the steps of an
+  operator chain share one budget, because they share one stack. Past it is a
+  refusal naming the limit and the remedy. This is P19's parser-depth-guard law,
+  and the SCRIPT1a audit measured what its absence cost: on a **1 MiB** stack (a
+  Windows main thread) the parser died between 512 and 768 nested parentheses
+  with `STATUS_STACK_OVERFLOW` — not a refusal, a *crash*, in a library the
+  editor calls on every keystroke. A chain spends the budget too (`1 + 1 + … + 1`
+  needs no parser frames and still builds an `n`-deep tree, which killed the
+  *emitter* at ten thousand terms), because the bound is on the tree that every
+  downstream consumer walks. The deepest construction in the round-trip corpus
+  is 4. Arms: `tests/hostile.rs`.
 * **Reserved words** (20): `actor and do else elseif end exposed false for
   function if local not on or return rust then true while`. `var` is
   deliberately *not* reserved — a declaration reads `var speed: float = 0` and
@@ -779,6 +811,17 @@ because every round-trip fixture in the tree starts from a *graph* and none of
 them wires a spawn's `entity` onward. Fixed in SCRIPT1a, with the regression
 built from a graph so the round-trip invariant applies to it.
 
+**And the audit fixed how that regression fails.** Reverting the `i += 1`
+announced itself as a **7.5 GB allocation failure after more than a minute** —
+a detection, but the worst kind: an OOM-killed CI job with no line number, a
+frozen editor, and on this machine a paging-file incident the repo has a law
+about. `raise_chain` now asserts its own advance (one comparison per statement)
+and returns `RaiseError::NoProgress(i)` instead, so the same mutation fails the
+same arm **immediately**, named, in 0.00 s. That is P21's "a refusal is a value"
+applied to a walk rather than to a gameplay node, and it also covers a matcher
+that ever returned a zero `consumed`, which nothing does today and nothing
+checked.
+
 ## A.6 The round trip, stated exactly
 
 Three laws, all in `crates/inf-script/tests/roundtrip.rs`:
@@ -787,7 +830,9 @@ Three laws, all in `crates/inf-script/tests/roundtrip.rs`:
    binding kinds, type annotations and mutability all survive. That is every
    `.infini` file anyone writes. For the committed corpus something stronger
    holds: `emit(parse(src)) == src`, so opening a script and saving it produces
-   no diff.
+   no diff — **of a file with no comments in it** (A.1: the IR has no trivia, so
+   a comment, a blank line and the author's own indentation go on the first
+   save; the text is a fixed point from the second).
 2. **`emit(parse(emit(f))) == emit(f)`, exactly, for every `f`** — including IR a
    graph produced, whose anonymous locals the lowerer numbered in its own walk.
    The emitter renumbers into the parser's allocation order, so the text is a
@@ -817,13 +862,50 @@ every `Expr` variant, every `BinOp`, both `UnOp`s, all four `Lit` kinds and all
 three `Binding` kinds, or the meta-arm fails. A round-trip test over the empty
 program proves nothing.
 
-**What the emitter refuses** is four IR states no producer in the tree makes: a
-non-finite float literal (`Lit::Float` is documented finite), a binder whose name
-is not an identifier, two live binders of one name, and a handler whose
-parameters are not its event's signature. And **anything the parser accepts, the
-emitter can write** — the two reserved names (`var`, `nodestate`) are refused at
-every declaration site for exactly that reason, because a program that parses and
-then cannot be printed is a worse failure than a refusal with a line number.
+**What the emitter refuses** is six IR states, four of which no producer in the
+tree makes: a non-finite float literal (`Lit::Float` is documented finite), a
+binder whose name is not an identifier, two live binders of one name, and a
+handler whose parameters are not its event's signature. The SCRIPT1a audit added
+the other two, and they are *resource* and *grammar* bounds rather than shapes:
+
+* `EmitError::TooDeep` — IR nesting deeper than `MAX_EMIT_NESTING` (twice the
+  parser's budget, so that anything the parser accepts the emitter can write).
+  A graph can chain operator nodes without limit and lowering makes the chain a
+  left-deep `Expr`; printing one was a stack overflow in whatever process opened
+  the Blueprint as text.
+* `EmitError::UnspellableStatement` — a `Stmt::ExprStmt` that is not a call the
+  grammar accepts in statement position (a literal, a local, a binary
+  expression, a `vars::get`, which prints as a bare name, or a
+  `nodestate::get_or`, which has a value spelling and no statement one).
+  InfiniScript has no evaluate-and-discard statement. `raise` refuses the same
+  shape (`UnsupportedStmt("non-call expr stmt")`), so this is a state both faces
+  agree they cannot hold rather than a new limit — and before the audit all five
+  printed happily and re-parsed not at all.
+
+And **anything the parser accepts, the emitter can write** — the two reserved
+names (`var`, `nodestate`) are refused at every declaration site for exactly that
+reason, because a program that parses and then cannot be printed is a worse
+failure than a refusal with a line number. The audit made that sentence a
+*measurement* rather than a policy: `hostile.rs` mutates a real script one
+character at a time (~3 500 inputs) and requires every mutation that parses to
+emit and re-parse to identical IR.
+
+**And the converse, which the wave had not stated and which was false**: anything
+the emitter writes, the parser must read back. Two shapes broke it and one of
+them is two nodes on a canvas —
+
+* **a comparison in a comparison's left operand.** `cmp.lt` wired into
+  `cmp.eq`'s `a` input lowers to `Binary(Eq, Binary(Lt, …), …)` and printed
+  `1.0 < 2.0 == true`, which the grammar refuses as a chained comparison
+  (A.2: `cmp` does not chain). The emitter parenthesised the *right* operand of
+  a non-associating operator and not the left; 36 of the 338 operator pairings
+  were this. Fixed, and pinned by the full 338-pairing sweep plus the two-node
+  graph itself;
+* the `ExprStmt` family above.
+
+An emitter that produces a file its own parser rejects is worse than one that
+refuses, because the refusal is silent until somebody opens the result — and
+"graphs and text are two views of one program" is the claim it falsifies.
 
 ## A.7 Containment, at its true granularity
 

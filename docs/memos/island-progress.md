@@ -20066,3 +20066,267 @@ feature's name, and each stays for the reason §7 gives.
 (the spec appendix + Infini Blueprints), `245ff0e9` (the third leg — and the
 negated-literal and `i64::MIN` findings), `99bfcb29` (clippy, and one rustdoc
 warning fewer than the baseline), and this ledger.
+
+## Wave SCRIPT1a — the adversarial audit (2026-08-28)
+
+The language is sound and the round trip is real. What the audit found is what a
+*language* wave always risks: the grammar was gated hard and the **surface** was
+not. A parser is the largest attack surface a wave can ship — it is the one
+component an editor calls on every keystroke, on a file somebody is halfway
+through typing — and three of its edges were **crashes** rather than refusals.
+
+Every finding below is reachable, two of them from the editor and one by drawing
+two nodes on a canvas.
+
+### The findings
+
+| # | sev | finding | verdict |
+|---|---|---|---|
+| 1 | HIGH | **There was no depth guard, so nesting was a stack overflow.** P19 paid for this law once already in the PCG grammar's parser. Measured on a **1 MiB** stack (a Windows main thread): the parser died between **512 and 768** nested parentheses with `STATUS_STACK_OVERFLOW` — not catchable, and it takes the process rather than the script. `not` chains, unary-minus chains and nested `if` did the same. And the shape with *no syntactic nesting at all* — `1 + 1 + … + 1`, read by a loop — built a left-deep tree that killed the **emitter** at ten thousand terms, because every consumer of the IR (emit, interpret, transpile, `Drop`) recurses once per level | FIXED `d111b98d` |
+| 2 | HIGH | **The emitter wrote text its own parser refuses — from a graph two nodes long.** `cmp.lt` wired into `cmp.eq`'s `a` input lowers to `Binary(Eq, Binary(Lt, …), …)` and printed `1.0 < 2.0 == true`, which the grammar refuses as a chained comparison. The emitter parenthesised the *right* operand of a non-associating operator and not the left: **36 of the 338** operator pairings, every one a comparison inside a comparison's left operand | FIXED `d111b98d` |
+| 3 | MED | **An expression in statement position printed happily and re-parsed not at all.** `Stmt::ExprStmt` of a literal, a local, a binary expression, a `vars::get` (which prints as a bare name) or a `nodestate::get_or` (which has a value spelling and no statement one) — five shapes, five lines the parser then rejects | FIXED `d111b98d` — `EmitError::UnspellableStatement`, the same verdict `raise` gives the shape |
+| 4 | MED | **A byte-order mark was a syntax error**, and the message named a character invisible in it: `1:1: error: unexpected character ``. The CRLF law's twin — a BOM is the *other* thing a Windows editor puts in a text file it saves, and the wave's own determinism claim is that a Windows checkout and a Unix one lower identically | FIXED `393d6eb8` |
+| 5 | MED | **The spawn hang's regression arm had no fast falsifier.** Reverting the wave's `i += 1` announced itself as a **7.5 GB allocation failure after more than a minute** — an OOM-killed CI job with no line number, a frozen editor, and on this machine a paging-file incident the repo has a law about | FIXED `2b1883dc` — `raise_chain` asserts its own advance and returns `RaiseError::NoProgress(i)`; the same mutation now fails the same arm in **0.00 s**, named |
+| 6 | MED | **A comment does not survive the round trip, and the claim did not say so.** `emit(parse(src)) == src` holds over the committed corpus *because that corpus carries no comments*; "open a script, save it, no diff" is true of a file that has none. The parser's output type **is** `BlueprintFn`, so there is nowhere for trivia to live — not a defect this wave can fix without an IR change | FIXED-IN-RECORD `2b1883dc` — pinned by an arm, and stated in memo A.1/A.6 and ROADMAP §14 |
+| 7 | MED | **(Not this wave's.)** `inf-physics`' `the_movers_per_character_cost_is_a_function_of_the_worlds_size` reddened under battery load at **5.00×** against its own 4.0 bound, and its module doc argued that bound "cannot be met by noise" | FIXED `7a86bead` — see the disposition below |
+| 8 | MED | **The loudest carried item was a memo sentence and a misleading refusal.** A handler cannot call its unit's own `function`s (the IR has no call form, A.9) — and the compiler said *"`double` is not a verb — a call names a namespace and a verb"*, which sends the reader looking for a namespace that does not exist and never mentions the `function double` three lines above. A refusal that names a remedy which does not apply is the failure mode the whole refusals-are-values doctrine exists to prevent | FIXED `599e3d2a` — the parser prescans `function` names for exactly this, both call shapes route through it, and the message names the real bound. Pinned as the table's **30th** row |
+| 9 | LOW | **Carried item 4 had no arm.** "A `math.neg` node wired to a `lit.float` lowers to IR the transpiler refuses" was three honest sentences in three files and nothing that fails when it changes | FIXED `c4aa7108` — armed, and the arm's message says to retire the ledger item when it goes red |
+
+### Carried, by name (the LOWs — four are message honesty, one is a
+routing item and one is a correction to the record)
+
+1. **`\u{ffffffffffffffff}` is refused as "not hexadecimal".** It *is*
+   hexadecimal; it overflows `u32`. `\u{}` is refused as ``` `` is not
+   hexadecimal ```, with empty backticks. Both are refusals with a line and a
+   column, so P21 holds; the sentence is just wrong about which fault it met.
+2. **`1e-999999999` underflows silently to `0.0`** and reprints as `0.0`.
+   (`1e999999999` correctly refuses as out of range — the overflow half is
+   right and the underflow half is quiet.)
+3. **A 10 000-segment dotted path produces a ~20 KB diagnostic**, because the
+   whole path is interpolated into the message. A refusal, not a hang.
+4. **`Unary(Neg, Lit::Bool)` prints `-(true)`, which does not parse.** Malformed
+   IR that no producer in the tree makes — the same class as the emitter's six
+   named refusals, and not on the list. Left rather than widened, because adding
+   a refusal for an unreachable state is a claim the arms cannot falsify.
+5. **There is no file door yet, so invalid UTF-8 has no refusal yet.**
+   `inf-script` reads no filesystem — `parse_unit` takes a `&str`, and a grep
+   for `std::fs`/`File::open`/`read_to_string`/`include_str!` across `src/`
+   returns nothing. So "the encoding is UTF-8" (A.1) is a statement about the
+   *caller*, and the caller does not exist until SCRIPT1b's watcher and cook.
+   **Routed to SCRIPT1b**: a `.infini` holding invalid bytes must decode into a
+   diagnostic with a line, not an `unwrap` — P21's law at the door rather than
+   inside it.
+6. **The Counts row does not add up, twice.** Both are small and both are
+   checkable, which is why they are here rather than shrugged at.
+   *(a)* The baseline is named as `3f6a9984` and given as 336 / 6 437; that
+   commit's **own** ledger says 336 / **6 438** — 6 437 was the SCRIPT0 wave
+   before its audit added
+   `a_scaffolded_project_writes_an_index_the_code_tab_owns`.
+   *(b)* The wave's own row reads `344 / 6 500 / 0 / 19` and the prose in the
+   same cell says one arm failed under battery load. Both cannot be true of one
+   run: this tree measures **6 515** with the audit's fourteen new arms, so the
+   pre-audit green total is **6 501**, and 6 500 is the passed count from the
+   run in which the physics arm failed — recorded beside a `0` in the failed
+   column. So "+63 arms" was **+62**, and "0 failed" was the intent rather than
+   the reading. The wave's table stands as published; this is the correction.
+
+### The fuzz verdict
+
+The wave's own sweep — every **prefix** of a working script, >100 refusing,
+none panicking — is real and it is the right instrument for an editor. It is
+also the only direction it swept. Extended here:
+
+* **suffixes.** Every truncation from the *front* — a paste, a badly resolved
+  merge conflict, a file cut off at the top. **224 of 233** refuse, none panics,
+  every diagnostic lands inside the text it was given. It reaches recovery paths
+  the prefix sweep never does (`recover` skipping to a column-1 declaration, a
+  bare `end`, a dangling `]]`).
+* **mutations.** Every position of a real script against a 29-character hostile
+  alphabet, plus the deletion of every position. None panics, and **every one
+  that parses emits and re-parses to identical IR**. That is the totality claim
+  in the only form that can be tested, and it is now an arm rather than a
+  sentence. It is anti-vacuous in both directions: the arm requires more than
+  3 000 inputs fed **and** more than 100 of them to have parsed, because a sweep
+  where everything refuses proves nothing about the round trip.
+* **pathological lexemes.** An unterminated string at end of file, a backslash
+  at end of file, a hundred thousand digits, `1e999999999`, a long bracket
+  opened at level 100 000, a `\u` escape that overflows `u32`, a lone surrogate,
+  a ten-thousand-segment path, ten thousand dots, ten thousand `end`s, an empty
+  file, one byte, and a **twenty-million-character line**. All values. The big
+  line takes 0.09 s and the whole hostile file 0.38 s.
+* **depth.** The direction the wave had not swept at all, and the one that was a
+  crash.
+
+**Verdict: the parser is now hostile-input clean, and it was not before.** The
+one shape that still ends a process is one nobody can reach through `parse` —
+IR handed straight to the emitter deeper than `MAX_EMIT_NESTING`, which is now
+`EmitError::TooDeep`.
+
+### The totality verdict
+
+*"The text face is TOTAL"* is the wave's headline and it survives, **with its
+emphasis corrected in two places**.
+
+It was stated as a property of the *emitter alone*: nothing the IR can hold is
+refused. Read that way it was already false in a harmless direction (four named
+refusals for IR states no producer makes) and, more importantly, it was
+**pointing the wrong way**. The claim a designer cares about is not "the emitter
+does not error" — it is *"a Blueprint opens as text and comes back"*, and that
+needs the **converse**: anything the emitter writes, the parser must read back.
+Nothing had asserted it, and it was false for 36 of 338 operator pairings and
+for five statement shapes.
+
+So the corrected pair, both now gated:
+
+* **the emitter refuses no IR *shape*** — every `Stmt`, `Expr`, `BinOp`, `UnOp`,
+  `Lit` and `Binding` kind has a spelling, and the meta-arm fails if the corpus
+  stops carrying one. Its six refusals are four unreachable IR states, one depth
+  bound, and one statement shape `raise` refuses too;
+* **everything it writes, the parser reads back** — 338 operator pairings, the
+  two-node graph itself, and every parsing mutation of a real script.
+
+The graph face is still the incomplete one, unchanged: `raise` refuses ten
+shapes and one unraisable statement takes a whole handler. That half of the
+wave's finding needed nothing.
+
+### The load-flaky arm, and its disposition
+
+The wave's own Counts row named it and left it: *"one arm failed under battery
+load only, and it is not this wave's"*. It is not — and it is a **clock arm that
+reddens under load**, which is the NPC1c-CI law verbatim, so it does not get
+left for the next push to rediscover.
+
+`the_movers_per_character_cost_is_a_function_of_the_worlds_size` asserted
+`big < small.ms * 4.0` — a **ratio of two wall clocks** — and its module doc
+argued "a bound at 4× cannot be met by noise". Measured at **5.00×** under a
+full workspace battery, green alone and green in two other full runs of the same
+tree. Both halves of a ratio are noisy and a ratio compounds them; the law
+reaches a ratio exactly as it reaches an absolute, and the module doc's sentence
+is now a falsified claim rather than an argument.
+
+Widening the number would have been the wrong fix, so the arm was split along
+the two things it was saying at once — which is also *a gate must aim at the
+thing it names*:
+
+* **this crate walking the body list** (the P29.4 A8 defect class) shows up as
+  *more scene queries per character*, and `PhysicsWorld3D::queries` already
+  counted them. That is the gate now, and no other process can perturb it.
+  Measured flat: **1.00** queries a character a step on 174 bodies and **1.00**
+  on 3 726.
+* **one broad-phase query getting dearer inside rapier** is invisible to a
+  counter, because it is the same call — so the clock is kept, bounded at
+  **half the fixture's own body growth** (21× bodies, so 10.5×): a figure
+  derived from the world rather than chosen, which a genuine walk (~21×) cannot
+  meet and which the 5.00× seen under load does not reach. It reads **2.75×**
+  unloaded.
+
+### The mutations
+
+| mutation | measured |
+|---|---|
+| remove `unary`'s depth guard | `nesting_past_the_bound_refuses_instead_of_overflowing_the_stack` **overflows the stack** — the arm does not fail, the process dies, which is the finding restated |
+| `left_min = p` (the emitter's old parenthesisation) | `every_operator_pairing_the_emitter_writes_reads_back_identically` **FAILED** and so did `a_comparison_wired_into_a_comparison_opens_as_text_and_comes_back` — the graph arm and the sweep catch it independently |
+| remove the `ExprStmt` refusal | `an_expression_in_statement_position_is_refused_rather_than_misprinted` **FAILED**, alone |
+| remove `strip_bom` | `a_file_saved_with_a_byte_order_mark_lowers_identically` **FAILED**, alone |
+| revert `raise_chain`'s `i += 1` (the wave's own bug) | `an_action_bound_to_a_local_raises_and_terminates` **FAILED in 0.00 s** with `NoProgress(0)` printed — against 7.5 GB and sixty seconds before the progress guard |
+| `"math.add" => "plus"` (one refusal message's needle) | `every_refusal_names_its_place_and_its_remedy` **FAILED**, naming the row and printing both strings — the table is a pin on the *messages*, not only on the positions |
+
+### What was checked and did not move
+
+* **The naming decision.** `Infinity Blueprints` survives in **10** places, all
+  of them prose *about* the rename (ROADMAP ×2, the memo ×2, this file ×6).
+  `Infini Blueprints` is in the ten spellings across the eight files the wave
+  names, plus the new crate's own doc and description. **Nothing serialized
+  moved**: the whole diff over `Cargo.toml`/`Cargo.lock`/`template.rs` is a
+  workspace member, a path dependency, a crate description and two doc comments.
+  `Cargo.lock` gains `inf-script` and **zero external crates**.
+* **The libm table.** `inf_blueprint::math_builtins` swept function by function:
+  `abs`/`floor`/`ceil`/`round`/`sqrt`/`min`/`max`/`clamp`/`lerp`/`to_int`/
+  `to_float` are exact IEEE operations, `sin`/`cos` route to
+  `inf_math::portable`, and **`pow` is `f64::powf`** — the one hole, exactly as
+  the wave carries it. The panicking-host arm is a real proof of the seam: it
+  parses text, runs the interpreter over a `Host` that panics if reached, and
+  compares **bits** against `psin64`/`pcos64`, so a builtin that sneaked
+  `std::sin` in on any path the arm drives would move the bits, and one that
+  went through the `Host` would panic instead.
+* **`chr(92)` sweep.** 7 300-odd added Rust lines, 230 with a backslash: every
+  one a well-formed `\n` `\u` `\\` `\"` `\r` `\t` `\0`. **Zero** instances of the
+  eaten-continuation signature (`\n` followed by eight or more spaces).
+* **The 29 refusals** were 29 (now 30), and the sweep over every prefix still
+  refuses more than a hundred with no panic.
+* **`lower ∘ raise == id` over the enlarged image**: `for_loop_round_trips` runs
+  the real invariant (`assert_round_trips` re-lowers the raised graph and
+  compares IR), not merely "no error".
+* **The rustdoc ceiling handles a decrease.** CI's ratchet is `n > CEILING`, so
+  373 individual warnings (403 `^warning:` lines, 30 of them per-crate
+  summaries) against a ceiling of 450 is green, and a *fall* ratchets nothing
+  down. The wave's "one below the baseline" needed no bookkeeping it did not get.
+
+### The determinism law, extended in the direction it points
+
+*"A `.infini` file's IR is a pure function of its bytes"* is trivially true and
+says nothing a designer cares about. What they care about is that **incidental
+formatting cannot change a program or a committed digest**: which editor did the
+indenting, whether it writes a BOM, whether it strips trailing space on save.
+The wave gated the line endings — CRLF, LF and a lone CR — and stopped there.
+Now also gated: a **byte-order mark** (finding 4), **tabs for spaces**,
+**doubled indentation**, and **trailing whitespace on every line**, each a real
+byte difference the lexer is required not to see, all against the same pinned
+FNV digest.
+
+It works on that fixture precisely because the fixture holds **no `rust`
+block** — which the fixture's own doc comment said it did, and is the audit's
+smallest correction. A snippet's contents are the one place in the language
+where bytes rather than tokens survive, so re-indenting one legitimately *does*
+change the program; a version of the arm over a fixture containing one would be
+asserting the opposite law. The snippet keeps its own arm.
+
+### Counts
+
+| | wave (`b6d4fe46`) | **audit (`HEAD`)** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 344 / 6 500 / 0 / 19 | **345 / 6 515 / 0 / 19** — `cargo test --workspace -j 3 --no-fail-fast`, exit 0, on the final tree. **+1 block** (`tests/hostile.rs`) and **+14 arms**, which is exactly the count of `#[test]` lines the audit's diff adds. The **+15** against the published 6 500 is the arithmetic correction: this tree's pre-audit green total is **6 501**, and the wave's row recorded the passed count from the run in which its physics arm failed while writing `0` in the failed column beside it |
+| goldens | 59 | **59** — `INF_GOLDEN_STRICT=1` green over **118 arms, 0 failed**; none added, none re-blessed, and `git status` over `crates/inf-render/tests/goldens` is empty afterwards |
+| rustdoc individual warnings (cold, ceiling 450) | 373 over 30 crates | **373 over 30 crates** — after `cargo clean --doc` (9 087 files, 222.9 MiB): **403 `^warning:` lines minus 30 per-crate summaries**, cross-checked against the sum of those summaries' own counts (373 exactly), over **48** documented crates. **The audit adds zero** — and it added one first: `RaiseError::NoProgress`'s doc linked the private `Raiser::raise_chain`, which is `rustdoc::private_intra_doc_links`, caught by running the count rather than assuming it. Headroom **77**. (The ceiling handles a *decrease* without help: CI's ratchet is `n > 450`, so a fall ratchets nothing down.) |
+| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — exit 0, run **LAST** per the rmeta law. Incremental, and said so: **10** crates re-checked (`inf-blueprint`, `inf-script`, `inf-physics` and everything downstream — `inf-transpile`, `inf-editor-core`, `inf-player`, `inf-packager`, `inf-cli`, `inf-viewport`, `inf-studio`), which is exactly the audit's code footprint; the rest served from a fingerprint cache keyed on the *same* `RUSTFLAGS`, which is what makes reusing it legitimate rather than a gap |
+| `cargo fmt --all --check` | clean | **clean** |
+| frontend | not run | **not run — no `editor/`, `runtime/`, `tools/` or `samples/` file moved in the whole wave range**, verified with `git diff --stat 3f6a9984..HEAD` over all four |
+| schemas / `Cargo.lock` / committed content | unmoved | **unmoved** — no schema constant in the audit's diff, `EXPECTED_LEVELS` still 23, `Cargo.lock` byte-identical (the audit adds no dependency) |
+| `chr(92)` sweep | clean | **clean** — 230 of the wave's 7 300 added Rust lines carry a backslash and every one is a well-formed escape; **zero** eaten-continuation signatures |
+| disk | 69 GB free | **65 GB** free; incremental only, no `cargo clean` beyond `--doc` |
+
+**Commits:** `d111b98d` (the depth guard, the comparison parenthesisation, the
+statement refusal, `tests/hostile.rs`), `393d6eb8` (the byte-order mark and the
+suffix sweep), `2b1883dc` (the progress guard and the comment arm), `7a86bead`
+(the load-flaky mover-cost ratio), `c4aa7108` (the carried graph gap's
+tripwire), `599e3d2a` (the user-function refusal), `2b667f47` (layout
+insensitivity and the emitter's doc), and this ledger.
+
+### The laws this audit adds
+
+**A parser's real failure mode is the stack, not the grammar.** Every arm this
+wave wrote was about what a `.infini` file *means*; none was about what a
+`.infini` file *does to the process reading it*. The grammar was gated to 29
+refusals, every prefix of a real script, three round-trip laws and a
+cross-host digest — and `((((…))))` still killed the process. A gate that reads
+a language reads it *for meaning*, and hostile input is a different question
+with different instruments (depth, size, mutation, truncation from both ends).
+
+**A round trip has two directions and the wave gated one.** "Anything the parser
+accepts, the emitter can write" was asserted; "anything the emitter writes, the
+parser reads back" was not, and it was the false one. The asymmetry is not
+accidental: the corpus is written *as text*, so it can only ever exercise the
+first. The second needs IR the corpus cannot express — a graph's, or a
+generator's — which is why the fix's arms are a 338-pairing sweep and a graph
+built node by node.
+
+**A carried item with no arm is a sentence that goes stale in both
+directions.** Nobody notices when it is fixed and nobody notices when it gets
+worse. Three of this wave's carried items are now tripwires that fail *when the
+limitation is lifted*, and say so in their own failure message.
+
+**How a mutation announces itself is part of the gate.** The wave's regression
+for its own spawn hang was correct and its falsifier was a 7.5 GB allocation
+failure after a minute — which on a runner is an OOM-killed job with no line
+number. A gate is not finished when it fails; it is finished when it fails
+*legibly*, quickly, and without taking the machine with it.

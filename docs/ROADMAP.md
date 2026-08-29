@@ -19663,13 +19663,20 @@ quicker.
   nodes by naming the syntax that replaces each. **Refusals are values**: 29 pinned to a line,
   a column and a remedy, plus a sweep over every prefix of a working script — what an editor
   hands the parser on each keystroke — asserting none of the 300-odd panics.
-  **The emitter is TOTAL over the IR**, which is the wave's finding and the memo's
+  **The emitter is TOTAL over the IR's shapes**, which is the wave's finding and the memo's
   A.5: `raise` refuses ten shapes and one of them makes a whole *handler* unraisable, and
   every one of them has a `.infini` spelling — a non-terminal `if`, an assignment, a call in
   value position, the `nodestate` cells, and opaque Rust. Graphs and text are two views of one
-  program, and **the text view is the complete one**. Three round-trip laws, all gated:
+  program, and **the text view is the complete one**. (The audit made the sentence precise:
+  the emitter has six refusals, four of them IR states no producer makes, plus a depth bound
+  and one statement shape `raise` refuses too — none a construct a canvas can draw. And it
+  added the converse the wave had not stated: *anything the emitter writes, the parser must
+  read back*, which was false for a comparison in a comparison's left operand.)
+  Three round-trip laws, all gated:
   `parse(emit(f)) == f` exactly on the parser's image (and `emit(parse(src)) == src` on the
-  committed corpus, so opening a script and saving it produces no diff); the emitted text is a
+  committed corpus, so opening a script and saving it produces no diff — **of a file with no
+  comments in it**: the IR has no trivia, so comments and blank lines go on the first save
+  and the text is a fixed point from the second); the emitted text is a
   **fixed point** for any IR including a graph's (the emitter renumbers anonymous locals into
   the parser's allocation order); and a round-tripped handler **runs identically**, compared
   as a host-call log and a wire trace rather than as an id. The corpus is checked for coverage
@@ -19726,6 +19733,40 @@ quicker.
   committed content moved, `EXPECTED_LEVELS` still 23, and `Cargo.lock` gains the new
   workspace member and **zero external crates**. The frontend suite was not run because
   no editor or studio file moved. Full ledger in `docs/memos/island-progress.md`.
+  **Audited the same day** — nine findings, two HIGH, and the shape of all of them is one
+  sentence: the *grammar* was gated hard and the **surface** was not. A parser is the
+  largest attack surface a wave can ship, and three of its edges were **crashes** rather
+  than refusals. (1) **No depth guard**, which is P19's law paid for a second time: on a
+  1 MiB stack — what a Windows main thread gets — the parser died between **512 and 768**
+  nested parentheses with `STATUS_STACK_OVERFLOW`, in a library the editor calls on every
+  keystroke; and a *flat* `1 + 1 + …` chain, which needs no parser frames at all, killed the
+  **emitter** at ten thousand terms, because every consumer of the IR recurses once per
+  level. `MAX_NESTING` = 128 now bounds a declaration's total nesting — blocks, parentheses,
+  unary operators and chain steps share one budget because they share one stack — and the
+  emitter takes twice that, so anything the parser accepts it can still write. (2) **The
+  emitter wrote text its own parser refuses**, from a graph two nodes long: `cmp.lt` into
+  `cmp.eq`'s `a` input printed `1.0 < 2.0 == true`, which the grammar refuses as a chained
+  comparison — **36 of the 338** operator pairings, every one a comparison in a comparison's
+  *left* operand. The wave gated "anything the parser accepts, the emitter can write" and
+  not its converse, and the converse was the false one; both are gated now. (3) five
+  `ExprStmt` shapes printed and did not re-parse (`EmitError::UnspellableStatement`, the
+  verdict `raise` already gives them). (4) a **byte-order mark** was a syntax error naming a
+  character invisible in its own message — the CRLF law's twin, now joined by tabs, doubled
+  indentation and trailing whitespace. (5) the spawn hang's regression fell over by **OOM
+  after a minute**; `raise_chain` asserts its own advance now and the same mutation fails in
+  **0.00 s** with `NoProgress(0)`. (6) comments do not survive a round trip and the "no
+  diff" claim did not say so. (8) the loudest carried item — a handler cannot call its
+  unit's own `function`s — surfaced as *"`double` is not a verb"*, and now says why. Two
+  more carried items gained tripwires that fail **when the limitation is lifted**. And the
+  pre-existing load-flaky arm was fixed rather than routed: `inf-physics`'
+  `the_movers_per_character_cost_is_a_function_of_the_worlds_size` asserted a **ratio of two
+  wall clocks** and read 5.00x against its own 4.0 bound under battery load, so its gate is
+  now the **counted** scene queries per character (flat at 1.00 over a 21x world) with the
+  clock kept at half the fixture's own body growth — a bound derived from the world rather
+  than chosen. Post-audit battery **345 / 6 515 / 0 / 19** (+1 block, +14 arms, exit 0),
+  goldens **59** unmoved over 118 strict arms, rustdoc **373** over 30 crates (the audit
+  adds zero, after taking one back out), clippy **0**, `fmt` clean, no schema and no
+  committed content moved. Full audit ledger in `docs/memos/island-progress.md`.
 * **SCRIPT1b — hot reload, the cook, and the crown gate (ROUTED).** The wave split at five
   majors under the brief's own rule, and the split is where the brief put it. Hot reload:
   `.infini` watcher on `inf-asset`'s notify substrate → re-lower → swap into the running
@@ -19733,7 +19774,12 @@ quicker.
   interpreter propagates a `RunError` out of `run_event`, so a broken script takes *its
   handler, on its actor, for that tick*; `run_on_guid` logs it and the per-actor loop
   continues, in both hosts. (The downstream-cone containment belongs to `inf_graph::exec`,
-  which is a different runner and not the one scripts run on.) Iteration timing **measured,
+  which is a different runner and not the one scripts run on.) **And the watcher is the
+  file door `inf-script` does not have** — the SCRIPT1a audit's routing item: the crate
+  reads no filesystem at all (`parse_unit` takes a `&str`), so "the encoding is UTF-8" is a
+  statement about the *caller*, and a `.infini` holding invalid bytes must decode into a
+  diagnostic with a line rather than an `unwrap`. P21's law at the door instead of inside
+  it. Iteration timing **measured,
   not asserted**. The cook: `.infini` is *source*, git-diffable text; the cook lowers it and
   either transpiles it to Rust into the project crate or packs its IR for the shipped
   interpreter, with `asset_deps` walking scripts so the cook closure sees script-named assets
