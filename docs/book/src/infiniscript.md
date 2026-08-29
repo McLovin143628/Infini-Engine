@@ -169,8 +169,9 @@ working — the language cannot outgrow the execution model by accident.
    same way; it is the same door.
 2. **Read it.** The tab gets InfiniScript highlighting: keywords, strings and
    long brackets, numbers, comments, the namespace and verb halves of a call,
-   and a type name after a `:`. The colours are the editor theme's, so a theme
-   swap repaints scripts with everything else.
+   and a type name in the two places the grammar has one — after a `:` and after
+   a `->`. The colours are the editor theme's, so a theme swap repaints scripts
+   with everything else.
 3. **Fix it.** A quarter of a second after you stop typing, the buffer goes to
    the engine's compiler — the same one the cook uses — and every refusal comes
    back with its line, its column and its remedy. They appear twice: as a
