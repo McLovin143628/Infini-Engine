@@ -19639,9 +19639,17 @@ quicker.
   cook closure sees script-named assets (the SK1c lesson). Gates: the parity gate; **byte-
   identical lowering across hosts** (a `.infini` file's IR is a pure function of its bytes);
   `PIE == shipping` over a trace whose gameplay runs from a script. **First named risk:**
-  `raise` is not total — `flow.for`, `flow.do_once`, `flow.flip_flop` and `flow.gate` are
-  raise-excluded today, so "two views of one program" is exactly as complete as `raise` is.
-  Closing that gap, or bounding it and saying so in the UI, is scope.
+  `raise` is not total, so "two views of one program" is exactly as complete as `raise` is.
+  Of the seven-node flow palette it inverts **two** (`flow.branch`, and `flow.while` via
+  `try_raise_while`'s exact-shape match); `flow.sequence` is flattened at lowering and
+  `flow.for`/`do_once`/`flip_flop`/`gate` are raise-excluded. It also refuses four shapes
+  that are *not* flow nodes and that text produces where a canvas could not: `Stmt::Assign`,
+  `Stmt::Snippet`, a non-call `Stmt::ExprStmt`, a call in value position — and, sharpest,
+  `RaiseError::NonLinear`, **an `if`/`return` that is not the last statement of its block**.
+  A single unraisable statement makes the whole *handler* unraisable (`raise_chain` returns
+  `Err`), which is the per-handler degradation `graph_open_actor` already lives with. The
+  full table is in the memo's §4. Closing that gap, or bounding it and saying so in the UI,
+  is scope.
 * **SCRIPT2 — the API surface and the tooling.** The verb surface grows toward the document's
   vision our way — `World.*`, `AI.*`, `Mission.*` (new, priced), `Audio.*`, `UI.*`,
   `Vehicle.*`, `Weapon.*`/`Door.*`/`Item.*` — every verb deterministic, Host-mediated,
@@ -19661,9 +19669,12 @@ quicker.
 
 ### Laws this arc is held to
 
-Portable math reaches a script **only** through Host verbs — a script cannot name a
-transcendental, so the P14/P22 determinism laws are enforced by the surface rather than by
-review. A gameplay refusal is a value, not a failure (P21). No engine schema moves without a
+A script cannot name a transcendental — **only a verb** — so the P14/P22 determinism laws
+are enforced by the surface rather than by review. The surface is two seams and the parser
+must resolve into both: pure arithmetic through the node kit's own builtins (`math.sin` /
+`math.cos` route to `inf_math::portable::psin64`/`pcos64`, which is why `inf-blueprint`
+depends on `inf-math` at all), everything external through the `Host`. Neither reaches `std`
+or `libm`. A gameplay refusal is a value, not a failure (P21). No engine schema moves without a
 STOP-and-price; a `.inf_script` asset kind, if taken, is **additive** — the sidecar rule. And
 a gate must aim at the thing it names and be built to falsify (P22/P23): a round-trip test
 that round-trips the empty program proves nothing.

@@ -51,7 +51,7 @@ shipped the substrate the document describes, and Phase 14 shipped the other hal
 | the parity gate | `inf-transpile/tests/parity.rs` | interpreted == compiled, pinned. *Preview is the shipped program.* |
 | graph ↔ IR | `inf_blueprint::lower` / `raise` | **both directions**: a graph lowers to IR, and IR raises to a graph |
 | the one boundary | the `Host` trait | everything external — engine calls, member variables, spawning — crosses one seam; the IR itself stays pure |
-| the verb surface | `inf_blueprint::nodekit` | 96 `NodeDef::new` sites across twenty registration groups: `event.*` `flow.*` `math.*` `logic.*` `var.*` `lit.*` `cmp.*` `dispatch.*` `engine.*` `debug.*` `input.*` `audio.*` `sky.*` `water.*` `voxel.*` `destruct.*` `door.*` `item.*` `health.*` `ik.*` `anim.*` |
+| the verb surface | `inf_blueprint::nodekit` | 96 `NodeDef::new` sites across twenty registration groups and **23** namespaces: `event.*` `flow.*` `math.*` `logic.*` `cmp.*` `var.*` `lit.*` `dispatch.*` `engine.*` `debug.*` `input.*` `audio.*` `physics2d.*` `physics3d.*` `sky.*` `water.*` `voxel.*` `destruct.*` `door.*` `item.*` `health.*` `ik.*` `anim.*` |
 | the sandbox | `crates/inf-wasm-host` + `crates/inf-mod` (P14.5) | a **`wasmtime`** engine with a capability-scoped linker, a flat host ABI, and a cook path Blueprint → Rust → `cdylib` → `.wasm` |
 | dylib hot-swap | `crates/inf-hotreload` | content-addressed shadow copies, never-unload, state migration |
 
@@ -84,10 +84,18 @@ books and it cost real waves:
 * **P22's extension of it** — `f64::cbrt` routes through the `libm` crate on
   `wasm32` and had to become `inf_math::pcbrt`, pinned bit-for-bit.
 
-A script that can name `math.sin` directly is a hole straight through both laws.
-Our answer is structural rather than disciplinary: **a script cannot name a
-transcendental — only a verb.** Portable math reaches scripts *through* the Host,
-so the determinism guarantee is a property of the surface, not of a review.
+A script that can name Luau's `math.sin` directly is a hole straight through both
+laws. Our answer is structural rather than disciplinary: **a script cannot name a
+transcendental — only a verb.** There *is* a `math.sin` in the node kit and it is
+not the standard library's: `inf_blueprint::math_builtins` routes it and
+`math.cos` to `inf_math::portable::psin64`/`pcos64`, and `inf-blueprint`'s
+`Cargo.toml` records that as the dependency's whole reason. So the determinism
+guarantee is a property of the surface rather than of a review — **but the
+surface is two seams, not one**, and SCRIPT1's name resolution has to know it:
+pure arithmetic is dispatched by the node kit's own builtins, and everything
+*external* (engine calls, member variables, spawning) crosses the `Host`. A
+`.infini` identifier must resolve into one of those two and never into `std` or
+`libm`.
 
 A GC is the second half of the same problem: allocation order becomes part of the
 program's observable behaviour the moment a finalizer or a table iteration order
@@ -184,14 +192,49 @@ running and the editor shows the error.
 
 ### The honest bound, named now rather than discovered in SCRIPT1
 
-`raise` is **not total**, and the memo says so at the front: `flow.for`,
-`flow.do_once`, `flow.flip_flop` and `flow.gate` lower to multi-statement or
-stateful expansions with no unambiguous single-node inverse, and are
-raise-excluded today (`crates/inf-blueprint/src/raise.rs`, module docs). Hand-
-edited Rust in those shapes survives as a `Stmt::Snippet` — lossless, but not a
-node. "Two views of one program" is therefore exactly as complete as `raise` is,
-and closing that gap (or bounding it and saying so in the UI) is SCRIPT1's first
-named risk, not a detail.
+`raise` is **not total**, so "two views of one program" is exactly as complete as
+`raise` is. This is the whole list, read off `crates/inf-blueprint/src/raise.rs`
+rather than off its summary, because SCRIPT1 plans from it.
+
+**Of the seven-node flow palette, `raise` inverts two.** `flow.branch` becomes a
+branch node; `flow.while` is recognised by `try_raise_while`, which matches the
+*exact* three-statement counter-guarded expansion `lower_while` emits. The other
+five do not come back:
+
+| node | what happens on the way back |
+|---|---|
+| `flow.sequence` | **flattened at lowering.** The program survives exactly; the node does not. The one lossy-but-not-failing case — and the one the first draft of this memo left out |
+| `flow.for` | lowers to a `Stmt::While` `try_raise_while` does not match → `UnsupportedStmt("while")` |
+| `flow.do_once` | `nodestate::*` state wrapped in `Stmt::If` → `NonLinear`, or `UnsupportedExpr("pure call")` on the state read |
+| `flow.flip_flop` | as above |
+| `flow.gate` | as above |
+
+**And `raise` refuses four shapes that have nothing to do with the flow
+palette** — which matter *more* here than they did for the canvas, because a
+canvas cannot draw them and text writes them without trying:
+
+* `Stmt::Assign` — `UnsupportedStmt("assign")`.
+* `Stmt::Snippet` — `UnsupportedStmt("snippet")`.
+* a `Stmt::ExprStmt` that is not a call — `UnsupportedStmt("non-call expr stmt")`.
+* a call in **value** position — `UnsupportedExpr("pure call")`. Only `engine::*`
+  and `debug::*` are action paths (`is_action_path`); every other call reachable
+  from an expression is out.
+* and the structural one, which is the sharpest: **`RaiseError::NonLinear` — an
+  `if` or a `return` that is not the last statement of its block.** `function f()
+  if x then A() end B() end` is ordinary text and today it does not raise at all.
+
+One more correction to the shape of the bound. A `Stmt::Snippet` does not sit
+in a raised graph as a node-less statement: `raise_chain` returns `Err` the
+moment it meets one, so **a single unraisable statement makes the whole handler
+unraisable**. Lift is lossless into the *IR*; it is the graph that is all-or-
+nothing per handler. `graph_open_actor` already lives with that — it opens the
+handlers that raise and names the ones that do not — and that per-handler
+degradation, not a per-statement one, is the precedent SCRIPT1 inherits.
+
+Closing this gap, or bounding it and saying so in the UI, is SCRIPT1's first
+named risk and not a detail. The cheap half is probably `flow.for` and
+`flow.sequence` (both are shape-recognition, like `try_raise_while` already is);
+the expensive half is `NonLinear`, which is a statement about what a graph *is*.
 
 ---
 
@@ -325,8 +368,9 @@ end to end — edit to running, and cold cook.
 
 ## 9. Laws this arc inherits
 
-* Portable math reaches a script only through Host verbs; a script cannot name a
-  transcendental.
+* A script cannot name a transcendental — only a verb. Pure arithmetic reaches it
+  through the node kit's own builtins (which route to `inf_math::portable`) and
+  everything external through the `Host`; neither seam exposes `std` or `libm`.
 * `PIE == shipping` over a trace whose gameplay runs from a `.infini` script is a
   SCRIPT1 gate arm, not a SCRIPT3 aspiration.
 * A gameplay refusal is a **value**, not a failure (P21) — for parse errors and
