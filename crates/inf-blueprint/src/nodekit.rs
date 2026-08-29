@@ -1271,6 +1271,39 @@ fn crowd_nodes() -> Vec<NodeDef> {
 /// same answer one step later than an event would; when the push half is built,
 /// these stay as they are.
 ///
+/// # The re-pricing, from the other side (wave SCRIPT3)
+///
+/// SCRIPT3 wrote the mission the event was priced for (`samples/harbour-heist`)
+/// and can therefore say what the estimate above left out. The five items are
+/// right and they are not the hard part. **The hard part is where a zone LIVES.**
+///
+/// An event is pushed by the fixed step, so the fixed step has to know the boxes
+/// before any handler runs — and today a box is six `Float` arguments *inside a
+/// script's own expression*, which nothing but the interpreter ever sees. Three
+/// ways to give it a home, priced:
+///
+/// * **A component.** `TriggerVolume { half_extents }` on an entity is the
+///   engine-shaped answer, it is what a designer would drag in the viewport, and
+///   it is a **scene schema move** — the one thing this arc has spent no window
+///   on. It also makes a zone authorable without a script, which is the right
+///   long-run design.
+/// * **A resource the script declares**, `zone.watch("vault", …)` on
+///   `BeginPlay`, exactly as `item.define` declares a catalogue and `door.spawn`
+///   declares doors. **No schema moves**, the zone belongs to the program that
+///   cares about it, and it costs one verb, one Ring-0 resource and one edge
+///   pass in each host. This is the cheap door and it is the one to take first.
+/// * **Neither** — keep polling. What that costs a designer is measured rather
+///   than guessed now: the Harbour Heist mission polls two boxes on `Tick` and
+///   the state machine it is written as reads *better* than four event handlers
+///   would, because the phase is explicit. What it costs is one fixed step of
+///   latency and a `Tick` that runs on every actor whether anything is happening
+///   or not.
+///
+/// So the wave's routing stands and the reason is sharper: the event is not a
+/// clause because the substrate it needs is a decision about authoring, not a
+/// dispatch mechanism. Routed to **SCRIPT4** by name, with the resource door as
+/// the recommended first cut.
+///
 /// The box is a **centre and half-extents**, in metres, axis-aligned. A rotated
 /// zone would need a shape cast rather than an AABB, which the query pipeline
 /// supports and this pair does not use, so the honest name for what it tests is
