@@ -16,7 +16,7 @@
 //! because the frontend's job model — id, phase, optional error — is identical;
 //! only the payload of a tick differs.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -539,7 +539,7 @@ pub struct TickOutcome {
     /// The content version to publish, or `None` when the project was busy.
     pub version: Option<u64>,
     /// **InfiniScript files that changed on disk** (SCRIPT1b), as `(asset GUID,
-    /// path)` in the order the watcher saw them.
+    /// path)` — **one entry per script, ordered by GUID**.
     ///
     /// The hot-reload path: Ring 2 compiles each through
     /// `inf_script::source::compile_path` — the one file door — and swaps the
@@ -549,6 +549,40 @@ pub struct TickOutcome {
     /// Resolved to a GUID **here**, while the database lock is already held, so
     /// the caller does not take it a second time to answer a question this pass
     /// already knew.
+    ///
+    /// # One save is one entry, whatever the platform's watcher does
+    ///
+    /// A single `std::fs::write` is **three** inotify events on Linux (create,
+    /// modify-data, close-write) and **one** `ReadDirectoryChangesW`
+    /// notification on Windows. `notify-debouncer-full` coalesces a burst in
+    /// *time*, not across event *kinds*, so one drain really does hand this pass
+    /// the same file three times — measured: CI reported
+    /// `[(e723334b…, Counter.infini) x3]` on ubuntu for one save that Windows
+    /// reported once. Carried through one-for-one that is three compiles and
+    /// three class swaps per Ctrl+S, which is the operating system's event shape
+    /// deciding how often a running world is re-lowered.
+    ///
+    /// So the pass collects into a map keyed by **GUID**, which is the right key
+    /// rather than a convenient one: the GUID *is* the script's identity here (an
+    /// actor binds through `ActorClass(Uuid)` — the SCRIPT1b audit's HIGH), so
+    /// "the same script twice" is exactly "the same key twice". The order that
+    /// falls out is GUID order — a total order this repository controls — rather
+    /// than the order the operating system happened to report, and it is the
+    /// order `SimSession::apply_pending_classes` then drains in.
+    ///
+    /// The sidecar `pin_script_ids` writes cannot add a fourth event:
+    /// [`AssetWatcher`] drops every `.toml` before it sends
+    /// (`inf_asset::is_sidecar`, *"so we don't process an asset twice per
+    /// save"*), and the pin writes at all only when no sidecar exists yet.
+    ///
+    /// # The path is the database's, not the watcher's
+    ///
+    /// `AssetEntry::path` has been through `inf_asset`'s one `normalize` door —
+    /// the same canonicalization its `by_path` index is keyed with — so a macOS
+    /// watcher reporting `/private/var/folders/…` for a root the editor opened
+    /// as `/var/folders/…` (the `/var` → `/private/var` symlink) yields **one**
+    /// spelling here instead of two. It is a handle to the bytes Ring 2 opens,
+    /// beside the GUID that is the identity.
     pub scripts: Vec<(uuid::Uuid, std::path::PathBuf)>,
 }
 
@@ -598,6 +632,12 @@ pub fn tick(
         if let Some(w) = watcher {
             let changes = w.drain();
             if !changes.is_empty() {
+                // **One entry per script, keyed by the identity, not by the
+                // event** — see [`TickOutcome::scripts`]. A drain carries one
+                // save as three events on Linux and one on Windows; a `Vec` of
+                // pushes would carry that difference into how many times the
+                // editor recompiles and swaps a class.
+                let mut scripts: BTreeMap<uuid::Uuid, PathBuf> = BTreeMap::new();
                 for c in changes {
                     let path = match &c {
                         AssetChange::Upserted(p) | AssetChange::Removed(p) => p.clone(),
@@ -642,7 +682,9 @@ pub fn tick(
                                 // the id back instead of re-deriving it.
                                 super::pin_script_ids(proj.db());
                                 if let Some(entry) = proj.db().get_by_path(&p) {
-                                    out.scripts.push((entry.id().0, p.clone()));
+                                    // The DATABASE's normalized path, not the
+                                    // watcher's raw one, and one value per GUID.
+                                    scripts.insert(entry.id().0, entry.path.clone());
                                 }
                             }
                         }
@@ -659,6 +701,7 @@ pub fn tick(
                 }
                 proj.bump();
                 out.content_changed = true;
+                out.scripts = scripts.into_iter().collect();
             }
         }
         out.version = Some(proj.version());
@@ -689,9 +732,38 @@ mod tests {
     /// a level's `ActorClass` is bound to** — that is, the one the database held
     /// *before* the edit, which is the assertion that found the wave's HIGH —
     /// and a change to something that is not a script must not arrive at all.
+    ///
+    /// # The two platform exposures this arm found (the SCRIPT1b CI-red fix)
+    ///
+    /// Written against Windows, it reddened on both other runners, and neither
+    /// red was about the arm's tolerance:
+    ///
+    /// * **ubuntu** reported the same file **three times** from one
+    ///   `std::fs::write` — one drain, three inotify kinds. The count is the
+    ///   claim (three compiles and three class swaps per save is a real cost),
+    ///   so [`TickOutcome::scripts`] now collapses a drain by GUID and the
+    ///   `== 1` here is asserted on every platform;
+    /// * **macOS** disagreed about the *path*: the watcher reports
+    ///   `/private/var/folders/…` where the tempdir is `/var/folders/…`. The
+    ///   GUID is the identity and it matched; the path is a handle to bytes, so
+    ///   it is asserted by **opening it** and then pinned through one
+    ///   canonicalization door rather than compared raw.
+    ///
+    /// Un-fix mutations, and what each platform can say about them. Reporting
+    /// the **watcher's** path instead of the database's (`p` for `entry.path`)
+    /// reddens here on *Windows*, where `normalize`'s `fs::canonicalize` returns
+    /// the `\\?\` verbatim form and the raw event path does not — so the macOS
+    /// exposure is armed on a platform that has no `/private/var` symlink.
+    /// Un-collapsing the drain (a `Vec` push for the map insert) reddens on
+    /// **ubuntu only**, and cannot be reproduced here: the probe below measures
+    /// this platform delivering **one** change event for a save (three rapid
+    /// saves were also tried, and also arrived as one). The pre-fix tree *is*
+    /// that mutant, and CI reddened it at this line with `left: 3, right: 1`.
     #[test]
     fn a_changed_script_reaches_the_tick_outcome_with_its_guid() {
         use std::time::{Duration, Instant};
+
+        const V2: &str = "on tick(dt)\n  debug.print(\"v2\")\nend\n";
 
         let dir = tempfile::tempdir().unwrap();
         let scripts = dir.path().join("Scripts");
@@ -713,25 +785,68 @@ mod tests {
 
         let watcher = inf_asset::AssetWatcher::watch(dir.path(), Duration::from_millis(50))
             .expect("the watcher starts");
+        // A second watcher over the same root, drained beside the tick and never
+        // asserted on. It is how many raw change events **this platform**
+        // delivered, and it is printed rather than asserted because that number
+        // is a fact about the operating system, not about the editor: CI
+        // measured ubuntu reporting ONE `fs::write` as three events, and this
+        // machine reports THREE writes as one. The collapse exists precisely so
+        // the tick's answer does not depend on which of those a runner is.
+        let probe = inf_asset::AssetWatcher::watch(dir.path(), Duration::from_millis(50))
+            .expect("the probe watcher starts");
         let mut queue = ImportQueue::spawn(project.clone());
-        std::fs::write(&path, "on tick(dt)\n  debug.print(\"v2\")\nend\n").unwrap();
+        // ONE save — the shape that reddened ubuntu, where it arrives as three
+        // events. Three rapid saves were tried here first, to give a
+        // single-event platform a duplicate to collapse; the probe below
+        // measured them arriving as **one** change event on Windows anyway, so
+        // the extra writes bought nothing and are not pretended to.
+        std::fs::write(&path, V2).unwrap();
         std::fs::write(&other, "v2").unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut seen: Vec<(uuid::Uuid, std::path::PathBuf)> = Vec::new();
         let mut saw_a_change = false;
+        let mut raw = 0usize;
+        let count_raw = |w: &inf_asset::AssetWatcher| {
+            w.drain()
+                .iter()
+                .filter(|c| inf_script::is_script_path(c.path()))
+                .count()
+        };
         while Instant::now() < deadline && seen.is_empty() {
             let out = tick(&mut queue, &project, Some(&watcher));
+            raw += count_raw(&probe);
             saw_a_change |= out.content_changed;
             seen = out.scripts;
             std::thread::yield_now();
         }
+        // The probe keeps its own debounce timer, started a moment after the
+        // watcher's, so it is usually still holding the batch when the tick
+        // wins the race — give it a bounded chance rather than print a zero
+        // that says nothing about the platform. A whole batch arrives at once.
+        let probe_deadline = Instant::now() + Duration::from_secs(5);
+        while raw == 0 && Instant::now() < probe_deadline {
+            raw += count_raw(&probe);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        println!(
+            "this platform's watcher delivered {raw} raw change event(s) for one \
+             save; the tick reported {}. On ubuntu CI the same save arrived as 3 \
+             — the difference this collapse exists to keep out of how often a \
+             running world is re-lowered. A platform printing 1 here cannot \
+             falsify the collapse; ubuntu can, and did",
+            seen.len()
+        );
         assert!(saw_a_change, "the watcher never reported anything at all");
         assert_eq!(
             seen.len(),
             1,
             "the tick reported {seen:?} — a `.infini` that changed must arrive \
-             here, and nothing else may"
+             here ONCE per save, whatever the platform's watcher does, and \
+             nothing else may. Linux delivers three inotify events for one \
+             `fs::write` (create, modify-data, close-write) where Windows \
+             delivers one; carried one-for-one that is three compiles and three \
+             class swaps for one Ctrl+S, so the drain is collapsed by GUID"
         );
         assert_eq!(
             seen[0].0, guid,
@@ -742,7 +857,28 @@ mod tests {
              actor with no gameplay logic at all. `pin_script_ids` is what \
              stops the id being re-derived from bytes that moved"
         );
-        assert_eq!(seen[0].1, path);
+
+        // The path is the SECONDARY claim, and what it owes is that Ring 2 can
+        // OPEN it — `hot_reload_scripts` hands it straight to `compile_path` —
+        // so it is asserted by reading it back rather than by matching a string.
+        assert_eq!(
+            std::fs::read_to_string(&seen[0].1).expect("the reported path opens"),
+            V2,
+            "the path handed to `compile_path` must open as the EDIT that was \
+             just saved, or hot reload recompiles something else"
+        );
+        // …and it is the database's own normalized spelling of that file.
+        // Canonicalized on BOTH sides at one door: on macOS the watcher reports
+        // `/private/var/folders/…` for a tempdir handed out as `/var/folders/…`
+        // (the `/var` → `/private/var` symlink), so a raw tempdir path is the
+        // one spelling that is wrong there. `AssetEntry::path` goes through
+        // `inf_asset`'s `normalize`, which is `fs::canonicalize` when the file
+        // exists — so this compares two doors' answers rather than restating one.
+        assert_eq!(
+            seen[0].1,
+            std::fs::canonicalize(&path).expect("the script is on disk"),
+            "the tick must report the path the DATABASE holds for that GUID"
+        );
     }
 
     #[test]
