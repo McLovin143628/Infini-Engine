@@ -19792,7 +19792,12 @@ quicker.
   hot-reload arm calls `reload_class` with a hard-coded constant, and the PIE gate writes its
   fixture a committed sidecar *because the wave knew a synthesised GUID would not resolve*.
   Fixed by `pin_script_ids` (the synthesised sidecar is written the first time a scan meets a
-  script), and the missing link — `queue::tick` reporting the change at all — is now armed. Containment is
+  script), and the missing link — `queue::tick` reporting the change at all — is now armed. **That
+  arm then went red on the other two runners and fixed two more things in the tick rather than in
+  itself**: a drain is now **collapsed by GUID** (one `fs::write` is three inotify events on Linux
+  and one on Windows, so a single save was three compiles and three class swaps there), and the
+  path it reports is the **database's normalized** one rather than the watcher's raw one (macOS
+  reports `/private/var/…` for a `/var/…` root). Containment is
   **tighter than §4 predicted**: a broken edit never becomes a class, so nothing is queued and
   the previous good program keeps running with the diagnostics in the Output Log. **Measured
   (corrected by the SCRIPT1b audit): the ENGINE's half — file door, compile, swap, one fixed

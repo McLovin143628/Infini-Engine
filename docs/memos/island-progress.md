@@ -21200,3 +21200,127 @@ this audit committed the same defect — its two new helpers went in between
 found it. The audit's own mechanical detector **would have** found it too; it
 had been run against the wave's diff and never against the audit's. A check
 written for somebody else's change is half a check.
+
+## Wave SCRIPT1b — the CI-red hotfix (2026-08-29)
+
+`d1f433af` went red on **ubuntu and macOS** — windows, frontend, wasm, deny and
+docs green — on a single arm, and it was the audit's own:
+`assets::queue::tests::a_changed_script_reaches_the_tick_outcome_with_its_guid`,
+the one written to close the missing first link of the hot-reload chain. Two
+runners, two different facts about two operating systems, and neither red was
+the arm asking for too much.
+
+### ubuntu: one save is three events, so one save was three swaps
+
+> the tick reported `[(e723334b…, Counter.infini) ×3]` — a `.infini` that
+> changed must arrive here, and nothing else may. **left: 3, right: 1**
+
+One `std::fs::write` on Linux is a create, a modify-data and a close-write, and
+`notify-debouncer-full` coalesces a burst in *time* but not across event
+*kinds* — its `add_event` reaches `push_event` for each. Windows delivered
+exactly one. So the arm was right and the tick was wrong: carried one-for-one
+into `TickOutcome::scripts` that is **three `compile_path` calls and three
+`reload_class` swaps for one Ctrl+S**, with the operating system's event shape
+deciding how often a running world is re-lowered.
+
+Fixed in the drain, where the batch already is: the pass collects into a
+`BTreeMap<Uuid, PathBuf>` instead of pushing onto a `Vec`. The key is the GUID
+because the GUID **is** the identity here — the audit's own HIGH, an actor binds
+through `ActorClass(Uuid)` — so "the same script twice" is exactly "the same key
+twice", and what falls out is GUID order: a total order this repository
+controls, instead of the order a filesystem reported. That also pins the tick's
+half of carried item 3 (*"`apply_pending_classes` drains in watcher order … an
+order this repository has not pinned"*) — the editor's one caller now hands it a
+deterministic one.
+
+**The sidecar cannot feed back**, which was the other suspect and is worth
+writing down rather than assuming: `pin_script_ids` runs inside this very loop
+and writes `X.infini.toml`, but the watcher drops every `.toml` before it sends
+(`inf_asset::is_sidecar` — *"so we don't process an asset twice per save"*), and
+the pin writes at all only when no sidecar exists yet. So **no content-hash
+short-circuit was built**: nothing re-lowers a script whose bytes did not move,
+because nothing arrives for a file nobody wrote. The principled version of that
+guard needs per-GUID state carried across ticks, and it would be state added for
+a feedback path that does not exist.
+
+### macOS: the watcher's path is canonical and a tempdir's is not
+
+> left `"/private/var/folders/…/Scripts/Counter.infini"`, right
+> `"/var/folders/…"` — the `/var` → `/private/var` symlink.
+
+The GUID matched: the identity claim held on all three platforms. What
+disagreed was the path, which is the secondary claim.
+
+Ruled on the **production** side, because the right answer was already in the
+tree. `AssetEntry::path` has been through `inf_asset`'s one `normalize` door —
+the same canonicalization its `by_path` index is keyed with, and the door C4-39
+wrote the reasoning for — so the tick now reports **the path the database holds
+for that GUID** instead of the raw path the watcher handed it. One spelling,
+normalized once, by the code that already owns normalizing; Ring 2 opens it
+exactly as before.
+
+The arm then asserts a path the way a path deserves: it **opens** it and
+requires the bytes to be the edit — which is what `hot_reload_scripts` does with
+it — and then pins it to `fs::canonicalize(&path)`, comparing two doors' answers
+rather than restating one.
+
+### The sibling sweep
+
+One other arm in `3f5d47f0..d1f433af` carried an exposure, and one only:
+`script_hot_reload.rs`'s `a_save_becomes_new_behaviour_in_a_running_simulate`
+matched the watcher's report against a raw tempdir path (`c.path() == path`).
+On macOS that finds nothing, and the arm would spend its whole 20-second
+deadline before failing at `expect("the watcher saw the save")` — a second
+macOS red standing behind the first. Both sides are canonicalized now. Nothing
+else in the range asserts a watcher event **count**, and the only other path
+comparison in it (`crown_parity`'s `build_dir` sweep) compares two `read_dir`
+results that already share a base.
+
+### Mutation evidence, and the half this machine cannot give
+
+| mutation | verdict |
+|---|---|
+| report the watcher's path (`p`) instead of `entry.path` | **RED on Windows**, at the arm's last assert: `left: "C:\…\Counter.infini"`, `right: "\\?\C:\…\Counter.infini"`. `normalize` returns the verbatim form and a raw event path does not — so the *macOS* exposure ends up armed on a platform that has no `/private/var` |
+| un-collapse the drain (a `Vec` push for the map insert) | **GREEN on Windows, and honestly so.** The arm's new probe — a second watcher over the same root, drained beside the tick and **printed, never asserted** — measures **1** raw change event per save here. Three rapid saves inside one debounce window were tried, to manufacture a duplicate a single-event platform could collapse, and *also* arrived as one; that attempt was removed rather than left in as decoration with a comment claiming otherwise. The pre-fix tree **is** this mutant, and CI reddened it at this line with `left: 3, right: 1` |
+
+### Counts
+
+| | |
+|---|---|
+| `cargo test -p inf-editor-core -j 3` | **41 blocks / 1 050 passed / 0 failed / 4 ignored, exit 0** — the whole crate, lib and every integration test, on the fixed tree. `assets::queue` 9/9 and `script_hot_reload` 5/5 re-run on the final tree after it |
+| the `chr(92)` sweep | **clean** — `inf-packager`'s `no_string_literal_in_the_workspace_carries_an_eaten_continuation` re-run over the workspace including this hotfix's new literals (every edit here was made with a text editor, not a Python script) |
+| `cargo fmt --all --check` | **clean** |
+| `cargo clippy -p inf-editor-core --all-targets`, `RUSTFLAGS=-D warnings` | **0**, exit 0, run **LAST** per the rmeta law, `CARGO_INCREMENTAL=0`. Run three times, and the second was the interesting one: it finished in 0.80 s reporting everything fresh, because a comment edited *while the first was compiling* had a mtime cargo read as already-built. `touch`ing both touched files forced the real re-check (17.95 s, `Checking inf-editor-core`). **A warm clippy that checked nothing is a green that means nothing** |
+| rustdoc | `cargo doc --no-deps -p inf-editor-core` → **72 warnings, none naming anything this fix touched**. The new doc block adds zero, so the workspace ratchet's 373 (ceiling 450) is unmoved |
+| schemas / goldens / committed content | **unmoved** — the change is one map, one field's provenance, and two arms |
+| frontend | **not run**: no `editor/studio/src/` file moved and no ts-rs type changed shape (`TickOutcome` is Ring 1 and crosses no wire) |
+
+**Commits:** `a566da5e` (the collapse, the database's path, and the probe),
+`8e10f849` (the sibling arm's raw tempdir path), plus this ledger and the
+ROADMAP's SCRIPT1b block.
+
+### The laws this hotfix adds
+
+**A watcher's event count is the operating system's opinion, not the editor's.**
+One save is three events on Linux and one on Windows, and a queue that carries
+that difference through carries it into how often it recompiles and swaps a
+running program. Collapse a drain on the **identity** the feature keys on, and
+the answer stops depending on which runner asked.
+
+**A path that crosses a door should be the one the door already normalized.**
+The database had a canonicalization rule with a written reason, and the tick
+reported the *watcher's* raw path beside a GUID that came from that database —
+two spellings of one file, one of which only exists on macOS. When a value has
+an owner, report the owner's copy.
+
+**A mutation that cannot redden on the machine you are on is still evidence, if
+you say which machine can.** The collapse is unfalsifiable on Windows because
+Windows has no duplicate to collapse; the arm now *measures and prints* that
+instead of letting its silence read as coverage.
+
+**A warm clippy that checked nothing is a green that means nothing.** A comment
+edited *while* clippy was compiling left a file whose mtime cargo read as
+already-built: the next run finished in **0.80 s** claiming the tree was fresh,
+and would have certified a version of the file it never saw. `touch` what you
+edited and watch for the `Checking <crate>` line before believing the exit
+code — the same shape as P26.2's "read a link error against `df`".
