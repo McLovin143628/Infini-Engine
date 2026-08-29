@@ -19645,7 +19645,13 @@ quicker.
   interpreter with failure containment armed. `.infini` is *source* (git-diffable text); the
   cook either transpiles it to Rust into the project crate or packs its IR for the shipped
   interpreter — both doors exist, both parity-gated — and `asset_deps` walks scripts so the
-  cook closure sees script-named assets (the SK1c lesson). Gates: the parity gate; **byte-
+  cook closure sees script-named assets (the SK1c lesson). **What "parity-gated" costs, since
+  the arc leans on it:** the P6 gate is four fixture families
+  (`parity`/`flow_parity`/`math_parity`/`coyote_parity`), each running the interpreter against
+  a **hand-written Rust mirror** string-pinned to `generate_fn`'s output. No test in the repo
+  compiles the transpiler's output and runs it. Extending it means one mirrored family per
+  construct class, or buying a new cook-build-run-diff gate; SCRIPT1 chooses, and neither is
+  free. Gates: the parity gate; **byte-
   identical lowering across hosts** (a `.infini` file's IR is a pure function of its bytes);
   `PIE == shipping` over a trace whose gameplay runs from a script. **First named risk:**
   `raise` is not total, so "two views of one program" is exactly as complete as `raise` is.

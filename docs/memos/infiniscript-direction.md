@@ -48,7 +48,7 @@ shipped the substrate the document describes, and Phase 14 shipped the other hal
 | the IR | `crates/inf-blueprint` (`BlueprintFn`, `Stmt`, `Expr`) | a small, pure, serializable gameplay IR — events (`BeginPlay`/`Tick`/`Input`/`Collision`/`Custom`), typed data (`Bool`/`Int`/`Float`/`Str`/`Named`), exec flow |
 | the interpreter | `inf_blueprint::interp` | a tree-walking evaluator **over that same IR**, running in-editor with no compile step; a failing node's damage is contained to its downstream cone |
 | the compiler | `crates/inf-transpile` (`emit`, `lift`) | IR → **real Rust**, and Rust → IR back; 15 round-trip/parity test files |
-| the parity gate | `inf-transpile/tests/parity.rs` | interpreted == compiled, pinned. *Preview is the shipped program.* |
+| the parity gate | `inf-transpile/tests/{parity,flow_parity,math_parity,coyote_parity}.rs` | interpreted == compiled over **four fixture families** — see the bound below. *Preview is the shipped program, per proven family.* |
 | graph ↔ IR | `inf_blueprint::lower` / `raise` | **both directions**: a graph lowers to IR, and IR raises to a graph |
 | the one boundary | the `Host` trait | everything external — engine calls, member variables, spawning — crosses one seam; the IR itself stays pure |
 | the verb surface | `inf_blueprint::nodekit` | 96 `NodeDef::new` sites across twenty registration groups and **23** namespaces: `event.*` `flow.*` `math.*` `logic.*` `cmp.*` `var.*` `lit.*` `dispatch.*` `engine.*` `debug.*` `input.*` `audio.*` `physics2d.*` `physics3d.*` `sky.*` `water.*` `voxel.*` `destruct.*` `door.*` `item.*` `health.*` `ik.*` `anim.*` |
@@ -59,6 +59,37 @@ So: the interpreter, the compiler, the parity between them, the sandbox, the
 capability model and the ~100-verb API the document asks a studio to *build* are
 built. What is missing is the one thing the document actually shows a designer —
 **a readable text file**.
+
+### What the parity gate actually is, since the arc leans its whole weight on it
+
+"Preview is the shipped program" is the arc's load-bearing claim and it is
+proven **per fixture family**, not as a general property. Four files, each
+running the interpreter against a **hand-written Rust mirror** of what
+`generate_fn` emits, with a *string pin* tying the mirror to the generator's real
+output so the two cannot silently drift:
+
+* `parity.rs` — the rotate-on-tick handler (`vars::*` + `engine::set_rotation`);
+* `flow_parity.rs` — the control-flow palette, loops and stateful nodes, over a
+  persistent `nodestate` map, including the runaway guard tripping identically;
+* `math_parity.rs` — the math palette, where parity holds *by construction*
+  (both sides bottom out in `inf_blueprint::math_builtins`) and the sweep guards
+  the coercion and dispatch around it;
+* `coyote_parity.rs` — the `physics2d.*` coyote-time jump against an identical
+  mock physics on both sides.
+
+**No test in the repository compiles the transpiler's output and runs it.**
+`parity.rs`'s own module doc names this: it is "the CI-cheap half of the parity
+story (no runtime `cargo build`)". `inf-wasm-host`'s `spinner_e2e` does compile
+and run real wasm, but from the *hand-written* `samples/mods/spinner`, not from
+generated code.
+
+That is a good gate and a real one. It is also a shape SCRIPT1 must plan for:
+"extending the P6 parity gate to scripts" means **one hand-mirrored fixture
+family per construct class**, and the honest alternative — cook a `.infini`
+script, build the generated crate, run it and diff the trace — is a new, slow,
+toolchain-dependent gate that does not exist yet. Deciding which of the two
+SCRIPT1 buys is a SCRIPT1 decision; pretending the first already covers
+arbitrary programs is not available.
 
 ---
 
@@ -147,13 +178,21 @@ time it ships — it is compiled Rust in the player binary, and no JIT beats tha
 **InfiniScript is a text front-end over the Blueprint IR.**
 
 ```
-.infini text ──parse──▶ BlueprintFn IR ──▶ interpreter   (in-editor, hot-swapped on save)
-                             │                              ▲
-                             │                              │ parity gate
-                             ├──── raise ──▶ graph ─ lower ─┘
-                             │
-                             └──transpile──▶ Rust ──▶ the shipped binary
+                                       ┌──▶ interpreter ──▶ in-editor, hot-swapped on save
+                                       │          ▲
+.infini text ──parse──▶ BlueprintFn IR ┤          │ parity gate (interpreted == compiled)
+       ▲                     │  ▲      │          ▼
+       └──── emit ───────────┘  │      └──▶ transpile ──▶ Rust ──▶ the shipped binary
+                                │
+                         raise ─┴─ lower  ⇄  graph      (round trip: lower(raise(f)) == f
+                                                         on lowering's image)
 ```
+
+Two different guarantees, and the first draft of this diagram put one label on
+the other's arrow. **Parity** is interpreter-vs-transpiled — the vertical seam on
+the right. **Round-trip** is `lower ∘ raise` — the graph loop at the bottom, and
+the thing that makes text and graph two views. They fail differently and they are
+gated separately.
 
 Three consequences follow, and they are the whole design:
 
@@ -165,7 +204,10 @@ Three consequences follow, and they are the whole design:
 2. **The shipped program is not a script.** At cook time a script either
    transpiles to Rust into the project crate or packs its IR for the shipped
    interpreter — *both doors already exist* — and the parity gate says the two
-   agree. The decision is per script class, taken with measurements, in SCRIPT3.
+   agree **over every construct family somebody has written a fixture for**
+   (§2's bound: four families today, hand-mirrored, string-pinned to the
+   generator). The decision is per script class, taken with measurements, in
+   SCRIPT3.
 
 3. **The signature feature: graphs and text are two views of one program.** Because
    `lower` and `raise` both exist, a designer can open any Blueprint **as
