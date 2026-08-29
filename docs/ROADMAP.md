@@ -19661,7 +19661,7 @@ quicker.
   `raise` is not total, so "two views of one program" is exactly as complete as `raise` is.
   Of the seven-node flow palette it inverts **two** (`flow.branch`, and `flow.while` via
   `try_raise_while`'s exact-shape match); `flow.sequence` is flattened at lowering and
-  `flow.for`/`do_once`/`flip_flop`/`gate` are raise-excluded. It also refuses four shapes
+  `flow.for`/`do_once`/`flip_flop`/`gate` are raise-excluded. It also refuses five shapes
   that are *not* flow nodes and that text produces where a canvas could not: `Stmt::Assign`,
   `Stmt::Snippet`, a non-call `Stmt::ExprStmt`, a call in value position — and, sharpest,
   `RaiseError::NonLinear`, **an `if`/`return` that is not the last statement of its block**.

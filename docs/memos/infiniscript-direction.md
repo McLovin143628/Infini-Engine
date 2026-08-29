@@ -268,7 +268,7 @@ five do not come back:
 | `flow.flip_flop` | as above |
 | `flow.gate` | as above |
 
-**And `raise` refuses four shapes that have nothing to do with the flow
+**And `raise` refuses five shapes that have nothing to do with the flow
 palette** — which matter *more* here than they did for the canvas, because a
 canvas cannot draw them and text writes them without trying:
 
