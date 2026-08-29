@@ -20,6 +20,7 @@ import EXAMPLE from "../../../../../../templates/scripts/Example.infini?raw";
 import {
   infini,
   INFINI_KEYWORDS,
+  INFINI_SYMBOLS,
   INFINI_TYPES,
   infiniStreamParser,
   type InfiniState,
@@ -42,9 +43,14 @@ function tokenize(src: string): Token[] {
       stream.start = stream.pos;
       const style = infiniStreamParser.token(stream, state);
       // The rule CodeMirror enforces with an exception: a token must consume.
-      expect(stream.pos, `the tokenizer stalled at ${JSON.stringify(line)}`).toBeGreaterThan(
-        stream.start,
-      );
+      // A bare `throw` rather than an `expect` per token, because the fuzz arms
+      // below drive this helper over hundred-thousand-character lines and an
+      // assertion object per character is the slowest thing in the suite.
+      if (stream.pos <= stream.start) {
+        throw new Error(
+          `the tokenizer stalled at column ${stream.start} of ${JSON.stringify(line)}`,
+        );
+      }
       out.push({ text: line.slice(stream.start, stream.pos), style });
     }
   }
@@ -56,15 +62,37 @@ function styleOf(tokens: Token[], text: string): string | null | undefined {
   return tokens.find((t) => t.text === text)?.style;
 }
 
-/** Pull a `["a", "b", …]` Rust array literal out of `lex.rs` by its name. */
+/**
+ * Pull a `["a", "b", …]` Rust array literal out of `lex.rs` by its name.
+ *
+ * **Checked against the array's own declared length**, which is the audit's
+ * fix: this is a regex reading Rust, and a reflow it could not follow used to
+ * fail *quietly* — a `close` it could not find makes `slice(open, -1)` the rest
+ * of the file, and an extraction that found no literals at all returns `[]`.
+ * The keyword arm would have gone red on either (it compares the whole list),
+ * but the symbol arm iterated whatever came back, so an empty `SYMBOLS` would
+ * have left it green over `SYMBOLS2`'s three. `[&str; N]` is Ring 0's own count
+ * of its own table, so requiring the extraction to match it is still not a
+ * number this test picked.
+ */
 function rustStringArray(source: string, name: string): string[] {
-  const at = source.indexOf(`${name}:`);
-  expect(at, `${name} is no longer declared in lex.rs`).toBeGreaterThan(-1);
-  const open = source.indexOf("[", source.indexOf("=", at));
+  const decl = new RegExp(`${name}:\\s*\\[&str;\\s*(\\d+)\\]\\s*=\\s*\\[`).exec(source);
+  expect(
+    decl,
+    `${name} is no longer declared in lex.rs as a fixed-size \`[&str; N]\` array — ` +
+      "this arm reads Ring 0's source and cannot follow that shape",
+  ).not.toBeNull();
+  const open = decl!.index + decl![0].length - 1;
   const close = source.indexOf("];", open);
-  return [...source.slice(open, close).matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) =>
+  expect(close, `${name}'s array literal is not closed by \`];\``).toBeGreaterThan(open);
+  const found = [...source.slice(open, close).matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) =>
     m[1].replace(/\\(.)/g, "$1"),
   );
+  expect(
+    found.length,
+    `read ${found.length} entries out of ${name}, which declares ${decl![1]}`,
+  ).toBe(Number(decl![1]));
+  return found;
 }
 
 describe("the .infini language mode", () => {
@@ -81,19 +109,23 @@ describe("the .infini language mode", () => {
   });
 
   it("gives every symbol Ring 0 lexes a colour, and invents none", () => {
-    const ring0 = new Set([
+    const ring0 = [
       ...rustStringArray(LEX_RS, "SYMBOLS"),
       ...rustStringArray(LEX_RS, "SYMBOLS2"),
-    ]);
-    const mine = new Set<string>();
+    ];
     for (const sym of ring0) {
       const tokens = tokenize(`a ${sym} b`);
       const t = tokens.find((x) => x.text === sym);
       expect(t, `\`${sym}\` did not lex as one token`).toBeDefined();
       expect(t?.style, `\`${sym}\` has no colour`).not.toBe("invalid");
-      mine.add(sym);
     }
-    expect(mine.size).toBe(ring0.size);
+    // BOTH directions, which is what "and invents none" in this arm's name
+    // claims. The first draft compared the size of a set it had just filled
+    // from `ring0` with `ring0`'s own size, so it was equal by construction and
+    // said nothing (the audit's finding). A symbol spelled in the mode and NOT
+    // in Ring 0 is the failure that matters: it would be coloured as an
+    // operator inside a file the compiler refuses.
+    expect([...INFINI_SYMBOLS].sort()).toEqual([...ring0].sort());
   });
 
   it("tokenizes the script every new project ships without one invalid token", () => {
@@ -202,5 +234,117 @@ describe("the .infini language mode", () => {
   it("marks a character the language has no token for as invalid", () => {
     expect(styleOf(tokenize("local a = 1 @ 2"), "@")).toBe("invalid");
     expect(styleOf(tokenize("local a = #b"), "#")).toBe("invalid");
+  });
+
+  /**
+   * **A tokenizer is on the keystroke path, so it must not stall, throw or
+   * run away — on any text at all** (added by the SCRIPT2b audit).
+   *
+   * The arms above are about what the mode *says*; these two are about whether
+   * it answers. `readToken` throws "Stream parser failed to advance stream"
+   * after ten calls that consume nothing, and every branch here that could is
+   * a branch about the END of something — a line, a string, a long bracket, the
+   * file. The corpus is those ends, one per row, plus the sizes at which a
+   * quadratic would show. No wall-clock assertion: the ceiling is generous
+   * enough that only a hang or a blow-up can reach it.
+   */
+  const HOSTILE: [string, string][] = [
+    ["an escaped quote", 'debug.print("a \\" b")\nlocal x = 1'],
+    ["an escaped backslash before the close", 'debug.print("a \\\\")\nlocal x = 1'],
+    ["a quote at end of line", 'local s = "'],
+    ["a backslash at end of line inside a string", 'local s = "abc\\'],
+    ["a nested long bracket", "rust [==[\n  [[ inner ]]\n]==]\nlocal after = 1"],
+    ["a long bracket that never closes", "rust [==[\nlet x = 1;"],
+    ["a long opener that is the whole file", "rust [==["],
+    ["a comment at EOF with no newline", "local x = 1 -- trailing"],
+    ["a bare `--` at EOF", "local x = 1 --"],
+    ["a lone `-` at EOF", "local x = 1 -"],
+    ["a `[` at EOF", "local x = ["],
+    ["a `[==` at EOF", "local x = [=="],
+    ["an empty document", ""],
+    ["nothing but newlines", "\n\n\n"],
+    ["nothing but whitespace", "    \n\t\t\n"],
+    ["a `:` at EOF, with the type position armed", "local x:"],
+    ["a `->` at EOF, with the type position armed", "function f() ->"],
+    ["a 10 000-character identifier", `local ${"a".repeat(10000)} = 1`],
+    ["a 10 000-digit number", `local a = ${"9".repeat(10000)}`],
+    ["a 10 000-character string", `local a = "${"x".repeat(10000)}"`],
+    ["a 10 000-character comment", `-- ${"z".repeat(10000)}`],
+    ["a 10 000-character long-bracket body", `rust [[${"q".repeat(10000)}]]`],
+    ["10 000 backslashes inside a string", `local a = "${"\\".repeat(10000)}"`],
+    ["50 000 one-character tokens on one line", "a ".repeat(50000)],
+    ["100 000 dots on one line", ".".repeat(100000)],
+    ["a long bracket open across 20 000 lines", `rust [==[\n${"x\n".repeat(20000)}`],
+    ["20 000 bare quotes", '"'.repeat(20000)],
+    ["5 000 `=` between the brackets", `rust [${"=".repeat(5000)}[`],
+    ["a close with no open", "]==]"],
+    ["an astral identifier", "local \u{1d54f} = 1"],
+    ["an emoji where a value goes", "local a = \u{1f600}"],
+    ["a lone surrogate", "local a = \ud83d"],
+    ["a NUL byte", "local a = \0 1"],
+    ["a combining mark", "local áb = 1"],
+    ["a number with a trailing dot", "local a = 1."],
+    ["an exponent with no digits", "local a = 1e"],
+  ];
+
+  it("never stalls, throws or runs away, on any of the ends it could", () => {
+    for (const [name, src] of HOSTILE) {
+      // `tokenize` asserts the consume rule itself; this is CodeMirror's own
+      // driver over the same text, which is the one that would throw in a real
+      // editor.
+      expect(() => tokenize(src), `my loop, on ${name}`).not.toThrow();
+      const state = EditorState.create({ doc: src, extensions: [infini()] });
+      const tree = ensureSyntaxTree(state, state.doc.length, 20000);
+      expect(tree, `CodeMirror's driver did not finish: ${name}`).not.toBeNull();
+      expect(tree!.length, `the tree does not cover the document: ${name}`).toBe(
+        state.doc.length,
+      );
+    }
+  });
+
+  it("survives four thousand pseudorandom documents through both drivers", () => {
+    // The alphabet is the language's own pieces plus the characters it has no
+    // token for, so the generator spends its time on token boundaries rather
+    // than on prose. xorshift32, so a failure names a reproducible seed.
+    const alphabet = [
+      ...'abcXYZ_019 \t.,:;()+-*/%<>=~[]"\'#@!$&|^{}?\\',
+      "--",
+      "->",
+      "==",
+      "~=",
+      "[[",
+      "]]",
+      "[=[",
+      "]=]",
+      "\n",
+      "actor",
+      "function",
+      "end",
+      "rust",
+      "local",
+      "\u{1d54f}",
+      "\u{1f600}",
+    ];
+    let s = 0x1234_5678;
+    const rnd = () => {
+      s ^= s << 13;
+      s >>>= 0;
+      s ^= s >>> 17;
+      s ^= s << 5;
+      s >>>= 0;
+      return s / 0x1_0000_0000;
+    };
+    for (let i = 0; i < 4000; i++) {
+      const n = 1 + Math.floor(rnd() * 900);
+      let doc = "";
+      for (let j = 0; j < n; j++) doc += alphabet[Math.floor(rnd() * alphabet.length)];
+      try {
+        tokenize(doc);
+        const state = EditorState.create({ doc, extensions: [infini()] });
+        expect(ensureSyntaxTree(state, state.doc.length, 20000)).not.toBeNull();
+      } catch (e) {
+        throw new Error(`document ${i}: ${JSON.stringify(doc)}\n${String(e)}`);
+      }
+    }
   });
 });

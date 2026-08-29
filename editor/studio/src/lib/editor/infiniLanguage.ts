@@ -86,6 +86,24 @@ const LONG_SYMBOLS = ["==", "~=", "<=", ">=", "->"];
 const OPERATORS = new Set(["+", "-", "*", "/", "%", "<", ">", "="]);
 const PUNCTUATION = new Set(["(", ")", ",", ".", ":", ";"]);
 
+/**
+ * Every symbol this mode gives a token to — the twin of `lex.rs`'s `SYMBOLS`
+ * plus `SYMBOLS2`.
+ *
+ * Exported so the arm can compare the two **sets**, in both directions. The
+ * first draft compared their sizes, and the size it compared was one it had
+ * just built out of Ring 0's own list, so it was always equal (the audit's
+ * finding). The direction that was missing is the one this mode can actually
+ * get wrong: a symbol spelled here and *not* in Ring 0 would be coloured as an
+ * operator in a file the compiler refuses — the editor being confidently
+ * wrong, which is the one thing the tokenizer design exists to prevent.
+ */
+export const INFINI_SYMBOLS: readonly string[] = [
+  ...LONG_SYMBOLS,
+  ...OPERATORS,
+  ...PUNCTUATION,
+];
+
 const IDENT = /^[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*/u;
 const NUMBER = /^\d+(\.\d+)?([eE][+-]?\d+)?/;
 const LONG_OPEN = /^\[(=*)\[/;
