@@ -145,6 +145,12 @@ another, is refused at compile time with the route it found. Write the repetitio
 as a `while` or a `for`, which are bounded in a way both the preview and the
 shipped build share.
 
+**And no chain of calls may be longer than 64.** The same reason: the preview
+interpreter counts calls and stops, and the Rust the cook generates does not, so
+a chain past the limit would run in one and be refused in the other. Sixty-four
+is far past anything a real script reaches — if you are near it, the refusal
+prints the route so you can see what is calling what.
+
 ### Types
 
 `float`, `int`, `bool`, `string`. That is the whole set: there are no tables,

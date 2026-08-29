@@ -51,7 +51,7 @@ shipped the substrate the document describes, and Phase 14 shipped the other hal
 | the parity gate | `inf-transpile/tests/{parity,flow_parity,math_parity,coyote_parity}.rs` | interpreted == compiled over **four fixture families** — see the bound below. *Preview is the shipped program, per proven family.* |
 | graph ↔ IR | `inf_blueprint::lower` / `raise` | **both directions**: a graph lowers to IR, and IR raises to a graph |
 | the one boundary | the `Host` trait | everything external — engine calls, member variables, spawning — crosses one seam; the IR itself stays pure |
-| the verb surface | `inf_blueprint::nodekit` | **115 registered verbs** (96 `NodeDef::new` sites, three of which are the `compare`/`unary_math`/`binary_math` helpers called 22 times between them) across twenty registration groups and **23** namespaces: `event.*` `flow.*` `math.*` `logic.*` `cmp.*` `var.*` `lit.*` `dispatch.*` `engine.*` `debug.*` `input.*` `audio.*` `physics2d.*` `physics3d.*` `sky.*` `water.*` `voxel.*` `destruct.*` `door.*` `item.*` `health.*` `ik.*` `anim.*` |
+| the verb surface | `inf_blueprint::nodekit` | **132 registered verbs** (113 `NodeDef::new` sites, three of which are the `compare`/`unary_math`/`binary_math` helpers called 22 times between them) across 23 registration groups and **26** namespaces: `event.*` `flow.*` `math.*` `logic.*` `cmp.*` `var.*` `lit.*` `dispatch.*` `engine.*` `debug.*` `input.*` `audio.*` `physics2d.*` `physics3d.*` `sky.*` `water.*` `voxel.*` `destruct.*` `door.*` `item.*` `health.*` `ik.*` `anim.*` `terrain.*` `crowd.*` `zone.*` — the last three added by wave SCRIPT2a, which also gave `engine.*` an arm recording that **neither host implements it** |
 | the sandbox | `crates/inf-wasm-host` + `crates/inf-mod` (P14.5) | a **`wasmtime`** engine with a capability-scoped linker, a flat host ABI, and a cook path Blueprint → Rust → `cdylib` → `.wasm` |
 | dylib hot-swap | `crates/inf-hotreload` | content-addressed shadow copies, never-unload, state migration |
 
@@ -669,18 +669,80 @@ worse than no coverage. They stay covered where they already are:
 `math_parity.rs` proves the two sides agree **by construction**. The
 exact-IEEE builtins are inside the gate and are exact on both sides.
 
-**SCRIPT2 — the API surface and the tooling.** The verb surface grows toward the
-document's vision our way: `World.*`, `AI.*`, `Mission.*` (new, priced), `Audio.*`,
-`UI.*`, `Vehicle.*`, `Weapon.*`/`Door.*`/`Item.*`. Every verb deterministic,
-Host-mediated, documented. The API Manual generates from the registry. In the
-editor: a CodeMirror 6 language mode for `.infini` on the P5 `extraCompartment`
-seam, diagnostics wiring, open-as-text on `.inf_act`/`.inf_fn`, and Ctrl+S =
-re-lower + hot-swap.
+**SCRIPT2a — the call form, the API surface and the manual (COMPLETE
+2026-08-29).** The wave split at the brief's own seam: 2a is the language and API
+half, 2b the editor half.
+
+* **The call form, and the pricing is its first result: it is not a wire move.**
+  A handler can call its unit's own `function` declarations — A.9's loudest
+  omission, retired. `Expr::Call` carries a `path: Vec<String>` and every
+  registered verb is `namespace.verb`, so **a unit-local call is the same variant
+  with one segment**. No new `Expr` or `Stmt` variant, no `schema_version` move,
+  no `FROZEN_WIRE` row, no pack change; the arc's one schema window is not spent.
+  That is §4's "the IR grows only with pricing" honoured, and the P6
+  vars-via-Host precedent met a second time. The interpreter resolves it in a new
+  `interp::LocalFns` decorator stacked **outside** `ActorHost` (so a callee's own
+  `vars::*` still land on the actor); the transpiler needed nothing, which only
+  the crown gate can say, so the gate's fixture grew in the same wave; and
+  `raise` refuses it **by name** — a `NodeDef`'s ports are fixed at registration
+  and a user function's signature is not, so a generic "call this function" node
+  would have to be derived per class and `lower ∘ raise == id` re-proved over a
+  registry that varies by document. Priced, not taken.
+* **Recursion and depth are both refused statically, and for the same reason.**
+  The interpreter bounds a chain at `MAX_CALL_DEPTH` (64) and answers with a
+  value (P21); the transpiled Rust has no bound at all. So the two faces cannot
+  be made to agree at run time, and the *language* refuses at compile time: the
+  cycle, with the route it found (`ping → pong → ping`), **and** — added by the
+  SCRIPT2a audit — a chain longer than the budget. Refusing the cycle alone left
+  a hole the audit measured on both faces: 65 functions each calling the next
+  have no cycle, so the interpreter refused at 64 while `rustc` compiled the same
+  program and ran it to 65. One program, two answers. `while` is the spelling
+  that survives both faces, because its bound lives in the IR (A.7).
+* **The surface: 115 → 132 verbs, 23 → 26 namespaces**, every one a door Ring 0
+  already had — `terrain.height_at` (dispatched by both hosts since P21.2 with no
+  `NodeDef`, so nothing could call it), four `sky.*` reads, three `door.*` under
+  one extracted resolution (`d3::door::nearest`), three `health.*` over a new
+  `weapon::damage_entity` whose second caller is the bullet path, four `crowd.*`
+  counts, and two `zone.*` queries — the mission primitive and **only** the
+  primitive, with the push half (`OnPlayerEnterZone`) priced. The
+  registry-versus-hosts gate now covers **every** host-dispatched namespace
+  instead of the two somebody remembered, and its first finding has its own arm:
+  **`engine.*` is registered and implemented by neither host** (see SCRIPT3).
+* **The API Manual generates** — `docs/book/src/infiniscript-api.md`, rendered
+  from the registry, **compared rather than rewritten** (`INF_BLESS_API_MANUAL=1`
+  to move it), so it needs no CI job and reddens inside the ordinary battery.
+  Twenty callable verbs had no description at all and now do, gated.
+  `docs/book/src/infiniscript.md` is the hand-written face beside it.
+
+**SCRIPT2b — the editor (ROUTED).** A CodeMirror 6 language mode for `.infini` on
+the P5 `extraCompartment` seam, the parse refusals wired into the Problems panel,
+opening a `.infini` through the existing `infinity:open-file` event, Ctrl+S =
+save → watcher → hot swap, and the graph↔text bridge's editor half. **The editor
+surface is still the Output Log** until it lands. The one hazard scouted and
+carried: `extraCompartment` is **single-occupant** and `lspBridge.ts` reconfigures
+it on every active-tab change, so a second consumer needs a third compartment in
+`setup.ts` rather than a share.
 
 **SCRIPT3 — dogfood and ship.** Real island gameplay migrates to `.infini` — the
 Phase 30 door and weapon logic, a settlement ambient script, and one
 mission-class sequence at Harbour City: the document's heist mockup, made real on
-our island. Migrated scripts' traces stay byte-identical to their predecessors
+our island.
+
+**`engine.*` is routed here, and it is a blocker for the mission clause rather
+than a tidy-up.** SCRIPT2a's generalized registry gate found that
+`engine.set_rotation`, `engine.spawn` and `engine.destroy` are registered,
+callable from text, and implemented by **neither** host — both end their `match`
+with the unknown-call arm, so all three log their path and answer `Unit`. A heist
+that cannot put anything in the world is not the document's mockup, so
+implementing `engine.spawn` in both hosts is a SCRIPT3 clause, and it carries two
+consequences the day it lands: the arm
+`the_engine_namespace_is_registered_and_implemented_by_neither_host` goes red and
+must be retired with `engine` removed from the registry gate's exclusion list,
+and **`inf_editor_core::pie::build_scene_payload` starts owing an asset edge it
+does not walk** — `engine.spawn`'s prefab is the kit's only `StrRole::Asset`
+port, `inf_packager::asset_deps` follows it and the payload builder is a
+hand-maintained mirror that does not, which is safe only while the verb is inert
+(`nothing_a_script_names_can_reach_a_world_yet` is the tripwire). Migrated scripts' traces stay byte-identical to their predecessors
 where semantics did not change. The interpret-vs-transpile decision is taken per
 script class *with measurements*. InfiniScript Core is documented with one demo
 plugin. And the arc closes honestly: the list of what a designer can build without
@@ -797,8 +859,16 @@ add         := mul (('+' | '-') mul)*
 mul         := unary (('*' | '/' | '%') unary)*
 unary       := ('-' | 'not') unary | primary
 primary     := NUMBER | STRING | 'true' | 'false' | '(' expr ')' | call | IDENT
-call        := IDENT ('.' IDENT){1,2} '(' (expr (',' expr)*)? ')'
+call        := IDENT ('.' IDENT){0,2} '(' (expr (',' expr)*)? ')'
 ```
+
+**Zero dots is the call form** (wave SCRIPT2a): a bare `name(args)` naming one of
+this unit's own `function` declarations. It resolves against the headers the
+parser prescans, so a handler written above its declarations still finds them;
+arity is **exact** (a verb's trailing inputs have lowerer defaults, a function's
+parameters have none); and value position requires a `->`, because a function
+with no return type has no value to be. A bare name that matches no declaration
+is still the registry's refusal, now saying how to declare one.
 
 A returned value must be on the `return`'s own line. Without the rule, `return`
 followed by a call on the next line reads the call as the returned value. Lua
@@ -856,14 +926,31 @@ A multi-result query names its result as a third segment
 (`physics2d.raycast.hit(…)`) — the lowerer's own rule that one wire carries one
 scalar. Arity and required arguments are checked at parse time.
 
+And **a call with no namespace at all is the third thing a call can be**: the
+call form (A.2), a bare name resolving to one of this unit's own `function`
+declarations, on the same `Host` seam. It is checked *before* the registry, so a
+declaration in the file wins, and it can never collide with the two synthesized
+namespaces (`vars`, `nodestate`) because those are two segments and this is one.
+
 **Six families of registered node are deliberately not callable**, each refused
 with the syntax that replaces it: the arithmetic/comparison/logic operators (they
 are `+`, `<`, `and` here), `logic.not` and `math.neg`, the `flow.*` palette
 (control flow is syntax), `event.*` (an event is a handler's header), `lit.*`
 (write the value), and `var.get`/`var.set` (write the name).
 
-The surface is **115 verbs across 23 namespaces**, pinned by `inf_script::verbs`'
-own census arm so this sentence cannot go stale silently.
+The surface is **132 verbs across 26 namespaces**, pinned by `inf_script::verbs`'
+own census arm.
+
+That arm's message names this sentence, and the SCRIPT2a audit found the promise
+was worth less than it read: the wave moved the census to 132/26, the arm's
+numbers moved with it, and **this line stayed at 115/23 for a whole wave**. A
+census arm pins the *number a test compares*; it cannot pin prose in a file it
+never opens. So "cannot go stale silently" is downgraded to what is true — the
+arm fails the day the registry moves, and updating the two places that quote it
+in prose (here and §2's table) is the wave's job. The third quotation — the
+generated manual's own header line — really is checked, by
+`the_manual_covers_the_surface_it_claims_to`, which is the difference between a
+number a test owns and a number a memo repeats.
 
 ## A.5 The honest-subset table — what raises, and what only exists as text
 
@@ -887,7 +974,18 @@ one**: the emitter refuses nothing the IR can hold. This table is executed by
 | **a `rust [[…]]` block** | ✔ | ✘ `UnsupportedStmt("snippet")` |
 | **a non-action call in value position** (`physics2d.is_grounded(e)`) | ✔ | ✘ `UnsupportedExpr("pure call")` |
 | **`nodestate.get_or` / `nodestate.set`** (a `do_once`/`flip_flop`/`gate` graph, read as text) | ✔ | ✘ `UnsupportedExpr("pure call")` |
+| **the call form, in statement position** (`tap()`) — SCRIPT2a | ✔ | ✘ `LocalFunctionCall("tap")` |
+| **the call form, in value position** (`speed = two()`) — SCRIPT2a | ✔ | ✘ `LocalFunctionCall("two")` |
 | `flow.sequence` | — | flattened at lowering: the program survives, the node does not |
+
+The two SCRIPT2a rows are a **named** refusal rather than a folded one, and that
+is the point: before the call form existed, a one-segment call in statement
+position went to `raise_action`, which added a graph node whose `type_id` no
+registry knows — a silently malformed graph rather than a verdict — and in value
+position it was folded into the generic `pure call`, whose remedy does not apply.
+Naming it also makes the editor's degradation honest: `graph_open_actor` reports
+every handler with a `raisable` flag and a `reason`, so a call-form handler
+appears in the switcher, greyed, saying what it is.
 
 Two consequences a designer should be told rather than discover.
 
@@ -1087,10 +1185,25 @@ Named by scope rather than discovered: no tables, arrays or structs (the IR's
 value set is `Float`/`Int`/`Bool`/`Str`), no user-defined types, no closures, no
 `repeat`/`break`/`continue`, no string concatenation operator (`debug.print`
 takes one string), no `for … in` over a collection, no modules or `require`, no
-multiple return values, no varargs, and **no calls from a handler to its unit's
-own `function` declarations** — the IR has no user-function call form, and adding
-one is an IR change with the P6 vars-via-Host bar to clear.
+multiple return values, and no varargs.
 
-Every one of those is a *pricing* question about the IR, not about the parser.
+**RETIRED by wave SCRIPT2a: "no calls from a handler to its unit's own
+`function` declarations".** This entry read *"the IR has no user-function call
+form, and adding one is an IR change with the P6 vars-via-Host bar to clear"* —
+and the bar was cleared by finding that **no IR change was needed**. A one-segment
+`Expr::Call` is the whole feature (§8, A.2, A.4). It is left standing here as the
+list's own worked example, because the prediction it makes is the one this list
+is *for*: every remaining line is a pricing question about the IR, and the first
+question to ask of one is not "what does the IR need" but **"what can the shapes
+it already has not say"**. Two of the entries above have been answered that way
+now — member variables at P6, the call form here.
+
+The call form arrived with two bounds of its own, both refusals rather than
+surprises: **no recursion**, and **no call chain longer than
+`MAX_CALL_DEPTH`** (64), because the interpreter bounds a chain and the
+transpiled Rust does not, so a program past either would run in one face and be
+refused by the other.
+
+Every remaining one is a *pricing* question about the IR, not about the parser.
 That is the design working: the language cannot outgrow the execution model by
 accident.
