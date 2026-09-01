@@ -1,6 +1,10 @@
 schema_version = 26
 guid = "00000000-0000-0000-0000-000084070000"
 title = "Blank 3D"
-entity_count = 3
-content_hash = "85a29adbcbb98eaa"
-dependencies = []
+entity_count = 4
+content_hash = "9d9791b547ded279"
+dependencies = [
+    "00000000-0000-0000-0000-00005c1000a0",
+    "00000000-0000-0000-0000-00005c1000a2",
+    "00000000-0000-0000-0000-00005c1000a6",
+]

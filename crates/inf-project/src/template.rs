@@ -242,7 +242,7 @@ pub const SCRIPTS_DIR: &str = "Scripts";
 /// | | |
 /// |---|---|
 /// | a new 3D project's `Content/Characters/` | **152 408 B on disk** |
-/// | its cooked `content.inf_pack` | **6 480 B** (against 1 606 for the 2D platformer) — the boot level spawns no character, so the closure reaches the rig, the three clips and the machine through the controller (a root kind) and never reaches the **body or its material** |
+/// | its cooked `content.inf_pack` | **33 625 B** (wave GTA1, re-measured; against 1 606 for the 2D platformer). It was 6 480 while the boot level spawned no character and the closure reached only the rig, the three clips and the machine through the controller; the level spawns one now, so the **body and its material** are in the closure too — which is the point, and 27 KB is what a player being in the build costs |
 /// | `inf.exe` (the CLI, which scaffolds) | carries all 95 932 body bytes — searched for and found |
 /// | `inf-player.exe` (**the shipped player**) | **does not carry them.** Searched for the same 64-byte probe: absent. The player links this crate and never reaches `starter_content`, so the constant is never materialised |
 ///

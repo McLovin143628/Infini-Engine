@@ -47,9 +47,46 @@ pub fn build(doc: &mut SceneDoc) {
     let fill = doc.create(SpawnKind::PointLight, "FillLight", Some(lighting));
     set_transform(doc, fill, translate(4.0, 3.0, 4.0));
 
+    // ── the pawn (wave GTA1) ──
+    //
+    // The editor's boot document had furniture and no player, so the first thing
+    // a new user does — press Play — produced an overhead camera above a floor
+    // and three primitives, with nothing to move: `camera_subject` returns `None`
+    // on a level with no `player_controlled` character, and the player host then
+    // keeps its own view.
+    //
+    // Through the same door the New Character wizard and the island's hero take,
+    // naming the committed starter character's asset guids. The editor's own
+    // content root is seeded with those seventeen files on first run
+    // (`commands::assets::seed_starter_content`), so the references resolve to
+    // real bytes rather than to a placeholder cube.
+    let ids = crate::samples::starter_character_ids();
+    let asset = |id: Option<inf_asset::AssetId>| id.expect("every starter id is fixed").0;
+    doc.edit_create_character_with_guid(
+        DEMO_PLAYER_GUID,
+        crate::samples::STARTER_CHARACTER_NAME,
+        asset(ids.skeleton),
+        asset(ids.mesh),
+        asset(ids.machine),
+        DVec3::new(0.0, 0.0, 3.0),
+        Some(asset(ids.actor)),
+        crate::samples::starter_character_spec().params.height_m,
+    );
+
+    // **A boot document has nothing to undo.** Every other spawn here goes
+    // through the non-recording `create`; the character's door records, because
+    // it is the same door an author's "Create Character" takes. Clearing the
+    // history is what keeps "press Ctrl+Z on a fresh editor" from deleting the
+    // player it just showed you — and keeps `undo_depth` at 0, which is what a
+    // fresh document means everywhere else in this crate.
+    doc.clear_history();
     doc.world_mut().propagate();
     doc.mark_saved();
 }
+
+/// The boot document's player entity. Fixed rather than minted so a level saved
+/// out of a fresh document twice names the same character both times.
+pub const DEMO_PLAYER_GUID: uuid::Uuid = uuid::Uuid::from_u128(0x0DE0_0001);
 
 /// Give the default scene the **sky authority** — the `TimeOfDay` +
 /// `SkyAtmosphere` pair that makes a new level's sky the physically-based one

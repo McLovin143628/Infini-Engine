@@ -405,7 +405,7 @@ impl AssetState {
     /// The on-disk **path** of a `.inf_terrain` asset (wave GTA1), for the PIE
     /// payload's `terrain_paths` route. Kind-checked exactly like
     /// [`load_terrain_bytes`](Self::load_terrain_bytes), which now reads through
-    /// it - one resolution rule, so a path and the bytes behind it cannot come
+    /// it — one resolution rule, so a path and the bytes behind it cannot come
     /// from two different files.
     ///
     /// This is what lets the island play: its terrain is 342 742 272 B, and a PIE
@@ -610,14 +610,39 @@ pub fn init_assets_on_boot(app: &AppHandle) {
     tracing::info!("asset system ready ({})", root.display());
 }
 
-/// Seed a few starter material assets on a fresh (empty) content root so the
-/// Content Drawer isn't blank on first run.
+/// Seed a few starter material assets **and the starter character** on a fresh
+/// (empty) content root so the Content Drawer isn't blank on first run.
+///
+/// # Why the character is here (wave GTA1)
+///
+/// `inf new` scaffolds the seventeen files of `samples/starter-character` into
+/// every 3D project (`inf_project::template::STARTER_CHARACTER`). The editor's
+/// own boot root — `<app_data>/Content`, the document you get before opening any
+/// project — had no such scaffolding, so the boot level's character and the
+/// `Place Actor ▸ Starter Character` row would both have named guids with no
+/// bytes behind them and drawn placeholder cubes.
+///
+/// The **same** constant, copied verbatim with its sidecars (each names the
+/// committed guid, so the scan adopts them with their identity intact) rather
+/// than re-derived through `write_asset`, which would mint new ids.
 fn seed_starter_content(project: &Arc<Mutex<AssetProject>>, root: &std::path::Path) {
     let Ok(mut proj) = project.lock() else { return };
-    if !proj.db().is_empty() {
+    // Read BEFORE anything is written, or seeding the character would make the
+    // root look non-fresh and the materials would never land.
+    let fresh = proj.db().is_empty();
+    // The character is seeded whenever it is ABSENT rather than only on a fresh
+    // root: an editor that has been run before this wave has a content root with
+    // three materials in it and no character, and "only on first run" would leave
+    // every such machine with a boot level full of placeholder cubes.
+    let has_character = inf_editor_core::samples::starter_character_ids()
+        .skeleton
+        .is_some_and(|id| proj.db().get(id).is_some());
+    if !has_character {
+        seed_starter_character(&mut proj, root);
+    }
+    if !fresh {
         return;
     }
-    let _ = root;
     let Ok(dir) = proj.content_dir("Materials") else {
         return;
     };
@@ -634,6 +659,33 @@ fn seed_starter_content(project: &Arc<Mutex<AssetProject>>, root: &std::path::Pa
             ..Default::default()
         };
         let _ = proj.write_asset(&dir, name, &mat, None, vec![], None);
+    }
+}
+
+/// Copy the committed starter character into `root/Characters/` and scan it in.
+///
+/// Verbatim bytes, sidecars included: each `.toml` names the guid
+/// `inf_editor_core::samples::starter_character_ids` hands out, so the scan
+/// adopts the files with the identity the boot level and the Place Actor row
+/// both reference. Writing them through `write_asset` would mint new ids and the
+/// references would dangle — which is the whole failure this seeding exists to
+/// prevent.
+fn seed_starter_character(proj: &mut AssetProject, root: &std::path::Path) {
+    for (rel, bytes) in inf_project::template::STARTER_CHARACTER {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!("could not seed {}: {e}", path.display());
+                continue;
+            }
+        }
+        if let Err(e) = std::fs::write(&path, *bytes) {
+            tracing::warn!("could not seed {}: {e}", path.display());
+        }
+    }
+    match proj.rescan() {
+        Ok(n) => tracing::info!("seeded the starter character ({n} assets in the root)"),
+        Err(e) => tracing::warn!("the seeded starter character did not scan: {e}"),
     }
 }
 
