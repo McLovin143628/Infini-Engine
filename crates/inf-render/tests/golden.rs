@@ -5361,6 +5361,32 @@ fn gi_sky_radiance_comes_from_the_atmosphere() {
         "the bounce colour did not track the time of day \
          (noon {blue_noon:.3}, dusk {blue_dusk:.3})"
     );
+
+    // ...and at MIDNIGHT the bounce is not sunset-coloured (wave GTA1).
+    //
+    // The probe march's miss term is `atmos_sample_skyview` — the same LUT the
+    // sky pass draws — so whatever that table says at 23:30 is what the floor
+    // bounces. What it said before the wave is measured, on the horizon band, by
+    // `golden_sky_night_horizon`: `[0.1174, 0.0281, 0.0318]`, a **blue/red of
+    // 0.27**. The floor asserted here is 0.6, so any of that band reaching the
+    // bounce fails this arm; it reads 1.000 (colourless) now.
+    //
+    // A RATIO rather than a level, because the honest post-fix answer is "there
+    // is almost no bounce at midnight" and a level assertion would be measuring
+    // the tonemap's floor.
+    let (mut night_scene, night_bodies) = tod_scene(84_600.0); // 23:30 UTC
+    assert!(night_bodies.sun.y < -0.2, "23:30 should be deep night");
+    night_scene.instances = scene.instances.clone();
+    night_scene.lights = scene.lights.clone();
+    night_scene.mark_dirty();
+    let at_night = render_with(&gpu, &night_scene, &view, gi_on);
+    let blue_night = region_channel_ratio(&at_night, floor.0.clone(), floor.1.clone(), 2, 0);
+    eprintln!("gi sky TOD: midnight blue/red {blue_night:.3}");
+    assert!(
+        blue_night > 0.6,
+        "the midnight bounce is red-dominated (blue/red {blue_night:.3}) — the \
+         probe march is reading the transmittance LUT's horizon-tangent texel"
+    );
 }
 
 // ── P17.2 physical atmosphere ────────────────────────────────────────────────
