@@ -29274,7 +29274,7 @@ ledger in `docs/memos/island-progress.md` under *"Wave VEH1a — the adversarial
 
 ## Wave GTA1 — the Play button plays, and the night sky is night (2026-08-31)
 
-**COMPLETE.** Base `bf1954e6`; six commits, one per clause plus one follow-up. Full ledger in
+**COMPLETE.** Base `bf1954e6`; one commit per clause plus four follow-ups. Full ledger in
 `docs/memos/wave-gta1-play-and-night.md`. **The scene schema does not move (v26).**
 `ScenePayload` **v11 → v12** — the wave's one version rung, and the first this envelope has
 taken to make a payload *smaller*. **Goldens 59 → 60** (one new, two re-blessed with stated
@@ -29314,8 +29314,13 @@ reads the midnight bounce at **blue/red 1.000** against a floor of 0.6, and the 
 midnight band was 0.27.
 
 (2) **THE ISLAND'S GROUND RIDES AS A PATH.** `build_scene_payload` embedded the whole
-`.inf_terrain`; the island's is **342 742 272 B** against `MAX_FRAME_LEN` **268 435 456**, so
-`write_msg` refused the frame and Play on 50 km² died in a one-line status message. **The cap did
+`.inf_terrain`; the island's is **549.9 MB** against `MAX_FRAME_LEN` **268 435 456 B**, so
+`write_msg` refused the frame and Play on 50 km² died in a one-line status message. **THE SIZE IS
+A CORRECTION AND IT IS THE THIRD TIME THIS NUMBER HAS GONE WRONG THE SAME WAY**: the wave brief
+scouted `342 742 272 B`, which is wave I7's figure, and this wave restated it in five source
+comments and five commit messages exactly as I8a did before its own audit caught it (that memo's
+item 3). Re-measured stands at 549.9 MB; `a8060ca4` corrects the comments, and both numbers are
+more than double the cap, so nothing downstream moves. **The cap did
 not move** — an unbounded frame length is what stands between a desynced pipe and a 4 GiB
 allocation. `ScenePayload` v12 appends `terrain_paths` at the tail; `TerrainRef::{Path,Bytes}`
 makes the choice the resolver's, because only the caller knows whether the asset has a file (the
@@ -29360,6 +29365,23 @@ and writes nothing, where `actor.newCharacter` mints six assets a click. Opening
 its boot level, chosen by **the cook's own rule** (lowest-GUID level) off the same asset database
 — and never over a dirty document, because opening a project is not consent to discard an edit.
 A missing `inf-player.exe` now names `cargo build -p inf-player` instead of quoting the OS.
+
+**FIVE PINS FIRED AND EVERY ONE WAS RIGHT** — `phase18_gate`'s golden inventory (pinned by NAME,
+so the new frame had to be named), the three `phase2{6,7,8}_gate` count-and-CONTENT digests
+(59 → 60, `1db3dd0b…` → `e4ef4624…`; the count alone would have accepted a swap and the digest is
+what makes a re-bless visible), and `inf-scene::decodes_the_committed_hybrid_template`, which
+counted five entities in a template that now has six. Nothing was silenced: the fixes are in
+`158ca5d4`, after the work that earned them, and the hybrid arm gained the assertion its count
+cannot make — that one of those entities is a **pawn**.
+
+**House gates at head:** battery **356 / 6 607 / 0 / 19** exit 0 (+3 arms, exactly the wave's
+`#[test]` diff, against the base's 356 / 6 604), goldens **60** with `INF_GOLDEN_STRICT=1` green
+over **119** arms in 200 s and none blessed by the run, rustdoc **373 over 30 crates** cold after
+`cargo clean --doc` (403 `^warning` lines − 30 summaries, cross-checked against their own sum —
+unmoved from the base after `544e2711` fixed the wave's own unresolved link, an `inf-runtime` doc
+pointing *up* at `inf-player`; headroom 77), clippy **0** with `-D warnings` at
+`CARGO_INCREMENTAL=0` run LAST, fmt clean, frontend typecheck + eslint clean with **85 files /
+775 tests**. `Cargo.lock` unmoved; no new dependency.
 
 **Findings recorded, not fixed:** the cook's vgeom advisory claims a placeholder cube for a
 sub-2 048-triangle mesh, which is **false for a `SkeletalMesh` on every native target**

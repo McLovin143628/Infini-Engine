@@ -16,6 +16,10 @@ ledger.
 | `117b9ed0` | clause 5 — the menus reach the levels |
 | `101c2a07` | clause 4 — Play with no pawn asks a question |
 | `ec261c7c` | clause 1 follow-up — the GI probes' night arm |
+| `158ca5d4` | the five pins this wave's committed images and content fired |
+| `a8060ca4` | the island terrain figure, corrected (549.9 MB, not 342.7) |
+| `544e2711` | the rustdoc link that pointed up the ring order |
+| `3f8a0cc4` | the digest pin's note is one doc comment, not two |
 | (this memo) | clause 6 — the ledger |
 
 **Schemas:** the scene schema is **unmoved** (v26). `ScenePayload` **v11 → v12**,
@@ -131,9 +135,19 @@ the bounce fails it.
 
 ## Clause 2 — PIE carries terrain by path
 
-The island's `.inf_terrain` is **342 742 272 B** against a `MAX_FRAME_LEN` of
-**268 435 456**, so `write_msg` refused the frame and Play on 50 km² of ground
+The island's `.inf_terrain` is **549.9 MB** against a `MAX_FRAME_LEN` of
+**268 435 456 B**, so `write_msg` refused the frame and Play on 50 km² of ground
 produced one line in the status bar and no player at all.
+
+**That figure is a correction, and it is the third time this number has gone
+wrong the same way.** The wave brief scouted `342 742 272 B`, which is *wave I7's*
+measurement; wave TER2b's detail band moved it and the I8a audit re-measured it
+at 549.9 MB off `build.report.summary()` — a correction that memo already records
+under its own item 3. This wave restated the stale number in new prose exactly as
+I8a did, in nine source comments and in its first five commit messages, and
+`a8060ca4` corrects the comments (a commit message cannot be corrected, so this
+paragraph is where the record lives). **Nothing about the conclusion changes**:
+both figures are more than double the cap.
 
 **The cap did not move**, and the reasoning is worth keeping: an unbounded frame
 length is the thing standing between a desynced pipe and a 4 GiB allocation, and
@@ -272,6 +286,35 @@ Four doors that named things they did not do.
 
 ---
 
+## The pins that fired (and what that says about them)
+
+Five arms went red on the first full battery, and **every one of them was right**
+— which is the report worth making about a wave that changes committed images and
+committed content:
+
+* `phase18_gate::the_golden_inventory_is_exactly_the_committed_set` — the golden
+  set is pinned **by name**, not by count, so the new frame had to be named.
+* the three `phase2{6,7,8}_gate` count-and-CONTENT digest pins — 59 → 60 and
+  `1db3dd0b…` → `e4ef4624…`. The count alone would have accepted a swap; the
+  digest is what makes a re-bless visible. This wave hits **both branches of that
+  pin's own rule at once** (one frame added, two re-blessed for the look), which
+  is why the note beside the digest says which is which, and why the two acts are
+  in different commits.
+* `inf-scene::decodes_the_committed_hybrid_template` — counted five entities in a
+  template that now has six. The count moved and the arm gained the assertion a
+  count cannot make: that one of those entities is a **pawn**.
+
+Nothing was silenced. The five fixes are in `158ca5d4`, on their own, after the
+work that earned them.
+
+Two more arrived from the gates the battery does not run: `cargo doc` went
+373 → **374** on an intra-doc link that pointed *up* the ring order
+(`inf-runtime` → `inf-player`), and clippy's `empty_line_after_doc_comments`
+caught the blank line a scripted insertion left between two halves of the digest
+pin's doc block — which would have silently split it into two comments, one of
+them documenting nothing. Both fixed (`544e2711`, `3f8a0cc4`); the rustdoc total
+is back to the base's 373.
+
 ## Findings this wave made and did NOT fix
 
 * **The cook's vgeom advisory is over-broad for a skinned mesh.** Cooking a
@@ -314,12 +357,29 @@ Four doors that named things they did not do.
   from its own recipe, which is the shipped path at a smaller size.
 * **Vehicle enter/exit animations** → VEH2.
 
+## House gates at head
+
+| | base `bf1954e6` | this tree |
+|---|---|---|
+| battery (`-j 3`, `--no-fail-fast`) | 356 / 6 604 / 0 / 19 | **356 / 6 607 / 0 / 19**, exit 0 |
+| goldens, `INF_GOLDEN_STRICT=1` | 59 files, 118 arms | **60 files, 119 arms**, 200 s, none blessed by the run |
+| rustdoc after `cargo clean --doc` | 373 over 30 crates | **373 over 30 crates** (403 `^warning` lines − 30 summaries, cross-checked against the summaries' own sum); headroom 77 against the 450 ceiling |
+| clippy `-D warnings`, run LAST | 0 | **0** |
+| `cargo fmt --all --check` | clean | clean |
+| frontend | — | typecheck + eslint clean, **85 files / 775 tests** (was 84 / 764) |
+
+The battery is **+3 arms, exactly this wave's new `#[test]` count**:
+`golden_sky_night_horizon`, `a_terrain_with_a_file_rides_as_a_path_and_the_frame_stays_small`
+and `every_starter_level_has_a_player_controlled_character`. The rustdoc total
+went to 374 first — the wave's own unresolved intra-doc link, `inf-runtime`
+pointing *up* at `inf-player`, fixed in `544e2711`.
+
 ## What this wave did NOT verify
 
 * **The real island's Play button was not pressed.** No `.inf_terrain` for the
-  shipped island exists on this machine (it is not committed), so the
-  342 742 272 B figure is the brief's scouted measurement rather than one taken
-  here. What is measured here is stronger than one more file size would be: the
+  shipped island exists on this machine (it is not committed), so neither the
+  549.9 MB nor the 342.7 MB figure was measured here — see the correction under
+  clause 2. What is measured here is stronger than one more file size would be: the
   payload no longer contains terrain bytes **at any size**, which the unit arm
   shows by building the same document both ways (the byte route grows by the
   whole file, the path route by a filename) and `island_gate` shows by the frame
