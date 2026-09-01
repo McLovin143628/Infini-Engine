@@ -389,23 +389,39 @@ pub const NPC_BUDGET_AGENTS: usize = 1000;
 /// the island's own grid — settled first, then MIN of three rounds of forty
 /// steps:
 ///
-/// | cars | dev | release | per car (dev) |
+/// | cars | dev (VEH1a) | dev (VEH2a) | per car (VEH2a) |
 /// |---|---|---|---|
-/// | 1 | 0.0015 ms | 0.0012 | 1.51 µs |
-/// | 4 | 0.0053 | 0.0041 | 1.33 |
-/// | 16 | 0.0227 | 0.0178 | 1.42 |
-/// | **64** | **0.1101 ms** | **0.0882** | **1.72 µs** |
+/// | 1 | 0.0015 ms | 0.0018 ms | 1.81 µs |
+/// | 4 | 0.0053 | 0.0063 | 1.57 |
+/// | 16 | 0.0227 | 0.0271 | 1.70 |
+/// | **64** | **0.1101 ms** | **0.1277 ms** | **2.00 µs** |
 ///
 /// Linear in the car count, which is what an `O(vehicles)` walk over four rays
-/// each has to look like.
+/// each has to look like. VEH1a's release column was 0.0882 ms at 64 cars, or
+/// about 0.80 of its `dev` figure.
 ///
-/// **0.5 ms is ~4.5× the 64-car `dev` measurement** and ~5.7× the release one —
-/// deliberately tighter than [`NPC_STEP_BUDGET_MS`]'s ~10×, because this phase's
-/// work is a fixed four casts a car with no tier ladder in front of it, so there
-/// is nothing here whose cost is *supposed* to vary. It is a twelfth of
-/// [`CITY_STEP_BUDGET_MS`], which is the property that makes it able to see
-/// anything: a vehicle phase that grew to a visible share of a 6 ms step trips
-/// this by an order of magnitude.
+/// # RE-PRICED AT WAVE VEH2a: **+16 %, and the constant does not move**
+///
+/// The model under this phase went from a spring, a flat drive force and two
+/// axis clamps to a wheel with angular state, a torque curve through a gearbox,
+/// a differential, a simplified-Pacejka tyre solved stick-or-slide, anti-roll
+/// bars, aero and three driver aids. That is **0.1101 → 0.1277 ms at 64 cars**,
+/// 1.72 → 2.00 µs a car: sixteen per cent for all of it, because the expensive
+/// thing in this phase was always the four ray casts and none of the new work
+/// casts anything.
+///
+/// **The budget stays at 0.5 ms.** Re-minting it at VEH1a's own ~4.5× rule would
+/// give 0.575, and §8 says this constant may only ever DECREASE — so the ratio
+/// tightens instead, from ~4.5× to **~3.9×** the dev measurement. That is the
+/// ratchet doing exactly what it is for: the wave that spends headroom is the
+/// wave that has less of it afterwards.
+///
+/// The comparison to [`NPC_STEP_BUDGET_MS`]'s ~10× still holds and still has its
+/// reason: this phase's work is a fixed four casts a car with no tier ladder in
+/// front of it, so there is nothing here whose cost is *supposed* to vary. It is
+/// a twelfth of [`CITY_STEP_BUDGET_MS`], which is the property that makes it
+/// able to see anything: a vehicle phase that grew to a visible share of a 6 ms
+/// step trips this by an order of magnitude.
 ///
 /// # A clock, so: release only, real machine only
 ///
@@ -413,7 +429,7 @@ pub const NPC_BUDGET_AGENTS: usize = 1000;
 /// everywhere, asserted under `cargo test --release` off CI.
 ///
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.** Minted at 0.5
-/// (VEH1a).
+/// (VEH1a); re-priced but NOT moved at VEH2a (see above).
 pub const VEHICLE_STEP_BUDGET_MS: f64 = 0.5;
 
 /// The fleet [`VEHICLE_STEP_BUDGET_MS`] is measured at.

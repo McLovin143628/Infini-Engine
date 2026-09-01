@@ -25,11 +25,25 @@
 //! two machines re-derive independently may not depend on a libm, and until this
 //! file existed nothing enforced it on this side of the seam.
 //!
-//! The three files are clean today. That is the point: this gate is what keeps
-//! the next `.atan2(` out, and the repository's own experience is that a rule
-//! with no gate holds until exactly the moment it matters.
+//! **And since island wave VEH2a, the two VEHICLE modules** —
+//! `inf_ecs::vehicle` and `d3/vehicle.rs`. That was a real hole, not a
+//! tidy-up: the vehicle model writes a chassis's `Transform` and every wheel's,
+//! its pose is compared byte for byte between two hosts by `island_gate`'s
+//! drive arm, and the *only* thing keeping `f64::sin` out of it was a comment.
+//! Every libm gate in the tree was checked when the hole was found —
+//! `portable_character`'s own list (four `d3` files, neither of them the
+//! vehicle), `portable_pose`'s thirty-five `include_str!`s (`inf-ecs`'s pose,
+//! camera, movement, crowd and society, and not its vehicle) and
+//! `inf-editor-core`'s crate-wide walk (a different crate) — and **not one of
+//! them covered either file**. A cross-target divergence in a car would have
+//! shipped: the two arms that compare a drive both run two hosts on one machine,
+//! which is exactly the comparison a libm difference is invisible to.
+//!
+//! The files are clean today. That is the point: this gate is what keeps the
+//! next `.atan2(` out, and the repository's own experience is that a rule with
+//! no gate holds until exactly the moment it matters.
 
-/// The three modules, with the reason each one is on the list.
+/// The modules, with the reason each one is on the list.
 /// The fourth element is the **minimum** number of non-comment lines the file
 /// must still have. It is per file rather than one number for all of them
 /// because `d3/camera.rs` is deliberately the smallest door on this list — its
@@ -37,7 +51,7 @@
 /// single floor would either be vacuous for the big three or unreachable for it.
 /// The guard exists so the ban cannot pass by scanning a file that has been
 /// emptied out from under it.
-const CHARACTER_PATH: [(&str, &str, &str, usize); 4] = [
+const CHARACTER_PATH: [(&str, &str, &str, usize); 6] = [
     (
         "d3/camera.rs",
         include_str!("../src/d3/camera.rs"),
@@ -62,11 +76,23 @@ const CHARACTER_PATH: [(&str, &str, &str, usize); 4] = [
         "the pelvis read chooses supine versus prone and places the capsule, and both are in the parity trace",
         100,
     ),
+    (
+        "d3/vehicle.rs",
+        include_str!("../src/d3/vehicle.rs"),
+        "the vehicle door casts the wheel rays and writes every wheel entity's Transform, and `island_gate` compares a drive byte for byte between two hosts",
+        100,
+    ),
+    (
+        "inf-ecs/src/vehicle.rs",
+        include_str!("../../inf-ecs/src/vehicle.rs"),
+        "the whole driving model — the tyre, the torque curve, the gearbox and the steering — and its answers reach a chassis pose that both hosts compare",
+        400,
+    ),
 ];
 
 /// A marker that must be present in each file, so the gate cannot pass because
 /// it is scanning something that is no longer the module it names.
-const ANCHORS: [(&str, &[&str]); 4] = [
+const ANCHORS: [(&str, &[&str]); 6] = [
     ("d3/camera.rs", &["inf_ecs::camera::", "cast_shape_where("]),
     (
         "d3/movement.rs",
@@ -79,6 +105,14 @@ const ANCHORS: [(&str, &[&str]); 4] = [
     (
         "d3/ragdoll_bridge.rs",
         &["inf_math::proll(", "inf_math::pyaw("],
+    ),
+    (
+        "d3/vehicle.rs",
+        &["cast_ray_where(", "apply_force_at_point("],
+    ),
+    (
+        "inf-ecs/src/vehicle.rs",
+        &["inf_math::pcos64(", "inf_math::psin64(", "curve_bias("],
     ),
 ];
 
@@ -136,16 +170,20 @@ fn the_character_step_calls_no_libm() {
     };
 
     for (name, src, why, min_lines) in CHARACTER_PATH {
-        // No `#[cfg(test)]` region, so the scope is the whole file. Asserted
-        // rather than assumed: the day one grows a test module, a fixture that
-        // builds a rotation from an angle would fail this gate for the wrong
-        // reason, and the fix is to strip the region the way `inf-anim`'s
-        // `portable_pose::production_code` does.
-        assert!(
-            !src.contains("#[cfg(test)]"),
-            "`{name}` grew a test module; this gate scans the whole file and must \
-             learn to strip `#[cfg(test)]` regions first"
-        );
+        // **PRODUCTION ONLY.** The first four files on this list had no test
+        // module and the gate asserted so, with a comment saying that the day one
+        // grew a test module the fix was to strip the region the way `inf-anim`'s
+        // `portable_pose::production_code` does. Wave VEH2a put
+        // `inf-ecs/src/vehicle.rs` on the list, which has a large one — so that
+        // is what happens now. The cut is at a COLUMN-ZERO `#[cfg(test)]`, which
+        // is where a module-level test block begins and where an inner attribute
+        // cannot be; `min_lines` below is what stops an over-eager cut from
+        // leaving the ban scanning nothing.
+        let whole = src.replace("\r\n", "\n");
+        let src = match whole.find("\n#[cfg(test)]") {
+            Some(i) => &whole[..i],
+            None => &whole[..],
+        };
         let code = production_code(src);
         assert!(
             code.lines().filter(|l| !l.trim().is_empty()).count() >= min_lines,

@@ -5807,12 +5807,29 @@ fn pie_equals_shipping_when_the_car_drives_the_circuit() {
         a.audio,
         a.pre_steps
     );
-    // 15 m against a measured 34.1 on the authoring machine. The margin is
+    // 15 m against a measured **27.0** on the authoring machine. The margin is
     // deliberate and it is not slack: the fixture's terrain is SAMPLED, and the
     // sampling step is the one this repository's portability law exempts by
     // name, so the ground a wheel finds is a fact about the machine that built
     // it. The claim this clause has to carry is "it drove", and a car that
     // covers fifteen metres in five seconds is driving on anybody's hillside.
+    //
+    // # RE-BLESSED AT WAVE VEH2a, and here is what moved
+    //
+    // Nothing about this arm's *purpose* changed: it is still the one place that
+    // says the editor's Simulate and the shipped player step a vehicle to the
+    // same bytes. What changed is the model underneath it, so the numbers it
+    // prints are published rather than quietly replaced:
+    //
+    // | | VEH1a | VEH2a | why |
+    // |---|---|---|---|
+    // | distance in 300 steps | 34.1 m | **27.0 m** | the settlement now parks a row from the grown fleet rather than always the saloon, and this one is a working vehicle |
+    // | top speed | 16.81 m/s | **7.65 m/s** | same, plus a real torque curve that has to rev through a real gearbox instead of a flat force available at once |
+    // | wheel contacts | 1 018 of 1 200 | **1 200 of 1 200** | the suspension keeps every wheel down for the whole drive now; VEH1a's model bounced one off the ground for a sixth of it |
+    // | peak revs | 0.4944 | **0.9269** | revs are the engine's own rpm between idle and the redline, not road speed against a top speed |
+    //
+    // The contact count is the one worth reading twice: it is not a tuning
+    // artefact, it is 182 wheel-steps that used to be spent in the air.
     assert!(
         travelled > 15.0,
         "the car covered {travelled} m in five seconds of throttle — that is a \

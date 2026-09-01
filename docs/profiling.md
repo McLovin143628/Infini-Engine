@@ -81,6 +81,8 @@ be lowered, never raised.** A regression must be fixed, not accommodated.
 | **The `crowd` phase alone** (the sim-LOD tier decision over `NPC_BUDGET_AGENTS` = 1 000 NPCs) | `NPC_STEP_BUDGET_MS` | 1.0 ms | `inf-player` · `tests/crowd_sweep.rs` |
 | **The `society` phase on a SETTLED level** (one entity walk that folds nothing) | `SOCIETY_STEP_BUDGET_MS` | 0.5 ms | `inf-player` · `tests/crowd_sweep.rs` |
 | **The `vehicle` phase alone** (four wheel rays a car over `VEHICLE_BUDGET_CARS` = 64 cars) | `VEHICLE_STEP_BUDGET_MS` | 0.5 ms | `inf-player` · `tests/island_gate.rs` |
+
+The `vehicle` row was **re-priced at wave VEH2a** and the constant deliberately did not move: the driving model grew a wheel state, a torque curve, a gearbox, a differential, a Pacejka tyre, anti-roll bars, aero and three driver aids for **+16 %** (0.1101 → 0.1277 ms at 64 cars, dev), because the expensive work in this phase was always the four ray casts and none of the new work casts anything. Re-minting at the original ~4.5× rule would have meant 0.575 ms, and §8 forbids raising a budget — so the headroom tightened from ~4.5× to ~3.9× instead. See `VEHICLE_STEP_BUDGET_MS`'s own doc for the full table.
 | Terrain page bytes resident (peak over the flythrough) | `TERRAIN_RESIDENT_BYTES_CEILING` | 16 MiB | `inf-player` · `tests/phase16_gate.rs` |
 | Partition cell bytes resident (peak) | `CELL_RESIDENT_BYTES_CEILING` | 256 KiB | `inf-player` · `tests/phase16_gate.rs` |
 | Partition cells active at once (peak) | `CELL_RESIDENT_CEILING` | 8 | `inf-player` · `tests/phase16_gate.rs` |
