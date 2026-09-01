@@ -1939,7 +1939,11 @@ impl RaycastVehicle {
     /// tuning choice: it is what the car weighs divided by how many wheels it
     /// stands on, and a class that authored it could disagree with its own body.
     fn static_load_n(&self, mass_kg: f64) -> f64 {
-        if self.rig.wheels.is_empty() || !(mass_kg > 0.0) {
+        // `is_finite() && > 0.0` rather than `!(> 0.0)`: the negated form is
+        // NaN-safe but lets an INFINITE mass through, and clippy's
+        // `neg_cmp_op_on_partial_ord` is right that it reads badly. This spelling
+        // refuses both, which is what a refusal-is-a-value model wants.
+        if self.rig.wheels.is_empty() || !(mass_kg.is_finite() && mass_kg > 0.0) {
             return 0.0;
         }
         mass_kg * 9.81 / self.rig.wheels.len() as f64
@@ -2075,7 +2079,7 @@ pub const GOVERNOR_BAND: f64 = 0.06;
 /// number that falls out of four other numbers.
 pub fn governor(tuning: &VehicleTuning, forward_mps: f64) -> f64 {
     let top = tuning.max_speed_mps;
-    if !(top > 0.0) || !forward_mps.is_finite() {
+    if !(top.is_finite() && top > 0.0) || !forward_mps.is_finite() {
         return 1.0;
     }
     let over = forward_mps.abs() / top - (1.0 - GOVERNOR_BAND);
@@ -2189,7 +2193,9 @@ pub fn tyre_curve(slip_norm: f64, rise_bias: f64, slide_frac: f64) -> f64 {
 /// and an axle's total is unchanged — so a centre of gravity height, an anti-roll
 /// bar and a soft spring would all be free.
 pub fn load_sensitive_mu(mu: f64, load_n: f64, static_load_n: f64, sensitivity: f64) -> f64 {
-    if !(load_n.is_finite() && sensitivity.is_finite()) || !(static_load_n > 0.0) {
+    if !(load_n.is_finite() && sensitivity.is_finite())
+        || !(static_load_n.is_finite() && static_load_n > 0.0)
+    {
         return mu;
     }
     let k = (1.0 - sensitivity * (load_n / static_load_n - 1.0)).clamp(MU_MIN_FRAC, MU_MAX_FRAC);
@@ -2301,7 +2307,11 @@ pub fn ackermann_deg(
     } else {
         0.0
     };
-    if a <= 0.0 || !(wheelbase_m > 0.0) || !rack_deg.is_finite() || !(half_track_m > 0.0) {
+    if a <= 0.0
+        || !(wheelbase_m.is_finite() && wheelbase_m > 0.0)
+        || !rack_deg.is_finite()
+        || !(half_track_m.is_finite() && half_track_m > 0.0)
+    {
         return rack_deg;
     }
     let k = rack_deg.to_radians().abs() * half_track_m / wheelbase_m;
