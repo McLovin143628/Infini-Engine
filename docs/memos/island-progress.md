@@ -23925,3 +23925,17 @@ reported a stop that never happened because the car was in free fall.
    (`RaycastVehicle::rpm`, `gear`, `WheelState::tc_cut`, `axle_load_n`) and
    nothing draws them.
 9. **Traffic is still VEH1b's.** The fleet parks; nothing drives itself.
+### Counts
+
+| | last recorded (IASSET2 audit) | **wave (`HEAD`)** |
+|---|---|---|
+| battery blocks / passed / failed / ignored | 356 / 6 604 / 0 / 19 | **358 / 6 689 / 0 / 20** — `cargo test --workspace -j 3 --no-fail-fast`, `INF_GOLDEN_STRICT=1`, **exit 0**. The wave's own `#[test]` diff is **+30 / −1**; the baseline row is three commits behind this wave's base, so the block and ignored deltas are not all its doing and are not claimed as such |
+| goldens | 60 files | **60, none blessed and none re-blessed** — `git status` over `crates/inf-render/tests/goldens` is empty and the diff against the base touches none. This wave renders nothing |
+| rustdoc individual warnings (ceiling 450) | 373 | **430 over 32 crates**, exit 0 — headroom **20**. **Zero of them are in the wave's own documentation**: `inf-ecs/src/vehicle.rs` and `inf-ecs/src/camera.rs` carry none at all, and no `inf-scene` warning lands past the v27 rung's first line |
+| `clippy --workspace --all-targets`, `RUSTFLAGS=-D warnings` | 0 | **0** — exit 0, run **LAST** per the rmeta law. Two findings on the way, both in this wave's code and both fixed rather than allowed: four `neg_cmp_op_on_partial_ord` NaN guards (which were also letting an INFINITE mass through) and one `type_complexity` |
+| `cargo fmt --all --check` | clean | **clean** |
+| `Cargo.lock` / manifests | byte-identical | **byte-identical.** No dependency of any kind, so `cargo deny` was not required |
+| schemas | scene v26 | **scene v27** — the wave's one window. `ScenePayload` **v12**, `.inf_sm` v3 and the island recipe v2 all **unmoved**, and the payload's own doc is right that a component growth is not its business |
+| committed content | 24 levels | **24 levels regenerated** (the version byte), of which the two islands also carry the class tail and the grown fleet: `VancouverIsland` 73 633 → **74 556 B**, `IslandFixture` 16 671 → **17 216 B**. Plus **two `camera.toml`s** for the drive block. `EXPECTED_LEVELS` still **24** |
+| frontend | not run | **not run — `editor/studio/src/` is untouched by this wave** |
+| disk | — | **139 GB free** at the end; no `cargo clean` was needed |
