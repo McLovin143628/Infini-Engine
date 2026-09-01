@@ -10,7 +10,7 @@ cargo test -p inf-island --test island_fixture
 
 ## Why it exists
 
-The real island is 51 km² of fetched elevation and 342.7 MB of terrain. CI
+The real island is 51 km² of fetched elevation and **549.9 MB** of terrain. CI
 cannot build it and must not fetch it. A fixture that stubbed the elevation with
 a synthetic heightfield would certify a decoder against itself, so this one
 commits **two real terrarium tiles** — the same public, keyless bytes the full

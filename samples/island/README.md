@@ -4,7 +4,9 @@
 This folder is the *generator*, not the world: the recipe, the designed
 coastline, the biome masks, the road network and the derived water layers —
 **287 679 bytes** (281 KB) over eleven tracked files. The world it describes is
-342.7 MB of terrain and is not committed.
+**549 879 456 B** (549.9 MB) of terrain and is not committed. (342.7 MB was wave
+I7's figure; wave TER2b's detail band moved it, and the number here is a fresh
+`island build` on the committed recipe — wave GTA1's audit.)
 
 ```sh
 inf island build --recipe samples/island/island.toml
@@ -30,7 +32,7 @@ another 40.7 s), and **156 tiles / 12 MB** of elevation on a cold one. Run
 
 | NOT committed | why |
 |---|---|
-| the `.inf_terrain` | 342.7 MB |
+| the `.inf_terrain` | **549 879 456 B** (549.9 MB) |
 | the road mesh | 517 086 vertices |
 | the `.inf_biomes` set | derived from the palette |
 | the tile cache | 12 MB of somebody else's bytes |
