@@ -209,6 +209,58 @@ names the door that has already taken the win it would be reaching for.
 
 ---
 
+## PRICED AND NOT TAKEN: a pack-level sub-directory
+
+The alternative to per-container block policy is a **pack-format** one: give each
+index entry a sub-directory of blocks, so `PackReader` itself could hand back one
+decompressed block. `docs/memos/p28-2-cluster-pages.md` §1(a) already priced that
+exact move for a different purpose and refused it. The price has not changed:
+
+| | container-level (taken) | pack-level sub-directory (refused) |
+|---|---|---|
+| format moves | `.inf_terrain` v5→v6, `.inf_voxel` v1→v2 — both spending an **already-reserved** directory byte, no record re-length | `PACK_FORMAT_VERSION` 2→**3**, a new per-entry sub-directory inside a **60-byte fixed-stride** index record |
+| readers touched | the two containers' own parsers | **every** pack reader, on every platform, plus the wasm arm |
+| frozen fixtures | none (the `pack_v1` fixture is untouched) | the committed `pack_v1` back-compat fixture has to keep parsing across a stride change |
+| what it buys | exactly what shipped: per-tile / per-chunk decode | the same thing, for kinds that already have a directory of their own |
+| what it costs the kinds that need it least | — | every kind pays index size for a feature three of them use |
+
+**The deciding fact is that the streaming containers already have directories.** A
+`.inf_terrain` is a header, a sorted tile directory and aligned blobs; putting a
+codec byte in it is a byte that was already reserved for the purpose. A pack-level
+sub-directory would build a *second* directory in front of the one that exists, so
+the pack could learn a fact its payload already knows. It is refused on that, not
+on effort — the same sentence P28.2 refused it with.
+
+The one thing the container-level answer does **not** cover is a kind with no
+directory of its own that nonetheless wants sub-entry granularity. None exists
+today; when one does, this table is where the comparison restarts.
+
+## CARRIED TO IASSET2: the strip list
+
+The arc's IASSET1 clause 1 named a "strip editor-only fields per kind" step. It is
+**not in this wave**, deliberately: stripping is only safe with a proof that the
+runtime never reads what is stripped, and this wave's whole budget went to
+compression, the rename and the tables. The candidates, so IASSET2 starts with a
+list rather than a search:
+
+* **`MeshAsset::material_slots` and `SubMesh::name`** — authoring identity. The
+  runtime binds materials by GUID off a level entity (the P26.3b wire), not by
+  slot name, so these look strippable; "look" is not the proof, and the proof is
+  a reader sweep per field.
+* **Dropping the source `.inf_mesh` when a `.inf_vmesh` was derived** — the big
+  one (18 958 057 B of the island pack is `mesh`), and **currently blocked**: the
+  physics bridge builds colliders from the source mesh, and a `.inf_vmesh` is a
+  render DAG. Stripping it would ship a world you can see and walk through
+  nothing of. IASSET2 should take this as **R4's cross-asset plan shape** — a
+  cook-time plan that knows which meshes are *only* drawn — rather than as a
+  per-asset strip.
+
+Both are quantization-adjacent in the same way: the moment the cook removes or
+rounds something the sim reads, the PIE-reads-loose / shipping-reads-cooked twin
+stops being safe, and IASSET1's "compression is lossless so both decode
+bit-identical" sentence stops covering it. That is the whole reason this wave
+quantized nothing.
+
 ## THE RENAME: `.inf_pack` → `.ipack`
 
 89 sites across 44 files, plus `.gitattributes`, the frozen `pack_v1` fixture, the

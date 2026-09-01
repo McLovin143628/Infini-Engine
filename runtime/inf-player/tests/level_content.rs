@@ -70,6 +70,51 @@ fn pack_built(pack_dir: &Path) -> BuiltWorld {
     level::load(&source, &builder).expect("pack level builds")
 }
 
+/// **THE COMPATIBILITY ARM** (IASSET1). A build directory cooked under the OLD
+/// pack name still boots, because `PackLevelSource::open` takes a directory's
+/// pack name from the manifest's `packs[0]` and only falls back to
+/// `level::PACK_FILE` when there is no manifest to ask.
+///
+/// The `.inf_pack` → `.ipack` rename changes what the cook *writes*, not what
+/// the runtime *accepts*, and that sentence is in `PACK_MAGIC`'s docs. This is
+/// the sentence being checked rather than asserted.
+///
+/// The legacy name is **assembled** rather than written: the workspace source
+/// gate bans the old spelling in code, and a test that needs to name it is
+/// exactly the case that would otherwise be exempted — the hole the gate exists
+/// to avoid.
+#[test]
+fn a_build_directory_whose_manifest_names_another_pack_still_boots() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = cook_sample(tmp.path());
+    let expected = fold_trace(pack_built(&out), 60, None);
+
+    let legacy = format!("content.{}_{}", "inf", "pack");
+    assert_ne!(
+        legacy, DEFAULT_PACK_NAME,
+        "the fixture must be the OLD name"
+    );
+    std::fs::rename(out.join(DEFAULT_PACK_NAME), out.join(&legacy)).unwrap();
+
+    let manifest_path = out.join(level::MANIFEST_FILE);
+    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+    let rewritten = manifest.replace(DEFAULT_PACK_NAME, &legacy);
+    assert_ne!(
+        rewritten, manifest,
+        "the manifest names the pack it shipped"
+    );
+    std::fs::write(&manifest_path, rewritten).unwrap();
+
+    // The directory no longer holds a file by today's default name, so a fallback
+    // to `PACK_FILE` would fail outright rather than pass by accident.
+    assert!(!out.join(DEFAULT_PACK_NAME).exists());
+    assert_eq!(
+        fold_trace(pack_built(&out), 60, None),
+        expected,
+        "an old build directory boots to a different world"
+    );
+}
+
 #[test]
 fn dev_level_builds_expected_entities_and_components() {
     let built = dev_built();

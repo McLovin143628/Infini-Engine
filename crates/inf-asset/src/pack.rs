@@ -91,14 +91,18 @@ use crate::kind::AssetKind;
 /// unreadable to buy nothing but a tidier hex dump — and would have broken the
 /// frozen `pack_v1` fixture the back-compat gate exists to hold.
 ///
-/// # Reading a `.inf_pack` written before the rename
+/// # Reading a pack written before the rename
 ///
-/// It opens. Nothing in this engine validates a pack's *extension*: the player
-/// resolves a pack by path (`inf_player::level`, `main.rs`), [`PackReader::open`]
-/// reads whatever it is handed, and identity comes from these eight bytes plus
-/// `format_ver`. So an existing build directory keeps booting under its old name,
-/// and the rename is a change to what the cook *writes*, not to what the runtime
-/// *accepts*.
+/// It opens, and a whole build *directory* from before the rename opens too.
+/// Nothing in this engine validates a pack's *extension*: [`PackReader::open`]
+/// reads whatever it is handed, identity comes from these eight bytes plus
+/// `format_ver`, and `PackLevelSource::open` takes the pack's **name from the
+/// manifest's `packs[0]`** when it is given a directory — falling back to the
+/// current default only when there is no manifest to ask.
+///
+/// So the rename is a change to what the cook *writes*, not to what the runtime
+/// *accepts*. `a_build_directory_whose_manifest_names_another_pack_still_boots`
+/// is the arm.
 pub const PACK_MAGIC: [u8; 8] = *b"INFPACK\0";
 
 /// The current container format version (bump on a breaking layout change).
@@ -235,9 +239,18 @@ pub enum EntryPolicy {
     /// when a level loads.
     WholeEntry,
 
-    /// The payload ships **raw at pack level** and its own container compresses
-    /// **per block** — one tile / page / cell at a time, codec recorded in that
-    /// container's directory ([`crate::block`]).
+    /// The payload ships **raw at pack level** because a runtime pages it one
+    /// unit at a time, and its blocks are **decoded** (never cast) — so the
+    /// container is free to compress them per block, codec recorded in its own
+    /// directory ([`crate::block`]).
+    ///
+    /// **Which containers actually do, today**: `.inf_terrain` (schema v6) and
+    /// `.inf_voxel` (schema v2). `.inf_part` is on this arm because it has the
+    /// same shape and the same freedom, and it is **not compressed** — measured
+    /// at ratio 0.198 on the island and **60 509 B, 0.024 % of the shipped
+    /// pack**, against a directory entry with no spare byte to put a codec in.
+    /// The arm is about what a kind *may* do; the container decides whether it is
+    /// worth doing, and that one wrote its answer down.
     ///
     /// # THE ANTI-CLAUSE
     ///

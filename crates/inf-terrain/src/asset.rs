@@ -776,6 +776,22 @@ impl RecompressReport {
 /// Passing [`BlockCodec::Raw`] is the inverse transcode, and it is not a no-op
 /// worth removing: it is how a test proves the round trip, and how a build that
 /// wants the old ship size gets it back with one option.
+///
+/// # The one thing this is NOT bit-preserving about, and why it is safe
+///
+/// A **v1** payload did not record its [`PyramidOptions`], and
+/// [`TerrainAssetHeader::pyramid`] reports that as `None` — *unknown*, which the
+/// P16.6 docs are emphatic is not the same as "the defaults". Lifting such a
+/// payload to v6 has nowhere to put "unknown", so the rebuilt header carries
+/// [`PyramidOptions::default`] and the distinction is lost.
+///
+/// That is harmless **here** and would not be elsewhere, so the reason is worth
+/// stating rather than assuming. The only consumer of the None/Some distinction
+/// is the editor's write-back re-plan (`inf_editor_core::terrain_edit`), which
+/// reads the **loose** `.inf_terrain` an author edits — a file this function
+/// never touches. Nothing reads `pyramid_options` out of a cooked pack. If
+/// something ever does, `a_v1_payload_transcodes_forward_without_decoding_its_tiles`
+/// pins the behaviour it would be reading.
 pub fn recompress_terrain_asset(
     payload: &[u8],
     codec: BlockCodec,
@@ -1466,6 +1482,14 @@ mod tests {
         for e in v1r.directory() {
             assert_eq!(v1r.tile_bytes(e.key).unwrap(), r.tile_bytes(e.key).unwrap());
         }
+        // The ONE thing the lift is not bit-preserving about, pinned rather than
+        // discovered: a v1 payload's pyramid options were *unknown*, and the
+        // lifted header has nowhere to say so, so it says "the defaults". See
+        // `recompress_terrain_asset`'s docs for why that is unreachable by the
+        // only consumer of the distinction — and why this assertion is what a
+        // future pack-side consumer would run into.
+        assert_eq!(v1r.pyramid_options(), None, "a v1 payload records nothing");
+        assert_eq!(r.pyramid_options(), Some(PyramidOptions::default()));
     }
 
     /// Compression is per-tile and independent: a tile that would inflate keeps
