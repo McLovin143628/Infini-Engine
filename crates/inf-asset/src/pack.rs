@@ -202,6 +202,70 @@ fn kind_from_code(code: u16) -> AssetKind {
     }
 }
 
+/// **How a kind's payload is stored in the pack** — the per-kind compression
+/// policy, as a statement of *why* rather than a bool (IASSET1).
+///
+/// `compresses_kind` used to be a `bool`, and a bool has room for exactly one
+/// reason. It could say "this kind is not zstd-compressed" and could not say
+/// whether that was because a runtime *casts* its bytes in place or because the
+/// kind's own container compresses each block itself. Those two have opposite
+/// futures — one must stay raw for ever, the other is the whole point of
+/// [`crate::block`] — and telling them apart is what makes
+/// [`PackWriter::compresses_kind`]'s anti-clause enforceable instead of
+/// aspirational.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EntryPolicy {
+    /// The whole payload is zstd-compressed at cook and decoded whole at load
+    /// (the P9.2 behaviour). Right for an authored asset read once, in full,
+    /// when a level loads.
+    WholeEntry,
+
+    /// The payload ships **raw at pack level** and its own container compresses
+    /// **per block** — one tile / page / cell at a time, codec recorded in that
+    /// container's directory ([`crate::block`]).
+    ///
+    /// # THE ANTI-CLAUSE
+    ///
+    /// Flipping one of these to [`WholeEntry`](Self::WholeEntry) is a one-line
+    /// change that looks like a ship-size win and is a catastrophe. A pack entry
+    /// is decompressed **whole, on every `read_ref`**, and `read_ref` is on a
+    /// per-frame path: `VgeomSource::payload` calls it once per asset per frame
+    /// and once per staged page. Compressing a `.inf_vmesh` entry therefore does
+    /// not cost one decode at load — it decodes the entire container every frame
+    /// it is drawn. Terrain and voxel are the same shape one step further away:
+    /// reaching one 581 KiB tile would decode all 550 MB of the island.
+    ///
+    /// So the entry stays raw and the *blocks* compress, which is the same ship
+    /// size for a bounded, per-block decode. `no_streaming_kind_compresses_whole`
+    /// is the guard.
+    BlockCompressed,
+
+    /// The payload ships raw and **nothing inside it compresses either**,
+    /// because a consumer **casts its bytes in place** off the mapping.
+    ///
+    /// A `.inf_tex` tile goes from the mapping to `write_texture`; a `.inf_vmesh`
+    /// parses its vertex/index sections with `bytemuck` casts. A compressed block
+    /// cannot be cast — it is not even 16-byte aligned (see
+    /// [`block::encode_block`](crate::block::encode_block)) — so this arm is the
+    /// mmap doctrine written as a type.
+    MappedInPlace,
+}
+
+impl EntryPolicy {
+    /// Whether the **pack** compresses the whole payload.
+    #[inline]
+    pub const fn compresses_whole_entry(self) -> bool {
+        matches!(self, Self::WholeEntry)
+    }
+
+    /// Whether the payload is **streaming-class**: paged one unit at a time out
+    /// of the mapping, and therefore never a candidate for whole-entry zstd.
+    #[inline]
+    pub const fn is_streaming(self) -> bool {
+        matches!(self, Self::BlockCompressed | Self::MappedInPlace)
+    }
+}
+
 /// One entry in a pack index (metadata only; the payload lives in the blob
 /// section and is fetched by [`PackReader::read`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,24 +325,32 @@ impl PackWriter {
         self.items.contains_key(&guid)
     }
 
-    /// Whether blobs of `kind` are considered for compression — the per-kind
-    /// compression policy seam (P16.1).
+    /// **The per-kind storage policy** — the seam P16.1 opened as a bool and
+    /// IASSET1 widened to [`EntryPolicy`].
     ///
-    /// **Streaming-class** kinds cook *uncompressed* so a runtime can page them
-    /// straight out of an mmap'd pack as borrowed slices
-    /// ([`PackReader::read_ref`]) with no decode step and no allocation: a tile
-    /// or meshlet page that must land within a frame budget cannot afford a zstd
-    /// pass, and a compressed blob can never be a zero-copy read. The trade is
-    /// ship size for streaming latency, and it is deliberate.
+    /// **Streaming-class** kinds cook *uncompressed at pack level* so a runtime
+    /// can page them straight out of an mmap'd pack as borrowed slices
+    /// ([`PackReader::read_ref`]) with no whole-container decode step: a tile or
+    /// meshlet page that must land within a frame budget cannot afford a decode
+    /// of the *whole asset*, and a compressed entry can never be a zero-copy
+    /// read.
     ///
     /// Today that is [`AssetKind::MeshletMesh`] (`.inf_vmesh`, read via mmap
-    /// slices in P18.2), [`AssetKind::Terrain`] (`.inf_terrain`, P16.3) and
-    /// [`AssetKind::Partition`] (`.inf_part`, P16.5): each is a header +
+    /// slices in P18.2), [`AssetKind::Terrain`] (`.inf_terrain`, P16.3),
+    /// [`AssetKind::Partition`] (`.inf_part`, P16.5), [`AssetKind::VoxelVolume`]
+    /// (P21.1) and [`AssetKind::Texture`] (`.inf_tex`, P26.1): each is a header +
     /// directory + **16-byte-aligned per-page blobs**, and the whole point of that
     /// layout is that a streamer slices one page out of the mapping without
-    /// touching the rest. zstd would force a whole-asset decode — hundreds of MB
-    /// to page one tile, or every cell in the world to spawn one — so they stay
-    /// raw.
+    /// touching the rest.
+    ///
+    /// **What IASSET1 changed** is what "uncompressed" costs. It used to mean
+    /// 100% of the raw bytes shipped, because the only two options were "zstd the
+    /// whole thing" and "nothing". [`EntryPolicy::BlockCompressed`] is the third:
+    /// the entry stays raw *here* and the container compresses each block itself
+    /// ([`crate::block`]), so the ship-size win comes back without the
+    /// decode-the-world catastrophe. [`EntryPolicy::MappedInPlace`] is the arm
+    /// that genuinely cannot: its blocks are **cast** off the mapping, and a
+    /// compressed block is neither castable nor aligned.
     ///
     /// **[`AssetKind::Level`] deliberately stays compressed**, which is exactly
     /// why P16.5's partition could not ride inside the level entry: a compressed
@@ -290,18 +362,27 @@ impl PackWriter {
     ///
     /// The match is exhaustive on purpose, exactly like [`kind_code`]: a new
     /// [`AssetKind`] must not silently inherit "compress me" — it fails to
-    /// compile until someone decides whether it is streaming-class.
-    pub fn compresses_kind(kind: AssetKind) -> bool {
+    /// compile until someone decides which of the three arms it is.
+    pub fn entry_policy(kind: AssetKind) -> EntryPolicy {
         match kind {
-            // Streaming-class: paged out of the mapping as borrowed slices.
+            // Streaming-class, and paged through a DECODER: the loader already
+            // copies these blocks on their way to being used, so a per-block
+            // decompress is an addition to an existing cost rather than the
+            // destruction of a zero-copy path.
+            //
+            // `.inf_terrain` (P16.3): every page-in bincode-decodes the tile blob
+            // into a `TerrainTile`. `.inf_voxel` (P21.1) and `.inf_part` (P16.5):
+            // same shape, chunk and cell respectively.
+            AssetKind::Terrain | AssetKind::Partition | AssetKind::VoxelVolume => {
+                EntryPolicy::BlockCompressed
+            }
+
+            // Streaming-class and CAST IN PLACE — the mmap doctrine's subjects.
+            //
+            // `.inf_vmesh` (P18.2) parses its vertex/index sections with
+            // `bytemuck` casts straight off the mapping, and stages a page by
+            // copying aligned bytes into a staging buffer.
             AssetKind::MeshletMesh
-            | AssetKind::Terrain
-            | AssetKind::Partition
-            // P21.1: a `.inf_voxel` is paged chunk-at-a-time out of the mapping,
-            // exactly like a `.inf_terrain` tile — 16-byte-aligned blobs a reader
-            // sub-slices with no decode and no copy. Compressing it would defeat
-            // the entire container layout.
-            | AssetKind::VoxelVolume
             // P26.1: a `.inf_tex` is a **tiled** container now — header +
             // directories + 16-byte-aligned 136² tile blobs — and streaming
             // virtual texturing pages ONE of those tiles per request, inside a
@@ -324,7 +405,7 @@ impl PackWriter {
             // A v1 (bincode) `.inf_tex` from an older cook rides along raw too.
             // That costs a little size and nothing else — it is read whole either
             // way, through `TextureAsset::from_payload`.
-            | AssetKind::Texture => false,
+            | AssetKind::Texture => EntryPolicy::MappedInPlace,
             AssetKind::Unknown
             | AssetKind::Level
             | AssetKind::Mesh
@@ -372,8 +453,18 @@ impl PackWriter {
             // `BlueprintClass` a `.inf_act` does — read whole when a level
             // loads, nothing to page. The Blueprint answer, for the Blueprint
             // reason.
-            | AssetKind::Script => true,
+            | AssetKind::Script => EntryPolicy::WholeEntry,
         }
+    }
+
+    /// Whether blobs of `kind` are considered for **whole-entry** compression.
+    ///
+    /// The bool [`entry_policy`](Self::entry_policy) used to be, kept because a
+    /// hundred call sites and doc links only ever asked this one question. The
+    /// policy is the source of truth; this reads it.
+    #[inline]
+    pub fn compresses_kind(kind: AssetKind) -> bool {
+        Self::entry_policy(kind).compresses_whole_entry()
     }
 
     /// Add an asset from raw payload bytes. Compresses eagerly (subject to
@@ -1397,6 +1488,88 @@ mod tests {
             assert!(matches!(r.read_ref(g).unwrap(), Cow::Borrowed(_)));
         }
         assert!(r.entry(guid(2)).unwrap().compressed, "meshes still zstd");
+    }
+
+    /// **THE ANTI-CLAUSE** (IASSET1). No streaming-class kind may ever be given
+    /// [`EntryPolicy::WholeEntry`], and this test exists so the one-line change
+    /// that does it fails here with the reason attached rather than shipping.
+    ///
+    /// # Why a one-line change is a catastrophe and not a regression
+    ///
+    /// A pack entry is decompressed **whole, on every `read_ref`** — there is no
+    /// cache in `PackReader`, only the verify-once mark. And `read_ref` is on a
+    /// **per-frame** path for these kinds, not a load-time one:
+    /// `VgeomSource::payload` calls it once per asset per frame (`inf-vgeom`'s
+    /// `asset.rs`, reached from the vgeom render pass) and again per staged page.
+    /// Flipping `MeshletMesh` to `WholeEntry` therefore does not cost one decode
+    /// at load — it decodes the entire `.inf_vmesh` **every frame it is drawn**.
+    /// Terrain and voxel are the same shape one step further away: reaching one
+    /// 581 KiB tile of the island's 550 MB `.inf_terrain` would decode all 550 MB,
+    /// per page-in, at the fixed-step boundary.
+    ///
+    /// The ship-size win that would tempt someone into it is **already taken**, by
+    /// the other door: [`EntryPolicy::BlockCompressed`] compresses each tile /
+    /// chunk / cell inside the container ([`crate::block`]), which is the same
+    /// bytes saved for a bounded per-block decode. There is nothing left here to
+    /// win, which is the strongest form this guard can take.
+    #[test]
+    fn no_streaming_kind_compresses_whole() {
+        /// Kinds a runtime pages ONE unit at a time. The list is the same one
+        /// `streaming_class_kinds_are_stored_uncompressed` pins; this test is
+        /// about the *reason*, that one is about the bytes.
+        const STREAMING: &[AssetKind] = &[
+            AssetKind::MeshletMesh,
+            AssetKind::Terrain,
+            AssetKind::Partition,
+            AssetKind::VoxelVolume,
+            AssetKind::Texture,
+        ];
+        for &k in STREAMING {
+            let p = PackWriter::entry_policy(k);
+            assert!(
+                p.is_streaming(),
+                "{k:?} is paged one unit at a time and must not be WholeEntry — \
+                 see EntryPolicy::BlockCompressed's anti-clause. If the goal was \
+                 ship size, compress the container's BLOCKS instead."
+            );
+            assert!(!p.compresses_whole_entry(), "{k:?}");
+        }
+        // And the converse: every kind NOT on that list is whole-entry, so a new
+        // kind cannot quietly acquire a streaming policy it has no container for.
+        for &k in AssetKind::all() {
+            if !STREAMING.contains(&k) {
+                assert_eq!(
+                    PackWriter::entry_policy(k),
+                    EntryPolicy::WholeEntry,
+                    "{k:?} has no per-unit paging path, so it compresses whole"
+                );
+            }
+        }
+    }
+
+    /// The three arms say different things, and the difference is load-bearing:
+    /// `BlockCompressed` is a kind whose container compresses its own blocks,
+    /// `MappedInPlace` is one whose blocks are **cast** and can never compress.
+    #[test]
+    fn the_two_streaming_arms_are_told_apart() {
+        for k in [
+            AssetKind::Terrain,
+            AssetKind::Partition,
+            AssetKind::VoxelVolume,
+        ] {
+            assert_eq!(
+                PackWriter::entry_policy(k),
+                EntryPolicy::BlockCompressed,
+                "{k:?} decodes its blocks (bincode) — they may compress"
+            );
+        }
+        for k in [AssetKind::MeshletMesh, AssetKind::Texture] {
+            assert_eq!(
+                PackWriter::entry_policy(k),
+                EntryPolicy::MappedInPlace,
+                "{k:?} CASTS its blocks off the mapping — they may not compress"
+            );
+        }
     }
 
     /// `open` maps the file and reads through the mapping.
